@@ -1460,13 +1460,29 @@ class InstanceMessagingService:
             #     ``persist_compaction_result`` seam itself (broader
             #     scope than the brief's "include only if trivial,
             #     say so either way");
-            #   * the engine's A4 pairing snap (compaction.py:2405)
-            #     and Lane 2 halving already handle the
+            #   * the engine's A4 pairing snap (compaction.py:2405) and
+            #     Lane 2 halving pairing re-snap
+            #     (:func:`_snap_orphan_tool_messages_at_cut` re-run
+            #     on every halving iteration) handle the
             #     pairing-safety invariant for the
-            #     ``tail_truncation_last_effort`` floor path —
-            #     the cross-phase pairing-safety invariant is
-            #     preserved through the engine, NOT through this
-            #     auxiliary guard at the seam boundary.
+            #     ``tail_truncation_last_effort`` floor path on
+            #     the count-based half-tail AND on every
+            #     token-aware halving iteration. The cross-phase
+            #     pairing-safety invariant is preserved through
+            #     the engine; this auxiliary guard at the seam
+            #     boundary only catches edge cases where the
+            #     channel payload diverges from the engine's
+            #     snap assumption (e.g., a stripped-engine
+            #     rebuild the floor did not see). Pin note added
+            #     for H5 transparency: the prior rationale
+            #     claimed the engine's snap was sufficient for
+            #     BOTH the count-based AND the halving path —
+            #     that cover was INCORRECT (adversarial round-2
+            #     #1, the halving path never re-snapped before
+            #     this fix). The current mitigation is honest:
+            #     halving now re-snaps on every iteration;
+            #     stripping that re-snap is what produced the
+            #     brick this rationale previously denied.
             # Pin note added: when the binding ``ToolMessage``
             # failure does manifest (a tail-leading
             # ``AIMessage(tool_calls)`` after the engine's

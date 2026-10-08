@@ -775,7 +775,16 @@ async def execute_compact(
     if checkpoint_state is not None:
         last_compacted_at = (checkpoint_state.values or {}).get("compacted_at")
 
-    if _is_recently_compacted(last_compacted_at):
+    if _is_recently_compacted(
+        last_compacted_at,
+        dedup_window_s=int(
+            getattr(
+                manager.config.compaction,
+                "dedup_window_s",
+                60,
+            )
+        ),
+    ):
         # Noop — emit success terminal with the noop detail.
         await context.update_phase(
             _PHASE_IN_PROGRESS,
@@ -830,25 +839,47 @@ async def execute_compact(
     # the pre-H4 reactive site. The unified H4 policy carries the
     # REAL system-prompt token count everywhere — the engine's
     # gate math, the reactive ctx at graph.py:8888, the pre-call
-    # hook, AND here. We pull the count from the compactor's LLM
-    # config (``llm_cache``) when present, falling back to 0 only
-    # when the cache is unavailable (e.g. legacy test fixtures).
-    # Pre-H4 sites still read 0, so this preserves the conservative
-    # bias on instances without a cached system prompt.
-    try:
-        system_prompt_tokens = int(
-            getattr(getattr(compactor, "_llm_cache", None), "last_compiled_tokens", 0)
-            or 0
-        )
-    except Exception:
-        system_prompt_tokens = 0
-    if system_prompt_tokens == 0:
-        # Defensive: try the canonical ``_get_system_prompt_tokens``
-        # helper if the cache above is unavailable.
+    # hook, AND here. The reactive site already aligns with the
+    # helper :meth:`InstanceMessagingService._get_system_prompt_tokens`
+    # (an async coroutine that offloads the sync SQLAlchemy read
+    # to a worker thread); the executor pre-check is also async,
+    # so we AWAIT the helper directly.
+    #
+    # Round 2 adversarial fix: pre-fix, this site read the
+    # non-existent ``compactor._llm_cache.last_compiled_tokens``
+    # attribute (zero producers — the compactor has no such
+    # attribute, only the messaging service carries a system-
+    # prompt cache). On the swallow-fail path, the fallback
+    # SYNC-ISH ``_get_system_prompt_tokens`` call without
+    # ``await`` produced a coroutine object whose ``int(...)``
+    # coercion raised ``TypeError`` — the defensive except
+    # silently set ``system_prompt_tokens=0`` and the
+    # numerator for the noop-floor measurement UNDERCOUNTED
+    # the system prompt on EVERY invocation. Post-fix:
+    #   1. DELETE the phantom ``compactor._llm_cache`` read
+    #      (no production code sets it; reading only ever
+    #      produced 0).
+    #   2. AWAIT the messaging-service helper properly. The
+    #      executor is async; awaiting is the natural shape
+    #      (mirrors graph.py:7562 ``estimate_tokens(system_prompt)``
+    #      where the reactive site computed the same number
+    #      via the sync ``estimate_tokens`` because it had
+    #      ``system_prompt`` in scope; here we don't, so the
+    #      async helper is the right primitive).
+    #   3. Tolerate the helper being unavailable on test
+    #      facades (no ``_messaging_service``) — ``system_prompt_tokens``
+    #      defaults to 0 on those manager mocks.
+    system_prompt_tokens = 0
+    messaging_service = getattr(manager, "_messaging_service", None)
+    if messaging_service is not None and hasattr(
+        messaging_service, "_get_system_prompt_tokens"
+    ):
         try:
             system_prompt_tokens = int(
-                manager._messaging_service._get_system_prompt_tokens(instance_id)
-            ) if hasattr(manager, "_messaging_service") else 0  # type: ignore[attr-defined]
+                await messaging_service._get_system_prompt_tokens(
+                    instance_id
+                )
+            )
         except Exception:
             system_prompt_tokens = 0
     estimated_tokens = estimate_messages_tokens(messages) + system_prompt_tokens

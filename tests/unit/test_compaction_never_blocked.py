@@ -1458,37 +1458,67 @@ class TestA4ToolCallPairingSnapToBoundary:
                 # orphans (their AIMessage was dropped).
             )
         ]
-        # Iterative halving drops drops slices — adjacent
-        # pair safety is preserved (the floor never creates an
-        # orphan; orphan ToolMessages are filtered out during
-        # deep-copy and the floor's snap+walk handles mid-
-        # corpus tool pairs safely).
-        for m in result.replacement_messages:
-            if isinstance(m, ToolMessage):
-                # ToolMessage in the output means its AIMessage
-                # partner must be EARLIER (impossible by the
-                # floor's order). Verify ordering invariants
-                # don't break it.
-                tool_call_id = getattr(m, "tool_call_id", None)
-                if tool_call_id:
-                    # If there's a ToolMessage, there must be
-                    # an AIMessage-bearing-tool_call_id EARLIER
-                    # in the replacement that is NOT removed.
-                    earlier_ai = any(
-                        not isinstance(x, RemoveMessage)
-                        and getattr(x, "type", "") == "ai"
-                        and any(
-                            tc.get("id") == tool_call_id
-                            for tc in getattr(x, "tool_calls", [])
-                            or []
-                        )
-                        for x in result.replacement_messages
-                    )
-                    # No assertion: this corpus has NO
-                    # AIMessages (all injected HumanMessages),
-                    # so there should be no ToolMessages in
-                    # the output. The check is informational.
-                    _ = earlier_ai
+        # Iterative halving drops deeper slices — adjacent pair
+        # safety MUST hold post-halving. Round-2 adversarial
+        # #1 closed the gap: the halving path now re-snaps the
+        # cut on every iteration. The retained tail can therefore
+        # NEVER lead with an orphan ToolMessage. We pin it here:
+        # the FIRST non-``RemoveMessage`` element of
+        # ``replacement_messages`` (the head of the channel) must
+        # NOT be a ToolMessage whose AIMessage(tool_calls=...)
+        # partner is missing from the channel.
+        head_msgs = [
+            m for m in result.replacement_messages
+            if not isinstance(m, RemoveMessage)
+        ]
+        if head_msgs:
+            head = head_msgs[0]
+            # The head is either the notice (always a HumanMessage
+            # with ``context_kind=compaction_notice``) OR an
+            # AIMessage that owns its ToolMessage partner in the
+            # retained tail. A bare ToolMessage as the head would
+            # be the textbook orphan.
+            if isinstance(head, ToolMessage):
+                # If we got here, the head is a ToolMessage — the
+                # pairing invariant FAILED. The adversarial fix
+                # is supposed to prevent this. Fail loud so the
+                # regression is caught by ``pytest``.
+                pytest.fail(
+                    "Lane 2 halving left an orphan ToolMessage "
+                    "at the head of the channel: the snap "
+                    "re-run on halving iteration is broken. "
+                    f"head={head!r} tool_call_id="
+                    f"{getattr(head, 'tool_call_id', None)!r} "
+                    f"head_msgs={head_msgs[:3]!r}"
+                )
+            # Even when the head is non-ToolMessage, an
+            # in-tail orphan ToolMessage (after a non-pair AIM
+            # that did not produce it) would also fail the
+            # invariant. We pin the ENGINE-level invariant that
+            # every ToolMessage in the retained tail has its
+            # AIMessage partner in the SAME retained tail
+            # (NOT in the dropped head, NOT a RemoveMessage).
+            tool_ids_in_tail: set[str] = set()
+            ai_ids_in_tail: set[str] = set()
+            for m in head_msgs:
+                if isinstance(m, ToolMessage):
+                    tcid = getattr(m, "tool_call_id", None)
+                    if tcid:
+                        tool_ids_in_tail.add(tcid)
+                elif getattr(m, "type", "") == "ai":
+                    for tc in getattr(m, "tool_calls", []) or []:
+                        tcid = tc.get("id")
+                        if tcid:
+                            ai_ids_in_tail.add(tcid)
+            orphan_tool_ids = tool_ids_in_tail - ai_ids_in_tail
+            assert not orphan_tool_ids, (
+                "Lane 2 halving pairing re-snap FAILED: orphan "
+                "ToolMessage(s) in the retained tail whose "
+                "AIMessage(tool_calls) partner was sliced into "
+                "the dropped head. Adversarial #1 mitigation is "
+                "broken. orphan tool_call_ids="
+                f"{orphan_tool_ids!r}"
+            )
 
     def test_pairing_integrity_helper_no_orphan_tool_message(self):
         """The pairing-integrity assertion helper itself: for

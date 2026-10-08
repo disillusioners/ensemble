@@ -40,6 +40,7 @@ Round-1 corpus (``test_compaction_never_blocked.py`` +
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -649,6 +650,278 @@ class TestLane2IterativeHalving:
 
 
 # =============================================================================
+# Lane 2 (round 2 adversarial #1) — pairing re-snap on halving iterations
+# =============================================================================
+
+
+class TestLane2HalvingPairing:
+    """Lane 2 round-2 adversarial fix — halving moves the cut
+    geometrically (``kept // 2``), so the new retained-tail head may
+    land on a ToolMessage whose AIMessage(tool_calls) partner was
+    sliced into the dropped head. Pre-fix, this orphan landed in
+    the channel and the next invoke produced a 2013 tool-call-
+    pairing failure (classifier NON-RETRYABLE → brick). Round-2
+    mitigation: re-run
+    :func:`_snap_orphan_tool_messages_at_cut` on every halving
+    iteration. See the PAIRING SAFETY block in
+    ``daemon/compaction.py::_last_effort_tail_truncation``.
+
+    Reachable brick population (per the council's N=20 simulation):
+    selectable < min_messages_before_compaction + over-budget
+    + tool-dense tail. The test class covers two shapes:
+
+      1. Tool-dense AIMessage+[ToolMessages] cluster trailing
+         the count-based cut, where halving reduces the tail
+         to land the new cut on a ToolMessage cluster.
+      2. AIMessage+ToolMessage pair straddling the
+         count-based cut, where halving must preserve the
+         pairing invariant in the deeper cut.
+    """
+
+    async def test_halving_re_snap_drops_orphan_tool_messages(self):
+        """REACHABLE BRICK population (selectable < min_messages,
+        over-budget, tool-dense tail): the floor MUST land a
+        result whose retained tail never leads with an orphan
+        ToolMessage and never contains an orphan in the tail.
+
+        Corpus (12 messages, selectable < min=15). The AIMessage
+        is positioned at idx 7 and its ToolMessage partner at
+        idx 8 — the exact boundary the halving cut crosses:
+
+          idx  0..6:  7 plain HumanMessages ("user-0".."user-6")
+          idx  7:     AIMessage(tool_calls=[tc-1])
+          idx  8:     ToolMessage(tool_call_id='tc-1')
+          idx  9..11: 3 plain HumanMessages
+
+        Count-based half-tail: dropped=6, kept=6. Tail =
+        [H6, A7, T8, H9, H10, H11] (length 6). Initial snap at
+        idx 6 = H6 → snap=0.
+
+        Halving iter 1: new_kept=ceil(6/2)=3; < last_k_floor=4 →
+        promoted to new_kept=4. iterative_tail =
+        iterative_tail[-4:] = [T8, H9, H10, H11] (length 4).
+        AIMessage A7 is now in the DROPPED head (idx 7, dropped
+        range 0..7), and T8 leads the retained tail.
+
+        THIS IS THE BRICK. Pre-fix:
+          * re-snap did NOT run on the halving cut
+          * channel persisted [notices, T8, H9, H10, H11]
+          * T8 is a bare ToolMessage with no AIMessage partner
+            in the channel → 2013 NON-RETRYABLE on next invoke.
+
+        Post-fix: re-snap walks idx 8 = T8 (snap=1) → idx 9 =
+        H9 (break). Snap adjusts the new cut to idx 9;
+        iterative_tail = [H9, H10, H11]. Final tail contains
+        zero ToolMessages → pairing invariant holds.
+        """
+        from langchain_core.messages import RemoveMessage
+
+        cfg = make_compaction_config(
+            # selectable < min_messages for floor engagement.
+            min_messages_before_compaction=15,
+            # Tiny window to force over-budget deterministically.
+            context_window_overrides={"gpt-4o": 100},
+            context_window_default=100,
+            # Tight halving envelope — last_k_floor=4 forces the
+            # half-tail (length 6) to halve to 4, which crosses
+            # the AIMessage(idx=7) / ToolMessage(idx=8) pair
+            # boundary the test pins.
+            last_k_floor=4,
+            floor_max_halvings=8,
+            threshold=0.50,
+        )
+        ai = AIMessage(
+            content="",
+            id="a-7",
+            tool_calls=[{"name": "X", "args": {}, "id": "tc-1"}],
+        )
+        t8 = ToolMessage(
+            content="r", id="t-8", tool_call_id="tc-1"
+        )
+        msgs: list = []
+        for i in range(7):
+            msgs.append(
+                HumanMessage(content=f"user-{i}", id=f"h-{i}")
+            )
+        msgs.append(ai)
+        msgs.append(t8)
+        msgs.append(HumanMessage(content="t-9", id="h-9"))
+        msgs.append(HumanMessage(content="t-10", id="h-10"))
+        msgs.append(HumanMessage(content="t-11", id="h-11"))
+
+        ctx = make_compact_context(
+            cfg, msgs, system_prompt_tokens=200
+        )
+        compactor = ContextCompactor(cfg, {})
+        result = await compactor.compact_state(ctx, force=True)
+
+        assert result is not None, (
+            "Lane 2 adversarial #1 — floor MUST produce a result "
+            "(over-budget + selectable < min_messages); got None"
+        )
+        assert result.compaction_type == (
+            COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
+        ), (
+            "Lane 2 adversarial #1 — round-2 floor path is the "
+            "never-blocked last-effort; got "
+            f"{result.compaction_type!r}"
+        )
+
+        # Pin 1: channel head AFTER RemoveMessage decoys is
+        # never a bare ToolMessage.
+        head_msgs = [
+            m for m in result.replacement_messages
+            if not isinstance(m, RemoveMessage)
+        ]
+        assert head_msgs, (
+            "Lane 2 adversarial #1 — replacement channel empty "
+            "after RemoveMessage decoy filter"
+        )
+        head = head_msgs[0]
+        assert not isinstance(head, ToolMessage), (
+            "Lane 2 adversarial #1 BRICK: head of replacement "
+            "channel is a bare ToolMessage (orphan). The "
+            "halving re-snap did NOT run on the new cut. "
+            f"head={head!r}"
+        )
+
+        # Pin 2: every retained-tail ToolMessage owns its
+        # AIMessage(tool_calls) partner in the SAME retained
+        # tail (not in the dropped head).
+        ai_tool_call_ids: set[str] = set()
+        tool_call_ids_in_tail: set[str] = set()
+        for m in head_msgs:
+            if getattr(m, "type", "") == "ai":
+                for tc in getattr(m, "tool_calls", []) or []:
+                    tcid = tc.get("id")
+                    if tcid:
+                        ai_tool_call_ids.add(tcid)
+            elif isinstance(m, ToolMessage):
+                tcid = getattr(m, "tool_call_id", None)
+                if tcid:
+                    tool_call_ids_in_tail.add(tcid)
+        orphan_ids = tool_call_ids_in_tail - ai_tool_call_ids
+        assert not orphan_ids, (
+            "Lane 2 adversarial #1 BRICK: orphan ToolMessage in "
+            "the retained tail whose AIMessage(tool_calls) "
+            "partner is missing from the same tail. Re-snap on "
+            "halving iter is broken. orphan tool_call_ids="
+            f"{orphan_ids!r}"
+        )
+
+    async def test_halving_no_orphan_with_pair_at_cut_boundary(self):
+        """Second reachable brick — AIMessage+ToolMessage pair
+        straddling the count-based cut. Halving must preserve
+        the pairing invariant in the deeper cut.
+
+        Corpus (12 messages, selectable < min=15):
+
+          idx 0..5: H0..H5
+          idx 6:   AIMessage(tool_calls=[tc-1])
+          idx 7:   ToolMessage(tool_call_id='tc-1')
+          idx 8..11: H8..H11
+
+        Count-based: dropped=6, kept=6. Tail =
+        [A6, T7, H8, H9, H10, H11] (length 6). Initial snap at
+        idx 6 = AIMessage (NOT ToolMessage) → snap=0.
+
+        Halving iter 1: new_kept=3 < last_k_floor=4 → promoted
+        to new_kept=4. iterative_tail = original[-4:] =
+        [T7, H8, H9, H10, H11] (length 4). AIMessage A6 is
+        now in the DROPPED head; T7 is the leading ToolMessage.
+
+        Brick identical to the primary test — re-snap must walk
+        forward from idx 7: T7 (snap=1) → H8 (break). Adjusted
+        tail = [H8, H9, H10, H11].
+        """
+        from langchain_core.messages import RemoveMessage
+
+        cfg = make_compaction_config(
+            min_messages_before_compaction=15,
+            context_window_overrides={"gpt-4o": 100},
+            context_window_default=100,
+            last_k_floor=4,
+            floor_max_halvings=8,
+            threshold=0.50,
+        )
+        msgs: list = []
+        for i in range(6):
+            msgs.append(HumanMessage(content=f"u-{i}", id=f"h-{i}"))
+        msgs.append(AIMessage(
+            content="",
+            id="a-6",
+            tool_calls=[{"name": "X", "args": {}, "id": "tc-1"}],
+        ))
+        msgs.append(ToolMessage(
+            content="r", id="t-7", tool_call_id="tc-1"
+        ))
+        for i in range(8, 12):
+            msgs.append(
+                HumanMessage(content=f"u-{i}", id=f"h-{i}")
+            )
+
+        ctx = make_compact_context(
+            cfg, msgs, system_prompt_tokens=200
+        )
+        compactor = ContextCompactor(cfg, {})
+        result = await compactor.compact_state(ctx, force=True)
+        assert result is not None
+        assert result.compaction_type == (
+            COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
+        )
+
+        head_msgs = [
+            m for m in result.replacement_messages
+            if not isinstance(m, RemoveMessage)
+        ]
+        assert head_msgs
+        assert not isinstance(head_msgs[0], ToolMessage), (
+            "Straddle-pair halving brick: head is a bare ToolMessage"
+        )
+        ai_ids: set[str] = set()
+        tool_ids_in_tail: set[str] = set()
+        for m in head_msgs:
+            if getattr(m, "type", "") == "ai":
+                for tc in getattr(m, "tool_calls", []) or []:
+                    tcid = tc.get("id")
+                    if tcid:
+                        ai_ids.add(tcid)
+            elif isinstance(m, ToolMessage):
+                tcid = getattr(m, "tool_call_id", None)
+                if tcid:
+                    tool_ids_in_tail.add(tcid)
+        orphan_ids = tool_ids_in_tail - ai_ids
+        assert not orphan_ids, (
+            f"Straddle-pair halving brick: orphans={orphan_ids!r}"
+        )
+
+    def test_snap_helper_is_module_level(self):
+        """The pairing snap helper must be a module-level callable
+        so the count-based half-tail snap AND each halving
+        iteration re-use ONE tested implementation. Regression
+        guard: a return to a duplicated inline snap loop breaks
+        this and the next brick is a future regression.
+        """
+        import daemon.compaction as compaction_mod
+        assert hasattr(
+            compaction_mod, "_snap_orphan_tool_messages_at_cut"
+        ), (
+            "Lane 2 round-2: pairing snap helper must be a "
+            "module-level callable on daemon.compaction for "
+            "the halving re-snap to share one implementation "
+            "with the count-based snap"
+        )
+        import inspect
+        sig = inspect.signature(
+            compaction_mod._snap_orphan_tool_messages_at_cut
+        )
+        assert list(sig.parameters) == ["corpus", "cut_idx"], (
+            "Lane 2 round-2: snap helper signature changed; "
+            "callers depend on (corpus, cut_idx) order"
+        )
+
+
+# =============================================================================
 # Lane 3 tests — estimator realism for non-text content blocks
 # =============================================================================
 
@@ -764,6 +1037,14 @@ class TestH4SystemPromptTokens:
     """H4 alignment — the reactive ctx at graph.py:8888 and the
     executor floor at compact_executor.py:812 carry REAL system
     prompt tokens, NOT 0.
+
+    Round-2 adversarial review (2026-10-08) rewrote the executor
+    site to await the canonical
+    :meth:`InstanceMessagingService._get_system_prompt_tokens`
+    helper (pre-fix, the helper was invoked without ``await`` and
+    silently fell through to ``system_prompt_tokens=0``). This
+    test class pins the round-1 reactive site AND the round-2
+    executor site: a regression to ``0`` on either path breaks.
     """
 
     def test_reactive_compaction_default_change_does_not_break(
@@ -777,7 +1058,117 @@ class TestH4SystemPromptTokens:
         should yield > 0 tokens).
         """
         from daemon.loader import estimate_tokens
-        assert estimate_tokens("hello") > 0
+        sys_tokens = estimate_tokens(
+            "You are a helpful assistant. Always answer concisely."
+        )
+        assert sys_tokens > 0, (
+            "H4 alignment: estimate_tokens must return > 0 on a "
+            "non-empty system_prompt; pre-fix the reactive ctx "
+            "passed ``system_prompt_tokens=0`` and the engine's "
+            "numerator undercounted by the typical ~200 tokens"
+        )
+
+    def test_executor_helpers_carry_real_system_prompt_tokens(self):
+        """Round-2 alignment — the executor
+        :func:`_is_recently_compacted` (now wired via
+        ``CompactionConfig.dedup_window_s``) and the
+        ``system_prompt_tokens`` read at compact_executor.py:~840
+        must operate on REAL config + helper values, not
+        silently fall through to ``0``.
+
+        Pinned:
+          * The executor's recency pre-check reads
+            ``manager.config.compaction.dedup_window_s``; the
+            config default is ``60`` (not the executor's
+            hard-coded local default of ``60`` that pre-fix
+            silently ignored operator overrides).
+          * The executor's ``system_prompt_tokens`` await is on
+            :meth:`InstanceMessagingService._get_system_prompt_tokens`
+            (async helper, returns ``int`` >= 0). Pre-fix
+            callers invoked it WITHOUT ``await``, producing a
+            coroutine that swallowed ``TypeError`` on
+            ``int(coro)`` and silently zeroed the numerator.
+
+        We pin the awaitable surface via
+        ``inspect.iscoroutinefunction`` so a regression to
+        sync-callsite (without ``await``) does not silently
+        re-emerge.
+        """
+        from daemon.services import (
+            compact_executor as compact_executor_mod,
+        )
+        from daemon.services.instance_messaging import (
+            InstanceMessagingService,
+        )
+        # The config field exists with the documented default.
+        cfg = make_compaction_config()
+        assert hasattr(cfg, "dedup_window_s"), (
+            "H4/Lane-1 wiring: CompactionConfig.dedup_window_s "
+            "must exist so the executor pre-check reads the "
+            "operator knob instead of a hard-coded default"
+        )
+        assert int(getattr(cfg, "dedup_window_s", 0)) >= 0, (
+            "H4/Lane-1 wiring: dedup_window_s must be a "
+            "non-negative int"
+        )
+
+        # The async helper exists and is genuinely a coroutine
+        # function — a regression to sync (no await) would
+        # silently produce a coroutine-typed expression that
+        # ``int(...)`` can't coerce. The async signature is
+        # the contract: the executor awaits it.
+        assert inspect.iscoroutinefunction(
+            InstanceMessagingService._get_system_prompt_tokens
+        ), (
+            "H4 alignment: InstanceMessagingService."
+            "_get_system_prompt_tokens must be async — "
+            "pre-round-2 the executor called it WITHOUT await "
+            "and the swallowed TypeError silently zeroed the "
+            "numerator"
+        )
+
+        # The executor must reference the messaging-service
+        # helper rather than a phantom ``compactor._llm_cache``
+        # read. A regression to the phantom read on a
+        # non-existent attribute would silently zero the
+        # numerator again. We pin the executor module's source
+        # for the LIVE read; if it returns as production code,
+        # this test fails loud. We strip comment-only lines so
+        # the regression grep only sees live code (the deleted
+        # phantom is documented in a comment trail, NOT in
+        # production code).
+        import re
+        src_full = inspect.getsource(compact_executor_mod)
+        code_lines: list[str] = []
+        for line in src_full.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            code_lines.append(line)
+        code_only = "\n".join(code_lines)
+        live_match = re.search(
+            r"\b(?:compactor|self\._compactor)\._llm_cache\b",
+            code_only,
+        )
+        assert live_match is None, (
+            "H4 alignment: live code in compact_executor reads "
+            "the non-existent "
+            "``compactor._llm_cache.last_compiled_tokens`` — "
+            "that read silently zeroed the numerator "
+            "pre-round-2"
+        )
+        assert "_get_system_prompt_tokens" in src_full, (
+            "H4 alignment: compact_executor must await the "
+            "InstanceMessagingService._get_system_prompt_tokens "
+            "helper for the H4-real-system-prompt-tokens policy"
+        )
+        # And the call site must be awaited.
+        assert "await messaging_service._get_system_prompt_tokens" in src_full, (
+            "H4 alignment: the executor must AWAIT the helper "
+            "— pre-round-2 the call was without ``await`` and "
+            "produced a coroutine whose int(...) coerced raised "
+            "TypeError (silently swallowed)"
+        )
 
 
 # =============================================================================

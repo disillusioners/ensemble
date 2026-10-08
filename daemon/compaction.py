@@ -1901,6 +1901,70 @@ def _is_tool_message(msg: BaseMessage) -> bool:
     return bool(getattr(msg, "tool_call_id", None))
 
 
+def _snap_orphan_tool_messages_at_cut(
+    corpus: list[BaseMessage],
+    cut_idx: int,
+) -> int:
+    """Walk FORWARD from ``cut_idx`` while consecutive ``ToolMessage``s
+    sit at the boundary. Returns the snap adjustment (number of
+    boundary ``ToolMessage``s skipped past).
+
+    Pairing invariant. A ``ToolMessage`` at the retained-tail position
+    means its ``AIMessage(tool_calls=...)`` partner lives in the
+    DROPPED head, because the AIMessage precedes its tool result in
+    message order. Persisting such an orphan into the channel is the
+    textbook 2013 failure: the next invoke reads
+    ``tool call result does not follow tool call`` and the LLM
+    error classifier (non-retryable) marks it terminal — a
+    deterministic brick on reactivation.
+
+    The snap ADVANCES the cut forward past those ToolMessages to
+    keep the retained tail API-valid: a tail that leads with an
+    AIMessage can own its AIMessage-or-ToolMessage pair, while a
+    tail that leads with a ToolMessage leaves the AIMessage behind
+    in the dropped head. We accept the depth loss (one or two
+    extra drops per snap) in exchange for the API-validity
+    guarantee.
+
+    Bounded. The walk advances only while consecutive
+    ``ToolMessage``s sit at the boundary; it stops on the FIRST
+    non-ToolMessage. If the ENTIRE retained tail is ToolMessages,
+    the walk consumes them all (returns ``len(corpus) - cut_idx``)
+    and the caller sees a notice-only replacement (single-HumanMessage
+    history — API-valid by construction; iteration-2 amendment).
+
+    Used by both the count-based half-tail snap (Lane 1 — A4 fix)
+    AND EACH Lane 2 halving iteration: halving moves the cut
+    geometrically (``-new_kept``) and the new cut may land on a
+    different pair boundary, so the same snap must run again on the
+    new boundary. Re-using one tested function for both sites
+    keeps the pairing-safety invariant uniform across the two
+    floor paths (count-based + token-aware halving).
+
+    Args:
+        corpus: The full message list (read-only index space — the
+            walk reads but never mutates ``corpus``).
+        cut_idx: Absolute index in ``corpus`` where the retained
+            tail begins. The walk looks at ``corpus[cut_idx]``
+            first and advances while the entry is a ToolMessage.
+
+    Returns:
+        ``int`` >= 0: the number of consecutive ToolMessages at
+        the cut that the walk skipped past. ``0`` means the cut
+        already starts on a non-ToolMessage (no orphan; no snap).
+        ``len(corpus) - cut_idx`` means the entire retained tail
+        was orphaned ToolMessages (the caller emits a notice-only
+        replacement — see iteration-2 amendment).
+    """
+    snap = 0
+    idx = cut_idx
+    n_corpus = len(corpus)
+    while idx < n_corpus and _is_tool_message(corpus[idx]):
+        snap += 1
+        idx += 1
+    return snap
+
+
 
 def _build_last_effort_replacement(
     context: "CompactionContext",
@@ -2627,13 +2691,7 @@ class ContextCompactor:
         #     all and emits a notice-only replacement.
         #   The notice alone keeps the history API-valid and
         #   non-empty.
-        snap_adjust = 0
-        while dropped + snap_adjust < n:
-            candidate_idx = dropped + snap_adjust
-            candidate = corpus[candidate_idx]
-            if not _is_tool_message(candidate):
-                break
-            snap_adjust += 1
+        snap_adjust = _snap_orphan_tool_messages_at_cut(corpus, dropped)
         if snap_adjust > 0:
             dropped = dropped + snap_adjust
             kept = n - dropped
@@ -2678,18 +2736,34 @@ class ContextCompactor:
         # "compaction chain" log so the operator sees the
         # deeper-cut landing.
         #
-        # CAVEAT: the iterative halving deliberately does NOT
-        # re-run the pairing snap (already done above) — the
-        # walk is bounded and a second pass on a now-shifted cut
-        # could double-snap. Pairing safety is preserved by the
-        # HALVING operation: an orphaned ToolMessage at the new
-        # cut boundary is acceptable because the cut advances
-        # forward by ``kept // 2`` units (a 320→160 halving
-        # always drops the older half cleanly, never splitting
-        # a pair). For the last-K floor (``kept <= last_k_floor``)
-        # we DO re-run a simplified snap with the bounding
-        # ``kept >= last_k_floor`` floor so the API-validity
-        # invariant holds.
+        # PAIRING SAFETY across halving (round 2, adversarial
+        # #1). Each halving iteration MOVES THE CUT (the new
+        # tail begins at a different absolute position in the
+        # corpus than the count-based half-tail), so the same
+        # pair-boundary may not hold. The adversarial round-2
+        # finding showed the snap-walk only ran at the
+        # count-based half-tail; halving moved the cut
+        # geometrically (``-new_kept``) and the new head of
+        # tail could land on an orphan ToolMessage whose
+        # AIMessage(t+1, t-1, ...) partner was sliced into the
+        # dropped head on this iteration (NOT the count-based
+        # snap). Persisting such an orphan into the channel
+        # produces the 2013 tool-call-pairing failure on the
+        # next invoke → classifier NON-RETRYABLE → reactivation
+        # brick.
+        #
+        # Mitigation: re-run the SAME pairing snap on the new
+        # cut each iteration. Re-using
+        # :func:`_snap_orphan_tool_messages_at_cut` (the
+        # count-based snap's helper, now promoted to a
+        # module-level helper so both sites share one
+        # implementation) keeps the pairing-safety invariant
+        # uniform across BOTH the count-based half-tail AND
+        # the token-aware halving. Halving depth loss from the
+        # re-snap is bounded (the snap only consumes
+        # consecutive orphans at the new cut, never reaches
+        # across the tail); the depth loss is the price of
+        # the API-validity guarantee.
         #
         # The ``_budget_eval`` helper local-closure captures
         # the tail + system_prompt + threshold_tokens math; the
@@ -2757,8 +2831,10 @@ class ContextCompactor:
         tail_to_keep = corpus[dropped:]
 
         # Snapshot the count-based tail as the starting point
-        # for the iteration. Lane 2 begins AFTER the snap so
-        # the pairing invariant is preserved.
+        # for the iteration. Lane 2 begins AFTER the initial snap
+        # so the pairing invariant is preserved BEFORE halving —
+        # the halving loop itself re-snaps on each iteration
+        # (see PAIRING SAFETY block above).
         iterative_tail = list(corpus[dropped:])
         if threshold_tokens > 0:
             while halving_iterations < max_halvings:
@@ -2799,6 +2875,42 @@ class ContextCompactor:
                     threshold_tokens,
                     skip_reason_label,
                 )
+                # PAIRING RE-SNAP (round 2 adversarial fix). The
+                # halving just moved the cut from the count-based
+                # position to ``n - new_kept`` — the new
+                # retained tail's HEAD may now sit on a
+                # ToolMessage whose AIMessage(tool_calls)
+                # partner was just sliced into the dropped head.
+                # Persisting that orphan produces the 2013
+                # tool-call-pairing failure on the next invoke
+                # → classifier NON-RETRYABLE → reactivation
+                # brick. Run the SAME pairing snap at the new
+                # cut. If the new head is a non-ToolMessage, the
+                # snap is a no-op and we move on.
+                #
+                # ``corpus`` index space is absolute; we resolve
+                # the new cut index into ``corpus`` by reversing
+                # the ``[-new_kept:]`` slice. Length accounting:
+                # ``iterative_tail`` started length T, now length
+                # ``new_kept`` <= T; the absolute cut in
+                # ``corpus`` is ``n - new_kept``.
+                halving_re_cut_idx = n - len(iterative_tail)
+                re_snap = _snap_orphan_tool_messages_at_cut(
+                    corpus, halving_re_cut_idx
+                )
+                if re_snap > 0:
+                    iterative_tail = iterative_tail[re_snap:]
+                    logger.warning(
+                        "[Compaction][obs] floor iterative halving "
+                        "RE-SNAP: advanced cut by %d additional "
+                        "ToolMessage(s) at iter=%d to keep "
+                        "tool_call pairs intact (n=%d, "
+                        "skip_reason=%s)",
+                        re_snap,
+                        halving_iterations,
+                        n,
+                        skip_reason_label,
+                    )
             # Last-K safety check: if iterative halving STILL
             # doesn't reach budget AND we hit the last-K floor,
             # append an extra notice + final shrink to
