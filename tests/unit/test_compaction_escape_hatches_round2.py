@@ -40,26 +40,37 @@ Round-1 corpus (``test_compaction_never_blocked.py`` +
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
+import daemon.loader as loader_mod
 from daemon.compaction import (
     COMPACTION_NOTICE_CONTEXT_KIND,
     COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT,
+    ChunkedOutcome,
     CompactionContext,
     ContextCompactor,
     _build_last_effort_replacement,
 )
 from daemon.config import CompactionConfig as CompactionConfigModel
+from daemon.graph import _PRECALL_NOOP, _maybe_precall_compact_95
 from daemon.loader import estimate_messages_tokens
 from daemon.services._escalation_metadata import (
     ESCALATION_THRESHOLD_KEY,
     ESCALATION_UNTIL_KEY,
     is_proactive_escalation_active,
+    set_proactive_escalation_metadata,
 )
 
 
@@ -119,6 +130,138 @@ def make_compact_context(
         llm_config={},
         last_compacted_at=last_compacted_at,
         instance_id=instance_id,
+    )
+
+
+# =============================================================================
+# Hook-driving helpers (Lane 4 read-block pin)
+# =============================================================================
+
+
+class _Lane4FakeRepo:
+    """Minimal in-memory fake of the InstanceRepository surface
+    used by the Lane 4 read-block pin test.
+
+    Exposes ONLY the parts the read block + the durable writer
+    exercise:
+
+    * ``get(instance_id)`` — read path the read block calls via
+      ``asyncio.to_thread``. Returns a MagicMock row carrying
+      both ``instance_metadata`` (the JSONB column the C2 reader
+      prefers) and ``metadata`` (the legacy fallback).
+    * ``set_metadata_many(instance_id, payload)`` — preferred
+      atomic write path (PostgreSQL ``jsonb_set`` / SQLite
+      ``json_set`` in one UPDATE). Used by
+      :func:`set_proactive_escalation_metadata` when present.
+
+    Deliberately excludes ``update`` / ``set_metadata`` — the
+    production writer prefers ``set_metadata_many`` and this
+    fake's presence forces THAT path (regression guard: a
+    regression to the legacy ``update`` write would not be
+    covered by this fake; the writer would no-op via the
+    defensive fallback). The seam's read-side (the C2 reader)
+    reads ``instance_metadata`` regardless of writer path.
+    """
+
+    def __init__(self, instance_id: str = "ci-blindspot-iid"):
+        self._instance_id = instance_id
+        self.row = MagicMock()
+        self.row.status = "running"
+        self.row.instance_metadata = {}
+        self.row.metadata = {}
+        self.set_metadata_many_calls: list[tuple[str, dict]] = []
+
+    def get(self, _instance_id: str):
+        return self.row
+
+    def set_metadata_many(
+        self, instance_id: str, payload: dict
+    ) -> None:
+        self.set_metadata_many_calls.append((instance_id, dict(payload)))
+        # Mirror the production ``jsonb_set`` semantics: merge
+        # into the column (additive, do not clobber other keys).
+        self.row.instance_metadata = {
+            **self.row.instance_metadata, **payload
+        }
+        # Keep the legacy fallback in sync so a regression to
+        # the legacy reader would still see the metadata.
+        self.row.metadata = dict(self.row.instance_metadata)
+
+
+@dataclass
+class _Lane4FakeState:
+    """Minimal ``StateSnapshot``-shaped stand-in (``.values`` dict)."""
+
+    values: dict = field(default_factory=dict)
+    next: tuple = ()
+
+
+class _Lane4FakeGraph:
+    """Graph stand-in that persists ``aupdate_state`` writes into
+    its fake values so subsequent ``aget_state`` reads reflect
+    them. Mimics the ``add_messages`` semantics the hook relies
+    on: a leading ``RemoveMessage`` sentinel replaces the whole
+    channel."""
+
+    def __init__(self, values: dict | None = None) -> None:
+        self.values: dict = dict(values or {})
+        self.aupdate_calls: list[tuple[dict, dict]] = []
+
+    async def aget_state(self, config):
+        return _Lane4FakeState(values=dict(self.values))
+
+    async def aupdate_state(self, config, update, **kwargs):
+        self.aupdate_calls.append((dict(update), dict(kwargs)))
+        if "messages" in update:
+            msgs = list(update["messages"])
+            if msgs and isinstance(msgs[0], RemoveMessage):
+                msgs = msgs[1:]
+            self.values["messages"] = msgs
+        if "compacted_at" in update:
+            self.values["compacted_at"] = update["compacted_at"]
+        return None
+
+
+def _lane4_stub_chunked_summarizer(compactor: ContextCompactor) -> None:
+    """Stub the merge-call LLM path so the real engine compacts
+    without an LLM (the 15% ceiling rule would otherwise trip
+    B-shape degrade)."""
+
+    async def _fake_chunked(compactable, context, previous_overview=None):
+        return ChunkedOutcome(
+            summaries=["[Conversation Summary]\nall groups"],
+            failed_batches=[],
+            stop_reason="completed",
+        )
+
+    compactor._summarize_chunked = _fake_chunked
+
+
+async def _lane4_run_hook(
+    *,
+    instance_id: str,
+    compactor: ContextCompactor,
+    graph: _Lane4FakeGraph,
+    full_messages: list,
+    tap_slot: Any | None = None,
+    llm_config: dict | None = None,
+):
+    """Invoke :func:`daemon.graph._maybe_precall_compact_95` with
+    the same closure-local defaults the agent_node site uses."""
+    return await _maybe_precall_compact_95(
+        instance_id=instance_id,
+        instance_short=instance_id.split("-")[0],
+        compactor=compactor,
+        graph_ref=[graph],
+        thread_config={"configurable": {"thread_id": instance_id}},
+        full_messages=full_messages,
+        system_prompt="system prompt",
+        llm_config=llm_config or {"model": "test-model"},
+        injected_msgs=[],
+        injected_report_msgs=[],
+        ephemeral_context_msgs=[],
+        pairing_synthesized_msgs=[],
+        precall_compaction_tap_slot=tap_slot,
     )
 
 
@@ -664,14 +807,18 @@ class TestLane5EscalationGateRatio:
 # =============================================================================
 
 
-class TestLane4CIBlindSpotPin:
-    """Lane 4 — pin the graph.py:7461-7484 escalation read block.
+class TestLane4CIBlindSpotPinSeam:
+    """Lane 4 — SEAM-ONLY pin for the escalation flag.
 
-    A REAL escalated row (``compaction_escalation_until`` is in the
-    future via the durable instance_metadata) MUST cause the
-    gate_ratio to drop from PRECALL_COMPACTION_RATIO (0.95) to
-    ``escalation_gate_ratio`` (default 0.80). This test fails if
-    the read block at graph.py:7461-7484 is deleted.
+    The companion hook-driving integration test
+    :class:`TestLane4CIBlindSpotPinReadBlock` (below) is the REAL
+    pin: it drives the ACTUAL ``_maybe_precall_compact_95`` hook
+    with a durable escalated row + a payload that crosses the
+    0.80×window band ONLY when the read block lowers
+    ``gate_ratio``. This test class pins the seam helpers in
+    isolation; deleting the read block at ``daemon/graph.py:7499-
+    7522`` would not fail these tests on its own — that's
+    specifically what the hook-driving test catches.
     """
 
     def test_escalation_active_flag_is_durable(self):
@@ -714,6 +861,232 @@ class TestLane4CIBlindSpotPin:
             ESCALATION_THRESHOLD_KEY: 3,
         }
         assert is_proactive_escalation_active(inst) is True
+
+
+# =============================================================================
+# Lane 4 — CI blind spot pin (real): drive the ACTUAL hook with a
+# durable escalated row. This is the integration test that
+# fails when the daemon/graph.py read block is deleted.
+# =============================================================================
+
+
+class TestLane4CIBlindSpotPinReadBlock:
+    """Lane 4 — REAL read-block pin: drives the ACTUAL
+    :func:`daemon.graph._maybe_precall_compact_95` hook with a
+    durable escalated row + a payload whose estimated token ratio
+    lands STRICTLY between the escalation gate (0.80×window) and
+    the normal pre-call ratio (0.95×window).
+
+    With the read block in place, the escalation metadata lowers
+    ``gate_ratio`` to 0.80 → the payload's 0.85× ratio crosses
+    the gate → the hook reaches the engine and the result is a
+    real shrink (``rebuilt_payload is not None``).
+
+    WITHOUT the read block (the mutation self-check
+    demonstrates this), ``gate_ratio`` stays at the default
+    0.95 → the same payload sits BELOW the gate → the hook
+    short-circuits at the gate predicate and returns
+    :data:`_PRECALL_NOOP` with no engine invocation.
+
+    The companion seam-only test class above
+    :class:`TestLane4CIBlindSpotPinSeam` covers the seam
+    helpers; THIS class is the one that catches a regression
+    that deletes the read block.
+
+    Fixtures (all local — see ``_Lane4FakeRepo``,
+    :class:`_Lane4FakeGraph`, and ``_lane4_stub_chunked_summarizer``
+    in this module):
+
+    * ``_Lane4FakeRepo`` exposes ``set_metadata_many`` (the
+      production-preferred atomic write path) plus
+      ``get`` for the read block's ``asyncio.to_thread`` call.
+      Using ``set_metadata_many`` exercises the durability
+      write exactly the way the proactive trigger does in
+      production (one UPDATE, dialect-aware, concurrent-safe).
+    * ``_Lane4FakeGraph`` mirrors the add_messages sentinel
+      semantics the hook rebuild relies on so a real shrink
+      yields a populated ``rebuilt_payload``.
+    * The chunked summarizer is stubbed to keep the test
+      off the LLM while the real engine path runs the rest
+      of the contraction (mirrors the helper of the same
+      name in ``tests/unit/services/test_proactive_compaction_fix_p1b.py``).
+    """
+
+    # Trigger window sized so 0.85×window (170) lands STRICTLY
+    # between 0.80×window (160) and 0.95×window (190). The
+    # escalation gate fires here; the 0.95 default does NOT.
+    WINDOW = 200
+    ESCALATION_BAND_TOKENS = 170  # 0.85 × 200
+
+    async def test_escalated_row_lowers_gate_and_hook_fires_engine(
+        self, monkeypatch
+    ):
+        """The full read-block round-trip: write the durable
+        escalation row, drive the actual hook, observe a real
+        engine invocation at the escalation-only band.
+
+        Steps:
+
+        1. Build a compactor pinned to a 200-token window via
+           ``context_window_overrides``.
+        2. Build a manager facade carrying a ``_Lane4FakeRepo``
+           (atomic ``set_metadata_many`` + ``get``); the repo's
+           row starts with empty ``instance_metadata``.
+        3. Write the durable escalated row via the REAL writer
+           (:func:`set_proactive_escalation_metadata`) — no
+           MagicMock seam substitution. Verify the writer hit
+           ``set_metadata_many`` (production-preferred path) and
+           the row's ``instance_metadata`` carries
+           ``compaction_escalation_until``.
+        4. Patch the estimator so the LLM-bound payload is
+           estimated at 170 tokens (0.85 × window — strictly
+           between 0.80× and 0.95×).
+        5. Invoke the hook. Observe ``compact_state`` was
+           awaited (engine reached), ``rebuilt_payload is not
+           None`` (real shrink), and the WARNING/INFO log
+           carries the ``escalation_80pct`` gate label.
+        """
+        # 1. Compactor + chunked-summarizer stub (off-LLM).
+        compactor = ContextCompactor(
+            make_compaction_config(
+                context_window_overrides={"test-model": self.WINDOW},
+                recent_message_window=1,
+                min_recent_window=1,
+            ),
+            {},
+        )
+        _lane4_stub_chunked_summarizer(compactor)
+
+        # 2. Manager facade carrying the durable repo.
+        repo = _Lane4FakeRepo(instance_id="ci-blindspot-iid")
+        compactor._manager = MagicMock()
+        compactor._manager._instance_repository = repo
+
+        # 3. Write the durable escalation row via the REAL
+        # writer (no MagicMock seam substitution). The writer
+        # routes through the repo's ``set_metadata_many`` (the
+        # production-preferred atomic path) because the fake
+        # exposes that method.
+        iid = "ci-blindspot-iid"
+        until_iso = (
+            datetime.now(timezone.utc) + timedelta(hours=1)
+        ).isoformat()
+        set_proactive_escalation_metadata(
+            repo,
+            iid,
+            until=until_iso,
+            threshold=3,
+            prev_message_count=10,
+            skip_count=3,
+        )
+        # Sanity: the write landed on the atomic path AND the
+        # C2 reader can see it via ``instance_metadata``.
+        assert repo.set_metadata_many_calls, (
+            "the durable writer MUST route through "
+            "set_metadata_many when the repo exposes it; "
+            "this fixture guarantees that path"
+        )
+        assert ESCALATION_UNTIL_KEY in repo.row.instance_metadata
+        assert is_proactive_escalation_active(repo.row) is True
+
+        # 4. Pin the estimator at the escalation-only band
+        # (0.85 × 200 = 170 — between 0.80×160 and 0.95×190).
+        monkeypatch.setattr(
+            loader_mod,
+            "estimate_messages_tokens",
+            lambda msgs: self.ESCALATION_BAND_TOKENS,
+        )
+
+        # 5. Drive the ACTUAL hook (no patch on
+        # ``_maybe_precall_compact_95`` itself).
+        graph = _Lane4FakeGraph(values={"messages": make_messages(30)})
+        payload = make_messages(30)
+        outcome = await _lane4_run_hook(
+            instance_id=iid,
+            compactor=compactor,
+            graph=graph,
+            full_messages=payload,
+        )
+
+        # The engine MUST have fired (gate_ratio lowered to
+        # 0.80 by the read block crossed 170 ≥ 0.80 × 200).
+        assert outcome is not _PRECALL_NOOP, (
+            "Lane 4 read-block pin FAIL: with a durable "
+            "escalated row, gate_ratio=0.80 MUST admit the "
+            "0.85× payload and the hook MUST reach the engine. "
+            "Returning _PRECALL_NOOP here means either the "
+            "read block at daemon/graph.py:7499-7522 was "
+            "deleted/regressed, the writer did not persist "
+            "the escalation, or the estimator was patched "
+            "to an out-of-band value."
+        )
+        assert outcome.rebuilt_payload is not None, (
+            "Lane 4 read-block pin: a real shrink at the "
+            "escalation-only band must yield rebuilt_payload"
+        )
+        # Engine was actually awaited (one Variant B write
+        # for messages + one for compacted_at, both with
+        # ``as_node='agent'`` per A.5).
+        assert len(graph.aupdate_calls) == 2
+        first_update, first_kwargs = graph.aupdate_calls[0]
+        second_update, second_kwargs = graph.aupdate_calls[1]
+        assert "messages" in first_update
+        assert first_kwargs.get("as_node") == "agent"
+        assert "compacted_at" in second_update
+        assert second_kwargs.get("as_node") == "agent"
+
+        # The dedup stamp rides the durable return.
+        assert outcome.compacted_at is not None
+
+    async def test_no_escalation_at_same_band_does_not_fire(
+        self, monkeypatch
+    ):
+        """Negative control: same payload, same estimator
+        patch, same hook — but WITHOUT an escalated row the
+        gate stays at 0.95 and the hook short-circuits at the
+        gate predicate (no engine call). This guards against
+        a future change that moves the 0.80 default into the
+        pre-call path globally; if THIS test ever fires the
+        engine while the escalation-row test does NOT, the
+        pin has been inverted."""
+        compactor = ContextCompactor(
+            make_compaction_config(
+                context_window_overrides={"test-model": self.WINDOW},
+                recent_message_window=1,
+                min_recent_window=1,
+            ),
+            {},
+        )
+        _lane4_stub_chunked_summarizer(compactor)
+
+        repo = _Lane4FakeRepo(instance_id="ci-blindspot-control")
+        compactor._manager = MagicMock()
+        compactor._manager._instance_repository = repo
+        # Deliberately do NOT call set_proactive_escalation_metadata.
+
+        monkeypatch.setattr(
+            loader_mod,
+            "estimate_messages_tokens",
+            lambda msgs: self.ESCALATION_BAND_TOKENS,
+        )
+
+        graph = _Lane4FakeGraph(values={"messages": make_messages(30)})
+        outcome = await _lane4_run_hook(
+            instance_id="ci-blindspot-control",
+            compactor=compactor,
+            graph=graph,
+            full_messages=make_messages(30),
+        )
+
+        assert outcome == _PRECALL_NOOP, (
+            "control: without an escalated row the gate "
+            "stays at 0.95 and 0.85×200 must NOT cross — "
+            "engine must be untouched"
+        )
+        assert graph.aupdate_calls == [], (
+            "control: no persistence writes must occur when "
+            "the gate short-circuits"
+        )
 
 
 # =============================================================================
