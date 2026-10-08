@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Test Pack: llm_error_classifier_unit_test — LLM error classifier unit suite.
+# Test Pack: graph_retry_integration_unit_test — Graph retry integration suite.
 #
-# Scope: tests/unit/test_llm_error_classifier.py (125 tests). The
-# classify-error module that routes transient vs permanent failures into
-# the graph retry chain. Companion to graph_retry: while
-# test_graph_retry_integration.py covers the wiring, this pack isolates
-# the classifier's classification surface end-to-end.
+# Scope: tests/unit/test_graph_retry_integration.py (19 tests). The graph
+# retry classification and recomposition integration tests assert the
+# retry-aware graph behavior on transient vs permanent failures and
+# propagation through the agent_node cycle. These tests are stateless
+# (no daemon, no LLM) and verify structural retry wiring on this branch.
 #
 # Branch pin: fix/tool-pairing-full-history-heal @ 86c1bc041.
 # Base: latest @ 9be991d56.
@@ -16,8 +16,6 @@
 # Dual-layer timeout (per test-pack skill):
 #   - Layer 1 (command-level): caller wraps with `timeout 240`
 #   - Layer 2 (script-internal): `timeout 210s` on the pytest process
-#     (125 tests; <90s observed in calibration, 210s is a margin-rich
-#     safety net).
 #
 # Exit codes (per test-pack skill):
 #   0   PASS
@@ -32,11 +30,11 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 cd "$PROJECT_DIR"
 
-echo "=== Test Pack: llm_error_classifier_unit_test (test_llm_error_classifier.py, 125 tests) ==="
+echo "=== Test Pack: graph_retry_integration_unit_test (test_graph_retry_integration.py, 19 tests) ==="
 
 # Layer 2 (script-internal): 210s hard cap on the pytest process.
 timeout 210s .venv/bin/pytest \
-  tests/unit/test_llm_error_classifier.py \
+  tests/unit/test_graph_retry_integration.py \
   --tb=short -q \
   --override-ini="addopts=" \
   --timeout=210 \

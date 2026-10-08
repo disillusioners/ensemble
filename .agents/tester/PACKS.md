@@ -2038,6 +2038,27 @@ Sizing note: 6–12-slice target infeasible for this suite — 22,639 tests at o
 
 ---
 
+## Active commission — TOOL-PAIRING FULL-HISTORY HEAL GATE (2026-10-08)
+
+Branch `fix/tool-pairing-full-history-heal` @ `86c1bc041` (worktree `/home/nea/ensemble-src-wt-pairing-heal`; already uv-synced, daemon imports inside). Incident ground: 03d7657f 2013 — 6-day-old checkpoint poison (dup tool_call_id + unanswered tool call from 10-02 mid-turn regen/failover) surfaced only under strict-provider routing on JOB_EVENT revives. REPAIR executed 10-08 (synth result blob f61a0651…, 1,694,695 B, 678 msgs net +1 synth). This gate pins the patch's import-time + pairing-aware heal surface — Core #2/#3 insulation + the 44-test full-history unit + the `d1_seam_pairing + injection_pairing + tph44` sweep. RED on the boot smoke is a finding (base-attribute), not a blocker per brief.
+
+| Pack | Invocation | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `tph44` | `timeout 240 bash test/packs/tph44_unit_test.sh` | `tests/unit/tool_pairing_history/` (44 tests: full_history_heal + w2_wiring) | <60s | _registered 2026-10-08_ | ⏳ pending first run |
+| `graph_retry_integration` | `timeout 240 bash test/packs/graph_retry_integration_unit_test.sh` | `tests/unit/test_graph_retry_integration.py` (19) | <40s | _registered 2026-10-08_ | ⏳ pending first run |
+| `compaction` (narrow) | `timeout 240 bash test/packs/compaction_unit_test.sh` | `tests/unit/test_compaction.py` (130, narrow scope; the 22-file NEVER-BLOCKED pack lives under compaction-never-blocked gate) | <90s | _registered 2026-10-08_ | ⏳ pending first run |
+| `d1_seam_pairing` | `timeout 240 bash test/packs/d1_seam_pairing_unit_test.sh` | `tests/unit/services/test_d1_seam_pairing_guard.py` (9) | <30s | _registered 2026-10-08_ | ⏳ pending first run |
+| `injection_pairing` | `timeout 240 bash test/packs/injection_pairing_unit_test.sh` | `tests/unit/graph/test_injection_tool_pairing.py` (30) | <40s | _registered 2026-10-08_ | ⏳ pending first run |
+| `instance_tools` | `timeout 240 bash test/packs/instance_tools_unit_test.sh` | `tests/unit/tools/test_instance_tools.py` (207) | <120s | _registered 2026-10-08_ | ⏳ pending first run |
+| `llm_error_classifier` | `timeout 240 bash test/packs/llm_error_classifier_unit_test.sh` | `tests/unit/test_llm_error_classifier.py` (125) | <90s | _registered 2026-10-08_ | ⏳ pending first run |
+| `job_queue_full` | `timeout 300 bash test/packs/job_queue_full_unit_test.sh` | `tests/job_queue/` (2046, xdist -n auto) | <80s | _registered 2026-10-08_ | ⏳ pending first run |
+| `dev_sh_static` | `timeout 60 bash test/packs/dev_sh_static_unit_test.sh` | `grep -F --timeout-graceful-shutdown 10 dev.sh` (Core #4 invariant, no pytest) | <10s | _registered 2026-10-08_ | ⏳ pending first run |
+| `pairing_heal_boot_smoke` | `timeout 300 bash test/packs/pairing_heal_boot_smoke_mock_test.sh` | daemon @15800 + PG @15810 + mock-LLM @15820 (Core #2/#3 insulation, banner + livez + readyz + clean SIGTERM + ports freed; RED = finding, base-attribute) | ~60s | _registered 2026-10-08_ | ⏳ pending first run |
+
+Port fence: 15800 / 15810 / 15820 are lane-disposable (no live ensemble binds them). 5432 / 8079 / 8088 / 15432 / 15433 NEVER touched. PG16 (`/usr/lib/postgresql/16/bin`) on Linux host — NOT the macOS `/opt/homebrew/opt/postgresql@14/bin` path.
+
+---
+
 ## Active commission — LCA FALSE-COMPLETION FIX CYCLE MERGE GATE (2026-09-26)
 
 Branch `feature/lca-false-complete` @ `d5c50994` (base `316a849b`; 1 commit, 32 files +2981/−161; worktree `agents-ensemble-wt-lca-false-complete`). Incident ground: 7d4a3bd9 Ep B — judge RIGHT (not_complete), 2 judge double-timeouts consumed the bound, silent COMPLETED over a live verdict. Dispatch: 8-job merge gate (full matrix / incident replay / timeout+scanner / surface read-points / PG lane + boot smoke / neutrality / no-prod-changes / verdict).

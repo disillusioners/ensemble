@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Test Pack: llm_error_classifier_unit_test — LLM error classifier unit suite.
+# Test Pack: instance_tools_unit_test — Instance tools (HTTP router + service)
+# unit suite.
 #
-# Scope: tests/unit/test_llm_error_classifier.py (125 tests). The
-# classify-error module that routes transient vs permanent failures into
-# the graph retry chain. Companion to graph_retry: while
-# test_graph_retry_integration.py covers the wiring, this pack isolates
-# the classifier's classification surface end-to-end.
+# Scope: tests/unit/tools/test_instance_tools.py (207 tests). The instance
+# tools surface — pause/resume/terminate/lifecycle endpoints + service-layer
+# callers. Wide unit-only surface (no daemon boot) that asserts the
+# pairing-heal branch does not regress the instance lifecycle tool layer.
 #
 # Branch pin: fix/tool-pairing-full-history-heal @ 86c1bc041.
 # Base: latest @ 9be991d56.
@@ -16,7 +16,7 @@
 # Dual-layer timeout (per test-pack skill):
 #   - Layer 1 (command-level): caller wraps with `timeout 240`
 #   - Layer 2 (script-internal): `timeout 210s` on the pytest process
-#     (125 tests; <90s observed in calibration, 210s is a margin-rich
+#     (207 tests; <120s observed in calibration, 210s is a margin-rich
 #     safety net).
 #
 # Exit codes (per test-pack skill):
@@ -32,11 +32,11 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 cd "$PROJECT_DIR"
 
-echo "=== Test Pack: llm_error_classifier_unit_test (test_llm_error_classifier.py, 125 tests) ==="
+echo "=== Test Pack: instance_tools_unit_test (test_instance_tools.py, 207 tests) ==="
 
 # Layer 2 (script-internal): 210s hard cap on the pytest process.
 timeout 210s .venv/bin/pytest \
-  tests/unit/test_llm_error_classifier.py \
+  tests/unit/tools/test_instance_tools.py \
   --tb=short -q \
   --override-ini="addopts=" \
   --timeout=210 \
