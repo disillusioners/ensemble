@@ -810,29 +810,52 @@ class TestLane2HalvingPairing:
         )
 
     async def test_halving_no_orphan_with_pair_at_cut_boundary(self):
-        """Second reachable brick — AIMessage+ToolMessage pair
-        straddling the count-based cut. Halving must preserve
-        the pairing invariant in the deeper cut.
+        """LOAD-BEARING straddle — AIMessage+ToolMessage pair cut
+        in HALF by a halving iteration (A dropped, T leads the
+        halved tail pre-snap). The re-snap MUST fire on the
+        halving cut; without it the retained tail leads with a
+        bare ToolMessage whose AIMessage(tool_calls) partner is
+        stranded in the dropped head → 2013 NON-RETRYABLE brick
+        on next invoke. Distinct from the sibling primary test
+        (7 humans / pair at idx 7-8): HERE the pair sits at
+        idx 8/9 so the halving cut lands EXACTLY ON the
+        ToolMessage.
 
-        Corpus (12 messages, selectable < min=15):
+        T2-N1 (round-2 re-gate) — this test previously used a
+        12-message corpus with the pair at idx 6/7; the halving
+        cut landed on H8, so NO orphan could materialize and
+        the test passed either way (and its first-position
+        check was doubly vacuous: the prepended compaction
+        notice, always a HumanMessage, sat at position 0).
+        Corpus shifted so the straddle genuinely materializes.
 
-          idx 0..5: H0..H5
-          idx 6:   AIMessage(tool_calls=[tc-1])
-          idx 7:   ToolMessage(tool_call_id='tc-1')
-          idx 8..11: H8..H11
+        Corpus (13 messages, selectable < min=15):
 
-        Count-based: dropped=6, kept=6. Tail =
-        [A6, T7, H8, H9, H10, H11] (length 6). Initial snap at
-        idx 6 = AIMessage (NOT ToolMessage) → snap=0.
+          idx 0..7: H0..H7
+          idx 8:   AIMessage(tool_calls=[tc-1])
+          idx 9:   ToolMessage(tool_call_id='tc-1')
+          idx 10..12: H10..H12
 
-        Halving iter 1: new_kept=3 < last_k_floor=4 → promoted
-        to new_kept=4. iterative_tail = original[-4:] =
-        [T7, H8, H9, H10, H11] (length 4). AIMessage A6 is
-        now in the DROPPED head; T7 is the leading ToolMessage.
+        Count-based: dropped = 13 - ceil(13/2) = 6, kept=7.
+        Tail = corpus[6:] = [H6, H7, A8, T9, H10, H11, H12]
+        (length 7). Initial snap at idx 6 = HumanMessage →
+        snap=0 (no-op).
 
-        Brick identical to the primary test — re-snap must walk
-        forward from idx 7: T7 (snap=1) → H8 (break). Adjusted
-        tail = [H8, H9, H10, H11].
+        Halving iter 1: over budget (sysprompt 200 > threshold
+        50) → new_kept = ceil(7/2) = 4 (>= last_k_floor=4, no
+        floor promotion). iterative_tail = tail[-4:] =
+        [T9, H10, H11, H12]. The cut moved to corpus idx
+        13-4 = 9 — EXACTLY ON T9. THIS is the straddle: A8 is
+        now in the dropped head, T9 leads the halved tail bare.
+
+        Re-snap walks forward from idx 9: T9 (snap=1) → H10
+        (break). Adjusted tail = [H10, H11, H12]. Post-snap
+        the retained tail contains ZERO ToolMessages.
+
+        Load-bearing proof: with the re-snap disabled the
+        retained tail is [T9, H10, H11, H12] → Pin 1 (bare-Tool
+        lead), Pin 2 (orphan scan) and Pin 3 (cut pin) ALL
+        fail.
         """
         from langchain_core.messages import RemoveMessage
 
@@ -845,17 +868,17 @@ class TestLane2HalvingPairing:
             threshold=0.50,
         )
         msgs: list = []
-        for i in range(6):
+        for i in range(8):
             msgs.append(HumanMessage(content=f"u-{i}", id=f"h-{i}"))
         msgs.append(AIMessage(
             content="",
-            id="a-6",
+            id="a-8",
             tool_calls=[{"name": "X", "args": {}, "id": "tc-1"}],
         ))
         msgs.append(ToolMessage(
-            content="r", id="t-7", tool_call_id="tc-1"
+            content="r", id="t-9", tool_call_id="tc-1"
         ))
-        for i in range(8, 12):
+        for i in range(10, 13):
             msgs.append(
                 HumanMessage(content=f"u-{i}", id=f"h-{i}")
             )
@@ -870,17 +893,37 @@ class TestLane2HalvingPairing:
             COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
         )
 
-        head_msgs = [
+        # Retained REAL tail: drop RemoveMessage decoys AND the
+        # prepended compaction notice (id prefix
+        # ``compaction-notice-``). Without the notice filter the
+        # first-position check below is vacuous — the notice is
+        # always a HumanMessage.
+        real_tail = [
             m for m in result.replacement_messages
             if not isinstance(m, RemoveMessage)
+            and not (getattr(m, "id", "") or "").startswith(
+                "compaction-notice-"
+            )
         ]
-        assert head_msgs
-        assert not isinstance(head_msgs[0], ToolMessage), (
-            "Straddle-pair halving brick: head is a bare ToolMessage"
+        assert real_tail, (
+            "Straddle-pair halving brick: retained real tail "
+            "empty after notice filter"
         )
+
+        # Pin 1: the retained tail's first REAL message is
+        # never a bare ToolMessage (pre-snap this is T9).
+        assert not isinstance(real_tail[0], ToolMessage), (
+            "Straddle-pair halving brick: retained tail leads "
+            "with a bare ToolMessage — the halving re-snap did "
+            f"NOT run on the new cut. head={real_tail[0]!r}"
+        )
+
+        # Pin 2: every retained ToolMessage owns its
+        # AIMessage(tool_calls) partner in the SAME retained
+        # tail (not in the dropped head).
         ai_ids: set[str] = set()
         tool_ids_in_tail: set[str] = set()
-        for m in head_msgs:
+        for m in real_tail:
             if getattr(m, "type", "") == "ai":
                 for tc in getattr(m, "tool_calls", []) or []:
                     tcid = tc.get("id")
@@ -893,6 +936,21 @@ class TestLane2HalvingPairing:
         orphan_ids = tool_ids_in_tail - ai_ids
         assert not orphan_ids, (
             f"Straddle-pair halving brick: orphans={orphan_ids!r}"
+        )
+
+        # Pin 3 (cut pin): the halving cut landed ON T9 and the
+        # re-snap consumed it — the retained tail is EXACTLY
+        # [H10, H11, H12]. Content-pinned: the seam re-ids
+        # retained messages but preserves content. If the
+        # corpus arithmetic drifts so the cut no longer lands
+        # on the pair, THIS pin fails loudly instead of the
+        # test silently going passing-either-way again.
+        assert [m.content for m in real_tail] == [
+            "u-10", "u-11", "u-12"
+        ], (
+            "Straddle-pair corpus drift: halving cut no longer "
+            "lands on the A8/T9 pair. real_tail="
+            f"{[(type(m).__name__, str(m.content)[:20]) for m in real_tail]!r}"
         )
 
     def test_snap_helper_is_module_level(self):

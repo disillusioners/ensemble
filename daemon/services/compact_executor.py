@@ -880,9 +880,27 @@ async def execute_compact(
                     instance_id
                 )
             )
-        except Exception:
+        except Exception as exc:
+            # W2-N1 (round-2 re-gate): the swallow must be LOUD.
+            # A silent 0 here is the original defect shape — the
+            # noop-floor numerator undercounts the system prompt
+            # with zero operator-visible signal. Log at WARNING so
+            # the fallback is diagnosable; keep the 0 fallback
+            # (behavior-preserving) because no clean SYNC source
+            # exists — the helper's value is only reachable via
+            # the async to_thread DB read, and a sync re-read
+            # here would block the event loop.
+            logger.warning(
+                "compact executor: system-prompt token probe "
+                "failed for instance %s — falling back to "
+                "system_prompt_tokens=0 (noop-floor numerator "
+                "UNDERCOUNTS the system prompt): %s: %s",
+                instance_id,
+                type(exc).__name__,
+                exc,
+            )
             system_prompt_tokens = 0
-    estimated_tokens = estimate_messages_tokens(messages) + system_prompt_tokens
+        estimated_tokens = estimate_messages_tokens(messages) + system_prompt_tokens
 
     # Floor ratio (config-driven; default 0.05).
     noop_floor_ratio = float(
