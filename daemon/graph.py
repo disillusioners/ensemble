@@ -9136,23 +9136,24 @@ def create_agent_node(
                 # ┌────────────────────────────────────────────────────┐
                 # │ TRANSIENT ESCAPE PATH (accepted; documented)      │
                 # │                                                    │
-                # │ The inner ``try/except`` at :9111-9116 catches     │
-                # │ ONLY ``ToolPairingInvalidError``. A transient     │
-                # │ exception raised inside the W2 retry invoke       │
-                # │ (e.g. ``openai.APITimeoutError`` on a 2013-then-  │
-                # │ transient sequence) escapes the inner except,    │
-                # │ propagates OUT of the W2 handler, and re-enters   │
-                # │ the outer except chain. It does NOT land in the   │
-                # │ transient sibling handler at :9525 (the           │
-                # │ post-compaction transient tuple) because Python   │
-                # │ ``except`` clauses only match exceptions raised    │
-                # │ in the immediately-enclosing ``try`` body — the   │
-                # │ inner W2 catch consumed the pairing exception,    │
-                # │ and the transient was raised INSIDE the inner     │
-                # │ try, so it falls through the inner except and     │
-                # │ propagates to the outer (post-compaction)         │
-                # │ transient handler at :9525 OR the generic         │
-                # │ ``except Exception`` below.                       │
+                # │ The W2 inner-try catches ONLY                       │
+                # │ ``ToolPairingInvalidError``. A transient raised     │
+                # │ inside the W2 retry-invoke body (a 2013-then-       │
+                # │ transient sequence: first invoke raises the        │
+                # │ pairing exception → W2 catch runs → heal → retry    │
+                # │ invoke raises a different, transient exception) is  │
+                # │ NOT a ``ToolPairingInvalidError`` → escapes the     │
+                # │ inner try uncaught → propagates out of the W2      │
+                # │ catch handler body → propagates out of the entire  │
+                # │ outer try statement. Python ``except`` clauses     │
+                # │ only match exceptions raised in the immediately-   │
+                # │ enclosing try body; sibling clauses (:9177          │
+                # │ ``ContextLengthExceededError``, :9604 transient     │
+                # │ tuple, :9789 generic ``Exception``) are NOT         │
+                # │ consulted for exceptions raised inside a handler   │
+                # │ body. Only the task-level error path (LangGraph     │
+                # │ node wrapper / task processor) catches the          │
+                # │ propagated transient.                              │
                 # │                                                    │
                 # │ Why accepted: the probability of a 2013-then-      │
                 # │ transient sequence inside the W2 retry window is   │
@@ -9571,29 +9572,30 @@ def create_agent_node(
                     # ┌────────────────────────────────────────────┐
                     # │ TRANSIENT ESCAPE PATH (accepted; documented)│
                     # │                                            │
-                    # │ Same escape path as the primary W2 site    │
-                    # │ (:9111-9128). The inner try/except at      │
-                    # │ :9544-9575 catches ONLY                     │
-                    # │ ``ToolPairingInvalidError``. A transient   │
-                    # │ exception raised inside the W2 retry       │
-                    # │ invoke (e.g. ``openai.APITimeoutError`` on  │
-                    # │ a 2013-then-transient sequence inside the   │
-                    # │ CLE handler) escapes the inner except,    │
-                    # │ propagates OUT of the post-compaction W2   │
-                    # │ handler, and re-enters the outer except     │
-                    # │ chain. It does NOT land in the transient    │
-                    # │ sibling handler at :9576 (the outer tuple  │
-                    # │ catches exceptions raised in the outer     │
-                    # │ try BODY, not nested handlers). The outer  │
-                    # │ transient handler is at the agent_node      │
-                    # │ level (still wired and reachable if the    │
-                    # │ exception propagates past the CLE handler  │
-                    # │ boundary), the task-level error path still  │
-                    # │ catches it, and building new retry         │
-                    # │ machinery here would couple the W2 bounded │
-                    # │ contract to a transient budget the design   │
-                    # │ rejects. Accepted — see primary site :9111- │
-                    # │ 9128 for the full rationale.                │
+                    # │ Same escape path as the primary W2 site.   │
+                    # │ The inner try/except at :9544-9575 catches  │
+                    # │ ONLY ``ToolPairingInvalidError``. A        │
+                    # │ transient raised inside the W2 retry       │
+                    # │ invoke body (a 2013-then-transient          │
+                    # │ sequence inside the CLE handler) escapes   │
+                    # │ the inner try uncaught → propagates out    │
+                    # │ of the W2 catch handler body → out of the   │
+                    # │ :9177 CLE clause → out of the entire       │
+                    # │ outer try statement. Sibling clauses        │
+                    # │ (:9177, :9604, :9789) are NOT consulted    │
+                    # │ for handler-body raises. Only the          │
+                    # │ task-level error path catches the           │
+                    # │ propagated transient.                       │
+                    # │                                            │
+                    # │ The outer transient handler is at the      │
+                    # │ agent_node level (still wired and          │
+                    # │ reachable if the exception propagates past │
+                    # │ the CLE handler boundary), the task-level  │
+                    # │ error path still catches it, and building  │
+                    # │ new retry machinery here would couple the  │
+                    # │ W2 bounded contract to a transient budget  │
+                    # │ the design rejects. Accepted — see primary │
+                    # │ site :9111-9128 for the full rationale.    │
                     # └────────────────────────────────────────────┘
                     logger.error(
                         f"[ToolPairing:FULL] W2 post-compaction heal did "
