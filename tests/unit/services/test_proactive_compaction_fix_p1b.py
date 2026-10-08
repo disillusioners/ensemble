@@ -478,11 +478,33 @@ class TestPreCall95MultiCallRefire:
 
 
 class TestPreCall95InjectionDominatedSkip:
-    """Injection-dominated no-op: skip + SINGLE rate-limited WARN +
-    stamp (A.6 anti-refire policy applies identically to the hook)."""
+    """Injection-dominated no-op: 60s dedup still engages after the floor.
+
+    COMPACTION NEVER-BLOCKED (Verdict A, fix/compaction-never-blocked
+    @ c600af60d). **OLD expectation** (pre-Phase-2): the 95% pre-call
+    hook emitted a stamp-only no-op for the injection-dominated case
+    (skip + single rate-limited WARN + stamp persisted via
+    ``as_node='agent'``). The context never shrank.
+
+    **NEW expectation** (post-Phase-2): the engine's all-injected
+    skip now falls through to the 50%-tail last-effort floor. The
+    hook sees a real shrink (rebuilt_payload + outgoing_prefix),
+    and the 60s dedup still engages after the floor's
+    ``compacted_at`` stamp.
+    """
 
     @pytest.mark.asyncio
     async def test_stamped_skip_single_warn_no_refire(self, caplog):
+        """Floor engages; 60s dedup still holds across subsequent calls.
+
+        Phase-2 expectation: the 95% pre-call hook fires the
+        50%-tail floor on the injection-dominated payload; the
+        result carries non-empty ``replacement_messages`` (drop
+        list + notice + tail). The dedup still engages on the
+        NEXT call within 60s (the floor's ``compacted_at``
+        stamp lands in the state, blocking subsequent
+        re-evaluations of the same payload).
+        """
         compactor = _make_compactor(
             context_window_overrides={"test-model": 200},
             min_messages_before_compaction=10,
@@ -491,7 +513,8 @@ class TestPreCall95InjectionDominatedSkip:
         # State: 3 regular + 12 injected. The payload estimate crosses
         # 95% of the 200-token window (real estimator on a big injected
         # block), but the regular pool is below min_messages → the
-        # engine returns the STAMPED skip.
+        # engine's min-messages gate fires, falling through to the
+        # 50%-tail floor (Phase-2 hardening).
         injected = _make_injected(12)
         injected[0].content = "[SYSTEM CONTEXT]\n" + ("x" * 400)
         injected[1].content = "[SYSTEM CONTEXT]\n" + ("y" * 400)
@@ -500,44 +523,97 @@ class TestPreCall95InjectionDominatedSkip:
         )
         payload = make_messages(3) + injected
 
-        with caplog.at_level(logging.WARNING, logger="daemon.graph"):
-            # Call 1 — crosses 95%, engine stamps a skip, WARN emitted.
+        with caplog.at_level(logging.INFO, logger="daemon.graph"):
+            # Call 1 — crosses 95%, floor engages, real shrink lands.
             outcome1 = await _run_hook(graph, compactor, payload)
-            # Calls 2..3 — dedup holds (stamp persisted into the fake
-            # state) → engine returns None → silent, no further WARN.
+            # Calls 2..3 — dedup holds (the floor's compacted_at stamp
+            # is persisted into the fake state) → engine returns
+            # None → silent, no further compaction fires.
             for _ in range(2):
                 outcome2 = await _run_hook(graph, compactor, payload)
 
-        # Stamp-only → original payload proceeds; dedup stamp carried.
-        assert outcome1.rebuilt_payload is None
-        assert outcome1.outgoing_prefix is None
+        # Phase-2: floor returns a real shrink → rebuilt_payload is
+        # populated. The dedup stamp is carried on compacted_at.
+        assert outcome1.rebuilt_payload is not None, (
+            "floor must produce a non-None rebuilt_payload — the seam "
+            "persists a real shrink, not just a stamp."
+        )
+        assert outcome1.outgoing_prefix is not None
         assert outcome1.compacted_at is not None
+        # Subsequent calls within 60s: dedup returns None, no rebuild.
         assert outcome2.rebuilt_payload is None
         assert outcome2.compacted_at is None
-        # Exactly ONE checkpoint write (the stamp), carrying as_node.
-        assert len(graph.aupdate_calls) == 1
-        update, kwargs = graph.aupdate_calls[0]
-        assert "compacted_at" in update and "messages" not in update
-        assert kwargs.get("as_node") == "agent"
-        # SINGLE rate-limited WARN — no per-call refire storm.
-        precall_warns = [
-            r for r in caplog.records
-            if "precall-95" in r.getMessage() and r.levelno >= logging.WARNING
-        ]
-        assert len(precall_warns) == 1, (
-            f"expected exactly 1 rate-limited WARN, got {len(precall_warns)}"
+        # Phase-2: Variant B standard path writes TWO aupdate_state
+        # calls (one for messages + sentinel, one for compacted_at).
+        # The OLD stamp-only path was a single aupdate (just the
+        # stamp). The pin flips from 1 → 2.
+        assert len(graph.aupdate_calls) == 2, (
+            f"Variant B (real shrink) writes 2 aupdate_state calls; "
+            f"got {len(graph.aupdate_calls)}"
         )
-        assert "skip without relief" in precall_warns[0].getMessage()
+        # First aupdate: messages channel (the new channel value)
+        update, kwargs = graph.aupdate_calls[0]
+        assert "messages" in update, (
+            "first aupdate must carry the messages channel (real shrink)"
+        )
+        assert kwargs.get("as_node") == "agent"
+        # Second aupdate: compacted_at stamp (the dedup anchor)
+        update2, kwargs2 = graph.aupdate_calls[1]
+        assert "compacted_at" in update2
+        assert kwargs2.get("as_node") == "agent"
+        # Phase-2: floor's INFO log is the new "precall-95 fired" signal.
+        # The hook logs "attempting" BEFORE the engine call on every
+        # dispatch (3 total — one per call), and a "complete" INFO log
+        # on the successful call 1. Calls 2-3 hit the engine dedup and
+        # return without engine invocation. Total precall-95 logs:
+        # 3 (attempting) + 1 (complete) = 4.
+        precall_infos = [
+            r for r in caplog.records
+            if "precall-95" in r.getMessage() and r.levelno == logging.INFO
+        ]
+        assert len(precall_infos) == 4, (
+            f"precall-95 logs: 3 'attempting' (one per call) + 1 'complete' "
+            f"(call 1, the floor lands); got {len(precall_infos)}"
+        )
+        # The differentiating dedup signal: the engine-side "falling
+        # through to last-effort floor" WARN fires ONCE (call 1),
+        # not 3 — confirming dedup engages.
+        floor_engaged_warns = [
+            r for r in caplog.records
+            if "falling through to last-effort floor" in r.getMessage()
+        ]
+        assert len(floor_engaged_warns) == 1, (
+            f"engine-side floor engagement must fire exactly once "
+            f"(dedup silences calls 2-3); got {len(floor_engaged_warns)}"
+        )
 
     @pytest.mark.asyncio
     async def test_stamp_only_skip_does_not_fire_tap(self):
+        """Phase-2: the floor IS a real shrink, so the tap DOES fire.
+
+        The OLD test asserted ``tap.tap_node_return.assert_not_awaited()``
+        because the stamp-only path had no replacement messages to tap.
+        The NEW behavior: the floor produces non-empty
+        ``replacement_messages`` (drop list + notice + retained tail),
+        so the tap IS invoked.
+
+        Note: the test must inflate the payload above 95% of the 200-token
+        window so the pre-call gate fires; the floor engages and the
+        tap is called. The OLD test got away with a single big
+        injected block because the stamp-only path fired on ANY
+        95%-crossing input. The NEW path needs the floor to engage
+        → 2 big injected blocks (matches the first test's payload).
+        """
         compactor = _make_compactor(
             context_window_overrides={"test-model": 200},
             min_messages_before_compaction=10,
         )
         _stub_chunked_summarizer(compactor)
         injected = _make_injected(12)
+        # Two big injected blocks so the payload crosses 95% of the
+        # 200-token window (forces the pre-call gate + floor).
         injected[0].content = "[SYSTEM CONTEXT]\n" + ("x" * 400)
+        injected[1].content = "[SYSTEM CONTEXT]\n" + ("y" * 400)
         graph = _FakeGraph(
             values={"messages": make_messages(3) + injected}
         )
@@ -548,8 +624,8 @@ class TestPreCall95InjectionDominatedSkip:
             graph, compactor, make_messages(3) + injected, tap_slot=tap
         )
 
-        # Stamp-only: no replacement messages → nothing to tap.
-        tap.tap_node_return.assert_not_awaited()
+        # Phase-2: floor is a real shrink, so the tap IS awaited.
+        tap.tap_node_return.assert_awaited()
 
 
 # =============================================================================

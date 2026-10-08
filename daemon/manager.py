@@ -506,6 +506,12 @@ class InstanceManager:
                     # ``base_url_backup``).
                     "buffer_response_header": self.config.llm.buffer_response_header,
                 },
+                # COMPACTION NEVER-BLOCKED (Verdict A) — the compactor
+                # reads per-instance escalation metadata off the
+                # instance row via ``_manager._instance_repository``
+                # inside the 95% pre-call hook (graph.py). Pass
+                # ``self`` so the read is wired at construction.
+                manager=self,
             )
             logger.info(
                 f"Context compaction enabled: threshold={self.config.compaction.threshold}, "

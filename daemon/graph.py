@@ -7444,16 +7444,55 @@ async def _maybe_precall_compact_95(
 
         # 3. The 95% gate (A.1). Float math (no int() truncation) so the
         # boundary is ">= 0.95 × window" exactly as documented.
-        if payload_tokens < trigger_window * PRECALL_COMPACTION_RATIO:
+        # COMPACTION NEVER-BLOCKED (Verdict A) — the gate ratio is
+        # lowered from PRECALL_COMPACTION_RATIO (0.95) to 0.80 for
+        # this instance when the proactive-trigger escalation
+        # metadata is active (see
+        # ``daemon/services/_escalation_metadata.py``). The metadata
+        # is written by the proactive trigger after N consecutive
+        # skips while context grows; it expires by TTL or is
+        # cleared on the next successful compaction. The instance
+        # row is read best-effort from the manager facade (passed
+        # indirectly via the compactor's ``_manager`` attribute when
+        # present); a DB hiccup falls through to the standard 0.95
+        # ratio (no widening).
+        gate_ratio = PRECALL_COMPACTION_RATIO
+        gate_label = "precall_95"
+        try:
+            from .services._escalation_metadata import (
+                is_proactive_escalation_active,
+            )
+            _manager_ref = getattr(compactor, "_manager", None)
+            _inst_repo = getattr(_manager_ref, "_instance_repository", None)
+            if _inst_repo is not None and hasattr(_inst_repo, "get"):
+                # The ``_inst_repo.get`` call is synchronous
+                # (PostgreSQL round-trip via SQLAlchemy). Keep it
+                # off the event loop per the codebase convention
+                # (see ``asyncio.to_thread`` at :1771 for the LLM
+                # call and :1820 for the prompt-cache hit path).
+                _inst_row = await asyncio.to_thread(
+                    _inst_repo.get, instance_id
+                )
+                if _inst_row is not None and is_proactive_escalation_active(_inst_row):
+                    gate_ratio = 0.80
+                    gate_label = "escalation_80pct"
+        except Exception:
+            # Defensive: never let the metadata read crash the
+            # pre-call hook. Fall through to the standard 0.95.
+            pass
+        if payload_tokens < trigger_window * gate_ratio:
             return _PRECALL_NOOP
 
         logger.info(
-            "[Compaction][precall-95] instance=%s payload_tokens=%d >= "
-            "95%% of trigger_window=%d (%d messages) — attempting "
-            "pre-call compaction",
+            "[Compaction][obs] precall-95 instance=%s payload_tokens=%d "
+            "trigger_window=%d ratio=%.2f (%s) headroom=%d — attempting "
+            "pre-call compaction (%d messages)",
             instance_short,
             payload_tokens,
             trigger_window,
+            gate_ratio,
+            gate_label,
+            trigger_window - payload_tokens,
             payload_count,
         )
 

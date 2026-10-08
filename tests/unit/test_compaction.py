@@ -866,12 +866,21 @@ class TestCompactState:
     async def test_skips_when_under_minimum_messages(self, mock_llm):
         """Test that compaction is skipped when message count is below min_messages_before_compaction.
 
-        Phase 1 (proactive-compaction-fix) — anti-refire: the engine
-        now returns a stamped CompactionResult with empty
-        replacement_messages for this skip path so the 60s dedup
-        (``compaction.py:1771-1774``) engages and the per-dispatch
-        refire loop closes. The ``compaction_type`` carries the
-        skip reason verbatim so callers + tests can identify it.
+        COMPACTION NEVER-BLOCKED (Verdict A, fix/compaction-never-blocked
+        @ c600af60d). **OLD expectation** (pre-Phase-2): the engine
+        returned a stamped CompactionResult with empty
+        replacement_messages and ``compaction_type="skipped_below_min_messages"``
+        — the seam's stamp-only path persisted ONLY the stamp, the
+        context never shrank.
+
+        **NEW expectation** (post-Phase-2): the min-messages skip falls
+        through to the 50%-tail last-effort floor. The engine returns
+        ``compaction_type="tail_truncation_last_effort"`` with non-empty
+        ``replacement_messages`` (RemoveMessage drops + notice + tail).
+        The seam takes the standard Variant A/B persist path and lands
+        a REAL shrink. Anti-refire is preserved by the stamp that the
+        result carries on ``compacted_at`` (the seam persists both the
+        messages AND the stamp).
         """
         config = make_compaction_config(
             min_messages_before_compaction=10,
@@ -886,14 +895,27 @@ class TestCompactState:
         )
         compactor = ContextCompactor(config, {})
         result = await compactor.compact_state(context)
-        # ANTI-REFIRE: stamped no-op, NOT None.
+        # NEVER-BLOCKED: NOT a stamp-only no-op. Real shrink lands.
         assert result is not None, (
-            "anti-refire: engine must stamp compacted_at so the dedup "
-            "engages on the next dispatch — return None un-stamped "
-            "would re-fire the gate every dispatch"
+            "floor must return a result (not None) — the never-blocked "
+            "guarantee is that the engine always produces something "
+            "the seam can persist."
         )
-        assert result.compaction_type == "skipped_below_min_messages"
+        # C1 fix: under-budget + not-force + min-messages skip →
+        # pre-commission stamp-only (regression guard against
+        # silent history loss).
+        assert result.compaction_type == "skipped_below_min_messages", (
+            "C1 fix: under-budget + not-force + min-messages skip → "
+            "pre-commission stamp-only skip (no shrinkage, no "
+            "message drops, 60s dedup stamp persists). The floor is "
+            "reserved for over-budget shrinks."
+        )
+        # No drops (the C1 guard)
         assert result.replacement_messages == []
+        # Messages unchanged
+        assert result.messages_before == 5
+        assert result.messages_after == 5
+        # Anti-refire stamp still set — the 60s dedup is preserved.
         assert result.compacted_at, "anti-refire stamp must be set"
 
     @pytest.mark.asyncio
@@ -1485,10 +1507,17 @@ class TestForceFlagWS2:
     async def test_force_does_not_bypass_min_messages(self, mock_llm):
         """Min-messages check still applies under force.
 
-        Phase 1 (proactive-compaction-fix) — anti-refire: even with
-        ``force=True`` the engine stamps ``compacted_at`` on this
-        skip path so the 60s dedup engages. The skip reason is
-        carried in ``compaction_type``.
+        COMPACTION NEVER-BLOCKED (Verdict A, fix/compaction-never-blocked
+        @ c600af60d). **OLD expectation** (pre-Phase-2): even with
+        ``force=True`` the engine stamps ``compacted_at`` on the
+        ``skipped_below_min_messages`` path so the 60s dedup engages
+        — empty ``replacement_messages``, stamp-only.
+
+        **NEW expectation** (post-Phase-2): the min-messages gate still
+        fires (force does NOT bypass it — that is the documented WS-2
+        contract), but the skip now falls through to the
+        ``tail_truncation_last_effort`` floor. The seam persists a
+        real shrink.
         """
         config = make_compaction_config(
             min_messages_before_compaction=100,  # big so we trip it
@@ -1507,10 +1536,19 @@ class TestForceFlagWS2:
         compactor = ContextCompactor(config, {})
         result = await compactor.compact_state(context, force=True)
         # Min-messages wins; force does not bypass it.
-        # ANTI-REFIRE: stamped no-op, NOT None.
+        # NEVER-BLOCKED: floor returns a real shrink, NOT a stamp-only no-op.
         assert result is not None
-        assert result.compaction_type == "skipped_below_min_messages"
-        assert result.replacement_messages == []
+        # OLD: assert result.compaction_type == "skipped_below_min_messages"
+        # NEW: floor engaged (min-messages still wins; the floor is the
+        # shrink shape, not a different gate)
+        assert result.compaction_type == "tail_truncation_last_effort", (
+            "min-messages skip must fall through to the 50%-tail floor "
+            "even under force=True (Phase-2 hardening, Verdict A framing). "
+            "force bypasses ONLY the threshold check, not the floor."
+        )
+        # OLD: assert result.replacement_messages == []
+        # NEW: floor result is non-empty (real shrink, not stamp-only)
+        assert len(result.replacement_messages) > 0
         assert result.compacted_at, "anti-refire stamp must be set"
 
     @pytest.mark.asyncio

@@ -801,9 +801,13 @@ class TestCompactionEmptyLLMResponseErrorEscapesTimeoutExcepts:
         # We expect AT LEAST one call inside the ``compact_state``
         # ``except Exception`` handler — the auto-path contract.
         assert any(
-            2495 <= line <= 2700 for line in truncate_call_lines
+            3050 <= line <= 3350 for line in truncate_call_lines
         ), (
             f"_truncate_fallback must be called inside the outer "
-            f"except Exception handler (~line 2601-2616); got call "
-            f"sites at lines {truncate_call_lines}"
+            f"except Exception handler; got call sites at lines "
+            f"{truncate_call_lines}. (Line range widened in the "
+            f"COMPACTION NEVER-BLOCKED Phase-2 commission because the "
+            f"engine file grew by ~200 lines for the floor helpers — "
+            f"the relative position of the truncate handler is "
+            f"preserved; only the absolute line number shifted.)"
         )

@@ -224,15 +224,19 @@ class TestProactiveCompactionPreservesInjection:
     @pytest.mark.asyncio
     async def test_all_unanswered_injections_skip_with_anti_refire_stamp(self):
         """When every message is an UNANSWERED bare injection,
-        compaction is skipped — and per the anti-refire contract the
-        engine returns a STAMPED no-op result (NOT ``None``) so the
-        60s dedup engages on the next dispatch.
+        compaction falls through to the all-injected skip path.
+        Iteration 3 (C1 REVIEWER): under-budget + not-force →
+        pre-commission stamp-only skip semantics (the budget
+        predicate is the regression guard against silent
+        history loss on under-budget contexts).
 
-        Migrated from the pre-anti-refire pin (``result is None``);
-        the hoisting fix keeps this skip firing for
-        permanent/unanswered injections only — answered notes would
-        make the pool non-empty (see the hoisting test module).
-        """
+        **OLD expectation** (pre-Phase-2): stamp-only no-op,
+        empty ``replacement_messages``.
+        **Iteration-2 expectation**: floor engaged, real shrink.
+        **Iteration-3 expectation** (C1 budget predicate):
+        under-budget + not-force → stamp-only. The 5 small
+        injection messages in this test are well under the
+        200-token window's 80% threshold."""
         compactor = _make_compactor()
         msgs = [
             HumanMessage(
@@ -246,11 +250,24 @@ class TestProactiveCompactionPreservesInjection:
 
         result = await compactor.compact_state(ctx)
 
-        # No compaction should occur — there's nothing selectable —
-        # but the anti-refire stamp must still land.
+        # Phase-2: floor returns a real shrink (NOT stamp-only).
         assert result is not None
+        # OLD: assert result.replacement_messages == []
+        # OLD: assert result.compaction_type == "skipped_injections_dominate"
+        # Iteration-2: floor engaged, real shrink.
+        # Iteration-3 (C1): under-budget + not-force → stamp-only
+        # (regression guard against silent history loss on
+        # under-budget contexts).
+        assert result.compaction_type == "skipped_injections_dominate", (
+            "C1 fix: under-budget + not-force + all-injected → "
+            "pre-commission stamp-only skip (no shrinkage, no "
+            "message drops, 60s dedup stamp persists). The floor is "
+            "reserved for over-budget shrinks."
+        )
+        # No drops — the C1 budget predicate is what protects
+        # under-budget contexts from silent history loss
         assert result.replacement_messages == []
-        assert result.compaction_type == "skipped_injections_dominate"
+        # Anti-refire stamp still set.
         assert result.compacted_at is not None
 
 
