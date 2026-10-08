@@ -26,7 +26,12 @@ import {
 import { SseService } from '../../services/sse.service';
 import { CommandStateService } from '../../services/command-state.service';
 import { ImageViewerActionsService } from '../../services/image-viewer-actions.service';
+import { LiveViewActionsService } from '../../services/live-view-actions.service';
 import { isTmpImageRef } from '../../constants/image-ref';
+import {
+  parseLiveViewUrl,
+  deriveLiveViewTitle,
+} from '../../constants/live-view-url';
 
 interface MermaidChartContext {
   /** Bubble that owns this chart — used to look up the source message. */
@@ -95,6 +100,15 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
    */
   private readonly imageViewerActions = inject(ImageViewerActionsService);
 
+  /**
+   * Phase 2 (live-view) — WebView dialog broker. The chat-interface
+   * owns the chip click bindings on rendered `<a>` tags that point
+   * at live-view artifacts; this service brokers the calls to
+   * MatDialog. The chip renderer below swaps the matched `<a>` for
+   * a clickable chip; the chip's (click) calls this service.
+   */
+  private readonly liveViewActions = inject(LiveViewActionsService);
+
   private shouldScroll = signal(false);
   isNearBottom = signal(true);
   private userHasScrolled = signal(false);
@@ -108,6 +122,14 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
    * double up. Keyed by the rendered SVG element identity.
    */
   private readonly injectedCharts = new WeakSet<Element>();
+  /**
+   * Track which live-view `<a>` tags we've already replaced with
+   * a chip. Keyed by the original anchor element identity so a
+   * MutationObserver re-fire is a no-op for the same href (the
+   * chip stays in place; the anchor is gone from the DOM after
+   * the swap).
+   */
+  private readonly injectedLiveViewChips = new WeakSet<HTMLAnchorElement>();
   /**
    * Active transient status pills, indexed by chart bubble, so we can
    * clear them when the bubble unmounts or a new status supersedes.
@@ -862,6 +884,7 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
     this.scanHandle = requestAnimationFrame(() => {
       this.scanHandle = null;
       this.scanForMermaidCharts();
+      this.scanForLiveViewChips();
     });
   }
 
@@ -904,6 +927,155 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
       this.injectOverlay({ bubble, mermaidEl, svg, source });
       this.injectedCharts.add(svg);
     });
+  }
+
+  // ─── Live-view chip injection (Phase 2) ─────────────────────────────
+  // The ``view_link`` tool mints ``/views/<root>/<rel>`` URLs that
+  // agents may drop into chat content. The Phase-1 daemon serves
+  // those URLs read-only, and the FE matcher in
+  // ``constants/live-view-url.ts`` gates the URL shape so only
+  // the live-view route family gets the chip treatment.
+  //
+  // After the markdown renderer turns message content into HTML,
+  // any matched URL appears as a regular ``<a href="/views/…">``
+  // inside the bubble. This scan walks the message container,
+  // picks out those anchors, and replaces them with a clickable
+  // chip that opens the WebView dialog via
+  // ``LiveViewActionsService.openViewer``.
+
+  /**
+   * Walk the messages container and swap every matched live-view
+   * ``<a>`` for a chip. Mirrors ``scanForMermaidCharts``'s shape
+   * — same MutationObserver-driven entry point, same
+   * short-circuit on ``isLoading``, same idempotency via a
+   * ``WeakSet`` of already-injected anchors.
+   */
+  private scanForLiveViewChips(): void {
+    if (this.isLoading) {
+      // Same rationale as the Mermaid scan — DOM is mutating fast
+      // during a stream; we re-fire on the post-stream
+      // ``isLoading`` true→false hook in ``ngOnChanges``.
+      return;
+    }
+    const container = this.messagesContainerRef?.nativeElement;
+    if (!container) {
+      return;
+    }
+    // Scope the scan to message bubbles so we never touch links
+    // inside the chat header / chrome (e.g. workspace buttons,
+    // the truncated instance-id chip — none of which are
+    // /views/ links today, but scoping future-proofs the scan).
+    const bubbles = container.querySelectorAll<HTMLElement>('.message-bubble');
+    bubbles.forEach((bubble) => {
+      const anchors = bubble.querySelectorAll<HTMLAnchorElement>('a[href]');
+      anchors.forEach((anchor) => {
+        if (this.injectedLiveViewChips.has(anchor)) {
+          return;
+        }
+        const href = anchor.getAttribute('href');
+        if (!href) {
+          return;
+        }
+        // ``parseLiveViewUrl`` is the only gate — every other
+        // URL shape (http://, //host, /viewsfoo, .., etc.) is
+        // rejected and the anchor is left untouched so the
+        // existing markdown-link behavior is preserved.
+        const parsed = parseLiveViewUrl(href);
+        if (parsed === null) {
+          return;
+        }
+        this.injectLiveViewChip(anchor, parsed);
+        this.injectedLiveViewChips.add(anchor);
+      });
+    });
+  }
+
+  /**
+   * Replace a matched live-view ``<a>`` with a chip element. The
+   * anchor is removed from the DOM; the chip is a plain
+   * ``<button>`` (NOT a link) so it has no native ``href`` /
+   * ``target`` semantics the user could accidentally activate
+   * (e.g. middle-click to open in a new tab — the dialog is
+   * the sanctioned entry point). The chip retains the anchor's
+   * original text content as a fallback so a future contributor
+   * who removes the title-derivation logic still has a working
+   * label.
+   */
+  private injectLiveViewChip(
+    anchor: HTMLAnchorElement,
+    parsed: ReturnType<typeof parseLiveViewUrl> & object,
+  ): void {
+    const title = deriveLiveViewTitle(parsed);
+    const chip = this.document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'live-view-chip';
+    chip.setAttribute('data-testid', 'live-view-chip');
+    chip.setAttribute('data-live-view-href', parsed.href);
+    chip.setAttribute('data-live-view-root', parsed.root);
+    chip.setAttribute('data-live-view-rel', parsed.relPath);
+    chip.title = `/views/${parsed.root}/${parsed.relPath}`;
+    chip.setAttribute('aria-label', `Open live view: ${title}`);
+
+    // Inline icon + label. The icon is inlined as an SVG so the
+    // chip does not depend on the Material icon font being
+    // loaded for a fresh bubble (the same trick the Mermaid
+    // overlay uses).
+    const icon = this.document.createElementNS(
+      'http://www.w3.org/1999/svg',
+      'svg',
+    );
+    icon.setAttribute('viewBox', '0 0 24 24');
+    icon.setAttribute('fill', 'none');
+    icon.setAttribute('stroke', 'currentColor');
+    icon.setAttribute('stroke-width', '2');
+    icon.setAttribute('stroke-linecap', 'round');
+    icon.setAttribute('stroke-linejoin', 'round');
+    icon.setAttribute('aria-hidden', 'true');
+    icon.classList.add('live-view-chip-icon');
+    const iconPath = this.document.createElementNS(
+      'http://www.w3.org/1999/svg',
+      'path',
+    );
+    // A simple "open-in-new" / "external artifact" glyph.
+    iconPath.setAttribute(
+      'd',
+      'M14 3h7v7M21 3l-9 9M5 5v14h14',
+    );
+    icon.appendChild(iconPath);
+    chip.appendChild(icon);
+
+    const label = this.document.createElement('span');
+    label.className = 'live-view-chip-label';
+    label.textContent = title;
+    chip.appendChild(label);
+
+    const rootBadge = this.document.createElement('span');
+    rootBadge.className = 'live-view-chip-root';
+    rootBadge.textContent = parsed.root;
+    chip.appendChild(rootBadge);
+
+    chip.addEventListener('click', (event) => {
+      // Stop the click from bubbling (some message templates
+      // may add a bubble-level click handler in the future;
+      // the same defensive stopPropagation pattern the Mermaid
+      // overlay uses).
+      event.preventDefault();
+      event.stopPropagation();
+      // Re-enter the Angular zone — the service opens a
+      // MatDialog, which is zone-aware. The MutationObserver
+      // that wired this chip runs outside the zone (mirrors
+      // the Mermaid overlay's pattern).
+      this.ngZone.run(() => {
+        this.liveViewActions.openViewer(parsed.href);
+      });
+    });
+
+    // Replace the anchor with the chip. The anchor is detached
+    // from the DOM but stays in ``injectedLiveViewChips`` so a
+    // re-render that swaps the anchor back into the same
+    // position (extremely unlikely but possible during a
+    // streaming reconnect) does not double-inject.
+    anchor.replaceWith(chip);
   }
 
   /**
