@@ -15,6 +15,18 @@ interrupted-mid-tool defect the tail-only helpers could not see:
     id was ``call_8ed9e1771dca`` (1c/0r — one call site, zero
     results, mid-history).
 
+FORENSIC FACT (commission correction 2026-10-08): the
+incident's ONLY real defect was the unanswered call above.
+The originally-cited "duplicate tool_call_id (2 call-sites /
+2 results)" was a 12-char-prefix grouping false positive — the
+two calls shared only their first 12 hex chars, not their full
+ids. The duplicate-tc_id class is NOT a brick-class defect; it is
+a strict-gateway ACCEPTED shape (each AIMessage with its own
+adjacent block) and is NOT what this helper mints a fix for.
+See the W1(c) NOTE below for the full count-vs-adjacency
+distinction and the producer-side guard that handles dup-id
+prevention at the COMMIT boundary.
+
 LESSON LOAD-BEARING for W1 — IMMEDIACY, not count-pairing:
     Strict OpenAI-compatible gateways reject requests with the
     shape ``AIMessage(tool_calls) → [non-ToolMessage]`` before the
@@ -35,25 +47,31 @@ LESSON LOAD-BEARING for W1 — IMMEDIACY, not count-pairing:
     **adjacency / immediacy** rule: every ``AIMessage(tool_calls)``
     must be answered by the IMMEDIATELY-adjacent contiguous
     ``ToolMessage`` block — no intervening non-ToolMessage between
-    call and answer. Healing actions:
+    call and answer.
 
-      * (a) Unanswered tool_calls → synthesize placeholder
-        ``ToolMessage`` at the END of the adjacent block (just
-        before the first non-ToolMessage), so the synthesized
-        placeholder sits IMMEDIATELY after the issuing
-        ``AIMessage``. Id format: ``partner-synth-{tc_id}``;
-        content "Tool execution interrupted…".
-      * (b) Orphaned ``ToolMessage`` (no matching call anywhere
-        in the resulting history) → remove. This catches
-        TMs that were stranded by a synthesis (e.g. a TM
-        originally intended for a now-synthesized-partnered
-        ``AIMessage``).
-      * (c) Duplicate ``tool_call_id`` across two DIFFERENT
-        ``AIMessage``s — NOT a gateway violation as long as
-        each AIMessage has its own adjacent block. The
-        pre-existing count-based duplicate detector was
-        over-aggressive; this helper does NOT remove duplicates
-        unless they create an order violation.
+HEAL OPS:
+
+  * (a) Unanswered tool_calls → synthesize placeholder
+    ``ToolMessage`` at the END of the adjacent block (just
+    before the first non-ToolMessage), so the synthesized
+    placeholder sits IMMEDIATELY after the issuing
+    ``AIMessage``. Id format: ``partner-synth-{tc_id}``;
+    content "Tool execution interrupted…".
+  * (b) Orphaned ``ToolMessage`` (no matching call anywhere
+    in the resulting history) → remove. This catches
+    TMs that were stranded by a synthesis (e.g. a TM
+    originally intended for a now-synthesized-partnered
+    ``AIMessage``).
+
+NOTE (W1(c) — non-action, NOT a heal op): count-duplicates of
+``tool_call_id`` across two DIFFERENT ``AIMessage``s are NOT a
+gateway violation as long as each AIMessage has its own
+adjacent block. The pre-existing count-based duplicate detector
+was over-aggressive; this helper does NOT remove duplicates
+unless they create an order violation. The producer-side guard
+:func:`daemon.graph._ensure_full_history_pairing`'s caller
+(graph.py, W4) handles dup-id prevention at the COMMIT
+boundary via :func:`dedupe_incoming_tool_call_ids`.
 
 Performance gating (W1 design rationale):
     The full scan is wired ONLY at the LLM dispatch boundary
@@ -61,9 +79,17 @@ Performance gating (W1 design rationale):
     enqueue-seam tail-guard). The hot-path cost is bounded by:
 
       * Always run the cheap O(n) ``has_pairing_violations`` probe
-        (O(n) time, O(n) auxiliary set of issued tool_call_ids
-        precomputed once per probe call). On healthy histories the
-        cost is the probe alone.
+        (O(n) time, O(n) auxiliary memory in a ROLLING prefix set
+        of issued tool_call_ids + the precomputed
+        ``_build_next_non_tool_after`` array — the set is NOT
+        precomputed in a separate pass; it grows as the left-to-
+        right walk encounters each AIMessage and resets to empty
+        when a non-AIMessage, non-ToolMessage (e.g. HumanMessage)
+        bounds the block-ownership region. Per ToolMessage the
+        orphan check is a single O(1) set lookup; per AIMessage
+        the adjacency check scans the immediately-adjacent
+        ToolMessage block). On healthy histories the cost is the
+        probe alone.
       * ONLY when the probe returns ``True`` (a real violation
         is present) does the full ``validate_and_heal_messages``
         run. The full scan mutates in place and returns a report

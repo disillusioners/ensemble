@@ -1725,18 +1725,28 @@ def emergency_truncate(
     while len(truncated) > 1 and estimate_fn(truncated) > max_tokens:
         truncated.pop(0)
 
-    # W3: order-based snap — the pop(0) loop may have severed
-    # call→result pairs (left an AIMessage(tc) without an adjacent
-    # ToolMessage block, or stranded a ToolMessage whose AIMessage
-    # has been dropped). Delegate to the order-based validator,
-    # which (a) synthesizes a partner immediately after any
-    # AIMessage(tc) whose adjacent block is incomplete, (c) removes
-    # any orphaned ToolMessages. The validator's healing is
-    # idempotent with the W1 full-history guard at the next
+    # W3 (post-pop-loop ORDER-BASED snap): the pop(0) loop may have
+    # severed call→result pairs (left an AIMessage(tc) without an
+    # adjacent ToolMessage block, or stranded a ToolMessage whose
+    # AIMessage has been dropped). Delegate to the order-based
+    # validator, which (a) synthesizes a partner immediately after
+    # any AIMessage(tc) whose adjacent block is incomplete, (b)
+    # removes any orphaned ToolMessages. The validator's healing
+    # is idempotent with the W1 full-history guard at the next
     # dispatch (synthesized ids are deterministic), so a re-heal
     # at the next dispatch is safe. See
     # ``daemon.tool_pairing_history.validate_and_heal_messages`` for
     # the contract.
+    #
+    # NOTE: this is a SEPARATE mechanism from the 50%-tail
+    # truncation floor at :1815-1865 (the never-blocked hardening
+    # ladder's last-effort path). The W3 snap repairs ORDER
+    # violations after ``pop(0)`` truncates the head of a
+    # tool-result-only group; the 50%-tail floor truncates the
+    # TAIL of an oversized all-injected / min-messages /
+    # preserved-within-threshold group. Different triggers, different
+    # targets, different invariants — they are not the same
+    # "adjacency snap" and should not be conflated.
     from .tool_pairing_history import validate_and_heal_messages as _validate_and_heal
     _w3_heal_report = _validate_and_heal(truncated, instance_short="emergency_truncate")
     if _w3_heal_report.synthesized or _w3_heal_report.removed_orphan_indices:

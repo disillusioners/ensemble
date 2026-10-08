@@ -474,12 +474,19 @@ def _ensure_full_history_pairing(
     O(1) tail-only helpers
     (:func:`_ensure_tool_result_pairing`,
     :func:`daemon.services.instance_messaging._heal_poisoned_checkpoint_tail`).
-    The forensic scenario minted two mid-history defects:
-
-      * a duplicate ``tool_call_id`` (``call_01a0fcefec43``) — TWO
-        AIMessage(tc) call-sites, EACH with its own ToolMessage;
-      * an unanswered ``tool_call_id`` (``call_8ed9e1771dca``) — one
-        AIMessage(tc) whose ToolMessage never arrived.
+    The forensic scenario minted one real mid-history defect:
+    an unanswered ``tool_call_id`` (``call_8ed9e1771dca``) — one
+    AIMessage(tc) whose ToolMessage never arrived (interrupted-
+    mid-tool shape, 1c/0r). The originally-cited "duplicate
+    ``tool_call_id`` (``call_01a0fcefec43``)" was a 12-char-prefix
+    grouping false positive — the two calls share only their
+    first 12 hex chars, NOT their full ids. The duplicate-tc_id
+    class is NOT a brick-class defect (strict gateways accept
+    count-duplicates when each AIMessage has its own adjacent
+    block); the W1(c) NOTE in
+    :mod:`daemon.tool_pairing_history` documents the count-vs-
+    adjacency distinction and the producer-side guard that
+    handles dup-id prevention at the COMMIT boundary.
 
     Performance gating (W1 design rationale):
         The LLM dispatch hot path is performance-sensitive — every
@@ -488,13 +495,20 @@ def _ensure_full_history_pairing(
         design-rejected at :287-289. The chosen gating pattern is:
 
           * Always run the cheap O(n) ``has_pairing_violations`` probe
-            (O(n) time, O(n) auxiliary set of issued tool_call_ids
-            precomputed once per probe call — a single tight loop over
-            the message list with one O(1) set lookup per ToolMessage
-            for the orphan check). For a 1k-msg history this is a few
-            µs; for a 10k-msg history it is sub-millisecond. The probe
-            is dominated by Python type checks, no DB / no I/O / no
-            locks.
+            (O(n) time, O(n) auxiliary memory in a ROLLING prefix
+            set of issued tool_call_ids + the precomputed
+            ``_build_next_non_tool_after`` array — the set is
+            NOT precomputed in a separate pass; it grows as the
+            left-to-right walk encounters each AIMessage and
+            resets to empty when a non-AIMessage, non-ToolMessage
+            (e.g. HumanMessage) bounds the block-ownership region.
+            The probe is one O(1) set lookup per ToolMessage for
+            the orphan check + a bounded scan of the immediately-
+            adjacent ToolMessage block per AIMessage for the
+            adjacency check. For a 1k-msg history this is a few
+            µs; for a 10k-msg history it is sub-millisecond. The
+            probe is dominated by Python type checks, no DB / no
+            I/O / no locks.
           * ONLY when the probe returns ``True`` (a real violation is
             present) does the full ``validate_and_heal_messages`` run.
             The full scan mutates in place and returns a report the
@@ -525,16 +539,25 @@ def _ensure_full_history_pairing(
         A :class:`ToolPairingHealReport` describing the heal. Empty
         report on the happy path.
     """
-    # Happy-path probe: a single O(n) walk that allocates an O(n)
-    # auxiliary set of issued tool_call_ids (precomputed once), with
-    # an O(1) set lookup per ToolMessage for the orphan check. The
-    # older no-allocation claim was true only for the AIMessage
-    # adjacency path; the orphan path used to slice ``msgs_list[:i]``
-    # per ToolMessage (O(n²) worst case) until FIX 2 replaced the
-    # slice with the precomputed set. ``has_pairing_violations``
-    # short-circuits on the FIRST violation found, so for healthy
-    # histories it inspects every message; for poisoned histories it
-    # returns on the first hit.
+    # Happy-path probe: a single O(n) left-to-right walk with a
+    # ROLLING prefix set of tool_call_ids (the set of tc_ids issued
+    # by AIMessages at indices < current). The set is NOT
+    # precomputed in a separate pass — it grows as we encounter
+    # each AIMessage and resets to empty when a non-AIMessage,
+    # non-ToolMessage (e.g. HumanMessage) bounds the block-
+    # ownership region. Per ToolMessage the orphan check is a
+    # single O(1) set lookup against the current rolling set;
+    # per AIMessage the adjacency check scans the immediately-
+    # adjacent ToolMessage block (bounded by the precomputed
+    # ``_build_next_non_tool_after`` array). The older O(n) slice
+    # + per-AIMessage ``_extract_tool_call_ids`` walk inside the
+    # orphan check made the probe worst-case O(n²); the rolling
+    # set + bounded-block scan keep it O(n) time, O(n) auxiliary
+    # memory (the prefix set + the ``_build_next_non_tool_after``
+    # array). ``has_pairing_violations`` short-circuits on the
+    # FIRST violation found, so for healthy histories it
+    # inspects every message; for poisoned histories it returns
+    # on the first hit.
     if not messages or not has_pairing_violations(messages):
         return ToolPairingHealReport(scanned_count=len(messages) if messages else 0)
 
@@ -3988,7 +4011,8 @@ class SessionState(MessagesState):
     # → ``agent_node``). Set by ``agent_repair_ghost`` when the durable
     # budget is exhausted; consumed (and cleared to ``None``) by
     # ``agent`` on its NEXT invocation. Mirrors the loop class's
-    # response-substitution precedent (graph.py:6847-6848): the
+    # response-substitution precedent (the ``response = _durable_loop.terminal_message``
+    # pattern in :func:`_maybe_durable_loop_repair`): the
     # terminal SUBSTITUTES the agent_node's response so NO LLM invoke
     # fires and the plain-AIMessage fall-through in ``should_continue``
     # routes to END with the terminal as ``messages[-1]`` — cycle-kill:
@@ -7947,7 +7971,8 @@ def create_agent_repair_ghost_node(
         # this field via response-substitution (graph.py::agent_node
         # near top of the closure body) — mirroring the loop class's
         # ``response = _durable_loop.terminal_message`` precedent
-        # (graph.py:6847-6848). The terminal SUBSTITUTES the LLM
+        # (the ``response = _durable_loop.terminal_message`` pattern in
+        # :func:`_maybe_durable_loop_repair`). The terminal SUBSTITUTES the LLM
         # response, so NO LLM invoke fires, the terminal is the final
         # visible message (``messages[-1]``), and
         # ``should_continue``'s plain-AIMessage fall-through routes to
@@ -8162,7 +8187,8 @@ def create_agent_node(
         # ``create_agent_repair_ghost_node`` exhaustion branch). The
         # unconditional ``agent_repair_ghost → agent`` edge then routes
         # here. Mirror the loop class's response-substitution precedent
-        # (graph.py:6847-6848 — ``response = _durable_loop.terminal_message``):
+        # (the ``response = _durable_loop.terminal_message`` pattern in
+        # :func:`_maybe_durable_loop_repair` —
         # APPEND the stashed terminal as this node's emitted message —
         # different mechanism from the loop precedent's `response = ...`
         # substitution, same cycle-kill: ``messages[-1]`` is a plain
@@ -8188,8 +8214,9 @@ def create_agent_node(
         _pending_ghost_terminal = state.get("pending_repair_ghost_terminal")
         if _pending_ghost_terminal is not None:
             # Carrier co-occurrence impossible by construction — when this
-            # early return fires, the loop-substitution (graph.py:6847-6848)
-            # and pre-terminal-intercept (graph.py:7141) paths below are
+            # early return fires, the loop-substitution (the
+            # ``response = _durable_loop.terminal_message`` pattern in
+            # :func:`_maybe_durable_loop_repair`) and pre-terminal-intercept (graph.py:7141) paths below are
             # unreachable (the carrier is set ONLY on ghost-rung budget
             # exhaustion, mutually exclusive with the other rungs).
             _ghost_terminal_budget = int(
@@ -10314,10 +10341,12 @@ def build_instance_llms(
     # Wrap with tenacity retry + failover if config provided. This
     # is the transient/timeout budget — SEPARATE from the
     # classifier wiring above. The classifier runs INSIDE the
-    # retry scope so the classifier's ToolPairingInvalidError
-    # conversion is itself retried by tenacity (no — tenacity
-    # does NOT retry ToolPairingInvalidError because it's not in
-    # TRANSIENT_EXCEPTIONS; the W2 catch is the bounded retry).
+    # retry scope, but tenacity does NOT retry
+    # ToolPairingInvalidError (it is not a TRANSIENT_EXCEPTIONS
+    # member — the W2 catch is the bounded retry for that
+    # exception class). Only the TRANSIENT/timeout budget is
+    # controlled here; the W2 budget is owned by the W2 catch
+    # itself.
     if retry_config:
         transient_attempts = retry_config.get("transient_attempts", 8)
         timeout_attempts = retry_config.get("timeout_attempts", 3)

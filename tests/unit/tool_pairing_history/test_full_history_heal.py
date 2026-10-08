@@ -121,9 +121,11 @@ Fixture map:
         The pop(0) loop drops oldest messages, then the validator
         runs to fix any order violations introduced by the drops.
 
-    W4 PRODUCER GUARD — ``TestDedupeIncomingToolCallIds``
+    W4 PRODUCER GUARD — ``TestDuplicateToolCallIdEachHasOwnTM``
         The cheap defensive guard re-ids colliding tool_call_ids in
-        the incoming AIMessage at the COMMIT boundary.
+        the incoming AIMessage at the COMMIT boundary
+        (real home: ``TestDuplicateToolCallIdEachHasOwnTM::
+        test_defensive_dedupe_incoming_collisions_at_commit_boundary``).
 """
 
 from __future__ import annotations

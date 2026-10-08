@@ -565,7 +565,10 @@ class TestClassifierToW2Seam:
 
     The test wraps a raw LLM provider with ``classify_llm_errors``
     (the same wrapping ``build_instance_llms`` does in production
-    at graph.py:10228) and feeds it into the agent_node. The
+    at graph.py:10310-10312, which since the round-2 🟡#3 fix is
+    UNCONDITIONAL — the classifier wrap fires regardless of
+    ``retry_config`` presence, so the W2 wiring is always active
+    in production) and feeds it into the agent_node. The
     provider's first invoke raises a real ``openai.BadRequestError``
     with the canonical 2013 signature; the classifier converts to
     ``ToolPairingInvalidError``; the W2 catch fires; the second

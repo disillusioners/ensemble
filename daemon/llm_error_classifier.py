@@ -451,21 +451,22 @@ class ToolPairingInvalidError(Exception):
     SIGNATURES — the canonical corpus-derived set; extend ONLY with
     forensics evidence. Adding patterns here MUST be paired with a
     test that reproduces the new shape end-to-end. The current set
-    covers:
+    (canonical 2013 + three sibling shapes) is listed verbatim from
+    the :attr:`SIGNATURES` tuple below as the single source of truth:
 
       * "tool call result does not follow tool call" (2013, canonical)
       * "messages with role 'tool' must be a response to a preceeding
-        message with 'tool_calls'" (sibling shape — same root cause)
-      * "messages.${idx}: tool call result does not follow tool call"
-        (anthropic-style sibling shape)
-      * "Invalid parameter: messages with role 'tool' must be a
-        response to a preceeding message with 'tool_calls'" (full
-        anthropic string with parameter prefix)
+        message with 'tool_calls'" (sibling — single-quote variant)
+      * "messages with role \\"tool\\" must be a response to a
+        preceeding message with \\"tool_calls\\"" (sibling —
+        double-quote variant)
+      * "invalid parameter: messages with role 'tool'" (sibling —
+        anthropic parameter-prefix variant)
     """
 
     #: Canonical signatures — case-insensitive substrings. Listed in
-    #: :data:`_PAIRING_INVALID_SIGNATURES` so both the classifier and
-    #: the tests reference a single source.
+    #: :attr:`ToolPairingInvalidError.SIGNATURES` so both the
+    #: classifier and the tests reference a single source.
     SIGNATURES: tuple[str, ...] = (
         "tool call result does not follow tool call",
         "messages with role 'tool' must be a response to a preceeding message with 'tool_calls'",
