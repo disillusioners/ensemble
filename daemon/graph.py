@@ -9585,9 +9585,11 @@ def create_agent_node(
                     # (the more recent one — the gateway rejected
                     # the post-heal payload too) with the ORIGINAL
                     # first invocation's exception as ``__cause__``
-                    # via ``from``. Mirrors the primary site's
-                    # FIX 4 alignment (:9111-9128) so both W2
-                    # catch sites behave identically:
+                    # via ``from``. Mirrors the primary W2 inner-try's
+                    # FIX 4 alignment (the ``raise ... from ...`` chain
+                    # documented in the primary site's TRANSIENT ESCAPE
+                    # PATH rationale above) so both W2 catch sites
+                    # behave identically:
                     #   - Primary raise: the second
                     #     ``ToolPairingInvalidError`` (most recent
                     #     rejection signature).
