@@ -1033,7 +1033,8 @@ class TestEmergencyTruncateAdjacencySnap:
     when the estimate is already under budget (it does not fix
     pre-existing violations, only those introduced by the pop loop).
     Caller-side responsibility for pre-existing violations lives at
-    the LLM dispatch boundary (W1 / graph.py:9013).
+    the LLM dispatch boundary (W1 / see
+    :func:`daemon.graph._ensure_full_history_pairing`).
     """
 
     def test_pop_with_unanswered_at_head_synthesizes_partner(self):

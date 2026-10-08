@@ -1737,16 +1737,6 @@ def emergency_truncate(
     # at the next dispatch is safe. See
     # ``daemon.tool_pairing_history.validate_and_heal_messages`` for
     # the contract.
-    #
-    # NOTE: this is a SEPARATE mechanism from the 50%-tail
-    # truncation floor at :1815-1865 (the never-blocked hardening
-    # ladder's last-effort path). The W3 snap repairs ORDER
-    # violations after ``pop(0)`` truncates the head of a
-    # tool-result-only group; the 50%-tail floor truncates the
-    # TAIL of an oversized all-injected / min-messages /
-    # preserved-within-threshold group. Different triggers, different
-    # targets, different invariants — they are not the same
-    # "adjacency snap" and should not be conflated.
     from .tool_pairing_history import validate_and_heal_messages as _validate_and_heal
     _w3_heal_report = _validate_and_heal(truncated, instance_short="emergency_truncate")
     if _w3_heal_report.synthesized or _w3_heal_report.removed_orphan_indices:
@@ -1755,6 +1745,16 @@ def emergency_truncate(
             f"fix: synthesized={len(_w3_heal_report.synthesized)} "
             f"orphans_removed={len(_w3_heal_report.removed_orphan_indices)}"
         )
+
+    # NOTE: the W3 snap above is a SEPARATE mechanism from the
+    # 50%-tail truncation floor at :1824 (the never-blocked hardening
+    # ladder's last-effort path). The W3 snap repairs ORDER
+    # violations after ``pop(0)`` truncates the head of a
+    # tool-result-only group; the 50%-tail floor truncates the
+    # TAIL of an oversized all-injected / min-messages /
+    # preserved-within-threshold group. Different triggers, different
+    # targets, different invariants — they are not the same
+    # "adjacency snap" and should not be conflated.
 
     return truncated
 

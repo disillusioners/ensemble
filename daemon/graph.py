@@ -318,12 +318,14 @@ def _frame_injected_report(content: str) -> str:
 # two ends cross-referenced when either changes.
 #
 # W5 (fix/tool-pairing-full-history-heal): this in-graph tail-only guard
-# is COMPLEMENTED by ``_ensure_full_history_pairing`` (defined later in
-# this module, :527), wired at every ``current_llm.invoke(...)`` site.
-# The tail-only guard covers the trailing poisoned-state shape (the
-# original use case); the full-history guard covers the mid-history
-# violations the tail-only guard cannot see (the 03d7657f forensic
-# shape). Both run together at the LLM dispatch boundary — the
+# is COMPLEMENTED by :func:`_ensure_full_history_pairing` (defined later
+# in this module, wired at the primary dispatch FIRST
+# ``current_llm.invoke(...)`` site; the W2 catch runs the heal
+# separately on the retry path, not at an invoke site). The tail-only
+# guard covers the trailing poisoned-state shape (the original use
+# case); the full-history guard covers the mid-history violations the
+# tail-only guard cannot see (the 03d7657f forensic shape). Both run
+# together at the LLM dispatch boundary — the
 # full-history guard runs FIRST (cheaper, O(n) probe + conditional
 # O(n) heal), then ``_ensure_tool_result_pairing`` runs for the
 # trailing drain semantics (its R1 deterministic id format overlaps
@@ -492,7 +494,10 @@ def _ensure_full_history_pairing(
         The LLM dispatch hot path is performance-sensitive — every
         ``current_llm.invoke(full_messages)`` site ships messages to
         the provider. An unbounded O(n) scan per invoke was
-        design-rejected at :287-289. The chosen gating pattern is:
+        design-rejected at the original brainstorming (see the
+        ADR / design discussion; the original rejection cite was
+        at line 287 in earlier revisions). The chosen gating
+        pattern is:
 
           * Always run the cheap O(n) ``has_pairing_violations`` probe
             (O(n) time, O(n) auxiliary memory in a ROLLING prefix
@@ -8390,17 +8395,12 @@ def create_agent_node(
         # poisoned state tail (unanswered ``AIMessage(tool_calls)``
         # after a daemon restart) would replay forever.
         pairing_synthesized_msgs: list[ToolMessage] = []
-        # W1: full-history pairing heal can REMOVE messages (orphan
-        # ToolMessages, duplicate AIMessage(tc) call-sites) as well as
-        # synthesize placeholders. ``pairing_remove_sentinels``
-        # collects the ``id``s of removed messages so the C2 return
-        # threads ``RemoveMessage(id=...)`` sentinels into the
-        # outgoing list and the LangGraph ``add_messages`` reducer
-        # drops them from the checkpoint in the same superstep. The
-        # removal is in-place on ``full_messages`` (the LLM-bound
-        # list is healed) and persistent via the C2 return
-        # (the checkpoint is healed). See
-        # :func:`_ensure_full_history_pairing` for the contract.
+        # W1 heal removes orphan ``ToolMessage``s whose block-ownership
+        # rule fires and synthesizes placeholders; duplicate
+        # ``AIMessage(tool_calls)`` call-sites are NOT removed
+        # (W1(c) — strict gateways accept count-dups with own
+        # adjacent blocks); W4 ``dedupe_incoming_tool_call_ids``
+        # prevents dup-ids at the commit boundary.
         pairing_remove_sentinels: list[RemoveMessage] = []
         if injection_slot is not None:
             pending_list = injection_slot.get(instance_id)
@@ -9511,7 +9511,9 @@ def create_agent_node(
             # W1: full-history pairing heal on the post-compaction
             # payload too — compaction may have produced a stale
             # boundary violation (orphaned ToolMessage at the new head)
-            # that the per-group snap in :1904-1965 does not cover.
+            # that the per-group snap in
+            # :func:`daemon.compaction._snap_orphan_tool_messages_at_cut`
+            # does not cover.
             # Probe-only O(n) walk; full heal only when the probe
             # flags a real violation.
             _post_compact_heal = _ensure_full_history_pairing(
@@ -9536,11 +9538,13 @@ def create_agent_node(
             # ``except ToolPairingInvalidError`` at the same level as
             # this CLE handler is unreachable for exceptions raised
             # inside the handler. Compaction may have left a stale
-            # pairing violation the per-group snap in :1904-1965 does
-            # not cover (the snap targets the 50%-tail floor boundary
-            # only); the W1 probe above handles the common case, this
-            # W2 inner-try handles the strict-gateway-still-rejects
-            # case the probe missed.
+            # pairing violation the per-group snap in
+            # :func:`daemon.compaction._snap_orphan_tool_messages_at_cut`
+            # does not cover; the W1 probe above handles the common case,
+            # this W2 inner-try handles the strict-gateway-still-rejects
+            # case the probe missed. See the NOTE at
+            # ``daemon/compaction.py:1750-1757`` for the W3 snap vs
+            # 50%-tail floor distinction.
             loop = asyncio.get_running_loop()
             try:
                 response = await loop.run_in_executor(
@@ -9550,7 +9554,8 @@ def create_agent_node(
             except ToolPairingInvalidError as _w2_compact_pairing_exc:
                 # W2 reactive heal on the post-compaction payload —
                 # same heal-once retry contract as the primary dispatch
-                # site (:9101-9114). Heal on ``compact_messages`` and
+                # site (:func:`daemon.graph.create_agent_node`'s primary
+                # W2 inner-try). Heal on ``compact_messages`` and
                 # re-invoke ONCE; second failure reraises and the
                 # existing error path takes over.
                 logger.warning(
@@ -9601,7 +9606,7 @@ def create_agent_node(
                     # │ TRANSIENT ESCAPE PATH (accepted; documented)│
                     # │                                            │
                     # │ Same escape path as the primary W2 site.   │
-                    # │ The inner try/except at :9544-9575 catches  │
+                    # │ The post-compaction W2 inner-try catches    │
                     # │ ONLY ``ToolPairingInvalidError``. A        │
                     # │ transient raised inside the W2 retry       │
                     # │ invoke body (a 2013-then-transient          │
@@ -9625,8 +9630,10 @@ def create_agent_node(
                     # │ and building new retry machinery here would  │
                     # │ couple the W2 bounded contract to a         │
                     # │ transient budget the design rejects.        │
-                    # │ Accepted — see primary site :9111-9128 for  │
-                    # │ the full rationale.                         │
+                    # │ Accepted — see the primary W2 site's full   │
+                    # │ TRANSIENT ESCAPE PATH rationale in the      │
+                    # │ comment block at the top of                  │
+                    # │ :func:`daemon.graph.create_agent_node`.      │
                     # └────────────────────────────────────────────┘
                     logger.error(
                         f"[ToolPairing:FULL] W2 post-compaction heal did "
@@ -9979,7 +9986,8 @@ def create_agent_node(
         # a follow-up step that never ran) cannot be prevented at the
         # producer boundary — by the time we know the ToolMessage
         # is missing, the AIMessage has already been checkpointed.
-        # W1's full-history heal (graph.py:9013) covers the next
+        # W1's full-history heal (see :func:`_ensure_full_history_pairing`)
+        # covers the next
         # dispatch with a synthesized placeholder immediately after
         # the issuing AIMessage; W2's reactive recovery covers the
         # rare case where the gateway still rejects after W1 (e.g.
@@ -10322,7 +10330,10 @@ def build_instance_llms(
     llm_standard = llm_standard_chat.bind_tools(tools)
 
     # CRITICAL — classify errors BEFORE any retry/cooldown layer so
-    # the agent_node W2 catch (graph.py:9111-9128 and :9455-9499)
+    # the agent_node W2 catch (the primary ``except ToolPairingInvalidError``
+    # site in :func:`daemon.graph.create_agent_node` and its post-
+    # compaction W2 inner-try inside the
+    # ``ContextLengthExceededError`` handler)
     # can intercept the ToolPairingInvalidError the classifier
     # raises for the 2013 signature. The classify_llm_errors
     # wrapping is INDEPENDENT of ``retry_config`` — the W2 wiring

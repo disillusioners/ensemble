@@ -269,9 +269,10 @@ async def _heal_poisoned_checkpoint_tail(
         # Coverage note (W5 / fix/tool-pairing-full-history-heal):
         # the silent-resume path is now covered by the W1 full-
         # history pairing guard wired at the LLM dispatch boundary
-        # (``daemon.graph._ensure_full_history_pairing`` invoked
-        # right before ``current_llm.invoke(full_messages)`` at
-        # graph.py:9013). The in-graph guard reads
+        # (:func:`daemon.graph._ensure_full_history_pairing` invoked
+        # right before ``current_llm.invoke(full_messages)`` at the
+        # W1 wire-up site in :func:`daemon.graph.create_agent_node`).
+        # The in-graph guard reads
         # ``state['messages']`` directly — independent of
         # ``graph_input`` — so the silent-resume branch reaches it
         # just like any other branch. The pre-W1 claim that "the

@@ -2,8 +2,9 @@
 
 Branch: ``fix/tool-pairing-full-history-heal``.
 
-The agent_node W2 catch (daemon/graph.py:9111-9128, primary site; the
-FIX 1 post-compaction inner-try at :9455-9499) heals the LLM-bound
+The agent_node W2 catch (the primary ``except ToolPairingInvalidError``
+site in :func:`daemon.graph.create_agent_node`; the FIX 1 post-compaction
+inner-try inside the ``ContextLengthExceededError`` handler) heals the LLM-bound
 payload when the gateway rejects with ``ToolPairingInvalidError`` and
 re-invokes the LLM ONCE. A second failure reraises the second
 exception with the FIRST exception as ``__cause__`` via ``from`` (the
@@ -15,10 +16,11 @@ cannot silently regress. The test design follows the existing
 ``mock_graph``, ``mock_compactor``, ``mock_state``) — same fixtures,
 same call style. Each test class targets one W2 site:
 
-  * ``TestW2PrimarySiteWiring`` — primary dispatch W2 (graph.py
-    :9111-9128). Poisoned history → first invoke raises
-    ``ToolPairingInvalidError`` → W2 heal-once-retry → second invoke
-    succeeds. Asserts invoke count is EXACTLY 2 and the second
+  * ``TestW2PrimarySiteWiring`` — primary dispatch W2 (the primary
+    ``except ToolPairingInvalidError`` site in
+    :func:`daemon.graph.create_agent_node`). Poisoned history → first
+    invoke raises ``ToolPairingInvalidError`` → W2 heal-once-retry →
+    second invoke succeeds. Asserts invoke count is EXACTLY 2 and the second
     payload is healed/order-valid.
 
   * ``TestW2PrimarySiteReraiseChain`` — second-failure path. BOTH
@@ -28,8 +30,9 @@ same call style. Each test class targets one W2 site:
     mismatch the review caught.
 
   * ``TestW2PostCompactionWiring`` — post-compaction W2 (the FIX 1
-    inner-try at :9455-9499, the formerly-dead sibling clause).
-    First invoke raises ``ContextLengthExceededError``; the compactor
+    inner-try inside the ``ContextLengthExceededError`` handler in
+    :func:`daemon.graph.create_agent_node`; the formerly-dead sibling
+    clause). First invoke raises ``ContextLengthExceededError``; the compactor
     runs; the post-compaction invoke raises
     ``ToolPairingInvalidError``; the W2 heal-once-retry catches it
     INSIDE the CLE handler (the dead-code fix); the retry succeeds.
@@ -143,7 +146,9 @@ def _make_mock_state(messages: list, compacted_at=None) -> _MockStateValues:
 
 
 class TestW2PrimarySiteWiring:
-    """Pin the primary dispatch W2 catch (graph.py :9111-9128).
+    """Pin the primary dispatch W2 catch (the primary
+    ``except ToolPairingInvalidError`` site in
+    :func:`daemon.graph.create_agent_node`).
 
     Fake LLM whose first invoke raises ``ToolPairingInvalidError``
     (simulating the gateway's 2013 rejection), second invoke returns
@@ -362,7 +367,9 @@ class TestW2PrimarySiteReraiseChain:
 
 
 class TestW2PostCompactionWiring:
-    """Pin the post-compaction W2 inner-try (graph.py :9455-9499).
+    """Pin the post-compaction W2 inner-try (the FIX 1 inner-try
+    inside the ``ContextLengthExceededError`` handler in
+    :func:`daemon.graph.create_agent_node`).
 
     Pre-FIX 1 the post-compaction W2 was a DEAD SIBLING CLAUSE at
     the same level as the ``ContextLengthExceededError`` handler —
@@ -565,7 +572,9 @@ class TestClassifierToW2Seam:
 
     The test wraps a raw LLM provider with ``classify_llm_errors``
     (the same wrapping ``build_instance_llms`` does in production
-    at graph.py:10310-10312, which since the round-2 🟡#3 fix is
+    at the unconditional classifier-wrap block in
+    :func:`daemon.graph.build_instance_llms` — see the comment
+    block above the wrap, which since the round-2 🟡#3 fix is
     UNCONDITIONAL — the classifier wrap fires regardless of
     ``retry_config`` presence, so the W2 wiring is always active
     in production) and feeds it into the agent_node. The

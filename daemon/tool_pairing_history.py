@@ -476,8 +476,9 @@ def validate_and_heal_messages(
                     # non-Tool message did NOT issue this tc_id.
                     # The TM is stranded in the wrong adjacent
                     # block — remove it. Sentinel threading picks
-                    # up the id below (id-less case documented at
-                    # :454-460).
+                    # up the id below (id-less case documented in
+                    # the rationale block above
+                    # ``removed_ids: list[str] = []``).
                     report.removed_orphan_indices.append(len(final_list))
                     continue
                 final_list.append(m)
@@ -545,8 +546,11 @@ def validate_and_heal_messages(
     # length, so the cost is sub-millisecond on realistic
     # histories. The right long-term fix is a LangGraph API
     # addition (``RemoveMessage(index=N)`` or remove-by-content)
-    # which is out of scope for this branch — see the linked
-    # issue in ``.agents/shared/knowledge/``.
+    # which is out of scope for this branch — see the related
+    # discussion under the ``03d7657f`` incident in
+    # CHANGELOG.md and the W1(c) NOTE above for the count-vs-
+    # adjacency distinction that the LangGraph ``add_messages``
+    # reducer enforces.
     removed_ids: list[str] = []
     for m in messages:
         if id(m) in final_ids_by_obj:
