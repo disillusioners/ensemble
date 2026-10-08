@@ -9147,27 +9147,28 @@ def create_agent_node(
                 # │ catch handler body → propagates out of the entire  │
                 # │ outer try statement. Python ``except`` clauses     │
                 # │ only match exceptions raised in the immediately-   │
-                # │ enclosing try body; sibling clauses (:9177          │
-                # │ ``ContextLengthExceededError``, :9604 transient     │
-                # │ tuple, :9789 generic ``Exception``) are NOT         │
-                # │ consulted for exceptions raised inside a handler   │
-                # │ body. Only the task-level error path (LangGraph     │
-                # │ node wrapper / task processor) catches the          │
-                # │ propagated transient.                              │
+                # │ enclosing try body; sibling clauses (the            │
+                # │ ``ContextLengthExceededError`` clause, the          │
+                # │ transient-tuple clause, and the generic            │
+                # │ ``Exception`` clause) are NOT consulted for         │
+                # │ exceptions raised inside a handler body. Only the  │
+                # │ task-level error path (LangGraph node wrapper /    │
+                # │ task processor) catches the propagated transient.   │
                 # │                                                    │
                 # │ Why accepted: the probability of a 2013-then-      │
                 # │ transient sequence inside the W2 retry window is   │
                 # │ low (the gateway that just 2013-rejected is more   │
                 # │ likely to keep rejecting than to time out), the   │
-                # │ outer transient sibling handler is still wired to   │
-                # │ catch the case at the agent_node level (the       │
-                # │ W2 inner-try doesn't break the outer tuple), and  │
-                # │ building new retry machinery here would couple the │
-                # │ W2 bounded-retry contract to a transient budget    │
-                # │ the design explicitly rejects (heal-once + retry-  │
-                # │ once, NEVER more — see FIX 1). The task-level      │
-                # │ error path still catches the propagated transient  │
-                # │ if it bypasses the W2 handler.                    │
+                # │ W2 inner-try does not disturb the outer transient │
+                # │ tuple's handling of try-BODY-raised transients    │
+                # │ (handler-raised transients were never its         │
+                # │ concern), and building new retry machinery here  │
+                # │ would couple the W2 bounded-retry contract to a   │
+                # │ transient budget the design explicitly rejects    │
+                # │ (heal-once + retry-once, NEVER more — see FIX 1). │
+                # │ The task-level error path still catches the       │
+                # │ propagated transient if it bypasses the W2        │
+                # │ handler.                                         │
                 # └────────────────────────────────────────────────────┘
                 logger.error(
                     f"[ToolPairing:FULL] W2 reactive heal did not "
@@ -9580,22 +9581,25 @@ def create_agent_node(
                     # │ sequence inside the CLE handler) escapes   │
                     # │ the inner try uncaught → propagates out    │
                     # │ of the W2 catch handler body → out of the   │
-                    # │ :9177 CLE clause → out of the entire       │
+                    # │ CLE clause → out of the entire             │
                     # │ outer try statement. Sibling clauses        │
-                    # │ (:9177, :9604, :9789) are NOT consulted    │
-                    # │ for handler-body raises. Only the          │
-                    # │ task-level error path catches the           │
-                    # │ propagated transient.                       │
+                    # │ (the ContextLengthExceededError clause, the  │
+                    # │ transient-tuple clause, and the generic      │
+                    # │ Exception clause) are NOT consulted for     │
+                    # │ handler-body raises. Only the task-level    │
+                    # │ error path catches the propagated transient. │
                     # │                                            │
-                    # │ The outer transient handler is at the      │
-                    # │ agent_node level (still wired and          │
-                    # │ reachable if the exception propagates past │
-                    # │ the CLE handler boundary), the task-level  │
-                    # │ error path still catches it, and building  │
-                    # │ new retry machinery here would couple the  │
-                    # │ W2 bounded contract to a transient budget  │
-                    # │ the design rejects. Accepted — see primary │
-                    # │ site :9111-9128 for the full rationale.    │
+                    # │ The W2 inner-try does not disturb the      │
+                    # │ outer transient tuple's handling of        │
+                    # │ try-BODY-raised transients past the CLE    │
+                    # │ handler boundary (handler-raised           │
+                    # │ transients were never its concern), the     │
+                    # │ task-level error path still catches it,     │
+                    # │ and building new retry machinery here would  │
+                    # │ couple the W2 bounded contract to a         │
+                    # │ transient budget the design rejects.        │
+                    # │ Accepted — see primary site :9111-9128 for  │
+                    # │ the full rationale.                         │
                     # └────────────────────────────────────────────┘
                     logger.error(
                         f"[ToolPairing:FULL] W2 post-compaction heal did "
