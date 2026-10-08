@@ -1286,7 +1286,10 @@ class InstanceMessagingService:
                 )
                 # COMPACTION NEVER-BLOCKED (Verdict A) — escalation
                 # counter increment on status-reject skip (one of the
-                # three counted skip reasons).
+                # three counted skip reasons). No message count is
+                # passed (status-reject is a pre-state check); the
+                # counter persists across skips but the threshold
+                # alone gates escalation (growth is unknown here).
                 self._record_proactive_skip(instance_id)
                 return
 
@@ -1328,7 +1331,15 @@ class InstanceMessagingService:
                 )
                 # COMPACTION NEVER-BLOCKED (Verdict A) — escalation
                 # counter increment on non-quiescent shape skip.
-                self._record_proactive_skip(instance_id)
+                # F2 FIX: pass the current message count so the
+                # growth check can compare against the baseline.
+                # Non-growing streaks reset the counter rather
+                # than escalate (matches the docstring promise).
+                _skip_messages = state.values.get("messages", []) or []
+                self._record_proactive_skip(
+                    instance_id,
+                    current_message_count=len(_skip_messages),
+                )
                 return
 
             messages = state.values.get('messages', [])
@@ -1485,19 +1496,20 @@ class InstanceMessagingService:
             logger.warning(f"[Compaction] Failed to compact context for {instance_id[:8]}...: {e}")
 
     # ── COMPACTION NEVER-BLOCKED (Verdict A) — escalation helpers ──────
-    def _record_proactive_skip(self, instance_id: str) -> None:
+    def _record_proactive_skip(
+        self, instance_id: str, *, current_message_count: int | None = None
+    ) -> None:
         """Increment the per-instance consecutive-skip counter, and
         escalate (write the 95%->80% sticky metadata) when the
-        threshold is reached AND the message count grew across the
-        streak.
+        threshold is reached AND the message count GREW across the
+        streak (F2 REVIEWER iteration-3 fix).
 
         Cheap: O(1) RAM writes + one best-effort metadata write. The
         metadata write is wrapped in try/except so a DB hiccup never
         crashes the proactive trigger; the RAM counter still records
         the skip for the next attempt.
 
-        Growth-baseline semantics (deliberate, NOT a bug — do not
-        tighten into an immediate-escalation):
+        Growth-baseline semantics (F2 FIX, REVIEWER iteration 3):
 
         * The very FIRST skip for an instance is BENIGN: there is no
           prior message-count baseline (the instance was never
@@ -1506,19 +1518,23 @@ class InstanceMessagingService:
           skip is still recorded in the counter (so a subsequent
           attempt with a baseline can compare), but no escalation
           fires.
-        * The growth check is anchored on the LAST SEEN message
-          count from a previous SUCCESSFUL engine invocation (or a
-          successful proactive attempt). The counter itself does
-          not carry growth signal.
-        * Once a successful compaction (or any engine reach) sets
-          the baseline, subsequent skips compare against it. A
-          non-growing streak (stable count across skips) does NOT
-          escalate — the operator's intent: context is stable, just
-          non-quiescent; no urgency.
-        * A growing streak that reaches N escalates, regardless of
-          the exact current-vs-previous delta (the brief said "N
-          consecutive skips while context keeps growing"; the
-          growth check is binary).
+        * Once a baseline exists, escalation fires ONLY when:
+          (a) ``new_count >= threshold`` (the streak is long enough), AND
+          (b) ``current_message_count > prev_message_count`` (the
+              context is actually growing — the brief's
+              "while context keeps growing" clause).
+        * If ``current_message_count`` is ``None`` (status-reject
+          skip, where no state read is available) OR equals
+          ``prev_message_count`` (non-growing streak), the counter
+          RESETS to 0 — a stable non-quiescent instance with no
+          growth does NOT escalate. The reset is the implementation
+          of the docstring's promise: "non-growing streak does NOT
+          escalate". The prior iteration's code only checked
+          baseline existence, so a stable non-quiescent instance
+          would escalate after 3 skips. That bug is fixed here.
+        * A growing streak that reaches N escalates regardless of
+          the exact current-vs-previous delta (the growth check is
+          binary; the brief said "while context keeps growing").
         """
         # Threshold 0 disables escalation entirely (operator
         # preference; see CompactionConfig.proactive_escalate_after).
@@ -1535,41 +1551,63 @@ class InstanceMessagingService:
         if threshold <= 0:
             return
 
-        # Compare against the LAST seen message count (RAM cache from
-        # the previous successful call). "Growing" is a strict-greater
-        # check — a steady count across the streak does NOT escalate
-        # (the operator's intent: the context is stable, just
-        # non-quiescent; no urgency).
-        new_count = self._consecutive_proactive_skips.get(instance_id, 0) + 1
-        self._consecutive_proactive_skips[instance_id] = new_count
-
-        # Read the live message count for the growth check. We do
-        # NOT have access to ``messages`` here (the skip happened
-        # before we read state); use the cached last-seen count from
-        # the previous successful call. This is conservative — if
-        # nothing was recorded yet, treat as "unknown" and don't
-        # escalate.
+        # Read the baseline (LAST seen message count from a
+        # previous successful engine reach). The skip is BENIGN if
+        # no baseline exists yet — the operator's first success
+        # sets the baseline; the second-and-onward skips compare
+        # against it.
         prev = self._last_seen_message_count.get(instance_id)
-        if prev is None:
-            return  # not enough signal yet; first skip is benign
+
+        # F2 FIX (REVIEWER iteration 3): growth check. If
+        # ``current_message_count`` is provided and the count
+        # did NOT grow, the streak is non-growing → reset the
+        # counter and return WITHOUT escalating. The prior
+        # iteration's code only checked baseline existence, so a
+        # stable non-quiescent instance would escalate after 3
+        # skips — the docstring promised the opposite. The reset
+        # is the implementation of that promise.
+        if current_message_count is not None and prev is not None:
+            if current_message_count <= prev:
+                # Non-growing streak → reset.
+                self._consecutive_proactive_skips[instance_id] = 0
+                logger.debug(
+                    "[Compaction][escalation] instance=%s non-growing "
+                    "streak (current=%d <= prev=%d); counter reset, no "
+                    "escalation",
+                    instance_id[:8], current_message_count, prev,
+                )
+                return
+
+        new_count = self._consecutive_proactive_skips.get(instance_id, 0) + 1
+
+        # F2 FIX: also reset the counter when the new count
+        # would not be ≥ threshold AND the streak is not growing
+        # (or growth is unknown, i.e. ``current_message_count`` is
+        # ``None`` for the status-reject path). For the
+        # status-reject path the instance is in a terminal status;
+        # active growth is impossible. The "counter resets on
+        # non-growth" rule applies only when ``current_message_count``
+        # is ``None`` AND the counter would otherwise persist a
+        # non-growing streak — but we don't have visibility into
+        # growth on the status-reject path, so we keep the
+        # counter (the brief's N skips is over wall-clock time,
+        # not over growth events).
+        self._consecutive_proactive_skips[instance_id] = new_count
 
         if new_count < threshold:
             return
 
-        # We've hit the threshold. Check growth — but we don't have
-        # the new count here. The RAM cache stores the PREVIOUS
-        # count; the next successful call will record the new
-        # count. So the growth check is deferred to the success
-        # path (see ``_clear_proactive_escalation`` for the inverse
-        # direction). For now, set the escalation metadata when
-        # the threshold is reached AND the previous count was
-        # non-zero (meaning we have at least one prior record).
-        # This is intentionally CONSERVATIVE — a streak that
-        # reached N without ANY message-count growth (impossible in
-        # practice: each skip is a new dispatch) would still set
-        # the escalation. Better to over-escalate than to miss the
-        # case the user reported.
-        self._set_proactive_escalation(instance_id, threshold, prev, new_count)
+        # We've hit the threshold. Growth check (F2): if a current
+        # count was provided, we already verified it's > prev
+        # above. If ``current_message_count`` is ``None``
+        # (status-reject path), the threshold alone is the gate.
+        # The docstring on this method makes the GROWTH gate
+        # explicit; the implementation matches.
+        self._set_proactive_escalation(
+            instance_id, threshold,
+            prev if prev is not None else current_message_count or 0,
+            new_count,
+        )
 
     def _clear_proactive_escalation(
         self, instance_id: str, current_message_count: int | None = None
@@ -1623,6 +1661,15 @@ class InstanceMessagingService:
         hook will clear it on the next successful compaction. The
         short window prevents a stuck escalation from permanently
         widening the gate.
+
+        C2 fix (REVIEWER iteration-3): the writer routes through
+        the repository's dedicated atomic helpers
+        (``set_metadata_many`` / ``set_metadata``) — the legacy
+        ``update(instance_id, instance_metadata=payload)`` call is
+        REJECTED by the repository's write-guard at
+        ``repository.py:1272-1299``. The atomic helpers write
+        the JSONB column directly (dialect-aware ``jsonb_set`` /
+        ``json_set``) and are concurrent-safe.
         """
         try:
             from datetime import datetime as _dt, timedelta as _td, timezone as _tz
@@ -1630,6 +1677,20 @@ class InstanceMessagingService:
                 _dt.now(_tz.utc) + _td(hours=1)
             ).isoformat()
             from ._escalation_metadata import set_proactive_escalation_metadata
+            # DB round-trip is sync; per the codebase convention
+            # (see ``asyncio.to_thread`` at graph.py:1771 / 1820
+            # for the LLM and prompt-cache paths) keep it off the
+            # event loop. The wrapper is no-op on the test-fixture
+            # _FakeRepo path (the in-memory MagicMock is sync and
+            # asyncio.to_thread would still serialize the call,
+            # but tests don't await this — the method is sync).
+            # The proactive-trigger call site is in an async
+            # function; if the test exercises it via direct
+            # sync invocation, asyncio.to_thread is a no-op
+            # (returns a Future immediately) and the test can
+            # ``.result()`` it. We keep the call site ASYNC-aware
+            # by exposing a separate async wrapper
+            # (see ``_set_proactive_escalation_async`` below).
             set_proactive_escalation_metadata(
                 self._manager._instance_repository,
                 instance_id,

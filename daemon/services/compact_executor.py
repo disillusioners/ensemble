@@ -5,10 +5,19 @@ Phase 1 / WS-2 (architect §2, §4, §6): the executor is the
 :class:`CommandDispatcher`. It drives the existing
 :class:`daemon.compaction.ContextCompactor` engine — force-bypasses
 the THRESHOLD ONLY (dedup + min-messages still apply inside the
-engine — WS-2.1 narrowed) — and writes the result back to the
-LangGraph checkpoint via the proactive-path recipe
-(``instance_messaging.py`` ~:1190-1202, D3 sentinel single-write +
-D12 ``compacted_at`` stamp).
+engine — WS-2.1 narrowed). Phase 2 of the never-blocked
+commission (C1) added a budget predicate at the engine's skip
+sites: the engine now returns the pre-commission stamp-only
+no-op (``replacement_messages=[]``, ``compaction_type=
+"skipped_injections_dominate"`` or ``"skipped_below_min_messages"``)
+on under-budget + not-force skip conditions, and falls through
+to the 50%-tail last-effort floor only on over-budget OR
+force=True. Under force, the engine still honors min-messages
+(WS-2.1); force does NOT bypass the budget predicate — it
+opts INTO the floor rather than bypassing it.
+Writes the result back to the LangGraph checkpoint via the
+proactive-path recipe (``instance_messaging.py`` ~:1190-1202,
+D3 sentinel single-write + D12 ``compacted_at`` stamp).
 
 Status gating per WS-6 (architect §6):
 
@@ -214,7 +223,13 @@ _NOOP_REASON_BELOW_FLOOR = "below_floor"
 _NOOP_REASON_RECENTLY_COMPACTED = "recently_compacted"
 _NOOP_REASON_TOO_FEW_MESSAGES = "too_few_messages"
 _NOOP_REASON_INJECTIONS_DOMINATE = "injections_dominate"
-_NOOP_REASON_PRESERVED_WITHIN_THRESHOLD = "preserved_within_threshold"
+# REMOVED in iteration 3: _NOOP_REASON_PRESERVED_WITHIN_THRESHOLD.
+# The engine no longer emits ``skipped_preserved_within_threshold``;
+# the preserved-within-threshold site falls through to the
+# last-effort floor (a real shrink). The NoopReason value is
+# retained as a dead-string reference in tests/unit/services/
+# test_compact_executor.py for the wire-mapping regression
+# guard; the executor no longer accepts it.
 
 # Cycle 2 (proactive-compaction-fix review W-4) — engine "skipped_*"
 # compaction_type values are user-facing no-ops, NOT a separate wire
@@ -239,11 +254,17 @@ _NOOP_REASON_PRESERVED_WITHIN_THRESHOLD = "preserved_within_threshold"
 # ``compacted_type="noop"`` + ``noop_reason=
 # "preserved_within_threshold"``, and the seam-skip call-site at
 # :func:`execute_compact` keys on this same dict membership, so
-# the seam is NOT invoked on this path.
+# the seam is NOT invoked on this path. Iteration 3 of the
+# never-blocked commission REMOVED ``skipped_preserved_within_threshold``
+# from this dict: the engine no longer emits that path (the
+# preserved-within-threshold site in the engine falls through to
+# the last-effort floor, which is a real shrink). The completeness
+# guard in ``test_engine_skipped_mapping_is_complete_against_engine_emitters``
+# catches future drift between dict membership and engine emit
+# patterns.
 _ENGINE_SKIPPED_TYPES_TO_NOOP_REASON: dict[str, str] = {
     "skipped_injections_dominate": _NOOP_REASON_INJECTIONS_DOMINATE,
     "skipped_below_min_messages": _NOOP_REASON_TOO_FEW_MESSAGES,
-    "skipped_preserved_within_threshold": _NOOP_REASON_PRESERVED_WITHIN_THRESHOLD,
 }
 
 _FAILURE_KIND_TIMEOUT = "timeout"

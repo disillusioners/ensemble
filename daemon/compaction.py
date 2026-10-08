@@ -1862,12 +1862,14 @@ COMPACTION_NOTICE_TEXT = (
     "[SYSTEM CONTEXT: Compaction Notice]\n\n"
     "Earlier context was compacted by trimming (last-effort 50%-tail "
     "truncation; all better compaction methods were either ineligible "
-    "or failed on this conversation). The earlier half of the "
-    "conversation has been DROPPED. PRIORITIZE THE LATEST MESSAGES in "
-    "the channel — they are the most recent and most relevant context. "
-    "Do not try to reference, quote, or reason about content that "
-    "precedes this notice; it is no longer in the channel. If the "
-    "earlier context was important, the user/operator can re-inject it.\n"
+    "or failed on this conversation). Some earlier messages MAY have "
+    "been trimmed to make room for the latest ones; this notice is "
+    "inserted so the LLM knows to treat the surviving tail as the "
+    "primary context. PRIORITIZE THE LATEST MESSAGES in the channel "
+    "— they are the most recent and most relevant context. If earlier "
+    "context was important and was trimmed, the user/operator can "
+    "re-inject it. This notice is a marker, not a hard guarantee "
+    "that specific messages were dropped.\n"
 )
 
 
@@ -2419,19 +2421,21 @@ class ContextCompactor:
         # head). Adjacent tool results AFTER a tail-leading
         # AIMessage(tool_calls) stay intact inside the tail.
         #
-        # Guardrails:
-        #   1. ``kept >= 1`` is INVARIANT — the walk can advance
-        #      the cut but never past ``len(corpus) - 1`` (so at
-        #      least one message remains in the tail).
-        #   2. AMENDED retained-count rule: ``kept = ceil(N/2)``
-        #      MINUS a bounded pairing-snap adjustment (a few
-        #      messages), NEVER below 1. The 639-message
-        #      HumanMessage-only replica (the incident replica)
-        #      snaps ZERO messages, so the pinned 639→320+notice
-        #      expectation is UNCHANGED.
-        #   3. The walk is bounded — it never scans the entire
-        #      corpus; it advances at most until it hits a non-
-        #      ToolMessage (or the kept>=1 cap).
+        # Guardrails (iteration 3 — preserved past iteration 2's
+        # cap removal):
+        #   1. The walk is bounded — it never scans the entire
+        #      corpus; it advances only while consecutive
+        #      ToolMessages sit at the natural cut. The floor
+        #      kept is ``>= 0`` (NOT ``>= 1`` — iteration 2
+        #      amendment removed the cap to prevent the API-invalid
+        #      ``[notice, orphan ToolMessage]`` history that
+        #      iteration 1's cap produced). A floor of 0 means
+        #      notice-only replacement — API-valid by construction.
+        #   2. AMENDED retained-count rule (iteration 2):
+        #      ``kept = ceil(N/2) - bounded_pairing_snap_adjustment``
+        #      with a FLOOR of 0. The 639-message HumanMessage-only
+        #      replica snaps ZERO messages, so the pinned
+        #      639→320+notice expectation is UNCHANGED.
         #
         # A4 REVIEWER FIX (iteration 1) — snap-to-boundary walk +
         # iteration-2 AMENDMENT — drop the kept>=1 cap when the
@@ -2721,23 +2725,63 @@ class ContextCompactor:
             )
         )
 
-        # COMPACTION NEVER-BLOCKED (Verdict A): the all-injected skip
-        # used to return ``anti_refire_skip`` (a stamp-only no-op that
-        # the seam persisted as ``compacted_at`` alone). That made the
-        # engine UNABLE to shrink an injected-dominated context. Per
-        # the commission, the engine MUST be able to shrink any
-        # oversized context — including the all-injected condition.
-        # The floor of the ladder is the 50%-tail last-effort, which
-        # explicitly applies to injected/unanswered messages.
+        # COMPACTION NEVER-BLOCKED (Verdict A) — iteration 3 budget
+        # predicate (REVIEWER C1): the all-injected skip used to
+        # return ``anti_refire_skip`` (a stamp-only no-op that the
+        # seam persisted as ``compacted_at`` alone). That made the
+        # engine UNABLE to shrink an injected-dominated context.
+        # Iteration 1 + 2 replaced it with the 50%-tail floor
+        # unconditionally. Iteration 3 adds a budget predicate:
+        # the floor only engages when ``force=True`` (operator
+        # asked explicitly) OR when the context is over-budget
+        # (``total_tokens > threshold_tokens``). Under-budget
+        # + not-force + skip-condition falls through to the
+        # pre-commission stamp-only skip semantics — no message
+        # drops, no history loss, no silent halving on young
+        # instances. The rationale: an under-budget skip is a
+        # selectivity floor (selectable=0 or selectable<min); the
+        # engine SHOULD stamp ``compacted_at`` for the 60s
+        # dedup (per anti-refire) but SHOULD NOT destroy history
+        # to satisfy a selectivity gate. The dedup alone is
+        # sufficient for under-budget skips; the never-blocked
+        # floor is reserved for over-budget shrinks where the
+        # engine has no better option.
         if not selectable_messages:
+            over_budget = (
+                int(
+                    estimate_messages_tokens(selectable_messages)
+                    + injected_tokens
+                    + context.system_prompt_tokens
+                )
+                > int(
+                    self._trigger_window(context)
+                    * context.config.threshold
+                )
+            )
+            if not force and not over_budget:
+                logger.info(
+                    "[Compaction] under-budget all-injected skip "
+                    "(n=%d, injected_tokens=%d, threshold=%d%%); "
+                    "no shrinkage (pre-commission stamp-only "
+                    "semantics) — 60s dedup engages",
+                    len(context.messages),
+                    injected_tokens,
+                    int(context.config.threshold * 100),
+                )
+                return anti_refire_skip(
+                    skip_reason="skipped_injections_dominate"
+                )
             logger.warning(
                 "[Compaction] skipping: every message carries the "
                 "injected_message flag and none are answered "
                 "(context_kind or unanswered bare notes; n=%d, "
                 "injected_tokens=%d); falling through to last-effort "
-                "floor (50%%-tail truncation) per never-blocked spec",
+                "floor (50%%-tail truncation) per never-blocked spec "
+                "(over_budget=%s, force=%s)",
                 len(context.messages),
                 injected_tokens,
+                over_budget,
+                force,
             )
             return self._last_effort_tail_truncation(
                 context,
@@ -2748,23 +2792,46 @@ class ContextCompactor:
         # 2. Eligibility: minimum messages check (against the SELECTABLE
         # subset — regular history plus answered notes — so a
         # preserved-injection-heavy conversation doesn't get spuriously
-        # compacted away). COMPACTION NEVER-BLOCKED (Verdict A): the
-        # floor now engages here too, instead of the anti-refire stamp
-        # alone. The min-messages gate is a per-design selectivity
-        # floor that says "not enough regular history to summarize
-        # safely" — but the never-blocked hardening says "shrink the
-        # whole context to 50% tail" when the proactive path triggers
-        # here. The two are reconciled: a skip here is still a
-        # no-summarize, but it IS a shrink (last-effort floor).
+        # compacted away). COMPACTION NEVER-BLOCKED (Verdict A,
+        # iteration 3): same budget predicate as above. Under-budget
+        # + not-force + skip-condition → pre-commission stamp-only
+        # skip semantics; over-budget OR force → floor.
         if len(selectable_messages) < context.config.min_messages_before_compaction:
+            over_budget = (
+                int(
+                    estimate_messages_tokens(selectable_messages)
+                    + injected_tokens
+                    + context.system_prompt_tokens
+                )
+                > int(
+                    self._trigger_window(context)
+                    * context.config.threshold
+                )
+            )
+            if not force and not over_budget:
+                logger.info(
+                    "[Compaction] under-budget min-messages skip "
+                    "(selectable=%d, minimum=%d, preserved_injected=%d, "
+                    "threshold=%d%%); no shrinkage (pre-commission "
+                    "stamp-only semantics) — 60s dedup engages",
+                    len(selectable_messages),
+                    context.config.min_messages_before_compaction,
+                    len(hoisted_injected),
+                    int(context.config.threshold * 100),
+                )
+                return anti_refire_skip(
+                    skip_reason="skipped_below_min_messages"
+                )
             logger.warning(
                 "[Compaction] skipping: %d selectable messages "
                 "(minimum: %d, preserved_injected=%d); falling through "
                 "to last-effort floor (50%%-tail truncation) per "
-                "never-blocked spec",
+                "never-blocked spec (over_budget=%s, force=%s)",
                 len(selectable_messages),
                 context.config.min_messages_before_compaction,
                 len(hoisted_injected),
+                over_budget,
+                force,
             )
             return self._last_effort_tail_truncation(
                 context,

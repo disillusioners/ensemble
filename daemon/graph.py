@@ -7465,7 +7465,14 @@ async def _maybe_precall_compact_95(
             _manager_ref = getattr(compactor, "_manager", None)
             _inst_repo = getattr(_manager_ref, "_instance_repository", None)
             if _inst_repo is not None and hasattr(_inst_repo, "get"):
-                _inst_row = _inst_repo.get(instance_id)
+                # The ``_inst_repo.get`` call is synchronous
+                # (PostgreSQL round-trip via SQLAlchemy). Keep it
+                # off the event loop per the codebase convention
+                # (see ``asyncio.to_thread`` at :1771 for the LLM
+                # call and :1820 for the prompt-cache hit path).
+                _inst_row = await asyncio.to_thread(
+                    _inst_repo.get, instance_id
+                )
                 if _inst_row is not None and is_proactive_escalation_active(_inst_row):
                     gate_ratio = 0.80
                     gate_label = "escalation_80pct"
