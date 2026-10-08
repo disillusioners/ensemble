@@ -25,17 +25,17 @@
       </span>
     </div>
     <div class="fullscreen-actions">
-      <a
-        class="open-external-link"
-        [href]="data.src"
-        target="_blank"
-        rel="noopener noreferrer"
-        data-testid="live-view-open-external"
-        title="Open in a new tab"
-        aria-label="Open the artifact in a new tab"
-      >
-        <mat-icon>open_in_new</mat-icon>
-      </a>
+      <!--
+        NO "open in new tab" affordance: every view-root
+        artifact must render ONLY inside the sandboxed
+        iframe (sandbox="allow-scripts", no
+        allow-same-origin) so a malicious artifact cannot
+        touch the ensemble app. A full-app-origin link
+        would bypass the iframe and land the artifact in
+        the parent tab, where it would inherit the app
+        origin and credentials. See SECURITY MODEL in
+        live-view-dialog.component.ts.
+      -->
       <button
         type="button"
         mat-icon-button

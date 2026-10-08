@@ -174,9 +174,15 @@ export function parseLiveViewUrl(href: unknown): ParsedLiveViewUrl | null {
   }
   // Reject ``..`` segments (after URL-decoding is not possible
   // here because we already reject ``%``; raw ``..`` is the only
-  // shape the daemon would see). The check is on the full
-  // remainder so a leading-dot root is still legal (none of the
-  // Phase 1 roots start with a dot, but the rule is structural).
+  // shape the daemon would see). The check is per relPath
+  // segment via ``split('/')`` — the empty string,
+  // single-dot ``.``, and ``..`` literals are all forbidden so
+  // neither an empty segment nor a traversal slide-through can
+  // survive. A leading-dot root is NOT legal here: the root
+  // shape was pinned upstream by ``ROOT_NAME_REGEX``
+  // (``/^[a-z][a-z0-9-]{0,62}$/``) which forbids a leading
+  // dot, so by the time we get here the root segment is
+  // guaranteed to start with a lowercase letter.
   const segments = relPath.split('/');
   for (const segment of segments) {
     if (segment === '' || segment === '.' || segment === '..') {

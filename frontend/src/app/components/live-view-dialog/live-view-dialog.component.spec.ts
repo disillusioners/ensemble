@@ -266,20 +266,24 @@ describe('LiveViewDialogComponent — Phase 2 live-view WebView', () => {
     });
   });
 
-  describe('external-link affordance', () => {
-    it('renders a "open in new tab" link with noopener noreferrer', () => {
+  describe('external-link affordance — REMOVED for sandbox integrity', () => {
+    it('does NOT render an "open in new tab" anchor (no target=_blank)', () => {
+      // Phase 2 hardening: the artifact must render ONLY
+      // inside the sandboxed iframe so a malicious
+      // artifact cannot escape the opaque origin into the
+      // ensemble app origin. An "open in new tab" link
+      // would land the artifact in a tab at the full app
+      // origin, where it inherits cookies / storage /
+      // same-origin privileges — defeating the sandbox.
+      // This assertion is the tripwire: any future
+      // contributor who reintroduces a ``target="_blank"``
+      // affordance trips it.
       setupMount(SAMPLE_DATA);
-      const link = fixture.nativeElement.querySelector(
-        '[data-testid="live-view-open-external"]',
-      ) as HTMLAnchorElement | null;
-      expect(link).not.toBeNull();
-      // The reverse-tabnabbing guards are mandatory — a
-      // missing rel="noopener" would let the artifact's own
-      // page.opener break the ensemble app.
-      expect(link!.getAttribute('rel')).toContain('noopener');
-      expect(link!.getAttribute('rel')).toContain('noreferrer');
-      expect(link!.getAttribute('target')).toBe('_blank');
-      expect(link!.getAttribute('href')).toBe(SAMPLE_DATA.src);
+      const root = fixture.nativeElement as HTMLElement;
+      expect(
+        root.querySelector('[data-testid="live-view-open-external"]'),
+      ).toBeNull();
+      expect(root.querySelector('a[target="_blank"]')).toBeNull();
     });
   });
 });

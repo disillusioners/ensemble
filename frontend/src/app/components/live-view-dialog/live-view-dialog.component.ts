@@ -192,9 +192,11 @@ export class LiveViewDialogComponent implements OnDestroy {
 
   /**
    * Iframe ``load`` handler. Flips ``loaded()`` to ``true``
-   * and clears the element-level ``onload`` so a synthetic
-   * re-load does not double-fire (the dialog swaps the
-   * signal only once — subsequent load events are no-ops).
+   * and clears the ``errored`` flag (in case the load was
+   * retried after a transient failure). The handler is
+   * idempotent — the leading ``loaded()`` guard means a
+   * synthetic re-load is a no-op (the signal stays ``true``
+   * and no extra change-detection pass is triggered).
    */
   onIframeLoad(): void {
     if (this.loaded()) {
