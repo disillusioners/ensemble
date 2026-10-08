@@ -624,8 +624,10 @@ class TestClassifierToW2Seam:
         raw_provider = _Provider()
         # Wrap the raw provider with the PRODUCTION classifier
         # wrapper. This is the exact transformation
-        # ``build_instance_llms`` does at graph.py:10228 when
-        # ``retry_config`` is truthy.
+        # ``build_instance_llms`` does at its unconditional
+        # classifier-wrap block (see the comment above the wrap in
+        # :func:`daemon.graph.build_instance_llms`) — the wrap fires
+        # regardless of ``retry_config`` presence.
         wrapped_provider = classify_llm_errors(raw_provider)
 
         config = {"configurable": {"thread_id": "test-classifier-w2-seam"}}
