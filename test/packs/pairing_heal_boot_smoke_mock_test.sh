@@ -229,9 +229,10 @@ ok "MOCK_LLM_PORT=$MOCK_LLM_PORT free"
 echo ""
 echo "===== PHASE 1: disposable PG16 on 127.0.0.1:$PG_PORT ====="
 rm -rf "$PGDATA" "$PG_LOG"
-"$PG_BIN/initdb" -A trust -U "$PG_USER" "$PGDATA" >/dev/null 2>&1 \
+"$PG_BIN/initdb" -A trust -U "$PG_USER" "$PGDATA" -c unix_socket_directories="$SCRATCH/pgsock" >/dev/null 2>&1 \
   || { bad "initdb failed"; exit 1; }
-"$PG_BIN/pg_ctl" -D "$PGDATA" -o "-p $PG_PORT" -l "$PG_LOG" start >/dev/null 2>&1 \
+mkdir -p "$SCRATCH/pgsock"
+"$PG_BIN/pg_ctl" -D "$PGDATA" -o "-p $PG_PORT -k $SCRATCH/pgsock" -l "$PG_LOG" start >/dev/null 2>&1 \
   || { bad "pg_ctl start failed"; tail -20 "$PG_LOG"; exit 1; }
 PG_RUN_BY_US=1
 for _ in $(seq 1 30); do
