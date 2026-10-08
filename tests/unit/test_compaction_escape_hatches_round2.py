@@ -26,7 +26,7 @@ Lane-by-lane coverage:
 * Lane 4 — CI blind spot pin: a real escalated row (durable
   ``compaction_escalation_until``) drives ``gate_ratio`` to the
   ``escalation_gate_ratio`` config field. Deleting the
-  graph.py:7461-7484 read block makes this test fail.
+  graph.py:7499-7522 read block makes this test fail.
 
 * Lane 5 — escalation ``gate_ratio`` defaults to 0.80 (env knob).
 
