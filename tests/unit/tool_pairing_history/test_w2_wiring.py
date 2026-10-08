@@ -541,3 +541,305 @@ class TestW2PostCompactionReraiseChain:
         # The original ``BadRequestError``s are still attached.
         assert raised.original is original_second
         assert raised.__cause__.original is original_first
+
+
+# ---------------------------------------------------------------------------
+# 🟡 #2 — Classifier→W2 seam test (real BadRequestError → classify_llm_errors → W2 retry)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifierToW2Seam:
+    """🟡 #2: REAL BadRequestError end-to-end through ``classify_llm_errors``.
+
+    The round-1 W2 wiring tests raise ``ToolPairingInvalidError``
+    directly (signature-string unit matching). The round-2 review
+    asked for a pin that drives the REAL BadRequestError through
+    ``classify_llm_errors`` (the production wrapper) so the
+    classifier's signature detection → ``ToolPairingInvalidError``
+    conversion → agent_node W2 catch chain is exercised end-to-end.
+
+    This catches a regression where the classifier stops matching
+    the 2013 signature (e.g. signature string drift) — the round-1
+    test would still pass (it skips the classifier), but production
+    would silently drop the W2 retry.
+
+    The test wraps a raw LLM provider with ``classify_llm_errors``
+    (the same wrapping ``build_instance_llms`` does in production
+    at graph.py:10228) and feeds it into the agent_node. The
+    provider's first invoke raises a real ``openai.BadRequestError``
+    with the canonical 2013 signature; the classifier converts to
+    ``ToolPairingInvalidError``; the W2 catch fires; the second
+    invoke (with the healed payload) returns a valid ``AIMessage``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_real_badrequest_2013_drives_w2_through_classifier(
+        self, monkeypatch
+    ):
+        from openai import BadRequestError
+        from daemon.graph import classify_llm_errors, create_agent_node
+
+        # Provider: 1st invoke raises a real ``BadRequestError``
+        # carrying the canonical 2013 signature. The classifier
+        # MUST detect it and raise ``ToolPairingInvalidError`` (the
+        # only path into the W2 catch — a raw ``BadRequestError``
+        # is NOT caught by the W2 handler).
+        class _Provider:
+            def __init__(self):
+                self.calls: list[list] = []
+                self._seq = 0
+
+            def invoke(self, messages):
+                self.calls.append(list(messages))
+                self._seq += 1
+                if self._seq == 1:
+                    # Canonical 2013 signature — the classifier
+                    # matches it via _matches_pairing_invalid and
+                    # raises ToolPairingInvalidError.
+                    raise BadRequestError(
+                        message=(
+                            "openai: invalid params, tool call result "
+                            "does not follow tool call (2013)"
+                        ),
+                        response=MagicMock(),
+                        body=None,
+                    )
+                return AIMessage(
+                    content="classifier → W2 → healed success",
+                    id="post-classifier-w2",
+                )
+
+        raw_provider = _Provider()
+        # Wrap the raw provider with the PRODUCTION classifier
+        # wrapper. This is the exact transformation
+        # ``build_instance_llms`` does at graph.py:10228 when
+        # ``retry_config`` is truthy.
+        wrapped_provider = classify_llm_errors(raw_provider)
+
+        config = {"configurable": {"thread_id": "test-classifier-w2-seam"}}
+        agent_node = create_agent_node(
+            wrapped_provider,
+            system_prompt="You are helpful.",
+            compactor=None,
+            graph_ref=[None],
+            config=config,
+            llm_config={"model": "gpt-4o"},
+        )
+
+        # The agent_node calls wrapped_provider.invoke, which calls
+        # raw_provider.invoke and then validate_llm_response. The
+        # 1st raw invoke raises BadRequestError; the classifier
+        # catches and raises ToolPairingInvalidError; the W2 catch
+        # fires; the 2nd invoke returns the valid AIMessage.
+        result = await agent_node({"messages": [HumanMessage(content="hi")]})
+
+        # EXACTLY 2 raw invokes (1st-raise + W2-retry success).
+        assert raw_provider._seq == 2, (
+            f"Classifier→W2 seam pin: expected EXACTLY 2 raw "
+            f"invokes (1st raises BadRequestError → classifier "
+            f"converts → W2 catch → 2nd succeeds); got "
+            f"{raw_provider._seq}"
+        )
+
+        # The response is the 2nd invoke's AIMessage (the post-W2
+        # healed response), NOT a propagated BadRequestError
+        # (which the classifier should have converted and the W2
+        # catch should have handled) and NOT a loud-ERROR fallback.
+        assert "messages" in result
+        last_ai = None
+        for m in result["messages"]:
+            if isinstance(m, AIMessage):
+                last_ai = m
+        assert last_ai is not None
+        assert last_ai.content == "classifier → W2 → healed success", (
+            f"Classifier→W2 seam: expected post-W2 AIMessage; got "
+            f"content={last_ai.content!r}. A non-2013 signature "
+            f"drift in the classifier would cause this assertion "
+            f"to fail (BadRequestError would propagate past the "
+            f"W2 catch because the classifier didn't convert it)."
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_pairing_badrequest_does_not_drive_w2(
+        self, monkeypatch
+    ):
+        """Belt-and-suspenders: a BadRequestError WITHOUT the 2013
+        signature (e.g. a generic 400) is NOT converted to
+        ``ToolPairingInvalidError`` by the classifier, so the W2
+        catch does NOT fire. The agent_node re-raises the raw
+        ``BadRequestError`` (the existing non-retryable path).
+        """
+        from openai import BadRequestError
+        from daemon.graph import classify_llm_errors, create_agent_node
+
+        class _Provider:
+            def __init__(self):
+                self.calls: list[list] = []
+                self._seq = 0
+
+            def invoke(self, messages):
+                self.calls.append(list(messages))
+                self._seq += 1
+                raise BadRequestError(
+                    message="missing required field 'messages'",
+                    response=MagicMock(),
+                    body=None,
+                )
+
+        raw_provider = _Provider()
+        wrapped_provider = classify_llm_errors(raw_provider)
+
+        config = {"configurable": {"thread_id": "test-classifier-non2013"}}
+        agent_node = create_agent_node(
+            wrapped_provider,
+            system_prompt="You are helpful.",
+            compactor=None,
+            graph_ref=[None],
+            config=config,
+            llm_config={"model": "gpt-4o"},
+        )
+
+        # The raw BadRequestError is NOT a pairing signature, so
+        # the classifier's `raise` line in the except branch
+        # re-raises the raw BadRequestError (NOT
+        # ToolPairingInvalidError). The W2 catch is specifically
+        # for ToolPairingInvalidError, so it does NOT fire — the
+        # agent_node re-raises the BadRequestError.
+        with pytest.raises(BadRequestError):
+            await agent_node({"messages": [HumanMessage(content="hi")]})
+
+        # EXACTLY 1 invoke — the W2 catch never fires (the
+        # classifier didn't convert, so the raw BadRequestError
+        # propagates).
+        assert raw_provider._seq == 1, (
+            f"Non-2013 BadRequestError must NOT trigger W2 retry; "
+            f"expected 1 invoke, got {raw_provider._seq}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 🟡 #1 — 3rd invoke site pin (graph.py:3134, pre-terminal repair re-invoke)
+# ---------------------------------------------------------------------------
+
+
+class TestPreTerminalThirdInvokeSite:
+    """🟡 #1: graph-level pin for the 3rd invoke site.
+
+    The pre-terminal repair path (hallucination-recovery ladder
+    Phase 2) fires ONCE after the shipped retry ladder exhausts
+    and BEFORE the loud ERROR. The helper
+    ``_maybe_pre_terminal_repair`` (graph.py:2863) detects
+    truncated (``finish_reason=length``) or
+    ``empty_post_ladder`` (``EmptyLLMResponseError``) raises,
+    runs the matching preset through ``SymptomRepairEngine``, and
+    re-invokes the LLM ONCE at graph.py:3134 (the 3rd invoke
+    site) with the surgery-prefixed history.
+
+    Existing pre-terminal tests pin the FAILURE path (3rd invoke
+    also raises → second-exception abort → loud ERROR) — see
+    ``tests/unit/test_ladder_p2_routed_gap2_second_exception.py``
+    and ``test_ladder_p2_routed_gap3_caller_seam_gate.py``. This
+    test pins the SUCCESS path: 3rd invoke fires, the post-
+    surgery response is the agent_node's emitted message, NOT a
+    propagated exception.
+
+    The fixture uses the truncated exception class
+    (``LLMResponseValidationError`` with a ``finish_reason=length``
+    response) since the empty class has its own exemption
+    surface. A ``side_effect`` list drives the LLM:
+      - 1st call → raises truncated validation error
+      - 2nd call → returns a valid ``AIMessage`` (the post-surgery
+        success)
+
+    Asserts: invoke count is EXACTLY 2 at the agent_node level
+    (1st raises → 2nd succeeds via the 3rd invoke re-invoke path),
+    the response is the 2nd invoke's AIMessage, and the surgery
+    doc rides the C2 return.
+    """
+
+    @pytest.mark.asyncio
+    async def test_third_invoke_succeeds_after_surgery(self, monkeypatch):
+        from daemon.config import _reset_symptom_repair_ladder_for_tests
+        from daemon.graph import create_agent_node
+        from daemon.response_validation import LLMResponseValidationError
+        from daemon.services.symptom_repair_engine import SymptomRepairEngine
+        from tests.helpers.symptom_repair import ok_summarizer
+
+        # Master ON — the pre-terminal intercept must fire.
+        monkeypatch.setenv("ENSEMBLE_SYMPTOM_REPAIR_LADDER", "1")
+        _reset_symptom_repair_ladder_for_tests()
+
+        # Engine summarizer stub — the real surgery/budget/doc flow
+        # is exercised (the helper reaches the engine before
+        # invoking the 3rd time).
+        monkeypatch.setattr(
+            SymptomRepairEngine,
+            "_summarize",
+            staticmethod(ok_summarizer),
+        )
+
+        # Provider: 1st call raises the truncated validation error
+        # (finish_reason=length), 2nd call returns a valid AIMessage.
+        class _Provider:
+            def __init__(self):
+                self.calls: list[list] = []
+                self._seq = 0
+
+            def invoke(self, messages):
+                self.calls.append(list(messages))
+                self._seq += 1
+                if self._seq == 1:
+                    raise LLMResponseValidationError(
+                        "truncated response",
+                        response=AIMessage(
+                            content="partial answer that hit the token limit",
+                            response_metadata={"finish_reason": "length"},
+                            id="trunc-1",
+                        ),
+                    )
+                return AIMessage(
+                    content="post-surgery healed",
+                    id="post-2",
+                )
+
+        provider = _Provider()
+        config = {"configurable": {"thread_id": "test-3rd-invoke"}}
+        agent_node = create_agent_node(
+            provider,
+            system_prompt="You are helpful.",
+            compactor=None,
+            graph_ref=[None],
+            config=config,
+            llm_config={"model": "gpt-4o"},
+        )
+
+        result = await agent_node({"messages": [HumanMessage(content="hi")]})
+
+        # EXACTLY 2 invokes at the agent_node level — the 1st raised
+        # truncated, the pre-terminal intercept fired, the surgery
+        # completed, and the 3rd invoke (graph.py:3134) returned the
+        # post-surgery success. NO third invoke (the success path
+        # terminates here, not the failure path).
+        assert provider._seq == 2, (
+            f"3rd-invoke-site pin: expected EXACTLY 2 invokes "
+            f"(1st-raise + 3rd-re-invoke success); got {provider._seq}"
+        )
+
+        # The emitted message is the 2nd invoke's AIMessage (the
+        # post-surgery healed response), NOT a propagated exception
+        # and NOT a loud-ERROR fallback.
+        assert "messages" in result
+        assert len(result["messages"]) >= 1
+        # The last emitted AIMessage is the post-surgery success.
+        last_ai_message = None
+        for m in result["messages"]:
+            if isinstance(m, AIMessage):
+                last_ai_message = m
+        assert last_ai_message is not None, (
+            f"3rd-invoke success: no AIMessage in result; got "
+            f"{[type(m).__name__ for m in result['messages']]}"
+        )
+        assert last_ai_message.content == "post-surgery healed", (
+            f"3rd-invoke success: expected post-surgery AIMessage; "
+            f"got content={last_ai_message.content!r}"
+        )

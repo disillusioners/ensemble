@@ -388,16 +388,33 @@ def validate_and_heal_messages(
                 continue
         i += 1
 
-    # Phase 2: orphan removal — TMs whose tc_id has no AIMessage(tc)
-    # at any EARLIER index in the resulting history. After Phase 1's
-    # adjacency fix, every AIMessage(tc) has its adjacent block
-    # covering its tc_ids. The remaining orphan TMs are those whose
-    # tc_id is not issued by any earlier AIMessage in the rebuilt
-    # list. This catches TMs stranded by a synthesis (a TM that was
-    # originally paired with an AIMessage, but the synthesized
-    # partner earlier in the history now satisfies the AIMessage and
-    # the original TM has no remaining AIMessage to pair with) AND
-    # order-inverted TMs (TM-before-issuer — see FIX 3 below).
+    # Phase 2: orphan removal — TMs whose nearest preceding NON-TOOL
+    # message did NOT issue their tc_id (the "block-ownership rule").
+    # A TM belongs to the adjacent ToolMessage block of the AIMessage
+    # that issued its tc_id; if some other AIMessage (or a Human/System
+    # message) is the nearest preceding non-Tool, the TM is in the
+    # wrong block and must be removed — strict gateways enforce
+    # immediacy (TM immediately after its issuer's adjacent block),
+    # and a misplaced TM is a 2013 brick-class violation.
+    #
+    # Earlier formulations tried:
+    #   (a) global issued-set (rejected by the review: a later
+    #       AIMessage in the list issuing the same tc_id kept the TM
+    #       as "issued" even though the TM was in the wrong block)
+    #   (b) prefix issued-set (round-1 FIX 3: TM-before-issuer shape
+    #       is caught but the misplacement-after-other-AI shape
+    #       ``[AI(X)][AI(Y)][TM(X)][TM(Y)]`` still survives — TM(X)
+    #       has an earlier issuer so the prefix rule keeps it, but
+    #       it's in AI(Y)'s block, so the gateway 2013-rejects)
+    #   (c) nearest preceding AIMessage (the review's literal
+    #       phrasing): still masks ``[AI(X)][Human][TM(X)]`` — the
+    #       nearest preceding AI IS the issuer, so the stranded TM
+    #       after the Human would survive and the probe would stay
+    #       clean, recreating the same masking class. The non-Tool
+    #       formulation subsumes both shapes and matches the
+    #       anthropic corpus signature ("messages with role 'tool'
+    #       must be a response to a preceeding message with
+    #       'tool_calls'").
     #
     # Guard: if the list has NO ``AIMessage``s at all (every
     # message is a ``ToolMessage``), there are no pairing semantics
@@ -405,39 +422,55 @@ def validate_and_heal_messages(
     # orphan removal in that case to preserve the at-least-one-
     # message contract callers (notably ``emergency_truncate``) rely
     # on when collapsing a long tool-result-only history.
-    #
-    # FIX 3: the issued-set is now a LEFT-TO-RIGHT PREFIX (built
-    # incrementally as we walk ``new_list``), NOT a global set
-    # precomputed in a separate pass. A TM is removed iff its
-    # ``tc_id`` is NOT in the prefix at the TM's position — i.e.
-    # no earlier ``AIMessage(tc)`` issued it. This closes the
-    # probe/healer mismatch on the order-inverted shape
-    # (TM-before-issuer): the previous global set kept the TM
-    # because a LATER ``AIMessage`` in the list issued the same
-    # ``tc_id``; with prefix scoping the misplaced TM has no
-    # earlier issuer and is removed as an orphan. Semantically
-    # consistent with the "orphaned TM → remove" heal op and
-    # aligned with the probe's same "before" semantic.
     has_any_aimessage = any(
         isinstance(m, AIMessage) for m in new_list
     )
 
     final_list: list[BaseMessage] = []
     if has_any_aimessage:
-        issued_tc_ids: set[str] = set()  # prefix: AIMessages at indices < current
+        # ``last_non_tool_tc_ids`` carries the tc_ids of the nearest
+        # preceding non-Tool message WHEN that message is an
+        # ``AIMessage`` with ``tool_calls``. When the nearest
+        # preceding non-Tool is a HumanMessage / SystemMessage /
+        # AIMessage without tool_calls, the set is empty (a TM
+        # following any of those is stranded → REMOVED).
+        last_non_tool_tc_ids: set[str] = set()
         for m in new_list:
             if isinstance(m, ToolMessage):
+                if _is_partner_synth(m):
+                    # Partner-synth placeholders are intentionally
+                    # placed by Phase 1 immediately after the
+                    # AIMessage that issued their tc_id — the
+                    # block-ownership rule naturally keeps them.
+                    final_list.append(m)
+                    continue
                 tc_id = getattr(m, "tool_call_id", None)
-                if tc_id and tc_id not in issued_tc_ids:
-                    # Order-inverted TM — no earlier AIMessage(tc)
-                    # issued this tc_id. Remove as orphan.
+                if tc_id and tc_id not in last_non_tool_tc_ids:
+                    # Block-ownership miss: the nearest preceding
+                    # non-Tool message did NOT issue this tc_id.
+                    # The TM is stranded in the wrong adjacent
+                    # block — remove it. Sentinel threading picks
+                    # up the id below (id-less case documented at
+                    # :454-460).
                     report.removed_orphan_indices.append(len(final_list))
                     continue
+                final_list.append(m)
             elif isinstance(m, AIMessage):
-                for tc_id in _extract_tool_call_ids(m):
-                    if tc_id:
-                        issued_tc_ids.add(tc_id)
-            final_list.append(m)
+                # New nearest preceding non-Tool message — refresh
+                # the tracking set with this AIMessage's tc_ids.
+                last_non_tool_tc_ids = {
+                    tc_id for tc_id in _extract_tool_call_ids(m)
+                    if tc_id
+                }
+                final_list.append(m)
+            else:
+                # HumanMessage / SystemMessage / RemoveMessage /
+                # etc. — also a non-Tool message, so it bounds the
+                # block-ownership region. An empty set means any
+                # subsequent TM (until the next AIMessage) is
+                # stranded.
+                last_non_tool_tc_ids = set()
+                final_list.append(m)
     else:
         # All-ToolMessages history — keep as-is, no pairing semantics.
         final_list = list(new_list)
@@ -451,6 +484,43 @@ def validate_and_heal_messages(
     for m in final_list:
         final_ids_by_obj.add(id(m))
 
+    # ROUND-2 DOCUMENTATION — id-less orphan TMs are removed
+    # payload-only with NO ``RemoveMessage`` sentinel. LangGraph's
+    # ``RemoveMessage`` API requires a message ``id`` to thread a
+    # removal sentinel into the C2 return (the ``add_messages``
+    # reducer matches sentinels by id; no id, no drop on the next
+    # checkpoint). For id-less TMs we collect no sentinel, so the
+    # removed message is gone from the LLM-bound payload
+    # (``full_messages``) for THIS dispatch — the gateway sees the
+    # healed history and accepts — but on the next dispatch, the
+    # checkpoint still carries the id-less TM (the previous
+    # sentinel never landed), so the W1 probe flags it again and
+    # the W1 heal removes it again. PERPETUAL RE-HEAL.
+    #
+    # Why we don't mint synthetic ids: the in-process ``messages``
+    # list is the W1/W2 caller's working copy, but the checkpoint
+    # row was committed by an earlier node and carries a different
+    # (or null) id. Mismatching ids would either be no-ops (the
+    # checkpoint reducer can't match them) or, worse, accidentally
+    # drop an UNRELATED committed message that happens to share the
+    # synthetic id. The risk of cross-message id collision
+    # outweighs the perpetual-re-heal cost, which is bounded (a
+    # few µs per dispatch per orphan) and self-resolving on the
+    # NEXT turn once the LLM produces an AIMessage whose commit
+    # replaces the orphaned tool-result-only segment.
+    #
+    # Mitigations already in place: (a) LangChain's default TM
+    # construction in this codebase always sets an id (the
+    # in-process helpers at ``daemon/loader.py`` and the
+    # ``add_messages`` reducer default), so id-less TMs are a
+    # corner case (mostly partner-synth placeholders minted by
+    # Phase 1, which carry the ``partner-synth-{tc_id}`` id); (b)
+    # the perpetual re-heal is O(n) and bounded by the conversation
+    # length, so the cost is sub-millisecond on realistic
+    # histories. The right long-term fix is a LangGraph API
+    # addition (``RemoveMessage(index=N)`` or remove-by-content)
+    # which is out of scope for this branch — see the linked
+    # issue in ``.agents/shared/knowledge/``.
     removed_ids: list[str] = []
     for m in messages:
         if id(m) in final_ids_by_obj:
@@ -458,6 +528,8 @@ def validate_and_heal_messages(
         mid = getattr(m, "id", None)
         if mid:
             removed_ids.append(mid)
+        # else: id-less orphan — payload-only removal (no
+        # sentinel). See the rationale block above.
 
     # Mutate in place.
     messages.clear()
@@ -485,12 +557,20 @@ def has_pairing_violations(messages: Iterable[BaseMessage]) -> bool:
       * any ``AIMessage(tool_calls=[...])`` carries a
         ``tool_call_id`` not satisfied by an IMMEDIATELY-adjacent
         ``ToolMessage`` (the load-bearing strict-gateway rule);
-      * any non-partner-synth ``ToolMessage`` carries a
-        ``tool_call_id`` with no matching ``AIMessage(tool_calls=[...])``
-        at any EARLIER index (the "before" semantic — a
-        ``ToolMessage`` whose issuing ``AIMessage`` appears LATER in
-        the list IS flagged, because strict gateways reject the
-        order-inverted shape even though the count-pairing is valid).
+      * any non-partner-synth ``ToolMessage``'s nearest preceding
+        NON-TOOL message did NOT issue its ``tool_call_id`` (the
+        block-ownership rule). The nearest preceding non-Tool is
+        the last message walking back that is not a
+        ``ToolMessage`` — typically the most recent ``AIMessage``
+        (an earlier ``HumanMessage``/``SystemMessage`` also
+        qualifies as "non-Tool", in which case the tracking set
+        is empty and ANY following ``ToolMessage`` is flagged as
+        stranded). This subsumes the misplacement-after-other-AI
+        shape ``[AI(X)][AI(Y)][TM(X)][TM(Y)]`` (TM(X)'s nearest
+        preceding non-Tool is AI(Y), which did not issue X) AND
+        the Human-interleave shape ``[AI(X)][Human][TM(X)]`` (the
+        Human is the nearest preceding non-Tool and does not
+        issue any tc_id).
 
     NOTE: count-duplicates are NOT reported here (per W1(c)
     clarification — strict gateways accept them as long as each
@@ -519,21 +599,27 @@ def has_pairing_violations(messages: Iterable[BaseMessage]) -> bool:
 
     next_non_tool_after = _build_next_non_tool_after(msgs_list)
 
-    # Single left-to-right pass with a PREFIX issued-set: at index
-    # ``i``, ``issued_tc_ids`` contains every ``tool_call_id`` issued
-    # by an ``AIMessage`` at an index < ``i``. This replaces the old
-    # O(n) ``msgs_list[:i]`` slice + per-AIMessage ``_extract_tool_call_ids``
-    # walk inside the orphan check (which made the probe worst-case
-    # O(n²) on histories with many ToolMessages) and the old global
-    # issued-set (which had the FIX 3 mismatch — a TM whose issuer
-    # appears LATER in the list would not be flagged as an orphan
-    # because the later AIMessage's tc_id was in the global set).
+    # Single left-to-right pass with two violation checks in the
+    # same loop. The adjacency check (AIMessage(tc) → all tc_ids in
+    # the IMMEDIATELY-adjacent ToolMessage block) is the load-bearing
+    # strict-gateway rule; the block-ownership check (TM(tc) → its
+    # nearest preceding NON-TOOL message issued the tc_id) is the
+    # misplacement/stranded-TM detector. Both checks share the same
+    # "nearest preceding non-Tool" tracking set that the healer's
+    # Phase 2 maintains.
     #
-    # The "before" semantic aligns the probe with the healer's
-    # Phase 2, which also scopes its issued-set to AIMessages at
-    # earlier indices (FIX 3). Order-inverted TMs (TM-before-issuer)
-    # are flagged here AND removed by the healer.
-    issued_tc_ids: set[str] = set()
+    # ROUND-2 BLOCKER — the previous prefix issued-set caught only
+    # TM-before-issuer (TM(X) with no earlier issuer). The misplace-
+    # ment-after-other-AI shape ``[AI(X)][AI(Y)][TM(X)][TM(Y)]``
+    # survived the prefix rule (TM(X) HAS an earlier issuer — AI(X)
+    # at index 0) but is in AI(Y)'s adjacent block, so the gateway
+    # 2013-rejects and the probe reported CLEAN (the W2 retry was
+    # a no-op, the reraise bricked the instance). The nearest
+    # preceding NON-TOOL formulation subsumes both shapes AND the
+    # Human-interleave shape ``[AI(X)][Human][TM(X)]``: the Human
+    # is a non-Tool, so the tracking set becomes empty, and TM(X)
+    # is flagged as stranded.
+    last_non_tool_tc_ids: set[str] = set()
 
     for i, msg in enumerate(msgs_list):
         if isinstance(msg, AIMessage):
@@ -552,28 +638,32 @@ def has_pairing_violations(messages: Iterable[BaseMessage]) -> bool:
                 for tc_id in ai_tc_ids:
                     if tc_id not in block_tc_ids:
                         return True
-                # Add this AIMessage's tc_ids to the prefix issued
-                # set so subsequent TMs can find them. Done AFTER
-                # the adjacency check; the adjacency check is
-                # independent of the issued set (it reads the next
-                # block, not the prefix).
-                for tc_id in ai_tc_ids:
-                    if tc_id:
-                        issued_tc_ids.add(tc_id)
+            # Update the nearest preceding non-Tool tracking set
+            # with this AIMessage's tc_ids. Done AFTER the adjacency
+            # check; the adjacency check is independent of the
+            # tracking set (it reads the next block, not the prefix).
+            last_non_tool_tc_ids = {
+                tc_id for tc_id in ai_tc_ids if tc_id
+            }
         elif isinstance(msg, ToolMessage):
             if _is_partner_synth(msg):
                 continue
             tc_id = getattr(msg, "tool_call_id", None)
             if not tc_id:
                 continue
-            # Orphan — TM with no AIMessage(tc) at any EARLIER index
-            # that issued this tc_id. O(1) lookup against the prefix
-            # issued set; no slicing, no per-TM linear walk. The
-            # "earlier" semantic (NOT "anywhere in the history")
-            # matches the healer's Phase 2 scoping so the probe and
-            # the healer agree on the order-inverted shape.
-            if tc_id not in issued_tc_ids:
+            # Block-ownership check: TM's nearest preceding
+            # non-Tool message must have issued its tc_id. If the
+            # nearest preceding non-Tool is a HumanMessage /
+            # SystemMessage / AIMessage-without-tool_calls, the
+            # tracking set is empty and ANY TM is stranded.
+            if tc_id not in last_non_tool_tc_ids:
                 return True
+        else:
+            # HumanMessage / SystemMessage / RemoveMessage / etc. —
+            # bounds the block-ownership region. An empty set
+            # means any subsequent TM (until the next AIMessage)
+            # is stranded.
+            last_non_tool_tc_ids = set()
     return False
 
 

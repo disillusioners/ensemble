@@ -9132,6 +9132,42 @@ def create_agent_node(
                 #     forensic access.
                 # The existing error path / non-retryable upstream
                 # pipeline takes over (terminal as shipped pre-W2).
+                #
+                # ┌────────────────────────────────────────────────────┐
+                # │ TRANSIENT ESCAPE PATH (accepted; documented)      │
+                # │                                                    │
+                # │ The inner ``try/except`` at :9111-9116 catches     │
+                # │ ONLY ``ToolPairingInvalidError``. A transient     │
+                # │ exception raised inside the W2 retry invoke       │
+                # │ (e.g. ``openai.APITimeoutError`` on a 2013-then-  │
+                # │ transient sequence) escapes the inner except,    │
+                # │ propagates OUT of the W2 handler, and re-enters   │
+                # │ the outer except chain. It does NOT land in the   │
+                # │ transient sibling handler at :9525 (the           │
+                # │ post-compaction transient tuple) because Python   │
+                # │ ``except`` clauses only match exceptions raised    │
+                # │ in the immediately-enclosing ``try`` body — the   │
+                # │ inner W2 catch consumed the pairing exception,    │
+                # │ and the transient was raised INSIDE the inner     │
+                # │ try, so it falls through the inner except and     │
+                # │ propagates to the outer (post-compaction)         │
+                # │ transient handler at :9525 OR the generic         │
+                # │ ``except Exception`` below.                       │
+                # │                                                    │
+                # │ Why accepted: the probability of a 2013-then-      │
+                # │ transient sequence inside the W2 retry window is   │
+                # │ low (the gateway that just 2013-rejected is more   │
+                # │ likely to keep rejecting than to time out), the   │
+                # │ outer transient sibling handler is still wired to   │
+                # │ catch the case at the agent_node level (the       │
+                # │ W2 inner-try doesn't break the outer tuple), and  │
+                # │ building new retry machinery here would couple the │
+                # │ W2 bounded-retry contract to a transient budget    │
+                # │ the design explicitly rejects (heal-once + retry-  │
+                # │ once, NEVER more — see FIX 1). The task-level      │
+                # │ error path still catches the propagated transient  │
+                # │ if it bypasses the W2 handler.                    │
+                # └────────────────────────────────────────────────────┘
                 logger.error(
                     f"[ToolPairing:FULL] W2 reactive heal did not "
                     f"resolve pairing-invalid for {instance_short} "
@@ -9531,6 +9567,34 @@ def create_agent_node(
                     # upstream pipeline takes over (terminal as
                     # shipped pre-W2). Maximal diagnostics
                     # preserved.
+                    #
+                    # ┌────────────────────────────────────────────┐
+                    # │ TRANSIENT ESCAPE PATH (accepted; documented)│
+                    # │                                            │
+                    # │ Same escape path as the primary W2 site    │
+                    # │ (:9111-9128). The inner try/except at      │
+                    # │ :9544-9575 catches ONLY                     │
+                    # │ ``ToolPairingInvalidError``. A transient   │
+                    # │ exception raised inside the W2 retry       │
+                    # │ invoke (e.g. ``openai.APITimeoutError`` on  │
+                    # │ a 2013-then-transient sequence inside the   │
+                    # │ CLE handler) escapes the inner except,    │
+                    # │ propagates OUT of the post-compaction W2   │
+                    # │ handler, and re-enters the outer except     │
+                    # │ chain. It does NOT land in the transient    │
+                    # │ sibling handler at :9576 (the outer tuple  │
+                    # │ catches exceptions raised in the outer     │
+                    # │ try BODY, not nested handlers). The outer  │
+                    # │ transient handler is at the agent_node      │
+                    # │ level (still wired and reachable if the    │
+                    # │ exception propagates past the CLE handler  │
+                    # │ boundary), the task-level error path still  │
+                    # │ catches it, and building new retry         │
+                    # │ machinery here would couple the W2 bounded │
+                    # │ contract to a transient budget the design   │
+                    # │ rejects. Accepted — see primary site :9111- │
+                    # │ 9128 for the full rationale.                │
+                    # └────────────────────────────────────────────┘
                     logger.error(
                         f"[ToolPairing:FULL] W2 post-compaction heal did "
                         f"not resolve pairing-invalid for {instance_short}; "
@@ -10224,13 +10288,31 @@ def build_instance_llms(
         llm_with_tools = llm_standard_chat.bind_tools(tools)
     llm_standard = llm_standard_chat.bind_tools(tools)
 
-    # Wrap with error classification and retry if config provided
-    if retry_config:
-        # CRITICAL: classify errors BEFORE retry so they can be caught
-        llm_with_tools = classify_llm_errors(llm_with_tools)
-        if llm_standard is not llm_with_tools:
-            llm_standard = classify_llm_errors(llm_standard)
+    # CRITICAL — classify errors BEFORE any retry/cooldown layer so
+    # the agent_node W2 catch (graph.py:9111-9128 and :9455-9499)
+    # can intercept the ToolPairingInvalidError the classifier
+    # raises for the 2013 signature. The classify_llm_errors
+    # wrapping is INDEPENDENT of ``retry_config`` — the W2 wiring
+    # is a separate concern from the transient-retry budget.
+    # Pre-round-2-fix the wrapping lived inside the ``if retry_config:``
+    # block, so a caller passing ``retry_config=None`` silently
+    # dropped W2 (a raw ``BadRequestError`` would propagate past
+    # the W2 catch, which is keyed on ``ToolPairingInvalidError``).
+    # The transient/timeout retry/tenacity wiring below REMAINS
+    # gated on ``retry_config`` (it's the budget knob, not the
+    # classifier knob).
+    llm_with_tools = classify_llm_errors(llm_with_tools)
+    if llm_standard is not llm_with_tools:
+        llm_standard = classify_llm_errors(llm_standard)
 
+    # Wrap with tenacity retry + failover if config provided. This
+    # is the transient/timeout budget — SEPARATE from the
+    # classifier wiring above. The classifier runs INSIDE the
+    # retry scope so the classifier's ToolPairingInvalidError
+    # conversion is itself retried by tenacity (no — tenacity
+    # does NOT retry ToolPairingInvalidError because it's not in
+    # TRANSIENT_EXCEPTIONS; the W2 catch is the bounded retry).
+    if retry_config:
         transient_attempts = retry_config.get("transient_attempts", 8)
         timeout_attempts = retry_config.get("timeout_attempts", 3)
         primary_url = llm_config_with_headers.get("base_url", "")

@@ -58,12 +58,18 @@ Fixture map:
         after the AIMessage; gateway-validated payload passes.
 
     PRIMARY REGRESSION — ``TestAdjacencyTrap``
-        ``[AI-issuer][AI-other][TM-synth][TM-other]`` — count-
+        ``[AI-issuer][AI-other][TM-issuer][TM-orphan]`` — count-
         pairing is valid (every tc_id has a TM somewhere) but the
         gateway STILL 2013-rejects because the AI-other message
         breaks the call→result adjacency. Validator heals by
         synthesizing a placeholder immediately after the AI-issuer
-        AND removing the stranded original TM.
+        AND removing BOTH stranded original TMs: the orphaned
+        ``TM-orphan`` (no AIMessage anywhere issued its tc_id) AND
+        the misplaced ``TM-issuer`` (its nearest preceding NON-TOOL
+        message after Phase 1 is AI-other, which did not issue its
+        tc_id — the block-ownership rule). The synth placeholder
+        at index 1 (a partner-synth, naturally belonging to
+        AI-issuer) satisfies AI-issuer's adjacency.
 
     DEFENSIVE — ``TestDuplicateToolCallIdEachHasOwnTM``
         Two AIMessages with the same ``tool_call_id``; each has
@@ -81,9 +87,30 @@ Fixture map:
         misplaced TM is now removed as an orphan. Probe and
         healer agree.
 
+    ROUND-2 BLOCKER — ``TestBlockOwnershipMisplacement``
+        ``[AI(X)][AI(Y)][TM(X)][TM(Y)]`` — TM(X) is in the wrong
+        adjacent block (its issuer AI(X) is earlier but the TM
+        sits in AI(Y)'s block). Round-1 prefix rule kept TM(X)
+        (had an earlier issuer); round-2 block-ownership rule
+        (TM's nearest preceding NON-TOOL message must have
+        issued its tc_id) removes it. AI(X) is then answered
+        by a synth placeholder. Also covers the
+        ``[AI(X)][Human][TM(X)]`` interleave sub-shape (Human
+        is the nearest preceding non-Tool, issued nothing → TM
+        stranded → removed). ``TestBlockOwnershipProbePin`` pins
+        the probe side of the same rule.
+
+    TEST GAPS — ``TestMultiCallAIMessageBothTcMissing``,
+        ``TestAdjacentAIMessageTcBackToBack``
+        Multi-tc AIMessage with NO TMs in its block (all
+        synthesized) and two adjacent AIMessage(tc)s back-to-back
+        with no TMs (each gets its own synth). Pins Phase 1
+        multi-call coverage.
+
     PROBE / W1 HOT-PATH GATE — ``TestHasPairingViolations``
-        The cheap pre-flight probe returns False on healthy
-        histories (no allocation) and True on poisoned histories.
+        The cheap O(n) pre-flight probe returns False on healthy
+        histories (O(n) auxiliary set) and True on poisoned
+        histories.
 
     ADJACENCY HELPERS — ``TestBuildNextNonToolAfter``
         The pre-computed ``next_non_tool_after`` array correctly
@@ -299,15 +326,33 @@ class TestAdjacencyTrap:
         # AI-other is now at index 2.
         assert isinstance(msgs[2], AIMessage)
         assert msgs[2].content == "other AI msg — no tool_calls"
-        # The original TM(call_other) is an orphan (no AIMessage(tc)
-        # anywhere in the list issued call_other — AI-other has no
-        # tool_calls). Validator removes it.
-        # Note: TM(call_issuer, original) is NOT removed because it
-        # has a matching AIMessage(tc) at index 0 — strict gateways
-        # accept the order-valid adjacency even if the original TM
-        # is now redundant (the synth placeholder at index 1
-        # satisfies the AIMessage at index 0).
-        # Verify: orphan TM(call_other) was removed.
+        # ROUND-2 BLOCKER: TM(call_issuer, original) IS removed by
+        # the block-ownership rule. Its nearest preceding NON-TOOL
+        # message at this point is AI-other (the AIMessage that
+        # broke adjacency), which did NOT issue call_issuer — the
+        # TM is stranded in the wrong block, NOT in AI-issuer's
+        # adjacent block, so it must come out. The synth placeholder
+        # at index 1 (a partner-synth, naturally belonging to
+        # AI-issuer) satisfies AI-issuer's adjacency. The pre-FIX
+        # test comment claimed the original TM was kept (the
+        # round-1 prefix rule masked this misplacement-after-other-
+        # AI shape), but the round-2 block-ownership rule removes
+        # it — which is exactly the safer behavior since the
+        # strict-gateway would have 2013-rejected the kept TM.
+        # Verify: BOTH original TMs are removed (call_issuer as a
+        # stranded misplaced TM, call_other as an orphan with no
+        # issuing AIMessage anywhere in the list).
+        original_tm_call_issuer = [
+            m for m in msgs
+            if isinstance(m, ToolMessage)
+            and m.tool_call_id == "call_issuer"
+            and not _is_partner_synth(m)
+        ]
+        assert original_tm_call_issuer == [], (
+            f"stranded original TM(call_issuer) must be removed by "
+            f"the block-ownership rule; still in msgs: "
+            f"{[m.tool_call_id for m in original_tm_call_issuer]}"
+        )
         other_tc_ids = [
             m.tool_call_id for m in msgs
             if isinstance(m, ToolMessage)
@@ -317,10 +362,18 @@ class TestAdjacencyTrap:
             f"orphan TM(call_other) was NOT removed by validator; "
             f"still in history: {other_tc_ids}"
         )
-        # Orphan removal tracked at least 1.
-        assert len(report.removed_orphan_indices) >= 1
+        # Orphan removal tracked at least 2 (both stranded TMs).
+        assert len(report.removed_orphan_indices) >= 2, (
+            f"both stranded TMs must be removed; "
+            f"removed_orphan_indices={report.removed_orphan_indices}"
+        )
 
-        # Post-state: probe clean.
+        # Post-state: probe clean. The remaining list is
+        # [AI-issuer, synth(call_issuer), AI-other, HumanMessage]
+        # — the partner-synth at index 1 satisfies AI-issuer's
+        # adjacency; AI-other has no tool_calls; the trailing
+        # HumanMessage bounds the block-ownership region for any
+        # future TM (none here).
         assert has_pairing_violations(msgs) is False
 
 
@@ -439,6 +492,318 @@ class TestOrderInvertedToolMessageBeforeIssuer:
         ] == []
         # Post-heal: probe clean (the AIMessage at the end gets a
         # synthesized partner in Phase 1).
+        assert has_pairing_violations(msgs) is False
+
+
+# ---------------------------------------------------------------------------
+# ROUND-2 BLOCKER — block-ownership rule (misplacement-after-other-AI + Human-interleave)
+# ---------------------------------------------------------------------------
+
+
+class TestBlockOwnershipMisplacement:
+    """ROUND-2 BLOCKER: the misplacement-after-other-AI shape.
+
+    The shape ``[AI(X)][AI(Y)][TM(X)][TM(Y)]`` is the exact
+    forensic-class from the live 10-08 repair: a TM whose issuer
+    exists earlier in the list but the TM is in the WRONG
+    adjacent block. Count-pairing is valid (every tc_id has a TM
+    somewhere) and the round-1 prefix-issued-set rule kept
+    TM(X) (its issuer AI(X) is at an earlier index), but the
+    strict-gateway 2013-rejects because TM(X) is in AI(Y)'s
+    block, not AI(X)'s.
+
+    The round-1 probe reported CLEAN for this shape, the W1 heal
+    was a no-op, and the W2 retry healed nothing (same issue)
+    — permanent brick WITH probe masking diagnosis.
+
+    The round-2 block-ownership rule subsumes this: a TM
+    survives only if the NEAREST PRECEDING NON-TOOL message is
+    an AIMessage that issued its tc_id. TM(X)'s nearest preceding
+    non-Tool (after Phase 1) is AI(Y) at index 2 (the new
+    layout has AI(X), synth(X), AI(Y), TM(X), TM(Y)), which
+    did not issue X — TM(X) is removed. AI(X) is then answered
+    by the synth placeholder.
+    """
+
+    def test_misplaced_tm_after_other_ai_is_flagged_by_probe(self):
+        """Pre-heal: probe flags the misplacement."""
+        msgs: list = [
+            AIMessage(content="", tool_calls=[_tc("call_x")]),
+            AIMessage(content="other AI", tool_calls=[_tc("call_y")]),
+            ToolMessage(content="r_x", tool_call_id="call_x", name="tool"),
+            ToolMessage(content="r_y", tool_call_id="call_y", name="tool"),
+        ]
+        # Pre-heal probe: BLOCKER (TM(x) is in AI(y)'s block, not
+        # AI(x)'s — adjacency violation at AI(x); the gate will
+        # 2013-reject).
+        assert has_pairing_violations(msgs) is True
+
+    def test_misplaced_tm_after_other_ai_is_removed_by_healer(self):
+        """Heal outcome: TM(X) removed, AI(X) answered by synth."""
+        msgs: list = [
+            AIMessage(content="", tool_calls=[_tc("call_x")]),
+            AIMessage(content="other AI", tool_calls=[_tc("call_y")]),
+            ToolMessage(content="r_x", tool_call_id="call_x", name="tool"),
+            ToolMessage(content="r_y", tool_call_id="call_y", name="tool"),
+        ]
+
+        report = validate_and_heal_messages(msgs, instance_short="iid-block")
+
+        # 1 synth: for call_x (AI(x) was unanswered after the
+        # misplacement removal). AI(y) is answered by its own TM
+        # in its adjacent block, so no synth for call_y.
+        assert len(report.synthesized) == 1
+        assert report.synthesized[0].tool_call_id == "call_x"
+        assert report.synthesized[0].id == "partner-synth-call_x"
+
+        # The original TM(x) (the misplaced one) is REMOVED. Its
+        # nearest preceding non-Tool after Phase 1 is AI(y) at the
+        # new index 2, which did not issue call_x.
+        original_tm_call_x = [
+            m for m in msgs
+            if isinstance(m, ToolMessage)
+            and m.tool_call_id == "call_x"
+            and not _is_partner_synth(m)
+        ]
+        assert original_tm_call_x == [], (
+            f"misplaced TM(call_x) must be removed; still in msgs: "
+            f"{[m.tool_call_id for m in original_tm_call_x]}"
+        )
+
+        # The TM(y) survives (its nearest preceding non-Tool is
+        # AI(y) at index 2, which DID issue call_y).
+        tm_call_y = [
+            m for m in msgs
+            if isinstance(m, ToolMessage)
+            and m.tool_call_id == "call_y"
+        ]
+        assert len(tm_call_y) == 1, (
+            f"TM(call_y) must be kept (correctly placed in AI(y)'s "
+            f"block); got {len(tm_call_y)}"
+        )
+
+        # The healed list shape (in order):
+        # [AI(x)][synth(x)][AI(y)][TM(y)]
+        # — the reviewer's expected heal form.
+        assert msgs[0].tool_calls[0]["id"] == "call_x"
+        assert msgs[1].tool_call_id == "call_x"
+        assert msgs[1].id == "partner-synth-call_x"
+        assert isinstance(msgs[2], AIMessage)
+        assert msgs[2].tool_calls[0]["id"] == "call_y"
+        assert msgs[3].tool_call_id == "call_y"
+
+        # Orphan removal tracked exactly 1 (the misplaced TM(x)).
+        assert len(report.removed_orphan_indices) == 1
+
+        # Post-heal: probe clean. The healed list
+        # [AI(x)][synth(x)][AI(y)][TM(y)] is order-valid:
+        # - AI(x) answered by synth(x) at index 1
+        # - AI(y) answered by TM(y) at index 3
+        # - TM(y)'s nearest preceding non-Tool is AI(y), which
+        #   issued call_y ✓
+        assert has_pairing_violations(msgs) is False
+
+    def test_human_interleave_subshape(self):
+        """ROUND-2: the Human-interleave sub-shape the review called
+        out as the reason for tightening past the literal
+        "nearest preceding AIMessage" phrasing.
+
+        ``[AI(X)][Human][TM(X)]`` — TM(X) appears AFTER a Human
+        message. Under the literal "nearest preceding AIMessage"
+        rule, the nearest preceding AIMessage IS the issuer, so
+        the stranded TM would survive and the probe would stay
+        clean — recreating the same masking class. The
+        non-Tool formulation subsumes this: the Human is a
+        non-Tool, so the tracking set is empty, and TM(X) is
+        flagged as stranded.
+        """
+        msgs: list = [
+            AIMessage(content="", tool_calls=[_tc("call_a")]),
+            HumanMessage(content="interrupt"),
+            ToolMessage(content="r_a", tool_call_id="call_a", name="tool"),
+        ]
+
+        # Pre-heal: probe MUST flag the stranded TM (the
+        # round-2 block-ownership rule, not the round-1 prefix
+        # rule which would have passed it).
+        assert has_pairing_violations(msgs) is True
+
+        report = validate_and_heal_messages(msgs, instance_short="iid-intl")
+
+        # Heal: AI(a) was answered by a synth placeholder (its
+        # adjacent block was empty — Human at index 1 is the
+        # first non-Tool, breaking adjacency). The stranded
+        # TM(call_a) is removed (its nearest preceding non-Tool
+        # is the Human, which issued nothing).
+        assert len(report.synthesized) == 1
+        assert report.synthesized[0].tool_call_id == "call_a"
+
+        # The original TM(a) is REMOVED.
+        original_tm_call_a = [
+            m for m in msgs
+            if isinstance(m, ToolMessage)
+            and m.tool_call_id == "call_a"
+            and not _is_partner_synth(m)
+        ]
+        assert original_tm_call_a == [], (
+            f"stranded TM(call_a) (Human-interleave) must be removed; "
+            f"still in msgs: {[m.tool_call_id for m in original_tm_call_a]}"
+        )
+
+        # Healed shape: [AI(a)][synth(a)][Human]
+        assert msgs[0].tool_calls[0]["id"] == "call_a"
+        assert msgs[1].tool_call_id == "call_a"
+        assert msgs[1].id == "partner-synth-call_a"
+        assert isinstance(msgs[2], HumanMessage)
+
+        # Post-heal: probe clean.
+        assert has_pairing_violations(msgs) is False
+
+    def test_valid_multicall_block_still_valid(self):
+        """Sanity-pin: the block-ownership rule does NOT regress
+        the valid multi-call adjacent block.
+
+        ``[AI(X,Y)][TM(X)][TM(Y)]`` — both TMs are in the
+        AIMessage's adjacent block. Each TM's nearest preceding
+        non-Tool is AI(X,Y), which issued both X and Y. Both
+        TMs survive. Probe-clean.
+        """
+        msgs: list = [
+            AIMessage(
+                content="",
+                tool_calls=[_tc("call_x", "tool_x"), _tc("call_y", "tool_y")],
+            ),
+            ToolMessage(content="r_x", tool_call_id="call_x", name="tool_x"),
+            ToolMessage(content="r_y", tool_call_id="call_y", name="tool_y"),
+        ]
+
+        # Pre-heal: probe clean (both TMs in their issuer's block).
+        assert has_pairing_violations(msgs) is False
+
+        # Healer is a no-op (no violations to fix).
+        report = validate_and_heal_messages(msgs, instance_short="iid-valid-multi")
+        assert report.synthesized == []
+        assert report.removed_orphan_indices == []
+
+        # Post-heal: still probe clean.
+        assert has_pairing_violations(msgs) is False
+
+
+class TestBlockOwnershipProbePin:
+    """The probe mirrors Phase 2's block-ownership rule (the
+    round-2 review requirement). Pre-existing probe tests
+    already pin the adjacency side; this class pins the
+    misplacement-flagging side."""
+
+    def test_probe_flags_misplacement_after_other_ai(self):
+        msgs = [
+            AIMessage(content="", tool_calls=[_tc("call_x")]),
+            AIMessage(content="other", tool_calls=[_tc("call_y")]),
+            ToolMessage(content="r_x", tool_call_id="call_x", name="t"),
+            ToolMessage(content="r_y", tool_call_id="call_y", name="t"),
+        ]
+        assert has_pairing_violations(msgs) is True
+
+    def test_probe_flags_human_interleave(self):
+        msgs = [
+            AIMessage(content="", tool_calls=[_tc("call_a")]),
+            HumanMessage(content="interrupt"),
+            ToolMessage(content="r_a", tool_call_id="call_a", name="t"),
+        ]
+        assert has_pairing_violations(msgs) is True
+
+    def test_probe_flags_stranded_after_other_ai_no_tc_match(self):
+        """Stranded TM (tc_id not issued by any AIMessage) after
+        another AI's block — the block-ownership rule catches it
+        because the nearest preceding non-Tool (the other AI)
+        didn't issue its tc_id."""
+        msgs = [
+            AIMessage(content="", tool_calls=[_tc("call_y")]),
+            ToolMessage(content="orphan", tool_call_id="call_orphan", name="t"),
+        ]
+        assert has_pairing_violations(msgs) is True
+
+
+# ---------------------------------------------------------------------------
+# Test gaps (🟡 #6) — both-tc-missing multi-call AIMessage, adjacent AIMessage(tc) back-to-back
+# ---------------------------------------------------------------------------
+
+
+class TestMultiCallAIMessageBothTcMissing:
+    """🟡 #6 test gap: an AIMessage with multiple tool_calls where
+    NONE of the TMs are in the adjacent block. Phase 1 should
+    synthesize placeholders for ALL missing tc_ids."""
+
+    def test_both_tc_missing_synthesizes_both_placeholders(self):
+        msgs: list = [
+            AIMessage(
+                content="",
+                tool_calls=[_tc("call_x", "tool_x"), _tc("call_y", "tool_y")],
+            ),
+            HumanMessage(content="no tool results at all"),
+        ]
+
+        # Pre-heal: probe flags the adjacency violation (no TMs
+        # in the AIMessage's block).
+        assert has_pairing_violations(msgs) is True
+
+        report = validate_and_heal_messages(msgs, instance_short="iid-both-missing")
+
+        # BOTH missing tc_ids are synthesized.
+        assert len(report.synthesized) == 2
+        synth_tc_ids = {s.tool_call_id for s in report.synthesized}
+        assert synth_tc_ids == {"call_x", "call_y"}
+        # Both synths sit immediately after the AIMessage.
+        assert msgs[1].tool_call_id in {"call_x", "call_y"}
+        assert msgs[1].id in {
+            "partner-synth-call_x", "partner-synth-call_y",
+        }
+        assert msgs[2].tool_call_id in {"call_x", "call_y"}
+        assert msgs[2].id in {
+            "partner-synth-call_x", "partner-synth-call_y",
+        }
+        # HumanMessage moved to index 3.
+        assert isinstance(msgs[3], HumanMessage)
+
+        # Post-heal: probe clean.
+        assert has_pairing_violations(msgs) is False
+
+
+class TestAdjacentAIMessageTcBackToBack:
+    """🟡 #6 test gap: two AIMessages with tool_calls back-to-back,
+    neither with a TM in the immediate adjacent block. Phase 1
+    should synthesize placeholders for both."""
+
+    def test_adjacent_ai_tc_synthesizes_for_each(self):
+        msgs: list = [
+            AIMessage(content="", tool_calls=[_tc("call_x")]),
+            AIMessage(content="", tool_calls=[_tc("call_y")]),
+            HumanMessage(content="no TMs at all"),
+        ]
+
+        # Pre-heal: probe flags BOTH adjacency violations.
+        assert has_pairing_violations(msgs) is True
+
+        report = validate_and_heal_messages(msgs, instance_short="iid-adj-ai")
+
+        # 2 synths total — one for each AIMessage.
+        assert len(report.synthesized) == 2
+        synth_tc_ids = {s.tool_call_id for s in report.synthesized}
+        assert synth_tc_ids == {"call_x", "call_y"}
+
+        # The healed shape:
+        # [AI(x)][synth(x)][AI(y)][synth(y)][Human]
+        # — each AIMessage answered by its own synth at the end
+        # of its (empty) adjacent block.
+        assert msgs[0].tool_calls[0]["id"] == "call_x"
+        assert msgs[1].tool_call_id == "call_x"
+        assert msgs[1].id == "partner-synth-call_x"
+        assert msgs[2].tool_calls[0]["id"] == "call_y"
+        assert msgs[3].tool_call_id == "call_y"
+        assert msgs[3].id == "partner-synth-call_y"
+        assert isinstance(msgs[4], HumanMessage)
+
+        # Post-heal: probe clean.
         assert has_pairing_violations(msgs) is False
 
 
