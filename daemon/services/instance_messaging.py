@@ -264,8 +264,21 @@ async def _heal_poisoned_checkpoint_tail(
         # branch sets ``graph_input = None`` (pure checkpoint resume
         # — silent mode or no content). The seam heal/prepend MUST
         # SKIP a None graph_input: that path injects no new
-        # mid-turn HumanMessage at the seam and is already covered
-        # by the in-graph pairing guard (graph.py:2971 / :3145).
+        # mid-turn HumanMessage at the seam.
+        #
+        # Coverage note (W5 / fix/tool-pairing-full-history-heal):
+        # the silent-resume path is now covered by the W1 full-
+        # history pairing guard wired at the LLM dispatch boundary
+        # (``daemon.graph._ensure_full_history_pairing`` invoked
+        # right before ``current_llm.invoke(full_messages)`` at
+        # graph.py:9013). The in-graph guard reads
+        # ``state['messages']`` directly — independent of
+        # ``graph_input`` — so the silent-resume branch reaches it
+        # just like any other branch. The pre-W1 claim that "the
+        # in-graph pairing guard already covers it" was a doc
+        # defect: the in-graph guard was O(1) tail-only and could
+        # not catch mid-history violations. The W1 fix closes the
+        # gap; this comment now matches the real coverage.
         return []
 
     # Read the checkpoint state. Pattern already used in this file

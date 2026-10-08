@@ -1717,10 +1717,35 @@ def emergency_truncate(
             if estimate_fn(truncated) <= max_tokens:
                 return truncated
     
-    # C1: After Pass 3, if still over limit, drop oldest messages as last resort
+    # C1: After Pass 3, if still over limit, drop oldest messages as last resort.
+    # Each pop(0) may sever a tool-call pair (the head may be an
+    # ``AIMessage(tool_calls)`` whose results are about to be
+    # orphaned, or an orphaned ``ToolMessage`` whose call-site is
+    # about to be removed). The pop loop drops the bare head.
     while len(truncated) > 1 and estimate_fn(truncated) > max_tokens:
         truncated.pop(0)
-    
+
+    # W3: order-based snap — the pop(0) loop may have severed
+    # call→result pairs (left an AIMessage(tc) without an adjacent
+    # ToolMessage block, or stranded a ToolMessage whose AIMessage
+    # has been dropped). Delegate to the order-based validator,
+    # which (a) synthesizes a partner immediately after any
+    # AIMessage(tc) whose adjacent block is incomplete, (c) removes
+    # any orphaned ToolMessages. The validator's healing is
+    # idempotent with the W1 full-history guard at the next
+    # dispatch (synthesized ids are deterministic), so a re-heal
+    # at the next dispatch is safe. See
+    # ``daemon.tool_pairing_history.validate_and_heal_messages`` for
+    # the contract.
+    from .tool_pairing_history import validate_and_heal_messages as _validate_and_heal
+    _w3_heal_report = _validate_and_heal(truncated, instance_short="emergency_truncate")
+    if _w3_heal_report.synthesized or _w3_heal_report.removed_orphan_indices:
+        logger.warning(
+            f"[ToolPairing:FULL] W3 emergency_truncate adjacency "
+            f"fix: synthesized={len(_w3_heal_report.synthesized)} "
+            f"orphans_removed={len(_w3_heal_report.removed_orphan_indices)}"
+        )
+
     return truncated
 
 
