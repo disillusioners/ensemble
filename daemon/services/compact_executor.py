@@ -323,24 +323,38 @@ class NoopOutcome:
     noop_reason: str
 
 
-def _is_recently_compacted(last_compacted_at: str | None) -> bool:
-    """True iff a ``last_compacted_at`` ISO stamp is within 60s of now.
+def _is_recently_compacted(
+    last_compacted_at: str | None,
+    dedup_window_s: int = 60,
+) -> bool:
+    """True iff a ``last_compacted_at`` ISO stamp is within
+    ``dedup_window_s`` of now.
 
-    Mirrors the in-engine ``_is_recently_compacted`` logic
-    (``daemon/compaction.py`` ~:1500-1517) so the executor pre-check
+    Escape-Hatch Hardening round 2 (Lane 1) — mirrors the in-engine
+    ``ContextCompactor._is_recently_compacted`` logic
+    (``daemon/compaction.py`` ~:4541-4557) so the executor pre-check
     matches the engine's. We re-implement here rather than calling the
     engine helper directly — the engine helper is private (``_`` prefix)
     and the executor pre-check needs to make its own decision BEFORE
     calling the engine (architect §2).
+
+    The 60s literal at ``:343`` was promoted to the
+    ``CompactionConfig.dedup_window_s`` config field (default 60
+    preserves pre-Lane-1 behavior). Both the engine and this
+    executor pre-check read the same config field so an operator
+    tightening the window sees the change on BOTH sites.
     """
     if not last_compacted_at:
+        return False
+    if dedup_window_s <= 0:
+        # Operator override — dedup entirely disabled.
         return False
     try:
         last_time = datetime.fromisoformat(last_compacted_at)
         if last_time.tzinfo is None:
             last_time = last_time.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
-        return (now - last_time).total_seconds() < 60
+        return (now - last_time).total_seconds() < dedup_window_s
     except (ValueError, TypeError):
         return False
 
@@ -761,7 +775,16 @@ async def execute_compact(
     if checkpoint_state is not None:
         last_compacted_at = (checkpoint_state.values or {}).get("compacted_at")
 
-    if _is_recently_compacted(last_compacted_at):
+    if _is_recently_compacted(
+        last_compacted_at,
+        dedup_window_s=int(
+            getattr(
+                manager.config.compaction,
+                "dedup_window_s",
+                60,
+            )
+        ),
+    ):
         # Noop — emit success terminal with the noop detail.
         await context.update_phase(
             _PHASE_IN_PROGRESS,
@@ -809,12 +832,75 @@ async def execute_compact(
     # Pull messages for the noop-floor measurement. We use the same
     # checkpoint_state we already read above (one DB hit total).
     messages = list((checkpoint_state.values or {}).get("messages", []) or [])
-    system_prompt_tokens = 0  # The proactive path uses the prompt cache
-    # — the executor uses 0 here for symmetry because we are only
-    # measuring against the floor (not running the engine). The
-    # floor is intentionally conservative — system prompt tokens
-    # count toward the budget too.
-    estimated_tokens = estimate_messages_tokens(messages) + system_prompt_tokens
+    # Escape-Hatch Hardening round 2 (H4 alignment) — the executor
+    # floor previously passed ``system_prompt_tokens=0`` to the
+    # canonical estimator; that was conservative (ignoring that the
+    # system prompt still counts toward the budget) and matched
+    # the pre-H4 reactive site. The unified H4 policy carries the
+    # REAL system-prompt token count everywhere — the engine's
+    # gate math, the reactive ctx at graph.py:8888, the pre-call
+    # hook, AND here. The reactive site already aligns with the
+    # helper :meth:`InstanceMessagingService._get_system_prompt_tokens`
+    # (an async coroutine that offloads the sync SQLAlchemy read
+    # to a worker thread); the executor pre-check is also async,
+    # so we AWAIT the helper directly.
+    #
+    # Round 2 adversarial fix: pre-fix, this site read the
+    # non-existent ``compactor._llm_cache.last_compiled_tokens``
+    # attribute (zero producers — the compactor has no such
+    # attribute, only the messaging service carries a system-
+    # prompt cache). On the swallow-fail path, the fallback
+    # SYNC-ISH ``_get_system_prompt_tokens`` call without
+    # ``await`` produced a coroutine object whose ``int(...)``
+    # coercion raised ``TypeError`` — the defensive except
+    # silently set ``system_prompt_tokens=0`` and the
+    # numerator for the noop-floor measurement UNDERCOUNTED
+    # the system prompt on EVERY invocation. Post-fix:
+    #   1. DELETE the phantom ``compactor._llm_cache`` read
+    #      (no production code sets it; reading only ever
+    #      produced 0).
+    #   2. AWAIT the messaging-service helper properly. The
+    #      executor is async; awaiting is the natural shape
+    #      (mirrors graph.py:7562 ``estimate_tokens(system_prompt)``
+    #      where the reactive site computed the same number
+    #      via the sync ``estimate_tokens`` because it had
+    #      ``system_prompt`` in scope; here we don't, so the
+    #      async helper is the right primitive).
+    #   3. Tolerate the helper being unavailable on test
+    #      facades (no ``_messaging_service``) — ``system_prompt_tokens``
+    #      defaults to 0 on those manager mocks.
+    system_prompt_tokens = 0
+    messaging_service = getattr(manager, "_messaging_service", None)
+    if messaging_service is not None and hasattr(
+        messaging_service, "_get_system_prompt_tokens"
+    ):
+        try:
+            system_prompt_tokens = int(
+                await messaging_service._get_system_prompt_tokens(
+                    instance_id
+                )
+            )
+        except Exception as exc:
+            # W2-N1 (round-2 re-gate): the swallow must be LOUD.
+            # A silent 0 here is the original defect shape — the
+            # noop-floor numerator undercounts the system prompt
+            # with zero operator-visible signal. Log at WARNING so
+            # the fallback is diagnosable; keep the 0 fallback
+            # (behavior-preserving) because no clean SYNC source
+            # exists — the helper's value is only reachable via
+            # the async to_thread DB read, and a sync re-read
+            # here would block the event loop.
+            logger.warning(
+                "compact executor: system-prompt token probe "
+                "failed for instance %s — falling back to "
+                "system_prompt_tokens=0 (noop-floor numerator "
+                "UNDERCOUNTS the system prompt): %s: %s",
+                instance_id,
+                type(exc).__name__,
+                exc,
+            )
+            system_prompt_tokens = 0
+        estimated_tokens = estimate_messages_tokens(messages) + system_prompt_tokens
 
     # Floor ratio (config-driven; default 0.05).
     noop_floor_ratio = float(

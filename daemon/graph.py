@@ -7435,8 +7435,24 @@ async def _maybe_precall_compact_95(
 
         # 2. Unified token estimate of the LLM-bound payload — primary
         # signal (``usage_metadata`` is a stale/undercounting proxy,
-        # A.3; never the primary). ALL messages incl. injected + the
-        # system prompt: consistent with P1's unified numerator.
+        # A.3; never the primary). ALL ``full_messages`` (which
+        # already include injected + ephemeral context +
+        # pairing-synthesized msgs + the system prompt's role in
+        # the LLM's view) are counted here via
+        # ``estimate_messages_tokens``. The pairing-synthesized
+        # trailing ``ToolMessage``s are PLACEHOLDERS with zero
+        # semantic weight on the LLM's input side, but the
+        # estimator counts them at 4-token-per-message overhead
+        # which slightly inflates the budget — accepted as the
+        # conservative bias. The system prompt tokens are NOT
+        # added separately here (``full_messages`` doesn't
+        # include a ``SystemMessage`` — the LLM call prepends
+        # the system prompt client-side). Engine-side, the
+        # ``CompactionContext.system_prompt_tokens`` carries
+        # the real system-prompt count (see H4 alignment at
+        # graph.py:8888 / compact_executor.py:812 — those sites
+        # carry the real number; this hook counts the live
+        # payload that the LLM will actually receive).
         payload_tokens = estimate_messages_tokens(full_messages)
         compactor.precall_estimate_record(
             instance_id, payload_count, payload_tokens
@@ -7458,6 +7474,28 @@ async def _maybe_precall_compact_95(
         # ratio (no widening).
         gate_ratio = PRECALL_COMPACTION_RATIO
         gate_label = "precall_95"
+        # Escape-Hatch Hardening round 2 (Lane 5) — promote the
+        # hard-coded ``0.80`` escalation gate ratio at this site
+        # to ``compactor.config.escalation_gate_ratio`` (default
+        # 0.80 preserves pre-Lane-5 behavior byte-for-byte). The
+        # three distinct 0.80s in the subsystem are
+        # disambiguated here:
+        #   * THIS field — the LOWERED reactive pre-call hook
+        #     threshold when proactive-skip escalation is active.
+        #   * ``compaction.threshold`` at config.py — the
+        #     auto-path engine gate (80% by default). Same
+        #     value, different surface.
+        #   * ``0.80 * trigger_window`` at
+        #     ``ContextCompactor.precall_estimate_needs_refresh``
+        #     — the at-risk band for per-call re-estimation,
+        #     HARDCODED (deliberately distinct from
+        #     ``threshold`` — re-estimation is a different
+        #     decision from "should we compact").
+        # Note: the ``escalation_gate_ratio`` field was added in
+        # this Lane (config.py), so a freshly-built compactor is
+        # guaranteed to carry the default. Reads via
+        # ``getattr(..., default)`` keep forward-compat with
+        # instances built before the field existed.
         try:
             from .services._escalation_metadata import (
                 is_proactive_escalation_active,
@@ -7474,7 +7512,9 @@ async def _maybe_precall_compact_95(
                     _inst_repo.get, instance_id
                 )
                 if _inst_row is not None and is_proactive_escalation_active(_inst_row):
-                    gate_ratio = 0.80
+                    gate_ratio = float(
+                        getattr(compactor.config, "escalation_gate_ratio", 0.80)
+                    )
                     gate_label = "escalation_80pct"
         except Exception:
             # Defensive: never let the metadata read crash the
@@ -8883,9 +8923,28 @@ def create_agent_node(
             # §4). F2 fix (2026-09-01) — pass ``instance_id`` so the
             # doc id is ``compaction-global-{iid}-{seq}`` (not
             # ``compaction-global--{seq}``) and seq is per-instance.
+            #
+            # Escape-Hatch Hardening round 2 (H4 alignment) —
+            # carry REAL ``system_prompt_tokens`` at the reactive
+            # site instead of 0. Pre-H4 alignment the reactive ctx
+            # passed ``system_prompt_tokens=0`` and the engine's
+            # numerator was under-counted by ~200 tokens (the
+            # typical system-prompt weight). The engine's gate
+            # math already handles the real number; passing 0
+            # here just deflated the budget and made the
+            # over-budget predicate misclassify. The reactive
+            # scope has the ``system_prompt`` string in scope
+            # (computed at the agent_node entry), so we call
+            # ``estimate_tokens(system_prompt)`` the same way the
+            # pre-call hook does. Falls back to 0 on a missing
+            # string (no scope; the pre-H4 value).
+            from .loader import estimate_tokens
+            _reactive_system_prompt_tokens = (
+                estimate_tokens(system_prompt) if system_prompt else 0
+            )
             ctx = CompactionContext(
                 messages=current_messages,
-                system_prompt_tokens=0,
+                system_prompt_tokens=_reactive_system_prompt_tokens,
                 model_name=llm_config.get('model', '') if llm_config else '',
                 config=compactor.config,
                 llm_config=compactor.llm_config,
@@ -8894,9 +8953,90 @@ def create_agent_node(
                 msg_timestamps=_extract_msg_timestamps(current_messages),
             )
 
-            result = await compactor.compact_state(ctx)
+            # Escape-Hatch Hardening round 2 (Lane 1) — close
+            # the H1×H3 interlock at the reactive CLE site. The
+            # pre-Lane-1 reactive handler did:
+            #     result = await compactor.compact_state(ctx)
+            #     if result is None or result.replacement_messages is None:
+            #         raise  # turn dies unshrunk
+            # That meant a 60s dedup hit on the reactive path was
+            # IMMEDIATE turn death (S1 — Sharpest verified bug
+            # at brief-acceptance time). Lane 1 changes three
+            # things at this single site:
+            #   (a) The engine call is wrapped in try/except — a
+            #       defensive ``Exception`` (NOT ``ContextLengthExceededError``
+            #       — we are already inside that handler) is
+            #       caught and routed to the force-floor retry
+            #       below instead of re-raised. Pre-Lane-1 the
+            #       ``raise`` propagated to the generic
+            #       handler at :9259 which logs + re-raises,
+            #       reactivation loop.
+            #   (b) On a ``None`` return (dedup held OR engine
+            #       decline), the reactive site invokes the
+            #       engine a SECOND time with ``force=True``.
+            #       Per Lane 1's dedup-yield semantics
+            #       (``context.config`` carries the engine),
+            #       ``force=True`` bypasses the dedup entirely
+            #       and the over-budget predicate kicks in —
+            #       floor path ALWAYS shrinks.
+            #   (c) On a SECOND ``None`` return (shouldn't
+            #       happen given force semantics, but defended),
+            #       raise with a CLEAR message; the upstream
+            #       CLE handler logs the original ContextLength
+            #       error. The turn dies LOUDLY, not silently.
+            # Net effect: the reactive path can no longer die
+            # unshrunk on a 60s dedup. The floor is the
+            # never-blocked guarantee; Lane 1 enforces it at
+            # the CLE consumption site.
+            try:
+                result = await compactor.compact_state(ctx)
+                if result is None or result.replacement_messages is None:
+                    logger.warning(
+                        '[Compaction] reactive: first-pass engine '
+                        'returned None (dedup held or engine '
+                        'declined), re-invoking with force=True to '
+                        'punch through the dedup window'
+                    )
+                    result = await compactor.compact_state(
+                        ctx, force=True
+                    )
+            except Exception as _reactive_exc:
+                # Engine raised — most likely the floor itself
+                # raising on a hostile message subclass (the
+                # H3 floor raise sites were wrapped with
+                # graceful degradation in Lane 1, so this
+                # catch is the belt-and-braces for unforeseen
+                # exceptions). Log + retry with force=True
+                # once; on a SECOND failure, re-raise so the
+                # upstream CLE handler sees the failure (the
+                # CLE retry path is fail-closed BY DESIGN —
+                # this surface is the safety net, not the
+                # autopilot).
+                logger.warning(
+                    '[Compaction] reactive: first-pass engine '
+                    'raised %r, re-invoking with force=True '
+                    'as the floor-punch-through', _reactive_exc,
+                )
+                try:
+                    result = await compactor.compact_state(
+                        ctx, force=True
+                    )
+                except Exception as _reactive_retry_exc:
+                    logger.error(
+                        '[Compaction] reactive: force=True retry '
+                        'also raised %r — letting the CLE '
+                        'handler surface the failure',
+                        _reactive_retry_exc,
+                    )
+                    raise
             if result is None or result.replacement_messages is None:
-                logger.warning('Reactive compaction returned no result, re-raising')
+                logger.error(
+                    '[Compaction] reactive: SECOND engine '
+                    'invocation (force=True) STILL returned '
+                    'None — cannot recover, re-raising so the '
+                    'upstream CLE handler sees the failure '
+                    'loudly'
+                )
                 raise
 
             # Architect §5 — W1 fix: read the pre-compaction

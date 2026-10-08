@@ -989,11 +989,168 @@ class CompactionConfig(BaseSettings):
         description=(
             "N consecutive proactive skips (status-reject or non-quiescent) "
             "while context keeps growing before the 95% pre-call hook is "
-            "temporarily lowered to 0.80 for this instance. Default 3, env: "
+            "temporarily lowered to a lower ratio for this instance. Default 3, env: "
             "ENSEMBLE_COMPACTION_PROACTIVE_ESCALATE_AFTER. 0 disables. Sticky "
             "until a successful compaction clears it; cleared automatically "
             "by the next non-skip proactive success or by the on-invoke "
             "metadata read in _maybe_precall_compact_95."
+        ),
+    )
+
+    # ── Escape-Hatch Hardening round 2 (2026-10-08) ─────────────────────────
+    # Lane 1 fix — consolidate the two duplicated 60s dedup literals
+    # (engine + executor) into ONE config-backed constant. Default 60
+    # preserves pre-Lane-1 behavior byte-for-byte. Env:
+    # ``ENSEMBLE_COMPACTION_DEDUP_WINDOW_S``. Operators tightening the
+    # window (e.g. on a flooding rate) see the change in BOTH the
+    # engine's ``_is_recently_compacted`` AND the executor's
+    # pre-check mirror without a per-site edit.
+    dedup_window_s: int = Field(
+        default=60,
+        ge=0,
+        validation_alias=AliasChoices(
+            "dedup_window_s",
+            "ENSEMBLE_COMPACTION_DEDUP_WINDOW_S",
+        ),
+        description=(
+            "Dedup window in seconds for ``last_compacted_at`` anti-refire. "
+            "Engine (``daemon/compaction.py``) + executor pre-check "
+            "(``daemon/services/compact_executor.py``) read the same config "
+            "value; default 60s. Env: ENSEMBLE_COMPACTION_DEDUP_WINDOW_S. "
+            "0 disables the dedup entirely (operator override; NOT recommended "
+            "in production — anti-refire becomes a no-op)."
+        ),
+    )
+
+    # Lane 5 fix — promote the hard-coded 0.80 escalation gate ratio at
+    # graph.py:7477 to a config field so operators can tune the
+    # widen-band without a code change. Default 0.80 preserves the
+    # pre-Lane-5 behavior byte-for-byte. Env:
+    # ``ENSEMBLE_COMPACTION_ESCALATION_GATE_RATIO``. Note: there are
+    # THREE distinct 0.80s in the compaction subsystem (this field,
+    # ``threshold`` above at config.py:878, and the at-risk band at
+    # ``daemon/compaction.py`` ``precall_estimate_needs_refresh``
+    # ``0.80 * trigger_window`` early-return) — disambiguated in
+    # comments at every read site.
+    escalation_gate_ratio: float = Field(
+        default=0.80,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "escalation_gate_ratio",
+            "ENSEMBLE_COMPACTION_ESCALATION_GATE_RATIO",
+        ),
+        description=(
+            "Gate ratio the 95% pre-call reactive hook lowers itself to "
+            "when a proactive-skip escalation is active (see "
+            "``proactive_escalate_after``). Default 0.80, env: "
+            "ENSEMBLE_COMPACTION_ESCALATION_GATE_RATIO. Range (0,1]. "
+            "Operators can raise the bar (e.g. 0.85) to widen the "
+            "escalation further or lower it (e.g. 0.70) to widen more. "
+            "Distinct from the engine's normal ``threshold`` (which "
+            "governs the auto-path gate at the engine level)."
+        ),
+    )
+
+    # Lane 3 fix — estimator realism knobs for non-text content blocks.
+    # Pre-Lane-3 the loader's ``estimate_messages_tokens`` measured
+    # dict-content blocks ONLY by ``block.get("text", "")`` — image /
+    # file / audio blocks counted ≈ 0 tokens, which understated the
+    # true provider-billed payload. Lane 3 adds per-block-type token
+    # weights so the engine's gate math reflects reality.
+    #
+    # Defaults are calibrated against OpenAI's published provider-side
+    # image-token pricing as of 2026-10-08 (gpt-4o family:
+    # low=85, high=170 base; per-1024-tile detail costs are absorbed
+    # in the high tier; "auto"/heuristic detail lands at high by
+    # default for most client SDKs). The numbers are conservative
+    # (image_high=170 is the documented base for sized tiles); a
+    # tightening operator can raise image_high to estimate the worst
+    # case or lower it for a more aggressive compaction ceiling.
+    image_block_tokens: int = Field(
+        default=170,
+        ge=0,
+        validation_alias=AliasChoices(
+            "image_block_tokens",
+            "ENSEMBLE_COMPACTION_IMAGE_BLOCK_TOKENS",
+        ),
+        description=(
+            "Token estimate per image-type content block (Anthropic / "
+            "OpenAI chat `image_url` blocks). Pre-Lane-3 these counted "
+            "as ≈ 0 tokens via the loader's ``block.get('text', '')`` "
+            "shortcut. Default 170 (OpenAI documented base for tiled "
+            "images; high detail). Env: "
+            "ENSEMBLE_COMPACTION_IMAGE_BLOCK_TOKENS."
+        ),
+    )
+    file_block_tokens: int = Field(
+        default=100,
+        ge=0,
+        validation_alias=AliasChoices(
+            "file_block_tokens",
+            "ENSEMBLE_COMPACTION_FILE_BLOCK_TOKENS",
+        ),
+        description=(
+            "Token estimate per file-type content block (PDF / file "
+            "blocks attached via OpenAI / Anthropic file tools). Pre- "
+            "Lane-3 these counted as ≈ 0 tokens. Default 100 reflects "
+            "the per-block overhead + a small body heuristic. Env: "
+            "ENSEMBLE_COMPACTION_FILE_BLOCK_TOKENS."
+        ),
+    )
+    audio_block_tokens: int = Field(
+        default=100,
+        ge=0,
+        validation_alias=AliasChoices(
+            "audio_block_tokens",
+            "ENSEMBLE_COMPACTION_AUDIO_BLOCK_TOKENS",
+        ),
+        description=(
+            "Token estimate per audio-type content block (input_audio "
+            "blocks for OpenAI realtime / audio-preview). Pre-Lane-3 "
+            "these counted as ≈ 0 tokens. Default 100 reflects a per- "
+            "second approximation; provider billing is per-second of "
+            "audio but we accept a flat estimate for compaction math. "
+            "Env: ENSEMBLE_COMPACTION_AUDIO_BLOCK_TOKENS."
+        ),
+    )
+
+    # Lane 2 fix — token-aware floor parameters. The
+    # ``last_k_floor`` is the rock-bottom retained tail length
+    # the iterative halving terminates at (default 4 messages;
+    # preserves the last user message + 3 AI turns of context
+    # which is the operator's minimum useful history). The
+    # ``floor_max_halvings`` bounds the halving loop (default
+    # 8; geometric convergence from 320 → 160 → 80 → 40 → 20
+    # → 10 → 5 → 4 = 7 iterations; 8 leaves headroom).
+    last_k_floor: int = Field(
+        default=4,
+        ge=1,
+        validation_alias=AliasChoices(
+            "last_k_floor",
+            "ENSEMBLE_COMPACTION_LAST_K_FLOOR",
+        ),
+        description=(
+            "Rock-bottom retained tail length for the token-aware "
+            "floor halving loop (Lane 2). Default 4 messages; "
+            "operator can raise (keep more history) or lower "
+            "(more aggressive shrink). Env: "
+            "ENSEMBLE_COMPACTION_LAST_K_FLOOR."
+        ),
+    )
+    floor_max_halvings: int = Field(
+        default=8,
+        ge=1,
+        validation_alias=AliasChoices(
+            "floor_max_halvings",
+            "ENSEMBLE_COMPACTION_FLOOR_MAX_HALVINGS",
+        ),
+        description=(
+            "Maximum halving iterations the token-aware floor will "
+            "perform (Lane 2). Default 8; geometric convergence "
+            "from a half-tail of 320 reaches the last_k_floor in "
+            "≤ 7 halvings. Env: "
+            "ENSEMBLE_COMPACTION_FLOOR_MAX_HALVINGS."
         ),
     )
 

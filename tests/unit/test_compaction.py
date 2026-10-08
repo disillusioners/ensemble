@@ -1481,8 +1481,23 @@ class TestForceFlagWS2:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_force_does_not_bypass_dedup(self, mock_llm):
-        """60s dedup still applies under force — recently compacted → None."""
+    async def test_dedup_holds_under_budget_no_force(
+        self, mock_llm
+    ):
+        """Lane 1 (round 2) — the dedup STILL applies to automatic
+        non-forced paths when the corpus is under-budget (the
+        anti-refire semantics for healthy corpora).
+
+        Pre-Lane-1 asserted the dedup was UNCONDITIONAL under
+        ``force=True``. Lane 1 changed that: dedup yields under
+        ``force=True`` AND under OVER-budget contexts (the
+        H1×H3 fix). This test pins the UNCHANGED under-budget
+        half — the dedup wins on a recent stamp + under-budget
+        corpus + ``force=False``. The over-budget + force=True
+        case is verified by
+        ``tests/unit/test_compaction_escape_hatches_round2.py::
+        TestLane1DedupYieldsToForce::test_force_true_bypasses_dedup_window``.
+        """
         config = make_compaction_config(
             min_messages_before_compaction=2,
             threshold=0.99,  # very high to avoid threshold triggering
@@ -1499,9 +1514,52 @@ class TestForceFlagWS2:
             last_compacted_at=datetime.now(timezone.utc).isoformat(),
         )
         compactor = ContextCompactor(config, {})
+        # Force=False (default) preserves pre-Lane-1 byte-identity:
+        # dedup wins on under-budget + recent stamp.
+        result = await compactor.compact_state(context)
+        assert result is None, (
+            "Lane 1: under-budget + recent stamp + force=False → "
+            "dedup wins (anti-refire preserved for healthy corpora)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_force_true_bypasses_dedup_unconditionally(
+        self, mock_llm
+    ):
+        """Lane 1 — force=True bypasses the dedup unconditionally.
+        The reactive CLE handler relies on this for the
+        force-floor-punch-through on a 60s-dedup hit (the H1×H3
+        interlock at the reactive site). Pinning it here so the
+        ``force=True`` semantics are not silently broken in a
+        future refactor.
+        """
+        config = make_compaction_config(
+            min_messages_before_compaction=2,
+            threshold=0.99,
+            recent_message_window=2,
+            min_recent_window=1,
+            context_window_overrides={"gpt-4o": 1_000_000},
+        )
+        context = CompactionContext(
+            messages=make_messages(20),
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config={},
+            last_compacted_at=datetime.now(timezone.utc).isoformat(),
+        )
+        compactor = ContextCompactor(config, {})
+        # force=True → dedup yields (Lane 1 binding property).
+        # Mock LLM: the engine attempts summarization with
+        # force=True; we don't assert on the result shape here,
+        # only that the engine RUNS (not None).
         result = await compactor.compact_state(context, force=True)
-        # Dedup wins; force does not bypass it.
-        assert result is None
+        assert result is not None, (
+            "Lane 1: force=True MUST bypass the dedup "
+            "unconditionally (even on a recent stamp); the "
+            "reactive CLE site relies on this for the "
+            "force-floor-punch-through"
+        )
 
     @pytest.mark.asyncio
     async def test_force_does_not_bypass_min_messages(self, mock_llm):

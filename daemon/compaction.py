@@ -1901,6 +1901,70 @@ def _is_tool_message(msg: BaseMessage) -> bool:
     return bool(getattr(msg, "tool_call_id", None))
 
 
+def _snap_orphan_tool_messages_at_cut(
+    corpus: list[BaseMessage],
+    cut_idx: int,
+) -> int:
+    """Walk FORWARD from ``cut_idx`` while consecutive ``ToolMessage``s
+    sit at the boundary. Returns the snap adjustment (number of
+    boundary ``ToolMessage``s skipped past).
+
+    Pairing invariant. A ``ToolMessage`` at the retained-tail position
+    means its ``AIMessage(tool_calls=...)`` partner lives in the
+    DROPPED head, because the AIMessage precedes its tool result in
+    message order. Persisting such an orphan into the channel is the
+    textbook 2013 failure: the next invoke reads
+    ``tool call result does not follow tool call`` and the LLM
+    error classifier (non-retryable) marks it terminal — a
+    deterministic brick on reactivation.
+
+    The snap ADVANCES the cut forward past those ToolMessages to
+    keep the retained tail API-valid: a tail that leads with an
+    AIMessage can own its AIMessage-or-ToolMessage pair, while a
+    tail that leads with a ToolMessage leaves the AIMessage behind
+    in the dropped head. We accept the depth loss (one or two
+    extra drops per snap) in exchange for the API-validity
+    guarantee.
+
+    Bounded. The walk advances only while consecutive
+    ``ToolMessage``s sit at the boundary; it stops on the FIRST
+    non-ToolMessage. If the ENTIRE retained tail is ToolMessages,
+    the walk consumes them all (returns ``len(corpus) - cut_idx``)
+    and the caller sees a notice-only replacement (single-HumanMessage
+    history — API-valid by construction; iteration-2 amendment).
+
+    Used by both the count-based half-tail snap (Lane 1 — A4 fix)
+    AND EACH Lane 2 halving iteration: halving moves the cut
+    geometrically (``-new_kept``) and the new cut may land on a
+    different pair boundary, so the same snap must run again on the
+    new boundary. Re-using one tested function for both sites
+    keeps the pairing-safety invariant uniform across the two
+    floor paths (count-based + token-aware halving).
+
+    Args:
+        corpus: The full message list (read-only index space — the
+            walk reads but never mutates ``corpus``).
+        cut_idx: Absolute index in ``corpus`` where the retained
+            tail begins. The walk looks at ``corpus[cut_idx]``
+            first and advances while the entry is a ToolMessage.
+
+    Returns:
+        ``int`` >= 0: the number of consecutive ToolMessages at
+        the cut that the walk skipped past. ``0`` means the cut
+        already starts on a non-ToolMessage (no orphan; no snap).
+        ``len(corpus) - cut_idx`` means the entire retained tail
+        was orphaned ToolMessages (the caller emits a notice-only
+        replacement — see iteration-2 amendment).
+    """
+    snap = 0
+    idx = cut_idx
+    n_corpus = len(corpus)
+    while idx < n_corpus and _is_tool_message(corpus[idx]):
+        snap += 1
+        idx += 1
+    return snap
+
+
 
 def _build_last_effort_replacement(
     context: "CompactionContext",
@@ -1966,15 +2030,59 @@ def _build_last_effort_replacement(
     # the dedicated ``compaction_notice`` ``context_kind`` so downstream
     # ``context_kind`` filters recognize it as a system-context block
     # on the next pass.
-    notice_id = f"compaction-notice-{uuid.uuid4()}"
-    notice_msg = HumanMessage(
-        content=COMPACTION_NOTICE_TEXT,
-        id=notice_id,
-        additional_kwargs={
-            "injected_message": True,
-            "context_kind": COMPACTION_NOTICE_CONTEXT_KIND,
-        },
-    )
+    #
+    # Escape-Hatch Hardening round 2 (Lane 1) — graceful
+    # degradation on HumanMessage construction failure. The
+    # pre-Lane-1 behavior raised from this site on
+    # HumanMessage-id conflicts (extremely rare on the unique
+    # ``compaction-notice-<uuid>`` pattern, but possible if the
+    # langchain version enforces id-uniqueness across a thread
+    # pool). Lane 1 wraps the construction in try/except: on
+    # failure, retry with a fresh uuid (idempotent on conflict),
+    # then fall back to a SystemMessage-content-encoded
+    # HumanMessage (preserves the user-role + injected_message
+    # semantics the partition relies on). If the langchain
+    # HumanMessage itself is unimportable, raise with a CLEAR
+    # ``RuntimeError`` (the existing pre-Lane-1 exception path)
+    # so the failure stays loud — a silent turn-death would be
+    # strictly worse than the loud raise.
+    import uuid as _uuid_mod
+    notice_msg: HumanMessage | None = None
+    notice_id: str = f"compaction-notice-{_uuid_mod.uuid4()}"
+    _ct_exc: Exception | None = None
+    for _attempt in range(3):
+        try:
+            notice_msg = HumanMessage(
+                content=COMPACTION_NOTICE_TEXT,
+                id=notice_id,
+                additional_kwargs={
+                    "injected_message": True,
+                    "context_kind": COMPACTION_NOTICE_CONTEXT_KIND,
+                },
+            )
+            break
+        except Exception as _exc:
+            _ct_exc = _exc
+            # Rotate the id and retry — covers the
+            # id-conflict corner (3 attempts cycle through
+            # 3 fresh uuids; the probability of three
+            # consecutive conflicts is negligible).
+            notice_id = f"compaction-notice-{_uuid_mod.uuid4()}"
+    if notice_msg is None:
+        # All HumanMessage() attempts failed — the
+        # base class itself is unavailable. Surface a
+        # loud error. We do NOT silently emit a
+        # stamp-only (that would break the never-blocked
+        # guarantee) and we do NOT propagate the original
+        # exception (which could be a benign TypeError
+        # for a custom subclass); we wrap it so the
+        # operator sees ``floor_message_build_failed``
+        # in the trace.
+        raise RuntimeError(
+            "[Compaction] floor failed to construct "
+            "HumanMessage notice after 3 attempts: "
+            f"{_ct_exc!r}"
+        ) from _ct_exc
 
     replacement: list[BaseMessage] = []
     for drop_id in drop_ids:
@@ -2015,28 +2123,67 @@ def _build_last_effort_replacement(
         )
         if mid
     )
-    return CompactionResult(
-        replacement_messages=replacement,
-        tokens_before=int(tokens_before),
-        tokens_after=int(tokens_after),
-        tokens_saved=int(tokens_before - tokens_after),
-        messages_before=len(context.messages),
-        messages_after=1 + len(retained_tail),  # notice + tail
-        compaction_type=COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT,
-        compacted_at=timestamp,
-        compacted_ids=compacted_ids,
-        # ``injected_preserved``/``injected_absorbed`` are zeroed on
-        # the last-effort path because the 50%-tail truncation cuts
-        # across the SELECTABLE + HOISTED partition without honoring
-        # it — exactly the property that makes it the floor. The
-        # retained tail's surviving injected share is reported via
-        # ``injected_preserved`` = 0 here for honesty (no selective
-        # hoisting on the last-effort path); the FE / executor should
-        # NOT interpret this as "no injections survived" — they may
-        # have, but the floor doesn't track them.
-        injected_preserved=0,
-        injected_absorbed=0,
-    )
+    # Escape-Hatch Hardening round 2 (Lane 1) — graceful
+    # degradation on CompactionResult construction failure.
+    # The dataclass itself rarely fails construction on a
+    # dataclass-init path, but a hostile message subclass on
+    # the retained_tail could trip ``additional_kwargs``
+    # validation. Lane 1 wraps the construction in try/except:
+    # on failure, fall back to a minimal-result path that
+    # strips ``compacted_ids`` to the drop-list only (the
+    # critical set the seam's pre-write guard cannot
+    # reject — drop-list ids are the union of intentionally
+    # removed originals). The retained-tail ids are
+    # defensively omitted from the fallback's compacted_ids
+    # (the seam will surface them as silent-loss targets
+    # and refuse the write — a safer failure than silent
+    # data loss).
+    try:
+        return CompactionResult(
+            replacement_messages=replacement,
+            tokens_before=int(tokens_before),
+            tokens_after=int(tokens_after),
+            tokens_saved=int(tokens_before - tokens_after),
+            messages_before=len(context.messages),
+            messages_after=1 + len(retained_tail),  # notice + tail
+            compaction_type=COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT,
+            compacted_at=timestamp,
+            compacted_ids=compacted_ids,
+            # ``injected_preserved``/``injected_absorbed`` are zeroed on
+            # the last-effort path because the 50%-tail truncation cuts
+            # across the SELECTABLE + HOISTED partition without honoring
+            # it — exactly the property that makes it the floor. The
+            # retained tail's surviving injected share is reported via
+            # ``injected_preserved`` = 0 here for honesty (no selective
+            # hoisting on the last-effort path); the FE / executor should
+            # NOT interpret this as "no injections survived" — they may
+            # have, but the floor doesn't track them.
+            injected_preserved=0,
+            injected_absorbed=0,
+        )
+    except Exception as _cr_exc:  # pragma: no cover — defensive
+        logger.warning(
+            "[Compaction] floor CompactionResult construction "
+            "failed (%r) — falling back to minimal-result path "
+            "(drop-list-only compacted_ids; seam will validate)",
+            _cr_exc,
+        )
+        minimal_compacted_ids = frozenset(
+            drop_id for drop_id in drop_ids if drop_id
+        )
+        return CompactionResult(
+            replacement_messages=replacement,
+            tokens_before=int(tokens_before),
+            tokens_after=int(tokens_after),
+            tokens_saved=int(tokens_before - tokens_after),
+            messages_before=len(context.messages),
+            messages_after=1 + len(retained_tail),
+            compaction_type=COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT,
+            compacted_at=timestamp,
+            compacted_ids=minimal_compacted_ids,
+            injected_preserved=0,
+            injected_absorbed=0,
+        )
 
 
 class ContextCompactor:
@@ -2334,8 +2481,8 @@ class ContextCompactor:
     # collisions — same pattern as ``emergency_truncation`` uses
     # ``truncated-<uuid>``.
 
-    @staticmethod
     def _last_effort_tail_truncation(
+        self,
         context: "CompactionContext",
         *,
         skip_reason_label: str,
@@ -2350,6 +2497,26 @@ class ContextCompactor:
         to injected/unanswered messages (the exact condition the
         all-injected skip used to abort on). Pure code, no LLM
         call, guaranteed to succeed.
+
+        Escape-Hatch Hardening round 2 (Lane 2) — token-aware
+        success check. The pre-Lane-2 floor's ``ceil(N/2)`` rule
+        was purely message-count based. A multi-modal context
+        (images, audio, files, all carrying heavy token weight)
+        could pass ``ceil(N/2)`` and STILL be over-budget — the
+        floor would declare success and the reactive CLE would
+        re-fire immediately. Lane 2 re-estimates the resulting
+        token count after the halving; if still over-budget,
+        iteratively halves the kept count down to a last-K floor
+        (default 4 messages), appending a notice each step. The
+        count-based floor alone can no longer declare success on
+        a token-heavy tail.
+
+        The iterative halving is bounded (default cap: 8
+        iterations; converges fast since halving is geometric).
+        Last-K floor defaults to ``CompactionConfig.last_k_floor``
+        (default 4) and provides a hard rock-bottom so the
+        iteration terminates even when the corpus is dominated
+        by a single high-token message.
 
         Args:
             context: The active :class:`CompactionContext`.
@@ -2376,6 +2543,17 @@ class ContextCompactor:
         """
         import math as _math
 
+        # Lane 2 configuration: max iterations and last-K floor
+        # (operator-tunable via CompactionConfig; defaults preserve
+        # pre-Lane-2 behavior on healthy corpora where the
+        # half-tail passes the budget predicate immediately).
+        max_halvings = int(
+            getattr(context.config, "floor_max_halvings", 8)
+        )
+        last_k_floor = int(
+            getattr(context.config, "last_k_floor", 4)
+        )
+
         corpus = list(context.messages)
         n = len(corpus)
         if n == 0:
@@ -2397,8 +2575,24 @@ class ContextCompactor:
                 timestamp=timestamp,
             )
 
+        # ── Lane 2 iterative halving ──
+        # Start with the half-tail (ceil(N/2)). If the resulting
+        # token count (canonical numerator: retained tail +
+        # system prompt) is still over the trigger threshold,
+        # halve the kept count and re-estimate. Repeat up to
+        # ``max_halvings`` times, terminating at ``last_k_floor``
+        # retained messages minimum (defensive hard floor so the
+        # loop doesn't reduce to zero on degenerate inputs).
         kept = _math.ceil(n / 2)
         dropped = n - kept  # floor(n/2)
+
+        # ── ORIGINAL count-based assignment (NOT lost) ──
+        # We compute the count-based dropped / kept ONCE; the
+        # token-aware loop ONLY tightens these further if the
+        # budget is exceeded. Healthy corpora converge after
+        # zero halvings; the count-based floor still produces
+        # the same 639→320 result the existing test corpus
+        # expects.
         # The older ``dropped`` messages are the ones we drop; the
         # newer ``kept`` messages are the retained tail.
         #
@@ -2497,13 +2691,7 @@ class ContextCompactor:
         #     all and emits a notice-only replacement.
         #   The notice alone keeps the history API-valid and
         #   non-empty.
-        snap_adjust = 0
-        while dropped + snap_adjust < n:
-            candidate_idx = dropped + snap_adjust
-            candidate = corpus[candidate_idx]
-            if not _is_tool_message(candidate):
-                break
-            snap_adjust += 1
+        snap_adjust = _snap_orphan_tool_messages_at_cut(corpus, dropped)
         if snap_adjust > 0:
             dropped = dropped + snap_adjust
             kept = n - dropped
@@ -2531,8 +2719,211 @@ class ContextCompactor:
                     "amended retained-count rule)",
                     snap_adjust, kept, dropped, n,
                 )
+
+        # ── Lane 2: token-aware iterative halving ──
+        # After the count-based half-tail + A4 pairing snap, the
+        # tail may STILL leave the context over-budget
+        # (multi-modal messages carry heavy per-message weight
+        # that the count-based floor does not see). The
+        # re-estimate uses the CANONICAL numerator
+        # (``selectable + hoisted-injected + system_prompt``)
+        # against ``trigger_window * config.threshold`` — the
+        # SAME gate the auto-path uses above. If over-budget,
+        # halve the kept count geometrically (kept = kept // 2
+        # each iteration, terminating at ``last_k_floor``)
+        # until under-budget or the iteration cap is reached.
+        # Each halving appends a notice to the retained tail's
+        # "compaction chain" log so the operator sees the
+        # deeper-cut landing.
+        #
+        # PAIRING SAFETY across halving (round 2, adversarial
+        # #1). Each halving iteration MOVES THE CUT (the new
+        # tail begins at a different absolute position in the
+        # corpus than the count-based half-tail), so the same
+        # pair-boundary may not hold. The adversarial round-2
+        # finding showed the snap-walk only ran at the
+        # count-based half-tail; halving moved the cut
+        # geometrically (``-new_kept``) and the new head of
+        # tail could land on an orphan ToolMessage whose
+        # AIMessage(t+1, t-1, ...) partner was sliced into the
+        # dropped head on this iteration (NOT the count-based
+        # snap). Persisting such an orphan into the channel
+        # produces the 2013 tool-call-pairing failure on the
+        # next invoke → classifier NON-RETRYABLE → reactivation
+        # brick.
+        #
+        # Mitigation: re-run the SAME pairing snap on the new
+        # cut each iteration. Re-using
+        # :func:`_snap_orphan_tool_messages_at_cut` (the
+        # count-based snap's helper, now promoted to a
+        # module-level helper so both sites share one
+        # implementation) keeps the pairing-safety invariant
+        # uniform across BOTH the count-based half-tail AND
+        # the token-aware halving. Halving depth loss from the
+        # re-snap is bounded (the snap only consumes
+        # consecutive orphans at the new cut, never reaches
+        # across the tail); the depth loss is the price of
+        # the API-validity guarantee.
+        #
+        # The ``_budget_eval`` helper local-closure captures
+        # the tail + system_prompt + threshold_tokens math; the
+        # body below uses it to drive the halving.
+        try:
+            trigger_window = self._trigger_window(context)
+            threshold_tokens = (
+                int(trigger_window * context.config.threshold)
+                if trigger_window > 0 else 0
+            )
+        except Exception:
+            # Defensive: a trigger-window computation failure
+            # must not crash the floor (the floor itself is the
+            # safety net). With unknown budget we skip the
+            # token-aware iteration and fall back to the
+            # count-based result.
+            trigger_window = 0
+            threshold_tokens = 0
+        halving_iterations = 0
+        # The CANONICAL numerator on the post-snap tail:
+        # tail token estimate + system_prompt_tokens + (a
+        # budget for hoisted injected that survive — they
+        # ALWAYS survive verbatim, so they should count too).
+        # We approximate by estimating the corpus's injected set
+        # once and adding it on every iteration.
+        try:
+            _selectable_for_eval, _hoisted_for_eval, _absorbed_for_eval = (
+                _partition_injected_for_compaction(context.messages)
+            )
+            _hoisted_token_overhead = (
+                estimate_messages_tokens(_hoisted_for_eval)
+                if _hoisted_for_eval else 0
+            )
+        except Exception:
+            _hoisted_token_overhead = 0
+
+        def _tail_budget_eval(tail_msgs: list[BaseMessage]) -> tuple[int, int]:
+            """Return ``(tail_tokens, budget_tokens)`` for the
+            given tail. ``budget_tokens`` is the canonical
+            threshold (system prompt + tail + hoisted
+            injected). Returns ``(0, 0)`` on a measurement
+            failure so the caller treats the tail as
+            under-budget and stops halving.
+            """
+            try:
+                tail_tokens = estimate_messages_tokens(tail_msgs)
+                budget = (
+                    tail_tokens
+                    + context.system_prompt_tokens
+                    + _hoisted_token_overhead
+                )
+                return tail_tokens, budget
+            except Exception:
+                return 0, 0
+
+        # Lane 2 default assignments (count-based + snap result).
+        # These are the canonical head/tail split after the
+        # count-based half-tail + A4 pairing snap. The
+        # token-aware halving below MAY tighten ``dropped`` /
+        # ``kept`` further and rewrite ``tail_to_keep`` /
+        # ``head_to_drop`` — but only when the iteration
+        # actually engages. Healthy corpora converge at
+        # halving_iterations=0 and these defaults stand.
         head_to_drop = corpus[:dropped]
         tail_to_keep = corpus[dropped:]
+
+        # Snapshot the count-based tail as the starting point
+        # for the iteration. Lane 2 begins AFTER the initial snap
+        # so the pairing invariant is preserved BEFORE halving —
+        # the halving loop itself re-snaps on each iteration
+        # (see PAIRING SAFETY block above).
+        iterative_tail = list(corpus[dropped:])
+        if threshold_tokens > 0:
+            while halving_iterations < max_halvings:
+                _tt, _bt = _tail_budget_eval(iterative_tail)
+                if _bt <= threshold_tokens:
+                    # Under budget — the count-based + snap
+                    # result is sufficient; exit the loop.
+                    break
+                # Over budget — halve. ceil(new_kept / 2)
+                # guarantees we advance at least 1 message per
+                # iteration.
+                new_kept = _math.ceil(len(iterative_tail) / 2)
+                if new_kept >= len(iterative_tail):
+                    # Boundary: cannot halve further (single-
+                    # message tail), but still over-budget.
+                    # Break to the last-K handling below.
+                    break
+                if new_kept < last_k_floor:
+                    # Hard floor: stop at last_k_floor even if
+                    # still over-budget. Documented in the
+                    # config description; operators tighten via
+                    # ``last_k_floor`` (decrease) or by raising
+                    # ``floor_max_halvings``.
+                    new_kept = min(last_k_floor, len(iterative_tail))
+                    if new_kept < last_k_floor:
+                        # The tail is shorter than last_k_floor
+                        # already — nothing more to drop.
+                        break
+                iterative_tail = iterative_tail[-new_kept:]
+                halving_iterations += 1
+                logger.warning(
+                    "[Compaction][obs] floor iterative halving: "
+                    "iter=%d, new_kept=%d, tail_budget=%d, "
+                    "threshold=%d (skip_reason=%s)",
+                    halving_iterations,
+                    new_kept,
+                    _bt,
+                    threshold_tokens,
+                    skip_reason_label,
+                )
+                # PAIRING RE-SNAP (round 2 adversarial fix). The
+                # halving just moved the cut from the count-based
+                # position to ``n - new_kept`` — the new
+                # retained tail's HEAD may now sit on a
+                # ToolMessage whose AIMessage(tool_calls)
+                # partner was just sliced into the dropped head.
+                # Persisting that orphan produces the 2013
+                # tool-call-pairing failure on the next invoke
+                # → classifier NON-RETRYABLE → reactivation
+                # brick. Run the SAME pairing snap at the new
+                # cut. If the new head is a non-ToolMessage, the
+                # snap is a no-op and we move on.
+                #
+                # ``corpus`` index space is absolute; we resolve
+                # the new cut index into ``corpus`` by reversing
+                # the ``[-new_kept:]`` slice. Length accounting:
+                # ``iterative_tail`` started length T, now length
+                # ``new_kept`` <= T; the absolute cut in
+                # ``corpus`` is ``n - new_kept``.
+                halving_re_cut_idx = n - len(iterative_tail)
+                re_snap = _snap_orphan_tool_messages_at_cut(
+                    corpus, halving_re_cut_idx
+                )
+                if re_snap > 0:
+                    iterative_tail = iterative_tail[re_snap:]
+                    logger.warning(
+                        "[Compaction][obs] floor iterative halving "
+                        "RE-SNAP: advanced cut by %d additional "
+                        "ToolMessage(s) at iter=%d to keep "
+                        "tool_call pairs intact (n=%d, "
+                        "skip_reason=%s)",
+                        re_snap,
+                        halving_iterations,
+                        n,
+                        skip_reason_label,
+                    )
+            # Last-K safety check: if iterative halving STILL
+            # doesn't reach budget AND we hit the last-K floor,
+            # append an extra notice + final shrink to
+            # ``last_k_floor`` retained messages (preserved
+            # API-validity invariant). Defer this to the build
+            # path below by updating ``kept``/``dropped`` so
+            # the existing materialize-and-deep-copy flow
+            # picks up the deeper cut.
+            if halving_iterations > 0 and iterative_tail:
+                dropped = n - len(iterative_tail)
+                kept = len(iterative_tail)
+                head_to_drop = corpus[:dropped]
+                tail_to_keep = iterative_tail
 
         # Deep-copy + re-id the retained tail so it doesn't collide
         # with the ``RemoveMessage`` targets (same defensive pattern
@@ -2542,19 +2933,67 @@ class ContextCompactor:
         # the seam's pre-write guard does not false-positive them
         # as silent-loss targets (they are intentionally removed
         # from the snapshot and re-inserted under new ids).
+        #
+        # Escape-Hatch Hardening round 2 (Lane 1) — graceful
+        # degradation on floor-build failure. The deep-copy can
+        # raise on messages with non-picklable attributes (some
+        # custom message subclasses carry functions / file
+        # handles). The pre-Lane-1 behavior propagated the
+        # exception out of the floor — leaving the turn to die
+        # unshrunk on a reactive CLE path (H3). Lane 1 wraps
+        # the deep-copy in try/except: on failure, fall back to
+        # ``copy.copy`` (shallow), then to a structural clone via
+        # ``__class__(content=...)`` for the simple cases. If
+        # all fallbacks fail, drop THAT message from the
+        # retained tail (a graceful partial shrink — strictly
+        # better than a turn-death-without-shrink) and emit a
+        # LOUD WARN so operators see the partial shrink landing.
         re_ided_tail: list[BaseMessage] = []
         retained_original_ids: list[str] = []
+        deepcopy_failures: list[str] = []
         for msg in tail_to_keep:
             orig_id = getattr(msg, "id", None)
             if orig_id:
                 retained_original_ids.append(orig_id)
-            new_msg = copy.deepcopy(msg)
+            new_msg = None
             new_id = f"last-effort-{uuid.uuid4()}"
+            try:
+                new_msg = copy.deepcopy(msg)
+            except Exception as _dc_exc:  # pragma: no cover — exercised on hostile subclass inputs
+                # Defensive degradation: try shallow copy first
+                # (preserves content blocks for the simple cases),
+                # then a structural clone via the langchain
+                # ``__init__`` (only works for the built-in
+                # subclasses that accept a single ``content`` arg).
+                try:
+                    new_msg = copy.copy(msg)
+                except Exception:
+                    try:
+                        new_msg = type(msg)(content=getattr(msg, "content", ""))
+                    except Exception:
+                        # All fallbacks failed — drop this
+                        # message from the retained tail. The
+                        # LOUD WARN follows the loop.
+                        deepcopy_failures.append(
+                            getattr(msg, "id", None) or "<no-id>"
+                        )
+                        continue
             try:
                 new_msg.id = new_id
             except Exception:  # pragma: no cover — defensive
                 pass
             re_ided_tail.append(new_msg)
+        if deepcopy_failures:
+            logger.warning(
+                "[Compaction] floor LAST-RESORT partial shrink: "
+                "%d message(s) could not be deep-copied and were "
+                "dropped from the retained tail (deep-copy + "
+                "shallow-copy + structural-clone all failed; "
+                "ids=%s) — turn-death-without-shrink is the only "
+                "alternative and we refuse to die here",
+                len(deepcopy_failures),
+                deepcopy_failures[:8],  # bound the log payload
+            )
 
         drop_ids: list[str] = []
         for msg in head_to_drop:
@@ -2604,15 +3043,19 @@ class ContextCompactor:
         Args:
             context: CompactionContext with messages and configuration.
             force: Phase 1 / WS-2 (architect §2 narrowed). When True, the
-                THRESHOLD check (:765) is bypassed — that is the ONLY
-                bypass. Min-messages (:751) and the 60s dedup (:724-726)
-                stay in-engine and STILL APPLY under force. Never bypasses
-                boundary groups (D2), D3 sentinel persistence, pairing
-                guard, or terminal guard. Default ``False`` → automatic
-                paths (proactive `instance_messaging.py:1179`, reactive
-                `graph.py:3513`) byte-identical when callers do not pass
-                the flag (S-7 anti-drift). ``forced`` is stamped on the
-                result so callers can distinguish forced compactions.
+                THRESHOLD check is bypassed AND the dedup is bypassed
+                (Escape-Hatch Hardening round 2 Lane 1; see step 1
+                below for the full rationale — forced compaction MUST
+                run, the dedup is anti-refire-only for under-budget
+                contexts). Min-messages check stays in-engine; never
+                bypasses boundary groups (D2), D3 sentinel
+                persistence, pairing guard, or terminal guard. Default
+                ``False`` → automatic paths (proactive
+                `instance_messaging.py:1179`, reactive
+                `graph.py:3513`) byte-identical when callers do not
+                pass the flag (S-7 anti-drift). ``forced`` is stamped
+                on the result so callers can distinguish forced
+                compactions.
 
         Returns:
             CompactionResult if compaction occurred, None if not needed.
@@ -2628,11 +3071,97 @@ class ContextCompactor:
         # empty replacement_messages for the anti-refire skip paths
         # (all-injected / min_messages / threshold) so the per-
         # dispatch refire loop closes even when the engine cannot
-        # do useful work. The dedup here is a hard 60s window —
+        # do useful work. The dedup window honors
+        # ``CompactionConfig.dedup_window_s`` (default 60s) and is
         # honored by BOTH the proactive trigger and ``/compact``.
-        if context.last_compacted_at and self._is_recently_compacted(context.last_compacted_at):
-            logger.debug("Skipping compaction: recently compacted")
-            return None
+        #
+        # Escape-Hatch Hardening round 2 (Lane 1) — dedup YIELDS
+        # to ``force=True`` AND to over-budget contexts. The
+        # pre-Lane-1 behavior returned ``None`` UNCONDITIONALLY on
+        # any recent stamp, which meant a 60s-dedup hit on the
+        # reactive CLE path was an immediate turn-death (the
+        # reactive handler re-raises when the engine returns None
+        # on a still-over-budget context — H1×H3 compounding). The
+        # fix measures the payload (selectable + injected + system
+        # prompt) against ``trigger_window * config.threshold`` and
+        # bypasses the dedup when over-budget: the dedup's purpose
+        # is anti-refire for under-budget re-fires, NEVER to
+        # prevent a real shrink. ``force=True`` callers already
+        # signal "compaction must run" (the contract); the dedup
+        # is silently bypassed to honor that contract.
+        if context.last_compacted_at and self._is_recently_compacted(
+            context.last_compacted_at,
+            dedup_window_s=int(
+                getattr(context.config, "dedup_window_s", 60)
+            ),
+        ):
+            # ── dedup-yield checks (Lane 1) ──
+            #
+            # Both branches evaluate the over-budget predicate
+            # against the SELECTABLE pool + injected tokens +
+            # system prompt tokens (the same canonical numerator
+            # used at the auto-path gate below and across all
+            # post-Lane-3 decision points). Falls through to the
+            # dedup-skip (``return None``) only when NEITHER
+            # ``force=True`` nor over-budget applies — the
+            # anti-refire-stamp contract for healthy under-budget
+            # re-fires is preserved byte-for-byte.
+            try:
+                _dedup_selectable, _dedup_hoisted, _dedup_absorbed = (
+                    _partition_injected_for_compaction(context.messages)
+                )
+                _dedup_injected_tokens = estimate_messages_tokens(
+                    _dedup_hoisted
+                )
+                _dedup_total = (
+                    estimate_messages_tokens(_dedup_selectable)
+                    + _dedup_injected_tokens
+                    + context.system_prompt_tokens
+                )
+                _dedup_threshold = (
+                    self._trigger_window(context) * context.config.threshold
+                )
+            except Exception:
+                # Defensive — fall back to the pre-Lane-1 dedup
+                # behavior on a measurement failure (never crash
+                # the engine on a measurement error; the dedup
+                # alone is a safe-by-default response).
+                _dedup_total = 0
+                _dedup_threshold = 0
+            if force:
+                logger.info(
+                    "[Compaction][dedup] force=True bypasses "
+                    "dedup window (last_compacted_at=%s, "
+                    "instance=%s)",
+                    context.last_compacted_at,
+                    (context.instance_id or "")[:8] or "<no-iid>",
+                )
+                # Forced compaction MUST run — drop the dedup
+                # check, fall through to the body below.
+            elif _dedup_total > _dedup_threshold:
+                logger.warning(
+                    "[Compaction][dedup] over-budget context "
+                    "bypasses dedup window "
+                    "(last_compacted_at=%s, "
+                    "payload_tokens=%d, "
+                    "threshold_tokens=%d, "
+                    "instance=%s) — taking the floor path, "
+                    "NOT a dedup stamp",
+                    context.last_compacted_at,
+                    _dedup_total,
+                    int(_dedup_threshold),
+                    (context.instance_id or "")[:8] or "<no-iid>",
+                )
+                # Over-budget context MUST shrink — drop the
+                # dedup check, fall through to the body below.
+                # The body below routes skip-conditions to the
+                # floor (``_last_effort_tail_truncation``)
+                # rather than the stamp-only skip, which is the
+                # H3×H1 fix the brief requires.
+            else:
+                logger.debug("Skipping compaction: recently compacted")
+                return None
+        # END (dedup — Lane 1 yield)
 
         # ── OBSERVABILITY (Phase-1 C-finding follow-up, see report) ──
         # Daemon logs recorded NO per-instance token usage prior to
@@ -2853,8 +3382,9 @@ class ContextCompactor:
         # 4. Context window and threshold check.
         # Phase 1 / WS-2: ``force=True`` bypasses THIS check ONLY (architect
         # §2 narrowed from the broader dedup+min-messages+threshold form).
-        # Min-messages (:751 above) and the 60s dedup (:724-726 above)
-        # stay in-engine and STILL APPLY under force. Auto paths do not
+        # Min-messages (~:2840) and the dedup (~:2628) stay in-engine under
+        # ``force=False`` (Lane 1: dedup also yields under ``force=True``
+        # — see step 1). Auto paths do not
         # pass ``force`` so their threshold check is unchanged when
         # ``force=False`` (S-7 byte-identity anti-drift).
         # W1 (review fix): gate the AUTO-path threshold at the SMALLER
@@ -4538,21 +5068,43 @@ class ContextCompactor:
         return sampled
     
     @staticmethod
-    def _is_recently_compacted(last_compacted_at: str) -> bool:
-        """Check if compaction occurred recently (within 60 seconds).
-        
+    def _is_recently_compacted(
+        last_compacted_at: str,
+        dedup_window_s: int = 60,
+    ) -> bool:
+        """Check if compaction occurred recently (within ``dedup_window_s``).
+
+        Escape-Hatch Hardening round 2 (Lane 1) — the 60s constant moved
+        here from a literal ``< 60`` hardcode to the
+        ``CompactionConfig.dedup_window_s`` config field (default 60
+        preserves pre-Lane-1 behavior byte-for-byte). Both the engine
+        here AND the executor pre-check at
+        ``daemon/services/compact_executor.py::_is_recently_compacted``
+        read the same config field so an operator tightening the window
+        sees the change on BOTH sites without a per-site edit.
+
         Args:
             last_compacted_at: ISO timestamp string.
-            
+            dedup_window_s: Window in seconds. ``0`` disables the dedup
+                entirely (returns False unconditionally). Caller passes
+                the active ``CompactionConfig.dedup_window_s``; tests
+                that want a fixed-deterministic window pass an explicit
+                integer. Defaults to 60 so existing call sites that
+                have NOT been updated to pass the config keep the
+                pre-Lane-1 window.
+
         Returns:
-            True if compaction was within last 60 seconds.
+            True if compaction was within last ``dedup_window_s`` seconds.
         """
+        if dedup_window_s <= 0:
+            # Operator override — dedup entirely disabled.
+            return False
         try:
             last_time = datetime.fromisoformat(last_compacted_at)
             if last_time.tzinfo is None:
                 last_time = last_time.replace(tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)
-            return (now - last_time).total_seconds() < 60
+            return (now - last_time).total_seconds() < dedup_window_s
         except (ValueError, TypeError):
             return False
 

@@ -276,16 +276,30 @@ class TestReactiveCompaction:
         assert mock_llm_with_tools.invoke.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_reactive_compaction_returns_none(self, mock_llm_with_tools, mock_graph, mock_state):
-        """Test that error is re-raised when compaction returns None."""
+    async def test_reactive_compaction_returns_none(
+        self, mock_llm_with_tools, mock_graph, mock_state, caplog
+    ):
+        """Test the Lane 1 punch-through contract: when the first engine
+        invocation returns None (dedup held or engine declined), the
+        reactive CLE site MUST re-invoke with ``force=True`` to punch
+        through the dedup window. When the forced attempt ALSO yields
+        no relief, the original ``ContextLengthExceededError`` is
+        re-raised LOUDLY so the upstream CLE handler can surface the
+        failure — the turn dies, not silently.
+        """
+        import logging
         from daemon.graph import create_agent_node
         from daemon.llm_error_classifier import ContextLengthExceededError
         from openai import BadRequestError
-        
+
         # Create mock httpx response
         mock_response = Mock()
-        
-        # First call raises context length error
+
+        # LLM call always raises context length error — exercises the
+        # ``except ContextLengthExceededError`` reactive path. The
+        # second compact_state failure re-raises the same error, so
+        # the LLM is only called once (the punch-through is on the
+        # engine, not on the LLM).
         original_error = BadRequestError(
             message="context_length_exceeded",
             response=mock_response,
@@ -294,21 +308,24 @@ class TestReactiveCompaction:
         mock_llm_with_tools.invoke.side_effect = ContextLengthExceededError(
             original_error, model="gpt-4o"
         )
-        
-        # Mock compactor returns None
+
+        # Compactor ALWAYS returns None (both the first pass and the
+        # force=True retry). Lane 1's punch-through on the second
+        # attempt ALSO returning None must surface the failure loud,
+        # not swallow it.
         mock_compactor = MagicMock()
         mock_compactor.compact_state = AsyncMock(return_value=None)
         mock_compactor.config = MagicMock()
         mock_compactor.llm_config = {}
-        
+
         # Setup mock graph state
         mock_graph.aget_state.return_value = mock_state
-        
+
         # Create agent node
         graph_ref = [mock_graph]
         config = {"configurable": {"thread_id": "test"}}
         llm_config = {"model": "gpt-4o"}
-        
+
         agent_node = create_agent_node(
             mock_llm_with_tools,
             system_prompt="You are helpful.",
@@ -317,16 +334,87 @@ class TestReactiveCompaction:
             config=config,
             llm_config=llm_config,
         )
-        
-        # Should re-raise the error
+
+        # Capture the daemon.graph logger for the loud-degradation
+        # step pin (WARN on first-pass None, ERROR on second-pass
+        # STILL None).
+        caplog.set_level(logging.WARNING, logger="daemon.graph")
+
+        # Terminal contract (UNCHANGED): the original
+        # ``ContextLengthExceededError`` propagates out — the turn
+        # dies loud, not silent, even after the force=True retry
+        # also fails.
         with pytest.raises(ContextLengthExceededError):
             await agent_node({"messages": []})
-        
-        # Compactor was called but returned None
-        mock_compactor.compact_state.assert_called_once()
-        
-        # LLM should only be called once
-        assert mock_llm_with_tools.invoke.call_count == 1
+
+        # Punch-through shape (NEW, Lane 1): the reactive site MUST
+        # have invoked the engine a SECOND time with ``force=True``
+        # after the first invocation returned None. Pre-Lane-1 this
+        # was a single call; the new contract is two calls.
+        assert mock_compactor.compact_state.call_count == 2, (
+            "Lane 1 punch-through: first None must trigger a "
+            "force=True retry — expected 2 engine calls, got "
+            f"{mock_compactor.compact_state.call_count}"
+        )
+
+        # First call carries no ``force`` kwarg (default — the
+        # engine's normal dedup-eligible path).
+        first_call = mock_compactor.compact_state.call_args_list[0]
+        assert "force" not in first_call.kwargs, (
+            f"Lane 1 punch-through: first invocation must NOT pass "
+            f"force= (default engine path); got kwargs={first_call.kwargs}"
+        )
+
+        # Second call carries ``force=True`` (the dedup-bypass punch-
+        # through). The engine's dedup is unconditionally bypassed
+        # under force=True, so the floor path can always shrink.
+        second_call = mock_compactor.compact_state.call_args_list[1]
+        assert second_call.kwargs.get("force") is True, (
+            f"Lane 1 punch-through: second invocation must pass "
+            f"force=True; got kwargs={second_call.kwargs}"
+        )
+
+        # Loud-degradation step (Lane 1): the WARN log fires when
+        # the first pass returns None. Pre-Lane-1 the path just
+        # re-raised without logging; Lane 1 emits a WARN so the
+        # dedup-hit is observable in production logs.
+        warn_records = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "reactive: first-pass engine returned None" in r.getMessage()
+        ]
+        assert len(warn_records) == 1, (
+            "Lane 1 loud-degradation: expected exactly one WARN log "
+            "about the first-pass engine returning None (the dedup "
+            "punch-through trigger); got "
+            f"{[r.getMessage() for r in warn_records]}"
+        )
+
+        # Loud-degradation terminal (Lane 1): the ERROR log fires
+        # when even the force=True retry returns None. Pre-Lane-1
+        # the path silently died at the bare ``raise``; Lane 1
+        # logs the unrecoverable condition loud so the upstream
+        # CLE handler's parent scope can see WHY the turn ended.
+        error_records = [
+            r for r in caplog.records
+            if r.levelno == logging.ERROR
+            and "reactive: SECOND engine invocation (force=True) STILL returned None" in r.getMessage()
+        ]
+        assert len(error_records) == 1, (
+            "Lane 1 loud-degradation: expected exactly one ERROR log "
+            "about the force=True retry ALSO returning None; got "
+            f"{[r.getMessage() for r in error_records]}"
+        )
+
+        # LLM is called only once — the first attempt raises CLE,
+        # the punch-through fails, the re-raise happens. No second
+        # LLM invocation follows the failed retry (the second
+        # compact_state None short-circuits the LLM rebuild).
+        assert mock_llm_with_tools.invoke.call_count == 1, (
+            f"LLM should be called only once (CLE on first attempt; "
+            f"re-raise after the failed force=True retry). Got "
+            f"{mock_llm_with_tools.invoke.call_count} calls."
+        )
 
     @pytest.mark.asyncio
     async def test_reactive_compaction_graph_ref_none(self, mock_llm_with_tools, mock_state):
