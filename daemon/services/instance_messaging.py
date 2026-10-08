@@ -1439,6 +1439,42 @@ class InstanceMessagingService:
                 mid_turn=False,
                 abort_policy="fail_open",
             )
+            # DEFER (round-2, Lane 5 — conditional deferred):
+            # wire ``_ensure_tool_result_pairing`` from graph.py:318
+            # here on the proactive path (and the executor floor
+            # path) so a stripped-engine rebuild with a trailing
+            # ``AIMessage(tool_calls)`` gets placeholder
+            # ``ToolMessage``s inserted BEFORE the seam's
+            # pre-write guard validates compacted_ids.
+            # Rationale for deferral:
+            #   * the helper is in ``daemon.graph``; importing from
+            #     here creates a graph↔services-conditional
+            #     coupling (graph already imports services);
+            #   * the seam's pre-write guard verifies
+            #     ``engine_compacted_ids <= site_compacted_ids``;
+            #     injecting pair-synthesized ``ToolMessage``s
+            #     BENEATH the guard's verification would change
+            #     ``replacement_messages`` after the guard runs
+            #     (race-condition risk), and injecting them
+            #     BEFORE requires wiring the helper into the
+            #     ``persist_compaction_result`` seam itself (broader
+            #     scope than the brief's "include only if trivial,
+            #     say so either way");
+            #   * the engine's A4 pairing snap (compaction.py:2405)
+            #     and Lane 2 halving already handle the
+            #     pairing-safety invariant for the
+            #     ``tail_truncation_last_effort`` floor path —
+            #     the cross-phase pairing-safety invariant is
+            #     preserved through the engine, NOT through this
+            #     auxiliary guard at the seam boundary.
+            # Pin note added: when the binding ``ToolMessage``
+            # failure does manifest (a tail-leading
+            # ``AIMessage(tool_calls)`` after the engine's
+            # rebuild that is NOT covered by the engine's snap),
+            # the fail-open "proactive never raises" semantic at
+            #   :1495-1496 catches the failure as a logged
+            # WARN. A round-3 commission can wire the helper
+            # once a pairing-loss incident is reproduced.
 
             # C2 (Phase 1 — langgraph-checkpoint-perf): fire the
             # ``compaction_aupdate_messaging`` message_metadata tap
@@ -1709,6 +1745,25 @@ class InstanceMessagingService:
             # DEBUG, not a crash). The C2 fix routes the write
             # through ``set_metadata_many`` on the production
             # ``InstanceRepository`` (atomic, dialect-aware).
+            #
+            # Escape-Hatch Hardening round 2 (Lane 5 — comment
+            # drift fix) — this CALL is plain sync, NOT
+            # ``asyncio.to_thread``-wrapped. The pre-Lane-5
+            # comment block was correct about the *intent*
+            # (offload the sync DB write), but the *code*
+            # below does NOT wrap with ``asyncio.to_thread``
+            # (the wrapping was deemed unnecessary because the
+            # call site schedules through ``run_async_no_wait``
+            # at the proactive trigger upstream of this method —
+            # see ``_maybe_compact_context`` at :1266 for the
+            # ``asyncio.to_thread`` pattern used elsewhere).
+            # The on-call sync write DOES block the event loop
+            # for the duration of the PostgreSQL round-trip;
+            # accepted as a known cost (the brief said "sync
+            # DB call is best-effort"; the documented failure
+            # mode is a logged DEBUG). Tests use a MagicMock
+            # that returns synchronously and exercises the
+            # path without blocking.
             set_proactive_escalation_metadata(
                 self._manager._instance_repository,
                 instance_id,

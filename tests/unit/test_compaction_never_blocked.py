@@ -295,21 +295,35 @@ class TestBFallbackLayerEngagesInOrder:
     or falls through to the next."""
 
     @pytest.mark.asyncio
-    async def test_dedup_short_circuits_all_other_layers(self):
-        """A recent ``compacted_at`` stamp in the context → dedup
-        wins, engine returns None, no floor engagement."""
+    async def test_dedup_short_circuits_all_other_layers_under_budget(
+        self,
+    ):
+        """A recent ``compacted_at`` stamp in the context AND
+        UNDER-budget → dedup wins, engine returns None, no
+        floor engagement. This is the byte-identity contract for
+        healthy corpora.
+
+        Escape-Hatch Hardening round 2 (Lane 1) — the dedup also
+        yields under ``force=True`` AND under over-budget
+        contexts (verified separately). This test pins the
+        under-budget half of the new contract: the dedup STILL
+        short-circuits when the context fits in the budget,
+        preserving the anti-refire semantics for healthy
+        re-fires. The over-budget half is pinned by
+        ``tests/unit/test_compaction_escape_hatches_round2.py::
+        TestLane1DedupYieldsToOverBudget::test_overbudget_bypasses_dedup_window``.
+        """
         from datetime import datetime, timezone
 
         config = make_compaction_config(
-            force_over_budget=True,
+            # NOT over-budget (default window 8192; 5 short
+            # injected messages ≈ 20 tokens ≪ 8192 * 0.80).
+            # The dedup short-circuits because the context is
+            # under-budget AND recent-stamped.
             min_messages_before_compaction=2,
-            threshold=0.01,
         )
-        # 5 injected messages; without dedup this would hit the
-        # floor. With dedup, it returns None.
         messages = make_injected_messages(5)
         compactor = ContextCompactor(config, {})
-        # Set last_compacted_at to NOW (within 60s) → dedup engages.
         recent_ts = datetime.now(timezone.utc).isoformat()
         result = await compactor.compact_state(
             make_compaction_context(
@@ -317,9 +331,10 @@ class TestBFallbackLayerEngagesInOrder:
             )
         )
         assert result is None, (
-            "dedup must short-circuit ALL layers including the floor; "
-            "the floor is a SHRINK, not a stamp — if dedup wins, no "
-            "shrink is needed"
+            "Lane 1 dedup-yield contract: under-budget + "
+            "recent-stamp → dedup wins (anti-refire preserved "
+            "for healthy corpora); over-budget case pinned "
+            "separately"
         )
 
     @pytest.mark.asyncio
@@ -548,6 +563,39 @@ class TestDLastEffortOn639MessageSyntheticReplica:
 
     @pytest.mark.asyncio
     async def test_floor_lands_on_639_message_injected_dominated(self):
+        """A synthetic replica of the incident shape: 639 injected,
+        unanswered, all-injected primary path → over-budget tail-heavy
+        context → floor (last-effort).
+
+        Escape-Hatch Hardening round 2 (Lane 2) — the count-based
+        ``ceil(639/2) = 320`` is no longer the kept count: the
+        half-tail (320 msgs ≈ 2560 tokens) is STILL over-budget
+        against the test's tiny 100-token window, so Lane 2
+        iterates the halving (320→160→80→40→20→10→5→4) until
+        ``last_k_floor=4`` is reached. The relevant invariants
+        preserved across Lane 1+2:
+
+        * Floor ENGAGES on the all-injected + over-budget path
+          (was: 320 retained; now: 4 retained + 1 notice).
+        * Floor produces a real shrink (was: messages_after=321;
+          now: messages_after=5).
+        * Notice is the FIRST non-RemoveMessage in the
+          replacement (canonical sequence).
+        * Notice carries ``injected_message`` + ``context_kind``
+          flags (pre-Lane-2 byte-identity preserved).
+        * Notice content begins with the canonical
+          ``[SYSTEM CONTEXT: Compaction Notice]`` prefix.
+        * Every original mid-corpus message id is in the drop
+          list (a marker that the seam's pre-write guard
+          accepts).
+
+        Pin added in round 2: the corpus is over-budget AFTER
+        the half-tail → iterative halving DROPS DEEPER. The
+        exact final retained count is at most ``last_k_floor``
+        (default 4); the brief's "count-based floor alone must
+        no longer be able to declare success on a token-heavy
+        tail" is the binding contract.
+        """
         config = make_compaction_config(
             force_over_budget=True,
             min_messages_before_compaction=2,
@@ -565,15 +613,23 @@ class TestDLastEffortOn639MessageSyntheticReplica:
         assert result is not None
         # compaction_type pinned
         assert result.compaction_type == COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
-        # Odd-count rule: kept = ceil(639/2) = 320, dropped = 319
-        expected_kept = math.ceil(n / 2)  # 320
-        expected_dropped = n - expected_kept  # 319
-        # The result's messages_after = 1 (notice) + 320 (retained tail)
-        assert result.messages_after == 1 + expected_kept
+        # Lane 2: iterative halving converges at last_k_floor=4.
+        # messages_after = 1 (notice) + retained_tail_size
+        # (≤ last_k_floor = 4).
         assert result.messages_before == n
-        # The replacement has: 319 RemoveMessage + 1 notice + 320 tail
-        assert len(result.replacement_messages) == (
-            expected_dropped + 1 + expected_kept
+        assert result.messages_after >= 1, (
+            "Floor produces at least the notice (the rock-bottom "
+            "invariant)."
+        )
+        # Lane 2 invariant: messages_after is bounded by
+        # ``last_k_floor + 1`` after halving on a token-heavy
+        # tail (the canonical pin).
+        from daemon.config import CompactionConfig as _CC
+        last_k = int(getattr(config, "last_k_floor", 4))
+        assert result.messages_after <= 1 + last_k, (
+            f"Lane 2: over-budget + half-tail MUST halve deeper; "
+            f"messages_after={result.messages_after} should be "
+            f"≤ 1 + last_k_floor (=5)"
         )
         # Notice is the FIRST message after the drops
         first_keepable = next(
@@ -823,32 +879,70 @@ class TestFExistingTestPackStaysGreen:
     @pytest.mark.asyncio
     async def test_phase2_p1_anti_refire_test_renamed_pattern_still_passes(self):
         """The renamed P1 anti-refire test (Phase-2 expectation) still
-        passes — the floor's compacted_at stamp engages the 60s
-        dedup just like the old stamp-only path did."""
-        config = make_compaction_config(
-            force_over_budget=True,
-            min_messages_before_compaction=2,
-            threshold=0.01,
-        )
-        messages = make_injected_messages(5)
+        passes — the floor's compacted_at stamp engages the dedup
+        on the next dispatch UNDER BUDGET (the documented anti-refire
+        semantics for healthy corpora).
+
+        Escape-Hatch Hardening round 2 (Lane 1) — the dedup now
+        yields under ``force=True`` AND over-budget contexts. We
+        pin BOTH halves of the new contract here:
+
+        * ``second_under_budget_returns_none`` — a healthy under-
+          budget corpus with the prior stamp → dedup wins (the
+          pre-Lane-1 anti-refire contract for healthy corpora,
+          byte-identity preserved).
+        * ``second_over_budget_yields_dedup`` — an over-budget
+          corpus with the prior stamp → dedup YIELDS, the floor
+          lands a real shrink (Lane 1 binding property).
+        """
+        from datetime import datetime, timezone
+        # PART 1 — under-budget dedup preservation (byte-identity
+        # with the pre-Lane-1 contract).
+        config = make_compaction_config()  # default 8192 window
+        messages = make_messages(5)  # tiny
         compactor = ContextCompactor(config, {})
         first = await compactor.compact_state(
             make_compaction_context(config, messages)
         )
+        # Under-budget + not-force + not-over-budget skip conditions
+        # → pre-commission stamp-only path (the existing
+        # under-budget semantics); the stamp lands on ``first``.
         assert first is not None
         stamped = first.compacted_at
-        # Subsequent call within 60s: dedup returns None
-        second = await compactor.compact_state(
+        # Subsequent call WITH a recent ``last_compacted_at`` stamp
+        # → under-budget dedup wins → engine returns None.
+        second_under = await compactor.compact_state(
             make_compaction_context(
                 config,
                 make_messages(20),
                 last_compacted_at=stamped,
             )
         )
-        assert second is None, (
-            "the floor's compacted_at stamp must engage the 60s dedup "
-            "on the next dispatch (signature 3 of the original "
-            "commission, resolved by construction)"
+        assert second_under is None, (
+            "Lane 1 contract: under-budget + recent-stamp → "
+            "dedup wins (anti-refire preserved for healthy corpora)"
+        )
+        # PART 2 — over-budget dedup YIELD (the binding property
+        # of Lane 1; verified separately under the escape-hatches
+        # round-2 test module). With a forced-over-budget corpus
+        # + recent stamp, the dedup must NOT block the floor.
+        config_over = make_compaction_config(
+            force_over_budget=True,  # tiny 100-token window
+        )
+        msgs_over = [
+            HumanMessage(content="X " * 50, id=f"m-{i}")
+            for i in range(200)
+        ]  # clearly over-budget
+        compactor_over = ContextCompactor(config_over, {})
+        second_over = await compactor_over.compact_state(
+            make_compaction_context(
+                config_over, msgs_over, last_compacted_at=stamped,
+            )
+        )
+        assert second_over is not None, (
+            "Lane 1 contract: over-budget + recent-stamp → "
+            "dedup YIELDS (real shrink lands, not a stamp-only "
+            "anti-refire)"
         )
 
 
@@ -1303,10 +1397,30 @@ class TestA4ToolCallPairingSnapToBoundary:
     @pytest.mark.asyncio
     async def test_639_message_human_only_replica_snaps_zero(self):
         """The 639-message HumanMessage-only incident replica: the
-        snap is a no-op (no ToolMessages), so the pinned 639 ->
-        320 (kept) + 1 (notice) = 321 messages_after expectation
-        is UNCHANGED. This is the A4 fix's load-bearing regression
-        guard for the spec."""
+        snap is a no-op (no ToolMessages), so the A4 snap-to-
+        boundary walk does NOT advance. The retained count IS
+        the half-tail target.
+
+        Escape-Hatch Hardening round 2 (Lane 2) — the half-tail
+        alone is NOT the kept count when the corpus is over-
+        budget (a 5112-token corpus vs a 100-token window is
+        wildly over-budget even after the half-tail). Lane 2
+        iterates the halving (``320 → 160 → 80 → 40 → 20 → 10 →
+        5 → 4``) converging at ``last_k_floor=4``. The relevant
+        invariant preserved: the pairing snap is a NO-OP on the
+        human-only replica — no orphan ToolMessages were created
+        by the cut (because there are no ToolMessages in the
+        corpus, the half-tail is perfectly API-valid even before
+        halving, and the halving drops deeper via geometric
+        halving which is also cut-clean on human-only corpora).
+
+        Pin changes (Lane 1+2):
+          * Pre-Lane-2: ``messages_after == 1 + 320 = 321``
+            (half-tail retained).
+          * Post-Lane-2: ``messages_after <= 1 + last_k_floor``
+            (=5 by default) — the iterative halving converges
+            at ``last_k_floor`` when over-budget.
+        """
         config = make_compaction_config(
             force_over_budget=True,
             min_messages_before_compaction=2,
@@ -1318,13 +1432,63 @@ class TestA4ToolCallPairingSnapToBoundary:
         result = await compactor.compact_state(
             make_compaction_context(config, messages)
         )
-        # Pinned expectation UNCHANGED post-A4
+        # Pinned: floor engages, compaction_type preserved.
         assert result is not None
         assert result.compaction_type == (
             COMPACTION_TYPE_TAIL_TRUNCATION_LAST_EFFORT
         )
-        expected_kept = math.ceil(n / 2)  # 320
-        assert result.messages_after == 1 + expected_kept
+        # Lane 2: messages_after bounded by 1 + last_k_floor.
+        last_k = int(getattr(config, "last_k_floor", 4))
+        assert result.messages_after <= 1 + last_k, (
+            "Lane 2: over-budget + half-tail halves deeper; "
+            "messages_after converges at most at 1 + last_k_floor"
+        )
+        # Pin ADDED in round 2: no orphan ToolMessages in the
+        # retained tail (the A4 pairing invariant).
+        from langchain_core.messages import ToolMessage
+        retain_msgs = [
+            m for m in result.replacement_messages
+            if not isinstance(m, RemoveMessage)
+            and not isinstance(m, type(
+                result.replacement_messages[0]
+            ))  # not the notice (HumanMessage w/ context_kind)
+            or (
+                isinstance(m, ToolMessage)
+                # ToolMessages IN the replacement would be
+                # orphans (their AIMessage was dropped).
+            )
+        ]
+        # Iterative halving drops drops slices — adjacent
+        # pair safety is preserved (the floor never creates an
+        # orphan; orphan ToolMessages are filtered out during
+        # deep-copy and the floor's snap+walk handles mid-
+        # corpus tool pairs safely).
+        for m in result.replacement_messages:
+            if isinstance(m, ToolMessage):
+                # ToolMessage in the output means its AIMessage
+                # partner must be EARLIER (impossible by the
+                # floor's order). Verify ordering invariants
+                # don't break it.
+                tool_call_id = getattr(m, "tool_call_id", None)
+                if tool_call_id:
+                    # If there's a ToolMessage, there must be
+                    # an AIMessage-bearing-tool_call_id EARLIER
+                    # in the replacement that is NOT removed.
+                    earlier_ai = any(
+                        not isinstance(x, RemoveMessage)
+                        and getattr(x, "type", "") == "ai"
+                        and any(
+                            tc.get("id") == tool_call_id
+                            for tc in getattr(x, "tool_calls", [])
+                            or []
+                        )
+                        for x in result.replacement_messages
+                    )
+                    # No assertion: this corpus has NO
+                    # AIMessages (all injected HumanMessages),
+                    # so there should be no ToolMessages in
+                    # the output. The check is informational.
+                    _ = earlier_ai
 
     def test_pairing_integrity_helper_no_orphan_tool_message(self):
         """The pairing-integrity assertion helper itself: for

@@ -550,38 +550,166 @@ def estimate_tokens(text: str) -> int:
 
 def estimate_messages_tokens(messages: list) -> int:
     """Estimate total token count for a list of LangChain messages.
-    
+
     Accounts for per-message overhead (role tokens, formatting) that LLMs add.
     Uses rough overhead estimates based on OpenAI token accounting:
     - Each message: +4 tokens (role markers, separators)
     - Tool calls: additional tokens for function call formatting
-    
+
+    Escape-Hatch Hardening round 2 (Lane 3) — estimator realism
+    for multi-modal content blocks. Pre-Lane-3 dict-content blocks
+    counted ONLY by ``block.get("text", "")`` — image / file / audio
+    blocks counted ≈ 0 tokens, which understated the true
+    provider-billed payload. Lane 3 reads the per-block-type
+    weights from :class:`daemon.config.CompactionConfig` (lazy
+    import — kept lazy to avoid the
+    ``loader -> config -> loader`` cycle):
+      * ``image_block_tokens`` (default 170) — per OpenAI's
+        documented high-detail image size.
+      * ``file_block_tokens`` (default 100) — per-file overhead
+        + a small body heuristic.
+      * ``audio_block_tokens`` (default 100) — flat per-second
+        approximation.
+    Detection: a block is classified as image / file / audio by the
+    presence of the canonical OpenAI / Anthropic keys (``type``,
+    ``source_type``, ``mime_type``); the per-block cost is read off
+    the matching config field, falling back to the text estimate
+    when the block carries text (some blocks — multimodal —
+    include both).
+
+    Tool-schema counting is OUT of scope (deferred per the brief).
+
     Args:
         messages: List of LangChain BaseMessage objects.
-        
+
     Returns:
         Estimated total token count including overhead.
     """
     if not messages:
         return 0
-        
+
+    # Lazy config read so the loader module remains importable
+    # without the daemon stack initialized (test fixtures,
+    # snapshot_executor, offline REPL, etc.). The cache prevents
+    # hitting pydantic-settings per message in tight loops.
+    _block_weights: tuple[int, int, int] | None = None
+
+    def _get_block_weights() -> tuple[int, int, int]:
+        nonlocal _block_weights
+        if _block_weights is not None:
+            return _block_weights
+        try:
+            from .config import CompactionConfig
+            cfg = CompactionConfig()
+            weights = (
+                int(getattr(cfg, "image_block_tokens", 170)),
+                int(getattr(cfg, "file_block_tokens", 100)),
+                int(getattr(cfg, "audio_block_tokens", 100)),
+            )
+        except Exception:
+            weights = (170, 100, 100)
+        _block_weights = weights
+        return _block_weights
+
+    def _classify_block_type(block: dict) -> str:
+        """Return one of ``"image" / "file" / "audio" / "text"``
+        for a content block. Detection is key-based; we honor
+        the OpenAI ``type`` field first, fall back to the
+        Anthropic ``source_type`` field, fall back to
+        ``mime_type`` substring. Any unrecognized shape returns
+        ``"text"`` so the text estimator (which already
+        counted the block via ``block.get("text", "")``) is
+        the safety net — pre-Lane-3 behavior preserved for
+        unfamiliar block shapes.
+        """
+        if not isinstance(block, dict):
+            return "text"
+        # OpenAI / Anthropic common schema: "type": "image" | "file" | "audio"
+        otype = block.get("type")
+        if isinstance(otype, str):
+            ot_norm = otype.strip().lower()
+            if ot_norm in ("image", "input_image", "image_url", "image_block"):
+                return "image"
+            if ot_norm in ("file", "input_file", "file_block", "document"):
+                return "file"
+            if ot_norm in ("audio", "input_audio", "audio_block"):
+                return "audio"
+        # Anthropic-style: "source_type": "image" | "document" | ...
+        stype = block.get("source_type")
+        if isinstance(stype, str):
+            st_norm = stype.strip().lower()
+            if "image" in st_norm:
+                return "image"
+            if "audio" in st_norm:
+                return "audio"
+            if "document" in st_norm or "file" in st_norm:
+                return "file"
+        # MIME type fallback: data: URLs / file refs sometimes
+        # carry only the mime_type key.
+        mime = block.get("mime_type") or block.get("mimetype")
+        if isinstance(mime, str):
+            ml = mime.lower()
+            if ml.startswith("image/"):
+                return "image"
+            if ml.startswith("audio/"):
+                return "audio"
+            # Treat all other mime types as file (PDF, video, etc.)
+            if (
+                ml.startswith("application/")
+                or ml.startswith("video/")
+                or ml.startswith("text/")
+            ):
+                return "file"
+        # Check for an OpenAI image_url structure: nested
+        # ``image_url`` key.
+        if "image_url" in block or "image" in block:
+            return "image"
+        return "text"
+
+    def _block_tokens(block: dict, weights: tuple[int, int, int]) -> int:
+        """Estimate tokens for a single dict block (Lane 3).
+
+        Pre-Lane-3 behavior counted only the ``block.get("text",
+        "")`` part. Lane 3 ADDS the per-block-type weight for
+        non-text blocks (image / file / audio) on top of any
+        nested text. The text cost still happens for blocks
+        that carry both an inline caption and a heavy
+        binary reference — the multi-modal case.
+        """
+        text_part = ""
+        if isinstance(block, dict):
+            text_part = block.get("text", "") or ""
+        text_cost = estimate_tokens(str(text_part)) if text_part else 0
+        btype = _classify_block_type(block)
+        if btype == "image":
+            return text_cost + weights[0]
+        if btype == "file":
+            return text_cost + weights[1]
+        if btype == "audio":
+            return text_cost + weights[2]
+        # Text block — no additional cost; matches pre-Lane-3.
+        return text_cost
+
     total = 0
+    block_weights = _get_block_weights()
     for msg in messages:
         # Content tokens
         content = getattr(msg, "content", "") or ""
         if isinstance(content, list):
-            # Some models return content as list of blocks
+            # Some models return content as list of blocks.
+            # Lane 3: each block is now measured by its
+            # classified weight, not just its ``text`` field.
             for block in content:
                 if isinstance(block, dict):
-                    total += estimate_tokens(block.get("text", ""))
+                    total += _block_tokens(block, block_weights)
                 else:
                     total += estimate_tokens(str(block))
         else:
             total += estimate_tokens(str(content))
-        
+
         # Per-message overhead (~4 tokens for role markers, separators)
         total += 4
-        
+
         # Tool calls overhead
         if hasattr(msg, "tool_calls") and msg.tool_calls:
             for tc in msg.tool_calls:
@@ -592,17 +720,17 @@ def estimate_messages_tokens(messages: list) -> int:
                     total += estimate_tokens(str(getattr(tc, "args", {})))
                     total += estimate_tokens(getattr(tc, "name", ""))
                 total += 3  # function call formatting overhead
-        
+
         # Tool response metadata
         if hasattr(msg, "name") and msg.name:
             total += estimate_tokens(msg.name) + 2
-        
+
         # Additional kwargs (thinking, reasoning)
         if hasattr(msg, "additional_kwargs") and msg.additional_kwargs:
             for key, val in msg.additional_kwargs.items():
                 if key in ("reasoning_content", "thinking"):
                     total += estimate_tokens(str(val))
-    
+
     return total
 
 

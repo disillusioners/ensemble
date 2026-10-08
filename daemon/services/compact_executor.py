@@ -323,24 +323,38 @@ class NoopOutcome:
     noop_reason: str
 
 
-def _is_recently_compacted(last_compacted_at: str | None) -> bool:
-    """True iff a ``last_compacted_at`` ISO stamp is within 60s of now.
+def _is_recently_compacted(
+    last_compacted_at: str | None,
+    dedup_window_s: int = 60,
+) -> bool:
+    """True iff a ``last_compacted_at`` ISO stamp is within
+    ``dedup_window_s`` of now.
 
-    Mirrors the in-engine ``_is_recently_compacted`` logic
-    (``daemon/compaction.py`` ~:1500-1517) so the executor pre-check
+    Escape-Hatch Hardening round 2 (Lane 1) — mirrors the in-engine
+    ``ContextCompactor._is_recently_compacted`` logic
+    (``daemon/compaction.py`` ~:4541-4557) so the executor pre-check
     matches the engine's. We re-implement here rather than calling the
     engine helper directly — the engine helper is private (``_`` prefix)
     and the executor pre-check needs to make its own decision BEFORE
     calling the engine (architect §2).
+
+    The 60s literal at ``:343`` was promoted to the
+    ``CompactionConfig.dedup_window_s`` config field (default 60
+    preserves pre-Lane-1 behavior). Both the engine and this
+    executor pre-check read the same config field so an operator
+    tightening the window sees the change on BOTH sites.
     """
     if not last_compacted_at:
+        return False
+    if dedup_window_s <= 0:
+        # Operator override — dedup entirely disabled.
         return False
     try:
         last_time = datetime.fromisoformat(last_compacted_at)
         if last_time.tzinfo is None:
             last_time = last_time.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
-        return (now - last_time).total_seconds() < 60
+        return (now - last_time).total_seconds() < dedup_window_s
     except (ValueError, TypeError):
         return False
 
@@ -809,11 +823,34 @@ async def execute_compact(
     # Pull messages for the noop-floor measurement. We use the same
     # checkpoint_state we already read above (one DB hit total).
     messages = list((checkpoint_state.values or {}).get("messages", []) or [])
-    system_prompt_tokens = 0  # The proactive path uses the prompt cache
-    # — the executor uses 0 here for symmetry because we are only
-    # measuring against the floor (not running the engine). The
-    # floor is intentionally conservative — system prompt tokens
-    # count toward the budget too.
+    # Escape-Hatch Hardening round 2 (H4 alignment) — the executor
+    # floor previously passed ``system_prompt_tokens=0`` to the
+    # canonical estimator; that was conservative (ignoring that the
+    # system prompt still counts toward the budget) and matched
+    # the pre-H4 reactive site. The unified H4 policy carries the
+    # REAL system-prompt token count everywhere — the engine's
+    # gate math, the reactive ctx at graph.py:8888, the pre-call
+    # hook, AND here. We pull the count from the compactor's LLM
+    # config (``llm_cache``) when present, falling back to 0 only
+    # when the cache is unavailable (e.g. legacy test fixtures).
+    # Pre-H4 sites still read 0, so this preserves the conservative
+    # bias on instances without a cached system prompt.
+    try:
+        system_prompt_tokens = int(
+            getattr(getattr(compactor, "_llm_cache", None), "last_compiled_tokens", 0)
+            or 0
+        )
+    except Exception:
+        system_prompt_tokens = 0
+    if system_prompt_tokens == 0:
+        # Defensive: try the canonical ``_get_system_prompt_tokens``
+        # helper if the cache above is unavailable.
+        try:
+            system_prompt_tokens = int(
+                manager._messaging_service._get_system_prompt_tokens(instance_id)
+            ) if hasattr(manager, "_messaging_service") else 0  # type: ignore[attr-defined]
+        except Exception:
+            system_prompt_tokens = 0
     estimated_tokens = estimate_messages_tokens(messages) + system_prompt_tokens
 
     # Floor ratio (config-driven; default 0.05).
