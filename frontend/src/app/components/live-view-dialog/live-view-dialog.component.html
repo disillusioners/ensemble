@@ -1,0 +1,101 @@
+<!--
+  Live-view WebView dialog shell.
+
+  The iframe is the load-bearing element — see the
+  SECURITY MODEL block in
+  ``live-view-dialog.component.ts`` for the rationale. The
+  markup below pairs the iframe with a loading overlay and
+  an error fallback so the user always sees SOMETHING while
+  the artifact fetches.
+-->
+<div
+  class="fullscreen-shell"
+  data-testid="live-view-dialog"
+  role="dialog"
+  aria-modal="true"
+  [attr.aria-label]="ariaLabel()"
+>
+  <header class="fullscreen-header">
+    <div class="header-text">
+      <h2 class="fullscreen-title" data-testid="live-view-title">
+        {{ data.title }}
+      </h2>
+      <span class="fullscreen-subtitle" data-testid="live-view-subtitle">
+        /views/{{ data.root }}/{{ data.relPath }}
+      </span>
+    </div>
+    <div class="fullscreen-actions">
+      <a
+        class="open-external-link"
+        [href]="data.src"
+        target="_blank"
+        rel="noopener noreferrer"
+        data-testid="live-view-open-external"
+        title="Open in a new tab"
+        aria-label="Open the artifact in a new tab"
+      >
+        <mat-icon>open_in_new</mat-icon>
+      </a>
+      <button
+        type="button"
+        mat-icon-button
+        class="close-btn"
+        data-testid="live-view-close"
+        (click)="onClose()"
+        aria-label="Close live view"
+        title="Close (Esc)"
+      >
+        <mat-icon>close</mat-icon>
+      </button>
+    </div>
+  </header>
+
+  <div class="fullscreen-body" data-testid="live-view-body">
+    <!--
+      The iframe is always rendered (so the load event fires
+      reliably across browsers); the loading / error overlays
+      layer on top via absolute positioning and the ``hidden``
+      attribute, so the iframe keeps its DOM presence but is
+      not visible to the user during the load window.
+
+      ``sandbox`` is the single most important attribute on
+      this element. See the SECURITY MODEL in the .ts file.
+    -->
+    <iframe
+      class="viewer-iframe"
+      data-testid="live-view-iframe"
+      [src]="safeSrc"
+      [title]="data.title"
+      sandbox="allow-scripts"
+      referrerpolicy="no-referrer"
+      (load)="onIframeLoad()"
+      (error)="onIframeError($event)"
+    ></iframe>
+
+    @if (!loaded() && !errored()) {
+      <div class="loading-overlay" data-testid="live-view-loading" role="status" aria-live="polite">
+        <div class="loading-spinner" aria-hidden="true"></div>
+        <p class="loading-text">Loading artifact…</p>
+      </div>
+    }
+
+    @if (errored()) {
+      <div class="error-panel" data-testid="live-view-error" role="alert">
+        <mat-icon class="error-icon" aria-hidden="true">error_outline</mat-icon>
+        <h3 class="error-title">Could not load the artifact</h3>
+        <p class="error-detail">
+          The server returned an error fetching this live view. The artifact
+          may have been removed, or the URL may be invalid.
+        </p>
+        <button
+          type="button"
+          mat-stroked-button
+          (click)="onClose()"
+          data-testid="live-view-error-close"
+        >
+          Close
+        </button>
+      </div>
+    }
+  </div>
+</div>
