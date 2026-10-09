@@ -232,16 +232,20 @@ def _extract_tool_call_ids(msg: BaseMessage) -> list[str]:
 
     For ``AIMessage``: the union of ids from BOTH ``msg.tool_calls``
     AND ``msg.invalid_tool_calls`` — first-class citizens of pairing
-    semantics on the OpenAI wire. The strict-gateway corpus
-    (``daemon.llm_error_classifier.ToolPairingInvalidError.SIGNATURES``)
-    enforces that every emitted ``tool_call_id`` (well-formed or
-    malformed) must be paired with a ``ToolMessage`` answer in the
-    IMMEDIATELY-adjacent block; emitting both fields under one id set
-    keeps probe / heal / ownership-tracking symmetric so any consumer
-    of this helper sees the full pairing surface. Tool_calls are
-    emitted first (preserves order-of-emission; the OpenAI wire
-    returns them in tool_calls then invalid_tool_calls order, with
-    no semantic overlap — a single id is never in both fields).
+    semantics on the OpenAI wire. Two-tier evidence basis for the
+    union: ROLE-level (corpus-pinned — the strict-gateway
+    ``SIGNATURES`` corpus in
+    ``daemon.llm_error_classifier.ToolPairingInvalidError`` pins
+    that any ``role='tool'`` must answer a preceding message
+    carrying ``tool_calls``); ID-level (EMPIRICAL OpenAI-wire
+    assumption, NOT corpus-pinned — every emitted id, well-formed
+    OR invalid, requires its own answer in the IMMEDIATELY-
+    adjacent block; position within the block is flexible — see
+    the mixed-call test docstrings). Emitting both fields under
+    one id set keeps probe / heal / ownership-tracking symmetric
+    so any consumer of this helper sees the full pairing surface.
+    Tool_calls are emitted first (order-of-emission; no semantic
+    overlap — a single id is never in both fields).
 
     For ``ToolMessage``: ``[msg.tool_call_id]`` when present.
     For every other message type: empty list.
@@ -552,8 +556,10 @@ def validate_and_heal_messages(
                         # PARTNER_SYNTH_TEXT wording. This is
                         # forensic-traceable in logs and round-1
                         # callers see no behavior change because
-                        # the union set's ids are sourced from
-                        # ``tool_calls`` only when W-A is enabled.
+                        # the union is structural — every consumer
+                        # reads the same helper, so text selection
+                        # is per-id at synthesis, not a per-site
+                        # toggle.
                         synth_text = (
                             PARTNER_SYNTH_INVALID_TEXT
                             if tc_id in invalid_ids
