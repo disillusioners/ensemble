@@ -53,7 +53,7 @@ from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 
 # ---------------------------------------------------------------------------
@@ -857,3 +857,153 @@ class TestPreTerminalThirdInvokeSite:
             f"3rd-invoke success: expected post-surgery AIMessage; "
             f"got content={last_ai_message.content!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# ROUND-2 — W2 INVALID-SHAPE POISON (invalid_tool_calls first-class)
+# ---------------------------------------------------------------------------
+
+
+class TestW2InvalidShapeHeal:
+    """ROUND-2 — W2 wiring pin for the invalid_tool_calls poison shape.
+
+    The round-2 live bug (incident 03d7657f task 10816, 2026-10-09):
+    an ``AIMessage(tool_calls=[], invalid_tool_calls=[X])`` was
+    committed mid-history. The W1 heal ran but the round-1 ownership
+    tracking set missed X (X lived only in ``invalid_tool_calls``),
+    so the in-block ``ToolMessage(X)`` was flagged
+    block-ownership-orphan and STRIPPED. The next dispatch re-shipped
+    the now-unanswered invalid call, the strict gateway 2013-rejected,
+    and W2 caught it but the heal AGAIN stripped the orphan TM
+    (perpetual loop, the failure arc never resolved).
+
+    Round-2 fix (this branch): the union lands in the ownership
+    tracking set so the TM answering an invalid-only AIMessage is
+    block-ownership-valid; the strip is dead; W2's single retry
+    succeeds.
+
+    This test pins the round-2 wiring at the agent_node W2 site:
+    the FIRST invoke carries the invalid-shape history; the W1
+    probe flags a violation (well-formed call X is missing from
+    the adjacent block); the W1 heal synthesizes a partner for X;
+    the FIRST invoke runs against the healed history and returns
+    a valid response (the gateway sees the now-paired
+    AIMessage(tc=[X]) + TM(X) and accepts).
+
+    The point is the LLM dispatch NEVER raises 2013 against the
+    healed payload (the W2 retry path is unnecessary in the
+    round-2 fix — the W1 probe + heal alone resolves the
+    invalid-shape adjacency). The negative pin asserts the
+    round-1 failure arc is dead: probe CLEAN, heal no-op, NO
+    invocation count burn, NO retry, the response rides the
+    first invoke.
+    """
+
+    @pytest.mark.asyncio
+    async def test_w1_heal_alone_resolves_invalid_shape_no_w2_retry(
+        self, mock_llm_with_tools
+    ):
+        """The round-1 failure arc is dead.
+
+        History: ``AIMessage(tool_calls=[], invalid_tool_calls=[X])``
+        + ``ToolMessage(X)`` + ``HumanMessage``. The W1 probe runs
+        against ``full_messages`` (system + state). The probe is
+        CLEAN (round-2 union) — no violation to flag. The W1 heal
+        is a no-op. The first invoke runs against the as-supplied
+        payload. NO 2013 fires. NO W2 retry needed. Invoke count
+        is EXACTLY 1.
+        """
+        from daemon.graph import create_agent_node
+
+        # State messages: an AIMessage carrying only an invalid call
+        # (the live-bug repair shape) followed by the answering TM
+        # (the DB-repair-lane TM the round-1 heal used to strip).
+        # The round-2 union keeps this TM (block-ownership-valid).
+        invalid_call_id = "call_8ed9e1771dca42348dfa7ca0"
+        ai_invalid = AIMessage(
+            content="",
+            invalid_tool_calls=[
+                {
+                    "id": invalid_call_id,
+                    "name": "do_thing",
+                    "args": "{broken",
+                    "type": "invalid_tool_call",
+                    "error": "Failed to parse tool call",
+                }
+            ],
+        )
+        # DB-repair-lane TM: plain uuid id (NOT a partner-synth
+        # prefix), the exact W-C verbatim shape.
+        tm_uuid = "1c2a9d4f-3b71-4f0e-9a23-deadbeef0001"
+        tm_answer = ToolMessage(
+            content="[repaired result]",
+            tool_call_id=invalid_call_id,
+            name="do_thing",
+            id=tm_uuid,
+        )
+        state_messages = [
+            ai_invalid,
+            tm_answer,
+            HumanMessage(content="continue"),
+        ]
+
+        # First invoke returns a valid AIMessage. If the round-1
+        # strip recurred, the payload would be missing the TM,
+        # the gateway would 2013, the W2 retry would fire — but
+        # we only put ONE side_effect, so any second consume
+        # would raise StopIteration and the test would fail with
+        # the round-1 bug signature.
+        first_response = AIMessage(content="OK after W1 heal")
+        mock_llm_with_tools.invoke.side_effect = [first_response]
+
+        config = {"configurable": {"thread_id": "test-w2-invalid-shape"}}
+        agent_node = create_agent_node(
+            mock_llm_with_tools,
+            system_prompt="You are helpful.",
+            compactor=None,
+            graph_ref=[None],
+            config=config,
+            llm_config={"model": "gpt-4o"},
+        )
+
+        result = await agent_node({"messages": state_messages})
+
+        # EXACTLY 1 invoke — the W1 probe is CLEAN (round-2
+        # union kept the TM), no violation to heal, no W2
+        # retry. If the round-1 bug recurred, the W2 retry
+        # would have fired and the second consume of
+        # side_effect would raise StopIteration.
+        assert mock_llm_with_tools.invoke.call_count == 1, (
+            f"round-2 W2 pin: expected EXACTLY 1 invoke (W1 "
+            f"heal resolved the invalid-shape adjacency); "
+            f"got {mock_llm_with_tools.invoke.call_count}. "
+            f"Round-1 failure arc recurred — the union at the "
+            f"ownership-tracking refresh site is broken."
+        )
+
+        # The first invoke's payload is healed/order-valid
+        # (it's the as-supplied history — round-2 keeps it
+        # intact because the union made the TM
+        # block-ownership-valid).
+        from daemon.tool_pairing_history import has_pairing_violations
+        first_payload = mock_llm_with_tools.invoke.call_args_list[0].args[0]
+        assert has_pairing_violations(first_payload) is False, (
+            f"first-invoke payload must be healed/order-valid "
+            f"after W1 probe + heal; got {first_payload}"
+        )
+
+        # The TM is in the first payload (round-2 didn't
+        # strip it — the round-1 regression is dead).
+        assert tm_answer in first_payload, (
+            f"round-2 negative pin: the DB-repair-lane TM "
+            f"must remain in the LLM-bound payload; round-1 "
+            f"used to strip it. If this assertion fires, the "
+            f"union at the ownership-tracking refresh site is "
+            f"broken."
+        )
+        assert first_payload[first_payload.index(tm_answer)].id == tm_uuid
+
+        # The response rides the first invoke's result.
+        assert "messages" in result
+        assert len(result["messages"]) == 1
+        assert result["messages"][0].content == "OK after W1 heal"

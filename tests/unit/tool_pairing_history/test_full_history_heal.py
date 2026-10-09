@@ -139,9 +139,12 @@ from langchain_core.messages import (
 )
 
 from daemon.tool_pairing_history import (
+    PARTNER_SYNTH_INVALID_TEXT,
     PARTNER_SYNTH_TEXT,
     ToolPairingHealReport,
     _build_next_non_tool_after,
+    _extract_invalid_only_ids,
+    _extract_tool_call_ids,
     _is_partner_synth,
     dedupe_incoming_tool_call_ids,
     has_pairing_violations,
@@ -1131,3 +1134,506 @@ class TestToolPairingInvalidSignature:
         assert e.signature == "test sig"
         assert "Tool-pairing-invalid" in str(e)
         assert "test sig" in str(e)
+
+
+# ---------------------------------------------------------------------------
+# ROUND-2 — invalid_tool_calls first-class pairing citizens
+# (incident 03d7657f round-2 fix; the prior module only walked
+# ``msg.tool_calls`` and missed ids the LLM emitted as invalid)
+# ---------------------------------------------------------------------------
+
+
+def _itc(tc_id: str, name: str = "tool", args: str = "{not valid json}") -> dict:
+    """Build a minimal invalid_tool_call dict in langchain_core
+    contract shape. The ``type`` field is the wire-level marker for
+    malformed calls (``"invalid_tool_call"``) and the ``args`` field
+    is commonly a raw string (not parsed JSON) when the LLM emitted
+    a tool call the gateway could not validate.
+    """
+    return {
+        "id": tc_id,
+        "name": name,
+        "args": args,
+        "type": "invalid_tool_call",
+        "error": "Failed to parse tool call: arguments were not valid JSON",
+    }
+
+
+class TestInvalidToolCallsFirstClassCitizens:
+    """ROUND-2 — ``AIMessage.invalid_tool_calls`` entries are
+    first-class citizens of pairing semantics on the OpenAI wire.
+
+    The live failure (incident 03d7657f task 10816, 2026-10-09
+    04:51-04:52Z): an ``AIMessage(tool_calls=[], invalid_tool_calls=[X])``
+    was committed mid-history. A DB-repair-lane ``ToolMessage``
+    answering ``call_8ed9e1771dca42348dfa7ca0`` (a tc_id living
+    SOLELY in ``invalid_tool_calls``) was in the history. The
+    round-1 heal built the ownership tracking set from
+    ``AIMessage.tool_calls`` only — the synth was flagged
+    block-ownership-orphan and STRIPPED from the payload. The
+    next dispatch re-shipped the now-unanswered invalid call and
+    the strict gateway 2013-rejected again (the failure arc never
+    resolved because removal was payload-only and the loop
+    repeated every message).
+
+    These tests pin the union landing (W-A) at every consumer
+    site — probe, ownership tracking, heal — so the round-2 bug
+    is a NEGATIVE pin (the strip no longer happens).
+    """
+
+    # ---- Id-extraction helper (the load-bearing change) ----
+
+    def test_extract_tool_call_ids_unions_invalid_field_for_aimessage(self):
+        """``_extract_tool_call_ids`` returns ids from BOTH
+        ``tool_calls`` and ``invalid_tool_calls`` for AIMessage
+        (the W-A union landing). Tool_calls first (preserves
+        OpenAI wire emission order), invalid_tool_calls second."""
+        ai = AIMessage(
+            content="",
+            tool_calls=[_tc("call_valid")],
+            invalid_tool_calls=[_itc("call_bad", args="{garbled")],
+        )
+        ids = _extract_tool_call_ids(ai)
+        assert ids == ["call_valid", "call_bad"]
+
+    def test_extract_tool_call_ids_returns_only_tool_calls_when_no_invalid(self):
+        """Backwards-compat pin: when ``invalid_tool_calls`` is
+        empty (the round-1 happy path), the helper returns the
+        same shape as before the union — no behavior change for
+        the 44 existing tests."""
+        ai = AIMessage(content="", tool_calls=[_tc("call_a"), _tc("call_b")])
+        ids = _extract_tool_call_ids(ai)
+        assert ids == ["call_a", "call_b"]
+
+    def test_extract_tool_call_ids_returns_only_invalid_when_no_tool_calls(self):
+        """Inverse backwards-compat: ``tool_calls=[]`` +
+        ``invalid_tool_calls=[X]`` returns ``[X]`` (the round-2
+        new path that the round-1 helper missed entirely — it
+        returned ``[]`` because ``tool_calls`` was empty)."""
+        ai = AIMessage(content="", invalid_tool_calls=[_itc("call_x")])
+        ids = _extract_tool_call_ids(ai)
+        assert ids == ["call_x"]
+
+    def test_extract_tool_call_ids_skips_malformed_invalid_entry(self):
+        """Defensive: an invalid_tool_call entry missing ``id``
+        (truly malformed — no id to pair with) contributes no
+        id, the walk continues. This is the live bug shape's
+        edge case (a partially-malformed LLM payload)."""
+        ai = AIMessage(
+            content="",
+            invalid_tool_calls=[
+                {"id": "call_ok", "name": "tool", "args": "{bad", "type": "invalid_tool_call"},
+                {"name": "tool", "args": "{worse", "type": "invalid_tool_call"},  # no id
+                _itc("call_also_ok"),
+            ],
+        )
+        ids = _extract_tool_call_ids(ai)
+        assert ids == ["call_ok", "call_also_ok"]
+
+    def test_extract_invalid_only_ids_excludes_tool_calls_field(self):
+        """``_extract_invalid_only_ids`` returns ids from
+        ``invalid_tool_calls`` ONLY — used by the synthesizer to
+        pick the right placeholder text."""
+        ai = AIMessage(
+            content="",
+            tool_calls=[_tc("call_valid")],
+            invalid_tool_calls=[_itc("call_bad_a"), _itc("call_bad_b")],
+        )
+        invalid = _extract_invalid_only_ids(ai)
+        assert invalid == {"call_bad_a", "call_bad_b"}
+
+    def test_extract_invalid_only_ids_empty_for_non_aimessage(self):
+        """``_extract_invalid_only_ids`` returns ``set()`` for
+        non-AIMessage — guards the synthesizer against picking
+        the wrong text for ``ToolMessage``/``HumanMessage``."""
+        from langchain_core.messages import HumanMessage
+        assert _extract_invalid_only_ids(HumanMessage(content="hi")) == set()
+        tm = ToolMessage(content="r", tool_call_id="x", name="t")
+        assert _extract_invalid_only_ids(tm) == set()
+
+    # ---- Probe (the W-A surface for the round-2 bug) ----
+
+    def test_probe_clean_on_answered_invalid_only_aimessage(self):
+        """INCIDENT-TRUE FIXTURE — answered.
+
+        AIMessage(tool_calls=[], invalid_tool_calls=[X]) +
+        ToolMessage(X) → probe returns ``False``. Before the
+        union the probe flagged this as a violation because the
+        ownership tracking set was empty (the AIMessage issued
+        no ids in ``tool_calls``) and the TM was stranded.
+        After the union the TM is block-ownership-valid (the
+        AIMessage issued X via ``invalid_tool_calls`` and the TM
+        answers it) — the strict gateway accepts the shape on
+        the wire."""
+        msgs = [
+            AIMessage(content="", invalid_tool_calls=[_itc("call_x")]),
+            ToolMessage(content="r_x", tool_call_id="call_x", name="tool"),
+            HumanMessage(content="hi"),
+        ]
+        assert has_pairing_violations(msgs) is False
+
+    def test_probe_flags_unanswered_invalid_only_aimessage(self):
+        """INCIDENT-TRUE FIXTURE — unanswered.
+
+        AIMessage(tool_calls=[], invalid_tool_calls=[X]) with
+        NO ``ToolMessage(X)`` in the adjacent block → probe
+        returns ``True`` (adjacency violation). The heal will
+        synthesize a partner in the adjacent block; the strict
+        gateway sees the same shape as a well-formed call."""
+        msgs = [
+            AIMessage(content="", invalid_tool_calls=[_itc("call_x")]),
+            HumanMessage(content="hi"),
+        ]
+        assert has_pairing_violations(msgs) is True
+
+    def test_probe_clean_on_partial_invalid_answered_in_block(self):
+        """AIMessage with 2 invalid calls + 1 answered + 1
+        missing → probe flags the missing one (only)."""
+        msgs = [
+            AIMessage(
+                content="",
+                invalid_tool_calls=[_itc("call_a"), _itc("call_b")],
+            ),
+            ToolMessage(content="r_a", tool_call_id="call_a", name="tool"),
+            HumanMessage(content="hi"),
+        ]
+        # call_a answered, call_b missing — probe flags.
+        assert has_pairing_violations(msgs) is True
+
+    # ---- Heal (the W-B synthesizer covering invalid ids) ----
+
+    def test_heal_synthesizes_partner_for_unanswered_invalid_call(self):
+        """Phase 1 synthesizes a partner-synth placeholder
+        immediately after the AIMessage, using the DISTINCT
+        PARTNER_SYNTH_INVALID_TEXT wording (the call was
+        rejected before execution — "result unavailable" would
+        be misleading)."""
+        ai = AIMessage(content="", invalid_tool_calls=[_itc("call_x", name="get_thing")])
+        msgs = [ai, HumanMessage(content="hi")]
+
+        report = validate_and_heal_messages(msgs, instance_short="iid-invalid")
+
+        assert len(report.synthesized) == 1
+        synth = report.synthesized[0]
+        assert synth.tool_call_id == "call_x"
+        assert synth.id == "partner-synth-call_x"
+        # Distinct text — the invalid-call wording, not the
+        # standard interrupted text.
+        assert synth.content == PARTNER_SYNTH_INVALID_TEXT
+        assert synth.content != PARTNER_SYNTH_TEXT
+        # Sits IMMEDIATELY after the AIMessage — adjacency
+        # preserved (the gateway's load-bearing rule).
+        assert msgs[1] is synth
+        assert msgs[2].content == "hi"
+
+        # Post-heal: probe clean.
+        assert has_pairing_violations(msgs) is False
+
+    def test_heal_synthesizes_multiple_invalid_call_partners(self):
+        """Phase 1 synthesizes a partner for every unanswered
+        invalid tc_id — multi-call coverage for the union
+        field."""
+        ai = AIMessage(
+            content="",
+            invalid_tool_calls=[
+                _itc("call_a", name="tool_a"),
+                _itc("call_b", name="tool_b"),
+            ],
+        )
+        msgs = [ai, HumanMessage(content="hi")]
+
+        report = validate_and_heal_messages(msgs, instance_short="iid-invalid-multi")
+
+        synth_ids = {s.tool_call_id for s in report.synthesized}
+        assert synth_ids == {"call_a", "call_b"}
+        for s in report.synthesized:
+            assert s.content == PARTNER_SYNTH_INVALID_TEXT
+            assert s.id == f"partner-synth-{s.tool_call_id}"
+
+    # ---- Live-bug regression — the W-C verbatim fixture ----
+
+    def test_wc_verbatim_uuid_id_tm_is_not_stripped(self):
+        """LIVE-BUG REGRESSION (W-C verbatim) — the exact repair
+        shape that round-1 mishandled.
+
+        Per the dispatch: ``uuid-id ToolMessage`` (a plain
+        36-char uuid id, not the ``partner-synth-`` prefix
+        format) sitting directly after an
+        ``AIMessage(tool_calls=[], invalid_tool_calls=[X])``.
+        Round-1's ownership tracking missed X (because X lived
+        ONLY in ``invalid_tool_calls``) and Phase 2 stripped
+        the TM as block-ownership-orphan. The probe
+        post-strip was CLEAN, the payload was missing the
+        answer, and the next dispatch re-shipped the
+        unanswered invalid call → 2013 brick.
+
+        Round-2's union puts X into the tracking set, the TM
+        is block-ownership-valid, and Phase 2 keeps it.
+
+        Asserts the NEGATIVE pin: probe stays CLEAN across the
+        full probe→heal arc, removed_orphan_indices is empty,
+        the TM keeps its identity and position."""
+        call_id = "call_8ed9e1771dca42348dfa7ca0"  # verbatim from incident
+        tm_uuid = "1c2a9d4f-3b71-4f0e-9a23-deadbeef0001"  # plain uuid
+        ai = AIMessage(
+            content="",
+            invalid_tool_calls=[_itc(call_id, name="do_thing", args="{broken")],
+        )
+        # LangChain assigns an id when none is given; force the
+        # plain-uuid id verbatim by constructing with id=...
+        tm = ToolMessage(
+            content="r",
+            tool_call_id=call_id,
+            name="do_thing",
+            id=tm_uuid,
+        )
+        msgs = [ai, tm, HumanMessage(content="hi")]
+
+        # Probe CLEAN — the TM answers X, the union put X into
+        # the tracking set, the strict-gateway adjacency is
+        # satisfied.
+        assert has_pairing_violations(msgs) is False, (
+            "round-2 negative pin: probe must NOT flag the live-"
+            "bug repair shape; if it does, the union is missing"
+            " at the probe site (W-A incomplete)."
+        )
+
+        # Heal — no-op (probe clean). removed_orphan_indices
+        # MUST stay empty (the round-1 regression strip is
+        # dead).
+        report = validate_and_heal_messages(msgs, instance_short="iid-wc-verbatim")
+        assert report.synthesized == []
+        assert report.removed_orphan_indices == []
+        assert report.removed_message_ids == []
+        assert report.scanned_count == 3
+
+        # TM retains its identity and position.
+        assert msgs[1] is tm
+        assert msgs[1].id == tm_uuid
+        assert msgs[1].tool_call_id == call_id
+
+    def test_live_bug_full_failure_arc_negative_pin(self):
+        """FULL FAILURE ARC — the negative pin on the dispatch
+        contract's \"probe → strip → retry-fail\" shape.
+
+        Asserts the round-1 failure arc is dead:
+
+          1. Pre-fix reproducer — ``AIMessage(tool_calls=[],
+             invalid_tool_calls=[X])`` + DB-repair-lane
+             ``ToolMessage(X)`` + intervening messages →
+             round-1 Phase 2 STRIPPED the TM as
+             block-ownership-orphan (the live bug).
+          2. Post-fix — round-2 union makes the TM
+             block-ownership-valid; the strip is dead.
+
+        Uses an intervening AIMessage after the TM to verify
+        the block-ownership rule's nearest-preceding-non-Tool
+        formulation (round-2, not round-1's prefix rule)
+        preserves the TM — the round-1 prefix rule ALSO kept
+        the TM (it had an earlier issuer, even if only in
+        invalid_tool_calls that round-1 ignored) so the live
+        bug was specifically the union miss at the
+        ownership-tracking refresh sites, not the block-
+        ownership formulation itself.
+        """
+        call_id = "call_8ed9e1771dca42348dfa7ca0"
+        ai_invalid = AIMessage(content="", invalid_tool_calls=[_itc(call_id)])
+        tm_answer = ToolMessage(
+            content="[repaired result]",
+            tool_call_id=call_id,
+            name="do_thing",
+            id="repair-lane-uuid-001",
+        )
+        ai_other = AIMessage(content="continued without that tool result")
+        msgs = [ai_invalid, tm_answer, ai_other]
+
+        # Heal — the TM stays, no synth (the AIMessage already
+        # has its answer in the adjacent block).
+        report = validate_and_heal_messages(msgs, instance_short="iid-failure-arc")
+
+        # Strip is dead — the round-1 regression cannot recur.
+        assert report.removed_orphan_indices == [], (
+            "round-2 negative pin: removed_orphan_indices must be "
+            "empty for the live-bug repair shape; the round-1 "
+            "strip recurred if this assertion fires. The union "
+            "at the ownership-tracking refresh site is broken."
+        )
+        assert report.synthesized == []
+        assert report.removed_message_ids == []
+        # TM still in the list, in its original position, with
+        # its identity preserved.
+        assert tm_answer in msgs
+        i_tm = msgs.index(tm_answer)
+        # Adjacency preserved — TM is right after the issuing
+        # AIMessage (the gateway's load-bearing rule).
+        assert msgs[i_tm - 1] is ai_invalid
+
+        # Probe clean — no violation to retry-fix.
+        assert has_pairing_violations(msgs) is False
+
+    # ---- Mixed-call — well-formed + invalid in one AIMessage ----
+
+    def test_mixed_valid_and_invalid_all_answered_is_clean(self):
+        """MIXED-CALL FIXTURE — well-formed and invalid calls
+        interleave in one AIMessage; both blocks are answered.
+
+        Per the MIXED_CALL_FINDING (report round-1): the
+        strict-gateway corpus (``daemon/llm_error_classifier``)
+        treats any ``role='tool'`` message as needing a
+        preceding message with ``tool_calls``. Empirically (and
+        per the OpenAI wire semantics), every emitted
+        ``tool_call_id`` — well-formed OR invalid — must be
+        paired with a ``ToolMessage`` answer in the
+        IMMEDIATELY-adjacent block. The corpus is SILENT on
+        ``invalid_tool_calls`` ordering specifically, so this
+        fixture documents the assumption: results for an AIMessage
+        carrying both fields are accepted in any order within
+        the adjacent block as long as each tc_id matches
+        (results are matched by id, not by position)."""
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[_tc("call_valid")],
+                invalid_tool_calls=[_itc("call_invalid")],
+            ),
+            # Invalid-call result FIRST (per wire emission order;
+            # invalid entries are emitted last in the AIMessage
+            # but the gateway matches by id, not position, so
+            # either order in the block is acceptable).
+            ToolMessage(content="r_invalid", tool_call_id="call_invalid", name="tool"),
+            ToolMessage(content="r_valid", tool_call_id="call_valid", name="tool"),
+            HumanMessage(content="hi"),
+        ]
+        assert has_pairing_violations(msgs) is False
+
+        report = validate_and_heal_messages(msgs, instance_short="iid-mixed")
+        assert report.synthesized == []
+        assert report.removed_orphan_indices == []
+
+    def test_mixed_valid_answered_invalid_missing_synthesizes_with_invalid_text(self):
+        """Mixed call where the invalid one is missing →
+        probe flags, heal synthesizes with the DISTINCT
+        PARTNER_SYNTH_INVALID_TEXT wording. The well-formed
+        call's TM (already in the block) stays; the invalid
+        call's placeholder is added at the END of the
+        adjacent block, immediately after the existing TMs.
+
+        Documents the MIXED_CALL assumption: results in the
+        adjacent block are matched by id, not by position;
+        one answered tc_id and one unanswered tc_id in the
+        SAME AIMessage is a partial-pairing violation per
+        the strict-gateway adjacency rule (every emitted
+        id — well-formed OR invalid — must have a tool
+        answer in the IMMEDIATELY-adjacent block)."""
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[_tc("call_valid", name="valid_tool")],
+                invalid_tool_calls=[_itc("call_invalid", name="bad_tool")],
+            ),
+            ToolMessage(content="r_valid", tool_call_id="call_valid", name="valid_tool"),
+            HumanMessage(content="hi"),
+        ]
+        # Probe flags — call_valid is answered but call_invalid
+        # is missing (the strict-gateway adjacency rule for
+        # BOTH fields).
+        assert has_pairing_violations(msgs) is True
+
+        report = validate_and_heal_messages(msgs, instance_short="iid-mixed-partial")
+        assert len(report.synthesized) == 1
+        synth = report.synthesized[0]
+        assert synth.tool_call_id == "call_invalid"
+        # Distinct text — invalid provenance.
+        assert synth.content == PARTNER_SYNTH_INVALID_TEXT
+        # Synth lands at the END of the adjacent block,
+        # immediately after the existing TM(valid) and
+        # BEFORE the HumanMessage (adjacency preserved).
+        assert msgs[1].tool_call_id == "call_valid"
+        assert msgs[2] is synth
+        assert msgs[2].content == PARTNER_SYNTH_INVALID_TEXT
+        assert msgs[3].content == "hi"
+
+    def test_mixed_valid_missing_invalid_missing_synthesizes_each_with_correct_text(self):
+        """Mixed call where BOTH are missing → probe flags,
+        heal synthesizes two placeholders, each with the
+        correct text for its provenance.
+
+        Documents the MIXED_CALL assumption one more time:
+        within the adjacent block, results are matched by id;
+        the synth ordering matches the AIMessage emission
+        order (tool_calls first, then invalid_tool_calls)
+        when appended to the END of the block — this is the
+        deterministic contract and matches the OpenAI wire
+        emission."""
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[_tc("call_valid", name="valid_tool")],
+                invalid_tool_calls=[_itc("call_invalid", name="bad_tool")],
+            ),
+            HumanMessage(content="hi"),
+        ]
+        report = validate_and_heal_messages(msgs, instance_short="iid-mixed-both-missing")
+        assert len(report.synthesized) == 2
+        synth_by_id = {s.tool_call_id: s for s in report.synthesized}
+        assert set(synth_by_id) == {"call_valid", "call_invalid"}
+        # call_valid → PARTNER_SYNTH_TEXT (well-formed
+        # provenance).
+        assert synth_by_id["call_valid"].content == PARTNER_SYNTH_TEXT
+        # call_invalid → PARTNER_SYNTH_INVALID_TEXT (invalid
+        # provenance, distinct wording).
+        assert synth_by_id["call_invalid"].content == PARTNER_SYNTH_INVALID_TEXT
+        # Names carried through (the synthesizer's
+        # ``tc_name_by_id`` walk covers both fields).
+        assert synth_by_id["call_valid"].name == "valid_tool"
+        assert synth_by_id["call_invalid"].name == "bad_tool"
+        # Both sit immediately after the AIMessage, in
+        # tool_calls-then-invalid order.
+        assert msgs[1].tool_call_id == "call_valid"
+        assert msgs[2].tool_call_id == "call_invalid"
+        assert msgs[3].content == "hi"
+
+    # ---- Malformed-args defensive coverage ----
+
+    def test_invalid_call_with_truly_malformed_args_still_pairs(self):
+        """An invalid_tool_call entry with a non-JSON-string
+        ``args`` (the wire-level reason the call was rejected)
+        still has a valid ``id`` and is paired by id only.
+        The malformed args are irrelevant to pairing — the
+        gateway matches results by id, not by args content.
+        """
+        ai = AIMessage(
+            content="",
+            invalid_tool_calls=[_itc("call_x", args="not even close to json {")],
+        )
+        msgs = [ai, ToolMessage(content="r", tool_call_id="call_x", name="tool")]
+
+        # Probe clean — the id paired, args irrelevant.
+        assert has_pairing_violations(msgs) is False
+
+        # Heal no-op.
+        report = validate_and_heal_messages(msgs, instance_short="iid-malformed-args")
+        assert report.synthesized == []
+
+    # ---- W-D belt — _is_partner_synth prefix exemption ----
+
+    def test_partner_synth_for_invalid_call_recognized_by_exemption(self):
+        """W-D belt — the prefix exemption covers invalid-call
+        placeholders too. A ``partner-synth-{tc_id}`` placeholder
+        minted for an invalid-call id (the round-2 addition)
+        must be recognized by ``_is_partner_synth`` so Phase 2
+        keeps it (block-ownership rule) even when the issuing
+        AIMessage is removed by a downstream surgery.
+
+        Without this recognition the healer's Phase 2 would
+        strip the placeholder as block-ownership-orphan on the
+        next dispatch (the perpetual-re-heal cycle the round-1
+        design warned about)."""
+        ai = AIMessage(content="", invalid_tool_calls=[_itc("call_x")])
+        msgs = [ai, HumanMessage(content="hi")]
+        report = validate_and_heal_messages(msgs, instance_short="iid-wd-belt")
+        assert len(report.synthesized) == 1
+        synth = report.synthesized[0]
+        # Belt — the prefix exemption still recognizes the
+        # round-2 minted placeholder.
+        assert _is_partner_synth(synth) is True

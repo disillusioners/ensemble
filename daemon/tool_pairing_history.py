@@ -137,6 +137,27 @@ PARTNER_SYNTH_TEXT = (
     "unavailable. Re-issue the tool call if still needed.]"
 )
 
+# ROUND-2 ADDITION — distinct placeholder text for tc_ids sourced from
+# ``AIMessage.invalid_tool_calls``. The OpenAI wire carries these
+# ids alongside ``tool_calls`` (they ARE emitted by the LLM but the
+# gateway marks the call malformed — typically a JSON-args parse error
+# or a schema-mismatched name). Strict gateways still require every
+# emitted ``tool_call_id`` to be paired with a ``ToolMessage`` answer
+# in the IMMEDIATELY-adjacent block — so the synth lands here. The
+# wording is HONEST about the cause (the call was rejected before
+# execution, so "result unavailable" would be misleading — no result
+# was ever attempted) and distinct enough to forensic-trace which
+# placeholder was minted against an invalid-call id vs a well-formed
+# call id. Sharing the same ``partner-synth-{tc_id}`` id format keeps
+# re-heal idempotent across the helper chain and lets
+# ``_is_partner_synth`` recognize both uniformly (W-D belt — exempt
+# synth ids answering untracked ids from block-ownership removal).
+PARTNER_SYNTH_INVALID_TEXT = (
+    "[Tool execution interrupted — invalid call rejected before "
+    "execution (malformed args / schema mismatch). Re-issue the "
+    "tool call with valid arguments if still needed.]"
+)
+
 
 @dataclass
 class ToolPairingHealReport:
@@ -185,29 +206,74 @@ class ToolPairingHealReport:
     scanned_count: int = 0
 
 
+def _tc_id_from_entry(entry) -> str | None:
+    """Extract the ``tool_call_id`` from one ``tool_calls`` or
+    ``invalid_tool_calls`` entry, defending against malformed shapes.
+
+    Both fields on ``AIMessage`` carry entries of the same shape
+    (``{"id": str, "name": str, "args": Any, "type": str}`` —
+    ``type`` is ``"tool_call"`` for well-formed calls and
+    ``"invalid_tool_call"`` for malformed ones). A malformed entry
+    (no ``id``, or a non-dict / non-object payload) returns ``None``
+    so the caller can continue. The helper is deliberately defensive:
+    ``invalid_tool_calls`` entries may carry malformed ``args``
+    (e.g. a raw string from a parse failure) but the ``id`` is what
+    pairs with the gateway, so extracting it is always safe.
+    """
+    if isinstance(entry, dict):
+        tc_id = entry.get("id")
+        return tc_id if tc_id else None
+    tc_id = getattr(entry, "id", None)
+    return tc_id if tc_id else None
+
+
 def _extract_tool_call_ids(msg: BaseMessage) -> list[str]:
     """Return the ``tool_call_id``s carried by ``msg`` as a list of str.
 
-    For ``AIMessage`` with non-empty ``tool_calls``: one id per entry
-    in ``msg.tool_calls`` (the dict shape ``{"id": str, ...}``).
+    For ``AIMessage``: the union of ids from BOTH ``msg.tool_calls``
+    AND ``msg.invalid_tool_calls`` — first-class citizens of pairing
+    semantics on the OpenAI wire. The strict-gateway corpus
+    (``daemon.llm_error_classifier.ToolPairingInvalidError.SIGNATURES``)
+    enforces that every emitted ``tool_call_id`` (well-formed or
+    malformed) must be paired with a ``ToolMessage`` answer in the
+    IMMEDIATELY-adjacent block; emitting both fields under one id set
+    keeps probe / heal / ownership-tracking symmetric so any consumer
+    of this helper sees the full pairing surface. Tool_calls are
+    emitted first (preserves order-of-emission; the OpenAI wire
+    returns them in tool_calls then invalid_tool_calls order, with
+    no semantic overlap — a single id is never in both fields).
+
     For ``ToolMessage``: ``[msg.tool_call_id]`` when present.
     For every other message type: empty list.
 
-    Defensive against malformed entries (non-dict tool_call rows):
+    Defensive against malformed entries (non-dict / object rows):
     a malformed entry contributes no id, the caller continues.
+
+    ROUND-2 — the previous iteration only read ``msg.tool_calls``,
+    leaving ``invalid_tool_calls`` entries invisible to the
+    ownership tracking set. A ``ToolMessage`` answering an
+    invalid-only ``AIMessage`` (the live bug shape, incident
+    03d7657f round 2 — ``call_8ed9e1771dca42348dfa7ca0`` lived
+    ONLY in ``invalid_tool_calls``) was misclassified as
+    block-ownership-orphan and STRIPPED from the payload, so the
+    next dispatch re-shipped the unanswered invalid call and the
+    strict gateway 2013-rejected again — the failure arc never
+    resolved.
     """
     if isinstance(msg, AIMessage):
-        tcs = getattr(msg, "tool_calls", None) or []
         ids: list[str] = []
-        for tc in tcs:
-            if isinstance(tc, dict):
-                tc_id = tc.get("id")
-                if tc_id:
-                    ids.append(tc_id)
-            else:
-                tc_id = getattr(tc, "id", None)
-                if tc_id:
-                    ids.append(tc_id)
+        # Well-formed calls first (order matches OpenAI wire emission).
+        for tc in (getattr(msg, "tool_calls", None) or []):
+            tc_id = _tc_id_from_entry(tc)
+            if tc_id:
+                ids.append(tc_id)
+        # Then malformed calls (the round-2 addition). Same id-extraction
+        # contract — a single malformed entry with no id contributes
+        # nothing and the walk continues.
+        for itc in (getattr(msg, "invalid_tool_calls", None) or []):
+            tc_id = _tc_id_from_entry(itc)
+            if tc_id:
+                ids.append(tc_id)
         return ids
     if isinstance(msg, ToolMessage):
         tc_id = getattr(msg, "tool_call_id", None)
@@ -215,9 +281,38 @@ def _extract_tool_call_ids(msg: BaseMessage) -> list[str]:
     return []
 
 
+def _extract_invalid_only_ids(msg: BaseMessage) -> set[str]:
+    """Return the set of ``tool_call_id``s sourced from
+    ``AIMessage.invalid_tool_calls`` ONLY (excludes
+    ``msg.tool_calls``).
+
+    Used by the synthesizer (Phase 1 in
+    :func:`validate_and_heal_messages`) to choose the right
+    placeholder text for a missing tc_id: a tc_id that was
+    emitted ONLY as invalid (the gateway rejected it before
+    execution) needs the distinct PARTNER_SYNTH_INVALID_TEXT
+    wording; a tc_id from ``tool_calls`` (the gateway accepted
+    it but the result was never delivered) uses the standard
+    PARTNER_SYNTH_TEXT.
+
+    Defensive against malformed entries (same contract as
+    :func:`_tc_id_from_entry`).
+    """
+    if not isinstance(msg, AIMessage):
+        return set()
+    ids: set[str] = set()
+    for itc in (getattr(msg, "invalid_tool_calls", None) or []):
+        tc_id = _tc_id_from_entry(itc)
+        if tc_id:
+            ids.add(tc_id)
+    return ids
+
+
 def _make_synth_tool_message(
     tc_id: str,
     tc_name: str = "",
+    *,
+    text: str = PARTNER_SYNTH_TEXT,
 ) -> ToolMessage:
     """Build a placeholder ``ToolMessage`` for an unanswered tc_id.
 
@@ -227,9 +322,19 @@ def _make_synth_tool_message(
     recognizes both this module's ``partner-synth-`` and the
     in-graph guard's ``pairing-synth-`` formats — re-heal across
     the helper chain stays idempotent.
+
+    The ``text`` keyword-only argument picks the placeholder body.
+    Default is :data:`PARTNER_SYNTH_TEXT` (the standard "result
+    unavailable" wording for a well-formed call whose result never
+    arrived). The synthesizer passes :data:`PARTNER_SYNTH_INVALID_TEXT`
+    when the missing tc_id was sourced from
+    ``AIMessage.invalid_tool_calls`` — the call was rejected before
+    execution, so the standard wording would mislabel the cause.
+    Callers that mint placeholders for well-formed calls should
+    omit ``text`` to preserve round-1 behavior.
     """
     return ToolMessage(
-        content=PARTNER_SYNTH_TEXT,
+        content=text,
         tool_call_id=tc_id,
         name=tc_name,
         id=f"partner-synth-{tc_id}",
@@ -385,6 +490,15 @@ def validate_and_heal_messages(
 
                 # Synthesize placeholders for missing tc_ids at the
                 # END of the adjacent block.
+                #
+                # ROUND-2 — the name lookup and synth text selection
+                # must walk BOTH ``tool_calls`` and
+                # ``invalid_tool_calls`` for full pairing coverage.
+                # An id sourced from ``invalid_tool_calls`` is
+                # rejected by the gateway before execution (malformed
+                # args / schema mismatch) but is still a first-class
+                # emitted id on the wire and needs its own
+                # ``ToolMessage`` answer in the adjacent block.
                 tc_name_by_id: dict[str, str] = {}
                 for tc in (msg.tool_calls or []):
                     if isinstance(tc, dict):
@@ -395,6 +509,32 @@ def validate_and_heal_messages(
                         tc_name_by_id[getattr(tc, "id", "") or ""] = (
                             getattr(tc, "name", "") or ""
                         )
+                # Same shape contract for invalid_tool_calls; a
+                # malformed entry (no id) contributes nothing, the
+                # walk continues. Names may be empty (the gateway
+                # sometimes cannot extract a name from a malformed
+                # payload) — the placeholder's ``name`` field stays
+                # ``""`` in that case, matching the well-formed
+                # empty-name case above.
+                invalid_ids = _extract_invalid_only_ids(msg)
+                for itc in (msg.invalid_tool_calls or []):
+                    tc_id = _tc_id_from_entry(itc)
+                    if tc_id:
+                        # Only overwrite if not already set by
+                        # ``tool_calls`` (defensive — a single id is
+                        # never in both fields per OpenAI wire
+                        # semantics, but the duplicate-key overwrite
+                        # keeps the dict well-formed even if some
+                        # future serializer ever produces overlap).
+                        if not tc_name_by_id.get(tc_id):
+                            if isinstance(itc, dict):
+                                tc_name_by_id[tc_id] = (
+                                    itc.get("name", "") or ""
+                                )
+                            else:
+                                tc_name_by_id[tc_id] = (
+                                    getattr(itc, "name", "") or ""
+                                )
                 missing = [
                     tc_id for tc_id in ai_tc_ids
                     if tc_id not in block_tc_ids
@@ -402,8 +542,27 @@ def validate_and_heal_messages(
                 if missing:
                     new_placeholders: list[ToolMessage] = []
                     for tc_id in missing:
+                        # Pick the synth text by id provenance —
+                        # ids from ``invalid_tool_calls`` get the
+                        # distinct PARTNER_SYNTH_INVALID_TEXT
+                        # wording (honest about the cause: the call
+                        # was rejected before execution, not
+                        # interrupted mid-execution); ids from
+                        # ``tool_calls`` use the standard
+                        # PARTNER_SYNTH_TEXT wording. This is
+                        # forensic-traceable in logs and round-1
+                        # callers see no behavior change because
+                        # the union set's ids are sourced from
+                        # ``tool_calls`` only when W-A is enabled.
+                        synth_text = (
+                            PARTNER_SYNTH_INVALID_TEXT
+                            if tc_id in invalid_ids
+                            else PARTNER_SYNTH_TEXT
+                        )
                         ph = _make_synth_tool_message(
-                            tc_id, tc_name_by_id.get(tc_id, "")
+                            tc_id,
+                            tc_name_by_id.get(tc_id, ""),
+                            text=synth_text,
                         )
                         new_placeholders.append(ph)
                         new_list.append(ph)
