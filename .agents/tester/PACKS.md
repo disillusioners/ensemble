@@ -2045,7 +2045,7 @@ Branch `fix/tool-pairing-invalid-tool-calls` @ `5869fcce0` (base `1ef37932c` = v
 | Pack | Invocation | Scope | Est. | Last Run | Status |
 |---|---|---|---|---|---|
 | `tph64` | `timeout 240 bash test/packs/tph64_unit_test.sh` | `tests/unit/tool_pairing_history/` (64: full_history_heal 54 + w2_wiring 10; 44 round-1 extend-only + 20 new) | <60s | _registered 2026-10-09_ | ⏳ pending |
-| `tool_pairing_original_symptom_v2` (G3-v2) | `timeout 300 bash test/packs/tool_pairing_original_symptom_v2_mock_test.sh` | `tests/integration/test_tool_pairing_original_symptom_v2.py` (4 arcs a-d: pre-fix-brick UNREACHABLE / W1 synth-for-invalid 1-invoke / W2 heal-retry identity-survival 2-invokes / verbatim live shape probe-clean) | <20s | _registered 2026-10-09_ | ⏳ pending |
+| `tool_pairing_original_symptom_v2` (G3-v2) | `timeout 300 bash test/packs/tool_pairing_original_symptom_v2_mock_test.sh` | `tests/integration/test_tool_pairing_original_symptom_v2.py` (4 arcs a-d: pre-fix-brick UNREACHABLE / W1 synth-for-invalid 1-invoke / W2 heal-retry identity-survival 2-invokes / verbatim live shape probe-clean) | <20s | PASS 2026-10-09 (4 passed, 1.50 s; v1 regression re-run green 4 passed 1.24 s) | ✅ pass |
 | rerun fleet note | round-1 packs rerun at 5869fcce0: graph_retry(19) compaction(130) d1_seam(9) injection(30) instance_tools(207) llm_error_classifier(125) job_queue_full(~2046; KNOWN 16 pre-existing d27a1ccc) dev_sh_static concurrency_atomic(99) gate_pins(5+perf-invalid) original_symptom v1(4) boot_smoke(v0.18.4 banner) | — | — | — | — |
 
 ---

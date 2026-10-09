@@ -703,3 +703,54 @@ Drives the REAL `daemon.graph.create_agent_node` via the same harness pattern as
 - **Result**: **PASS** — 4 passed, 9 warnings, pytest 1.24s, pack exit 0 (dual-layer timeout: `timeout 240s` pytest outer + `--timeout=210` per-test; both far from binding)
 - **Quick Fixes**: none needed — all four scenarios passed on the first execution (a pre-flight direct pytest run also passed 4/4 in 1.83s; the official captured run is the pack run)
 - **Report**: implementation notes — (1) monkeypatch target documented: the graph calls `has_pairing_violations` AS IMPORTED INTO `daemon.graph` (`daemon/graph.py:31` import, `:566` probe call inside `_ensure_full_history_pairing` def `:468`; the probe serves BOTH the agent-node W1 site `~:9049` and the W2 reactive-heal site `~:9107`, so one patch disables both heals — S1 therefore asserts 2 invocations with every received payload still poisoned and the rejection surfacing terminally). (2) S2 spec wording deviation pinned to the real contract: the W1 heal op for a mid-list unanswered call is SYNTHESIZE-PARTNER (placeholder `ToolMessage` id `partner-synth-{tc_id}` adjacent to the issuing AI), NOT orphan-AI removal (see `daemon/tool_pairing_history.py` heal ops; pinned in the test docstring). (3) S3's first rejection is call-count-based on an adjacency-clean post-W1 payload — the documented W2 motivating case ("gateway flags a violation the proactive W1 heal did not cover"). (4) Classification seam is production-faithful: the raw fake raises the canonical 2013 `BadRequestError` and the REAL `daemon.graph.classify_llm_errors` wrap converts it → `ToolPairingInvalidError` → W2 catch (mirrors `TestClassifierToW2Seam`). Registered in `.agents/tester/PACKS.md` under the TOOL-PAIRING FULL-HISTORY HEAL GATE section.
+
+
+---
+
+## Mock Test: tool-pairing original-symptom closure V2 — invalid_tool_calls shape (round-2 criterion, task 10816)
+
+### Metadata
+- **Created**: 2026-10-09
+- **Script**: `test/packs/tool_pairing_original_symptom_v2_mock_test.sh` (header modeled on `test/packs/tool_pairing_original_symptom_mock_test.sh`)
+- **Language**: Python (pytest, in-process)
+- **Status**: ACTIVE
+- **Commission gate**: round-2 item 2 — THE round-2 closure criterion
+
+### Configuration
+- **Timeout**: 240 s internal + `timeout 300` outer (dual-layer)
+- **Service/Mock Ports**: n/a — in-process strict-gateway fake LLM (no daemon boot, no ports)
+- **Cleanup**: pure in-process; pytest fixtures dispose everything
+
+### What It Tests
+The incident-TRUE round-2 shape: mid-list poison where the AIMessage carries `tool_calls=[], invalid_tool_calls=[X]`. Round-1 code stripped a DB-repair synth TM answering the invalid call → W2 retry re-shipped the unanswered X → 2013 loop (task 10816, empirically observed on v0.18.4).
+
+**Mock fidelity (round-2 mandate):** the strict gateway validates id-keyed immediate adjacency for BOTH fields — `tool_calls` AND `invalid_tool_calls` ids enter the same needed-set (union); every id must be answered by exactly one ToolMessage in the immediately-adjacent block; orphan TMs (answering nothing in the unioned set) are rejected. **Evidence tier (documented honestly in the test docstring, per the production docstring at `daemon/tool_pairing_history.py:230-247`):** the ROLE-level rule (a role='tool' message must answer a preceding tool-carrying message) is corpus-pinned via `daemon.llm_error_classifier.ToolPairingInvalidError` SIGNATURES; the ID-level rule (every emitted id, well-formed OR invalid, requires its own adjacent answer) is an EMPIRICAL OpenAI-wire assumption, NOT corpus-pinned. The v2 test docstring must cite both tiers with this exact framing.
+
+**Harness delta (surgical, from discovery):** the v1 harness `_tool_call_ids` (tests/integration/test_tool_pairing_original_symptom.py:154-163) iterates ONLY `tool_calls` — v2 MUST iterate BOTH fields (either extend the local helper or import `daemon.tool_pairing_history._extract_tool_call_ids`). Sentinel exemption (`_is_synth_sentinel`) already recognizes the shared `partner-synth-*`/`pairing-synth-*` formats — unchanged. Build v2 as a NEW file `tests/integration/test_tool_pairing_original_symptom_v2.py` importing/adapting the v1 `StrictGatewayLLM` (line 164) with the unioned id-extraction; do NOT modify the v1 file (it must stay green as round-1 regression).
+
+### Test Scenarios (arcs a-d)
+a. **Pre-fix-brick arc — UNREACHABLE assertion**: simulate round-1 behavior explicitly: construct the poisoned history (`AIMessage(tool_calls=[], invalid_tool_calls=[X])` mid-list, NO answering TM anywhere), then demonstrate the round-1 failure mechanism in-test WITHOUT production code: (i) a gateway that unions both fields REJECTS the un-healed poison (assert the 2013-shaped rejection fires on the raw poison — proving the gateway strictness that produced the live loop); (ii) the round-1-strip simulation: if one manually removes/strips an answering TM (as round-1 heal did), the payload STILL carries unanswered X → gateway rejects again (the loop mechanism). Then assert ON THIS BRANCH both are moot: `has_pairing_violations(poison)` is True → W1 heals before dispatch → the branch NEVER ships the un-healed shape. Assert UNREACHABLE: after running the real W1 path, no captured payload contains an unanswered invalid id.
+b. **W1 pre-heal synthesizes for the invalid call**: poisoned history → real `create_agent_node` dispatch → strict gateway (always-validate mode) receives a CLEAN payload: the invalid X answered by a synthesized partner TM (id `partner-synth-X`, content `PARTNER_SYNTH_INVALID_TEXT` — the invalid-flavored text, NOT `PARTNER_SYNTH_TEXT`); invoke count == 1; node returns OK.
+c. **W2 arc with identity survival**: gateway in fail-once-then-succeed mode; use a history whose poison W1 heals, and where the first invoke raises the 2013-shaped BadRequestError (unioned-signature). Assert: exactly 2 invokes; in the SECOND (retry) payload, the synthesized TM from the W2 heal is present BY IDENTITY (same `id` string, same position class — adjacent block) AND the DB-repair-style uuid-id TM (if present in the scenario) is NOT stripped; retry passes; node returns OK.
+d. **Verbatim live shape — probe CLEAN, no removal**: the exact incident tuple: `AIMessage(invalid_tool_calls=[{id:"call_8ed9e1771dca42348dfa7ca0", name:"do_thing", args:"{broken"}])` answered by `ToolMessage(tool_call_id="call_8ed9e1771dca42348dfa7ca0", id="1c2a9d4f-3b71-4f0e-9a23-deadbeef0001")` (plain uuid, post-repair-blob form), embedded mid-list in a ~600-msg history. Assert: `has_pairing_violations` is False (probe CLEAN — the uuid TM answers the invalid call under the union rule); after a full W1 pass the TM object is STILL present by identity (`is` check on the list element) — NOT stripped; gateway accepts the payload; invoke count == 1.
+
+### Success Criteria
+- [ ] (a) gateway rejects raw poison AND strip-simulation; branch ships no un-healed payload (unreachable assertion)
+- [ ] (b) W1 synth for invalid call, PARTNER_SYNTH_INVALID_TEXT, 1 invoke, OK
+- [ ] (c) exactly 2 invokes; synthesized TM identity-survives in retry payload; uuid TM not stripped; OK
+- [ ] (d) verbatim live tuple: probe CLEAN, zero removal, 1 invoke, OK
+- [ ] Both-fields adjacency validated by the gateway in every arc (union, not tool_calls-only)
+- [ ] Evidence-tier docstring (corpus-pinned ROLE / empirical ID) present in the test file
+- [ ] v1 file untouched; pack exits 0 under dual-layer timeout
+
+### Implementation Notes
+- Reuse v1 fixtures (`_tc`, `_make_pairing_invalid_bad_request`, `_make_poisoned_history` pattern); the ONLY gateway-code delta is the unioned id extraction.
+- Register the pack row (already scaffolded by pack-prep in the round-2 PACKS.md section) and flip this spec Status → ACTIVE after the run.
+- Commit pathspec-only: v2 pytest file + pack script + MOCK_TESTS.md + PACKS.md row status.
+
+### Last Run
+- **Date**: 2026-10-09 (v2 pack: `timeout 300 bash test/packs/tool_pairing_original_symptom_v2_mock_test.sh`)
+- **Worker Instance**: pairing-heal-2 worktree executor (branch `fix/tool-pairing-invalid-tool-calls`, `.venv` 3.14.7, in-process)
+- **Result**: PASS — 4 passed in 1.50 s (dual-layer 240 s/300 s; exit 0). Per-arc: (a) union gateway rejects raw invalid-only poison + round-1-strip simulation, v1-view negative control ACCEPTS (blind spot proven), real-W1 UNREACHABLE assertion holds (no captured payload carries an unanswered invalid id); (b) W1 synth `partner-synth-{X}` with PARTNER_SYNTH_INVALID_TEXT (invalid flavor asserted ≠ PARTNER_SYNTH_TEXT), 1 invoke, OK; (c) 2 invokes, 2013-shaped unioned-signature rejection asserted on the RAW raised BadRequestError, synth TM identity-survives into the retry payload (same id string + same Python object + adjacent block), uuid-id TM present-and-not-stripped by identity, OK; (d) verbatim live tuple (`call_8ed9e1771dca42348dfa7ca0` + uuid TM `1c2a9d4f-3b71-4f0e-9a23-deadbeef0001`) mid-list in ~600 msgs — probe CLEAN, TM + AI survive by identity (`is`), zero removal, 1 invoke, OK. v1 regression pack re-run GREEN (4 passed, 1.24 s).
+- **Quick Fixes**: 1 test-only quick-fix (<20 lines): arc (c) 2013-shape assertion moved from the `rejections` reason list (which stores only the walk reason, not the canonical body) to the RAW raised `BadRequestError` via a `CapturingGateway` subclass override — the canonical `_CANONICAL_2013` prefix rides the raised exception message only.
+- **Report**: RESULTS/2026-10-09-tool-pairing-original-symptom-v2-mock-test.md; deviation note documented in the arc-(c) test docstring (W1+W2 share the same idempotent heal helper — a W2-ONLY-minted synth is unreachable by construction; the pinned contract is the synth surviving the W2 cycle by identity)
