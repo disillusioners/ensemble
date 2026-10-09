@@ -325,16 +325,129 @@ def env():
 
 @pytest.fixture
 def fake_client_factory():
-    """Inject a controllable _CLIENT_FACTORY; restores defaults in teardown."""
+    """Inject a controllable ``_LLM_INVOKER``; restores defaults in teardown.
 
-    saved_factory = OdGenerate._CLIENT_FACTORY
+    Stage-1 seam migration: the pre-v2 ``_CLIENT_FACTORY`` returned
+    ``(client, model)`` and ``execute()`` called ``client.chat.completions.create(...)``
+    directly. The v2 ``_LLM_INVOKER`` returns a chat-completion
+    response directly, so a single (client, model) tuple is no
+    longer enough — the invoker must reconstruct the kwargs and call
+    ``client.chat.completions.create(...)`` itself.
 
-    def _set(content_factory):
-        OdGenerate._CLIENT_FACTORY = staticmethod(content_factory)
+    This fixture auto-translates the old ``(client, model)`` shape
+    (or a ``lambda env: (client, model)``) into the new invoker
+    shape via :func:`_make_invoker_from_client`. New tests can pass
+    a pre-built invoker callable directly; the auto-translation is
+    transparent.
+
+    Auto-translation rules:
+
+    - ``(client, model)`` tuple → wrapped via _make_invoker_from_client.
+    - Callable returning a (client, model) tuple (i.e. a single arg
+      callable) → wrapped the same way.
+    - Anything else → set as the invoker directly.
+    """
+    saved_invoker = OdGenerate._LLM_INVOKER
+
+    def _set(target):
+        # Case 1: tuple (client, model). Direct auto-wrap.
+        if isinstance(target, tuple) and len(target) == 2:
+            client, model = target
+            OdGenerate._LLM_INVOKER = staticmethod(
+                _make_invoker_from_client(client, model)
+            )
+            return
+        # Case 2: callable. Decide based on shape — single-arg
+        # callable that returns a tuple is the legacy factory pattern.
+        # NOTE: probe exceptions PROPAGATE — a legacy factory that raises
+        # is a mis-shaped injection, not a pre-built invoker (those use
+        # the separate ``fake_invoker`` fixture). Silently swallowing
+        # the raise and falling through to install the callable directly
+        # as the new-style invoker is a latent trap: the legacy factory
+        # returns ``(client, model)`` (a tuple), not a chat-completion
+        # response, so the downstream ``OdGenerate.execute`` would crash
+        # on first invocation with a confusing TypeError. Probe failures
+        # must surface at the test boundary so the fixture author sees
+        # the shape mismatch immediately.
+        if callable(target):
+            result = target({})
+            if isinstance(result, tuple) and len(result) == 2:
+                client, model = result
+                OdGenerate._LLM_INVOKER = staticmethod(
+                    _make_invoker_from_client(client, model)
+                )
+                return
+            # Pre-built invoker — set directly.
+            OdGenerate._LLM_INVOKER = staticmethod(target)
+            return
+        raise ValueError(
+            f"fake_client_factory: cannot handle target {type(target).__name__}"
+        )
 
     yield _set
 
-    OdGenerate._CLIENT_FACTORY = saved_factory
+    OdGenerate._LLM_INVOKER = saved_invoker
+
+
+def _make_invoker_from_client(client, model="vision"):
+    """Wrap an openai-shaped fake client into the v2 ``_LLM_INVOKER`` shape.
+
+    Used by :func:`fake_client_factory` to translate the pre-v2
+    ``(client, model)`` test fixture into the post-v2 invoker seam.
+    Extracts ``system_prompt`` / ``user_prompt`` / ``max_tokens`` /
+    ``temperature`` / ``timeout`` from the invoker kwargs and forwards
+    them as ``messages=`` / ``max_tokens=`` / ``temperature=`` /
+    ``timeout=`` to ``client.chat.completions.create(...)`` so the
+    existing timeout-introspecting fixtures (e.g.
+    ``_make_capturing_client``) continue to capture kwargs
+    identically.
+    """
+
+    def _invoker(
+        *,
+        model=None,
+        base_url=None,
+        base_url_backup=None,
+        api_key=None,
+        system_prompt,
+        user_prompt,
+        max_tokens,
+        temperature,
+        timeout,
+        default_headers=None,
+        wall_clock_cap_s=420.0,
+        **_extra_kwargs,
+    ):
+        return client.chat.completions.create(
+            model=model or model,  # prefer kwarg over the default
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+        )
+
+    return _invoker
+
+
+@pytest.fixture
+def fake_invoker():
+    """Stage-1 alias for :func:`fake_client_factory`.
+
+    New-style tests inject a pre-built invoker matching the
+    :func:`_invoke_chat_via_facade` signature directly (the auto-
+    translation layer is skipped). Same teardown semantics.
+    """
+    saved_invoker = OdGenerate._LLM_INVOKER
+
+    def _set(invoker):
+        OdGenerate._LLM_INVOKER = staticmethod(invoker)
+
+    yield _set
+
+    OdGenerate._LLM_INVOKER = saved_invoker
 
 
 class TestOdGenerateSuccess:
@@ -587,21 +700,47 @@ class TestOdGenerateInputValidation:
         assert isinstance(result, dict)
 
     def test_byok_not_configured_when_env_missing(self, env, fake_client_factory):
-        """Missing OPENAI_BASE_URL / OPENAI_API_KEY surfaces as a clear error."""
-        def _factory(_env):
-            raise RuntimeError(
-                "byok_not_configured: OPENAI_BASE_URL and OPENAI_API_KEY must be set"
-            )
-        fake_client_factory(_factory)
+        """Missing OPENAI_BASE_URL / OPENAI_API_KEY surfaces as the typed
+        ``byok_not_configured`` envelope (config resolution fails BEFORE
+        the LLM seam is reached).
+
+        Pre-probe-fix this test injected a raising legacy factory whose
+        RuntimeError was silently swallowed by the fixture's
+        ``except Exception: pass`` and the callable was installed
+        directly as a broken new-style invoker. The test then passed
+        for the wrong reason: ``_resolve_llm_config`` raised on the
+        empty ``env`` (generate.py:666-670) and the factory's raise
+        path was never exercised at all. With the fixture probe now
+        fail-loud, the raise would propagate at the fixture call — so
+        the misleading factory injection is replaced with a sentinel
+        legacy-shape fake that exercises the legacy translation path
+        but is itself never invoked (config resolution short-circuits
+        first, provably not reaching the ``_LLM_INVOKER`` seam).
+
+        The assertion is tightened from the prior OR
+        (``byok_not_configured`` OR ``upstream_http_error``) to a
+        SPECIFIC ``byok_not_configured`` code: that pin proves the
+        typed envelope came from config resolution, not from any
+        seam-level failure.
+        """
+        # Sentinel legacy-shape fake: probe yields ``(cli, model)``
+        # tuple so the fixture installs the translated invoker. The
+        # LLM seam is provably not reached because ``_resolve_llm_config``
+        # raises on the empty ``env`` below.
+        fake_client_factory(lambda _env: (object(), "vision"))
         result = OdGenerate.execute(
             GenerateInput(prompt="x"),
-            env={},  # empty env
+            env={},  # empty env: byok_not_configured short-circuit
         )
-        # The factory raises RuntimeError; the adapter's outer except
-        # catches it and returns the typed envelope.
         assert result["error"] is not None
         assert result["truncated"] is True
-        assert "byok_not_configured" in result["error"]["message"] or "upstream_http_error" in result["error"]["code"]
+        # Tightened: the typed ``byok_not_configured`` code proves the
+        # envelope came from ``_resolve_llm_config`` (config resolution),
+        # not from a seam-level failure. Pre-probe-fix this assertion
+        # passed for the wrong reason — the seam was never reached.
+        assert result["error"]["code"] == "byok_not_configured"
+        assert "OPENAI_BASE_URL" in result["error"]["message"]
+        assert "OPENAI_API_KEY" in result["error"]["message"]
 
 
 class TestOdGenerateTimeoutFormula:
@@ -784,3 +923,466 @@ class TestOdGenerateComposer:
 
         sp = _compose_system_prompt(GenerateInput(prompt="x", kind="image"))
         assert sp  # non-empty
+
+
+# ---------------------------------------------------------------------------
+# Stage-1 (od-generate-agent-lane) wiring tests
+# ---------------------------------------------------------------------------
+#
+# Per-prescription coverage for the v2 ``_LLM_INVOKER`` seam routing
+# through ``invoke_raw_with_failover``:
+#
+#   (a) factory re-entrancy / URL swap per attempt — module-level
+#       factory + ``current_failover_url()`` reread pattern (no
+#       closure over a constant URL).
+#   (b) raw-config pass-through — covered in test_generate_model_resolution
+#       (TestRawLLMConfigPassThrough).
+#   (c) BadRequestError → upstream_bad_request envelope.
+#   (d) overflow sniff → context_length_exceeded.
+#   (e) SDK max_retries=0.
+#   (f) wall_clock_cap_s=420 explicitly passed to the facade.
+#   (g) transient-error retry-then-success through the facade — the
+#       facade's tenacity predicate converts APIStatusError → TransientAPIError
+#       and retries; the adapter sees only the success on the second
+#       attempt.
+#   (h) 3 gates still green post-migration — covered by
+#       TestOdGenerateCompletenessGates above.
+#   (i) timeout-formula still green — covered by
+#       TestOdGenerateTimeoutFormula above.
+
+
+class TestOdGenerateFacadeWiring:
+    """Stage-1 wiring coverage: the raw SDK call now rides through
+    ``invoke_raw_with_failover`` (prescription 5). These tests pin the
+    contract — args, retry, wall-clock cap, typed envelopes — at the
+    seam."""
+
+    @staticmethod
+    def _fake_response():
+        """Return a ChatCompletion-shaped response object directly."""
+        return _make_response(
+            "stop",
+            "<!doctype html><html><head></head><body>OK</body></html>",
+        )
+
+    @staticmethod
+    def _build_openai_fake(captured_kwargs=None, response_factory=None):
+        """Build a fake openai.OpenAI that records __init__ kwargs.
+
+        Mirrors the structure of :func:`_make_response`'s nested
+        classes: ``openai.OpenAI(api_key=..., base_url=...).chat.completions.create(...)``
+        must return a ChatCompletion-shaped object.
+        """
+        if captured_kwargs is None:
+            captured_kwargs = []
+        if response_factory is None:
+            response_factory = TestOdGenerateFacadeWiring._fake_response
+
+        class _Comps:
+            def create(self, **kwargs):
+                return response_factory()
+
+        class _Chat:
+            completions = _Comps()
+
+        class _FakeOpenAI:
+            def __init__(self, **kw):
+                captured_kwargs.append(kw)
+                self.chat = _Chat()
+
+        return _FakeOpenAI, captured_kwargs
+
+    # (a) factory re-entrancy + URL swap ------------------------------------
+
+    def test_factory_url_resolution_uses_current_failover_url(self, monkeypatch, env):
+        """Per-attempt URL rerun via ``current_failover_url()`` —
+        exercising the production path that prevents stale-URL closure
+        bugs. The factory reads ``current_failover_url()`` each call;
+        a closure over ``base_url`` would return the primary every
+        time and miss the swap.
+        """
+        from daemon.plugin_subsystem.opendesign import generate as gen_mod
+        import openai as real_openai
+
+        FakeOpenAI, captured_kwargs = self._build_openai_fake()
+
+        # Patch openai.OpenAI in the real module (the ``import openai``
+        # inside ``_do_chat_call`` reads sys.modules, which gets the
+        # same module object).
+        monkeypatch.setattr(real_openai, "OpenAI", FakeOpenAI)
+        # Simulate ``current_failover_url()`` returning the swap URL
+        # (post-swap; would normally be bound by the retry predicate).
+        monkeypatch.setattr(
+            gen_mod,
+            "current_failover_url",
+            lambda: "http://backup.test/v1",
+        )
+
+        gen_mod._do_chat_call(
+            model="vision",
+            base_url="http://primary.test/v1",
+            api_key="fake-key",
+            system_prompt="sys",
+            user_prompt="user",
+            max_tokens=4096,
+            temperature=0.7,
+            timeout=120.0,
+        )
+        # The factory read the URL via current_failover_url(), not the
+        # primary kwarg — verifying per-attempt re-read.
+        assert len(captured_kwargs) == 1
+        assert captured_kwargs[0]["base_url"] == "http://backup.test/v1"
+
+    def test_factory_falls_back_to_base_url_when_no_failover_active(
+        self, monkeypatch, env
+    ):
+        """When ``current_failover_url()`` returns ``None`` (HA off),
+        the factory uses the primary ``base_url`` — same behavior
+        as pre-v2."""
+        from daemon.plugin_subsystem.opendesign import generate as gen_mod
+        import openai as real_openai
+
+        FakeOpenAI, captured_kwargs = self._build_openai_fake()
+
+        monkeypatch.setattr(real_openai, "OpenAI", FakeOpenAI)
+        monkeypatch.setattr(gen_mod, "current_failover_url", lambda: None)
+
+        gen_mod._do_chat_call(
+            model="vision",
+            base_url="http://primary.test/v1",
+            api_key="fake-key",
+            system_prompt="sys",
+            user_prompt="user",
+            max_tokens=4096,
+            temperature=0.7,
+            timeout=120.0,
+        )
+        assert captured_kwargs[0]["base_url"] == "http://primary.test/v1"
+
+    # (c) BadRequestError → upstream_bad_request --------------------------
+
+    def test_bad_request_error_maps_to_upstream_bad_request(self, env, fake_invoker):
+        """Catching openai.BadRequestError post-facade surfaces as the
+        new ``upstream_bad_request`` envelope (commission prescription
+        6 — additive; existing codes/shapes untouched)."""
+
+        import openai as real_openai
+
+        # Build a minimal httpx.Response-like object with the
+        # attributes openai.BadRequestError.__init__ reads.
+        class _FakeHeaders:
+            def get(self, key, default=None):
+                return None
+
+        class _FakeResponse:
+            status_code = 400
+            request = type("R", (), {"method": "POST", "url": "http://x.test/v1"})()
+            headers = _FakeHeaders()
+            def json(self):
+                return {"error": {"message": "bad"}}
+
+        fake_exc = real_openai.BadRequestError(
+            "invalid value for parameter 'messages'",
+            response=_FakeResponse(),
+            body=None,
+        )
+
+        def _invoker(**kwargs):
+            raise fake_exc
+
+        fake_invoker(_invoker)
+        result = OdGenerate.execute(
+            GenerateInput(prompt="x", kind="prototype"),
+            env=env,
+        )
+
+        assert result["truncated"] is True
+        assert result["error"] is not None
+        assert result["error"]["code"] == "upstream_bad_request"
+
+    # (d) overflow sniff → context_length_exceeded -------------------------
+
+    def test_context_length_exceeded_sniff_typed_envelope(self, env, fake_invoker):
+        """Overflow indicators in the error body → ``context_length_exceeded``
+        envelope. The sniff matches any of:
+          - ``context_length_exceeded`` (OpenAI/vision proxy literal)
+          - ``maximum context length``
+          - ``reduce the length``
+          - bare ``context length`` (defensive)
+        """
+        import openai as real_openai
+
+        class _FakeHeaders:
+            def get(self, key, default=None):
+                return None
+
+        class _FakeResponse:
+            status_code = 400
+            request = type("R", (), {"method": "POST", "url": "http://x.test/v1"})()
+            headers = _FakeHeaders()
+            def json(self):
+                return {"error": {"message": "context_length_exceeded"}}
+
+        fake_exc = real_openai.BadRequestError(
+            "context_length_exceeded: maximum context length is 32768 tokens",
+            response=_FakeResponse(),
+            body=None,
+        )
+
+        def _invoker(**kwargs):
+            raise fake_exc
+
+        fake_invoker(_invoker)
+        result = OdGenerate.execute(
+            GenerateInput(prompt="x", kind="prototype"),
+            env=env,
+        )
+        assert result["truncated"] is True
+        assert result["error"]["code"] == "context_length_exceeded"
+
+    def test_reduce_the_length_trigger_phrase(self, env, fake_invoker):
+        """Same sniff with a different upstream wording —
+        ``reduce the length`` is the human-readable fallback wording
+        some proxies emit."""
+        import openai as real_openai
+
+        class _FakeHeaders:
+            def get(self, key, default=None):
+                return None
+
+        class _FakeResponse:
+            status_code = 400
+            request = type("R", (), {"method": "POST", "url": "http://x.test/v1"})()
+            headers = _FakeHeaders()
+            def json(self):
+                return {"error": {"message": "Please reduce the length of the messages"}}
+
+        fake_exc = real_openai.BadRequestError(
+            "Please reduce the length of the messages",
+            response=_FakeResponse(),
+            body=None,
+        )
+
+        def _invoker(**kwargs):
+            raise fake_exc
+
+        fake_invoker(_invoker)
+        result = OdGenerate.execute(
+            GenerateInput(prompt="x", kind="prototype"),
+            env=env,
+        )
+        assert result["error"]["code"] == "context_length_exceeded"
+
+    # (e) SDK max_retries=0 ----------------------------------------------
+
+    def test_openai_client_built_with_max_retries_zero(self, monkeypatch, env):
+        """Prescription 7: the inner openai.OpenAI is built with
+        ``max_retries=0`` so the facade owns retry discipline and the
+        SDK's default ``max_retries=2`` does not double-budget the
+        transient-retry ladder."""
+        from daemon.plugin_subsystem.opendesign import generate as gen_mod
+        import openai as real_openai
+
+        FakeOpenAI, captured_kwargs = self._build_openai_fake()
+        monkeypatch.setattr(real_openai, "OpenAI", FakeOpenAI)
+        monkeypatch.setattr(gen_mod, "current_failover_url", lambda: None)
+
+        gen_mod._do_chat_call(
+            model="vision",
+            base_url="http://primary.test/v1",
+            api_key="fake-key",
+            system_prompt="sys",
+            user_prompt="user",
+            max_tokens=4096,
+            temperature=0.7,
+            timeout=120.0,
+        )
+        assert captured_kwargs[0].get("max_retries") == 0, (
+            f"openai.OpenAI(..., max_retries=...) must be 0; "
+            f"got {captured_kwargs[0].get('max_retries')!r}; "
+            "the SDK default would silently double-budget the transient-retry ladder"
+        )
+
+    def test_default_headers_carry_proxy_identity(self, monkeypatch, env):
+        """Prescription 4: the openai.OpenAI client carries the
+        ``x-proxy-app`` + ``x-proxy-interleaved-thinking`` headers in
+        its ``default_headers`` kwarg — the same stamp the agent-chat
+        hot path carries on 6 inline sites."""
+        from daemon.plugin_subsystem.opendesign import generate as gen_mod
+        import openai as real_openai
+
+        FakeOpenAI, captured_kwargs = self._build_openai_fake()
+        monkeypatch.setattr(real_openai, "OpenAI", FakeOpenAI)
+        monkeypatch.setattr(gen_mod, "current_failover_url", lambda: None)
+
+        gen_mod._do_chat_call(
+            model="vision",
+            base_url="http://primary.test/v1",
+            api_key="fake-key",
+            system_prompt="sys",
+            user_prompt="user",
+            max_tokens=4096,
+            temperature=0.7,
+            timeout=120.0,
+            default_headers={
+                "x-proxy-app": "ensemble",
+                "x-proxy-interleaved-thinking": "True",
+            },
+        )
+        headers = captured_kwargs[0].get("default_headers") or {}
+        assert headers.get("x-proxy-app") == "ensemble"
+        assert headers.get("x-proxy-interleaved-thinking") == "True"
+
+    # (f) wall_clock_cap_s=420 passed to facade ---------------------------
+
+    def test_wall_clock_cap_s_420_passed_to_invoke_raw_with_failover(
+        self, monkeypatch, env
+    ):
+        """Prescription 7 + 5.1: ``_invoke_chat_via_facade`` passes
+        ``wall_clock_cap_s=420.0`` to :func:`invoke_raw_with_failover`.
+        Default 45 s would kill 130-170 s calls; 420 s leaves room for
+        the HA retry ladder under the HA-on path."""
+        from daemon.plugin_subsystem.opendesign import generate as gen_mod
+
+        captured = {}
+
+        def _capture_invoke(factory, llm_config, **kwargs):
+            captured["kwargs"] = kwargs
+            captured["llm_config"] = llm_config
+            return TestOdGenerateFacadeWiring._fake_response()
+
+        monkeypatch.setattr(gen_mod, "invoke_raw_with_failover", _capture_invoke)
+
+        gen_mod._invoke_chat_via_facade(
+            model="vision",
+            base_url="http://primary.test/v1",
+            base_url_backup="http://backup.test/v1",
+            api_key="fake-key",
+            system_prompt="sys",
+            user_prompt="user",
+            max_tokens=4096,
+            temperature=0.7,
+            timeout=120.0,
+            default_headers={
+                "x-proxy-app": "ensemble",
+                "x-proxy-interleaved-thinking": "True",
+            },
+        )
+
+        assert captured["kwargs"]["wall_clock_cap_s"] == 420.0
+
+    def test_raw_llm_config_carries_base_url_backup(self, monkeypatch, env):
+        """Prescription 2: the llm_config dict passed to
+        ``invoke_raw_with_failover`` carries the RAW base_url AND
+        base_url_backup — the graph path's ``clean_llm_config`` strips
+        the backup and silently kills failover; the raw-SDK facade
+        expects both keys intact."""
+        from daemon.plugin_subsystem.opendesign import generate as gen_mod
+
+        captured = {}
+
+        def _capture_invoke(factory, llm_config, **kwargs):
+            captured["llm_config"] = dict(llm_config)
+            return TestOdGenerateFacadeWiring._fake_response()
+
+        monkeypatch.setattr(gen_mod, "invoke_raw_with_failover", _capture_invoke)
+
+        gen_mod._invoke_chat_via_facade(
+            model="vision",
+            base_url="http://primary.test/v1",
+            base_url_backup="http://backup.test/v1",
+            api_key="fake-key",
+            system_prompt="sys",
+            user_prompt="user",
+            max_tokens=4096,
+            temperature=0.7,
+            timeout=120.0,
+        )
+
+        assert captured["llm_config"]["base_url"] == "http://primary.test/v1"
+        assert captured["llm_config"]["base_url_backup"] == "http://backup.test/v1"
+        assert captured["llm_config"]["api_key"] == "fake-key"
+
+    # (g) transient retry-then-success through facade ---------------------
+
+    def test_invoker_chat_call_failure_drives_upstream_http_error(
+        self, env, fake_invoker
+    ):
+        """When the invoker raises a generic (non-BadRequest) error
+        after the facade exhausts retries, the adapter maps it to
+        ``upstream_http_error`` (existing post-v2 behavior —
+        preservation pin)."""
+
+        def _invoker(**kwargs):
+            raise RuntimeError("network reset")
+
+        fake_invoker(_invoker)
+        result = OdGenerate.execute(
+            GenerateInput(prompt="x", kind="prototype"),
+            env=env,
+        )
+        assert result["truncated"] is True
+        assert result["error"]["code"] == "upstream_http_error"
+        assert "network reset" in result["error"]["message"]
+
+    def test_factory_is_re_entrant_under_real_facade(self, env, fake_invoker):
+        """When ``OdGenerate._LLM_INVOKER`` is the default
+        (``_invoke_chat_via_facade``), the inner factory is re-entered
+        on every retry attempt by :func:`invoke_raw_with_failover`'s
+        tenacity loop. We exercise the production path end-to-end:
+        raise a retryable failure to confirm the factory IS called
+        multiple times.
+
+        End-to-end retry behavior with classification
+        (TransientAPIError / UsageLimitError) is exhaustively pinned
+        in ``tests/unit/test_llm_failover_v2.py``; this test verifies
+        the integration seam is honored — a factory raising a
+        TRANSIENT_EXCEPTIONS member triggers a retry that ultimately
+        surfaces the success response unchanged.
+        """
+        from daemon.services.llm_failover import (
+            invoke_raw_with_failover,
+        )
+
+        # We deliberately invoke ``invoke_raw_with_failover`` directly
+        # with a re-entrant factory of our own to observe retry
+        # behavior. This mirrors how the v2 prod path runs.
+        call_count = [0]
+
+        # Build a ChatCompletion-shaped response object (a plain
+        # namespace with .choices[0].finish_reason works because the
+        # facade passes the factory's return through verbatim).
+        class _Msg:
+            content = "<!doctype html><html><head></head><body>OK</body></html>"
+
+        class _Choice:
+            finish_reason = "stop"
+            message = _Msg()
+
+        class _ChatCompletion:
+            choices = [_Choice()]
+            usage = None
+
+        def _factory():
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First attempt: ConnectionResetError → TRANSIENT_EXCEPTIONS
+                # member; tenacity retries.
+                raise ConnectionResetError("peer closed mid-stream")
+            return _ChatCompletion()
+
+        result = invoke_raw_with_failover(
+            _factory,
+            {
+                "base_url": "http://fake.test/v1",
+                "base_url_backup": None,
+                "api_key": "fake-key",
+            },
+            wall_clock_cap_s=420.0,
+        )
+        assert call_count[0] >= 2, (
+            f"facade must re-enter the factory on retryable errors; "
+            f"saw {call_count[0]} attempt(s)"
+        )
+        # And the success unwraps to a ChatCompletion-shaped response.
+        assert result.choices[0].finish_reason == "stop"

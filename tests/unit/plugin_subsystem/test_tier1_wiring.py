@@ -96,7 +96,10 @@ class TestPluginBootScanWiring:
         registry = stub._plugin_registry
         assert registry is not None
         assert "opendesign" in registry
-        assert registry.skill_ids() == ("opendesign.list_systems",)
+        assert registry.skill_ids() == (
+            "opendesign.generate-pipeline",
+            "opendesign.list_systems",
+        )
         assert not registry.has_failures()
 
     def test_boot_scan_absent_root_degrades_to_no_plugins(self, monkeypatch, tmp_path) -> None:

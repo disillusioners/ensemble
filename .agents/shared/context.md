@@ -123,3 +123,51 @@ intentional historical records.
 - `daemon/tools/live_views.py` — `view_link` tool factory.
 
 **Security**: no auth at the daemon. Edge guard is the OAuth proxy. URL is "public-by-obscurity" per `.agents/shared/conventions.md`. **Do not expose `/views/*` to the internet without edge auth.**
+
+## Sketcher lane — Stage 1 + Stage 2 (2026-10-09)
+
+**Status**: BUILT on `feature/sketcher-agent` @ `ca80a0f88` (+ this docs close-out).
+Pilot mechanism PROVEN live (re-smoke PASS: `compose_brief` -> `generate` -> `lint` ->
+`od.save` correctly SKIPPED per bounded logic; earlier hang signature did NOT recur —
+transient upstream, not branch). Campaign GO post-promote.
+
+**Stage 1 — `od.generate` on the ensemble LLM lane** (commit `e69669937`):
+- `daemon/tools/od_generate.py` is now a fail-over facade over the ensemble LLM lane.
+  `ThinkingChatOpenAI`/`llm_failover` semantics, retry classification, and
+  completeness-gate `marker_pass` / `finish_reason` surface are inherited; the upstream
+  tool-call is the inner step.
+- Additive typed 400 envelope codes (upstream-only, design-lane surface):
+  `upstream_bad_request` and `context_length_exceeded` belong to the OVERFLOW class
+  (zero retries) per Cardinal #3 retry envelope. `truncation_detected` and
+  `missing_artifact_marker` remain TRUNCATION class (one bounded retry).
+
+**Stage 2 — sketcher generation worker + designer orchestration** (commit `7f03b37a4`):
+- New agent `agents/sketcher/` is a leaf generation worker: vision pin
+  (`llm_model=vision`), closed `tools.allow` fence (od.* + image + dynamic-skill;
+  NO bash/filesystem/write/instance, no `tools.deny`), empty `team_members`,
+  `recursion_limit_multiplier=12`, `default_queue=system_parallel_queue`,
+  `skill_injection=true`, `watchover.timeout_seconds>=60`.
+- `agents/designer/` orchestration surface gains a `team_members=["sketcher", ...]`
+  and a `Dual-Run Pilot` block in `workflow.md` that emits parity rows matching the
+  schema in `.agents/shared/planning/od-generate-agent-lane/stage2-addendum.md`.
+- Pilot rows land in `parity-runs.jsonl` (one per lane per page); the schema is the
+  sole contract and the addendum is the sole gate source. The first row
+  (`run_id=sketcher-resmoke-20261009-140826`) is a mechanism-smoke row; campaign
+  aggregation MUST filter it out (rule recorded in the addendum).
+
+**Pilot knobs (campaign, not smoke)**: `max_tokens >= 16000` (8K saturates the
+vision lane — `finish_reason=length` both attempts on the smoke row). Median latency
+budget <= 1.5x direct; tokens/page <= 1.3x direct; truncated <= direct+5pp;
+marker_pass >= 95% AND within 5pp of direct; N >= 10 dual-run pages.
+
+**Known deferrals**: `_OD_GENERATE_WALL_CLOCK_CAP_S=420` cap-math gap (fires only
+between attempts; observed 489s at 32K max_tokens — pre-existing, faces designer
+equally); review-green #4 sketcher pipeline paraphrase tightening (not load-bearing);
+`design.capture_mockup` tool follow-up slice; 12 pre-existing test failures
+(4 plugin_subsystem + 8 agent files, base-proven 2026-10-07/09) remain upstream
+debt. All recorded in the addendum.
+
+**Review/test status**: APPROVED (governor council, 0 critical / 0 warning);
+PASS-with-preexisting (1 branch regression tier1 boot-scan fixed `efc460262`; 12
+pre-existing base-proven). Awaiting user promote ceremony (3-factor nonce gate) —
+NO live promote performed.

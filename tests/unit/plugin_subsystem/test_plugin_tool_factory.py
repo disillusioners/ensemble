@@ -253,18 +253,18 @@ class TestToolInvocationRouting:
         class _Client:
             chat = _Chat()
 
-        saved_factory = OdGenerate._CLIENT_FACTORY
+        saved_factory = OdGenerate._LLM_INVOKER
 
-        def _factory(_env):
-            return _Client(), "vision"
+        def _factory(**_kwargs):
+            return _Client().chat.completions.create()
 
-        OdGenerate._CLIENT_FACTORY = staticmethod(_factory)
+        OdGenerate._LLM_INVOKER = staticmethod(_factory)
         try:
             # Pass an empty prompt — the adapter refuses BEFORE the LLM call.
             result = tool.invoke({"prompt": ""})
             assert result["error"]["code"] == "prompt_composition_failed"
         finally:
-            OdGenerate._CLIENT_FACTORY = saved_factory
+            OdGenerate._LLM_INVOKER = saved_factory
 
     def test_generate_full_success_through_factory_lane(self):
         """Sweep (F1-round-3): a COMPLETE generate response through the
@@ -310,12 +310,25 @@ class TestToolInvocationRouting:
         class _Client:
             chat = _Chat()
 
-        saved_factory = OdGenerate._CLIENT_FACTORY
-        OdGenerate._CLIENT_FACTORY = staticmethod(lambda _env: (_Client(), "vision"))
+        saved_factory = OdGenerate._LLM_INVOKER
+
+        def _invoker(**kwargs):
+            return _Client().chat.completions.create(
+                messages=[
+                    {"role": "system", "content": kwargs["system_prompt"]},
+                    {"role": "user", "content": kwargs["user_prompt"]},
+                ],
+                model=kwargs.get("model", "vision"),
+                max_tokens=kwargs.get("max_tokens", 64000),
+                temperature=kwargs.get("temperature", 0.7),
+                timeout=kwargs.get("timeout", 120.0),
+            )
+
+        OdGenerate._LLM_INVOKER = staticmethod(_invoker)
         try:
             result = tool.invoke({"prompt": "landing page", "kind": "prototype"})
         finally:
-            OdGenerate._CLIENT_FACTORY = saved_factory
+            OdGenerate._LLM_INVOKER = saved_factory
         assert result["html"] == complete_html
         assert result["finish_reason"] == "stop"
         assert result["truncated"] is False

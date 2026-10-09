@@ -1,0 +1,12 @@
+agent_id: sketcher
+skills:
+  - name: opendesign.generate-pipeline
+    version: "1.0.0"
+    auto_load: true
+    category: design
+    description: "Operational OD generation pipeline — compose, generate, gate check, bounded regenerate-on-truncation, lint, write-through; references-not-text discipline"
+  - name: opendesign.list_systems
+    version: "1.0.0"
+    auto_load: false
+    category: design
+    description: "Enumerate the 154 design systems the opendesign plugin carries (per the vendored design-systems tree)"

@@ -69,8 +69,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from daemon.plugin_subsystem.opendesign.ts_prompt_eval import TsPromptEvalError
+from daemon.services.llm_failover import (
+    current_failover_url,
+    invoke_raw_with_failover,
+)
 
-__all__ = ["OdGenerate", "GenerateInput", "GenerateOutput"]
+__all__ = ["OdGenerate", "GenerateInput", "GenerateOutput", "_do_chat_call",
+           "_invoke_chat_via_facade", "_PROXY_IDENTITY_HEADERS",
+           "_resolve_llm_config", "_OD_FAILOVER_INACTIVE_NOTE"]
 
 logger = logging.getLogger(__name__)
 
@@ -528,51 +534,301 @@ def _gate_html(html: str, finish_reason: str) -> Tuple[bool, Optional[str]]:
 # ---------------------------------------------------------------------------
 # LLM client (tier-1 proxy; same lane the daemon already uses)
 # ---------------------------------------------------------------------------
+#
+# Stage 1 of the od-generate-agent-lane plan: wire od.generate's raw SDK
+# call onto the ensemble LLM lane via the shared HA facade. Replaces the
+# pre-v2 single-shot ``openai.OpenAI(...).chat.completions.create(...)``
+# call with a module-level factory + ``invoke_raw_with_failover`` so the
+# call gets bounded retry + (when configured) primary→backup swap.
+#
+# Three things this section preserves from pre-v2:
+#
+#   1. **OPENAI_MODEL_VISION-first model resolution** — the purpose-bound
+#      design knob wins; the daemon's default-pool chat model
+#      (``OPENAI_MODEL``) is never read. See the comment at the
+#      resolution site for the 2026-10-07 designer-model-vision-fix arc.
+#   2. **Adaptive inner timeout formula** — ``max(120.0, max_tokens /
+#      370.0)``. Pinned by tests/unit/plugin_subsystem/test_opendesign_b_element.py
+#      at ~173 s (64K) and ~540 s (200K). 370 tok/s is the conservative
+#      divisor derived from the live 130-170 s observation at 64K tokens.
+#   3. **The 3 completeness gates** (empty / non-stop finish_reason /
+#      structural ``</html>``/``</body>`` marker) — those are applied
+#      AFTER the facade call returns; the facade owns retry, the adapter
+#      owns the gate verdict (the failure mode that caused the
+#      2026-10-06 2/2 live failure).
+#
+# Things this section ADDS in Stage 1:
+#
+#   4. **Per-attempt URL reread via ``current_failover_url()``** — the
+#      factory re-enters on every retry, and each attempt re-reads the
+#      target URL via the facade's thread-local. Capturing the primary
+#      URL in a closure would break failover (see module docstring of
+#      ``daemon.services.llm_failover``).
+#   5. **Proxy identity headers** (``x-proxy-app`` / ``x-proxy-interleaved-thinking``)
+#      — closes the raw-SDK parity gap that the agent-chat hot path
+#      already carries (6 inline ``default_headers`` sites; see
+#      ``daemon/compaction.py:2277-2278`` for the canonical stamp).
+#   6. **SDK max_retries=0** — the openai SDK's built-in retry is
+#      disabled; the facade owns retry discipline (otherwise the SDK's
+#      default ``max_retries=2`` would silently double-budget the
+#      transient-retry ladder and inflate the failure window).
+#   7. **wall_clock_cap_s=420.0** — the 130-170 s live observation +
+#      the 60 s cushion for transient retry backoff ≈ 230 s nominal,
+#      rounded up to 420 s for headroom under the HA-on path.
+#   8. **Typed 400-class envelopes** — ``upstream_bad_request`` for
+#      generic openai.BadRequestError; ``context_length_exceeded`` for
+#      the contextual-overflow sniff (matches the hot-path classifier's
+#      existing ``ContextLengthExceededError`` taxonomy).
+#
+# **Backup endpoint and HA-active status are runtime-environment
+# resolved (decision D3 stays open).** The facade's HA controller
+# activates whenever ``OPENAI_BASE_URL_BACKUP`` is visible in the
+# daemon's process environment; the .env-scoped reading of this
+# module is NOT authoritative for the running daemon. The daemon
+# inherits the shell environment at launch — even when the .env
+# omits ``OPENAI_BASE_URL_BACKUP``, an export in the launching
+# shell makes failover live. Evidence (2026-10-09 sandbox smoke):
+# LLM-HA primary→backup swap fired live; log
+# ``/tmp/sketcher-smoke-daemon.log`` line 1191 — ``daemon.services.llm_failover`` WARNING
+# ``[LLM-HA] secondary raw-SDK swap: primary=https://llm.ensem.dev/v1 -> backup=https://llm.daoduc.org/v1``
+# (controller was enabled on boot at line 338: primary=llm.ensem.dev/v1,
+# backup=llm.daoduc.org/v1). When the controller is configured, the
+# retry ladder splits between primary and backup; with no backup
+# visible to the daemon, retry runs against primary only — same
+# pre-v2 behavior modulo bounded retry. Cite
+# ``daemon/services/skill_embedding_service.py:468-474`` for the
+# endpoint-mismatch guard precedent: when a backup IS configured it
+# MUST serve the vision model (the design-generation knob), not the
+# chat model — mismatched-endpoint failover is wrong by design.
+#
+# **Single-shot invocation seam: ``_LLM_INVOKER``.** A class-level
+# staticmethod that runs the entire chat invocation — config resolution
+# → facade-wrapped API call → response. Default implementation
+# (``_invoke_chat_via_facade``) routes through ``invoke_raw_with_failover``
+# with the per-attempt URL reread. Tests override ``_LLM_INVOKER`` to
+# inject canned responses without touching the openai SDK or the facade.
+# The seam replaces the pre-v2 ``_CLIENT_FACTORY`` (which returned an
+# openai.OpenAI client); the existing 30+ tests are migrated
+# mechanically (see ``test_opendesign_b_element.py``).
 
 
-def _build_openai_client(env: Optional[Mapping[str, str]] = None):
-    """Build the tier-1 proxy client from OPENAI_* env vars.
+# Proxy identity headers — same stamp the agent-chat hot path carries
+# (compaction.py:2277 canonical hot-path stamp + keyword_extraction.py:370
+# + 4 other inline sites). The proxy uses
+# these to identify ensemble traffic and to enable interleaved thinking
+# mode on the vision BYOK lane. Missing them from a raw-SDK site is a
+# known parity gap that the Stage 1 wiring closes.
+_PROXY_IDENTITY_HEADERS: Dict[str, str] = {
+    "x-proxy-app": "ensemble",
+    "x-proxy-interleaved-thinking": "True",
+}
 
-    Returns an ``openai.OpenAI`` (sync) client. The non-streaming call
-    returns a ``ChatCompletion`` whose ``choices[0].finish_reason`` and
-    ``usage`` are read by the adapter's completeness gates. Tests mock
-    this client by passing a stub into :meth:`OdGenerate.execute`.
+# Per-call wall-clock cap for the facade (prescription: 420 s).
+# Default 45 s would kill 130-170 s calls; 420 s leaves room for the
+# HA retry ladder (3 transient + 2 timeout attempts + exponential-jitter
+# backoff).
+_OD_GENERATE_WALL_CLOCK_CAP_S: float = 420.0
 
-    The env var resolution is opt-in via ``env`` for testability; the
-    default reads ``os.environ``. The function reads:
+# Operators haven't configured ``OPENAI_BASE_URL_BACKUP`` in this
+# deployment — failover is INERT until that env var appears. The
+# docstring tag keeps the operational truth visible at the call site.
+_OD_FAILOVER_INACTIVE_NOTE = (
+    "OPENAI_BASE_URL_BACKUP unset on this deployment → "
+    "FailoverController.is_configured=False → every retry is against "
+    "primary only (bounded, not blind-failover)."
+)
 
-    - ``OPENAI_BASE_URL`` (the tier-1 proxy URL).
-    - ``OPENAI_API_KEY`` (the API key).
-    - ``OPENAI_MODEL_VISION`` (the design-generation model; default
-      ``vision``). The daemon's default-pool chat model env var
-      (``OPENAI_MODEL``) is deliberately NEVER read here — see the
-      comment at the resolution site.
 
-    Failures (missing keys, import errors) surface as
-    ``byok_not_configured`` so the calling agent sees a typed error.
+def _resolve_llm_config(env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+    """Resolve the raw ``llm_config`` dict the facade expects.
+
+    The facade's :func:`invoke_raw_with_failover` requires a RAW config
+    dict (``base_url`` / ``base_url_backup`` / ``api_key``). The graph
+    path's :func:`clean_llm_config` strips ``base_url_backup`` and
+    would silently kill failover — the facade reads the BACKUP directly
+    from the dict it receives, so we pass it through untransformed.
+
+    Returns:
+        Dict with keys ``base_url``, ``base_url_backup`` (None if unset),
+        ``api_key``, ``model``. The ``model`` field carries the
+        PURPOSE-BOUND design knob (``OPENAI_MODEL_VISION``); the daemon's
+        default-pool chat model ``OPENAI_MODEL`` is NEVER read here.
+
+    Raises:
+        RuntimeError: ``byok_not_configured`` envelope when
+            ``OPENAI_BASE_URL`` or ``OPENAI_API_KEY`` is missing.
     """
     src = env if env is not None else os.environ
     base_url = src.get("OPENAI_BASE_URL")
     api_key = src.get("OPENAI_API_KEY")
-    # 2026-10-07 designer-model-vision fix: the generation model is the
-    # PURPOSE-BOUND design knob (OPENAI_MODEL_VISION; .env sets it to
-    # ``vision`` — the BYOK design-generation model on the user's
-    # llm-supervisor-proxy), NEVER the daemon's default-pool chat
+    # Mirrors the 2026-10-07 designer-model-vision fix: the generation
+    # model is the PURPOSE-BOUND design knob (OPENAI_MODEL_VISION; .env
+    # sets it to ``vision`` — the BYOK design-generation model on the
+    # user's llm-supervisor-proxy), NEVER the daemon's default-pool chat
     # model (OPENAI_MODEL). The previous resolution read OPENAI_MODEL,
     # so the live v0.18.0 designer debut generated on ``agentic``
     # (settings-page-redesign/design/OD-LANE-FAILURE.md — the "upstream
     # timeout" attribution was wrong-model, not upstream capacity).
     model = src.get("OPENAI_MODEL_VISION", "vision")
+    # Backup URL is opt-in: when absent the facade's _RawFailoverShim
+    # builds with ``failover_controller=None`` and every retry hits the
+    # primary (bounded retry only; HA swap inert — see D3 open).
+    base_url_backup = src.get("OPENAI_BASE_URL_BACKUP") or None
     if not base_url or not api_key:
         raise RuntimeError(
             "byok_not_configured: OPENAI_BASE_URL and OPENAI_API_KEY must be set "
             "(per the project's LLM config; same lane the daemon already uses)"
         )
+    return {
+        "base_url": base_url,
+        "base_url_backup": base_url_backup,
+        "api_key": api_key,
+        "model": model,
+    }
+
+
+def _build_openai_client(env: Optional[Mapping[str, str]] = None):
+    """Legacy v1 seam — preserved for ``test_generate_model_resolution.py``.
+
+    Returns ``(openai.OpenAI(...), model)``. The model resolution is the
+    load-bearing 2026-10-07 fix; the client itself is constructed
+    directly (the v2 prod path goes through
+    :func:`_invoke_chat_via_facade` instead, leaving this seam for the
+    4 pinned regression tests only).
+
+    The env var resolution is opt-in via ``env`` for testability; the
+    default reads ``os.environ``.
+    """
+    cfg = _resolve_llm_config(env)
     try:
         import openai  # noqa: PLC0415 - imported here for lazy init
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(f"openai SDK not importable: {exc}") from exc
-    return openai.OpenAI(api_key=api_key, base_url=base_url), model
+    return openai.OpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"]), cfg["model"]
+
+
+def _do_chat_call(
+    model: str,
+    base_url: Optional[str],
+    api_key: Optional[str],
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    max_tokens: int,
+    temperature: float,
+    timeout: float,
+    default_headers: Optional[Dict[str, str]] = None,
+    max_retries: int = 0,
+) -> Any:
+    """Module-level chat-completion factory.
+
+    Constructed fresh on every retry attempt. URL is re-read via
+    :func:`current_failover_url` (a thread-local the facade updates
+    per attempt) so a primary→backup swap is observed by the next
+    attempt's client construction. Capturing the URL in a closure
+    would break failover (the stale-URL failure mode flagged in
+    :mod:`daemon.services.llm_failover`).
+
+    Mirror of ``daemon.services.skill_embedding_service._do_chat_call``
+    + ``daemon.services.snapshot_embedding_service._do_chat_call``;
+    the three factories share the per-attempt URL reread pattern. The
+    differences here: the model is the vision knob (not the chat
+    default), the request carries ``max_tokens``/``temperature``/``timeout``
+    (the generate-specific knobs), and the SDK's built-in retry is
+    disabled (``max_retries=0`` — the facade owns retry discipline).
+    The proxy identity headers ride on ``default_headers`` to close the
+    raw-SDK parity gap.
+    """
+    import openai  # noqa: PLC0415 - imported here for lazy init
+
+    url = current_failover_url() or base_url
+    client_kwargs: Dict[str, Any] = {
+        "api_key": api_key or "",
+        "base_url": url or None,
+        "max_retries": max_retries,
+    }
+    if default_headers:
+        client_kwargs["default_headers"] = dict(default_headers)
+    client = openai.OpenAI(**client_kwargs)
+    return client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout=timeout,
+    )
+
+
+def _invoke_chat_via_facade(
+    model: str,
+    base_url: Optional[str],
+    base_url_backup: Optional[str],
+    api_key: Optional[str],
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    max_tokens: int,
+    temperature: float,
+    timeout: float,
+    default_headers: Optional[Dict[str, str]] = None,
+    wall_clock_cap_s: float = _OD_GENERATE_WALL_CLOCK_CAP_S,
+) -> Any:
+    """Default implementation of :attr:`OdGenerate._LLM_INVOKER`.
+
+    Wraps :func:`_do_chat_call` in a closure factory and routes through
+    :func:`invoke_raw_with_failover` with ``wall_clock_cap_s`` passed
+    EXPLICITLY (the facade's default 45 s would kill 130-170 s calls).
+    The factory closure captures ONLY the per-call arguments (model,
+    prompts, knobs); the URL is re-read inside :func:`_do_chat_call`
+    on every retry via ``current_failover_url()`` — never captured.
+
+    Args:
+        model, base_url, base_url_backup, api_key: Resolved from
+            :func:`_resolve_llm_config`.
+        system_prompt, user_prompt: Composed upstream
+            (``_compose_system_prompt``).
+        max_tokens, temperature, timeout: The generate knobs.
+            ``timeout = max(120.0, max_tokens / 370.0)`` per the
+            pre-v2 formula (preserved; pinned by tests).
+        default_headers: Carries the proxy identity headers
+            (``x-proxy-app`` / ``x-proxy-interleaved-thinking``).
+        wall_clock_cap_s: Total wall-clock cap for the entire
+            facade cycle (default 420 s — calibrated above the
+            HA-on backoff envelope).
+
+    Raises:
+        Whatever :func:`invoke_raw_with_failover` surfaces after the
+        retry budget is exhausted. The caller (``OdGenerate.execute``)
+        catches ``openai.BadRequestError`` for the typed 400 envelopes
+        and ``Exception`` for the catch-all upstream envelope.
+    """
+    llm_config: Dict[str, Any] = {
+        "base_url": base_url,
+        "base_url_backup": base_url_backup,
+        "api_key": api_key,
+    }
+
+    def _factory() -> Any:
+        return _do_chat_call(
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout=timeout,
+            default_headers=default_headers,
+        )
+
+    return invoke_raw_with_failover(
+        _factory,
+        llm_config,
+        wall_clock_cap_s=wall_clock_cap_s,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -587,11 +843,23 @@ class OdGenerate:
     entry; :meth:`execute_dict` accepts a dict matching the Port's
     ``inputs_schema`` and returns the ``outputs_schema`` shape (for
     the plugin tool factory wiring).
+
+    **Stage-1 LLM lane.** :attr:`_LLM_INVOKER` is the single seam where
+    the chat-completion call enters. Default impl
+    (:func:`_invoke_chat_via_facade`) routes through the shared HA
+    facade (``invoke_raw_with_failover``) so every call gets bounded
+    retry + (when ``OPENAI_BASE_URL_BACKUP`` is set) primary→backup
+    failover. Tests override the seam via
+    :meth:`_set_test_hooks` — see
+    ``tests/unit/plugin_subsystem/test_opendesign_b_element.py`` for
+    the migration from the pre-v2 ``_CLIENT_FACTORY`` (the v1 seam
+    returned ``(openai.OpenAI, model)``; v2 returns the chat
+    completion directly).
     """
 
     # --- injection points for tests ---------------------------------------
 
-    _CLIENT_FACTORY = staticmethod(_build_openai_client)
+    _LLM_INVOKER = staticmethod(_invoke_chat_via_facade)
     _COMPOSER = staticmethod(_compose_system_prompt)
 
     @classmethod
@@ -600,8 +868,18 @@ class OdGenerate:
         the Port's ``outputs_schema`` dict.
 
         The ``env`` parameter is opt-in for tests; the default reads
-        ``os.environ``. ``client_factory`` and ``composer`` are
-        class-level injection points for tests (see :meth:`_set_test_hooks`).
+        ``os.environ``. ``_LLM_INVOKER`` and ``_COMPOSER`` are
+        class-level injection points for tests (see
+        :meth:`_set_test_hooks`).
+
+        The Stage-1 wiring routes the chat-completion call through
+        :func:`invoke_raw_with_failover` with
+        ``wall_clock_cap_s=420.0``. The SDK's built-in retry
+        (``max_retries=0``) is disabled so the facade owns the retry
+        discipline. Typed 400-class envelopes
+        (``upstream_bad_request`` / ``context_length_exceeded``) are
+        surfaced here when the facade exhausts its retry budget and
+        re-raises ``openai.BadRequestError`` unmodified.
         """
         if not isinstance(args.prompt, str) or not args.prompt:
             return cls._error_envelope(
@@ -611,16 +889,23 @@ class OdGenerate:
                 finish_reason="other",
             )
 
+        # Resolve the raw llm_config dict from env. Failures here
+        # surface as the typed ``byok_not_configured`` envelope (same
+        # shape as pre-v2).
         try:
-            client, model = cls._CLIENT_FACTORY(env)
-        except Exception as exc:  # noqa: BLE001 - any factory failure becomes a typed envelope
-            logger.warning("od.generate: client factory failed: %s", exc)
+            cfg = _resolve_llm_config(env)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("od.generate: config resolution failed: %s", exc)
             return cls._error_envelope(
                 "byok_not_configured",
                 f"client factory failed: {exc}",
                 details={"max_tokens": args.max_tokens},
                 finish_reason="other",
             )
+        model = cfg["model"]
+        base_url = cfg["base_url"]
+        base_url_backup = cfg["base_url_backup"]
+        api_key = cfg["api_key"]
 
         # Compose (F1: extraction is loud — a vendored source that cannot
         # be evaluated faithfully surfaces as a typed envelope instead of
@@ -636,29 +921,77 @@ class OdGenerate:
                 finish_reason="other",
             )
 
-        # Make the LLM call (non-streaming; surface finish_reason +
-        # usage). The retry discipline is the openai SDK's
-        # ``request_timeout`` plus ``max_retries`` (default 2); for
-        # this adapter we set ``timeout`` to the max_tokens-derived
-        # wall-clock budget. Derivation: the live lane observed 130-170s at
+        # Adaptive inner per-request timeout (preserved verbatim from
+        # pre-v2). Derivation: the live lane observed 130-170s at
         # 64K tokens (tools_note.md:49 + workflow.md:77), giving ~376-492 tok/s.
         # We use a CONSERVATIVE divisor 370 tok/s (64000/370 ~= 173s;
         # 200000/370 ~= 540s) with a 120s floor (a sub-120s budget is never
         # right for generation — the prior 60s floor was below the live
         # observation and would fire upstream_http_error on SUCCESSFUL calls).
+        # This per-request ``timeout`` guards against a single hanging
+        # request; ``wall_clock_cap_s=420`` on the facade is the
+        # retry-storm ceiling.
         timeout = max(120.0, args.max_tokens / 370.0)  # 370 tok/s conservative
         try:
-            response = client.chat.completions.create(
+            response = cls._LLM_INVOKER(
                 model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": args.prompt},
-                ],
+                base_url=base_url,
+                base_url_backup=base_url_backup,
+                api_key=api_key,
+                system_prompt=system_prompt,
+                user_prompt=args.prompt,
                 max_tokens=args.max_tokens,
                 temperature=0.7,
                 timeout=timeout,
+                default_headers=_PROXY_IDENTITY_HEADERS,
             )
-        except Exception as exc:  # noqa: BLE001 - any upstream failure becomes a typed envelope
+        except Exception as exc:  # noqa: BLE001 - any facade-exhausted failure becomes a typed envelope
+            # Lazy import — the openai SDK is an optional dep; tests
+            # that override ``_LLM_INVOKER`` may never import it.
+            try:
+                import openai  # noqa: PLC0415
+            except ImportError:  # pragma: no cover
+                openai = None  # type: ignore[assignment]
+            if openai is not None and isinstance(exc, openai.BadRequestError):
+                # Stage-1 typed 400-class envelope (commission override
+                # over the plan's "envelopes unchanged"). The openai SDK
+                # raises BadRequestError for any 400-class HTTP error on
+                # the FIRST occurrence — 400-class is NON-RETRYABLE in
+                # the facade's taxonomy, so the transient retry ladder
+                # never engages and the raw exception re-raises
+                # unmodified.
+                err_str = str(exc).lower()
+                if any(
+                    needle in err_str
+                    for needle in (
+                        "context_length_exceeded",
+                        "maximum context length",
+                        "reduce the length",
+                        "context length",
+                    )
+                ):
+                    logger.warning(
+                        "od.generate: context length exceeded: %s", exc
+                    )
+                    return cls._error_envelope(
+                        "context_length_exceeded",
+                        f"context length exceeded: {exc}",
+                        details={
+                            "max_tokens": args.max_tokens,
+                            "model": model,
+                        },
+                        finish_reason="other",
+                    )
+                logger.warning("od.generate: upstream BadRequestError: %s", exc)
+                return cls._error_envelope(
+                    "upstream_bad_request",
+                    f"upstream BadRequestError: {exc}",
+                    details={
+                        "max_tokens": args.max_tokens,
+                        "model": model,
+                    },
+                    finish_reason="other",
+                )
             logger.warning("od.generate: upstream call failed: %s", exc)
             return cls._error_envelope(
                 "upstream_http_error",
@@ -828,19 +1161,29 @@ class OdGenerate:
     def _set_test_hooks(
         cls,
         *,
-        client_factory=None,
+        llm_invoker=None,
         composer=None,
     ) -> None:
         """Inject test hooks (class-level; restore in tearDown).
 
-        The hooks let tests stub the OpenAI client and the composer
+        The hooks let tests stub the LLM invocation and the composer
         without monkey-patching the module globals. Tests should
-        restore the defaults in tearDown via the returned restore tuple.
+        restore the defaults in tearDown.
+
+        Stage 1 renaming: the pre-v2 ``client_factory`` kwarg was
+        replaced by ``llm_invoker``. The semantics shifted from "build
+        an openai.OpenAI client and return it" to "run the full chat
+        invocation and return the response" — the facade wrapping is
+        now internal to the default ``_LLM_INVOKER``. Tests that
+        need a canned response inject a callable matching the
+        :func:`_invoke_chat_via_facade` signature; the existing
+        ``fake_invoker`` helper in ``test_opendesign_b_element.py``
+        provides the canonical idiom.
         """
         saved: List[Any] = []
-        if client_factory is not None:
-            saved.append(("client_factory", cls._CLIENT_FACTORY))
-            cls._CLIENT_FACTORY = staticmethod(client_factory)
+        if llm_invoker is not None:
+            saved.append(("llm_invoker", cls._LLM_INVOKER))
+            cls._LLM_INVOKER = staticmethod(llm_invoker)
         if composer is not None:
             saved.append(("composer", cls._COMPOSER))
             cls._COMPOSER = staticmethod(composer)
