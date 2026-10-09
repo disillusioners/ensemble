@@ -2111,3 +2111,54 @@ Branch `feature/stage-freshness-guard` @ `1ed5f051` (6 commits over base `ac1bf7
 | Pack | Invocation (essentials) | Scope | Est. | Last Run | Status |
 |---|---|---|---|---|---|
 | `stage_freshness_guard` (registered 2026-10-05 — direct suite) | `timeout 300 bash tests/test_stage_freshness_guard.sh` | cn 0472b31f trap-family guard: stale/foreign-binary refusal + fresh-match writer→verifier round-trip + FE-touched-without-rebuild + blind-reuse/missing-sidecar + non-tip tree + argv-only `--allow-stale-stage` override + dirty-build real round-trip + legacy `git_dirty:1` vocabulary + malformed sidecars ×8 (missing/garbage per-field incl. balance + uniqueness gates) + tip-tag trap (refs/tags/latest ≠ tip) + shasum-less writer refusal + chmod-000 unreadable state + G3 FE-sidecar payload-exclusion guard | ~46s · Last run 2026-10-05 @ 1ed5f051: PASS 118/0 |
+
+## Completed commission — LIVE-VIEW PHASE 2 MERGE GATE @ 09e6b2e98 (2026-10-08) — verdict **PASS for merge** in RESULTS/2026-10-08-live-view-phase2-merge-gate.md
+
+Worktree `/home/nea/ensemble-src-wt-live-view-phase2` (branch `feature/live-view-phase2`, base `latest` @ 74b36b478; 11 files +2153, all `frontend/src/`). 5 workers, 0 re-dispatch failures, read-only (HEAD immobile; porcelain unchanged — tidier scratch waived, `.agents/**`-scoped). Dev claims independently reproduced EXACTLY: scoped 133/133 + tsc clean; full suite 3867/3871 with the 4 failures **adjudicated PRE-EXISTING at base** (byte-identical assertions + sha256-identical spec files base..lane → mechanistic innocence; 4 tests → QUARANTINE.md, fix commission recommended on latest). Link-hygiene matrix M1-M7 + modal B1-B4 proven at component AND real-browser layers (daemon-less Playwright via the repo's orphaned proxy.conf.mock.json path, artifacts /tmp/lv2-e2e/); iframe sandbox exactly `allow-scripts`.
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `lv2_scoped_unit` (ad-hoc) | frontend jest: 4 LV2 spec paths + frontend-local tsc --noEmit | 4 new LV2 specs (matcher/dialog/service/chip) + typecheck | <1 min | 2026-10-08 @ 09e6b2e98 | ✅ PASS 133/133 + tsc 0 errors (8s + 8s) |
+| `lv2_full_suite` (ad-hoc) | frontend `npm test` (jest, 112 suites) | full FE unit suite | ~30s | 2026-10-08 @ 09e6b2e98 | ✅ PASS-with-quarantine 3867/3871 (0 new; 21.5s) |
+| `lv2_base_adjudication` (ad-hoc) | /tmp/lv2-base-wt @ 74b36b478 (throwaway worktree, hardlink node_modules; removed after) | 2 failing spec files at base | <1 min | 2026-10-08 | ✅ ADJUDICATED-PRE-EXISTING 4/4 byte-identical (6.2s) |
+| `lv2_e2e_probe` (ad-hoc, /tmp/lv2-e2e/ retained) | Playwright vs lane ng serve :14999 + node mock :10080 (proxy.conf.mock.json) | matrix M1-M7 + modal B1-B3/B2b in real chromium | ~14 min incl. boot | 2026-10-08 @ 09e6b2e98 | ✅ E2E-PROVEN 1/1 (10.9s test; B4 during-load covered at component layer) |
+
+
+## Completed commission — COMPACTION NEVER-BLOCKED FIX GATE @ 55176cbe7 (2026-10-08) — verdict **GATE PASS** in RESULTS/2026-10-08-compaction-never-blocked-gate.md
+
+Worktree `/home/nea/ensemble-src-wt-compaction-never-blocked` (branch `fix/compaction-never-blocked`, base `latest` @ c600af60d; 16 files +3914/−311, all compaction-scoped). 7 workers, 0 re-dispatches, read-only (HEAD immobile start=end). 9/9 commissioned matrix items PASS via independent probes (639-replica floor 639→321 w/ ceil(N/2)+snap; under-budget zero-drop stamp-only; escalation N=3 growth-gated 0.95→0.80 1h-sticky incl. real-row SQLite write/read-back + legacy-inert double-proof; quiescence skip preserved; summarization path + ladder order tracer-proven). ensure.md Core scoped-in: compaction pack + concurrency lane + dev.sh static.
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `compaction_unit_test` (registered) | test/packs/compaction_unit_test.sh | 22-file authoritative compaction-scoped set (incl. NEW tests/unit/test_compaction_never_blocked.py, 40 tests) | ~1 min | 2026-10-08 @ 55176cbe7 | ✅ PASS **781/0/0 in 43.45s** (exact expected baseline; standalone file 40/0 in 0.85s) |
+| `concurrency_atomic_unit_test` (registered; ensure.md Core #2/#3 lane insurance) | test/packs/concurrency_atomic_unit_test.sh | escalation-write-path lane insurance | ~70s | 2026-10-08 @ 55176cbe7 | ✅ PASS 99P/0F/74S in 65.26s (+1P vs 98P baseline, branch-unattributable — 0/13 pack files diffed base..HEAD; 99P previously observed 2026-10-05) |
+| ad-hoc probes (d)(C1)(C2)(h)(i)(a)(b) | /tmp/gate-compaction/ (probe scripts + outputs retained) | independent behavioral validation, production seams driven | <1 min each | 2026-10-08 @ 55176cbe7 | ✅ 16/16 sub-assertions + C2 real-row cross-process read-back PASS |
+
+
+## Completed commission — LIVE-VIEWS PHASE 1 MERGE GATE @ 4f23313c2 (2026-10-07) — verdict **PASS for merge** in RESULTS/2026-10-07-live-views-phase1-merge-gate.md
+
+Worktree `/home/nea/ensemble-src-wt-live-views` (branch `feature/live-views`, base `latest` @ c600af60d; 23 files +4479/−27). 9 workers, 0 re-dispatches, read-only (0 commits). Independent behavioral gate after 3 static security reviews: **666 passed / 0 branch-caused failures** (2 pre-existing project_manager prompt-xref failures A/B-proven at base → quarantined), **125/125 edge-pack scenarios** (traversal/TOCTOU behavioral proof, uniform-404 envelope diff, MIME map, 32 MiB cap inclusive-at-cap, view_link 20/20, visibility matrix 6/6 via real factory, registry/M11 9/9), bonus sandbox-boot smoke PASS. Findings: 2 should-fix post-merge (M11 message root-name; `CATEGORY_MODULES["view-views"]` boot-warning row) + 3 nits — none gating.
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `lv_unit` (ad-hoc) | tests/unit/{routers,services,tools}/test_live_views_*.py + tests/unit/config/test_live_views_config.py | 174 live-views unit | <1 min | 2026-10-07 @ 4f23313c2 | ✅ PASS 174/174 (8.5s; dev "174 post-T1" reproduced) |
+| `lv_pins` (ad-hoc) | test_upgrade_registration.py + test_attestation_registration.py + test_maintenancer_spawn_resolves_tools.py + test_service_tool_flag_off_byte_identical.py (default addopts) | tool-registry pins | ~1 min | 2026-10-07 @ 4f23313c2 | ✅ PASS 21+24+13 passed; byte-identical 9-deselected (by-design default state) |
+| `lv_integration` (ad-hoc) | test_service_tool_flag_off_byte_identical.py -m integration | 9 integration-deselected | <1 min | 2026-10-07 @ 4f23313c2 | ✅ PASS 9/9 (5.5s; incl. privileged-category-set pin) |
+| `lv_core_touched` (ad-hoc) | 13 suites: tool pins ×2 + test_tool_filter + test_registry + config ×3 + routers/defer ×2 + manager ×2 + tmp_image_store ×2 | core-files regression (config/api/manager/_tool_registry/instance/tmp_image_store) | ~1 min | 2026-10-07 @ 4f23313c2 | ✅ PASS-effectively 425/427 (2 pre-existing base-attributed prompt-xref failures → QUARANTINE.md) |
+| `lv_b1_edge` (ad-hoc, /tmp harness — retained at /tmp/lv_b1_meta/) | real router+service TestClient | 48 traversal/isolation/uniform-404 scenarios incl. behavioral TOCTOU | ~1 min | 2026-10-07 @ 4f23313c2 | ✅ PASS 48/48, zero leaks; 1 nit (LF→Starlette default 404 envelope) |
+| `lv_b2_edge` (ad-hoc, /tmp) | real router+service | 42 content-typing/serving/fd-read scenarios; 32 MiB cap truth table | <1 min | 2026-10-07 @ 4f23313c2 | ✅ PASS 42/42; cap inclusive-at-cap/404-above (code+tests+docs agree) |
+| `lv_b3_edge` (ad-hoc, /tmp) | real create_instance_tools + _apply_tool_filter + meta.json | view_link 20 + visibility matrix 6 agents | ~1 min | 2026-10-07 @ 4f23313c2 | ✅ PASS 26/26; should-fix CATEGORY_MODULES row (boot-log noise, runtime correct) |
+| `lv_b4_edge` (ad-hoc, /tmp) | real LiveViewsConfig→service→router | registry 8.1-8.7 + M11 9.1-9.2 | <1 min | 2026-10-07 @ 4f23313c2 | ✅ PASS 9/9; should-fix M11 message root-name |
+| `lv_sandbox_smoke` (ad-hoc, /tmp) | real daemon boot (ensemble_sandbox PG + ENSEMBLE_DATA_DIR/ENSEMBLE_CONFIG overrides) | /views/livez shape + artifact round-trip + teardown | ~1 min | 2026-10-07 @ 4f23313c2 | ✅ PASS (bonus leg; livez names-only, sha-identical round-trip) |
+
+
+## Completed commission — DESIGNER-MODEL-VISION VERIFICATION @ 806ba42c9 (2026-10-07) — verdict **SYMPTOM DEAD** in RESULTS/2026-10-07-designer-model-vision-verification.md
+
+Fix worktree `/home/nea/ensemble-src-wt-designer-model-vision-fix` (branch `fix/designer-model-vision`, 2 files: generate.py resolution + NEW pinned suite); BASE throwaway `/tmp/ens-base-verify` @ `c600af60d` (removed+pruned post-gate). 7 workers, 0 re-dispatches, read-only (0 commits). Gate: live env shape `OPENAI_MODEL=agentic`+`OPENAI_MODEL_VISION=vision` → resolves **`vision`** at real seam `generate.py:565` (consumed at `chat.completions.create` :652); negative control 2F/2P at base (`assert 'agentic' == 'vision'`); 4 plugin-dir failures base-identical (pre-existing); model-config 4-file set 101P/0F at BOTH commits (dev claim "90P/1F" referenced a different set — no delta). New lesson: foreign-cwd import trap (LESSONS/2026-10-07-worktree-foreign-cwd-import-trap.md).
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `dmv_pinned_unit_test` (ad-hoc) | tests/unit/plugin_subsystem/test_generate_model_resolution.py | 4 pinned: live-leak-shape / never-inherit / knob-honored / meta-pin | <1 min | 2026-10-07 @ 806ba42c9 | ✅ PASS 4/4 (0.44s); base leg 2F/2P = sensitivity PROVEN |
+| `dmv_seam_probe` (ad-hoc, /tmp) | real `_build_openai_client` via `OdGenerate._CLIENT_FACTORY`, sha256-guarded | 3 env shapes incl. live failure shape | <1 min | 2026-10-07 @ 806ba42c9 | ✅ PASS 3/3 — agentic+vision → `vision`; fallback `vision`; custom passthrough |
+| `plugin_dir` (registered) | tests/unit/plugin_subsystem/ | 567 collected (563 + 4 new pinned) | ~1 min | 2026-10-07 @ 806ba42c9 | ✅ PASS-effectively 563/567 (4 pre-existing, base-identical @ c600af60d, ledger families unchanged) |
+| `dmv_modelcfg_unit_test` (ad-hoc) | test_llm_config_override.py + test_llm_allowed_models_precedence.py + test_compaction_model_config.py + test_scripted_chat_model.py | 101 model-config items | <1 min | 2026-10-07 @ 806ba42c9 AND @ c600af60d | ✅ PASS 101/0 both commits (dev "90P/1F" claim = different set; no base→HEAD delta) |

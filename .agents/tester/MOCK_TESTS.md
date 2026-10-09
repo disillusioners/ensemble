@@ -754,3 +754,23 @@ d. **Verbatim live shape — probe CLEAN, no removal**: the exact incident tuple
 - **Result**: PASS — 4 passed in 1.50 s (dual-layer 240 s/300 s; exit 0). Per-arc: (a) union gateway rejects raw invalid-only poison + round-1-strip simulation, v1-view negative control ACCEPTS (blind spot proven), real-W1 UNREACHABLE assertion holds (no captured payload carries an unanswered invalid id); (b) W1 synth `partner-synth-{X}` with PARTNER_SYNTH_INVALID_TEXT (invalid flavor asserted ≠ PARTNER_SYNTH_TEXT), 1 invoke, OK; (c) 2 invokes, 2013-shaped unioned-signature rejection asserted on the RAW raised BadRequestError, synth TM identity-survives into the retry payload (same id string + same Python object + adjacent block), uuid-id TM present-and-not-stripped by identity, OK; (d) verbatim live tuple (`call_8ed9e1771dca42348dfa7ca0` + uuid TM `1c2a9d4f-3b71-4f0e-9a23-deadbeef0001`) mid-list in ~600 msgs — probe CLEAN, TM + AI survive by identity (`is`), zero removal, 1 invoke, OK. v1 regression pack re-run GREEN (4 passed, 1.24 s).
 - **Quick Fixes**: 1 test-only quick-fix (<20 lines): arc (c) 2013-shape assertion moved from the `rejections` reason list (which stores only the walk reason, not the canonical body) to the RAW raised `BadRequestError` via a `CapturingGateway` subclass override — the canonical `_CANONICAL_2013` prefix rides the raised exception message only.
 - **Report**: RESULTS/2026-10-09-tool-pairing-original-symptom-v2-mock-test.md; deviation note documented in the arc-(c) test docstring (W1+W2 share the same idempotent heal helper — a W2-ONLY-minted synth is unreachable by construction; the pinned contract is the synth surviving the W2 cycle by identity)
+
+## Sandbox-Boot Smoke: Live-Views /views Subsystem (2026-10-07)
+
+### Metadata
+- **Created**: 2026-10-07
+- **Script**: ad-hoc `/tmp/lv_c/` recipe (not retained; recipe preserved in LESSONS/2026-10-07-live-views-merge-gate.md §1)
+- **Language**: Bash + curl (real daemon boot)
+- **Status**: PASS (bonus leg of the live-views Phase 1 merge gate; see RESULTS/2026-10-07-live-views-phase1-merge-gate.md)
+
+### Configuration
+- **Timeout**: 120 s boot wrapper; ~25 s total wall
+- **Service Port**: free port >10000 (14321 used; verified via `ss -ltn` before/after) — NEVER 8079/8088
+- **DB**: forced `POSTGRES_DB=ensemble_sandbox` (convention from scripts/upgrade/lib.sh:472), created/dropped via `sudo -n -u postgres psql`
+- **Cleanup**: port verified free, no orphan `-m daemon` procs (`/proc/*/cmdline` walk), DB dropped, scratch removed
+
+### What It Tests
+- Real-boot wiring: config.yaml/env → LiveViewsConfig → router mounted pre-SPA-catch-all (daemon/api.py:3262)
+- `/views/livez` envelope: names+enabled only, zero filesystem-path leakage (regex-audited)
+- Artifact round-trip: 200, correct content-type, nosniff, sha256-identical body
+- Uniform 404 at real boot (unknown root / traversal / unknown path)
