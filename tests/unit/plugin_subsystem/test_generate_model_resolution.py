@@ -119,8 +119,8 @@ class TestRawLLMConfigPassThrough:
 
 class TestProxyIdentityHeadersConstant:
     """Stage 1 (prescription 4): proxy identity headers carry the
-    same stamp the agent-chat hot path rides (snapshot_embedding_service
-    + 6 inline sites). Verify the constant holds the exact header
+    same stamp the agent-chat hot path rides (compaction.py:2277
+    + 5 inline sites). Verify the constant holds the exact header
     names/values the proxy expects."""
 
     def test_x_proxy_app_header_name_and_value(self):

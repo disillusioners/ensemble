@@ -602,8 +602,8 @@ def _gate_html(html: str, finish_reason: str) -> Tuple[bool, Optional[str]]:
 
 
 # Proxy identity headers — same stamp the agent-chat hot path carries
-# (snapshot_embedding_service.py header pair + compaction.py:2277 +
-# keyword_extraction.py:370 + 5 other inline sites). The proxy uses
+# (compaction.py:2277 canonical hot-path stamp + keyword_extraction.py:370
+# + 4 other inline sites). The proxy uses
 # these to identify ensemble traffic and to enable interleaved thinking
 # mode on the vision BYOK lane. Missing them from a raw-SDK site is a
 # known parity gap that the Stage 1 wiring closes.
