@@ -1007,3 +1007,229 @@ class TestW2InvalidShapeHeal:
         assert "messages" in result
         assert len(result["messages"]) == 1
         assert result["messages"][0].content == "OK after W1 heal"
+
+    @pytest.mark.asyncio
+    async def test_w2_blind_retry_leaves_invalid_shape_payload_intact(
+        self, monkeypatch
+    ):
+        """W2 catch's unioned-validator no-op path (round-2 follow-up).
+
+        PINS the literal commissioned test-minimum arc "2013 → heal
+        → retry passes" at the W2 call site with the invalid-shape
+        repair payload. The W1-alone pin above + the payload-agnostic
+        classifier→W2 seam test cover the two pieces separately;
+        this test ties them together end-to-end:
+
+            1. State carries the W-C live repair shape — an
+               ``AIMessage(tool_calls=[], invalid_tool_calls=[X])``
+               followed by a plain-uuid-id ``ToolMessage(X)``
+               (DB-repair-lane TM the round-1 heal stripped).
+               The W1 probe is CLEAN post-union (no violation to
+               flag, no heal needed).
+            2. The provider is a BLIND-rejection gateway — it
+               raises the canonical 2013 signature REGARDLESS of
+               payload content. The first invoke carries the
+               probe-clean as-supplied history and 2013-rejects.
+            3. The classifier (production ``classify_llm_errors``
+               wrap, same as ``build_instance_llms`` uses in
+               production) detects the 2013 signature and raises
+               ``ToolPairingInvalidError``.
+            4. The agent_node W2 catch fires, runs the
+               full-history validator+healer on the LLM-bound
+               payload, sees probe-clean (round-2 union), and
+               performs a no-op heal — the ToolMessage(X)
+               survives by IDENTITY in the retry payload.
+            5. The second invoke runs against the intact payload
+               and returns a valid AIMessage.
+
+        This guards against a future W2-catch regression that
+        strips unowned-looking TMs during a blind retry (the
+        round-1 failure mode, but at the W2 catch site — the
+        heal-once-retry path would have stripped the TM, the
+        retry would carry the unanswered invalid call, the
+        gateway would 2013 again, and the W2 path would have
+        no second retry to catch it). Asserting identity
+        preservation across invokes pins the W2 heal against
+        any future drift back to the round-1 ownership-tracking
+        miss.
+        """
+        from openai import BadRequestError
+        from daemon.graph import classify_llm_errors, create_agent_node
+        from daemon.tool_pairing_history import has_pairing_violations
+
+        # State messages — the W-C live repair shape, mid-history
+        # (no leading HumanMessage at index 0; the agent_node
+        # prepends the system prompt and the state carries only
+        # the conversation turn).
+        invalid_call_id = "call_8ed9e1771dca42348dfa7ca0"
+        ai_invalid = AIMessage(
+            content="",
+            invalid_tool_calls=[
+                {
+                    "id": invalid_call_id,
+                    "name": "do_thing",
+                    "args": "{broken",
+                    "type": "invalid_tool_call",
+                    "error": "Failed to parse tool call",
+                }
+            ],
+        )
+        tm_uuid = "1c2a9d4f-3b71-4f0e-9a23-deadbeef0001"
+        tm_answer = ToolMessage(
+            content="[repaired result]",
+            tool_call_id=invalid_call_id,
+            name="do_thing",
+            id=tm_uuid,
+        )
+        state_messages = [
+            ai_invalid,
+            tm_answer,
+            HumanMessage(content="continue"),
+        ]
+
+        # Provider: blind-rejection gateway — raises the
+        # canonical 2013 signature REGARDLESS of payload
+        # content (simulates a stricter gateway that doesn't
+        # introspect the heal). The classifier MUST detect
+        # the 2013 signature and convert to
+        # ``ToolPairingInvalidError``; otherwise the W2 catch
+        # doesn't fire.
+        class _Provider:
+            def __init__(self):
+                self.calls: list[list] = []
+                self._seq = 0
+
+            def invoke(self, messages):
+                self.calls.append(list(messages))
+                self._seq += 1
+                if self._seq == 1:
+                    raise BadRequestError(
+                        message=(
+                            "openai: invalid params, tool call result "
+                            "does not follow tool call (2013)"
+                        ),
+                        response=MagicMock(),
+                        body=None,
+                    )
+                return AIMessage(
+                    content="classifier → W2 → no-op heal → retry success",
+                    id="post-w2-retry",
+                )
+
+        raw_provider = _Provider()
+        # Wrap with the PRODUCTION ``classify_llm_errors``
+        # wrapper (same wrap ``build_instance_llms`` uses in
+        # production at the unconditional classifier-wrap
+        # block in :func:`daemon.graph.build_instance_llms`).
+        wrapped_provider = classify_llm_errors(raw_provider)
+
+        config = {
+            "configurable": {
+                "thread_id": "test-w2-blind-retry-invalid-shape",
+            }
+        }
+        agent_node = create_agent_node(
+            wrapped_provider,
+            system_prompt="You are helpful.",
+            compactor=None,
+            graph_ref=[None],
+            config=config,
+            llm_config={"model": "gpt-4o"},
+        )
+
+        result = await agent_node({"messages": state_messages})
+
+        # EXACTLY 2 raw invokes — 1st raised 2013 (classifier
+        # converted → W2 catch fired → no-op heal → 2nd
+        # succeeded). A 3rd invoke would mean the W2 retry
+        # burned out without resolving the shape.
+        assert raw_provider._seq == 2, (
+            f"W2 blind-retry pin: expected EXACTLY 2 raw "
+            f"invokes (1st 2013 → classifier → W2 catch → "
+            f"no-op heal → 2nd success); got "
+            f"{raw_provider._seq}"
+        )
+
+        # Both invoke payloads must be probe-clean (round-2
+        # union landed; no violation to flag in either
+        # attempt). The 1st-invoke probe-clean is the
+        # as-supplied state (post-union); the 2nd-invoke
+        # probe-clean is the no-op heal output (same content
+        # — heal didn't mutate).
+        first_payload = raw_provider.calls[0]
+        second_payload = raw_provider.calls[1]
+        assert has_pairing_violations(first_payload) is False, (
+            f"1st-invoke payload must be probe-clean "
+            f"post-union; got violations in {first_payload}"
+        )
+        assert has_pairing_violations(second_payload) is False, (
+            f"2nd-invoke (W2 retry) payload must remain "
+            f"probe-clean after the no-op heal; got "
+            f"violations in {second_payload}"
+        )
+
+        # THE ROUND-2 NEGATIVE PIN — ToolMessage(X) survives
+        # by IDENTITY in the retry payload. The W2 catch's
+        # unioned-validator no-op path is the contract; a
+        # future regression that re-introduces the round-1
+        # strip at the W2 call site would fail this
+        # assertion (the TM would be missing from the retry
+        # payload, and the strict gateway would 2013 again
+        # on the unanswered invalid call).
+        assert tm_answer in second_payload, (
+            f"W2 blind-retry negative pin: the DB-repair-"
+            f"lane TM must survive by identity in the retry "
+            f"payload; the round-1 strip recurred at the W2 "
+            f"catch site if this assertion fires. Retry "
+            f"payload: {second_payload}"
+        )
+        # Identity-preserved across the W2 heal — same object
+        # reference, same uuid id. The heal ran validate-
+        # and-heal-messages but the probe was clean so the
+        # list was returned unchanged.
+        assert second_payload[second_payload.index(tm_answer)] is tm_answer, (
+            f"W2 retry payload must preserve the TM by "
+            f"identity (no-op heal — the probe was clean, "
+            f"nothing to strip or synthesize); got a "
+            f"different object at the same index."
+        )
+        assert second_payload[second_payload.index(tm_answer)].id == tm_uuid
+
+        # The 1st and 2nd payloads carry the SAME TM list
+        # contents (the heal is a no-op for probe-clean
+        # inputs — the list is returned with the same
+        # elements in the same order).
+        assert (
+            [id(m) for m in first_payload]
+            == [id(m) for m in second_payload]
+        ), (
+            f"W2 heal is a no-op for probe-clean inputs; "
+            f"the retry payload must carry the same object "
+            f"identities as the 1st payload. 1st: "
+            f"{first_payload}, 2nd: {second_payload}"
+        )
+
+        # The response rides the 2nd invoke's AIMessage —
+        # NOT a propagated BadRequestError (the classifier
+        # would have converted; a non-2013 signature drift
+        # would surface here as a BadRequestError instead).
+        assert "messages" in result
+        last_ai = None
+        for m in result["messages"]:
+            if isinstance(m, AIMessage):
+                last_ai = m
+        assert last_ai is not None, (
+            f"W2 retry success must surface the 2nd-invoke "
+            f"AIMessage in the agent_node return; got "
+            f"{[type(m).__name__ for m in result['messages']]}"
+        )
+        assert (
+            last_ai.content
+            == "classifier → W2 → no-op heal → retry success"
+        ), (
+            f"W2 retry pin: expected the 2nd-invoke's "
+            f"AIMessage content; got content="
+            f"{last_ai.content!r}. A classifier signature-"
+            f"drift or a non-W2 routing would surface as a "
+            f"propagated exception instead."
+        )
