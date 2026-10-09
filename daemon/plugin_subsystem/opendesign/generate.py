@@ -887,7 +887,7 @@ class OdGenerate:
             logger.warning("od.generate: config resolution failed: %s", exc)
             return cls._error_envelope(
                 "byok_not_configured",
-                f"config resolution failed: {exc}",
+                f"client factory failed: {exc}",
                 details={"max_tokens": args.max_tokens},
                 finish_reason="other",
             )
@@ -944,10 +944,11 @@ class OdGenerate:
             if openai is not None and isinstance(exc, openai.BadRequestError):
                 # Stage-1 typed 400-class envelope (commission override
                 # over the plan's "envelopes unchanged"). The openai SDK
-                # raises BadRequestError for any 400-class HTTP error
-                # AFTER the facade exhausts its retry budget (the
-                # facade's classifier treats 400 as non-retryable — the
-                # raw exception re-raises unmodified).
+                # raises BadRequestError for any 400-class HTTP error on
+                # the FIRST occurrence — 400-class is NON-RETRYABLE in
+                # the facade's taxonomy, so the transient retry ladder
+                # never engages and the raw exception re-raises
+                # unmodified.
                 err_str = str(exc).lower()
                 if any(
                     needle in err_str
