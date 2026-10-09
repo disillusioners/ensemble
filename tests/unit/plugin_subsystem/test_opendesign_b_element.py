@@ -359,17 +359,24 @@ def fake_client_factory():
             return
         # Case 2: callable. Decide based on shape — single-arg
         # callable that returns a tuple is the legacy factory pattern.
+        # NOTE: probe exceptions PROPAGATE — a legacy factory that raises
+        # is a mis-shaped injection, not a pre-built invoker (those use
+        # the separate ``fake_invoker`` fixture). Silently swallowing
+        # the raise and falling through to install the callable directly
+        # as the new-style invoker is a latent trap: the legacy factory
+        # returns ``(client, model)`` (a tuple), not a chat-completion
+        # response, so the downstream ``OdGenerate.execute`` would crash
+        # on first invocation with a confusing TypeError. Probe failures
+        # must surface at the test boundary so the fixture author sees
+        # the shape mismatch immediately.
         if callable(target):
-            try:
-                result = target({})
-                if isinstance(result, tuple) and len(result) == 2:
-                    client, model = result
-                    OdGenerate._LLM_INVOKER = staticmethod(
-                        _make_invoker_from_client(client, model)
-                    )
-                    return
-            except Exception:
-                pass
+            result = target({})
+            if isinstance(result, tuple) and len(result) == 2:
+                client, model = result
+                OdGenerate._LLM_INVOKER = staticmethod(
+                    _make_invoker_from_client(client, model)
+                )
+                return
             # Pre-built invoker — set directly.
             OdGenerate._LLM_INVOKER = staticmethod(target)
             return
@@ -693,21 +700,47 @@ class TestOdGenerateInputValidation:
         assert isinstance(result, dict)
 
     def test_byok_not_configured_when_env_missing(self, env, fake_client_factory):
-        """Missing OPENAI_BASE_URL / OPENAI_API_KEY surfaces as a clear error."""
-        def _factory(_env):
-            raise RuntimeError(
-                "byok_not_configured: OPENAI_BASE_URL and OPENAI_API_KEY must be set"
-            )
-        fake_client_factory(_factory)
+        """Missing OPENAI_BASE_URL / OPENAI_API_KEY surfaces as the typed
+        ``byok_not_configured`` envelope (config resolution fails BEFORE
+        the LLM seam is reached).
+
+        Pre-probe-fix this test injected a raising legacy factory whose
+        RuntimeError was silently swallowed by the fixture's
+        ``except Exception: pass`` and the callable was installed
+        directly as a broken new-style invoker. The test then passed
+        for the wrong reason: ``_resolve_llm_config`` raised on the
+        empty ``env`` (generate.py:666-670) and the factory's raise
+        path was never exercised at all. With the fixture probe now
+        fail-loud, the raise would propagate at the fixture call — so
+        the misleading factory injection is replaced with a sentinel
+        legacy-shape fake that exercises the legacy translation path
+        but is itself never invoked (config resolution short-circuits
+        first, provably not reaching the ``_LLM_INVOKER`` seam).
+
+        The assertion is tightened from the prior OR
+        (``byok_not_configured`` OR ``upstream_http_error``) to a
+        SPECIFIC ``byok_not_configured`` code: that pin proves the
+        typed envelope came from config resolution, not from any
+        seam-level failure.
+        """
+        # Sentinel legacy-shape fake: probe yields ``(cli, model)``
+        # tuple so the fixture installs the translated invoker. The
+        # LLM seam is provably not reached because ``_resolve_llm_config``
+        # raises on the empty ``env`` below.
+        fake_client_factory(lambda _env: (object(), "vision"))
         result = OdGenerate.execute(
             GenerateInput(prompt="x"),
-            env={},  # empty env
+            env={},  # empty env: byok_not_configured short-circuit
         )
-        # The factory raises RuntimeError; the adapter's outer except
-        # catches it and returns the typed envelope.
         assert result["error"] is not None
         assert result["truncated"] is True
-        assert "byok_not_configured" in result["error"]["message"] or "upstream_http_error" in result["error"]["code"]
+        # Tightened: the typed ``byok_not_configured`` code proves the
+        # envelope came from ``_resolve_llm_config`` (config resolution),
+        # not from a seam-level failure. Pre-probe-fix this assertion
+        # passed for the wrong reason — the seam was never reached.
+        assert result["error"]["code"] == "byok_not_configured"
+        assert "OPENAI_BASE_URL" in result["error"]["message"]
+        assert "OPENAI_API_KEY" in result["error"]["message"]
 
 
 class TestOdGenerateTimeoutFormula:
