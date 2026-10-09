@@ -2038,6 +2038,18 @@ Sizing note: 6–12-slice target infeasible for this suite — 22,639 tests at o
 
 ---
 
+## Active commission — TOOL-PAIRING INVALID_TOOL_CALLS UNION GATE (round 2, 2026-10-09)
+
+Branch `fix/tool-pairing-invalid-tool-calls` @ `5869fcce0` (base `1ef37932c` = v0.18.4 tip; 3 commits, 3 files +1079: `daemon/tool_pairing_history.py` +195 — `invalid_tool_calls` unioned into shared `_extract_tool_call_ids` consumed by probe:480 / block-ownership:654, `PARTNER_SYNTH_INVALID_TEXT`, two-tier evidence docstring :230-247 [ROLE corpus-pinned / ID empirical]; tests 44→64 [+20]). Round-2 closure criterion: v0.18.4 live gap — heal stripped DB-repair TM answering `invalid_tool_calls` call → W2 re-shipped unanswered call → 2013 loop (task 10816).
+
+| Pack | Invocation | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `tph64` | `timeout 240 bash test/packs/tph64_unit_test.sh` | `tests/unit/tool_pairing_history/` (64: full_history_heal 54 + w2_wiring 10; 44 round-1 extend-only + 20 new) | <60s | _registered 2026-10-09_ | ⏳ pending |
+| `tool_pairing_original_symptom_v2` (G3-v2) | `timeout 300 bash test/packs/tool_pairing_original_symptom_v2_mock_test.sh` | `tests/integration/test_tool_pairing_original_symptom_v2.py` (4 arcs a-d: pre-fix-brick UNREACHABLE / W1 synth-for-invalid 1-invoke / W2 heal-retry identity-survival 2-invokes / verbatim live shape probe-clean) | <20s | _registered 2026-10-09_ | ⏳ pending |
+| rerun fleet note | round-1 packs rerun at 5869fcce0: graph_retry(19) compaction(130) d1_seam(9) injection(30) instance_tools(207) llm_error_classifier(125) job_queue_full(~2046; KNOWN 16 pre-existing d27a1ccc) dev_sh_static concurrency_atomic(99) gate_pins(5+perf-invalid) original_symptom v1(4) boot_smoke(v0.18.4 banner) | — | — | — | — |
+
+---
+
 ## Active commission — TOOL-PAIRING FULL-HISTORY HEAL GATE (2026-10-08)
 
 Branch `fix/tool-pairing-full-history-heal` @ `86c1bc041` (worktree `/home/nea/ensemble-src-wt-pairing-heal`; already uv-synced, daemon imports inside). Incident ground: 03d7657f 2013 — 6-day-old checkpoint poison (dup tool_call_id + unanswered tool call from 10-02 mid-turn regen/failover) surfaced only under strict-provider routing on JOB_EVENT revives. REPAIR executed 10-08 (synth result blob f61a0651…, 1,694,695 B, 678 msgs net +1 synth). This gate pins the patch's import-time + pairing-aware heal surface — Core #2/#3 insulation + the 44-test full-history unit + the `d1_seam_pairing + injection_pairing + tph44` sweep. RED on the boot smoke is a finding (base-attribute), not a blocker per brief.
