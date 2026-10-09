@@ -239,3 +239,5 @@ skills:
   entries:
   - skill_id: opendesign.list_systems
     path: skills/opendesign.list_systems.yaml
+  - skill_id: opendesign.generate-pipeline
+    path: skills/opendesign.generate-pipeline.yaml

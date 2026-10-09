@@ -100,6 +100,9 @@ consumption:
   # At slice ④ the named consumer is the test surface; slice ⑤
   # widens this to the designer agent's actual skill-set.yaml
   # registration when the generation B-element lands.
+  # od-generate-agent-lane Stage 2 (2026-10-09): sketcher joins as the
+  # generation-worker consumer (systems lookups during brief digestion).
   by:
     - "worker/designer"
+    - "sketcher"
     - "test/opendesign.list_systems"

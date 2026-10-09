@@ -1,0 +1,31 @@
+{
+  "id": "sketcher",
+  "name": "Sketcher",
+  "description": "OpenDesign generation worker — runs the od.compose_brief → od.generate → od.lint → od.save mockup pipeline per dispatched page-brief; vision-pinned leaf that digests reference images and reports envelope metrics",
+  "icon": "🖌️",
+  "color": "accent-purple",
+  "version": "1.0.0",
+  "llm_model": "vision",
+  "innate_skills": ["dynamic-skill"],
+  "skill_injection": true,
+  "no_force_explore": true,
+  "recursion_limit_multiplier": 12,
+  "default_queue": "system_parallel_queue",
+  "tools": {
+    "allow": [
+      "od.generate",
+      "od.compose_brief",
+      "od.lint",
+      "od.save",
+      "image",
+      "dynamic-skill"
+    ]
+  },
+  "context_injection": {
+    "heuristic_match_shared_md_files": true
+  },
+  "watchover": {
+    "timeout_seconds": 90
+  },
+  "team_members": []
+}

@@ -1,0 +1,126 @@
+# Plugin Subsystem v1 — opendesign.generate-pipeline (od-generate-agent-lane Stage 2)
+#
+# The SECOND plugin-skill (after opendesign.list_systems).  Authored for the
+# sketcher agent lane (architecture-recommendation.md §5 Slice 2 / §10 item 3):
+# the operational generation-pipeline contract the sketcher executes per
+# dispatched page-brief.
+#
+# Like list_systems, this file is DATA (CON §7 no-runtime-loading sentinel):
+# the YAML declares the version-visibility surface (plugin_ref), the vendored
+# tree aliases (content.vendored_references), and the named consumers
+# (consumption.by) — no code, no class definitions, no entry points.
+#
+# V8 discipline (references-not-text): the body carries OPERATIONAL guidance
+# (order, gates, retry bounds) and points at the vendored prompt/design-system
+# trees by reference.  NO upstream prompt text is hand-copied here — the
+# snapshot-with-drift-alarm contract (manifest class pins + divergence
+# register) dies silently if prompt text is duplicated into a skill body.
+# The evaluator consumes the vendored TS prompt modules in code; this skill
+# only tells the agent where the authoritative resources live and how the
+# pipeline behaves.
+#
+# Source of truth: .agents/shared/planning/od-generate-agent-lane/
+# architecture-recommendation.md (§4 recommendation, §5 Slice 2, V8/V9);
+# MANIFEST.yaml snapshot_with_drift_alarm class pins.
+
+skill_id: "opendesign.generate-pipeline"
+schema_version: "1.0.0"
+
+plugin_ref:
+  # CON §6: name MUST equal the parent plugin's plugin.name (the loader
+  # checks this at load — name_mismatch is a hard refusal).
+  name: "opendesign"
+  # CON §8 / C1.3: parent-equality with the parent manifest's
+  # schema_version.  Authored at the current parent epoch (1.0.3), so the
+  # literal parent value is carried — the clean shape per the loader's
+  # parent-equality-or-family-match rule.
+  manifest_schema_version: "1.0.3"
+  # CON §6: upstream_tag MUST be present at load.  This skill's references
+  # span BOTH vendored classes (the drift-alarmed prompt stack AND the
+  # frozen data trees), so both per-class pins are declared and each is
+  # cross-checked against the parent manifest's tag_pin_per_class at load
+  # (a divergence is a plugin_ref_pin_mismatch refusal — read-your-writes,
+  # never eventual).
+  upstream_tag:
+    copy_freely: "open-design-v0.24.1"
+    snapshot_with_drift_alarm: "open-design-v0.24.1"
+  license: "Apache-2.0"
+
+content:
+  description: >-
+    Operational contract for the OD generation pipeline — compose brief,
+    generate one self-contained HTML page, check the completeness-gate
+    envelope, bounded regenerate-on-truncation, lint, and write-through to
+    the canonical mockup path. Points at the vendored prompt-contract and
+    design-system trees; carries no prompt text itself.
+  body_markdown: |
+    # opendesign.generate-pipeline
+
+    The per-page execution contract for the OpenDesign mockup pipeline.
+    The authoritative prompt content and design data live in the vendored
+    trees this skill references — read them through the aliases below;
+    never copy their content into reports or dispatches.
+
+    ## Pipeline order (per dispatched page-brief)
+
+    1. **Digest references into brief text.** Reference images (attached
+       pixels or substrate refs) become structured textual descriptions
+       BEFORE brief composition. The brief inputs (`page_prompt`,
+       `brief_answers`, `brand_spec`) are text-only — descriptions fold
+       in there, raw image payloads never do.
+    2. **`od.compose_brief`** — assemble the brief from the dispatched
+       inputs plus the digested descriptions (pure formatter, no network).
+       Keep core inputs identical across pages of one run.
+    3. **`od.generate`** — one call per attempt. The 130–170s latency band
+       is normal; wait it out. The envelope (`finish_reason`, `usage`,
+       `truncated`, typed `error.code`) is the evidence of record.
+    4. **Gate check** — the adapter applies three completeness gates
+       before any success surfaces: empty response (`empty_response`),
+       early upstream close (`finish_reason` ≠ `stop` →
+       `truncation_detected`), structural completeness (missing
+       `</html>`/`</body>` → `missing_artifact_marker`).
+    5. **`od.lint`** — record the verdict verbatim (`pass` | `fail-N`);
+       the artifact ships regardless, the verdict rides the report.
+    6. **`od.save`** — write-through to the canonical mockup path the
+       brief specifies, at generation time. Unsaved = unshipped.
+
+    ## Retry bounds (the whole budget)
+
+    - `truncation_detected` | `missing_artifact_marker` → regenerate
+      EXACTLY ONCE with the same brief (no mid-retry prompt edits), then
+      ship the second envelope as-is.
+    - `upstream_bad_request` | `context_length_exceeded` → ZERO retries
+      (overflow class: report back; the orchestrator decides).
+    - Any other `error.code` → ZERO retries, report as-is.
+
+    ## References-not-text discipline
+
+    The design systems (`systems` alias) and the prompt-contract modules
+    (`prompt-contracts` alias) are vendored snapshot content. The
+    generation evaluator consumes the prompt modules in code; agents read
+    the design systems for palette/typography/component signals and cite
+    them. Hand-copying prompt text from either tree into any artifact
+    breaks the drift-alarm provenance — always point, never paste.
+
+  vendored_references:
+    - alias: "prompt-contracts"
+      # snapshot_with_drift_alarm class (hot prompt content): the
+      # composer/prompt contract modules the generation evaluator
+      # consumes in code.  Drift-alarmed per the parent manifest —
+      # the alias makes the authoritative location visible at load
+      # time without copying any prompt text into this skill.
+      path: "snapshot_with_drift_alarm/prompts/contracts/"
+    - alias: "image-templates"
+      # copy_freely class (frozen data): the 48 JSON prompt templates.
+      path: "copy_freely/prompt-templates/image/"
+    - alias: "systems"
+      # copy_freely class (frozen data): the 154 design systems
+      # (152 brand dirs + _schema/ + README.md per CURATION.md §2).
+      path: "copy_freely/design-systems/"
+
+consumption:
+  # CON §6: NAMED consumers only — anonymous `["*"]` or any globbed
+  # form is refused at load (fail-closed, tested).
+  by:
+    - "sketcher"
+    - "test/opendesign.generate-pipeline"
