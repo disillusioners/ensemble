@@ -283,13 +283,15 @@ class TestPromptCompositionFailedEnvelope:
             def build(_env):
                 raise AssertionError("LLM client must not be reached when composition fails")
 
-        saved = OdGenerate._CLIENT_FACTORY
-        OdGenerate._CLIENT_FACTORY = staticmethod(lambda _env: (_Factory, "vision"))
+        saved = OdGenerate._LLM_INVOKER
+        OdGenerate._LLM_INVOKER = staticmethod(
+            lambda **kwargs: (_Factory.build(None), None)
+        )
         try:
             result = OdGenerate.execute_dict(
                 {"prompt": "x", "kind": "prototype"},
                 env={"OPENAI_BASE_URL": "http://fake", "OPENAI_API_KEY": "k"},
             )
         finally:
-            OdGenerate._CLIENT_FACTORY = saved
+            OdGenerate._LLM_INVOKER = saved
         assert result["error"]["code"] == "prompt_composition_failed"

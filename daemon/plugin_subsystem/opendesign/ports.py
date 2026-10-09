@@ -139,6 +139,8 @@ _PORT_GENERATE: Dict[str, Any] = {
                         "byok_not_configured",
                         "prompt_composition_failed",
                         "upstream_http_error",
+                        "upstream_bad_request",
+                        "context_length_exceeded",
                         "upstream_stream_closed",
                         "truncation_detected",
                         "missing_artifact_marker",
