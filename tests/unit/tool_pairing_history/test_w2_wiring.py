@@ -53,7 +53,7 @@ from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 
 # ---------------------------------------------------------------------------
@@ -856,4 +856,380 @@ class TestPreTerminalThirdInvokeSite:
         assert last_ai_message.content == "post-surgery healed", (
             f"3rd-invoke success: expected post-surgery AIMessage; "
             f"got content={last_ai_message.content!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# ROUND-2 — W2 INVALID-SHAPE POISON (invalid_tool_calls first-class)
+# ---------------------------------------------------------------------------
+
+
+class TestW2InvalidShapeHeal:
+    """ROUND-2 — W2 wiring pin for the invalid_tool_calls poison shape.
+
+    The round-2 live bug (incident 03d7657f task 10816, 2026-10-09):
+    an ``AIMessage(tool_calls=[], invalid_tool_calls=[X])`` was
+    committed mid-history. The W1 heal ran but the round-1 ownership
+    tracking set missed X (X lived only in ``invalid_tool_calls``),
+    so the in-block ``ToolMessage(X)`` was flagged
+    block-ownership-orphan and STRIPPED. The next dispatch re-shipped
+    the now-unanswered invalid call, the strict gateway 2013-rejected,
+    and W2 caught it but the heal AGAIN stripped the orphan TM
+    (perpetual loop, the failure arc never resolved).
+
+    Round-2 fix (this branch): the union lands in the ownership
+    tracking set so the TM answering an invalid-only AIMessage is
+    block-ownership-valid; the strip is dead; W2's single retry
+    succeeds.
+
+    This test pins the round-2 wiring at the agent_node W2 site:
+    the FIRST invoke carries the invalid-shape history; the W1
+    probe flags a violation (well-formed call X is missing from
+    the adjacent block); the W1 heal synthesizes a partner for X;
+    the FIRST invoke runs against the healed history and returns
+    a valid response (the gateway sees the now-paired
+    AIMessage(tc=[X]) + TM(X) and accepts).
+
+    The point is the LLM dispatch NEVER raises 2013 against the
+    healed payload (the W2 retry path is unnecessary in the
+    round-2 fix — the W1 probe + heal alone resolves the
+    invalid-shape adjacency). The negative pin asserts the
+    round-1 failure arc is dead: probe CLEAN, heal no-op, NO
+    invocation count burn, NO retry, the response rides the
+    first invoke.
+    """
+
+    @pytest.mark.asyncio
+    async def test_w1_heal_alone_resolves_invalid_shape_no_w2_retry(
+        self, mock_llm_with_tools
+    ):
+        """The round-1 failure arc is dead.
+
+        History: ``AIMessage(tool_calls=[], invalid_tool_calls=[X])``
+        + ``ToolMessage(X)`` + ``HumanMessage``. The W1 probe runs
+        against ``full_messages`` (system + state). The probe is
+        CLEAN (round-2 union) — no violation to flag. The W1 heal
+        is a no-op. The first invoke runs against the as-supplied
+        payload. NO 2013 fires. NO W2 retry needed. Invoke count
+        is EXACTLY 1.
+        """
+        from daemon.graph import create_agent_node
+
+        # State messages: an AIMessage carrying only an invalid call
+        # (the live-bug repair shape) followed by the answering TM
+        # (the DB-repair-lane TM the round-1 heal used to strip).
+        # The round-2 union keeps this TM (block-ownership-valid).
+        invalid_call_id = "call_8ed9e1771dca42348dfa7ca0"
+        ai_invalid = AIMessage(
+            content="",
+            invalid_tool_calls=[
+                {
+                    "id": invalid_call_id,
+                    "name": "do_thing",
+                    "args": "{broken",
+                    "type": "invalid_tool_call",
+                    "error": "Failed to parse tool call",
+                }
+            ],
+        )
+        # DB-repair-lane TM: plain uuid id (NOT a partner-synth
+        # prefix), the exact W-C verbatim shape.
+        tm_uuid = "1c2a9d4f-3b71-4f0e-9a23-deadbeef0001"
+        tm_answer = ToolMessage(
+            content="[repaired result]",
+            tool_call_id=invalid_call_id,
+            name="do_thing",
+            id=tm_uuid,
+        )
+        state_messages = [
+            ai_invalid,
+            tm_answer,
+            HumanMessage(content="continue"),
+        ]
+
+        # First invoke returns a valid AIMessage. If the round-1
+        # strip recurred, the payload would be missing the TM,
+        # the gateway would 2013, the W2 retry would fire — but
+        # we only put ONE side_effect, so any second consume
+        # would raise StopIteration and the test would fail with
+        # the round-1 bug signature.
+        first_response = AIMessage(content="OK after W1 heal")
+        mock_llm_with_tools.invoke.side_effect = [first_response]
+
+        config = {"configurable": {"thread_id": "test-w2-invalid-shape"}}
+        agent_node = create_agent_node(
+            mock_llm_with_tools,
+            system_prompt="You are helpful.",
+            compactor=None,
+            graph_ref=[None],
+            config=config,
+            llm_config={"model": "gpt-4o"},
+        )
+
+        result = await agent_node({"messages": state_messages})
+
+        # EXACTLY 1 invoke — the W1 probe is CLEAN (round-2
+        # union kept the TM), no violation to heal, no W2
+        # retry. If the round-1 bug recurred, the W2 retry
+        # would have fired and the second consume of
+        # side_effect would raise StopIteration.
+        assert mock_llm_with_tools.invoke.call_count == 1, (
+            f"round-2 W2 pin: expected EXACTLY 1 invoke (W1 "
+            f"heal resolved the invalid-shape adjacency); "
+            f"got {mock_llm_with_tools.invoke.call_count}. "
+            f"Round-1 failure arc recurred — the union at the "
+            f"ownership-tracking refresh site is broken."
+        )
+
+        # The first invoke's payload is healed/order-valid
+        # (it's the as-supplied history — round-2 keeps it
+        # intact because the union made the TM
+        # block-ownership-valid).
+        from daemon.tool_pairing_history import has_pairing_violations
+        first_payload = mock_llm_with_tools.invoke.call_args_list[0].args[0]
+        assert has_pairing_violations(first_payload) is False, (
+            f"first-invoke payload must be healed/order-valid "
+            f"after W1 probe + heal; got {first_payload}"
+        )
+
+        # The TM is in the first payload (round-2 didn't
+        # strip it — the round-1 regression is dead).
+        assert tm_answer in first_payload, (
+            f"round-2 negative pin: the DB-repair-lane TM "
+            f"must remain in the LLM-bound payload; round-1 "
+            f"used to strip it. If this assertion fires, the "
+            f"union at the ownership-tracking refresh site is "
+            f"broken."
+        )
+        assert first_payload[first_payload.index(tm_answer)].id == tm_uuid
+
+        # The response rides the first invoke's result.
+        assert "messages" in result
+        assert len(result["messages"]) == 1
+        assert result["messages"][0].content == "OK after W1 heal"
+
+    @pytest.mark.asyncio
+    async def test_w2_blind_retry_leaves_invalid_shape_payload_intact(
+        self, monkeypatch
+    ):
+        """W2 catch's unioned-validator no-op path (round-2 follow-up).
+
+        PINS the literal commissioned test-minimum arc "2013 → heal
+        → retry passes" at the W2 call site with the invalid-shape
+        repair payload. The W1-alone pin above + the payload-agnostic
+        classifier→W2 seam test cover the two pieces separately;
+        this test ties them together end-to-end:
+
+            1. State carries the W-C live repair shape — an
+               ``AIMessage(tool_calls=[], invalid_tool_calls=[X])``
+               followed by a plain-uuid-id ``ToolMessage(X)``
+               (DB-repair-lane TM the round-1 heal stripped).
+               The W1 probe is CLEAN post-union (no violation to
+               flag, no heal needed).
+            2. The provider is a BLIND-rejection gateway — it
+               raises the canonical 2013 signature REGARDLESS of
+               payload content. The first invoke carries the
+               probe-clean as-supplied history and 2013-rejects.
+            3. The classifier (production ``classify_llm_errors``
+               wrap, same as ``build_instance_llms`` uses in
+               production) detects the 2013 signature and raises
+               ``ToolPairingInvalidError``.
+            4. The agent_node W2 catch fires, runs the
+               full-history validator+healer on the LLM-bound
+               payload, sees probe-clean (round-2 union), and
+               performs a no-op heal — the ToolMessage(X)
+               survives by IDENTITY in the retry payload.
+            5. The second invoke runs against the intact payload
+               and returns a valid AIMessage.
+
+        This guards against a future W2-catch regression that
+        strips unowned-looking TMs during a blind retry (the
+        round-1 failure mode, but at the W2 catch site — the
+        heal-once-retry path would have stripped the TM, the
+        retry would carry the unanswered invalid call, the
+        gateway would 2013 again, and the W2 path would have
+        no second retry to catch it). Asserting identity
+        preservation across invokes pins the W2 heal against
+        any future drift back to the round-1 ownership-tracking
+        miss.
+        """
+        from openai import BadRequestError
+        from daemon.graph import classify_llm_errors, create_agent_node
+        from daemon.tool_pairing_history import has_pairing_violations
+
+        # State messages — the W-C live repair shape, mid-history
+        # (no leading HumanMessage at index 0; the agent_node
+        # prepends the system prompt and the state carries only
+        # the conversation turn).
+        invalid_call_id = "call_8ed9e1771dca42348dfa7ca0"
+        ai_invalid = AIMessage(
+            content="",
+            invalid_tool_calls=[
+                {
+                    "id": invalid_call_id,
+                    "name": "do_thing",
+                    "args": "{broken",
+                    "type": "invalid_tool_call",
+                    "error": "Failed to parse tool call",
+                }
+            ],
+        )
+        tm_uuid = "1c2a9d4f-3b71-4f0e-9a23-deadbeef0001"
+        tm_answer = ToolMessage(
+            content="[repaired result]",
+            tool_call_id=invalid_call_id,
+            name="do_thing",
+            id=tm_uuid,
+        )
+        state_messages = [
+            ai_invalid,
+            tm_answer,
+            HumanMessage(content="continue"),
+        ]
+
+        # Provider: blind-rejection gateway — raises the
+        # canonical 2013 signature REGARDLESS of payload
+        # content (simulates a stricter gateway that doesn't
+        # introspect the heal). The classifier MUST detect
+        # the 2013 signature and convert to
+        # ``ToolPairingInvalidError``; otherwise the W2 catch
+        # doesn't fire.
+        class _Provider:
+            def __init__(self):
+                self.calls: list[list] = []
+                self._seq = 0
+
+            def invoke(self, messages):
+                self.calls.append(list(messages))
+                self._seq += 1
+                if self._seq == 1:
+                    raise BadRequestError(
+                        message=(
+                            "openai: invalid params, tool call result "
+                            "does not follow tool call (2013)"
+                        ),
+                        response=MagicMock(),
+                        body=None,
+                    )
+                return AIMessage(
+                    content="classifier → W2 → no-op heal → retry success",
+                    id="post-w2-retry",
+                )
+
+        raw_provider = _Provider()
+        # Wrap with the PRODUCTION ``classify_llm_errors``
+        # wrapper (same wrap ``build_instance_llms`` uses in
+        # production at the unconditional classifier-wrap
+        # block in :func:`daemon.graph.build_instance_llms`).
+        wrapped_provider = classify_llm_errors(raw_provider)
+
+        config = {
+            "configurable": {
+                "thread_id": "test-w2-blind-retry-invalid-shape",
+            }
+        }
+        agent_node = create_agent_node(
+            wrapped_provider,
+            system_prompt="You are helpful.",
+            compactor=None,
+            graph_ref=[None],
+            config=config,
+            llm_config={"model": "gpt-4o"},
+        )
+
+        result = await agent_node({"messages": state_messages})
+
+        # EXACTLY 2 raw invokes — 1st raised 2013 (classifier
+        # converted → W2 catch fired → no-op heal → 2nd
+        # succeeded). A 3rd invoke would mean the W2 retry
+        # burned out without resolving the shape.
+        assert raw_provider._seq == 2, (
+            f"W2 blind-retry pin: expected EXACTLY 2 raw "
+            f"invokes (1st 2013 → classifier → W2 catch → "
+            f"no-op heal → 2nd success); got "
+            f"{raw_provider._seq}"
+        )
+
+        # Both invoke payloads must be probe-clean (round-2
+        # union landed; no violation to flag in either
+        # attempt). The 1st-invoke probe-clean is the
+        # as-supplied state (post-union); the 2nd-invoke
+        # probe-clean is the no-op heal output (same content
+        # — heal didn't mutate).
+        first_payload = raw_provider.calls[0]
+        second_payload = raw_provider.calls[1]
+        assert has_pairing_violations(first_payload) is False, (
+            f"1st-invoke payload must be probe-clean "
+            f"post-union; got violations in {first_payload}"
+        )
+        assert has_pairing_violations(second_payload) is False, (
+            f"2nd-invoke (W2 retry) payload must remain "
+            f"probe-clean after the no-op heal; got "
+            f"violations in {second_payload}"
+        )
+
+        # THE ROUND-2 NEGATIVE PIN — ToolMessage(X) survives
+        # by IDENTITY in the retry payload. The W2 catch's
+        # unioned-validator no-op path is the contract; a
+        # future regression that re-introduces the round-1
+        # strip at the W2 call site would fail this
+        # assertion (the TM would be missing from the retry
+        # payload, and the strict gateway would 2013 again
+        # on the unanswered invalid call).
+        assert tm_answer in second_payload, (
+            f"W2 blind-retry negative pin: the DB-repair-"
+            f"lane TM must survive by identity in the retry "
+            f"payload; the round-1 strip recurred at the W2 "
+            f"catch site if this assertion fires. Retry "
+            f"payload: {second_payload}"
+        )
+        # Identity-preserved across the W2 heal — same object
+        # reference, same uuid id. The heal ran validate-
+        # and-heal-messages but the probe was clean so the
+        # list was returned unchanged.
+        assert second_payload[second_payload.index(tm_answer)] is tm_answer, (
+            f"W2 retry payload must preserve the TM by "
+            f"identity (no-op heal — the probe was clean, "
+            f"nothing to strip or synthesize); got a "
+            f"different object at the same index."
+        )
+        assert second_payload[second_payload.index(tm_answer)].id == tm_uuid
+
+        # The 1st and 2nd payloads carry the SAME TM list
+        # contents (the heal is a no-op for probe-clean
+        # inputs — the list is returned with the same
+        # elements in the same order).
+        assert (
+            [id(m) for m in first_payload]
+            == [id(m) for m in second_payload]
+        ), (
+            f"W2 heal is a no-op for probe-clean inputs; "
+            f"the retry payload must carry the same object "
+            f"identities as the 1st payload. 1st: "
+            f"{first_payload}, 2nd: {second_payload}"
+        )
+
+        # The response rides the 2nd invoke's AIMessage —
+        # NOT a propagated BadRequestError (the classifier
+        # would have converted; a non-2013 signature drift
+        # would surface here as a BadRequestError instead).
+        assert "messages" in result
+        last_ai = None
+        for m in result["messages"]:
+            if isinstance(m, AIMessage):
+                last_ai = m
+        assert last_ai is not None, (
+            f"W2 retry success must surface the 2nd-invoke "
+            f"AIMessage in the agent_node return; got "
+            f"{[type(m).__name__ for m in result['messages']]}"
+        )
+        assert (
+            last_ai.content
+            == "classifier → W2 → no-op heal → retry success"
+        ), (
+            f"W2 retry pin: expected the 2nd-invoke's "
+            f"AIMessage content; got content="
+            f"{last_ai.content!r}. A classifier signature-"
+            f"drift or a non-W2 routing would surface as a "
+            f"propagated exception instead."
         )
