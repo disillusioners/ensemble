@@ -580,15 +580,26 @@ def _gate_html(html: str, finish_reason: str) -> Tuple[bool, Optional[str]]:
 #      the contextual-overflow sniff (matches the hot-path classifier's
 #      existing ``ContextLengthExceededError`` taxonomy).
 #
-# **Backup endpoint unconfigured today (failover inert, decision D3
-# open).** When the operator sets ``OPENAI_BASE_URL_BACKUP``, the
-# facade's HA controller activates and the retry ladder splits between
-# primary and backup. Until then, retry runs against the primary only
-# — same pre-v2 behavior modulo bounded retry. Cite
+# **Backup endpoint and HA-active status are runtime-environment
+# resolved (decision D3 stays open).** The facade's HA controller
+# activates whenever ``OPENAI_BASE_URL_BACKUP`` is visible in the
+# daemon's process environment; the .env-scoped reading of this
+# module is NOT authoritative for the running daemon. The daemon
+# inherits the shell environment at launch — even when the .env
+# omits ``OPENAI_BASE_URL_BACKUP``, an export in the launching
+# shell makes failover live. Evidence (2026-10-09 sandbox smoke):
+# LLM-HA primary→backup swap fired live; log
+# ``/tmp/sketcher-smoke-daemon.log`` line 1191 — ``daemon.services.llm_failover`` WARNING
+# ``[LLM-HA] secondary raw-SDK swap: primary=https://llm.ensem.dev/v1 -> backup=https://llm.daoduc.org/v1``
+# (controller was enabled on boot at line 338: primary=llm.ensem.dev/v1,
+# backup=llm.daoduc.org/v1). When the controller is configured, the
+# retry ladder splits between primary and backup; with no backup
+# visible to the daemon, retry runs against primary only — same
+# pre-v2 behavior modulo bounded retry. Cite
 # ``daemon/services/skill_embedding_service.py:468-474`` for the
-# endpoint-mismatch guard precedent: when a backup is configured it MUST
-# serve the vision model (the design-generation knob), not the chat
-# model — mismatched-endpoint failover is wrong by design.
+# endpoint-mismatch guard precedent: when a backup IS configured it
+# MUST serve the vision model (the design-generation knob), not the
+# chat model — mismatched-endpoint failover is wrong by design.
 #
 # **Single-shot invocation seam: ``_LLM_INVOKER``.** A class-level
 # staticmethod that runs the entire chat invocation — config resolution
