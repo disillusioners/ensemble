@@ -29,7 +29,6 @@ from daemon.services.live_views import (
     BaseURLResolver,
     HostRecorder,
     LiveViewsService,
-    _HOST_HEADER_PATTERN,
     _is_valid_host_header,
     _normalize_bind_host,
     _split_host_port,

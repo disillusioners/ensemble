@@ -1,4 +1,4 @@
-"""Live-view HTTP route family (Phase 1).
+"""Live-view HTTP route family (Phase 1 + Phase 2).
 
 GET/HEAD ``/views/<root-name>/<relative-path>`` for any registered
 root. The router is the **only** HTTP surface for the subsystem;
@@ -28,9 +28,11 @@ SECURITY MODEL (architect ruling, 2026-10-07):
 * No auth at the daemon. Edge guard is documented in
   ``docs/runbooks/live-views.md``.
 
-The router does NOT do content conversion (no markdown→HTML, no
-image resize). Phase 1 is the primitive; FE WebView + on-the-fly
-conversion is Phase 2 (not in this slice).
+Content-aware rendering (Phase 2, live here): ``.md`` files are
+NOT served as a raw ``text/markdown`` blob — the router wraps them
+in an HTML viewer page (pinned-CDN renderer + sanitizer + CSP
+nonce) via ``render_markdown_wrapper``. Non-markdown content stays
+a byte-for-byte passthrough.
 
 TOCTOU CONTAINMENT (REWORK 2026-10-07, M4): the service does a
 ``realpath``-based containment check + a stat-based size cap on

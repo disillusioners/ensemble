@@ -1,4 +1,4 @@
-"""Live-view subsystem registry (Phase 1).
+"""Live-view subsystem service (Phase 1 + Phase 2).
 
 Owns the per-name → disk-path / policy mapping for the
 ``/views/<root>/<rel>`` route family. The registry is a thin
@@ -6,6 +6,19 @@ wrapper over the config-tree section ``live_views.roots`` plus a
 ``LiveViewsService`` that resolves a name + relative path into an
 absolute on-disk path (and an optional content-type) WITH the full
 path-traversal guard surface.
+
+Phase 1 is the path-resolution primitive above. Phase 2 (both
+shipped on this branch) adds the two halves the registry alone
+could not provide:
+
+* **URL base-resolution chain** — ``HostRecorder`` (fed by
+  ``daemon.middleware.host_capture.HostCaptureMiddleware``) plus
+  ``BaseURLResolver`` mint fully-qualified ``view_link`` URLs from
+  operator override / captured Host evidence / bind config.
+* **Content-aware rendering** — ``.md`` files are served through
+  an HTML wrapper page (pinned-CDN ``marked`` renderer + DOMPurify
+  sanitizer + per-response CSP nonce) instead of a raw
+  ``text/markdown`` blob browsers display as plain text.
 
 The registry is **read-only at request time** — it is populated
 once at lifespan start from ``config.live_views.roots`` and
@@ -56,6 +69,33 @@ Three seed roots ship by default (config-driven; operator-editable):
 * ``tmp-images`` (tmp_images) — thin shim over the existing
   ``TmpImageStore`` substrate. MIME comes from the sidecar
   record, NOT the extension (architect risk #7 ruling).
+
+MODULE-BAND RATIONALE + SECTION MAP (2026-10-10, mirrors the
+``daemon/api.py`` M10 note): this file lives in the ~1300-line
+band by design and is organized as five top-to-bottom sections:
+
+1. **Validation helpers** — root-name / rel-path syntactic
+   validation, the extension→MIME map, and the shared
+   ``_normalize_text`` guard surface.
+2. **Base-URL resolution chain (Phase 2)** — ``_HOST_HEADER_PATTERN``
+   + host helpers, ``HostRecorder`` (the last-write-wins
+   ``(host, port, scheme)`` sink the middleware feeds), and
+   ``BaseURLResolver`` (operator override → captured Host → bind
+   evidence → None precedence).
+3. **Resolved-target dataclass + error hierarchy** —
+   ``ResolvedTarget`` and the ``LiveViewsServiceError`` family.
+4. **``LiveViewsService``** — the Phase-1 registry/resolve engine:
+   config-tree mapping, project-scoped resolution, fd-free
+   containment checks, the ``build_url`` mint surface.
+5. **Markdown rendering (Phase 2)** — CSP template, wrapper HTML,
+   ``new_csp_nonce``, ``render_markdown_wrapper``,
+   ``is_markdown_content_type``.
+
+Growth policy: a NEW self-contained concern gets its own module
+rather than growing this one — precedent: the Host-capture
+middleware was extracted to ``daemon/middleware/host_capture.py``
+(2026-10-10) instead of living beside the recorder. In-file
+growth is reserved for extensions of the five sections above.
 """
 
 from __future__ import annotations
@@ -66,7 +106,6 @@ import os
 import re
 import secrets
 import threading
-import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -372,9 +411,9 @@ class HostRecorder:
     """Thread-safe recorder of the most recent inbound Host header.
 
     Lives at ``app.state.host_recorder``; the ``HostCaptureMiddleware``
-    (daemon/api.py) feeds it from each HTTP request the daemon
-    serves. The ``BaseURLResolver`` reads the latest record to mint
-    fully-qualified ``view_link`` URLs.
+    (daemon/middleware/host_capture.py) feeds it from each HTTP
+    request the daemon serves. The ``BaseURLResolver`` reads the
+    latest record to mint fully-qualified ``view_link`` URLs.
 
     **Trust model.** An anonymous client can send any value in the
     Host header — HTTP Host is not authenticated. The recorder
@@ -398,7 +437,6 @@ class HostRecorder:
         self._host: str | None = None
         self._port: int | None = None
         self._scheme: str = "http"
-        self._recorded_at: float = 0.0
         # Phase 2 follow-up: once an HTTPS request has been
         # observed via X-Forwarded-Proto, the recorder remembers
         # the fact even if the current host is later dropped
@@ -447,7 +485,6 @@ class HostRecorder:
             self._host = split_host
             self._port = split_port
             self._scheme = chosen_scheme
-            self._recorded_at = time.monotonic()
             if chosen_scheme == "https":
                 self._saw_https = True
 
@@ -482,7 +519,6 @@ class HostRecorder:
             self._host = None
             self._port = None
             self._scheme = "http"
-            self._recorded_at = 0.0
 
 
 class BaseURLResolver:
@@ -491,7 +527,8 @@ class BaseURLResolver:
     Precedence (top wins):
 
     1. **Operator override** — ``config.live_views.external_base_url``.
-       The existing knob from Phase 1; always wins. Syntactic
+       The Phase-1 config knob, retained through Phase 2; always
+       wins. Syntactic
        validation lives in the resolver (a malformed value falls
        through to step 2 — never a bad mint).
     2. **Host-capture auto-detect** — the most recent
