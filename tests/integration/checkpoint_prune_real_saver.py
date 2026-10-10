@@ -301,7 +301,14 @@ class TestRealSaverWritePruneResume:
         assert expected_survivors, "healthy thread must keep referenced blobs"
 
         # 3) DRY-RUN (default env): reports would-delete > 0, deletes NOTHING.
-        with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
+        # The sweep summary (``op=blob_prune_summary``) is emitted by the
+        # prune module's OWN logger (daemon.services.checkpoint_prune),
+        # NOT daemon.checkpoint_perf (which only carries the per-pair
+        # DEBUG detail). Raise the emitting logger or caplog never sees
+        # the INFO record (its effective level is inherited WARNING).
+        with caplog.at_level(
+            logging.INFO, logger="daemon.services.checkpoint_prune"
+        ):
             summary = await prune_unreferenced_blobs(adapter)
         assert summary.dry_run is True
         assert summary.total_deleted == 0
@@ -935,7 +942,12 @@ class TestRealSaverDryRunReport:
         await adapter.delete_writes_excluding(T, "", keep)
 
         fp_before = await blob_fingerprint(adapter, T)
-        with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
+        # Same logger correction as the dry-run test above: the summary
+        # line comes from daemon.services.checkpoint_prune, not
+        # daemon.checkpoint_perf.
+        with caplog.at_level(
+            logging.INFO, logger="daemon.services.checkpoint_prune"
+        ):
             summary = await prune_unreferenced_blobs(adapter)
         assert summary.dry_run is True and summary.total_deleted == 0
         assert await blob_fingerprint(adapter, T) == fp_before
