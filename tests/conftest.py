@@ -50,6 +50,42 @@ mock_langgraph_checkpoint_sqlite_aio = create_mock_module("langgraph.checkpoint.
     "AsyncSqliteSaver": MagicMock()
 })
 
+# Mock for ``langgraph.checkpoint.base.BaseCheckpointSaver`` — needed because
+# ``daemon.checkpoint_adapter`` (incident 2026-10-10) subclasses this class
+# to satisfy the ``isinstance`` gate that ``StateGraph.compile`` runs via
+# ``ensure_valid_checkpointer``. The mock is a plain class (inherits
+# from object, not ABCMeta) — it satisfies the import and the proxy's
+# subclass relationship at unit-test scope. Tests that need the REAL
+# pinned class use the mock-eviction + module-reload binding gate
+# (``evict_langgraph_mocks``/``restore_langgraph_mocks`` from
+# ``tests/helpers/checkpoint_prune_pg.py``; see the
+# ``_real_langgraph_saver_base`` fixture in
+# ``tests/test_checkpoint_adapter_resilience.py`` and the autouse
+# ``_real_langgraph`` fixture in the real-PG integration tests) —
+# under the mock the real-langgraph gate tests would silently skip
+# (inverted semantics), which is exactly what the binding gate exists
+# to prevent.
+mock_langgraph_checkpoint_base = create_mock_module(
+    "langgraph.checkpoint.base", {"__path__": []}
+)
+
+
+class _MockBaseCheckpointSaver:
+    """Stand-in for ``langgraph.checkpoint.base.BaseCheckpointSaver``.
+
+    Plain class — no ``ABCMeta`` machinery, no concrete saver surface.
+    ``isinstance`` against a proxy that subclasses this mock returns
+    True, mirroring the real production behavior under the real
+    langgraph class. Unit tests that don't exercise the real LangGraph
+    gate are satisfied by this; tests that need the real pinned class
+    (the K-guard contract test, the compile gate, the K1/K2 regression
+    tests) go through the mock-eviction + reload binding gate — NOT
+    through this mock, which would silently invert the semantics.
+    """
+
+
+mock_langgraph_checkpoint_base.BaseCheckpointSaver = _MockBaseCheckpointSaver
+
 # Create mock MCP SDK module (mcp package)
 mock_mcp_tool_adapter = create_mock_module("daemon.mcp.tool_adapter", {
     "mcp_tool_name": lambda server_name, tool_name: f"mcp_{server_name}_{tool_name}",
@@ -223,6 +259,7 @@ _mock_modules = {
     "langgraph.checkpoint.memory": mock_langgraph_checkpoint_memory,
     "langgraph.checkpoint.sqlite": mock_langgraph_checkpoint_sqlite,
     "langgraph.checkpoint.sqlite.aio": mock_langgraph_checkpoint_sqlite_aio,
+    "langgraph.checkpoint.base": mock_langgraph_checkpoint_base,
     "daemon.mcp.tool_adapter": mock_mcp_tool_adapter,
     # Mock MCP SDK modules
     "mcp": mock_mcp,

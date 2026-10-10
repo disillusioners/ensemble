@@ -158,6 +158,9 @@ async def test_readyz_ready_200(root_client, app_with_mock_manager):
         "database": True,
         "queue_freshness": True,
         "services": True,
+        # incident 2026-10-10: new component, healthy default for
+        # tests that don't construct a probe (SQLite / no-probe path).
+        "checkpoint_saver": True,
     }
     assert body["detail"]["reasons"] == []
     assert body["detail"]["queue_max_age_seconds"] == 12.5

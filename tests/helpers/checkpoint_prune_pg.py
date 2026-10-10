@@ -48,6 +48,12 @@ LANGGRAPH_MOCK_KEYS = [
     "langgraph.checkpoint.memory",
     "langgraph.checkpoint.sqlite",
     "langgraph.checkpoint.sqlite.aio",
+    # 1af1a1da2 added this conftest mock (saver proxy subclasses
+    # BaseCheckpointSaver) — must be evicted too or the stale mock (no
+    # __file__, no real attrs) shadows the REAL langgraph.checkpoint.base
+    # and every real-saver import below dies with
+    # "ImportError ... (unknown location)".
+    "langgraph.checkpoint.base",
 ]
 
 
@@ -57,6 +63,16 @@ def evict_langgraph_mocks() -> dict:
     Returns the saved mapping (pass to :func:`restore_langgraph_mocks`).
     Mirrors the ``restore_langgraph_modules`` fixture pattern used by the
     existing real-langgraph integration tests.
+
+    MOCK-ONLY eviction (round 2): a sys.modules entry that already has a
+    ``__file__`` is a REAL module (imported by an earlier eviction in
+    this session) and is left in place. Re-executing real langgraph
+    modules on every eviction would fork module identity — a second
+    ``langgraph.checkpoint.base`` module object whose ``BaseCheckpointSaver``
+    fails ``isinstance`` against the first copy's (observed live:
+    ``ensure_valid_checkpointer`` rejecting a proxy bound to the other
+    copy). Keeping real modules cached keeps every consumer bound to
+    ONE class object per session.
 
     Deliberately does NOT evict ``daemon.*`` modules: none of
     ``daemon.checkpoint_adapter`` / ``daemon.checkpoint_perf`` /
@@ -68,22 +84,84 @@ def evict_langgraph_mocks() -> dict:
     """
     saved = {}
     for key in LANGGRAPH_MOCK_KEYS:
-        if key in sys.modules:
-            saved[key] = sys.modules[key]
-            del sys.modules[key]
+        mod = sys.modules.get(key)
+        if mod is None:
+            continue
+        if getattr(mod, "__file__", None):
+            # Real module (already imported by a prior eviction) — keep
+            # it cached so identities stay stable across runs.
+            continue
+        saved[key] = mod
+        del sys.modules[key]
     return saved
 
 
 def restore_langgraph_mocks(saved: dict) -> None:
+    """Restore evicted mock modules — MOCK-ONLY (round 2).
+
+    A key whose sys.modules entry is now a REAL module (``__file__``
+    present — imported by this session's eviction) is NOT re-poisoned
+    with the mock: doing so would (a) fork module identity on the next
+    eviction+import cycle (a second ``langgraph.checkpoint.base`` whose
+    ``BaseCheckpointSaver`` fails ``isinstance`` against the first
+    copy's) and (b) leave the parent mock / real child split-brain.
+    The repo's only ``langgraph.checkpoint.base`` importer is
+    ``daemon.checkpoint_adapter`` (verified), so keeping the real
+    module cached once loaded is safe for every other consumer.
+    """
     for key in LANGGRAPH_MOCK_KEYS:
-        if key in saved:
-            sys.modules[key] = saved[key]
+        if key not in saved:
+            continue
+        current = sys.modules.get(key)
+        if current is not None and getattr(current, "__file__", None):
+            # Real module took the slot during the eviction window —
+            # keep it; identity stays stable for the whole session.
+            continue
+        sys.modules[key] = saved[key]
+
+
+def snapshot_module_state(mod) -> dict:
+    """Shallow-copy a module's ``__dict__`` (exact object snapshot).
+
+    Pair with :func:`restore_module_state` to undo an
+    ``importlib.reload`` WITHOUT re-executing the module: reload keeps
+    the module object but re-creates every class in it, which forks
+    identity for any consumer that bound names at its own import time
+    (e.g. ``daemon.persistence`` holds ``SqliteCheckpointerAdapter``
+    from collection time — a post-fixture fresh import would get a
+    different class object and ``isinstance`` would split across test
+    files). Snapshot-restore puts the EXACT original objects back.
+    """
+    return dict(vars(mod))
+
+
+def restore_module_state(mod, snapshot: dict) -> None:
+    """Restore a :func:`snapshot_module_state` snapshot in place.
+
+    Clears the module namespace and re-installs the exact saved objects
+    (no fresh imports, no re-execution). ``sys.modules`` keeps holding
+    the same module object throughout.
+    """
+    vars(mod).clear()
+    vars(mod).update(snapshot)
+
+
+def _pg_unavailable_skip(exc: Exception):
+    """Loud skip with the canonical unavailable reason (shared by both guards)."""
+    pytest.skip(
+        f"BLOCKING real-saver test SKIPPED: PostgreSQL not available at "
+        f"{ADMIN_DSN} ({type(exc).__name__}: {exc}). The C3 blob-prune "
+        "gate requires a real PostgreSQL backend — do NOT merge PR4 on "
+        "a skip; start PG (docker compose test stack or local) and re-run."
+    )
 
 
 def require_postgres() -> None:
     """Loud skip when PostgreSQL is unreachable (never a silent mock).
 
     Safe to call from sync contexts (module import / sync fixtures).
+    NOT safe inside a running event loop (``asyncio.run`` raises
+    RuntimeError there) — async fixtures use :func:`require_postgres_async`.
     """
     import asyncpg
 
@@ -94,12 +172,32 @@ def require_postgres() -> None:
     try:
         asyncio.run(_probe())
     except Exception as exc:  # noqa: BLE001
-        pytest.skip(
-            f"BLOCKING real-saver test SKIPPED: PostgreSQL not available at "
-            f"{ADMIN_DSN} ({type(exc).__name__}: {exc}). The C3 blob-prune "
-            "gate requires a real PostgreSQL backend — do NOT merge PR4 on "
-            "a skip; start PG (docker compose test stack or local) and re-run."
-        )
+        _pg_unavailable_skip(exc)
+
+
+async def require_postgres_async() -> None:
+    """Async-safe twin of :func:`require_postgres` — await inside async fixtures.
+
+    Round-2 H1: ``require_postgres()`` uses ``asyncio.run``, which raises
+    ``RuntimeError: asyncio.run() cannot be called from a running event
+    loop`` when called from a pytest-asyncio fixture; the guard's bare
+    ``except`` then mislabeled a HEALTHY server as "PostgreSQL not
+    available" and deterministically skipped the two
+    ``test_pg_checkpoint_saver_probe_*`` tests (false green). This twin
+    awaits the same probe on the caller's running loop instead. Same
+    skip contract: loud skip (never a silent mock) when the server is
+    truly unreachable.
+    """
+    import asyncpg
+
+    async def _probe() -> None:
+        conn = await asyncpg.connect(ADMIN_DSN, timeout=5)
+        await conn.close()
+
+    try:
+        await asyncio.wait_for(_probe(), timeout=6)
+    except Exception as exc:  # noqa: BLE001
+        _pg_unavailable_skip(exc)
 
 
 async def create_disposable_db() -> tuple[str, str]:
@@ -139,39 +237,84 @@ async def drop_database(name: str) -> None:
 
 
 @asynccontextmanager
-async def real_pg_checkpointer(dbname: str, dsn: str):
+async def real_pg_checkpointer(dbname: str, dsn: str, *, pool: bool = False):
     """Yield the production-shaped (saver, pool, adapter) stack on a real DB.
 
     Mirrors ``daemon/persistence.py::create_postgres_checkpointer``:
-    psycopg autocommit connection with ``prepare_threshold=0`` +
-    ``dict_row`` → ``AsyncPostgresSaver`` + ``setup()``; asyncpg pool for
-    the adapter's direct SQL. Everything is closed on exit.
+
+    * ``pool=False`` (default — backward compatible): psycopg autocommit
+      connection with ``prepare_threshold=0`` + ``dict_row`` →
+      ``AsyncPostgresSaver`` + ``setup()``; asyncpg pool for the
+      adapter's direct SQL.
+    * ``pool=True`` (incident 2026-10-10): saver is backed by a
+      ``psycopg_pool.AsyncConnectionPool`` (``min_size=1, max_size=5``,
+      kwargs autocommit/dict_row/prepare_threshold, ``check=`` wired
+      to ``AsyncConnectionPool.check_connection``) — the production
+      topology after the fix. The asyncpg pool is unchanged.
+
+    Everything is closed on exit. Existing consumers continue to
+    receive the legacy single-conn topology (``pool=False``); new
+    tests opt in to the pool-backed topology with ``pool=True``.
     """
     import asyncpg
     import psycopg
     from psycopg.rows import dict_row
 
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg_pool import AsyncConnectionPool
 
     from daemon.checkpoint_adapter import PostgresCheckpointerAdapter
 
-    saver_conn = await psycopg.AsyncConnection.connect(
-        dsn,
-        autocommit=True,
-        prepare_threshold=0,
-        row_factory=dict_row,
-    )
-    try:
-        saver = AsyncPostgresSaver(conn=saver_conn)
-        await saver.setup()
-        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
+    if pool:
+        saver_pool = AsyncConnectionPool(
+            conninfo=dsn,
+            open=False,
+            min_size=1,
+            max_size=5,
+            check=AsyncConnectionPool.check_connection,
+            max_lifetime=3600,
+            max_idle=600,
+            reconnect_timeout=300,
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            },
+        )
         try:
-            adapter = PostgresCheckpointerAdapter(saver, pool)
-            yield saver, pool, adapter
+            await saver_pool.open()
+            try:
+                saver = AsyncPostgresSaver(conn=saver_pool)
+                await saver.setup()
+                asyncpg_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
+                try:
+                    adapter = PostgresCheckpointerAdapter(saver, asyncpg_pool)
+                    yield saver, asyncpg_pool, adapter
+                finally:
+                    await asyncpg_pool.close()
+            finally:
+                await saver_pool.close()
+        except BaseException:
+            # open() failure leaves the pool un-openable; nothing to clean.
+            raise
+    else:
+        saver_conn = await psycopg.AsyncConnection.connect(
+            dsn,
+            autocommit=True,
+            prepare_threshold=0,
+            row_factory=dict_row,
+        )
+        try:
+            saver = AsyncPostgresSaver(conn=saver_conn)
+            await saver.setup()
+            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
+            try:
+                adapter = PostgresCheckpointerAdapter(saver, pool)
+                yield saver, pool, adapter
+            finally:
+                await pool.close()
         finally:
-            await pool.close()
-    finally:
-        await saver_conn.close()
+            await saver_conn.close()
 
 
 @asynccontextmanager
