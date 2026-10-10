@@ -1,6 +1,6 @@
-# Live-Views Subsystem — Phase 1 Runbook
+# Live-Views Subsystem — Phase 1 + Phase 2 Runbook
 
-- **Version:** 1.0 @ feature/live-views *(Phase 1 of the live-view subsystem commission, shipped with the post-v0.18.1 release vehicle)*
+- **Version:** 2.0 @ feature/live-views-url-and-rendering (Phase 1 + Phase 2 of the live-view subsystem commission, ships with the post-v0.18.1 release vehicle).
 - **Canonical path:** `docs/runbooks/live-views.md` (matches the `docs/runbooks/` house convention; the other live-views planning lives in `.agents/shared/planning/live-views/`).
 - **Scope:** the `GET/HEAD /views/<root>/<rel>` HTTP route family + the `view_link` agent tool + the per-app `LiveViewsService` registry. **No write / delete / list endpoints** — read-only by design. **No auth at the daemon** — the edge guard is the deployment's responsibility.
 
@@ -11,12 +11,15 @@
 ```nginx
 # Example (nginx) — adapt for your proxy of choice.
 location /views/ {
-    auth_request /oauth2/auth;       # or your proxy's auth directive
-    proxy_pass http://127.0.0.1:9797; # the daemon
-    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header Host $host;             # critical — HostCaptureMiddleware
+                                            # reads this; do not overwrite
+                                            # with the upstream default
     proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_pass http://127.0.0.1:9797; # the daemon
 }
 ```
+
+The Host header is the canonical signal the daemon uses to mint fully-qualified `view_link` output (see §6 for the chain). **Do NOT overwrite the Host header in the proxy** — the daemon's Host-capture tier relies on the value the client actually used.
 
 The URL is "public-by-obscurity" the same way `/api/tmp_images/<id>` already is — the convention lives in `.agents/shared/conventions.md`. **The difference**: tmp_images keys are 32-hex content-addressed ids (unguessable in practice). `view_link` URLs carry the file's repo-relative path (a deterministic name like `mockups/landing.html`), so an attacker who can guess the project + path shape can read the artifact. **This is by design — the URL is meant to be a stable reference an implement-brief can carry, not a secret.** Edge auth is the layer that keeps it scoped to the right team.
 
@@ -29,14 +32,18 @@ The URL is "public-by-obscurity" the same way `/api/tmp_images/<id>` already is 
   * `designer-artifact` — project-scoped (REWORK 2026-10-07, M2). URL shape: `/views/designer-artifact/<project_shortname>/<feature>/design/mockups/<file>`. The first path segment after the root is the project shortname (must be a registered `Project.shortnames` entry), exactly like `planning`. The canonical mockups subtree is the `<project_workdir>/.agents/shared/planning/<feature>/design/mockups/` template; the resolver enforces the `*/design/mockups/*` shape by construction (M3) so the URL cannot serve arbitrary planning files under the `designer-artifact` name.
   * `planning` — project-scoped. URL shape: `/views/planning/<project_shortname>/<rel>`. The first path segment after the root is the project shortname (must be a registered `Project.shortnames` entry). The root is the per-project `.agents/shared/planning/` subtree.
   * `tmp-images` — delegates to the per-app `TmpImageStore` substrate. MIME comes from the sidecar record (architect risk #7 — NEVER extension-guessed). 32-hex image id only.
-* **`view_link` tool** — agent-facing URL minter. **RESTRICTED first-release visibility (REWORK 2026-10-07, M1, user refinement #1).** The `view-views` category is in `PRIVILEGED_TOOL_CATEGORIES` (empty-allow agents do NOT get the tool); the three commissioned users (ari, leader, designer) opt in via `tools.allow: ["view-views"]` in their meta.json. The tool name stays in `KNOWN_TOOL_NAMES` (inventory, not the gate). Returns path-relative URLs by default; fully-qualified when `config.live_views.external_base_url` is set. Route stays general; extensibility is per-agent allow entries + per-root config.
+* **`view_link` tool** — agent-facing URL minter. **RESTRICTED first-release visibility (REWORK 2026-10-07, M1, user refinement #1).** The `view-views` category is in `PRIVILEGED_TOOL_CATEGORIES` (empty-allow agents do NOT get the tool); the three commissioned users (ari, leader, designer) opt in via `tools.allow: ["view-views"]` in their meta.json. The tool name stays in `KNOWN_TOOL_NAMES` (inventory, not the gate). Returns fully-qualified URLs by default (auto-detected from the most recent inbound Host the daemon served); falls back to bind-evidence (`http://127.0.0.1:<port>/...`); falls back to path-relative only when nothing trustworthy resolves. Route stays general; extensibility is per-agent allow entries + per-root config.
 * **Designer write-through** — the design artifacts table contract (`agents/designer/skills-template/design-strategy.md:71`) gains a `view_url` column populated via `view_link('designer-artifact', f"{shortname}/{<row.path>}")` (REWORK 2026-10-07, M2 — the first URL segment is the project shortname, the rest is the row's `path` value, e.g. `view_link('designer-artifact', "ens/feat/design/mockups/landing.html")`). The LLM writes the column; the tool is the surface.
 
 **Out of v1 scope** (Phase 2 candidates, not in this slice):
 * FE WebView rendering of served content
-* Conversion (markdown → HTML, image resize)
 * Auth at the daemon (the edge proxy is the layer)
 * Write / delete / list endpoints (read-only by design)
+
+## 1b. v2 scope (Phase 2 — delivered with the URL/rendering commission)
+
+* **Fully-qualified `view_link` URLs (Phase 2).** `view_link` now returns an HTTP URL a chat client can click — see §6 for the four-tier precedence and the Host-capture auto-detect mechanism. No agent / operator change to the URL minting call; the tool is a thin wrapper around `LiveViewsService.build_url`, which now consults the `BaseURLResolver` chain.
+* **Content-aware rendering.** `/views/<root>/<rel>.md` serves an HTML viewer page (renderer + sanitizer via pinned CDN, CSP nonce, SRI integrity) instead of the Phase 1 raw `text/markdown` blob. Other content types are unchanged — see §7 for the per-type table.
 
 ## 2. Operator notes
 
@@ -78,9 +85,9 @@ Set `live_views.enabled: false`, then restart. The router still mounts the route
 
 ### 2.4 Switch the URL base to fully-qualified
 
-Set `live_views.external_base_url: https://ensemble.example.com`, then restart. `view_link` mints `https://ensemble.example.com/views/<root>/<rel>` instead of `/views/<root>/<rel>`. **The OAuth proxy MUST resolve the same hostname** — a mismatch (minted URL points to host A, the proxy is on host B) yields a confusing 404-from-proxy and a useful-but-hard-to-debug log line.
+Set `live_views.external_base_url: https://ensemble.example.com`, then restart. `view_link` mints `https://ensemble.example.com/views/<root>/<rel>` instead of path-relative. **The OAuth proxy MUST resolve the same hostname** — a mismatch (minted URL points to host A, the proxy is on host B) yields a confusing 404-from-proxy and a useful-but-hard-to-debug log line.
 
-**Default (unset) is the recommended setting for behind-OAuth-proxy deployments** — the daemon has no canonical public hostname, so a path-relative URL is the safe mint. Operators that need fully-qualified URLs (e.g. a share-by-link feature in the FE) opt in explicitly.
+**Default (unset) is the recommended setting when the daemon has a deterministic public hostname** — Host-capture (§6) auto-detects whichever hostname the client used to reach the daemon and mints against that. Operators that need a hard override (e.g. an external HTTPS terminator they don't fully control, or a share-by-link feature in the FE that needs a canonical URL regardless of which client mints it) opt into the explicit override.
 
 ### 2.5 Verify the subsystem is alive
 
@@ -136,6 +143,22 @@ Likely causes, in order of frequency:
 
 The exception is `/views/tmp-images/<id>` — that path uses the sidecar MIME (architect risk #7), not the extension. The blob is extensionless on disk; the sidecar is the only source of truth.
 
+### 3.5 `view_link` returns a path-relative URL when I expected fully-qualified
+
+The chain in §6 takes precedence top-down. The most common reasons a fully-qualified URL was NOT minted:
+
+1. `live_views.external_base_url` is set to a malformed value (`javascript:`, no `://`, with a path, with userinfo) — falls through to step 2. Cure: correct the config value.
+2. The Host-capture recorder has never seen a request (the daemon was freshly restarted; the next request after restart becomes the recorded base). For dev: `curl -H 'Host: foo.example.com' http://127.0.0.1:8079/livez` then `view_link`.
+3. The proxy is overwriting the Host header (`proxy_set_header Host $proxy_host` instead of `$host`) — the daemon sees the proxy's hostname, not the client's. Cure: pass the client's Host through.
+4. The bind-host is `0.0.0.0` and the daemon has seen no requests yet — step 3 maps to `http://127.0.0.1:PORT` (not `http://0.0.0.0:PORT` — that would be a nonsense URL). If the daemon has been idle long enough that step 2 has not fired, step 3 produces `http://127.0.0.1:PORT/...`.
+
+### 3.6 `.md` URLs serve raw text instead of a rendered page
+
+Two possibilities:
+
+1. The root's `allowed_extensions` does NOT include `md`. The allowlist gate fires before the wrapper dispatch — uniform 404 (the MIME shape is hidden behind the gate). Cure: add `md` to the root's `allowed_extensions`.
+2. The daemon was built BEFORE Phase 2 landed. Re-pull the worktree and rebuild. (Phase 2 is wired into the router, not a separate service — a stale binary just serves `text/markdown` like Phase 1.)
+
 ## 4. Security notes
 
 * **Uniform 404.** Every miss is the same body, the same code, the same `X-Content-Type-Options: nosniff`. A probing client cannot distinguish "root missing" from "traversal rejected" from "path missing" — this is the model the architect set for `/api/tmp_images/<id>` and we mirror it.
@@ -143,13 +166,70 @@ The exception is `/views/tmp-images/<id>` — that path uses the sidecar MIME (a
 * **No content sniffing.** Content-Type comes from the explicit map (filesystem / project_scoped roots) or the sidecar record (tmp-images root). Never `mimetypes.guess_type` on the read bytes. Never the magic-byte sniff the image tools use.
 * **Path-traversal guards.** Every `resolve_for_instance` call runs `is_well_formed_rel_path` (rejects `..`, control chars, leading `/`, backslash, percent-encoded forms after decode) and a `realpath`-based containment check against the resolved root. The `tmp-images` root applies the same `^[a-f0-9]{32}$` regex as `/api/tmp_images/<id>`.
 * **No auth at the daemon.** Same shape as `/api/tmp_images/<id>` (`.agents/shared/conventions.md`). The edge proxy is the layer. The `/views/livez` operator probe is NOT a public status — it reveals the subsystem state to anyone who knows the URL; do not expose `/views/*` directly to the internet without edge auth.
+* **Host-header spoofing (Phase 2).** The Host-capture tier in §6 accepts whatever the client sent (HTTP Host is not authenticated). An anonymous attacker on the same network can poison the minted URL base with a chosen hostname by sending a request with `Host: evil.example.com`. Impact = the daemon mints `view_link` URLs that look like they point to `evil.example.com` until the next recorder reset. Mitigation = the operator override (`external_base_url`) ALWAYS wins — set it whenever the deployment has a known public hostname; the chain never falls through to Host-capture when the override is set. The HostRecorder also syntactically validates the value (no userinfo / path / whitespace / oversize) — see `_is_valid_host_header` in `daemon/services/live_views.py` — so a malformed Host cannot produce a malformed URL.
+* **Markdown wrapper security posture (Phase 2).** The `.md` wrapper (§7) loads `marked@12.0.2` + `dompurify@3.0.11` from `cdn.jsdelivr.net` with `integrity="sha384-..."` + `crossorigin="anonymous"` attrs. The page carries a strict CSP:
+  - `script-src 'self' https://cdn.jsdelivr.net 'nonce-X'` (no `unsafe-inline`, no `unsafe-eval`).
+  - `style-src 'self' 'nonce-X' 'unsafe-inline'` (`unsafe-inline` is the documented trade-off — markdown-emitted raw HTML inline styles can survive DOMPurify when authors write `<style>` tags; the wrapper degrades gracefully when this attribute is removed).
+  - `object-src 'none'`, `base-uri 'self'`, `form-action 'self'`, `frame-ancestors 'none'`.
+  The raw markdown is HTML-escaped before being embedded in the wrapper's `<article><pre>` element — the only consumer is the bootstrap script, which reads via `.textContent` (auto-decodes the entities) and runs `marked.parse` + `DOMPurify.sanitize` before any `innerHTML` write. CDN compromise → SRI fails → script does not load → page shows the raw `<pre>` fallback (graceful degradation). Bootstrap failure (JS off / CDN unreachable / parse error) → catch block leaves the embedded `<pre>` visible — the page is never blank.
 
 ## 5. Cross-references
 
-* `daemon/services/live_views.py` — the registry + resolver (single source of truth for path-traversal guards, content-type map, URL minting).
-* `daemon/routers/live_views.py` — the HTTP route family. GET + HEAD only.
+* `daemon/services/live_views.py` — the registry + resolver (single source of truth for path-traversal guards, content-type map, URL minting chain, markdown wrapper).
+* `daemon/routers/live_views.py` — the HTTP route family. GET + HEAD only. Phase 2 dispatches `.md` to the wrapper; everything else serves native.
+* `daemon/api.py` — the `HostCaptureMiddleware` (Phase 2) reads `app.state.host_recorder` from `scope["app"]` on every request and feeds the URL-resolver chain.
 * `daemon/routers/tmp_images.py:130` — the same path-traversal regex the tmp-images root applies (defense in depth — the live-views service applies the same gate).
 * `daemon/tools/image_tools.py:465-480` — the project-workdir resolution pattern the `designer-artifact` root mirrors.
 * `daemon/tools/live_views.py` — the `view_link` tool factory.
 * `agents/designer/skills-template/design-strategy.md:71` — the design artifacts table contract (now carries a `view_url` column).
 * `.agents/shared/conventions.md` — the public-by-obscurity file-serving convention.
+
+## 6. URL resolution chain (Phase 2)
+
+The `BaseURLResolver` (in `daemon/services/live_views.py`) is the single source of truth for the URL base. Precedence (top wins):
+
+1. **Operator override** — `config.live_views.external_base_url`. The existing knob from Phase 1; always wins when set. The resolver syntactically validates the value (scheme + host + optional port, no path / userinfo / whitespace) — a malformed override falls through to step 2 rather than producing a bad mint.
+2. **Host-capture auto-detect** — the most recent inbound HTTP request the daemon served. A small middleware (`HostCaptureMiddleware` in `daemon/api.py`) reads the `Host` header + `X-Forwarded-Proto` on every request and writes them to `app.state.host_recorder` (a tiny thread-safe state object). The resolver reads the latest record and mints `http(s)://<host>[:<port>]/views/<root>/<rel>`. Syntactic validation lives in `HostRecorder.record` — empty / malformed / userinfo / path-bearing / header-smuggling values are silently dropped (the middleware errors never break the request path).
+3. **Bind evidence** — `config.daemon.host` + `config.daemon.port`. Wildcards (`0.0.0.0`, `::`, empty) collapse to `127.0.0.1` so the daemon never produces a nonsense URL like `http://0.0.0.0:8079/...`. Scheme `http`. This is the last-known-reachable guess — the tier that fires for single-host localhost dev and for behind-proxy deployments where the proxy doesn't forward Host and we haven't yet seen a host.
+4. **None (path-relative fallback)** — `view_link` emits `/views/<root>/<rel>`. Last resort; should become rare after Host-capture kicks in (a daemon that has served even one HTTP request has a recorded host).
+
+**Trust model.** Step 2 accepts whatever the client sent — HTTP Host is not authenticated. The risk is that an anonymous client can poison the minted URL base with a chosen hostname by sending a request with `Host: evil.example.com`. Mitigation:
+
+- The operator override (step 1) ALWAYS wins. Set `external_base_url` whenever the deployment has a known public hostname; the chain never falls through to Host-capture.
+- The HostRecorder syntactically validates the value (no userinfo / path / whitespace / oversize / header-smuggling). A malformed Host cannot produce a malformed URL.
+- The recorder uses last-write-wins. The next request after any client mint becomes the new base — a polling client (like the FE's queue-status badge) stabilizes the base after one cycle.
+
+**Why no localhost / private-IP blacklist.** An operator who runs the daemon behind a localhost-only reverse proxy still wants a localhost URL in their chat client. Blacklisting would force them to either set the operator override (loses Host-capture for legit dev loops) or set the daemon's bind host to a routable one (security regression). The trust model is documented above; the user controls when step 1 wins.
+
+**X-Forwarded-Proto.** The middleware reads this header on every request and feeds the recorder; `https`, `HTTPS` (case-insensitive) mint `https://...`, anything else falls back to `http`. The header is set by the OAuth proxy / TLS terminator in front of the daemon. Direct-connect (no proxy) leaves it unset → `http://...`.
+
+## 7. Content-aware rendering (Phase 2)
+
+The router dispatches per-type on the resolved MIME:
+
+| Extension | MIME (from `_EXT_TO_MIME`) | Render shape | Notes |
+|-----------|----------------------------|--------------|-------|
+| `.md` / `.markdown` | `text/markdown; charset=utf-8` | **HTML wrapper page** | Phase 2 — see §4 (security posture) + wrapper shape below |
+| `.html` / `.htm` | `text/html; charset=utf-8` | Native (no wrapper, no CSP) | Designer mockups may carry legitimate `<script>` — over-restrictive CSP would break them |
+| `.svg` | `image/svg+xml; charset=utf-8` | Native | nosniff header prevents SVG-with-script from being sniffed to executable |
+| `.jpg` / `.jpeg` / `.png` / `.gif` / `.webp` | `image/*` | Native | Tmp-images: sidecar MIME (architect risk #7), never extension-guessed |
+| `.pdf` | `application/pdf` | Native | Browser-native viewer |
+| `.css` | `text/css; charset=utf-8` | Native | nosniff prevents sniffing to HTML |
+| `.js` / `.mjs` | `application/javascript; charset=utf-8` | Native | Only executes if a parent page references them — no inline-script execution surface |
+| `.txt` / `.json` / `.csv` / `.log` / `.yml` / `.yaml` / `.xml` / `.asc` / `.mmd` | `text/plain` / `application/json` / `application/yaml` / `application/xml` / `text/plain` | Native (text/* served as-is) | Browser displays monospace by default; a wrapper adds bytes without value |
+| (anything else) | `application/octet-stream` | Native | Spec's safe "I don't know" answer — never sniff content |
+
+**`.md` wrapper shape.** The HTML viewer page renders via:
+
+- `marked@12.0.2` (`https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js`, sha384 SRI) — markdown → HTML.
+- `dompurify@3.0.11` (`https://cdn.jsdelivr.net/npm/dompurify@3.0.11/dist/purify.min.js`, sha384 SRI) — XSS sanitizer.
+- A per-request bootstrap reads the raw markdown (HTML-escaped in `<article id="rendered"><pre>`), runs `marked.parse` + `DOMPurify.sanitize`, and replaces `innerHTML`. On any failure (JS off, CDN unreachable, marked/DOMPurify missing), the bootstrap's catch block leaves the embedded `<pre>` visible — the page is never blank.
+- A per-request CSP nonce (`secrets.token_urlsafe(16)`) gates the inline bootstrap script. No `unsafe-inline` for scripts.
+
+**Why not server-side markdown rendering + sanitization (Phase 2 design choice).** The CDN client-side approach was chosen over a server-side Python implementation for three reasons:
+
+1. **Zero new Python deps.** The current live-views subsystem has zero non-stdlib imports in `daemon/services/live_views.py`; a server-side implementation would need either a full markdown library (`markdown` / `mistune` / `mdformat` — none are small) AND a sanitizer (`bleach` / `nh3` — both add to install footprint) — both are heavyweight for what is fundamentally a viewer page.
+2. **Browser sandbox.** The CSP + SRI + nonce stack is the defense in depth — a compromised CDN cannot inject new JS without the SRI failing, and the CSP further restricts the allowed script origin to `cdn.jsdelivr.net`. Server-side rendering shifts the trust boundary to the Python process (a vulnerability in a Python markdown lib is in the daemon process, not a sandboxed browser tab).
+3. **Graceful degradation is a feature.** When the CDN is unreachable (proxy blocking, dev box being offline), the page shows the raw markdown in a readable `<pre>` rather than a 500. Server-side rendering would either succeed (the markdown lib is local) but lose the defense-in-depth cleanup, or fail (if the sanitizer rejects the input) and serve nothing.
+
+The trade-off is documented: the wrapper depends on a single CDN (`cdn.jsdelivr.net`). The browser caches the scripts (HTTP semantics; both have a default immutable-style cache); the second visit loads the CDN scripts from the cache. For air-gapped deployments, an operator can run a local CDN mirror and override the URLs via a future config knob (deferred — the URL constants live in `daemon/services/live_views.py` and are greppable).
