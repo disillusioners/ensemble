@@ -1029,7 +1029,18 @@ async def lifespan(app: FastAPI):
     # registry is read-only at request time, populated once
     # here from ``config.live_views.roots``).
     # ─────────────────────────────────────────────────────────────
-    from daemon.services.live_views import LiveViewsService
+    from daemon.services.live_views import HostRecorder, LiveViewsService
+
+    # Phase 2: HostRecorder is the live-capture seam for the
+    # URL base-resolution chain (see ``BaseURLResolver`` docstring).
+    # The recorder is shared between the ``LiveViewsService``
+    # (reads from it via ``build_url``) and the
+    # ``HostCaptureMiddleware`` (writes to it on every inbound
+    # HTTP request). The recorder MUST be created BEFORE the
+    # service so the service's resolver constructor captures
+    # the same instance the middleware writes to.
+    host_recorder = HostRecorder()
+    app.state.host_recorder = host_recorder
 
     def _resolve_project_workdir_by_shortname(shortname: str | None) -> str | None:
         """Return the main_directory of the project matching ``shortname``.
@@ -1070,6 +1081,17 @@ async def lifespan(app: FastAPI):
         config=config.live_views,
         tmp_image_store=tmp_image_store,
         project_workdir_by_shortname_resolver=_resolve_project_workdir_by_shortname,
+        # Phase 2: bind evidence is the third-tier fallback in
+        # the URL base-resolution chain (operator override >
+        # Host-capture auto-detect > bind evidence > path-relative).
+        # The Host-capture tier is fed by ``HostCaptureMiddleware``
+        # reading ``app.state.host_recorder``; the recorder itself
+        # is created here and shared between the service and the
+        # middleware so the service's ``build_url`` reads the
+        # same state the middleware writes.
+        bind_host=config.daemon.host,
+        bind_port=config.daemon.port,
+        host_recorder=host_recorder,
     )
     app.state.live_views_service = live_views_service
     # Thread the service onto the manager so the ``view_link``
@@ -2956,7 +2978,7 @@ def create_app() -> FastAPI:
 
             method_color = self.COLORS.get(method, self.RESET)
             status_color = self.status_color(status_code)
-            
+
             log_msg = (
                 f"{self.BOLD}{client_addr}{self.RESET} "
                 f"{method_color}{method}{self.RESET} "
@@ -2964,6 +2986,58 @@ def create_app() -> FastAPI:
                 f"{status_color}{status_code}{self.RESET}"
             )
             logger.info(log_msg)
+
+    # ─────────────────────────────────────────────────────────────
+    # Host-capture middleware (Phase 2 of the live-view
+    # subsystem). Reads the inbound ``Host`` and ``X-Forwarded-Proto``
+    # headers and writes them to ``app.state.host_recorder`` —
+    # the second-tier input of the URL base-resolution chain
+    # (see ``BaseURLResolver``). Last-write-wins semantics: the
+    # most recent request's host becomes the next minted URL
+    # base. Syntactic validation lives in
+    # ``daemon.services.live_views.HostRecorder.record``; this
+    # middleware is intentionally a thin pass-through (no
+    # failure path; a bad Host is dropped at the recorder,
+    # never an error).
+    #
+    # The middleware looks up the recorder via ``scope["app"]``
+    # (Starlette 0.30+) rather than capturing it at construction
+    # — ``app.add_middleware`` is invoked BEFORE the lifespan
+    # runs, so the recorder does not yet exist at construction
+    # time. Lookup at request time is the canonical pattern.
+    # ─────────────────────────────────────────────────────────────
+    class HostCaptureMiddleware:
+        """Capture inbound Host + X-Forwarded-Proto for URL minting."""
+
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "http":
+                app_ref = scope.get("app")
+                recorder = (
+                    getattr(app_ref.state, "host_recorder", None)
+                    if app_ref is not None
+                    else None
+                )
+                if recorder is not None:
+                    # ASGI headers are list[tuple[bytes, bytes]].
+                    # Decode once, lower-case keys, ignore any
+                    # malformed pair — the recorder drops bad
+                    # values; the middleware must NEVER raise.
+                    headers: dict[str, str] = {}
+                    for raw_k, raw_v in scope.get("headers", []):
+                        try:
+                            key = raw_k.decode("latin-1").lower()
+                            val = raw_v.decode("latin-1")
+                        except (UnicodeDecodeError, AttributeError):
+                            continue
+                        headers[key] = val
+                    host = headers.get("host")
+                    if host:
+                        proto = headers.get("x-forwarded-proto")
+                        recorder.record(host, proto)
+            await self.app(scope, receive, send)
 
     # Add CORS
     app.add_middleware(
@@ -2976,6 +3050,14 @@ def create_app() -> FastAPI:
 
     # Add selective access log middleware
     app.add_middleware(SelectiveAccessLogMiddleware)
+
+    # Phase 2 / Host-capture for the live-view URL mint.
+    # Registered LAST so it sees the headers as the client
+    # sent them (BEFORE any CORS / access-log middlewares
+    # mutate the request); the recorder is pass-through and
+    # does not modify the request, so registration order has
+    # no functional impact — ordering for clarity.
+    app.add_middleware(HostCaptureMiddleware)
 
     # Global exception handler
     @app.exception_handler(Exception)
