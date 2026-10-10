@@ -30,6 +30,7 @@ from daemon.plugin_subsystem import (
 )
 from daemon.plugin_subsystem.opendesign.compose_brief import OdComposeBrief
 from daemon.plugin_subsystem.opendesign.generate import OdGenerate, GenerateInput
+from daemon.plugin_subsystem.opendesign.ports import DEFAULT_MAX_TOKENS
 from daemon.plugin_subsystem.opendesign.lint import OdLint
 from daemon.plugin_subsystem.opendesign.save import OdSave
 from daemon.plugin_subsystem.plugin_tool_factory import (
@@ -319,7 +320,7 @@ class TestToolInvocationRouting:
                     {"role": "user", "content": kwargs["user_prompt"]},
                 ],
                 model=kwargs.get("model", "vision"),
-                max_tokens=kwargs.get("max_tokens", 64000),
+                max_tokens=kwargs.get("max_tokens", DEFAULT_MAX_TOKENS),
                 temperature=kwargs.get("temperature", 0.7),
                 timeout=kwargs.get("timeout", 120.0),
             )

@@ -93,6 +93,7 @@ from daemon.llm_error_classifier import (
     _matches_usage_limit,
     _transient_patterns,
 )
+from daemon.plugin_subsystem.opendesign.ports import DEFAULT_MAX_TOKENS
 from daemon.plugin_subsystem.opendesign.ts_prompt_eval import TsPromptEvalError
 from daemon.services.llm_failover import (
     current_failover_url,
@@ -124,7 +125,7 @@ class GenerateInput:
     kind: str = "prototype"  # prototype|deck|template|other|image|video|audio
     user_instructions: Optional[str] = None
     project_instructions: Optional[str] = None
-    max_tokens: int = 64000
+    max_tokens: int = DEFAULT_MAX_TOKENS
     skip_discovery_brief: bool = False
     design_system: Optional[str] = None
     skill_id: Optional[str] = None
@@ -575,8 +576,12 @@ def _gate_html(html: str, finish_reason: str) -> Tuple[bool, Optional[str]]:
 #      resolution site for the 2026-10-07 designer-model-vision-fix arc.
 #   2. **Adaptive inner timeout formula** — ``max(120.0, max_tokens /
 #      370.0)``. Pinned by tests/unit/plugin_subsystem/test_opendesign_b_element.py
-#      at ~173 s (64K) and ~540 s (200K). 370 tok/s is the conservative
-#      divisor derived from the live 130-170 s observation at 64K tokens.
+#      at ~173 s (the pre-Phase-2 64K default) and ~540 s (200K). 370
+#      tok/s is the conservative divisor derived from the live 130-170 s
+#      observation at 64K tokens. Under streaming (Phase 1) this bound
+#      is ADVISORY/VESTIGIAL as a wall bound — 5s proxy heartbeats keep
+#      bytes flowing so the httpx read timeout fires only on true
+#      stalls — it remains the per-attempt stall bound (plan §6.2).
 #   3. **The 3 completeness gates** (empty / non-stop finish_reason /
 #      structural ``</html>``/``</body>`` marker) — those are applied
 #      AFTER the facade call returns; the facade owns retry, the adapter
@@ -598,9 +603,12 @@ def _gate_html(html: str, finish_reason: str) -> Tuple[bool, Optional[str]]:
 #      disabled; the facade owns retry discipline (otherwise the SDK's
 #      default ``max_retries=2`` would silently double-budget the
 #      transient-retry ladder and inflate the failure window).
-#   7. **wall_clock_cap_s=420.0** — the 130-170 s live observation +
-#      the 60 s cushion for transient retry backoff ≈ 230 s nominal,
-#      rounded up to 420 s for headroom under the HA-on path.
+#   7. **wall_clock_cap_s=600.0** (plan §6.2 decision (a); was 420 s) —
+#      at the 200k budget the inner attempt is ≈540 s; the wall admits
+#      ONE full attempt + fast-fail failover room (connection-refused /
+#      immediate-5xx attempts cost seconds), with a typed wall-clock
+#      failure at budget. The 130-170 s live band at the old 64K default
+#      drove the historical 420 s figure.
 #   8. **Typed 400-class envelopes** — ``upstream_bad_request`` for
 #      generic openai.BadRequestError; ``context_length_exceeded`` for
 #      the contextual-overflow sniff (matches the hot-path classifier's
@@ -649,19 +657,27 @@ _PROXY_IDENTITY_HEADERS: Dict[str, str] = {
     "x-proxy-interleaved-thinking": "True",
 }
 
-# Per-call wall-clock cap for the facade (prescription: 420 s).
-# Default 45 s would kill 130-170 s calls; 420 s leaves room for the
-# HA retry ladder (3 transient + 2 timeout attempts + exponential-jitter
-# backoff).
-_OD_GENERATE_WALL_CLOCK_CAP_S: float = 420.0
+# Per-call wall-clock cap for the facade (plan od-generate-async-poll
+# §6.2 decision (a): 600 s). At the 200k budget the inner attempt is
+# max(120, 200000/370) ≈ 540 s — ONE full attempt + fast-fail failover
+# room fits inside the wall; a second FULL attempt does not (typed
+# wall-clock failure surfaces to the designer for re-dispatch, whose
+# ≤3-round severity-gated loop already owns the outer retry).
+_OD_GENERATE_WALL_CLOCK_CAP_S: float = 600.0
 
-# Operators haven't configured ``OPENAI_BASE_URL_BACKUP`` in this
-# deployment — failover is INERT until that env var appears. The
-# docstring tag keeps the operational truth visible at the call site.
+# Failover ACTIVATION is runtime-environment scoped: the facade's HA
+# controller activates whenever ``OPENAI_BASE_URL_BACKUP`` is visible
+# in the daemon's process environment — failover is live when it is
+# set at runtime, inert (primary-only bounded retry) when not. The
+# production daemon env HAS it set (probe 2026-10-10 + the 2026-10-09
+# sandbox smoke both observed the primary→backup swap live); a checkout
+# .env may not. The docstring tag keeps the operational truth visible
+# at the call site without asserting a per-env falsehood.
 _OD_FAILOVER_INACTIVE_NOTE = (
-    "OPENAI_BASE_URL_BACKUP unset on this deployment → "
+    "OPENAI_BASE_URL_BACKUP unset at runtime → "
     "FailoverController.is_configured=False → every retry is against "
-    "primary only (bounded, not blind-failover)."
+    "primary only (bounded, not blind-failover). The production daemon "
+    "env HAS it set → failover LIVE there; a checkout .env may not."
 )
 
 
@@ -1035,8 +1051,9 @@ def _invoke_chat_via_facade(
         default_headers: Carries the proxy identity headers
             (``x-proxy-app`` / ``x-proxy-interleaved-thinking``).
         wall_clock_cap_s: Total wall-clock cap for the entire
-            facade cycle (default 420 s — calibrated above the
-            HA-on backoff envelope).
+            facade cycle (default 600 s — plan §6.2 decision (a):
+            ONE full 200k attempt (≈540 s inner) + fast-fail failover
+            room; typed failure at budget).
 
     Raises:
         Whatever :func:`invoke_raw_with_failover` surfaces after the
@@ -1113,7 +1130,8 @@ class OdGenerate:
 
         The Stage-1 wiring routes the chat-completion call through
         :func:`invoke_raw_with_failover` with
-        ``wall_clock_cap_s=420.0``. The SDK's built-in retry
+        ``wall_clock_cap_s=600.0`` (plan §6.2 decision (a)). The SDK's
+        built-in retry
         (``max_retries=0``) is disabled so the facade owns the retry
         discipline. Typed 400-class envelopes
         (``upstream_bad_request`` / ``context_length_exceeded``) are
@@ -1161,15 +1179,19 @@ class OdGenerate:
             )
 
         # Adaptive inner per-request timeout (preserved verbatim from
-        # pre-v2). Derivation: the live lane observed 130-170s at
-        # 64K tokens (tools_note.md:49 + workflow.md:77), giving ~376-492 tok/s.
-        # We use a CONSERVATIVE divisor 370 tok/s (64000/370 ~= 173s;
-        # 200000/370 ~= 540s) with a 120s floor (a sub-120s budget is never
-        # right for generation — the prior 60s floor was below the live
-        # observation and would fire upstream_http_error on SUCCESSFUL calls).
-        # This per-request ``timeout`` guards against a single hanging
-        # request; ``wall_clock_cap_s=420`` on the facade is the
-        # retry-storm ceiling.
+        # pre-v2). Derivation: the live lane observed 130-170s at 64K
+        # tokens (tools_note.md:49 + workflow.md:77), giving ~376-492 tok/s.
+        # We use a CONSERVATIVE divisor 370 tok/s (the pre-Phase-2 64K
+        # default ≈ 173s; the DEFAULT_MAX_TOKENS 200000 budget ≈ 540s)
+        # with a 120s floor (a sub-120s budget is never right for
+        # generation — the prior 60s floor was below the live
+        # observation and would fire upstream_http_error on SUCCESSFUL
+        # calls). Under streaming this bound is advisory as a wall bound
+        # (5s heartbeats keep bytes flowing) and remains the per-attempt
+        # stall bound. This per-request ``timeout`` guards against a
+        # single hanging request; ``wall_clock_cap_s=600`` (plan §6.2
+        # decision (a)) on the facade is the retry-storm ceiling —
+        # ONE full 200k attempt + fast-fail failover room fits inside it.
         timeout = max(120.0, args.max_tokens / 370.0)  # 370 tok/s conservative
         try:
             response = cls._LLM_INVOKER(
@@ -1331,13 +1353,13 @@ class OdGenerate:
                 f"'kind' must be one of prototype|deck|template|other|image|video|audio; got {kind!r}",
                 details={"kind": kind},
             )
-        max_tokens = raw.get("max_tokens", 64000)
+        max_tokens = raw.get("max_tokens", DEFAULT_MAX_TOKENS)
         try:
             max_tokens = int(max_tokens)
         except (TypeError, ValueError):
-            max_tokens = 64000
+            max_tokens = DEFAULT_MAX_TOKENS
         if max_tokens < 1 or max_tokens > 200000:
-            max_tokens = 64000
+            max_tokens = DEFAULT_MAX_TOKENS
         skip_discovery_brief = bool(raw.get("skip_discovery_brief", False))
         audio = raw.get("audio_voice_options")
         args = GenerateInput(

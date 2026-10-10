@@ -415,7 +415,7 @@ def _make_invoker_from_client(client, model="vision"):
         temperature,
         timeout,
         default_headers=None,
-        wall_clock_cap_s=420.0,
+        wall_clock_cap_s=600.0,
         **_extra_kwargs,
     ):
         return client.chat.completions.create(
@@ -689,7 +689,7 @@ class TestOdGenerateInputValidation:
         assert result["error"]["details"]["kind"] == "invalid"
 
     def test_max_tokens_out_of_range_clamps_to_default(self, env, fake_client_factory):
-        """Out-of-range max_tokens falls back to the default (64000)."""
+        """Out-of-range max_tokens falls back to the default (200000)."""
         result = OdGenerate.execute_dict(
             {"prompt": "x", "max_tokens": 1000000},
             env=env,
@@ -749,7 +749,7 @@ class TestOdGenerateTimeoutFormula:
 
     Formula: ``max(120.0, max_tokens / 370.0)`` seconds.
     Derivation: 64K tokens observed in 130-170 s ⇒ 376-492 tok/s; 370 = conservative
-    divisor (64000/370 ≈ 173 s; 200000/370 ≈ 540 s); 120 s floor guards against
+    divisor (the DEFAULT_MAX_TOKENS 200000 budget → ≈540 s; 120 s floor guards against
     a sub-120 s budget firing on successful calls.
 
     The prior formula ``max(60.0, max_tokens / 800.0)`` returned 80 s at the
@@ -805,8 +805,11 @@ class TestOdGenerateTimeoutFormula:
 
         return _Client()
 
-    def test_timeout_at_default_64k_is_about_173s(self, env, fake_client_factory):
-        """The default max_tokens=64000 yields timeout ≈ 173 s (64000 / 370 = 172.97...)."""
+    def test_timeout_at_default_budget_is_about_540s(self, env, fake_client_factory):
+        """The DEFAULT budget (DEFAULT_MAX_TOKENS = 200000, plan §6.2)
+        yields timeout ≈ 540 s (200000 / 370 = 540.54...) — pins the
+        dataclass-default → timeout chain at the 200k budget. (Was the
+        64K default ≈ 173 s pre-Phase-2.)"""
         captured: dict = {}
         cli = self._make_capturing_client(captured)
         fake_client_factory(lambda env: (cli, "vision"))
@@ -817,9 +820,9 @@ class TestOdGenerateTimeoutFormula:
         )
         assert result["error"] is None
         assert "timeout" in captured, "upstream call must carry an explicit timeout kwarg"
-        # 64000 / 370 = 172.9729... — well above the 120 s floor.
-        assert captured["timeout"] == pytest.approx(64000 / 370.0, rel=1e-9)
-        # Floor guard: must be strictly > 120 s at the default budget.
+        # 200000 / 370 = 540.5405... — well above the 120 s floor.
+        assert captured["timeout"] == pytest.approx(200000 / 370.0, rel=1e-9)
+        # Floor guard: strictly > 120 s at the default budget.
         assert captured["timeout"] > 120.0
 
     def test_timeout_at_200k_is_about_540s(self, env, fake_client_factory):
@@ -940,7 +943,7 @@ class TestOdGenerateComposer:
 #   (c) BadRequestError → upstream_bad_request envelope.
 #   (d) overflow sniff → context_length_exceeded.
 #   (e) SDK max_retries=0.
-#   (f) wall_clock_cap_s=420 explicitly passed to the facade.
+#   (f) wall_clock_cap_s=600 explicitly passed to the facade (§6.2 chain).
 #   (g) transient-error retry-then-success through the facade — the
 #       facade's tenacity predicate converts APIStatusError → TransientAPIError
 #       and retries; the adapter sees only the success on the second
@@ -1265,15 +1268,16 @@ class TestOdGenerateFacadeWiring:
         assert headers.get("x-proxy-app") == "ensemble"
         assert headers.get("x-proxy-interleaved-thinking") == "True"
 
-    # (f) wall_clock_cap_s=420 passed to facade ---------------------------
+    # (f) wall_clock_cap_s=600 passed to facade ---------------------------
 
-    def test_wall_clock_cap_s_420_passed_to_invoke_raw_with_failover(
+    def test_wall_clock_cap_s_600_passed_to_invoke_raw_with_failover(
         self, monkeypatch, env
     ):
-        """Prescription 7 + 5.1: ``_invoke_chat_via_facade`` passes
-        ``wall_clock_cap_s=420.0`` to :func:`invoke_raw_with_failover`.
-        Default 45 s would kill 130-170 s calls; 420 s leaves room for
-        the HA retry ladder under the HA-on path."""
+        """Plan od-generate-async-poll §6.2 decision (a):
+        ``_invoke_chat_via_facade`` passes ``wall_clock_cap_s=600.0``
+        to :func:`invoke_raw_with_failover` — ONE full 200k attempt
+        (≈540 s inner) + fast-fail failover room, typed failure at
+        budget. (Was 420 s over the pre-Phase-2 64K budget.)"""
         from daemon.plugin_subsystem.opendesign import generate as gen_mod
 
         captured = {}
@@ -1301,7 +1305,7 @@ class TestOdGenerateFacadeWiring:
             },
         )
 
-        assert captured["kwargs"]["wall_clock_cap_s"] == 420.0
+        assert captured["kwargs"]["wall_clock_cap_s"] == 600.0
 
     def test_raw_llm_config_carries_base_url_backup(self, monkeypatch, env):
         """Prescription 2: the llm_config dict passed to
@@ -1410,7 +1414,7 @@ class TestOdGenerateFacadeWiring:
                 "base_url_backup": None,
                 "api_key": "fake-key",
             },
-            wall_clock_cap_s=420.0,
+            wall_clock_cap_s=600.0,
         )
         assert call_count[0] >= 2, (
             f"facade must re-enter the factory on retryable errors; "
