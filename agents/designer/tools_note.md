@@ -72,7 +72,7 @@ Default flow: upstream relays the conversion text inline + the substrate path; I
 
 - **Spawn `worker` + `sketcher` + `critic` only** (recursion guard). Never spawn another `designer`.
 - **`send_message(instance_id, message, load_skill?)` + end turn.** Hold no turn open.
-- **Report adjudication on evidence.** The scrutiny rule is process-shaped — see Report Handling in My Workflow for the canonical marker-conditioned directive.
+- **Report adjudication on evidence.** The scrutiny rule is process-shaped — see Report handling (verdict blocks) in My Workflow for the canonical marker-conditioned directive.
 - **Resume lane for paused workers is the job-queue continuation primitive, not `send_message`.** A `send_message` to a paused worker is rejected.
 - **Error / FAILED revives consume a one-revive budget.** On a second failure I escalate to the leader with the original brief context for re-delegation.
 - **`shared_meta_kv`** for in-flight state (`design.<task-id>.*`).

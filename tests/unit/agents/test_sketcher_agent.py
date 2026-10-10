@@ -19,9 +19,13 @@ wiring, per the Stage 2 dispatch:
    body (V8 references-not-text).
 4. **Fail-closed glob behavior** — anonymous consumers, tree traversal,
    and tag-pin divergence are refused at load.
-5. **Designer wiring** — team_members carries sketcher; the (d) report-
-   scrutiny guidance survives; the dual-run parity row schema in the
-   designer workflow matches the addendum schema.
+5. **Designer wiring + critic pipeline** — team_members carries
+   sketcher; the (d) report-scrutiny guidance survives. Post-rework
+   contract (designer-critic-orchestration): sketcher is the SOLE OD
+   generation lane (dual-run retired), designer prose holds zero od.*
+   tokens, the critic pipeline pins survive (pinned_spec_sha mandatory,
+   anchored verdict parse), and parity-runs.jsonl validates under schema
+   v2 (lane = sketcher | critic).
 """
 
 from __future__ import annotations
@@ -505,6 +509,33 @@ def _critic_meta() -> dict:
     return json.loads((CRITIC_DIR / "meta.json").read_text(encoding="utf-8"))
 
 
+def _resolve_critic_filter(instance_tag: str) -> set:
+    """The critic tool-filter seam, shimmed locally (tidier round 2 #5;
+    identical shape to test_designer_rewire._resolve_critic_filter — no
+    cross-test-file imports): factory-created image+compare tools ->
+    scan_tools_for_full_docs -> resolve_tool_filter against critic's
+    canonical meta allow/deny, registry metadata saved/restored."""
+    from daemon.tools.image_tools import create_image_tools
+    from daemon.tools.compare_tools import create_compare_tools
+    from daemon.tools import _tool_registry as reg
+    from daemon.tools.instance import resolve_tool_filter
+
+    meta = _critic_meta()
+    saved = dict(reg._tool_metadata)
+    try:
+        tools = create_image_tools(None, instance_tag) + create_compare_tools(
+            None, instance_tag
+        )
+        reg.scan_tools_for_full_docs(tools)
+        return resolve_tool_filter(
+            meta["tools"]["allow"], meta["tools"]["deny"],
+            tool_categories=reg.list_tools_by_category(),
+        )
+    finally:
+        reg._tool_metadata.clear()
+        reg._tool_metadata.update(saved)
+
+
 class TestCriticAgentNit2:
     """Nit-2 pattern list (architecture-recommendation.md §3 Nit 2):
     meta validation, deny-strips-allow, implicit team expansion, schema
@@ -544,63 +575,32 @@ class TestCriticAgentNit2:
         )
 
     def test_critic_deny_wins(self):
-        """No allow entry can sneak a write capability past the explicit
-        deny list: resolving critic's filter yields zero write-capable
-        tools (image_save stripped from the image category; no
-        write_file/edit_file anywhere)."""
-        from daemon.tools.image_tools import create_image_tools
-        from daemon.tools.compare_tools import create_compare_tools
-        from daemon.tools import _tool_registry as reg
-        from daemon.tools.instance import resolve_tool_filter
-
-        meta = _critic_meta()
-        saved = dict(reg._tool_metadata)
-        try:
-            tools = create_image_tools(None, "critic-deny-wins") + create_compare_tools(
-                None, "critic-deny-wins"
-            )
-            reg.scan_tools_for_full_docs(tools)
-            resolved = resolve_tool_filter(
-                meta["tools"]["allow"], meta["tools"]["deny"],
-                tool_categories=reg.list_tools_by_category(),
-            )
-        finally:
-            reg._tool_metadata.clear()
-            reg._tool_metadata.update(saved)
+        """Thin consumer of the shared critic tool-filter seam (tidier
+        round 2 #5; the AUTHORITATIVE exact-5-tool-set assertion lives in
+        test_designer_rewire.TestCriticToolsResolveNit2): no allow entry
+        can sneak a write capability past the explicit deny list —
+        image_save stripped from the image category; no
+        write_file/edit_file anywhere."""
+        resolved = _resolve_critic_filter("critic-deny-wins")
         for write_tool in ("write_file", "edit_file", "image_save"):
             assert write_tool not in resolved, (
                 f"write-capable tool {write_tool!r} leaked through critic's filter"
             )
 
     def test_parity_runs_v2_schema(self):
-        """The parity log validates under schema v2: the HTML-comment
-        header line is skipped, the historical smoke row stays valid, and
-        a `critic_verdict` field would be rejected."""
-        from pathlib import Path
-
-        parity = (
-            REPO_ROOT / ".agents" / "shared" / "planning"
-            / "od-generate-agent-lane" / "parity-runs.jsonl"
-        )
+        """Lean Nit-2 surface (tidier round 2 #4): header-skip + smoke-row
+        presence ONLY — the full v2 schema assertions (field set, lane
+        enum, critic_verdict rejection, field types) are single-sourced
+        in TestDesignerSketcherWiring.test_parity_rows_validate_against_schema."""
+        parity = PARITY_DIR / "parity-runs.jsonl"
         assert parity.is_file()
-        required = {
-            "run_id", "ts", "page", "lane", "latency_s", "usage",
-            "truncated", "gates", "marker_pass", "model",
-        }
         saw_data_row = False
         for line in parity.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("<!--"):
-                continue
-            row = json.loads(stripped)
+                continue  # header-skip: schema-evolution markers never hit json.loads
+            json.loads(stripped)  # every data row must parse
             saw_data_row = True
-            assert row["lane"] in ("sketcher", "critic"), (
-                f"lane {row['lane']!r} outside v2 enum"
-            )
-            assert "critic_verdict" not in row
-            assert not (set(row) - required - {"notes"}), (
-                f"unexpected fields: {set(row) - required - {'notes'}}"
-            )
         assert saw_data_row, "smoke row missing"
 
     def test_agent_registry_scan(self):

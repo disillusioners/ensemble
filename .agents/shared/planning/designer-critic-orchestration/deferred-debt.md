@@ -22,6 +22,14 @@ Read the spawn-log `model=` line, not `OPENAI_MODEL`, when attributing generatio
 
 Promoted to spec in THIS commission (`design-capture-mockup-spec.md`, same directory) per D7/Q7.2; the tool itself is the deliverable of "Future commission A". Until it ships, `[VISUAL-QA-DEFERRED]` is the canonical page-handoff marker (critic schema `screenshot_capture` field + designer Guideline (g)).
 
+## (f) parity-runs.jsonl + v2 tooling end-state ownership undefined post-dual-run
+
+The parity log and its schema-v2 validation tooling outlived the dual-run pilot that created them: the pilot is retired (sketcher sole lane), yet `parity-runs.jsonl` + `test_parity_rows_validate_against_schema` stay in CI with no owner commission for the end-state (maintain as historical record vs archive both file and test). Load-bearing wrinkle: the `assert validated >= 1` at `tests/unit/agents/test_sketcher_agent.py:495` makes the single historical smoke row REQUIRED for CI — archiving or rewriting the jsonl without relaxing that assertion breaks the suite. Next-commission action: decide the end-state owner ("Future commission G") — either freeze the file as an immutable historical record with the assertion documented, or archive file + test together in one commit.
+
+## (g) capture-availability dialect tension — `agents/sketcher/tools_note.md:51`
+
+Sketcher's Capture Procedure states the capture lands unconditionally "as part of my write-through (the capture lands right after my save passes the gate check)" — plan-rooted in the phase-1 T7 migration wording. The phase-3 side of the same plan (designer Guideline (g) + critic schema `screenshot_capture`) treats the capture as possibly ABSENT (`[VISUAL-QA-DEFERRED]` until `design.capture_mockup` ships, deferred-debt (e)). Both readings cannot be true at once: either sketcher always captures (tools_note as written) or capture is a deferred capability the schema must tolerate missing. Next-commission action: upstream wording decision — reword one side to match the other once "Future commission A" (the capture tool) lands; do NOT resolve by silent edit inside this branch.
+
 ## Related out-of-scope threads (recorded, not debt of this branch)
 
 - **120s llm-supervisor-proxy read window** vs 130–170s generation budget — root cause of 524-class escalations; its own commission ("Future commission D", constraint C1). Every 524-driven round-3 escalation under this architecture is an infra escalation, not a design failure.

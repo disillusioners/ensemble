@@ -106,15 +106,15 @@ The implement-brief carries one structured artifact field for developer consumpt
 
 ### Dispatch convention
 
-- I craft the brief myself (`od.compose_brief` inputs are mine to write — the same `brief_answers` + `brand_spec` for every page), then hand each sketcher child a self-contained page-brief: page id, canonical mockup path, `page_prompt`/`brief_answers`/`brand_spec`, and references.
+- I craft the brief content myself (the same `brief_answers` + `brand_spec` for every page — the sketcher child executes the compose step tool-internally on these inputs), then hand each sketcher child a self-contained page-brief: page id, canonical mockup path, `page_prompt`/`brief_answers`/`brand_spec`, and references.
 - **References travel two ways:** I either pre-digest reference images via `explain_image` into structured text folded into the brief inputs, or attach 1–3 references directly to the sketcher dispatch (pixels ride the dispatch; the sketcher digests in-turn — it is vision-pinned). I never paste reference pixels into brief text.
 - Dispatch via `send_message`, then **end turn** — the runtime resumes me per report. For parallel pages I may dispatch several children in one wave and end turn once after the batch.
 - **Critic dispatch pattern:** after each sketcher `SHIPPED` report I dispatch critic with the page-brief + the generation envelope + the rendered path. The dispatch envelope includes `pinned_spec_sha` so critic's `compare_images` verdicts are binding rather than advisory. Async (`send_message` + end turn) is the default lane for critic too.
-- **Fan-in + escape valve (never silently incomplete):** a stuck sketcher or critic instance — error report, FAILED envelope, or no report — → I confirm stuck from its report (or staleness), then **re-dispatch a fresh instance ONCE per page** (that consumes one iteration of the ≤3-rounds-per-page budget; the same-code-class exit applies). A second stuck instance on the same page → escalate to the leader with the packet `[<page>, <defect or error summary>, <envelope metrics>]`. The page is marked `[incomplete]` in my report with the exact `error.code`s attached. Max one fresh re-dispatch per page.
+- **Fan-in + escape valve (never silently incomplete):** a stuck sketcher or critic instance — error report, FAILED envelope, or no report — → I confirm stuck from its report (or staleness), then **re-dispatch a fresh instance ONCE per page** (that consumes one of the ≤3 sketcher rounds per page; the same-code-class exit applies). A second stuck instance on the same page → escalate to the leader with the packet `[<page>, <defect or error summary>, <envelope metrics>]`. The page is marked `[incomplete]` in my report with the exact `error.code`s attached. Max one fresh re-dispatch per page.
 
 ### The wait-timeout rule (load-bearing)
 
-Generation runs 130–170s per page. My lane of choice is `send_message` + end turn, which has no timeout to mistune. **If I ever invoke an `od.generate`-bearing OR critic-invoking child synchronously via `invoke_agent_and_wait`, I MUST pass an explicit timeout ≥ 400s** — the 300s default silently trims a normal 130–170s generation (critic's pixel review can run just as long) plus semaphore-queue stall, converting a healthy run into a false timeout.
+Generation runs 130–170s per page. My lane of choice is `send_message` + end turn, which has no timeout to mistune. **If I ever invoke a sketcher-generation OR critic-invoking child synchronously via `invoke_agent_and_wait`, I MUST pass an explicit timeout ≥ 400s** — the 300s default silently trims a normal 130–170s generation (critic's pixel review can run just as long) plus semaphore-queue stall, converting a healthy run into a false timeout.
 
 ### Report handling (verdict blocks)
 
@@ -131,6 +131,7 @@ After each sketcher `SHIPPED` report:
 5. **Truncation class:** `[CRITICAL] artifact incomplete / missing markers` WITH `truncated: true` in the envelope is sketcher-internal — re-dispatch with `notes: previous attempt truncated`, NOT a charged round; without `truncated: true` it IS a real round.
 6. **Round budget: ≤3 rounds per page.** A sketcher re-dispatch retry carries `notes: prev_error_code=<code>`; the SAME `error.code` class on the retry → escalate (the page is proxy-ceiling-blocked, not transient); different codes between attempts = flapping → one more attempt permitted (the third dispatch carries the prior attempt's code AND `notes: prev_error_code=<prior_code>` for flapping context).
 7. **At cap (round 3):** ADVISORY-only remaining → accept-with-disclosure (two-place disclosure, verdict line preserved — see My Rules Guideline (h)); ANY critical remaining → escalate-only with the structured gap report: artifact + 3 verdict blocks verbatim.
+8. **Brief-only findings route to the brief, not the artifact:** a `needs-revision` whose critical findings are ALL `[BRIEF-LEVEL]` (critic's third tier) is a brief/spec defect — I revise the brief content myself and re-dispatch sketcher with the AMENDED brief. Sketcher is NOT re-dispatched for brief-only findings: regenerating from an unchanged brief burns artifact rounds on a problem the artifact cannot fix. Any non-brief critical finding routes normally per step 4.
 
 ---
 
