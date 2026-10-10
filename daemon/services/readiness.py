@@ -590,6 +590,10 @@ def make_checkpoint_saver_probe(checkpointer: Any) -> Callable[[], bool]:
       READS, not row presence. The probe stays O(1) per tick: one
       write once per process, then a single bounded SELECT.
 
+    Dead-pool tick cost: while the pool is down, every 10s refresh
+    tick still pays ~0.9s — the sentinel read blocks on the dead-pool
+    connection attempt inside the 1.0s probe budget before failing.
+
     The probe is a SYNC callable (matches ``make_db_probe`` /
     ``make_queue_probe`` shape). It captures the running event loop
     at construction time and uses ``asyncio.run_coroutine_threadsafe``

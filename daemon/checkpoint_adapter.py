@@ -142,7 +142,7 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
     ``BaseCheckpointSaver`` surface has an EXPLICIT forwarder (the MRO
     rule: base-concrete attributes resolve via MRO and ``__getattr__``
     never fires for them — see the proxy class docstring). Only the
-    seven hot-path async ops carry the retry layer. Non-method access
+    six hot-path async ops carry the retry layer. Non-method access
     (e.g. ``wrapper.conn``, ``wrapper.lock``) passes through unchanged
     so existing consumers (the adapter's ``close()`` reads
     ``saver.conn``) are unaffected.
@@ -182,7 +182,7 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
 
         (b) Therefore EVERY concrete public member of the base
         surface has an EXPLICIT forwarder below. The retry-wrapped
-        set is the seven hot-path async ops (``aget``, ``aget_tuple``,
+        set is the six hot-path async ops (``aget``, ``aget_tuple``,
         ``aput``, ``aput_writes``, ``aget_delta_channel_history``,
         ``adelete_thread`` — plus ``aput``-family write coverage);
         everything else forwards with NO retry: ``get_next_version``
@@ -195,12 +195,31 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         The sync twins (``get_tuple`` / ``list`` / ``put`` /
         ``put_writes`` / ``delete_thread`` / ``get`` / ``copy_thread``
         / ``delete_for_runs`` / ``prune`` /
-        ``get_delta_channel_history``) are intentionally
-        NotImplementedError in this daemon — the surface is
-        async-only. The forwarders pass through to the wrapped
-        saver's own sync stubs, so a stray sync caller gets the
-        saver's own upstream-classified NotImplementedError, not a
-        proxy artifact.
+        ``get_delta_channel_history``) — the proxy forwards ALL of
+        them regardless. Their pinned-upstream behavior is NOT
+        uniformly NotImplementedError (verified against the pinned
+        ``AsyncPostgresSaver``, aio.py):
+
+        * ``get_tuple`` / ``list`` / ``delete_thread`` — real sync
+          wrappers: they drive the async twin via
+          ``run_coroutine_threadsafe(...).result()`` and carry a
+          main-loop guard that raises
+          ``asyncio.InvalidStateError`` when invoked ON the saver's
+          own running loop (a worker thread with no running loop
+          passes the guard and blocks on ``.result()``).
+        * ``put`` / ``put_writes`` — real sync wrappers WITHOUT the
+          main-loop guard: calling either from the daemon's async
+          loop would DEADLOCK on ``.result()`` (latent hazard —
+          this async-only daemon has no sync caller today; never
+          call them from the loop).
+        * ``get`` / ``get_delta_channel_history`` — real base-class
+          defaults that delegate to ``self.get_tuple(...)``, so they
+          inherit ``get_tuple``'s guard/blocking semantics
+          (``get_delta_channel_history`` is a beta surface).
+        * ``copy_thread`` / ``delete_for_runs`` / ``prune`` —
+          upstream NotImplementedError stubs: a stray sync caller
+          gets the saver's own upstream-classified
+          NotImplementedError, not a proxy artifact.
 
         (c) LOCKSTEP REQUIREMENT: the explicit-forwarders list below
         MUST be kept in lockstep with ``BaseCheckpointSaver``'s
@@ -265,7 +284,7 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
                 return await method(*args, **kwargs)
 
         # ── Retry-wrapped async methods (hot checkpoint ops) ─────────
-        # The seven methods below carry the one-shot connection-retry
+        # The six methods below carry the one-shot connection-retry
         # layer. They are the LangGraph hot path (reads/writes during
         # pregel turns). Everything else on the base surface forwards
         # WITHOUT retry — see the class docstring for the rationale.
@@ -338,7 +357,7 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
 
         # Remaining concrete async ops — forward (async-preserving),
         # no retry (not on the hot path; the retry set above is
-        # deliberately the seven hot-path ops).
+        # deliberately the six hot-path ops).
         async def acopy_thread(self, *args, **kwargs):
             return await self._saver.acopy_thread(*args, **kwargs)
 
@@ -348,12 +367,12 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         async def aprune(self, *args, **kwargs):
             return await self._saver.aprune(*args, **kwargs)
 
-        # Sync twins — concrete on the base, intentionally
-        # NotImplementedError in this async-only daemon. The
-        # forwarders route to the wrapped saver's own sync stubs so
-        # a stray sync caller gets the saver's own
-        # NotImplementedError (upstream-classified), not a proxy
-        # artifact. NO retry (never invoked by the daemon).
+        # Sync twins — concrete on the base; their pinned-upstream
+        # behavior varies per twin (real sync wrappers for most —
+        # see the class docstring's sync-twins breakdown). The
+        # forwarders route to the wrapped saver's own implementations
+        # either way, so a stray sync caller gets upstream behavior,
+        # not a proxy artifact. NO retry (never invoked by the daemon).
         def get_tuple(self, *args, **kwargs):
             return self._saver.get_tuple(*args, **kwargs)
 
@@ -1118,6 +1137,8 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         self, max_per_thread: int
     ) -> list[tuple[str, str, int]]:
         """Find (thread_id, checkpoint_ns, count) groups exceeding max_per_thread."""
+        # W1: no sentinel exclusion needed — the readiness-probe sentinel
+        # writes checkpoint_writes only and never creates a checkpoints row.
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
