@@ -1,5 +1,16 @@
 # Test Packs
 
+## Active commission — SNAPSHOTS V2 MERGE GATE @ 8c1534f9a→a05d4ae9d (2026-10-10) — VERDICT: FAIL (narrow) — RESULTS/2026-10-10-snapshots-v2-merge-gate.md
+
+Worktree `/home/nea/ensemble-src-wt-snapshots-redesign-v2` (branch `feature/snapshots-redesign-v2`, FE-only diff: 11 files +3525/−1180, zero daemon-side — recon-verified; harness commit `5d411a395` on top). Product code FROZEN; test artifacts only (`test(snapshots):` scope). Conformance pre-approved (pin 53fa39ec6d). **Verdict: FAIL (narrow)** — 1/10 browser legs red (AC-A11Y.3b second-Esc, deterministic product defect D1) + v1-e2e backdrop contract flag D2; jest 4 RED all base-attributed (identical failing set at `8c1534f9a`, scratch-worktree A/B) + quarantined.
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `fe_jest_full` | `test/packs/fe_unit_full_test.sh` (env `EXPECTED_BRANCH=feature/snapshots-redesign-v2`) | full FE jest census, 112 specs / 3892 tests | <1 min (27s actual) | 2026-10-10 @ a05d4ae9d | ✅ PASS-with-preexisting 3888/3892 — 4 RED base-attributed (jobs-grouping time-bomb ×3, jobs-filter-state pin drift ×1 → QUARANTINE.md); zero branch-caused |
+| `snapshots_v2_webauto` | `test/packs/snapshots_v2_webauto_test.sh` (harness commit `5d411a395`: `frontend/playwright.snapshots-v2stub.config.ts` + `frontend/e2e/snapshots-v2-gate.spec.ts`) | 10 tests / 9 commissioned legs + backdrop spot-check, real chromium vs `ng serve` 14199, API stubbed via `page.route` | 2 min (74s ×2 runs) | 2026-10-10 @ 5d411a395 (smoke + official confirm, deterministic) | ❌ FAIL 9/10 — AC-A11Y.3b second-Esc product defect D1 (deterministic, 2/2 identical signature); all other legs PASS with measured evidence |
+
+ensure.md scoping: Core daemon-side items (`concurrency_atomic_unit_test`, dev.sh grep) OUT of blast radius — FE-only diff. Release Gate not warranted (no daemon/architecture change); the full FE jest suite IS this lane's full-suite run. FE e2e QUARANTINE rows (2026-10-06 families) unaffected — different spec files.
+
 ## Completed commission — UPGRADE-RESILIENCE FINAL TEST PASS @ dc17a9142→b78c9fbba (2026-10-07) — verdict in RESULTS/2026-10-07-upgrade-resilience-final-gate.md
 
 Worktree `/home/nea/ensemble-src-wt-upgrade-resilience` (branch feature/upgrade-executor-resilience; commissioned tip dc17a9142 + 13 authorized test-lane commits); BASE scratch `/home/nea/ensemble-src-wt-test-base` @ 2753ee78d (removed post-gate). 30 workers (4 dispatch-loss replacements), every residual family BASE-discriminated. **Zero fix-range-caused failures**; 86-node release_journal cascade closed by fixture fix (f7db75ed4 contract change sans fixture update). Real-systemd kill evidence R1/R2/R6 on live-systemd host (disposable `ensemble-test-<uuid>` units, zero strays). Mid-gate concurrent-actor event: giter committed production `dc01af6a1` (STOP_SCRIPT_BUDGET_S derivation) + `83f0b53a5` mid-gate — bounded_waits re-run at new tip covers it (57/57 incl. D1-D8 sync-guard).
