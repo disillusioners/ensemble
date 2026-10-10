@@ -563,11 +563,16 @@ def make_checkpoint_saver_probe(checkpointer: Any) -> Callable[[], bool]:
     Args:
         checkpointer: A ``CheckpointerAdapter`` exposing
             ``raw_saver`` (a ``PostgresCheckpointerAdapter`` or
-            ``SqliteCheckpointerAdapter``). The PG adapter
-            unwraps the retry proxy to reach the real saver via
-            ``raw_saver`` if needed — but since the proxy passes
-            attribute access through, ``raw_saver.conn`` resolves
-            transparently.
+            ``SqliteCheckpointerAdapter``). The PG adapter's
+            ``raw_saver`` is the retry PROXY (it must stay that
+            way so LangGraph hot paths gain retry coverage) —
+            ``raw_saver.conn`` resolves through the proxy's
+            ``__getattr__`` passthrough to the wrapped saver's
+            ``.conn``. There is no unwrap on this path; passthrough
+            via ``__getattr__`` is what carries the pool connection
+            reference out of the proxy.
+            ``daemon.checkpoint_adapter.PostgresCheckpointerAdapter._raw_saver``
+            holds the unwrapped saver for tests that need it.
 
     Returns:
         A sync callable that returns ``True`` when ``pool.check()``
@@ -622,7 +627,12 @@ def make_checkpoint_saver_probe(checkpointer: Any) -> Callable[[], bool]:
             future = asyncio.run_coroutine_threadsafe(pool.check(), loop)
             # Block on the result; rely on ``_guarded``'s
             # ``asyncio.wait_for`` for the actual timeout enforcement.
-            future.result(timeout=CHECKPOINT_SAVER_PROBE_TIMEOUT_S)
+            # The inner ``future.result`` timeout is slightly UNDER
+            # ``CHECKPOINT_SAVER_PROBE_TIMEOUT_S`` so the inner
+            # timeout fires first (this thread never blocks past
+            # the budget) even if ``_guarded``'s outer
+            # ``asyncio.wait_for`` were mis-scheduled.
+            future.result(timeout=CHECKPOINT_SAVER_PROBE_TIMEOUT_S - 0.1)
             return True
         except Exception as exc:
             # ``_guarded`` already converts exceptions into a

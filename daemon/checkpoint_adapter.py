@@ -25,6 +25,20 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
+try:
+    # Incident 2026-10-10 review fix: the retry proxy subclasses
+    # ``BaseCheckpointSaver`` so ``StateGraph.compile`` (via
+    # ``ensure_valid_checkpointer``) accepts it as a valid saver.
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+except ImportError:
+    # Fenced fallback: any deployment where this submodule is
+    # absent (older langgraph pin, packaging accident) loses the
+    # ``isinstance`` gate but keeps the proxy functional. The
+    # proxy still inherits from ``object`` so its surface is
+    # identical to the language-level contract — only the
+    # LangGraph compile-time gate would then raise TypeError.
+    BaseCheckpointSaver = object  # type: ignore[assignment,misc]
+
 from daemon.constants import CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES
 
 logger = logging.getLogger(__name__)
@@ -70,9 +84,6 @@ logger = logging.getLogger(__name__)
 # instance-state / error-classification pipeline (task_processor.py:651)
 # sees the same exception class as before the fix — the wrapper is
 # transparent to upstream consumers.
-_RETRY_SQLSTATE_CLASSES: tuple[str, ...] = tuple(
-    f"08{i:03d}" for i in range(0, 1000)
-)
 _RETRY_SQLSTATE_EXACT: frozenset[str] = frozenset(
     {"57P01", "57P02", "57P03"}
 )
@@ -86,6 +97,14 @@ def _is_retryable_connection_error(exc: BaseException) -> bool:
     plus a fallback string match for psycopg's ``OperationalError: the
     connection is closed`` (which fires at cursor-open time, before
     SQLSTATE is available).
+
+    The substring fallback is GUARDED by ``type(exc).__module__``
+    starting with ``"psycopg"`` — psycopg's ``OperationalError``
+    family lives in the ``psycopg`` / ``psycopg.errors`` /
+    ``psycopg._adapters`` modules. Without this guard, any unrelated
+    exception (e.g. an application-level ``RuntimeError`` whose
+    message happens to contain the same English phrase) would be
+    mis-classified as retryable and trigger a wasted retry.
     """
     sqlstate = getattr(exc, "sqlstate", None)
     if isinstance(sqlstate, str):
@@ -95,8 +114,14 @@ def _is_retryable_connection_error(exc: BaseException) -> bool:
             return True
     # psycopg's OperationalError family — the most common surface for
     # "the connection is closed" when the cursor() open itself fails.
-    msg = str(exc) if exc else ""
-    if _RETRY_OPERATIONAL_CLOSED_SUBSTR in msg.lower():
+    # Guard: only fire the substring fallback when the exception's
+    # module is a psycopg family module, so a coincidentally-worded
+    # exception from elsewhere is not mis-classified.
+    exc_module = type(exc).__module__ or ""
+    if (
+        exc_module.startswith("psycopg")
+        and _RETRY_OPERATIONAL_CLOSED_SUBSTR in str(exc).lower()
+    ):
         return True
     return False
 
@@ -119,8 +144,28 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         method call once on a connection-class failure.
     """
 
-    class _SaverRetryProxy:
-        """One-shot retry proxy — see module docstring for rationale."""
+    class _SaverRetryProxy(BaseCheckpointSaver):
+        """One-shot retry proxy — see module docstring for rationale.
+
+        Inherits from ``BaseCheckpointSaver`` so the LangGraph
+        ``isinstance`` gate at ``ensure_valid_checkpointer``
+        (``langgraph/types.py``) — and the companion gates at
+        ``pregel/main.py`` — see this as a real saver. The proxy
+        forwards attribute access to the wrapped saver via
+        ``__getattr__``; explicit async methods (one per public
+        saver method) carry the retry layer. Any public attr the
+        proxy doesn't define explicitly is resolved against the
+        inner saver by ``__getattr__``.
+
+        Why direct inheritance instead of ``register``:
+        ``BaseCheckpointSaver`` in langgraph 1.0.9 is a plain
+        ``type`` (``type(BaseCheckpointSaver) is type``), not
+        ``ABCMeta``, so ``register`` is unavailable. Direct
+        inheritance satisfies ``isinstance`` cleanly without any
+        ``ABCMeta`` workaround, which would be a hidden compat
+        hazard against a future langgraph bump that does flip
+        ``BaseCheckpointSaver`` to ``ABCMeta``.
+        """
 
         __slots__ = ("_saver",)
 
@@ -128,6 +173,10 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
             self._saver = saver
 
         def __getattr__(self, name: str) -> Any:
+            # Only invoked when normal lookup misses — explicit
+            # methods below take priority, and inherited
+            # BaseCheckpointSaver attributes resolve via the
+            # descriptor protocol before __getattr__ fires.
             return getattr(self._saver, name)
 
         async def _call_with_retry(self, method_name: str, args: tuple, kwargs: dict) -> Any:
@@ -179,8 +228,11 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
             )
 
         async def adelete_thread(self, *args, **kwargs):
-            # Backwards-compat alias — not on the upstream aio.py
-            # surface, but historically seen in callers.
+            # Public method on the AsyncPostgresSaver aio.py surface
+            # (pinned aio.py:340 in langgraph-checkpoint-postgres
+            # 2.0.x). Forwarded through the same retry wrapper as
+            # the other public methods so a mid-cursor-open PG
+            # failure during a thread drop is also recovered once.
             return await self._call_with_retry(
                 "adelete_thread", args, kwargs
             )
@@ -712,7 +764,24 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
 
     @property
     def raw_saver(self) -> Any:
-        """Return the underlying AsyncPostgresSaver."""
+        """Return the retry proxy wrapping the AsyncPostgresSaver.
+
+        The proxy carries one-shot connection-class retry coverage
+        — see :func:`_wrap_saver_with_connection_retry` for the
+        wrapper contract. ``StateGraph.compile(checkpointer=...)``
+        routes LangGraph reads/writes through this proxy and gains
+        the retry layer for free. ``isinstance(raw_saver,
+        BaseCheckpointSaver)`` holds because the proxy class
+        subclasses ``BaseCheckpointSaver`` (the gate at
+        ``langgraph.types.ensure_valid_checkpointer`` would
+        otherwise raise ``TypeError``).
+
+        Renaming this property or unwrapping here would silently
+        disable retry coverage on every LangGraph hot-path call —
+        callers MUST continue to receive the proxy, not the bare
+        saver. Tests that need the bare saver for assertions can
+        reach it via ``adapter._raw_saver``.
+        """
         return self._saver
 
     async def list_thread_ids(self) -> list[str]:

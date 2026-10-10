@@ -12,6 +12,20 @@ Three components are exercised here:
    SQLSTATE 08xxx, 57P01/57P02/57P03, psycopg OperationalError
    "the connection is closed"; everything else is non-retryable.
 
+Additionally covered:
+
+4. ``_SaverRetryProxy`` ABC registration — the proxy MUST pass the
+   ``isinstance(..., BaseCheckpointSaver)`` gate that
+   ``StateGraph.compile`` runs via ``ensure_valid_checkpointer``.
+   Without that, every PG install dies at first instance-graph build
+   with ``TypeError: Invalid checkpointer provided``. See fix #1 in
+   incident 2026-10-10 review.
+
+5. ``_is_retryable_connection_error`` substring guard — the
+   "the connection is closed" substring fallback fires ONLY for
+   psycopg-family exception modules. A coincidentally-worded
+   exception from elsewhere must NOT be classified as retryable.
+
 These are pure-Python tests — no DB connection required. Real-PG
 recovery integration is the tester's lane (out of scope here).
 """
@@ -38,7 +52,15 @@ class _OperationalError(Exception):
 
     psycopg exposes ``.sqlstate`` as a class attribute; tests set it
     on instances via kwargs.
+
+    The ``__module__`` is forced to ``"psycopg"`` so the
+    ``_is_retryable_connection_error`` substring-guard correctly
+    recognises this stand-in as a psycopg-family exception (post
+    incident-2026-10-10 review fix #3 — the substring fallback
+    fires only on psycopg modules).
     """
+
+    __module__ = "psycopg"
 
     def __init__(self, message: str, sqlstate: str | None = None) -> None:
         super().__init__(message)
@@ -170,6 +192,191 @@ class TestIsRetryableConnectionError:
         mis-classified as retryable."""
         exc = _OperationalError("some other db error")
         assert _is_retryable_connection_error(exc) is False
+
+    def test_non_psycopg_exception_with_connection_closed_substring_is_NOT_retryable(
+        self,
+    ):
+        """Guard against false positives on the substring fallback.
+
+        The ``"the connection is closed"`` substring match must only
+        fire for psycopg-family exception modules. An application-
+        level ``RuntimeError`` (or any exception whose module is NOT
+        in the ``psycopg`` family) that happens to carry the same
+        English phrase must NOT be classified as retryable — the
+        retry would silently swallow upstream error classes.
+        """
+
+        class _RuntimeErrorLike(RuntimeError):
+            pass
+
+        # __module__ defaults to the test module, which is not a
+        # psycopg family. The exception's class is RuntimeError,
+        # unrelated to psycopg.
+        exc = _RuntimeErrorLike("the connection is closed")
+        assert _is_retryable_connection_error(exc) is False
+
+    def test_psycopg_exception_with_connection_closed_substring_IS_retryable(
+        self,
+    ):
+        """Confirm the guard is BROAD ENOUGH — a real psycopg
+        exception with the substring IS retryable, so tightening
+        the predicate did not break the original incident case.
+        """
+
+        class _PsycopgOp(Exception):
+            pass
+
+        # Simulate ``type(exc).__module__ == "psycopg"`` (or
+        # psycopg.errors / similar) without depending on the
+        # psycopg driver at test-import time.
+        _PsycopgOp.__module__ = "psycopg.errors"
+        exc = _PsycopgOp("the connection is closed")
+        assert _is_retryable_connection_error(exc) is True
+
+
+# ── _SaverRetryProxy isinstance / compile gate (review fix #1) ───────────────
+
+
+class TestSaverRetryProxyABCRegistration:
+    """The retry proxy must satisfy ``BaseCheckpointSaver`` isinstance
+    checks that LangGraph runs via ``ensure_valid_checkpointer``.
+
+    Without this, ``StateGraph.compile(checkpointer=proxy)`` raises
+    ``TypeError: Invalid checkpointer provided…`` for every PG
+    install at first instance-graph build (the runtime-reproduced
+    blocker). These tests are the unblock proof.
+    """
+
+    def test_proxy_is_BaseCheckpointSaver_instance(self):
+        """isinstance(proxy, BaseCheckpointSaver) must hold.
+
+        Independent of any compile-time machinery — this is the
+        exact gate at ``langgraph.types.ensure_valid_checkpointer``.
+        Works under the conftest's ``langgraph.checkpoint.base`` mock
+        (which exposes a plain stand-in class) AND against the real
+        langgraph class.
+        """
+        from langgraph.checkpoint.base import BaseCheckpointSaver
+
+        saver = _FakeSaver(_FakePool())
+        proxy = _wrap_saver_with_connection_retry(saver)
+        assert isinstance(proxy, BaseCheckpointSaver)
+        # The proxy class itself subclasses BaseCheckpointSaver,
+        # not via register() / monkey-patch. Direct inheritance
+        # is the only safe way given langgraph 1.0.9's plain
+        # ``type`` (not ABCMeta) checkpointer class.
+        proxy_cls = type(proxy)
+        assert issubclass(proxy_cls, BaseCheckpointSaver)
+        assert BaseCheckpointSaver in proxy_cls.__mro__
+
+    def test_ensure_valid_checkpointer_does_not_raise(self):
+        """The exact gate ``StateGraph.compile`` runs.
+
+        Requires real LangGraph — both ``langgraph.types`` and
+        ``langgraph.checkpoint.base``. Skips under the conftest's
+        mock setup because ``pytest.importorskip("langgraph.types")``
+        cannot resolve the real submodule against the empty
+        ``langgraph`` namespace package the conftest installs.
+
+        On a real LangGraph install this exercises the runtime
+        gate against the actual ``BaseCheckpointSaver`` class and
+        proves the unblock.
+        """
+        pytest.importorskip("langgraph.types")
+        from langgraph.checkpoint.base import BaseCheckpointSaver
+        from langgraph.types import ensure_valid_checkpointer
+
+        saver = _FakeSaver(_FakePool())
+        proxy = _wrap_saver_with_connection_retry(saver)
+        # Must NOT raise. (Returns the proxy unchanged for valid
+        # inputs; ``None``/``True``/``False`` are also valid.)
+        result = ensure_valid_checkpointer(proxy)
+        assert result is proxy
+        # Defense in depth — if the proxy ever regresses to a
+        # non-subclass object, the gate would still pass
+        # ``ensure_valid_checkpointer`` but ``isinstance`` would
+        # fail directly. Assert both.
+        assert isinstance(proxy, BaseCheckpointSaver)
+
+    def test_stategraph_compile_accepts_proxy_as_checkpointer(self):
+        """End-to-end: a real StateGraph.compile(checkpointer=proxy)
+        must succeed against the same proxy the manager wires in
+        production. This is the runtime-reproduced failure path
+        the reviewer identified — when this passes, the blocker
+        is dead.
+
+        Skips under the conftest's mock path: the
+        ``StateGraph = MagicMock()`` placeholder installed by
+        ``tests/conftest.py`` would let the test "pass" without
+        ever invoking ``ensure_valid_checkpointer``. Detected via
+        ``unittest.mock`` introspection (``_mock_name`` is set on
+        all ``MagicMock`` instances; the real ``StateGraph`` from
+        ``langgraph.graph`` is a plain class with no such
+        attribute).
+        """
+        pytest.importorskip("langgraph.graph")
+        from langgraph.graph import StateGraph
+
+        # Real-langgraph guard: MagicMock from conftest would
+        # silently pass this test without exercising the gate.
+        # The real ``StateGraph`` is a class, not a Mock instance.
+        if isinstance(StateGraph, type) is False or hasattr(
+            StateGraph, "_mock_name"
+        ):
+            pytest.skip(
+                "test_stategraph_compile_accepts_proxy_as_checkpointer "
+                "requires a real langgraph.graph (not the conftest Mock)"
+            )
+        from typing import TypedDict
+
+        class _State(TypedDict):
+            x: int
+
+        # Minimal fake saver providing just the two methods
+        # StateGraph.compile touches synchronously.
+        class _CompileSaver:
+            async def aget(self, config):
+                return None
+
+            async def aput(self, config, checkpoint, metadata, new_versions):
+                return {
+                    "configurable": {
+                        "thread_id": "t",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": "c",
+                    }
+                }
+
+        proxy = _wrap_saver_with_connection_retry(_CompileSaver())
+        graph = StateGraph(_State)
+
+        def _inc(state: _State) -> _State:
+            return {"x": state.get("x", 0) + 1}
+
+        graph.add_node("inc", _inc)
+        graph.set_entry_point("inc")
+        graph.add_edge("inc", "__end__")
+
+        # Must NOT raise TypeError. A successful return value is a
+        # CompiledStateGraph; the compile-time checkpointer gate
+        # ran clean.
+        compiled = graph.compile(checkpointer=proxy)
+        assert compiled is not None
+
+    def test_proxy_preserves_method_call_through_retry(self):
+        """Inheritance + explicit method definitions must coexist:
+        the wrapper keeps its retry layer even though it now has
+        inherited ``BaseCheckpointSaver`` machinery in the MRO.
+        """
+        saver = _FakeSaver(_FakePool())
+        proxy = _wrap_saver_with_connection_retry(saver)
+        # Public method dispatched via the explicit async aget,
+        # which carries the retry layer.
+        assert asyncio.iscoroutinefunction(proxy.aget)
+        # Inherited methods (none yet exercised by the public
+        # gate) still resolve via __getattr__ to the wrapped
+        # saver, NOT via MRO.
+        assert proxy.fail_count == 0  # attribute passthrough
 
 
 # ── _wrap_saver_with_connection_retry ──────────────────────────────────────

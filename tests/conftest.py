@@ -50,6 +50,34 @@ mock_langgraph_checkpoint_sqlite_aio = create_mock_module("langgraph.checkpoint.
     "AsyncSqliteSaver": MagicMock()
 })
 
+# Mock for ``langgraph.checkpoint.base.BaseCheckpointSaver`` — needed because
+# ``daemon.checkpoint_adapter`` (incident 2026-10-10) subclasses this class
+# to satisfy the ``isinstance`` gate that ``StateGraph.compile`` runs via
+# ``ensure_valid_checkpointer``. The mock is a plain class (inherits
+# from object, not ABCMeta) — it satisfies the import and the proxy's
+# subclass relationship at unit-test scope. The real-langgraph gate
+# itself (TestSaverRetryProxyABCRegistration.test_stategraph_compile_…
+# and test_ensure_valid_checkpointer_…) skips under mocks via the
+# ``_REQUIRE_REAL_LANGGRAPH`` guard in the test file.
+mock_langgraph_checkpoint_base = create_mock_module(
+    "langgraph.checkpoint.base", {"__path__": []}
+)
+
+
+class _MockBaseCheckpointSaver:
+    """Stand-in for ``langgraph.checkpoint.base.BaseCheckpointSaver``.
+
+    Plain class — no ``ABCMeta`` machinery. ``isinstance`` against
+    a proxy that subclasses this mock returns True, mirroring the
+    real production behavior under the real langgraph class.
+    Unit tests that don't exercise the real LangGraph gate are
+    satisfied by this; tests that need the real gate skip
+    explicitly (see ``_REQUIRE_REAL_LANGGRAPH``).
+    """
+
+
+mock_langgraph_checkpoint_base.BaseCheckpointSaver = _MockBaseCheckpointSaver
+
 # Create mock MCP SDK module (mcp package)
 mock_mcp_tool_adapter = create_mock_module("daemon.mcp.tool_adapter", {
     "mcp_tool_name": lambda server_name, tool_name: f"mcp_{server_name}_{tool_name}",
@@ -223,6 +251,7 @@ _mock_modules = {
     "langgraph.checkpoint.memory": mock_langgraph_checkpoint_memory,
     "langgraph.checkpoint.sqlite": mock_langgraph_checkpoint_sqlite,
     "langgraph.checkpoint.sqlite.aio": mock_langgraph_checkpoint_sqlite_aio,
+    "langgraph.checkpoint.base": mock_langgraph_checkpoint_base,
     "daemon.mcp.tool_adapter": mock_mcp_tool_adapter,
     # Mock MCP SDK modules
     "mcp": mock_mcp,
