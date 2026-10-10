@@ -1,5 +1,23 @@
 # Test Packs
 
+## Completed commission (ROUND 2, fixed HEAD) — CHECKPOINT-CONN-RESILIENCE @ 7ec80b6c3 + test-lane 5f8c20b3f/fb72bae84 (gate HEAD fb72bae84) (2026-10-10) — ✅ ALL GATES PASS, verdict in RESULTS/2026-10-10-checkpoint-conn-resilience-round2-gate.md
+
+R1 isolation fixture fixed (`5f8c20b3f`, exact-object snapshot/restore — 4/4 green) · H1 PG harness fixed (`fb72bae84`, async-safe guard — 9P/0S live) · outage drill PASS (readyz 503+checkpoint_saver:false @6.4s, livez 200, recover 49.7s) · B2 REAL-RECOVERY-PROVEN 3/3 + K1-SHAPE-PASS ×3 · full re-run: A1 143P/0S, A2 10P/0S, core 99P/0F/74S, PG 9P/0S. Optional guard-test automation DEFERRED (worker 8aff7b13 provider-502, non-gating). ORIGINAL SYMPTOM: PROVEN-FIXED.
+
+## Completed commission (ROUND 1, pre-fix — review-REJECTED mid-gate) — CHECKPOINT-CONN-RESILIENCE @ f19803dc3 (+ test-lane 97c7f7bdc/0ea77bfdf) (2026-10-10) — verdict in RESULTS/2026-10-10-checkpoint-conn-resilience-round1-gate.md
+
+Worktree `/home/nea/ensemble-src-wt-checkpoint-conn-resilience`; 8 workers; ambient `POSTGRES_*`=PROD → every pack ran under `env -u` fence; PG work on per-wave throwaway PG16 clusters (recipe in RESULTS/LESSONS). Round-1 NOT READY: review criticals K1/K2 runtime-CONFIRMED by probe (pinned f19803dc3), K3 mock-lane; tester-found H1 (fix-specific PG tests deterministically skipped — false green) + D1-D3. Fix commit `0122db579` (explicit forwarders) landed mid-gate and runtime-refutes K1/K2 — ROUND 2 pending on fixed HEAD after re-review.
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `a1_targeted_unit` | tests/{test_persistence,test_checkpoint_adapter_resilience,test_readiness_checkpoint_saver,test_health_probes}.py | delivered targeted set | ~1 min | 2026-10-10 @ f19803dc3 | ✅ PASS 126P/2S (baseline-exact; mock-lane caveat per K3) |
+| `a2_checkpoint_integration` | tests/integration/checkpoint_prune_{real_saver,restore_rehearsal}.py + helpers import | checkpoint prune regression | ~1 min | 2026-10-10 @ 0ea77bfdf | ✅ PASS 10P/0F/0S (after QF 97c7f7bdc+0ea77bfdf, test-code only) |
+| `a3_pg_readiness_scoped` | tests/postgres/test_readiness_pg.py (PG_TEST_* → throwaway PG16:15432) | PG readiness incl. 2 fix-specific tests | <1 min | 2026-10-10 @ 0ea77bfdf | ⚠️ PASS 7P/2S — BOTH fix-specific SKIPPED (H1 async-fixture×sync-guard; gate-not-satisfied) |
+| `core_concurrency_atomic` | test/packs/concurrency_atomic_unit_test.sh | ensure.md Core #2/#3 | ~1.5 min | 2026-10-10 @ f19803dc3 | ✅ PASS 99P/0F/74S (baseline 98P/0F/74S; +1P informational) |
+| `b2_real_recovery` | /tmp/cp-resilience-b2/recovery_probe.py (recipe: RESULTS §B2) | incident repro: terminate own saver conns → recovery | ~3 min | 2026-10-10 @ f19803dc3 | ✅ REAL-RECOVERY-PROVEN 3/3 (~1s recovery, no restart, pool stats prove detection) |
+| `c_boot_smoke` | live boot @ throwaway PG16:15433, HTTP 8381, CWD /tmp | boot + pool-backed saver + readyz + degrade attempt | ~5 min | 2026-10-10 @ 0ea77bfdf | ⚠️ SMOKE-PASS-PARTIAL (degrade flip unobserved — attack-vector mismatch D3; outage-class attack needed) |
+| `k1k2_mro_probe` | /tmp/k1-probe/ (pinned f19803dc3 + live 0122db579) | MRO-shadowing runtime confirmation, real langgraph | <1 min | 2026-10-10 | ✅ K1/K2 CONFIRMED pre-fix; REFUTED/DELEGATES post-fix @0122db579 |
+
 ## Completed commission — LIVE-VIEWS URL + RENDERING FEATURE GATE @ 0c040e5f8→8dbbcb6a1 (2026-10-10) — verdict PASS-with-preexisting in RESULTS/2026-10-10-live-views-url-and-rendering-gate.md
 
 Worktree `/home/nea/ensemble-src-wt-liveviews-20261010` (branch feature/live-views-url-and-rendering; 12 commits; base 0c040e5f8). 20 workers, 0 losses. **Zero branch-caused failures**; all 72F+21E reds base-attributed (full-glob ag A/B node-identical; 5 ledger-exact; 5 `/tmp`-location artifacts excluded — base worktrees must live under `/home`). Live smoke (user acceptance) ALL PASS incl. config>Host>bind precedence with verbatim fully-qualified URLs; real-Chromium browser gate PASS (XSS inert, SRI+CSP+no-referrer live-verified); 32MiB cap live-verified.
