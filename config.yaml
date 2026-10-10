@@ -105,10 +105,44 @@ llm:
   # the LLM proxy supports request-body gzip.
   request_gzip: ${OPENAI_REQUEST_GZIP:-false}
 
-# Server Configuration  
+# Server Configuration
 daemon:
   host: ${HOST:-0.0.0.0}
   port: ${PORT:-8088}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Live-Views Subsystem (Phase 1 + Phase 2) — operator override model
+# ─────────────────────────────────────────────────────────────────────────
+# The daemon ships with sensible live_views defaults: the subsystem is
+# ENABLED, the three seed roots (``designer-artifact``, ``planning``,
+# ``tmp-images``) are registered, and ``external_base_url`` is UNSET.
+# Set ``external_base_url`` whenever the deployment has a known public
+# hostname — the operator override always wins over the Host-capture
+# auto-detect (see docs/runbooks/live-views.md §6 for the full chain).
+#
+# Examples:
+#
+#   # force fully-qualified URLs (operator override; the canonical
+#   # production form behind a TLS-terminating reverse proxy):
+#   live_views:
+#     external_base_url: https://ensemble.example.com
+#
+#   # disable a single seed root without redefining the others:
+#   live_views:
+#     roots:
+#       tmp-images: {enabled: false}
+#
+#   # add a custom filesystem root (absolute path required):
+#   live_views:
+#     roots:
+#       docs:
+#         type: filesystem
+#         path: /var/ensemble/docs
+#         allowed_extensions: [html, css, js, md, pdf, png]
+#         description: "Operator-curated HTML docs"
+#
+# Restart the daemon after editing this section — the registry is
+# read once at lifespan start.
 
 # Instance Limits
 limits:

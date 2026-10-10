@@ -1,5 +1,33 @@
 # Test Packs
 
+## Completed commission — LIVE-VIEWS URL + RENDERING FEATURE GATE @ 0c040e5f8→8dbbcb6a1 (2026-10-10) — verdict PASS-with-preexisting in RESULTS/2026-10-10-live-views-url-and-rendering-gate.md
+
+Worktree `/home/nea/ensemble-src-wt-liveviews-20261010` (branch feature/live-views-url-and-rendering; 12 commits; base 0c040e5f8). 20 workers, 0 losses. **Zero branch-caused failures**; all 72F+21E reds base-attributed (full-glob ag A/B node-identical; 5 ledger-exact; 5 `/tmp`-location artifacts excluded — base worktrees must live under `/home`). Live smoke (user acceptance) ALL PASS incl. config>Host>bind precedence with verbatim fully-qualified URLs; real-Chromium browser gate PASS (XSS inert, SRI+CSP+no-referrer live-verified); 32MiB cap live-verified.
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| liveviews_changed_area (ad-hoc) | 7 files: routers/test_live_views_{router,markdown}.py, tools/test_live_views_tool.py, config/test_live_views_config.py, test_host_capture_middleware.py, services/test_live_views_{service,base_url}.py | 315 changed-area unit | <1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ PASS 315/315 (14.6s) |
+| sweep_top_ag | tests/unit/test_[a-g]*.py | 2482P/39F/21E | ~1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ effectively PASS — 39F+21E ALL pre-existing (full-glob A/B at base: identical set) |
+| sweep_top_hi | tests/unit/test_[h-i]*.py | 185 | <1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ PASS 185/185 (hm split validated: weight is in j-m) |
+| sweep_top_jm | tests/unit/test_[j-m]*.py | 2040P/2F | ~2 min | 2026-10-10 @ 8dbbcb6a1 | ✅ effectively PASS — 2F pre-existing (llm_allowed_models 1, release_tag_pin 1; base node-identical) |
+| sweep_top_ns | tests/unit/test_[n-s]*.py | 2317P/8F/41S | ~1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ effectively PASS — 8F pre-existing (claim_lane 6 + projmgr 2; base node-identical) |
+| sweep_top_tz | tests/unit/test_[t-z]*.py | 835P/1F/11S | <1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ effectively PASS — 1F terminal_reason registry (ledger-exact + diff-reach empty) |
+| sweep_routers | tests/unit/routers/ | 563 | <1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ PASS 563/563 (prior 2 drift reds confirmed fixed) |
+| sweep_services_ai | tests/unit/services/test_[a-i]*.py | 899 | <1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ PASS 899/899 |
+| sweep_services_jr | tests/unit/services/test_[j-r]*.py | 1164P/7F | ~1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ effectively PASS — 7F job_queue_proxy_phase1 (base node-identical; ledger-exact) |
+| sweep_services_sz | tests/unit/services/test_[s-z]*.py | 530P/2F | <1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ effectively PASS — 2F time-bomb + pid_dead race (base node-identical) |
+| sweep_tools_ai | tests/unit/tools/test_[a-i]*.py | 788P/5S | <1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ PASS 788/788 effective |
+| sweep_tools_jr | tests/unit/tools/test_[j-r]*.py | 1954P/9F | ~1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ effectively PASS — 9F pre-existing (knowtools 2 node-identical; prompt_integrity 7 zero-id-drift at base) |
+| sweep_tools_sz | tests/unit/tools/test_[s-z]*.py | 692P/2S | <1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ PASS 692/692 effective |
+| sweep_small_dirs | 14 dirs (agents…tool_pairing_history_gate) | 1231P/4F | ~1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ effectively PASS — 4F plugin_subsystem (ledger-exact + diff-reach empty) |
+| ensure_concurrency | test/packs/concurrency_atomic_unit_test.sh | 99P/74S | ~1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ PASS 0F (67.0s) |
+| ensure_static | dev.sh grep + await-correctness greps | 3 checks | <1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ PASS 3/3 (dev.sh:142; 9/9 awaits; diff non-reach 0) |
+| liveviews_smoke (ad-hoc) | .smoke/smoke_live_views.py :18079 + real-mint driver | S0-S8 acceptance | <1 min/phase | 2026-10-10 @ 8dbbcb6a1 | ✅ ALL PASS — verbatim URLs incl. https://liveviews.example.com/... (Host+XFP) and config-wins https://views.example.test/...; 32MiB live 404 |
+| liveviews_browser (ad-hoc) | harness :18080 + headless chromium | A1-A5 | <1 min | 2026-10-10 @ 8dbbcb6a1 | ✅ PASS — XSS inert (0 dialogs, 0 content scripts), marked renders, SRI/CDN 200 |
+| classify_ab (ad-hoc) | base 0c040e5f8 temp worktree, 10 re-runs | A/B attribution | ~15 min | 2026-10-10 | ✅ 0 branch-caused; 67F+21E node-identical; 5 ledger-exact; 5 location-artifacts excluded |
+
+---
+
 ## Completed commission — UPGRADE-RESILIENCE FINAL TEST PASS @ dc17a9142→b78c9fbba (2026-10-07) — verdict in RESULTS/2026-10-07-upgrade-resilience-final-gate.md
 
 Worktree `/home/nea/ensemble-src-wt-upgrade-resilience` (branch feature/upgrade-executor-resilience; commissioned tip dc17a9142 + 13 authorized test-lane commits); BASE scratch `/home/nea/ensemble-src-wt-test-base` @ 2753ee78d (removed post-gate). 30 workers (4 dispatch-loss replacements), every residual family BASE-discriminated. **Zero fix-range-caused failures**; 86-node release_journal cascade closed by fixture fix (f7db75ed4 contract change sans fixture update). Real-systemd kill evidence R1/R2/R6 on live-systemd host (disposable `ensemble-test-<uuid>` units, zero strays). Mid-gate concurrent-actor event: giter committed production `dc01af6a1` (STOP_SCRIPT_BUDGET_S derivation) + `83f0b53a5` mid-gate — bounded_waits re-run at new tip covers it (57/57 incl. D1-D8 sync-guard).

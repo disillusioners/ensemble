@@ -3,8 +3,9 @@
 This module contains the app factory, lifespan management, middleware,
 and global error handlers. All API endpoints are in daemon/routers/.
 
-M10 — module-band rationale (2026-09-13): this file lives in the
-~1000-3000-line band by design. It carries (a) the FastAPI app
+M10 — module-band rationale (2026-09-13, refreshed 2026-10-10):
+this file lives in the ~3000-3500-line band by design (currently
+~3290 lines). It carries (a) the FastAPI app
 factory ``create_app`` (the lifespan wiring + middleware
 registration lives here), (b) the ``lifespan`` async-context
 manager that boots the per-instance watchdog, the long-tool-call-
@@ -22,6 +23,15 @@ modules instead of one and would scatter the related
 construction-failure recovery decisions. The routers themselves
 live under ``daemon/routers/``; this module owns the wiring, not
 the routes.
+
+Growth policy (2026-10-10): NEW self-contained middleware goes to
+``daemon/middleware/`` (first resident: ``host_capture``, the
+live-view Host/X-Forwarded-Proto capture), NOT into this file —
+api.py keeps only the ``add_middleware`` wiring (plus
+create_app()-local middlewares that need closure over factory
+state, e.g. ``SelectiveAccessLogMiddleware``). The full api.py
+split (lifespan extraction, handler extraction) remains on the
+hygiene backlog; it is deliberate and deferred, not forgotten.
 """
 
 import warnings
@@ -151,6 +161,7 @@ from daemon.utils import validate_agent_id as validate_agent_id  # noqa: F401
 from daemon.routers.messages import send_message as send_message  # noqa: F401
 
 from daemon import __version__
+from daemon.middleware.host_capture import HostCaptureMiddleware
 from daemon.models import ErrorCodes, ErrorResponse, HealthResponse, LivezResponse, ReadyzResponse
 from daemon.ensemble_config import EnsembleConfig
 from daemon.services.live_event_hub import LiveEventHub
@@ -1029,7 +1040,18 @@ async def lifespan(app: FastAPI):
     # registry is read-only at request time, populated once
     # here from ``config.live_views.roots``).
     # ─────────────────────────────────────────────────────────────
-    from daemon.services.live_views import LiveViewsService
+    from daemon.services.live_views import HostRecorder, LiveViewsService
+
+    # Phase 2: HostRecorder is the live-capture seam for the
+    # URL base-resolution chain (see ``BaseURLResolver`` docstring).
+    # The recorder is shared between the ``LiveViewsService``
+    # (reads from it via ``build_url``) and the
+    # ``HostCaptureMiddleware`` (writes to it on every inbound
+    # HTTP request). The recorder MUST be created BEFORE the
+    # service so the service's resolver constructor captures
+    # the same instance the middleware writes to.
+    host_recorder = HostRecorder()
+    app.state.host_recorder = host_recorder
 
     def _resolve_project_workdir_by_shortname(shortname: str | None) -> str | None:
         """Return the main_directory of the project matching ``shortname``.
@@ -1070,6 +1092,17 @@ async def lifespan(app: FastAPI):
         config=config.live_views,
         tmp_image_store=tmp_image_store,
         project_workdir_by_shortname_resolver=_resolve_project_workdir_by_shortname,
+        # Phase 2: bind evidence is the third-tier fallback in
+        # the URL base-resolution chain (operator override >
+        # Host-capture auto-detect > bind evidence > path-relative).
+        # The Host-capture tier is fed by ``HostCaptureMiddleware``
+        # reading ``app.state.host_recorder``; the recorder itself
+        # is created here and shared between the service and the
+        # middleware so the service's ``build_url`` reads the
+        # same state the middleware writes.
+        bind_host=config.daemon.host,
+        bind_port=config.daemon.port,
+        host_recorder=host_recorder,
     )
     app.state.live_views_service = live_views_service
     # Thread the service onto the manager so the ``view_link``
@@ -2956,7 +2989,7 @@ def create_app() -> FastAPI:
 
             method_color = self.COLORS.get(method, self.RESET)
             status_color = self.status_color(status_code)
-            
+
             log_msg = (
                 f"{self.BOLD}{client_addr}{self.RESET} "
                 f"{method_color}{method}{self.RESET} "
@@ -2976,6 +3009,14 @@ def create_app() -> FastAPI:
 
     # Add selective access log middleware
     app.add_middleware(SelectiveAccessLogMiddleware)
+
+    # Phase 2 / Host-capture for the live-view URL mint.
+    # Registered LAST so it sees the headers as the client
+    # sent them (BEFORE any CORS / access-log middlewares
+    # mutate the request); the recorder is pass-through and
+    # does not modify the request, so registration order has
+    # no functional impact — ordering for clarity.
+    app.add_middleware(HostCaptureMiddleware)
 
     # Global exception handler
     @app.exception_handler(Exception)

@@ -1,4 +1,4 @@
-"""Live-view HTTP route family (Phase 1).
+"""Live-view HTTP route family (Phase 1 + Phase 2).
 
 GET/HEAD ``/views/<root-name>/<relative-path>`` for any registered
 root. The router is the **only** HTTP surface for the subsystem;
@@ -28,9 +28,11 @@ SECURITY MODEL (architect ruling, 2026-10-07):
 * No auth at the daemon. Edge guard is documented in
   ``docs/runbooks/live-views.md``.
 
-The router does NOT do content conversion (no markdown→HTML, no
-image resize). Phase 1 is the primitive; FE WebView + on-the-fly
-conversion is Phase 2 (not in this slice).
+Content-aware rendering (Phase 2, live here): ``.md`` files are
+NOT served as a raw ``text/markdown`` blob — the router wraps them
+in an HTML viewer page (pinned-CDN renderer + sanitizer + CSP
+nonce) via ``render_markdown_wrapper``. Non-markdown content stays
+a byte-for-byte passthrough.
 
 TOCTOU CONTAINMENT (REWORK 2026-10-07, M4): the service does a
 ``realpath``-based containment check + a stat-based size cap on
@@ -70,6 +72,66 @@ _HARDENING_HEADERS: dict[str, str] = {
     "X-Content-Type-Options": "nosniff",
     "Cache-Control": "private, max-age=60",
 }
+
+
+def _render_markdown_response(
+    file_bytes: bytes, rel_path: str, nonce: str | None = None
+) -> Response:
+    """Render a ``.md`` file as the HTML wrapper page.
+
+    Phase 2 of the live-view subsystem: instead of serving the
+    raw markdown as ``text/markdown`` (which browsers render as
+    raw text and which never shows up as a rendered page), the
+    router wraps the markdown in an HTML viewer page that loads
+    a pinned-version CDN markdown renderer (``marked``) and a
+    sanitizer (``DOMPurify``) with strict SRI + CSP. The
+    wrapper degrades gracefully to readable raw text when JS
+    is off / CDN is unreachable — the raw markdown lives in a
+    ``<pre>`` in the page until the bootstrap rewrites it.
+
+    The hardening headers (nosniff + cache-control) ride on the
+    response alongside the CSP (which is built by the service-
+    side ``render_markdown_wrapper`` to keep the template
+    consistent with the service's other surface). The CSP
+    blocks inline-script execution from any source other than
+    the per-request nonced bootstrap — defense in depth with
+    the SRI hashes on the CDN tags.
+
+    The raw ``.html`` family (designer mockups, etc.) is NOT
+    affected — they continue to be served with the basic
+    ``_HARDENING_HEADERS`` set and no CSP, per the architect
+    ruling that legitimate HTML may include scripts.
+    """
+    from daemon.services.live_views import (
+        render_markdown_wrapper,
+    )
+
+    # The file bytes were already size-capped (32 MiB) by
+    # the service and re-capped at read time by ``_fd_read``
+    # (``os.fstat`` → re-check). We pass them straight through
+    # to the wrapper — utf-8 decode failure (rare; valid
+    # markdown is text) collapses to a uniform response.
+    try:
+        markdown_text = file_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        # Fall back to a lossy decode so the wrapper still
+        # renders something readable (the byte sequence
+        # probably contains binary garbage — operator can
+        # spot the issue from the daemon log).
+        markdown_text = file_bytes.decode("utf-8", errors="replace")
+
+    body, headers = render_markdown_wrapper(
+        rel_path=rel_path, markdown_text=markdown_text, nonce=nonce
+    )
+    return Response(
+        content=body,
+        media_type="text/html; charset=utf-8",
+        status_code=200,
+        headers={
+            **headers,
+            "Content-Length": str(len(body.encode("utf-8"))),
+        },
+    )
 
 
 def _fd_read(path: "os.PathLike[str] | str", max_bytes: int) -> bytes | None:
@@ -264,6 +326,59 @@ def build_router() -> APIRouter:
                     "Content-Length": str(resolved.size_bytes),
                 },
             )
+        # Phase 2: ``.md`` files wrap into a per-response HTML
+        # page whose size depends on the wrapper template +
+        # markdown content. The HEAD handler must return a
+        # Content-Length that matches the GET body — we render
+        # the wrapper once (with a stable test-friendly
+        # nonce) just to measure it, then throw the body
+        # away. The cost is the same fd-read + utf-8 decode the
+        # GET path does; for a HEAD request this is wasted
+        # work but keeps the contract consistent.
+        from daemon.services.live_views import (
+            MAX_SERVED_BYTES,
+            is_markdown_content_type,
+            new_csp_nonce,
+            render_markdown_wrapper,
+        )
+
+        if is_markdown_content_type(resolved.content_type):
+            try:
+                file_bytes = _fd_read(resolved.on_disk_path, MAX_SERVED_BYTES)
+                if file_bytes is None:
+                    return _uniform_404()
+                markdown_text = file_bytes.decode(
+                    "utf-8", errors="replace"
+                )
+                body, headers = render_markdown_wrapper(
+                    rel_path=rel_path,
+                    markdown_text=markdown_text,
+                    nonce=new_csp_nonce(),
+                )
+                return Response(
+                    status_code=200,
+                    headers={
+                        **_HARDENING_HEADERS,
+                        **{k: v for k, v in headers.items() if k != "X-Content-Type-Options" and k != "Cache-Control"},
+                        "Content-Type": "text/html; charset=utf-8",
+                        "Content-Length": str(
+                            len(body.encode("utf-8"))
+                        ),
+                    },
+                )
+            except Exception:
+                # The HEAD path is best-effort: if the
+                # wrapper render blows up for any reason we
+                # collapse to the headers-only response so
+                # the client sees a consistent shape.
+                return Response(
+                    status_code=200,
+                    headers={
+                        **_HARDENING_HEADERS,
+                        "Content-Type": "text/html; charset=utf-8",
+                        "Content-Length": "0",
+                    },
+                )
         return Response(
             status_code=200,
             headers={
@@ -315,7 +430,11 @@ def build_router() -> APIRouter:
         # ``Path.read_bytes()`` shape exposed (the second open
         # could see a different file than the service's resolve
         # + stat + size-check saw).
-        from daemon.services.live_views import MAX_SERVED_BYTES
+        from daemon.services.live_views import (
+            MAX_SERVED_BYTES,
+            is_markdown_content_type,
+            new_csp_nonce,
+        )
 
         file_bytes = _fd_read(resolved.on_disk_path, MAX_SERVED_BYTES)
         if file_bytes is None:
@@ -324,6 +443,20 @@ def build_router() -> APIRouter:
             # ``O_NOFOLLOW`` open time, etc.) — uniform 404, no
             # stack trace leak.
             return _uniform_404()
+
+        # Phase 2: content-aware rendering. ``.md`` files get
+        # the HTML wrapper (renderer + sanitizer via pinned CDN,
+        # CSP nonce, SRI integrity) instead of the raw
+        # ``text/markdown`` blob (browsers display raw markdown
+        # as plain text — useless for a /views URL a human is
+        # supposed to click in chat). Other text types stay
+        # native — ``text/plain`` and ``text/html`` are already
+        # useful in a browser; image types keep their MIME.
+        if is_markdown_content_type(resolved.content_type):
+            return _render_markdown_response(
+                file_bytes, rel_path, nonce=new_csp_nonce()
+            )
+
         return Response(
             content=file_bytes,
             media_type=resolved.content_type,
