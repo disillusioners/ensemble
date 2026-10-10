@@ -1,0 +1,1103 @@
+<!DOCTYPE html>
+<!--
+  Snapshots Page v2 — text-lane mockup (hand-authored)
+
+  Generation lane: text  (mockup_lane: text)
+  fallback_reason: timeout
+  Context: `od.generate` (OD lane, default) returned a Cloudflare 524
+  upstream timeout at 120s; per the designer's mockup-lane procedure
+  ("one call, no retry-storm; timeout mid-call → text fallback for
+  that page"), this artifact was authored by hand. Self-contained,
+  no external deps (per task brief). Does NOT claim pixel fidelity
+  — text mockup is layout-and-placement aid only.
+
+  Spec SHA: see .agents/shared/planning/snapshots-redesign-alt/design/design-spec.md
+  Diagnosis: see .agents/shared/planning/snapshots-redesign-alt/diagnosis.md
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Snapshots v2 — text-lane mockup</title>
+<style>
+  /* ── design system tokens (hand-authored; trace to brand_spec) ─ */
+  :root {
+    --bg-app: #0f172a;
+    --bg-surface: #1e293b;
+    --bg-surface-2: #273348;
+    --bg-surface-3: #334155;
+    --bg-input: #0b1326;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --text: rgba(255, 255, 255, 0.92);
+    --text-2: rgba(255, 255, 255, 0.70);
+    --text-3: rgba(255, 255, 255, 0.50);
+    --text-4: rgba(255, 255, 255, 0.35);
+    --accent: #4f46e5;
+    --accent-2: #6366f1;
+    --accent-soft: rgba(99, 102, 241, 0.16);
+
+    --status-ok-bg: rgba(16, 185, 129, 0.14);
+    --status-ok-fg: #10b981;
+    --status-info-bg: rgba(59, 130, 246, 0.16);
+    --status-info-fg: #3b82f6;
+    --status-warn-bg: rgba(245, 158, 11, 0.16);
+    --status-warn-fg: #f59e0b;
+    --status-err-bg: rgba(239, 68, 68, 0.16);
+    --status-err-fg: #ef4444;
+    --status-muted-bg: rgba(100, 116, 139, 0.16);
+    --status-muted-fg: #94a3b8;
+
+    --radius-1: 4px;
+    --radius-2: 6px;
+    --radius-3: 8px;
+    --radius-pill: 999px;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.4);
+    --shadow-3: 0 24px 60px rgba(0, 0, 0, 0.55);
+
+    --mono: 'JetBrains Mono', 'Menlo', 'Consolas', monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg-app);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  /* ── mockup wrapper (two panels side-by-side) ──────────────── */
+  .mockup {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    padding: 24px;
+    min-width: 1400px;
+  }
+  .panel {
+    background: var(--bg-app);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-3);
+    overflow: hidden;
+    position: relative;
+    box-shadow: var(--shadow-2);
+  }
+  .panel-label {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    background: rgba(0, 0, 0, 0.6);
+    color: var(--text-3);
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: var(--radius-pill);
+    z-index: 20;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+
+  /* ── top nav (shared) ─────────────────────────────────────── */
+  .topnav {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(0, 0, 0, 0.2);
+  }
+  .logo {
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-2);
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 700;
+    font-size: 12px;
+  }
+  .topnav nav {
+    display: flex;
+    gap: 4px;
+    margin-left: 12px;
+  }
+  .topnav nav a {
+    color: var(--text-2);
+    text-decoration: none;
+    padding: 6px 10px;
+    border-radius: var(--radius-2);
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .topnav nav a.active {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.06);
+  }
+  .topnav .spacer { flex: 1; }
+
+  /* ── page header (collapsed toggle moved to kebab) ────────── */
+  .page-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 24px 24px 0;
+  }
+  .page-title { margin: 0; font-size: 22px; font-weight: 600; }
+  .page-subtitle {
+    margin: 6px 0 0;
+    color: var(--text-3);
+    font-size: 13px;
+    max-width: 580px;
+  }
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-pill);
+    border: none;
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .icon-btn:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
+
+  /* ── KPI strip (compact single row, NOT a 2-card grid) ────── */
+  .kpi-strip {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 12px 16px;
+    margin: 16px 24px 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2);
+    background: rgba(255, 255, 255, 0.02);
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .kpi-strip .kpi-label {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+    color: var(--text-3);
+    font-size: 11px;
+  }
+  .kpi-strip .kpi-value { font-weight: 600; color: var(--text); }
+  .kpi-strip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok-fg); display: inline-block; margin-right: 6px; }
+  .kpi-strip .divider { width: 1px; height: 16px; background: var(--border); }
+
+  /* ── filter bar (single horizontal row) ────────────────────── */
+  .filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 12px 24px 0;
+  }
+  .select {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: var(--radius-2);
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .select .label { color: var(--text-3); font-weight: 500; }
+  .select .value { color: var(--text); }
+  .select .caret { color: var(--text-3); font-size: 10px; margin-left: 4px; }
+
+  .chip-group { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: var(--radius-2); background: var(--bg-input); }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+    font-weight: 500;
+  }
+  .chip:hover { color: var(--text); border-color: var(--border-strong); }
+  .chip.selected {
+    background: var(--accent-soft);
+    border-color: var(--accent-2);
+    color: var(--text);
+  }
+  .chip .swatch {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .chip.s-active .swatch { background: var(--status-ok-fg); }
+  .chip.s-running .swatch { background: var(--status-info-fg); }
+  .chip.s-superseded .swatch { background: var(--status-muted-fg); }
+  .chip.s-failed .swatch { background: var(--status-err-fg); }
+  .chip.s-interrupted .swatch { background: var(--status-warn-fg); }
+
+  .tag-input {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2);
+    padding: 4px 6px;
+    flex: 1;
+    min-width: 240px;
+    max-width: 360px;
+  }
+  .tag-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--accent-soft);
+    color: #c7d2fe;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+    border: 1px solid rgba(99, 102, 241, 0.32);
+  }
+  .tag-pill .x { color: var(--text-3); cursor: pointer; font-size: 11px; }
+  .tag-input input {
+    flex: 1;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 12px;
+    padding: 2px 4px;
+    min-width: 100px;
+  }
+  .tag-input input::placeholder { color: var(--text-4); }
+  .filter-spacer { flex: 1; }
+  .active-filters {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-3);
+  }
+  .active-filters .count {
+    background: var(--accent-soft);
+    color: #c7d2fe;
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+    border: 1px solid rgba(99, 102, 241, 0.32);
+    font-weight: 600;
+    font-size: 11px;
+  }
+  .clear-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-2);
+    padding: 4px 10px;
+    border-radius: var(--radius-2);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .clear-btn:hover { color: var(--text); border-color: var(--border-strong); }
+
+  /* ── table ────────────────────────────────────────────────── */
+  .snap-table {
+    width: calc(100% - 48px);
+    margin: 16px 24px 0;
+    border-collapse: collapse;
+    font-size: 12.5px;
+  }
+  .snap-table th {
+    text-align: left;
+    color: var(--text-3);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .snap-table td {
+    padding: 10px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .snap-table tbody tr { cursor: pointer; position: relative; }
+  .snap-table tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
+  .snap-table .title-cell .title {
+    font-weight: 500;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 240px;
+  }
+  .snap-table .meta-line {
+    font-size: 11px;
+    color: var(--text-3);
+    margin-top: 2px;
+  }
+  .snap-table .meta-line .meta-sep { margin: 0 6px; color: var(--text-4); }
+  .snap-table .mono { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+  .snap-table .tag-list { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+  .snap-table .tag-list .tag {
+    background: rgba(148, 163, 184, 0.10);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    color: var(--text-2);
+    border-radius: var(--radius-pill);
+    padding: 1px 8px;
+    font-size: 10.5px;
+    font-family: var(--mono);
+  }
+  .snap-table .tag-list .more {
+    color: var(--text-3);
+    font-size: 10.5px;
+    padding: 1px 6px;
+  }
+  .snap-table .created-cell {
+    color: var(--text-2);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .snap-table .created-cell .abs {
+    display: block;
+    font-size: 10.5px;
+    color: var(--text-4);
+    font-family: var(--mono);
+    margin-top: 2px;
+  }
+
+  /* ── status chip (v2 — color + icon + label) ──────────────── */
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: var(--radius-pill);
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .status .ic { font-size: 12px; line-height: 1; }
+  .status.ok       { background: var(--status-ok-bg);      color: var(--status-ok-fg);      border-color: rgba(16, 185, 129, 0.36); }
+  .status.info     { background: var(--status-info-bg);    color: var(--status-info-fg);    border-color: rgba(59, 130, 246, 0.36); }
+  .status.warn     { background: var(--status-warn-bg);    color: var(--status-warn-fg);    border-color: rgba(245, 158, 11, 0.36); }
+  .status.err      { background: var(--status-err-bg);     color: var(--status-err-fg);     border-color: rgba(239, 68, 68, 0.36); }
+  .status.muted    { background: var(--status-muted-bg);   color: var(--status-muted-fg);   border-color: rgba(100, 116, 139, 0.36); }
+
+  /* ── paginator ────────────────────────────────────────────── */
+  .paginator {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 24px 20px;
+    margin-top: 8px;
+    color: var(--text-3);
+    font-size: 12px;
+  }
+  .pages { display: inline-flex; align-items: center; gap: 4px; }
+  .pages button {
+    width: 28px; height: 28px;
+    border-radius: var(--radius-2);
+    border: 1px solid var(--border);
+    background: var(--bg-input);
+    color: var(--text-2);
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .pages button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .pages button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ── row kebab menu (open in panel A) ─────────────────────── */
+  .row-kebab {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; border-radius: var(--radius-pill);
+    border: none; background: transparent; color: var(--text-3); cursor: pointer;
+  }
+  .row-kebab:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
+  .menu {
+    position: absolute;
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-2);
+    box-shadow: var(--shadow-3);
+    min-width: 220px;
+    padding: 4px;
+    z-index: 30;
+    font-size: 12px;
+  }
+  .menu .item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: var(--radius-1);
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .menu .item:hover { background: rgba(255,255,255,0.06); color: var(--text); }
+  .menu .item .ic { color: var(--text-3); font-size: 14px; width: 14px; }
+  .menu .divider-line { height: 1px; background: var(--border); margin: 4px 0; }
+  .menu .submenu { position: relative; }
+  .menu .submenu-arrow { margin-left: auto; color: var(--text-3); }
+  .menu .submenu-pop {
+    position: absolute;
+    left: 100%;
+    top: 0;
+    margin-left: 4px;
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-2);
+    box-shadow: var(--shadow-3);
+    min-width: 180px;
+    padding: 4px;
+  }
+  /* anchor the kebab-open row visually */
+  .row-anchor { position: relative; }
+  .row-anchor .menu { right: 8px; top: 36px; }
+  .row-anchor .menu .submenu:hover .submenu-pop { display: block; }
+  .menu .submenu-pop { display: none; }
+
+  /* ── drawer overlay (panel B) ─────────────────────────────── */
+  .drawer-host {
+    position: relative;
+  }
+  .drawer-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.55);
+    z-index: 5;
+  }
+  .drawer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 720px;
+    max-width: 92%;
+    height: 100%;
+    background: var(--bg-surface);
+    border-left: 1px solid var(--border-strong);
+    box-shadow: var(--shadow-3);
+    z-index: 6;
+    display: flex;
+    flex-direction: column;
+  }
+  .drawer-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(0, 0, 0, 0.18);
+  }
+  .drawer-header .titles .drawer-title {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 600;
+    line-height: 1.3;
+    word-break: break-word;
+  }
+  .drawer-header .titles .meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 11.5px;
+    color: var(--text-3);
+  }
+  .drawer-header .titles .meta .mono { font-family: var(--mono); }
+  .drawer-header .actions { display: flex; gap: 4px; flex-shrink: 0; }
+  .dirty-flag {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    color: var(--status-warn-fg);
+    font-size: 11px;
+    background: var(--status-warn-bg);
+    border: 1px solid rgba(245, 158, 11, 0.32);
+    padding: 1px 8px;
+    border-radius: var(--radius-pill);
+  }
+
+  /* drawer body — 2-region */
+  .drawer-body {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    flex: 1;
+    overflow: hidden;
+  }
+  .drawer-rail {
+    border-right: 1px solid var(--border);
+    padding: 16px 16px 24px;
+    overflow-y: auto;
+    background: rgba(0, 0, 0, 0.12);
+  }
+  .drawer-rail h4 {
+    margin: 0 0 8px;
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-3);
+  }
+  .drawer-rail .kv { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  .drawer-rail .kv-row .k { font-size: 10.5px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+  .drawer-rail .kv-row .v { font-size: 12.5px; color: var(--text); margin-top: 2px; word-break: break-word; }
+  .drawer-rail .kv-row .v.mono { font-family: var(--mono); font-size: 11.5px; }
+  .drawer-rail .kv-row .v.muted { color: var(--text-3); }
+
+  .drawer-sections {
+    padding: 16px 20px 24px;
+    overflow-y: auto;
+  }
+  .drawer-sections .section { margin-bottom: 20px; }
+  .drawer-sections .section h3 {
+    margin: 0 0 8px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-3);
+  }
+  .drawer-sections .task-summary {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2);
+    padding: 12px 14px;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .drawer-sections .supersedes {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--accent-2);
+    text-decoration: none;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    padding: 6px 10px;
+    border-radius: var(--radius-2);
+    background: var(--accent-soft);
+    border: 1px solid rgba(99, 102, 241, 0.32);
+    cursor: pointer;
+  }
+  .drawer-sections .supersedes:hover { background: rgba(99, 102, 241, 0.24); }
+  .drawer-sections .kv-list { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; font-size: 12px; }
+  .drawer-sections .kv-list .kv-row .k { color: var(--text-3); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+  .drawer-sections .kv-list .kv-row .v { color: var(--text); font-family: var(--mono); font-size: 11.5px; word-break: break-word; }
+  .drawer-sections .tag-list .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(148, 163, 184, 0.10);
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    color: var(--text-2);
+    border-radius: var(--radius-pill);
+    padding: 2px 10px;
+    font-size: 11px;
+    font-family: var(--mono);
+    cursor: pointer;
+  }
+  .drawer-sections .tag-list .tag:hover { color: var(--text); border-color: var(--border-strong); }
+  .drawer-sections .digest-panel {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2);
+    background: rgba(0, 0, 0, 0.18);
+  }
+  .drawer-sections .digest-panel .digest-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 10px 14px;
+    background: transparent;
+    border: none;
+    color: var(--text-2);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .drawer-sections .digest-panel .digest-toggle:hover { color: var(--text); }
+  .drawer-sections .digest-panel .digest-meta {
+    margin-left: auto;
+    color: var(--text-3);
+    font-size: 11px;
+  }
+
+  /* dim the underlying table when drawer open (panel B only) */
+  .panel.drawer-open .snap-table,
+  .panel.drawer-open .filter-bar,
+  .panel.drawer-open .kpi-strip,
+  .panel.drawer-open .paginator { opacity: 0.55; }
+
+  /* ── footnote ─────────────────────────────────────────────── */
+  .mockup-footer {
+    padding: 12px 24px 24px;
+    color: var(--text-3);
+    font-size: 11px;
+    font-style: italic;
+  }
+</style>
+</head>
+<body>
+
+<div class="mockup">
+
+  <!-- ════════════════ PANEL A — DRAWER CLOSED ════════════════ -->
+  <section class="panel" aria-label="Snapshots v2 list (drawer closed)">
+    <span class="panel-label">Panel A · list (drawer closed)</span>
+
+    <header class="topnav">
+      <span class="logo">E</span>
+      <nav>
+        <a href="#">Home</a>
+        <a href="#">Jobs</a>
+        <a href="#">Instances</a>
+        <a href="#">Plans</a>
+        <a href="#">Skills</a>
+        <a href="#" class="active">Snapshots</a>
+        <a href="#">Settings</a>
+      </nav>
+      <span class="spacer"></span>
+      <button class="icon-btn" aria-label="Notifications" title="Notifications">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2zm6-6V11a6 6 0 0 0-5-5.91V4a1 1 0 1 0-2 0v1.09A6 6 0 0 0 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
+      </button>
+      <button class="icon-btn" aria-label="Page actions" title="Page actions">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
+      </button>
+    </header>
+
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">Snapshots</h1>
+        <p class="page-subtitle">Browse and inspect every captured agent-snapshot. Toggle creation in Settings → Snapshot creation.</p>
+      </div>
+    </div>
+
+    <div class="kpi-strip" aria-label="Snapshot usage metrics">
+      <span><span class="dot"></span><span class="kpi-label">Capture counts</span> <span class="kpi-value">47</span></span>
+      <span class="divider"></span>
+      <span><span class="kpi-label">Warmed</span> <span class="kpi-value">128 spawns</span></span>
+      <span class="divider"></span>
+      <span><span class="kpi-label">Last capture</span> <span class="kpi-value">2 min ago</span></span>
+      <span class="divider"></span>
+      <span><span class="kpi-label">Top tag</span> <span class="kpi-value">domain:api</span></span>
+    </div>
+
+    <div class="filter-bar" role="region" aria-label="Filter snapshots">
+      <span class="select"><span class="label">Project</span> <span class="value">agents-ensemble</span><span class="caret">▾</span></span>
+      <span class="select"><span class="label">Agent</span> <span class="value">designer</span><span class="caret">▾</span></span>
+
+      <span class="chip-group" role="group" aria-label="Status">
+        <button class="chip s-active selected"><span class="swatch"></span>active</button>
+        <button class="chip s-running"><span class="swatch"></span>running</button>
+        <button class="chip s-superseded"><span class="swatch"></span>superseded</button>
+        <button class="chip s-failed"><span class="swatch"></span>failed</button>
+        <button class="chip s-interrupted"><span class="swatch"></span>interrupted</button>
+      </span>
+
+      <span class="chip-group" role="group" aria-label="Age">
+        <button class="chip">24h</button>
+        <button class="chip">7d</button>
+        <button class="chip">30d</button>
+        <button class="chip selected">All</button>
+      </span>
+
+      <span class="select" title="Match all tags"><span class="label">Tag mode</span> <span class="value">all</span><span class="caret">▾</span></span>
+
+      <span class="tag-input">
+        <span class="tag-pill">domain:api <span class="x" title="Remove">×</span></span>
+        <span class="tag-pill">domain:web <span class="x" title="Remove">×</span></span>
+        <input type="text" placeholder="Add tag (e.g. region:eu) and press Enter" aria-label="Add tag filter" />
+      </span>
+
+      <span class="filter-spacer"></span>
+
+      <span class="active-filters">
+        <span class="count">3 active filters</span>
+        <button class="clear-btn"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="vertical-align: -1px"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg> Clear</button>
+      </span>
+    </div>
+
+    <table class="snap-table" aria-label="Snapshots">
+      <thead>
+        <tr>
+          <th style="width: 28%">Title</th>
+          <th style="width: 14%">Project</th>
+          <th style="width: 12%">Agent</th>
+          <th style="width: 12%">Status</th>
+          <th style="width: 18%">Tags</th>
+          <th style="width: 12%">Created</th>
+          <th style="width: 4%"></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="title-cell">
+            <div class="title">designer-skill-checkpoint-v2</div>
+            <div class="meta-line">12 warm spawns <span class="meta-sep">·</span> v0.18.5 <span class="meta-sep">·</span> designer → inst-7c3a</div>
+          </td>
+          <td><span class="mono">agents-ensemble</span></td>
+          <td><span class="mono">designer</span></td>
+          <td><span class="status ok"><span class="ic">✓</span>active</span></td>
+          <td><div class="tag-list"><span class="tag">domain:api</span><span class="tag">domain:web</span><span class="more">+1</span></div></td>
+          <td class="created-cell">2 min ago<span class="abs">2026-10-10 06:33</span></td>
+          <td><button class="row-kebab" aria-label="Row actions">⋮</button></td>
+        </tr>
+
+        <!-- anchor row with open kebab menu -->
+        <tr class="row-anchor">
+          <td class="title-cell">
+            <div class="title">od-generate-agent-lane-design-spec</div>
+            <div class="meta-line">7 warm spawns <span class="meta-sep">·</span> v0.18.4 <span class="meta-sep">·</span> developer[v2] → inst-a1b2</div>
+          </td>
+          <td><span class="mono">agents-ensemble</span></td>
+          <td><span class="mono">developer[v2]</span></td>
+          <td><span class="status info"><span class="ic" style="display:inline-block;animation:spin 2s linear infinite">↻</span>running</span></td>
+          <td><div class="tag-list"><span class="tag">domain:design</span><span class="tag">phase:p2</span></div></td>
+          <td class="created-cell">14 min ago<span class="abs">2026-10-10 06:21</span></td>
+          <td>
+            <button class="row-kebab" aria-label="Row actions">⋮</button>
+            <div class="menu" role="menu" aria-label="Snapshot actions">
+              <div class="item"><span class="ic">↗</span>Open detail</div>
+              <div class="item"><span class="ic">⎘</span>Copy snapshot ID</div>
+              <div class="divider-line"></div>
+              <div class="item"><span class="ic">⌕</span>Filter by this agent</div>
+              <div class="item"><span class="ic">⌕</span>Filter by project</div>
+              <div class="item submenu">
+                <span class="ic">⌕</span>Filter by tag <span class="submenu-arrow">▸</span>
+                <div class="submenu-pop">
+                  <div class="item"><span class="ic">·</span>domain:design</div>
+                  <div class="item"><span class="ic">·</span>phase:p2</div>
+                </div>
+              </div>
+              <div class="divider-line"></div>
+              <div class="item" style="color:var(--text-3)"><span class="ic">↶</span>Open predecessor</div>
+            </div>
+          </td>
+        </tr>
+
+        <tr>
+          <td class="title-cell">
+            <div class="title">snapshot-uiux-v1</div>
+            <div class="meta-line">23 warm spawns <span class="meta-sep">·</span> v0.18.0 <span class="meta-sep">·</span> designer → inst-3f8e</div>
+          </td>
+          <td><span class="mono">agents-ensemble</span></td>
+          <td><span class="mono">designer</span></td>
+          <td><span class="status muted"><span class="ic">↺</span>superseded</span></td>
+          <td><div class="tag-list"><span class="tag">domain:ui</span><span class="tag">domain:web</span></div></td>
+          <td class="created-cell">3 h ago<span class="abs">2026-10-10 03:21</span></td>
+          <td><button class="row-kebab" aria-label="Row actions">⋮</button></td>
+        </tr>
+
+        <tr>
+          <td class="title-cell">
+            <div class="title">check-pause-resume-recovery</div>
+            <div class="meta-line">3 warm spawns <span class="meta-sep">·</span> v0.18.4 <span class="meta-sep">·</span> tester → inst-92d4</div>
+          </td>
+          <td><span class="mono">agents-ensemble</span></td>
+          <td><span class="mono">tester</span></td>
+          <td><span class="status err"><span class="ic">✕</span>failed</span></td>
+          <td><div class="tag-list"><span class="tag">domain:recovery</span></div></td>
+          <td class="created-cell">5 h ago<span class="abs">2026-10-10 01:14</span></td>
+          <td><button class="row-kebab" aria-label="Row actions">⋮</button></td>
+        </tr>
+
+        <tr>
+          <td class="title-cell">
+            <div class="title">infra-info-design-bootstrap</div>
+            <div class="meta-line">— warm spawns <span class="meta-sep">·</span> v0.17.2 <span class="meta-sep">·</span> designer → inst-cc11</div>
+          </td>
+          <td><span class="mono">agents-ensemble</span></td>
+          <td><span class="mono">designer</span></td>
+          <td><span class="status warn"><span class="ic">!</span>interrupted</span></td>
+          <td><div class="tag-list"><span class="tag">domain:infra</span><span class="tag">phase:p0</span><span class="more">+2</span></div></td>
+          <td class="created-cell">1 day ago<span class="abs">2026-10-09 09:48</span></td>
+          <td><button class="row-kebab" aria-label="Row actions">⋮</button></td>
+        </tr>
+
+        <tr>
+          <td class="title-cell">
+            <div class="title">job-event-premature-completed-fix</div>
+            <div class="meta-line">41 warm spawns <span class="meta-sep">·</span> v0.17.4 <span class="meta-sep">·</span> developer → inst-77a0</div>
+          </td>
+          <td><span class="mono">agents-ensemble</span></td>
+          <td><span class="mono">developer</span></td>
+          <td><span class="status muted"><span class="ic">↺</span>superseded</span></td>
+          <td><div class="tag-list"><span class="tag">domain:jobs</span><span class="tag">domain:events</span></div></td>
+          <td class="created-cell">2 days ago<span class="abs">2026-10-08 16:02</span></td>
+          <td><button class="row-kebab" aria-label="Row actions">⋮</button></td>
+        </tr>
+
+        <tr>
+          <td class="title-cell">
+            <div class="title">designer-od-lane-fix</div>
+            <div class="meta-line">18 warm spawns <span class="meta-sep">·</span> v0.18.2 <span class="meta-sep">·</span> designer → inst-e2c4</div>
+          </td>
+          <td><span class="mono">agents-ensemble</span></td>
+          <td><span class="mono">designer</span></td>
+          <td><span class="status ok"><span class="ic">✓</span>active</span></td>
+          <td><div class="tag-list"><span class="tag">domain:design</span><span class="tag">phase:p1</span></div></td>
+          <td class="created-cell">3 days ago<span class="abs">2026-10-07 11:30</span></td>
+          <td><button class="row-kebab" aria-label="Row actions">⋮</button></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="paginator">
+      <span>1–10 of 47</span>
+      <span class="pages">
+        <button disabled>‹</button>
+        <button class="active">1</button>
+        <button>2</button>
+        <button>3</button>
+        <button>4</button>
+        <button>5</button>
+        <button>›</button>
+      </span>
+      <span>10 / page ▾</span>
+    </div>
+
+    <p class="mockup-footer">
+      Panel A — list view, drawer closed. Filter bar collapsed to a single row;
+      status chips color-coded with icon; project column shows project name (joined client-side);
+      row metadata under title carries warm-spawn count and runtime version; "Warm" column dropped.
+    </p>
+  </section>
+
+  <!-- ════════════════ PANEL B — DRAWER OPEN ══════════════════ -->
+  <section class="panel drawer-open" aria-label="Snapshots v2 list (drawer open)">
+    <span class="panel-label">Panel B · list (drawer open)</span>
+
+    <header class="topnav">
+      <span class="logo">E</span>
+      <nav>
+        <a href="#">Home</a>
+        <a href="#">Jobs</a>
+        <a href="#">Instances</a>
+        <a href="#">Plans</a>
+        <a href="#">Skills</a>
+        <a href="#" class="active">Snapshots</a>
+        <a href="#">Settings</a>
+      </nav>
+      <span class="spacer"></span>
+      <button class="icon-btn" aria-label="Notifications" title="Notifications">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2zm6-6V11a6 6 0 0 0-5-5.91V4a1 1 0 1 0-2 0v1.09A6 6 0 0 0 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
+      </button>
+      <button class="icon-btn" aria-label="Page actions" title="Page actions">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
+      </button>
+    </header>
+
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">Snapshots</h1>
+        <p class="page-subtitle">Browse and inspect every captured agent-snapshot.</p>
+      </div>
+    </div>
+
+    <div class="kpi-strip">
+      <span><span class="dot"></span><span class="kpi-label">Capture counts</span> <span class="kpi-value">47</span></span>
+      <span class="divider"></span>
+      <span><span class="kpi-label">Warmed</span> <span class="kpi-value">128 spawns</span></span>
+      <span class="divider"></span>
+      <span><span class="kpi-label">Last capture</span> <span class="kpi-value">2 min ago</span></span>
+    </div>
+
+    <div class="filter-bar">
+      <span class="select"><span class="label">Project</span> <span class="value">agents-ensemble</span><span class="caret">▾</span></span>
+      <span class="select"><span class="label">Agent</span> <span class="value">designer</span><span class="caret">▾</span></span>
+      <span class="chip-group">
+        <button class="chip s-active selected"><span class="swatch"></span>active</button>
+        <button class="chip s-running"><span class="swatch"></span>running</button>
+        <button class="chip s-superseded"><span class="swatch"></span>superseded</button>
+        <button class="chip s-failed"><span class="swatch"></span>failed</button>
+        <button class="chip s-interrupted"><span class="swatch"></span>interrupted</button>
+      </span>
+      <span class="chip-group">
+        <button class="chip">24h</button>
+        <button class="chip">7d</button>
+        <button class="chip">30d</button>
+        <button class="chip selected">All</button>
+      </span>
+      <span class="select"><span class="label">Tag mode</span> <span class="value">all</span><span class="caret">▾</span></span>
+      <span class="tag-input">
+        <span class="tag-pill">domain:api <span class="x">×</span></span>
+        <span class="tag-pill">domain:web <span class="x">×</span></span>
+        <input type="text" placeholder="Add tag…" />
+      </span>
+      <span class="filter-spacer"></span>
+      <span class="active-filters">
+        <span class="count">3 active filters</span>
+        <button class="clear-btn">× Clear</button>
+      </span>
+    </div>
+
+    <table class="snap-table">
+      <thead>
+        <tr>
+          <th style="width: 28%">Title</th>
+          <th style="width: 14%">Project</th>
+          <th style="width: 12%">Agent</th>
+          <th style="width: 12%">Status</th>
+          <th style="width: 18%">Tags</th>
+          <th style="width: 12%">Created</th>
+          <th style="width: 4%"></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="background: rgba(99,102,241,0.10); outline: 1px solid rgba(99,102,241,0.42);">
+          <td class="title-cell">
+            <div class="title">designer-skill-checkpoint-v2</div>
+            <div class="meta-line">12 warm spawns <span class="meta-sep">·</span> v0.18.5 <span class="meta-sep">·</span> designer → inst-7c3a</div>
+          </td>
+          <td><span class="mono">agents-ensemble</span></td>
+          <td><span class="mono">designer</span></td>
+          <td><span class="status ok"><span class="ic">✓</span>active</span></td>
+          <td><div class="tag-list"><span class="tag">domain:api</span><span class="tag">domain:web</span><span class="more">+1</span></div></td>
+          <td class="created-cell">2 min ago<span class="abs">2026-10-10 06:33</span></td>
+          <td><button class="row-kebab">⋮</button></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="paginator">
+      <span>1–1 of 1</span>
+      <span class="pages">
+        <button disabled>‹</button>
+        <button class="active">1</button>
+        <button disabled>›</button>
+      </span>
+    </div>
+
+    <!-- drawer -->
+    <div class="drawer-host">
+      <div class="drawer-backdrop" aria-hidden="true"></div>
+
+      <aside class="drawer" role="dialog" aria-modal="true" aria-label="Snapshot detail">
+        <div class="drawer-header">
+          <div class="titles">
+            <h2 class="drawer-title">designer-skill-checkpoint-v2</h2>
+            <div class="meta">
+              <span class="status ok"><span class="ic">✓</span>active</span>
+              <span class="mono" title="f0bd3c81-12ab-4ed4-bd29-7e9c5d51aa3e">f0bd…aa3e</span>
+              <button class="icon-btn" style="width:24px;height:24px" title="Copy snapshot ID" aria-label="Copy snapshot ID">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z"/></svg>
+              </button>
+              <span class="dirty-flag" title="Working tree was dirty at capture">⚠ dirty</span>
+            </div>
+          </div>
+          <div class="actions">
+            <button class="icon-btn" aria-label="Snapshot actions" title="Snapshot actions">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
+            </button>
+            <button class="icon-btn" aria-label="Close drawer (Esc)" title="Close (Esc)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="drawer-body">
+          <!-- LEFT RAIL — metadata -->
+          <aside class="drawer-rail" aria-label="Snapshot metadata">
+            <h4>Metadata</h4>
+            <div class="kv">
+              <div class="kv-row"><div class="k">Project</div><div class="v">agents-ensemble</div></div>
+              <div class="kv-row"><div class="k">Agent</div><div class="v mono">designer</div></div>
+              <div class="kv-row"><div class="k">Target instance</div><div class="v mono">inst-7c3a</div></div>
+              <div class="kv-row"><div class="k">Runtime</div><div class="v mono">v0.18.5</div></div>
+              <div class="kv-row"><div class="k">Effective model</div><div class="v mono">gpt-4o-mini</div></div>
+              <div class="kv-row"><div class="k">Created</div><div class="v">2026-10-10 06:33:12 UTC</div></div>
+              <div class="kv-row"><div class="k">Captured by</div><div class="v mono">designer</div></div>
+              <div class="kv-row"><div class="k">Capture bytes</div><div class="v mono">14.2 KB</div></div>
+            </div>
+          </aside>
+
+          <!-- RIGHT — sections in priority order -->
+          <main class="drawer-sections" aria-label="Snapshot sections">
+            <section class="section" aria-labelledby="sec-summary">
+              <h3 id="sec-summary">Task summary</h3>
+              <p class="task-summary">
+                Captured the designer's current design-strategy skill checkpoint after the v2 mockup
+                pipeline landed. Tracks the OpenDesign lane binding, the OD-gen timeout envelope, and the
+                hand-authored fallback HTML pattern. Draft write is intentionally out of scope (D9); this
+                snapshot is read-only and intended to seed a warm spawn for the next designer turn.
+              </p>
+            </section>
+
+            <section class="section" aria-labelledby="sec-supersedes">
+              <h3 id="sec-supersedes">Supersedes chain</h3>
+              <a class="supersedes" href="#">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3.9 12a3.1 3.1 0 0 1 3.1-3.1h4V7H7a5 5 0 1 0 0 10h4v-1.9H7A3.1 3.1 0 0 1 3.9 12zm9.1-1H7v1.9h6V11zm4-4H13v1.9h4a3.1 3.1 0 0 1 0 6.2h-4V17h4a5 5 0 0 0 0-10z"/></svg>
+                f0bd…aa3e (open predecessor) · snapshot-uiux-v1
+              </a>
+            </section>
+
+            <section class="section" aria-labelledby="sec-git">
+              <h3 id="sec-git">Git anchor</h3>
+              <div class="kv-list">
+                <div class="kv-row"><div class="k">SHA</div><div class="v">a3c7d2e1f908</div></div>
+                <div class="kv-row"><div class="k">Branch</div><div class="v">feature/sketcher-agent</div></div>
+                <div class="kv-row"><div class="k">Repo path</div><div class="v">/home/nea/ensemble-src</div></div>
+                <div class="kv-row"><div class="k">Dirty</div><div class="v">Yes</div></div>
+              </div>
+            </section>
+
+            <section class="section" aria-labelledby="sec-tags">
+              <h3 id="sec-tags">Tags</h3>
+              <div class="tag-list">
+                <span class="tag">domain:api <span style="color:var(--text-4)">⌕</span></span>
+                <span class="tag">domain:web <span style="color:var(--text-4)">⌕</span></span>
+                <span class="tag">phase:p2 <span style="color:var(--text-4)">⌕</span></span>
+              </div>
+            </section>
+
+            <section class="section" aria-labelledby="sec-digest">
+              <h3 id="sec-digest">Digest</h3>
+              <div class="digest-panel">
+                <button class="digest-toggle" aria-expanded="false" aria-controls="digest-content">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>
+                  Show digest
+                  <span class="digest-meta">~4 KB · JSON</span>
+                </button>
+                <div id="digest-content" hidden>
+                  <pre style="margin:0;padding:12px 14px;font-family:var(--mono);font-size:11.5px;color:var(--text-2);overflow:auto;max-height:280px">{ ... }</pre>
+                </div>
+              </div>
+            </section>
+          </main>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+</div>
+
+<style>
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+</style>
+
+</body>
+</html>
