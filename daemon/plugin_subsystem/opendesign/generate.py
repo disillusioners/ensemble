@@ -19,11 +19,29 @@ fallback when the mirror is absent (OQ7 disposition).
 ``OPENAI_BASE_URL`` / ``OPENAI_API_KEY`` / ``OPENAI_MODEL_VISION``
 env vars (the project's existing LLM config; same lane the daemon
 already uses, NOT a new client stack; the model is the purpose-bound
-design-generation knob, not the default-pool chat model). Streaming is OFF by default; the
-non-streaming call surfaces ``finish_reason`` + ``usage`` to the
-caller — the live failure mode that the MCP lane cannot distinguish
-(``finish_reason=length`` indistinguishable from ``finish_reason=stop``
-per ``od-generation-engine.md`` §4).
+design-generation knob, not the default-pool chat model).
+
+**Streaming (CF-524 consumer-side fix, plan od-generate-async-poll
+§6.1).** The single chat call is issued with ``stream=True`` +
+``stream_options={"include_usage": True}`` and the SSE stream is
+consumed synchronously INSIDE the factory attempt: ``delta.content``
+joins into the answer text, ``delta.reasoning_content`` (verified
+emitted on the vision lane — MiniMax-M3 interleaved thinking, Phase-0
+probe) accumulates separately, the last non-null ``finish_reason`` and
+the terminal ``usage`` chunk are captured. The factory returns a
+ChatCompletion-SHAPED envelope (:class:`StreamedChatCompletion`) so
+``execute()`` extraction and the three completeness gates stay
+byte-identical — the envelope is the invariant. Rationale: buffered
+(``stream:false``) responses emit zero client bytes until the full
+upstream response completes, so the Cloudflare edge read window
+(~100-125s) 524s long generations mid-flight; the streamed path is
+CF-safe by construction (SSE headers at t=0 + 5s heartbeats) and is
+the same mechanism production-proven on the LangChain main lane
+(``ThinkingChatOpenAI.default_streaming = True``). The proxy's SSE
+comment heartbeats (``: connected`` / ``: heartbeat``) are tolerated
+by the SDK stream iterator. A non-streamed reply to the ``stream:true``
+request (wrong Content-Type) and in-band SSE error envelopes map into
+the existing retry taxonomy (transient), never a crash.
 
 **Completeness gates INSIDE the adapter.** The adapter refuses to
 return a success dict on:
@@ -64,10 +82,17 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from daemon.llm_error_classifier import (
+    TransientLLMError,
+    _any_substring,
+    _matches_timeout_body,
+    _matches_usage_limit,
+    _transient_patterns,
+)
 from daemon.plugin_subsystem.opendesign.ts_prompt_eval import TsPromptEvalError
 from daemon.services.llm_failover import (
     current_failover_url,
@@ -76,7 +101,8 @@ from daemon.services.llm_failover import (
 
 __all__ = ["OdGenerate", "GenerateInput", "GenerateOutput", "_do_chat_call",
            "_invoke_chat_via_facade", "_PROXY_IDENTITY_HEADERS",
-           "_resolve_llm_config", "_OD_FAILOVER_INACTIVE_NOTE"]
+           "_resolve_llm_config", "_OD_FAILOVER_INACTIVE_NOTE",
+           "StreamedChatCompletion"]
 
 logger = logging.getLogger(__name__)
 
@@ -707,6 +733,209 @@ def _build_openai_client(env: Optional[Mapping[str, str]] = None):
     return openai.OpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"]), cfg["model"]
 
 
+# ChatCompletion-shaped envelope for the streamed call (plan §6.1). The
+# ENVELOPE IS THE INVARIANT: ``OdGenerate.execute`` extraction reads
+# ``choices[0].message.content`` / ``.finish_reason`` / ``response.usage``
+# defensively, so the streamed envelope exposes exactly those attributes
+# and the extraction + gate code stays byte-identical. ``reasoning_content``
+# accumulates SEPARATELY on the message (Phase-0 probe verified emission:
+# MiniMax-M3 interleaved thinking splits thinking vs answer deltas);
+# extraction does not consume it today — it rides the envelope for parity
+# visibility only.
+
+
+@dataclass(frozen=True)
+class _StreamedMessage:
+    """ChatCompletion ``choices[0].message`` shape (streamed join)."""
+
+    content: str = ""
+    reasoning_content: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _StreamedChoice:
+    """ChatCompletion ``choices[0]`` shape (streamed join)."""
+
+    message: _StreamedMessage = field(default_factory=_StreamedMessage)
+    finish_reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _StreamedUsageDetails:
+    """``usage.completion_tokens_details`` shape (reasoning tokens)."""
+
+    reasoning_tokens: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class _StreamedUsage:
+    """ChatCompletion ``usage`` shape (from the terminal usage chunk)."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    completion_tokens_details: Optional[_StreamedUsageDetails] = None
+
+
+@dataclass(frozen=True)
+class StreamedChatCompletion:
+    """ChatCompletion-shaped result of the synchronous SSE join.
+
+    Attribute-compatible with ``openai.types.chat.ChatCompletion`` for
+    everything ``OdGenerate.execute`` reads (``choices[0].message.content``,
+    ``choices[0].finish_reason``, ``usage.*`` incl. the optional
+    ``completion_tokens_details.reasoning_tokens``).
+    """
+
+    id: str = ""
+    model: str = ""
+    choices: Tuple[_StreamedChoice, ...] = ()
+    usage: Optional[_StreamedUsage] = None
+
+
+def _consume_chat_stream(stream: Any) -> StreamedChatCompletion:
+    """Consume ONE SSE chat stream synchronously into the envelope.
+
+    Runs INSIDE a single factory attempt (the facade's retry/failover
+    re-enters :func:`_do_chat_call`, which re-invokes this consumer) —
+    a mid-stream abort therefore classifies exactly like a request
+    error today.
+
+    Consumption rules (plan od-generate-async-poll §6.1):
+
+    - ``delta.content`` joins into the answer text;
+      ``delta.reasoning_content`` accumulates separately (verified
+      emitted on the vision lane; NOT consumed by extraction today).
+    - The last NON-null ``finish_reason`` wins (the terminal chunk).
+    - The terminal ``usage`` chunk (``stream_options.include_usage``)
+      is captured — it arrives with empty ``choices``.
+    - SSE comment lines (``: connected`` / ``: heartbeat``, the real
+      proxy tokens) are ignored by the SDK stream iterator (SSE spec:
+      colon-prefixed lines are comments).
+
+    Error mapping (§6.4 / §7.1 / §7.4a — site-local, siblings untouched):
+
+    - A non-streamed reply to the ``stream:true`` request (missing /
+      wrong Content-Type) raises :class:`TransientLLMError` — the SDK's
+      stream iterator silently yields ZERO chunks on a buffered JSON
+      body, so without this check the failure would surface as a silent
+      empty envelope instead of a retryable classification.
+    - An in-band SSE error envelope (``data: {"error": {...}}``, e.g.
+      the proxy's live-mode StreamDeadline guard fire) is raised by the
+      SDK as ``openai.APIError`` mid-iteration; this consumer maps it
+      into the existing retry taxonomy — quota-window + mandatory
+      blocklist shapes re-raise UNCHANGED (the facade's bare-APIError
+      branch owns their terminal typing), everything else wraps as
+      :class:`TransientLLMError` (``timeout_body`` kind when the body
+      reads as a relayed timeout, else ``api_error_body``).
+    - Any other exception (connection reset, SDK transport error)
+      propagates untouched — ``_classify_raw_sdk_exceptions`` owns it,
+      exactly as for a buffered request error.
+    """
+    import openai  # noqa: PLC0415 - lazy, mirrors _do_chat_call
+
+    # Non-stream fallback (§6.4): fail-closed on the Content-Type BEFORE
+    # iterating — a buffered reply yields zero chunks silently.
+    content_type = ""
+    response = getattr(stream, "response", None)
+    if response is not None:
+        try:
+            content_type = (response.headers or {}).get("content-type", "") or ""
+        except Exception:  # noqa: BLE001 - header access is best-effort
+            content_type = ""
+    if "text/event-stream" not in content_type.lower():
+        raise TransientLLMError(
+            "value_error_body",
+            ValueError(
+                "stream:true request answered non-streamed "
+                f"(content-type={content_type!r}); classified transient "
+                "for the facade's retry/failover ladder"
+            ),
+        )
+
+    content_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    finish_reason: Optional[str] = None
+    usage_obj: Any = None
+    completion_id = ""
+    completion_model = ""
+    try:
+        for chunk in stream:
+            chunk_id = getattr(chunk, "id", None)
+            if chunk_id and not completion_id:
+                completion_id = str(chunk_id)
+            chunk_model = getattr(chunk, "model", None)
+            if chunk_model:
+                completion_model = str(chunk_model)
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                usage_obj = chunk_usage
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue  # terminal usage chunk carries empty choices
+            choice = choices[0]
+            fr = getattr(choice, "finish_reason", None)
+            if fr:
+                finish_reason = fr  # last non-null wins (terminal chunk)
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+            piece = getattr(delta, "content", None)
+            if piece:
+                content_parts.append(piece)
+            # Accumulated separately (probe-verified emission); the
+            # answer join NEVER mixes thinking tokens in.
+            thinking = getattr(delta, "reasoning_content", None)
+            if thinking:
+                reasoning_parts.append(thinking)
+    except openai.APIError as exc:
+        # In-band SSE error envelope (§7.1 pin) — map into the EXISTING
+        # taxonomy. Blocklist/quota precedence mirrors the facade's
+        # bare-APIError branch (shared pattern sets — imported, never
+        # duplicated); re-raising unchanged routes the terminal typing
+        # (UsageLimitError / blocklist re-raise) through the facade.
+        msg = str(exc)
+        lowered = msg.lower()
+        if _matches_usage_limit(msg) or _any_substring(
+            _transient_patterns.apierror_blocklist, lowered
+        ):
+            raise
+        kind = "timeout_body" if _matches_timeout_body(msg) else "api_error_body"
+        raise TransientLLMError(kind, exc) from exc
+
+    usage_out: Optional[_StreamedUsage] = None
+    if usage_obj is not None:
+        details = getattr(usage_obj, "completion_tokens_details", None)
+        reasoning_tokens = (
+            getattr(details, "reasoning_tokens", None) if details is not None else None
+        )
+        usage_out = _StreamedUsage(
+            prompt_tokens=int(getattr(usage_obj, "prompt_tokens", 0) or 0),
+            completion_tokens=int(getattr(usage_obj, "completion_tokens", 0) or 0),
+            total_tokens=int(getattr(usage_obj, "total_tokens", 0) or 0),
+            completion_tokens_details=(
+                _StreamedUsageDetails(reasoning_tokens=int(reasoning_tokens))
+                if reasoning_tokens is not None
+                else None
+            ),
+        )
+
+    return StreamedChatCompletion(
+        id=completion_id,
+        model=completion_model,
+        choices=(
+            _StreamedChoice(
+                message=_StreamedMessage(
+                    content="".join(content_parts),
+                    reasoning_content="".join(reasoning_parts) or None,
+                ),
+                finish_reason=finish_reason,
+            ),
+        ),
+        usage=usage_out,
+    )
+
+
 def _do_chat_call(
     model: str,
     base_url: Optional[str],
@@ -720,7 +949,7 @@ def _do_chat_call(
     default_headers: Optional[Dict[str, str]] = None,
     max_retries: int = 0,
 ) -> Any:
-    """Module-level chat-completion factory.
+    """Module-level chat-completion factory (streamed; plan §6.1).
 
     Constructed fresh on every retry attempt. URL is re-read via
     :func:`current_failover_url` (a thread-local the facade updates
@@ -734,10 +963,17 @@ def _do_chat_call(
     the three factories share the per-attempt URL reread pattern. The
     differences here: the model is the vision knob (not the chat
     default), the request carries ``max_tokens``/``temperature``/``timeout``
-    (the generate-specific knobs), and the SDK's built-in retry is
-    disabled (``max_retries=0`` — the facade owns retry discipline).
-    The proxy identity headers ride on ``default_headers`` to close the
-    raw-SDK parity gap.
+    (the generate-specific knobs), the SDK's built-in retry is
+    disabled (``max_retries=0`` — the facade owns retry discipline),
+    and THIS factory streams (``stream=True`` +
+    ``stream_options={"include_usage": True}``, the CF-524 consumer-side
+    fix — the sibling embedding factories are short buffered calls and
+    stay untouched). The SSE stream is consumed synchronously inside
+    this ONE factory attempt (:func:`_consume_chat_stream`) and a
+    ChatCompletion-shaped envelope is returned, so per-attempt URL
+    re-read + facade retry/failover semantics are unchanged and the
+    ``execute()`` extraction stays byte-identical. The proxy identity
+    headers ride on ``default_headers`` to close the raw-SDK parity gap.
     """
     import openai  # noqa: PLC0415 - imported here for lazy init
 
@@ -750,7 +986,7 @@ def _do_chat_call(
     if default_headers:
         client_kwargs["default_headers"] = dict(default_headers)
     client = openai.OpenAI(**client_kwargs)
-    return client.chat.completions.create(
+    stream = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -759,7 +995,10 @@ def _do_chat_call(
         max_tokens=max_tokens,
         temperature=temperature,
         timeout=timeout,
+        stream=True,
+        stream_options={"include_usage": True},
     )
+    return _consume_chat_stream(stream)
 
 
 def _invoke_chat_via_facade(

@@ -966,21 +966,53 @@ class TestOdGenerateFacadeWiring:
         )
 
     @staticmethod
-    def _build_openai_fake(captured_kwargs=None, response_factory=None):
+    def _build_openai_fake(captured_kwargs=None):
         """Build a fake openai.OpenAI that records __init__ kwargs.
 
         Mirrors the structure of :func:`_make_response`'s nested
         classes: ``openai.OpenAI(api_key=..., base_url=...).chat.completions.create(...)``
         must return a ChatCompletion-shaped object.
+
+        Phase-1 streaming adaptation (plan od-generate-async-poll §6.1):
+        ``_do_chat_call`` now issues ``stream=True`` and consumes the
+        SSE stream, so ``create()`` returns a minimal streamed fake —
+        an iterable of one ``stop`` chunk carrying ``.response`` with an
+        ``text/event-stream`` Content-Type. The pins in this class
+        assert CLIENT-CONSTRUCTION kwargs (base_url re-read,
+        ``max_retries=0``, proxy identity headers), which the streaming
+        switch does not alter.
         """
         if captured_kwargs is None:
             captured_kwargs = []
-        if response_factory is None:
-            response_factory = TestOdGenerateFacadeWiring._fake_response
+
+        class _FakeStreamResponse:
+            headers = {"content-type": "text/event-stream"}
+
+        class _FakeStream:
+            response = _FakeStreamResponse()
+
+            def __init__(self, chunks):
+                self._chunks = list(chunks)
+
+            def __iter__(self):
+                return iter(self._chunks)
+
+        def _default_chunks():
+            class _Delta:
+                content = "ok"
+
+            class _Choice:
+                finish_reason = "stop"
+                delta = _Delta()
+
+            class _Chunk:
+                choices = [_Choice()]
+
+            return [_Chunk()]
 
         class _Comps:
             def create(self, **kwargs):
-                return response_factory()
+                return _FakeStream(_default_chunks())
 
         class _Chat:
             completions = _Comps()
