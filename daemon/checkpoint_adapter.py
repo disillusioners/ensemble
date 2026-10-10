@@ -130,10 +130,14 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
     """Wrap a saver with one-shot retry on connection-class failures.
 
     The wrapper forwards every attribute access and method call to the
-    underlying saver, intercepting method calls only to add a retry
-    layer. Non-method access (e.g. ``wrapper.conn``, ``wrapper.lock``)
-    passes through unchanged so existing consumers (the adapter's
-    ``close()`` reads ``saver.conn``) are unaffected.
+    underlying saver. Every CONCRETE public member of the pinned
+    ``BaseCheckpointSaver`` surface has an EXPLICIT forwarder (the MRO
+    rule: base-concrete attributes resolve via MRO and ``__getattr__``
+    never fires for them — see the proxy class docstring). Only the
+    seven hot-path async ops carry the retry layer. Non-method access
+    (e.g. ``wrapper.conn``, ``wrapper.lock``) passes through unchanged
+    so existing consumers (the adapter's ``close()`` reads
+    ``saver.conn``) are unaffected.
 
     Args:
         saver: An ``AsyncPostgresSaver`` (or any object with
@@ -150,12 +154,60 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         Inherits from ``BaseCheckpointSaver`` so the LangGraph
         ``isinstance`` gate at ``ensure_valid_checkpointer``
         (``langgraph/types.py``) — and the companion gates at
-        ``pregel/main.py`` — see this as a real saver. The proxy
-        forwards attribute access to the wrapped saver via
-        ``__getattr__``; explicit async methods (one per public
-        saver method) carry the retry layer. Any public attr the
-        proxy doesn't define explicitly is resolved against the
-        inner saver by ``__getattr__``.
+        ``pregel/main.py`` — see this as a real saver.
+
+        ── THE MRO RULE (round-2 root cause of K1/K2) ──────────────
+
+        (a) Every attribute that is CONCRETE (non-abstract) on
+        ``BaseCheckpointSaver`` resolves via normal MRO lookup, and
+        ``__getattr__`` NEVER fires for it. ``__getattr__`` covers
+        only attributes ABSENT from the base surface (``conn``,
+        ``lock``, ``setup``, ...). In the pinned base
+        (``langgraph/checkpoint/base/__init__.py``, langgraph 1.0.9 /
+        langgraph-checkpoint 3.1.x) there are ZERO abstract methods —
+        all 22 public methods plus the ``serde`` /
+        ``config_specs`` surface members are concrete, including the
+        ``get_next_version`` stub (raises for ``str`` versions) and
+        the ``alist`` async-generator stub (raises
+        NotImplementedError on first ``__anext__``). An
+        ``__getattr__``-fall-through for any of them is INERT.
+
+        (b) Therefore EVERY concrete public member of the base
+        surface has an EXPLICIT forwarder below. The retry-wrapped
+        set is the seven hot-path async ops (``aget``, ``aget_tuple``,
+        ``aput``, ``aput_writes``, ``aget_delta_channel_history``,
+        ``adelete_thread`` — plus ``aput``-family write coverage);
+        everything else forwards with NO retry: ``get_next_version``
+        is a synchronous ID mint (pregel wraps its own retry), and
+        ``alist`` is an async generator (buffering the stream to
+        retry it would change the memory profile; the pool's
+        self-heal covers subsequent iteration attempts, and pregel's
+        own retry-on-NextNotFound covers restart semantics).
+
+        The sync twins (``get_tuple`` / ``list`` / ``put`` /
+        ``put_writes`` / ``delete_thread`` / ``get`` / ``copy_thread``
+        / ``delete_for_runs`` / ``prune`` /
+        ``get_delta_channel_history``) are intentionally
+        NotImplementedError in this daemon — the surface is
+        async-only. The forwarders pass through to the wrapped
+        saver's own sync stubs, so a stray sync caller gets the
+        saver's own upstream-classified NotImplementedError, not a
+        proxy artifact.
+
+        (c) LOCKSTEP REQUIREMENT: the explicit-forwarders list below
+        MUST be kept in lockstep with ``BaseCheckpointSaver``'s
+        concrete public surface across langgraph bumps. A new
+        concrete stub on the base that lacks a forwarder would
+        silently shadow the wrapped saver via MRO.
+
+        (d) ENFORCEMENT: the K-guard contract test
+        (``tests/test_checkpoint_adapter_resilience.py::
+        TestRealLanggraphSaverProxy::test_k_guard_concrete_surface_
+        forwards_wrapped_overrides``) walks the REAL pinned
+        ``BaseCheckpointSaver``, overrides each concrete public
+        method on a fake wrapped saver, and asserts the proxy routes
+        to the wrapped implementation — it fails loudly when a new
+        base stub appears without a forwarder. Do not disable it.
 
         Why direct inheritance instead of ``register``:
         ``BaseCheckpointSaver`` in langgraph 1.0.9 is a plain
@@ -165,16 +217,6 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         ``ABCMeta`` workaround, which would be a hidden compat
         hazard against a future langgraph bump that does flip
         ``BaseCheckpointSaver`` to ``ABCMeta``.
-
-        Informational: the sync twins ``get_tuple`` / ``list`` /
-        ``put`` / ``put_writes`` / ``delete_thread`` declared on
-        ``BaseCheckpointSaver`` resolve via ``__getattr__`` to the
-        wrapped saver's *own* sync methods, which the saver only
-        stubs with ``raise NotImplementedError`` (the AsyncPostgresSaver
-        surface is async-only). This proxy does not re-declare them —
-        deliberately. The async-only daemon never invokes them; if a
-        caller does, the saver's own NotImplementedError surfaces,
-        which is the correct upstream-classified signal.
         """
 
         __slots__ = ("_saver",)
@@ -183,10 +225,13 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
             self._saver = saver
 
         def __getattr__(self, name: str) -> Any:
-            # Only invoked when normal lookup misses — explicit
-            # methods below take priority, and inherited
-            # BaseCheckpointSaver attributes resolve via the
-            # descriptor protocol before __getattr__ fires.
+            # Only invoked when normal lookup misses — the explicit
+            # forwarders below take priority, and every attribute
+            # CONCRETE on BaseCheckpointSaver resolves via the MRO
+            # before __getattr__ ever fires (the MRO rule — see the
+            # class docstring). __getattr__ therefore only serves
+            # attributes ABSENT from the base surface: ``conn``,
+            # ``lock``, ``setup``, and future additions.
             return getattr(self._saver, name)
 
         async def _call_with_retry(self, method_name: str, args: tuple, kwargs: dict) -> Any:
@@ -208,15 +253,11 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
                 # exactly as it did before the wrapper existed.
                 return await method(*args, **kwargs)
 
-        # Intercept all async methods exposed by the saver. The list
-        # below covers the AsyncPostgresSaver public surface (aio.py);
-        # LangGraph also calls into these via the saver. ``alist``
-        # is INTENTIONALLY excluded — it is an async generator, not a
-        # coroutine; see the comment block at its fall-through point
-        # below for the full reasoning. Any other unknown method
-        # also falls through to ``__getattr__`` (no retry), which is
-        # safe because nothing else on the saver surface fails on
-        # connection-class issues.
+        # ── Retry-wrapped async methods (hot checkpoint ops) ─────────
+        # The seven methods below carry the one-shot connection-retry
+        # layer. They are the LangGraph hot path (reads/writes during
+        # pregel turns). Everything else on the base surface forwards
+        # WITHOUT retry — see the class docstring for the rationale.
         async def aget(self, *args, **kwargs):
             return await self._call_with_retry("aget", args, kwargs)
 
@@ -228,32 +269,6 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
 
         async def aput_writes(self, *args, **kwargs):
             return await self._call_with_retry("aput_writes", args, kwargs)
-
-        # NOTE: ``alist`` is intentionally NOT intercepted. On
-        # langgraph-checkpoint-postgres 3.1.0 ``AsyncPostgresSaver.alist``
-        # is an ASYNC GENERATOR (the source contains ``yield``), and
-        # LangGraph consumes it via ``async for c in checkpointer.alist(...)``
-        # (pinned pregel/main.py:1417). Wrapping it as a coroutine here
-        # would break BOTH consumption styles:
-        #   * ``async for proxy.alist(...)`` -> ``TypeError: ... requires __aiter__``
-        #   * ``await proxy.alist(...)``     -> ``TypeError: object async_generator
-        #                                       can't be used in 'await'``
-        # An async-generator surface cannot be coroutine-retried without
-        # buffering the whole stream (which would defeat ``alist``'s
-        # cursor-paginated streaming and inflate memory on long thread
-        # histories). The decision: fall through ``__getattr__`` to the
-        # underlying saver's real async generator — no retry on alist,
-        # no interception. If a conn dies mid-walk, the next ``__anext__``
-        # raises and the upstream pipeline retries the whole alist call,
-        # and the connection-pool self-heal (``check=`` + auto-replace)
-        # means the fresh iteration attempt lands on a healthy conn.
-        # Operational scope: zero live daemon callers of alist/
-        # aget_state_history against the PG proxy (PR3 expected-0-live-
-        # alist-calls contract); LangGraph itself does call alist for
-        # state-history walks but those are debug/admin paths, not hot.
-
-        async def adelete(self, *args, **kwargs):
-            return await self._call_with_retry("adelete", args, kwargs)
 
         async def aget_delta_channel_history(self, *args, **kwargs):
             return await self._call_with_retry(
@@ -269,6 +284,120 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
             return await self._call_with_retry(
                 "adelete_thread", args, kwargs
             )
+
+        # NOTE: ``adelete`` is deliberately NOT defined here — it is
+        # absent from BOTH the pinned langgraph-checkpoint-postgres
+        # 3.1.0 aio.py surface AND the pinned BaseCheckpointSaver
+        # (verified 2026-10-10). A stray ``proxy.adelete`` call
+        # raises AttributeError via ``__getattr__``, which is the
+        # honest surface. (A prior revision wrapped a non-existent
+        # ``adelete`` in the retry layer — dead code, removed.)
+
+        # ── Explicit forwarders — the MRO rule (K1/K2 cure) ──────────
+        #
+        # K1 — ``get_next_version``. CONCRETE on the pinned base
+        # (raises NotImplementedError for ``str`` versions, which is
+        # what every existing PG thread carries via
+        # postgres/base.py ``f"{next_v:032}.{next_h:016}"``). Pregel
+        # calls it at 8 sites (pregel/main.py:1538…2279) — without
+        # this forwarder the FIRST message to any existing PG
+        # instance post-deploy crashes in prepare_next_tasks.
+        # NO retry: this is a synchronous ID mint, not a checkpoint
+        # op; pregel's own retry around it covers transient failures.
+        def get_next_version(self, current=None, channel=None):
+            return self._saver.get_next_version(current, channel)
+
+        # K2 — ``alist``. CONCRETE async-generator stub on the pinned
+        # base (raises NotImplementedError on first ``__anext__``).
+        # MRO resolves it before ``__getattr__``, so a
+        # fall-through de-interception is INERT (the round-1 defect):
+        # this explicit forwarder is the fix. It is a plain ``def``
+        # returning the wrapped saver's async generator — the shape
+        # LangGraph consumes via ``async for`` (pregel/main.py:1417).
+        # NO retry: an async generator cannot be retried without
+        # buffering the whole stream (memory-profile change on long
+        # histories); the pool's self-heal covers subsequent
+        # iteration attempts, and pregel's retry-on-NextNotFound
+        # covers restart semantics. Zero live daemon callers of
+        # alist/aget_state_history against the PG proxy (PR3
+        # expected-0-live-alist-calls contract); LangGraph's own
+        # alist walks are debug/admin paths, not hot.
+        def alist(self, *args, **kwargs):
+            return self._saver.alist(*args, **kwargs)
+
+        # Remaining concrete async ops — forward (async-preserving),
+        # no retry (not on the hot path; the retry set above is
+        # deliberately the seven hot-path ops).
+        async def acopy_thread(self, *args, **kwargs):
+            return await self._saver.acopy_thread(*args, **kwargs)
+
+        async def adelete_for_runs(self, *args, **kwargs):
+            return await self._saver.adelete_for_runs(*args, **kwargs)
+
+        async def aprune(self, *args, **kwargs):
+            return await self._saver.aprune(*args, **kwargs)
+
+        # Sync twins — concrete on the base, intentionally
+        # NotImplementedError in this async-only daemon. The
+        # forwarders route to the wrapped saver's own sync stubs so
+        # a stray sync caller gets the saver's own
+        # NotImplementedError (upstream-classified), not a proxy
+        # artifact. NO retry (never invoked by the daemon).
+        def get_tuple(self, *args, **kwargs):
+            return self._saver.get_tuple(*args, **kwargs)
+
+        def get(self, *args, **kwargs):
+            return self._saver.get(*args, **kwargs)
+
+        def list(self, *args, **kwargs):
+            return self._saver.list(*args, **kwargs)
+
+        def put(self, *args, **kwargs):
+            return self._saver.put(*args, **kwargs)
+
+        def put_writes(self, *args, **kwargs):
+            return self._saver.put_writes(*args, **kwargs)
+
+        def delete_thread(self, *args, **kwargs):
+            return self._saver.delete_thread(*args, **kwargs)
+
+        def delete_for_runs(self, *args, **kwargs):
+            return self._saver.delete_for_runs(*args, **kwargs)
+
+        def copy_thread(self, *args, **kwargs):
+            return self._saver.copy_thread(*args, **kwargs)
+
+        def prune(self, *args, **kwargs):
+            return self._saver.prune(*args, **kwargs)
+
+        def get_delta_channel_history(self, *args, **kwargs):
+            return self._saver.get_delta_channel_history(*args, **kwargs)
+
+        # ``with_allowlist`` — concrete on the base and SHADOWABLE:
+        # the base implementation shallow-copies ``self`` and swaps
+        # the serde. Without this forwarder, MRO would clone the
+        # PROXY (dropping the wrapped saver's serde + allowlist and
+        # returning a half-wired object). Forwarding returns the
+        # wrapped saver's own clone; note the clone escapes retry
+        # coverage — acceptable, it is a builder-time utility with
+        # no pregel call sites on the checkpointer.
+        def with_allowlist(self, *args, **kwargs):
+            return self._saver.with_allowlist(*args, **kwargs)
+
+        # Surface-member forwarders (same shadowing family as the
+        # methods above): ``serde`` is a CLASS-attribute default on
+        # the base (JsonPlusSerializer) that the wrapped saver
+        # overrides per-instance in ``__init__``; ``config_specs``
+        # is a base ``@property`` returning ``[]``. Without these,
+        # MRO resolves the BASE's value on the proxy instead of the
+        # wrapped saver's.
+        @property
+        def serde(self):
+            return self._saver.serde
+
+        @property
+        def config_specs(self):
+            return self._saver.config_specs
 
     return _SaverRetryProxy(saver)
 
