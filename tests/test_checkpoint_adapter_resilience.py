@@ -33,6 +33,8 @@ recovery integration is the tester's lane (out of scope here).
 from __future__ import annotations
 
 import asyncio
+import importlib
+import inspect
 from typing import Any
 
 import pytest
@@ -134,6 +136,45 @@ class _FakeSaver:
             if self.exc_factory:
                 raise self.exc_factory()
         return []
+
+
+# ── Real-langgraph binding gate (K3) ────────────────────────────────────────
+
+
+@pytest.fixture()
+def _real_langgraph_saver_base():
+    """Bind ``daemon.checkpoint_adapter``'s ``BaseCheckpointSaver`` to the
+    REAL pinned class for one test, then restore the conftest mock view.
+
+    Mirrors the binding-gate idiom of
+    ``tests/integration/test_get_instance_messages_observed_count_zero.py``
+    (``evict_langgraph_mocks`` → real imports → ``restore_langgraph_mocks``,
+    autouse fixture, function lifetime) with one addition this file needs:
+    a RELOAD PAIRING. ``evict_langgraph_mocks()`` clears ``sys.modules``
+    but ``daemon.checkpoint_adapter`` is already imported (collection-time,
+    under the conftest mocks) with its module-global ``BaseCheckpointSaver``
+    bound to the conftest MOCK class — and the retry proxy subclasses
+    whichever object that global holds when ``_wrap_saver_with_connection_retry``
+    runs. Eviction alone therefore proves nothing here; reloading the
+    module under eviction rebinds the global to the REAL pinned
+    ``langgraph.checkpoint.base.BaseCheckpointSaver``. The ``finally``
+    block restores the mocks and reloads again, so mock-bound unit tests
+    sharing this session keep their original module view.
+    """
+    from tests.helpers.checkpoint_prune_pg import (
+        evict_langgraph_mocks,
+        restore_langgraph_mocks,
+    )
+
+    saved = evict_langgraph_mocks()
+    import daemon.checkpoint_adapter as ca
+
+    importlib.reload(ca)
+    try:
+        yield ca
+    finally:
+        restore_langgraph_mocks(saved)
+        importlib.reload(ca)
 
 
 # ── _is_retryable_connection_error ─────────────────────────────────────────
@@ -245,21 +286,31 @@ class TestSaverRetryProxyABCRegistration:
     ``TypeError: Invalid checkpointer provided…`` for every PG
     install at first instance-graph build (the runtime-reproduced
     blocker). These tests are the unblock proof.
+
+    K3: every test here runs against the REAL pinned
+    ``langgraph.checkpoint.base.BaseCheckpointSaver`` via the
+    ``_real_langgraph_saver_base`` fixture (mock evict + module
+    reload + restore). Round 1 certified these gates against the
+    conftest MOCK — inverted semantics: the mock has no
+    ``ensure_valid_checkpointer`` and no concrete base surface, so
+    the suite stayed green while production was broken.
     """
 
-    def test_proxy_is_BaseCheckpointSaver_instance(self):
-        """isinstance(proxy, BaseCheckpointSaver) must hold.
-
-        Independent of any compile-time machinery — this is the
-        exact gate at ``langgraph.types.ensure_valid_checkpointer``.
-        Works under the conftest's ``langgraph.checkpoint.base`` mock
-        (which exposes a plain stand-in class) AND against the real
-        langgraph class.
+    def test_proxy_is_BaseCheckpointSaver_instance(
+        self, _real_langgraph_saver_base
+    ):
+        """isinstance(proxy, BaseCheckpointSaver) must hold against the
+        REAL pinned class — the exact gate at
+        ``langgraph.types.ensure_valid_checkpointer``.
         """
-        from langgraph.checkpoint.base import BaseCheckpointSaver
+        ca = _real_langgraph_saver_base
+        BaseCheckpointSaver = ca.BaseCheckpointSaver
+        # K3 guard: this MUST be the real pinned class, not the
+        # conftest mock (which lives in tests.conftest).
+        assert BaseCheckpointSaver.__module__ == "langgraph.checkpoint.base"
 
         saver = _FakeSaver(_FakePool())
-        proxy = _wrap_saver_with_connection_retry(saver)
+        proxy = ca._wrap_saver_with_connection_retry(saver)
         assert isinstance(proxy, BaseCheckpointSaver)
         # The proxy class itself subclasses BaseCheckpointSaver,
         # not via register() / monkey-patch. Direct inheritance
@@ -269,25 +320,25 @@ class TestSaverRetryProxyABCRegistration:
         assert issubclass(proxy_cls, BaseCheckpointSaver)
         assert BaseCheckpointSaver in proxy_cls.__mro__
 
-    def test_ensure_valid_checkpointer_does_not_raise(self):
-        """The exact gate ``StateGraph.compile`` runs.
+    def test_ensure_valid_checkpointer_does_not_raise(
+        self, _real_langgraph_saver_base
+    ):
+        """The exact gate ``StateGraph.compile`` runs — REAL LangGraph.
 
-        Requires real LangGraph — both ``langgraph.types`` and
-        ``langgraph.checkpoint.base``. Skips under the conftest's
-        mock setup because ``pytest.importorskip("langgraph.types")``
-        cannot resolve the real submodule against the empty
-        ``langgraph`` namespace package the conftest installs.
-
-        On a real LangGraph install this exercises the runtime
-        gate against the actual ``BaseCheckpointSaver`` class and
-        proves the unblock.
+        Under the conftest mock namespace this test used to SILENTLY
+        SKIP (``importorskip("langgraph.types")`` cannot resolve the
+        real submodule against the mocked empty ``langgraph`` package)
+        — the inverted-semantics defect: the suite "proved" the fix
+        while the runtime gate would have rejected the proxy. The
+        fixture evicts the mocks, so the real import resolves.
         """
         pytest.importorskip("langgraph.types")
-        from langgraph.checkpoint.base import BaseCheckpointSaver
+        ca = _real_langgraph_saver_base
+        BaseCheckpointSaver = ca.BaseCheckpointSaver
         from langgraph.types import ensure_valid_checkpointer
 
         saver = _FakeSaver(_FakePool())
-        proxy = _wrap_saver_with_connection_retry(saver)
+        proxy = ca._wrap_saver_with_connection_retry(saver)
         # Must NOT raise. (Returns the proxy unchanged for valid
         # inputs; ``None``/``True``/``False`` are also valid.)
         result = ensure_valid_checkpointer(proxy)
@@ -298,35 +349,29 @@ class TestSaverRetryProxyABCRegistration:
         # fail directly. Assert both.
         assert isinstance(proxy, BaseCheckpointSaver)
 
-    def test_stategraph_compile_accepts_proxy_as_checkpointer(self):
+    def test_stategraph_compile_accepts_proxy_as_checkpointer(
+        self, _real_langgraph_saver_base
+    ):
         """End-to-end: a real StateGraph.compile(checkpointer=proxy)
         must succeed against the same proxy the manager wires in
         production. This is the runtime-reproduced failure path
         the reviewer identified — when this passes, the blocker
         is dead.
 
-        Skips under the conftest's mock path: the
-        ``StateGraph = MagicMock()`` placeholder installed by
-        ``tests/conftest.py`` would let the test "pass" without
-        ever invoking ``ensure_valid_checkpointer``. Detected via
-        ``unittest.mock`` introspection (``_mock_name`` is set on
-        all ``MagicMock`` instances; the real ``StateGraph`` from
-        ``langgraph.graph`` is a plain class with no such
-        attribute).
+        Runs under REAL langgraph only: the fixture evicts the
+        conftest ``StateGraph = MagicMock()`` placeholder, so no
+        mock-detection skip is needed (round 1 needed one because
+        the mock would silently "pass" this test without ever
+        invoking ``ensure_valid_checkpointer``).
         """
         pytest.importorskip("langgraph.graph")
+        ca = _real_langgraph_saver_base
         from langgraph.graph import StateGraph
 
-        # Real-langgraph guard: MagicMock from conftest would
-        # silently pass this test without exercising the gate.
-        # The real ``StateGraph`` is a class, not a Mock instance.
-        if isinstance(StateGraph, type) is False or hasattr(
-            StateGraph, "_mock_name"
-        ):
-            pytest.skip(
-                "test_stategraph_compile_accepts_proxy_as_checkpointer "
-                "requires a real langgraph.graph (not the conftest Mock)"
-            )
+        # K3 guard: the fixture guarantees the real StateGraph (a
+        # plain class), never the conftest MagicMock.
+        assert not hasattr(StateGraph, "_mock_name")
+
         from typing import TypedDict
 
         class _State(TypedDict):
@@ -347,7 +392,7 @@ class TestSaverRetryProxyABCRegistration:
                     }
                 }
 
-        proxy = _wrap_saver_with_connection_retry(_CompileSaver())
+        proxy = ca._wrap_saver_with_connection_retry(_CompileSaver())
         graph = StateGraph(_State)
 
         def _inc(state: _State) -> _State:
@@ -504,31 +549,26 @@ class TestRetryWrapper:
         fake = _AlistGeneratorSaver()
         proxy = _wrap_saver_with_connection_retry(fake)
 
-        # (a) Attribute passthrough — proxy does NOT define alist,
-        # so __getattr__ returns ``getattr(self._saver, "alist")``,
-        # which is a bound method on the wrapped saver. Identity is
-        # only meaningful at the underlying-function level (bound
-        # method objects are distinct per instance); assert both the
-        # shared ``__func__`` and that proxy.alist is NOT a coroutine
-        # wrapper (the regression: a proxy-defined ``async def alist``
-        # would make this a coroutine function and break
-        # ``async for`` consumption).
-        assert proxy.alist.__func__ is fake.alist.__func__, (
-            "proxy must not intercept alist; expected the bound method's "
-            "__func__ to be the underlying saver's alist (passthrough via "
-            "__getattr__), not a coroutine wrapper"
+        # (a) The proxy now defines an EXPLICIT alist forwarder (the
+        # round-2 MRO-rule fix: a bare __getattr__ fall-through is
+        # INERT because the pinned base declares a CONCRETE alist
+        # stub that resolves via MRO first). The forwarder must be a
+        # plain ``def`` that returns the wrapped saver's async
+        # generator — NOT a coroutine wrapper, and NOT the base's
+        # concrete stub. The regression classes: (i) a proxy-defined
+        # ``async def alist`` would make this a coroutine function
+        # and break ``async for`` consumption; (ii) no forwarder at
+        # all would let the base stub win via MRO and raise
+        # NotImplementedError on first ``__anext__``.
+        assert proxy.alist.__func__ is not fake.alist.__func__, (
+            "proxy.alist should be the proxy's own explicit forwarder "
+            "(the MRO rule makes a __getattr__ fall-through inert); if "
+            "this is the wrapped saver's function the forwarder vanished"
         )
-        # And the proxy must not have promoted it to a coroutine —
-        # a coroutine-wrapped ``alist`` is the regression that the
-        # proxy-explicit-async-def shape used to produce. An async
-        # generator function is NOT a coroutine function under
-        # asyncio.iscoroutinefunction (CO_ASYNC_GENERATOR vs
-        # CO_COROUTINE / CO_ITERABLE_COROUTINE); the bound method
-        # delegates the flag check to its __func__.
         assert not asyncio.iscoroutinefunction(proxy.alist), (
-            "proxy.alist must remain an async generator function, not "
-            "a coroutine — the whole TypeError flow: a coroutine wrapping "
-            "an async generator fails both ``async for`` and ``await``"
+            "proxy.alist must remain an async-generator-preserving "
+            "passthrough, not a coroutine — a coroutine wrapping an "
+            "async generator fails both ``async for`` and ``await``"
         )
         # Belt-and-braces: the call returns an async generator object,
         # NOT a coroutine. This is the live-shape check — if a future
@@ -679,3 +719,304 @@ class TestAdapterCloseTopology:
         # aget is callable through the proxy.
         result = await rs.aget("config-1")
         assert result["args"] == ("config-1",)
+
+# ── K-guard: real-pinned-class contract (round 2, incident 2026-10-10) ──────
+
+
+class TestRealLanggraphSaverProxy:
+    """Contract tests against the REAL pinned ``BaseCheckpointSaver``.
+
+    THE ROOT-CAUSE CLASS this file's mock-bound tests could never see:
+    the pinned base (``.venv/.../langgraph/checkpoint/base/__init__.py``,
+    langgraph 1.0.9 / langgraph-checkpoint 3.1.x) declares ZERO abstract
+    methods — every public member is CONCRETE, so MRO resolves it on the
+    proxy and ``__getattr__`` never fires. Any member the proxy fails to
+    forward explicitly silently becomes the BASE's stub:
+
+    * K1 — ``get_next_version``: base stub raises NotImplementedError
+      for ``str`` versions (every existing PG thread carries str
+      versions, ``f"{next_v:032}.{next_h:016}"``); pregel calls it at
+      8 sites → first message to any existing PG instance crashed.
+    * K2 — ``alist``: base stub is a concrete async-generator that
+      raises NotImplementedError on first ``__anext__`` → every
+      ``aget_state_history`` broke.
+
+    Every test here runs under ``_real_langgraph_saver_base`` — the
+    conftest langgraph mocks are EVICTED and ``daemon.checkpoint_adapter``
+    is reloaded so its proxy subclasses the true pinned class. The
+    tests self-verify the binding (``__module__`` /
+    ``inspect.getfile`` assertions), so a regression of the fixture
+    back to mock-bound state fails loudly instead of passing vacuously.
+    """
+
+    @staticmethod
+    def _assert_real_pinned(base_cls) -> None:
+        """Fail loudly if the binding regressed to the conftest mock."""
+        assert base_cls.__module__ == "langgraph.checkpoint.base", (
+            f"expected the REAL pinned BaseCheckpointSaver, got "
+            f"{base_cls.__module__}.{base_cls.__qualname__} — the "
+            f"mock-eviction/reload fixture regressed"
+        )
+        module_file = inspect.getfile(base_cls)
+        assert "site-packages" in module_file and module_file.endswith(
+            "langgraph/checkpoint/base/__init__.py"
+        ), f"not the pinned site-packages class: {module_file}"
+
+    def test_k1_get_next_version_forwards_wrapped_override(
+        self, _real_langgraph_saver_base
+    ):
+        """K1: a wrapped saver that OVERRIDES ``get_next_version`` must
+        be reachable through the proxy — the base's concrete stub (which
+        raises NotImplementedError for str versions) must NOT win via
+        MRO. This is the deployment blocker: pregel calls
+        ``checkpointer.get_next_version(current, None)`` with str
+        versions minted by postgres/base.py:543-552.
+        """
+        ca = _real_langgraph_saver_base
+        real_base = ca.BaseCheckpointSaver
+        self._assert_real_pinned(real_base)
+
+        STR_VERSION = (
+            "00000000000000000000000000000001.0000000000000000"
+        )
+        EXPECTED_NEXT = (
+            "00000000000000000000000000000002.0000000000000000"
+        )
+
+        class _StrVersionSaver(real_base):
+            """PG-shaped saver: str versions (postgres/base.py:543-552)."""
+
+            def get_next_version(self, current, channel):
+                # Sanity: the base stub would raise NotImplementedError
+                # for this exact input — prove the override is live.
+                assert isinstance(current, str)
+                next_v = int(current.split(".")[0], 16) + 1
+                return f"{next_v:032}.{0:016}"
+
+        # Precondition: the fake really overrides the base member.
+        assert (
+            _StrVersionSaver.get_next_version is not real_base.get_next_version
+        )
+
+        proxy = ca._wrap_saver_with_connection_retry(_StrVersionSaver())
+        # NO NotImplementedError — the wrapped override answers.
+        assert (
+            proxy.get_next_version(STR_VERSION, None) == EXPECTED_NEXT
+        )
+        # And the proxy surface must not be a coroutine (sync ID mint).
+        assert not asyncio.iscoroutinefunction(proxy.get_next_version)
+
+    def test_k2_alist_round_trips_wrapped_async_generator(
+        self, _real_langgraph_saver_base
+    ):
+        """K2: ``async for c in proxy.alist(...)`` must drive the
+        WRAPPED saver's real async generator — the base's concrete
+        alist stub (raises NotImplementedError on first ``__anext__``)
+        must NOT win via MRO. Round 1's ``__getattr__`` de-interception
+        (f19803dc3) was INERT for exactly this reason.
+        """
+        ca = _real_langgraph_saver_base
+        real_base = ca.BaseCheckpointSaver
+        self._assert_real_pinned(real_base)
+
+        class _AlistSaver(real_base):
+            """Real async-generator alist (aio.py 3.1.0 shape)."""
+
+            async def alist(self, *args, **kwargs):
+                for i in (1, 2, 3):
+                    yield {"i": i, "args": args, "kwargs": kwargs}
+
+        assert (
+            _AlistSaver.alist is not real_base.alist
+        ), "fake must override the base alist stub"
+        # The base alist IS an async-generator function (concrete stub).
+        assert inspect.isasyncgenfunction(real_base.alist)
+
+        fake = _AlistSaver()
+        proxy = ca._wrap_saver_with_connection_retry(fake)
+
+        # The proxy's alist is NOT a coroutine function (explicit
+        # forwarder returning the wrapped async generator).
+        assert not asyncio.iscoroutinefunction(proxy.alist)
+        gen_obj = proxy.alist("cfg", limit=5)
+        assert not asyncio.iscoroutine(gen_obj)
+        assert hasattr(gen_obj, "__aiter__") and hasattr(gen_obj, "__anext__")
+
+        async def _walk():
+            out = []
+            async for c in proxy.alist("cfg", limit=5):
+                out.append(c)
+            return out
+
+        items = asyncio.run(_walk())
+        assert [i["i"] for i in items] == [1, 2, 3]
+        assert items[0]["args"] == ("cfg",)
+        assert items[0]["kwargs"] == {"limit": 5}
+
+    def test_k_guard_concrete_surface_forwards_wrapped_overrides(
+        self, _real_langgraph_saver_base
+    ):
+        """K-GUARD (systematic, load-bearing).
+
+        Walks the REAL pinned ``BaseCheckpointSaver``'s concrete public
+        methods and asserts: for EACH method, a wrapped saver that
+        overrides it is reachable THROUGH the proxy (the proxy's
+        attribute resolves to the wrapped implementation, not the base
+        stub). A future langgraph bump that adds a new concrete stub to
+        the base without a matching explicit forwarder fails this test
+        loudly — the exact K1/K2 recurrence trap.
+
+        Also covers the two shadowable surface members of the same
+        family (``serde`` class-attr default, ``config_specs``
+        property): the proxy must route both to the wrapped saver.
+        """
+        ca = _real_langgraph_saver_base
+        real_base = ca.BaseCheckpointSaver
+        self._assert_real_pinned(real_base)
+
+        abstract = getattr(real_base, "__abstractmethods__", set())
+        concrete_public = sorted(
+            name
+            for name, member in inspect.getmembers(
+                real_base, predicate=inspect.isfunction
+            )
+            if not name.startswith("_") and name not in abstract
+        )
+        # Sanity: the walk must actually see the K1/K2 members —
+        # otherwise the guard degenerates to a vacuous pass.
+        assert "get_next_version" in concrete_public
+        assert "alist" in concrete_public
+        assert len(concrete_public) >= 20, (
+            f"unexpectedly small base surface ({len(concrete_public)}) — "
+            "the walk is broken, not the proxy"
+        )
+
+        problems: list[str] = []
+
+        for name in concrete_public:
+            base_member = getattr(real_base, name)
+            hit = {"called": False}
+            SENTINEL = object()
+
+            if inspect.isasyncgenfunction(base_member):
+                # Async-generator member: override with a real async
+                # generator yielding exactly one sentinel item; iterate
+                # through the proxy and require the sentinel.
+                async def _gen(self, *args, _hit=hit, _s=SENTINEL, **kwargs):
+                    _hit["called"] = True
+                    yield _s
+
+                override = _gen
+            elif inspect.iscoroutinefunction(base_member):
+
+                async def _coro(self, *args, _hit=hit, _s=SENTINEL, **kwargs):
+                    _hit["called"] = True
+                    return _s
+
+                override = _coro
+            else:
+
+                def _sync(self, *args, _hit=hit, _s=SENTINEL, **kwargs):
+                    _hit["called"] = True
+                    return _s
+
+                override = _sync
+
+            fake = type(
+                f"_KG Fake override:{name}",
+                (real_base,),
+                {
+                    name: override,
+                    # Never call the base __init__ (it would normalize
+                    # serde etc.); these fakes carry no state.
+                    "__init__": lambda self, *a, **kw: None,
+                },
+            )()
+            proxy = ca._wrap_saver_with_connection_retry(fake)
+
+            try:
+                if inspect.isasyncgenfunction(base_member):
+                    async def _drive():
+                        got = []
+                        async for item in getattr(proxy, name)():
+                            got.append(item)
+                        return got
+
+                    got = asyncio.run(_drive())
+                    routed = bool(got) and got[0] is SENTINEL
+                elif inspect.iscoroutinefunction(base_member):
+                    routed = asyncio.run(getattr(proxy, name)()) is SENTINEL
+                else:
+                    routed = getattr(proxy, name)() is SENTINEL
+            except NotImplementedError as exc:
+                problems.append(
+                    f"{name}: base stub leaked through the proxy "
+                    f"(NotImplementedError: {exc}) — missing explicit "
+                    f"forwarder (the K1/K2 recurrence)"
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001 — report, don't crash
+                problems.append(
+                    f"{name}: unexpected {type(exc).__name__}: {exc}"
+                )
+                continue
+
+            if not hit["called"] or not routed:
+                problems.append(
+                    f"{name}: proxy did NOT route to the wrapped "
+                    f"override (called={hit['called']}, "
+                    f"routed={routed}) — MRO resolved the base stub; "
+                    f"add an explicit forwarder"
+                )
+
+        # Shadowable non-method surface members of the same family.
+        class _SerdeFake(real_base):
+            serde = ("fake-serde",)  # class attr shadows base default
+            config_specs = ["fake-spec"]  # class attr shadows base property
+
+            def __init__(self, *a, **kw):
+                pass  # do NOT let the base __init__ normalize serde
+
+        serde_fake = _SerdeFake()
+        serde_proxy = ca._wrap_saver_with_connection_retry(serde_fake)
+        if serde_proxy.serde is not serde_fake.serde:
+            problems.append(
+                "serde: proxy resolved the BASE class-attr default "
+                "instead of the wrapped saver's serde — add the "
+                "property forwarder"
+            )
+        if serde_proxy.config_specs != ["fake-spec"]:
+            problems.append(
+                "config_specs: proxy resolved the BASE property "
+                "([]) instead of the wrapped saver's specs — add the "
+                "property forwarder"
+            )
+
+        assert not problems, (
+            "K-GUARD FAILURES — BaseCheckpointSaver members the proxy "
+            "does not forward to a wrapped override:\n  "
+            + "\n  ".join(problems)
+            + "\nEvery concrete public member of the pinned base needs "
+            "an explicit forwarder on _SaverRetryProxy (the MRO rule: "
+            "__getattr__ never fires for base-concrete attributes). "
+            "See the proxy class docstring (lockstep requirement)."
+        )
+
+    def test_k_guard_base_surface_is_fully_concrete_assumption(
+        self, _real_langgraph_saver_base
+    ):
+        """Documents the MRO rule's premise: the pinned base has ZERO
+        abstract methods. If a future pin flips members back to
+        abstract, the K-guard walk above still holds (abstract members
+        are excluded), but this premise statement must be revisited —
+        abstract members on the proxy would make the proxy itself
+        non-instantiable, an even louder failure.
+        """
+        ca = _real_langgraph_saver_base
+        real_base = ca.BaseCheckpointSaver
+        self._assert_real_pinned(real_base)
+        assert getattr(real_base, "__abstractmethods__", set()) == set(), (
+            "pinned BaseCheckpointSaver now has abstract methods — "
+            "revisit the proxy's explicit-forwarder strategy and this "
+            "test's premise"
+        )

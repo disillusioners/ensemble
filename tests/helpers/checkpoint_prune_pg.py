@@ -64,6 +64,16 @@ def evict_langgraph_mocks() -> dict:
     Mirrors the ``restore_langgraph_modules`` fixture pattern used by the
     existing real-langgraph integration tests.
 
+    MOCK-ONLY eviction (round 2): a sys.modules entry that already has a
+    ``__file__`` is a REAL module (imported by an earlier eviction in
+    this session) and is left in place. Re-executing real langgraph
+    modules on every eviction would fork module identity — a second
+    ``langgraph.checkpoint.base`` module object whose ``BaseCheckpointSaver``
+    fails ``isinstance`` against the first copy's (observed live:
+    ``ensure_valid_checkpointer`` rejecting a proxy bound to the other
+    copy). Keeping real modules cached keeps every consumer bound to
+    ONE class object per session.
+
     Deliberately does NOT evict ``daemon.*`` modules: none of
     ``daemon.checkpoint_adapter`` / ``daemon.checkpoint_perf`` /
     ``daemon.services.checkpoint_prune`` import langgraph at module
@@ -74,16 +84,40 @@ def evict_langgraph_mocks() -> dict:
     """
     saved = {}
     for key in LANGGRAPH_MOCK_KEYS:
-        if key in sys.modules:
-            saved[key] = sys.modules[key]
-            del sys.modules[key]
+        mod = sys.modules.get(key)
+        if mod is None:
+            continue
+        if getattr(mod, "__file__", None):
+            # Real module (already imported by a prior eviction) — keep
+            # it cached so identities stay stable across runs.
+            continue
+        saved[key] = mod
+        del sys.modules[key]
     return saved
 
 
 def restore_langgraph_mocks(saved: dict) -> None:
+    """Restore evicted mock modules — MOCK-ONLY (round 2).
+
+    A key whose sys.modules entry is now a REAL module (``__file__``
+    present — imported by this session's eviction) is NOT re-poisoned
+    with the mock: doing so would (a) fork module identity on the next
+    eviction+import cycle (a second ``langgraph.checkpoint.base`` whose
+    ``BaseCheckpointSaver`` fails ``isinstance`` against the first
+    copy's) and (b) leave the parent mock / real child split-brain.
+    The repo's only ``langgraph.checkpoint.base`` importer is
+    ``daemon.checkpoint_adapter`` (verified), so keeping the real
+    module cached once loaded is safe for every other consumer.
+    """
     for key in LANGGRAPH_MOCK_KEYS:
-        if key in saved:
-            sys.modules[key] = saved[key]
+        if key not in saved:
+            continue
+        current = sys.modules.get(key)
+        if current is not None and getattr(current, "__file__", None):
+            # Real module took the slot during the eviction window —
+            # keep it; identity stays stable for the whole session.
+            continue
+        sys.modules[key] = saved[key]
 
 
 def require_postgres() -> None:
