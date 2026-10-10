@@ -442,6 +442,110 @@ describe('SnapshotsComponent (v2 redesign)', () => {
     expect(component.statusCounts().interrupted).toBe(1);
     expect(component.totalWarmedSpawns()).toBe(4);
   }));
+
+  // ── (p) v2 B1 (conformance r1): `.table-area` wraps the table; the
+  //      height chain (`.drawer-content-region` → `.table-area` →
+  //      `<app-snapshots-table>`) is structurally complete so the inner
+  //      `.snapshots-table` can claim its share of remaining height.
+  //      jsdom does not compute flex layout, so we assert the DOM
+  //      structure + the SCSS class presence + that with 55+ rows the
+  //      table renders all rows into the scroll container, with the
+  //      paginator as a non-scrolling sibling. (AC-3.1/3.2/3.4)
+  it('(p) B1: page hosts a `.table-area` containing the table; 55 rows render into the scroll viewport with the paginator as a non-scrolling sibling', fakeAsync(() => {
+    // 55 rows — exceeds the 50-row mark from AC-3.5.
+    const rows: SnapshotRow[] = Array.from({ length: 55 }, (_, i) =>
+      makeRow({
+        id: `row-${i}`,
+        title: `snap-${i}`,
+        created_by_agent_id: i % 2 === 0 ? 'coder' : 'tester',
+      }),
+    );
+    mockSnapshotService.list.mockReturnValue(
+      of(makeListResponse({ items: rows, total: 55 })),
+    );
+    // Mock getById so the drawer constructor effect can subscribe
+    // without throwing) — this protects the selected-row click below
+    // from leaking an unhandled promise rejection (the test focuses
+    // on the height chain, not the drawer fetch contract).
+    mockSnapshotService.getById.mockReturnValue(of({} as never));
+    fixture.detectChanges();
+    tick();
+    fixture.detectChanges();
+
+    const compiled = fixture.nativeElement as HTMLElement;
+    // The page template (snapshots.component.html:280) renders
+    // <mat-drawer-content class="drawer-content-region">
+    //   <div class="table-area">
+    //     <app-snapshots-table>
+    // The drawer-content-region must wrap the table-area (AC-4.2
+    // declares flex:1.5 1 0 there; we check the class is present
+    // here so the SCSS rule can match).
+    const drawerContent = compiled.querySelector('.drawer-content-region');
+    expect(drawerContent).not.toBeNull();
+    // The .table-area wrapper is the page's height-chain hop that
+    // closes the flex chain (conformance B1).
+    const tableArea = compiled.querySelector('.table-area');
+    expect(tableArea).not.toBeNull();
+    // The table-area must be a child of drawer-content-region.
+    expect(tableArea?.parentElement).toBe(drawerContent);
+    // The table component lives inside .table-area (the ONLY place
+    // the page wraps the table — no other wrappers, no obvious).
+    const tableEl = tableArea?.querySelector('app-snapshots-table');
+    expect(tableEl).not.toBeNull();
+
+    // 55 rows render into the scroll viewport. jsdom does not compute
+    // layout — we assert structural presence: every row is a child of
+    // the .table-scroll (the actual scroll container per AC-3.2) and
+    // not a child of the paginator (the paginator is a sibling, not a
+    // descendant, per AC-3.4).
+    const scroll = tableEl?.querySelector('.table-scroll');
+    expect(scroll).not.toBeNull();
+    const renderedRows = scroll?.querySelectorAll('tr.snapshots-row');
+    expect(renderedRows?.length).toBe(55);
+
+    const paginator = tableEl?.querySelector('mat-paginator');
+    expect(paginator).not.toBeNull();
+    // Paginator must be a sibling of .table-scroll inside the table
+    // component's host (.snapshots-table), NOT inside the scroll
+    // viewport itself (AC-3.4 — separated; pinned via flex-shrink: 0
+    // at the bottom of .table-area; .table-area's new CSS rule
+    // provides the height context so the paginator is not part of the
+    // scroll flow). The .snapshots-table host is the FIRST element
+    // child of the Angular <app-snapshots-table> element.
+    const tableHost = tableEl?.firstElementChild;
+    expect(tableHost?.classList.contains('snapshots-table')).toBe(true);
+    expect(paginator?.parentElement).toBe(tableHost);
+    // The paginator MUST NOT be a descendant of the scroll viewport.
+    expect(scroll?.querySelector('mat-paginator')).toBeNull();
+
+    // Selected row (after one click) carries the .selected class —
+    // AC-3.6 (visual; jsdom sanity). Confirms the page-side selection
+    // signal survives the height chain rebuild.
+    renderedRows?.[0]?.dispatchEvent(new Event('click'));
+    fixture.detectChanges();
+    const selectedRow = tableEl?.querySelector('tr.snapshots-row.selected');
+    expect(selectedRow).not.toBeNull();
+  }));
+
+  // ── (p-extra) v2 S3: `.drawer-content-region` carries the
+  //      `flex: 1.5 1 0; min-width: 0;` lock (AC-4.2). We assert
+  //      structurally (the element + its class are present in the
+  //      rendered DOM); the actual flex computation is a layout
+  //      concern that the dev-server visual check confirms.
+  it('(p-extra) S3: `.drawer-content-region` is present and wraps `.table-area` (AC-4.2)', () => {
+    fixture.detectChanges();
+    const compiled = fixture.nativeElement as HTMLElement;
+    const drawerContent = compiled.querySelector('.drawer-content-region');
+    expect(drawerContent).not.toBeNull();
+    // mat-drawer-content carries the .drawer-content-region class
+    // (snapshots.component.html:279); confirm the tag is present too.
+    expect(drawerContent?.tagName.toLowerCase()).toBe('mat-drawer-content');
+    // The .table-area is the immediate child, NOT a deeply-nested
+    // element — so the flex:1.5 lock applies directly to its host.
+    expect(drawerContent?.firstElementChild?.classList.contains('table-area')).toBe(
+      true,
+    );
+  });
 });
 
 // (of/BehaviorSubject/throwError imports hoisted to the top of the file)
