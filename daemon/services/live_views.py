@@ -399,7 +399,12 @@ class HostRecorder:
         # that does not otherwise reach the client. Default ``http``
         # covers direct-connect (no proxy) and the common case where
         # the proxy passes X-Forwarded-Proto: https only on TLS.
-        chosen_scheme = (scheme or "http").strip().lower()
+        # RFC 7239 comma-chained proxies pass multi-hop values like
+        # "https, http" — take the FIRST hop's scheme (the scheme
+        # the client actually used to reach the trust boundary).
+        # An exact-membership check would otherwise silently
+        # downgrade the whole chain to the http default.
+        chosen_scheme = (scheme or "http").split(",", 1)[0].strip().lower()
         if chosen_scheme not in ("http", "https"):
             chosen_scheme = "http"
         with self._lock:
@@ -536,8 +541,15 @@ class BaseURLResolver:
             latest = self._host_recorder.latest()
             if latest is not None:
                 host, port, scheme = latest
+                # RFC 3986: IPv6 literals in a URI authority MUST be
+                # bracketed when a port is present (and conventionally
+                # even when not). _split_host_port() strips the
+                # brackets at capture time; re-wrap here so the
+                # minted base URL is well-formed for both the
+                # port-present and port-less composition branches.
+                host_for_url = f"[{host}]" if ":" in host else host
                 port_str = f":{port}" if port else ""
-                return f"{scheme}://{host}{port_str}"
+                return f"{scheme}://{host_for_url}{port_str}"
         # 3. Bind evidence.
         if self._bind_host_provided and self._bind_host:
             port_str = f":{self._bind_port}" if self._bind_port else ""

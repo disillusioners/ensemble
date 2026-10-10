@@ -198,6 +198,16 @@ class TestHostRecorder:
         rec.record("example.com", "ftp")
         assert rec.latest() == ("example.com", None, "http")
 
+    def test_x_forwarded_proto_comma_chain_takes_first_hop(self):
+        # RFC 7239 multi-hop proxies pass comma-chained values
+        # like "https, http". Without tokenization, the exact-
+        # membership check would silently downgrade the whole
+        # chain to http, breaking HTTPS-only deployments behind
+        # multi-hop proxy chains.
+        rec = HostRecorder()
+        rec.record("example.com", "https, http")
+        assert rec.latest() == ("example.com", None, "https")
+
     def test_empty_host_dropped(self):
         rec = HostRecorder()
         rec.record("")
@@ -390,7 +400,27 @@ class TestBaseURLResolverHostCapture:
             bind_port=None,
             host_recorder=rec,
         )
-        assert resolver.resolve() == "http://::1:8079"
+        # RFC 3986: IPv6 literals in a URI authority MUST be
+        # bracketed when a port is present. _split_host_port()
+        # strips the brackets at capture time; resolve() must
+        # re-wrap before composing scheme://host[:port].
+        assert resolver.resolve() == "http://[::1]:8079"
+
+    def test_host_capture_ipv6_no_port(self):
+        # Port-less bracketed IPv6 (the Host-header validator
+        # rejects bare "::1", so [::1] is the capture form).
+        # Conventional and safe to keep brackets even without
+        # a port — RFC 3986 allows it and disambiguation with
+        # any future port is trivial.
+        rec = HostRecorder()
+        rec.record("[::1]", "http")
+        resolver = BaseURLResolver(
+            external_base_url=None,
+            bind_host=None,
+            bind_port=None,
+            host_recorder=rec,
+        )
+        assert resolver.resolve() == "http://[::1]"
 
 
 class TestBaseURLResolverBindEvidence:
