@@ -251,12 +251,16 @@ def mime_for_extension(ext: str) -> str:
 # whitespace, and CR/LF (header smuggling) are rejected. The
 # pattern is intentionally tight — it accepts only what is
 # structurally a Host and refuses everything else.
+#
+# RFC 1035 caps hostname length at 253 chars; port is 1..65535
+# (max 5 digits). The total ``len(value) > 259`` cap below covers
+# 253 + ":" + 5.
 _HOST_HEADER_PATTERN = re.compile(
     r"^"
     r"(?P<host>"
     r"(?:\[[0-9a-fA-F:]+\])"      # bracketed IPv6 literal
     r"|"
-    r"[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,253}[A-Za-z0-9])?"  # host / IPv4
+    r"[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,251}[A-Za-z0-9])?"  # host / IPv4 (max 253)
     r")"
     r"(?::(?P<port>\d{1,5}))?"      # optional :port (1..65535 enforced below)
     r"$"
@@ -288,7 +292,7 @@ def _is_valid_host_header(value: str) -> bool:
     # could indicate a multi-line header injection attempt.
     if any(c in value for c in "\r\n\t "):
         return False
-    if len(value) > 254:
+    if len(value) > 259:
         return False
     m = _HOST_HEADER_PATTERN.match(value)
     if not m:
@@ -1015,3 +1019,185 @@ class LiveViewsService:
         if base:
             return f"{base}{path_part}"
         return path_part
+
+
+# ─────────────────────────────────────────────────────────────────
+# Markdown rendering (Phase 2: content-aware smart rendering)
+# ─────────────────────────────────────────────────────────────────
+
+# Pinned CDN URLs + SRI hashes. The pin + integrity attribute
+# combo is the security contract: a CDN compromise cannot inject
+# new JS without the SRI failing (the browser refuses to load),
+# and the CSP in ``_MARKDOWN_CSP_TEMPLATE`` further restricts
+# allowed script origins to ``cdn.jsdelivr.net`` only.
+# Versions are pinned to current stable releases of the
+# ``marked`` markdown renderer and ``DOMPurify`` XSS sanitizer.
+#
+# Marked 12.0.2 — ``https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js``
+# DOMPurify 3.0.11 — ``https://cdn.jsdelivr.net/npm/dompurify@3.0.11/dist/purify.min.js``
+# SRI hashes computed locally:
+#   marked     sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi
+#   dompurify  sha384-Ic7KEGROu37YaruU6NyiYeib7UhjFyDZQ5fzBAji965L75T/4LGk5nzwMEjNGexs
+MARKED_CDN_URL = "https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
+MARKED_CDN_INTEGRITY = (
+    "sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi"
+)
+DOMPURIFY_CDN_URL = (
+    "https://cdn.jsdelivr.net/npm/dompurify@3.0.11/dist/purify.min.js"
+)
+DOMPURIFY_CDN_INTEGRITY = (
+    "sha384-Ic7KEGROu37YaruU6NyiYeib7UhjFyDZQ5fzBAji965L75T/4LGk5nzwMEjNGexs"
+)
+
+# Content-Security-Policy applied to the markdown wrapper page.
+# The CSP allows:
+#   - scripts from self + jsdelivr (marked + DOMPurify CDN);
+#   - one inline bootstrap script per request via the per-request
+#     ``nonce`` (NO ``unsafe-inline`` for scripts — the nonce is
+#     the strict mechanism);
+#   - styles from self + one inline <style> per request via nonce
+#     + ``unsafe-inline`` (documented: markdown-emitted inline
+#     style attrs may slip through DOMPurify when authors use raw
+#     HTML in markdown; the trade-off is documented in the runbook
+#     and the wrapper gracefully degrades when this attribute is
+#     removed);
+#   - images from self + data: URIs (data: covers inline SVG and
+#     base64-embedded images in markdown);
+#   - object-src 'none' (no plugins), base-uri 'self' (no <base>
+#     hijack), form-action 'self' (no form posting to attacker
+#     hosts), frame-ancestors 'none' (no embedding in attacker
+#     iframes).
+_MARKDOWN_CSP_TEMPLATE = (
+    "default-src 'self'; "
+    "script-src 'self' https://cdn.jsdelivr.net 'nonce-{nonce}'; "
+    "style-src 'self' 'nonce-{nonce}' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+# The wrapper page template. The raw markdown is embedded (escaped
+# via ``html.escape``) inside the ``<article id="rendered"><pre>``
+# so it serves as the readable fallback for NO-JS, JS-failed, or
+# CDN-unreachable cases — the bootstrap script either rewrites
+# the ``<article>`` with sanitized rendered HTML or leaves the
+# raw markdown visible (whichever is feasible given runtime state).
+#
+# Marked does NOT escape raw HTML in markdown by default in v12 —
+# that is why DOMPurify is mandatory on the output. The wrapper
+# also keeps the embedded ``<pre>`` outside the live body content
+# path until the bootstrap rewrites the article, so a malicious
+# header cannot force-execute by targeting the embedded text (the
+# only consumer is the bootstrap ``script``, which only renders
+# sanitized output).
+_MARKDOWN_WRAPPER_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style nonce="{nonce}">
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 920px; margin: 2em auto; padding: 0 1em; line-height: 1.5; color: #222; }}
+  pre {{ white-space: pre-wrap; word-wrap: break-word; background: #f6f8fa; padding: 1em; border-radius: 4px; overflow-x: auto; }}
+  article {{ line-height: 1.6; }}
+  article h1, article h2, article h3 {{ line-height: 1.25; margin-top: 1.5em; }}
+  article code {{ background: #f6f8fa; padding: 0.15em 0.3em; border-radius: 3px; }}
+  article pre code {{ background: transparent; padding: 0; }}
+  article a {{ color: #0366d6; }}
+  article blockquote {{ border-left: 4px solid #dfe2e5; margin: 0; padding: 0 1em; }}
+  article table {{ border-collapse: collapse; }}
+  article table th, article table td {{ border: 1px solid #dfe2e5; padding: 0.4em 0.8em; }}
+</style>
+</head>
+<body>
+<article id="rendered"><pre>{escaped_markdown}</pre></article>
+<script src="{marked_url}" integrity="{marked_integrity}" crossorigin="anonymous" nonce="{nonce}"></script>
+<script src="{dompurify_url}" integrity="{dompurify_integrity}" crossorigin="anonymous" nonce="{nonce}"></script>
+<script nonce="{nonce}">
+(function() {{
+  var article = document.getElementById('rendered');
+  if (!article) {{ return; }}
+  var raw = article.textContent || '';
+  try {{
+    if (typeof marked === 'undefined') {{ throw new Error('marked not loaded'); }}
+    if (typeof DOMPurify === 'undefined') {{ throw new Error('DOMPurify not loaded'); }}
+    var html = marked.parse(raw);
+    var safe = DOMPurify.sanitize(html, {{ USE_PROFILES: {{ html: true }} }});
+    article.innerHTML = safe;
+  }} catch (e) {{
+    // Bootstrap failed (JS off, CDN unreachable, marked/DOMPurify
+    // missing). Leave the embedded <pre> with raw markdown
+    // visible — graceful degradation contract.
+  }}
+}})();
+</script>
+</body>
+</html>
+"""
+
+
+def new_csp_nonce() -> str:
+    """Generate a per-request CSP nonce (base64-url, ~22 chars).
+
+    The middleware-style per-request nonce closes the inline-
+    script injection vector: the bootstrap ``<script nonce=>``
+    is the only inline script allowed by the CSP, and the
+    nonce changes on every request.
+    """
+    return secrets.token_urlsafe(16)
+
+
+def render_markdown_wrapper(
+    *,
+    rel_path: str,
+    markdown_text: str,
+    nonce: str | None = None,
+) -> tuple[str, dict[str, str]]:
+    """Return ``(html_body, headers)`` for the markdown wrapper.
+
+    The caller (``daemon/routers/live_views.py``) wraps the
+    tuple in a FastAPI ``Response`` so this module stays free
+    of FastAPI imports. The headers include the per-response
+    CSP nonce and the same hardening headers as raw serving
+    (``X-Content-Type-Options: nosniff`` + ``Cache-Control``).
+
+    The raw markdown is HTML-escaped before being embedded in
+    the wrapper's ``<article><pre>`` element. The bootstrap
+    script reads ``article.textContent`` (which auto-decodes
+    the entities back to the original markdown source) and
+    runs marked.parse + DOMPurify.sanitize. The raw form
+    stays in the DOM until the bootstrap rewrites the article;
+    if the bootstrap never runs (JS off / CDN unreachable),
+    the raw markdown is the page's content — readable, never
+    blank.
+    """
+    nonce = nonce or new_csp_nonce()
+    title = f"{rel_path} - live view"
+    body = _MARKDOWN_WRAPPER_HTML.format(
+        title=html.escape(title),
+        escaped_markdown=html.escape(markdown_text),
+        nonce=html.escape(nonce),
+        marked_url=MARKED_CDN_URL,
+        marked_integrity=MARKED_CDN_INTEGRITY,
+        dompurify_url=DOMPURIFY_CDN_URL,
+        dompurify_integrity=DOMPURIFY_CDN_INTEGRITY,
+    )
+    headers: dict[str, str] = {
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, max-age=60",
+        "Content-Security-Policy": _MARKDOWN_CSP_TEMPLATE.format(nonce=nonce),
+    }
+    return body, headers
+
+
+def is_markdown_content_type(content_type: str) -> bool:
+    """Return True iff ``content_type`` advertises a markdown variant.
+
+    Catches both ``text/markdown`` (canonical) and
+    ``text/x-markdown`` (some user agents / older clients) with
+    any charset suffix stripped.
+    """
+    base = content_type.split(";", 1)[0].strip().lower()
+    return base in ("text/markdown", "text/x-markdown")

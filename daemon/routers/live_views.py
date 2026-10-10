@@ -334,6 +334,7 @@ def build_router() -> APIRouter:
         # GET path does; for a HEAD request this is wasted
         # work but keeps the contract consistent.
         from daemon.services.live_views import (
+            MAX_SERVED_BYTES,
             is_markdown_content_type,
             new_csp_nonce,
             render_markdown_wrapper,
