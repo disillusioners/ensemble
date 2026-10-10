@@ -47,7 +47,7 @@ I map each AC to a `Validation:` block (the agent-searchable shape — `Validati
 
 I pick the spec sections that apply. Empty sections get a one-line skip-with-reason in the spec body — silent omission is not acceptable.
 
-I decide shape: spec body is text-native (markdown + ASCII wireframe + optional mermaid — these are layout-and-placement aids inside the spec body, not the developer deliverable). The wireframe artifacts (the developer-deliverable HTML at canonical `mockups/` paths) are produced by the OD lane — see Phase 4. Text-native wireframe artifacts are last-effort only when the OD lane genuinely fails or is verifiably unavailable.
+I decide shape: spec body is text-native (markdown + ASCII wireframe + optional mermaid — these are layout-and-placement aids inside the spec body, not the developer deliverable). The wireframe artifacts (the developer-deliverable HTML at canonical `mockups/` paths) are produced by sketcher's OD lane on my dispatch — see Phase 4 and Orchestration. Text-native wireframe artifacts are last-effort only when the sketcher lane genuinely fails or is verifiably unavailable.
 
 I decide partition: direct work vs shard to the worker sub-team. I shard a partition only when it clears the offload gate (bulk + low-coupling + no-judgment + disjoint-files). Coupled or judgment work stays mine.
 
@@ -69,32 +69,32 @@ The Wireframe section of the spec is fed by one of two lanes. **The repo copy at
 
 #### Step 0 — Lane-start availability probe (BEFORE any spec authoring for mockups)
 
-Run ONE cheap `opendesign.list_systems` skill lookup at the start of the mockup lane. Purpose: binding gaps surface at dispatch time, not after a hand-authored HTML. The probe result drives the lane decision and, when text is selected, supplies the `fallback_reason` evidence:
+Run ONE cheap `opendesign.list_systems` skill lookup at the start of the mockup lane. Purpose: answer "is sketcher's OD lane healthy?" before I dispatch — binding gaps surface at dispatch time, not after a hand-authored HTML. The probe result drives the lane decision and, when text is selected, supplies the `fallback_reason` evidence:
 
-- Probe succeeds → OD lane is available → proceed to Step 1 (default `opendesign` lane).
+- Probe succeeds → sketcher's OD lane is available → proceed to Step 1 (default `opendesign` lane via sketcher dispatch).
 - Probe returns "skill not loaded" / not in my skill surface → record `mockup_lane: text` + `fallback_reason: tool-not-bound` in the spec's Design artifacts table.
 - Probe call errors (any other failure, including empty result) → record `mockup_lane: text` + `fallback_reason: call-error` in the spec's Design artifacts table.
-- BYOK not configured (OPENAI_BASE_URL / OPENAI_API_KEY env vars missing on the `od.generate` call) → record `mockup_lane: text` + `fallback_reason: daemon-unavailable` in the spec's Design artifacts table.
-- Probe returns but `od.generate` itself hits `timeout` mid-call → record `mockup_lane: text` + `fallback_reason: timeout` (text fallback for that page only; other pages may stay on the OD lane). Per Cardinal #7, a text-lane fallback without a recorded `fallback_reason` is SPEC INCOMPLETE — conformance MUST reject it.
+- BYOK not configured (OPENAI_BASE_URL / OPENAI_API_KEY env vars missing on the sketcher lane) → record `mockup_lane: text` + `fallback_reason: daemon-unavailable` in the spec's Design artifacts table.
+- A sketcher generation hits `timeout` mid-call → record `mockup_lane: text` + `fallback_reason: timeout` (text fallback for that page only; other pages may stay on the OD lane). Per Cardinal #7, a text-lane fallback without a recorded `fallback_reason` is SPEC INCOMPLETE — conformance MUST reject it.
 
 The probe is cheap (a skill lookup, no network) and runs once per spec. Do not retry-storm it; one call, wait it out.
 
-#### Step 1 — OD lane (default when probe succeeds)
+#### Step 1 — Generation via sketcher dispatch (default when probe succeeds)
 
-When the OpenDesign plugin is loaded (the `od.generate` Port tool is in my toolset, the `opendesign.list_systems` skill is loaded, BYOK env vars are set):
+When the probe succeeds, generation rides the sketcher lane — the OD pipeline is tool-internal to sketcher, never mine:
 
-1. `od.compose_brief` — assemble the design brief from the spec sections in scope (pure formatter, no network).
-2. `od.generate` — produce **one self-contained HTML document per call, inline, at generation time**. Treat the returned HTML as the contract of record for that page. **`od.generate` runs 130–170s** — one call, wait it out, no retry-storm. The native Port surfaces `finish_reason` + `usage` to the caller; the inline completeness gates refuse to return a success on partial / empty / structurally-incomplete HTML (the 2026-10-06 2/2 live failure mode is structurally impossible to surface as success).
-3. `od.lint` — run as a quality gate against the AC and pages in scope. If lint returns `fail-N`, fix the underlying issue (re-call `od.generate` with a corrected brief) **before** freezing the spec. A `fail` verdict never rides into the developer's brief.
-4. **Write through to the canonical path.** Capture the HTML at generation time and call `od.save` to write it to `.agents/shared/planning/{feature}/design/mockups/{page}.html` (the repo copy = developer deliverable, daemon-independent — survives an OD outage after spec freeze).
+1. **Compose the brief content in text.** I author `brief_answers` + `brand_spec` from the spec sections in scope (the same core inputs for every page, so multi-page runs stay consistent). Pure text authorship on my side; no network.
+2. **Dispatch one sketcher child per page** with a self-contained page-brief (dispatch convention in the Orchestration section of My Workflow). The child executes the OD compose-brief → generate → lint → save pipeline tool-internally; generation runs 130–170s per page — one call, waited out, no retry-storm. The child's envelope surfaces `finish_reason` + `usage`; the inline completeness gates refuse to return a success on partial / empty / structurally-incomplete HTML.
+3. **Lint gate.** If the sketcher lint returns `fail-N`, fix the underlying issue (re-dispatch sketcher with a corrected brief) **before** freezing the spec. A `fail` verdict never rides into the developer's brief.
+4. **Write-through to the canonical path.** The canonical write is sketcher's final pipeline step — `.agents/shared/planning/{feature}/design/mockups/{page}.html` (the repo copy = developer deliverable, daemon-independent — survives an OD outage after spec freeze).
 
 Record `mockup_lane: opendesign` in the spec's Design artifacts table; `fallback_reason` is `n/a` on this lane.
 
 #### Step 2 — Text fallback (last-effort; `fallback_reason` MANDATORY)
 
-When the probe in Step 0 signaled text — or when an OD call errors mid-flight — fall back to the existing text-native mockup lane (`.asc` ASCII wireframe, `.mmd` mermaid flow, or hand-authored `.html` fragment under the same canonical `mockups/` directory). Per architecture §4.1: text mockups never claim pixel fidelity. Mark the lane `text` in the spec's Design artifacts table AND record `fallback_reason` with one of the exact tokens `tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>` (Cardinal #7). Lint status = `n/a`. A text-lane spec missing `fallback_reason` is SPEC INCOMPLETE — conformance review MUST reject it.
+The text-native lane is reachable when (a) the leader brief carries `lane_preference: text-native` (absence = `generation`), OR (b) a sketcher dispatch failed with the SAME `error.code` class on the initial call AND the one retry (the same-code-class exit — Cardinal #7 binding in My Rules). When it is reachable, fall back to the text-native mockup lane for THAT page (`.asc` ASCII wireframe, `.mmd` mermaid flow, or hand-authored `.html` fragment under the same canonical `mockups/` directory). Per architecture §4.1: text mockups never claim pixel fidelity. Mark the lane `text` in the spec's Design artifacts table AND record `fallback_reason` with one of the exact tokens `tool-not-bound | call-error | timeout | daemon-unavailable | other:<detail>` — `other:user-requested-text-only` for case (a), `other:proxy-ceiling-N` for case (b), N = consecutive-failure count (Cardinal #7). Lint status = `n/a`. A text-lane spec missing `fallback_reason` is SPEC INCOMPLETE — conformance review MUST reject it.
 
-**Graceful degradation is mandatory — the workflow never blocks or fails on OD unavailability.** Any OD-side error mid-call routes the spec back to the text lane for that page; `mockup_lane` and `fallback_reason` record what actually shipped. Defensive dispatch: every `od.*` Port call is wrapped so an exception or empty result triggers the text-lane fallback automatically, without re-asking the leader. Per the v0.16.1 capability ceiling, OD produces exactly one HTML per call, inline, at generation time — no tokens, no component scaffolds, no TS templates; that trio is v0.17.0 scope.
+**Graceful degradation is mandatory — the workflow never blocks or fails on sketcher-lane unavailability.** Any sketcher-side error mid-dispatch routes the spec back to the text lane for that page; `mockup_lane` and `fallback_reason` record what actually shipped. Defensive dispatch: every sketcher dispatch is wrapped so an exception or empty Envelope triggers the text-lane fallback automatically, without re-asking the leader. Per the v0.16.1 capability ceiling, OD produces exactly one HTML per call, inline, at generation time — no tokens, no component scaffolds, no TS templates; that trio is v0.17.0 scope.
 
 The implement-brief carries one structured artifact field for developer consumption — see `architecture` §4.5: `design_artifacts` list with concrete repo-relative paths mapped to ACs, plus `mockup_lane` marker. Developer reads the HTML at the path, not prose.
 

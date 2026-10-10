@@ -1,3 +1,4 @@
+<!-- SUPERSEDED 2026-10-10 by designer-critic-orchestration (pilot gates no longer apply; sketcher is the sole generation lane by user directive) — see .agents/shared/planning/designer-critic-orchestration/architecture-recommendation.md §1 D7 -->
 # Stage 2 Addendum — Sketcher Lane Dual-Run Pilot (od-generate-agent-lane)
 
 **Status:** PROVISIONAL GATES — leader-set, verbatim from the Stage 2 dispatch (2026-10-09).

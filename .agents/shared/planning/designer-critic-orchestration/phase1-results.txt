@@ -1,0 +1,17 @@
+# Phase 1 results — 2026-10-10T16:08:52Z
+
+== T9 gate: pytest tests/unit/probe_designer_od_lane_binding.py tests/unit/test_report_integrity_prompts.py -k designer ==
+tests/unit/test_report_integrity_prompts.py .                            [100%]
+
+======================= 1 passed, 69 deselected in 0.51s =======================
+PYTEST_EXIT=0 (captured above; report-integrity designer test PASS)
+
+== T9 supplement: probe file run standalone per its own docstring (stdlib-only script; pytest collects 0 from it — finding 14 anticipated this) ==
+probe root: /home/nea/ensemble-src-wt-designer-critic-orchestration
+PASS  T1 broken-lane preload contract (THE DISCRIMINATOR — fails@base)
+PASS  T2 healthy-lane pin (no-regression guard)
+PASS  T3 cache-mechanics pin (silence + permanence + blocked backfill)
+PASS  T4 async-capability pin (fix-shape verdict)
+RESULT: PASS (all lanes preload)
+
+== Transient-red note (by design, per phase1-plan T9): tests/unit/plugin_subsystem/test_designer_rewire.py :199/:204 pins now run RED against the reworked designer prose until phase 4 T9/T9b flip them. NOT a phase-1 gate. ==
