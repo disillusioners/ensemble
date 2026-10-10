@@ -503,6 +503,170 @@ describe('SnapshotsComponent (v2 redesign)', () => {
     expect(navigateCallsAfter).toBe(navigateCallsBefore);
   }));
 
+  // ── (n-bf-defaults) v2 S1 parity: back/forward with ALL filters at
+  //      defaults (the COMMON case — bare /snapshots URL, no query
+  //      params). The S1 seed wrote `lastWrittenUrlKey` from RAW signal
+  //      values (`status: []`, `age: 'all'`, ...) while the URL-sync
+  //      effect's dedup key is null-NORMALIZED (`status: null`,
+  //      `age: null`, ...) — different JSON bytes, so the dedup check
+  //      failed and EVERY back/forward emitted a redundant
+  //      `router.navigate`. The fix computes the key via ONE shared
+  //      helper (`computeUrlQueryParams`) at all three sites, making
+  //      seed and effect keys byte-identical by construction. The
+  //      original (n-bf) test used all-non-default values, so it could
+  //      not catch this.
+  it('(n-bf-defaults) S1: default-state back/forward does NOT re-navigate (seed/effect key parity)', fakeAsync(() => {
+    // Mount with NO query params — every filter seeds to its default.
+    TestBed.resetTestingModule();
+    routeStub = makeActivatedRouteStub({});
+    TestBed.configureTestingModule({
+      imports: [SnapshotsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: SnapshotService, useValue: mockSnapshotService },
+        { provide: SettingsService, useValue: mockSettingsService },
+        { provide: ProjectService, useValue: mockProjectService },
+        { provide: Clipboard, useValue: clipboard },
+        { provide: MatSnackBar, useValue: snackBar },
+        { provide: Router, useValue: router },
+        { provide: ActivatedRoute, useValue: routeStub },
+      ],
+    });
+    TestBed.compileComponents();
+    fixture = TestBed.createComponent(SnapshotsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    tick();
+    flushMicrotasks();
+
+    // Sanity — all filters at defaults.
+    expect(component.filterProjectId()).toBeNull();
+    expect(component.filterAgentId()).toBeNull();
+    expect(component.filterStatus()).toEqual([]);
+    expect(component.filterAge()).toBe('all');
+    expect(component.filterTagMode()).toBe('all');
+    expect(component.filterSort()).toBe('created_at_desc');
+    expect(component.filterTags()).toEqual([]);
+
+    // Drain any URL-sync navigations from the seed/init phase.
+    flushMicrotasks();
+    tick();
+    const navigateCallsBefore = router.navigate.mock.calls.length;
+
+    // ── Back/forward: the browser emits a queryParamMap that ALSO
+    // represents defaults (e.g. history entry for bare /snapshots).
+    routeStub.queryParamMap.next(convertToParamMap({}));
+    tick();
+    flushMicrotasks();
+
+    // Signals re-seeded — still all at defaults, no error thrown.
+    expect(component.filterProjectId()).toBeNull();
+    expect(component.filterAgentId()).toBeNull();
+    expect(component.filterStatus()).toEqual([]);
+    expect(component.filterAge()).toBe('all');
+    expect(component.filterTagMode()).toBe('all');
+    expect(component.filterSort()).toBe('created_at_desc');
+    expect(component.filterTags()).toEqual([]);
+    expect(component.pageIndex()).toBe(0);
+
+    // Deterministic parity exposure: the URL-sync effect's re-run
+    // triggered by the back/forward seed lands INSIDE the
+    // `skipUrlSync` window (early return), so a bare back/forward
+    // never reaches the dedup check in this harness. The redundant
+    // navigate on pre-fix code surfaces on the NEXT post-flip effect
+    // evaluation with unchanged filter state. Force exactly that:
+    // a same-value identity write to a watched signal re-runs the
+    // effect (new array instance → signal notifies) without changing
+    // any filter value. Pre-fix, the RAW-seeded `lastWrittenUrlKey`
+    // (`status: []`, `age: 'all'`, ...) diverges from the effect's
+    // null-normalized key → redundant navigate (+1). Post-fix, the
+    // shared `computeUrlQueryParams` makes the keys byte-identical →
+    // dedup, count unchanged.
+    component.filterStatus.set([...component.filterStatus()]);
+    // Effects flush during change detection in the zone TestBed (see
+    // (n-bf-extra): detectChanges precedes its navigation assertion).
+    fixture.detectChanges();
+    tick();
+    flushMicrotasks();
+    const navigateCallsAfter = router.navigate.mock.calls.length;
+    expect(navigateCallsAfter).toBe(navigateCallsBefore);
+  }));
+
+  // ── (n-bf-defaults-mixed) v2 S1 parity: back/forward where ONE
+  //      non-default field is present in the incoming map (mixed
+  //      default/non-default state). Guards the shared-key fix against
+  //      over-suppression: a MIXED seed key must still match the
+  //      effect's key (no redundant navigate), the re-seed must land,
+  //      and USER-driven writes after the back/forward must still flow.
+  it('(n-bf-defaults-mixed) S1: mixed default/non-default back/forward re-seeds without redundant navigate, user writes still flow', fakeAsync(() => {
+    // Mount with NO query params — defaults.
+    TestBed.resetTestingModule();
+    routeStub = makeActivatedRouteStub({});
+    TestBed.configureTestingModule({
+      imports: [SnapshotsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: SnapshotService, useValue: mockSnapshotService },
+        { provide: SettingsService, useValue: mockSettingsService },
+        { provide: ProjectService, useValue: mockProjectService },
+        { provide: Clipboard, useValue: clipboard },
+        { provide: MatSnackBar, useValue: snackBar },
+        { provide: Router, useValue: router },
+        { provide: ActivatedRoute, useValue: routeStub },
+      ],
+    });
+    TestBed.compileComponents();
+    fixture = TestBed.createComponent(SnapshotsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    tick();
+    flushMicrotasks();
+    flushMicrotasks();
+    tick();
+    const navigateCallsBefore = router.navigate.mock.calls.length;
+
+    // ── Back/forward: ONE non-default field (status), rest absent
+    // (→ defaults). Mixed state.
+    routeStub.queryParamMap.next(
+      convertToParamMap({ status: ['failed'] }),
+    );
+    tick();
+    flushMicrotasks();
+
+    // Re-seed landed: status from URL, everything else at defaults.
+    expect(component.filterStatus()).toEqual(['failed']);
+    expect(component.filterAge()).toBe('all');
+    expect(component.filterTagMode()).toBe('all');
+    expect(component.filterSort()).toBe('created_at_desc');
+    expect(component.filterTags()).toEqual([]);
+
+    // No redundant re-navigation for the mixed state either. Same
+    // parity-exposure as (n-bf-defaults): force a post-flip URL-sync
+    // effect evaluation with unchanged filter state — pre-fix the
+    // raw-seeded key diverges from the normalized effect key (+1
+    // navigate), post-fix the shared computation dedups.
+    component.filterStatus.set([...component.filterStatus()]);
+    fixture.detectChanges();
+    tick();
+    flushMicrotasks();
+    const navigateCallsAfterBackForward = router.navigate.mock.calls.length;
+    expect(navigateCallsAfterBackForward).toBe(navigateCallsBefore);
+
+    // Over-suppression guard: a USER-driven filter change AFTER the
+    // back/forward must still navigate (the mixed seed is not "stuck").
+    component.onFilterProjectChange('user-picked-project');
+    fixture.detectChanges();
+    tick();
+    flushMicrotasks();
+    const navigateCallsAfterUserChange = router.navigate.mock.calls.length;
+    expect(navigateCallsAfterUserChange).toBeGreaterThan(
+      navigateCallsAfterBackForward,
+    );
+    const lastCall = router.navigate.mock.calls[navigateCallsAfterUserChange - 1];
+    expect(lastCall[0]).toEqual(['snapshots']);
+    expect(lastCall[1].queryParams.project_id).toBe('user-picked-project');
+  }));
+
   // ── (n-bf-extra) v2 S1: a USER-DRIVEN filter change AFTER a
   //      back/forward must still write to the URL (the seed from
   //      back/forward is not "stuck"). This catches a regression

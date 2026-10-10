@@ -37,7 +37,9 @@ import { SnapshotStatus, SnapshotRow } from '../../models/snapshot.model';
  * * plain HTML `<table>` with `position: sticky; top: 0` on `<thead>`
  *   (mat-table's sticky never worked because the page scroll was the
  *   only scroll; now the scroll viewport sits inside a constrained
- *   `.table-area` with `flex: 1; min-height: 0; overflow-y: auto`,
+ *   `.table-area` with `flex: 1; min-height: 0; overflow: hidden`
+ *   (rule lives in snapshots.component.scss — NOT `overflow-y: auto`;
+ *   the inner `.snapshots-table` host is the actual scroll container),
  *   so plain HTML's sticky just works — see AC-3.1/3.2/3.3).
  * * `selectedRowId` input drives the per-row `selected` class which
  *   carries both `background: var(--accent-soft)` AND

@@ -336,34 +336,16 @@ export class SnapshotsComponent implements OnInit {
     // using `merge` semantics so other URL state survives. Suppressed
     // while we are seeding the signals FROM the URL on init.
     effect(() => {
-      const projectId = this.filterProjectId();
-      const agentId = this.filterAgentId();
-      const status = this.filterStatus();
-      const age = this.filterAge();
-      const tagMode = this.filterTagMode();
-      const sort = this.filterSort();
-      const tags = this.filterTags();
-
-      // Track the dependencies explicitly so the effect re-runs on any
-      // change. The read on `tagMode` is for tracking only, so the
-      // `void` operator was previously inserted to silence "unused
-      // expression" lints. S1 conformance r1 cleanup: tagMode is
-      // read once below in the qp assembly, so the void is no longer
-      // needed and is dropped here.
-
+      // Reads every filter signal — inside the effect's reactive
+      // context this tracks them, so the effect re-runs on any change.
+      // S1 parity: the key comes from the SAME shared computation as
+      // the two seed sites' `lastWrittenUrlKey` (computeUrlQueryParams),
+      // so seed and effect keys are byte-identical by construction.
+      const qp = this.computeUrlQueryParams();
+      const key = JSON.stringify(qp);
       if (this.skipUrlSync) {
         return;
       }
-      const qp: Record<string, string | string[] | null> = {
-        project_id: projectId,
-        agent_id: agentId,
-        status: status.length ? status : null,
-        age: age !== DEFAULT_AGE ? age : null,
-        tag_mode: tagMode !== DEFAULT_TAG_MODE ? tagMode : null,
-        sort: sort !== DEFAULT_SORT ? sort : null,
-        tags: tags.length ? tags : null,
-      };
-      const key = JSON.stringify(qp);
       if (key === this.lastWrittenUrlKey) {
         return;
       }
@@ -376,6 +358,44 @@ export class SnapshotsComponent implements OnInit {
         });
       });
     });
+  }
+
+  /**
+   * Single source of truth for the URL-sync dedup key (AC-6.3, S1 parity).
+   *
+   * Builds the null-normalized queryParams object the URL-sync effect
+   * mirrors to the route: default/empty filter values are normalized to
+   * `null` so the mirrored shape is canonical. The effect's dedup key
+   * AND both seed sites' `lastWrittenUrlKey` derive from THIS one
+   * computation, so the keys are byte-identical by construction.
+   *
+   * S1 parity fix: the seed sites previously stringified RAW signal
+   * values (`status: []`, `age: 'all'`, ...) while the effect
+   * stringified the null-normalized shape — different bytes whenever a
+   * filter sat at its default (the common case), so
+   * `key === lastWrittenUrlKey` failed and every back/forward emitted
+   * a redundant `router.navigate`.
+   *
+   * Called from: the URL-sync effect (constructor), the ngOnInit seed,
+   * and the back/forward `queryParamMap` subscription seed.
+   */
+  private computeUrlQueryParams(): Record<string, string | string[] | null> {
+    const projectId = this.filterProjectId();
+    const agentId = this.filterAgentId();
+    const status = this.filterStatus();
+    const age = this.filterAge();
+    const tagMode = this.filterTagMode();
+    const sort = this.filterSort();
+    const tags = this.filterTags();
+    return {
+      project_id: projectId,
+      agent_id: agentId,
+      status: status.length ? status : null,
+      age: age !== DEFAULT_AGE ? age : null,
+      tag_mode: tagMode !== DEFAULT_TAG_MODE ? tagMode : null,
+      sort: sort !== DEFAULT_SORT ? sort : null,
+      tags: tags.length ? tags : null,
+    };
   }
 
   ngOnInit(): void {
@@ -414,15 +434,10 @@ export class SnapshotsComponent implements OnInit {
     // dedups and does NOT navigate. This replaces the v1
     // suppressUrlSync + queueMicrotask dance, which is brittle in
     // test environments where queueMicrotask may not be patched.
-    this.lastWrittenUrlKey = JSON.stringify({
-      project_id: this.filterProjectId(),
-      agent_id: this.filterAgentId(),
-      status: this.filterStatus(),
-      age: this.filterAge(),
-      tag_mode: this.filterTagMode(),
-      sort: this.filterSort(),
-      tags: this.filterTags(),
-    });
+    // S1 parity: computed via the SAME shared null-normalized helper
+    // as the effect's dedup key, so the bytes match even when filters
+    // sit at defaults.
+    this.lastWrittenUrlKey = JSON.stringify(this.computeUrlQueryParams());
 
     // Re-sync on URL changes (back/forward navigation).
     // Skip the BehaviorSubject's initial replay — we already used
@@ -465,15 +480,10 @@ export class SnapshotsComponent implements OnInit {
         // catch the loop on every back/forward. The `skipUrlSync`
         // + microtask dance is kept as belt-and-suspenders for the
         // signal-write-protection case but is no longer load-bearing.
-        this.lastWrittenUrlKey = JSON.stringify({
-          project_id: this.filterProjectId(),
-          agent_id: this.filterAgentId(),
-          status: this.filterStatus(),
-          age: this.filterAge(),
-          tag_mode: this.filterTagMode(),
-          sort: this.filterSort(),
-          tags: this.filterTags(),
-        });
+        // S1 parity: computed via the SAME shared null-normalized
+        // helper as the effect's dedup key (computeUrlQueryParams),
+        // so the bytes match even when filters sit at defaults.
+        this.lastWrittenUrlKey = JSON.stringify(this.computeUrlQueryParams());
         // Allow the URL-sync effect to navigate on the next
         // USER-DRIVEN filter change. The seed above means even if
         // the microtask races ahead of the effect, the dedup check
