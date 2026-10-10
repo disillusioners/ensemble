@@ -1,6 +1,7 @@
-"""Unit tests for ``daemon.api.HostCaptureMiddleware``.
+"""Unit tests for ``daemon.middleware.host_capture.HostCaptureMiddleware``.
 
-Phase 2 follow-up — module-level class placement lets the test
+Phase 2 follow-up — module-level class placement (own module since
+the 2026-10-10 hygiene move out of ``daemon/api.py``) lets the test
 import the middleware directly without the ``inspect.getsource``
 extraction trick used for ``SelectiveAccessLogMiddleware`` (see
 ``tests/unit/test_selective_access_log_middleware.py``). The
@@ -40,7 +41,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
-from daemon.api import HostCaptureMiddleware
+from daemon.middleware.host_capture import HostCaptureMiddleware
 from daemon.services.live_views import HostRecorder
 
 

@@ -3,8 +3,9 @@
 This module contains the app factory, lifespan management, middleware,
 and global error handlers. All API endpoints are in daemon/routers/.
 
-M10 — module-band rationale (2026-09-13): this file lives in the
-~1000-3000-line band by design. It carries (a) the FastAPI app
+M10 — module-band rationale (2026-09-13, refreshed 2026-10-10):
+this file lives in the ~3000-3500-line band by design (currently
+~3290 lines). It carries (a) the FastAPI app
 factory ``create_app`` (the lifespan wiring + middleware
 registration lives here), (b) the ``lifespan`` async-context
 manager that boots the per-instance watchdog, the long-tool-call-
@@ -22,6 +23,15 @@ modules instead of one and would scatter the related
 construction-failure recovery decisions. The routers themselves
 live under ``daemon/routers/``; this module owns the wiring, not
 the routes.
+
+Growth policy (2026-10-10): NEW self-contained middleware goes to
+``daemon/middleware/`` (first resident: ``host_capture``, the
+live-view Host/X-Forwarded-Proto capture), NOT into this file —
+api.py keeps only the ``add_middleware`` wiring (plus
+create_app()-local middlewares that need closure over factory
+state, e.g. ``SelectiveAccessLogMiddleware``). The full api.py
+split (lifespan extraction, handler extraction) remains on the
+hygiene backlog; it is deliberate and deferred, not forgotten.
 """
 
 import warnings
@@ -151,6 +161,7 @@ from daemon.utils import validate_agent_id as validate_agent_id  # noqa: F401
 from daemon.routers.messages import send_message as send_message  # noqa: F401
 
 from daemon import __version__
+from daemon.middleware.host_capture import HostCaptureMiddleware
 from daemon.models import ErrorCodes, ErrorResponse, HealthResponse, LivezResponse, ReadyzResponse
 from daemon.ensemble_config import EnsembleConfig
 from daemon.services.live_event_hub import LiveEventHub
@@ -2880,63 +2891,6 @@ async def shutdown_dependency_bus(app) -> None:
         except Exception as e:
             logger.warning(f"Error stopping DependencyBus: {e}")
         set_dependency_bus(None)
-
-
-# ─────────────────────────────────────────────────────────────────
-# Host-capture middleware (Phase 2 of the live-view subsystem).
-# Reads the inbound ``Host`` and ``X-Forwarded-Proto`` headers
-# and writes them to ``app.state.host_recorder`` — the
-# second-tier input of the URL base-resolution chain (see
-# ``BaseURLResolver``). Last-write-wins semantics: the most
-# recent request's host becomes the next minted URL base.
-# Syntactic validation lives in
-# ``daemon.services.live_views.HostRecorder.record``; this
-# middleware is intentionally a thin pass-through (no failure
-# path; a bad Host is dropped at the recorder, never an error).
-#
-# The middleware looks up the recorder via ``scope["app"]``
-# (Starlette 0.30+) rather than capturing it at construction
-# — ``app.add_middleware`` is invoked BEFORE the lifespan runs,
-# so the recorder does not yet exist at construction time.
-# Lookup at request time is the canonical pattern.
-#
-# Module-level placement (rather than create_app()-local) so
-# tests can import the class directly. Wiring in create_app()
-# is unchanged: ``app.add_middleware(HostCaptureMiddleware)``
-# at the same site, same behavior.
-# ─────────────────────────────────────────────────────────────────
-class HostCaptureMiddleware:
-    """Capture inbound Host + X-Forwarded-Proto for URL minting."""
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            app_ref = scope.get("app")
-            recorder = (
-                getattr(app_ref.state, "host_recorder", None)
-                if app_ref is not None
-                else None
-            )
-            if recorder is not None:
-                # ASGI headers are list[tuple[bytes, bytes]].
-                # Decode once, lower-case keys, ignore any
-                # malformed pair — the recorder drops bad
-                # values; the middleware must NEVER raise.
-                headers: dict[str, str] = {}
-                for raw_k, raw_v in scope.get("headers", []):
-                    try:
-                        key = raw_k.decode("latin-1").lower()
-                        val = raw_v.decode("latin-1")
-                    except (UnicodeDecodeError, AttributeError):
-                        continue
-                    headers[key] = val
-                host = headers.get("host")
-                if host:
-                    proto = headers.get("x-forwarded-proto")
-                    recorder.record(host, proto)
-        await self.app(scope, receive, send)
 
 
 def create_app() -> FastAPI:

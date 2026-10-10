@@ -7,25 +7,33 @@ HTTP server without booting the full daemon. Pick a free port
 (18079 by default — the spec notes 8079 may collide with a running
 daemon); bind to 127.0.0.1 only.
 
-Run from the worktree root:
+Run from the worktree root (or anywhere — the worktree is derived
+from this file's location; override with LIVE_VIEWS_SMOKE_WORKTREE
+when running from a copied/installed tree):
 
-    .venv/bin/python /tmp/smoke_live_views.py [PORT]
+    .venv/bin/python .smoke/smoke_live_views.py [PORT]
 """
 from __future__ import annotations
 
 import os
 import sys
-import threading
-import time
 from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
 
 # Worktree-root Python — make sure the worktree's daemon package is
-# importable. The script is intended to be invoked from the worktree.
-WORKTREE = Path("/home/nea/ensemble-src-wt-liveviews-20261010")
+# importable regardless of the caller's CWD. The script lives at
+# ``<worktree>/.smoke/smoke_live_views.py``, so parents[1] is the
+# worktree root. Override via LIVE_VIEWS_SMOKE_WORKTREE (e.g. when
+# the harness is copied into a non-worktree location).
+WORKTREE = Path(
+    os.environ.get("LIVE_VIEWS_SMOKE_WORKTREE", "")
+    or Path(__file__).resolve().parents[1]
+)
 sys.path.insert(0, str(WORKTREE))
+
+from daemon.middleware.host_capture import HostCaptureMiddleware  # noqa: E402
 
 
 def main() -> int:
@@ -91,42 +99,10 @@ def main() -> int:
     app = FastAPI()
     app.state.live_views_service = service
     app.state.host_recorder = recorder
-    # Inline the same HostCaptureMiddleware shape the daemon
-    # uses (defined at create_app() scope in daemon/api.py);
-    # the smoke harness needs its own module-level copy so it
-    # can register it on this fresh app. The recorder
+    # HostCaptureMiddleware is imported at module scope (from
+    # daemon.middleware.host_capture, after the sys.path fix-up) —
+    # the same class the daemon wires in create_app(). The recorder
     # resolution is identical — scope["app"].state.host_recorder.
-    from typing import Awaitable, Callable  # noqa: E402
-
-    class HostCaptureMiddleware:  # noqa: D401 - test fixture
-        """Mirror of daemon/api.py:HostCaptureMiddleware for smoke."""
-
-        def __init__(self, app):
-            self.app = app
-
-        async def __call__(self, scope, receive, send):
-            if scope["type"] == "http":
-                app_ref = scope.get("app")
-                recorder = (
-                    getattr(app_ref.state, "host_recorder", None)
-                    if app_ref is not None
-                    else None
-                )
-                if recorder is not None:
-                    headers: dict[str, str] = {}
-                    for raw_k, raw_v in scope.get("headers", []):
-                        try:
-                            key = raw_k.decode("latin-1").lower()
-                            val = raw_v.decode("latin-1")
-                        except (UnicodeDecodeError, AttributeError):
-                            continue
-                        headers[key] = val
-                    host = headers.get("host")
-                    if host:
-                        proto = headers.get("x-forwarded-proto")
-                        recorder.record(host, proto)
-            await self.app(scope, receive, send)
-
     app.add_middleware(HostCaptureMiddleware)
     app.include_router(build_router())
 
