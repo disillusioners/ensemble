@@ -41,6 +41,8 @@ from daemon.services.live_views import (
     MARKED_CDN_INTEGRITY,
     MARKED_CDN_URL,
     LiveViewsService,
+    new_csp_nonce,
+    render_markdown_wrapper,
 )
 
 
@@ -568,3 +570,242 @@ class TestRegressionGuards:
         assert head_resp.headers.get("content-length") == str(
             len(get_resp.content)
         )
+
+
+# ===========================================================================
+# Group 6 — Phase 2 follow-up: nonce uniqueness + bootstrap pin
+# ===========================================================================
+
+
+class TestCspNonceUniqueness:
+    """``new_csp_nonce`` must yield distinct values across calls.
+
+    Phase 2 follow-up — a nonce that repeated would let the
+    browser cache-match inline scripts across requests and
+    re-evaluate the same CSP scope; the per-request fresh
+    nonce is the strict mechanism that closes inline-script
+    injection. The function uses ``secrets.token_urlsafe(16)``
+    (≈ 128 bits of entropy) so 50 draws must produce 50 unique
+    values with overwhelming probability — a regression here
+    is a real bug.
+    """
+
+    def test_fifty_draws_all_unique(self):
+        nonces = {new_csp_nonce() for _ in range(50)}
+        assert len(nonces) == 50, (
+            f"50 nonce draws produced {len(nonces)} unique values; "
+            f"a collision indicates ``secrets.token_urlsafe`` was "
+            f"replaced with a lower-entropy source."
+        )
+
+    def test_consecutive_requests_get_distinct_nonces_inline(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        mockup = (
+            filesystem_root_dir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        (mockup / "notes.md").write_bytes(b"# Hello\n")
+        c = _client_with_workdir(filesystem_root_dir)
+        resp_a = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/notes.md"
+        )
+        resp_b = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/notes.md"
+        )
+        assert resp_a.status_code == 200
+        assert resp_b.status_code == 200
+        # The CSP header in each response carries the nonce for
+        # that specific request — they MUST differ.
+        csp_a = resp_a.headers["content-security-policy"]
+        csp_b = resp_b.headers["content-security-policy"]
+        assert csp_a != csp_b, (
+            f"two consecutive requests returned the same CSP "
+            f"header — the nonce is not per-request"
+        )
+
+
+class TestBootstrapGuardOrdering:
+    """The bootstrap script's guard checks MUST come BEFORE the
+    first render call.
+
+    Phase 2 follow-up — fail-closed structural pin. If a future
+    refactor moves ``marked.parse(raw)`` (or the DOMPurify
+    call) ahead of the availability guards, a missing-marked
+    scenario throws ``TypeError: marked.parse is not a function``
+    or similar inside the try block — the catch block handles
+    it, but the security model is that the guard is explicit,
+    not implicit. This test extracts the inline bootstrap
+    ``<script>`` body and asserts the textual order of the
+    guard tokens vs. the render-call token.
+    """
+
+    def _bootstrap_body(self) -> str:
+        """Return the inline bootstrap ``<script>`` body (NOT
+        the CDN ``<script src=...>`` tags — those are external).
+
+        The wrapper renders ``<script nonce=...>...</script>``
+        exactly once for the inline bootstrap; the two CDN
+        ``<script src=...>`` tags are external and excluded
+        by the regex (``src=`` attribute must be absent). We
+        find the inline script's opening tag, then walk forward
+        to its matching ``</script>`` to extract the body. The
+        CDN tags sit BETWEEN the inline script and the next
+        opening ``<script>``, so a non-greedy scan handles the
+        first ``</script>`` correctly.
+        """
+        body, _ = render_markdown_wrapper(
+            rel_path="notes.md", markdown_text="# Hello\n"
+        )
+        import re
+
+        # Find the inline bootstrap opening tag: ``<script``
+        # followed by attributes that include ``nonce=`` but
+        # NOT ``src=``. Then find the matching ``</script>``.
+        # The body is the content between ``>`` and ``</script>``.
+        m = re.search(
+            r'<script(?![^>]*\bsrc=)[^>]*nonce="[^"]*"[^>]*>',
+            body,
+        )
+        assert m is not None, (
+            "could not locate the inline bootstrap <script ... nonce=...> "
+            "tag — the wrapper template's inline-script shape changed"
+        )
+        start = m.end()
+        end = body.find("</script>", start)
+        assert end > start, (
+            "the inline bootstrap <script> tag has no closing "
+            "</script> — wrapper template structure regressed"
+        )
+        return body[start:end]
+
+    def test_marked_defined_guard_precedes_render_call(self):
+        body = self._bootstrap_body()
+        # Anchor the render call on ``var html = marked.parse``
+        # to skip the comment text that mentions ``marked.parse``
+        # in prose.
+        idx_guard = body.find("typeof marked === 'undefined'")
+        idx_render = body.find("var html = marked.parse(raw)")
+        assert idx_guard > -1, (
+            "bootstrap must contain a ``typeof marked === 'undefined'`` guard"
+        )
+        assert idx_render > -1, (
+            "bootstrap must contain the ``var html = marked.parse(raw)`` call"
+        )
+        assert idx_guard < idx_render, (
+            "the marked-availability guard MUST precede the render call; "
+            f"got guard at byte {idx_guard}, render at byte {idx_render}"
+        )
+
+    def test_marked_parse_function_guard_precedes_render_call(self):
+        """Phase 2 follow-up — the ``typeof marked.parse ===
+        'function'`` guard is the tighter shape (a bare
+        ``typeof marked`` check passes if marked is a defined
+        object but lacks ``parse`` — e.g. an ESM-default
+        re-export)."""
+        body = self._bootstrap_body()
+        idx_guard = body.find("typeof marked.parse !== 'function'")
+        idx_render = body.find("var html = marked.parse(raw)")
+        assert idx_guard > -1, (
+            "bootstrap must contain a ``typeof marked.parse !== "
+            "'function'`` guard (the tightened Phase 2 follow-up)"
+        )
+        assert idx_render > -1, (
+            "bootstrap must contain the ``var html = marked.parse(raw)`` call"
+        )
+        assert idx_guard < idx_render, (
+            "the marked.parse function-availability guard MUST precede "
+            f"the render call; got guard at {idx_guard}, render at {idx_render}"
+        )
+
+    def test_dompurify_defined_guard_precedes_sanitize_call(self):
+        body = self._bootstrap_body()
+        idx_guard = body.find("typeof DOMPurify === 'undefined'")
+        idx_render = body.find("var safe = DOMPurify.sanitize(html")
+        assert idx_guard > -1, (
+            "bootstrap must contain a ``typeof DOMPurify === 'undefined'`` guard"
+        )
+        assert idx_render > -1, (
+            "bootstrap must contain the ``var safe = DOMPurify.sanitize(html`` call"
+        )
+        assert idx_guard < idx_render, (
+            "the DOMPurify-availability guard MUST precede the sanitize "
+            f"call; got guard at {idx_guard}, render at {idx_render}"
+        )
+
+    def test_dompurify_sanitize_function_guard_precedes_sanitize_call(self):
+        """Phase 2 follow-up — companion to the marked.parse
+        guard: the DOMPurify.sanitize function shape is the
+        tighter check, matching the same defense pattern."""
+        body = self._bootstrap_body()
+        idx_guard = body.find(
+            "typeof DOMPurify.sanitize !== 'function'"
+        )
+        idx_render = body.find("var safe = DOMPurify.sanitize(html")
+        assert idx_guard > -1, (
+            "bootstrap must contain a ``typeof DOMPurify.sanitize !== "
+            "'function'`` guard (the tightened Phase 2 follow-up)"
+        )
+        assert idx_render > -1, (
+            "bootstrap must contain the ``var safe = DOMPurify.sanitize(html`` call"
+        )
+        assert idx_guard < idx_render, (
+            "the DOMPurify.sanitize function-availability guard MUST "
+            f"precede the sanitize call; got guard at {idx_guard}, render at {idx_render}"
+        )
+
+
+# ===========================================================================
+# Group 7 — Phase 2 follow-up: Referrer-Policy on the wrapper only
+# ===========================================================================
+
+
+class TestReferrerPolicyWrapperOnly:
+    """The ``.md`` wrapper sets ``Referrer-Policy: no-referrer``.
+
+    Phase 2 follow-up — defense in depth: the wrapper's
+    sanitized HTML may carry user-authored ``href=`` values
+    that point off-origin; suppressing the Referer prevents
+    the destination from learning the artifact path. Raw
+    ``.html`` / image / text responses are NOT touched (they
+    are operator-curated artifacts whose outbound linking
+    behavior we don't presume to override).
+    """
+
+    def test_wrapper_sets_referrer_policy_no_referrer(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        mockup = (
+            filesystem_root_dir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        (mockup / "notes.md").write_bytes(b"# Hello\n")
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/notes.md"
+        )
+        assert resp.status_code == 200
+        assert resp.headers.get("referrer-policy") == "no-referrer"
+
+    def test_raw_html_does_not_set_referrer_policy(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        # The seeded fixture already provides landing.html.
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/landing.html"
+        )
+        assert resp.status_code == 200
+        # Raw HTML is operator-curated — wrapper-only header
+        # MUST NOT leak into this response.
+        assert "referrer-policy" not in resp.headers
