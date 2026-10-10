@@ -30,6 +30,10 @@ The parity log and its schema-v2 validation tooling outlived the dual-run pilot 
 
 Sketcher's Capture Procedure states the capture lands unconditionally "as part of my write-through (the capture lands right after my save passes the gate check)" — plan-rooted in the phase-1 T7 migration wording. The phase-3 side of the same plan (designer Guideline (g) + critic schema `screenshot_capture`) treats the capture as possibly ABSENT (`[VISUAL-QA-DEFERRED]` until `design.capture_mockup` ships, deferred-debt (e)). Both readings cannot be true at once: either sketcher always captures (tools_note as written) or capture is a deferred capability the schema must tolerate missing. Next-commission action: upstream wording decision — reword one side to match the other once "Future commission A" (the capture tool) lands; do NOT resolve by silent edit inside this branch.
 
+## (h) plan-fencing gap — non-owned test file slipped the commission's test surface
+
+`tests/unit/plugin_subsystem/test_tier1_wiring.py` was never in the plan's owned-files/test-surface inventory, so its two stale designer-od.* asserts (:215/:337) went red when phase 1 removed designer's od.* allow entries — the plan's hard-escalation clause covered the file in principle, but no worker owned it and no deferred-debt entry recorded it until the final gate adjudication (tester N1/N2; fixed post-ruling in this branch's close-out commit). Next-commission action: when deriving a plan's owned-test inventory, grep repo-wide for the killed architecture's symbol co-occurrences (e.g. `designer` + `od.` in tests/) instead of listing only the files each phase task touches.
+
 ## Related out-of-scope threads (recorded, not debt of this branch)
 
 - **120s llm-supervisor-proxy read window** vs 130–170s generation budget — root cause of 524-class escalations; its own commission ("Future commission D", constraint C1). Every 524-driven round-3 escalation under this architecture is an infra escalation, not a design failure.

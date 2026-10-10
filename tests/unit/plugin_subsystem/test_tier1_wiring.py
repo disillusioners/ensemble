@@ -13,7 +13,8 @@ Covers the three sanctioned tier-1 touches (REC §4.3 row ⑤ PROVES line;
    instance toolset with the 4 plugin Port tools. Tested through the
    REAL ``create_instance_tools`` path with a MagicMock manager +
    synthetic agent (the ``test_service_registration.py`` precedent),
-   covering: designer-shaped allow grants them, agents without the
+   covering: sketcher-shaped allow grants them (designer's allow — the
+   sketcher-sole od.* lane — grants none), agents without the
    names do not get them (uniform gating), and build failure /
    refused ports degrade cleanly to "not bound".
 3. ``daemon/tools/_tool_registry.py`` — ``DYNAMIC_TOOL_NAMES`` carries
@@ -154,6 +155,10 @@ DESIGNER_ALLOW: list[str] = json.loads(
     (REPO_ROOT / "agents" / "designer" / "meta.json").read_text(encoding="utf-8")
 )["tools"]["allow"]
 
+SKETCHER_ALLOW: list[str] = json.loads(
+    (REPO_ROOT / "agents" / "sketcher" / "meta.json").read_text(encoding="utf-8")
+)["tools"]["allow"]
+
 
 def _stage_synthetic_agent(tmp_path: Path, agent_id: str, tools_cfg: dict) -> Path:
     """Stage a synthetic agent dir with the given tools config (the
@@ -202,18 +207,34 @@ def _build_instance_tools(agent_id: str) -> dict[str, object]:
 class TestPluginToolBinding:
     """create_instance_tools extends with the 4 plugin Port tools."""
 
-    def test_designer_shaped_allow_resolves_all_four(self, tmp_path, registry_for) -> None:
-        """A designer-shaped agent (its real allow list, which carries
-        the od.* names) resolves ALL four plugin Port tools through the
-        real create_instance_tools path."""
+    def test_designer_shaped_allow_resolves_zero(self, tmp_path, registry_for) -> None:
+        """A designer-shaped agent (its real allow list — the
+        sketcher-sole od.* lane removed ALL od.* names from designer)
+        resolves ZERO plugin Port tools through the real
+        create_instance_tools path."""
         agents_dir = _stage_synthetic_agent(
             tmp_path, "syn-od-designer", {"allow": list(DESIGNER_ALLOW)}
         )
         registry_for(agents_dir)
         by_name = _build_instance_tools("syn-od-designer")
         got = PLUGIN_TOOL_NAMES & by_name.keys()
+        assert got == set(), (
+            f"designer-shaped allow must bind ZERO od.* port tools "
+            f"(sketcher-sole lane); leaked={sorted(got)}"
+        )
+
+    def test_sketcher_shaped_allow_resolves_all_four(self, tmp_path, registry_for) -> None:
+        """A sketcher-shaped agent (its real allow list, which carries
+        the od.* names) resolves ALL four plugin Port tools — the
+        sketcher-sole od.* generation lane."""
+        agents_dir = _stage_synthetic_agent(
+            tmp_path, "syn-od-sketcher", {"allow": list(SKETCHER_ALLOW)}
+        )
+        registry_for(agents_dir)
+        by_name = _build_instance_tools("syn-od-sketcher")
+        got = PLUGIN_TOOL_NAMES & by_name.keys()
         assert got == set(PLUGIN_TOOL_NAMES), (
-            f"designer-shaped allow must bind all 4 plugin Port tools; "
+            f"sketcher-shaped allow must bind all 4 plugin Port tools; "
             f"missing={sorted(set(PLUGIN_TOOL_NAMES) - got)}"
         )
 
@@ -244,8 +265,9 @@ class TestPluginToolBinding:
 
     def test_factory_crash_degrades_to_unbound(self, tmp_path, monkeypatch, registry_for) -> None:
         """Graceful degradation (contractual): a plugin-tool build
-        failure must never break instance assembly — the designer path
-        degrades to tool-not-bound (its text fallback)."""
+        failure must never break instance assembly — the agent path
+        degrades to tool-not-bound and the rest of the toolset
+        survives intact."""
         from daemon.tools import instance as inst_mod
 
         def _boom(**kwargs):
@@ -323,19 +345,28 @@ class TestPluginToolNameUniverse:
 
 
 # =============================================================================
-# 4. Designer lane config (sanctioned designer-lane file)
+# 4. Lane allow config pins (designer carries zero / sketcher is sole)
 # =============================================================================
 
 
-class TestDesignerLaneAllow:
-    """The designer's meta.json allow list carries the 4 names — the
-    designer-shaped agent above derives from THIS file, so the
-    functional grant test and this config pin stay in lockstep."""
+class TestLaneAllowPins:
+    """Config pins in lockstep with the functional tests above: the
+    designer's meta.json allow list carries ZERO od.* names (the
+    designer-shaped agent derives from THIS file), while the sketcher
+    meta.json is the sole od.* carrier (sketcher-sole lane)."""
 
-    def test_designer_allow_includes_all_four(self) -> None:
-        missing = PLUGIN_TOOL_NAMES - set(DESIGNER_ALLOW)
+    def test_designer_allow_carries_zero_od_tools(self) -> None:
+        leaked = PLUGIN_TOOL_NAMES & set(DESIGNER_ALLOW)
+        assert leaked == set(), (
+            f"agents/designer/meta.json tools.allow must carry ZERO od.* "
+            f"plugin Port tools (sketcher-sole od.* lane): "
+            f"{sorted(leaked)}"
+        )
+
+    def test_sketcher_allow_includes_all_four(self) -> None:
+        missing = PLUGIN_TOOL_NAMES - set(SKETCHER_ALLOW)
         assert missing == set(), (
-            f"agents/designer/meta.json tools.allow missing plugin Port "
-            f"tools: {sorted(missing)} — the designer native lane would "
-            f"be filtered out despite the tier-1 binding"
+            f"agents/sketcher/meta.json tools.allow missing plugin Port "
+            f"tools: {sorted(missing)} — the sketcher native od.* lane "
+            f"would be filtered out despite the tier-1 binding"
         )
