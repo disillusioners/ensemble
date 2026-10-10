@@ -120,6 +120,32 @@ def restore_langgraph_mocks(saved: dict) -> None:
         sys.modules[key] = saved[key]
 
 
+def snapshot_module_state(mod) -> dict:
+    """Shallow-copy a module's ``__dict__`` (exact object snapshot).
+
+    Pair with :func:`restore_module_state` to undo an
+    ``importlib.reload`` WITHOUT re-executing the module: reload keeps
+    the module object but re-creates every class in it, which forks
+    identity for any consumer that bound names at its own import time
+    (e.g. ``daemon.persistence`` holds ``SqliteCheckpointerAdapter``
+    from collection time — a post-fixture fresh import would get a
+    different class object and ``isinstance`` would split across test
+    files). Snapshot-restore puts the EXACT original objects back.
+    """
+    return dict(vars(mod))
+
+
+def restore_module_state(mod, snapshot: dict) -> None:
+    """Restore a :func:`snapshot_module_state` snapshot in place.
+
+    Clears the module namespace and re-installs the exact saved objects
+    (no fresh imports, no re-execution). ``sys.modules`` keeps holding
+    the same module object throughout.
+    """
+    vars(mod).clear()
+    vars(mod).update(snapshot)
+
+
 def require_postgres() -> None:
     """Loud skip when PostgreSQL is unreachable (never a silent mock).
 

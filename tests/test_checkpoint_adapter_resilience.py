@@ -159,23 +159,35 @@ def _real_langgraph_saver_base():
     runs. Eviction alone therefore proves nothing here; reloading the
     module under eviction rebinds the global to the REAL pinned
     ``langgraph.checkpoint.base.BaseCheckpointSaver``. The ``finally``
-    block restores the mocks and reloads again, so mock-bound unit tests
-    sharing this session keep their original module view.
+    block restores the mocks and then restores the module's EXACT
+    pre-fixture namespace (snapshot/restore, round-2 R1) — NOT a second
+    reload. A second ``importlib.reload`` re-creates every class in the
+    module, so consumers that bound names at their own import time
+    (``daemon.persistence`` holds ``SqliteCheckpointerAdapter`` from
+    collection time) end up isinstance-split against fresh imports in
+    later test files of the same session (observed live: combined
+    ``test_checkpoint_adapter_resilience.py + test_persistence.py`` run
+    failed ``test_get_checkpointer_sqlite_returns_adapter``). Snapshot
+    before the reload, restore the same objects after — symmetric, no
+    fresh imports.
     """
     from tests.helpers.checkpoint_prune_pg import (
         evict_langgraph_mocks,
         restore_langgraph_mocks,
+        restore_module_state,
+        snapshot_module_state,
     )
 
     saved = evict_langgraph_mocks()
     import daemon.checkpoint_adapter as ca
 
+    ca_snapshot = snapshot_module_state(ca)
     importlib.reload(ca)
     try:
         yield ca
     finally:
         restore_langgraph_mocks(saved)
-        importlib.reload(ca)
+        restore_module_state(ca, ca_snapshot)
 
 
 # ── _is_retryable_connection_error ─────────────────────────────────────────
