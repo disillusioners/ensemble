@@ -30,6 +30,164 @@ from daemon.constants import CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES
 logger = logging.getLogger(__name__)
 
 
+# ── Incident 2026-10-10: narrow connection-failure retry wrapper ─────────
+#
+# The saver is now backed by a pool (see ``daemon.persistence``), so dead
+# connections are normally replaced transparently. This wrapper is
+# belt-and-braces for the narrow race window where a cursor-open lands
+# on a connection that died AFTER ``check=`` validated it but BEFORE the
+# statement ran (PG-side session kill mid-execution). It also covers
+# admin-initiated terminations that propagate as
+# ``psycopg.OperationalError: the connection is closed``.
+#
+# WHAT WE WRAP: the saver object (smaller surface than wrapping the
+# adapter methods). LangGraph's reads/writes flow through the saver;
+# adapter methods operate on the SEPARATE asyncpg pool, which has its
+# own resilience (and is exercised by maintenance, not the hot instance
+# path). Wrapping the saver covers exactly the failure class the
+# incident produced, with one retry only.
+#
+# IDEMPOTENCY RATIONALE (writes): ``AsyncPostgresSaver`` upserts are
+# keyed on (thread_id, checkpoint_id). A retry that re-runs an upsert
+# after a cursor-open failure lands the same row in the same state —
+# the previous attempt did not execute the statement, so there is no
+# half-written state to overwrite. ``setup()`` is idempotent (DDL uses
+# IF NOT EXISTS / CREATE INDEX IF NOT EXISTS) and is NEVER routed
+# through this wrapper (we only wrap method calls, never setup). The
+# READ path is naturally idempotent.
+#
+# SCOPE OF RETRY: SQLSTATE class 08 (connection exceptions:
+# 08000-08999), 57P01 (admin_shutdown), 57P02 (crash_shutdown), 57P03
+# (cannot_connect_now), and psycopg's ``OperationalError`` family
+# carrying the "the connection is closed" message. Other errors
+# propagate immediately. The class-08 catch covers asyncpg/psycopg
+# exceptions that expose a ``.sqlstate`` attribute; the
+# ``OperationalError`` catch covers the psycopg-3 idiomatic exception
+# raised before SQLSTATE reaches the driver (cursor-open on a closed
+# conn).
+#
+# On second failure we re-raise unchanged so the existing
+# instance-state / error-classification pipeline (task_processor.py:651)
+# sees the same exception class as before the fix — the wrapper is
+# transparent to upstream consumers.
+_RETRY_SQLSTATE_CLASSES: tuple[str, ...] = tuple(
+    f"08{i:03d}" for i in range(0, 1000)
+)
+_RETRY_SQLSTATE_EXACT: frozenset[str] = frozenset(
+    {"57P01", "57P02", "57P03"}
+)
+_RETRY_OPERATIONAL_CLOSED_SUBSTR: str = "the connection is closed"
+
+
+def _is_retryable_connection_error(exc: BaseException) -> bool:
+    """Classify an exception as a transient connection-class failure.
+
+    Duck-typed on ``.sqlstate`` (psycopg and asyncpg both expose it)
+    plus a fallback string match for psycopg's ``OperationalError: the
+    connection is closed`` (which fires at cursor-open time, before
+    SQLSTATE is available).
+    """
+    sqlstate = getattr(exc, "sqlstate", None)
+    if isinstance(sqlstate, str):
+        if sqlstate in _RETRY_SQLSTATE_EXACT:
+            return True
+        if sqlstate[:2] == "08":
+            return True
+    # psycopg's OperationalError family — the most common surface for
+    # "the connection is closed" when the cursor() open itself fails.
+    msg = str(exc) if exc else ""
+    if _RETRY_OPERATIONAL_CLOSED_SUBSTR in msg.lower():
+        return True
+    return False
+
+
+def _wrap_saver_with_connection_retry(saver: Any) -> Any:
+    """Wrap a saver with one-shot retry on connection-class failures.
+
+    The wrapper forwards every attribute access and method call to the
+    underlying saver, intercepting method calls only to add a retry
+    layer. Non-method access (e.g. ``wrapper.conn``, ``wrapper.lock``)
+    passes through unchanged so existing consumers (the adapter's
+    ``close()`` reads ``saver.conn``) are unaffected.
+
+    Args:
+        saver: An ``AsyncPostgresSaver`` (or any object with
+            ``aget``/``aput``/``alist``/etc. methods).
+
+    Returns:
+        A proxy object that behaves like the saver but retries each
+        method call once on a connection-class failure.
+    """
+
+    class _SaverRetryProxy:
+        """One-shot retry proxy — see module docstring for rationale."""
+
+        __slots__ = ("_saver",)
+
+        def __init__(self, saver: Any) -> None:
+            self._saver = saver
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._saver, name)
+
+        async def _call_with_retry(self, method_name: str, args: tuple, kwargs: dict) -> Any:
+            method = getattr(self._saver, method_name)
+            try:
+                return await method(*args, **kwargs)
+            except Exception as exc:
+                if not _is_retryable_connection_error(exc):
+                    raise
+                logger.warning(
+                    "[CheckpointAdapter] %s raised %s (%s); retrying once "
+                    "with a fresh pooled connection",
+                    method_name,
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
+                # Second (and final) attempt. If this also fails, re-raise
+                # unchanged so the upstream pipeline classifies the error
+                # exactly as it did before the wrapper existed.
+                return await method(*args, **kwargs)
+
+        # Intercept all async methods exposed by the saver. The list
+        # below covers the AsyncPostgresSaver public surface (aio.py);
+        # LangGraph also calls into these via the saver. Unknown
+        # methods fall through to __getattr__ (no retry), which is
+        # safe because nothing else on the saver surface fails on
+        # connection-class issues.
+        async def aget(self, *args, **kwargs):
+            return await self._call_with_retry("aget", args, kwargs)
+
+        async def aget_tuple(self, *args, **kwargs):
+            return await self._call_with_retry("aget_tuple", args, kwargs)
+
+        async def aput(self, *args, **kwargs):
+            return await self._call_with_retry("aput", args, kwargs)
+
+        async def aput_writes(self, *args, **kwargs):
+            return await self._call_with_retry("aput_writes", args, kwargs)
+
+        async def alist(self, *args, **kwargs):
+            return await self._call_with_retry("alist", args, kwargs)
+
+        async def adelete(self, *args, **kwargs):
+            return await self._call_with_retry("adelete", args, kwargs)
+
+        async def aget_delta_channel_history(self, *args, **kwargs):
+            return await self._call_with_retry(
+                "aget_delta_channel_history", args, kwargs
+            )
+
+        async def adelete_thread(self, *args, **kwargs):
+            # Backwards-compat alias — not on the upstream aio.py
+            # surface, but historically seen in callers.
+            return await self._call_with_retry(
+                "adelete_thread", args, kwargs
+            )
+
+    return _SaverRetryProxy(saver)
+
+
 # ── Phase 1 C3: reference-aware checkpoint_blobs prune (direct anti-join) ────────
 #
 # The shared NOT EXISTS predicate of the blob prune, used VERBATIM by both
@@ -532,10 +690,24 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         """Initialize the PostgreSQL checkpointer adapter.
 
         Args:
-            saver: An AsyncPostgresSaver instance.
+            saver: An AsyncPostgresSaver instance (pool-backed; see
+                ``daemon.persistence.create_postgres_checkpointer``).
             pool: An asyncpg.Pool instance for direct SQL access.
+
+        The ``saver`` argument is wrapped in a one-shot retry proxy
+        (see :func:`_wrap_saver_with_connection_retry`) that retries
+        each method call once on a connection-class failure. The
+        proxy's surface is identical to the saver — non-method
+        attribute access (``wrapper.conn``) passes through, so the
+        adapter's ``close()`` continues to read ``saver.conn``
+        transparently.
         """
-        self._saver = saver
+        self._saver = _wrap_saver_with_connection_retry(saver)
+        # Keep an unwrapped reference too: the wrapper is non-essential
+        # for ``close()`` (which only needs ``.conn``), and tests that
+        # want to assert against the real saver object can do so via
+        # this reference.
+        self._raw_saver = saver
         self._pool = pool
 
     @property
@@ -977,11 +1149,23 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                 await asyncio.sleep(backoff_s)
 
     async def close(self) -> None:
-        """Close the asyncpg pool and the saver's psycopg connection.
+        """Close the asyncpg pool and the saver's psycopg resource.
 
-        Both resources are long-lived (one per process). The pool is closed
-        first (so no new maintenance queries can be issued) and the saver's
-        psycopg connection is closed last.
+        Both resources are long-lived (one per process). The asyncpg pool
+        (used by maintenance operations) is closed FIRST so no new
+        maintenance queries can be issued; the saver's psycopg resource
+        (single ``AsyncConnection`` in legacy paths, OR an
+        ``AsyncConnectionPool`` after the incident 2026-10-10 fix) is
+        closed LAST.
+
+        Topology detection is duck-typed: the psycopg-pool's
+        ``AsyncConnectionPool`` exposes ``.close()`` as an awaitable,
+        and so does a plain ``AsyncConnection`` — the same ``await
+        conn.close()`` call works for both. The detection criterion
+        is the presence of a ``pool``-only marker attribute
+        (``get_stats`` is pool-specific and absent on a bare
+        ``AsyncConnection``) so we log a precise topology name and
+        can branch later if needed.
 
         Failures are logged and swallowed so the rest of the shutdown
         sequence can continue. The original errors are preserved in the
@@ -995,13 +1179,32 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
             except Exception as e:
                 logger.warning(f"Error closing PostgreSQL checkpointer pool: {e}")
 
-        # Close the saver's psycopg connection
+        # Close the saver's psycopg resource (connection OR pool — see
+        # incident 2026-10-10 fix). The retry wrapper passes ``.conn``
+        # attribute access through transparently, so we read it the same
+        # way as before.
         conn = getattr(self._saver, "conn", None)
-        if conn is not None:
-            try:
-                await conn.close()
-                logger.debug("PostgreSQL checkpointer saver connection closed")
-            except Exception as e:
-                logger.warning(
-                    f"Error closing PostgreSQL checkpointer saver connection: {e}"
-                )
+        if conn is None:
+            return
+        # Topology detection: AsyncConnectionPool exposes ``get_stats`` /
+        # ``min_size`` / ``max_size``; AsyncConnection does not. We do NOT
+        # import AsyncConnectionPool here (SQLite-only installs must not
+        # pay for it). Duck-typed on the pool-only ``get_stats`` attribute
+        # — psycopg_pool 3.3.1 guarantees this attribute exists on the
+        # pool object (pool_async.py: ``self._pool`` is a deque of
+        # connections and ``get_stats`` is a public method).
+        is_pool = hasattr(conn, "get_stats") and hasattr(conn, "min_size")
+        topology = "pool" if is_pool else "single-connection"
+        try:
+            await conn.close()
+            logger.debug(
+                "PostgreSQL checkpointer saver resource closed "
+                "(topology=%s)",
+                topology,
+            )
+        except Exception as e:
+            logger.warning(
+                "Error closing PostgreSQL checkpointer saver %s: %s",
+                topology,
+                e,
+            )

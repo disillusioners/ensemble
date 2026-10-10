@@ -9,11 +9,19 @@ Threading Notes (SQLite):
   use separate connections.
 
 PostgreSQL Notes:
-- For PostgreSQL, the saver uses a long-lived psycopg.AsyncConnection (driven by
-  ``langgraph-checkpoint-postgres``). The adapter additionally maintains an asyncpg.Pool
-  for the raw SQL operations used by maintenance.py (Phase 2 migration).
-- Both imports (psycopg/asyncpg + langgraph.checkpoint.postgres.aio) are LAZY so the
-  SQLite path is unaffected when PostgreSQL extras are not installed.
+- For PostgreSQL, the saver is backed by a ``psycopg_pool.AsyncConnectionPool``
+  (driver psycopg 3, via ``langgraph-checkpoint-postgres`` 3.1.0). The pool
+  transparently replaces dead connections — incident 2026-10-10 (PG restart
+  killed the prior single long-lived ``AsyncConnection`` permanently). The
+  pool is constructed with ``autocommit=True``, ``prepare_threshold=0`` and
+  ``row_factory=dict_row`` flowing through to every connection via the
+  pool's ``kwargs`` (psycopg_pool's ``_connect`` applies them on every
+  fresh-connect, including replacements). The adapter additionally maintains
+  an ``asyncpg.Pool`` for the raw SQL operations used by maintenance.py
+  (Phase 2 migration) — a separate driver, separate purpose.
+- All imports (psycopg/psycopg_pool/asyncpg + langgraph.checkpoint.postgres.aio)
+  are LAZY so the SQLite path is unaffected when PostgreSQL extras are not
+  installed.
 """
 
 import asyncio
@@ -160,11 +168,17 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
     install the ``postgres`` extras.
 
     The returned adapter wraps:
-    - A long-lived ``psycopg.AsyncConnection`` feeding an ``AsyncPostgresSaver``
-      (the LangGraph checkpointer). ``setup()`` is called on the saver to
-      create the required tables.
+    - An ``AsyncConnectionPool`` (psycopg_pool 3.3.1) feeding an
+      ``AsyncPostgresSaver`` (the LangGraph checkpointer). ``setup()`` is
+      called on the saver to create the required tables.
+      Incident 2026-10-10 fix: the pool transparently replaces dead
+      connections after a PG restart (was: a single long-lived
+      ``psycopg.AsyncConnection`` that the daemon never reconnected,
+      permanently breaking every checkpoint op).
     - An ``asyncpg.Pool`` used by ``PostgresCheckpointerAdapter`` for the
       raw SQL operations required by maintenance.py (operation D, etc.).
+      This pool is a SEPARATE driver from the saver pool — independent
+      lifecycle, independent failure domain.
 
     The connection string is built from environment variables (with
     ``POSTGRES_URL`` as a shortcut) falling back to ``config.postgres`` from
@@ -184,11 +198,20 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
                      ``pip install ensemble[postgres]``.
     """
     # ── Lazy imports ───────────────────────────────────────────────────────
+    # NOTE: ``psycopg_pool`` is required transitively by
+    # ``langgraph-checkpoint-postgres`` 3.1.0 — the saver's
+    # ``_ainternal.get_connection`` (aio.py:374) accepts an
+    # ``AsyncConnectionPool`` and routes every cursor-open through it via
+    # ``pool.connection()``. SQLite-only installs would not pay for it,
+    # but in practice the ``postgres`` extras already pull it in; we keep
+    # the import lazy for symmetry with the psycopg import above so the
+    # SQLite path's import surface stays minimal.
     try:
         import asyncpg
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
         from psycopg.rows import dict_row
         import psycopg
+        from psycopg_pool import AsyncConnectionPool
     except ImportError as e:
         raise ImportError(
             "PostgreSQL checkpoint support requires optional dependencies. "
@@ -204,47 +227,93 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
     # Both the saver (psycopg) and the adapter's asyncpg pool are long-lived
     # resources tied to the application's lifetime. We open them inside a
     # single try/except so that a failure during pool creation also closes
-    # the saver connection (otherwise it would leak on startup errors).
-    saver_conn = None
+    # the saver pool (otherwise it would leak on startup errors).
+    saver_pool = None
     try:
-        # ``autocommit=True``: AsyncPostgresSaver manages its own
-        # transactions internally (it explicitly begins/commits per
-        # operation). Leaving autocommit off would cause psycopg to
-        # implicitly start a transaction on the first statement and
-        # starve the saver of an open transaction for its writes.
-        # ``prepare_threshold=0``: disables psycopg's server-side
-        # prepared-statement cache. This is the recommended setting
-        # when running behind connection poolers such as PgBouncer
-        # in "transaction" mode, where prepared statements cannot be
-        # reused across pooled connections. It also matches the
-        # upstream ``AsyncPostgresSaver`` recommendation.
-        saver_conn = await psycopg.AsyncConnection.connect(
-            conn_string,
-            autocommit=True,
-            prepare_threshold=0,
-            row_factory=dict_row,
+        # ── Pool-backed saver (incident 2026-10-10 fix) ─────────────────
+        #
+        # Before this change the saver held a SINGLE long-lived
+        # ``psycopg.AsyncConnection`` (``saver_conn``). When the PG server
+        # killed that connection (DC node restart, failover), EVERY
+        # subsequent checkpoint op raised
+        # ``psycopg.OperationalError: the connection is closed`` and the
+        # instance pipeline terminated the run. Readiness was blind
+        # because its database probe uses a fresh SQLAlchemy engine conn.
+        #
+        # The fix is to back the saver with an ``AsyncConnectionPool``
+        # (psycopg_pool 3.3.1). The pool acquires a fresh connection
+        # whenever the saver opens a cursor via
+        # ``_ainternal.get_connection`` → ``pool.connection()``; dead
+        # connections are detected by ``check=`` and replaced transparently
+        # on the next acquire.
+        #
+        # ``kwargs=`` vs ``configure=``: psycopg_pool's ``_connect``
+        # (pool_async.py:682-708) calls ``connection_class.connect(conninfo,
+        # **kwargs)`` for EVERY new connection — so ``kwargs`` flows
+        # through to every freshly-created connection, including the ones
+        # the pool spins up to replace one that died. We do NOT need a
+        # ``configure=`` callback for the simple setters used here
+        # (``autocommit``, ``prepare_threshold``, ``row_factory``); those
+        # are constructor kwargs to ``AsyncConnection.connect`` and apply
+        # uniformly. ``configure=`` is reserved for per-reconnect
+        # runtime state (session vars, GUCs) that need to be re-applied
+        # after a reconnect — we have none of that today.
+        #
+        # ``max_lifetime=3600``: rotate every connection hourly so a
+        # connection cannot drift into an unhealthy state.
+        # ``max_idle=600``: drop idle conns after 10 min so they don't
+        # accumulate when traffic is bursty.
+        # ``reconnect_timeout=300``: failed-reconnect back-off window
+        # (matches psycopg_pool default; documented for clarity).
+        # ``check=AsyncConnectionPool.check_connection``: a one-line
+        # ``conn.execute("")`` liveness probe the pool runs before
+        # handing out a connection — caught dead conns get replaced
+        # transparently. The check runs on a worker thread, NOT the
+        # caller's event loop.
+        saver_pool = AsyncConnectionPool(
+            conninfo=conn_string,
+            open=False,
+            min_size=1,
+            max_size=5,
+            check=AsyncConnectionPool.check_connection,
+            max_lifetime=3600,
+            max_idle=600,
+            reconnect_timeout=300,
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            },
         )
-        saver = AsyncPostgresSaver(conn=saver_conn)
-        # ``setup`` is idempotent and must be called before the saver is used.
-        # It creates the checkpoint tables and runs any pending migrations.
+        await saver_pool.open()
+        # ``conn=`` accepts an ``AsyncConnectionPool`` (aio.py:45-61;
+        # ``_ainternal.Conn`` is the union). ``setup`` runs through the
+        # pool (``_ainternal.get_connection`` → ``pool.connection()`` per
+        # call) so the DDL lands on a pooled connection — idempotent and
+        # safe to retry.
+        saver = AsyncPostgresSaver(conn=saver_pool)
         await saver.setup()
 
         # ── Open an asyncpg pool for the adapter's direct SQL operations ───
         # The adapter uses asyncpg for the GROUP BY / DELETE / COUNT operations
         # that maintenance.py needs. asyncpg's connection pool is the most
         # ergonomic way to share connections across the maintenance service.
+        # This pool is independent of the saver pool (different driver,
+        # different purpose — the maintenance service does raw SQL that
+        # the saver does not own).
         pool = await asyncpg.create_pool(
             conn_string,
             min_size=1,
             max_size=5,
         )
     except Exception:
-        # If any step in resource setup fails, close the saver connection
-        # (if it was opened) and re-raise. The pool, if it was the failing
-        # step, cleans itself up automatically on creation failure.
-        if saver_conn is not None:
+        # If any step in resource setup fails, close the saver pool
+        # (if it was opened) and re-raise. The asyncpg pool, if it was
+        # the failing step, cleans itself up automatically on creation
+        # failure.
+        if saver_pool is not None:
             try:
-                await saver_conn.close()
+                await saver_pool.close()
             except Exception:
                 pass
         raise
@@ -257,7 +326,8 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
     adapter = PostgresCheckpointerAdapter(saver, pool)
     logger.info(
         f"PostgreSQL checkpointer adapter ready "
-        f"(saver=AsyncPostgresSaver, pool=asyncpg.Pool)"
+        f"(saver=AsyncPostgresSaver(pool=AsyncConnectionPool), "
+        f"adapter_pool=asyncpg.Pool)"
     )
     return adapter
 

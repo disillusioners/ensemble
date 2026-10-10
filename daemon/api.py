@@ -161,6 +161,7 @@ from daemon.services.readiness import (
     READINESS_FORCE_DEGRADED_ENV,
     ReadinessComposite,
     apply_forced_degradation,
+    make_checkpoint_saver_probe,
     make_db_probe,
     make_queue_probe,
     refresh_readiness_composite,
@@ -2436,6 +2437,18 @@ async def _periodic_readiness_refresh_loop(
                 ),
                 services_ok=services_ok,
                 queue_freshness_threshold_seconds=queue_freshness_threshold_seconds,
+                # Checkpoint-saver probe (incident 2026-10-10 fix):
+                # ``None`` → SQLite / "nothing to probe" → composite
+                # stays ready on the new ``checkpoint_saver`` field.
+                # PG installs pass a probe that runs
+                # ``AsyncConnectionPool.check()`` against the saver's
+                # pool; failure / timeout → 503 (ADR-005: never
+                # restart on degraded readiness).
+                checkpoint_saver_probe=(
+                    make_checkpoint_saver_probe(manager.checkpointer)
+                    if getattr(manager, "checkpointer", None) is not None
+                    else None
+                ),
             )
             # Drill knob (deferred tester probe P7): read PER TICK from
             # the environment so flipping it between ticks of an
@@ -3158,6 +3171,11 @@ def create_app() -> FastAPI:
                         "database": False,
                         "queue_freshness": False,
                         "services": False,
+                        # incident 2026-10-10: when no composite
+                        # exists, fail closed on the new component
+                        # too — readiness never reports green on
+                        # "haven't checked yet".
+                        "checkpoint_saver": False,
                     },
                     detail={
                         "reasons": ["readiness composite not yet computed"],
