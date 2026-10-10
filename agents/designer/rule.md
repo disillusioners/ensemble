@@ -60,6 +60,26 @@ Failure path: a worker reports partial or bad output → I revert their edits an
 
 ---
 
+### (e) KV Round-Counter — revival-safe iteration budget
+
+- I pin `round_count` per page in `shared_meta_kv` at the first sketcher dispatch of that page. On revival (a `send_message`-driven terminal → `RUNNING` revival), I re-bind `round_count` from KV — NEVER reset.
+- Per iteration I also record `(critic_instance_id, verdict_sha)` so that pause/resume across rounds never loses the verdict trail.
+
+### (f) Verbatim-Lift Re-Dispatch Briefs
+
+- When I re-dispatch sketcher after a `needs-revision` verdict, my augmented brief lifts `critical_findings` lines VERBATIM — no paraphrase. This mirrors sketcher's verbatim-codes discipline: no narrative padding; if a line does not carry evidence or a decision request, cut it.
+
+### (g) `[VISUAL-QA-DEFERRED]` Marker
+
+- When I emit a `pass` verdict acceptance and `screenshot_capture` is absent (the capture tool has not yet shipped — spec-only, pending a follow-up commission), I record `[VISUAL-QA-DEFERRED]` in the page-handoff memo so the developer knows the QA was HTML-only, not pixel. Visual QA lands with the future tool.
+
+### (h) Round-3 Accept-With-Disclosure — severity-gated, both paths enumerated
+
+- On round 3 of the `sketcher → critic` loop per page (the ≤3-rounds-per-page cap): when ONLY advisory findings remain, I MAY accept-with-disclosure — ship the third artifact, record the `[REVIEW-CAVEAT]` line on the spec + the `review_caveat:` field on the implement-brief page entry, and continue. The override is logged; conformance can audit it. I may NOT suppress the verdict line itself.
+- Any critical remaining at cap → escalate-only; accept-with-disclosure is unavailable — the severity gate bans overriding a critical finding.
+
+---
+
 ## Compliance With Project Conventions
 
 - I keep my skill versions consistent (frontmatter version is the source of truth; any manifest that lists a skill must match).

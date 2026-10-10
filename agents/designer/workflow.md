@@ -100,49 +100,37 @@ The implement-brief carries one structured artifact field for developer consumpt
 
 ---
 
-## Orchestration — the Sketcher Lane (multi-page generation)
+## Orchestration — the Sketcher + Critic Lane (per-page generation)
 
-For **multi-page runs** I dispatch per-page generation to `sketcher` children — one sketcher instance per page, each running the full OD pipeline (`od.compose_brief` → `od.generate` → `od.lint` → `od.save`) on its page-brief and reporting the generation envelope back to me. **Single-page one-offs stay on my own direct `od.generate`** (Step 1 above) — the two lanes coexist (dual-run); nothing is deprecated while the pilot gates are open.
+**Sketcher is the ONLY OD generation lane. There is no direct `od.generate` lane from designer to OD.** Every page — a single-page run or one page of a multi-page run — goes out as a sketcher dispatch: I compose the brief content in text and the sketcher child runs the OD pipeline tool-internally, reporting the generation envelope back to me. `needs-revision` iterations re-dispatch a fresh sketcher instance with augmented brief (the verbatim-lift Guideline applies). After each sketcher `SHIPPED` report the page goes to critic review before I accept or iterate — the full loop is `designer → sketcher → critic → designer accept/save`.
 
 ### Dispatch convention
 
 - I craft the brief myself (`od.compose_brief` inputs are mine to write — the same `brief_answers` + `brand_spec` for every page), then hand each sketcher child a self-contained page-brief: page id, canonical mockup path, `page_prompt`/`brief_answers`/`brand_spec`, and references.
 - **References travel two ways:** I either pre-digest reference images via `explain_image` into structured text folded into the brief inputs, or attach 1–3 references directly to the sketcher dispatch (pixels ride the dispatch; the sketcher digests in-turn — it is vision-pinned). I never paste reference pixels into brief text.
 - Dispatch via `send_message`, then **end turn** — the runtime resumes me per report. For parallel pages I may dispatch several children in one wave and end turn once after the batch.
-- **Fan-in + escape valve (never silently incomplete):** a sketcher child that errors, reports a FAILED envelope, or never reports → I confirm stuck from its report (or staleness), then **take that page back and run it on my own direct `od.generate`** — one takeover, no re-dispatch. If the takeover also fails, the page is marked `[incomplete]` in my report with the exact `error.code`s and escalated with gaps. Max one takeover per page.
+- **Critic dispatch pattern:** after each sketcher `SHIPPED` report I dispatch critic with the page-brief + the generation envelope + the rendered path. The dispatch envelope includes `pinned_spec_sha` so critic's `compare_images` verdicts are binding rather than advisory. Async (`send_message` + end turn) is the default lane for critic too.
+- **Fan-in + escape valve (never silently incomplete):** a stuck sketcher or critic instance — error report, FAILED envelope, or no report — → I confirm stuck from its report (or staleness), then **re-dispatch a fresh instance ONCE per page** (that consumes one iteration of the ≤3-rounds-per-page budget; the same-code-class exit applies). A second stuck instance on the same page → escalate to the leader with the packet `[<page>, <defect or error summary>, <envelope metrics>]`. The page is marked `[incomplete]` in my report with the exact `error.code`s attached. Max one fresh re-dispatch per page.
 
 ### The wait-timeout rule (load-bearing)
 
-`od.generate` runs 130–170s. My lane of choice is `send_message` + end turn, which has no timeout to mistune. **If I ever invoke a sketcher (or any `od.generate`-bearing child) synchronously via `invoke_agent_and_wait`, I MUST pass an explicit timeout ≥ 400s** — the 300s default silently trims a normal 130–170s generation plus semaphore-queue stall, converting a healthy run into a false timeout.
+Generation runs 130–170s per page. My lane of choice is `send_message` + end turn, which has no timeout to mistune. **If I ever invoke an `od.generate`-bearing OR critic-invoking child synchronously via `invoke_agent_and_wait`, I MUST pass an explicit timeout ≥ 400s** — the 300s default silently trims a normal 130–170s generation (critic's pixel review can run just as long) plus semaphore-queue stall, converting a healthy run into a false timeout.
 
-### Report handling (parity rows)
+### Report handling (verdict blocks)
 
-Every sketcher report's Envelope Metrics block converts to one parity row per page per lane — see the Dual-Run Pilot below. I adjudicate every child report on evidence: **if a report carries the `[REPORT SANITY: …]` marker — or shows zero tool-call evidence and no concrete output artifact — treat it as interim, not completion: verify by `send_message` to the child, or escalate to the leader, before acting on it or logging a parity row from it.**
+Every child report is evidence-first; no parity rows — the dual-run is retired. I adjudicate every child report on evidence: **if a report carries the `[REPORT SANITY: …]` marker — or shows zero tool-call evidence and no concrete output artifact — treat it as interim, not completion: verify by `send_message` to the child, or escalate to the leader, before acting on it.** Critic verdicts parse with the regex anchor `^verdict:\s*(pass|needs-revision)\s*$` on the verdict line — substring scans mis-fire when critic prose quotes "verdict:" in evidence. A verdict block that fails to parse → I re-dispatch **critic** with `notes: prev_attempt_unparseable`, never sketcher: a parse failure is not a quality failure, and a sketcher re-dispatch would burn round budget regenerating the same input.
 
-### Post-save visual QA (per page, on my side)
+### Post-save QA loop (per page, severity-gated)
 
-After a sketcher child (or my direct lane) writes through:
+After each sketcher `SHIPPED` report:
 
-1. Capture the shipped page via the documented browser-capture procedure (see Capture Procedure in Tools — the canonical recipe; I do not restate it here).
-2. `image_save` the capture with full provenance (feature/page/version = spec SHA or WP id).
-3. `compare_images` the capture against the reference image, or against the prior iteration's capture on a re-run.
-4. Verdict `fail` → bounded re-dispatch to the sketcher child with concrete fix instructions, inside the existing conformance-loop budget (**≤3 iterations** per page). Iteration 3 fail → escalate with captures attached.
-
----
-
-## Dual-Run Pilot (od-generate-agent-lane Stage 2)
-
-For **pilot pages**, I run BOTH lanes on the same page-brief and log one JSON row per lane:
-
-1. Lane `direct` — my own `od.compose_brief` → `od.generate` → `od.lint` → `od.save` on the page.
-2. Lane `sketcher` — a sketcher child dispatched with the identical brief; its Envelope Metrics report supplies the row.
-3. Append one JSON object per lane to the parity log at `.agents/shared/planning/od-generate-agent-lane/parity-runs.jsonl`:
-
-```json
-{"run_id": "<run id>", "ts": "<ISO-8601>", "page": "<page id>", "lane": "direct|sketcher", "latency_s": <number>, "usage": {"prompt_tokens": <int>, "completion_tokens": <int>, "total_tokens": <int>}, "truncated": <bool>, "gates": {"empty_response": "pass|fail", "finish_reason": "pass|fail", "eof_markers": "pass|fail"}, "marker_pass": <bool>, "model": "<model id>", "notes": "<optional>"}
-```
-
-Field names are exact — the parity tooling and the pilot addendum (`stage2-addendum.md` in the same planning directory) key on these literal strings. The provisional pilot gates (N, marker-pass floor, truncation and latency/token ceilings) live in that addendum, not in my prose; I read the gates from there when the pilot is adjudicated.
+1. **Dispatch critic** with the page-brief + the generation envelope + the rendered path. `pinned_spec_sha` is MANDATORY in the envelope so comparator verdicts bind, not advise.
+2. **Parse the verdict block** (regex anchor per Report handling; parse-fail → critic re-dispatch with `notes: prev_attempt_unparseable`).
+3. **`pass`** (including PASS-with-advisories — a valid terminal verdict) → accept/save; advisories ride into the spec as fix-up inputs and the page moves to spec-compositing. On the round-3 advisory-only accept path, record the `[REVIEW-CAVEAT]` line on the spec + the `review_caveat:` field on the implement-brief page entry. When `screenshot_capture` is absent (the capture tool has not yet shipped), add `[VISUAL-QA-DEFERRED]` to the page-handoff memo.
+4. **`needs-revision`** → augmented-brief sketcher re-dispatch with `critical_findings` lifted VERBATIM, no paraphrase (verbatim-lift Guideline).
+5. **Truncation class:** `[CRITICAL] artifact incomplete / missing markers` WITH `truncated: true` in the envelope is sketcher-internal — re-dispatch with `notes: previous attempt truncated`, NOT a charged round; without `truncated: true` it IS a real round.
+6. **Round budget: ≤3 rounds per page.** A sketcher re-dispatch retry carries `notes: prev_error_code=<code>`; the SAME `error.code` class on the retry → escalate (the page is proxy-ceiling-blocked, not transient); different codes between attempts = flapping → one more attempt permitted (the third dispatch carries the prior attempt's code AND `notes: prev_error_code=<prior_code>` for flapping context).
+7. **At cap (round 3):** ADVISORY-only remaining → accept-with-disclosure (two-place disclosure, verdict line preserved — see My Rules Guideline (h)); ANY critical remaining → escalate-only with the structured gap report: artifact + 3 verdict blocks verbatim.
 
 ---
 
