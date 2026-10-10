@@ -273,6 +273,13 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
         saver_pool = AsyncConnectionPool(
             conninfo=conn_string,
             open=False,
+            # FUTURE KNOB (incident 2026-10-10 round-2 note): pool sizing
+            # (min_size/max_size) is hard-coded, not config-tunable. Both
+            # pools (saver + asyncpg) would take a settings-plumbed
+            # size if concurrent checkpoint contention ever warrants it —
+            # deliberately NOT done in this fix (no behavior change;
+            # a knob without an observed contention signal is surface
+            # without payoff).
             min_size=1,
             max_size=5,
             check=AsyncConnectionPool.check_connection,

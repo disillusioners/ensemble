@@ -55,10 +55,16 @@ mock_langgraph_checkpoint_sqlite_aio = create_mock_module("langgraph.checkpoint.
 # to satisfy the ``isinstance`` gate that ``StateGraph.compile`` runs via
 # ``ensure_valid_checkpointer``. The mock is a plain class (inherits
 # from object, not ABCMeta) — it satisfies the import and the proxy's
-# subclass relationship at unit-test scope. The real-langgraph gate
-# itself (TestSaverRetryProxyABCRegistration.test_stategraph_compile_…
-# and test_ensure_valid_checkpointer_…) skips under mocks via the
-# ``_REQUIRE_REAL_LANGGRAPH`` guard in the test file.
+# subclass relationship at unit-test scope. Tests that need the REAL
+# pinned class use the mock-eviction + module-reload binding gate
+# (``evict_langgraph_mocks``/``restore_langgraph_mocks`` from
+# ``tests/helpers/checkpoint_prune_pg.py``; see the
+# ``_real_langgraph_saver_base`` fixture in
+# ``tests/test_checkpoint_adapter_resilience.py`` and the autouse
+# ``_real_langgraph`` fixture in the real-PG integration tests) —
+# under the mock the real-langgraph gate tests would silently skip
+# (inverted semantics), which is exactly what the binding gate exists
+# to prevent.
 mock_langgraph_checkpoint_base = create_mock_module(
     "langgraph.checkpoint.base", {"__path__": []}
 )
@@ -67,12 +73,14 @@ mock_langgraph_checkpoint_base = create_mock_module(
 class _MockBaseCheckpointSaver:
     """Stand-in for ``langgraph.checkpoint.base.BaseCheckpointSaver``.
 
-    Plain class — no ``ABCMeta`` machinery. ``isinstance`` against
-    a proxy that subclasses this mock returns True, mirroring the
-    real production behavior under the real langgraph class.
-    Unit tests that don't exercise the real LangGraph gate are
-    satisfied by this; tests that need the real gate skip
-    explicitly (see ``_REQUIRE_REAL_LANGGRAPH``).
+    Plain class — no ``ABCMeta`` machinery, no concrete saver surface.
+    ``isinstance`` against a proxy that subclasses this mock returns
+    True, mirroring the real production behavior under the real
+    langgraph class. Unit tests that don't exercise the real LangGraph
+    gate are satisfied by this; tests that need the real pinned class
+    (the K-guard contract test, the compile gate, the K1/K2 regression
+    tests) go through the mock-eviction + reload binding gate — NOT
+    through this mock, which would silently invert the semantics.
     """
 
 

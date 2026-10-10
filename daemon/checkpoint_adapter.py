@@ -31,12 +31,16 @@ try:
     # ``ensure_valid_checkpointer``) accepts it as a valid saver.
     from langgraph.checkpoint.base import BaseCheckpointSaver
 except ImportError:
-    # Fenced fallback: any deployment where this submodule is
-    # absent (older langgraph pin, packaging accident) loses the
-    # ``isinstance`` gate but keeps the proxy functional. The
-    # proxy still inherits from ``object`` so its surface is
-    # identical to the language-level contract — only the
-    # LangGraph compile-time gate would then raise TypeError.
+    # Fenced fallback — covers ONLY older langgraph pins where the
+    # ``langgraph.checkpoint.base`` submodule does not exist (the
+    # 1.0.x-era layout had a different base path) or a packaging
+    # accident. The current pin (langgraph 1.0.9 /
+    # langgraph-checkpoint 3.1.x) ships the submodule and takes the
+    # try-branch. Under the fallback the daemon loses the
+    # ``isinstance`` gate but keeps the proxy functional: the proxy
+    # inherits from ``object`` so its surface is identical to the
+    # language-level contract — only the LangGraph compile-time gate
+    # would then raise TypeError.
     BaseCheckpointSaver = object  # type: ignore[assignment,misc]
 
 from daemon._redact import redact_exc_str
@@ -950,6 +954,16 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         callers MUST continue to receive the proxy, not the bare
         saver. Tests that need the bare saver for assertions can
         reach it via ``adapter._raw_saver``.
+
+        MRO-rule note (round 2): because ``.conn`` / ``.lock`` /
+        ``setup`` are ABSENT from the pinned ``BaseCheckpointSaver``
+        surface, attribute access on the proxy resolves through
+        ``__getattr__`` to the wrapped saver — that is how this
+        property's consumers (and the readiness probe's topology
+        detector) reach the pool. Base-CONCRETE members behave the
+        opposite way (explicit forwarders; see the proxy class
+        docstring and the K-guard contract test, which is what keeps
+        this property safe to hand to LangGraph across base bumps).
         """
         return self._saver
 

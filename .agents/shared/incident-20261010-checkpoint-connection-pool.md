@@ -146,3 +146,55 @@ The fix is implemented in three independent layers that compose; each layer alon
 - **Status:** pending review/test/merge. The fix builds and the targeted tests (see commit messages) pass; full / regression suites are the tester's job.
 - **Constraints honored:** no pyproject/uv.lock changes (pinned: langgraph 1.0.9, langgraph-checkpoint-postgres 3.1.0, psycopg 3.3.4, psycopg-pool 3.3.1); SQLite saver path untouched; the incident doc was copied into the worktree (no edits to the main checkout).
 - **Optional items (per round-1 sketch):** TCP keepalives kwargs on pool conns and a structured INFO log on pool reconnect events — **SKIPPED** for complexity-vs-benefit (the pool's own reconnect machinery + the existing connection-level error classification already give the signal we need; adding keepalives adds a knob and a moving piece without changing the failure-mode outcome).
+
+## Round-2 review addendum (2026-10-10)
+
+Status: **pending review/test/merge** (worktree `feature/checkpoint-conn-resilience`, base `0c040e5f8`). Round 2 was triggered by an independent leader-side REJECT whose root-cause pattern the round-1 chain missed.
+
+### The MRO rule (root cause of K1 AND K2)
+
+**Every attribute that is CONCRETE (non-abstract) on `BaseCheckpointSaver` resolves via normal MRO lookup, and `__getattr__` NEVER fires for it.** The pinned base (`.venv/lib/python3.13/site-packages/langgraph/checkpoint/base/__init__.py`, langgraph 1.0.9 / langgraph-checkpoint 3.1.x) declares **zero abstract methods** — all 22 public methods plus the `serde` / `config_specs` surface members are concrete, including:
+
+- `get_next_version` (`:706-707`): raises `NotImplementedError` for `str` versions. Every existing PG thread carries str versions (`postgres/base.py:543-552`, `f"{next_v:032}.{next_h:016}"`); pregel calls `get_next_version` at 8 sites (`pregel/main.py:1538…2279`). Round 1 shipped without a forwarder → **first message to any existing PG instance post-deploy would crash in `prepare_next_tasks`** (K1, deployment blocker).
+- `alist` (`:443-465`): a concrete async-generator stub raising `NotImplementedError` on first `__anext__`. Round 1's "de-interception" (f19803dc3) relied on `__getattr__` fall-through — **INERT**: MRO resolves the base stub first, so every `aget_state_history` would still break (K2).
+
+**Cure (systematic enumeration + explicit forwarders, commit `0122db579`):** the proxy now explicitly forwards EVERY concrete public member of the base surface. The retry set stays exactly the seven hot-path async ops; `get_next_version` forwards with NO retry (synchronous ID mint; pregel's own retry covers transients); `alist` forwards as a plain `def` returning the wrapped async generator (no retry — buffering would change the memory profile; pool self-heal + pregel retry-on-NextNotFound cover iteration restarts); the sync twins forward preserving the wrapped saver's own `NotImplementedError` signal (intentionally NotImplementedError surface in this async-only daemon); `with_allowlist` forwards (the base impl shallow-copies SELF — without the forwarder MRO would clone the proxy and drop the wrapped saver's serde); `serde`/`config_specs` forward as properties (same shadowing family). Verified absent from the pinned 3.1.0 aio.py AND base: `adelete` — the round-1 interceptor was dead code and is removed.
+
+### K-guard contract test (systematic, load-bearing)
+
+`tests/test_checkpoint_adapter_resilience.py::TestRealLanggraphSaverProxy::test_k_guard_concrete_surface_forwards_wrapped_overrides` walks the REAL pinned `BaseCheckpointSaver` via `inspect.getmembers(...)`, filters public + concrete + non-abstract (must be ≥20 and must include `get_next_version` + `alist`), overrides EACH method on a fresh fake wrapped saver with a sentinel implementation, and asserts the proxy ROUTES to the wrapped implementation (call-through with hit tracking; NotImplementedError → loud "K1/K2 recurrence" failure). It also covers the shadowable non-method members (`serde`, `config_specs`) and asserts the zero-abstract-methods premise. **Mutation-verified**: stripping the `alist` forwarder fails both K2 and the K-guard; restored → green. A future langgraph bump that adds a base stub without a forwarder now fails this test loudly instead of silently shadowing the wrapped saver in production.
+
+The whole real-pinned-class test family runs under `_real_langgraph_saver_base` — the K3 binding gate: `evict_langgraph_mocks` → `importlib.reload(daemon.checkpoint_adapter)` (rebinds the module-global `BaseCheckpointSaver` to the real class; eviction alone cannot, the module was imported under the conftest mock) → restore + reload-back. Round 1's suite certified INVERTED semantics: the conftest mock has no concrete surface and no `ensure_valid_checkpointer`, and the two `importorskip("langgraph.types")` tests silently skipped under the mocked empty namespace package. Supporting helper evolution (mock-only eviction/restore in `tests/helpers/checkpoint_prune_pg.py`): real modules (`__file__` present) are never evicted and never re-poisoned with the mock — repeated cycles otherwise fork module identity (a second `langgraph.checkpoint.base` whose `BaseCheckpointSaver` fails `isinstance` against the first copy's; observed live during this round). The repo's ONLY `langgraph.checkpoint.base` importer is `daemon/checkpoint_adapter.py`, so once-real-stays-real is safe for every other consumer.
+
+### W1 sentinel probe (redesign of the round-1 readiness probe)
+
+`pool.check()` discards + replaces dead connections and NEVER raises — the round-1 probe could PREVENT the outage class but could not DETECT it (incident doc requirement #2). Replaced with a sentinel checkpoint read through the real hot path (`raw_saver` retry proxy → `AsyncPostgresSaver`):
+
+- **Write-once init**: first tick of the process plants the sentinel via `aput_writes` with a fixed `(thread_id, checkpoint_ns, checkpoint_id, task_id)` key — idempotent upsert (chosen over `aput` because it needs no synthetic checkpoint payload and is re-run-safe); a failed init does NOT latch the flag. The write lands ONLY in `checkpoint_writes` — no `checkpoints` row — so instance lifecycle / pause-resume / prune tools never see it; the PG adapter's `list_thread_ids` additionally excludes the sentinel thread (defense-in-depth for maintenance Operation A).
+- **Read-only tick**: `aget_tuple` on the fixed sentinel thread (`daemon/constants.py::CHECKPOINT_SENTINEL_THREAD_ID` = `"__ensemble_readiness_probe__"`). `None` (row absent) is HEALTHY — the probe detects a path that cannot SERVE READS, not row presence. O(1) per tick.
+- Failure (exception OR timeout) → composite degrades with a reason string naming the sentinel read; 1s `_guarded` budget, degrade-not-restart (ADR-005), O(1) cached `/readyz` (ADR-003) unchanged. SQLite / single-conn / no-pool passthrough True unchanged.
+- The probe's internal warning log was removed — `_guarded` is the single log site (double-log fix).
+
+### W2/W3/W4
+
+- **W2**: `daemon/_redact.py::redact_exc_str` — masks URI netlocs (credentials + host), libpq verbose TCP/unix-socket shapes, keyword-value DSN fields, bare IPv4:port before truncation; routed into the checkpoint retry warning and the readiness probe-failure warning (which previously logged the FULL untruncated `str(exc)`). Documented limitation: bare `hostname:port` pairs are not masked (false-positive risk). Checked existing conventions first: `daemon/util/log_redaction_filter.py` (KMS plaintext handler filter) and `mcp_servers.redact_secrets` (config dict) — neither covers exception strings.
+- **W3**: the proxy class docstring rewritten to the MRO rule: (a) base-concrete attrs resolve via MRO, `__getattr__` never fires; (b) sync twins intentionally NotImplementedError (async-only daemon); (c) explicit-forwarders list MUST stay in lockstep with base updates; (d) the K-guard enforces it.
+- **W4**: conftest `_REQUIRE_REAL_LANGGRAPH` orphan doc text replaced with the actual mechanism (mock-eviction + reload binding gate). Optional items: `adelete` dead interceptor removed with verification note; ImportError fallback comment refined (covers only older 1.0.x-era pins / packaging accidents — the current pin ships the submodule); `raw_saver` property docstring aligned with the MRO-rule framing; pool min/max-size recorded as a FUTURE knob in `daemon/persistence.py` (no behavior change).
+
+### Files touched in this round
+
+- `daemon/checkpoint_adapter.py` — explicit forwarders for every concrete base member (K1/K2 cure), `adelete` removal, W3 docstring, sentinel exclusion in PG `list_thread_ids`, W2 redaction at the retry-warning site, ImportError/raw_saver doc refinements.
+- `daemon/services/readiness.py` — W1 sentinel probe (factory rewrite + reason strings + double-log removal).
+- `daemon/constants.py` — `CHECKPOINT_SENTINEL_*` namespace.
+- `daemon/_redact.py` — NEW: exception-string redaction helper (W2).
+- `daemon/persistence.py` — pool-sizing future-knob comment only (no behavior change).
+- `tests/test_checkpoint_adapter_resilience.py` — K-guard + K1/K2 regression tests + real-langgraph binding gate (`_real_langgraph_saver_base`), gate tests converted off the mock, redaction tests.
+- `tests/test_readiness_checkpoint_saver.py` — sentinel-probe contract tests (write-once/read-only/failure/timeout/reason strings).
+- `tests/helpers/checkpoint_prune_pg.py` — mock-only evict/restore (identity-fork fix).
+- `tests/conftest.py` — W4 doc drift fix.
+- `.agents/shared/incident-20261010-checkpoint-connection-pool.md` — this addendum.
+
+### Branch / status
+
+- **Branch:** `feature/checkpoint-conn-resilience` — base `0c040e5f8`, round-2 commits: `0122db579` (K1/K2 forwarders + W3), `0f376f63d` (K-guard + K3), `cea8a4c73` (W1 sentinel probe), `97862499e` (W2 redaction), docs commit (W4 + optional items + this addendum).
+- **Status: pending review/test/merge** — still awaiting the leader's clean declaration; targeted suites pass (resilience 43, readiness+health 76, persistence unchanged-green); regression suites, real-PG recovery scenarios, and the K-guard in a real-langgraph integration pass remain the tester's lane.
