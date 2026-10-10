@@ -248,13 +248,24 @@ test.beforeAll(async () => {
 
 // ── Shared helpers ───────────────────────────────────────────────────────
 
-/** Wait for the NEXT GET /api/snapshots list response (never /metrics, never /{id}). */
-function nextListResponse(page: Page, url?: URL): Promise<Response> {
-  void url;
+/**
+ * Wait for the NEXT GET /api/snapshots list response (never /metrics,
+ * never /{id}) whose query satisfies `paramMatch`.
+ *
+ * race-immune arming: the caller MUST scope the wait with a
+ * full-query-param predicate — a pathname-only predicate resolves on a
+ * PRIOR sub-leg's echo GET (v2 double-fires the list GET per filter
+ * write, ~19ms apart: the URL-mirror navigate re-triggers the fetch
+ * effect), so the response read after the wait can lack the params the
+ * leg asserts. Pass exactly the params the leg asserts (same strength).
+ * See .agents/tester/LESSONS/2026-10-10-playwright-waitforresponse-arming-race.md
+ */
+function nextListResponse(page: Page, paramMatch: (u: URL) => boolean): Promise<Response> {
   return page.waitForResponse((r) => {
     if (r.request().method() !== 'GET') return false;
     try {
-      return new URL(r.url()).pathname === '/api/snapshots';
+      const u = new URL(r.url());
+      return u.pathname === '/api/snapshots' && paramMatch(u);
     } catch {
       return false;
     }
@@ -345,7 +356,7 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
 
     // (a) Project → searchable-select placeholder changed "Search projects…" → "All projects" (§2.3 row).
     let [resp] = await Promise.all([
-      nextListResponse(page),
+      nextListResponse(page, (u) => u.searchParams.get('project_id') === PROJECT_ALPHA_ID),
       (async () => {
         await page.locator('app-searchable-select.filter-project input').click();
         await page.getByRole('option', { name: 'e2e-snapshots-alpha' }).click();
@@ -360,7 +371,7 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     // (b) Agent → searchable-select placeholder changed "Search agents…" → "All agents" (§2.3 row).
     // seenAgents accumulates from the first list response (v1 amendment #5 — page-owned, preserved).
     [resp] = await Promise.all([
-      nextListResponse(page),
+      nextListResponse(page, (u) => u.searchParams.get('agent') === 'coder'),
       (async () => {
         await page.locator('app-searchable-select.filter-agent input').click();
         await page.getByRole('option', { name: 'coder', exact: true }).click();
@@ -377,7 +388,8 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     // (c) Tags → `data-test="filter-tag-input"` hook preserved (AC-5.2). R4 250ms
     // debounce preserved (§2.3 Behavior). Repeated-param idiom.
     [resp] = await Promise.all([
-      nextListResponse(page),
+      // race-immune arming: full-query-param predicate — pathname-only resolves on prior sub-leg echoes (v2 double-fires the list GET per filter write); see .agents/tester/LESSONS/2026-10-10-playwright-waitforresponse-arming-race.md
+      nextListResponse(page, (u) => u.searchParams.getAll('tags').includes('kind:implementation')),
       (async () => {
         await page.locator('[data-test="filter-tag-input"]').fill('kind:implementation');
         await page.locator('[data-test="filter-tag-input"]').press('Enter');
@@ -397,8 +409,12 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     const statusPopover = page.getByRole('dialog', { name: 'Status filter' });
     await expect(statusPopover).toBeVisible();
     // First chip → fires GET with status=active.
+    // race-immune arming: full-query-param predicate (exactly ['active'], mirroring the assertion below) — pathname-only resolves on prior sub-leg echoes (v2 double-fires the list GET per filter write); see .agents/tester/LESSONS/2026-10-10-playwright-waitforresponse-arming-race.md
     let [respActive] = await Promise.all([
-      nextListResponse(page),
+      nextListResponse(page, (u) => {
+        const s = u.searchParams.getAll('status');
+        return s.length === 1 && s[0] === 'active';
+      }),
       statusPopover.locator('label.status-menu-item', { hasText: /^active$/ }).click(),
     ]);
     expect(respActive.status()).toBe(200);
@@ -502,8 +518,22 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     // removal or a name drift.
     await expect(clearBtn).toHaveAccessibleName('Clear all filters');
 
+    // race-immune arming: full-query-param predicate (reset request = every filter param absent, mirroring the assertion below) — pathname-only resolves on prior filter-write echoes (v2 double-fires the list GET per filter write); see .agents/tester/LESSONS/2026-10-10-playwright-waitforresponse-arming-race.md
     const [req] = await Promise.all([
-      page.waitForRequest((r) => r.method() === 'GET' && new URL(r.url()).pathname === '/api/snapshots'),
+      page.waitForRequest((r) => {
+        if (r.method() !== 'GET') return false;
+        try {
+          const u = new URL(r.url());
+          return (
+            u.pathname === '/api/snapshots' &&
+            ['project_id', 'agent', 'tags', 'status', 'created_after', 'sort', 'tag_mode'].every(
+              (k) => !u.searchParams.has(k),
+            )
+          );
+        } catch {
+          return false;
+        }
+      }),
       clearBtn.click(),
     ]);
 
