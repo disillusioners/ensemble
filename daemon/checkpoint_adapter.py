@@ -165,6 +165,16 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         ``ABCMeta`` workaround, which would be a hidden compat
         hazard against a future langgraph bump that does flip
         ``BaseCheckpointSaver`` to ``ABCMeta``.
+
+        Informational: the sync twins ``get_tuple`` / ``list`` /
+        ``put`` / ``put_writes`` / ``delete_thread`` declared on
+        ``BaseCheckpointSaver`` resolve via ``__getattr__`` to the
+        wrapped saver's *own* sync methods, which the saver only
+        stubs with ``raise NotImplementedError`` (the AsyncPostgresSaver
+        surface is async-only). This proxy does not re-declare them —
+        deliberately. The async-only daemon never invokes them; if a
+        caller does, the saver's own NotImplementedError surfaces,
+        which is the correct upstream-classified signal.
         """
 
         __slots__ = ("_saver",)
@@ -200,8 +210,11 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
 
         # Intercept all async methods exposed by the saver. The list
         # below covers the AsyncPostgresSaver public surface (aio.py);
-        # LangGraph also calls into these via the saver. Unknown
-        # methods fall through to __getattr__ (no retry), which is
+        # LangGraph also calls into these via the saver. ``alist``
+        # is INTENTIONALLY excluded — it is an async generator, not a
+        # coroutine; see the comment block at its fall-through point
+        # below for the full reasoning. Any other unknown method
+        # also falls through to ``__getattr__`` (no retry), which is
         # safe because nothing else on the saver surface fails on
         # connection-class issues.
         async def aget(self, *args, **kwargs):
@@ -216,8 +229,28 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         async def aput_writes(self, *args, **kwargs):
             return await self._call_with_retry("aput_writes", args, kwargs)
 
-        async def alist(self, *args, **kwargs):
-            return await self._call_with_retry("alist", args, kwargs)
+        # NOTE: ``alist`` is intentionally NOT intercepted. On
+        # langgraph-checkpoint-postgres 3.1.0 ``AsyncPostgresSaver.alist``
+        # is an ASYNC GENERATOR (the source contains ``yield``), and
+        # LangGraph consumes it via ``async for c in checkpointer.alist(...)``
+        # (pinned pregel/main.py:1417). Wrapping it as a coroutine here
+        # would break BOTH consumption styles:
+        #   * ``async for proxy.alist(...)`` -> ``TypeError: ... requires __aiter__``
+        #   * ``await proxy.alist(...)``     -> ``TypeError: object async_generator
+        #                                       can't be used in 'await'``
+        # An async-generator surface cannot be coroutine-retried without
+        # buffering the whole stream (which would defeat ``alist``'s
+        # cursor-paginated streaming and inflate memory on long thread
+        # histories). The decision: fall through ``__getattr__`` to the
+        # underlying saver's real async generator — no retry on alist,
+        # no interception. If a conn dies mid-walk, the next ``__anext__``
+        # raises and the upstream pipeline retries the whole alist call,
+        # and the connection-pool self-heal (``check=`` + auto-replace)
+        # means the fresh iteration attempt lands on a healthy conn.
+        # Operational scope: zero live daemon callers of alist/
+        # aget_state_history against the PG proxy (PR3 expected-0-live-
+        # alist-calls contract); LangGraph itself does call alist for
+        # state-history walks but those are debug/admin paths, not hot.
 
         async def adelete(self, *args, **kwargs):
             return await self._call_with_retry("adelete", args, kwargs)
@@ -230,7 +263,7 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         async def adelete_thread(self, *args, **kwargs):
             # Public method on the AsyncPostgresSaver aio.py surface
             # (pinned aio.py:340 in langgraph-checkpoint-postgres
-            # 2.0.x). Forwarded through the same retry wrapper as
+            # 3.1.x). Forwarded through the same retry wrapper as
             # the other public methods so a mid-cursor-open PG
             # failure during a thread drop is also recovered once.
             return await self._call_with_retry(

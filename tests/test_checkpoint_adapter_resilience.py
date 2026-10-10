@@ -462,16 +462,103 @@ class TestRetryWrapper:
         assert wrapped.fail_count == 0  # data attribute passthrough
 
     @pytest.mark.asyncio
-    async def test_alist_retries_too(self):
-        saver = _FakeSaver(
-            _FakePool(),
-            fail_count=1,
-            exc_factory=lambda: _OperationalError("the connection is closed"),
+    async def test_alist_not_intercepted_async_generator_passthrough(self):
+        """``alist`` MUST NOT be wrapped as a coroutine on the proxy.
+
+        ``AsyncPostgresSaver.alist`` (langgraph-checkpoint-postgres 3.1.0)
+        is an ASYNC GENERATOR — the source contains ``yield`` — and
+        LangGraph consumes it via ``async for c in checkpointer.alist(...)``
+        (pinned pregel/main.py:1417). A coroutine-shaped wrapper breaks
+        both consumption styles:
+
+          * ``async for proxy.alist(...)`` → ``TypeError: ... requires __aiter__``
+          * ``await proxy.alist(...)``     → ``TypeError: object
+            async_generator can't be used in 'await'``
+
+        The contract: ``alist`` falls through ``__getattr__`` to the
+        wrapped saver's real async generator. (a) The proxy must NOT
+        declare an explicit ``alist`` attribute — so attribute access
+        returns the same object the underlying saver exposes. (b)
+        Iterating the proxy must drive the underlying saver's yields.
+        """
+        seen_items: list[Any] = []
+
+        class _AlistGeneratorSaver:
+            """Minimal saver whose ``alist`` is a real async generator.
+
+            ``async def ... yield ...`` makes ``alist`` an async
+            generator function (has ``__code__`` with ``CO_ASYNC_GENERATOR``),
+            which is the exact surface shape
+            ``langgraph-checkpoint-postgres 3.1.0`` ships.
+        """
+
+            conn = None  # topology detector short-circuits
+
+            async def alist(self, *args, **kwargs):
+                # The yield makes this an ``async def`` with
+                # ``__aiter__`` / ``__anext__`` on the returned
+                # iterator — the correct shape for ``async for``.
+                for i in (1, 2, 3):
+                    yield {"i": i, "args": args, "kwargs": kwargs}
+
+        fake = _AlistGeneratorSaver()
+        proxy = _wrap_saver_with_connection_retry(fake)
+
+        # (a) Attribute passthrough — proxy does NOT define alist,
+        # so __getattr__ returns ``getattr(self._saver, "alist")``,
+        # which is a bound method on the wrapped saver. Identity is
+        # only meaningful at the underlying-function level (bound
+        # method objects are distinct per instance); assert both the
+        # shared ``__func__`` and that proxy.alist is NOT a coroutine
+        # wrapper (the regression: a proxy-defined ``async def alist``
+        # would make this a coroutine function and break
+        # ``async for`` consumption).
+        assert proxy.alist.__func__ is fake.alist.__func__, (
+            "proxy must not intercept alist; expected the bound method's "
+            "__func__ to be the underlying saver's alist (passthrough via "
+            "__getattr__), not a coroutine wrapper"
         )
-        wrapped = _wrap_saver_with_connection_retry(saver)
-        result = await wrapped.alist("config-1")
-        assert saver.call_count == 2
-        assert result == []
+        # And the proxy must not have promoted it to a coroutine —
+        # a coroutine-wrapped ``alist`` is the regression that the
+        # proxy-explicit-async-def shape used to produce. An async
+        # generator function is NOT a coroutine function under
+        # asyncio.iscoroutinefunction (CO_ASYNC_GENERATOR vs
+        # CO_COROUTINE / CO_ITERABLE_COROUTINE); the bound method
+        # delegates the flag check to its __func__.
+        assert not asyncio.iscoroutinefunction(proxy.alist), (
+            "proxy.alist must remain an async generator function, not "
+            "a coroutine — the whole TypeError flow: a coroutine wrapping "
+            "an async generator fails both ``async for`` and ``await``"
+        )
+        # Belt-and-braces: the call returns an async generator object,
+        # NOT a coroutine. This is the live-shape check — if a future
+        # refactor swaps the proxy's intercepted method shape, this
+        # still fires.
+        gen_obj = proxy.alist("config-1")
+        assert not asyncio.iscoroutine(gen_obj), (
+            "proxy.alist(...) must return an async generator object, "
+            "not a coroutine"
+        )
+        assert hasattr(gen_obj, "__aiter__") and hasattr(gen_obj, "__anext__"), (
+            "proxy.alist(...) must return an object with async iterator "
+            "protocol — that is the only shape LangGraph's pregel/main.py:1417 "
+            "consumes via ``async for``"
+        )
+
+        # (b) Iteration works end-to-end through the proxy — the
+        # upstream pipeline's exact consumption style. This is the
+        # assertion the original ``await proxy.alist(...)`` style
+        # failed (TypeError: object async_generator can't be used
+        # in 'await'); ``async for`` is the surviving style and it
+        # must produce the underlying saver's items verbatim.
+        async for item in proxy.alist("config-1", limit=5):
+            seen_items.append(item)
+
+        assert seen_items == [
+            {"i": 1, "args": ("config-1",), "kwargs": {"limit": 5}},
+            {"i": 2, "args": ("config-1",), "kwargs": {"limit": 5}},
+            {"i": 3, "args": ("config-1",), "kwargs": {"limit": 5}},
+        ], "proxy must yield the underlying async generator's items"
 
     @pytest.mark.asyncio
     async def test_does_not_swallow_cancelled_error(self):
