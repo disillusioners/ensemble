@@ -4,10 +4,17 @@
      internally; the body's content grid is single-column on < 1280px
      and switches to a 240px rail + sections column on >= 1280px (AC-6.2). -->
 <div class="snapshot-drawer" role="complementary">
-  <!-- Drawer header (sticky at the top of the body scroll) -->
+  <!-- Drawer header (sticky at the top of the body scroll).
+       B2 conformance r1 (AC-A11Y-3): cdkTrapFocus on the drawer
+       content wrapper establishes the focus trap; cdkFocusInitial on
+       the close button (later in this template) marks where focus
+       lands when the trap activates. Escape is handled by a
+       @HostListener in the component class. -->
   <div
     class="drawer-header"
     [attr.aria-labelledby]="drawerTitleId()"
+    cdkTrapFocus
+    [cdkTrapFocusAutoCapture]="true"
   >
     <div class="header-top">
       <h2 class="drawer-title" [id]="drawerTitleId()">
@@ -37,6 +44,7 @@
           matTooltip="Close drawer"
           aria-label="Close drawer"
           data-test="drawer-close"
+          cdkFocusInitial
         >
           <mat-icon>close</mat-icon>
         </button>

@@ -321,4 +321,163 @@ describe('SnapshotDetailDrawerComponent', () => {
     const compiled = fixture.nativeElement as HTMLElement;
     expect(compiled.querySelector('[data-test="digest-pre"]')).not.toBeNull();
   });
+
+  // ── (k) B2 BLOCKER (conformance r1, AC-A11Y-3) ────────────────
+  // The reviewer's round-1 verdict overturned v1's PARTIAL to FAIL:
+  // v1's `mode="over"` provided Esc/trap behavior by Material design,
+  // but v2's `mode="side"` does not. The fix is:
+  //   1. cdkTrapFocus on the drawer header wrapper (Tab cycling stays
+  //      inside the drawer);
+  //   2. cdkFocusInitial on the close button (focus lands on close
+  //      when the trap activates);
+  //   3. @HostListener('document:keydown.escape') on the component
+  //      (Esc closes the drawer via the existing `close` output);
+  //   4. Constructor captures `document.activeElement` (the row that
+  //      was clicked to open the drawer); DestroyRef.onDestroy
+  //      restores focus on it (works for ALL close paths).
+
+  // (k.1) cdkTrapFocus directive is present on the drawer header
+  //       wrapper (the trap's anchor element). Angular's directive
+  //       selector reflection lowercases the attribute name to
+  //       `cdktrapfocus` on the element. Without the directive, Tab
+  //       would leak OUT of the drawer into the underlying table —
+  //       defeating AC-A11Y-3.
+  it('(k.1) cdkTrapFocus directive anchors the focus trap on the drawer header wrapper', async () => {
+    fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
+    fixture.detectChanges();
+    await Promise.resolve();
+    await Promise.resolve();
+    fixture.detectChanges();
+    const compiled = fixture.nativeElement as HTMLElement;
+    const drawerHeader = compiled.querySelector('.drawer-header');
+    expect(drawerHeader).not.toBeNull();
+    // Angular's template parser lowercases directive-attribute names
+    // that are also DOM attribute selectors — `cdkTrapFocus` reflects
+    // as `cdktrapfocus` (no dashes). The CDK runtime is
+    // case-insensitive on attribute matching, so the runtime trap
+    // still fires correctly in real browsers.
+    expect(drawerHeader?.hasAttribute('cdktrapfocus')).toBe(true);
+  });
+
+  // (k.2) cdkFocusInitial is stamped on the close button — when the
+  //       trap activates, focus lands on the close button, satisfying
+  //       the "focus trapped in drawer" half of AC-A11Y-3. Angular's
+  //       template parser lowercases the attribute name to
+  //       `cdkfocusinitial` (no dashes) when reflecting it to the DOM.
+  it('(k.2) cdkFocusInitial is stamped on the close button (initial focus point)', async () => {
+    fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
+    fixture.detectChanges();
+    await Promise.resolve();
+    await Promise.resolve();
+    fixture.detectChanges();
+    const compiled = fixture.nativeElement as HTMLElement;
+    const closeBtn = compiled.querySelector<HTMLButtonElement>(
+      '[data-test="drawer-close"]',
+    );
+    expect(closeBtn).not.toBeNull();
+    // Angular lowercases directive-attribute names that are also DOM
+    // attribute selectors — the literal token `cdkFocusInitial` in the
+    // template reflects as `cdkfocusinitial` on the element. The CDK
+    // runtime queries via `[cdkFocusInitial]` which is case-insensitive
+    // for HTML attribute matching, so both forms resolve to the same
+    // element. We assert the literal lowercased form here.
+    expect(closeBtn?.hasAttribute('cdkfocusinitial')).toBe(true);
+  });
+
+  // (k.3) Pressing Escape emits the `close` output. The component
+  //       gates on `isDrawerMode()` so the full-page view (which has
+  //       its own Esc routing) is NOT short-circuited.
+  it('(k.3) Esc keypress while drawer is open emits the close output (AC-A11Y-3)', async () => {
+    fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
+    fixture.componentRef.setInput('isDrawerMode', true);
+    fixture.detectChanges();
+    await Promise.resolve();
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    const closeSpy = jest.fn();
+    component.close.subscribe(closeSpy);
+
+    // Dispatch a real Escape keydown at the document level — the
+    // @HostListener('document:keydown.escape') registers at the
+    // DOCUMENT target.
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'escape', bubbles: true }),
+    );
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // (k.4) Esc is suppressed when isDrawerMode() is false (the
+  //       full-page variant of this component owns its own Esc
+  //       routing, so the drawer-mode shortcut must not double-fire).
+  it('(k.4) Esc is suppressed when isDrawerMode is false (no double-fire)', async () => {
+    fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
+    fixture.componentRef.setInput('isDrawerMode', false);
+    fixture.detectChanges();
+    await Promise.resolve();
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    const closeSpy = jest.fn();
+    component.close.subscribe(closeSpy);
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'escape', bubbles: true }),
+    );
+    expect(closeSpy).not.toHaveBeenCalled();
+  });
+
+  // (k.5) On teardown, focus is restored to the previously-focused
+  //       element (the row that opened the drawer). We simulate the
+  //       row by appending an HTMLElement to document.body and
+  //       putting focus on it BEFORE the drawer is instantiated —
+  //       the constructor captures the active element synchronously.
+  //       NOTE: jsdom does not compute layout, so cdkTrapFocus's
+  //       auto-capture `.focus()` calls silently no-op. We assert the
+  //       restore side directly: on teardown, the captured element
+  //       (the row) receives focus again.
+  it('(k.5) on component teardown the captured previously-focused element receives focus (AC-A11Y-3)', async () => {
+    // Create a fake "row" element and put focus on it BEFORE the
+    // drawer is instantiated — the constructor captures it.
+    const fakeRow = document.createElement('button');
+    fakeRow.id = 'fake-row-opener';
+    fakeRow.textContent = 'previous-row';
+    document.body.appendChild(fakeRow);
+    fakeRow.focus();
+    expect(document.activeElement).toBe(fakeRow);
+
+    // Now mount the drawer; its constructor captures fakeRow into
+    // `previouslyFocusedElement` (B2 implementation).
+    fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
+    fixture.componentRef.setInput('isDrawerMode', true);
+    fixture.detectChanges();
+    await Promise.resolve();
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    // Trigger the teardown path. In the real flow the host destroys
+    // this component when `close` is emitted; here we directly call
+    // `fixture.destroy()` to invoke DestroyRef hooks synchronously.
+    fixture.destroy();
+
+    // After teardown, the captured element must receive focus — this
+    // is the AC-A11Y-3 "focus returns to the previously-selected
+    // row" requirement.
+    expect(document.activeElement).toBe(fakeRow);
+
+    // Clean up the test DOM.
+    fakeRow.remove();
+  });
+
+  // (k.6) The focus restoration is a no-op when no element was
+  //       captured (defensive guard — the drawer might be rendered in
+  //       a context where the active element was BODY).
+  it('(k.6) teardown does not throw when no previously-focused element was captured', () => {
+    // Default fixture: focus is body, not a row.
+    fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
+    fixture.componentRef.setInput('isDrawerMode', true);
+    fixture.detectChanges();
+
+    // destroyRef.onDestroy callback must not error out.
+    expect(() => fixture.destroy()).not.toThrow();
+  });
 });

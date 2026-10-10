@@ -2,7 +2,10 @@ import {
   ChangeDetectionStrategy,
   Component,
   computed,
+  DestroyRef,
+  DOCUMENT,
   effect,
+  HostListener,
   inject,
   input,
   output,
@@ -16,6 +19,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Clipboard } from '@angular/cdk/clipboard';
+import { CdkTrapFocus } from '@angular/cdk/a11y';
 import { MatSnackBar } from '@angular/material/snack-bar';
 
 import { SnapshotService } from '../../services/snapshot.service';
@@ -71,6 +75,7 @@ const DIGEST_GUARD_BYTES = 200 * 1024;
     MatIconModule,
     MatProgressSpinnerModule,
     MatTooltipModule,
+    CdkTrapFocus,
   ],
   templateUrl: './snapshot-detail-drawer.component.html',
   styleUrl: './snapshot-detail-drawer.component.scss',
@@ -101,6 +106,21 @@ export class SnapshotDetailDrawerComponent {
   private readonly snapshotService = inject(SnapshotService);
   private readonly clipboard = inject(Clipboard);
   private readonly snackBar = inject(MatSnackBar);
+  private readonly document = inject(DOCUMENT);
+  private readonly destroyRef = inject(DestroyRef);
+
+  // ── Focus restoration (AC-A11Y-3, B2 conformance r1) ───────────
+  // The row the user clicked had focus when the drawer opened. When
+  // the drawer closes, focus must return to that row. We capture
+  // `document.activeElement` SYNCHRONOUSLY in the constructor —
+  // BEFORE `cdkTrapFocus` activates (the trap shifts focus into the
+  // drawer to the `cdkFocusInitial`-marked close button). The
+  // captured element survives in `previouslyFocusedElement` until
+  // either the user closes the drawer (`onClose` emits, the host
+  // tears down the component) or the component is otherwise
+  // destroyed. We restore focus on `DestroyRef.onDestroy` so all
+  // close paths (Esc, close-button click, host onCloseDrawer) recover.
+  private previouslyFocusedElement: HTMLElement | null = null;
 
   // ── Detail state (drawer-owned) ─────────────────────────────
   readonly detail = signal<SnapshotDetailResponse | null>(null);
@@ -122,49 +142,98 @@ export class SnapshotDetailDrawerComponent {
 
   // ── Constructor effect: re-fetch on snapshotId change ───────
   constructor() {
-    effect((onCleanup) => {
-      const id = this.snapshotId();
-      if (!id) {
-        this.resetDetailState();
-        return;
-      }
-      // Reset every per-snapshot signal so the drawer shows the
-      // loading state immediately when the id swaps.
-      this.detailLoading.set(true);
-      this.detailError.set(null);
-      this.digest.set(null);
-      this.digestError.set(null);
-      this.showDigest.set(false);
+    effect(
+      (onCleanup) => {
+        const id = this.snapshotId();
+        if (!id) {
+          this.resetDetailState();
+          return;
+        }
+        // Reset every per-snapshot signal so the drawer shows the
+        // loading state immediately when the id swaps.
+        this.detailLoading.set(true);
+        this.detailError.set(null);
+        this.digest.set(null);
+        this.digestError.set(null);
+        this.showDigest.set(false);
 
-      // Increment-and-capture the request id BEFORE subscribing so a
-      // late-resolving response for an older snapshotId is discarded
-      // (deep-review 🟡#3 — mirrors digestRequestId below).
-      const detailReqId = ++this.detailRequestId;
-      this.snapshotService
-        .getById(id, { includeDigest: false })
-        .subscribe({
-          next: (resp) => {
-            if (this.detailRequestId !== detailReqId) {
-              return; // stale — a newer request has already started
-            }
-            this.detail.set(resp);
-            this.detailLoading.set(false);
-          },
-          error: (err: { message?: string }) => {
-            if (this.detailRequestId !== detailReqId) {
-              return; // stale
-            }
-            this.detailError.set(
-              this.toMessage(err?.message || 'Failed to load snapshot details'),
-            );
-            this.detailLoading.set(false);
-          },
+        // Increment-and-capture the request id BEFORE subscribing so a
+        // late-resolving response for an older snapshotId is discarded
+        // (deep-review 🟡#3 — mirrors digestRequestId below).
+        const detailReqId = ++this.detailRequestId;
+        this.snapshotService
+          .getById(id, { includeDigest: false })
+          .subscribe({
+            next: (resp) => {
+              if (this.detailRequestId !== detailReqId) {
+                return; // stale — a newer request has already started
+              }
+              this.detail.set(resp);
+              this.detailLoading.set(false);
+            },
+            error: (err: { message?: string }) => {
+              if (this.detailRequestId !== detailReqId) {
+                return; // stale
+              }
+              this.detailError.set(
+                this.toMessage(err?.message || 'Failed to load snapshot details'),
+              );
+              this.detailLoading.set(false);
+            },
+          });
+
+        onCleanup(() => {
+          // The HTTP observable completes on its own; nothing to do.
         });
+      },
+      // forward-compat nit (confiler): signal writes inside an effect
+      // require `allowSignalWrites: true` in modern Angular. The
+      // detail/digest signals reset above + onCleanup would otherwise
+      // log an `NG0600` warning at runtime.
+      { allowSignalWrites: true },
+    );
 
-      onCleanup(() => {
-        // The HTTP observable completes on its own; nothing to do.
-      });
+    // ── B2 (AC-A11Y-3): capture the row that opened the drawer so
+    //    we can restore focus when the drawer closes. We do this
+    //    SYNCHRONOUSLY in the constructor (before `cdkTrapFocus`
+    //    activates and shifts focus into the drawer to the
+    //    `cdkFocusInitial`-marked close button). queueMicrotask
+    //    would land AFTER cdkTrapFocus, by which time the row is no
+    //    longer `document.activeElement`.
+    const active = this.document.activeElement;
+    if (active instanceof HTMLElement && active !== this.document.body) {
+      this.previouslyFocusedElement = active;
+    }
+
+    // ── B2 (AC-A11Y-3): restore focus on drawer teardown. All close
+    //    paths (Esc HostListener, close-button click, host
+    //    `onCloseDrawer`) ultimately destroy this component, so a
+    //    single `DestroyRef.onDestroy` covers them.
+    this.destroyRef.onDestroy(() => {
+      const el = this.previouslyFocusedElement;
+      if (el && typeof el.focus === 'function') {
+        // The element may have been removed from the DOM (e.g. a
+        // table row that was filtered out). `isConnected` guards
+        // against the DOMException for disconnected subtrees.
+        if (el.isConnected) {
+          el.focus();
+        }
+      }
     });
+  }
+
+  /**
+   * B2 (AC-A11Y-3): Escape closes the drawer. `cdkTrapFocus` provides
+   * the focus trap (Tab cycling inside the drawer); Esc is the only
+   * standard way out of a trap. Only act when this component is
+   * embedded in a drawer (not when it is rendered as a full-page
+   * view, where the host handles its own Esc routing).
+   */
+  @HostListener('document:keydown.escape')
+  onEscapeKey(): void {
+    if (this.isDrawerMode()) {
+      this.close.emit();
+    }
   }
 
   // ── Computed helpers (template-facing) ──────────────────────
