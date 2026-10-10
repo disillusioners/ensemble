@@ -311,7 +311,7 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     await expect(page.getByRole('heading', { name: 'Snapshots', exact: true })).toHaveText('Snapshots');
     // Design A §2.2: info icon (aria-label="Page description", popover with v1 subtitle text).
     await expect(page.getByRole('button', { name: 'Page description' })).toBeVisible();
-    // Design A §2.2: toggle pill (aria-label="Snapshot creation: ON|OFF (unsaved)"). NOT a mat-radio.
+    // Design A §2.2: toggle pill (aria-label="Snapshot creation: ON|OFF") + "(unsaved)" suffix per snapshots.component.html:39-42. NOT a mat-radio.
     await expect(page.locator('button.toggle-pill[aria-label*="Snapshot creation"]')).toBeVisible();
     // Design A §2.2 + AC-5.2: metrics pill carries the v1 `data-test="metrics-capture-card"` hook.
     await expect(page.locator('[data-test="metrics-capture-card"]')).toBeVisible();
@@ -321,10 +321,11 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     await expect(page.locator('.filter-row')).toBeVisible();
     // Design A §2.4 / AC-2.3: stats strip aside with status summary.
     await expect(page.locator('aside.stats-strip')).toBeVisible();
-    // Design A §2.5 / AC-5.1: plain HTML <table aria-label="Snapshots"> with sticky thead
-    // and 7 th cells. v1's 8-col census drops to 7 because the "Warm" column was retired
-    // to the stats strip + the drawer's "Last warmed" row (drawer IA §1.3) — the per-row
-    // warm count moved out of the table when compaction closed pain point #1.
+    // Plain HTML <table aria-label="Snapshots"> with sticky thead
+    // and 7 th cells (DERIVED: v1's 8 columns minus the retired "Warm"
+    // column; warmed data lives in the stats strip per §2.4 + the
+    // drawer's "Last warmed" row per §1.3). The per-row warm count
+    // moved out of the table when compaction closed pain point #1.
     const headers = page.locator('table thead th');
     await expect(headers).toHaveCount(7);
     // 6 labeled + 1 empty Action col (aria-label="Open", col-action).
@@ -354,7 +355,7 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
   test('step 3 — each filter drives the v2 widget + fires GET /api/snapshots with the right param, 200, pageIndex reset, URL mirror (AC-6.3)', async ({ page }) => {
     await openSnapshotsWithRows(page);
 
-    // (a) Project → searchable-select placeholder changed "Search projects…" → "All projects" (§2.3 row).
+    // (a) Project → searchable-select placeholder changed "Search projects…" → "All projects" (snapshots.component.html:113).
     let [resp] = await Promise.all([
       nextListResponse(page, (u) => u.searchParams.get('project_id') === PROJECT_ALPHA_ID),
       (async () => {
@@ -368,7 +369,7 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     await expect.poll(() => new URL(page.url()).searchParams.get('project_id')).toBe(PROJECT_ALPHA_ID);
     await expect(page.locator('[data-test="paginator-page-1"]')).toBeVisible();
 
-    // (b) Agent → searchable-select placeholder changed "Search agents…" → "All agents" (§2.3 row).
+    // (b) Agent → searchable-select placeholder changed "Search agents…" → "All agents" (snapshots.component.html:123).
     // seenAgents accumulates from the first list response (v1 amendment #5 — page-owned, preserved).
     [resp] = await Promise.all([
       nextListResponse(page, (u) => u.searchParams.get('agent') === 'coder'),
@@ -748,7 +749,7 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     expect(pageErrors).toEqual([]);
 
     // Focus-INSIDE path closes via the document capture handler
-    // (D1, AC-A11Y-3b) + Material's convergent drawer-element Esc
+    // (D1, AC-A11Y-3; impl label AC-A11Y.3b — non-spec) + Material's convergent drawer-element Esc
     // listener — NOT the app-snapshots host-scoped HostListener:
     // the pane (`mat-drawer`, parent of the `app-snapshots` host) is
     // OUTSIDE `hostEl.contains(pane)`, so the host-scoped handler
