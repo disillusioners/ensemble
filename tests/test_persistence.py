@@ -107,51 +107,88 @@ class TestCreatePostgresCheckpointer:
         assert "ensemble[postgres]" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_creates_adapter_with_saver_and_pool(self):
-        """When deps are available, builds AsyncPostgresSaver + asyncpg.Pool and wraps in adapter."""
+    async def test_creates_adapter_with_pool_backed_saver(self):
+        """incident 2026-10-10 fix: AsyncPostgresSaver is now backed by
+        an AsyncConnectionPool (psycopg_pool), not a single long-lived
+        psycopg.AsyncConnection. This test asserts:
+        - pool is constructed with the documented kwargs (autocommit,
+          prepare_threshold, row_factory)
+        - pool.check= is wired to AsyncConnectionPool.check_connection
+        - pool.open() is awaited before the saver is constructed
+        - saver.setup() is awaited (idempotent DDL)
+        - AsyncPostgresSaver is constructed with ``conn=pool`` (not a
+          single connection)
+        - adapter is constructed with (saver, asyncpg_pool) — the
+          asyncpg pool is the SEPARATE maintenance driver
+        """
         from daemon.checkpoint_adapter import PostgresCheckpointerAdapter
 
         config = EnsembleConfig(database="postgres")
 
-        # Build fake modules for the lazy imports
+        # Capture pool construction args so we can assert wiring.
+        captured: dict = {}
+
         fake_saver_instance = MagicMock(name="AsyncPostgresSaver")
         fake_saver_instance.setup = AsyncMock()
 
-        class _FakeSaverCls:
-            def __init__(self, conn):
-                self.conn = conn
-                return fake_saver_instance  # but the cls is called, so return the mock
-
-        # Easier: return a callable that returns the mock
         def _saver_factory(conn):
+            captured["saver_conn_arg"] = conn
             return fake_saver_instance
 
         fake_aio_module = MagicMock()
         fake_aio_module.AsyncPostgresSaver = _saver_factory
 
-        fake_pool_instance = MagicMock(name="asyncpg.Pool")
+        fake_asyncpg_pool = MagicMock(name="asyncpg.Pool")
 
         class _FakeAsyncpg:
             @staticmethod
             async def create_pool(*args, **kwargs):
-                return fake_pool_instance
+                return fake_asyncpg_pool
 
         class _FakeDictRow:
             pass
 
-        # Fake psycopg with AsyncConnection.connect that returns a mock conn
-        class _FakeAsyncConnection:
-            @staticmethod
-            async def connect(*args, **kwargs):
-                return MagicMock(name="psycopg_conn")
+        class _FakeAsyncConnectionPool:
+            """Minimal stand-in for psycopg_pool.AsyncConnectionPool.
+
+            Captures construction kwargs and tracks ``open()`` /
+            ``check_connection`` invocations so the test can assert
+            the wiring without spinning up a real pool.
+            """
+            # Class-level marker so the duck-typing topology detector
+            # recognizes this as a pool (not a single connection).
+            check_connection = staticmethod(lambda conn: conn.execute(""))
+
+            # Track ALL instances constructed (the factory may create
+            # more than one if production code paths diverge). Tests
+            # look up the SAVED one (saved_instance).
+            instances: list = []
+            saved_instance = None  # type: ignore[assignment]
+
+            def __init__(self, **kwargs):
+                _FakeAsyncConnectionPool.instances.append(self)
+                _FakeAsyncConnectionPool.saved_instance = self
+                captured["pool_kwargs"] = kwargs
+                self._opened = False
+
+            async def open(self):
+                self._opened = True
+                captured["pool_open_called"] = True
 
             async def close(self):
                 pass
 
         class _FakePsycopg:
-            AsyncConnection = _FakeAsyncConnection
+            AsyncConnection = MagicMock()  # NOT used in pool path
             rows = MagicMock()
             rows.dict_row = _FakeDictRow
+
+        # Do NOT pre-construct an instance — let production code call
+        # AsyncConnectionPool(**kwargs) exactly once. ``saved_instance``
+        # is populated by the fake's __init__.
+
+        class _FakePsycopgPoolModule:
+            AsyncConnectionPool = _FakeAsyncConnectionPool
 
         with patch.dict(
             sys.modules,
@@ -159,17 +196,55 @@ class TestCreatePostgresCheckpointer:
                 "asyncpg": _FakeAsyncpg,
                 "psycopg": _FakePsycopg,
                 "psycopg.rows": _FakePsycopg.rows,
+                "psycopg_pool": _FakePsycopgPoolModule,
                 "langgraph.checkpoint.postgres.aio": fake_aio_module,
             },
         ):
             adapter = await create_postgres_checkpointer(config)
 
+        # Adapter wraps (saver, asyncpg_pool) — the maintenance pool is
+        # the SEPARATE asyncpg driver, NOT the saver pool.
         assert isinstance(adapter, PostgresCheckpointerAdapter)
-        assert adapter.raw_saver is fake_saver_instance
-        # setup() was called on the saver
+        assert adapter._pool is fake_asyncpg_pool
+
+        # Saver was constructed with the POOL, not a single connection.
+        pool_instance = _FakeAsyncConnectionPool.saved_instance
+        assert pool_instance is not None
+        assert captured["saver_conn_arg"] is pool_instance
+
+        # Pool kwargs are the documented wiring.
+        kwargs = captured["pool_kwargs"]
+        assert kwargs["open"] is False, "pool.open() must be explicit"
+        assert kwargs["min_size"] == 1
+        assert kwargs["max_size"] == 5
+        # ``check=`` wired to AsyncConnectionPool.check_connection —
+        # the static liveness probe that catches dead conns.
+        assert kwargs["check"] is _FakeAsyncConnectionPool.check_connection
+        # Lifetime / reconnect knobs documented in the addendum.
+        assert kwargs["max_lifetime"] == 3600
+        assert kwargs["max_idle"] == 600
+        assert kwargs["reconnect_timeout"] == 300
+        # Per-conn kwargs applied to every fresh connect.
+        inner = kwargs["kwargs"]
+        assert inner["autocommit"] is True
+        assert inner["prepare_threshold"] == 0
+        assert inner["row_factory"] is _FakeDictRow
+
+        # pool.open() was awaited BEFORE saver construction.
+        assert captured.get("pool_open_called") is True
+
+        # saver.setup() was awaited (idempotent DDL).
         fake_saver_instance.setup.assert_awaited_once()
-        # The asyncpg pool was created and stored
-        assert adapter._pool is fake_pool_instance
+
+        # raw_saver passes through the retry proxy transparently.
+        # ``raw_saver`` property returns the underlying saver (the
+        # retry proxy's _saver attribute); assert identity equivalence.
+        # We use ``is`` on the unwrapped form so the test is robust to
+        # future proxy refactors (the proxy passes attribute access
+        # through).
+        # Use _raw_saver (kept by the adapter for tests/close to read
+        # the unwrapped object).
+        assert adapter._raw_saver is fake_saver_instance
 
 
 class TestGetInstanceMessages:

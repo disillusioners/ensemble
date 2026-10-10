@@ -139,39 +139,84 @@ async def drop_database(name: str) -> None:
 
 
 @asynccontextmanager
-async def real_pg_checkpointer(dbname: str, dsn: str):
+async def real_pg_checkpointer(dbname: str, dsn: str, *, pool: bool = False):
     """Yield the production-shaped (saver, pool, adapter) stack on a real DB.
 
     Mirrors ``daemon/persistence.py::create_postgres_checkpointer``:
-    psycopg autocommit connection with ``prepare_threshold=0`` +
-    ``dict_row`` → ``AsyncPostgresSaver`` + ``setup()``; asyncpg pool for
-    the adapter's direct SQL. Everything is closed on exit.
+
+    * ``pool=False`` (default — backward compatible): psycopg autocommit
+      connection with ``prepare_threshold=0`` + ``dict_row`` →
+      ``AsyncPostgresSaver`` + ``setup()``; asyncpg pool for the
+      adapter's direct SQL.
+    * ``pool=True`` (incident 2026-10-10): saver is backed by a
+      ``psycopg_pool.AsyncConnectionPool`` (``min_size=1, max_size=5``,
+      kwargs autocommit/dict_row/prepare_threshold, ``check=`` wired
+      to ``AsyncConnectionPool.check_connection``) — the production
+      topology after the fix. The asyncpg pool is unchanged.
+
+    Everything is closed on exit. Existing consumers continue to
+    receive the legacy single-conn topology (``pool=False``); new
+    tests opt in to the pool-backed topology with ``pool=True``.
     """
     import asyncpg
     import psycopg
     from psycopg.rows import dict_row
 
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg_pool import AsyncConnectionPool
 
     from daemon.checkpoint_adapter import PostgresCheckpointerAdapter
 
-    saver_conn = await psycopg.AsyncConnection.connect(
-        dsn,
-        autocommit=True,
-        prepare_threshold=0,
-        row_factory=dict_row,
-    )
-    try:
-        saver = AsyncPostgresSaver(conn=saver_conn)
-        await saver.setup()
-        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
+    if pool:
+        saver_pool = AsyncConnectionPool(
+            conninfo=dsn,
+            open=False,
+            min_size=1,
+            max_size=5,
+            check=AsyncConnectionPool.check_connection,
+            max_lifetime=3600,
+            max_idle=600,
+            reconnect_timeout=300,
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            },
+        )
         try:
-            adapter = PostgresCheckpointerAdapter(saver, pool)
-            yield saver, pool, adapter
+            await saver_pool.open()
+            try:
+                saver = AsyncPostgresSaver(conn=saver_pool)
+                await saver.setup()
+                asyncpg_pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
+                try:
+                    adapter = PostgresCheckpointerAdapter(saver, asyncpg_pool)
+                    yield saver, asyncpg_pool, adapter
+                finally:
+                    await asyncpg_pool.close()
+            finally:
+                await saver_pool.close()
+        except BaseException:
+            # open() failure leaves the pool un-openable; nothing to clean.
+            raise
+    else:
+        saver_conn = await psycopg.AsyncConnection.connect(
+            dsn,
+            autocommit=True,
+            prepare_threshold=0,
+            row_factory=dict_row,
+        )
+        try:
+            saver = AsyncPostgresSaver(conn=saver_conn)
+            await saver.setup()
+            pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
+            try:
+                adapter = PostgresCheckpointerAdapter(saver, pool)
+                yield saver, pool, adapter
+            finally:
+                await pool.close()
         finally:
-            await pool.close()
-    finally:
-        await saver_conn.close()
+            await saver_conn.close()
 
 
 @asynccontextmanager

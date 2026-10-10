@@ -17,12 +17,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import asyncio
 from sqlalchemy import text
 
 import daemon.repositories.task.models  # noqa: F401 — register Task in metadata
 from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.services.readiness import (
     evaluate_queue_freshness,
+    make_checkpoint_saver_probe,
     make_db_probe,
     make_queue_probe,
 )
@@ -249,3 +251,97 @@ def test_pg_inflight_turns_advisory_count(pg_engine):
     assert result.inflight_turns == 1
     assert result.max_age_seconds is not None
     assert 5 <= result.max_age_seconds <= 20  # the 10s beat sets the MAX
+
+
+# ── incident 2026-10-10: checkpoint-saver probe on real PG ──────────────────
+#
+# These tests verify the new readiness component (``checkpoint_saver``)
+# behaves correctly against the production-shaped pool-backed
+# ``AsyncPostgresSaver``. They use the ``real_pg_checkpointer(..., pool=True)``
+# variant introduced in incident-2026-10-10 fix; the ``postgres`` marker is
+# applied at module scope (this entire file is /postgres-only).
+#
+# Marked properly-skipped when PostgreSQL is unreachable — never a silent
+# mock. See ``tests/helpers/checkpoint_prune_pg.py::require_postgres``.
+
+
+@pytest.fixture
+async def pool_backed_checkpointer():
+    """Pool-backed production-shaped saver harness (incident 2026-10-10)."""
+    from tests.helpers.checkpoint_prune_pg import (
+        create_disposable_db,
+        drop_database,
+        require_postgres,
+    )
+
+    require_postgres()
+    dbname, dsn = await create_disposable_db()
+    try:
+        from tests.helpers.checkpoint_prune_pg import real_pg_checkpointer
+
+        async with real_pg_checkpointer(dbname, dsn, pool=True) as (saver, pool, adapter):
+            yield saver, pool, adapter
+    finally:
+        await drop_database(dbname)
+
+
+@pytest.mark.asyncio
+async def test_pg_checkpoint_saver_probe_passes_on_healthy_pool(
+    pool_backed_checkpointer,
+):
+    """Pool.check() succeeds against a healthy production-shaped pool.
+
+    This is the GREEN path the incident's blind spot missed — readiness
+    must report green here (was: would have lied because the readiness
+    DB probe used a fresh engine connection and ignored the saver's
+    pool entirely).
+    """
+    saver, _pool, adapter = pool_backed_checkpointer
+
+    probe = make_checkpoint_saver_probe(adapter)
+    # Run in a thread (the probe is sync; runs against the captured loop).
+    result = await asyncio.to_thread(probe)
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_pg_checkpoint_saver_probe_passes_after_pool_recycles_dead_conn(
+    pool_backed_checkpointer,
+):
+    """Server-side terminate of pool conns → pool.check() still passes.
+
+    The pool's ``check=`` callback detects the dead one and the pool
+    transparently replaces it on the next acquire. We exercise this
+    by killing one connection via ``pg_terminate_backend`` and
+    re-running the probe.
+
+    NOTE: this is a real-PG integration test — it acquires, terminates,
+    re-acquires. Requires PG_TEST_HOST env (default localhost:5432,
+    same as the rest of tests/postgres/).
+    """
+    from daemon.services.readiness import make_checkpoint_saver_probe
+
+    _saver, _pool, adapter = pool_backed_checkpointer
+    probe = make_checkpoint_saver_probe(adapter)
+
+    # Probe is healthy before tampering.
+    assert await asyncio.to_thread(probe) is True
+
+    # Terminate one pool connection server-side. The pool's min_size
+    # is 1, so one kill covers the active conn. We use the adapter's
+    # SEPARATE asyncpg pool to issue the terminate — clean PG
+    # session, distinct from the saver pool we want to kill.
+    apg_pool = adapter._pool
+    async with apg_pool.acquire() as c:
+        await c.execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            "WHERE datname = current_database() AND pid <> pg_backend_pid() "
+            "LIMIT 1"
+        )
+
+    # Pool.check() must still pass — the pool detected the dead conn
+    # and the next acquire replaces it. (We rely on the pool's
+    # check= callback to detect and replace; this test verifies the
+    # end-to-end contract.)
+    result = await asyncio.to_thread(probe)
+    assert result is True
