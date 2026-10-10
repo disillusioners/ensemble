@@ -411,7 +411,11 @@ class TestDesignerSketcherWiring:
     def test_invoke_wait_timeout_convention(self):
         workflow = (DESIGNER_DIR / "workflow.md").read_text(encoding="utf-8")
         assert "invoke_agent_and_wait" in workflow
-        assert "400" in workflow  # explicit timeout >= 400s
+        # §6.2 chain: wall 600 + 60s strict margin — the documented
+        # explicit-wait floor is 660s (bumped from the Phase-1 400s;
+        # the workflow may still cite 400s as the chain-violating
+        # rationale, hence only the positive pin here).
+        assert "≥ 660s" in workflow
 
     def test_addendum_exists_with_leader_gates(self):
         addendum = (PARITY_DIR / "stage2-addendum.md").read_text(encoding="utf-8")
