@@ -303,8 +303,16 @@ export class SnapshotsComponent implements OnInit {
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   readonly debouncedTags = signal<string[]>([]);
 
-  /** Guard against recursive URL ↔ signal sync (AC-6.3). */
-  private suppressUrlSync = false;
+  /**
+   * Last URL queryParams we wrote via the URL-sync effect. Used as a
+   * dedup key so the seed-from-URL flow does NOT immediately write
+   * the URL back to itself (which would be a no-op, but unnecessary).
+   * Keyed by `JSON.stringify` of the qp object.
+   */
+  private lastWrittenUrlKey: string | null = null;
+
+  /** Set this in tests to observe the URL-sync side effects directly. */
+  private skipUrlSync = false;
 
   constructor() {
     // ── Filter-effect: drive the list fetch on every change ──
@@ -341,7 +349,9 @@ export class SnapshotsComponent implements OnInit {
       // for tracking only (matches the v1 effect pattern).
       void tagMode;
 
-      if (this.suppressUrlSync) return;
+      if (this.skipUrlSync) {
+        return;
+      }
       const qp: Record<string, string | string[] | null> = {
         project_id: projectId,
         agent_id: agentId,
@@ -351,6 +361,11 @@ export class SnapshotsComponent implements OnInit {
         sort: sort !== DEFAULT_SORT ? sort : null,
         tags: tags.length ? tags : null,
       };
+      const key = JSON.stringify(qp);
+      if (key === this.lastWrittenUrlKey) {
+        return;
+      }
+      this.lastWrittenUrlKey = key;
       untracked(() => {
         this.router.navigate(['snapshots'], {
           queryParams: qp,
@@ -363,7 +378,6 @@ export class SnapshotsComponent implements OnInit {
 
   ngOnInit(): void {
     // ── Seed filter signals from URL (AC-6.3) ──
-    this.suppressUrlSync = true;
     const qp = this.route.snapshot.queryParamMap;
     const projectId = qp.get('project_id');
     const agentId = qp.get('agent_id');
@@ -393,20 +407,33 @@ export class SnapshotsComponent implements OnInit {
         this.debouncedTags.set([...dedup]);
       }
     }
-    // Release the suppression on the next microtask so the URL-sync
-    // effect's FIRST run does not immediately overwrite what we just
-    // seeded (the values match so it's a no-op either way, but this
-    // avoids a redundant router.navigate).
-    queueMicrotask(() => {
-      this.suppressUrlSync = false;
+    // Record the seed values as the last-written URL key so the
+    // URL-sync effect's first run (which sees the same signals)
+    // dedups and does NOT navigate. This replaces the v1
+    // suppressUrlSync + queueMicrotask dance, which is brittle in
+    // test environments where queueMicrotask may not be patched.
+    this.lastWrittenUrlKey = JSON.stringify({
+      project_id: this.filterProjectId(),
+      agent_id: this.filterAgentId(),
+      status: this.filterStatus(),
+      age: this.filterAge(),
+      tag_mode: this.filterTagMode(),
+      sort: this.filterSort(),
+      tags: this.filterTags(),
     });
 
-    // Also re-sync on URL changes (back/forward navigation).
+    // Re-sync on URL changes (back/forward navigation).
+    // Skip the BehaviorSubject's initial replay — we already used
+    // `route.snapshot.queryParamMap` to seed the filter signals.
+    let isFirstQueryParamEmit = true;
     this.route.queryParamMap
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((map) => {
-        if (this.suppressUrlSync) return;
-        this.suppressUrlSync = true;
+        if (isFirstQueryParamEmit) {
+          isFirstQueryParamEmit = false;
+          return;
+        }
+        this.skipUrlSync = true;
         const pid = map.get('project_id');
         const aid = map.get('agent_id');
         const st = map.getAll('status').filter(isStatus);
@@ -423,8 +450,12 @@ export class SnapshotsComponent implements OnInit {
         this.filterTags.set(tg);
         this.debouncedTags.set([...tg]);
         this.pageIndex.set(0);
+        // Reset the dedup key so the URL-sync effect can navigate
+        // on the next user-driven filter change.
+        this.lastWrittenUrlKey = null;
+        // Allow the URL-sync effect to navigate on the next change.
         queueMicrotask(() => {
-          this.suppressUrlSync = false;
+          this.skipUrlSync = false;
         });
       });
 

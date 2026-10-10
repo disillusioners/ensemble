@@ -1,8 +1,10 @@
-import { ComponentFixture, TestBed, fakeAsync, tick } from '@angular/core/testing';
+import { ComponentFixture, TestBed, fakeAsync, tick, flushMicrotasks } from '@angular/core/testing';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
-import { of, throwError } from 'rxjs';
+import { BehaviorSubject, of, throwError } from 'rxjs';
 import { Clipboard } from '@angular/cdk/clipboard';
 import { MatSnackBar } from '@angular/material/snack-bar';
+import { ActivatedRoute, Router, convertToParamMap } from '@angular/router';
+import { ParamMap } from '@angular/router';
 import { signal } from '@angular/core';
 
 import { SnapshotsComponent } from './snapshots.component';
@@ -41,19 +43,11 @@ function makeRow(overrides: Partial<SnapshotRow> = {}): SnapshotRow {
 }
 
 function makeListResponse(overrides: Partial<SnapshotListResponse> = {}): SnapshotListResponse {
-  return {
-    items: [],
-    total: 0,
-    ...overrides,
-  };
+  return { items: [], total: 0, ...overrides };
 }
 
 function makeMetrics(overrides: Partial<SnapshotUsageMetrics> = {}): SnapshotUsageMetrics {
-  return {
-    capture_counts: {},
-    spawn_counts_per_snapshot: [],
-    ...overrides,
-  };
+  return { capture_counts: {}, spawn_counts_per_snapshot: [], ...overrides };
 }
 
 function makeProject(overrides: Partial<Project> = {}): Project {
@@ -69,9 +63,21 @@ function makeProject(overrides: Partial<Project> = {}): Project {
   } as Project;
 }
 
+// ── Route stubs (v2 AC-6.3 — URL queryParams mirror) ───────
+function makeActivatedRouteStub(initialQp: Record<string, string | string[]> = {}): {
+  snapshot: { queryParamMap: ParamMap };
+  queryParamMap: BehaviorSubject<ParamMap>;
+} {
+  const subject = new BehaviorSubject<ParamMap>(convertToParamMap(initialQp));
+  return {
+    snapshot: { queryParamMap: subject.value },
+    queryParamMap: subject.asObservable() as BehaviorSubject<ParamMap>,
+  };
+}
+
 // ── Suite ───────────────────────────────────────────────────
 
-describe('SnapshotsComponent', () => {
+describe('SnapshotsComponent (v2 redesign)', () => {
   let fixture: ComponentFixture<SnapshotsComponent>;
   let component: SnapshotsComponent;
 
@@ -91,6 +97,8 @@ describe('SnapshotsComponent', () => {
   };
   let clipboard: { copy: jest.Mock };
   let snackBar: { open: jest.Mock };
+  let router: { navigate: jest.Mock };
+  let routeStub: ReturnType<typeof makeActivatedRouteStub>;
 
   beforeEach(async () => {
     mockSnapshotService = {
@@ -109,6 +117,8 @@ describe('SnapshotsComponent', () => {
     };
     clipboard = { copy: jest.fn() };
     snackBar = { open: jest.fn() };
+    router = { navigate: jest.fn().mockResolvedValue(true) };
+    routeStub = makeActivatedRouteStub({});
 
     await TestBed.configureTestingModule({
       imports: [SnapshotsComponent],
@@ -119,6 +129,8 @@ describe('SnapshotsComponent', () => {
         { provide: ProjectService, useValue: mockProjectService },
         { provide: Clipboard, useValue: clipboard },
         { provide: MatSnackBar, useValue: snackBar },
+        { provide: Router, useValue: router },
+        { provide: ActivatedRoute, useValue: routeStub },
       ],
     }).compileComponents();
 
@@ -130,15 +142,13 @@ describe('SnapshotsComponent', () => {
     jest.clearAllMocks();
   });
 
-  // ── (a) renders header toggle + metrics strip + filter bar + table skeleton on init
-  it('(a) renders header toggle + metrics strip + filter bar + table skeleton on init', () => {
+  // ── (a) v2 chrome renders control row + filter row + stats strip + table
+  it('(a) renders control row + filter row + stats strip + table component on init', () => {
     fixture.detectChanges();
     const compiled = fixture.nativeElement as HTMLElement;
-    expect(compiled.querySelector('.toggle-section')).not.toBeNull();
-    expect(compiled.querySelector('.metrics-strip')).not.toBeNull();
-    expect(compiled.querySelector('.filter-bar')).not.toBeNull();
-    // The table is present (the inner table component handles its
-    // own loading skeleton; the wrapper is the host's <app-snapshots-table>).
+    expect(compiled.querySelector('.control-row')).not.toBeNull();
+    expect(compiled.querySelector('.filter-row')).not.toBeNull();
+    expect(compiled.querySelector('.stats-strip')).not.toBeNull();
     expect(compiled.querySelector('app-snapshots-table')).not.toBeNull();
   });
 
@@ -182,22 +192,40 @@ describe('SnapshotsComponent', () => {
       'Dismiss',
       expect.any(Object),
     );
-    // saved should remain false (the initial value)
     expect(component.savedSnapshotCreateEnabled()).toBe(false);
-    // saving flips back to false
     expect(component.savingSnapshotCreate()).toBe(false);
   }));
 
-  // ── (e) Clear Filters button visible when hasActiveFilters, hidden when default
-  it('(e) Clear Filters button is visible when hasActiveFilters and hidden when default', () => {
+  // ── (d-extra) v2 toggle pill click: first click toggles + marks dirty,
+  //              second click (when dirty) saves via setSnapshotCreateEnabled.
+  it('(d-extra) toggle-pill click: first flips + dirties, second (dirty) saves', fakeAsync(() => {
+    fixture.detectChanges();
+    tick();
+    fixture.detectChanges();
+    expect(component.snapshotCreateEnabled()).toBe(false); // initial from mock
+    expect(component.snapshotCreateDirty()).toBe(false);
+
+    component.onTogglePillClick(); // first click → flip + dirty
+    fixture.detectChanges();
+    expect(component.snapshotCreateEnabled()).toBe(true);
+    expect(component.snapshotCreateDirty()).toBe(true);
+
+    component.onTogglePillClick(); // second click (dirty) → save
+    tick();
+    expect(mockSettingsService.setSnapshotCreateEnabled).toHaveBeenCalledWith(true);
+  }));
+
+  // ── (e) Clear Filters (filter-clear) visible when hasActiveFilters, hidden when default
+  it('(e) Clear Filters is visible when hasActiveFilters and hidden when default', () => {
     fixture.detectChanges();
     let compiled = fixture.nativeElement as HTMLElement;
-    expect(compiled.querySelector('.clear-filters-btn')).toBeNull();
+    expect(compiled.querySelector('[data-test="filter-clear"]')).toBeNull();
 
     component.filterAgentId.set('coder');
     fixture.detectChanges();
     compiled = fixture.nativeElement as HTMLElement;
-    expect(compiled.querySelector('.clear-filters-btn')).not.toBeNull();
+    expect(compiled.querySelector('[data-test="filter-clear"]')).not.toBeNull();
+    expect(compiled.querySelector('[data-test="filter-active-count"]')).not.toBeNull();
   });
 
   // ── (f) any filter change (incl. Clear-filters) resets pageIndex to 0 IN THE SAME SIGNAL WRITE
@@ -239,8 +267,8 @@ describe('SnapshotsComponent', () => {
     expect(component.drawerOpen()).toBe(false);
   });
 
-  // ── (i) metrics fetch error → inline retry, page still usable
-  it('(i) metrics fetch error surfaces an inline error; the page is still usable', fakeAsync(() => {
+  // ── (i) metrics fetch error → page still usable
+  it('(i) metrics fetch error surfaces an error; the page is still usable', fakeAsync(() => {
     mockSnapshotService.getMetrics.mockReturnValue(
       throwError(() => new Error('metrics boom')),
     );
@@ -248,18 +276,7 @@ describe('SnapshotsComponent', () => {
     tick();
     fixture.detectChanges();
     expect(component.metricsError()).toContain('metrics boom');
-    // The list and toggle are unaffected.
     expect(component.listError()).toBeNull();
-  }));
-
-  // ── (j) metrics empty → "No captures yet." in the Capture card; Warmed card hidden
-  it('(j) empty metrics renders "No captures yet." and hides the Warmed card', fakeAsync(() => {
-    mockSnapshotService.getMetrics.mockReturnValue(of(makeMetrics()));
-    fixture.detectChanges();
-    tick();
-    fixture.detectChanges();
-    const compiled = fixture.nativeElement as HTMLElement;
-    expect(compiled.textContent).toContain('No captures yet.');
   }));
 
   // ── (k) R10 cold start — projects() empty → listProjects() called exactly once
@@ -288,18 +305,14 @@ describe('SnapshotsComponent', () => {
     fixture.detectChanges();
     tick();
     fixture.detectChanges();
-    // First list response: page 1 has 'coder' → seenAgents = {'coder'}
     expect(component.seenAgents().has('coder')).toBe(true);
 
-    // Trigger page 2 (simulate by setting pageIndex)
     component.onPageChange({ pageIndex: 1, pageSize: 25, length: 50 });
     tick();
     fixture.detectChanges();
-    // Second list response: page 2 has 'tester' → seenAgents = {'coder', 'tester'}
     expect(component.seenAgents().has('coder')).toBe(true);
     expect(component.seenAgents().has('tester')).toBe(true);
 
-    // agentOptions includes both
     const opts = component.agentOptions();
     expect(opts.map((o) => o.value)).toContain('coder');
     expect(opts.map((o) => o.value)).toContain('tester');
@@ -308,7 +321,6 @@ describe('SnapshotsComponent', () => {
   // ── (m) selected-agent pin — agent option stays pinned/valid when it is the currently selected value
   it('(m) selected-agent pin: a selected agent stays in agentOptions even when absent from later responses', fakeAsync(() => {
     component.filterAgentId.set('ghost-agent');
-    // page 1 returns nothing
     mockSnapshotService.list.mockReturnValueOnce(of(makeListResponse({ items: [], total: 0 })));
     fixture.detectChanges();
     tick();
@@ -318,25 +330,118 @@ describe('SnapshotsComponent', () => {
     expect(opts.map((o) => o.value)).toContain('ghost-agent');
   }));
 
-  it('(m-extra) wire: list() is called with buildParams that emit ?agent=<id> (D-2)', fakeAsync(() => {
+  it('(m-extra) wire: list() is called with buildParams that carry agent_id (D-2)', fakeAsync(() => {
     component.filterAgentId.set('coder');
-    // Force a re-fetch
     component.onFilterAgentChange('coder');
     tick();
     fixture.detectChanges();
-    // Inspect the call args for buildParams
     expect(mockSnapshotService.list).toHaveBeenCalled();
     const lastCallFilters: SnapshotFilters =
       mockSnapshotService.list.mock.calls[mockSnapshotService.list.mock.calls.length - 1][0];
     expect(lastCallFilters.agent_id).toBe('coder');
-    // Wire rename D-2
-    const params = TestBed.inject(SnapshotService as any).buildParams?.(lastCallFilters) ??
-      // SnapshotService is a class — instantiate a fresh one and call
-      // buildParams to verify the wire name (SnapshotService is
-      // `providedIn: 'root'` so TestBed.inject returns the instance).
-      (null as any);
-    // SnapshotService is `providedIn: 'root'` but we provided a useValue
-    // override — so we re-instantiate it directly for the wire test.
-    expect(lastCallFilters.agent_id).toBe('coder');
+  }));
+
+  // ── (n) v2 NEW: filter signal write mirrors to queryParams (AC-6.3)
+  it('(n) AC-6.3: filter signal write mirrors to queryParams via Router.navigate merge', fakeAsync(() => {
+    fixture.detectChanges();
+    tick();
+    fixture.detectChanges();
+    TestBed.tick();
+    // Capture the navigation calls from ngOnInit seed (these use the
+    // default filter state so the queryParams object is null-keyed for
+    // every entry — i.e. the effect ran with suppressUrlSync=true).
+    const initialCalls = router.navigate.mock.calls.length;
+    // Now change a filter and force the effect to re-run.
+    component.onFilterProjectChange('proj-uuid-1');
+    TestBed.tick();
+    const afterChangeCalls = router.navigate.mock.calls.length;
+    expect(afterChangeCalls).toBeGreaterThan(initialCalls);
+    // The latest call must contain the new project_id and merge mode.
+    const lastCall = router.navigate.mock.calls[afterChangeCalls - 1];
+    expect(lastCall[0]).toEqual(['snapshots']);
+    expect(lastCall[1].queryParamsHandling).toBe('merge');
+    expect(lastCall[1].queryParams.project_id).toBe('proj-uuid-1');
+  }));
+
+  // ── (n-extra) v2 NEW: URL queryParams seed the filter signals on init (AC-6.3)
+  it('(n-extra) AC-6.3: ActivatedRoute.queryParams seed the filter signals', fakeAsync(() => {
+    // Reset and re-create with a populated queryParamMap.
+    TestBed.resetTestingModule();
+    routeStub = makeActivatedRouteStub({
+      project_id: 'proj-seed-uuid',
+      agent_id: 'seed-agent',
+      status: ['active', 'running'],
+      age: '7d',
+      tag_mode: 'any',
+      sort: 'title_asc',
+      tags: ['domain:api', 'env:prod'],
+    });
+    TestBed.configureTestingModule({
+      imports: [SnapshotsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: SnapshotService, useValue: mockSnapshotService },
+        { provide: SettingsService, useValue: mockSettingsService },
+        { provide: ProjectService, useValue: mockProjectService },
+        { provide: Clipboard, useValue: clipboard },
+        { provide: MatSnackBar, useValue: snackBar },
+        { provide: Router, useValue: router },
+        { provide: ActivatedRoute, useValue: routeStub },
+      ],
+    });
+    TestBed.compileComponents();
+    fixture = TestBed.createComponent(SnapshotsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    tick();
+    flushMicrotasks();
+
+    expect(component.filterProjectId()).toBe('proj-seed-uuid');
+    expect(component.filterAgentId()).toBe('seed-agent');
+    expect(component.filterStatus()).toEqual(['active', 'running']);
+    expect(component.filterAge()).toBe('7d');
+    expect(component.filterTagMode()).toBe('any');
+    expect(component.filterSort()).toBe('title_asc');
+    expect(component.filterTags()).toEqual(['domain:api', 'env:prod']);
+  }));
+
+  // ── (o) v2 NEW: stats-strip reads from records + metrics
+  it('(o) AC-2.3: stats-strip counts reflect in-memory records + metrics', fakeAsync(() => {
+    mockSnapshotService.list.mockReturnValue(
+      of(
+        makeListResponse({
+          items: [
+            makeRow({ id: 'a', status: 'active' }),
+            makeRow({ id: 'b', status: 'active' }),
+            makeRow({ id: 'c', status: 'running' }),
+            makeRow({ id: 'd', status: 'failed' }),
+            makeRow({ id: 'e', status: 'interrupted' }),
+          ],
+          total: 47,
+        }),
+      ),
+    );
+    mockSnapshotService.getMetrics.mockReturnValue(
+      of(
+        makeMetrics({
+          spawn_counts_per_snapshot: [
+            { snapshot_id: 'a', count: 3 },
+            { snapshot_id: 'b', count: 1 },
+          ],
+        }),
+      ),
+    );
+    fixture.detectChanges();
+    tick();
+    fixture.detectChanges();
+
+    expect(component.totalSnapshotCount()).toBe(47);
+    expect(component.statusCounts().active).toBe(2);
+    expect(component.statusCounts().running).toBe(1);
+    expect(component.statusCounts().failed).toBe(1);
+    expect(component.statusCounts().interrupted).toBe(1);
+    expect(component.totalWarmedSpawns()).toBe(4);
   }));
 });
+
+// (of/BehaviorSubject/throwError imports hoisted to the top of the file)
