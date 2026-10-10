@@ -345,9 +345,11 @@ export class SnapshotsComponent implements OnInit {
       const tags = this.filterTags();
 
       // Track the dependencies explicitly so the effect re-runs on any
-      // change. We don't actually USE them — the read on `tagMode` is
-      // for tracking only (matches the v1 effect pattern).
-      void tagMode;
+      // change. The read on `tagMode` is for tracking only, so the
+      // `void` operator was previously inserted to silence "unused
+      // expression" lints. S1 conformance r1 cleanup: tagMode is
+      // read once below in the qp assembly, so the void is no longer
+      // needed and is dropped here.
 
       if (this.skipUrlSync) {
         return;
@@ -450,10 +452,32 @@ export class SnapshotsComponent implements OnInit {
         this.filterTags.set(tg);
         this.debouncedTags.set([...tg]);
         this.pageIndex.set(0);
-        // Reset the dedup key so the URL-sync effect can navigate
-        // on the next user-driven filter change.
-        this.lastWrittenUrlKey = null;
-        // Allow the URL-sync effect to navigate on the next change.
+        // S1 (conformance r1): seed `lastWrittenUrlKey` from the
+        // POST-seed signal values. The previous implementation set
+        // `lastWrittenUrlKey = null` and relied on `skipUrlSync`
+        // + `queueMicrotask` to suppress the URL-sync effect. That
+        // left a narrow race: if the microtask landed BEFORE the
+        // effect's re-run, the effect saw `skipUrlSync === false`,
+        // saw the freshly-mutated signals, and re-navigated with
+        // identical params — a re-navigation loop. Seeding
+        // `lastWrittenUrlKey` from the post-seed values makes the
+        // URL-sync effect's dedup check (`key === lastWrittenUrlKey`)
+        // catch the loop on every back/forward. The `skipUrlSync`
+        // + microtask dance is kept as belt-and-suspenders for the
+        // signal-write-protection case but is no longer load-bearing.
+        this.lastWrittenUrlKey = JSON.stringify({
+          project_id: this.filterProjectId(),
+          agent_id: this.filterAgentId(),
+          status: this.filterStatus(),
+          age: this.filterAge(),
+          tag_mode: this.filterTagMode(),
+          sort: this.filterSort(),
+          tags: this.filterTags(),
+        });
+        // Allow the URL-sync effect to navigate on the next
+        // USER-DRIVEN filter change. The seed above means even if
+        // the microtask races ahead of the effect, the dedup check
+        // still catches the loop.
         queueMicrotask(() => {
           this.skipUrlSync = false;
         });

@@ -64,14 +64,25 @@ function makeProject(overrides: Partial<Project> = {}): Project {
 }
 
 // ── Route stubs (v2 AC-6.3 — URL queryParams mirror) ───────
-function makeActivatedRouteStub(initialQp: Record<string, string | string[]> = {}): {
+interface ActivatedRouteStub {
   snapshot: { queryParamMap: ParamMap };
+  /** Underlying BehaviorSubject (for `.next(...)` to simulate back/forward). */
+  queryParamMapSubject: BehaviorSubject<ParamMap>;
+  /** Observable used as the ActivatedRoute.queryParamMap value. */
   queryParamMap: BehaviorSubject<ParamMap>;
-} {
+}
+function makeActivatedRouteStub(
+  initialQp: Record<string, string | string[]> = {},
+): ActivatedRouteStub {
   const subject = new BehaviorSubject<ParamMap>(convertToParamMap(initialQp));
   return {
     snapshot: { queryParamMap: subject.value },
-    queryParamMap: subject.asObservable() as BehaviorSubject<ParamMap>,
+    queryParamMapSubject: subject,
+    // Expose the BehaviorSubject itself as the route's queryParamMap —
+    // ActivatedRoute's API only consumes it as an Observable, so
+    // tests can still rely on the BehaviorSubject's `.next(...)` to
+    // simulate browser back/forward without breaking the public contract.
+    queryParamMap: subject,
   };
 }
 
@@ -403,6 +414,150 @@ describe('SnapshotsComponent (v2 redesign)', () => {
     expect(component.filterTagMode()).toBe('any');
     expect(component.filterSort()).toBe('title_asc');
     expect(component.filterTags()).toEqual(['domain:api', 'env:prod']);
+  }));
+
+  // ── (n-bf) v2 S1 (conformance r1): URL back/forward (queryParamMap
+  //      .next with a new map) re-seeds the filter signals AND
+  //      does NOT trigger a re-navigation. Previously the
+  //      subscription reset `lastWrittenUrlKey = null` and relied
+  //      on `skipUrlSync` + `queueMicrotask` to suppress the
+  //      URL-sync effect — that left a narrow race where the
+  //      microtask could land before the effect's re-run and the
+  //      effect would re-navigate with identical params (loop
+  //      risk). The fix seeds `lastWrittenUrlKey` from the
+  //      POST-seed signal values so the dedup check catches the
+  //      loop regardless of microtask scheduling.
+  it('(n-bf) S1: back/forward re-seeds filter signals AND does NOT trigger re-navigation', fakeAsync(() => {
+    // Mount the page with a non-empty URL (so ngOnInit seeds signals).
+    TestBed.resetTestingModule();
+    routeStub = makeActivatedRouteStub({
+      project_id: 'proj-seed-uuid',
+      agent_id: 'seed-agent',
+      status: ['active'],
+      age: '7d',
+    });
+    TestBed.configureTestingModule({
+      imports: [SnapshotsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: SnapshotService, useValue: mockSnapshotService },
+        { provide: SettingsService, useValue: mockSettingsService },
+        { provide: ProjectService, useValue: mockProjectService },
+        { provide: Clipboard, useValue: clipboard },
+        { provide: MatSnackBar, useValue: snackBar },
+        { provide: Router, useValue: router },
+        { provide: ActivatedRoute, useValue: routeStub },
+      ],
+    });
+    TestBed.compileComponents();
+    fixture = TestBed.createComponent(SnapshotsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    tick();
+    flushMicrotasks();
+
+    // Sanity — initial state reflects the seed URL.
+    expect(component.filterProjectId()).toBe('proj-seed-uuid');
+    expect(component.filterAgentId()).toBe('seed-agent');
+    expect(component.filterStatus()).toEqual(['active']);
+    expect(component.filterAge()).toBe('7d');
+
+    // Drain any URL-sync navigations from the seed/init phase.
+    flushMicrotasks();
+    tick();
+    const navigateCallsBefore = router.navigate.mock.calls.length;
+
+    // ── Back/forward: simulate the URL changing to a new snapshot.
+    // The user pressed the browser back button — the route emits a
+    // fresh `queryParamMap` value with a DIFFERENT filter set.
+    routeStub.queryParamMap.next(
+      convertToParamMap({
+        project_id: 'proj-other-uuid',
+        agent_id: 'other-agent',
+        status: ['failed', 'interrupted'],
+        age: '30d',
+        tag_mode: 'any',
+        sort: 'title_asc',
+        tags: ['domain:web'],
+      }),
+    );
+    tick();
+    flushMicrotasks();
+
+    // Signals re-seeded from the new URL.
+    expect(component.filterProjectId()).toBe('proj-other-uuid');
+    expect(component.filterAgentId()).toBe('other-agent');
+    expect(component.filterStatus()).toEqual(['failed', 'interrupted']);
+    expect(component.filterAge()).toBe('30d');
+    expect(component.filterTagMode()).toBe('any');
+    expect(component.filterSort()).toBe('title_asc');
+    expect(component.filterTags()).toEqual(['domain:web']);
+    // PageIndex resets to 0 on back/forward (v1 amendment #10).
+    expect(component.pageIndex()).toBe(0);
+
+    // Critical: NO re-navigation. The URL-sync dedup is now keyed by
+    // the post-seed signal values, so even if the microtask races
+    // ahead of the URL-sync effect, the effect's `key === lastWrittenUrlKey`
+    // check dedups and does NOT navigate.
+    const navigateCallsAfter = router.navigate.mock.calls.length;
+    expect(navigateCallsAfter).toBe(navigateCallsBefore);
+  }));
+
+  // ── (n-bf-extra) v2 S1: a USER-DRIVEN filter change AFTER a
+  //      back/forward must still write to the URL (the seed from
+  //      back/forward is not "stuck"). This catches a regression
+  //      where the fix accidentally suppresses user-driven writes.
+  it('(n-bf-extra) S1: user-driven filter change AFTER back/forward still navigates', fakeAsync(() => {
+    // Re-mount with non-empty URL.
+    TestBed.resetTestingModule();
+    routeStub = makeActivatedRouteStub({
+      project_id: 'proj-seed-uuid',
+      agent_id: 'seed-agent',
+      status: ['active'],
+      age: '7d',
+    });
+    TestBed.configureTestingModule({
+      imports: [SnapshotsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: SnapshotService, useValue: mockSnapshotService },
+        { provide: SettingsService, useValue: mockSettingsService },
+        { provide: ProjectService, useValue: mockProjectService },
+        { provide: Clipboard, useValue: clipboard },
+        { provide: MatSnackBar, useValue: snackBar },
+        { provide: Router, useValue: router },
+        { provide: ActivatedRoute, useValue: routeStub },
+      ],
+    });
+    TestBed.compileComponents();
+    fixture = TestBed.createComponent(SnapshotsComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    tick();
+    flushMicrotasks();
+
+    // Back/forward first.
+    routeStub.queryParamMap.next(
+      convertToParamMap({
+        project_id: 'proj-other-uuid',
+        agent_id: 'other-agent',
+      }),
+    );
+    tick();
+    flushMicrotasks();
+    const navigateCallsBeforeUserChange = router.navigate.mock.calls.length;
+
+    // User changes a filter — must still trigger navigation.
+    component.onFilterProjectChange('user-picked-project');
+    fixture.detectChanges();
+    tick();
+    flushMicrotasks();
+    const navigateCallsAfter = router.navigate.mock.calls.length;
+    expect(navigateCallsAfter).toBeGreaterThan(navigateCallsBeforeUserChange);
+    // The new navigation must reflect the user-picked value.
+    const lastCall = router.navigate.mock.calls[navigateCallsAfter - 1];
+    expect(lastCall[0]).toEqual(['snapshots']);
+    expect(lastCall[1].queryParams.project_id).toBe('user-picked-project');
   }));
 
   // ── (o) v2 NEW: stats-strip reads from records + metrics
