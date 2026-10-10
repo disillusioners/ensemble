@@ -415,7 +415,14 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
         const s = u.searchParams.getAll('status');
         return s.length === 1 && s[0] === 'active';
       }),
-      statusPopover.locator('label.status-menu-item', { hasText: /^active$/ }).click(),
+      // FIX(2026-10-10): unanchored hasText — `label.status-menu-item`'s rendered
+      // textContent is `<mat-icon>check_circle</mat-icon> active ` (ligature
+      // + text + whitespace), so `/^active$/` can never match. No sibling
+      // option text contains "active" as a substring (verified: the 5 status
+      // enums are active/running/superseded/failed/interrupted), so an
+      // unanchored regex is collision-safe. See LESSONS/2026-10-10-anchored-
+      // text-locator-vs-mat-icon-ligature.md (Fixes §1 + §3).
+      statusPopover.locator('label.status-menu-item', { hasText: /active/ }).click(),
     ]);
     expect(respActive.status()).toBe(200);
     expect(new URL(respActive.request().url()).searchParams.getAll('status')).toEqual(['active']);
@@ -432,7 +439,13 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
           return false;
         }
       }),
-      statusPopover.locator('label.status-menu-item', { hasText: /^superseded$/ }).click(),
+      // FIX(2026-10-10): same-pattern fix as the first-chip click above —
+      // `label.status-menu-item`'s textContent is `<mat-icon>history</mat-icon>
+      // superseded ` (ligature + text + whitespace), so an anchored regex
+      // can never match. No sibling option contains "superseded" as a
+      // substring (verified), so an unanchored regex is collision-safe.
+      // See LESSONS/2026-10-10-anchored-text-locator-vs-mat-icon-ligature.md.
+      statusPopover.locator('label.status-menu-item', { hasText: /superseded/ }).click(),
     ]);
     expect(resp.status()).toBe(200);
     const statusParams = new URL(resp.request().url()).searchParams.getAll('status');
@@ -461,7 +474,14 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
           return false;
         }
       }),
-      page.locator('[data-test="filter-age"] button', { hasText: /^24h$/ }).click(),
+      // FIX(2026-10-10): unanchored hasText — regex hasText matches RAW
+      // textContent (no whitespace normalization; playwright-core
+      // createTextMatcher regex branch), and the age button renders ' 24h '
+      // (interpolation padding), so /^24h$/ can never match. No sibling age
+      // label (24h/7d/30d/All) contains '24h' as a substring →
+      // collision-safe. See LESSONS/2026-10-10-anchored-text-locator-vs-
+      // mat-icon-ligature.md.
+      page.locator('[data-test="filter-age"] button', { hasText: /24h/ }).click(),
     ]);
     expect(resp.status()).toBe(200);
     const cutoff = new URL(resp.request().url()).searchParams.get('created_after');
