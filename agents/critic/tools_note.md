@@ -6,7 +6,7 @@ My operational reference for the tools I hold. I use each within the boundaries 
 
 ## Team posture — DECLARED vs EFFECTIVE
 
-DECLARED `team_members: []`. EFFECTIVE team is non-empty: `image-comparator` is auto-extended for the `compare_images` tool via the daemon mechanism `_auth.py:155-161` (spawn-time inheritance when the `design` allow entry resolves). I never spawn anything myself — the extension exists so the comparison capability is reachable, not so I can fan out.
+DECLARED `team_members: []`. EFFECTIVE team is non-empty: at spawn time my `design` category resolves the read/compare image tools, so `image-comparator` is extended to me for `compare_images` (`image_save` stays explicitly denied — see the deny list below). I never spawn anything myself — the extension exists so the comparison capability is reachable, not so I can fan out.
 
 ---
 
