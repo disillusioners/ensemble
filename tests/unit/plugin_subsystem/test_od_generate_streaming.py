@@ -697,3 +697,145 @@ class TestInbandErrorPrecedence:
         )
         assert result["error"]["ok"] is False
         assert result["error"]["code"] == "upstream_http_error"
+
+    def test_blocklist_kind_inband_envelope_reraised_unchanged_direct(
+        self, monkeypatch
+    ):
+        """DIRECT consumer assertion (reviewer Issue 3a): a blocklist-kind
+        in-band SSE error envelope is re-raised UNCHANGED by
+        ``_consume_chat_stream`` itself (generate.py:928-931, blocklist
+        leg) — the original SDK error escapes unwrapped so the facade's
+        terminal blocklist typing is preserved, NOT wrapped as transient.
+        The fixture discriminates the blocklist leg: it matches
+        ``apierror_blocklist`` ("invalid params") but NOT the quota window
+        (``_matches_usage_limit``)."""
+        import openai as real_openai
+
+        from daemon.llm_error_classifier import (
+            TransientLLMError,
+            _any_substring,
+            _matches_usage_limit,
+            _transient_patterns,
+        )
+        from daemon.plugin_subsystem.opendesign import generate as gen_mod
+
+        message = "invalid params: unknown model 'bogus-vision'"
+        assert not _matches_usage_limit(message), (
+            "fixture must NOT hit the quota leg"
+        )
+        assert _any_substring(
+            _transient_patterns.apierror_blocklist, message.lower()
+        ), "fixture must hit the blocklist leg"
+        blocklist_event = _raw_data_event(
+            {
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": message,
+                }
+            }
+        )
+        _patch_streaming_openai(
+            monkeypatch, _sse_bytes([b": connected\n\n", blocklist_event])
+        )
+        client = real_openai.OpenAI(
+            api_key="fake-key", base_url="http://primary.test/v1"
+        )
+        stream = client.chat.completions.create(
+            model="vision",
+            messages=[{"role": "user", "content": "x"}],
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+        with pytest.raises(Exception) as excinfo:
+            gen_mod._consume_chat_stream(stream)
+        assert isinstance(excinfo.value, real_openai.APIError)
+        assert not isinstance(excinfo.value, TransientLLMError), (
+            "blocklist shapes re-raise unchanged; wrapping here would "
+            "route a terminal classification into the retry ladder"
+        )
+        assert "invalid params" in str(excinfo.value).lower()
+
+    def test_quota_kind_inband_envelope_reraised_unchanged_direct(
+        self, monkeypatch
+    ):
+        """DIRECT consumer assertion (reviewer Issue 3b): a quota/usage-limit
+        kind in-band SSE error envelope re-raises UNCHANGED through
+        ``_consume_chat_stream`` (generate.py:928-931, the
+        ``_matches_usage_limit`` precedence leg) — terminal usage-limit
+        typing is preserved for the facade's bare-APIError branch, NOT
+        wrapped as transient."""
+        import openai as real_openai
+
+        from daemon.llm_error_classifier import (
+            TransientLLMError,
+            _matches_usage_limit,
+        )
+        from daemon.plugin_subsystem.opendesign import generate as gen_mod
+
+        message = "Token Plan usage limit reached"
+        assert _matches_usage_limit(message), "fixture must hit the quota leg"
+        quota_event = _raw_data_event(
+            {
+                "error": {
+                    "type": "usage_limit",
+                    "message": message,
+                }
+            }
+        )
+        _patch_streaming_openai(
+            monkeypatch, _sse_bytes([b": connected\n\n", quota_event])
+        )
+        client = real_openai.OpenAI(
+            api_key="fake-key", base_url="http://primary.test/v1"
+        )
+        stream = client.chat.completions.create(
+            model="vision",
+            messages=[{"role": "user", "content": "x"}],
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+        with pytest.raises(Exception) as excinfo:
+            gen_mod._consume_chat_stream(stream)
+        assert isinstance(excinfo.value, real_openai.APIError)
+        assert not isinstance(excinfo.value, TransientLLMError), (
+            "quota shapes re-raise unchanged; wrapping here would retry a "
+            "terminal usage-limit classification"
+        )
+        assert "usage limit" in str(excinfo.value).lower()
+
+
+class TestStreamedUsageDetails:
+    """Terminal usage-chunk detail path (reviewer Issue 4): the streamed
+    usage capture reads the optional ``completion_tokens_details``
+    defensively (generate.py:937-953) and carries ``reasoning_tokens``
+    through the captured usage object."""
+
+    def test_streamed_usage_reasoning_tokens_flows_through(self, monkeypatch):
+        from daemon.plugin_subsystem.opendesign import generate as gen_mod
+
+        events = _happy_stream_events(
+            usage={
+                "prompt_tokens": 10,
+                "completion_tokens": 25,
+                "total_tokens": 35,
+                "completion_tokens_details": {"reasoning_tokens": 17},
+            }
+        )
+        _patch_streaming_openai(monkeypatch, _sse_bytes(events))
+        envelope = gen_mod._do_chat_call(
+            model="vision",
+            base_url="http://primary.test/v1",
+            api_key="fake-key",
+            system_prompt="sys",
+            user_prompt="user",
+            max_tokens=4096,
+            temperature=0.7,
+            timeout=120.0,
+        )
+        usage = envelope.usage
+        assert usage is not None, "terminal usage chunk must be captured"
+        assert usage.prompt_tokens == 10
+        assert usage.completion_tokens == 25
+        assert usage.total_tokens == 35
+        assert usage.completion_tokens_details is not None
+        assert usage.completion_tokens_details.reasoning_tokens == 17
