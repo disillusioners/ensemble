@@ -39,6 +39,7 @@ from typing import Any
 
 import pytest
 
+from daemon._redact import redact_exc_str
 from daemon.checkpoint_adapter import (
     PostgresCheckpointerAdapter,
     _is_retryable_connection_error,
@@ -1020,3 +1021,117 @@ class TestRealLanggraphSaverProxy:
             "revisit the proxy's explicit-forwarder strategy and this "
             "test's premise"
         )
+
+
+# ── W2: exception-string redaction (incident 2026-10-10) ────────────────────
+
+
+class TestRedactExcStr:
+    """``daemon._redact.redact_exc_str`` masks libpq/DSN server
+    identifiers before they reach log lines. The two production call
+    sites: the checkpoint-saver retry warning
+    (``daemon/checkpoint_adapter.py`` ``_call_with_retry``) and the
+    readiness probe-failure warning (``daemon/services/readiness.py``
+    ``_guarded``) — both previously logged raw ``str(exc)``."""
+
+    def test_uri_with_credentials_masked(self):
+        exc = RuntimeError(
+            "connection failed: postgresql://ensemble:s3cret@10.1.2.3:5432/ensemble"
+        )
+        out = redact_exc_str(exc)
+        assert "s3cret" not in out
+        assert "10.1.2.3" not in out
+        assert "ensemble:s3cret" not in out
+        assert "postgresql://***/ensemble" in out
+
+    def test_libpq_tcp_verbose_shape_masked(self):
+        exc = ConnectionError(
+            'connection to server at "10.44.0.2", port 5432 failed: '
+            "Connection refused"
+        )
+        out = redact_exc_str(exc)
+        assert "10.44.0.2" not in out
+        assert 'at "<redacted>", port ***' in out
+        assert "Connection refused" in out, "cause text must survive"
+
+    def test_libpq_unix_socket_shape_masked(self):
+        exc = ConnectionError(
+            'connection to server on socket '
+            '"/var/run/postgresql/.s.PGSQL.5432" failed: No such file'
+        )
+        out = redact_exc_str(exc)
+        assert "/var/run/postgresql" not in out
+        assert 'on socket "<redacted>"' in out
+
+    def test_keyword_value_dsn_fields_masked(self):
+        exc = RuntimeError(
+            "could not connect: host=10.1.2.3 port=5432 dbname=ensemble "
+            "user=ensemble password=hunter2"
+        )
+        out = redact_exc_str(exc)
+        assert "hunter2" not in out
+        assert "10.1.2.3" not in out
+        assert "ensemble" not in out.replace("ensemble_test", "")
+        assert "host=***" in out and "password=***" in out
+        assert "dbname=***" in out and "user=***" in out
+
+    def test_bare_ipv4_port_masked(self):
+        exc = RuntimeError("connect to 10.1.2.3:5432 failed immediately")
+        out = redact_exc_str(exc)
+        assert "10.1.2.3:5432" not in out
+        assert "***:***" in out
+
+    def test_plain_message_untouched(self):
+        exc = ValueError("duplicate key value violates unique constraint")
+        assert redact_exc_str(exc) == (
+            "duplicate key value violates unique constraint"
+        )
+
+    def test_truncation_applied_after_redaction(self):
+        exc = RuntimeError(
+            'connection to server at "10.1.2.3", port 5432 failed: '
+            "x" * 500
+        )
+        out = redact_exc_str(exc, limit=200)
+        assert len(out) == 200
+        assert "10.1.2.3" not in out
+
+    def test_never_raises_on_hostile_input(self):
+        class _Hostile:
+            def __str__(self):
+                raise RuntimeError("bad __str__")
+
+        assert redact_exc_str(_Hostile()) == "<unstringifiable exception>"
+        # Non-exception inputs are stringified safely.
+        assert redact_exc_str(None) == "None"
+
+    def test_retry_warning_log_is_redacted(self, caplog):
+        """The production retry-log site (checkpoint_adapter
+        ``_call_with_retry``) emits a REDACTED message — the libpq
+        host:port must not appear in the captured log line."""
+        import logging as _logging
+
+        saver = _FakeSaver(
+            _FakePool(),
+            fail_count=1,
+            exc_factory=lambda: _OperationalError(
+                'connection to server at "10.1.2.3", port 5432 failed: '
+                "the connection is closed",
+                sqlstate="08006",
+            ),
+        )
+        wrapped = _wrap_saver_with_connection_retry(saver)
+
+        with caplog.at_level(_logging.WARNING, logger="daemon.checkpoint_adapter"):
+            asyncio.run(wrapped.aget("cfg"))
+
+        retry_lines = [
+            r.message for r in caplog.records
+            if "retrying once" in r.message
+        ]
+        assert retry_lines, "expected the retry warning in caplog"
+        joined = " ".join(retry_lines)
+        assert "10.1.2.3" not in joined
+        assert "<redacted>" in joined
+        # The retry itself still happened (second call succeeded).
+        assert saver.call_count == 2

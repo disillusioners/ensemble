@@ -24,6 +24,7 @@ from typing import Callable, NamedTuple, Optional
 from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Engine
 
+from daemon._redact import redact_exc_str
 from daemon.constants import (
     CHECKPOINT_SENTINEL_CHANNEL,
     CHECKPOINT_SENTINEL_CHECKPOINT_ID,
@@ -449,7 +450,11 @@ async def refresh_readiness_composite(
         except TimeoutError:
             return True, None
         except Exception as exc:
-            logger.warning("Readiness probe failed: %s", exc)
+            # W2 (incident 2026-10-10): probe exceptions can carry
+            # libpq server identifiers — redact before logging.
+            logger.warning(
+                "Readiness probe failed: %s", redact_exc_str(exc)
+            )
             return False, default
 
     db_timed_out, database_ok = await _guarded(db_probe, DB_PROBE_TIMEOUT_S, False)

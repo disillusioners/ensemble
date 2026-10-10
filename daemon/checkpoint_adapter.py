@@ -39,6 +39,7 @@ except ImportError:
     # LangGraph compile-time gate would then raise TypeError.
     BaseCheckpointSaver = object  # type: ignore[assignment,misc]
 
+from daemon._redact import redact_exc_str
 from daemon.constants import (
     CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES,
     CHECKPOINT_SENTINEL_THREAD_ID,
@@ -249,7 +250,10 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
                     "with a fresh pooled connection",
                     method_name,
                     type(exc).__name__,
-                    str(exc)[:200],
+                    # W2 (incident 2026-10-10): libpq messages carry
+                    # host:port / socket / dbname identifiers — mask
+                    # them before the log line is built.
+                    redact_exc_str(exc),
                 )
                 # Second (and final) attempt. If this also fails, re-raise
                 # unchanged so the upstream pipeline classifies the error
