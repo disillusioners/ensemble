@@ -39,7 +39,10 @@ except ImportError:
     # LangGraph compile-time gate would then raise TypeError.
     BaseCheckpointSaver = object  # type: ignore[assignment,misc]
 
-from daemon.constants import CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES
+from daemon.constants import (
+    CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES,
+    CHECKPOINT_SENTINEL_THREAD_ID,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -947,10 +950,21 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         return self._saver
 
     async def list_thread_ids(self) -> list[str]:
-        """Return all distinct thread_ids from checkpoints table."""
+        """Return all distinct thread_ids from checkpoints table.
+
+        Excludes the readiness-probe sentinel thread (incident
+        2026-10-10 W1): the sentinel is not an instance thread and must
+        never surface in maintenance Operation A's orphan scan. The
+        sentinel write lands in ``checkpoint_writes`` only (no
+        ``checkpoints`` row is ever created), so this guard is
+        defense-in-depth today — but it keeps the sentinel out of
+        orphan scans if the probe design ever writes a checkpoints row.
+        """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT DISTINCT thread_id FROM checkpoints"
+                "SELECT DISTINCT thread_id FROM checkpoints "
+                "WHERE thread_id != $1",
+                CHECKPOINT_SENTINEL_THREAD_ID,
             )
             return [row["thread_id"] for row in rows]
 

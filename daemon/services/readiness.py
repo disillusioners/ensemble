@@ -24,6 +24,13 @@ from typing import Callable, NamedTuple, Optional
 from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Engine
 
+from daemon.constants import (
+    CHECKPOINT_SENTINEL_CHANNEL,
+    CHECKPOINT_SENTINEL_CHECKPOINT_ID,
+    CHECKPOINT_SENTINEL_TASK_ID,
+    CHECKPOINT_SENTINEL_THREAD_ID,
+    CHECKPOINT_SENTINEL_VALUE,
+)
 from daemon.services.boot_epoch import BOOT_EPOCH_FLOOR
 
 logger = logging.getLogger(__name__)
@@ -37,11 +44,12 @@ logger = logging.getLogger(__name__)
 DB_PROBE_TIMEOUT_S: float = 0.5
 
 # Hard timeout for the checkpoint-saver probe (incident 2026-10-10 fix).
-# The probe schedules the async ``AsyncConnectionPool.check()`` on the
-# running loop from the sync callable running in a worker thread; the
-# timeout enforced here is the wall-clock budget for the round-trip
-# (loop schedule + pool.check() + return). The probe is FAIL-CLOSED —
-# any timeout or exception degrades ``checkpoint_saver``.
+# The probe schedules the sentinel checkpoint cycle (write-once init +
+# ``aget_tuple`` read) on the running loop from the sync callable
+# running in a worker thread; the timeout enforced here is the
+# wall-clock budget for the round-trip (loop schedule + sentinel read +
+# return). The probe is FAIL-CLOSED — any timeout or exception degrades
+# ``checkpoint_saver`` with a sentinel-read reason string.
 CHECKPOINT_SAVER_PROBE_TIMEOUT_S: float = 1.0
 
 # Timeout for the queue-freshness aggregate. A single indexed MAX()
@@ -469,11 +477,17 @@ async def refresh_readiness_composite(
         if ckpt_timed_out:
             checkpoint_saver_ok = False
             ckpt_extra_reason = (
-                "checkpoint_saver: AsyncConnectionPool.check() timed out "
-                f"after {CHECKPOINT_SAVER_PROBE_TIMEOUT_S}s"
+                "checkpoint_saver: sentinel checkpoint read (aget_tuple) "
+                f"timed out after {CHECKPOINT_SAVER_PROBE_TIMEOUT_S}s"
+            )
+        elif not ckpt_value:
+            checkpoint_saver_ok = False
+            ckpt_extra_reason = (
+                "checkpoint_saver: sentinel checkpoint read failed "
+                "(checkpoint path cannot serve reads — see readiness logs)"
             )
         else:
-            checkpoint_saver_ok = bool(ckpt_value)
+            checkpoint_saver_ok = True
             ckpt_extra_reason = ""
 
     inflight_turns: Optional[int] = None
@@ -533,53 +547,79 @@ def make_db_probe(engine: Engine) -> Callable[[], bool]:
 
 
 def make_checkpoint_saver_probe(checkpointer: Any) -> Callable[[], bool]:
-    """Build a sync probe that runs ``AsyncConnectionPool.check()``.
+    """Build a sync probe that reads a SENTINEL CHECKPOINT through the
+    saver path.
 
-    Incident 2026-10-10 fix: this probe is what flips /readyz to
-    degraded when the checkpoint-saver connection pool becomes
-    unreachable (was: blind — the database probe used a fresh engine
-    connection and reported green while the saver pool was dead).
+    Incident 2026-10-10 fix (W1, round 2 redesign): the first revision
+    probed ``AsyncConnectionPool.check()`` — which self-heals by
+    discarding and replacing dead connections and NEVER raises. It
+    could PREVENT the outage class but could not DETECT it (a probe
+    that always returns True is not observability). This probe instead
+    performs a trivial O(1) sentinel checkpoint read
+    (``aget_tuple`` on a fixed synthetic thread) through the SAME code
+    path user checkpoint ops take (``raw_saver`` → retry proxy →
+    ``AsyncPostgresSaver``): any checkpoint path that cannot serve
+    reads raises or times out → the composite degrades (ADR-005 503 +
+    reason), never restarts.
+
+    Sentinel design (write-vs-no-write — write-once chosen):
+
+    * Thread/config are fixed and discoverable
+      (``daemon.constants.CHECKPOINT_SENTINEL_THREAD_ID`` =
+      ``"__ensemble_readiness_probe__"``; synthetic thread no pregel
+      turn ever mints).
+    * FIRST tick of the process writes the sentinel ONCE via
+      ``aput_writes`` with a fixed (thread_id, checkpoint_ns,
+      checkpoint_id, task_id) key — idempotent (upsert semantics on
+      the writes table; safe to re-run, e.g. process restart). The
+      write goes through the retry proxy, so it exercises the real
+      hot write path, and it lands ONLY in ``checkpoint_writes`` —
+      no ``checkpoints`` row is created, so instance lifecycle /
+      pause-resume / prune tools never see the sentinel (the PG
+      adapter's ``list_thread_ids`` additionally excludes the
+      sentinel thread as defense-in-depth).
+    * EVERY tick (including the first, after the write) READS:
+      ``await saver.aget_tuple(sentinel_config)``. A ``None`` return
+      (row absent — e.g. a manual cleanup removed the sentinel) is a
+      HEALTHY answer: the probe detects a path that cannot SERVE
+      READS, not row presence. The probe stays O(1) per tick: one
+      write once per process, then a single bounded SELECT.
 
     The probe is a SYNC callable (matches ``make_db_probe`` /
     ``make_queue_probe`` shape). It captures the running event loop
     at construction time and uses ``asyncio.run_coroutine_threadsafe``
-    to schedule ``pool.check()`` on that loop from the worker thread
-    that ``asyncio.to_thread`` runs the probe in. ``pool.check()``
-    iterates the pool's current connections and runs the
-    ``check=`` callback (``conn.execute("")``) on each — a cheap
-    liveness probe that replaces dead connections on the next
-    acquire.
+    to schedule the sentinel cycle on that loop from the worker
+    thread that ``asyncio.to_thread`` runs the probe in.
 
     Topology detection: the pool object is identified by
     ``getattr(checkpointer.raw_saver, "conn", None)`` — the saver
     stores its connection (or pool) under ``.conn`` (aio.py:57).
     When the saver is pool-backed (incident 2026-10-10 fix), the
-    object is an ``AsyncConnectionPool``. When the saver is the
-    historical single-connection shape (or SQLite), there is no
-    long-lived resource to monitor: the probe returns True
-    (healthy) so readiness is never falsely degraded on SQLite
-    installs or on PG installs that pre-date this fix.
+    object is an ``AsyncConnectionPool`` and the sentinel probe is
+    installed. When the saver is the historical single-connection
+    shape (or SQLite), there is no pool to monitor: the probe
+    returns True (healthy) so readiness is never falsely degraded on
+    SQLite installs or on PG installs that pre-date this fix.
 
     Args:
         checkpointer: A ``CheckpointerAdapter`` exposing
             ``raw_saver`` (a ``PostgresCheckpointerAdapter`` or
             ``SqliteCheckpointerAdapter``). The PG adapter's
             ``raw_saver`` is the retry PROXY (it must stay that
-            way so LangGraph hot paths gain retry coverage) —
+            way so the sentinel rides the exact hot path LangGraph
+            uses, including the one-shot connection retry) —
             ``raw_saver.conn`` resolves through the proxy's
             ``__getattr__`` passthrough to the wrapped saver's
-            ``.conn``. There is no unwrap on this path; passthrough
-            via ``__getattr__`` is what carries the pool connection
-            reference out of the proxy.
+            ``.conn`` (an attribute ABSENT from the base saver
+            surface, so the MRO rule does not shadow it).
             ``daemon.checkpoint_adapter.PostgresCheckpointerAdapter._raw_saver``
             holds the unwrapped saver for tests that need it.
 
     Returns:
-        A sync callable that returns ``True`` when ``pool.check()``
-        succeeded and ``False`` otherwise. The probe raises
-        ``ValueError`` if the pool cannot be reached — the readiness
-        orchestrator's exception handler converts that to a degraded
-        component.
+        A sync callable returning ``True`` when the sentinel read
+        succeeded and raising otherwise (the readiness orchestrator's
+        guard converts the failure into a degraded component with a
+        sentinel-read reason string).
     """
     # Capture the running loop. ``asyncio.run_coroutine_threadsafe``
     # requires a running loop in the destination thread; the
@@ -615,34 +655,54 @@ def make_checkpoint_saver_probe(checkpointer: Any) -> Callable[[], bool]:
 
         return _passthrough_probe
 
-    pool = conn  # local alias for clarity
+    # Sentinel configs (fixed + discoverable; see daemon.constants).
+    sentinel_write_config = {
+        "configurable": {
+            "thread_id": CHECKPOINT_SENTINEL_THREAD_ID,
+            "checkpoint_ns": "",
+            "checkpoint_id": CHECKPOINT_SENTINEL_CHECKPOINT_ID,
+        }
+    }
+    sentinel_read_config = {
+        "configurable": {
+            "thread_id": CHECKPOINT_SENTINEL_THREAD_ID,
+            "checkpoint_ns": "",
+        }
+    }
+    sentinel_initialized = False
+
+    async def _sentinel_cycle() -> None:
+        """One probe cycle: write-once init, then a read-only tick."""
+        nonlocal sentinel_initialized
+        if not sentinel_initialized:
+            # First tick of this process: plant the sentinel through
+            # the saver's real write path. Fixed key → idempotent.
+            await saver.aput_writes(
+                sentinel_write_config,
+                [(CHECKPOINT_SENTINEL_CHANNEL, CHECKPOINT_SENTINEL_VALUE)],
+                CHECKPOINT_SENTINEL_TASK_ID,
+            )
+            sentinel_initialized = True
+        # Read-only tick. None is HEALTHY (no row ≠ broken path);
+        # only an exception (or the outer timeout) degrades.
+        await saver.aget_tuple(sentinel_read_config)
 
     def _probe() -> bool:
-        # Schedule ``pool.check()`` on the captured loop from this
+        # Schedule the sentinel cycle on the captured loop from this
         # worker thread and wait for it synchronously with a timeout
         # that is slightly under ``CHECKPOINT_SAVER_PROBE_TIMEOUT_S``
         # so ``asyncio.wait_for`` in ``_guarded`` is the budget
         # authority (defense in depth — both layers enforce it).
         try:
-            future = asyncio.run_coroutine_threadsafe(pool.check(), loop)
-            # Block on the result; rely on ``_guarded``'s
-            # ``asyncio.wait_for`` for the actual timeout enforcement.
-            # The inner ``future.result`` timeout is slightly UNDER
-            # ``CHECKPOINT_SAVER_PROBE_TIMEOUT_S`` so the inner
-            # timeout fires first (this thread never blocks past
-            # the budget) even if ``_guarded``'s outer
-            # ``asyncio.wait_for`` were mis-scheduled.
+            future = asyncio.run_coroutine_threadsafe(_sentinel_cycle(), loop)
             future.result(timeout=CHECKPOINT_SAVER_PROBE_TIMEOUT_S - 0.1)
             return True
-        except Exception as exc:
-            # ``_guarded`` already converts exceptions into a
-            # degraded-component flag. Re-raise so the orchestrator
-            # sees the failure class and can log it.
-            logger.warning(
-                "Checkpoint-saver probe failed (%s): %s",
-                type(exc).__name__,
-                str(exc)[:200],
-            )
+        except Exception:
+            # NO logging here — ``_guarded`` in
+            # refresh_readiness_composite is the single log site for
+            # probe failures (the prior revision logged here AND in
+            # _guarded: a double log). Re-raise so the orchestrator
+            # degrades the component with the sentinel-read reason.
             raise
 
     return _probe

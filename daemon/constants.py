@@ -146,6 +146,21 @@ DB_BUSY_TIMEOUT_S: int = 30  # SQLite busy timeout
 CHECKPOINT_INTERVAL: int = 1  # Checkpoint interval (messages)
 CHECKPOINT_TTL_HOURS: int = 168  # Checkpoint TTL (7 days)
 CHECKPOINT_CLEANUP_INTERVAL_HOURS: int = 24  # Checkpoint cleanup interval
+
+# ── Checkpoint readiness sentinel (incident 2026-10-10, W1) ─────────────
+# Fixed, discoverable namespace for the checkpoint-saver readiness
+# probe's sentinel write+read. The sentinel goes through the REAL saver
+# path (retry proxy → AsyncPostgresSaver) so the probe exercises the
+# hot path, and its thread_id is synthetic (leading/trailing
+# underscores, never minted by pregel) so no instance lifecycle /
+# pause-resume / prune tool ever touches it. See
+# daemon/services/readiness.py::make_checkpoint_saver_probe.
+CHECKPOINT_SENTINEL_THREAD_ID: str = "__ensemble_readiness_probe__"
+CHECKPOINT_SENTINEL_CHECKPOINT_ID: str = "__ensemble_readiness_probe__"
+CHECKPOINT_SENTINEL_TASK_ID: str = "__ensemble_readiness_probe__"
+CHECKPOINT_SENTINEL_CHANNEL: str = "__ensemble_readiness_probe__"
+CHECKPOINT_SENTINEL_VALUE: str = "readiness-probe"
+
 MAX_INSTANCE_HISTORY: int = 500  # Max terminal instances to keep checkpoint data for
 MAINTENANCE_CHECK_INTERVAL_MINUTES: int = 15  # Maintenance service check interval
 IDEMPOTENCY_KEY_TTL_HOURS: int = 24  # Idempotency key deduplication TTL

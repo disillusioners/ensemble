@@ -3,12 +3,17 @@
 Three components exercised:
 
 1. ``make_checkpoint_saver_probe(checkpointer)`` — topology detection
-   (pool → real probe; single-conn / SQLite / no-pool → passthrough True).
+   (pool → sentinel checkpoint read probe; single-conn / SQLite /
+   no-pool → passthrough True) and the sentinel cycle itself
+   (write-once init via ``aput_writes``, read-only ``aget_tuple``
+   tick — round-2 W1 redesign; the first revision probed
+   ``pool.check()``, which self-heals and never raises, so it could
+   not DETECT the outage class).
 2. ``ReadinessComposite.checkpoint_saver`` — default True for back-compat;
    ``ready`` reflects the new component.
 3. ``refresh_readiness_composite`` — passes ``checkpoint_saver_probe``
-   through, fail-closed on timeout / failure, default True when probe
-   is None (no-probe path).
+   through, fail-closed on timeout / failure with a sentinel-read
+   reason string, default True when probe is None (no-probe path).
 """
 
 from __future__ import annotations
@@ -19,6 +24,12 @@ from typing import Any
 
 import pytest
 
+from daemon.constants import (
+    CHECKPOINT_SENTINEL_CHANNEL,
+    CHECKPOINT_SENTINEL_CHECKPOINT_ID,
+    CHECKPOINT_SENTINEL_TASK_ID,
+    CHECKPOINT_SENTINEL_THREAD_ID,
+)
 from daemon.services.readiness import (
     CHECKPOINT_SAVER_PROBE_TIMEOUT_S,
     ReadinessComposite,
@@ -32,12 +43,16 @@ from daemon.services.readiness import (
 
 
 class _FakePool:
-    """psycopg_pool.AsyncConnectionPool stand-in for topology tests."""
+    """psycopg_pool.AsyncConnectionPool stand-in for topology tests.
+
+    The sentinel probe never calls ``pool.check()`` (the round-2
+    redesign reads a sentinel checkpoint through the saver instead);
+    the pool stand-in only needs the pool-only attributes the topology
+    detector duck-types (``get_stats``, ``min_size``).
+    """
 
     def __init__(self) -> None:
         self.check_calls = 0
-        self.check_should_raise: Exception | None = None
-        self.check_should_hang: bool = False
         self.min_size = 1
         self.max_size = 5
 
@@ -46,19 +61,32 @@ class _FakePool:
 
     async def check(self) -> None:
         self.check_calls += 1
-        if self.check_should_raise:
-            raise self.check_should_raise
-        if self.check_should_hang:
-            # Sleep longer than the test timeout so the orchestrator's
-            # wait_for enforces the budget.
-            await asyncio.sleep(CHECKPOINT_SAVER_PROBE_TIMEOUT_S + 1)
 
 
 class _FakeSaver:
-    """Saver exposing the pool via .conn (per upstream aio.py:57)."""
+    """Saver exposing the pool via .conn (per upstream aio.py:57) plus
+    the sentinel-cycle surface: ``aput_writes`` (write-once init) and
+    ``aget_tuple`` (the read-only tick the probe actually monitors)."""
 
     def __init__(self, conn: Any) -> None:
         self.conn = conn
+        self.aput_writes_calls: list[tuple] = []
+        self.aget_tuple_calls: list[Any] = []
+        self.aget_tuple_should_raise: Exception | None = None
+        self.aget_tuple_should_hang: bool = False
+
+    async def aput_writes(self, config, writes, task_id, *args, **kwargs):
+        self.aput_writes_calls.append((config, writes, task_id))
+
+    async def aget_tuple(self, config):
+        import asyncio as _aio
+
+        self.aget_tuple_calls.append(config)
+        if self.aget_tuple_should_raise:
+            raise self.aget_tuple_should_raise
+        if self.aget_tuple_should_hang:
+            await _aio.sleep(CHECKPOINT_SAVER_PROBE_TIMEOUT_S + 1)
+        return None  # no sentinel row — a HEALTHY read answer
 
 
 class _FakeAdapterPool:
@@ -94,11 +122,10 @@ class TestProbeTopologyDetection:
 
         probe = make_checkpoint_saver_probe(adapter)
 
-        # The probe is a sync function. Invoking it should drive
-        # ``pool.check()`` via run_coroutine_threadsafe. We can't
-        # easily wait for that without a running loop in this sync
-        # context, so we just verify the probe is callable and the
-        # pool object is reachable. Real execution tested separately.
+        # The probe is a sync function. Invoking it drives the
+        # sentinel cycle (aput_writes write-once + aget_tuple read)
+        # via run_coroutine_threadsafe. Real execution is covered by
+        # TestSentinelProbeExecution below.
         assert callable(probe)
         assert probe is not None
 
@@ -136,43 +163,106 @@ class TestProbeTopologyDetection:
         assert make_checkpoint_saver_probe(_AdapterNoConn())() is True
 
 
-# ── Pool topology: real async execution ────────────────────────────────────
+# ── Pool topology: sentinel-cycle execution ────────────────────────────────
 
 
-class TestPoolProbeExecution:
-    """Drive the probe through a real event loop (asyncio.to_thread)."""
+class TestSentinelProbeExecution:
+    """Drive the sentinel probe through a real event loop
+    (asyncio.to_thread): write-once init + read-only ticks."""
 
     @pytest.mark.asyncio
-    async def test_probe_returns_true_when_pool_check_succeeds(self):
+    async def test_probe_returns_true_and_write_once_then_read(self):
+        """First tick: one idempotent sentinel write + one read.
+        Second tick: read ONLY — the write must not repeat (write-once
+        per process)."""
         pool = _FakePool()
+        saver = _FakeSaver(pool)
         adapter = _FakeAdapterPool(pool)
+        adapter.raw_saver = saver
         probe = make_checkpoint_saver_probe(adapter)
 
-        result = await asyncio.to_thread(probe)
-        assert result is True
-        assert pool.check_calls == 1
+        first = await asyncio.to_thread(probe)
+        assert first is True
+        assert pool.check_calls == 0, "sentinel probe must not drive pool.check()"
+        assert len(saver.aput_writes_calls) == 1, "write-once init"
+        assert len(saver.aget_tuple_calls) == 1
+
+        second = await asyncio.to_thread(probe)
+        assert second is True
+        assert len(saver.aput_writes_calls) == 1, "no second write"
+        assert len(saver.aget_tuple_calls) == 2, "read-only tick"
+
+        # Sentinel namespace is the fixed discoverable thread.
+        write_config, writes, task_id = saver.aput_writes_calls[0]
+        assert write_config["configurable"]["thread_id"] == (
+            CHECKPOINT_SENTINEL_THREAD_ID
+        )
+        assert write_config["configurable"]["checkpoint_id"] == (
+            CHECKPOINT_SENTINEL_CHECKPOINT_ID
+        )
+        assert task_id == CHECKPOINT_SENTINEL_TASK_ID
+        assert writes[0][0] == CHECKPOINT_SENTINEL_CHANNEL
+        read_config = saver.aget_tuple_calls[0]
+        assert read_config["configurable"]["thread_id"] == (
+            CHECKPOINT_SENTINEL_THREAD_ID
+        )
+        assert "checkpoint_id" not in read_config["configurable"], (
+            "read tick must be a latest-row read, not id-pinned"
+        )
 
     @pytest.mark.asyncio
-    async def test_probe_raises_when_pool_check_fails(self):
-        """Probe failure re-raises so the orchestrator's
-        ``_guarded`` exception handler can flip the component to
-        degraded. This is the incident's blind-spot case."""
+    async def test_probe_raises_when_sentinel_read_fails(self):
+        """A checkpoint path that cannot serve reads must surface as a
+        probe failure (the incident's blind-spot case — pool.check()
+        never raised, so the old probe could not detect this)."""
         pool = _FakePool()
-        pool.check_should_raise = ConnectionError("the connection is closed")
+        saver = _FakeSaver(pool)
+        saver.aget_tuple_should_raise = ConnectionError(
+            "the connection is closed"
+        )
         adapter = _FakeAdapterPool(pool)
+        adapter.raw_saver = saver
         probe = make_checkpoint_saver_probe(adapter)
 
         with pytest.raises(ConnectionError):
             await asyncio.to_thread(probe)
 
     @pytest.mark.asyncio
-    async def test_probe_failure_degrades_composite(self):
-        """End-to-end: probe fails → composite reports degraded with
-        the checkpoint_saver reason. Mirrors the incident: server
-        unreachable → /readyz flips to 503."""
+    async def test_failed_init_write_retries_next_tick(self):
+        """If the write-once init fails, the flag must NOT latch — the
+        next tick re-attempts the write before reading."""
         pool = _FakePool()
-        pool.check_should_raise = ConnectionError("the connection is closed")
+        saver = _FakeSaver(pool)
         adapter = _FakeAdapterPool(pool)
+        adapter.raw_saver = saver
+        probe = make_checkpoint_saver_probe(adapter)
+
+        original = saver.aput_writes
+
+        async def _failing_write(*a, **kw):
+            raise ConnectionError("still down")
+
+        saver.aput_writes = _failing_write
+        with pytest.raises(ConnectionError):
+            await asyncio.to_thread(probe)
+
+        saver.aput_writes = original  # heal
+        assert await asyncio.to_thread(probe) is True
+        assert len(saver.aput_writes_calls) == 1, "write retried and landed"
+        assert len(saver.aget_tuple_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_sentinel_read_failure_degrades_composite(self):
+        """End-to-end: sentinel read fails → composite reports degraded
+        with a reason naming the sentinel read. Mirrors the incident:
+        checkpoint path cannot serve reads → /readyz flips to 503."""
+        pool = _FakePool()
+        saver = _FakeSaver(pool)
+        saver.aget_tuple_should_raise = ConnectionError(
+            "server closed the connection unexpectedly"
+        )
+        adapter = _FakeAdapterPool(pool)
+        adapter.raw_saver = saver
         probe = make_checkpoint_saver_probe(adapter)
 
         composite = await refresh_readiness_composite(
@@ -185,8 +275,33 @@ class TestPoolProbeExecution:
         assert composite.checkpoint_saver is False
         assert composite.ready is False
         assert any(
-            "checkpoint_saver" in reason for reason in composite.reasons
+            "checkpoint_saver" in reason and "sentinel" in reason
+            for reason in composite.reasons
+        ), composite.reasons
+
+    @pytest.mark.asyncio
+    async def test_sentinel_read_timeout_degrades_with_reason(self):
+        """A hung ``aget_tuple`` must hit the budget and degrade with
+        the sentinel-timeout reason string."""
+        pool = _FakePool()
+        saver = _FakeSaver(pool)
+        saver.aget_tuple_should_hang = True
+        adapter = _FakeAdapterPool(pool)
+        adapter.raw_saver = saver
+        probe = make_checkpoint_saver_probe(adapter)
+
+        composite = await refresh_readiness_composite(
+            db_probe=lambda: True,
+            queue_probe=lambda: 0.0,
+            services_ok=True,
+            queue_freshness_threshold_seconds=10.0,
+            checkpoint_saver_probe=probe,
         )
+        assert composite.checkpoint_saver is False
+        assert any(
+            "sentinel" in reason and "timed out" in reason
+            for reason in composite.reasons
+        ), composite.reasons
 
 
 # ── Composite integration ──────────────────────────────────────────────────
