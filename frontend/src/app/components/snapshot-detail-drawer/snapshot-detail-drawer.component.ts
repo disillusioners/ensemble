@@ -21,6 +21,7 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 import { SnapshotService } from '../../services/snapshot.service';
 import {
   SnapshotDetailResponse,
+  SnapshotStatus,
 } from '../../models/snapshot.model';
 
 /** 200KB digest guard (brief §4(e)). */
@@ -75,11 +76,20 @@ const DIGEST_GUARD_BYTES = 200 * 1024;
   styleUrl: './snapshot-detail-drawer.component.scss',
 })
 export class SnapshotDetailDrawerComponent {
-  // ── Inputs (pass 4 #7) ───────────────────────────────────────
+  // ── Inputs (v1 pass 4 #7) ───────────────────────────────────────
   /** The id of the snapshot to load. The drawer fetches its own detail. */
   readonly snapshotId = input.required<string>();
   /** Reserved for future full-page reuse (defaults to drawer mode). */
   readonly isDrawerMode = input<boolean>(true);
+  /**
+   * Warmed-spawn count for the open snapshot (v2 AC-4.7). When the
+   * value is non-null, the Timestamps section adds a 'Last warmed'
+   * kv-row showing the count. When null the row shows '—'.
+   * Sourced from `SnapshotUsageMetrics.spawn_counts_per_snapshot` by
+   * the page host; the drawer's own detail fetch does NOT carry the
+   * metric (the v1 BE contract — D-5).
+   */
+  readonly warmedSpawnCount = input<number | null>(null);
 
   // ── Outputs ──────────────────────────────────────────────────
   readonly close = output<void>();
@@ -180,6 +190,39 @@ export class SnapshotDetailDrawerComponent {
   truncatedTargetInstanceId = computed<string>(() =>
     this.truncateId(this.detail()?.target_instance_id),
   );
+
+  /**
+   * Stable id for the drawer title (used by `aria-labelledby`).
+   * Material's drawer also wraps the panel, but our header is the
+   * accessible label target for AC-A11Y-1.
+   */
+  readonly drawerTitleId = computed<string>(() => 'drawer-title-snapshot');
+
+  /**
+   * Tooltip text for the 'Last warmed' '—' placeholder (v2 AC-4.7).
+   * The BE does not yet surface per-snapshot warm timestamps (D-5);
+   * when the host's metrics carry a non-null count for the open
+   * snapshot, the value is shown directly.
+   */
+  readonly warmTooltip =
+    'Warmed-spawn timestamps are not yet surfaced in v2 — the count ' +
+    'shown elsewhere comes from the global metrics rollup.';
+
+  /** Material icon for a status chip (AC-6.1; mirrors the table). */
+  statusIcon(s: SnapshotStatus): string {
+    switch (s) {
+      case 'active':
+        return 'check_circle';
+      case 'running':
+        return 'autorenew';
+      case 'superseded':
+        return 'history';
+      case 'failed':
+        return 'error';
+      case 'interrupted':
+        return 'warning';
+    }
+  }
 
   // ── Template handlers ───────────────────────────────────────
 

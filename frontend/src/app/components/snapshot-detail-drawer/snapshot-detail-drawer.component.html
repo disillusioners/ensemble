@@ -1,8 +1,16 @@
-<div class="snapshot-drawer">
-  <!-- Drawer header -->
-  <div class="drawer-header">
+<!-- SnapshotDetailDrawer — v2 redesign (Design A).
+     mode="side" full-height drawer (page host owns the mat-drawer shell).
+     Sticky header (title + actions + status chip + meta). Body scrolls
+     internally; the body's content grid is single-column on < 1280px
+     and switches to a 240px rail + sections column on >= 1280px (AC-6.2). -->
+<div class="snapshot-drawer" role="complementary">
+  <!-- Drawer header (sticky at the top of the body scroll) -->
+  <div
+    class="drawer-header"
+    [attr.aria-labelledby]="drawerTitleId()"
+  >
     <div class="header-top">
-      <h2 class="drawer-title">
+      <h2 class="drawer-title" [id]="drawerTitleId()">
         @if (detail(); as d) {
           {{ d.title }}
         } @else {
@@ -12,7 +20,8 @@
       <div class="header-actions">
         @if (detail()?.id) {
           <button
-            mat-icon-button
+            type="button"
+            class="drawer-action-btn"
             (click)="onCopyId()"
             matTooltip="Copy snapshot ID"
             aria-label="Copy snapshot ID"
@@ -22,9 +31,10 @@
           </button>
         }
         <button
-          mat-icon-button
+          type="button"
+          class="drawer-action-btn"
           (click)="onClose()"
-          matTooltip="Close"
+          matTooltip="Close drawer"
           aria-label="Close drawer"
           data-test="drawer-close"
         >
@@ -34,17 +44,21 @@
     </div>
     @if (detail(); as d) {
       <div class="header-meta">
-        <span class="status-chip" [ngClass]="'status-' + d.status">{{ d.status }}</span>
+        <span class="status-chip" [class]="'status-chip status-' + d.status">
+          <mat-icon class="status-icon">{{ statusIcon(d.status) }}</mat-icon>
+          <span>{{ d.status }}</span>
+        </span>
         <span class="muted">id:</span>
         <code class="mono">{{ truncatedSnapshotId() }}</code>
         @if (d.git_dirty) {
-          <span class="dirty-flag" matTooltip="Working tree was dirty at capture">⚠ dirty</span>
+          <span class="dirty-flag" matTooltip="Working tree was dirty at capture">
+            <mat-icon>warning_amber</mat-icon>
+            dirty
+          </span>
         }
       </div>
     }
   </div>
-
-  <mat-divider></mat-divider>
 
   <!-- Detail error state (with retry) -->
   @if (detailError(); as errMsg) {
@@ -52,7 +66,8 @@
       <mat-icon>error_outline</mat-icon>
       <p>{{ errMsg }}</p>
       <button
-        mat-stroked-button
+        type="button"
+        class="retry-btn"
         (click)="onRetryDetail()"
         data-test="drawer-retry"
       >
@@ -79,204 +94,275 @@
     </div>
   }
 
-  <!-- Detail loaded — 7 sections (D-5: warm-spawn section OMITTED) -->
+  <!-- Detail loaded — 7 sections (preserved verbatim) + Digest toggle.
+       On viewports >= 1280px, the body grid adds a left rail with the
+       snapshot's quick-glance metadata (AC-6.2). -->
   @else if (detail(); as d) {
     <div class="drawer-body">
+      <div class="drawer-grid">
 
-      <!-- 1. Task summary -->
-      <section class="detail-section" data-test="drawer-section">
-        <h3>Task summary</h3>
-        @if (d.task_summary) {
-          <p class="task-summary">{{ d.task_summary }}</p>
-        } @else {
-          <span class="muted">No task summary recorded.</span>
-        }
-      </section>
+        <!-- 2-region rail (AC-6.2): visible only on >= 1280px viewport.
+             Carries the snapshot's quick-glance metadata — Project,
+             Agent, Target instance, Runtime version, Effective model,
+             Created, Captured by, Capture bytes — all from the
+             SnapshotDetailResponse shape. -->
+        <aside class="drawer-rail" aria-label="Snapshot quick glance">
+          <div class="rail-section">
+            <span class="rail-key">Project</span>
+            <code class="rail-val mono small">{{ d.project_id }}</code>
+          </div>
+          <div class="rail-section">
+            <span class="rail-key">Agent</span>
+            <code class="rail-val mono">{{ d.created_by_agent_id }}</code>
+          </div>
+          <div class="rail-section">
+            <span class="rail-key">Target instance</span>
+            <code
+              class="rail-val mono small"
+              [matTooltip]="d.target_instance_id"
+            >{{ truncatedTargetInstanceId() }}</code>
+          </div>
+          <div class="rail-section">
+            <span class="rail-key">Runtime</span>
+            <code class="rail-val mono small">{{ d.runtime_version || '—' }}</code>
+          </div>
+          <div class="rail-section">
+            <span class="rail-key">Model</span>
+            <code class="rail-val mono small">{{ d.effective_model || '—' }}</code>
+          </div>
+          <div class="rail-section">
+            <span class="rail-key">Created</span>
+            <span class="rail-val">{{ formatCreatedAt(d.created_at) }}</span>
+          </div>
+          <div class="rail-section">
+            <span class="rail-key">Captured by</span>
+            <span class="rail-val">{{ d.created_by_agent_id }}</span>
+          </div>
+          <div class="rail-section">
+            <span class="rail-key">Capture bytes</span>
+            <span class="rail-val">—</span>
+          </div>
+        </aside>
 
-      <!-- 2. Git anchor -->
-      <section class="detail-section" data-test="drawer-section">
-        <h3>Git anchor</h3>
-        <div class="kv-list">
-          <div class="kv-row">
-            <span class="kv-key">SHA</span>
-            <code class="kv-val mono">
-              {{ d.git_sha || '—' }}
-            </code>
-          </div>
-          <div class="kv-row">
-            <span class="kv-key">Branch</span>
-            <span class="kv-val">{{ d.git_branch || '—' }}</span>
-          </div>
-          <div class="kv-row">
-            <span class="kv-key">Repo path</span>
-            <span class="kv-val mono small">{{ d.repo_path || '—' }}</span>
-          </div>
-          <div class="kv-row">
-            <span class="kv-key">Dirty</span>
-            <span class="kv-val">{{ d.git_dirty ? 'Yes' : 'No' }}</span>
-          </div>
-        </div>
-      </section>
-
-      <!-- 3. Runtime / Model -->
-      <section class="detail-section" data-test="drawer-section">
-        <h3>Runtime / Model</h3>
-        <div class="kv-list">
-          <div class="kv-row">
-            <span class="kv-key">Runtime version</span>
-            <code class="kv-val mono">{{ d.runtime_version || '—' }}</code>
-          </div>
-          <div class="kv-row">
-            <span class="kv-key">Effective model</span>
-            <code class="kv-val mono">{{ d.effective_model || '—' }}</code>
-          </div>
-        </div>
-      </section>
-
-      <!-- 4. Supersedes chain -->
-      <section class="detail-section" data-test="drawer-section">
-        <h3>Supersedes chain</h3>
-        @if (d.supersedes_snapshot_id) {
-          <button
-            mat-button
-            color="primary"
-            (click)="onSupersedesClick()"
-            class="predecessor-link"
-          >
-            <mat-icon>link</mat-icon>
-            {{ d.supersedes_snapshot_id | slice: 0 : 8 }}… (open predecessor)
-          </button>
-        } @else {
-          <span class="muted">This snapshot does not supersede another.</span>
-        }
-      </section>
-
-      <!-- 5. Tags -->
-      <section class="detail-section" data-test="drawer-section">
-        <h3>Tags</h3>
-        @if (d.domain_tags?.length) {
-          <div class="tag-list">
-            @for (tag of d.domain_tags; track tag) {
-              <span class="tag-chip">{{ tag }}</span>
-            }
-          </div>
-        } @else {
-          <span class="muted">No tags.</span>
-        }
-      </section>
-
-      <!-- 6. Timestamps -->
-      <section class="detail-section" data-test="drawer-section">
-        <h3>Timestamps</h3>
-        <div class="kv-list">
-          <div class="kv-row">
-            <span class="kv-key">Created</span>
-            <span class="kv-val">{{ formatCreatedAt(d.created_at) }}</span>
-          </div>
-        </div>
-      </section>
-
-      <!-- 7. Context (project + agent) -->
-      <section class="detail-section" data-test="drawer-section">
-        <h3>Context</h3>
-        <div class="kv-list">
-          <div class="kv-row">
-            <span class="kv-key">Project</span>
-            <code class="kv-val mono small">{{ d.project_id }}</code>
-          </div>
-          <div class="kv-row">
-            <span class="kv-key">Agent</span>
-            <code class="kv-val mono">{{ d.created_by_agent_id }}</code>
-          </div>
-          <div class="kv-row">
-            <span class="kv-key">Target instance</span>
-            <code class="kv-val mono small" [matTooltip]="d.target_instance_id">
-              {{ truncatedTargetInstanceId() }}
-            </code>
-          </div>
-        </div>
-      </section>
-
-      <!-- Digest (lazy, render-only guard at 200KB) — NOT counted among
-           the 7 fixed sections per the test-hook contract; the digest
-           is a separate, on-demand panel. -->
-      <section class="detail-section digest-section">
-        <div class="digest-header">
-          <h3>Digest</h3>
-          <button
-            mat-stroked-button
-            (click)="onToggleDigest()"
-            [disabled]="digestLoading()"
-            class="digest-toggle-btn"
-          >
-            @if (digestLoading()) {
-              <mat-progress-spinner diameter="14" mode="indeterminate"></mat-progress-spinner>
-              Loading…
-            } @else if (showDigest()) {
-              <mat-icon>expand_less</mat-icon>
-              Hide digest
+        <!-- Main sections column -->
+        <div class="drawer-sections">
+          <!-- 1. Task summary -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Task summary</h3>
+            @if (d.task_summary) {
+              <p class="task-summary">{{ d.task_summary }}</p>
             } @else {
-              <mat-icon>expand_more</mat-icon>
-              Show digest
+              <span class="muted">No task summary recorded.</span>
             }
-          </button>
-        </div>
+          </section>
 
-        @if (showDigest()) {
-          @if (digestError(); as derr) {
-            <div class="error-block digest-error" role="alert">
-              <mat-icon>error_outline</mat-icon>
-              <p>Failed to load digest: {{ derr }}</p>
-              <button mat-stroked-button (click)="onRetryDigest()">
-                <mat-icon>refresh</mat-icon>
-                Retry
+          <!-- 2. Git anchor -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Git anchor</h3>
+            <div class="kv-list">
+              <div class="kv-row">
+                <span class="kv-key">SHA</span>
+                <code class="kv-val mono">{{ d.git_sha || '—' }}</code>
+              </div>
+              <div class="kv-row">
+                <span class="kv-key">Branch</span>
+                <span class="kv-val">{{ d.git_branch || '—' }}</span>
+              </div>
+              <div class="kv-row">
+                <span class="kv-key">Repo path</span>
+                <span class="kv-val mono small">{{ d.repo_path || '—' }}</span>
+              </div>
+              <div class="kv-row">
+                <span class="kv-key">Dirty</span>
+                <span class="kv-val">{{ d.git_dirty ? 'Yes' : 'No' }}</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- 3. Runtime / Model -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Runtime / Model</h3>
+            <div class="kv-list">
+              <div class="kv-row">
+                <span class="kv-key">Runtime version</span>
+                <code class="kv-val mono">{{ d.runtime_version || '—' }}</code>
+              </div>
+              <div class="kv-row">
+                <span class="kv-key">Effective model</span>
+                <code class="kv-val mono">{{ d.effective_model || '—' }}</code>
+              </div>
+            </div>
+          </section>
+
+          <!-- 4. Supersedes chain (AC-5.2 drawer-predecessor) -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Supersedes chain</h3>
+            @if (d.supersedes_snapshot_id) {
+              <button
+                type="button"
+                class="predecessor-link"
+                (click)="onSupersedesClick()"
+                [attr.aria-label]="'Open predecessor snapshot'"
+                data-test="drawer-predecessor"
+              >
+                <mat-icon>link</mat-icon>
+                {{ d.supersedes_snapshot_id | slice: 0 : 8 }}…
+              </button>
+            } @else {
+              <span class="muted">This snapshot does not supersede another.</span>
+            }
+          </section>
+
+          <!-- 5. Tags -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Tags</h3>
+            @if (d.domain_tags?.length) {
+              <div class="tag-list">
+                @for (tag of d.domain_tags; track tag) {
+                  <span class="tag-chip">{{ tag }}</span>
+                }
+              </div>
+            } @else {
+              <span class="muted">No tags.</span>
+            }
+          </section>
+
+          <!-- 6. Timestamps (v2: ADDS 'Last warmed' row, AC-4.7) -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Timestamps</h3>
+            <div class="kv-list">
+              <div class="kv-row">
+                <span class="kv-key">Created</span>
+                <span class="kv-val">{{ formatCreatedAt(d.created_at) }}</span>
+              </div>
+              <div class="kv-row">
+                <span class="kv-key">Last warmed</span>
+                <span class="kv-val">
+                  @if (warmedSpawnCount() !== null) {
+                    <span class="warm-value">
+                      <mat-icon class="warm-icon">local_fire_department</mat-icon>
+                      {{ warmedSpawnCount() }} warm spawn{{ warmedSpawnCount() === 1 ? '' : 's' }}
+                    </span>
+                  } @else {
+                    <span class="muted" [matTooltip]="warmTooltip">
+                      —
+                    </span>
+                  }
+                </span>
+              </div>
+            </div>
+          </section>
+
+          <!-- 7. Context (project + agent) -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Context</h3>
+            <div class="kv-list">
+              <div class="kv-row">
+                <span class="kv-key">Project</span>
+                <code class="kv-val mono small">{{ d.project_id }}</code>
+              </div>
+              <div class="kv-row">
+                <span class="kv-key">Agent</span>
+                <code class="kv-val mono">{{ d.created_by_agent_id }}</code>
+              </div>
+              <div class="kv-row">
+                <span class="kv-key">Target instance</span>
+                <code
+                  class="kv-val mono small"
+                  [matTooltip]="d.target_instance_id"
+                >{{ truncatedTargetInstanceId() }}</code>
+              </div>
+            </div>
+          </section>
+
+          <!-- Digest (lazy, render-only guard at 200KB) — NOT counted
+               among the 7 fixed sections per the test-hook contract.
+               data-test="drawer-digest-toggle" added per AC-5.2. -->
+          <section class="detail-section digest-section">
+            <div class="digest-header">
+              <h3>Digest</h3>
+              <button
+                type="button"
+                class="digest-toggle"
+                (click)="onToggleDigest()"
+                [disabled]="digestLoading()"
+                data-test="drawer-digest-toggle"
+              >
+                @if (digestLoading()) {
+                  <mat-icon class="digest-icon">refresh</mat-icon>
+                  Loading…
+                } @else if (showDigest()) {
+                  <mat-icon>expand_less</mat-icon>
+                  Hide digest
+                } @else {
+                  <mat-icon>expand_more</mat-icon>
+                  Show digest
+                }
               </button>
             </div>
-          } @else if (digestLoading()) {
-            <div class="digest-loading">
-              <mat-progress-spinner diameter="20" mode="indeterminate"></mat-progress-spinner>
-              <span>Loading digest…</span>
-            </div>
-          } @else if (digest()) {
-            @if (digestTooLarge()) {
-              <div class="digest-too-large" role="status">
-                <mat-icon>warning_amber</mat-icon>
-                <span>
-                  Digest too large to display
-                  ({{ digestJsonString().length | number }} bytes,
-                  guard is 200 KB). Use the Copy button to grab the raw JSON.
-                </span>
-                <button
-                  mat-stroked-button
-                  (click)="onCopyDigest()"
-                  class="copy-digest-btn"
-                  data-test="digest-copy"
-                >
-                  <mat-icon>content_copy</mat-icon>
-                  Copy
-                </button>
-              </div>
+
+            @if (showDigest()) {
+              @if (digestError(); as derr) {
+                <div class="error-block digest-error" role="alert">
+                  <mat-icon>error_outline</mat-icon>
+                  <p>Failed to load digest: {{ derr }}</p>
+                  <button
+                    type="button"
+                    class="retry-btn"
+                    (click)="onRetryDigest()"
+                  >
+                    <mat-icon>refresh</mat-icon>
+                    Retry
+                  </button>
+                </div>
+              } @else if (digestLoading()) {
+                <div class="digest-loading">
+                  <mat-icon class="spinning">progress_activity</mat-icon>
+                  <span>Loading digest…</span>
+                </div>
+              } @else if (digest()) {
+                @if (digestTooLarge()) {
+                  <div class="digest-too-large" role="status">
+                    <mat-icon>warning_amber</mat-icon>
+                    <span>
+                      Digest too large to display
+                      ({{ digestJsonString().length | number }} bytes,
+                      guard is 200 KB). Use the Copy button to grab the raw JSON.
+                    </span>
+                    <button
+                      type="button"
+                      class="copy-digest-btn"
+                      (click)="onCopyDigest()"
+                      data-test="digest-copy"
+                    >
+                      <mat-icon>content_copy</mat-icon>
+                      Copy
+                    </button>
+                  </div>
+                } @else {
+                  <pre
+                    class="digest-pre"
+                    data-test="digest-pre"
+                  >{{ digestJsonString() }}</pre>
+                  <div class="digest-actions">
+                    <button
+                      type="button"
+                      class="copy-digest-btn"
+                      (click)="onCopyDigest()"
+                      data-test="digest-copy"
+                    >
+                      <mat-icon>content_copy</mat-icon>
+                      Copy digest
+                    </button>
+                  </div>
+                }
+              }
             } @else {
-              <pre
-                class="digest-pre"
-                data-test="digest-pre"
-              >{{ digestJsonString() }}</pre>
-              <div class="digest-actions">
-                <button
-                  mat-stroked-button
-                  (click)="onCopyDigest()"
-                  data-test="digest-copy"
-                >
-                  <mat-icon>content_copy</mat-icon>
-                  Copy digest
-                </button>
-              </div>
+              <span class="muted">Digest is loaded on demand.</span>
             }
-          }
-        } @else {
-          <span class="muted">Digest is loaded on demand.</span>
-        }
-      </section>
+          </section>
+        </div>
+      </div>
     </div>
   }
 </div>
