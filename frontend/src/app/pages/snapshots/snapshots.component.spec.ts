@@ -1,5 +1,6 @@
 import { ComponentFixture, TestBed, fakeAsync, tick, flushMicrotasks } from '@angular/core/testing';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
+import { By } from '@angular/platform-browser';
 import { BehaviorSubject, of, throwError } from 'rxjs';
 import { Clipboard } from '@angular/cdk/clipboard';
 import { MatSnackBar } from '@angular/material/snack-bar';
@@ -8,6 +9,7 @@ import { ParamMap } from '@angular/router';
 import { signal } from '@angular/core';
 
 import { SnapshotsComponent } from './snapshots.component';
+import { SnapshotDetailDrawerComponent } from '../../components/snapshot-detail-drawer/snapshot-detail-drawer.component';
 import { SnapshotService } from '../../services/snapshot.service';
 import { ProjectService } from '../../services/project.service';
 import { SettingsService } from '../../services/settings.service';
@@ -1031,6 +1033,64 @@ describe('SnapshotsComponent (v2 redesign)', () => {
     // The headline still reflects the (zero) totals.
     expect(component.totalSnapshotCount()).toBe(0);
     expect(component.totalWarmedSpawns()).toBe(0);
+  }));
+
+  // ── (r) D1 (AC-A11Y.3b): page-level popover-open tracking ──────
+  // The page counts open mat-menu popovers from the four triggers'
+  // (menuOpened)/(menuClosed) outputs and hands the counter to the
+  // detail drawer, whose document-level Esc handler gates on it
+  // (popover-Esc must close ONLY the popover — R3-2 semantics).
+  it('(r) D1: menusOpen counter tracks popover opens/closes (floor 0) and feeds the drawer Esc gate live', fakeAsync(() => {
+    // The drawer needs a detail payload to render its content block.
+    mockSnapshotService.getById.mockReturnValue(of({} as never));
+
+    // Counter starts closed.
+    expect(component.menusOpen()).toBe(0);
+
+    // Two opens (e.g. metrics pill, then status — the counter tracks
+    // whatever the trigger outputs report) then one close.
+    component.onMenuOpened();
+    component.onMenuOpened();
+    expect(component.menusOpen()).toBe(2);
+    component.onMenuClosed();
+    expect(component.menusOpen()).toBe(1);
+
+    // Stray closes (e.g. a menu destroyed mid-open during teardown)
+    // must NOT drive the counter negative — a negative value would
+    // read as "> 0" false-negative... a broken gate. Floor at 0.
+    component.onMenuClosed();
+    component.onMenuClosed();
+    expect(component.menusOpen()).toBe(0);
+
+    // The drawer's [menusOpen] input mirrors the page counter LIVE —
+    // this is the wire the drawer's Esc gate reads.
+    component.onRowClick(makeRow());
+    fixture.detectChanges();
+    tick();
+    fixture.detectChanges();
+    const drawerDebug = fixture.debugElement.query(
+      By.directive(SnapshotDetailDrawerComponent),
+    );
+    expect(drawerDebug).not.toBeNull();
+    const drawer = drawerDebug!.componentInstance as SnapshotDetailDrawerComponent;
+    expect(drawer.menusOpen()).toBe(0);
+    component.onMenuOpened();
+    fixture.detectChanges(); // parent binding pushes the counter into the child input
+    expect(drawer.menusOpen()).toBe(1);
+    component.onMenuClosed();
+    fixture.detectChanges();
+    expect(drawer.menusOpen()).toBe(0);
+
+    // Structural: the 4 menu-trigger elements exist (info/metrics/
+    // status/sort). `[matMenuTriggerFor]` is an input BINDING — not
+    // DOM-visible — as are the (menuOpened)/(menuClosed) event
+    // bindings, so the live counter calls above ARE the wiring proof
+    // at unit level; template drift would break them.
+    const compiled = fixture.nativeElement as HTMLElement;
+    expect(compiled.querySelector('.info-icon-btn')).not.toBeNull();
+    expect(compiled.querySelector('[data-test="metrics-capture-card"]')).not.toBeNull();
+    expect(compiled.querySelector('[data-test="filter-status"]')).not.toBeNull();
+    expect(compiled.querySelector('[data-test="filter-sort"]')).not.toBeNull();
   }));
 });
 

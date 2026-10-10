@@ -11,6 +11,8 @@
         type="button"
         class="info-icon-btn"
         [matMenuTriggerFor]="infoMenu"
+        (menuOpened)="onMenuOpened()"
+        (menuClosed)="onMenuClosed()"
         aria-label="Page description"
       >
         <mat-icon>info</mat-icon>
@@ -51,6 +53,8 @@
         type="button"
         class="metrics-pill"
         [matMenuTriggerFor]="metricsMenu"
+        (menuOpened)="onMenuOpened()"
+        (menuClosed)="onMenuClosed()"
         [attr.aria-label]="metricsPillAriaLabel()"
         data-test="metrics-capture-card"
       >
@@ -131,6 +135,8 @@
         'Filter by status (' + filterStatus().length + ' selected)'
       "
       [matMenuTriggerFor]="statusMenu"
+      (menuOpened)="onMenuOpened()"
+      (menuClosed)="onMenuClosed()"
       aria-label="Filter by status ({{ filterStatus().length }} selected)"
       data-test="filter-status"
     >
@@ -232,6 +238,8 @@
       type="button"
       class="filter-pill sort-pill"
       [matMenuTriggerFor]="sortMenu"
+      (menuOpened)="onMenuOpened()"
+      (menuClosed)="onMenuClosed()"
       aria-label="Sort snapshots"
       data-test="filter-sort"
     >
@@ -344,6 +352,7 @@
         <app-snapshot-detail-drawer
           [snapshotId]="drawerId"
           [warmedSpawnCount]="warmedSpawnCountForSelected()"
+          [menusOpen]="menusOpen()"
           (close)="onCloseDrawer()"
           (navigateToPredecessor)="onNavigateToPredecessor($event)"
           (copyId)="onCopySnapshotId()"

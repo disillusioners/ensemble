@@ -181,6 +181,26 @@ export class SnapshotsComponent implements OnInit {
   readonly drawerOpen = signal(false);
   readonly selectedSnapshotId = signal<string | null>(null);
 
+  // ── D1 (AC-A11Y.3b): page-level popover-open tracking ──────────
+  /**
+   * Number of page-level mat-menu popovers (info/metrics/status/
+   * sort) currently open, tracked from the triggers'
+   * `(menuOpened)`/`(menuClosed)` outputs. Handed to the detail
+   * drawer as its Esc gate: while this is > 0, Esc closes only the
+   * popover — never the drawer (R3-2 core semantics).
+   */
+  readonly menusOpen = signal(0);
+
+  onMenuOpened(): void {
+    this.menusOpen.update((c) => c + 1);
+  }
+
+  onMenuClosed(): void {
+    // Math.max guards a stray close (e.g. a menu destroyed mid-open
+    // during teardown) from driving the counter negative.
+    this.menusOpen.update((c) => Math.max(0, c - 1));
+  }
+
   // ── Metrics strip ─────────────────────────────────────────────
   readonly metrics = signal<SnapshotUsageMetrics | null>(null);
   readonly metricsLoading = signal(false);

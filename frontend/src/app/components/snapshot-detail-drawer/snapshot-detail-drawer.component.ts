@@ -5,6 +5,7 @@ import {
   DestroyRef,
   DOCUMENT,
   effect,
+  ElementRef,
   HostListener,
   inject,
   input,
@@ -94,6 +95,15 @@ export class SnapshotDetailDrawerComponent {
    */
   readonly warmedSpawnCount = input<number | null>(null);
 
+  /**
+   * D1 (AC-A11Y.3b): number of page-level popovers (info/metrics/
+   * status/sort mat-menus) currently open. Tracked by the host page
+   * from the triggers' `(menuOpened)`/`(menuClosed)` outputs and
+   * handed here as the Esc GATE — a popover-Esc must close ONLY the
+   * popover, never the drawer (R3-2 core semantics).
+   */
+  readonly menusOpen = input<number>(0);
+
   // ── Outputs ──────────────────────────────────────────────────
   readonly close = output<void>();
   readonly navigateToPredecessor = output<string>();
@@ -106,6 +116,8 @@ export class SnapshotDetailDrawerComponent {
   private readonly snackBar = inject(MatSnackBar);
   private readonly document = inject(DOCUMENT);
   private readonly destroyRef = inject(DestroyRef);
+  /** Host element — used by the document-level Esc handler's scope check. */
+  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
 
   // ── Focus restoration (AC-A11Y-3, B2 conformance r1) ───────────
   // The row the user clicked had focus when the drawer opened. When
@@ -119,6 +131,63 @@ export class SnapshotDetailDrawerComponent {
   // destroyed. We restore focus on `DestroyRef.onDestroy` so all
   // close paths (Esc, close-button click, host onCloseDrawer) recover.
   private previouslyFocusedElement: HTMLElement | null = null;
+
+  // ── D1 (AC-A11Y.3b): GATED document-level Esc handler ───────────
+  /**
+   * Closes the drawer on Escape pressed ANYWHERE (drawer focus OR
+   * page focus — e.g. the popover trigger that just regained focus),
+   * UNLESS a page-level popover is currently open.
+   *
+   * R3-2 semantics are PRESERVED by the gate, not by event scoping:
+   * the Esc that closes an open popover must never also close the
+   * drawer. The gate therefore reads `menusOpen` and returns early
+   * while any popover is open.
+   *
+   * RACE (why CAPTURE phase — the trap the design calls out): when
+   * Esc closes an open mat-menu, CDK's overlay keydown handler runs
+   * in the BUBBLE phase (the overlay pane is deeper in the DOM than
+   * a document-level listener) and closes the menu SYNCHRONOUSLY —
+   * emitting `menuClosed`, so the page decrements `menusOpen` —
+   * BEFORE a bubble-phase document listener would run. A bubble-
+   * phase listener would then read the DECREMENTED count (0), think
+   * no popover is open, and close the drawer — resurrecting the
+   * double-close. A CAPTURE-phase listener
+   * (`addEventListener(..., true)`) runs before the overlay's bubble
+   * handler, so it sees the PRE-Esc state (count still includes the
+   * open menu), gates correctly, and the popover closes alone.
+   *
+   * Registered on `document` with capture=true in the constructor;
+   * removed via `DestroyRef` (below) so the listener never outlives
+   * the drawer.
+   */
+  private readonly docEscapeHandler = (event: Event): void => {
+    if (!(event instanceof KeyboardEvent)) {
+      return;
+    }
+    // Case-insensitive match — mirrors Angular's `keydown.escape`
+    // host-selector semantics (the browser always sends 'Escape',
+    // but synthetic events in tests historically use lowercase).
+    if (event.key.toLowerCase() !== 'escape') {
+      return;
+    }
+    // Gate 1 — popover open: Esc belongs to the popover (R3-2).
+    // The CDK overlay's own Esc handling will close it in the bubble
+    // phase, after this handler has already backed off.
+    if (this.menusOpen() > 0) {
+      return;
+    }
+    // Gate 2 — Esc originating INSIDE the drawer subtree is owned by
+    // the component-scoped HostListener below; handling it here too
+    // would double-emit `close` for a single keypress.
+    const target = event.target;
+    if (target instanceof Node) {
+      const hostEl = this.host.nativeElement;
+      if (hostEl === target || hostEl.contains(target)) {
+        return;
+      }
+    }
+    this.close.emit();
+  };
 
   // ── Detail state (drawer-owned) ─────────────────────────────
   readonly detail = signal<SnapshotDetailResponse | null>(null);
@@ -218,6 +287,15 @@ export class SnapshotDetailDrawerComponent {
         }
       }
     });
+
+    // ── D1 (AC-A11Y.3b): register the gated document-level Esc
+    //    handler in the CAPTURE phase (see docEscapeHandler for the
+    //    race rationale). Removed on destroy so it never outlives
+    //    the drawer.
+    this.document.addEventListener('keydown', this.docEscapeHandler, true);
+    this.destroyRef.onDestroy(() => {
+      this.document.removeEventListener('keydown', this.docEscapeHandler, true);
+    });
   }
 
   /**
@@ -225,12 +303,17 @@ export class SnapshotDetailDrawerComponent {
    * provides the focus trap (Tab cycling inside the drawer); Esc is
    * the only standard way out of a trap.
    *
-   * The listener is deliberately COMPONENT-SCOPED (the host element,
-   * not `document:keydown.escape`): CDK overlay content (mat-menu
-   * popovers, snackbars) mounts OUTSIDE this component's host
-   * subtree, so an Esc pressed to close a popover never bubbles
-   * through the drawer host and cannot double-close the drawer.
-   * Esc pressed inside the drawer bubbles up to the host and closes.
+   * This component-scoped listener owns Esc events originating
+   * INSIDE the drawer subtree (they bubble up to the host). Esc
+   * events from ANYWHERE ELSE (page focus, e.g. the popover trigger
+   * that regained focus after its popover closed) are owned by the
+   * GATED document-level capture handler (`docEscapeHandler`, D1 /
+   * AC-A11Y.3b), which closes the drawer only when no page popover
+   * is open — CDK overlay content (mat-menu popovers, snackbars)
+   * mounts OUTSIDE this host subtree, and popover-Esc must never
+   * close the drawer. The two listeners are mutually exclusive per
+   * keypress (the document handler skips targets inside the host),
+   * so a single Esc emits `close` exactly once.
    */
   @HostListener('keydown.escape')
   onEscapeKey(): void {

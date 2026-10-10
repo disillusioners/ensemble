@@ -509,10 +509,10 @@ describe('SnapshotDetailDrawerComponent', () => {
   });
 
   // (k.3) Pressing Escape INSIDE the drawer emits the `close` output
-  //       (AC-A11Y-3). R3-2: the listener is component-scoped, so the
-  //       event must originate inside the drawer subtree and bubble
-  //       up to the component host — the old document-level dispatch
-  //       deliberately no longer reaches it.
+  //       (AC-A11Y-3). The component-scoped host listener owns Esc
+  //       events that originate inside the drawer subtree and bubble
+  //       up to the component host; page-level Esc is owned by the
+  //       gated document-level capture handler (D1, see k.4).
   it('(k.3) Esc keypress inside the drawer emits the close output (AC-A11Y-3, R3-2)', async () => {
     fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
     fixture.detectChanges();
@@ -536,54 +536,170 @@ describe('SnapshotDetailDrawerComponent', () => {
     expect(closeSpy).toHaveBeenCalledTimes(1);
   });
 
-  // (k.4) Esc is SCOPED to the drawer subtree (R3-2). The old
-  //       document-level listener closed the drawer whenever ANY Esc
-  //       fired — including the Esc that only closed an unrelated
-  //       mat-menu popover (info/metrics/status/sort; their CDK
-  //       overlay content mounts OUTSIDE the drawer host subtree,
-  //       under document.body). Reworked from the removed
-  //       `isDrawerMode` suppression gate (dead input — the sole
-  //       call site hardcoded `true`). An Escape dispatched on
-  //       document.body must NOT emit close; an Escape from inside
-  //       the drawer subtree must.
-  it('(k.4) Esc outside the drawer subtree (popover close) does NOT close the drawer; inside does (R3-2)', async () => {
+  // (k.4) REWORKED (D1 — gated document-level Esc, leader ruling):
+  //       Esc semantics are now GATE-based, not location-based. The
+  //       R3-2 component-scoped listener could not see Esc pressed
+  //       at page-level focus (the tester's deterministic leg-10
+  //       FAIL: popover closes → focus lands on the page trigger →
+  //       second Esc never reached the drawer host). The drawer now
+  //       ALSO listens at document level (capture phase) and closes
+  //       UNLESS a page popover is open (menusOpen > 0) — preserving
+  //       R3-2's core guarantee (popover-Esc never closes the
+  //       drawer) via the gate instead of event scoping.
+  it('(k.4) gated document-level Esc: popover open → NO close; popover closed → page-focus Esc closes; inside-Esc still single-emits (D1, AC-A11Y.3b)', async () => {
     fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
     fixture.detectChanges();
     await Promise.resolve();
     await Promise.resolve();
     fixture.detectChanges();
 
-    // Attach the drawer host to the document so the negative
-    // assertion is honest: an Esc on document.body travels nowhere
-    // near the host even though the host IS in the document (events
-    // bubble UP toward the root, never back down into sibling
-    // subtrees — which is exactly how CDK overlay popover content
-    // behaves in production).
+    // Attach the drawer host to the document so the dispatch
+    // topology is honest (host is a body child; the Esc targets
+    // below are body itself / drawer descendants).
     const compiled = fixture.nativeElement as HTMLElement;
     document.body.appendChild(compiled);
 
     const closeSpy = jest.fn();
     component.close.subscribe(closeSpy);
 
-    // OUTSIDE: Esc on document.body — the exact topology of closing
-    // one of the page popovers (overlay content lives outside the
-    // drawer subtree). Under the old document-level listener this
-    // closed the drawer too (the R3-2 bug).
+    // (i) POPOVER OPEN: menusOpen=1 — document-level Esc (page
+    // focus; the overlay itself in production) must NOT close the
+    // drawer. R3-2 core semantics via the gate.
+    fixture.componentRef.setInput('menusOpen', 1);
     document.body.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'escape', bubbles: true }),
     );
     expect(closeSpy).not.toHaveBeenCalled();
 
-    // INSIDE: Esc on a drawer body element bubbles up to the host
-    // and closes the drawer.
+    // (ii) POPOVER CLOSED: menusOpen=0 — the same Esc from the same
+    // page-level focus NOW closes the drawer (AC-A11Y.3b; the
+    // tester's red leg, unit-green).
+    fixture.componentRef.setInput('menusOpen', 0);
+    document.body.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'escape', bubbles: true }),
+    );
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+
+    // (iii) INSIDE: Esc from a drawer descendant still closes —
+    // owned by the component-scoped host listener; the document
+    // capture handler skips drawer-subtree targets, so this emits
+    // exactly ONE more event (no double-fire).
     const drawerBody = compiled.querySelector('.drawer-body');
     expect(drawerBody).not.toBeNull();
     drawerBody!.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'escape', bubbles: true }),
     );
-    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(closeSpy).toHaveBeenCalledTimes(2);
 
     // Clean up the test DOM.
+    compiled.remove();
+  });
+
+  // (k.4-race) THE trap the D1 design calls out: when Esc closes an
+  //       open mat-menu, CDK's overlay keydown handler runs in the
+  //       BUBBLE phase (the overlay pane is deeper in the DOM than a
+  //       document-level listener) and closes the menu SYNCHRONOUSLY
+  //       — `menuClosed` fires and the page decrements menusOpen —
+  //       BEFORE a bubble-phase document listener would read the
+  //       count. ONLY a capture-phase listener sees the pre-Esc
+  //       state. This test pins the sequencing with a fake CDK
+  //       overlay: a bubble-phase "close the menu" listener
+  //       decrements the counter mid-dispatch, and the drawer must
+  //       still NOT close. (A bubble-phase document listener
+  //       implementation fails this test — it would read the
+  //       decremented 0 and resurrect the double-close.)
+  it('(k.4-race) capture-vs-bubble sequencing: fake CDK overlay closes the menu (decrement) mid-dispatch — drawer must NOT close (D1 race)', async () => {
+    fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
+    fixture.detectChanges();
+    await Promise.resolve();
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    const compiled = fixture.nativeElement as HTMLElement;
+    document.body.appendChild(compiled);
+
+    const closeSpy = jest.fn();
+    component.close.subscribe(closeSpy);
+
+    // Fake CDK overlay topology: an overlay pane as a SIBLING of
+    // the drawer host under body (exactly where CDK mounts mat-menu
+    // content). Focus sits in the overlay — the Esc target is a
+    // descendant of the pane.
+    const overlayPane = document.createElement('div');
+    overlayPane.className = 'cdk-overlay-pane';
+    const overlayTarget = document.createElement('button');
+    overlayPane.appendChild(overlayTarget);
+    document.body.appendChild(overlayPane);
+
+    // Fake "CDK closes the menu" — BUBBLE phase on the pane:
+    // emits menuClosed → page decrements the counter (input → 0).
+    const fakeCdkCloseHandler = () => fixture.componentRef.setInput('menusOpen', 0);
+    overlayPane.addEventListener('keydown', fakeCdkCloseHandler);
+
+    fixture.componentRef.setInput('menusOpen', 1);
+    overlayTarget.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'escape', bubbles: true }),
+    );
+
+    // Event path: document CAPTURE (our handler reads menusOpen=1 →
+    // gated) → html → body → pane at-target bubble (fake CDK
+    // decrements to 0) → ... A bubble-phase document listener would
+    // run AFTER the decrement, read 0, and wrongly close.
+    expect(closeSpy).not.toHaveBeenCalled();
+
+    // POSITIVE CONTROL — same topology, gate open: the drawer MUST
+    // close. Without this, the negative above would also "pass" if
+    // the document listener were never wired at all.
+    fixture.componentRef.setInput('menusOpen', 0);
+    overlayTarget.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'escape', bubbles: true }),
+    );
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+
+    overlayPane.removeEventListener('keydown', fakeCdkCloseHandler);
+    overlayPane.remove();
+    compiled.remove();
+  });
+
+  // (k.4-seq) D1 regression — the EXACT tester leg-10 sequence at
+  //       unit level: popover open → Esc #1 closes ONLY the popover
+  //       (gate blocks the drawer; menuClosed fires; counter
+  //       decrements) → focus lands on the page-level trigger
+  //       (outside the drawer host) → Esc #2 closes the DRAWER.
+  it('(k.4-seq) D1 regression: popover-close sequence — Esc #1 leaves drawer open, Esc #2 from page focus closes it (AC-A11Y.3b)', async () => {
+    fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
+    fixture.detectChanges();
+    await Promise.resolve();
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    const compiled = fixture.nativeElement as HTMLElement;
+    document.body.appendChild(compiled);
+
+    const closeSpy = jest.fn();
+    component.close.subscribe(closeSpy);
+
+    // Esc #1 — popover open. The drawer must not react (the popover
+    // closes via its own CDK overlay handler — out of unit scope).
+    fixture.componentRef.setInput('menusOpen', 1);
+    document.body.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'escape', bubbles: true }),
+    );
+    expect(closeSpy).not.toHaveBeenCalled();
+
+    // menuClosed fired (simulated at unit level): the page
+    // decrements the counter; CDK restores focus to the page-level
+    // trigger — page focus, OUTSIDE the drawer host (the dispatch
+    // target below is body itself, matching that topology).
+    fixture.componentRef.setInput('menusOpen', 0);
+
+    // Esc #2 — no popover open, drawer open, page-level focus: the
+    // drawer MUST close.
+    document.body.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'escape', bubbles: true }),
+    );
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+
     compiled.remove();
   });
 
