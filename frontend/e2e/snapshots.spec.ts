@@ -545,24 +545,33 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     expect(JSON.stringify(await legacy.json())).toBe(JSON.stringify(await modern.json()));
   });
 
-  test('step 11a — Escape closes the drawer; table stays interactive; no page errors', async ({ page }) => {
+  test('step 11a — Escape closes the drawer from page focus (post-D1, no pane focus needed); inside-focus path kept; no page errors', async ({ page }) => {
     const pageErrors = trackPageErrors(page);
     await openSnapshotsWithRows(page);
     await page.locator('table tbody tr').first().click();
     await expect(page.locator('[data-test="snapshot-drawer"]')).toBeVisible();
 
-    // Focus the drawer pane (the <mat-drawer> element itself, which carries
-    // tabindex="-1") so Material's CdkTrapFocus Escape handler is the active
-    // listener when the key reaches the page. Without this, the keypress
-    // lands on the document and the mat-drawer-open state does not flip.
-    await page.locator('[data-test="snapshot-drawer"]').focus();
+    // v2 / D1: the drawer listens for Escape at DOCUMENT level
+    // (capture phase), gated on "no page popover open". Focus is on
+    // the clicked table row — page-level focus OUTSIDE the drawer
+    // subtree — which the pre-D1 component-scoped listener could not
+    // see (the drawer stayed open). No pane focus() needed anymore.
     await page.keyboard.press('Escape');
     await expect(page.locator('[data-test="snapshot-drawer"]')).not.toBeVisible();
     await expect(page.locator('table tbody tr').first()).toBeVisible();
     expect(pageErrors).toEqual([]);
+
+    // Focus-INSIDE path still closes via the component-scoped host
+    // listener (R3-2, AC-A11Y-3): re-open, focus the pane, Escape.
+    await page.locator('table tbody tr').first().click();
+    await expect(page.locator('[data-test="snapshot-drawer"]')).toBeVisible();
+    await page.locator('[data-test="snapshot-drawer"]').focus();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('[data-test="snapshot-drawer"]')).not.toBeVisible();
+    expect(pageErrors).toEqual([]);
   });
 
-  test('step 11b — backdrop click closes the re-opened drawer; no page errors', async ({ page }) => {
+  test('step 11b — side-mode drawer: no backdrop, neutral outside click keeps it open, Esc + close button close it; no page errors', async ({ page }) => {
     const pageErrors = trackPageErrors(page);
     await openSnapshotsWithRows(page);
 
@@ -570,14 +579,32 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     await page.locator('table tbody tr').first().click();
     await expect(page.locator('[data-test="snapshot-drawer"]')).toBeVisible();
 
-    // drawer-backdrop is bound to the <mat-drawer-container>; assert
-    // the Material-owned descendant backdrop directly, then close via
-    // the container-center click (leader-pinned implementation fact).
+    // v2 side-mode contract (D2, AC-4.1 mandates mode="side"):
+    // Material resolves hasBackdrop=false for side drawers, so the
+    // backdrop element is NEVER rendered. The v1 backdrop-click step
+    // (assert visible + click to close) is structurally dead against
+    // this design and was replaced by the assertions below. The
+    // `data-test="drawer-backdrop"` hook on the container is kept
+    // for selector compatibility.
     const container = page.locator('[data-test="drawer-backdrop"]');
-    await expect(container.locator('.mat-drawer-backdrop')).toBeVisible();
-    await container.click();
+    await expect(container.locator('.mat-drawer-backdrop')).toHaveCount(0);
 
+    // (1) Neutral outside click does NOT close the drawer (side mode
+    // pushes content; there is no backdrop intercepting clicks).
+    await page.locator('.page-title').click();
+    await expect(page.locator('[data-test="snapshot-drawer"]')).toBeVisible();
+
+    // (2) Esc closes the drawer (post-D1: from any focus — here the
+    // focus sits on the page, outside the drawer subtree).
+    await page.keyboard.press('Escape');
     await expect(page.locator('[data-test="snapshot-drawer"]')).not.toBeVisible();
+
+    // (3) The drawer close button closes the re-opened drawer.
+    await page.locator('table tbody tr').first().click();
+    await expect(page.locator('[data-test="snapshot-drawer"]')).toBeVisible();
+    await page.locator('[data-test="drawer-close"]').click();
+    await expect(page.locator('[data-test="snapshot-drawer"]')).not.toBeVisible();
+
     await expect(page.locator('table tbody tr').first()).toBeVisible();
     expect(pageErrors).toEqual([]);
   });
