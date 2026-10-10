@@ -1,5 +1,14 @@
 # Tidier Review Notes — agents-ensemble
 
+## 2026-10-07 — live-views Phase 1 tidy pass (worktree feature/live-views @ 343d9e789, range c600af60d..HEAD, 22 files +3899/−26), Iteration 001
+- 5th edit-commission occurrence (leader asked Tidier to implement 5-item tidy ledger + pathspec commits + test runs) → implementation re-routed to Developer per Cardinal #5 precedent chain (09-26, 10-04, 10-06); Tidier delivered verification map + sweep instead.
+- Dispatch: 3 parallel read-only workers (readable ef049770, hygiene 6bcc0c95, robustness 85f74253) + 2 verification rounds with readable (addendum CHECKs 1-3; second round demanded finding #11 the worker's own summary counted but body omitted — interim-report rule caught it).
+- Verdict: NEEDS WORK (non-blocking; zero High). 24 findings after dedup: 12 Medium / 12 Low. ALL 5 leader ledger items CONFIRMED with evidence. Dead-seam trace (item 4): 5 wired sites / 0 reads; CRITICAL removal note — `_project_workdir_by_shortname_resolver` (api.py:1068 closure) IS live, remove only the instance-id variant (`_resolve_project_workdir_for_instance` api.py:1034 + ctor param services:307/:317 + stale comment services:401).
+- Dedup: A3≡B5 (four→five test rename, cross-confirmed both workers); B1+B2+B3 merged 3-in-1 (Literal upgrade ×3 sites); A7 folded into ledger-1 rewrite; A+C cross-observation `_MAX_SERVED_BYTES` private import merged as one Low.
+- Beyond-ledger hardening flagged for leader scope adjudication (keep-diff-small tension): C2 OSError→500 leak vs uniform-404 contract (services:594-595, router:216 catch set); C3 silent misconfig→boot-time validator (services:389-393/477-480, config.py) — fail-loud-at-load is a behavior change.
+- Worker report defects: B summary undercounted its own table (said 3 Medium, table had 5 rows — counted themes); A addendum omitted CHECK 1 body while counting #11 in summary (repaired via verification round).
+- skill_feedback-first: C claimed pre-turn filing; A/B not visibly evidenced — process nit now 7th consecutive pass.
+
 ## 2026-10-06 — snapshot-uiux tidy pass (worktree feature/snapshot-uiux, range ac399874..HEAD, 14 scoped files +3550/−55), Iteration 001
 - Commission asked Tidier to edit+commit+run-gates → 4th occurrence of the edit-commission pattern; fixes routed to Developer per Cardinal #5 (precedent 2026-10-04, 09-26).
 - Dispatch: 2 parallel read-only workers (readable ddbbc60e, hygiene 5d94c3f1). Both reported fully; no gaps; 6 cross-worker merges (col nit, table chips/divider/spinner modules, page progress-bar, service rxjs imports).
