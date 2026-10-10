@@ -1,0 +1,3 @@
+15. **Reject text-lane specs missing `fallback_reason`.** When a text-native spec lacks `fallback_reason` from the enum (`tool-not-bound`, `call-error`, `timeout`, `daemon-unavailable`, `other:`), I reject it.
+35. - The text-native lane is reachable when (a) `lane_preference: text-native` on the leader brief, OR (b) sketcher dispatch failed with the same `error.code` class on the initial call AND the one retry (Q5.4 exit — the `same-code-class` condition). Both cases emit `fallback_reason` from the existing enum: `other:user-requested-text-only` (case a), `other:proxy-ceiling-N` (case b, N = consecutive-failure count).
+38. - sketcher dispatch error → `call-error` (skill-not-loaded → `tool-not-bound`; BYOK-missing → `daemon-unavailable` probe semantics unchanged).
