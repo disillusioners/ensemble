@@ -84,8 +84,6 @@ export class SnapshotDetailDrawerComponent {
   // ── Inputs (v1 pass 4 #7) ───────────────────────────────────────
   /** The id of the snapshot to load. The drawer fetches its own detail. */
   readonly snapshotId = input.required<string>();
-  /** Reserved for future full-page reuse (defaults to drawer mode). */
-  readonly isDrawerMode = input<boolean>(true);
   /**
    * Warmed-spawn count for the open snapshot (v2 AC-4.7). When the
    * value is non-null, the Timestamps section adds a 'Last warmed'
@@ -223,17 +221,20 @@ export class SnapshotDetailDrawerComponent {
   }
 
   /**
-   * B2 (AC-A11Y-3): Escape closes the drawer. `cdkTrapFocus` provides
-   * the focus trap (Tab cycling inside the drawer); Esc is the only
-   * standard way out of a trap. Only act when this component is
-   * embedded in a drawer (not when it is rendered as a full-page
-   * view, where the host handles its own Esc routing).
+   * R3 (AC-A11Y-3, R3-2): Escape closes the drawer. `cdkTrapFocus`
+   * provides the focus trap (Tab cycling inside the drawer); Esc is
+   * the only standard way out of a trap.
+   *
+   * The listener is deliberately COMPONENT-SCOPED (the host element,
+   * not `document:keydown.escape`): CDK overlay content (mat-menu
+   * popovers, snackbars) mounts OUTSIDE this component's host
+   * subtree, so an Esc pressed to close a popover never bubbles
+   * through the drawer host and cannot double-close the drawer.
+   * Esc pressed inside the drawer bubbles up to the host and closes.
    */
-  @HostListener('document:keydown.escape')
+  @HostListener('keydown.escape')
   onEscapeKey(): void {
-    if (this.isDrawerMode()) {
-      this.close.emit();
-    }
+    this.close.emit();
   }
 
   // ── Computed helpers (template-facing) ──────────────────────

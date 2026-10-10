@@ -1,5 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
+import { InteractivityChecker } from '@angular/cdk/a11y';
 import { of, throwError, Subject } from 'rxjs';
 import { Clipboard } from '@angular/cdk/clipboard';
 import { MatSnackBar } from '@angular/material/snack-bar';
@@ -74,6 +75,24 @@ describe('SnapshotDetailDrawerComponent', () => {
         { provide: SnapshotService, useValue: mockSnapshotService },
         { provide: Clipboard, useValue: clipboard },
         { provide: MatSnackBar, useValue: snackBar },
+        // (k.1b) jsdom computes no layout, so CDK's InteractivityChecker
+        // reports EVERY element as invisible (zero getClientRects
+        // geometry) and the focus trap finds zero tabbable elements.
+        // The behavioral Tab-cycle test overrides the checker with
+        // geometry-free logic so the trap's REAL wrap mechanics (the
+        // boundary anchors' focus listeners + the
+        // _getFirst/LastTabbableElement DOM walk) execute against the
+        // actual drawer DOM. Visibility probing only — nothing else.
+        {
+          provide: InteractivityChecker,
+          useValue: {
+            isVisible: () => true,
+            isDisabled: (el: HTMLElement) => el.hasAttribute('disabled'),
+            isTabbable: (el: HTMLElement) => el.tabIndex >= 0,
+            isFocusable: (el: HTMLElement) =>
+              el.tabIndex >= 0 && !el.hasAttribute('disabled'),
+          },
+        },
       ],
     }).compileComponents();
 
@@ -322,41 +341,146 @@ describe('SnapshotDetailDrawerComponent', () => {
     expect(compiled.querySelector('[data-test="digest-pre"]')).not.toBeNull();
   });
 
-  // ── (k) B2 BLOCKER (conformance r1, AC-A11Y-3) ────────────────
+  // ── (k) B2 BLOCKER (conformance r1, AC-A11Y-3) + R3 conformance ──
   // The reviewer's round-1 verdict overturned v1's PARTIAL to FAIL:
   // v1's `mode="over"` provided Esc/trap behavior by Material design,
-  // but v2's `mode="side"` does not. The fix is:
-  //   1. cdkTrapFocus on the drawer header wrapper (Tab cycling stays
-  //      inside the drawer);
+  // but v2's `mode="side"` does not. The fix (as amended in R3):
+  //   1. cdkTrapFocus on the drawer ROOT wrapper (R3-1 — the Tab
+  //      cycle covers header AND body; the old header-only placement
+  //      left every .drawer-body focusable outside the trap);
   //   2. cdkFocusInitial on the close button (focus lands on close
   //      when the trap activates);
-  //   3. @HostListener('document:keydown.escape') on the component
-  //      (Esc closes the drawer via the existing `close` output);
+  //   3. component-scoped @HostListener('keydown.escape') on the
+  //      component host (R3-2 — Esc closes the drawer via the
+  //      existing `close` output; scoping to the host means Esc
+  //      pressed on CDK-overlay content, e.g. a mat-menu popover,
+  //      never bubbles through the drawer and cannot double-close it);
   //   4. Constructor captures `document.activeElement` (the row that
   //      was clicked to open the drawer); DestroyRef.onDestroy
   //      restores focus on it (works for ALL close paths).
 
-  // (k.1) cdkTrapFocus directive is present on the drawer header
-  //       wrapper (the trap's anchor element). Angular's directive
-  //       selector reflection lowercases the attribute name to
-  //       `cdktrapfocus` on the element. Without the directive, Tab
-  //       would leak OUT of the drawer into the underlying table —
-  //       defeating AC-A11Y-3.
-  it('(k.1) cdkTrapFocus directive anchors the focus trap on the drawer header wrapper', async () => {
+  // (k.1) cdkTrapFocus directive anchors the focus trap on the drawer
+  //       ROOT wrapper (R3-1). Angular's directive selector
+  //       reflection lowercases the attribute name to `cdktrapfocus`
+  //       on the element. Without the directive — or with the old
+  //       header-only placement — Tab would leak out of the cycle or
+  //       skip the body entirely, defeating AC-A11Y-3.
+  it('(k.1) cdkTrapFocus anchors the focus trap on the drawer ROOT wrapper, not the header (R3-1)', async () => {
     fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
     fixture.detectChanges();
     await Promise.resolve();
     await Promise.resolve();
     fixture.detectChanges();
     const compiled = fixture.nativeElement as HTMLElement;
-    const drawerHeader = compiled.querySelector('.drawer-header');
-    expect(drawerHeader).not.toBeNull();
+    const drawerRoot = compiled.querySelector('.snapshot-drawer');
+    expect(drawerRoot).not.toBeNull();
     // Angular's template parser lowercases directive-attribute names
     // that are also DOM attribute selectors — `cdkTrapFocus` reflects
     // as `cdktrapfocus` (no dashes). The CDK runtime is
     // case-insensitive on attribute matching, so the runtime trap
     // still fires correctly in real browsers.
-    expect(drawerHeader?.hasAttribute('cdktrapfocus')).toBe(true);
+    expect(drawerRoot?.hasAttribute('cdktrapfocus')).toBe(true);
+    // R3-1 regression guard: the header must NOT carry the trap — the
+    // old header-only placement left every .drawer-body focusable
+    // outside the Tab cycle.
+    const drawerHeader = compiled.querySelector('.drawer-header');
+    expect(drawerHeader).not.toBeNull();
+    expect(drawerHeader?.hasAttribute('cdktrapfocus')).toBe(false);
+  });
+
+  // (k.1b) BEHAVIORAL Tab-cycle test (R3-1; spec AC-A11Y-3: "Tab
+  //        cycles within the drawer header + body links/buttons").
+  //
+  //        Mechanics (documented per the reviewer's engineering
+  //        note): jsdom implements no keyboard-focus traversal, so a
+  //        synthetic Tab keydown can never move focus — and CDK 21's
+  //        trap has NO keydown handler either. Its wrap mechanism is
+  //        two hidden anchor divs (`cdk-focus-trap-anchor`) inserted
+  //        as DOM siblings immediately BEFORE and AFTER the trap
+  //        element; each listens for `focus` and pulls focus back
+  //        inside (`focusLastTabbableElement` /
+  //        `focusFirstTabbableElement`). In a real browser the native
+  //        Tab from the trap's last focusable lands on the END anchor
+  //        (the next tabbable in DOM order) and the listener wraps
+  //        focus back into the drawer. We simulate exactly that
+  //        traversal by focusing the anchors programmatically after
+  //        attaching the fixture host to the document (jsdom fires
+  //        `focus` events synchronously on `.focus()` for in-document
+  //        elements), exercising the trap's REAL wrap path. The
+  //        suite's InteractivityChecker override supplies the
+  //        geometry-free visibility logic jsdom cannot compute.
+  it('(k.1b) BEHAVIORAL: Tab-cycle wraps inside the drawer — body focusables reachable, no escape (R3-1, AC-A11Y-3)', async () => {
+    // Detail WITH a predecessor link AND an open digest, so the body
+    // carries >= 3 focusables (predecessor, digest toggle, digest copy).
+    mockSnapshotService.getById.mockImplementation(() =>
+      of(makeDetail({ supersedes_snapshot_id: 'prev-snap-uuid' })),
+    );
+    fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
+    fixture.detectChanges();
+    await Promise.resolve();
+    await Promise.resolve();
+    fixture.detectChanges();
+
+    component.digest.set({ small: 'value' });
+    component.showDigest.set(true);
+    fixture.detectChanges();
+
+    const compiled = fixture.nativeElement as HTMLElement;
+    // jsdom only fires focus events for elements in the document —
+    // attach the host for the wrap simulation, remove at the end.
+    document.body.appendChild(compiled);
+    const drawerRoot = compiled.querySelector('.snapshot-drawer')!;
+    expect(drawerRoot).not.toBeNull();
+
+    const predecessorBtn = compiled.querySelector<HTMLButtonElement>(
+      '[data-test="drawer-predecessor"]',
+    );
+    const digestToggleBtn = compiled.querySelector<HTMLButtonElement>(
+      '[data-test="drawer-digest-toggle"]',
+    );
+    const digestCopyBtn = compiled.querySelector<HTMLButtonElement>(
+      '[data-test="digest-copy"]',
+    );
+    const copyIdBtn = compiled.querySelector<HTMLButtonElement>(
+      '[data-test="drawer-copy-id"]',
+    );
+    expect(predecessorBtn).not.toBeNull();
+    expect(digestToggleBtn).not.toBeNull();
+    expect(digestCopyBtn).not.toBeNull();
+    expect(copyIdBtn).not.toBeNull();
+
+    // (1) Reachability: each body focusable can receive focus in the
+    // cycle (sequential focus() — jsdom has no Tab traversal).
+    for (const el of [predecessorBtn, digestToggleBtn, digestCopyBtn]) {
+      el!.focus();
+      expect(document.activeElement).toBe(el);
+    }
+
+    // (2) The trap's hidden boundary anchors exist around the ROOT
+    // element (start before it, end after it).
+    const anchors = compiled.querySelectorAll<HTMLElement>(
+      '.cdk-focus-trap-anchor',
+    );
+    expect(anchors.length).toBe(2);
+
+    // (3) Tab off the END of the trap (from the last body focusable,
+    // as a real browser's Tab would land on the end anchor): focus
+    // must wrap BACK INSIDE the drawer to the FIRST tabbable (the
+    // header's Copy ID button) — never escape `.snapshot-drawer`.
+    digestCopyBtn!.focus();
+    anchors[1].focus();
+    expect(document.activeElement).toBe(copyIdBtn);
+    expect(drawerRoot.contains(document.activeElement)).toBe(true);
+
+    // (4) Shift-Tab off the START of the trap: the start anchor wraps
+    // focus to the LAST tabbable — the digest copy button in the
+    // body — again staying inside the drawer.
+    anchors[0].focus();
+    expect(document.activeElement).toBe(digestCopyBtn);
+    expect(drawerRoot.contains(document.activeElement)).toBe(true);
+
+    // Clean up the test DOM.
+    compiled.remove();
   });
 
   // (k.2) cdkFocusInitial is stamped on the close button — when the
@@ -384,12 +508,13 @@ describe('SnapshotDetailDrawerComponent', () => {
     expect(closeBtn?.hasAttribute('cdkfocusinitial')).toBe(true);
   });
 
-  // (k.3) Pressing Escape emits the `close` output. The component
-  //       gates on `isDrawerMode()` so the full-page view (which has
-  //       its own Esc routing) is NOT short-circuited.
-  it('(k.3) Esc keypress while drawer is open emits the close output (AC-A11Y-3)', async () => {
+  // (k.3) Pressing Escape INSIDE the drawer emits the `close` output
+  //       (AC-A11Y-3). R3-2: the listener is component-scoped, so the
+  //       event must originate inside the drawer subtree and bubble
+  //       up to the component host — the old document-level dispatch
+  //       deliberately no longer reaches it.
+  it('(k.3) Esc keypress inside the drawer emits the close output (AC-A11Y-3, R3-2)', async () => {
     fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
-    fixture.componentRef.setInput('isDrawerMode', true);
     fixture.detectChanges();
     await Promise.resolve();
     await Promise.resolve();
@@ -398,32 +523,68 @@ describe('SnapshotDetailDrawerComponent', () => {
     const closeSpy = jest.fn();
     component.close.subscribe(closeSpy);
 
-    // Dispatch a real Escape keydown at the document level — the
-    // @HostListener('document:keydown.escape') registers at the
-    // DOCUMENT target.
-    document.dispatchEvent(
+    // Dispatch a real Escape keydown from INSIDE the drawer subtree —
+    // @HostListener('keydown.escape') registers on the component
+    // host, so only events bubbling up from descendants reach it.
+    const header = (fixture.nativeElement as HTMLElement).querySelector(
+      '.drawer-header',
+    );
+    expect(header).not.toBeNull();
+    header!.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'escape', bubbles: true }),
     );
     expect(closeSpy).toHaveBeenCalledTimes(1);
   });
 
-  // (k.4) Esc is suppressed when isDrawerMode() is false (the
-  //       full-page variant of this component owns its own Esc
-  //       routing, so the drawer-mode shortcut must not double-fire).
-  it('(k.4) Esc is suppressed when isDrawerMode is false (no double-fire)', async () => {
+  // (k.4) Esc is SCOPED to the drawer subtree (R3-2). The old
+  //       document-level listener closed the drawer whenever ANY Esc
+  //       fired — including the Esc that only closed an unrelated
+  //       mat-menu popover (info/metrics/status/sort; their CDK
+  //       overlay content mounts OUTSIDE the drawer host subtree,
+  //       under document.body). Reworked from the removed
+  //       `isDrawerMode` suppression gate (dead input — the sole
+  //       call site hardcoded `true`). An Escape dispatched on
+  //       document.body must NOT emit close; an Escape from inside
+  //       the drawer subtree must.
+  it('(k.4) Esc outside the drawer subtree (popover close) does NOT close the drawer; inside does (R3-2)', async () => {
     fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
-    fixture.componentRef.setInput('isDrawerMode', false);
     fixture.detectChanges();
     await Promise.resolve();
     await Promise.resolve();
     fixture.detectChanges();
 
+    // Attach the drawer host to the document so the negative
+    // assertion is honest: an Esc on document.body travels nowhere
+    // near the host even though the host IS in the document (events
+    // bubble UP toward the root, never back down into sibling
+    // subtrees — which is exactly how CDK overlay popover content
+    // behaves in production).
+    const compiled = fixture.nativeElement as HTMLElement;
+    document.body.appendChild(compiled);
+
     const closeSpy = jest.fn();
     component.close.subscribe(closeSpy);
-    document.dispatchEvent(
+
+    // OUTSIDE: Esc on document.body — the exact topology of closing
+    // one of the page popovers (overlay content lives outside the
+    // drawer subtree). Under the old document-level listener this
+    // closed the drawer too (the R3-2 bug).
+    document.body.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'escape', bubbles: true }),
     );
     expect(closeSpy).not.toHaveBeenCalled();
+
+    // INSIDE: Esc on a drawer body element bubbles up to the host
+    // and closes the drawer.
+    const drawerBody = compiled.querySelector('.drawer-body');
+    expect(drawerBody).not.toBeNull();
+    drawerBody!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'escape', bubbles: true }),
+    );
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+
+    // Clean up the test DOM.
+    compiled.remove();
   });
 
   // (k.5) On teardown, focus is restored to the previously-focused
@@ -431,10 +592,12 @@ describe('SnapshotDetailDrawerComponent', () => {
   //       row by appending an HTMLElement to document.body and
   //       putting focus on it BEFORE the drawer is instantiated —
   //       the constructor captures the active element synchronously.
-  //       NOTE: jsdom does not compute layout, so cdkTrapFocus's
-  //       auto-capture `.focus()` calls silently no-op. We assert the
-  //       restore side directly: on teardown, the captured element
-  //       (the row) receives focus again.
+  //       NOTE: with the suite's InteractivityChecker stub (jsdom has
+  //       no layout), cdkTrapFocus's auto-capture DOES move focus to
+  //       the close button during detectChanges — irrelevant here:
+  //       the constructor captured the row SYNCHRONOUSLY before any
+  //       of that, and on teardown both the trap's restore and the
+  //       component's DestroyRef restore target the same captured row.
   it('(k.5) on component teardown the captured previously-focused element receives focus (AC-A11Y-3)', async () => {
     // Create a fake "row" element and put focus on it BEFORE the
     // drawer is instantiated — the constructor captures it.
@@ -448,7 +611,6 @@ describe('SnapshotDetailDrawerComponent', () => {
     // Now mount the drawer; its constructor captures fakeRow into
     // `previouslyFocusedElement` (B2 implementation).
     fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
-    fixture.componentRef.setInput('isDrawerMode', true);
     fixture.detectChanges();
     await Promise.resolve();
     await Promise.resolve();
@@ -474,7 +636,6 @@ describe('SnapshotDetailDrawerComponent', () => {
   it('(k.6) teardown does not throw when no previously-focused element was captured', () => {
     // Default fixture: focus is body, not a row.
     fixture.componentRef.setInput('snapshotId', 'snap-uuid-1');
-    fixture.componentRef.setInput('isDrawerMode', true);
     fixture.detectChanges();
 
     // destroyRef.onDestroy callback must not error out.

@@ -3,18 +3,24 @@
      Sticky header (title + actions + status chip + meta). Body scrolls
      internally; the body's content grid is single-column on < 1280px
      and switches to a 240px rail + sections column on >= 1280px (AC-6.2). -->
-<div class="snapshot-drawer" role="complementary">
-  <!-- Drawer header (sticky at the top of the body scroll).
-       B2 conformance r1 (AC-A11Y-3): cdkTrapFocus on the drawer
-       content wrapper establishes the focus trap; cdkFocusInitial on
-       the close button (later in this template) marks where focus
-       lands when the trap activates. Escape is handled by a
-       @HostListener in the component class. -->
+<!-- R3 conformance (AC-A11Y-3, R3-1): cdkTrapFocus sits on the ROOT
+     drawer wrapper — NOT the header — so the Tab cycle covers the
+     header AND the .drawer-body focusables (predecessor link, digest
+     toggle, digest copy, retry). The old header-only placement left
+     every body focusable OUTSIDE the trap. cdkFocusInitial on the
+     close button (later in this template) marks where focus lands
+     when the trap activates. Escape is handled by a component-scoped
+     @HostListener in the component class. -->
+<div
+  class="snapshot-drawer"
+  role="complementary"
+  cdkTrapFocus
+  [cdkTrapFocusAutoCapture]="true"
+>
+  <!-- Drawer header (sticky at the top of the body scroll). -->
   <div
     class="drawer-header"
     [attr.aria-labelledby]="drawerTitleId()"
-    cdkTrapFocus
-    [cdkTrapFocusAutoCapture]="true"
   >
     <div class="header-top">
       <h2 class="drawer-title" [id]="drawerTitleId()">

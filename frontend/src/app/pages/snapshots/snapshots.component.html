@@ -19,7 +19,7 @@
         <div
           class="info-popover"
           (click)="$event.stopPropagation()"
-          role="tooltip"
+          role="dialog"
           aria-label="Page description"
         >
           <p class="info-popover-text">{{ pageDescription }}</p>
@@ -64,7 +64,7 @@
         <div
           class="metrics-popover"
           (click)="$event.stopPropagation()"
-          role="tooltip"
+          role="dialog"
           aria-label="Snapshot metrics breakdown"
         >
           <p class="metrics-popover-headline">
@@ -343,7 +343,6 @@
       @if (drawerOpen() && selectedSnapshotId(); as drawerId) {
         <app-snapshot-detail-drawer
           [snapshotId]="drawerId"
-          [isDrawerMode]="true"
           [warmedSpawnCount]="warmedSpawnCountForSelected()"
           (close)="onCloseDrawer()"
           (navigateToPredecessor)="onNavigateToPredecessor($event)"
