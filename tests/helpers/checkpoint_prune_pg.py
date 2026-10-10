@@ -48,6 +48,12 @@ LANGGRAPH_MOCK_KEYS = [
     "langgraph.checkpoint.memory",
     "langgraph.checkpoint.sqlite",
     "langgraph.checkpoint.sqlite.aio",
+    # 1af1a1da2 added this conftest mock (saver proxy subclasses
+    # BaseCheckpointSaver) — must be evicted too or the stale mock (no
+    # __file__, no real attrs) shadows the REAL langgraph.checkpoint.base
+    # and every real-saver import below dies with
+    # "ImportError ... (unknown location)".
+    "langgraph.checkpoint.base",
 ]
 
 
