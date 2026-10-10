@@ -99,23 +99,6 @@ ADDENDUM_GATE_TOKENS = (
     "tokens/page <= 1.3x direct",
 )
 
-PARITY_SCHEMA = {
-    "run_id": str,
-    "ts": str,
-    "page": str,
-    "lane": str,
-    "latency_s": (int, float),
-    "usage": dict,
-    "truncated": bool,
-    "gates": dict,
-    "marker_pass": bool,
-    "model": str,
-    "notes": str,  # optional
-}
-
-_PARITY_SCHEMA_REQUIRED = set(PARITY_SCHEMA) - {"notes"}
-
-
 def _read(*parts: str) -> str:
     return (SKETCHER_DIR.joinpath(*parts)).read_text(encoding="utf-8")
 
@@ -397,31 +380,6 @@ class TestFailClosedGlobBehavior:
 # ---------------------------------------------------------------------------
 
 
-def _designer_parity_block():
-    """Extract the Dual-Run Pilot JSON schema template and return
-    (top_level_keys, parsed_template) with placeholders sanitized."""
-    workflow = (DESIGNER_DIR / "workflow.md").read_text(encoding="utf-8")
-    match = re.search(
-        r"## Dual-Run Pilot.*?```json\s*(\{.*\})\s*```", workflow, re.DOTALL
-    )
-    assert match, "Dual-Run Pilot parity JSON block not found in designer workflow"
-    block = match.group(1)
-    sanitized = block
-    # Quoted placeholders ("​<run id>" style) → plain strings first…
-    sanitized = re.sub(r'"<[^"]*>"', '"x"', sanitized)
-    # …then bare placeholders (<number>, <int>, <bool>) → JSON literals.
-    sanitized = sanitized.replace("<number>", "1")
-    sanitized = sanitized.replace("<int>", "0")
-    sanitized = sanitized.replace("<bool>", "true")
-    sanitized = sanitized.replace("direct|sketcher", "direct")
-    sanitized = sanitized.replace("pass|fail", "pass")
-    try:
-        parsed = json.loads(sanitized)
-    except json.JSONDecodeError as exc:
-        raise AssertionError(f"parity template not parseable after sanitize: {exc}\n{sanitized}")
-    return set(parsed.keys()), parsed
-
-
 class TestDesignerSketcherWiring:
     def test_designer_team_carries_sketcher(self):
         meta = json.loads((DESIGNER_DIR / "meta.json").read_text(encoding="utf-8"))
@@ -459,40 +417,210 @@ class TestDesignerSketcherWiring:
     def test_parity_runs_file_exists(self):
         assert (PARITY_DIR / "parity-runs.jsonl").is_file()
 
-    def test_parity_block_schema_matches(self):
-        keys, parsed = _designer_parity_block()
-        assert keys == set(PARITY_SCHEMA), (
-            f"parity block keys drifted: {keys ^ set(PARITY_SCHEMA)}"
+    def test_designer_no_dual_run_orchestrator(self):
+        """The dual-run pilot is dead: designer's workflow carries NO
+        Dual-Run Pilot section and pins the sole-lane orchestrator shape
+        (sketcher dispatch -> critic review -> designer accept/save)."""
+        workflow = (DESIGNER_DIR / "workflow.md").read_text(encoding="utf-8")
+        assert "## Dual-Run Pilot" not in workflow, (
+            "Dual-Run Pilot section must be deleted (designer-critic-orchestration D7)"
         )
-        assert parsed["lane"] == "direct"
-        assert set(parsed["usage"]) == {
-            "prompt_tokens",
-            "completion_tokens",
-            "total_tokens",
-        }
-        assert set(parsed["gates"]) == {"empty_response", "finish_reason", "eof_markers"}
-        assert isinstance(parsed["truncated"], bool)
-        assert isinstance(parsed["marker_pass"], bool)
+        assert re.search(
+            r"sketcher is the ONLY OD generation lane", workflow, re.IGNORECASE
+        ), "sole-lane rule missing from designer workflow"
+        assert re.search(
+            "designer → sketcher → critic → designer accept/save", workflow
+        ), "pipeline shape (designer → sketcher → critic → accept/save) missing"
+
+    def test_critic_pipeline_pins_present(self):
+        """The critic-pipeline pins survive in designer's rule surface:
+        pinned_spec_sha mandatory, D4 severity-gated two-branch terminal,
+        D3 amendment discipline (malformed-verdict -> critic re-dispatch)."""
+        rule = (DESIGNER_DIR / "rule.md").read_text(encoding="utf-8")
+        workflow = (DESIGNER_DIR / "workflow.md").read_text(encoding="utf-8")
+        # pinned_spec_sha mandatory (D3 amendment 4) -- Cardinal #1.
+        assert "pinned_spec_sha" in rule
+        # D4 severity-gated two-branch trigger -- Guideline (h).
+        assert "accept-with-disclosure" in rule
+        assert "escalate-only" in rule
+        assert "[REVIEW-CAVEAT]" in rule
+        # D3 amendment discipline (amendments 2+3) -- workflow report handling.
+        assert "prev_attempt_unparseable" in workflow
+        assert "^verdict:\\s*(pass|needs-revision)" in workflow, (
+            "regex-anchored verdict parse rule missing from designer workflow"
+        )
 
     def test_parity_rows_validate_against_schema(self):
-        """Validate any logged rows (the file ships empty; rows appear
-        once the pilot runs)."""
+        """Validate any logged rows against the v2 schema
+        (lane = sketcher | critic; 'direct' is no longer reachable).
+        HTML-comment header lines (schema-evolution markers) are skipped
+        so they never hit json.loads; a `critic_verdict` field is
+        REJECTED — the verdict lives on the review itself, never as a
+        parity-runs field."""
         path = PARITY_DIR / "parity-runs.jsonl"
-        rows = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        for i, line in enumerate(rows):
-            row = json.loads(line)
-            missing = set(PARITY_SCHEMA) - set(row)
+        required = {
+            "run_id", "ts", "page", "lane", "latency_s", "usage",
+            "truncated", "gates", "marker_pass", "model",
+        }
+        rejected_fields = {"critic_verdict"}
+        skipped = 0
+        validated = 0
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("<!--"):
+                skipped += 1
+                continue
+            row = json.loads(stripped)
+            validated += 1
+            missing = required - set(row)
             assert not missing, f"row {i} missing fields: {missing}"
-            assert row["lane"] in ("direct", "sketcher")
+            assert row["lane"] in ("sketcher", "critic"), (
+                f"row {i} lane {row['lane']!r} outside v2 enum {{sketcher, critic}}"
+            )
+            bad = rejected_fields & set(row)
+            assert not bad, f"row {i} carries rejected field(s): {bad}"
+            unexpected = set(row) - required - {"notes"}
+            assert not unexpected, f"row {i} unexpected fields: {unexpected}"
             assert isinstance(row["latency_s"], (int, float))
             assert isinstance(row["truncated"], bool)
             assert isinstance(row["marker_pass"], bool)
-            # `notes` is the only optional field; the rest are required.
-            unexpected = set(row) - _PARITY_SCHEMA_REQUIRED - {"notes"}
-            assert not unexpected, f"row {i} unexpected fields: {unexpected}"
             assert set(row["usage"]) == {
                 "prompt_tokens",
                 "completion_tokens",
                 "total_tokens",
             }
             assert set(row["gates"]) == {"empty_response", "finish_reason", "eof_markers"}
+        assert validated >= 1, "expected at least one data row (the historical smoke row)"
+
+# ---------------------------------------------------------------------------
+# 6. Critic-agent Nit-2 gates (designer-critic-orchestration)
+# ---------------------------------------------------------------------------
+
+CRITIC_DIR = REPO_ROOT / "agents" / "critic"
+
+
+def _critic_meta() -> dict:
+    return json.loads((CRITIC_DIR / "meta.json").read_text(encoding="utf-8"))
+
+
+class TestCriticAgentNit2:
+    """Nit-2 pattern list (architecture-recommendation.md §3 Nit 2):
+    meta validation, deny-strips-allow, implicit team expansion, schema
+    v2 validity, new-agent-dir discoverability."""
+
+    def test_critic_meta(self):
+        """Critic meta.json shape per the canonical D6 form: bare-name
+        allow, image_save + mcp + hard refusals in deny, view-views
+        absent, leaf team, vision lane."""
+        meta = _critic_meta()
+        assert meta["id"] == "critic"
+        assert meta["team_members"] == []
+        assert meta["tools"]["allow"] == ["read_file", "image", "design"]
+        deny = set(meta["tools"]["deny"])
+        for token in (
+            "bash", "proc", "instance", "service", "midflight",
+            "shared_meta_kv", "infra", "mcp", "image_save",
+        ):
+            assert token in deny, f"critic tools.deny missing {token!r}"
+        assert "view-views" not in meta["tools"]["allow"]
+        assert meta["llm_model"] == "vision"
+        assert meta["skill_injection"] is True
+        assert "default_queue" not in meta
+        assert "watchover" not in meta
+
+    def test_critic_team_implied(self):
+        """DECLARED team_members is empty, but the `design` allow entry
+        auto-extends EFFECTIVE team membership with image-comparator
+        (daemon _auth TOOL_REQUIRED_AGENTS mapping)."""
+        meta = _critic_meta()
+        assert meta["team_members"] == []  # DECLARED
+        from daemon.tools._auth import TOOL_REQUIRED_AGENTS
+        assert "design" in meta["tools"]["allow"]
+        assert TOOL_REQUIRED_AGENTS["design"] == ["image-comparator"], (
+            "design category must auto-extend the effective team with "
+            "image-comparator (spawn-time inheritance)"
+        )
+
+    def test_critic_deny_wins(self):
+        """No allow entry can sneak a write capability past the explicit
+        deny list: resolving critic's filter yields zero write-capable
+        tools (image_save stripped from the image category; no
+        write_file/edit_file anywhere)."""
+        from daemon.tools.image_tools import create_image_tools
+        from daemon.tools.compare_tools import create_compare_tools
+        from daemon.tools import _tool_registry as reg
+        from daemon.tools.instance import resolve_tool_filter
+
+        meta = _critic_meta()
+        saved = dict(reg._tool_metadata)
+        try:
+            tools = create_image_tools(None, "critic-deny-wins") + create_compare_tools(
+                None, "critic-deny-wins"
+            )
+            reg.scan_tools_for_full_docs(tools)
+            resolved = resolve_tool_filter(
+                meta["tools"]["allow"], meta["tools"]["deny"],
+                tool_categories=reg.list_tools_by_category(),
+            )
+        finally:
+            reg._tool_metadata.clear()
+            reg._tool_metadata.update(saved)
+        for write_tool in ("write_file", "edit_file", "image_save"):
+            assert write_tool not in resolved, (
+                f"write-capable tool {write_tool!r} leaked through critic's filter"
+            )
+
+    def test_parity_runs_v2_schema(self):
+        """The parity log validates under schema v2: the HTML-comment
+        header line is skipped, the historical smoke row stays valid, and
+        a `critic_verdict` field would be rejected."""
+        from pathlib import Path
+
+        parity = (
+            REPO_ROOT / ".agents" / "shared" / "planning"
+            / "od-generate-agent-lane" / "parity-runs.jsonl"
+        )
+        assert parity.is_file()
+        required = {
+            "run_id", "ts", "page", "lane", "latency_s", "usage",
+            "truncated", "gates", "marker_pass", "model",
+        }
+        saw_data_row = False
+        for line in parity.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("<!--"):
+                continue
+            row = json.loads(stripped)
+            saw_data_row = True
+            assert row["lane"] in ("sketcher", "critic"), (
+                f"lane {row['lane']!r} outside v2 enum"
+            )
+            assert "critic_verdict" not in row
+            assert not (set(row) - required - {"notes"}), (
+                f"unexpected fields: {set(row) - required - {'notes'}}"
+            )
+        assert saw_data_row, "smoke row missing"
+
+    def test_agent_registry_scan(self):
+        """New-agent-dir discoverability (Nit-2 / R23): the real registry
+        facade discovers agents/critic/ (counterpart to the tier-1
+        boot-scan fix efc460262). Runs the probe in a subprocess pinned
+        to the repo root; the venv interpreter is required on this host
+        (system python3 lacks pydantic)."""
+        import subprocess
+        import sys
+
+        probe = (
+            "from daemon.registry import get_registry; "
+            "assert get_registry().exists('critic'); "
+            "assert get_registry().exists('sketcher')"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120,
+        )
+        assert result.returncode == 0, (
+            f"agent_registry_scan probe failed:\n{result.stderr[-2000:]}"
+        )

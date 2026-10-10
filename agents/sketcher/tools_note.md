@@ -78,8 +78,8 @@ For ops-lane or scratch runs where the LLM agent turn is not available (e.g. pro
      -H 'Content-Type: application/json' \
      -d '{"images":[{"filename":"<basename>.png","content_type":"image/png","data_base64":"<b64>"}]}'
    ```
-   Response shape (frozen API contract — see `daemon/routers/tmp_images.py:212` docstring): `{ "uploads": [{ "image_id", "ref_url", "content_type", "size_bytes", "uploaded_at" }] }`. Note: the response does **not** echo provenance — the POST contract accepts `{filename, content_type, data_base64}` only (`extra="forbid"` on `TmpImageUpload`); provenance is written in the next step.
-3. **Write the provenance sidecar** at `<data_dir>/tmp_images/<image_id>.json` (the sidecar's filename suffix is `.json`; see `daemon/services/tmp_image_store.py:79`). The data dir resolves `ENSEMBLE_DATA_DIR > DATA_DIR > ./data` (see `daemon/api.py:234-238`). For a throwaway dev boot the path is `./data/tmp_images/<id>.json`; for production it is whatever the install dir resolves to. Sidecar JSON shape (matching the in-tool writer at `daemon/tools/image_tools.py:798-808`):
+   Response shape (frozen API contract): `{ "uploads": [{ "image_id", "ref_url", "content_type", "size_bytes", "uploaded_at" }] }`. Note: the response does **not** echo provenance — the POST contract accepts `{filename, content_type, data_base64}` only (`extra="forbid"` on `TmpImageUpload`); provenance is written in the next step.
+3. **Write the provenance sidecar** at `<data_dir>/tmp_images/<image_id>.json` (the sidecar's filename suffix is `.json`). The data dir resolves `ENSEMBLE_DATA_DIR > DATA_DIR > ./data` . For a throwaway dev boot the path is `./data/tmp_images/<id>.json`; for production it is whatever the install dir resolves to. Sidecar JSON shape (matching the in-tool writer's shape):
    ```json
    {
      "image_id": "<32 hex>",
@@ -96,7 +96,7 @@ For ops-lane or scratch runs where the LLM agent turn is not available (e.g. pro
      "retention_class": "normal"
    }
    ```
-   Older sidecars without `provenance` / `retention_class` parse cleanly (they become `None` / `"normal"` per `daemon/services/tmp_image_store.py:109-111`); the missing fields are forward-compatible.
+   Older sidecars without `provenance` / `retention_class` parse cleanly (they become `None` / `"normal"` — forward-compatible defaults); the missing fields are forward-compatible.
 4. **Verify the read-back.** `GET /api/tmp_images/<image_id>` returns 200 with the original bytes (the GET endpoint 404s if the sidecar is missing or torn — a successful 200 is the durable-form check). The header set (`Content-Type`, `Content-Length`, `ETag`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, max-age=3600`, `Content-Disposition: inline; filename="<image_id>"`) all come from the sidecar. The ETag is the sha256[:16]; if I compute it client-side I can confirm byte-fidelity with `If-None-Match`. A direct `cat <data_dir>/tmp_images/<id>.json` confirms the four provenance keys are populated.
 
 ### Provenance tag policy

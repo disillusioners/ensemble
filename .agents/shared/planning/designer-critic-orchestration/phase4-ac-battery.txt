@@ -1,0 +1,31 @@
+# Phase 4 hygiene + AC battery — 16:37:04Z
+
+T1/AC1: stage2-addendum SUPERSEDED marker (verification only — no phase-4 edit)
+<!-- SUPERSEDED 2026-10-10 by designer-critic
+
+AC3: parity-runs.jsonl header + line2 smoke + wc=2
+<!-- schema v2: lane ∈ {"sketcher","critic"
+2
+
+T12/AC10: worktree-only writes — merge-base diff paths (should be commission-owned only):
+ agents/designer/workflow.md                        |  70 ++++++--------
+ agents/sketcher/tools_note.md                      |  89 +++++++++++++++++
+ 28 files changed, 893 insertions(+), 154 deletions(-)
+main-checkout designer meta.json hash (expect 06b8bf641911ebd1abb5f734b5ea872e9617eb2b = pre-commission):
+06b8bf641911ebd1abb5f734b5ea872e9617eb2b  /home/nea/ensemble-src/agents/designer/meta.json
+
+T13/AC11: freeze-set diff empty:
+0
+
+AC13: OWNED test-update executed (both files green)
+76 passed in 11.35s
+
+Nit-2 canonical batch (expect 7 passed):
+7 passed, 69 deselected in 4.72s
+
+Supplemental report-integrity (critic skip-by-design + designer pass):
+1 skipped, 70 deselected in 0.28s
+1 passed, 70 deselected in 0.31s
+
+SC-12 full rewire:
+24 passed in 0.84s

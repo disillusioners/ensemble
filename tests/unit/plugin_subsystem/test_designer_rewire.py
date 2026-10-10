@@ -191,40 +191,109 @@ class TestDesignerNoLiveLegacyOdTools:
         )
 
 
-class TestDesignerHasNewPortTools:
-    """The new Port-style tools are referenced as live call sites."""
+class TestDesignerHasZeroOdPorts:
+    """INVERTED pin (designer-critic-orchestration D1=B): designer holds
+    ZERO od.* tokens. The generation lane moved to sketcher wholesale —
+    any live od.* reference in designer prose is a lane-leak regression.
+    (workflow.md is intentionally NOT swept here: the sole-lane rule
+    names `od.generate` in the negative — "There is no direct
+    `od.generate` lane" — which is prose, not a call site.)"""
 
-    def test_soul_md_references_new_ports(self):
-        soul = (DESIGNER_ROOT / "soul.md").read_text(encoding="utf-8")
-        for port in ("od.compose_brief", "od.generate", "od.lint", "od.save"):
-            assert port in soul, f"soul.md missing new port {port}"
+    ZERO_PORT_PATTERN = re.compile(r"od\.(generate|compose_brief|save|lint)")
 
-    def test_rule_md_references_new_ports(self):
-        rule = (DESIGNER_ROOT / "rule.md").read_text(encoding="utf-8")
-        for port in ("od.compose_brief", "od.generate", "od.lint", "od.save"):
-            assert port in rule, f"rule.md missing new port {port}"
+    def _assert_zero(self, relpath: str) -> None:
+        text = (DESIGNER_ROOT / relpath).read_text(encoding="utf-8")
+        hits = self.ZERO_PORT_PATTERN.findall(text)
+        assert not hits, f"{relpath} still carries od.* tokens: {hits}"
 
-    def test_workflow_md_references_new_ports_in_step_1(self):
-        workflow = (DESIGNER_ROOT / "workflow.md").read_text(encoding="utf-8")
-        step1_match = re.search(
-            r"####\s+Step 1.*?(?=####\s+Step 2)",
-            workflow,
-            re.DOTALL,
+    def test_soul_md_zero_od_ports(self):
+        self._assert_zero("soul.md")
+
+    def test_rule_md_zero_od_ports(self):
+        self._assert_zero("rule.md")
+
+    def test_tools_note_md_zero_od_ports(self):
+        self._assert_zero("tools_note.md")
+
+    def test_design_strategy_md_zero_od_ports(self):
+        self._assert_zero("skills-template/design-strategy.md")
+
+    def test_designer_od_generate_removed(self):
+        """Nit-2 spine inverse: the od.generate kill is total across the
+        designer prose surface (meta/soul/rule/tools_note/skill)."""
+        meta_text = (DESIGNER_ROOT / "meta.json").read_text(encoding="utf-8")
+        assert not re.search(r'"od\.[a-z_]+"', meta_text), (
+            "designer meta.json still grants an od.* tool"
         )
-        assert step1_match
-        step1 = step1_match.group(0)
-        # od.compose_brief, od.generate, od.lint, od.save are all in Step 1.
-        for port in NEW_OD_PORTS:
-            assert port in step1, f"Step 1 missing port {port}"
+        for relpath in (
+            "soul.md", "rule.md", "tools_note.md",
+            "skills-template/design-strategy.md",
+        ):
+            self._assert_zero(relpath)
 
-    def test_tools_note_md_documents_all_four_new_ports(self):
-        """The per-tool surface (tools_note.md) lists all 4 new Port tools + the skill probe."""
-        tools_note = (DESIGNER_ROOT / "tools_note.md").read_text(encoding="utf-8")
-        for port in NEW_OD_PORTS:
-            assert port in tools_note, f"tools_note.md missing port {port}"
-        # The probe tool (plugin-skill) is also documented.
-        assert "opendesign.list_systems" in tools_note, (
-            "tools_note.md should document the opendesign.list_systems skill probe"
+
+class TestSketcherHasFourOdPorts:
+    """The SPINE's positive half: the four od.* Port tools live on the
+    sketcher side — present in sketcher's tool grant AND its prose."""
+
+    NEW_OD_PORTS = ("od.compose_brief", "od.generate", "od.lint", "od.save")
+    SKETCHER_ROOT = DESIGNER_ROOT.parent / "sketcher"
+
+    def test_sketcher_meta_grants_all_four_ports(self):
+        import json
+        meta = json.loads(
+            (self.SKETCHER_ROOT / "meta.json").read_text(encoding="utf-8")
+        )
+        for port in self.NEW_OD_PORTS:
+            assert port in meta["tools"]["allow"], (
+                f"sketcher meta.json missing port {port}"
+            )
+
+    def test_sketcher_prose_names_all_four_ports(self):
+        surface = "\n".join(
+            (self.SKETCHER_ROOT / f).read_text(encoding="utf-8")
+            for f in ("soul.md", "rule.md", "workflow.md", "tools_note.md")
+        )
+        for port in self.NEW_OD_PORTS:
+            assert port in surface, f"sketcher prose missing port {port}"
+
+
+class TestCriticToolsResolveNit2:
+    """Nit-2 WRITE-LEAK GATE: resolving critic's canonical filter through
+    the REAL daemon seam (factory-created tools -> scan_tools_for_full_docs
+    -> resolve_tool_filter) yields the EXACT 5-tool read-only set. An AC
+    pinned at '4+1' can never pass because the `image` category resolves
+    to FOUR tools incl. image_save — the explicit deny strips it."""
+
+    EXPECTED_RESOLVED = {
+        "read_file", "image_get", "image_list", "explain_image", "compare_images",
+    }
+
+    def test_critic_tools_resolve(self):
+        import json
+
+        from daemon.tools.image_tools import create_image_tools
+        from daemon.tools.compare_tools import create_compare_tools
+        from daemon.tools import _tool_registry as reg
+        from daemon.tools.instance import resolve_tool_filter
+
+        critic_root = DESIGNER_ROOT.parent / "critic"
+        meta = json.loads((critic_root / "meta.json").read_text(encoding="utf-8"))
+        saved = dict(reg._tool_metadata)
+        try:
+            tools = create_image_tools(None, "critic-tools-resolve") + create_compare_tools(
+                None, "critic-tools-resolve"
+            )
+            reg.scan_tools_for_full_docs(tools)
+            resolved = resolve_tool_filter(
+                meta["tools"]["allow"], meta["tools"]["deny"],
+                tool_categories=reg.list_tools_by_category(),
+            )
+        finally:
+            reg._tool_metadata.clear()
+            reg._tool_metadata.update(saved)
+        assert resolved == self.EXPECTED_RESOLVED, (
+            f"critic resolved tool set drifted: {resolved ^ self.EXPECTED_RESOLVED}"
         )
 
 
