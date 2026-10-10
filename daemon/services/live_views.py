@@ -276,6 +276,32 @@ _HOST_HEADER_PATTERN = re.compile(
 _BIND_WILDCARDS: frozenset[str] = frozenset({"0.0.0.0", "::", ""})
 
 
+# Module-level once-per-process throttle for the resolver's
+# operator warnings (downgrade / bind-tier / path-relative mints).
+# Per-tier: one warning per (kind, tier) tuple is enough — repeated
+# identical messages would spam the daemon log on every ``view_link``
+# call from a long-running LLM session. ``_once_warned`` survives
+# the lifetime of the daemon process; the tracker is reset by a
+# process restart (acceptable — the warning is operator-actionable,
+# not per-request noise).
+_once_warned: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Emit ``logger.warning(message)`` exactly once per process for ``key``.
+
+    The tracker is module-local (``_once_warned``) and survives only
+    for the process lifetime; on daemon restart the warning will
+    fire once again for the first mint on the new tier. The key
+    names the specific tier+kind so distinct warnings don't
+    suppress each other.
+    """
+    if key in _once_warned:
+        return
+    _once_warned.add(key)
+    logger.warning(message)
+
+
 def _is_valid_host_header(value: str) -> bool:
     """Return True iff ``value`` is a syntactically valid Host header.
 
@@ -373,6 +399,16 @@ class HostRecorder:
         self._port: int | None = None
         self._scheme: str = "http"
         self._recorded_at: float = 0.0
+        # Phase 2 follow-up: once an HTTPS request has been
+        # observed via X-Forwarded-Proto, the recorder remembers
+        # the fact even if the current host is later dropped
+        # (malformed Host, daemon restart, etc.). The resolver
+        # uses this flag to surface the http-downgrade mint case
+        # — the operator hasn't changed the topology, but the
+        # mint silently dropped to ``http://...`` and the next
+        # chat-client click would be over plain HTTP. See
+        # ``BaseURLResolver.resolve``.
+        self._saw_https: bool = False
 
     def record(
         self,
@@ -412,6 +448,8 @@ class HostRecorder:
             self._port = split_port
             self._scheme = chosen_scheme
             self._recorded_at = time.monotonic()
+            if chosen_scheme == "https":
+                self._saw_https = True
 
     def latest(self) -> tuple[str, int | None, str] | None:
         """Return ``(host, port, scheme)`` of the latest record, or None.
@@ -426,6 +464,17 @@ class HostRecorder:
             if self._host is None:
                 return None
             return (self._host, self._port, self._scheme)
+
+    def saw_https(self) -> bool:
+        """Return True iff ``X-Forwarded-Proto: https`` was ever recorded.
+
+        Phase 2 follow-up: the resolver uses this flag to log an
+        operator warning when a downstream mint silently drops to
+        ``http://...`` despite the deployment having produced https
+        evidence at some prior point. See ``BaseURLResolver.resolve``.
+        """
+        with self._lock:
+            return self._saw_https
 
     def reset(self) -> None:
         """Clear the recorded state (test seam)."""
@@ -532,11 +581,38 @@ class BaseURLResolver:
         """Return the base URL (no trailing slash) or None.
 
         None = no trustworthy base; caller emits path-relative.
+
+        Operator-warning contract (Phase 2 follow-up):
+
+        * When this method falls through to the **bind-derived
+          tier** (step 3) or the **path-relative fallback**
+          (step 4), a one-shot ``logger.warning`` fires per
+          process per tier. The bind-derived warning's message
+          escalates when the recorder saw an ``X-Forwarded-Proto:
+          https`` capture at any prior point — that's the
+          **http-downgrade** case (silently minting ``http://``
+          for a deployment that previously produced https
+          evidence). The escalation lives on the same warn-once
+          key so a single process logs at most one bind-tier
+          warning regardless of which sub-case applies.
+        * The warning is process-scoped (module-level
+          ``_once_warned`` set in ``daemon/services/live_views.py``)
+          so a long-running LLM session that calls ``view_link``
+          hundreds of times does not flood the daemon log.
+        * The cure is the same in every case: set
+          ``live_views.external_base_url`` with an ``https://``
+          value so the operator-override tier (1) short-circuits
+          the chain before Host-capture / bind evidence is touched.
         """
         # 1. Operator override.
         if self._external_base_url:
             return self._external_base_url
         # 2. Host-capture auto-detect.
+        saw_https_evidence = (
+            self._host_recorder.saw_https()
+            if self._host_recorder is not None
+            else False
+        )
         if self._host_recorder is not None:
             latest = self._host_recorder.latest()
             if latest is not None:
@@ -553,8 +629,40 @@ class BaseURLResolver:
         # 3. Bind evidence.
         if self._bind_host_provided and self._bind_host:
             port_str = f":{self._bind_port}" if self._bind_port else ""
+            if saw_https_evidence:
+                _warn_once(
+                    "bind-tier-downgrade",
+                    "[LiveViews] view_link minted http://... but the "
+                    "recorder previously captured X-Forwarded-Proto: "
+                    "https evidence; falling through to bind-derived "
+                    "is silently downgrading the URL. Set "
+                    "live_views.external_base_url with an https:// value "
+                    "(e.g. https://ensemble.example.com) — operator "
+                    "override always wins and short-circuits the chain.",
+                )
+            else:
+                _warn_once(
+                    "bind-tier-fallback",
+                    "[LiveViews] view_link landed on the bind-derived "
+                    "tier (http://<bind-host>:<port>/...). Host-capture "
+                    "has not yet recorded a request, or the recorded "
+                    "Host was rejected as malformed. Set "
+                    "live_views.external_base_url with an https:// value "
+                    "to override (recommended for behind-proxy / "
+                    "internet-exposed deployments where pre-auth Host "
+                    "poisoning is in scope).",
+                )
             return f"http://{self._bind_host}{port_str}"
         # 4. None.
+        _warn_once(
+            "path-relative-fallback",
+            "[LiveViews] view_link landed on the path-relative "
+            "fallback (/views/...). No bind host was configured and "
+            "Host-capture has no record. Set live_views.external_base_url "
+            "with an https:// value to mint fully-qualified links; the "
+            "path-relative shape is only safe on a localhost dev loop "
+            "where the chat client can resolve it.",
+        )
         return None
 
 
@@ -1133,15 +1241,31 @@ _MARKDOWN_WRAPPER_HTML = """<!DOCTYPE html>
   if (!article) {{ return; }}
   var raw = article.textContent || '';
   try {{
+    // Phase 2 follow-up — bootstrap guard tightening:
+    //
+    // * ``typeof marked.parse === 'function'`` — not just
+    //   ``typeof marked !== 'undefined'`` — a future marked
+    //   release that ships without ``parse`` (e.g. ESM-default
+    //   re-export shape) would otherwise leave us with a
+    //   defined object that throws ``TypeError: marked.parse
+    //   is not a function`` at the call site; the catch block
+    //   already swallows it but we want a deterministic guard.
+    // * DOMPurify availability guard was always present; the
+    //   pin test (``test_bootstrap_guards_precede_render_call``)
+    //   asserts both guards textually precede the
+    //   ``marked.parse(raw)`` call so a render-then-guard
+    //   reorder fails the test.
     if (typeof marked === 'undefined') {{ throw new Error('marked not loaded'); }}
+    if (typeof marked.parse !== 'function') {{ throw new Error('marked.parse is not a function'); }}
     if (typeof DOMPurify === 'undefined') {{ throw new Error('DOMPurify not loaded'); }}
+    if (typeof DOMPurify.sanitize !== 'function') {{ throw new Error('DOMPurify.sanitize is not a function'); }}
     var html = marked.parse(raw);
     var safe = DOMPurify.sanitize(html, {{ USE_PROFILES: {{ html: true }} }});
     article.innerHTML = safe;
   }} catch (e) {{
     // Bootstrap failed (JS off, CDN unreachable, marked/DOMPurify
-    // missing). Leave the embedded <pre> with raw markdown
-    // visible — graceful degradation contract.
+    // missing, or a guard tripped). Leave the embedded <pre> with
+    // raw markdown visible — graceful degradation contract.
   }}
 }})();
 </script>
@@ -1200,6 +1324,17 @@ def render_markdown_wrapper(
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, max-age=60",
         "Content-Security-Policy": _MARKDOWN_CSP_TEMPLATE.format(nonce=nonce),
+        # Phase 2 follow-up — ``Referrer-Policy: no-referrer`` on
+        # the markdown wrapper only (not raw .html / image / text
+        # responses — those are operator-curated artifacts whose
+        # outbound linking behavior we don't presume to override).
+        # The wrapper's bootstrap script rewrites ``article.innerHTML``
+        # with sanitized HTML that may carry user-authored ``href=``
+        # values; suppressing the Referer prevents the destination site
+        # from learning the artifact path came from our daemon
+        # (defense in depth — a leaked path is informational, not
+        # secret, but path leakage correlates with URL-space probing).
+        "Referrer-Policy": "no-referrer",
     }
     return body, headers
 

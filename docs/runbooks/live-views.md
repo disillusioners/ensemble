@@ -89,6 +89,8 @@ Set `live_views.external_base_url: https://ensemble.example.com`, then restart. 
 
 **Default (unset) is the recommended setting when the daemon has a deterministic public hostname** — Host-capture (§6) auto-detects whichever hostname the client used to reach the daemon and mints against that. Operators that need a hard override (e.g. an external HTTPS terminator they don't fully control, or a share-by-link feature in the FE that needs a canonical URL regardless of which client mints it) opt into the explicit override.
 
+**MANDATE for behind-proxy / internet-exposed deployments.** HTTP `Host` is not authenticated (see §6 trust model). Any anonymous internet client can send `Host: evil.example.com` and poison the recorder until the next legitimate request lands. **Pre-auth Host poisoning is a blocker in that topology** — the only mitigation is the operator override, which always wins (chain step 1). Set `live_views.external_base_url` with the canonical public hostname **and** HTTPS scheme before exposing the daemon. Dev / loopback deployments where the URL space is uninteresting to attackers are exempt (the path-relative / bind-derived mints are harmless when the URL is only opened on the operator's laptop).
+
 ### 2.5 Verify the subsystem is alive
 
 ```bash
@@ -152,6 +154,12 @@ The chain in §6 takes precedence top-down. The most common reasons a fully-qual
 3. The proxy is overwriting the Host header (`proxy_set_header Host $proxy_host` instead of `$host`) — the daemon sees the proxy's hostname, not the client's. Cure: pass the client's Host through.
 4. The bind-host is `0.0.0.0` and the daemon has seen no requests yet — step 3 maps to `http://127.0.0.1:PORT` (not `http://0.0.0.0:PORT` — that would be a nonsense URL). If the daemon has been idle long enough that step 2 has not fired, step 3 produces `http://127.0.0.1:PORT/...`.
 
+### 3.5a `view_link` returns `http://...` despite an HTTPS-only deployment
+
+A specific downgrade case worth singling out from §3.5:
+
+* **Direct-HTTPS-without-proxy deployments** — TLS is terminated BEFORE the daemon (a load balancer, a sidecar, an in-cluster nginx), but the LB does NOT forward `X-Forwarded-Proto: https`. The recorder sees no header → defaults to http → step 2 falls through → step 3 (bind-derived) mints `http://<bind>:<port>/...`. The deployment is HTTPS at the edge, but the URL mint is plaintext. Cure: **set `live_views.external_base_url` with an `https://` value** (chain step 1 always wins). The warning that surfaces on this case is `[LiveViews] view_link minted http://... but the recorder previously captured X-Forwarded-Proto: https evidence` (one-shot per process per bind-tier downgrade) — that warning only fires after the daemon has actually seen an https request, so a daemon that has NEVER recorded an https request mints http silently on bind-derived and logs the bind-fallback warning instead.
+
 ### 3.6 `.md` URLs serve raw text instead of a rendered page
 
 Two possibilities:
@@ -169,9 +177,9 @@ Two possibilities:
 * **Host-header spoofing (Phase 2).** The Host-capture tier in §6 accepts whatever the client sent (HTTP Host is not authenticated). An anonymous attacker on the same network can poison the minted URL base with a chosen hostname by sending a request with `Host: evil.example.com`. Impact = the daemon mints `view_link` URLs that look like they point to `evil.example.com` until the next recorder reset. Mitigation = the operator override (`external_base_url`) ALWAYS wins — set it whenever the deployment has a known public hostname; the chain never falls through to Host-capture when the override is set. The HostRecorder also syntactically validates the value (no userinfo / path / whitespace / oversize) — see `_is_valid_host_header` in `daemon/services/live_views.py` — so a malformed Host cannot produce a malformed URL.
 * **Markdown wrapper security posture (Phase 2).** The `.md` wrapper (§7) loads `marked@12.0.2` + `dompurify@3.0.11` from `cdn.jsdelivr.net` with `integrity="sha384-..."` + `crossorigin="anonymous"` attrs. The page carries a strict CSP:
   - `script-src 'self' https://cdn.jsdelivr.net 'nonce-X'` (no `unsafe-inline`, no `unsafe-eval`).
-  - `style-src 'self' 'nonce-X' 'unsafe-inline'` (`unsafe-inline` is the documented trade-off — markdown-emitted raw HTML inline styles can survive DOMPurify when authors write `<style>` tags; the wrapper degrades gracefully when this attribute is removed).
+  - `style-src 'self' 'nonce-X' 'unsafe-inline'` — note: the literal header reads `unsafe-inline`, but **under CSP3 with a nonce present, modern browsers IGNORE `'unsafe-inline'` for nonce-carrying directives**. The effective runtime posture is stricter than the literal header reads: the nonce is the strict mechanism, and the `unsafe-inline` token only widens the surface for directives that lack a nonce (none here). The `unsafe-inline` token is kept in the literal header for defense-in-depth against older browsers that don't honor the nonce-overrides-inline rule (CSP1 / CSP2-era user agents), and to document the trade-off — markdown-emitted raw HTML inline styles can survive DOMPurify when authors write `<style>` tags; the wrapper degrades gracefully when this attribute is removed.
   - `object-src 'none'`, `base-uri 'self'`, `form-action 'self'`, `frame-ancestors 'none'`.
-  The raw markdown is HTML-escaped before being embedded in the wrapper's `<article><pre>` element — the only consumer is the bootstrap script, which reads via `.textContent` (auto-decodes the entities) and runs `marked.parse` + `DOMPurify.sanitize` before any `innerHTML` write. CDN compromise → SRI fails → script does not load → page shows the raw `<pre>` fallback (graceful degradation). Bootstrap failure (JS off / CDN unreachable / parse error) → catch block leaves the embedded `<pre>` visible — the page is never blank.
+  The raw markdown is HTML-escaped before being embedded in the wrapper's `<article><pre>` element — the only consumer is the bootstrap script, which reads via `.textContent` (auto-decodes the entities) and runs `marked.parse` + `DOMPurify.sanitize` before any `innerHTML` write. CDN compromise → SRI fails → script does not load → page shows the raw `<pre>` fallback (graceful degradation). Bootstrap failure (JS off / CDN unreachable / parse error / marked / DOMPurify availability guards tripped) → catch block leaves the embedded `<pre>` visible — the page is never blank.
 
 ## 5. Cross-references
 
@@ -202,6 +210,8 @@ The `BaseURLResolver` (in `daemon/services/live_views.py`) is the single source 
 **Why no localhost / private-IP blacklist.** An operator who runs the daemon behind a localhost-only reverse proxy still wants a localhost URL in their chat client. Blacklisting would force them to either set the operator override (loses Host-capture for legit dev loops) or set the daemon's bind host to a routable one (security regression). The trust model is documented above; the user controls when step 1 wins.
 
 **X-Forwarded-Proto.** The middleware reads this header on every request and feeds the recorder; `https`, `HTTPS` (case-insensitive) mint `https://...`, anything else falls back to `http`. The header is set by the OAuth proxy / TLS terminator in front of the daemon. Direct-connect (no proxy) leaves it unset → `http://...`.
+
+**Multi-hop X-Forwarded-Proto chains (RFC 7239 §7.5 first-hop rule).** RFC 7239 §7.5 mandates that proxies APPEND to the chain, not overwrite — a request that traversed `[client] → [edge-LB] → [internal-LB] → [daemon]` arrives at the daemon as `X-Forwarded-Proto: https, http, https` (leftmost = closest to the client). The resolver takes the **first comma-separated token** (`https` in this example) because that is the scheme the client actually used to reach the trust boundary; later hops' schemes reflect the inter-proxy transport, not the client-facing transport. **Multi-hop operators should expect the value nearest the client's first proxy hop to win** — if your edge LB normalizes the chain to a single value (or you have a single-proxy topology), the resolver's behavior matches the operator's mental model. If your proxies APPEND naively, configure the edge LB to overwrite (`proxy_set_header X-Forwarded-Proto $scheme`) or set `live_views.external_base_url` to make the choice deterministic and operator-controlled.
 
 ## 7. Content-aware rendering (Phase 2)
 
