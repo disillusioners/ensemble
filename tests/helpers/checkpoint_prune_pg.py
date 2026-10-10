@@ -146,10 +146,22 @@ def restore_module_state(mod, snapshot: dict) -> None:
     vars(mod).update(snapshot)
 
 
+def _pg_unavailable_skip(exc: Exception):
+    """Loud skip with the canonical unavailable reason (shared by both guards)."""
+    pytest.skip(
+        f"BLOCKING real-saver test SKIPPED: PostgreSQL not available at "
+        f"{ADMIN_DSN} ({type(exc).__name__}: {exc}). The C3 blob-prune "
+        "gate requires a real PostgreSQL backend — do NOT merge PR4 on "
+        "a skip; start PG (docker compose test stack or local) and re-run."
+    )
+
+
 def require_postgres() -> None:
     """Loud skip when PostgreSQL is unreachable (never a silent mock).
 
     Safe to call from sync contexts (module import / sync fixtures).
+    NOT safe inside a running event loop (``asyncio.run`` raises
+    RuntimeError there) — async fixtures use :func:`require_postgres_async`.
     """
     import asyncpg
 
@@ -160,12 +172,32 @@ def require_postgres() -> None:
     try:
         asyncio.run(_probe())
     except Exception as exc:  # noqa: BLE001
-        pytest.skip(
-            f"BLOCKING real-saver test SKIPPED: PostgreSQL not available at "
-            f"{ADMIN_DSN} ({type(exc).__name__}: {exc}). The C3 blob-prune "
-            "gate requires a real PostgreSQL backend — do NOT merge PR4 on "
-            "a skip; start PG (docker compose test stack or local) and re-run."
-        )
+        _pg_unavailable_skip(exc)
+
+
+async def require_postgres_async() -> None:
+    """Async-safe twin of :func:`require_postgres` — await inside async fixtures.
+
+    Round-2 H1: ``require_postgres()`` uses ``asyncio.run``, which raises
+    ``RuntimeError: asyncio.run() cannot be called from a running event
+    loop`` when called from a pytest-asyncio fixture; the guard's bare
+    ``except`` then mislabeled a HEALTHY server as "PostgreSQL not
+    available" and deterministically skipped the two
+    ``test_pg_checkpoint_saver_probe_*`` tests (false green). This twin
+    awaits the same probe on the caller's running loop instead. Same
+    skip contract: loud skip (never a silent mock) when the server is
+    truly unreachable.
+    """
+    import asyncpg
+
+    async def _probe() -> None:
+        conn = await asyncpg.connect(ADMIN_DSN, timeout=5)
+        await conn.close()
+
+    try:
+        await asyncio.wait_for(_probe(), timeout=6)
+    except Exception as exc:  # noqa: BLE001
+        _pg_unavailable_skip(exc)
 
 
 async def create_disposable_db() -> tuple[str, str]:

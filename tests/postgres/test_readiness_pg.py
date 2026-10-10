@@ -265,16 +265,45 @@ def test_pg_inflight_turns_advisory_count(pg_engine):
 # mock. See ``tests/helpers/checkpoint_prune_pg.py::require_postgres``.
 
 
+@pytest.fixture(autouse=True)
+def _real_langgraph():
+    """Evict the root-conftest langgraph mocks for this module (repo pattern).
+
+    The two ``test_pg_checkpoint_saver_probe_*`` tests build the
+    production-shaped saver via ``real_pg_checkpointer``, which imports
+    the REAL ``langgraph.checkpoint.postgres.aio`` — unresolvable while
+    the root conftest mock (``__path__ == []``) shadows the package
+    (masked until the H1 guard fix because the broken sync guard skipped
+    these tests before the import ever fired). Same autouse eviction
+    fixture every other ``real_pg_checkpointer`` consumer module
+    declares (e.g. ``tests/integration/test_message_metadata_prune.py``).
+    """
+    from tests.helpers.checkpoint_prune_pg import (
+        evict_langgraph_mocks,
+        restore_langgraph_mocks,
+    )
+
+    saved = evict_langgraph_mocks()
+    try:
+        yield
+    finally:
+        restore_langgraph_mocks(saved)
+
+
 @pytest.fixture
 async def pool_backed_checkpointer():
     """Pool-backed production-shaped saver harness (incident 2026-10-10)."""
     from tests.helpers.checkpoint_prune_pg import (
         create_disposable_db,
         drop_database,
-        require_postgres,
+        require_postgres_async,
     )
 
-    require_postgres()
+    # H1 (round 2): the SYNC guard calls asyncio.run(), which raises
+    # RuntimeError inside this pytest-asyncio fixture's running loop and
+    # got mislabeled "PostgreSQL not available" — deterministic false
+    # skip of the two probe tests below even with a healthy server.
+    await require_postgres_async()
     dbname, dsn = await create_disposable_db()
     try:
         from tests.helpers.checkpoint_prune_pg import real_pg_checkpointer
