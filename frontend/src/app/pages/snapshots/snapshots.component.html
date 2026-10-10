@@ -10,11 +10,21 @@
       <button
         type="button"
         class="info-icon-btn"
-        [matTooltip]="pageDescription"
+        [matMenuTriggerFor]="infoMenu"
         aria-label="Page description"
       >
         <mat-icon>info</mat-icon>
       </button>
+      <mat-menu #infoMenu="matMenu" class="filter-menu-panel">
+        <div
+          class="info-popover"
+          (click)="$event.stopPropagation()"
+          role="tooltip"
+          aria-label="Page description"
+        >
+          <p class="info-popover-text">{{ pageDescription }}</p>
+        </div>
+      </mat-menu>
       <button
         type="button"
         class="toggle-pill"
@@ -40,9 +50,8 @@
       <button
         type="button"
         class="metrics-pill"
-        [matTooltip]="metricsPillTooltip()"
-        [matTooltipDisabled]="false"
-        aria-label="Snapshot metrics summary"
+        [matMenuTriggerFor]="metricsMenu"
+        [attr.aria-label]="metricsPillAriaLabel()"
         data-test="metrics-capture-card"
       >
         <mat-icon>insights</mat-icon>
@@ -51,6 +60,35 @@
           <span class="num">{{ totalWarmedSpawns() }}</span> warmed
         </span>
       </button>
+      <mat-menu #metricsMenu="matMenu" class="filter-menu-panel">
+        <div
+          class="metrics-popover"
+          (click)="$event.stopPropagation()"
+          role="tooltip"
+          aria-label="Snapshot metrics breakdown"
+        >
+          <p class="metrics-popover-headline">
+            <span class="num">{{ totalSnapshotCount() }}</span>
+            capture{{ totalSnapshotCount() === 1 ? '' : 's' }}
+            <span class="sep">·</span>
+            <span class="num">{{ totalWarmedSpawns() }}</span>
+            warmed spawn{{ totalWarmedSpawns() === 1 ? '' : 's' }}
+          </p>
+          <div class="metrics-popover-section-label">Per-agent captures</div>
+          @if (metricsCaptureEntries().length) {
+            <ul class="metrics-popover-agent-list">
+              @for (e of metricsCaptureEntries(); track e.agent) {
+                <li class="metrics-popover-agent-row">
+                  <span class="agent">{{ e.agent }}</span>
+                  <span class="count">{{ e.created }}</span>
+                </li>
+              }
+            </ul>
+          } @else {
+            <p class="metrics-popover-empty">No agent captures yet.</p>
+          }
+        </div>
+      </mat-menu>
       <button
         type="button"
         class="icon-btn"

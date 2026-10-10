@@ -837,16 +837,14 @@ export class SnapshotsComponent implements OnInit {
     return opt?.label ?? '';
   }
 
-  /** Tooltip text for the metrics pill (per-agent breakdown). */
-  metricsPillTooltip(): string {
-    const cap = this.metricsCaptureEntries()
-      .slice(0, 8)
-      .map((e) => `${e.agent}: ${e.created}`)
-      .join('\n');
-    const warm = this.totalWarmedSpawns();
-    const head = `${this.totalSnapshotCount()} capture${this.totalSnapshotCount() === 1 ? '' : 's'} · ${warm} warmed spawn${warm === 1 ? '' : 's'}`;
-    if (!cap) return head;
-    return `${head}\n\nPer-agent captures:\n${cap}`;
+  /** Aria-label for the metrics pill trigger (S2 conformance r1).
+   * Spec §2.2 mandates "Snapshot metrics: N captures, M warmed" — the
+   * same shape as the click popover's headline, so SR users hear the
+   * same totals via the trigger's accessible name. */
+  metricsPillAriaLabel(): string {
+    const n = this.totalSnapshotCount();
+    const w = this.totalWarmedSpawns();
+    return `Snapshot metrics: ${n} capture${n === 1 ? '' : 's'}, ${w} warmed spawn${w === 1 ? '' : 's'}`;
   }
 
   /**

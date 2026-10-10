@@ -636,6 +636,100 @@
   }
 }
 
+// ── S2 (conformance r1, AC-2.x / §2.2): click-triggered info +
+// metrics popovers. The previous implementation used hover-only
+// `matTooltip` directives; SR users had no path in. Spec §2.2
+// mandates click-triggered overlays for the subtitle info popover
+// and the per-agent metrics breakdown. These popovers reuse the
+// matMenu pattern that the existing status/sort popovers use
+// (snapshots.component.html:105-129 / :204-217) and are
+// keyboard-reachable via the trigger button (Enter/Space).
+.info-popover {
+  display: flex;
+  flex-direction: column;
+  padding: 12px 14px;
+  min-width: 240px;
+  max-width: 320px;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.info-popover-text {
+  margin: 0;
+  color: var(--text-secondary);
+}
+.metrics-popover {
+  display: flex;
+  flex-direction: column;
+  padding: 12px 14px;
+  min-width: 260px;
+  max-width: 360px;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.metrics-popover-headline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  font-weight: 600;
+  color: var(--text-primary);
+  .num {
+    color: var(--accent);
+  }
+  .sep {
+    color: var(--text-muted);
+  }
+}
+.metrics-popover-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin: 8px 0 4px;
+}
+.metrics-popover-agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.metrics-popover-agent-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 4px;
+  border-radius: 3px;
+  font-family: 'JetBrains Mono', 'Menlo', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  .agent {
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .count {
+    color: var(--accent);
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  &:hover {
+    background: var(--bg-surface-2);
+  }
+}
+.metrics-popover-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 3px 4px;
+}
+
 // ── Drawer region (mat-drawer-container) ──────────────────────────────
 .drawer-region {
   flex: 1;
