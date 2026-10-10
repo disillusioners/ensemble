@@ -248,13 +248,24 @@ test.beforeAll(async () => {
 
 // ── Shared helpers ───────────────────────────────────────────────────────
 
-/** Wait for the NEXT GET /api/snapshots list response (never /metrics, never /{id}). */
-function nextListResponse(page: Page, url?: URL): Promise<Response> {
-  void url;
+/**
+ * Wait for the NEXT GET /api/snapshots list response (never /metrics,
+ * never /{id}) whose query satisfies `paramMatch`.
+ *
+ * race-immune arming: the caller MUST scope the wait with a
+ * full-query-param predicate — a pathname-only predicate resolves on a
+ * PRIOR sub-leg's echo GET (v2 double-fires the list GET per filter
+ * write, ~19ms apart: the URL-mirror navigate re-triggers the fetch
+ * effect), so the response read after the wait can lack the params the
+ * leg asserts. Pass exactly the params the leg asserts (same strength).
+ * See .agents/tester/LESSONS/2026-10-10-playwright-waitforresponse-arming-race.md
+ */
+function nextListResponse(page: Page, paramMatch: (u: URL) => boolean): Promise<Response> {
   return page.waitForResponse((r) => {
     if (r.request().method() !== 'GET') return false;
     try {
-      return new URL(r.url()).pathname === '/api/snapshots';
+      const u = new URL(r.url());
+      return u.pathname === '/api/snapshots' && paramMatch(u);
     } catch {
       return false;
     }
@@ -292,58 +303,94 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     expect(pageErrors).toEqual([]);
   });
 
-  test('step 2 — page renders header, toggle, metrics strip, filter bar, 8-column table, paginator', async ({ page }) => {
+  // Design A §2.2 / AC-2.1 / AC-5.1 rebase: v1 asserted `mat-radio` for
+  // the R15 toggle (which v2 retired to a compact pill button). Control
+  // row hosts H1 + info icon + toggle pill + metrics pill + refresh.
+  test('step 2 — page renders control row (H1 + info + toggle pill + metrics + refresh), 1-row filter row, stats strip, 7-col table, paginator', async ({ page }) => {
     await openSnapshotsWithRows(page);
     await expect(page.getByRole('heading', { name: 'Snapshots', exact: true })).toHaveText('Snapshots');
-    await expect(page.getByRole('radio', { name: 'Enabled' })).toBeVisible();
-    await expect(page.getByRole('radio', { name: 'Disabled' })).toBeVisible();
+    // Design A §2.2: info icon (aria-label="Page description", popover with v1 subtitle text).
+    await expect(page.getByRole('button', { name: 'Page description' })).toBeVisible();
+    // Design A §2.2: toggle pill (aria-label="Snapshot creation: ON|OFF") + "(unsaved)" suffix per snapshots.component.html:39-42. NOT a mat-radio.
+    await expect(page.locator('button.toggle-pill[aria-label*="Snapshot creation"]')).toBeVisible();
+    // Design A §2.2 + AC-5.2: metrics pill carries the v1 `data-test="metrics-capture-card"` hook.
     await expect(page.locator('[data-test="metrics-capture-card"]')).toBeVisible();
-    await expect(page.locator('section.filter-bar')).toBeVisible();
-    // 8 columns (Title, Project, Agent, Status, Tags, Created, Warm, Actions);
-    // the Actions header cell is empty by design — assert the 7 labeled ones.
+    // Design A §2.2: refresh icon button (aria-label="Refresh").
+    await expect(page.getByRole('button', { name: 'Refresh' })).toBeVisible();
+    // Design A §2.3 / AC-2.2: filter row is one row, all v1 facets + tag + sort + clear.
+    await expect(page.locator('.filter-row')).toBeVisible();
+    // Design A §2.4 / AC-2.3: stats strip aside with status summary.
+    await expect(page.locator('aside.stats-strip')).toBeVisible();
+    // Plain HTML <table aria-label="Snapshots"> with sticky thead
+    // and 7 th cells (DERIVED: v1's 8 columns minus the retired "Warm"
+    // column; warmed data lives in the stats strip per §2.4 + the
+    // drawer's "Last warmed" row per §1.3). The per-row warm count
+    // moved out of the table when compaction closed pain point #1.
     const headers = page.locator('table thead th');
-    await expect(headers).toHaveCount(8);
-    const expected = ['Title', 'Project', 'Agent', 'Status', 'Tags', 'Created', 'Warm'];
+    await expect(headers).toHaveCount(7);
+    // 6 labeled + 1 empty Action col (aria-label="Open", col-action).
+    const expected = ['Title', 'Project', 'Agent', 'Status', 'Tags', 'Created'];
     for (let i = 0; i < expected.length; i++) {
       await expect(headers.nth(i)).toHaveText(expected[i]);
     }
+    // Design A §2.5 / AC-5.2: paginator separated, data-test hook preserved.
     await expect(page.locator('[data-test="paginator"]')).toBeVisible();
     // Seeded rows exist → the empty state must NOT render.
     await expect(page.getByText('No snapshots yet.')).toHaveCount(0);
   });
 
-  test('step 3 — each filter fires GET /api/snapshots with the right param, 200, pageIndex reset', async ({ page }) => {
+  // Design A §2.3 / AC-5.1 / AC-6.3 rebase: v1 asserted the v1 widget
+  // locators (mat-listbox for Status, mat-listbox for Age, mat-form-field
+  // for Sort, "Search projects…"/"Search agents…" placeholder text). v2
+  // replaces the Status multi-chip with a button+popover (no chip listbox),
+  // the Age chip listbox with a segmented control (no listbox), and the
+  // Sort mat-form-field with an inline pill+popover. The page-owned list
+  // fetch (v1 amendments #5/#8/#10) is preserved verbatim per §2.3
+  // Behavior — per-filter refetch + debounce + listRequestId race handling
+  // + pageIndex reset all hold. Driving the v2 widgets correctly must
+  // fire a GET /api/snapshots with the right param, 200, pageIndex=0
+  // (paginator-page-1 visible). AC-6.3 adds the URL mirror as v2-only
+  // strengthening — the filter signal writes are mirrored to
+  // ActivatedRoute.queryParams via Router.navigate({queryParamsHandling:'merge'}).
+  test('step 3 — each filter drives the v2 widget + fires GET /api/snapshots with the right param, 200, pageIndex reset, URL mirror (AC-6.3)', async ({ page }) => {
     await openSnapshotsWithRows(page);
 
-    // (a) Project → a known seeded project id.
+    // (a) Project → searchable-select placeholder changed "Search projects…" → "All projects" (snapshots.component.html:113).
     let [resp] = await Promise.all([
-      nextListResponse(page),
+      nextListResponse(page, (u) => u.searchParams.get('project_id') === PROJECT_ALPHA_ID),
       (async () => {
-        await page.locator('app-searchable-select input[placeholder="Search projects…"]').click();
+        await page.locator('app-searchable-select.filter-project input').click();
         await page.getByRole('option', { name: 'e2e-snapshots-alpha' }).click();
       })(),
     ]);
     expect(resp.status()).toBe(200);
     expect(new URL(resp.request().url()).searchParams.get('project_id')).toBe(PROJECT_ALPHA_ID);
+    // AC-6.3 URL mirror.
+    await expect.poll(() => new URL(page.url()).searchParams.get('project_id')).toBe(PROJECT_ALPHA_ID);
     await expect(page.locator('[data-test="paginator-page-1"]')).toBeVisible();
 
-    // (b) Agent → "coder" (D-2 wire rename: agent_id → agent).
+    // (b) Agent → searchable-select placeholder changed "Search agents…" → "All agents" (snapshots.component.html:123).
+    // seenAgents accumulates from the first list response (v1 amendment #5 — page-owned, preserved).
     [resp] = await Promise.all([
-      nextListResponse(page),
+      nextListResponse(page, (u) => u.searchParams.get('agent') === 'coder'),
       (async () => {
-        await page.locator('app-searchable-select input[placeholder="Search agents…"]').click();
+        await page.locator('app-searchable-select.filter-agent input').click();
         await page.getByRole('option', { name: 'coder', exact: true }).click();
       })(),
     ]);
     expect(resp.status()).toBe(200);
+    // D-2 wire rename: agent_id → agent (preserved in v2 wire contract).
     expect(new URL(resp.request().url()).searchParams.get('agent')).toBe('coder');
+    // AC-6.3 URL mirror uses the FE's `agent_id` key (snapshots.component.ts:411, the
+    // page-host signal-graph binding; the BE wire is still `agent` per D-2).
+    await expect.poll(() => new URL(page.url()).searchParams.get('agent_id')).toBe('coder');
     await expect(page.locator('[data-test="paginator-page-1"]')).toBeVisible();
 
-    // (c) Tags → kind:implementation (chip appears immediately; the
-    // list fetch is debounced ~250ms — the waitForResponse window
-    // covers it). Repeated-param idiom.
+    // (c) Tags → `data-test="filter-tag-input"` hook preserved (AC-5.2). R4 250ms
+    // debounce preserved (§2.3 Behavior). Repeated-param idiom.
     [resp] = await Promise.all([
-      nextListResponse(page),
+      // race-immune arming: full-query-param predicate — pathname-only resolves on prior sub-leg echoes (v2 double-fires the list GET per filter write); see .agents/tester/LESSONS/2026-10-10-playwright-waitforresponse-arming-race.md
+      nextListResponse(page, (u) => u.searchParams.getAll('tags').includes('kind:implementation')),
       (async () => {
         await page.locator('[data-test="filter-tag-input"]').fill('kind:implementation');
         await page.locator('[data-test="filter-tag-input"]').press('Enter');
@@ -351,11 +398,36 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     ]);
     expect(resp.status()).toBe(200);
     expect(new URL(resp.request().url()).searchParams.getAll('tags')).toContain('kind:implementation');
+    await expect.poll(() => new URL(page.url()).searchParams.getAll('tags')).toContain('kind:implementation');
     await expect(page.locator('[data-test="paginator-page-1"]')).toBeVisible();
 
-    // (d) Status multi-select → 2 chips (active + superseded). The
-    // chip-listbox emits a change per click, so wait for the request
-    // carrying BOTH values.
+    // (d) Status multi-select → v1 chip-listbox is replaced by a button+popover
+    // (§2.3 row: "Status (multi-chip) → button 'Status' with count badge …
+    // click opens a popover with the chip listbox"). Each click fires its
+    // own refetch (per-filter refetch preserved per §2.3 Behavior) — wait
+    // for the response carrying BOTH values (the second click).
+    await page.locator('[data-test="filter-status"]').click();
+    const statusPopover = page.getByRole('dialog', { name: 'Status filter' });
+    await expect(statusPopover).toBeVisible();
+    // First chip → fires GET with status=active.
+    // race-immune arming: full-query-param predicate (exactly ['active'], mirroring the assertion below) — pathname-only resolves on prior sub-leg echoes (v2 double-fires the list GET per filter write); see .agents/tester/LESSONS/2026-10-10-playwright-waitforresponse-arming-race.md
+    let [respActive] = await Promise.all([
+      nextListResponse(page, (u) => {
+        const s = u.searchParams.getAll('status');
+        return s.length === 1 && s[0] === 'active';
+      }),
+      // FIX(2026-10-10): unanchored hasText — `label.status-menu-item`'s rendered
+      // textContent is `<mat-icon>check_circle</mat-icon> active ` (ligature
+      // + text + whitespace), so `/^active$/` can never match. No sibling
+      // option text contains "active" as a substring (verified: the 5 status
+      // enums are active/running/superseded/failed/interrupted), so an
+      // unanchored regex is collision-safe. See LESSONS/2026-10-10-anchored-
+      // text-locator-vs-mat-icon-ligature.md (Fixes §1 + §3).
+      statusPopover.locator('label.status-menu-item', { hasText: /active/ }).click(),
+    ]);
+    expect(respActive.status()).toBe(200);
+    expect(new URL(respActive.request().url()).searchParams.getAll('status')).toEqual(['active']);
+    // Second chip → fires GET with status=active&status=superseded.
     [resp] = await Promise.all([
       page.waitForResponse((r) => {
         if (r.request().method() !== 'GET') return false;
@@ -368,19 +440,31 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
           return false;
         }
       }),
-      (async () => {
-        const statusList = page.getByRole('listbox', { name: 'Filter by status' });
-        await statusList.getByRole('option', { name: 'active', exact: true }).click();
-        await statusList.getByRole('option', { name: 'superseded', exact: true }).click();
-      })(),
+      // FIX(2026-10-10): same-pattern fix as the first-chip click above —
+      // `label.status-menu-item`'s textContent is `<mat-icon>history</mat-icon>
+      // superseded ` (ligature + text + whitespace), so an anchored regex
+      // can never match. No sibling option contains "superseded" as a
+      // substring (verified), so an unanchored regex is collision-safe.
+      // See LESSONS/2026-10-10-anchored-text-locator-vs-mat-icon-ligature.md.
+      statusPopover.locator('label.status-menu-item', { hasText: /superseded/ }).click(),
     ]);
     expect(resp.status()).toBe(200);
     const statusParams = new URL(resp.request().url()).searchParams.getAll('status');
     expect(statusParams).toContain('active');
     expect(statusParams).toContain('superseded');
+    // AC-6.3 URL mirror.
+    await expect
+      .poll(() => new URL(page.url()).searchParams.getAll('status').sort())
+      .toEqual(['active', 'superseded']);
     await expect(page.locator('[data-test="paginator-page-1"]')).toBeVisible();
+    // Dismiss the popover before the next sub-letter (Esc closes the
+    // popover; the document capture handler is gated on `menusOpen > 0`).
+    await page.keyboard.press('Escape');
 
-    // (e) Age → "24h" → created_after=<ISO cutoff> (D-7).
+    // (e) Age → v1 chip-listbox is replaced by a segmented control
+    // (§2.3 row: "Age (chip preset) → segmented control (5 buttons, 30px
+    // tall, more compact than chips)"). Wire: age preset → created_after
+    // (D-7 preserved; `all` omits the param entirely).
     [resp] = await Promise.all([
       page.waitForResponse((r) => {
         if (r.request().method() !== 'GET') return false;
@@ -391,15 +475,30 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
           return false;
         }
       }),
-      page.getByRole('listbox', { name: 'Filter by age' }).getByRole('option', { name: '24h', exact: true }).click(),
+      // FIX(2026-10-10): unanchored hasText — regex hasText matches RAW
+      // textContent (no whitespace normalization; playwright-core
+      // createTextMatcher regex branch), and the age button renders ' 24h '
+      // (interpolation padding), so /^24h$/ can never match. No sibling age
+      // label (24h/7d/30d/All) contains '24h' as a substring →
+      // collision-safe. See LESSONS/2026-10-10-anchored-text-locator-vs-
+      // mat-icon-ligature.md.
+      page.locator('[data-test="filter-age"] button', { hasText: /24h/ }).click(),
     ]);
     expect(resp.status()).toBe(200);
     const cutoff = new URL(resp.request().url()).searchParams.get('created_after');
     expect(cutoff).not.toBeNull();
     expect(Number.isNaN(Date.parse(cutoff as string))).toBe(false);
+    // AC-6.3 URL mirror (age encodes the preset string in the URL, not the
+    // ISO cutoff — the BE wire is `created_after`; the FE's URL keeps the preset).
+    await expect.poll(() => new URL(page.url()).searchParams.get('age')).toBe('24h');
     await expect(page.locator('[data-test="paginator-page-1"]')).toBeVisible();
 
-    // (f) Sort → "Oldest first" → sort=created_at_asc.
+    // (f) Sort → v1 mat-form-field is replaced by an inline pill+popover
+    // (§2.3 row: "Sort → mat-form-field select, full Material chrome →
+    // inline pill with icon + label + value"). Wire: sort=created_at_asc.
+    await page.locator('[data-test="filter-sort"]').click();
+    const sortPopover = page.getByRole('dialog', { name: 'Sort' });
+    await expect(sortPopover).toBeVisible();
     [resp] = await Promise.all([
       page.waitForResponse((r) => {
         if (r.request().method() !== 'GET') return false;
@@ -412,24 +511,50 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
           return false;
         }
       }),
-      (async () => {
-        await page.locator('mat-form-field.sort-field').click();
-        await page.getByRole('option', { name: 'Oldest first' }).click();
-      })(),
+      sortPopover.locator('button.sort-menu-item', { hasText: 'Oldest first' }).click(),
     ]);
     expect(resp.status()).toBe(200);
+    // AC-6.3 URL mirror.
+    await expect.poll(() => new URL(page.url()).searchParams.get('sort')).toBe('created_at_asc');
     await expect(page.locator('[data-test="paginator-page-1"]')).toBeVisible();
   });
 
-  test('step 4 — filter to empty shows Clear filters; clicking it drops every filter param', async ({ page }) => {
+  // Design A §2.3 / AC-5.2 rebase: v1 asserted a `/Clear filters/i` regex
+  // that cannot match v2's non-contiguous accessible name "Clear all filters"
+  // (aria-label, snapshots.component.html:277). The data-test="filter-clear"
+  // hook is the v2 addition for this affordance (AC-5.2 v2-additions row).
+  // v1's behavioral contract — click drops every filter param + URL drops
+  // every filter query — is preserved verbatim (§2.3 "Same behavior" row).
+  test('step 4 — filter to empty shows Clear filters; clicking it drops every filter param + URL', async ({ page }) => {
     await openSnapshotsWithRows(page);
     await page.locator('[data-test="filter-tag-input"]').fill('nonexistent:tag');
     await page.locator('[data-test="filter-tag-input"]').press('Enter');
-    const clearBtn = page.getByRole('button', { name: /Clear filters/i });
+    // AC-5.2 v2-addition: the Clear filters button carries `data-test="filter-clear"`.
+    const clearBtn = page.locator('[data-test="filter-clear"]');
     await expect(clearBtn).toBeVisible();
+    // Belt-and-suspenders: the exact accessible name matches the v2 aria-label
+    // (a non-contiguous "Clear all filters" — the v1 `/Clear filters/i` regex
+    // would miss the "all" between "Clear" and "filters"). This double-locates
+    // via the v1-`getByRole` shape too, so the test catches either a data-test
+    // removal or a name drift.
+    await expect(clearBtn).toHaveAccessibleName('Clear all filters');
 
+    // race-immune arming: full-query-param predicate (reset request = every filter param absent, mirroring the assertion below) — pathname-only resolves on prior filter-write echoes (v2 double-fires the list GET per filter write); see .agents/tester/LESSONS/2026-10-10-playwright-waitforresponse-arming-race.md
     const [req] = await Promise.all([
-      page.waitForRequest((r) => r.method() === 'GET' && new URL(r.url()).pathname === '/api/snapshots'),
+      page.waitForRequest((r) => {
+        if (r.method() !== 'GET') return false;
+        try {
+          const u = new URL(r.url());
+          return (
+            u.pathname === '/api/snapshots' &&
+            ['project_id', 'agent', 'tags', 'status', 'created_after', 'sort', 'tag_mode'].every(
+              (k) => !u.searchParams.has(k),
+            )
+          );
+        } catch {
+          return false;
+        }
+      }),
       clearBtn.click(),
     ]);
 
@@ -444,6 +569,16 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     for (const param of ['project_id', 'agent', 'tags', 'status', 'created_after', 'sort', 'tag_mode']) {
       expect(cleared.searchParams.getAll(param)).toEqual([]);
     }
+    // AC-6.3 strengthening: the URL mirror clears too. After Clear, every
+    // filter query param is absent (the page-host URL-sync effect writes
+    // `null` for default/empty values, which `queryParamsHandling: 'merge'`
+    // removes from the URL — snapshots.component.ts:402-419).
+    await expect.poll(() => {
+      const u = new URL(page.url());
+      return ['project_id', 'agent_id', 'status', 'age', 'tag_mode', 'sort', 'tags'].every(
+        (k) => u.searchParams.getAll(k).length === 0,
+      );
+    }).toBe(true);
     // The list re-renders with the (non-empty) defaults.
     await expect(page.locator('table tbody tr').first()).toBeVisible();
   });
@@ -482,48 +617,100 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     expect(clipboard).toBe(firstRowId);
   });
 
-  test('step 6 — metrics: capture card >=1 row; warmed card hidden when spawn counts empty', async ({ page }) => {
+  // Design A §2.2 + §2.4 / AC-5.2 rebase: v1 asserted `ul.metrics-list li`
+  // inside `[data-test="metrics-capture-card"]` for the capture counts
+  // card and a separate `.metric-card` with a "Warmed snapshots" heading
+  // for the warmed card. v2 retired the inline 2-card grid (Design A
+  // §2.4 StatsStrip rebalanced the metrics surface) — the v1
+  // `ul.metrics-list` markup is GONE (grep=0 in v2 templates). The
+  // `[data-test="metrics-capture-card"]` hook is KEPT on the metrics
+  // PILL BUTTON (snapshots.component.html:59) and the per-agent
+  // breakdown is now inside the metrics popover (role="dialog"
+  // aria-label="Snapshot metrics breakdown") as
+  // `ul.metrics-popover-agent-list li.metrics-popover-agent-row` with
+  // `.agent` + `.count` spans. The warmed-count data is in the popover
+  // headline (no separate warmed card in v2).
+  test('step 6 — metrics: popover has capture list with >=1 row (coder) + empty-state hidden; warmed count 0 in headline', async ({ page }) => {
     await page.goto('/snapshots');
-    const captureCard = page.locator('[data-test="metrics-capture-card"]');
-    await expect(captureCard).toBeVisible();
-    // Seed: exactly one capture counter (coder → 3) and NO "empty" note.
-    await expect(captureCard.locator('ul.metrics-list li')).toHaveCount(1);
-    await expect(captureCard.getByText('coder')).toBeVisible();
-    await expect(captureCard.getByText('No captures yet.')).toHaveCount(0);
+    // AC-5.2: the [data-test="metrics-capture-card"] hook is preserved
+    // — it's now the metrics PILL BUTTON that opens the popover.
+    const metricsPill = page.locator('[data-test="metrics-capture-card"]');
+    await expect(metricsPill).toBeVisible();
+    await metricsPill.click();
+    const popover = page.getByRole('dialog', { name: 'Snapshot metrics breakdown' });
+    await expect(popover).toBeVisible();
+    // Seed: exactly one capture counter (coder → 3) → ≥1 row in the
+    // per-agent captures list, and the empty-state branch is NOT taken.
+    const agentRows = popover.locator('ul.metrics-popover-agent-list li.metrics-popover-agent-row');
+    await expect(agentRows).toHaveCount(1);
+    await expect(agentRows.locator('span.agent', { hasText: 'coder' })).toBeVisible();
+    await expect(popover.getByText('No agent captures yet.')).toHaveCount(0);
 
-    // Warmed card: spawn_counts_per_snapshot is EMPTY in the seed → the
-    // card renders NO entries (hidden-when-empty, not blank).
-    const warmedCard = page.locator('.metric-card', {
-      has: page.getByRole('heading', { name: 'Warmed snapshots' }),
-    });
-    await expect(warmedCard).toHaveCount(1);
-    await expect(warmedCard.locator('ul.metrics-list')).toHaveCount(0);
+    // Warmed-card v2 equivalent: v2 has no separate warmed card; the
+    // popover headline carries the warmed total (always shown) and
+    // the stats strip carries the same number. Seed has no spawn
+    // counters, so the headline reports "0 warmed spawns" — this
+    // preserves the v1 "warmed card hidden when empty" signal as a
+    // "warmed count is 0 when no spawn counters" assertion.
+    await expect(popover.locator('.metrics-popover-headline')).toContainText(/0\s+warmed spawn/);
+    // Stats strip (Design A §2.4) carries the same number — read-only
+    // aside, AC-2.3 — assert it for cross-surface parity.
+    await expect(page.locator('aside.stats-strip')).toContainText(/0\s+total warmed spawns/);
   });
 
-  test('step 7 — toggle Enabled→Disabled: dirty hint, PUT {"enabled": false}, 200, hint hides, reload persists', async ({ page }) => {
+  // Design A §2.2 + AC-5.3 rebase: v1 asserted `mat-radio` for the
+  // R15 toggle (which v2 retired to a compact pill button). v1's
+  // R/W contract — PUT /api/settings/snapshot-create, dirty hint,
+  // Apply button, error toast — is preserved verbatim per AC-5.3
+  // ("The toggle's R/W contract is unchanged"). v2's visual is a
+  // 28px pill: first click flips the desired state + marks dirty
+  // (CSS class .dirty + ::after '•' marker + aria-label '(unsaved)'
+  // suffix); second click (while dirty) saves via
+  // setSnapshotCreateEnabled(PUT) — onSnapshotCreateSelectionChange
+  // / saveSnapshotCreateEnabled (snapshots.component.ts:539-578).
+  // The PUT round-trip is mandatory — this leg verifies REAL behavior
+  // and does NOT become a no-op.
+  test('step 7 — toggle pill ON→OFF: first click dirties (• marker + unsaved aria-label), second click saves PUT {"enabled": false} 200, reload persists OFF', async ({ page }) => {
     await page.goto('/snapshots');
-    // Seed precondition: the R15 toggle starts Enabled.
-    await expect(page.getByRole('radio', { name: 'Enabled' })).toBeChecked({ timeout: 15000 });
+    // Seed precondition: the R15 toggle starts ON (project_metadata_records
+    // sets snapshot_create_enabled="on" on the system default project —
+    // see the beforeAll seed in this spec).
+    const pill = page.locator('button.toggle-pill[aria-label*="Snapshot creation"]');
+    await expect(pill).toBeVisible();
+    await expect(pill).toHaveAccessibleName('Snapshot creation: ON');
+    await expect(pill).not.toHaveClass(/dirty/);
 
-    const disabledRadio = page.getByRole('radio', { name: 'Disabled' });
-    await disabledRadio.check();
-    await expect(page.getByText('Unsaved changes')).toBeVisible();
-    const applyBtn = page.getByRole('button', { name: 'Apply' });
-    await expect(applyBtn).toBeEnabled();
+    // First click: flips desired state to OFF + marks dirty. The v2
+    // pill surfaces the dirty state via THREE channels — the .dirty
+    // CSS class, the ::after '•' pseudo-element (snapshots.component.scss:150-156),
+    // and the "(unsaved)" suffix on the aria-label (snapshots.component.html:39-42).
+    // Asserting all three binds the v1 visual contract (radio + Apply
+    // + "Unsaved changes" text) to the v2 equivalent.
+    await pill.click();
+    await expect(pill).toHaveClass(/dirty/);
+    await expect(pill).toHaveAccessibleName('Snapshot creation: OFF (unsaved)');
 
+    // Second click (while dirty): saves → PUT /api/settings/snapshot-create.
+    // AC-5.3: the v1 R/W contract (PUT endpoint, payload, 200) is unchanged.
     const [resp] = await Promise.all([
       page.waitForResponse(
-        (r) => r.request().method() === 'PUT' && new URL(r.url()).pathname === '/api/settings/snapshot-create',
+        (r) =>
+          r.request().method() === 'PUT' &&
+          new URL(r.url()).pathname === '/api/settings/snapshot-create',
       ),
-      applyBtn.click(),
+      pill.click(),
     ]);
     expect(resp.status()).toBe(200);
     expect(resp.request().postDataJSON()).toEqual({ enabled: false });
-    await expect(page.getByText('Unsaved changes')).toHaveCount(0);
+    // Save completed: dirty marker clears; aria-label back to "Snapshot creation: OFF" (no unsaved).
+    await expect(pill).not.toHaveClass(/dirty/);
+    await expect(pill).toHaveAccessibleName('Snapshot creation: OFF');
 
-    // Reload → persisted state reflects Disabled.
+    // Reload → persisted state reflects OFF.
     await page.reload();
-    await expect(page.getByRole('radio', { name: 'Disabled' })).toBeChecked();
+    const pillAfter = page.locator('button.toggle-pill[aria-label*="Snapshot creation"]');
+    await expect(pillAfter).toBeVisible();
+    await expect(pillAfter).toHaveAccessibleName('Snapshot creation: OFF');
   });
 
   test('step 8 — /settings renders NO Agent Snapshots / Snapshot Usage Metrics sections', async ({ page }) => {
@@ -561,8 +748,19 @@ test.describe('Snapshots page — sequencing §4.3 (steps 1-9 + 11a-11c)', () =>
     await expect(page.locator('table tbody tr').first()).toBeVisible();
     expect(pageErrors).toEqual([]);
 
-    // Focus-INSIDE path still closes via the component-scoped host
-    // listener (R3-2, AC-A11Y-3): re-open, focus the pane, Escape.
+    // Focus-INSIDE path closes via the document capture handler
+    // (D1, AC-A11Y-3; impl label AC-A11Y.3b — non-spec) + Material's convergent drawer-element Esc
+    // listener — NOT the app-snapshots host-scoped HostListener:
+    // the pane (`mat-drawer`, parent of the `app-snapshots` host) is
+    // OUTSIDE `hostEl.contains(pane)`, so the host-scoped handler
+    // cannot observe a focus on the pane. The document-level capture
+    // (snapshot-detail-drawer.component.ts:295, R3-2 invariant held)
+    // catches the Esc either way; the convergent Material listener
+    // fires the same `closedStart → onCloseDrawer` end state
+    // (idempotent — never double-emits the close output). This
+    // leg stays a regression guard for the inside-focus path; the
+    // assertion shape is correct, only the mechanism attribution in
+    // the comment needed the fix.
     await page.locator('table tbody tr').first().click();
     await expect(page.locator('[data-test="snapshot-drawer"]')).toBeVisible();
     await page.locator('[data-test="snapshot-drawer"]').focus();
