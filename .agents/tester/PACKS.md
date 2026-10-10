@@ -1,5 +1,16 @@
 # Test Packs
 
+## Commission CLOSED — SNAPSHOTS V2 MERGE GATE + RE-VERIFICATION @ 8c1534f9a→f19b4d705 (2026-10-10) — VERDICT: PASS-WITH-PREEXISTING — RESULTS/2026-10-10-snapshots-v2-merge-gate.md + RESULTS/2026-10-10-snapshots-v2-reverification.md
+
+Worktree `/home/nea/ensemble-src-wt-snapshots-redesign-v2` (branch `feature/snapshots-redesign-v2`; FE-only diff; harness commit `5d411a395`, lane docs `e97d6c33c`, fix round `95d57adb2`+`f19b4d705`). Round 1 verdict FAIL-narrow (D1 AC-A11Y.3b second-Esc no-op; D2 v1-e2e backdrop contract dead in side-mode) → fix round landed → re-verified: D1 fixed deterministic ×2, D2 validated daemon-free (12-test collection; daemon-lane run PENDING post-merge), jest zero new failures. **Final: PASS-WITH-PREEXISTING — merge gate GREEN.**
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `fe_jest_full` | `test/packs/fe_unit_full_test.sh` (env `EXPECTED_BRANCH=feature/snapshots-redesign-v2`) | full FE jest census, 112 specs / 3895 tests @ f19b4d705 | <1 min (24.2s) | 2026-10-10 @ f19b4d705 | ✅ PASS-with-preexisting 3891/3895 — same 4 quarantined base-attributed REDs (identical signatures); +3 new tests from fix commits, all passing; zero new failures |
+| `snapshots_v2_webauto` | `test/packs/snapshots_v2_webauto_test.sh` (harness commit `5d411a395`) | 10 tests / 9 commissioned legs + backdrop spot-check, real chromium vs `ng serve` 14199, API stubbed | ~75s/run | 2026-10-10 @ f19b4d705 ×2 (deterministic; prior: FAIL 9/10 @ 5d411a395 ×2) | ✅ PASS 10/10 ×2 — D1 (AC-A11Y.3b) fixed both popover paths; R3-2 invariant held; trap 0-escape; sweep legs green |
+
+ensure.md scoping: Core daemon-side items (`concurrency_atomic_unit_test`, dev.sh grep) OUT of blast radius — FE-only diff. Release Gate not warranted (no daemon/architecture change); the full FE jest suite IS this lane's full-suite run. FE e2e QUARANTINE rows (2026-10-06 families) unaffected — different spec files.
+
 ## Completed commission (ROUND 2, fixed HEAD) — CHECKPOINT-CONN-RESILIENCE @ 7ec80b6c3 + test-lane 5f8c20b3f/fb72bae84 (gate HEAD fb72bae84) (2026-10-10) — ✅ ALL GATES PASS, verdict in RESULTS/2026-10-10-checkpoint-conn-resilience-round2-gate.md
 
 R1 isolation fixture fixed (`5f8c20b3f`, exact-object snapshot/restore — 4/4 green) · H1 PG harness fixed (`fb72bae84`, async-safe guard — 9P/0S live) · outage drill PASS (readyz 503+checkpoint_saver:false @6.4s, livez 200, recover 49.7s) · B2 REAL-RECOVERY-PROVEN 3/3 + K1-SHAPE-PASS ×3 · full re-run: A1 143P/0S, A2 10P/0S, core 99P/0F/74S, PG 9P/0S. Optional guard-test automation DEFERRED (worker 8aff7b13 provider-502, non-gating). ORIGINAL SYMPTOM: PROVEN-FIXED.

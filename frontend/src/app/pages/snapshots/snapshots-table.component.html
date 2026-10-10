@@ -1,3 +1,7 @@
+<!-- SnapshotsTable — v2 redesign (Design A).
+     Plain HTML <table> with sticky <thead> inside a flex scroll viewport.
+     Paginator is pinned to the bottom of the table area (sibling, not
+     descendant of the scroll viewport). -->
 <div class="snapshots-table">
   <!-- Skeleton / initial loading -->
   @if (loading() && rows().length === 0) {
@@ -10,7 +14,6 @@
           <div class="skeleton-bar chip"></div>
           <div class="skeleton-bar medium"></div>
           <div class="skeleton-bar short"></div>
-          <div class="skeleton-bar tiny"></div>
         </div>
       }
       <span class="visually-hidden">Loading snapshots…</span>
@@ -48,7 +51,7 @@
     </div>
   }
 
-  <!-- Loaded: table + paginator -->
+  <!-- Loaded: scroll viewport (sticky thead) + paginator separated. -->
   @else {
     <!-- Subsequent page loading: thin progress bar (replace-path; keep
          previous rows visible — fe-plan §7.1) -->
@@ -60,130 +63,97 @@
       ></mat-progress-bar>
     }
 
-    <table
-      mat-table
-      [dataSource]="rows()"
-      [trackBy]="trackById"
-      class="snapshots-mat-table">
-      <!-- title -->
-      <ng-container matColumnDef="title">
-        <th mat-header-cell *matHeaderCellDef>Title</th>
-        <td mat-cell *matCellDef="let row" class="title-cell">
-          <span
-            class="title-truncate"
-            [matTooltip]="row.title"
-            (click)="onRowClick(row)"
-            tabindex="0"
-            role="button"
-            (keydown.enter)="onRowClick(row)"
-            (keydown.space)="onRowClick(row); $event.preventDefault()"
-          >{{ row.title }}</span>
-        </td>
-      </ng-container>
+    <!-- Scroll viewport (thead is sticky inside this scrollable area). -->
+    <div class="table-scroll">
+      <table
+        class="snapshots-table-grid"
+        aria-label="Snapshots"
+        data-test="snapshots-table"
+      >
+        <thead>
+          <tr>
+            <th class="col-title" scope="col">Title</th>
+            <th class="col-project" scope="col">Project</th>
+            <th class="col-agent" scope="col">Agent</th>
+            <th class="col-status" scope="col">Status</th>
+            <th class="col-tags" scope="col">Tags</th>
+            <th class="col-created" scope="col">Created</th>
+            <th class="col-action" scope="col" aria-label="Open"></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (row of rows(); track trackById($index, row)) {
+            <tr
+              class="snapshots-row"
+              [class.selected]="row.id === selectedRowId()"
+              [attr.data-test]="'snapshot-row'"
+              [attr.aria-label]="'Open snapshot ' + row.title"
+              [attr.aria-selected]="row.id === selectedRowId()"
+              role="button"
+              tabindex="0"
+              (click)="onRowClick(row)"
+              (keydown.enter)="onRowClick(row)"
+              (keydown.space)="onRowClick(row); $event.preventDefault()"
+            >
+              <td class="title-cell">
+                <span
+                  class="title-truncate"
+                  [matTooltip]="row.title"
+                >{{ row.title }}</span>
+              </td>
+              <td class="project-cell">
+                <span class="mono-cell" [matTooltip]="row.project_id">
+                  {{ truncateId(row.project_id) }}
+                </span>
+              </td>
+              <td class="agent-cell">
+                <span class="agent-name">{{ row.created_by_agent_id }}</span>
+              </td>
+              <td class="status-cell">
+                <span
+                  class="status-chip"
+                  [class]="statusClass(row.status)"
+                >
+                  <mat-icon class="status-icon">{{ statusIcon(row.status) }}</mat-icon>
+                  <span class="status-label">{{ row.status }}</span>
+                </span>
+              </td>
+              <td class="tags-cell">
+                @for (tag of visibleTags(row); track tag) {
+                  <span class="tag-chip" [matTooltip]="tag">{{ tag }}</span>
+                }
+                @if (overflowCount(row) > 0) {
+                  <span
+                    class="tag-overflow"
+                    [matTooltip]="(row.domain_tags || []).slice(2).join(', ')"
+                  >+{{ overflowCount(row) }}</span>
+                }
+                @if (visibleTags(row).length === 0) {
+                  <span class="muted">—</span>
+                }
+              </td>
+              <td class="created-cell">
+                <span class="muted" [matTooltip]="formatAbsolute(row.created_at)">
+                  {{ formatRelative(row.created_at) }}
+                </span>
+              </td>
+              <td class="action-cell">
+                <button
+                  type="button"
+                  class="open-detail-btn"
+                  (click)="onRowClick(row, $event)"
+                  [attr.aria-label]="'Open snapshot ' + row.title"
+                >
+                  <mat-icon>chevron_right</mat-icon>
+                </button>
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
 
-      <!-- project (D-5: truncated UUID) -->
-      <ng-container matColumnDef="project">
-        <th mat-header-cell *matHeaderCellDef>Project</th>
-        <td mat-cell *matCellDef="let row">
-          <span
-            class="muted mono"
-            [matTooltip]="row.project_id"
-          >{{ truncateId(row.project_id) }}</span>
-        </td>
-      </ng-container>
-
-      <!-- agent -->
-      <ng-container matColumnDef="agent">
-        <th mat-header-cell *matHeaderCellDef>Agent</th>
-        <td mat-cell *matCellDef="let row">
-          <span class="agent-cell">{{ row.created_by_agent_id }}</span>
-        </td>
-      </ng-container>
-
-      <!-- status -->
-      <ng-container matColumnDef="status">
-        <th mat-header-cell *matHeaderCellDef>Status</th>
-        <td mat-cell *matCellDef="let row">
-          <span
-            class="status-chip"
-            [ngClass]="statusClass(row.status)"
-          >{{ row.status }}</span>
-        </td>
-      </ng-container>
-
-      <!-- tags -->
-      <ng-container matColumnDef="tags">
-        <th mat-header-cell *matHeaderCellDef>Tags</th>
-        <td mat-cell *matCellDef="let row">
-          <div class="tags-cell">
-            @for (tag of visibleTags(row); track tag) {
-              <span class="tag-chip" [matTooltip]="tag">{{ tag }}</span>
-            }
-            @if (overflowCount(row) > 0) {
-              <span
-                class="tag-overflow"
-                [matTooltip]="(row.domain_tags || []).slice(2).join(', ')"
-              >+{{ overflowCount(row) }}</span>
-            }
-            @if (visibleTags(row).length === 0) {
-              <span class="muted">—</span>
-            }
-          </div>
-        </td>
-      </ng-container>
-
-      <!-- created -->
-      <ng-container matColumnDef="created">
-        <th mat-header-cell *matHeaderCellDef>Created</th>
-        <td mat-cell *matCellDef="let row">
-          <span
-            class="muted"
-            [matTooltip]="formatAbsolute(row.created_at)"
-          >{{ formatRelative(row.created_at) }}</span>
-        </td>
-      </ng-container>
-
-      <!-- warm (D-5: always '—' in v1; column slot kept for Phase-2) -->
-      <ng-container matColumnDef="warm">
-        <th mat-header-cell *matHeaderCellDef>Warm</th>
-        <td mat-cell *matCellDef="let row">
-          <span class="muted" [matTooltip]="'Coming in a future release'">—</span>
-        </td>
-      </ng-container>
-
-      <!-- actions -->
-      <ng-container matColumnDef="actions">
-        <th mat-header-cell *matHeaderCellDef></th>
-        <td mat-cell *matCellDef="let row">
-          <button
-            mat-icon-button
-            (click)="onRowClick(row); $event.stopPropagation()"
-            matTooltip="Open detail"
-            aria-label="Open snapshot detail">
-            <mat-icon>chevron_right</mat-icon>
-          </button>
-        </td>
-      </ng-container>
-
-      <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
-      <tr
-        mat-row
-        *matRowDef="let row; columns: displayedColumns"
-        class="snapshots-row"
-        (click)="onRowClick(row)"
-        [attr.aria-label]="'Open snapshot ' + row.title"
-        role="button"
-        tabindex="0"
-        (keydown.enter)="onRowClick(row)"
-        (keydown.space)="onRowClick(row); $event.preventDefault()"
-      ></tr>
-    </table>
-
-    <!-- Paginator (data-test="paginator"). The e2e hook
-         data-test="paginator-page-1" is stamped by the component onto
-         Material's rendered first-page button (review pass 1 FIX 1:
-         Material's paginator has NO per-page buttons — only
-         first/prev/next/last + range label + page-size selector). -->
+    <!-- Paginator (data-test="paginator") — sibling of the scroll viewport. -->
     <mat-paginator
       [length]="total()"
       [pageSize]="pageSize()"
@@ -192,7 +162,7 @@
       [showFirstLastButtons]="true"
       (page)="onPageChange($event)"
       data-test="paginator"
-      class="snapshots-paginator">
-    </mat-paginator>
+      class="snapshots-paginator"
+    ></mat-paginator>
   }
 </div>

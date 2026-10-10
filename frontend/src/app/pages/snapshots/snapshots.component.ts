@@ -1,6 +1,7 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  DestroyRef,
   OnInit,
   computed,
   effect,
@@ -8,27 +9,23 @@ import {
   signal,
   untracked,
 } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { ActivatedRoute, Router } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
-import { MatChipsModule } from '@angular/material/chips';
-import { MatDividerModule } from '@angular/material/divider';
-import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
+import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
-import { MatSelectModule } from '@angular/material/select';
 import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { MatInputModule } from '@angular/material/input';
 import { PageEvent } from '@angular/material/paginator';
 import { Clipboard } from '@angular/cdk/clipboard';
 
 import { ProjectService } from '../../services/project.service';
 import { SettingsService } from '../../services/settings.service';
-import {
-  SnapshotService,
-} from '../../services/snapshot.service';
+import { SnapshotService } from '../../services/snapshot.service';
 import {
   SearchableSelectComponent,
   SearchableSelectOption,
@@ -42,7 +39,7 @@ import {
   SnapshotUsageMetrics,
 } from '../../models/snapshot.model';
 
-/** Status enum values for the multi-chip filter. */
+/** Status enum values for the multi-select filter. */
 const STATUS_VALUES: SnapshotStatus[] = [
   'active',
   'superseded',
@@ -51,47 +48,69 @@ const STATUS_VALUES: SnapshotStatus[] = [
   'interrupted',
 ];
 
-/** Default age preset (D-7 — `all`, NOT `30d`). */
+/** Default filter values. */
 const DEFAULT_AGE: SnapshotFilters['age'] = 'all';
 const DEFAULT_SORT: SnapshotFilters['sort'] = 'created_at_desc';
 const DEFAULT_TAG_MODE: SnapshotFilters['tag_mode'] = 'all';
 const DEFAULT_LIMIT = 25;
 
 /**
- * Global `/snapshots` page (snapshot-uiux v1).
+ * Query-param keys mirrored to the URL (AC-6.3).
+ * `status` and `tags` are multi-value (repeated `?status=active&status=running`).
+ */
+type QueryKey = 'project_id' | 'agent_id' | 'status' | 'age' | 'tag_mode' | 'sort' | 'tags';
+
+/** All filter values are non-default when absent from the URL (URL is the seed). */
+function isAge(v: string | null): v is SnapshotFilters['age'] {
+  return v === '24h' || v === '7d' || v === '30d' || v === 'all';
+}
+function isSort(v: string | null): v is SnapshotFilters['sort'] {
+  return (
+    v === 'created_at_desc' ||
+    v === 'created_at_asc' ||
+    v === 'title_asc' ||
+    v === 'status_asc'
+  );
+}
+function isStatus(v: string | null): v is SnapshotStatus {
+  return STATUS_VALUES.includes(v as SnapshotStatus);
+}
+function isTagMode(v: string | null): v is 'all' | 'any' {
+  return v === 'all' || v === 'any';
+}
+
+/**
+ * Global `/snapshots` page (snapshots-redesign v2 — Design A).
  *
- * Hosts the snapshot-creation toggle (R15 — relocated from
- * /settings), the snapshot usage metrics strip (R16 — relocated
- * from /settings), the filter bar + paginator, the table, and the
- * detail drawer. The page is the OWNER of the list fetch per pass 4
- * amendment #8 — it calls `service.list()`, owns `records / total /
- * listLoading / listError / seenAgents`, and feeds the presentational
- * `<app-snapshots-table>` via inputs.
+ * Hosts the page-level chrome in three compact rows (control row +
+ * filter row + stats strip, total ≤ 147px above the table area),
+ * the page-owned list fetch, the table (delegated to
+ * `<app-snapshots-table>`), and the detail drawer in `mode="side"`.
  *
- * Page-owned rules (binding for implementation):
+ * Page-owned rules (binding for implementation — all preserved from v1):
  *
  * * EVERY filter-signal write (incl. `onClearFilters()`) resets
- *   `pageIndex` to 0 in the SAME signal write (amendment #10), so
- *   exactly one `list()` request fires and it carries `offset=0`.
- * * The `seenAgents` set is session-accumulated: the page's fetch
- *   handler calls `populateSeenAgents(items)` on every response, so
- *   an agent seen on page 1 stays available on page 2. The currently
- *   selected agent is also pinned (so a set filter never vanishes
- *   from the dropdown — amendment #5).
- * * The drawer component (`SnapshotDetailDrawerComponent`) owns its
- *   own detail fetch + digest + 200KB guard + retry (amendment #7).
- *   The page only owns the id-swap signal that hands the drawer its
- *   new snapshot to load.
- * * R11 in-flight race: a `listRequestId` increments on every fetch;
+ *   `pageIndex` to 0 in the SAME signal write (v1 amendment #10).
+ * * `seenAgents` is session-accumulated; `populateSeenAgents(items)`
+ *   augments it on every list response.
+ * * The drawer (`SnapshotDetailDrawerComponent`) owns its own detail
+ *   fetch + digest + 200KB guard + retry. The page only owns the
+ *   id-swap signal that hands the drawer its new snapshot.
+ * * R11 in-flight race: `listRequestId` increments on every fetch;
  *   stale responses are dropped before the state writes.
  * * R10 cold start: the project dropdown is fed by
  *   `projectService.projects()`; if empty on init, the page calls
  *   `listProjects()` exactly once.
  * * R4 250ms tag-input debounce: a private `debouncedTags` signal
- *   lags the user-input `filterTags` by 250ms, so a typing burst
- *   fires exactly one `list()`.
- * * No per-agent `snapshot_enabled` gating (amendment §9.2 — stub-free
- *   v1). The page header has only the global toggle.
+ *   lags the user-input `filterTags` by 250ms.
+ * * R15 toggle's R/W contract is preserved: `PUT /api/settings/snapshot-create`
+ *   with the v1 dirty / spinner / error-toast pattern (the visual
+ *   is now a 28px pill; the behaviour is identical).
+ * * v2 NEW (AC-6.3): every filter-signal write mirrors to the URL
+ *   via `Router.navigate(... queryParamsHandling: 'merge')`. On
+ *   `ngOnInit` the page reads `ActivatedRoute.queryParams` and seeds
+ *   the filter signals. NO new service is added — this rides on the
+ *   page's existing filter signals directly.
  */
 @Component({
   selector: 'app-snapshots',
@@ -101,13 +120,9 @@ const DEFAULT_LIMIT = 25;
     CommonModule,
     FormsModule,
     MatButtonModule,
-    MatChipsModule,
-    MatDividerModule,
-    MatFormFieldModule,
     MatIconModule,
-    MatInputModule,
+    MatMenuModule,
     MatProgressSpinnerModule,
-    MatSelectModule,
     MatSidenavModule,
     MatTooltipModule,
     SearchableSelectComponent,
@@ -124,6 +139,9 @@ export class SnapshotsComponent implements OnInit {
   private readonly projectService = inject(ProjectService);
   private readonly snackBar = inject(MatSnackBar);
   private readonly clipboard = inject(Clipboard);
+  private readonly router = inject(Router);
+  private readonly route = inject(ActivatedRoute);
+  private readonly destroyRef = inject(DestroyRef);
 
   // ── Header toggle state (mirror of /settings R15) ────────────
   readonly snapshotCreateEnabled = signal<boolean>(false);
@@ -145,11 +163,11 @@ export class SnapshotsComponent implements OnInit {
   /** New tag typed in the chip input (not yet committed to filterTags). */
   readonly pendingTagInput = signal<string>('');
 
-  // ── Paginator state — HOST-OWNED (amendment #10) ─────────────
+  // ── Paginator state — HOST-OWNED (v1 amendment #10) ─────────────
   readonly pageIndex = signal(0);
   readonly pageSize = signal(DEFAULT_LIMIT);
 
-  // ── LIST-LEVEL state — HOST-OWNED (amendment #8) ─────────────
+  // ── LIST-LEVEL state — HOST-OWNED (v1 amendment #8) ─────────────
   readonly records = signal<SnapshotRow[]>([]);
   readonly total = signal(0);
   readonly listLoading = signal(false);
@@ -162,6 +180,26 @@ export class SnapshotsComponent implements OnInit {
   // ── Drawer state (page only owns the id swap) ────────────────
   readonly drawerOpen = signal(false);
   readonly selectedSnapshotId = signal<string | null>(null);
+
+  // ── D1 (AC-A11Y.3b): page-level popover-open tracking ──────────
+  /**
+   * Number of page-level mat-menu popovers (info/metrics/status/
+   * sort) currently open, tracked from the triggers'
+   * `(menuOpened)`/`(menuClosed)` outputs. Handed to the detail
+   * drawer as its Esc gate: while this is > 0, Esc closes only the
+   * popover — never the drawer (R3-2 core semantics).
+   */
+  readonly menusOpen = signal(0);
+
+  onMenuOpened(): void {
+    this.menusOpen.update((c) => c + 1);
+  }
+
+  onMenuClosed(): void {
+    // Math.max guards a stray close (e.g. a menu destroyed mid-open
+    // during teardown) from driving the counter negative.
+    this.menusOpen.update((c) => Math.max(0, c - 1));
+  }
 
   // ── Metrics strip ─────────────────────────────────────────────
   readonly metrics = signal<SnapshotUsageMetrics | null>(null);
@@ -191,6 +229,34 @@ export class SnapshotsComponent implements OnInit {
     if (this.filterAge() !== DEFAULT_AGE) n++;
     if (this.filterSort() !== DEFAULT_SORT) n++;
     return n;
+  });
+
+  // ── Computed: stats-strip counts (one-line summary, AC-2.3) ──
+  readonly totalSnapshotCount = computed<number>(() => this.total());
+
+  /** Per-status counts derived from the in-memory `records` (page slice). */
+  readonly statusCounts = computed<Record<SnapshotStatus, number>>(() => {
+    const counts: Record<SnapshotStatus, number> = {
+      active: 0,
+      superseded: 0,
+      running: 0,
+      failed: 0,
+      interrupted: 0,
+    };
+    for (const r of this.records()) {
+      counts[r.status] = (counts[r.status] ?? 0) + 1;
+    }
+    return counts;
+  });
+
+  /** Total warmed spawns (sum of `spawn_counts_per_snapshot[].count`). */
+  readonly totalWarmedSpawns = computed<number>(() => {
+    const m = this.metrics();
+    if (!m) return 0;
+    return (m.spawn_counts_per_snapshot ?? []).reduce(
+      (sum, e) => sum + Number(e?.count ?? 0),
+      0,
+    );
   });
 
   // ── Option lists ─────────────────────────────────────────────
@@ -229,7 +295,7 @@ export class SnapshotsComponent implements OnInit {
     },
   );
 
-  // ── Agent filter options (amendment #5 — page-owned) ─────────
+  // ── Agent filter options (v1 amendment #5 — page-owned) ─────────
   // distinct(created_by_agent_id) over a session-accumulated set,
   // PLUS the currently-selected agent (so a set filter never
   // vanishes from the dropdown).
@@ -257,22 +323,19 @@ export class SnapshotsComponent implements OnInit {
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   readonly debouncedTags = signal<string[]>([]);
 
-  // ── Constructor effect: drive the list fetch on every change ─
-  // The host owns the fetch lifecycle. We watch the union of all
-  // filter signals + paginator + the debounced tags; any change
-  // fires a `list()` call (with the pageIndex-reset rule below).
-  //
-  // The effect is gated on the filter / paginator / debouncedTags
-  // signals only — it does NOT track the request-state signals
-  // (records / total / listLoading / listError / seenAgents) so the
-  // effect's own response handler does not re-trigger the effect
-  // (otherwise the list fetch would loop forever).
-  //
-  // `untracked()` inside the read paths below keeps Angular from
-  // adding the request-state signals to the dep graph during the
-  // call (defence in depth — the read paths don't subscribe
-  // either way; this just makes the intent explicit).
+  /**
+   * Last URL queryParams we wrote via the URL-sync effect. Used as a
+   * dedup key so the seed-from-URL flow does NOT immediately write
+   * the URL back to itself (which would be a no-op, but unnecessary).
+   * Keyed by `JSON.stringify` of the qp object.
+   */
+  private lastWrittenUrlKey: string | null = null;
+
+  /** Set this in tests to observe the URL-sync side effects directly. */
+  private skipUrlSync = false;
+
   constructor() {
+    // ── Filter-effect: drive the list fetch on every change ──
     effect(() => {
       // touch all the reactive sources to track them
       this.filterProjectId();
@@ -287,9 +350,169 @@ export class SnapshotsComponent implements OnInit {
       // fire the fetch (pageIndex-reset handled by callers, not here)
       untracked(() => this.fetchList());
     });
+
+    // ── URL-sync effect (AC-6.3) ──
+    // Mirrors every non-default filter value to the route's queryParams
+    // using `merge` semantics so other URL state survives. Suppressed
+    // while we are seeding the signals FROM the URL on init.
+    effect(() => {
+      // Reads every filter signal — inside the effect's reactive
+      // context this tracks them, so the effect re-runs on any change.
+      // S1 parity: the key comes from the SAME shared computation as
+      // the two seed sites' `lastWrittenUrlKey` (computeUrlQueryParams),
+      // so seed and effect keys are byte-identical by construction.
+      const qp = this.computeUrlQueryParams();
+      const key = JSON.stringify(qp);
+      if (this.skipUrlSync) {
+        return;
+      }
+      if (key === this.lastWrittenUrlKey) {
+        return;
+      }
+      this.lastWrittenUrlKey = key;
+      untracked(() => {
+        this.router.navigate(['snapshots'], {
+          queryParams: qp,
+          queryParamsHandling: 'merge',
+          replaceUrl: true,
+        });
+      });
+    });
+  }
+
+  /**
+   * Single source of truth for the URL-sync dedup key (AC-6.3, S1 parity).
+   *
+   * Builds the null-normalized queryParams object the URL-sync effect
+   * mirrors to the route: default/empty filter values are normalized to
+   * `null` so the mirrored shape is canonical. The effect's dedup key
+   * AND both seed sites' `lastWrittenUrlKey` derive from THIS one
+   * computation, so the keys are byte-identical by construction.
+   *
+   * S1 parity fix: the seed sites previously stringified RAW signal
+   * values (`status: []`, `age: 'all'`, ...) while the effect
+   * stringified the null-normalized shape — different bytes whenever a
+   * filter sat at its default (the common case), so
+   * `key === lastWrittenUrlKey` failed and every back/forward emitted
+   * a redundant `router.navigate`.
+   *
+   * Called from: the URL-sync effect (constructor), the ngOnInit seed,
+   * and the back/forward `queryParamMap` subscription seed.
+   */
+  private computeUrlQueryParams(): Record<string, string | string[] | null> {
+    const projectId = this.filterProjectId();
+    const agentId = this.filterAgentId();
+    const status = this.filterStatus();
+    const age = this.filterAge();
+    const tagMode = this.filterTagMode();
+    const sort = this.filterSort();
+    const tags = this.filterTags();
+    return {
+      project_id: projectId,
+      agent_id: agentId,
+      status: status.length ? status : null,
+      age: age !== DEFAULT_AGE ? age : null,
+      tag_mode: tagMode !== DEFAULT_TAG_MODE ? tagMode : null,
+      sort: sort !== DEFAULT_SORT ? sort : null,
+      tags: tags.length ? tags : null,
+    };
   }
 
   ngOnInit(): void {
+    // ── Seed filter signals from URL (AC-6.3) ──
+    const qp = this.route.snapshot.queryParamMap;
+    const projectId = qp.get('project_id');
+    const agentId = qp.get('agent_id');
+    const statusRaw = qp.getAll('status');
+    const ageRaw = qp.get('age');
+    const tagModeRaw = qp.get('tag_mode');
+    const sortRaw = qp.get('sort');
+    const tagsRaw = qp.getAll('tags');
+
+    if (projectId !== null) this.filterProjectId.set(projectId);
+    if (agentId !== null) this.filterAgentId.set(agentId);
+    if (statusRaw.length) {
+      const valid = statusRaw.filter(isStatus);
+      if (valid.length) this.filterStatus.set(valid);
+    }
+    if (isAge(ageRaw)) this.filterAge.set(ageRaw);
+    if (isTagMode(tagModeRaw)) this.filterTagMode.set(tagModeRaw);
+    if (isSort(sortRaw)) this.filterSort.set(sortRaw);
+    if (tagsRaw.length) {
+      // Dedup + case-insensitive
+      const dedup: string[] = [];
+      for (const t of tagsRaw) {
+        if (!dedup.includes(t)) dedup.push(t);
+      }
+      if (dedup.length) {
+        this.filterTags.set(dedup);
+        this.debouncedTags.set([...dedup]);
+      }
+    }
+    // Record the seed values as the last-written URL key so the
+    // URL-sync effect's first run (which sees the same signals)
+    // dedups and does NOT navigate. This replaces the v1
+    // suppressUrlSync + queueMicrotask dance, which is brittle in
+    // test environments where queueMicrotask may not be patched.
+    // S1 parity: computed via the SAME shared null-normalized helper
+    // as the effect's dedup key, so the bytes match even when filters
+    // sit at defaults.
+    this.lastWrittenUrlKey = JSON.stringify(this.computeUrlQueryParams());
+
+    // Re-sync on URL changes (back/forward navigation).
+    // Skip the BehaviorSubject's initial replay — we already used
+    // `route.snapshot.queryParamMap` to seed the filter signals.
+    let isFirstQueryParamEmit = true;
+    this.route.queryParamMap
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((map) => {
+        if (isFirstQueryParamEmit) {
+          isFirstQueryParamEmit = false;
+          return;
+        }
+        this.skipUrlSync = true;
+        const pid = map.get('project_id');
+        const aid = map.get('agent_id');
+        const st = map.getAll('status').filter(isStatus);
+        const ag = map.get('age');
+        const tm = map.get('tag_mode');
+        const so = map.get('sort');
+        const tg = map.getAll('tags');
+        this.filterProjectId.set(pid);
+        this.filterAgentId.set(aid);
+        this.filterStatus.set(st);
+        if (isAge(ag)) this.filterAge.set(ag);
+        if (isTagMode(tm)) this.filterTagMode.set(tm);
+        if (isSort(so)) this.filterSort.set(so);
+        this.filterTags.set(tg);
+        this.debouncedTags.set([...tg]);
+        this.pageIndex.set(0);
+        // S1 (conformance r1): seed `lastWrittenUrlKey` from the
+        // POST-seed signal values. The previous implementation set
+        // `lastWrittenUrlKey = null` and relied on `skipUrlSync`
+        // + `queueMicrotask` to suppress the URL-sync effect. That
+        // left a narrow race: if the microtask landed BEFORE the
+        // effect's re-run, the effect saw `skipUrlSync === false`,
+        // saw the freshly-mutated signals, and re-navigated with
+        // identical params — a re-navigation loop. Seeding
+        // `lastWrittenUrlKey` from the post-seed values makes the
+        // URL-sync effect's dedup check (`key === lastWrittenUrlKey`)
+        // catch the loop on every back/forward. The `skipUrlSync`
+        // + microtask dance is kept as belt-and-suspenders for the
+        // signal-write-protection case but is no longer load-bearing.
+        // S1 parity: computed via the SAME shared null-normalized
+        // helper as the effect's dedup key (computeUrlQueryParams),
+        // so the bytes match even when filters sit at defaults.
+        this.lastWrittenUrlKey = JSON.stringify(this.computeUrlQueryParams());
+        // Allow the URL-sync effect to navigate on the next
+        // USER-DRIVEN filter change. The seed above means even if
+        // the microtask races ahead of the effect, the dedup check
+        // still catches the loop.
+        queueMicrotask(() => {
+          this.skipUrlSync = false;
+        });
+      });
+
     this.loadSnapshotCreateEnabled();
     this.loadMetrics();
 
@@ -307,6 +530,21 @@ export class SnapshotsComponent implements OnInit {
   }
 
   // ── Public handlers (template-bound) ─────────────────────────
+
+  /**
+   * R15 pill click. The v1 radio+Apply+Unsaved-changes pattern is
+   * preserved (AC-5.3): clicking the pill flips the desired value
+   * and marks dirty; clicking again (when dirty) saves.
+   */
+  onTogglePillClick(): void {
+    if (!this.snapshotCreateDirty()) {
+      // First click: flip desired state, mark dirty.
+      this.onSnapshotCreateSelectionChange(!this.snapshotCreateEnabled());
+      return;
+    }
+    // Second click (while dirty): save and clear dirty state.
+    this.saveSnapshotCreateEnabled();
+  }
 
   onSnapshotCreateSelectionChange(enabled: boolean): void {
     this.snapshotCreateEnabled.set(enabled);
@@ -494,7 +732,7 @@ export class SnapshotsComponent implements OnInit {
   /**
    * Augment the session-accumulated `seenAgents` set with the
    * distinct `created_by_agent_id` values from a list response.
-   * (amendment #5/#8 — page-owned.)
+   * (v1 amendment #5/#8 — page-owned.)
    */
   private populateSeenAgents(items: SnapshotRow[]): void {
     if (!items || items.length === 0) return;
@@ -589,4 +827,70 @@ export class SnapshotsComponent implements OnInit {
           b.count - a.count || a.snapshot_id.localeCompare(b.snapshot_id),
       );
   });
+
+  // ── Template helpers (v2 chrome — control row + stats strip) ─
+
+  /** Verbatim page description text (v1 subtitle moved into a tooltip). */
+  readonly pageDescription =
+    'Browse and inspect every agent-snapshot in the system. ' +
+    'Toggle the global creation switch to opt in / out.';
+
+  /** Material icon name for each status (AC-6.1). */
+  statusIcon(s: SnapshotStatus): string {
+    switch (s) {
+      case 'active':
+        return 'check_circle';
+      case 'running':
+        return 'autorenew';
+      case 'superseded':
+        return 'history';
+      case 'failed':
+        return 'error';
+      case 'interrupted':
+        return 'warning';
+    }
+  }
+
+  /** Multi-select status toggle handler. */
+  onStatusToggle(s: SnapshotStatus): void {
+    const current = this.filterStatus();
+    if (current.includes(s)) {
+      this.onFilterStatusChange(current.filter((x) => x !== s));
+    } else {
+      this.onFilterStatusChange([...current, s]);
+    }
+  }
+
+  /** Display label for the current sort selection. */
+  sortLabel(): string {
+    const opt = this.sortOptions.find((o) => o.value === this.filterSort());
+    return opt?.label ?? '';
+  }
+
+  /** Aria-label for the metrics pill trigger (S2 conformance r1).
+   * Spec §2.2 mandates "Snapshot metrics: N captures, M warmed" — the
+   * same shape as the click popover's headline, so SR users hear the
+   * same totals via the trigger's accessible name. */
+  metricsPillAriaLabel(): string {
+    const n = this.totalSnapshotCount();
+    const w = this.totalWarmedSpawns();
+    return `Snapshot metrics: ${n} capture${n === 1 ? '' : 's'}, ${w} warmed spawn${w === 1 ? '' : 's'}`;
+  }
+
+  /**
+   * Look up the warmed-spawn count for the currently-open snapshot,
+   * if any. Used by the drawer to render the v2 "Last warmed" row.
+   * Returns `null` when the snapshot is not in the metrics rollup
+   * (drawer renders the `—` placeholder).
+   */
+  warmedSpawnCountForSelected(): number | null {
+    const id = this.selectedSnapshotId();
+    if (!id) return null;
+    const m = this.metrics();
+    if (!m) return null;
+    const hit = (m.spawn_counts_per_snapshot ?? []).find(
+      (e) => e.snapshot_id === id,
+    );
+    return hit ? hit.count : null;
+  }
 }

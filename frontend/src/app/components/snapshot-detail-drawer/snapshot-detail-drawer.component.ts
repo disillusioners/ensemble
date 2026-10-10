@@ -2,7 +2,11 @@ import {
   ChangeDetectionStrategy,
   Component,
   computed,
+  DestroyRef,
+  DOCUMENT,
   effect,
+  ElementRef,
+  HostListener,
   inject,
   input,
   output,
@@ -16,11 +20,13 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Clipboard } from '@angular/cdk/clipboard';
+import { CdkTrapFocus } from '@angular/cdk/a11y';
 import { MatSnackBar } from '@angular/material/snack-bar';
 
 import { SnapshotService } from '../../services/snapshot.service';
 import {
   SnapshotDetailResponse,
+  SnapshotStatus,
 } from '../../models/snapshot.model';
 
 /** 200KB digest guard (brief §4(e)). */
@@ -70,16 +76,33 @@ const DIGEST_GUARD_BYTES = 200 * 1024;
     MatIconModule,
     MatProgressSpinnerModule,
     MatTooltipModule,
+    CdkTrapFocus,
   ],
   templateUrl: './snapshot-detail-drawer.component.html',
   styleUrl: './snapshot-detail-drawer.component.scss',
 })
 export class SnapshotDetailDrawerComponent {
-  // ── Inputs (pass 4 #7) ───────────────────────────────────────
+  // ── Inputs (v1 pass 4 #7) ───────────────────────────────────────
   /** The id of the snapshot to load. The drawer fetches its own detail. */
   readonly snapshotId = input.required<string>();
-  /** Reserved for future full-page reuse (defaults to drawer mode). */
-  readonly isDrawerMode = input<boolean>(true);
+  /**
+   * Warmed-spawn count for the open snapshot (v2 AC-4.7). When the
+   * value is non-null, the Timestamps section adds a 'Last warmed'
+   * kv-row showing the count. When null the row shows '—'.
+   * Sourced from `SnapshotUsageMetrics.spawn_counts_per_snapshot` by
+   * the page host; the drawer's own detail fetch does NOT carry the
+   * metric (the v1 BE contract — D-5).
+   */
+  readonly warmedSpawnCount = input<number | null>(null);
+
+  /**
+   * D1 (AC-A11Y.3b): number of page-level popovers (info/metrics/
+   * status/sort mat-menus) currently open. Tracked by the host page
+   * from the triggers' `(menuOpened)`/`(menuClosed)` outputs and
+   * handed here as the Esc GATE — a popover-Esc must close ONLY the
+   * popover, never the drawer (R3-2 core semantics).
+   */
+  readonly menusOpen = input<number>(0);
 
   // ── Outputs ──────────────────────────────────────────────────
   readonly close = output<void>();
@@ -91,6 +114,80 @@ export class SnapshotDetailDrawerComponent {
   private readonly snapshotService = inject(SnapshotService);
   private readonly clipboard = inject(Clipboard);
   private readonly snackBar = inject(MatSnackBar);
+  private readonly document = inject(DOCUMENT);
+  private readonly destroyRef = inject(DestroyRef);
+  /** Host element — used by the document-level Esc handler's scope check. */
+  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
+
+  // ── Focus restoration (AC-A11Y-3, B2 conformance r1) ───────────
+  // The row the user clicked had focus when the drawer opened. When
+  // the drawer closes, focus must return to that row. We capture
+  // `document.activeElement` SYNCHRONOUSLY in the constructor —
+  // BEFORE `cdkTrapFocus` activates (the trap shifts focus into the
+  // drawer to the `cdkFocusInitial`-marked close button). The
+  // captured element survives in `previouslyFocusedElement` until
+  // either the user closes the drawer (`onClose` emits, the host
+  // tears down the component) or the component is otherwise
+  // destroyed. We restore focus on `DestroyRef.onDestroy` so all
+  // close paths (Esc, close-button click, host onCloseDrawer) recover.
+  private previouslyFocusedElement: HTMLElement | null = null;
+
+  // ── D1 (AC-A11Y.3b): GATED document-level Esc handler ───────────
+  /**
+   * Closes the drawer on Escape pressed ANYWHERE (drawer focus OR
+   * page focus — e.g. the popover trigger that just regained focus),
+   * UNLESS a page-level popover is currently open.
+   *
+   * R3-2 semantics are PRESERVED by the gate, not by event scoping:
+   * the Esc that closes an open popover must never also close the
+   * drawer. The gate therefore reads `menusOpen` and returns early
+   * while any popover is open.
+   *
+   * RACE (why CAPTURE phase — the trap the design calls out): when
+   * Esc closes an open mat-menu, CDK's overlay keydown handler runs
+   * in the BUBBLE phase (the overlay pane is deeper in the DOM than
+   * a document-level listener) and closes the menu SYNCHRONOUSLY —
+   * emitting `menuClosed`, so the page decrements `menusOpen` —
+   * BEFORE a bubble-phase document listener would run. A bubble-
+   * phase listener would then read the DECREMENTED count (0), think
+   * no popover is open, and close the drawer — resurrecting the
+   * double-close. A CAPTURE-phase listener
+   * (`addEventListener(..., true)`) runs before the overlay's bubble
+   * handler, so it sees the PRE-Esc state (count still includes the
+   * open menu), gates correctly, and the popover closes alone.
+   *
+   * Registered on `document` with capture=true in the constructor;
+   * removed via `DestroyRef` (below) so the listener never outlives
+   * the drawer.
+   */
+  private readonly docEscapeHandler = (event: Event): void => {
+    if (!(event instanceof KeyboardEvent)) {
+      return;
+    }
+    // Case-insensitive match — mirrors Angular's `keydown.escape`
+    // host-selector semantics (the browser always sends 'Escape',
+    // but synthetic events in tests historically use lowercase).
+    if (event.key.toLowerCase() !== 'escape') {
+      return;
+    }
+    // Gate 1 — popover open: Esc belongs to the popover (R3-2).
+    // The CDK overlay's own Esc handling will close it in the bubble
+    // phase, after this handler has already backed off.
+    if (this.menusOpen() > 0) {
+      return;
+    }
+    // Gate 2 — Esc originating INSIDE the drawer subtree is owned by
+    // the component-scoped HostListener below; handling it here too
+    // would double-emit `close` for a single keypress.
+    const target = event.target;
+    if (target instanceof Node) {
+      const hostEl = this.host.nativeElement;
+      if (hostEl === target || hostEl.contains(target)) {
+        return;
+      }
+    }
+    this.close.emit();
+  };
 
   // ── Detail state (drawer-owned) ─────────────────────────────
   readonly detail = signal<SnapshotDetailResponse | null>(null);
@@ -112,49 +209,115 @@ export class SnapshotDetailDrawerComponent {
 
   // ── Constructor effect: re-fetch on snapshotId change ───────
   constructor() {
-    effect((onCleanup) => {
-      const id = this.snapshotId();
-      if (!id) {
-        this.resetDetailState();
-        return;
-      }
-      // Reset every per-snapshot signal so the drawer shows the
-      // loading state immediately when the id swaps.
-      this.detailLoading.set(true);
-      this.detailError.set(null);
-      this.digest.set(null);
-      this.digestError.set(null);
-      this.showDigest.set(false);
+    effect(
+      (onCleanup) => {
+        const id = this.snapshotId();
+        if (!id) {
+          this.resetDetailState();
+          return;
+        }
+        // Reset every per-snapshot signal so the drawer shows the
+        // loading state immediately when the id swaps.
+        this.detailLoading.set(true);
+        this.detailError.set(null);
+        this.digest.set(null);
+        this.digestError.set(null);
+        this.showDigest.set(false);
 
-      // Increment-and-capture the request id BEFORE subscribing so a
-      // late-resolving response for an older snapshotId is discarded
-      // (deep-review 🟡#3 — mirrors digestRequestId below).
-      const detailReqId = ++this.detailRequestId;
-      this.snapshotService
-        .getById(id, { includeDigest: false })
-        .subscribe({
-          next: (resp) => {
-            if (this.detailRequestId !== detailReqId) {
-              return; // stale — a newer request has already started
-            }
-            this.detail.set(resp);
-            this.detailLoading.set(false);
-          },
-          error: (err: { message?: string }) => {
-            if (this.detailRequestId !== detailReqId) {
-              return; // stale
-            }
-            this.detailError.set(
-              this.toMessage(err?.message || 'Failed to load snapshot details'),
-            );
-            this.detailLoading.set(false);
-          },
+        // Increment-and-capture the request id BEFORE subscribing so a
+        // late-resolving response for an older snapshotId is discarded
+        // (deep-review 🟡#3 — mirrors digestRequestId below).
+        const detailReqId = ++this.detailRequestId;
+        this.snapshotService
+          .getById(id, { includeDigest: false })
+          .subscribe({
+            next: (resp) => {
+              if (this.detailRequestId !== detailReqId) {
+                return; // stale — a newer request has already started
+              }
+              this.detail.set(resp);
+              this.detailLoading.set(false);
+            },
+            error: (err: { message?: string }) => {
+              if (this.detailRequestId !== detailReqId) {
+                return; // stale
+              }
+              this.detailError.set(
+                this.toMessage(err?.message || 'Failed to load snapshot details'),
+              );
+              this.detailLoading.set(false);
+            },
+          });
+
+        onCleanup(() => {
+          // The HTTP observable completes on its own; nothing to do.
         });
+      },
+      // forward-compat nit (confiler): signal writes inside an effect
+      // require `allowSignalWrites: true` in modern Angular. The
+      // detail/digest signals reset above + onCleanup would otherwise
+      // log an `NG0600` warning at runtime.
+      { allowSignalWrites: true },
+    );
 
-      onCleanup(() => {
-        // The HTTP observable completes on its own; nothing to do.
-      });
+    // ── B2 (AC-A11Y-3): capture the row that opened the drawer so
+    //    we can restore focus when the drawer closes. We do this
+    //    SYNCHRONOUSLY in the constructor (before `cdkTrapFocus`
+    //    activates and shifts focus into the drawer to the
+    //    `cdkFocusInitial`-marked close button). queueMicrotask
+    //    would land AFTER cdkTrapFocus, by which time the row is no
+    //    longer `document.activeElement`.
+    const active = this.document.activeElement;
+    if (active instanceof HTMLElement && active !== this.document.body) {
+      this.previouslyFocusedElement = active;
+    }
+
+    // ── B2 (AC-A11Y-3): restore focus on drawer teardown. All close
+    //    paths (Esc HostListener, close-button click, host
+    //    `onCloseDrawer`) ultimately destroy this component, so a
+    //    single `DestroyRef.onDestroy` covers them.
+    this.destroyRef.onDestroy(() => {
+      const el = this.previouslyFocusedElement;
+      if (el && typeof el.focus === 'function') {
+        // The element may have been removed from the DOM (e.g. a
+        // table row that was filtered out). `isConnected` guards
+        // against the DOMException for disconnected subtrees.
+        if (el.isConnected) {
+          el.focus();
+        }
+      }
     });
+
+    // ── D1 (AC-A11Y.3b): register the gated document-level Esc
+    //    handler in the CAPTURE phase (see docEscapeHandler for the
+    //    race rationale). Removed on destroy so it never outlives
+    //    the drawer.
+    this.document.addEventListener('keydown', this.docEscapeHandler, true);
+    this.destroyRef.onDestroy(() => {
+      this.document.removeEventListener('keydown', this.docEscapeHandler, true);
+    });
+  }
+
+  /**
+   * R3 (AC-A11Y-3, R3-2): Escape closes the drawer. `cdkTrapFocus`
+   * provides the focus trap (Tab cycling inside the drawer); Esc is
+   * the only standard way out of a trap.
+   *
+   * This component-scoped listener owns Esc events originating
+   * INSIDE the drawer subtree (they bubble up to the host). Esc
+   * events from ANYWHERE ELSE (page focus, e.g. the popover trigger
+   * that regained focus after its popover closed) are owned by the
+   * GATED document-level capture handler (`docEscapeHandler`, D1 /
+   * AC-A11Y.3b), which closes the drawer only when no page popover
+   * is open — CDK overlay content (mat-menu popovers, snackbars)
+   * mounts OUTSIDE this host subtree, and popover-Esc must never
+   * close the drawer. The two listeners are mutually exclusive per
+   * keypress (the document handler skips targets inside the host),
+   * so a single Esc emits `close` exactly once.
+   */
+  @HostListener('keydown.escape')
+  onEscapeKey(): void {
+    this.close.emit();
   }
 
   // ── Computed helpers (template-facing) ──────────────────────
@@ -180,6 +343,39 @@ export class SnapshotDetailDrawerComponent {
   truncatedTargetInstanceId = computed<string>(() =>
     this.truncateId(this.detail()?.target_instance_id),
   );
+
+  /**
+   * Stable id for the drawer title (used by `aria-labelledby`).
+   * Material's drawer also wraps the panel, but our header is the
+   * accessible label target for AC-A11Y-1.
+   */
+  readonly drawerTitleId = computed<string>(() => 'drawer-title-snapshot');
+
+  /**
+   * Tooltip text for the 'Last warmed' '—' placeholder (v2 AC-4.7).
+   * The BE does not yet surface per-snapshot warm timestamps (D-5);
+   * when the host's metrics carry a non-null count for the open
+   * snapshot, the value is shown directly.
+   */
+  readonly warmTooltip =
+    'Warmed-spawn timestamps are not yet surfaced in v2 — the count ' +
+    'shown elsewhere comes from the global metrics rollup.';
+
+  /** Material icon for a status chip (AC-6.1; mirrors the table). */
+  statusIcon(s: SnapshotStatus): string {
+    switch (s) {
+      case 'active':
+        return 'check_circle';
+      case 'running':
+        return 'autorenew';
+      case 'superseded':
+        return 'history';
+      case 'failed':
+        return 'error';
+      case 'interrupted':
+        return 'warning';
+    }
+  }
 
   // ── Template handlers ───────────────────────────────────────
 

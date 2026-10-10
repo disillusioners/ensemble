@@ -1,328 +1,348 @@
-<div class="snapshots-container">
-  <!-- Header -->
-  <header class="snapshots-header">
-    <div class="header-left">
+<!-- Snapshots page — v2 redesign (Design A, per
+     .agents/shared/planning/snapshots-redesign/design/design-spec.md).
+     Page shell: control row (56px) → filter row (52px) → stats strip (36px)
+     → table area (fills remaining viewport) + drawer (mode="side"). -->
+<main class="snapshots-page" aria-label="Snapshots">
+  <!-- ── Control row: H1 + info icon + toggle pill + metrics pill + refresh (56px) ── -->
+  <div class="control-row">
+    <div class="control-left">
       <h1 class="page-title">Snapshots</h1>
-      <p class="page-subtitle">
-        Browse and inspect every agent-snapshot in the system.
-        Toggle the global creation switch to opt in / out.
-      </p>
-    </div>
-  </header>
-
-  <!-- Header toggle: Agent Snapshots (R15) — relocated from /settings.
-       The radio + Apply pattern matches the existing /settings code. -->
-  <section class="toggle-section" aria-label="Snapshot creation toggle">
-    <div class="toggle-row">
-      <div class="toggle-text">
-        <span class="toggle-title">Snapshot creation</span>
-        <span class="toggle-hint">
-          When <strong>Enabled</strong>, the <code>snapshot_create</code> tool
-          captures instance experience. When <strong>Disabled</strong>,
-          captures are refused and <code>spawn_hot_instance</code> falls back
-          to a cold spawn.
+      <button
+        type="button"
+        class="info-icon-btn"
+        [matMenuTriggerFor]="infoMenu"
+        (menuOpened)="onMenuOpened()"
+        (menuClosed)="onMenuClosed()"
+        aria-label="Page description"
+      >
+        <mat-icon>info</mat-icon>
+      </button>
+      <mat-menu #infoMenu="matMenu" class="filter-menu-panel">
+        <div
+          class="info-popover"
+          (click)="$event.stopPropagation()"
+          role="dialog"
+          aria-label="Page description"
+        >
+          <p class="info-popover-text">{{ pageDescription }}</p>
+        </div>
+      </mat-menu>
+      <button
+        type="button"
+        class="toggle-pill"
+        [class.on]="snapshotCreateEnabled()"
+        [class.off]="!snapshotCreateEnabled()"
+        [class.dirty]="snapshotCreateDirty()"
+        [class.saving]="savingSnapshotCreate()"
+        [disabled]="savingSnapshotCreate()"
+        (click)="onTogglePillClick()"
+        [attr.aria-label]="
+          'Snapshot creation: ' + (snapshotCreateEnabled() ? 'ON' : 'OFF') +
+          (snapshotCreateDirty() ? ' (unsaved)' : '')
+        "
+      >
+        <span class="pill-label">Snapshot creation:</span>
+        <span class="pill-state">{{ snapshotCreateEnabled() ? 'ON' : 'OFF' }}</span>
+        <span class="switch" aria-hidden="true">
+          <span class="switch-knob"></span>
         </span>
-      </div>
-
-      <div class="toggle-controls" role="radiogroup" aria-label="Snapshot create preference">
-        <label
-          class="editor-option"
-          [class.selected]="snapshotCreateEnabled() === true"
+      </button>
+    </div>
+    <div class="control-right">
+      <button
+        type="button"
+        class="metrics-pill"
+        [matMenuTriggerFor]="metricsMenu"
+        (menuOpened)="onMenuOpened()"
+        (menuClosed)="onMenuClosed()"
+        [attr.aria-label]="metricsPillAriaLabel()"
+        data-test="metrics-capture-card"
+      >
+        <mat-icon>insights</mat-icon>
+        <span>
+          <span class="num">{{ totalSnapshotCount() }}</span> captures ·
+          <span class="num">{{ totalWarmedSpawns() }}</span> warmed
+        </span>
+      </button>
+      <mat-menu #metricsMenu="matMenu" class="filter-menu-panel">
+        <div
+          class="metrics-popover"
+          (click)="$event.stopPropagation()"
+          role="dialog"
+          aria-label="Snapshot metrics breakdown"
         >
-          <input
-            type="radio"
-            name="snapshot-create-preference"
-            value="on"
-            [checked]="snapshotCreateEnabled() === true"
-            (change)="onSnapshotCreateSelectionChange(true)"
-            [disabled]="savingSnapshotCreate()"
-          />
-          <span class="editor-option-label">Enabled</span>
-        </label>
-        <label
-          class="editor-option"
-          [class.selected]="snapshotCreateEnabled() === false"
-        >
-          <input
-            type="radio"
-            name="snapshot-create-preference"
-            value="off"
-            [checked]="snapshotCreateEnabled() === false"
-            (change)="onSnapshotCreateSelectionChange(false)"
-            [disabled]="savingSnapshotCreate()"
-          />
-          <span class="editor-option-label">Disabled</span>
-        </label>
-      </div>
-
-      <div class="toggle-actions">
-        <button
-          mat-raised-button
-          color="primary"
-          (click)="saveSnapshotCreateEnabled()"
-          [disabled]="!snapshotCreateDirty() || savingSnapshotCreate()"
-        >
-          @if (savingSnapshotCreate()) {
-            <mat-progress-spinner
-              diameter="18"
-              mode="indeterminate"
-              class="apply-spinner"
-            ></mat-progress-spinner>
-            <span>Applying...</span>
+          <p class="metrics-popover-headline">
+            <span class="num">{{ totalSnapshotCount() }}</span>
+            capture{{ totalSnapshotCount() === 1 ? '' : 's' }}
+            <span class="sep">·</span>
+            <span class="num">{{ totalWarmedSpawns() }}</span>
+            warmed spawn{{ totalWarmedSpawns() === 1 ? '' : 's' }}
+          </p>
+          <div class="metrics-popover-section-label">Per-agent captures</div>
+          @if (metricsCaptureEntries().length) {
+            <ul class="metrics-popover-agent-list">
+              @for (e of metricsCaptureEntries(); track e.agent) {
+                <li class="metrics-popover-agent-row">
+                  <span class="agent">{{ e.agent }}</span>
+                  <span class="count">{{ e.created }}</span>
+                </li>
+              }
+            </ul>
           } @else {
-            <span>Apply</span>
+            <p class="metrics-popover-empty">No agent captures yet.</p>
           }
-        </button>
-        @if (snapshotCreateDirty() && !savingSnapshotCreate()) {
-          <span class="dirty-hint">Unsaved changes</span>
-        }
-      </div>
-    </div>
-  </section>
-
-  <!-- Metrics strip (R16) — Capture counts + Warmed snapshots. -->
-  <section class="metrics-strip" aria-label="Snapshot usage metrics">
-    <div class="metrics-grid">
-      <!-- Capture counts card (data-test="metrics-capture-card") -->
-      <div class="metric-card" data-test="metrics-capture-card">
-        <div class="metric-card-header">
-          <mat-icon>add_circle_outline</mat-icon>
-          <h3>Capture counts</h3>
         </div>
-        @if (metricsLoading()) {
-          <div class="metric-skeleton">
-            <div class="skeleton-line"></div>
-            <div class="skeleton-line"></div>
-            <div class="skeleton-line short"></div>
-          </div>
-        } @else if (metricsError()) {
-          <div class="metric-error">
-            <span>{{ metricsError() }}</span>
-            <button mat-button (click)="onRetryMetrics()">
-              <mat-icon>refresh</mat-icon>
-              Retry
-            </button>
-          </div>
-        } @else if (metricsCaptureEntries().length === 0) {
-          <div class="metric-empty">No captures yet.</div>
-        } @else {
-          <ul class="metrics-list">
-            @for (entry of metricsCaptureEntries(); track entry.agent) {
-              <li>
-                <span class="metrics-agent">{{ entry.agent }}</span>
-                <span class="metrics-count">
-                  {{ entry.created }} capture{{ entry.created === 1 ? '' : 's' }}
-                </span>
-              </li>
-            }
-          </ul>
-        }
-      </div>
-
-      <!-- Warmed snapshots card -->
-      <div class="metric-card">
-        <div class="metric-card-header">
-          <mat-icon>local_fire_department</mat-icon>
-          <h3>Warmed snapshots</h3>
-        </div>
-        @if (metricsLoading()) {
-          <div class="metric-skeleton">
-            <div class="skeleton-line"></div>
-            <div class="skeleton-line short"></div>
-          </div>
-        } @else if (metricsError()) {
-          <div class="metric-error">
-            <span>{{ metricsError() }}</span>
-            <button mat-button (click)="onRetryMetrics()">
-              <mat-icon>refresh</mat-icon>
-              Retry
-            </button>
-          </div>
-        } @else if (metricsSpawnEntries().length === 0) {
-          <!-- Per design-spec §4.3: Warmed card hidden when empty -->
-        } @else {
-          <h4 class="metrics-subheading">Warmed snapshots</h4>
-          <ul class="metrics-list">
-            @for (entry of metricsSpawnEntries(); track entry.snapshot_id) {
-              <li>
-                <span class="metrics-agent">{{ entry.snapshot_id }}</span>
-                <span class="metrics-count">
-                  {{ entry.count }} warm spawn{{ entry.count === 1 ? '' : 's' }}
-                </span>
-              </li>
-            }
-          </ul>
-        }
-      </div>
+      </mat-menu>
+      <button
+        type="button"
+        class="icon-btn"
+        (click)="onRetryList()"
+        matTooltip="Refresh"
+        aria-label="Refresh"
+      >
+        <mat-icon>refresh</mat-icon>
+      </button>
     </div>
-    <p class="metrics-footer">
-      Monitoring only — these counters never feed the search ranking.
-    </p>
-  </section>
+  </div>
 
-  <mat-divider></mat-divider>
+  <!-- ── Filter row: 5 v1 facets + tag input + sort + active badge + clear (52px) ── -->
+  <div class="filter-row" role="group" aria-label="Snapshot filters">
+    <app-searchable-select
+      class="filter-searchable filter-project"
+      label="Project"
+      placeholder="All projects"
+      [options]="projectOptions()"
+      [ngModel]="filterProjectId()"
+      (ngModelChange)="onFilterProjectChange($event)"
+      aria-label="Filter by project"
+    ></app-searchable-select>
 
-  <!-- Filter bar -->
-  <section class="filter-bar" aria-label="Filter snapshots">
-    <div class="filter-row">
-      <app-searchable-select
-        class="filter-field"
-        label="Project"
-        placeholder="Search projects…"
-        [options]="projectOptions()"
-        [ngModel]="filterProjectId()"
-        (ngModelChange)="onFilterProjectChange($event)"
-      ></app-searchable-select>
+    <app-searchable-select
+      class="filter-searchable filter-agent"
+      label="Agent"
+      placeholder="All agents"
+      [options]="agentOptions()"
+      [ngModel]="filterAgentId()"
+      (ngModelChange)="onFilterAgentChange($event)"
+      aria-label="Filter by agent"
+    ></app-searchable-select>
 
-      <app-searchable-select
-        class="filter-field"
-        label="Agent"
-        placeholder="Search agents…"
-        [options]="agentOptions()"
-        [ngModel]="filterAgentId()"
-        (ngModelChange)="onFilterAgentChange($event)"
-      ></app-searchable-select>
-
-      <mat-form-field appearance="outline" class="filter-field sort-field">
-        <mat-label>Sort</mat-label>
-        <mat-select
-          [value]="filterSort()"
-          (valueChange)="onFilterSortChange($event)"
-        >
-          @for (opt of sortOptions; track opt.value) {
-            <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
-          }
-        </mat-select>
-      </mat-form-field>
-    </div>
-
-    <div class="filter-row">
-      <div class="filter-group">
-        <span class="filter-label">Status</span>
-        <mat-chip-listbox
-          multiple
-          aria-label="Filter by status"
-          [value]="filterStatus()"
-          (change)="onFilterStatusChange($event.value || [])"
-        >
-          @for (s of statusOptions; track s) {
-            <mat-chip-option [value]="s" [selected]="filterStatus().includes(s)">
+    <button
+      type="button"
+      class="filter-control filter-status-btn"
+      [class.active]="filterStatus().length > 0"
+      [matTooltip]="
+        'Filter by status (' + filterStatus().length + ' selected)'
+      "
+      [matMenuTriggerFor]="statusMenu"
+      (menuOpened)="onMenuOpened()"
+      (menuClosed)="onMenuClosed()"
+      aria-label="Filter by status ({{ filterStatus().length }} selected)"
+      data-test="filter-status"
+    >
+      <mat-icon>label</mat-icon>
+      <span class="label">Status</span>
+      @if (filterStatus().length > 0) {
+        <span class="count" aria-hidden="true">{{ filterStatus().length }}</span>
+      }
+    </button>
+    <mat-menu #statusMenu="matMenu" class="filter-menu-panel">
+      <div
+        class="status-menu"
+        (click)="$event.stopPropagation()"
+        role="dialog"
+        aria-label="Status filter"
+      >
+        @for (s of statusOptions; track s) {
+          <label
+            class="status-menu-item"
+            [class.selected]="filterStatus().includes(s)"
+          >
+            <input
+              type="checkbox"
+              [checked]="filterStatus().includes(s)"
+              (change)="onStatusToggle(s)"
+            />
+            <span class="status-chip-inline" [class]="'status-chip-inline status-' + s">
+              <mat-icon class="status-icon">{{ statusIcon(s) }}</mat-icon>
               {{ s }}
-            </mat-chip-option>
-          }
-        </mat-chip-listbox>
+            </span>
+          </label>
+        }
       </div>
+    </mat-menu>
 
-      <div class="filter-group">
-        <span class="filter-label">Age</span>
-        <mat-chip-listbox
-          aria-label="Filter by age"
-          [value]="filterAge()"
-          (change)="onFilterAgeChange($event.value || 'all')"
-        >
-          @for (a of ageOptions; track a.value) {
-            <mat-chip-option [value]="a.value" [selected]="filterAge() === a.value">
-              {{ a.label }}
-            </mat-chip-option>
-          }
-        </mat-chip-listbox>
-      </div>
-
-      <div class="filter-group">
-        <span class="filter-label">Tag mode</span>
+    <div
+      class="age-seg"
+      role="group"
+      aria-label="Filter by age"
+      data-test="filter-age"
+    >
+      @for (a of ageOptions; track a.value) {
         <button
-          mat-stroked-button
-          (click)="onToggleTagMode()"
-          class="tag-mode-btn"
-          [matTooltip]="'Match ' + (filterTagMode() === 'all' ? 'all' : 'any') + ' tags'"
+          type="button"
+          [class.selected]="filterAge() === a.value"
+          (click)="onFilterAgeChange(a.value)"
         >
-          <mat-icon>{{ filterTagMode() === 'all' ? 'all_inclusive' : 'done_all' }}</mat-icon>
-          {{ filterTagMode() === 'all' ? 'all' : 'any' }}
-        </button>
-      </div>
-    </div>
-
-    <div class="filter-row">
-      <div class="filter-group tag-input-group">
-        <span class="filter-label">Tags</span>
-        <mat-form-field appearance="outline" class="tag-input-field">
-          <mat-label>Add tag (e.g. <code>domain:api</code>) and press Enter</mat-label>
-          <input
-            matInput
-            [value]="pendingTagInput()"
-            (input)="pendingTagInput.set($any($event.target).value)"
-            (keydown)="onTagInputKey($event)"
-            placeholder="domain:api"
-            data-test="filter-tag-input"
-          />
-        </mat-form-field>
-        <div class="tag-chips">
-          @for (tag of filterTags(); track tag) {
-            <mat-chip
-              [removable]="true"
-              (removed)="onRemoveTag(tag)"
-              class="filter-tag-chip"
-            >
-              {{ tag }}
-              <button matChipRemove [attr.aria-label]="'remove tag ' + tag">
-                <mat-icon>cancel</mat-icon>
-              </button>
-            </mat-chip>
-          }
-        </div>
-      </div>
-    </div>
-
-    <div class="filter-row actions-row">
-      @if (hasActiveFilters()) {
-        <span class="active-filter-badge" aria-live="polite">
-          {{ activeFilterCount() }} active filter{{ activeFilterCount() === 1 ? '' : 's' }}
-        </span>
-        <button
-          mat-button
-          (click)="onClearFilters()"
-          class="clear-filters-btn"
-        >
-          <mat-icon>clear</mat-icon>
-          Clear filters
+          {{ a.label }}
         </button>
       }
     </div>
-  </section>
 
-  <!-- Table + drawer (mat-drawer-container end drawer for detail).
-       The mat-drawer-container renders a Material-owned backdrop
-       element as a descendant `<div class="mat-drawer-backdrop">`.
-       The container carries `data-test="drawer-backdrop"` and the e2e
-       drill-locates `.mat-drawer-backdrop` under the container for the
-       actual click target (step 11b). No `[backdropClass]` binding is
-       valid on `<mat-drawer-container>` in this Material version
-       (NG8002) — the container has only `autosize` / `hasBackdrop`
-       inputs; the backdrop styling is reached via CSS descendant on
-       the Material-rendered backdrop element. -->
+    <button
+      type="button"
+      class="filter-pill tag-mode-pill"
+      [matTooltip]="'Match ' + (filterTagMode() === 'all' ? 'all' : 'any') + ' tags'"
+      (click)="onToggleTagMode()"
+      [attr.aria-label]="'Tag match mode: ' + filterTagMode()"
+      data-test="filter-tag-mode"
+    >
+      <mat-icon>{{ filterTagMode() === 'all' ? 'all_inclusive' : 'done_all' }}</mat-icon>
+      <span class="label">{{ filterTagMode() }}</span>
+    </button>
+
+    <div class="tag-input-wrap">
+      <mat-icon class="tag-input-icon">sell</mat-icon>
+      <input
+        type="text"
+        class="tag-input"
+        placeholder="Add tag…"
+        [value]="pendingTagInput()"
+        (input)="pendingTagInput.set($any($event.target).value)"
+        (keydown)="onTagInputKey($event)"
+        aria-label="Add tag"
+        data-test="filter-tag-input"
+      />
+      @if (filterTags().length) {
+        <div class="tag-chips" aria-label="Active tags">
+          @for (tag of filterTags(); track tag) {
+            <span class="filter-tag-chip">
+              {{ tag }}
+              <button
+                type="button"
+                class="tag-chip-x"
+                (click)="onRemoveTag(tag)"
+                [attr.aria-label]="'remove tag ' + tag"
+              >
+                <mat-icon>cancel</mat-icon>
+              </button>
+            </span>
+          }
+        </div>
+      }
+    </div>
+
+    <span class="filter-spacer"></span>
+
+    <button
+      type="button"
+      class="filter-pill sort-pill"
+      [matMenuTriggerFor]="sortMenu"
+      (menuOpened)="onMenuOpened()"
+      (menuClosed)="onMenuClosed()"
+      aria-label="Sort snapshots"
+      data-test="filter-sort"
+    >
+      <mat-icon>sort</mat-icon>
+      <span class="label">Sort:</span>
+      <span class="value">{{ sortLabel() }}</span>
+    </button>
+    <mat-menu #sortMenu="matMenu" class="filter-menu-panel">
+      <div (click)="$event.stopPropagation()" class="sort-menu" role="dialog" aria-label="Sort">
+        @for (opt of sortOptions; track opt.value) {
+          <button
+            type="button"
+            class="sort-menu-item"
+            [class.selected]="filterSort() === opt.value"
+            (click)="onFilterSortChange(opt.value)"
+          >
+            {{ opt.label }}
+          </button>
+        }
+      </div>
+    </mat-menu>
+
+    @if (hasActiveFilters()) {
+      <span
+        class="active-badge"
+        aria-live="polite"
+        data-test="filter-active-count"
+      >
+        {{ activeFilterCount() }} filter{{ activeFilterCount() === 1 ? '' : 's' }}
+      </span>
+      <button
+        type="button"
+        class="clear-btn"
+        (click)="onClearFilters()"
+        aria-label="Clear all filters"
+        data-test="filter-clear"
+      >
+        <mat-icon>clear</mat-icon>
+        Clear filters
+      </button>
+    }
+  </div>
+
+  <!-- ── Stats strip (36px) — one-line summary (AC-2.3) ── -->
+  <aside
+    class="stats-strip"
+    aria-label="Snapshot status summary"
+  >
+    <span class="stats-segment">
+      <strong>{{ totalSnapshotCount() }}</strong>
+      {{ totalSnapshotCount() === 1 ? 'snapshot' : 'snapshots' }}
+    </span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span class="stats-segment">
+      <span class="dot dot-active" aria-hidden="true"></span>
+      <span class="stats-num">{{ statusCounts().active }}</span> active
+    </span>
+    <span class="stats-segment">
+      <span class="dot dot-running" aria-hidden="true"></span>
+      <span class="stats-num">{{ statusCounts().running }}</span> running
+    </span>
+    <span class="stats-segment">
+      <span class="dot dot-failed" aria-hidden="true"></span>
+      <span class="stats-num">{{ statusCounts().failed }}</span> failed
+    </span>
+    <span class="stats-segment">
+      <span class="dot dot-interrupted" aria-hidden="true"></span>
+      <span class="stats-num">{{ statusCounts().interrupted }}</span> interrupted
+    </span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span class="stats-segment">
+      <strong>{{ totalWarmedSpawns() }}</strong> total warmed spawns
+    </span>
+  </aside>
+
+  <!-- ── Table area + drawer (side-mode). The mat-drawer-container
+       carries data-test="drawer-backdrop" for the v1 e2e contract;
+       the drawer is mode="side" (pushes table left to flex:1.5). ── -->
   <mat-drawer-container
-    class="snapshots-drawer-container"
-    [hasBackdrop]="true"
+    class="drawer-region"
     data-test="drawer-backdrop"
   >
-    <mat-drawer-content class="snapshots-content">
-      <app-snapshots-table
-        [rows]="records()"
-        [total]="total()"
-        [loading]="listLoading()"
-        [error]="listError()"
-        [pageIndex]="pageIndex()"
-        [pageSize]="pageSize()"
-        [hasActiveFilters]="hasActiveFilters()"
-        (rowClick)="onRowClick($event)"
-        (pageChange)="onPageChange($event)"
-        (retry)="onRetryList()"
-      ></app-snapshots-table>
+    <mat-drawer-content class="drawer-content-region">
+      <div class="table-area">
+        <app-snapshots-table
+          [rows]="records()"
+          [total]="total()"
+          [loading]="listLoading()"
+          [error]="listError()"
+          [pageIndex]="pageIndex()"
+          [pageSize]="pageSize()"
+          [hasActiveFilters]="hasActiveFilters()"
+          [selectedRowId]="selectedSnapshotId()"
+          (rowClick)="onRowClick($event)"
+          (pageChange)="onPageChange($event)"
+          (retry)="onRetryList()"
+        ></app-snapshots-table>
+      </div>
     </mat-drawer-content>
 
     <mat-drawer
       position="end"
-      mode="over"
+      mode="side"
       [opened]="drawerOpen()"
       (closedStart)="onCloseDrawer()"
       class="snapshot-detail-drawer-panel"
@@ -331,7 +351,8 @@
       @if (drawerOpen() && selectedSnapshotId(); as drawerId) {
         <app-snapshot-detail-drawer
           [snapshotId]="drawerId"
-          [isDrawerMode]="true"
+          [warmedSpawnCount]="warmedSpawnCountForSelected()"
+          [menusOpen]="menusOpen()"
           (close)="onCloseDrawer()"
           (navigateToPredecessor)="onNavigateToPredecessor($event)"
           (copyId)="onCopySnapshotId()"
@@ -339,4 +360,4 @@
       }
     </mat-drawer>
   </mat-drawer-container>
-</div>
+</main>
