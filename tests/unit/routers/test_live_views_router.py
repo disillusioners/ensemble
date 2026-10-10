@@ -438,11 +438,17 @@ class TestMimePins:
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "image/svg+xml; charset=utf-8"
 
-    def test_markdown_served_as_text_markdown(
+    def test_markdown_served_as_html_wrapper(
         self, client_with_filesystem_root: TestClient,
         filesystem_root_dir: pathlib.Path,
     ):
-        # Stage a markdown file in the mockups subtree.
+        # Phase 2: ``.md`` files render as the HTML viewer
+        # wrapper (renderer + sanitizer via pinned CDN, CSP
+        # nonce, SRI integrity). The Phase 1 ``text/markdown``
+        # serving was the right primitive for an API but
+        # useless for a chat-clickable URL (browsers display
+        # raw markdown as plain text). The wrapper is the
+        # user-visible shape; pin it on a per-shape basis here.
         mockup = (
             filesystem_root_dir
             / ".agents"
@@ -477,7 +483,13 @@ class TestMimePins:
             "/views/designer-artifact/ens/feat/design/mockups/notes.md"
         )
         assert resp.status_code == 200
-        assert resp.headers["content-type"] == "text/markdown; charset=utf-8"
+        # Phase 2 wrapper shape: HTML, not text/markdown.
+        assert resp.headers["content-type"] == "text/html; charset=utf-8"
+        # Hardening header rides.
+        assert resp.headers.get("x-content-type-options") == "nosniff"
+        # The raw markdown is embedded (escaped) so the page
+        # is readable when JS is off / CDN unreachable.
+        assert b"# Heading" in resp.content
 
 
 # ===========================================================================

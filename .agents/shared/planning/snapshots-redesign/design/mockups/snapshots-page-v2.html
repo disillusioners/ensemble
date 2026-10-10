@@ -1,0 +1,1168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Snapshots · Agents Ensemble — Redesign v2</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css?family=Roboto:400,500,600,700&family=JetBrains+Mono:400,500&display=swap" rel="stylesheet">
+  <style>
+    /* =========================================================================
+       SNAPSHOTS PAGE — v2 REDESIGN
+       Companion to: .agents/shared/planning/snapshots-redesign/design/design-spec.md
+       Lane: text (OD call timed out at the 173s cap; recorded fallback_reason: timeout)
+       Goal: address the three pain points of v1:
+         1. Page chrome was ~520-590px (60% of viewport); v2 collapses to ~190px.
+         2. Table didn't scroll internally; v2 wraps the table in a flex:1 region
+            with overflow-y: auto and a sticky thead.
+         3. Detail drawer was bounded by the table's height; v2 uses
+            mode="side" + sticky drawer-header so the drawer fills the full
+            available height with internal scroll.
+       ========================================================================= */
+
+    :root {
+      --bg-base: #0f172a;
+      --bg-surface: #1e293b;
+      --bg-surface-2: #1e2a3f;
+      --bg-elevated: #243044;
+      --border: rgba(148, 163, 184, 0.18);
+      --border-strong: rgba(148, 163, 184, 0.35);
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent: #10a7f7;
+      --accent-soft: rgba(16, 167, 247, 0.12);
+      --success: #10b981;
+      --warn: #f59e0b;
+      --error: #f43f5e;
+      --gradient-logo: linear-gradient(135deg, #10a7f7, #8b5cf6);
+
+      /* Status palette (per design-spec §3.1) */
+      --status-active-bg: rgba(16, 185, 129, 0.15);
+      --status-active-fg: #10b981;
+      --status-superseded-bg: rgba(148, 163, 184, 0.18);
+      --status-superseded-fg: #94a3b8;
+      --status-running-bg: rgba(16, 167, 247, 0.15);
+      --status-running-fg: #10a7f7;
+      --status-failed-bg: rgba(244, 63, 94, 0.15);
+      --status-failed-fg: #f43f5e;
+      --status-interrupted-bg: rgba(245, 158, 11, 0.18);
+      --status-interrupted-fg: #f59e0b;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: Roboto, "Helvetica Neue", sans-serif;
+      background: var(--bg-base);
+      color: var(--text-primary);
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    /* ─── App header (real, to anchor the page in context) ──────────────── */
+    .app-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      background: var(--bg-base);
+      border-bottom: 1px solid var(--border);
+      height: 56px;
+      flex-shrink: 0;
+    }
+    .app-header .header-left { display: flex; align-items: center; gap: 24px; }
+    .logo-link { display: flex; align-items: center; gap: 12px; text-decoration: none; color: var(--text-primary); }
+    .logo {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: var(--gradient-logo);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 700; font-size: 12px;
+    }
+    .app-title { margin: 0; font-size: 16px; font-weight: 600; }
+    .header-nav { display: flex; gap: 4px; }
+    .nav-link {
+      padding: 6px 12px; color: var(--text-secondary);
+      text-decoration: none; font-size: 14px; font-weight: 500; border-radius: 6px;
+    }
+    .nav-link:hover { color: var(--text-primary); background: var(--bg-elevated); }
+    .nav-link.active { color: var(--accent); background: var(--accent-soft); }
+    .header-right { display: flex; align-items: center; gap: 16px; }
+    .health-status { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
+    .gear-icon { color: var(--text-secondary); cursor: pointer; }
+    .gear-icon:hover { color: var(--text-primary); }
+
+    /* ─── Section caption (used to label the two states) ───────────────── */
+    .state-caption {
+      padding: 16px 32px 8px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      background: var(--bg-base);
+    }
+    .state-caption .badge {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 2px 8px;
+      background: var(--bg-elevated);
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 10px;
+      letter-spacing: 0.04em;
+    }
+
+    /* ─── Page container — fills the viewport below the header ──────────── */
+    .snapshots-page {
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - 56px); /* viewport - app-header */
+      background: var(--bg-base);
+      overflow: hidden;
+    }
+
+    /* ─── Control row: H1 + toggle pill + actions (56px) ───────────────── */
+    .control-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 24px;
+      height: 56px;
+      background: var(--bg-base);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .control-left { display: flex; align-items: center; gap: 14px; }
+    .page-title {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .info-icon-btn {
+      width: 28px; height: 28px;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: transparent; border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text-secondary);
+      cursor: pointer; font-size: 16px;
+    }
+    .info-icon-btn:hover { color: var(--text-primary); background: var(--bg-elevated); }
+    .toggle-pill {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 12px 6px 14px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+    .toggle-pill .label { font-weight: 500; color: var(--text-primary); }
+    .toggle-pill.on .switch { background: var(--success); }
+    .toggle-pill.on .switch-knob { transform: translateX(14px); }
+    .toggle-pill .switch {
+      width: 28px; height: 16px;
+      background: var(--bg-surface-2);
+      border-radius: 8px;
+      position: relative;
+      transition: background 0.15s;
+    }
+    .toggle-pill .switch-knob {
+      position: absolute; top: 2px; left: 2px;
+      width: 12px; height: 12px;
+      background: var(--text-primary);
+      border-radius: 50%;
+      transition: transform 0.15s;
+    }
+    .toggle-pill.dirty {
+      border-color: var(--warn);
+    }
+    .toggle-pill.dirty::after {
+      content: "•";
+      color: var(--warn);
+      font-size: 24px;
+      line-height: 0;
+      margin-left: 4px;
+    }
+    .control-right { display: flex; align-items: center; gap: 8px; }
+    .icon-btn {
+      width: 32px; height: 32px;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: transparent; border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text-secondary);
+      cursor: pointer; font-size: 18px;
+    }
+    .icon-btn:hover { color: var(--text-primary); background: var(--bg-elevated); }
+    .metrics-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 6px 12px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+    .metrics-pill .material-icons { font-size: 16px; color: var(--accent); }
+    .metrics-pill .num { color: var(--text-primary); font-weight: 500; }
+    .metrics-pill:hover { background: var(--bg-surface-2); }
+
+    /* ─── Filter row: searchables + chip selects + sort (52px) ──────────── */
+    .filter-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 24px;
+      height: 52px;
+      background: var(--bg-base);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      overflow-x: auto;
+    }
+    .filter-row::-webkit-scrollbar { height: 4px; }
+    .filter-row::-webkit-scrollbar-thumb { background: var(--bg-elevated); border-radius: 2px; }
+    .filter-control {
+      display: inline-flex; align-items: center; gap: 6px;
+      height: 32px;
+      padding: 0 10px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background-color 0.1s, border-color 0.1s;
+    }
+    .filter-control:hover { background: var(--bg-surface-2); border-color: var(--border-strong); }
+    .filter-control.active { border-color: var(--accent); color: var(--text-primary); }
+    .filter-control .material-icons { font-size: 16px; }
+    .filter-control .label { font-weight: 500; }
+    .filter-control .value { color: var(--text-primary); font-weight: 500; }
+    .filter-control .count {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 18px; height: 18px;
+      padding: 0 5px;
+      background: var(--accent);
+      color: #0b1220;
+      font-size: 10px;
+      font-weight: 700;
+      border-radius: 9px;
+    }
+    .searchable-input {
+      display: inline-flex; align-items: center; gap: 6px;
+      height: 32px;
+      padding: 0 10px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      min-width: 160px;
+    }
+    .searchable-input .material-icons { font-size: 16px; color: var(--text-secondary); }
+    .searchable-input input {
+      background: transparent; border: none; outline: none;
+      color: var(--text-primary); font-size: 12px;
+      width: 100%; min-width: 0;
+    }
+    .searchable-input input::placeholder { color: var(--text-muted); }
+
+    .age-seg {
+      display: inline-flex;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .age-seg button {
+      padding: 0 10px;
+      height: 30px;
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+      border-right: 1px solid var(--border);
+    }
+    .age-seg button:last-child { border-right: none; }
+    .age-seg button.selected { background: var(--accent-soft); color: var(--accent); }
+    .age-seg button:hover:not(.selected) { background: var(--bg-surface-2); color: var(--text-primary); }
+
+    .tag-pill {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 2px 8px 2px 10px;
+      background: rgba(16, 167, 247, 0.18);
+      color: #93c5fd;
+      font-size: 11px;
+      font-weight: 500;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+    }
+    .tag-pill .x { cursor: pointer; opacity: 0.7; }
+    .tag-pill .x:hover { opacity: 1; }
+
+    .filter-spacer { flex: 1; }
+
+    .sort-control {
+      display: inline-flex; align-items: center; gap: 6px;
+      height: 32px; padding: 0 10px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .sort-control .material-icons { font-size: 16px; }
+    .clear-btn {
+      display: inline-flex; align-items: center; gap: 4px;
+      height: 32px; padding: 0 10px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .clear-btn:hover { background: var(--bg-elevated); color: var(--text-primary); }
+    .clear-btn .material-icons { font-size: 14px; }
+    .active-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      height: 22px; padding: 0 8px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 11px;
+    }
+
+    /* ─── Stats strip: 1-line summary (36px) ───────────────────────────── */
+    .stats-strip {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 0 24px;
+      height: 36px;
+      background: var(--bg-surface-2);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+    .stats-strip .dot {
+      display: inline-block;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      margin-right: 4px;
+    }
+    .stats-strip .dot-active { background: var(--status-active-fg); }
+    .stats-strip .dot-running { background: var(--status-running-fg); }
+    .stats-strip .dot-failed { background: var(--status-failed-fg); }
+    .stats-strip .dot-interrupted { background: var(--status-interrupted-fg); }
+    .stats-strip .sep { color: var(--text-muted); }
+
+    /* ─── Table area: fills remaining viewport height ──────────────────── */
+    .table-area {
+      flex: 1;
+      min-height: 0; /* CRITICAL — allow flex shrink so the scroll viewport works */
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-surface);
+      overflow: hidden;
+    }
+
+    /* ─── The scrollable table itself ──────────────────────────────────── */
+    .snapshots-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      table-layout: fixed;
+    }
+    .snapshots-table thead th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--bg-surface-2);
+      color: var(--text-secondary);
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      text-align: left;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    .snapshots-table thead th.col-title { width: 26%; }
+    .snapshots-table thead th.col-project { width: 12%; }
+    .snapshots-table thead th.col-agent { width: 10%; }
+    .snapshots-table thead th.col-status { width: 9%; }
+    .snapshots-table thead th.col-tags { width: 18%; }
+    .snapshots-table thead th.col-created { width: 12%; }
+    .snapshots-table thead th.col-action { width: 4%; text-align: right; }
+    .table-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+    .table-scroll::-webkit-scrollbar { width: 8px; }
+    .table-scroll::-webkit-scrollbar-track { background: var(--bg-surface); }
+    .table-scroll::-webkit-scrollbar-thumb { background: var(--bg-elevated); border-radius: 4px; }
+    .table-scroll::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+    .snapshots-table tbody tr {
+      cursor: pointer;
+      transition: background 0.1s;
+      border-bottom: 1px solid var(--border);
+    }
+    .snapshots-table tbody tr:hover { background: var(--bg-elevated); }
+    .snapshots-table tbody tr.selected {
+      background: var(--accent-soft);
+      box-shadow: inset 2px 0 0 var(--accent);
+    }
+    .snapshots-table tbody td {
+      padding: 8px 14px;
+      vertical-align: middle;
+      color: var(--text-primary);
+    }
+    .title-cell {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 500;
+    }
+    .mono-cell {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+    .agent-cell {
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 11px;
+      color: var(--text-primary);
+    }
+    .status-chip {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .status-active { background: var(--status-active-bg); color: var(--status-active-fg); }
+    .status-superseded { background: var(--status-superseded-bg); color: var(--status-superseded-fg); }
+    .status-running { background: var(--status-running-bg); color: var(--status-running-fg); }
+    .status-failed { background: var(--status-failed-bg); color: var(--status-failed-fg); }
+    .status-interrupted { background: var(--status-interrupted-bg); color: var(--status-interrupted-fg); }
+    .tags-cell {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tags-cell .tag-pill { margin-right: 4px; }
+    .tag-overflow {
+      display: inline-block;
+      padding: 1px 6px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-secondary);
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 500;
+    }
+    .muted { color: var(--text-muted); }
+    .action-cell { text-align: right; }
+    .action-cell .material-icons { color: var(--text-secondary); font-size: 18px; }
+
+    /* ─── Paginator: pinned to the bottom of the table area (52px) ─────── */
+    .paginator {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      height: 52px;
+      background: var(--bg-surface);
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+    .paginator .range { font-weight: 500; }
+    .paginator .controls { display: flex; align-items: center; gap: 8px; }
+    .paginator .page-size {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 4px 8px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .paginator .page-size .material-icons { font-size: 14px; }
+    .paginator .nav-btn {
+      width: 28px; height: 28px;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+    .paginator .nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .paginator .nav-btn:not(:disabled):hover { background: var(--bg-elevated); color: var(--text-primary); }
+    .paginator .nav-btn .material-icons { font-size: 16px; }
+
+    /* ─── Drawer (side-mode, full height) ──────────────────────────────── */
+    .drawer-region {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+    }
+    .drawer-region.with-drawer .table-area { flex: 1.5; }
+    .drawer {
+      width: 576px;
+      max-width: 40vw;
+      background: #161b22;
+      color: var(--text-primary);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+    .drawer-header {
+      flex-shrink: 0;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 20px;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    .drawer-header-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+    .drawer-title {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-primary);
+      line-height: 1.3;
+      word-break: break-word;
+    }
+    .drawer-actions { display: flex; gap: 4px; flex-shrink: 0; }
+    .drawer-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+    .drawer-meta .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; }
+    .drawer-meta .dirty { color: var(--warn); font-weight: 500; }
+    .drawer-body {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .drawer-body::-webkit-scrollbar { width: 8px; }
+    .drawer-body::-webkit-scrollbar-track { background: #161b22; }
+    .drawer-body::-webkit-scrollbar-thumb { background: var(--bg-elevated); border-radius: 4px; }
+
+    .detail-section h3 {
+      margin: 0 0 8px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .kv-list { display: flex; flex-direction: column; gap: 4px; }
+    .kv-row {
+      display: grid;
+      grid-template-columns: 110px 1fr;
+      align-items: baseline;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .kv-row .kv-key { color: var(--text-muted); }
+    .kv-row .kv-val { color: var(--text-primary); word-break: break-all; }
+    .kv-row .kv-val.mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    .task-summary {
+      margin: 0;
+      font-size: 13px;
+      color: var(--text-primary);
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .predecessor-link {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 6px 12px;
+      background: transparent;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: 'JetBrains Mono', ui-monospace, monospace;
+      font-size: 12px;
+    }
+    .predecessor-link:hover { background: var(--accent-soft); }
+    .predecessor-link .material-icons { font-size: 14px; }
+    .tag-list { display: flex; flex-wrap: wrap; gap: 4px; }
+    .digest-toggle {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 6px 12px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .digest-toggle:hover { background: var(--bg-surface-2); color: var(--text-primary); }
+    .digest-toggle .material-icons { font-size: 16px; }
+
+    /* ─── Footer caption (mockup meta) ─────────────────────────────────── */
+    .mockup-footer {
+      padding: 24px 32px 32px;
+      font-size: 12px;
+      color: var(--text-muted);
+      background: var(--bg-base);
+      line-height: 1.6;
+      border-top: 1px solid var(--border);
+    }
+    .mockup-footer strong { color: var(--text-primary); }
+    .mockup-footer ul { margin: 8px 0 0; padding-left: 20px; }
+    .mockup-footer li { margin: 4px 0; }
+  </style>
+</head>
+<body>
+  <!-- Real app header (anchors the page in context) -->
+  <header class="app-header">
+    <div class="header-left">
+      <a href="#" class="logo-link">
+        <div class="logo">AE</div>
+        <h1 class="app-title">Agents Ensemble</h1>
+      </a>
+      <nav class="header-nav">
+        <a href="#" class="nav-link">Home</a>
+        <a href="#" class="nav-link">Jobs</a>
+        <a href="#" class="nav-link">Settings</a>
+        <a href="#" class="nav-link active">Snapshots</a>
+      </nav>
+    </div>
+    <div class="header-right">
+      <div class="health-status">
+        <span class="status-dot"></span>
+        <span>healthy</span>
+        <span style="color: var(--text-muted);">·</span>
+        <span>v0.18.4</span>
+      </div>
+      <span class="material-icons gear-icon" title="Settings">settings</span>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- STATE 1: DRAWER CLOSED — full-width table fills the viewport        -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <div class="state-caption">
+    State 1: drawer closed
+    <span class="badge">full-width table</span>
+  </div>
+
+  <main class="snapshots-page">
+    <!-- Control row: H1 + toggle pill + actions (56px) -->
+    <div class="control-row">
+      <div class="control-left">
+        <h1 class="page-title">Snapshots</h1>
+        <span class="info-icon-btn material-icons" title="Browse and inspect every agent-snapshot in the system. Toggle the global creation switch to opt in / out.">info</span>
+        <span class="toggle-pill on" title="Snapshot creation: enabled">
+          <span>Snapshot creation:</span>
+          <span class="label">ON</span>
+          <span class="switch"><span class="switch-knob"></span></span>
+        </span>
+      </div>
+      <div class="control-right">
+        <span class="metrics-pill" title="Capture counts (47) + Warmed snapshots (12). Click for breakdown.">
+          <span class="material-icons">insights</span>
+          <span><span class="num">47</span> captures · <span class="num">12</span> warmed</span>
+        </span>
+        <span class="icon-btn material-icons" title="Refresh">refresh</span>
+      </div>
+    </div>
+
+    <!-- Filter row (52px) — all controls on one row -->
+    <div class="filter-row">
+      <span class="searchable-input" data-test="filter-project">
+        <span class="material-icons">workspaces</span>
+        <input value="ensemble-prod" readonly>
+      </span>
+      <span class="searchable-input" data-test="filter-agent">
+        <span class="material-icons">smart_toy</span>
+        <input value="All agents" readonly>
+      </span>
+      <span class="filter-control active" data-test="filter-status">
+        <span class="material-icons">label</span>
+        <span class="label">Status</span>
+        <span class="count">2</span>
+      </span>
+      <div class="age-seg" data-test="filter-age">
+        <button>24h</button>
+        <button>7d</button>
+        <button class="selected">30d</button>
+        <button>90d</button>
+        <button>All</button>
+      </div>
+      <span class="filter-control" data-test="filter-tag-mode" title="Match all tags">
+        <span class="material-icons">all_inclusive</span>
+        <span class="label">all</span>
+      </span>
+      <span class="searchable-input" data-test="filter-tag-input" style="min-width: 200px;">
+        <span class="material-icons">sell</span>
+        <input value="domain:api + 2 more" readonly>
+      </span>
+      <div class="filter-spacer"></div>
+      <span class="sort-control" data-test="filter-sort">
+        <span class="material-icons">sort</span>
+        <span class="label">Sort:</span>
+        <span class="value">Newest first</span>
+      </span>
+      <span class="active-badge" data-test="filter-active-count">3 filters</span>
+      <button class="clear-btn" data-test="filter-clear">
+        <span class="material-icons">clear</span>
+        Clear filters
+      </button>
+    </div>
+
+    <!-- Stats strip (36px) — one-line summary -->
+    <div class="stats-strip">
+      <span><strong style="color: var(--text-primary);">47</strong> snapshots</span>
+      <span class="sep">·</span>
+      <span><span class="dot dot-active"></span>23 active</span>
+      <span><span class="dot dot-running"></span>12 running</span>
+      <span><span class="dot dot-failed"></span>8 failed</span>
+      <span><span class="dot dot-interrupted"></span>4 interrupted</span>
+      <span class="sep">·</span>
+      <span><strong style="color: var(--text-primary);">89</strong> total warmed spawns</span>
+    </div>
+
+    <!-- Table area fills the remaining viewport -->
+    <div class="table-area">
+      <div class="table-scroll">
+        <table class="snapshots-table" data-test="snapshots-table" aria-label="Snapshots">
+          <thead>
+            <tr>
+              <th class="col-title">Title</th>
+              <th class="col-project">Project</th>
+              <th class="col-agent">Agent</th>
+              <th class="col-status">Status</th>
+              <th class="col-tags">Tags</th>
+              <th class="col-created">Created</th>
+              <th class="col-action"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="selected" data-test="snapshot-row" aria-label="Open snapshot version-pump-v0.13.9-after-cpo-rebuild">
+              <td class="title-cell">version-pump-v0.13.9-after-cpo-rebuild</td>
+              <td class="mono-cell">8a3fc2e7…</td>
+              <td class="agent-cell">designer</td>
+              <td><span class="status-chip status-active">active</span></td>
+              <td class="tags-cell">
+                <span class="tag-pill">domain:api</span>
+                <span class="tag-pill">env:prod</span>
+                <span class="tag-overflow">+1</span>
+              </td>
+              <td class="muted">2 hours ago</td>
+              <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+            </tr>
+            <tr data-test="snapshot-row">
+              <td class="title-cell">compaction-r2-merge-with-rollback</td>
+              <td class="mono-cell">c12b9f4a…</td>
+              <td class="agent-cell">developer</td>
+              <td><span class="status-chip status-running">running</span></td>
+              <td class="tags-cell">
+                <span class="tag-pill">domain:compaction</span>
+                <span class="tag-pill">phase:r2</span>
+              </td>
+              <td class="muted">5 hours ago</td>
+              <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+            </tr>
+            <tr data-test="snapshot-row">
+              <td class="title-cell">designer-od-lane-timeout-recovery</td>
+              <td class="mono-cell">f08e2d31…</td>
+              <td class="agent-cell">designer</td>
+              <td><span class="status-chip status-active">active</span></td>
+              <td class="tags-cell">
+                <span class="tag-pill">env:dev</span>
+                <span class="tag-pill">lane:od</span>
+              </td>
+              <td class="muted">7 hours ago</td>
+              <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+            </tr>
+            <tr data-test="snapshot-row">
+              <td class="title-cell">jober-oversight-defer-seam</td>
+              <td class="mono-cell">9a4b7c12…</td>
+              <td class="agent-cell">jober</td>
+              <td><span class="status-chip status-failed">failed</span></td>
+              <td class="tags-cell">
+                <span class="tag-pill">domain:queue</span>
+                <span class="tag-pill">severity:high</span>
+                <span class="tag-overflow">+2</span>
+              </td>
+              <td class="muted">1 day ago</td>
+              <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+            </tr>
+            <tr data-test="snapshot-row">
+              <td class="title-cell">pre-restart-arm-notify-2026-10-08</td>
+              <td class="mono-cell">e1c3a9b5…</td>
+              <td class="agent-cell">leader</td>
+              <td><span class="status-chip status-superseded">superseded</span></td>
+              <td class="tags-cell">
+                <span class="tag-pill">env:dev</span>
+                <span class="tag-pill">phase:restart</span>
+              </td>
+              <td class="muted">1 day ago</td>
+              <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+            </tr>
+            <tr data-test="snapshot-row">
+              <td class="title-cell">v0.18.4-tool-pairing-heal-2</td>
+              <td class="mono-cell">7dfb3c69…</td>
+              <td class="agent-cell">developer</td>
+              <td><span class="status-chip status-active">active</span></td>
+              <td class="tags-cell">
+                <span class="tag-pill">env:prod</span>
+                <span class="tag-pill">lane:upgrade</span>
+                <span class="tag-pill">milestone</span>
+              </td>
+              <td class="muted">2 days ago</td>
+              <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+            </tr>
+            <tr data-test="snapshot-row">
+              <td class="title-cell">v0.18.3-compaction-r1-r2-cargo</td>
+              <td class="mono-cell">c034a90b…</td>
+              <td class="agent-cell">developer</td>
+              <td><span class="status-chip status-superseded">superseded</span></td>
+              <td class="tags-cell">
+                <span class="tag-pill">env:prod</span>
+                <span class="tag-pill">lane:upgrade</span>
+              </td>
+              <td class="muted">2 days ago</td>
+              <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+            </tr>
+            <tr data-test="snapshot-row">
+              <td class="title-cell">tester-bugfix-tool-pairing-fail</td>
+              <td class="mono-cell">2a8b4d9c…</td>
+              <td class="agent-cell">tester</td>
+              <td><span class="status-chip status-interrupted">interrupted</span></td>
+              <td class="tags-cell">
+                <span class="tag-pill">env:test</span>
+                <span class="tag-pill">incident</span>
+              </td>
+              <td class="muted">3 days ago</td>
+              <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+            </tr>
+            <tr data-test="snapshot-row">
+              <td class="title-cell">charter-needs-more-info-discipline</td>
+              <td class="mono-cell">b3f6e8a1…</td>
+              <td class="agent-cell">charter</td>
+              <td><span class="status-chip status-active">active</span></td>
+              <td class="tags-cell">
+                <span class="tag-pill">domain:planning</span>
+              </td>
+              <td class="muted">4 days ago</td>
+              <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+            </tr>
+            <tr data-test="snapshot-row">
+              <td class="title-cell">architect-plugin-tier-ratify</td>
+              <td class="mono-cell">d4c2b5e9…</td>
+              <td class="agent-cell">architect</td>
+              <td><span class="status-chip status-running">running</span></td>
+              <td class="tags-cell">
+                <span class="tag-pill">domain:plugin</span>
+                <span class="tag-pill">phase:r1</span>
+              </td>
+              <td class="muted">5 days ago</td>
+              <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+            </tr>
+            <tr data-test="snapshot-row">
+              <td class="title-cell">worker-skill-set-eval-round-3</td>
+              <td class="mono-cell">5e7a1f3b…</td>
+              <td class="agent-cell">worker</td>
+              <td><span class="status-chip status-failed">failed</span></td>
+              <td class="tags-cell">
+                <span class="tag-pill">domain:skill</span>
+                <span class="tag-pill">env:test</span>
+                <span class="tag-overflow">+3</span>
+              </td>
+              <td class="muted">6 days ago</td>
+              <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+            </tr>
+            <tr data-test="snapshot-row">
+              <td class="title-cell">explorer-knowledge-base-bootstrap</td>
+              <td class="mono-cell">8c9d2e7a…</td>
+              <td class="agent-cell">explorer</td>
+              <td><span class="status-chip status-superseded">superseded</span></td>
+              <td class="tags-cell">
+                <span class="tag-pill">domain:kb</span>
+                <span class="tag-pill">env:dev</span>
+              </td>
+              <td class="muted">1 week ago</td>
+              <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Paginator (52px) — pinned to the bottom of the table area -->
+      <div class="paginator" data-test="paginator">
+        <span class="range">1–12 of 47</span>
+        <div class="controls">
+          <span class="page-size">
+            <span>10 / page</span>
+            <span class="material-icons">arrow_drop_down</span>
+          </span>
+          <button class="nav-btn" disabled><span class="material-icons">first_page</span></button>
+          <button class="nav-btn" disabled><span class="material-icons">chevron_left</span></button>
+          <button class="nav-btn"><span class="material-icons">chevron_right</span></button>
+          <button class="nav-btn"><span class="material-icons">last_page</span></button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- STATE 2: DRAWER OPEN — table pushed left to ~60%, drawer takes rest -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <div class="state-caption">
+    State 2: drawer open
+    <span class="badge">mode="side" · full-height drawer with internal scroll</span>
+  </div>
+
+  <main class="snapshots-page">
+    <div class="control-row">
+      <div class="control-left">
+        <h1 class="page-title">Snapshots</h1>
+        <span class="info-icon-btn material-icons">info</span>
+        <span class="toggle-pill on">
+          <span>Snapshot creation:</span>
+          <span class="label">ON</span>
+          <span class="switch"><span class="switch-knob"></span></span>
+        </span>
+      </div>
+      <div class="control-right">
+        <span class="metrics-pill">
+          <span class="material-icons">insights</span>
+          <span><span class="num">47</span> captures · <span class="num">12</span> warmed</span>
+        </span>
+        <span class="icon-btn material-icons">refresh</span>
+      </div>
+    </div>
+
+    <div class="filter-row">
+      <span class="searchable-input"><span class="material-icons">workspaces</span><input value="ensemble-prod" readonly></span>
+      <span class="searchable-input"><span class="material-icons">smart_toy</span><input value="All agents" readonly></span>
+      <span class="filter-control active"><span class="material-icons">label</span><span class="label">Status</span><span class="count">2</span></span>
+      <div class="age-seg"><button>24h</button><button>7d</button><button class="selected">30d</button><button>90d</button><button>All</button></div>
+      <span class="filter-control"><span class="material-icons">all_inclusive</span><span class="label">all</span></span>
+      <span class="searchable-input" style="min-width: 200px;"><span class="material-icons">sell</span><input value="domain:api + 2 more" readonly></span>
+      <div class="filter-spacer"></div>
+      <span class="sort-control"><span class="material-icons">sort</span><span class="label">Sort:</span><span class="value">Newest first</span></span>
+      <span class="active-badge">3 filters</span>
+      <button class="clear-btn"><span class="material-icons">clear</span>Clear filters</button>
+    </div>
+
+    <div class="stats-strip">
+      <span><strong style="color: var(--text-primary);">47</strong> snapshots</span>
+      <span class="sep">·</span>
+      <span><span class="dot dot-active"></span>23 active</span>
+      <span><span class="dot dot-running"></span>12 running</span>
+      <span><span class="dot dot-failed"></span>8 failed</span>
+      <span><span class="dot dot-interrupted"></span>4 interrupted</span>
+      <span class="sep">·</span>
+      <span><strong style="color: var(--text-primary);">89</strong> total warmed spawns</span>
+    </div>
+
+    <!-- Drawer region: table shrinks to flex:1.5, drawer takes 576px -->
+    <div class="drawer-region with-drawer">
+      <div class="table-area" data-test="snapshots-table-area">
+        <div class="table-scroll">
+          <table class="snapshots-table" data-test="snapshots-table" aria-label="Snapshots">
+            <thead>
+              <tr>
+                <th class="col-title">Title</th>
+                <th class="col-project">Project</th>
+                <th class="col-agent">Agent</th>
+                <th class="col-status">Status</th>
+                <th class="col-tags">Tags</th>
+                <th class="col-created">Created</th>
+                <th class="col-action"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="selected" data-test="snapshot-row">
+                <td class="title-cell">version-pump-v0.13.9-after-cpo-rebuild</td>
+                <td class="mono-cell">8a3fc2e7…</td>
+                <td class="agent-cell">designer</td>
+                <td><span class="status-chip status-active">active</span></td>
+                <td class="tags-cell">
+                  <span class="tag-pill">domain:api</span>
+                  <span class="tag-pill">env:prod</span>
+                  <span class="tag-overflow">+1</span>
+                </td>
+                <td class="muted">2 hours ago</td>
+                <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+              </tr>
+              <tr data-test="snapshot-row">
+                <td class="title-cell">compaction-r2-merge-with-rollback</td>
+                <td class="mono-cell">c12b9f4a…</td>
+                <td class="agent-cell">developer</td>
+                <td><span class="status-chip status-running">running</span></td>
+                <td class="tags-cell">
+                  <span class="tag-pill">domain:compaction</span>
+                  <span class="tag-pill">phase:r2</span>
+                </td>
+                <td class="muted">5 hours ago</td>
+                <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+              </tr>
+              <tr data-test="snapshot-row">
+                <td class="title-cell">designer-od-lane-timeout-recovery</td>
+                <td class="mono-cell">f08e2d31…</td>
+                <td class="agent-cell">designer</td>
+                <td><span class="status-chip status-active">active</span></td>
+                <td class="tags-cell">
+                  <span class="tag-pill">env:dev</span>
+                  <span class="tag-pill">lane:od</span>
+                </td>
+                <td class="muted">7 hours ago</td>
+                <td class="action-cell"><span class="material-icons">chevron_right</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="paginator" data-test="paginator">
+          <span class="range">1–12 of 47</span>
+          <div class="controls">
+            <span class="page-size"><span>10 / page</span><span class="material-icons">arrow_drop_down</span></span>
+            <button class="nav-btn" disabled><span class="material-icons">first_page</span></button>
+            <button class="nav-btn" disabled><span class="material-icons">chevron_left</span></button>
+            <button class="nav-btn"><span class="material-icons">chevron_right</span></button>
+            <button class="nav-btn"><span class="material-icons">last_page</span></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- The drawer — full height of the table-area, internal scroll, sticky header -->
+      <aside class="drawer" data-test="snapshot-drawer" role="complementary" aria-labelledby="drawer-title-2">
+        <header class="drawer-header">
+          <div class="drawer-header-top">
+            <h2 class="drawer-title" id="drawer-title-2">version-pump-v0.13.9-after-cpo-rebuild</h2>
+            <div class="drawer-actions">
+              <button class="icon-btn" data-test="drawer-copy-id" title="Copy snapshot ID" style="width:28px; height:28px; font-size:16px;">
+                <span class="material-icons">content_copy</span>
+              </button>
+              <button class="icon-btn" data-test="drawer-close" title="Close" style="width:28px; height:28px; font-size:16px;">
+                <span class="material-icons">close</span>
+              </button>
+            </div>
+          </div>
+          <div class="drawer-meta">
+            <span class="status-chip status-active">active</span>
+            <span class="muted">id:</span>
+            <span class="mono">8a3fc2e7-19d4-4f12-9b8e-a3c7d2e1f908</span>
+            <span class="dirty" title="Working tree was dirty at capture">⚠ dirty</span>
+          </div>
+        </header>
+        <div class="drawer-body" data-test="drawer-body">
+          <!-- 1. Task summary -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Task summary</h3>
+            <p class="task-summary">After CPO rebuild, validate that the version-pump v0.13.9 release preserves the compactor's rollback-safety contract. Capture covers the merge → upgrade-journal → live-probe handoff and verifies the pre-restart arm-notify is honored across both cold and warm spawn lanes.</p>
+          </section>
+          <!-- 2. Git anchor -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Git anchor</h3>
+            <div class="kv-list">
+              <div class="kv-row"><span class="kv-key">SHA</span><span class="kv-val mono">2ca69147b5</span></div>
+              <div class="kv-row"><span class="kv-key">Branch</span><span class="kv-val">feature/snapshot-uiux</span></div>
+              <div class="kv-row"><span class="kv-key">Repo path</span><span class="kv-val mono">/home/nea/ensemble-src</span></div>
+              <div class="kv-row"><span class="kv-key">Dirty</span><span class="kv-val">Yes</span></div>
+            </div>
+          </section>
+          <!-- 3. Runtime / Model -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Runtime / Model</h3>
+            <div class="kv-list">
+              <div class="kv-row"><span class="kv-key">Runtime version</span><span class="kv-val mono">v0.18.4</span></div>
+              <div class="kv-row"><span class="kv-key">Effective model</span><span class="kv-val mono">vision</span></div>
+            </div>
+          </section>
+          <!-- 4. Supersedes chain -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Supersedes chain</h3>
+            <button class="predecessor-link" data-test="drawer-predecessor">
+              <span class="material-icons">link</span>
+              7dfb3c69… (open predecessor)
+            </button>
+          </section>
+          <!-- 5. Tags -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Tags</h3>
+            <div class="tag-list">
+              <span class="tag-pill">domain:api</span>
+              <span class="tag-pill">env:prod</span>
+              <span class="tag-pill">milestone</span>
+            </div>
+          </section>
+          <!-- 6. Timestamps -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Timestamps</h3>
+            <div class="kv-list">
+              <div class="kv-row"><span class="kv-key">Created</span><span class="kv-val">2026-10-09 14:21:03 UTC</span></div>
+              <div class="kv-row"><span class="kv-key">Last warmed</span><span class="kv-val">2 hours ago</span></div>
+            </div>
+          </section>
+          <!-- 7. Context -->
+          <section class="detail-section" data-test="drawer-section">
+            <h3>Context</h3>
+            <div class="kv-list">
+              <div class="kv-row"><span class="kv-key">Project</span><span class="kv-val mono">83da04de-a410-4fb5</span></div>
+              <div class="kv-row"><span class="kv-key">Agent</span><span class="kv-val mono">designer</span></div>
+              <div class="kv-row"><span class="kv-key">Target instance</span><span class="kv-val mono">53515960-b275-4479</span></div>
+            </div>
+          </section>
+          <!-- 8. Digest (collapsed by default) -->
+          <section class="detail-section">
+            <h3>Digest</h3>
+            <button class="digest-toggle" data-test="drawer-digest-toggle">
+              <span class="material-icons">expand_more</span>
+              Show digest
+            </button>
+          </section>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <!-- Mockup meta -->
+  <footer class="mockup-footer">
+    <strong>Snapshots page — v2 redesign</strong> · mockup lane: <strong>text</strong> (OD call timed out at the 173s cap; recorded <code>fallback_reason: timeout</code>) · canonical path: <code>.agents/shared/planning/snapshots-redesign/design/mockups/snapshots-page-v2.html</code>
+    <ul>
+      <li><strong>Pain point 1 (chrome ate ~60% of viewport):</strong> v2 collapses the four regions above the table from ~520-590px to ~190px (control row 56 + filter row 52 + stats strip 36 + borders ~46 = 190px). Subtitle moved to a tooltip on the info icon. 2-card metrics banner demoted to a 1-line pill on the control row (per-agent breakdown lives in a popover). Toggle compressed to a single inline pill. 3-row filter bar collapsed to a single 52px row with horizontally-scrolling overflow. Visible in the mockup: 12 rows of table data + paginator sit in the remaining ~700px of a 900px viewport.</li>
+      <li><strong>Pain point 2 (table doesn't scroll internally):</strong> v2 wraps the table in a <code>flex: 1; min-height: 0; overflow: hidden</code> shell with an internal <code>overflow-y: auto</code> scroll viewport. The <code>thead</code> uses <code>position: sticky; top: 0</code> so the column labels stay visible during scroll. The paginator is pinned to the bottom of the table area, separated from the scroll viewport. Result: 100+ rows scroll inside the table area, not the page.</li>
+      <li><strong>Pain point 3 (drawer too short for the 7 sections):</strong> v2 switches the drawer from <code>mode="over"</code> to <code>mode="side"</code> (pushes the table left to flex:1.5 instead of overlaying it). The drawer takes 576px (or 40vw) and the full available height. Inside the drawer: the <code>.drawer-header</code> is <code>position: sticky; top: 0</code> so the title + close + copy-id stay visible while the body scrolls. The <code>.drawer-body</code> is <code>overflow-y: auto</code> with all 7 sections + digest toggle visible by scrolling, not by the user losing the header.</li>
+    </ul>
+  </footer>
+</body>
+</html>
