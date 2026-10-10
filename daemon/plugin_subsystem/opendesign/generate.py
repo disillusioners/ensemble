@@ -681,6 +681,19 @@ _OD_FAILOVER_INACTIVE_NOTE = (
 )
 
 
+# Phase 3 (plan §6.3): the in-adapter retry-on-truncation bound —
+# exactly ONE same-prompt re-attempt when the completeness gates
+# refuse with ``finish_reason="length"`` (the Gate-2 truncation
+# refusal, INCLUDING its Gate-1-empty thinking-only surface — the
+# budget was consumed either way; the finish_reason is the
+# discriminator); a second truncation fails typed with NO third
+# attempt (§7.10 pins the bound). Deterministic refusals (Gate-3
+# missing marker, and Gate-1/Gate-2 with a non-"length" reason such
+# as content_filter or a bare empty stream) are NOT re-attempted —
+# the same prompt cannot produce a different verdict.
+_TRUNCATION_REATTEMPTS: int = 1
+
+
 def _resolve_llm_config(env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """Resolve the raw ``llm_config`` dict the facade expects.
 
@@ -1193,105 +1206,139 @@ class OdGenerate:
         # decision (a)) on the facade is the retry-storm ceiling —
         # ONE full 200k attempt + fast-fail failover room fits inside it.
         timeout = max(120.0, args.max_tokens / 370.0)  # 370 tok/s conservative
-        try:
-            response = cls._LLM_INVOKER(
-                model=model,
-                base_url=base_url,
-                base_url_backup=base_url_backup,
-                api_key=api_key,
-                system_prompt=system_prompt,
-                user_prompt=args.prompt,
-                max_tokens=args.max_tokens,
-                temperature=0.7,
-                timeout=timeout,
-                default_headers=_PROXY_IDENTITY_HEADERS,
-            )
-        except Exception as exc:  # noqa: BLE001 - any facade-exhausted failure becomes a typed envelope
-            # Lazy import — the openai SDK is an optional dep; tests
-            # that override ``_LLM_INVOKER`` may never import it.
+        # Phase 3 (plan §6.3): invocation → extraction → gating runs
+        # inside a bounded loop — exactly ONE same-prompt re-attempt
+        # when the Gate-2 truncation refusal fires with
+        # finish_reason="length"; a second truncation fails typed with
+        # NO third attempt (§7.10 pins the bound). Transport/HTTP
+        # failures return their typed envelopes directly (the facade
+        # owns transport-level retry); Gate-1/Gate-3 refusals and
+        # non-"length" Gate-2 reasons (e.g. content_filter) are
+        # deterministic — re-attempting the same prompt cannot help.
+        for _gate_attempt in range(1 + _TRUNCATION_REATTEMPTS):
             try:
-                import openai  # noqa: PLC0415
-            except ImportError:  # pragma: no cover
-                openai = None  # type: ignore[assignment]
-            if openai is not None and isinstance(exc, openai.BadRequestError):
-                # Stage-1 typed 400-class envelope (commission override
-                # over the plan's "envelopes unchanged"). The openai SDK
-                # raises BadRequestError for any 400-class HTTP error on
-                # the FIRST occurrence — 400-class is NON-RETRYABLE in
-                # the facade's taxonomy, so the transient retry ladder
-                # never engages and the raw exception re-raises
-                # unmodified.
-                err_str = str(exc).lower()
-                if any(
-                    needle in err_str
-                    for needle in (
-                        "context_length_exceeded",
-                        "maximum context length",
-                        "reduce the length",
-                        "context length",
-                    )
-                ):
-                    logger.warning(
-                        "od.generate: context length exceeded: %s", exc
-                    )
+                response = cls._LLM_INVOKER(
+                    model=model,
+                    base_url=base_url,
+                    base_url_backup=base_url_backup,
+                    api_key=api_key,
+                    system_prompt=system_prompt,
+                    user_prompt=args.prompt,
+                    max_tokens=args.max_tokens,
+                    temperature=0.7,
+                    timeout=timeout,
+                    default_headers=_PROXY_IDENTITY_HEADERS,
+                )
+            except Exception as exc:  # noqa: BLE001 - any facade-exhausted failure becomes a typed envelope
+                # Lazy import — the openai SDK is an optional dep; tests
+                # that override ``_LLM_INVOKER`` may never import it.
+                try:
+                    import openai  # noqa: PLC0415
+                except ImportError:  # pragma: no cover
+                    openai = None  # type: ignore[assignment]
+                if openai is not None and isinstance(exc, openai.BadRequestError):
+                    # Stage-1 typed 400-class envelope (commission override
+                    # over the plan's "envelopes unchanged"). The openai SDK
+                    # raises BadRequestError for any 400-class HTTP error on
+                    # the FIRST occurrence — 400-class is NON-RETRYABLE in
+                    # the facade's taxonomy, so the transient retry ladder
+                    # never engages and the raw exception re-raises
+                    # unmodified.
+                    err_str = str(exc).lower()
+                    if any(
+                        needle in err_str
+                        for needle in (
+                            "context_length_exceeded",
+                            "maximum context length",
+                            "reduce the length",
+                            "context length",
+                        )
+                    ):
+                        logger.warning(
+                            "od.generate: context length exceeded: %s", exc
+                        )
+                        return cls._error_envelope(
+                            "context_length_exceeded",
+                            f"context length exceeded: {exc}",
+                            details={
+                                "max_tokens": args.max_tokens,
+                                "model": model,
+                            },
+                            finish_reason="other",
+                        )
+                    logger.warning("od.generate: upstream BadRequestError: %s", exc)
                     return cls._error_envelope(
-                        "context_length_exceeded",
-                        f"context length exceeded: {exc}",
+                        "upstream_bad_request",
+                        f"upstream BadRequestError: {exc}",
                         details={
                             "max_tokens": args.max_tokens,
                             "model": model,
                         },
                         finish_reason="other",
                     )
-                logger.warning("od.generate: upstream BadRequestError: %s", exc)
+                logger.warning("od.generate: upstream call failed: %s", exc)
                 return cls._error_envelope(
-                    "upstream_bad_request",
-                    f"upstream BadRequestError: {exc}",
-                    details={
-                        "max_tokens": args.max_tokens,
-                        "model": model,
-                    },
+                    "upstream_http_error",
+                    f"upstream call failed: {exc}",
+                    details={"max_tokens": args.max_tokens, "model": model},
                     finish_reason="other",
                 )
-            logger.warning("od.generate: upstream call failed: %s", exc)
-            return cls._error_envelope(
-                "upstream_http_error",
-                f"upstream call failed: {exc}",
-                details={"max_tokens": args.max_tokens, "model": model},
-                finish_reason="other",
-            )
 
-        # Extract finish_reason + usage. The OpenAI client returns a
-        # ChatCompletion object; we read the attributes defensively.
-        try:
-            choice = response.choices[0]
-            finish_reason = getattr(choice, "finish_reason", None) or "other"
-            html = getattr(choice.message, "content", "") or ""
-        except (IndexError, AttributeError) as exc:
-            logger.warning("od.generate: response shape unexpected: %s", exc)
-            return cls._error_envelope(
-                "upstream_stream_closed",
-                f"response shape unexpected: {exc}",
-                details={"model": model},
-                finish_reason="other",
-            )
+            # Extract finish_reason + usage. The OpenAI client returns a
+            # ChatCompletion object; we read the attributes defensively.
+            try:
+                choice = response.choices[0]
+                finish_reason = getattr(choice, "finish_reason", None) or "other"
+                html = getattr(choice.message, "content", "") or ""
+            except (IndexError, AttributeError) as exc:
+                logger.warning("od.generate: response shape unexpected: %s", exc)
+                return cls._error_envelope(
+                    "upstream_stream_closed",
+                    f"response shape unexpected: {exc}",
+                    details={"model": model},
+                    finish_reason="other",
+                )
 
-        # Usage is on the response (not the choice).
-        usage_obj = getattr(response, "usage", None)
-        usage: Dict[str, int] = {
-            "prompt_tokens": int(getattr(usage_obj, "prompt_tokens", 0) or 0) if usage_obj else 0,
-            "completion_tokens": int(getattr(usage_obj, "completion_tokens", 0) or 0) if usage_obj else 0,
-            "total_tokens": int(getattr(usage_obj, "total_tokens", 0) or 0) if usage_obj else 0,
-        }
-        # ``reasoning_tokens`` is OpenAI-specific; capture if present.
-        details = getattr(usage_obj, "completion_tokens_details", None) if usage_obj else None
-        if details is not None:
-            reasoning = getattr(details, "reasoning_tokens", None)
-            if reasoning is not None:
-                usage["reasoning_tokens"] = int(reasoning)
+            # Usage is on the response (not the choice).
+            usage_obj = getattr(response, "usage", None)
+            usage: Dict[str, int] = {
+                "prompt_tokens": int(getattr(usage_obj, "prompt_tokens", 0) or 0) if usage_obj else 0,
+                "completion_tokens": int(getattr(usage_obj, "completion_tokens", 0) or 0) if usage_obj else 0,
+                "total_tokens": int(getattr(usage_obj, "total_tokens", 0) or 0) if usage_obj else 0,
+            }
+            # ``reasoning_tokens`` is OpenAI-specific; capture if present.
+            details = getattr(usage_obj, "completion_tokens_details", None) if usage_obj else None
+            if details is not None:
+                reasoning = getattr(details, "reasoning_tokens", None)
+                if reasoning is not None:
+                    usage["reasoning_tokens"] = int(reasoning)
+            # Apply the inline completeness gates.
+            truncated, error_code = _gate_html(html, finish_reason)
+            # Gate-2 truncation family bounded re-attempt: the
+            # discriminator is ``finish_reason == "length"`` — the model
+            # consumed its whole budget before closing. That profile
+            # surfaces as Gate-2 ``truncation_detected`` when a partial
+            # answer exists, and as Gate-1 ``empty_response`` when the
+            # budget was consumed entirely by thinking tokens (the
+            # Phase-0 probe's zero-answer-content profile — the exact
+            # shape this retry exists to handle, probe addendum #2).
+            # Either way ONE same-prompt re-attempt, never more.
+            if finish_reason == "length" and _gate_attempt < _TRUNCATION_REATTEMPTS:
+                logger.info(
+                    "od.generate: budget-consumed truncation "
+                    "(finish_reason=length, gate=%s) on attempt %d/%d — "
+                    "ONE bounded same-prompt re-attempt",
+                    error_code,
+                    _gate_attempt + 1,
+                    1 + _TRUNCATION_REATTEMPTS,
+                )
+                continue
+            break
 
-        # Apply the inline completeness gates.
-        truncated, error_code = _gate_html(html, finish_reason)
+        # Gate verdict: the loop exits here only on refusal (or after
+        # the re-attempt budget's final truncation) — the truncated
+        # path returns the typed error envelope, never a partial
+        # success.
         if truncated:
             logger.info(
                 "od.generate: completeness gate refused (code=%s, finish_reason=%s, html_bytes=%d)",
