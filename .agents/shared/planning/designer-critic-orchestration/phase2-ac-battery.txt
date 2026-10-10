@@ -1,0 +1,52 @@
+# Phase 2 AC battery — 16:16:25Z
+
+AC1: critic dir was absent pre-build (logged) + schema SHA1 stable
+1
+(1 = PASS; SHA match logged in same file)
+
+AC2: meta.json canonical form + designer team check
+PASS
+
+AC3: soul >=2048 chars + closure-grep 0
+4062
+0
+
+AC4: soul no single-page one-offs (expect 0)
+0
+
+AC5: cardinals <=7 (expect 7) + anchors >=4
+7
+7
+
+AC6: Review heading >=1 + verdict line >=1 + file <=60 lines
+2
+1
+46
+
+AC7: DECLARED/EFFECTIVE/image_save/purity/kv greps (each expect >=1)
+2
+2
+1
+1
+1
+
+AC8: skillset decision exists + states NO
+1
+
+AC9: conformance log non-empty + PASS count >=4
+non-empty PASS
+10
+
+AC10: freeze-set diff empty (expect 0 bytes)
+0
+
+AC11: pytest exit 0 (see results file)
+1
+
+AC12: capture-mockup spec exists, <=60 lines, 4 sections
+26
+4
+
+SC-15 cross-check: design allow index non-null + view-views null
+2
+null

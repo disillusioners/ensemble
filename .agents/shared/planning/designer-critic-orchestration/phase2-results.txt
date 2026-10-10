@@ -1,0 +1,9 @@
+== T10: freeze-set unchanged (expect empty diff) ==
+diff-bytes: 0 (0 = unchanged)
+
+== T11: pytest tests/unit/test_report_integrity_prompts.py -k critic ==
+
+tests/unit/test_report_integrity_prompts.py s                            [100%]
+
+====================== 1 skipped, 70 deselected in 0.31s =======================
+EXIT=0

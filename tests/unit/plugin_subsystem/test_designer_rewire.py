@@ -10,8 +10,10 @@ This test asserts:
 1. **The legacy 10 MCP ``od_*`` tools are NOT referenced as live call
    sites** in agents/designer/{soul,rule,workflow,skills-template,tools_note}.md
    (the only allowed references are "previous/historical" mentions).
-2. **The new Port-style ``od.*`` native tools ARE referenced** in the
-   same files (the rewire replaces the legacy surface).
+2. **Designer holds ZERO Port-style ``od.*`` tokens** across the same
+   files (the designer-critic-orchestration rewire moved the generation
+   lane to sketcher wholesale; workflow.md's only permitted od.* mention
+   is the sole-lane negative, "There is no direct ``od.generate`` lane").
 3. **The last-effort text-fallback block in workflow.md is PRESERVED
    VERBATIM** (the slice-⑤ directive: "⛔ LAST-EFFORT TEXT FALLBACK
    UNCHANGED — absolute, verbatim-preserved fallback semantics.").
@@ -67,15 +69,6 @@ RARE_OD_TOOLS = (
     "od_update_project",       # slice ⑤: dropped (project admin surface not needed)
     "od_delete_project",       # slice ⑤: dropped (project admin surface not needed)
 )
-
-# The 4 new Port-style tools that MUST appear as live call sites.
-NEW_OD_PORTS = (
-    "od.compose_brief",
-    "od.generate",
-    "od.lint",
-    "od.save",
-)
-
 
 def _read_designer_text() -> str:
     """Read all designer-side .md files (soul, rule, workflow, tools_note, skills-template)."""
@@ -191,40 +184,143 @@ class TestDesignerNoLiveLegacyOdTools:
         )
 
 
-class TestDesignerHasNewPortTools:
-    """The new Port-style tools are referenced as live call sites."""
+class TestDesignerHasZeroOdPorts:
+    """INVERTED pin (designer-critic-orchestration D1=B): designer holds
+    ZERO od.* tokens. The generation lane moved to sketcher wholesale —
+    any live od.* reference in designer prose is a lane-leak regression.
+    workflow.md IS swept line-by-line: the ONLY exempt lines are the
+    sole-lane negative sentences ("There is no direct ...") — any other
+    od.* hit there fails the sweep (tidier round 2 narrowed the old
+    blanket skip)."""
 
-    def test_soul_md_references_new_ports(self):
-        soul = (DESIGNER_ROOT / "soul.md").read_text(encoding="utf-8")
-        for port in ("od.compose_brief", "od.generate", "od.lint", "od.save"):
-            assert port in soul, f"soul.md missing new port {port}"
+    ZERO_PORT_PATTERN = re.compile(r"od\.(generate|compose_brief|save|lint)")
+    SOLE_LANE_NEGATIVE = "There is no direct"
 
-    def test_rule_md_references_new_ports(self):
-        rule = (DESIGNER_ROOT / "rule.md").read_text(encoding="utf-8")
-        for port in ("od.compose_brief", "od.generate", "od.lint", "od.save"):
-            assert port in rule, f"rule.md missing new port {port}"
+    def _assert_zero(self, relpath: str) -> None:
+        text = (DESIGNER_ROOT / relpath).read_text(encoding="utf-8")
+        hits = self.ZERO_PORT_PATTERN.findall(text)
+        assert not hits, f"{relpath} still carries od.* tokens: {hits}"
 
-    def test_workflow_md_references_new_ports_in_step_1(self):
-        workflow = (DESIGNER_ROOT / "workflow.md").read_text(encoding="utf-8")
-        step1_match = re.search(
-            r"####\s+Step 1.*?(?=####\s+Step 2)",
-            workflow,
-            re.DOTALL,
+    def test_soul_md_zero_od_ports(self):
+        self._assert_zero("soul.md")
+
+    def test_rule_md_zero_od_ports(self):
+        self._assert_zero("rule.md")
+
+    def test_tools_note_md_zero_od_ports(self):
+        self._assert_zero("tools_note.md")
+
+    def test_design_strategy_md_zero_od_ports(self):
+        self._assert_zero("skills-template/design-strategy.md")
+
+    def test_workflow_md_zero_od_ports_outside_sole_lane_negative(self):
+        """workflow.md sweep with the NARROWED exemption: a line may carry
+        an od.* token only when it matches the sole-lane negative pattern
+        ("There is no direct ..."). Any other od.* hit is a lane leak
+        (:109-class) and fails here."""
+        workflow_lines = (DESIGNER_ROOT / "workflow.md").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        leaks = [
+            line.strip()
+            for line in workflow_lines
+            if re.search(r"\bod\.[a-z_]+", line)
+            and self.SOLE_LANE_NEGATIVE not in line
+        ]
+        assert not leaks, (
+            "workflow.md carries od.* tokens outside the sole-lane "
+            f"negative — lane-leak regression:\n" + "\n".join(leaks)
         )
-        assert step1_match
-        step1 = step1_match.group(0)
-        # od.compose_brief, od.generate, od.lint, od.save are all in Step 1.
-        for port in NEW_OD_PORTS:
-            assert port in step1, f"Step 1 missing port {port}"
 
-    def test_tools_note_md_documents_all_four_new_ports(self):
-        """The per-tool surface (tools_note.md) lists all 4 new Port tools + the skill probe."""
-        tools_note = (DESIGNER_ROOT / "tools_note.md").read_text(encoding="utf-8")
-        for port in NEW_OD_PORTS:
-            assert port in tools_note, f"tools_note.md missing port {port}"
-        # The probe tool (plugin-skill) is also documented.
-        assert "opendesign.list_systems" in tools_note, (
-            "tools_note.md should document the opendesign.list_systems skill probe"
+    def test_designer_od_generate_removed(self):
+        """Nit-2 spine inverse: the od.generate kill is total across the
+        designer prose surface (meta/soul/rule/tools_note/skill)."""
+        meta_text = (DESIGNER_ROOT / "meta.json").read_text(encoding="utf-8")
+        assert not re.search(r'"od\.[a-z_]+"', meta_text), (
+            "designer meta.json still grants an od.* tool"
+        )
+        for relpath in (
+            "soul.md", "rule.md", "tools_note.md",
+            "skills-template/design-strategy.md",
+        ):
+            self._assert_zero(relpath)
+
+
+class TestSketcherHasFourOdPorts:
+    """The SPINE's positive half: the four od.* Port tools live on the
+    sketcher side — present in sketcher's tool grant AND its prose."""
+
+    NEW_OD_PORTS = ("od.compose_brief", "od.generate", "od.lint", "od.save")
+    SKETCHER_ROOT = DESIGNER_ROOT.parent / "sketcher"
+
+    def test_sketcher_meta_grants_all_four_ports(self):
+        import json
+        meta = json.loads(
+            (self.SKETCHER_ROOT / "meta.json").read_text(encoding="utf-8")
+        )
+        for port in self.NEW_OD_PORTS:
+            assert port in meta["tools"]["allow"], (
+                f"sketcher meta.json missing port {port}"
+            )
+
+    def test_sketcher_prose_names_all_four_ports(self):
+        surface = "\n".join(
+            (self.SKETCHER_ROOT / f).read_text(encoding="utf-8")
+            for f in ("soul.md", "rule.md", "workflow.md", "tools_note.md")
+        )
+        for port in self.NEW_OD_PORTS:
+            assert port in surface, f"sketcher prose missing port {port}"
+
+
+def _resolve_critic_filter(instance_tag: str) -> set:
+    """The critic tool-filter seam, factored ONCE (tidier round 2 #5):
+    factory-created image+compare tools -> scan_tools_for_full_docs ->
+    resolve_tool_filter against critic's canonical meta allow/deny.
+    Registry metadata is saved and restored around the probe.
+    (test_sketcher_agent.py carries an identical local shim — no
+    cross-test-file imports.)"""
+    import json
+
+    from daemon.tools.image_tools import create_image_tools
+    from daemon.tools.compare_tools import create_compare_tools
+    from daemon.tools import _tool_registry as reg
+    from daemon.tools.instance import resolve_tool_filter
+
+    critic_root = DESIGNER_ROOT.parent / "critic"
+    meta = json.loads((critic_root / "meta.json").read_text(encoding="utf-8"))
+    saved = dict(reg._tool_metadata)
+    try:
+        tools = create_image_tools(None, instance_tag) + create_compare_tools(
+            None, instance_tag
+        )
+        reg.scan_tools_for_full_docs(tools)
+        return resolve_tool_filter(
+            meta["tools"]["allow"], meta["tools"]["deny"],
+            tool_categories=reg.list_tools_by_category(),
+        )
+    finally:
+        reg._tool_metadata.clear()
+        reg._tool_metadata.update(saved)
+
+
+class TestCriticToolsResolveNit2:
+    """Nit-2 WRITE-LEAK GATE: resolving critic's canonical filter through
+    the REAL daemon seam (factory-created tools -> scan_tools_for_full_docs
+    -> resolve_tool_filter) yields the EXACT 5-tool read-only set. An AC
+    pinned at '4+1' can never pass because the `image` category resolves
+    to FOUR tools incl. image_save — the explicit deny strips it."""
+
+    EXPECTED_RESOLVED = {
+        "read_file", "image_get", "image_list", "explain_image", "compare_images",
+    }
+
+    def test_critic_tools_resolve(self):
+        """AUTHORITATIVE exact-5-tool-set check (the shared seam's
+        assertion of record; test_sketcher_agent.test_critic_deny_wins is
+        a thin consumer of the same seam shape)."""
+        resolved = _resolve_critic_filter("critic-tools-resolve")
+        assert resolved == self.EXPECTED_RESOLVED, (
+            f"critic resolved tool set drifted: {resolved ^ self.EXPECTED_RESOLVED}"
         )
 
 
@@ -239,6 +335,9 @@ class TestFallbackBlockPreservedVerbatim:
     """
 
     def test_step_2_fallback_block_intact(self):
+        """Structural sentinels of the Step 2 fallback block (tidier
+        round 2 #6: token-set presence moved to the single parametrized
+        source in TestFallbackReasonAudit — no duplicate loops here)."""
         workflow = (DESIGNER_ROOT / "workflow.md").read_text(encoding="utf-8")
         step2_match = re.search(
             r"####\s+Step 2.*?(?=\n---\n|\Z)",
@@ -247,13 +346,6 @@ class TestFallbackBlockPreservedVerbatim:
         )
         assert step2_match, "Step 2 section not found in workflow.md"
         step2 = step2_match.group(0)
-
-        # All five fallback_reason tokens must appear verbatim.
-        for token in FALLBACK_REASON_TOKENS:
-            assert token in step2, (
-                f"Step 2 fallback block missing token {token!r} — the "
-                f"slice-⑤ directive forbids changing fallback semantics"
-            )
 
         # The Cardinal #7 sentinel must appear.
         assert "SPEC INCOMPLETE" in step2, (
@@ -265,32 +357,40 @@ class TestFallbackBlockPreservedVerbatim:
         )
 
     def test_cardinal_seven_in_rule_md(self):
-        """Cardinal #7 lives in rule.md (the live designer Cardinal).
-        The fallback_reason token set + the text-lane-spec-incomplete
-        guarantee must be preserved verbatim there too.
+        """Cardinal #7 lives in rule.md (the live designer Cardinal):
+        the text-lane-spec-incomplete guarantee sentinel. The token set
+        itself is asserted once, parametrized, in TestFallbackReasonAudit.
         """
         rule = (DESIGNER_ROOT / "rule.md").read_text(encoding="utf-8")
-        for token in FALLBACK_REASON_TOKENS:
-            assert token in rule, (
-                f"rule.md Cardinal #7 missing token {token!r}"
-            )
         assert "Cardinal #7 applies" in rule, (
             "rule.md Cardinal #7 sentinel must be preserved"
         )
 
 
 class TestFallbackReasonAudit:
-    """Audit that the fallback_reason tokens are intact across all designer files."""
+    """ONE parametrized source over the fallback_reason token set
+    (tidier round 2 #6): every token must appear in rule.md (Cardinal #7)
+    and in workflow.md's Step 2 fallback block — the section-scoped check
+    subsumes whole-file presence, so the weaker whole-file loop is gone."""
 
     @pytest.mark.parametrize("token", FALLBACK_REASON_TOKENS)
     def test_fallback_reason_token_present_in_rule_md(self, token):
         rule = (DESIGNER_ROOT / "rule.md").read_text(encoding="utf-8")
-        assert token in rule
+        assert token in rule, f"rule.md Cardinal #7 missing token {token!r}"
 
     @pytest.mark.parametrize("token", FALLBACK_REASON_TOKENS)
     def test_fallback_reason_token_present_in_workflow_md(self, token):
         workflow = (DESIGNER_ROOT / "workflow.md").read_text(encoding="utf-8")
-        assert token in workflow
+        step2_match = re.search(
+            r"####\s+Step 2.*?(?=\n---\n|\Z)",
+            workflow,
+            re.DOTALL,
+        )
+        assert step2_match, "Step 2 section not found in workflow.md"
+        assert token in step2_match.group(0), (
+            f"Step 2 fallback block missing token {token!r} — the "
+            f"slice-⑤ directive forbids changing fallback semantics"
+        )
 
     def test_fallback_reason_tokens_exact_string_match(self):
         """The token set is exact — no slight rewordings."""

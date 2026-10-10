@@ -1,0 +1,67 @@
+# Phase 1 preconditions log — 2026-10-10T15:57:59Z
+
+== P1-Pre-1: architecture-recommendation.md present (binding text) ==
+01f98d810e05680488e6d2b66629a3a2d2adc89a  .agents/shared/planning/designer-critic-orchestration/architecture-recommendation.md
+RESULT: PASS (present)
+
+== P1-Pre-1b: open-design-decisions.md present (historical record) ==
+RESULT: PASS (present)
+
+== P1-Pre-2: agents/sketcher/ exists in worktree ==
+RESULT: PASS (dir exists)
+b908405460aacdcbbf0102a3c04885cced540184  agents/sketcher/meta.json
+-- compare vs live v0.18.5 (main checkout):
+b908405460aacdcbbf0102a3c04885cced540184  /home/nea/ensemble-src/agents/sketcher/meta.json
+b908405460aacdcbbf0102a3c04885cced540184  agents/sketcher/meta.json
+Common subdirectories: /home/nea/ensemble-src/agents/sketcher/skills-template and agents/sketcher/skills-template
+RESULT: PASS (sketcher tree byte-identical to live v0.18.5 checkout)
+
+== P1-Pre-3: A/B judge job not blocked; phase 1 edits on existing branch ==
+feature/designer-critic-orchestration
+RESULT: PASS (editing existing branch feature/designer-critic-orchestration; no rename at phase 1)
+
+== Positive controls (pre-edit, executed 15:58:32Z) ==
+-- AC5 pc1: od.* count in rule.md (expect 2, lines 35+38)
+2
+-- AC5 pc2: literal-pipe form false-green proof (expect 0)
+0
+-- SC-5 pc: real enum-alternation grep (expect 2: lines 15+38)
+2
+-- AC6 pc1: word-boundary critic grep (expect 0)
+0
+-- AC6 pc2: worker grep hits incl :12+:67
+12:4. **Sub-team: `worker` + `sketcher` only.** I do not spawn another `designer`. No exceptions; the recursion guard is the rule.
+13:5. **End turn after `send_message`.** Holding the turn blocks report delivery and deadlocks the run. The runtime resumes me when the worker reports back.
+14:6. **One shot per partition.** A failed worker partition comes back on my plate. I do not re-dispatch.
+41:### (d) Sharding Discipline — what partitions go to workers
+43:I shard a partition only when it clears **all four** of: bulk (5+ files), low-coupling (each file editable independently), no-judgment (edit fully determined from the brief), disjoint (no overlap with my own edits or another worker's).
+54:- WCAG sweep across a component inventory (one criterion per worker partition)
+59:Failure path: a worker reports partial or bad output → I revert their edits and do the partition by hand. I never silently absorb partial output, and I never re-dispatch.
+67:- I never invent "spawn a peer agent" fallbacks. My only sub-team targets are `worker` and `sketcher`; escalation across agents is the caller's job.
+-- SC-3 pc: workflow kill-pattern (expect 2 lines: 105+112)
+105:For **multi-page runs** I dispatch per-page generation to `sketcher` children — one sketcher instance per page, each running the full OD pipeline (`od.compose_brief` → `od.generate` → `od.lint` → `od.save`) on its page-brief and reporting the generation envelope back to me. **Single-page one-offs stay on my own direct `od.generate`** (Step 1 above) — the two lanes coexist (dual-run); nothing is deprecated while the pilot gates are open.
+112:- **Fan-in + escape valve (never silently incomplete):** a sketcher child that errors, reports a FAILED envelope, or never reports → I confirm stuck from its report (or staleness), then **take that page back and run it on my own direct `od.generate`** — one takeover, no re-dispatch. If the takeover also fails, the page is marked `[incomplete]` in my report with the exact `error.code`s and escalated with gaps. Max one takeover per page.
+-- SC-18 pc: soul kill-pattern (expect 1 line: 55)
+55:Per-page **generation** is sketcher's lane — on multi-page runs I dispatch one sketcher child per page (see the Orchestration section of My Workflow); single-page one-offs stay on my own direct `od.generate`.
+-- AC8 pc1: Capture Procedure designer-side (expect 1 at :55)
+55:## Capture Procedure (agent-browser → substrate)
+-- AC8 pc2: Capture Procedure sketcher-side (expect 0)
+0
+-- AC8 pc3: Provenance tag policy designer-side (expect 1 at :124)
+1
+-- AC8 pc4: fence count prescribed range :55-110 (expect 5 ODD)
+5
+-- AC8 pc5: fence count full section :55-139 (expect 6 EVEN)
+6
+-- AC8 pc6: whole designer file fence count (expect 6)
+6
+-- AC12/SC-21 pc: four-amendment grep vs architecture doc (expect 6)
+6
+-- SC-7 pc: closure-grep vs designer/soul.md (expect 0)
+0
+-- SC-8 pc: designer rule.md numbered-cardinal count (expect 7)
+7
+-- SC-20 pc: three-keyword grep on designer rule.md (expect 0 today)
+0
+-- SC-1 pc: od.* in designer meta.json (expect 4-token line at :18)
+18:              "od.generate", "od.compose_brief", "od.save", "od.lint",

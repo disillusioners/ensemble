@@ -1,0 +1,4 @@
+== T8: pytest tests/unit/test_report_integrity_prompts.py -k designer ==
+tests/unit/test_report_integrity_prompts.py .                            [100%]
+
+======================= 1 passed, 70 deselected in 0.30s =======================

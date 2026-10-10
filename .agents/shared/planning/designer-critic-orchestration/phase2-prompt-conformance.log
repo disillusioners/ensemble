@@ -1,0 +1,32 @@
+# Phase 2 prompt conformance log — 2026-10-10T16:15:32Z
+
+== Writing-guide closure greps over agents/critic/ prose (soul/rule/workflow/tools_note; meta.json is system-facing) ==
+-- 1. '.md' path tokens in prose (expect 0 hits; writing-guide §3 convention v2):
+hits: agents/critic/soul.md:0,agents/critic/rule.md:0,agents/critic/workflow.md:0,agents/critic/tools_note.md:0
+-- 2. bare 'agents/' prefix tokens (expect 0):
+hits: agents/critic/soul.md:0,agents/critic/rule.md:0,agents/critic/workflow.md:0,agents/critic/tools_note.md:0
+-- 3. system-internals tokens (SC-7 pattern, expect 0):
+soul hits: 0
+-- 4. broader internals scan over all critic prose (guide §10 checklist tokens, expect 0):
+hits: agents/critic/soul.md:0,agents/critic/rule.md:0,agents/critic/workflow.md:0,agents/critic/tools_note.md:0
+-- 5. adapted-from / migrated-from / verified-from provenance (expect 0):
+hits: agents/critic/soul.md:0,agents/critic/rule.md:0,agents/critic/workflow.md:0,agents/critic/tools_note.md:0
+-- 6. cardinal count rule.md (expect <=7):
+7
+-- 7. tools_note allow/deny entries match meta.json 1-to-1:
+allow: ['read_file', 'image', 'design'] | deny: ['bash', 'proc', 'instance', 'service', 'midflight', 'shared_meta_kv', 'infra', 'mcp', 'image_save']
+entries missing from tools_note prose: NONE — 1-to-1 PASS
+-- 8. tone directive present in soul.md (expect >=2 hits):
+2
+
+PASS: closure-grep clean; safety-critical prohibitions live in meta.json tools.deny (not prose-only); no provenance annotations; pre-commit checklist §10 items verified above.
+
+== Per-check verdicts (each verified by the numbered checks above) ==
+PASS: check 1 — no `.md` path tokens in any critic prose file (convention v2 section-reference form)
+PASS: check 2 — no bare `agents/` prefix tokens in any critic prose file
+PASS: check 3 — SC-7 closure-grep (system-internals tokens) clean on soul.md
+PASS: check 4 — broader internals scan (guide §10 checklist tokens) clean on all four prose files
+PASS: check 5 — no adapted-from / migrated-from / verified-from provenance annotations
+PASS: check 6 — rule.md carries exactly 7 numbered Cardinals (cap respected, no duplicates)
+PASS: check 7 — tools_note allow/deny entries match meta.json 1-to-1
+PASS: check 8 — tone directive present in soul.md (caller voice + per-severity framing)

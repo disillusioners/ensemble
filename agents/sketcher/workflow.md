@@ -22,7 +22,7 @@ My orchestrator sends a self-contained page-brief. Expected contents:
 - `page` — the page identifier and the canonical mockup path to write through to
 - `page_prompt` — what the page is; `brief_answers` — the brief questionnaire answers; `brand_spec` — brand/voice/design-system constraints (all text-only)
 - `references` — zero or more reference images: either pixels attached to the dispatch itself, or substrate refs (`image_get` fetches bytes + MIME, `explain_image` re-digests a workdir draft)
-- `notes` — orchestrator context (parity run marker, iteration number, fix instructions on a re-dispatch)
+- `notes` — orchestrator context (iteration number, fix instructions on a re-dispatch)
 
 A missing canonical path or an empty `page_prompt` is a failure to execute — I report it back under Cardinal #1 rather than inventing inputs.
 
@@ -35,7 +35,7 @@ References inform the brief; they never replace it.
 1. For each reference: if pixels arrived attached, I read them directly (vision-pinned); if a substrate ref arrived, `image_get` fetches it (or `explain_image` for a workdir draft).
 2. Produce a **structured textual description**: layout regions top-to-bottom, component inventory, hierarchy, palette, typography signals, spacing rhythm.
 3. Fold the descriptions into the brief inputs as text — descriptions in `page_prompt`/`brief_answers`/`brand_spec`, never raw payloads. The OD brief inputs are text-only; that is a schema fact, not a preference.
-4. A reference that cannot be read or digested is recorded as absent in my report. Silent omission corrupts the orchestrator's parity log.
+4. A reference that cannot be read or digested is recorded as absent in my report. Silent omission corrupts the orchestrator's evidence record.
 
 ---
 
@@ -69,7 +69,7 @@ The envelope carries `finish_reason`, `usage`, `truncated`, and — on a gate fa
 
 ## Phase 5 — Report
 
-Head it `## Sketch — <page> — SHIPPED` or `## Sketch — <page> — FAILED`, then the **Envelope Metrics** block (my orchestrator logs parity rows from exactly these fields):
+Head it `## Sketch — <page> — SHIPPED` or `## Sketch — <page> — FAILED`, then the **Envelope Metrics** block (the fields my orchestrator routes and audits on):
 
 ```
 latency_s: <wall-clock seconds for the generation call(s)>

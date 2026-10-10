@@ -1,0 +1,12 @@
+# Phase 2 preconditions — 2026-10-10T16:12:22Z
+
+== T1a: agents/critic/ absent ==
+ls: cannot access 'agents/critic': No such file or directory
+(the ls failure above IS the expected pass evidence — AC1 pipe-free wording)
+
+== T1b: phase-1 verdict schema doc present, SHA1 stable vs phase-1 commit ==
+3526522a829b7f82fcedf35ca1aa4ffe6f7dd84a  .agents/shared/planning/designer-critic-orchestration/critic-verdict-schema.md
+3526522a829b7f82fcedf35ca1aa4ffe6f7dd84a  -
+
+== P3-Pre-1 support: designer team_members contains critic (phase-1 T3 default) ==
+["worker","sketcher","critic"]

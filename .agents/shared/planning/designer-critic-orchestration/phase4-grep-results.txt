@@ -1,0 +1,73 @@
+# Phase 4 grep gates (SC battery) — 16:36:19Z
+SC-1 designer meta od.* count (expect 0):
+0
+SC-2 critic in designer team (expect non-null int):
+2
+SC-3 workflow kill primary+secondary (expect 0 / 0):
+0
+0
+SC-4 Dual-Run header (expect 0):
+0
+SC-5 literal-pipe false-green form (expect 0):
+0
+SC-5b enum alternation (expect >=2):
+3
+SC-7 critic soul closure-grep (expect 0):
+0
+SC-8 critic cardinals (expect 7 <=7):
+7
+SC-8b critic four-anchor (expect >=4):
+7
+SC-11 pipeline shape (expect >=1):
+5
+SC-13 commit count (expect 4 phase commits):
+dd949c4c2 chore(orchestration): phase-3 pipeline wiring — designer -> sketcher -> critic -> accept/save
+7530712b4 chore(critic): phase-2 critic agent build — read-only design-QA leaf
+a29ae3391 chore(designer): phase-1 od.* surgery — designer holds zero od.* tokens
+0c040e5f8 chore(release): bump version to v0.18.5
+d9a786129 feat: sketcher generation agent — od.generate on ensemble LLM lane
+SC-15 design allow index (expect non-null):
+2
+SC-15b view-views null check (expect null):
+null
+SC-17 marker at line 1 (expect the HTML comment):
+<!-- SUPERSEDED 2026-10-10 by designer-c
+SC-17b addendum line delta (expect 112):
+112
+SC-18 soul kill (expect 0 / 0):
+0
+0
+SC-19 Review canonical home (expect >=3):
+3
+SC-19b critic workflow lines (expect <=60):
+46
+SC-20 designer cardinals (expect 7 <=7):
+7
+SC-20b three-control anchors (expect >=3):
+4
+SC-21 schema doc amendment hits (expect >=4):
+10
+SC-supplemental: designer prose zero od.* (soul/rule/tools_note/skill, expect 0 x4):
+0
+0
+0
+0
+SC-supplemental: workflow parity-runs mention (expect 0):
+0
+NOTE: SC-6 (mechanical python assert), SC-9 (registry probe), SC-10 (pytest) are executed in the AC batteries / Nit-2 batch, not grep gates.
+SC-supplemental: critic soul single-page (expect 0):
+0
+SC-supplemental: workflow critic-revoking typo (expect 0):
+0
+SC-supplemental: view-views anywhere in critic meta (expect 0):
+0
+SC-supplemental: .md path tokens in critic prose x4 (expect 0 x4):
+0
+0
+0
+0
+SC-supplemental: bare agents/ tokens in critic prose x4 (expect 0 x4):
+0
+0
+0
+0

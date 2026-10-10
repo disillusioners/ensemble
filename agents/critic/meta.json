@@ -1,0 +1,18 @@
+{
+  "id": "critic",
+  "name": "Critic",
+  "description": "Design-QA gate — reviews each shipped mockup page against the spec ACs and the dispatch brief, and returns one machine-parseable verdict block (pass / needs-revision). Read-only leaf on the vision lane; comparator-backed when a reference capture exists.",
+  "icon": "🔍",
+  "color": "accent-teal",
+  "version": "1.0.0",
+  "llm_model": "vision",
+  "innate_skills": ["dynamic-skill", "todo"],
+  "skill_injection": true,
+  "recursion_limit_multiplier": 7,
+  "tools": {
+    "allow": ["read_file", "image", "design"],
+    "deny": ["bash", "proc", "instance", "service", "midflight",
+             "shared_meta_kv", "infra", "mcp", "image_save"]
+  },
+  "team_members": []
+}

@@ -1,0 +1,43 @@
+
+# Phase 3 AC battery — 16:20:21Z
+
+AC1: orchestration snapshot exists (46 lines)
+46
+
+AC3: kill-pattern (expect 0/0)
+0
+0
+
+AC4: 400s>=1 / critic-invoking>=1 / critic-revoking=0
+1
+1
+0
+
+AC5: parity=0 / verdict-greps>=2 / pinned_spec_sha>=1
+0
+4
+9
+
+AC6: post-save QA tokens >=3
+4
+
+AC7: outline order + Dual-Run=0
+56:## Phase 4 — Author the Spec
+103:## Orchestration — the Sketcher + Critic Lane (per-page generation)
+137:## Phase 5 — Self-Review
+0
+
+AC8: pytest exit
+======================= 1 passed, 70 deselected in 0.30s =======================
+
+AC9: cardinals=7 + keyword anchors >=3
+7
+4
+
+SC-11: pipeline shape (expect >=1)
+5
+
+:149-equivalent content check — Phase 5+ untouched by boundary:
+## Phase 5 — Self-Review
+
+Five passes on my own work before pinning SHA:

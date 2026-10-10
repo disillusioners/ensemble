@@ -1,0 +1,66 @@
+{
+  "captured_at": "2026-10-10T16:09:13Z",
+  "files": {
+    "agents/designer/meta.json": {
+      "lines": 22,
+      "sha1": "b90666c7e37f07862b5d144cfb3f5543de7e4928",
+      "bytes": 848,
+      "pre_sha1": "06b8bf641911ebd1abb5f734b5ea872e9617eb2b",
+      "pre_lines": 23,
+      "line_delta": -1
+    },
+    "agents/designer/soul.md": {
+      "lines": 86,
+      "sha1": "f444e9d23a9e68abe36d30659783839d6ad78c14",
+      "bytes": 7311,
+      "pre_sha1": "1af0004138bf14548fa136c0e864a72785272c3b",
+      "pre_lines": 86,
+      "line_delta": 0
+    },
+    "agents/designer/rule.md": {
+      "lines": 67,
+      "sha1": "9236093957fad35a3b8215668ae93b847774d943",
+      "bytes": 6643,
+      "pre_sha1": "8bad7727deee82539216b5f975c3405acc7fe77f",
+      "pre_lines": 67,
+      "line_delta": 0
+    },
+    "agents/designer/workflow.md": {
+      "lines": 225,
+      "sha1": "8d7bc0b1eb91f36adde6313bdeb0f8d9baa74848",
+      "bytes": 18185,
+      "pre_sha1": "4bdf8c882901c8a21781826d255641dd08a0a46e",
+      "pre_lines": 225,
+      "line_delta": 0
+    },
+    "agents/designer/tools_note.md": {
+      "lines": 79,
+      "sha1": "e292edeb6ac9a87aa33b38d59bd650c387e13183",
+      "bytes": 6915,
+      "pre_sha1": "6e85a90e9766a205d18cc11ad694cb82c51dc037",
+      "pre_lines": 172,
+      "line_delta": -93
+    },
+    "agents/designer/skills-template/design-strategy.md": {
+      "lines": 119,
+      "sha1": "5927a59425226c30cd6cc572a8710d2af6f98304",
+      "bytes": 11782,
+      "pre_sha1": "f3fcde8da5907b5491b116a6fff579b64c9b88d6",
+      "pre_lines": 119,
+      "line_delta": 0
+    },
+    "agents/sketcher/tools_note.md": {
+      "lines": 124,
+      "sha1": "03a58fa6f8884a2ffbc88427cad472d6023e675d",
+      "bytes": 13238,
+      "pre_sha1": "d6697192a195fbcab862e08d0aae69ff8d77aeba",
+      "pre_lines": 35,
+      "line_delta": 89
+    }
+  },
+  "workflow_tail_103plus": {
+    "sha1": "ea955368c62c9248fb215c9e266dfaf130d258ac",
+    "pre_sha1": "ea955368c62c9248fb215c9e266dfaf130d258ac",
+    "byte_identical": true
+  }
+}

@@ -1,0 +1,55 @@
+# Phase 1 AC battery — 16:10:17Z
+
+AC1: [preconditions.log + snapshot.json exist]
+PASS
+
+AC2: meta.json zero od.* + critic in team_members (expect 0 + non-null)
+0
+2
+
+AC3: soul.md orchestrator framing (expect >=4)
+5
+
+AC4: D5 re-key four greps (each expect >=1)
+1
+1
+1
+1
+
+AC5: enum alternation (expect >=2) + zero od.* (expect 0)
+3
+0
+
+AC6: critic refs covering :12+:67 (expect 2 hits)
+12 67 
+
+AC7: :103+ byte-identical (expect True)
+True
+
+AC8: tools_note od.*(0)/critic(>=1)/CaptureProc designer(0)/sketcher(>=1)/orphans(0/0)/fences-even
+0
+1
+0
+1
+0
+0
+6
+0
+
+AC9: design-strategy zero od.* (expect 0)
+0
+
+AC10: phase1-results.txt shows 0 exit codes
+1
+1
+
+AC11: phase1-post.json present
+PASS
+
+AC12: verdict schema <=60 lines + >=4 amendment hits
+49
+10
+
+AC13: SUPERSEDED marker at line 1, +1 delta
+<!-- SUPERSEDED 2026-10-10 by designer-critic-orch
+112

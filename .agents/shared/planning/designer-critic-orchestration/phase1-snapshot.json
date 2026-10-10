@@ -1,0 +1,44 @@
+{
+  "captured_at": "2026-10-10T15:58:12Z",
+  "files": {
+    "agents/designer/meta.json": {
+      "lines": 23,
+      "sha1": "06b8bf641911ebd1abb5f734b5ea872e9617eb2b",
+      "bytes": 909
+    },
+    "agents/designer/soul.md": {
+      "lines": 86,
+      "sha1": "1af0004138bf14548fa136c0e864a72785272c3b",
+      "bytes": 6928
+    },
+    "agents/designer/rule.md": {
+      "lines": 67,
+      "sha1": "8bad7727deee82539216b5f975c3405acc7fe77f",
+      "bytes": 6369
+    },
+    "agents/designer/workflow.md": {
+      "lines": 225,
+      "sha1": "4bdf8c882901c8a21781826d255641dd08a0a46e",
+      "bytes": 17654
+    },
+    "agents/designer/tools_note.md": {
+      "lines": 172,
+      "sha1": "6e85a90e9766a205d18cc11ad694cb82c51dc037",
+      "bytes": 17533
+    },
+    "agents/designer/skills-template/design-strategy.md": {
+      "lines": 119,
+      "sha1": "f3fcde8da5907b5491b116a6fff579b64c9b88d6",
+      "bytes": 11271
+    },
+    "agents/sketcher/tools_note.md": {
+      "lines": 35,
+      "sha1": "d6697192a195fbcab862e08d0aae69ff8d77aeba",
+      "bytes": 3162
+    }
+  },
+  "workflow_tail_103plus": {
+    "sha1": "ea955368c62c9248fb215c9e266dfaf130d258ac",
+    "lines": 124
+  }
+}
