@@ -16,6 +16,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatStepperModule, MatStepper } from '@angular/material/stepper';
+import { StepperSelectionEvent } from '@angular/cdk/stepper';
 import { BreakpointObserver } from '@angular/cdk/layout';
 import { map } from 'rxjs/operators';
 import { Subscription } from 'rxjs';
@@ -181,25 +182,104 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   });
 
   /**
-   * W1 — sync `activeStep()` with Material's `<mat-stepper>` selection.
-   * Bound to `(selectionChange)` on BOTH orientation branches in the
-   * template. Without this, header-driven step jumps leave the custom
-   * footer rendering the WRONG active-step buttons (per-step branch
-   * in the template reads `activeStep()`, but the stepper's internal
-   * `selectedIndex` would diverge). The handler clamps to the valid
-   * 0..3 range as a defensive belt — the stepper already clamps.
+   * Selection-change gate — wiznav-fix ROUND 3. The original
+   * wiznav-fix (round 1/2) had a stale-read + sync-revert defect
+   * that the reviewer's runtime probe caught: the installed
+   * `@angular/cdk` 21.2.5
+   * (node_modules/@angular/cdk/fesm2022/stepper.mjs:521-533)
+   * emits `selectionChange` BEFORE committing `_selectedIndex.set`:
+   *
+   *     _updateSelectedItemIndex(newIndex) {
+   *       ...
+   *       this.selectionChange.emit({ selectedIndex: newIndex, ... });
+   *       this._selectedIndex.set(newIndex);  // <-- AFTER emit
+   *       ...
+   *     }
+   *
+   * The round-1/2 handler read `stepper.selectedIndex` live in the
+   * handler (a getter backed by `_selectedIndex()`) — that read
+   * returned the OLD value (pre-commit). Two failure modes:
+   *
+   *   - C1 (app-initiated, e.g. footer Back 1→0): the live getter
+   *     read 1 while the event carried 0. Handler saw mismatch,
+   *     synchronously wrote `stepper.selectedIndex = 0` which
+   *     re-fired the setter → re-emit → another revert write →
+   *     recursion to stack limit.
+   *   - C2 (genuine user keyboard / focus jump): the live getter
+   *     read the OLD index (e.g. 0 for a 0→3 jump). Handler saw
+   *     match, early-returned, the setter committed. The bug
+   *     SURVIVED every non-mouse nav path — only mouse was fenced
+   *     by `pointer-events: none` in component.scss.
+   *
+   * Round-3 fix:
+   *   - Template binds the event payload:
+   *       (selectionChange)="onStepperSelectionChange(stepper, $event)"
+   *     `event.selectedIndex` carries the NEW index the CDK is
+   *     trying to set (the value the post-emit
+   *     `_selectedIndex.set(newIndex)` will commit).
+   *   - The handler reads `event.selectedIndex` (not the live
+   *     getter). On mismatch, the revert write is DEFERRED via
+   *     `queueMicrotask` so the current setter chain unwinds
+   *     first; the re-emit from the deferred write hits the
+   *     handler with the (now-committed, post-revert) value
+   *     matching `activeStep()` → no further write → bounded
+   *     ≤2 emissions per app or user action.
+   *
+   * Mouse is fenced upstream by `pointer-events: none` on
+   * `.mat-step-header` (component.scss). The handler here closes
+   * keyboard / focus-teleport / W1 bounce paths AND avoids the
+   * round-1/2 C1/C2 staleness bug.
+   *
+   * ─── CDK SETTER-RATCHET CAVEAT (do NOT add `editable="false"`
+   * on any <mat-step>) ─────────────────────────────────────────────
+   * The installed `@angular/cdk` 21.2.5
+   * (`node_modules/@angular/cdk/fesm2022/stepper.mjs:415-419`) has
+   * a silent asymmetric guard in the `selectedIndex` setter:
+   *
+   *     if (!this._anyControlsInvalidOrPending(index)
+   *         && (index >= this.selectedIndex
+   *             || this.steps.toArray()[index].editable)) {
+   *       this._updateSelectedItemIndex(index);
+   *     }
+   *
+   * The `|| ...editable` arm is asymmetric: with any
+   * `<mat-step editable="false">`, BACKWARD writes are silently
+   * DROPPED. Do not reintroduce `editable="false"` anywhere in
+   * this wizard — the source-template structural pin
+   * (wiznav-fix ROUND 3 — per-tag editable scan) catches it at
+   * test time.
+   * ─────────────────────────────────────────────────────────────────
    */
-  onStepperSelectionChange(stepper: MatStepper | undefined): void {
-    if (!stepper) {
+  onStepperSelectionChange(
+    stepper: MatStepper | undefined,
+    event: StepperSelectionEvent | undefined,
+  ): void {
+    if (!stepper || !event) {
       return;
     }
-    const idx = stepper.selectedIndex;
+    const idx = event.selectedIndex;
     if (idx < 0 || idx > 3) {
       return;
     }
-    if (idx !== this.activeStep()) {
-      this.activeStep.set(idx);
+    if (idx === this.activeStep()) {
+      return; // app-initiated change already matches the source of truth
     }
+    // Mismatch: someone moved the stepper without our permission
+    // (genuine user keyboard / focus / W1 bounce). Defer the
+    // revert write via queueMicrotask so the current setter
+    // chain unwinds (it completes `_selectedIndex.set(idx)` and
+    // `selectedIndexChange.emit` AFTER the selectionChange we
+    // are handling) before our revert triggers another
+    // selectionChange. Self-bounded: the deferred write's
+    // selectionChange carries the post-revert value, which
+    // matches `activeStep()` here → early return → no further
+    // write, no recursion. ≤2 selectionChange emissions per
+    // user action total.
+    queueMicrotask(() => {
+      if (stepper.selectedIndex !== this.activeStep()) {
+        stepper.selectedIndex = this.activeStep();
+      }
+    });
   }
 
   // ── Status Strip render helpers (spec §2.1) ────────────────────────────
@@ -345,6 +425,11 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
    * and nothing more can be learned from another poll round.
    */
   private resumePollingIfInFlight(status: CheckpointCleanupStatus): void {
+    // ROUND 3 FIX — guard against null (matching seedBannerFromStatus;
+    // see that method's docstring for the rationale).
+    if (!status) {
+      return;
+    }
     const inFlight = status.in_flight;
     if (!inFlight || !inFlight.run_id) {
       return;
@@ -401,6 +486,20 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
    * session); the seed leaves it null.
    */
   private seedBannerFromStatus(status: CheckpointCleanupStatus): void {
+    // ROUND 3 FIX — guard against null. The poll-terminal handler in
+    // `startPolling` calls `refreshStatus()` which subscribes to
+    // `service.fetchStatus()`. If the BE returns null (e.g. during
+    // the 409-adoption window where the run was adopted from a
+    // separate poll row, or during an unhandled error state),
+    // the mock's `of(this.status())` returns `of(null)` and the
+    // subscribe's next callback would throw `Cannot read
+    // properties of null (reading 'last_run')` here. Production
+    // hits the same edge case (the BE is allowed to return null
+    // in transient states); the guard is defensive and zero-cost
+    // for the happy path.
+    if (!status) {
+      return;
+    }
     const last = status.last_run;
     if (!last) {
       return;
@@ -607,10 +706,14 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
           // without a manual navigation. `succeeded` only — `failed`
           // surfaces inline on Step 3, `interrupted` surfaces inline on
           // Step 3 (the rerun card); both stay on the Confirm step.
-          // The header `(selectionChange)` handler is the read-side
-          // back-pressure: any stepper-side jump propagates back into
-          // `activeStep()` so the footer always renders the active
-          // step's buttons.
+          // wiznav-fix — the header `(selectionChange)` handler is the
+          // CONTROLLED-INPUT gate: any stepper-side jump is REVERTED
+          // (selectionChange handler writes stepper.selectedIndex =
+          // activeStep() instead of mirroring into activeStep), so
+          // user-driven attempts on header clicks / keyboard / focus
+          // teleport / W1 bounce cannot escape the activeStep value.
+          // See onStepperSelectionChange docstring for the full
+          // rationale + the CDK setter-ratchet caveat.
           if (run.status === 'succeeded') {
             this.activeStep.set(3);
             this.snackBar.open('Cleanup succeeded.', 'Dismiss', {
@@ -729,6 +832,62 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   /** AM-6 — interrupted-state render guard. */
   canRerunInterrupted(run: CheckpointCleanupRun): boolean {
     return run.status === 'interrupted';
+  }
+
+  /**
+   * wiznav-fix ROUND 3 / W4 — footer "View result" affordance.
+   * When an execute run reaches a terminal `failed` or
+   * `interrupted` state, the operator currently loses the only
+   * path to the Step 4 post-mortem UI (Step 4 has no auto-advance
+   * for non-succeeded runs, and the stepper headers are inert
+   * under the pointer-events fence). This helper is the
+   * canonical, sanctioned navigation surface for that state —
+   * a footer button is per spec the ONE way to navigate the
+   * wizard, so this helper exists to gate the button.
+   *
+   * Returns true ONLY when `lastExecuteResult` is a terminal row
+   * in `failed` or `interrupted` status. `succeeded` rows
+   * auto-advance to Step 4 via the poll terminal handler at
+   * ts:~676, so the button is redundant for those; the button
+   * fires for failed/interrupted specifically.
+   */
+  canViewResult(): boolean {
+    const run = this.lastExecuteResult();
+    return (
+      !!run &&
+      (run.status === 'failed' || run.status === 'interrupted')
+    );
+  }
+
+  /**
+   * wiznav-fix ROUND 3 / W4 — sanity check before the viewResult()
+   * action. Returns true when the post-mortem is actually
+   * viewable (the failed/interrupted result row is in place AND
+   * we're not in the middle of an in-flight execute that would
+   * race with the navigate). Currently equivalent to
+   * canViewResult() but kept as a separate guard for forward
+   * compatibility (e.g. an in-flight check could be added
+   * without breaking the caller).
+   */
+  canNavigateToResult(): boolean {
+    return this.canViewResult() && !this.executing();
+  }
+
+  /**
+   * wiznav-fix ROUND 3 / W4 — sanctioned footer-driven nav to
+   * Step 4 when a run reached a terminal failed/interrupted
+   * state. Writes `activeStep` (the source of truth); the
+   * `[selectedIndex]="activeStep()"` binding flows the new index
+   * to the stepper, the round-3 selectionChange handler reads
+   * `event.selectedIndex` (==3) which matches `activeStep()` (==3)
+   * → early return → no recursion, no revert. Self-bounded to
+   * ≤2 emissions (the forward write + the post-commit CD).
+   */
+  viewResult(): void {
+    if (!this.canNavigateToResult()) {
+      return;
+    }
+    this.activeStep.set(3);
   }
 
   /** T6.3 pin target: `formatBytes` source MUST contain `1024` (binary). */

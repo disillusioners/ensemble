@@ -1,5 +1,13 @@
 # Tidier Review Notes — agents-ensemble
 
+## 2026-10-11 — watch-loss fix Option A+E tidy pass (worktree feature/fix-retry-supersede-fix @ fd73fca8f, range 45dc39e45~1..fd73fca8f, 13 files +2478), Iteration 001
+- Commission: complementary craftsmanship pass after 0-critical design review; do-not-reopen list (in-txn hook, fail-open E1, table shape, GC shape) honored by both workers.
+- Range correction: caller's `45dc39e45..fd73fca8f` excluded base commit 45dc39e45 itself — the commit ADDING stored_watches model/repo/migration listed in scope; dispatched workers with `~1` to cover described surface.
+- Dispatch: 2 parallel read-only workers (readable 50a87e8d, hygiene da96a5d0); both reported fully, no gaps; 3 cross-worker merges (index parity A5≡B1, status literals A2⊃B2, unused test imports A7⊃B3).
+- Verdict: NEEDS WORK (non-blocking; zero High). 14 findings after dedup: 6 Medium / 8 Low. Two headline Mediums INDEPENDENTLY confirmed by both workers: migration index parity (`idx_*` file vs `ix_*` create_all, migration:49/53 ← Field(index=True) at models:97/101) and status-literal bypass of STORED_WATCH_STATUS_* constants (GC sites job_queue_service:1174/1216/1232 + hook 'armed' inline turn_transitions:888).
+- Regression-gate answer: every production file in range LOGIC-modified; zero formatting-only.
+- Deferred to Reviewer ×3: uq constraint-vs-index duality on fresh SQLite; `instance_id or ""` witness coercion consumer question; dialect-sniff getattr fallback direction (Session-typed caller → SQLite branch).
+
 ## 2026-10-07 — live-views Phase 1 tidy pass (worktree feature/live-views @ 343d9e789, range c600af60d..HEAD, 22 files +3899/−26), Iteration 001
 - 5th edit-commission occurrence (leader asked Tidier to implement 5-item tidy ledger + pathspec commits + test runs) → implementation re-routed to Developer per Cardinal #5 precedent chain (09-26, 10-04, 10-06); Tidier delivered verification map + sweep instead.
 - Dispatch: 3 parallel read-only workers (readable ef049770, hygiene 6bcc0c95, robustness 85f74253) + 2 verification rounds with readable (addendum CHECKs 1-3; second round demanded finding #11 the worker's own summary counted but body omitted — interim-report rule caught it).

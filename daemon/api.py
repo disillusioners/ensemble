@@ -540,6 +540,19 @@ async def lifespan(app: FastAPI):
     watcher_repo = JobWatcherRepository(engine=manager.engine)
     manager._watcher_repo = watcher_repo  # Store on manager for tools access
 
+    # Option A depth 3 (fix e8a61da3 — usage-limit retry-supersede
+    # double-silence): stored-watch quarantine repository + table.
+    # Explicit ``metadata.create_all`` next to the JobWatcher
+    # precedent above covers engines whose manager-level create_all
+    # ran before this model module was imported.
+    from daemon.repositories.job_queue.stored_watch_models import StoredWatch
+    from daemon.repositories.job_queue.stored_watch_repository import (
+        StoredWatchRepository,
+    )
+    StoredWatch.metadata.create_all(manager.engine)
+    stored_watch_repo = StoredWatchRepository(engine=manager.engine)
+    manager._stored_watch_repo = stored_watch_repo
+
     # Phase 2 (Batch 2) of feature/virtual-job-management-surface:
     # construct the WorkResolverService now that the JobRepository is
     # available. The resolver is the single point that looks up a
@@ -621,6 +634,9 @@ async def lifespan(app: FastAPI):
     job_queue_service.set_event_loop(asyncio.get_running_loop())
     job_queue_service.set_config(config.job_system)
     job_queue_service.set_watcher_repo(watcher_repo)
+    # Option A depth 4 (fix e8a61da3): wire the stored-watch GC leg's
+    # repository into the sweep's service seam.
+    job_queue_service.set_stored_watch_repo(stored_watch_repo)
     job_queue_service.set_dispatch_bus(dispatch_event_bus)
     # Phase 2 (Batch 2) — wire the WorkResolverService so
     # ``JobQueueService.notify_watchers`` delegates to

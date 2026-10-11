@@ -2629,6 +2629,86 @@ class JobRecoveryService:
                                 f"terminalises."
                             )
                             continue
+                        # ── E1 mission-live gate (fix e8a61da3,
+                        # Option E phase 1) ─────────────────────
+                        # The W1 retry-child conjunct above is a
+                        # TASK-scoped quiesce read — it answers
+                        # "is a retry still in flight on this
+                        # instance", NOT "is the MISSION still
+                        # alive". Mission 043d64a8 (the exact
+                        # incident): usage-limit deferral cancelled
+                        # the parent task, the retry task quiesced
+                        # between attempts, and the reconciler
+                        # finalized the JobItem while the wider
+                        # mission tree (instances outside this
+                        # task-scoped predicate) was STILL LIVE —
+                        # the premature notify spent the mission's
+                        # watch rows at the wrong moment (Pattern
+                        # (f) compounding failure (i)). The gate
+                        # below reads MISSION liveness via the
+                        # canonical ``evaluate_mission_live``
+                        # (3-leg verdict incl. Leg-0 zombie
+                        # backstop, 6h orphan window,
+                        # ALL-TERMINAL→live=False immediately —
+                        # frozen contract 2026-09-28) and NEVER
+                        # finalizes while the mission is alive.
+                        # The guard is consumed READ-ONLY; the
+                        # retry-child-live conjunct above STAYS
+                        # (both must pass). Bus leg is unknown on
+                        # this lane (the f1 branch has no bus
+                        # seam; the deferral releases its bus
+                        # watchers) — ``bus_pending_count=None``
+                        # skips leg (a); the tree legs decide.
+                        # Fail-open contract preserved: guard
+                        # errors open the door (live=False,
+                        # error=True) per the at-least-once
+                        # precedence.
+                        mission_verdict_f1 = await evaluate_mission_live(
+                            instance_repository=self._instance_repository,
+                            instance_id=instance_id,
+                            bus_pending_count=None,
+                        )
+                        if mission_verdict_f1.live:
+                            details.append({
+                                "pattern": (
+                                    "orphan_active_skipped_mission_live_f1"
+                                ),
+                                "job_id": job_id,
+                                "task_id": task_id,
+                                "instance_id": instance_id,
+                                "reason": (
+                                    f"mission-live guard (E1): "
+                                    f"{mission_verdict_f1.reason} — "
+                                    f"FAILED/CANCELLED parent Task "
+                                    f"{task_id} quiesced but the "
+                                    f"mission tree is still live; "
+                                    f"finalize + notify skipped, "
+                                    f"watcher rows untouched this "
+                                    f"sweep (043d64a8 premature-"
+                                    f"finalize class)"
+                                ),
+                            })
+                            logger.info(
+                                f"reconcile_drift_states: Pattern (f1) "
+                                f"skip — mission-live guard holds "
+                                f"JobItem {job_id[:8]}... (task "
+                                f"{task_id}, instance "
+                                f"{instance_id[:8] if instance_id else '?'}...): "
+                                f"{mission_verdict_f1.reason}"
+                            )
+                            continue
+                        if (
+                            mission_verdict_f1.error
+                            or mission_verdict_f1.timed_out
+                        ):
+                            logger.warning(
+                                f"reconcile_drift_states: Pattern (f1) "
+                                f"mission-live guard opened the finalize "
+                                f"door for job {job_id[:8]}... "
+                                f"(error={mission_verdict_f1.error}, "
+                                f"timed_out={mission_verdict_f1.timed_out}): "
+                                f"{mission_verdict_f1.reason}"
+                            )
                         # Route through the
                         # ``_fail_orphaned_job``-style
                         # boundary: lock release +
@@ -4198,6 +4278,15 @@ class JobRecoveryService:
                     f"notify_failed:{type(notify_err).__name__}"
                 )
 
+        # E2 (fix e8a61da3): durable witness row on the f2 done
+        # finalize — same contract as the f1 terminal-routing paths.
+        await self._publish_finalize_witness_event(
+            instance_id=instance_id,
+            job_id=job_id,
+            status="completed",
+            error_message=None,
+        )
+
         return (
             True,
             f"Pattern (f2): active JobItem with COMPLETED "
@@ -4205,6 +4294,93 @@ class JobRecoveryService:
             f"{instance_id[:8] if instance_id else '?'}...) "
             f"finalized to DONE; lock_released; {notify_status}",
         )
+
+    async def _publish_finalize_witness_event(
+        self,
+        *,
+        instance_id: str | None,
+        job_id: str | None,
+        status: str,
+        error_message: str | None = None,
+    ) -> bool:
+        """E2 (fix e8a61da3, Option E phase 2): publish the durable
+        ``JOB_COMPLETED`` witness event row at a RECOVERY-lane
+        mission finalize.
+
+        The natural observer path already publishes this row
+        (``job_feedback_observer`` Item-3b, OUTSIDE the
+        ``instance_was_terminal`` gate); the recovery finalize boundary
+        published NOTHING durable — the compounding failure (ii) of
+        the 043d64a8 RCA ("witness no-publish: zero job-side trace of
+        the true terminal"). This helper closes that hole on the
+        Pattern (f) finalize paths (f1 terminal-routing + f2 done).
+
+        Storage path ruling (brief pre-ruling on the matrix line-24
+        tension): EventBus durable lane (existing ``event`` table via
+        ``events_service._event_bus.create_event``) — the SAME
+        ``EventKind.JOB_COMPLETED`` kind and payload shape the
+        observer producer uses, so consumers need no new reader. NOT
+        a watcher notification: ``create_event`` never touches
+        ``job_watchers`` and never fans out to watchers — it persists
+        the row (EventRepository) + notifies SSE listeners + global
+        subscribers only. Lane safety: ``JobFeedbackObserver.
+        _process_event`` hard-filters ``event_type !=
+        "instance_lifecycle"`` (job_feedback_observer.py:1050) so this
+        row stays off the v0.13.9 result-body completion lane.
+
+        Soft-fail: a witness-publish failure NEVER breaks the finalize
+        that already committed (best-effort observability arm — same
+        contract as the observer's publish site).
+        """
+        if not job_id:
+            return False
+        events_service = getattr(
+            self._instance_manager, "_events_service", None
+        )
+        event_bus = getattr(events_service, "_event_bus", None)
+        if event_bus is None:
+            logger.debug(
+                "_publish_finalize_witness_event: no events service "
+                "wired — witness row skipped for job %s...",
+                job_id[:8],
+            )
+            return False
+        try:
+            from daemon.repositories.event.models import EventKind
+
+            data: dict[str, Any] = {
+                "job_id": job_id,
+                "status": status,
+                "result_summary": None,
+                # Additive keys (readers ignore unknown keys — the
+                # SSE parser surfaces ``kind`` as a string):
+                "source": "job_recovery_service.pattern_f",
+            }
+            if error_message:
+                data["error"] = error_message
+            await event_bus.create_event(
+                instance_id=instance_id or "",
+                kind=EventKind.JOB_COMPLETED.value,
+                data=data,
+            )
+            logger.debug(
+                "_publish_finalize_witness_event: published "
+                "JOB_COMPLETED witness row for job %s... "
+                "(status=%s)",
+                job_id[:8],
+                status,
+            )
+            return True
+        except Exception as witness_err:  # noqa: BLE001 — soft-fail
+            logger.warning(
+                "_publish_finalize_witness_event: failed to publish "
+                "JOB_COMPLETED witness row for job %s... "
+                "(status=%s): %s",
+                job_id[:8],
+                status,
+                witness_err,
+            )
+            return False
 
     async def _pattern_f_finalize_failed_terminal(
         self,
@@ -4325,6 +4501,16 @@ class JobRecoveryService:
                     )
                 )
                 if canonical_job_id is not None:
+                    # E2 (fix e8a61da3): durable witness row — the
+                    # job-side trace of this recovery finalize (the
+                    # observer publishes its own row only on the
+                    # natural path; soft-fail by contract).
+                    await self._publish_finalize_witness_event(
+                        instance_id=instance_id,
+                        job_id=job_id,
+                        status=target_status,
+                        error_message=error_message,
+                    )
                     try:
                         await job_queue_service.notify_watchers(
                             job_id, target_status, error_message
@@ -4421,6 +4607,15 @@ class JobRecoveryService:
                 f"{job_id[:8]}...: "
                 f"{type(trans_err).__name__}: {trans_err}",
             )
+
+        # E2 (fix e8a61da3): durable witness row on the legacy
+        # fallback success too — same contract as the preferred path.
+        await self._publish_finalize_witness_event(
+            instance_id=instance_id,
+            job_id=job_id,
+            status=target_status,
+            error_message=error_message,
+        )
 
         return (
             True,
