@@ -695,3 +695,76 @@ class TestStoredWatchGCLeg:
         assert repo.transition_status(stored_id, "released") is True
         assert repo.transition_status(stored_id, "released") is False
         assert repo.transition_status(stored_id, "rehydrated") is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hook defensive guard (e8a61da3 Minor-1, verifier)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestHookDefensiveGuard:
+    """e8a61da3 Minor-1 (verifier): the re-arm hook self-gates when
+    ``instance_id`` is None — binding None into the NOT-NULL
+    ``stored_watches.mission_instance_id`` column would
+    ``IntegrityError``-abort the retry transaction itself, escalating
+    a watch-loss into retry-breakage. The hook MUST short-circuit;
+    the F6 re-key itself MUST still execute.
+
+    Pin: ``RetryTurn(rearm_watchers=True, instance_id=None)`` →
+    no ``stored_watches`` row, no exception, F6 re-key UPDATE runs
+    unchanged. Direct-hook invocation isolates the guard from the
+    child-task INSERT path (``task.instance_id`` is NOT NULL, so the
+    full ``RetryTurn.run()`` cannot pre-stage ``None`` end-to-end).
+    """
+
+    def test_instance_id_none_skips_hook_and_f6_rekey_still_executes(
+        self, iso_engine
+    ):
+        from daemon.services.turn_transitions import RetryTurn
+
+        eng = iso_engine
+        _seed_default_watch(eng, "W1", "leader-1")
+
+        turn = RetryTurn(
+            parent_work_id="W1",
+            child_work_id="W2",
+            task_repo=None,
+            instance_id=None,
+            child_kwargs={
+                "task_type": "process_message",
+                "message_id": None,
+                "retry_count": 1,
+                "next_retry_at": None,
+                "created_at": "2026-10-11T08:00:00",
+                "cancel_requested": False,
+                "retry_scheduled": False,
+                "is_deferred": False,
+                "is_background": False,
+            },
+            rearm_watchers=True,
+        )
+
+        # 1. Hook must NOT raise; MUST return [] (no quarantine work).
+        with eng.begin() as conn:
+            result = turn._rearm_watchers_in_txn(conn)
+        assert result == []
+
+        # 2. No quarantine row was created.
+        assert _stored_rows(eng) == []
+
+        # 3. F6 re-key SQL is structurally UNCHANGED — still migrates
+        #    the parent-keyed watcher onto the child work_id with
+        #    default events untouched (no mission_terminal arm).
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE job_watchers SET job_id = :child_work_id "
+                    "WHERE job_id = :parent_work_id"
+                ),
+                {"child_work_id": "W2", "parent_work_id": "W1"},
+            )
+
+        events_on_w2 = _get_watch_events(eng, "W2")
+        assert len(events_on_w2) == 10  # default set, untouched
+        assert "mission_terminal" not in events_on_w2  # NO arming
+        assert _get_watch_events(eng, "W1") == []  # rekeyed away

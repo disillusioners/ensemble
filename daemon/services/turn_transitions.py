@@ -817,6 +817,13 @@ class RetryTurn(_Transition):
         the parent had no watchers — the plain F6 re-key below still
         runs and remains a no-op in that case).
         """
+        # e8a61da3 Minor-1: skip the hook when instance_id is None —
+        # binding None into stored_watches.mission_instance_id (NOT NULL)
+        # would IntegrityError-abort the retry transaction itself,
+        # escalating a watch-loss into retry-breakage. F6 re-key below
+        # runs UNCHANGED.
+        if self.instance_id is None:
+            return []
         rows = session.execute(
             text(
                 "SELECT watch_id, instance_id, watch_events "
