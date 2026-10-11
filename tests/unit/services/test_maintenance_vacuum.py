@@ -666,10 +666,13 @@ class TestRepairLaneVacuumExemption:
 
         Asymmetry: the helper requires the parens form
         ``VACUUM (ANALYZE)`` to express ANALYZE. The bare
-        ``VACUUM ANALYZE`` (no parens) is not valid PG syntax
-        anyway, and the helper short-circuits on the missing
-        parens. Pinned: lowercased or not, the no-parens form
-        returns ``False``. Post-FIX-4 behavior — confirmed.
+        legacy two-word ``VACUUM ANALYZE`` form IS valid PG
+        syntax; it is rejected here by design — deliberate
+        allow-list strictness that admits only the
+        parenthesized form, a fail-closed narrowing rather
+        than a syntax constraint. Pinned: lowercased or not,
+        the no-parens form returns ``False``. Post-FIX-4
+        behavior — confirmed.
         """
         from daemon.tools.ens_db_tools import (
             _statement_is_vacuum_analyze,
