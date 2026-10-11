@@ -18,10 +18,14 @@ post-run banner surfaces the recovery CTA.
 
 `MAINTENANCE_ENDPOINTS_ENABLED=0` (boot-read — restart the daemon after
 editing) → endpoints 2–5 return `503 maintenance_disabled`; `/availability`
-returns `200 {state: "kill_switched"}`. The auto cycle's env dual-arm
-(`CHECKPOINT_BLOB_PRUNE_DRY_RUN` / `CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE`) is
-UNAFFECTED by this switch (INV-1): auto stays destructive-if-armed while the
-manual API refuses. That split is by design.
+returns `200 {state: "kill_switched"}`. The auto cycle's blob prune is
+**not** affected by this switch — destructive is the unconditional
+default since feature/blob-prune-default-on (the env-flag ladder
+``CHECKPOINT_BLOB_PRUNE_DRY_RUN`` / ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE``
+is gone). To stop the auto cycle entirely, set
+``CHECKPOINT_CLEANUP_INTERVAL=0`` or stop the maintenance timer
+through the normal ops path; the manual API surface stays kill-
+switched independently.
 
 ## Origin guard (AM-1 + C1 hardening)
 
