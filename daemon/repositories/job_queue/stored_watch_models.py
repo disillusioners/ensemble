@@ -80,7 +80,16 @@ class StoredWatch(SQLModel, table=True):
             "watcher_instance_id",
             name="uq_stored_watches_original_work_watcher",
         ),
+        # Explicit named indexes (JobWatcher pattern,
+        # watcher_models.py) — names MUST stay byte-identical to
+        # create_stored_watches.sql; the model is the canonical
+        # source for the PostgreSQL create_all path.
+        Index("idx_stored_watches_original_work_id", "original_work_id"),
         Index("idx_stored_watches_retry_work_id", "retry_work_id"),
+        Index(
+            "idx_stored_watches_watcher_instance_id",
+            "watcher_instance_id",
+        ),
         Index(
             "idx_stored_watches_status_created",
             "status",
@@ -94,11 +103,11 @@ class StoredWatch(SQLModel, table=True):
     )
 
     # The re-key pair — parent (cancelled) → retry child (fresh UUID).
-    original_work_id: str = Field(index=True)
+    original_work_id: str = Field()
     retry_work_id: str = Field()
 
     # Who was watching (the ``job_watchers.instance_id`` at hook time).
-    watcher_instance_id: str = Field(foreign_key="instances.instance_id", index=True)
+    watcher_instance_id: str = Field(foreign_key="instances.instance_id")
 
     # The watcher's ORIGINAL event list (pre-arming). JSON list of
     # strings — same dual-dialect treatment as
