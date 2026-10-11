@@ -97,6 +97,15 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     "maintenance_router",   # /api/maintenance
     "plane_router",         # /api/plane
     "tmp_images_router",    # /api/tmp_images
+    # oauth2-auth v1 DESIGNED mounts (refreshed pin): +2 over the
+    # pre-auth baseline, both registered ONLY under `if auth_enabled:`
+    # in daemon/api.py (OFF-state route table untouched, G3.2).
+    # Accounting matches tests/unit/test_router_scope_manifest.py
+    # (30 textual include_router matches = 28 unconditional + these
+    # 2 auth-ON-gated families). The guard's intent is UNCHANGED: an
+    # unauthorized 31st mount still fails this test loudly.
+    "mcp_kb_keys_router",   # /api/mcp/kb/keys (OAuth2 human lane)
+    "auth_router",          # /api/auth/*
 )
 
 # Names that are explicitly REJECTED for the wake surface (D-FA3.1

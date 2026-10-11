@@ -22,6 +22,11 @@ scope:
 * **Auth-tables-only scope**: setup drops + recreates ONLY the four
   auth tables (``tables=[...]`` create_all) and teardown drops them —
   the shared ``ensemble_test`` scratch DB is otherwise untouched.
+* **xdist guard**: the PostgreSQL leg SKIPS under ``pytest -n auto``
+  (``PYTEST_XDIST_WORKER`` set) — the shared scratch DB + fixed table
+  names cannot take concurrent DROP/CREATE across workers. Mirror of
+  ``tests/postgres/conftest.py``; the SQLite legs stay race-free
+  (per-test ``tmp_path`` files) and still run in parallel.
 """
 
 from __future__ import annotations
@@ -59,6 +64,19 @@ PG_PASSWORD = os.environ.get("PG_TEST_PASSWORD", "ensemble_dev")
 
 PG_URL = f"postgresql+psycopg://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 
+# --- xdist guard (mirror of tests/postgres/conftest.py:27-95) --------------
+# This helper shares ONE scratch database + the SAME four table names
+# across every worker; setup DROPs + CREATEs them per call, so concurrent
+# workers race (UndefinedTable / UniqueViolation / DuplicateTable — the
+# exact symptom set the 2026-10-11 final merge gate captured under
+# ``pytest -n auto``). The sibling PG lane skips its tests at collection
+# time under xdist; this helper has no conftest hook, so the same guard
+# lives at the single chokepoint every PG leg flows through
+# (``scratch_pg_engine_or_skip``). Solo behavior is UNCHANGED (no
+# ``PYTEST_XDIST_WORKER`` ⇒ no skip); the SQLite legs are per-test
+# ``tmp_path`` files, stay race-free, and still run under ``-n auto``.
+_XDIST_WORKER_ENV = "PYTEST_XDIST_WORKER"
+
 
 def _tripwire() -> None:
     """Fail-closed guard against ambient env poison.
@@ -91,6 +109,16 @@ def scratch_pg_engine_or_skip() -> Engine:
     every test starts from a clean slate (create_all is CREATE-only; a
     stale schema from a crashed prior session would otherwise leak).
     """
+    if _XDIST_WORKER_ENV in os.environ:
+        # xdist guard (see block above) — the shared scratch DB + fixed
+        # table names cannot take concurrent DROP/CREATE. Skip the PG
+        # leg the same way the sibling ``tests/postgres`` lane does.
+        pytest.skip(
+            "auth scratch-PG tests cannot run under pytest-xdist (shared "
+            "scratch DB + fixed table names race on DROP/CREATE). Run "
+            "serially, e.g. pytest <auth files> -p no:cacheprovider "
+            "(no -n); mirror of tests/postgres/conftest.py xdist guard."
+        )
     _tripwire()
     engine = create_engine(PG_URL, pool_pre_ping=True, future=True)
     try:
