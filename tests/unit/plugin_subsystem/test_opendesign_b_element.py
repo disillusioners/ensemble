@@ -1001,17 +1001,48 @@ class TestOdGenerateFacadeWiring:
                 return iter(self._chunks)
 
         def _default_chunks():
-            class _Delta:
+            # Real wire order (the A1 wire-order invariant — phases
+            # observed on the live vision lane): content chunk(s)
+            # first, finish_reason chunk SECOND, empty-choices usage
+            # chunk LAST. The streamed-content tests in
+            # test_od_generate_streaming.py pin the same order at the
+            # wire-format level; this fake keeps the B-element
+            # _build_openai_fake clients consistent with that order so
+            # production-shape coverage stays invariant.
+            class _DeltaContent:
                 content = "ok"
 
-            class _Choice:
+            class _ChoiceContent:
+                finish_reason = None
+                delta = _DeltaContent()
+
+            class _ChunkContent:
+                choices = [_ChoiceContent()]
+
+            class _DeltaEmpty:
+                content = None
+
+            class _ChoiceFinish:
                 finish_reason = "stop"
-                delta = _Delta()
+                delta = _DeltaEmpty()
 
-            class _Chunk:
-                choices = [_Choice()]
+            class _ChunkFinish:
+                choices = [_ChoiceFinish()]
 
-            return [_Chunk()]
+            class _ChunkUsage:
+                choices = []
+
+                class _Usage:
+                    prompt_tokens = 0
+                    completion_tokens = 0
+                    total_tokens = 0
+
+                    class completion_tokens_details:
+                        pass
+
+                usage = _Usage()
+
+            return [_ChunkContent(), _ChunkFinish(), _ChunkUsage()]
 
         class _Comps:
             def create(self, **kwargs):

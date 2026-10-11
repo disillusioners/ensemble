@@ -839,3 +839,193 @@ class TestStreamedUsageDetails:
         assert usage.total_tokens == 35
         assert usage.completion_tokens_details is not None
         assert usage.completion_tokens_details.reasoning_tokens == 17
+
+
+# ---------------------------------------------------------------------------
+# A1 wire-order drain pins (tester-anomaly-1 fix; Phase-0 probe + 3/3 live)
+# ---------------------------------------------------------------------------
+
+
+class TestWireOrderDrainPin:
+    """Pin the A1 fix: terminal ``usage`` chunk arrives STRICTLY AFTER
+    the ``finish_reason`` chunk on the real wire (Phase-0 probe + 3/3
+    live traffic). The streaming consumer must drain past
+    ``finish_reason`` to natural close — exiting the consumption loop on
+    the finish_reason chunk would drop the terminal usage and the
+    three completeness gates would then see ``usage=None`` in
+    production. These tests make that failure mode impossible to
+    regress by emitting the explicit real wire order AND the
+    EOF-without-usage tolerance (drain ends at natural close, ``usage``
+    stays ``None`` — the three gates do not require usage).
+    """
+
+    def test_stream_usage_chunk_after_finish_drained_in_real_wire_order(
+        self, monkeypatch
+    ):
+        """Wire-order pin (A1 fix): usage chunk arrives STRICTLY AFTER the
+        finish_reason chunk (3 chunks in real order — content, finish,
+        empty-choices usage) and the captured envelope carries the
+        usage token counts. Asserts the consumer did NOT exit on
+        finish_reason — the drain past it is what surfaced the usage."""
+        from daemon.plugin_subsystem.opendesign import generate as gen_mod
+
+        # Build chunks in real wire order: content → finish_reason →
+        # empty-choices usage (Phase-0 probe shape).
+        body_content = {
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 1739212800,
+            "model": "vision",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "<!doctype html><body>OK</body></html>"},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        body_finish = {
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 1739212800,
+            "model": "vision",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        body_usage = {
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 1739212800,
+            "model": "vision",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 198,
+                "completion_tokens": 24,
+                "total_tokens": 222,
+            },
+        }
+        events: List[Any] = [
+            ("data: " + json.dumps(body_content) + "\n\n").encode(),
+            ("data: " + json.dumps(body_finish) + "\n\n").encode(),
+            ("data: " + json.dumps(body_usage) + "\n\n").encode(),
+            b"data: [DONE]\n\n",
+        ]
+        _patch_streaming_openai(monkeypatch, _sse_bytes(events))
+
+        envelope = gen_mod._do_chat_call(
+            model="vision",
+            base_url="http://primary.test/v1",
+            api_key="fake-key",
+            system_prompt="sys",
+            user_prompt="user",
+            max_tokens=4096,
+            temperature=0.7,
+            timeout=120.0,
+        )
+
+        # Pin finish_reason capture (saw the finish chunk, drain continued).
+        assert envelope.choices[0].finish_reason == "stop"
+        # Pin usage chunk captured AFTER finish_reason — this is the
+        # exact A1 assertion. ``usage is not None`` is the regression
+        # gate; if the consumer exited on finish_reason, this would be
+        # None and the gates would then see usage=0 in production.
+        assert envelope.usage is not None, (
+            "terminal usage chunk after finish_reason must be captured — "
+            "the drain past finish_reason is the A1 fix"
+        )
+        assert envelope.usage.prompt_tokens == 198
+        assert envelope.usage.completion_tokens == 24
+        assert envelope.usage.total_tokens == 222
+        # Content join sanity check: drain-after-finish must NOT disturb
+        # content collection for the same stream.
+        assert (
+            envelope.choices[0].message.content
+            == "<!doctype html><body>OK</body></html>"
+        )
+
+    def test_stream_usage_chunk_after_finish_drained_in_real_wire_order_execute(
+        self, monkeypatch
+    ):
+        """End-to-end pin (A1 fix) through ``OdGenerate.execute``: the
+        execute() extraction reads ``response.usage`` defensively, so if
+        the consumer drops the terminal usage the success dict would
+        carry ``usage={prompt_tokens:0, completion_tokens:0,
+        total_tokens:0}`` — silent zeroing of real token counts. Pin
+        the FULL numbers ride through after the drain."""
+        from daemon.plugin_subsystem.opendesign import generate as gen_mod
+
+        events = _happy_stream_events(
+            content_pieces=["<!doctype html><body>OK</body></html>"],
+            usage={
+                "prompt_tokens": 42,
+                "completion_tokens": 18,
+                "total_tokens": 60,
+            },
+            finish_reason="stop",
+        )
+        _patch_streaming_openai(monkeypatch, _sse_bytes(events))
+
+        result = OdGenerate.execute(
+            GenerateInput(prompt="landing page", kind="prototype"),
+            env=ENV_PRIMARY,
+        )
+        assert result["error"] is None
+        assert result["truncated"] is False
+        assert result["finish_reason"] == "stop"
+        # Pin the real token counts (NOT zeros — zeros would mean the
+        # consumer dropped the terminal usage chunk).
+        assert result["usage"] == {
+            "prompt_tokens": 42,
+            "completion_tokens": 18,
+            "total_tokens": 60,
+        }
+
+    def test_eof_without_usage_terminal_tolerated(self, monkeypatch):
+        """EOF-without-usage tolerance pin (A1 fix termination
+        semantics): when the upstream stream closes naturally without
+        ever sending a usage chunk (legacy / buffered-pretending
+        paths, or a non-OpenAI proxy that drops ``include_usage``),
+        the consumer must terminate cleanly at EOF with ``usage=None``
+        — the three completeness gates do not require usage, so
+        downstream behavior must NOT change. The drain is bounded by
+        the outer ``timeout=`` + httpx read-window; no unbounded wait
+        inside the consumer."""
+        from daemon.plugin_subsystem.opendesign import generate as gen_mod
+
+        # Stream ends cleanly after the finish_reason chunk — NO usage
+        # chunk follows. Real OpenAI behavior would send usage here;
+        # the tolerance path proves the consumer does not hang / raise
+        # on EOF-without-usage.
+        events: List[Any] = [
+            b": connected\n\n",
+            {"delta": {"content": "<!doctype html><body>OK</body></html>"}},
+            {"delta": {}, "finish_reason": "stop"},
+            b"data: [DONE]\n\n",
+        ]
+        _patch_streaming_openai(monkeypatch, _sse_bytes(events))
+
+        envelope = gen_mod._do_chat_call(
+            model="vision",
+            base_url="http://primary.test/v1",
+            api_key="fake-key",
+            system_prompt="sys",
+            user_prompt="user",
+            max_tokens=4096,
+            temperature=0.7,
+            timeout=120.0,
+        )
+        # finish_reason captured, content joined, USAGE None tolerated.
+        assert envelope.choices[0].finish_reason == "stop"
+        assert (
+            envelope.choices[0].message.content
+            == "<!doctype html><body>OK</body></html>"
+        )
+        assert envelope.usage is None, (
+            "EOF-without-usage is tolerated exactly as today — usage "
+            "stays None and the three gates continue to fire normally"
+        )

@@ -823,7 +823,7 @@ class StreamedChatCompletion:
 
 
 def _consume_chat_stream(stream: Any) -> StreamedChatCompletion:
-    """Consume ONE SSE chat stream synchronously into the envelope.
+    """Consume ONE SSE chat-completion stream synchronously into the envelope.
 
     Runs INSIDE a single factory attempt (the facade's retry/failover
     re-enters :func:`_do_chat_call`, which re-invokes this consumer) —
@@ -838,9 +838,27 @@ def _consume_chat_stream(stream: Any) -> StreamedChatCompletion:
     - The last NON-null ``finish_reason`` wins (the terminal chunk).
     - The terminal ``usage`` chunk (``stream_options.include_usage``)
       is captured — it arrives with empty ``choices``.
+
+    **Wire-order invariant (drained-to-EOF, the A1 fix).** The OpenAI
+    wire order observed on Phase-0 probe + 3/3 live traffic is:
+
+        1. content chunks       ``choices=[{delta:{content:...}, finish_reason:None}]``
+        2. finish_reason chunk  ``choices=[{delta:{}, finish_reason:"<reason>"}]``  (FIRST)
+        3. usage chunk          ``choices=[]``, top-level ``usage`` (LAST, empty choices)
+
+    The loop therefore does NOT exit on finish_reason — it DRAINS to
+    natural close (SDK iterator break on ``[DONE]`` / transport EOF).
+    The OpenAI client's outer ``timeout=`` plus the httpx read-window
+    bound are the HANG GUARDS; there is NO unbounded wait inside this
+    consumer. When the upstream never sends a usage chunk (legacy /
+    buffered path), ``usage_obj`` stays None and the envelope surfaces
+    ``usage=None`` — the three completeness gates do not require usage,
+    so EOF-without-usage is tolerated exactly as today.
+
     - SSE comment lines (``: connected`` / ``: heartbeat``, the real
       proxy tokens) are ignored by the SDK stream iterator (SSE spec:
-      colon-prefixed lines are comments).
+      colon-prefixed lines are comments) — tolerance holds
+      automatically during the drain window.
 
     Error mapping (§6.4 / §7.1 / §7.4a — site-local, siblings untouched):
 
@@ -889,23 +907,46 @@ def _consume_chat_stream(stream: Any) -> StreamedChatCompletion:
     completion_id = ""
     completion_model = ""
     try:
+        # Drain the SSE stream to natural EOF. Real wire order is
+        # content chunks → finish_reason chunk → empty-choices usage
+        # chunk → ``[DONE]`` (the A1 wire-order invariant — see the
+        # docstring above). The loop therefore NEVER exits on
+        # ``finish_reason``; it continues until the SDK iterator closes
+        # on ``[DONE]`` or transport EOF (the outer ``timeout=`` plus
+        # httpx read-window bound is the hang guard — no unbounded
+        # wait inside this consumer). ``usage_obj`` capture is the
+        # LITERAL first per-iteration action so it sees usage on
+        # every chunk regardless of whether the rest of the iteration
+        # would short-circuit on empty choices.
         for chunk in stream:
+            # First: capture usage if the chunk carries it. The
+            # canonical terminal usage chunk has empty choices (and
+            # is therefore skipped below), but this placement also
+            # handles any earlier-emit variant.
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                usage_obj = chunk_usage
             chunk_id = getattr(chunk, "id", None)
             if chunk_id and not completion_id:
                 completion_id = str(chunk_id)
             chunk_model = getattr(chunk, "model", None)
             if chunk_model:
                 completion_model = str(chunk_model)
-            chunk_usage = getattr(chunk, "usage", None)
-            if chunk_usage is not None:
-                usage_obj = chunk_usage
             choices = getattr(chunk, "choices", None) or []
             if not choices:
-                continue  # terminal usage chunk carries empty choices
+                # Empty-choices chunk (canonical wire source for the
+                # terminal usage — ``usage_obj`` capture above already
+                # ran). Continue draining until SDK iterator closes.
+                continue
             choice = choices[0]
             fr = getattr(choice, "finish_reason", None)
             if fr:
-                finish_reason = fr  # last non-null wins (terminal chunk)
+                # Last non-null wins (the terminal chunk is the
+                # canonical source for the answer-stop signal). DO NOT
+                # exit the loop here — the wire-order invariant above
+                # says the trailing empty-choices usage chunk follows
+                # this one in real traffic.
+                finish_reason = fr
             delta = getattr(choice, "delta", None)
             if delta is None:
                 continue
