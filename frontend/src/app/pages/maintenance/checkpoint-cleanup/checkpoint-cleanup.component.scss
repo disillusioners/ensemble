@@ -491,15 +491,60 @@ mat-progress-bar {
       background: transparent;
     }
 
+    // wiznav-fix — the wizard's stepper is nav-by-footer only
+    // (spec §2.2 + footer-only nav stipulation; cf. designer spec
+    // .agents/designer/specs/maintenance-checkpoint-cleanup-redesign.md
+    // :397,:450). Visual-only progress indicators: every input
+    // affordance is disabled here.
+    //
+    //   - `pointer-events: none` blocks MOUSE clicks on the 72px
+    //     header strip (Material default is `cursor: pointer`, our
+    //     override below removes the visual cue too).
+    //   - `cursor: default` removes Material's default `cursor:
+    //     pointer` so the element doesn't advertise as clickable.
+    //   - The cdk-program-focused / cdk-keyboard-focused background
+    //     tints are zeroed so keyboard roving tabindex doesn't
+    //     produce a "this header looks selected" hint — the header
+    //     strip is a progress bar, not a nav target.
+    //
+    // ─── A11Y NOTE (keyboard-tab stops) ──────────────────────────
+    // Material's CDK only marks the ACTIVE header `[tabIndex]=0`
+    // (others = -1), so tab from a header lands on the next
+    // interactive element (footer button). Enter/Space on a
+    // header reaches CdkStepper's `_onKeydown` (stepper.mjs:535)
+    // → writes `stepper.selectedIndex` → `_updateSelectedItemIndex`
+    // (stepper.mjs:521) emits `selectionChange` BEFORE committing
+    // `_selectedIndex.set` (the C1/C2 timing root cause) → the TS
+    // handler reads `event.selectedIndex` (the NEW index) and
+    // checks against `activeStep()`. On mismatch, the revert write
+    // is deferred via `queueMicrotask` so the current setter
+    // chain unwinds first; the deferred write's selectionChange
+    // carries the matching post-revert value, the handler
+    // early-returns, and the cascade self-terminates at ≤2
+    // emissions (see component.ts `onStepperSelectionChange`
+    // docstring for the full C1/C2 fix rationale). The visible
+    // focus ring on the active header stays as the affordance;
+    // a no-op Enter/Space is the symptom of the controlled-input
+    // shape — keyboard operators learn to use the footer buttons.
+    //
+    // A future enhancement would wire `aria-disabled="true"` on
+    // non-active headers via a directive + a `(click)` block to
+    // preempt the keyboard route at the source. Out of scope for
+    // this round; the minimal cost here is the documenting
+    // comment + the round-3 TS handler with queueMicrotask
+    // deferral, which together close every nav path symmetrically
+    // without recursion.
     .mat-step-header {
       padding: 0.75rem 1rem;
       border-radius: 6px;
+      pointer-events: none;
+      cursor: default;
     }
 
     .mat-step-header.cdk-program-focused,
     .mat-step-header.cdk-keyboard-focused,
     .mat-step-header:hover {
-      background: rgba($bg-card-hover, 0.5);
+      background: transparent;
     }
 
     .mat-step-header .mat-step-icon {

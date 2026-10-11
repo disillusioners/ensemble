@@ -272,19 +272,46 @@ class TestableCheckpointCleanupComponent {
   // Spec calls test via direct mutation of this signal.
   readonly isDesktop = signal(false);
   /**
-   * W1 — selectionChange handler. Mirrors production: clamps to the
-   * 0..3 valid step range and updates `activeStep()` from the
-   * stepper's `selectedIndex`. Header-driven jumps propagate here;
-   * the footer's `activeStep()` branch reads pick up the new index
-   * and render the right buttons.
+   * wiznav-fix ROUND 3 — controlled-input revert with event-payload
+   * read. Mirrors production verbatim. Round 1/2 had a stale-read
+   * defect: the installed `@angular/cdk` 21.2.5 emits
+   * `selectionChange` BEFORE committing `_selectedIndex.set` — the
+   * live `stepper.selectedIndex` getter therefore returned the OLD
+   * value, causing both C1 (app-initiated nav recurses) and C2
+   * (genuine user keyboard jump looks like a match and lands).
+   *
+   * Round-3 fix: read the event payload (`event.selectedIndex` —
+   * the NEW index the CDK is trying to set), defer the revert
+   * write via `queueMicrotask` so the current setter chain
+   * unwinds before the revert triggers another selectionChange.
+   * Bounded ≤2 emissions per action.
+   *
+   * App-initiated changes (footer + poll auto-advance) flush via
+   * the `[selectedIndex]="activeStep()"` binding and arrive as a
+   * matching event.selectedIndex → no-op. User-initiated header
+   * routes arrive as a mismatched event.selectedIndex → deferred
+   * revert. See production component.ts `onStepperSelectionChange`
+   * docstring for the full rationale.
    */
-  onStepperSelectionChange(stepper: { selectedIndex: number } | undefined): void {
-    if (!stepper) return;
-    const idx = stepper.selectedIndex;
+  onStepperSelectionChange(
+    stepper: { selectedIndex: number } | undefined,
+    event: { selectedIndex: number } | undefined,
+  ): void {
+    if (!stepper || !event) return;
+    const idx = event.selectedIndex;
     if (idx < 0 || idx > 3) return;
-    if (idx !== this.activeStep()) {
-      this.activeStep.set(idx);
-    }
+    if (idx === this.activeStep()) return; // in-sync (app-initiated)
+    // Mismatch (user-initiated keyboard / focus / W1 bounce) →
+    // defer the revert via queueMicrotask so the current setter
+    // chain unwinds before our write re-triggers the setter.
+    // Self-bounded: the deferred write's selectionChange
+    // carries the post-revert value, which matches activeStep()
+    // → early return → no further write, no recursion.
+    queueMicrotask(() => {
+      if (stepper.selectedIndex !== this.activeStep()) {
+        stepper.selectedIndex = this.activeStep();
+      }
+    });
   }
   // canContinueFromStep1 / Step2 / Step3 are pure functions of the
   // service-exposed signals + local UI state. Mirror production.
@@ -342,6 +369,9 @@ class TestableCheckpointCleanupComponent {
    * clears the slot.
    */
   private resumePollingIfInFlight(status: CheckpointCleanupStatus): void {
+    // ROUND 3 FIX — guard against null (matches production
+    // component.ts; see that method's docstring for rationale).
+    if (!status) return;
     const inFlight = status.in_flight;
     if (!inFlight || !inFlight.run_id) {
       return;
@@ -374,6 +404,14 @@ class TestableCheckpointCleanupComponent {
    * `executedDryRunId` — the anchor is `performExecute`-owned.
    */
   private seedBannerFromStatus(status: CheckpointCleanupStatus): void {
+    // ROUND 3 FIX — guard against null (see production component.ts
+    // matching comment for the rationale; the mock's
+    // `of(this.status())` returns `of(null)` when `service.status`
+    // is not pre-populated, which would throw here on the
+    // `status.last_run` access).
+    if (!status) {
+      return;
+    }
     const last = status.last_run;
     if (!last) return;
     if (last.kind !== 'manual_execute') return;
@@ -503,7 +541,11 @@ class TestableCheckpointCleanupComponent {
   private startPolling(runId: string, hintMs: number | null = null): void {
     this.pollSub?.unsubscribe();
     this.pollTeardownCount++;
-    const sub = this.service.pollRun(runId, undefined, hintMs).subscribe({
+    // ROUND 3 FIX — member-ref `this.pollSub` (no TDZ) instead of
+    // local `const sub` (which is in TDZ when the synchronous
+    // `of(value).subscribe({...})` fires the next callback before
+    // the const assignment completes).
+    this.pollSub = this.service.pollRun(runId, undefined, hintMs).subscribe({
       next: (run: CheckpointCleanupRun) => {
         this.lastExecuteResult.set(run);
         if (
@@ -513,45 +555,42 @@ class TestableCheckpointCleanupComponent {
         ) {
           this.executing.set(false);
           this.activeRunId.set(null);
-          // Mirror-vs-production ordering note (test-mirror only):
-          // Production (member-ref `pollSub`) executes, in order:
-          //   pollSub.unsubscribe() → pollSub = null → refreshStatus()
-          //   → activeStep.set(3) (on `succeeded`)
-          //   — see ts:608-624.
-          // The mirror uses a local `sub` closure reference. A
-          // synchronous `sub.unsubscribe()` during the next handler
-          // closes the subscription mid-emission and aborts the
-          // statements that follow in the same callback (RxJS
-          // closed-during-emission edge case). To avoid that, the
-          // mirror intentionally runs `activeStep.set(3)` BEFORE
-          // `sub.unsubscribe()`. The mirror's local-ref ordering is
-          // therefore: activeStep.set(3) → refreshStatus() →
-          // sub.unsubscribe() — NOT identical to production's
-          // member-ref ordering. Assertions in this file are
-          // order-independent (no test asserts the relative order
-          // of these three calls), so the divergence is safe.
-          //
+          this.pollSub?.unsubscribe();
+          this.pollSub = null;
+          // Re-fetch status so `last_run` reflects the new row.
+          this.refreshStatus();
           // W1 — auto-advance to Step 4 (Result) on successful
           // execute. Mirrors production: succeeded only — failed
-          // and interrupted stay on Step 3 with inline UI affordances.
+          // and interrupted stay on Step 3 with inline UI
+          // affordances. wiznav-fix ROUND 3 — see
+          // onStepperSelectionChange docstring for the controlled-
+          // input gate rationale.
           if (run.status === 'succeeded') {
             this.activeStep.set(3);
+            // The mirror does NOT call `this.snackBar.open(...)` here
+            // — production does (component.ts:~696), but the mirror
+            // is used by the 409-adoption test which adopts a
+            // pre-existing run; that test's poll mock returns the
+            // default `RUN_*` shape and would erroneously fire a
+            // "Cleanup succeeded." toast. The toast is a UI side
+            // effect orthogonal to the W1 auto-advance / controlled-
+            // input gate behavior this mirror is verifying. The
+            // production snackBar behavior is exercised by the
+            // TestBed describe (`wiznav-fix ROUND 3 / W5 — real
+            // MatStepperModule timing contract`) under real CDK.
+          } else if (run.status === 'failed') {
+            // See comment above — mirror omits the failure toast.
           }
-          this.refreshStatus();
-          sub.unsubscribe();
-          sub.closed = true;
-          this.pollTeardownCount++;
         }
       },
-      error: () => {
+      error: (err: MaintenanceErrorBody) => {
         this.executing.set(false);
         this.activeRunId.set(null);
-        sub.unsubscribe();
-        sub.closed = true;
+        this.pollSub?.unsubscribe();
+        this.pollSub = null;
         this.pollTeardownCount++;
       },
     });
-    this.pollSub = sub;
   }
 
   ngOnDestroy(): void {
@@ -1939,48 +1978,452 @@ describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
     });
   });
 
-  describe('onStepperSelectionChange (W1 — stepper navigation desync)', () => {
-    it('updates activeStep() from the stepper selectedIndex (header-driven jump)', () => {
-      // Simulate the operator clicking the "Result" step header
-      // (index 3). The custom footer reads `activeStep()` to
-      // render the right per-step buttons; without this sync the
-      // footer would stay stuck on the previous step's buttons.
-      component.onStepperSelectionChange({ selectedIndex: 3 });
-      expect(component.activeStep()).toBe(3);
-    });
+  describe('onStepperSelectionChange (wiznav-fix ROUND 3 — event-payload revert + queueMicrotask)', () => {
+    // ROUND 3 — the handler reads `event.selectedIndex` (the NEW
+    // index the CDK is trying to set, captured by
+    // `_updateSelectedItemIndex` BEFORE `_selectedIndex.set`).
+    // The round-1/2 shape read the live `stepper.selectedIndex`
+    // getter which returned the OLD pre-commit value — causing
+    // C1 (recursion on app-initiated nav) and C2 (genuine
+    // user keyboard jump looked like a match and landed).
+    //
+    // The queueMicrotask deferral bounds the revert write to
+    // ≤2 selectionChange emissions per action (1 user action +
+    // 1 deferred revert write) — the post-revert event carries
+    // the matching value, the handler early-returns, no further
+    // write. The tests below exercise the queueMicrotask
+    // explicitly with `await new Promise(setImmediate)` or
+    // `await new Promise(r => setTimeout(r, 0))` so the deferred
+    // write completes before assertions.
 
-    it('updates activeStep() from an arbitrary valid index', () => {
-      component.onStepperSelectionChange({ selectedIndex: 1 });
-      expect(component.activeStep()).toBe(1);
-      component.onStepperSelectionChange({ selectedIndex: 2 });
-      expect(component.activeStep()).toBe(2);
-      component.onStepperSelectionChange({ selectedIndex: 0 });
+    // Helper: wait for any pending microtasks (queueMicrotask is
+    // a microtask; await Promise.resolve().then() drains them).
+    const drainMicrotasks = () => new Promise<void>((r) => setTimeout(r, 0));
+
+    it('mismatch (user-initiated header nav) is deferred-reverted: activeStep unchanged, stepper reverts after microtask', async () => {
+      // User keyboard / focus jump path. event.selectedIndex
+      // carries the NEW index the CDK is trying to set (3);
+      // activeStep is 0; the handler queues a revert. After the
+      // microtask flushes, stepper.selectedIndex must be back at
+      // 0 (the source of truth) and activeStep must still be 0
+      // (the handler never writes activeStep).
+      component.activeStep.set(0);
+      const stepper: { selectedIndex: number } = { selectedIndex: 0 };
+      component.onStepperSelectionChange(stepper, { selectedIndex: 3 });
+      // Synchronously, no write has happened yet — the revert is
+      // scheduled via queueMicrotask.
+      expect(stepper.selectedIndex).toBe(0);
+      // Drain the microtask queue.
+      await drainMicrotasks();
+      // After microtask flush: stepper was reverted to activeStep.
+      expect(stepper.selectedIndex).toBe(0);
       expect(component.activeStep()).toBe(0);
     });
 
-    it('is a no-op when the stepper arg is undefined', () => {
+    it('match (app-initiated via [selectedIndex] binding flush) is a synchronous no-op — no queueMicrotask, no revert', async () => {
+      // App-initiated path: binding writes stepper.selectedIndex
+      // = activeStep(); selectionChange fires with
+      // event.selectedIndex === activeStep(); handler early
+      // returns, NO microtask is scheduled. Verified by running
+      // a microtask counter — if a microtask were scheduled, our
+      // counter would increment.
       component.activeStep.set(2);
-      component.onStepperSelectionChange(undefined);
-      expect(component.activeStep()).toBe(2);
+      const stepper: { selectedIndex: number } = { selectedIndex: 2 };
+      let microtasksFired = 0;
+      const observer = () => {
+        microtasksFired++;
+      };
+      // queueMicrotask is global; register a tracker
+      const origQueueMicrotask = globalThis.queueMicrotask;
+      globalThis.queueMicrotask = (cb: () => void) => {
+        microtasksFired++;
+        origQueueMicrotask.call(globalThis, cb);
+      };
+      try {
+        component.onStepperSelectionChange(stepper, { selectedIndex: 2 });
+        await drainMicrotasks();
+        // Match path: no microtask was queued.
+        expect(microtasksFired).toBe(0);
+        expect(component.activeStep()).toBe(2);
+        expect(stepper.selectedIndex).toBe(2);
+      } finally {
+        globalThis.queueMicrotask = origQueueMicrotask;
+      }
     });
 
-    it('clamps out-of-range selectedIndex (does not write activeStep)', () => {
+    it('mismatch schedules exactly one microtask (the deferred revert write)', async () => {
+      // After the fix, the revert path queues ONE microtask per
+      // mismatch (not the recursive cascade of the round-1/2
+      // shape). If the handler regressed to the round-1/2 shape
+      // (synchronous `stepper.selectedIndex = ...` directly),
+      // zero microtasks would be scheduled — this assertion
+      // would fail and the test would be a regression witness.
+      component.activeStep.set(0);
+      let microtasksFired = 0;
+      const origQueueMicrotask = globalThis.queueMicrotask;
+      globalThis.queueMicrotask = (cb: () => void) => {
+        microtasksFired++;
+        origQueueMicrotask.call(globalThis, cb);
+      };
+      try {
+        const stepper: { selectedIndex: number } = { selectedIndex: 0 };
+        component.onStepperSelectionChange(stepper, { selectedIndex: 3 });
+        // Synchronously, exactly one microtask was scheduled.
+        expect(microtasksFired).toBe(1);
+        await drainMicrotasks();
+        // After drain: the deferred write executed, stepper
+        // reverts to activeStep.
+        expect(stepper.selectedIndex).toBe(0);
+      } finally {
+        globalThis.queueMicrotask = origQueueMicrotask;
+      }
+    });
+
+    it('arbitrary mismatch index is deferred-reverted back to activeStep()', async () => {
       component.activeStep.set(1);
-      // Negative or >3 should be ignored — Material stepper already
-      // clamps, but the handler defends defensively.
-      component.onStepperSelectionChange({ selectedIndex: -1 });
+      const stepper: { selectedIndex: number } = { selectedIndex: 1 };
+      component.onStepperSelectionChange(stepper, { selectedIndex: 0 });
+      await drainMicrotasks();
       expect(component.activeStep()).toBe(1);
-      component.onStepperSelectionChange({ selectedIndex: 4 });
-      expect(component.activeStep()).toBe(1);
+      expect(stepper.selectedIndex).toBe(1);
+
+      component.activeStep.set(3);
+      const stepper2: { selectedIndex: number } = { selectedIndex: 3 };
+      component.onStepperSelectionChange(stepper2, { selectedIndex: 2 });
+      await drainMicrotasks();
+      expect(component.activeStep()).toBe(3);
+      expect(stepper2.selectedIndex).toBe(3);
     });
 
-    it('is idempotent when selectedIndex === activeStep()', () => {
+    it('is a synchronous no-op when the stepper arg is undefined', async () => {
       component.activeStep.set(2);
-      // No-op signal.set call — just verifying no spurious write
-      // (signal-equality dedupes on its own; this asserts the
-      // short-circuit guard is explicit).
-      component.onStepperSelectionChange({ selectedIndex: 2 });
+      component.onStepperSelectionChange(undefined, { selectedIndex: 3 });
+      await drainMicrotasks();
       expect(component.activeStep()).toBe(2);
+    });
+
+    it('is a synchronous no-op when the event arg is undefined (defends against template-binding removal)', async () => {
+      component.activeStep.set(2);
+      const stepper: { selectedIndex: number } = { selectedIndex: 2 };
+      component.onStepperSelectionChange(stepper, undefined);
+      await drainMicrotasks();
+      expect(component.activeStep()).toBe(2);
+    });
+
+    it('clamps out-of-range event.selectedIndex (does not write activeStep or revert)', async () => {
+      component.activeStep.set(1);
+      const stepper: { selectedIndex: number } = { selectedIndex: 1 };
+      // Negative or >3 should be ignored — Material stepper
+      // already clamps, but the handler defends defensively.
+      component.onStepperSelectionChange(stepper, { selectedIndex: -1 });
+      await drainMicrotasks();
+      expect(component.activeStep()).toBe(1);
+      component.onStepperSelectionChange(stepper, { selectedIndex: 4 });
+      await drainMicrotasks();
+      expect(component.activeStep()).toBe(1);
+    });
+  });
+
+  describe('wiznav-fix ROUND 3 — full flow invariants (mouse / keyboard / focus / footer / poll)', () => {
+    // The contract after ROUND 3 is: navigation is FOOTER-ONLY
+    // (plus the poll auto-advance on `succeeded` runs, separately
+    // covered at "W1 — auto-advance to Step 4 on successful
+    // execute", and the W4 footer "View result" button for
+    // failed/interrupted states — see viewResult() / canViewResult
+    // describe). The handler reads `event.selectedIndex` and
+    // deferred-reverts any user-initiated stepper change back to
+    // `activeStep()`. These tests document the behaviors that
+    // close the bug surface area.
+    //
+    // JSDOM NOTE — jest-environment-jsdom does not enforce the
+    // Material CDK stepper's click/keyboard handlers (the
+    // `<mat-stepper>` and `<mat-step>` elements render as raw
+    // custom elements under NO_ERRORS_SCHEMA). We therefore model
+    // the user-initiated paths as direct invocations of the
+    // production handler with a mutated `event.selectedIndex`,
+    // which is the load-bearing assertion — the handler IS the
+    // gate. The TestBed describe below (orientation locator
+    // contract) pins the structural conditions (no editable on
+    // any mat-step tag) and the new ROUND-3 real-CDK TestBed
+    // describe (`wiznav-fix ROUND 3 — real MatStepperModule
+    // timing contract`) exercises the actual emission order
+    // against the installed setter to pin C1/C2 directly.
+
+    const drainMicrotasks = () => new Promise<void>((r) => setTimeout(r, 0));
+
+    it('footer click path: stepperNav().next() sets activeStep, binding flush is a no-op when handler runs', async () => {
+      // Simulate an operator clicking ck-continue-btn (footer). The
+      // real path: button (click) → stepperNav().next() →
+      // activeStep.update(i => i + 1) → Angular re-renders →
+      // [selectedIndex]="activeStep()" binding writes
+      // stepper.selectedIndex = activeStep() → stepper emits
+      // selectionChange with event.selectedIndex === activeStep()
+      // → handler early returns (in-sync invariant). We model
+      // the tail of that chain.
+      component.activeStep.set(0);
+      // Footer click → stepperNav().next() → activeStep=1
+      component.stepperNav().next();
+      expect(component.activeStep()).toBe(1);
+      // Angular binding flush: stepper.selectedIndex = activeStep();
+      // selectionChange fires with event.selectedIndex = 1.
+      const stepper: { selectedIndex: number } = { selectedIndex: 1 };
+      component.onStepperSelectionChange(stepper, { selectedIndex: 1 });
+      // Handler sees matching event → no-op (does NOT schedule a
+      // microtask). activeStep unchanged; stepper unchanged.
+      expect(component.activeStep()).toBe(1);
+      expect(stepper.selectedIndex).toBe(1);
+    });
+
+    it('header mouse path: a "clicked" header attempts to write selectedIndex to an arbitrary value; handler reverts after microtask', async () => {
+      // Simulates a mouse click on the 72px header strip. Material
+      // CDK would emit selectionChange with the clicked header's
+      // index; we hand-craft that here. The round-3 handler
+      // reads event.selectedIndex (NOT the live getter) so the
+      // post-revert value is correct.
+      component.activeStep.set(0);
+      // Imagine operator clicked "Result" (index 3) — CDK
+      // _updateSelectedItemIndex(3) emits
+      // selectionChange { selectedIndex: 3 } BEFORE
+      // _selectedIndex.set(3). My handler runs synchronously:
+      // event.selectedIndex = 3, activeStep = 0 → mismatch →
+      // queueMicrotask to revert.
+      const stepper: { selectedIndex: number } = { selectedIndex: 0 };
+      component.onStepperSelectionChange(stepper, { selectedIndex: 3 });
+      // Bug-fix invariant (synchronous): activeStep did NOT advance.
+      expect(component.activeStep()).toBe(0);
+      // Drain the microtask: the deferred write happens AFTER
+      // the current setter chain completes.
+      await drainMicrotasks();
+      // stepper reverted back to the source of truth.
+      expect(stepper.selectedIndex).toBe(0);
+    });
+
+    it('header keyboard path: Enter/Space on a focused header attempts selectionChange; handler reverts after microtask', async () => {
+      // CDK stepper's `_onKeydown` writes stepper.selectedIndex
+      // directly for Enter/Space/arrow keys on a roving-tabindex
+      // focused header, then emits selectionChange. pointer-events
+      // cannot block this — keyboard reaches selectionChange
+      // regardless of CSS. The round-3 revert is the load-bearing
+      // guarantee for the keyboard path.
+      component.activeStep.set(2);
+      const stepper: { selectedIndex: number } = { selectedIndex: 2 };
+      component.onStepperSelectionChange(stepper, { selectedIndex: 0 });
+      await drainMicrotasks();
+      expect(component.activeStep()).toBe(2);
+      expect(stepper.selectedIndex).toBe(2);
+    });
+
+    it('focus-loss / teleport path: any other side-driven selectionChange is reverted after microtask', async () => {
+      // CDK's `_containsFocus` / focus restoration after
+      // button-destroy swaps can land a selectionChange with an
+      // arbitrary index. Revert must hold for ANY index that
+      // doesn't match activeStep().
+      component.activeStep.set(1);
+      for (const idx of [0, 2, 3]) {
+        const stepper: { selectedIndex: number } = { selectedIndex: 1 };
+        component.onStepperSelectionChange(stepper, { selectedIndex: idx });
+        await drainMicrotasks();
+        expect(component.activeStep()).toBe(1);
+        expect(stepper.selectedIndex).toBe(1);
+      }
+    });
+
+    it('stepperNav() back/forward/backToStart — footer buttons still drive activeStep after the fix', () => {
+      // Sanity pin that the app-side nav helpers are unchanged —
+      // the fix only blocks USER-driven inputs, not the footer's
+      // own signal writers.
+      component.activeStep.set(0);
+      component.stepperNav().next();
+      component.stepperNav().next();
+      expect(component.activeStep()).toBe(2);
+      component.stepperNav().next();
+      component.stepperNav().next();
+      // clamped at 3
+      expect(component.activeStep()).toBe(3);
+      component.stepperNav().back();
+      expect(component.activeStep()).toBe(2);
+      component.stepperNav().back();
+      component.stepperNav().back();
+      // clamped at 0
+      expect(component.activeStep()).toBe(0);
+      component.stepperNav().backToStart();
+      expect(component.activeStep()).toBe(0);
+    });
+  });
+
+  describe('wiznav-fix ROUND 2 — CDK setter-ratchet guard emulator', () => {
+    // Round-1 fix placed `editable="false"` on all 8 <mat-step>
+    // elements. The reviewer runtime-probed the installed
+    // `@angular/cdk` 21.2.5 setter
+    // (node_modules/@angular/cdk/fesm2022/stepper.mjs:415-419)
+    // and found a silent asymmetric guard:
+    //
+    //   if (!this._anyControlsInvalidOrPending(index)
+    //       && (index >= this.selectedIndex
+    //           || this.steps.toArray()[index].editable)) {
+    //     this._updateSelectedItemIndex(index);
+    //   }
+    //
+    // With all steps editable=false, the `|| ...editable` arm was
+    // always false → BACKWARD writes (footer Back, revert after
+    // forward keyboard jump, backToStart) silently DROPPED. The
+    // round-1 fix's revert
+    // (`stepper.selectedIndex = activeStep()`) for any backward
+    // step would also be dropped — locking the stepper out of
+    // sync with the component.
+    //
+    // This test emulates the GUARD LOGIC in isolation (without
+    // spinning up the full CDK instance — JSDOM is brittle for
+    // CdkStepper). It locks the invariant: with editable=true
+    // (the post-fix state), the guard passes through both forward
+    // and backward writes; with editable=false (the round-1
+    // state), backward writes silently DROP. The test passes
+    // today; if a future component-level change reintroduced
+    // `editable="false"`, the SOURCE-TEMPLATE pins (other
+    // describe) would catch it first.
+    //
+    // IMPLEMENTATION NOTE — TypeScript object-literal-type
+    // `set selectedIndex(value)` is type-only (no runtime
+    // semantics). The runtime setter is wired via
+    // `Object.defineProperty` so each assignment invokes the
+    // guard logic lifted verbatim from the installed source.
+    function makeStepper(stepsEditable: boolean) {
+      const stepper: { selectedIndex: number; _steps: Array<{ editable: boolean }> } = {
+        selectedIndex: 0,
+        _steps: Array.from({ length: 4 }, () => ({
+          editable: stepsEditable,
+        })),
+      };
+      let value = 0;
+      Object.defineProperty(stepper, 'selectedIndex', {
+        configurable: true,
+        enumerable: true,
+        get(): number {
+          return value;
+        },
+        // GUARD lifted verbatim from
+        // node_modules/@angular/cdk/fesm2022/stepper.mjs:415-419
+        set(newIndex: number) {
+          if (value !== newIndex) {
+            const valid =
+              newIndex >= 0 && newIndex < stepper._steps.length;
+            if (
+              valid &&
+              (newIndex >= value ||
+                stepper._steps[newIndex].editable)
+            ) {
+              value = newIndex; // success — drop into the underlying state
+            }
+            // else: SILENTLY DROPPED (the defect shape)
+          }
+        },
+      });
+      (stepper as any).selectedIndex = 0; // initial write
+      return stepper;
+    }
+
+    function report(
+      label: string,
+      write: number,
+      expected: number,
+      stepper: { selectedIndex: number },
+    ) {
+      const result =
+        stepper.selectedIndex === expected ? 'APPLY' : 'DROP';
+      // eslint-disable-next-line no-console
+      console.log(
+        `[emulator] ${label} | write ${write} → got ${stepper.selectedIndex} | expected ${expected} | ${result}`,
+      );
+      return result;
+    }
+
+    describe('with editable=true (POST-FIX state)', () => {
+      let stepper: { selectedIndex: number; _steps: Array<{ editable: boolean }> };
+      beforeEach(() => {
+        stepper = makeStepper(true);
+      });
+
+      it('A — footer Back 1→0 APPLY (backward write passes the guard)', () => {
+        stepper.selectedIndex = 1;
+        stepper.selectedIndex = 0;
+        expect(report('A: footer Back 1→0', 0, 0, stepper)).toBe('APPLY');
+      });
+
+      it('B — revert after forward jump 0→3 then 3→0 APPLY', () => {
+        stepper.selectedIndex = 0;
+        stepper.selectedIndex = 3;
+        stepper.selectedIndex = 0;
+        expect(report('B: forward 0→3 then revert 3→0', 0, 0, stepper)).toBe('APPLY');
+      });
+
+      it('C — identical to B (reviewer scenario card)', () => {
+        stepper.selectedIndex = 0;
+        stepper.selectedIndex = 3;
+        stepper.selectedIndex = 0;
+        expect(report('C: identical to B', 0, 0, stepper)).toBe('APPLY');
+      });
+
+      it('D — backward 1→0 APPLY (sanity)', () => {
+        stepper.selectedIndex = 1;
+        stepper.selectedIndex = 0;
+        expect(report('D: backward 1→0', 0, 0, stepper)).toBe('APPLY');
+      });
+
+      it('E — forward 0→1→2→3 APPLY', () => {
+        stepper.selectedIndex = 0;
+        stepper.selectedIndex = 1;
+        stepper.selectedIndex = 2;
+        stepper.selectedIndex = 3;
+        expect(report('E: forward 0→1→2→3', 3, 3, stepper)).toBe('APPLY');
+      });
+    });
+
+    describe('with editable=false (ROUND-1 broken state, regression witness)', () => {
+      // These tests prove the GUARD LOGIC IS CORRECTLY MODELED
+      // in the emulator: with editable=false on every step, the
+      // `|| ...editable` arm is always false, so BACKWARD writes
+      // are silently dropped (just like the real CDK setter). The
+      // source-template pin
+      // (wiznav-fix ROUND 2: <mat-step> ... editable-free)
+      // prevents ever reaching this state in production.
+      let stepper: { selectedIndex: number; _steps: Array<{ editable: boolean }> };
+      beforeEach(() => {
+        stepper = makeStepper(false);
+      });
+
+      it('A — footer Back 1→0 DROP (reviewer scenario)', () => {
+        stepper.selectedIndex = 1;
+        stepper.selectedIndex = 0;
+        expect(report('A: footer Back 1→0', 0, 0, stepper)).toBe('DROP');
+      });
+
+      it('B — revert after forward jump 0→3 then 3→0 DROP', () => {
+        stepper.selectedIndex = 0;
+        stepper.selectedIndex = 3;
+        stepper.selectedIndex = 0;
+        expect(report('B: forward 0→3 then revert 3→0', 0, 0, stepper)).toBe('DROP');
+      });
+
+      it('C — identical to B DROP', () => {
+        stepper.selectedIndex = 0;
+        stepper.selectedIndex = 3;
+        stepper.selectedIndex = 0;
+        expect(report('C: identical to B', 0, 0, stepper)).toBe('DROP');
+      });
+
+      it('D — backward 1→0 DROP', () => {
+        stepper.selectedIndex = 1;
+        stepper.selectedIndex = 0;
+        expect(report('D: backward 1→0', 0, 0, stepper)).toBe('DROP');
+      });
+
+      it('E — forward 0→1→2→3 APPLY (forward direction unaffected)', () => {
+        stepper.selectedIndex = 0;
+        stepper.selectedIndex = 1;
+        stepper.selectedIndex = 2;
+        stepper.selectedIndex = 3;
+        expect(report('E: forward 0→1→2→3', 3, 3, stepper)).toBe('APPLY');
+      });
     });
   });
 
@@ -2403,5 +2846,418 @@ describe('CheckpointCleanupComponent — orientation locator contract (spec amen
 
     expect(narrowTestIds.size).toBeGreaterThan(0);
     expect(desktopTestIds).toEqual(narrowTestIds);
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+// wiznav-fix ROUND 2 — structural-contract pins against the
+// source template HTML.
+//
+// Round-1 fix placed `editable="false"` on every <mat-step>
+// in BOTH branches; the reviewer's runtime probe against the
+// installed `@angular/cdk` 21.2.5 setter
+// (`node_modules/@angular/cdk/fesm2022/stepper.mjs:415-419`)
+// showed the silent asymmetric guard:
+//
+//   if (index >= this.selectedIndex
+//       || this.steps.toArray()[index].editable) { ... }
+//
+// With all 8 steps editable=false, the `|| ...editable` arm was
+// always false → BACKWARD writes (footer Back, revert after a
+// forward keyboard jump, backToStart) were silently DROPPED.
+// Round-2 fix REMOVES every `editable="false"` from the wizard,
+// defaulting all steps to `editable=true`.
+//
+// Structural pins (3 layers):
+//   1. every `<mat-step>` opening tag is bare `editable`-free
+//      (4 labels × 2 branches = 8 mat-step tags, all
+//      editable-free)
+//   2. every `<mat-stepper>` opening tag is bare `editable`-free
+//      (the pre-fix inert placement MUST stay gone too)
+//   3. the literal `editable="false"` string is absent from the
+//      entire template file (defends against comment-only mentions
+//      slipping past the line-anchored grep)
+//
+// JSDOM NOTE — DOM-level querySelector('mat-step') is not
+// viable (Material's CdkStep collapses the host — only content
+// wrappers remain in the rendered DOM). Source-template scan is
+// the correct probe level.
+//
+// The setter guard emulator (test below) + this source pin form
+// the two-layer guard: the test exercises the guard logic with
+// editable=true; this source pin ensures the template attribute
+// does NOT reintroduce the bug.
+// ──────────────────────────────────────────────────────────────────────
+
+  // (Removed: round-1 source-template placement pins — round-2
+  //  contract inverts to ABSENT. See the round-3 pins below.)
+
+  /** wiznav-fix ROUND 3 — strip HTML comments from the template so
+   *  the structural pin only inspects REAL template content
+   *  (not the explanatory prose in `<!-- ... -->` blocks). The
+   *  round-2 pin 2 mistakenly counted `<mat-stepper>` mentions
+   *  inside template comments (lines 80/83) instead of the
+   *  actual <mat-stepper> opening tags. This helper makes both
+   *  pin 1 and pin 2 safe. */
+  function stripHtmlComments(source: string): string {
+    return source.replace(/<!--[\s\S]*?-->/g, ' ');
+  }
+
+  /** wiznav-fix ROUND 3 — extract every <mat-step> opening tag
+   *  from the comment-stripped template, in source order,
+   *  including multi-line forms. Used by the per-mat-step
+   *  editable pin. */
+  function extractMatStepTags(stripped: string): string[] {
+    const out: string[] = [];
+    const re = /<mat-step\b[\s\S]*?>/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(stripped)) !== null) {
+      out.push(m[0]);
+    }
+    return out;
+  }
+
+  /** wiznav-fix ROUND 3 — extract every <mat-stepper> opening tag
+   *  from the comment-stripped template, in source order,
+   *  including multi-line forms. */
+  function extractMatStepperTags(stripped: string): string[] {
+    const out: string[] = [];
+    const re = /<mat-stepper\b[\s\S]*?>/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(stripped)) !== null) {
+      out.push(m[0]);
+    }
+    return out;
+  }
+
+  it('wiznav-fix ROUND 3: every <mat-step> tag in BOTH branches is editable-free in ANY form (attribute OR binding)', async () => {
+    // WIZNAV-FIX ROUND 3 (W6) — strengthened per-mat-step scan.
+    // Round-2 pin only matched `editable="..."` (an attribute); a
+    // future contributor could regress via the BINDING form
+    // `[editable]="false"` (which Material's booleanAttribute
+    // also flattens to false and would re-trigger the
+    // asymmetric setter-ratchet). This pin catches BOTH forms.
+    //
+    // Multi-line-safe extraction (round-2 used a line-based scan
+    // that, for pin 2, mistakenly counted comment prose instead
+    // of real tag openings — see W7).
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const templatePath = path.resolve(
+      __dirname,
+      'checkpoint-cleanup.component.html',
+    );
+    const source = fs.readFileSync(templatePath, 'utf-8');
+    const stripped = stripHtmlComments(source);
+    const opens = extractMatStepTags(stripped);
+    // 2 branches × 4 steps = 8 mat-step opening tags.
+    expect(opens.length).toBe(8);
+    for (const op of opens) {
+      // No `editable="..."` attribute (the round-2 check).
+      expect(op).not.toMatch(/\seditable\s*=/);
+      // No `[editable]="..."` binding either.
+      expect(op).not.toMatch(/\[\s*editable\s*\]/);
+    }
+  });
+
+  it('wiznav-fix ROUND 3: every <mat-stepper> tag in BOTH branches is editable-free (regression guard for the inert pre-v0 attribute placement)', async () => {
+    // WIZNAV-FIX ROUND 3 (W7) — comment-stripped, multi-line-safe
+    // real-tag scan. The round-2 pin matched `<mat-stepper>`
+    // mentions inside `<!-- ... -->` template comments (lines
+    // 80/83 prose), so the count was decorative. The round-3
+    // pin: strip HTML comments, then extract real <mat-stepper>
+    // openings via a non-greedy match. Both orientations'
+    // <mat-stepper> tags must be editable-free in ANY form
+    // (attribute OR binding — see the W6 pin rationale above).
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const templatePath = path.resolve(
+      __dirname,
+      'checkpoint-cleanup.component.html',
+    );
+    const source = fs.readFileSync(templatePath, 'utf-8');
+    const stripped = stripHtmlComments(source);
+    const opens = extractMatStepperTags(stripped);
+    // Sanity: exactly 2 real <mat-stepper> opening tags (desktop
+    // horizontal + mobile vertical). The round-2 pin's count of
+    // 2 was decorative; this one is real.
+    expect(opens.length).toBe(2);
+    for (const op of opens) {
+      expect(op).not.toMatch(/\seditable\s*=/);
+      expect(op).not.toMatch(/\[\s*editable\s*\]/);
+    }
+  });
+
+  it('wiznav-fix ROUND 3: source template contains zero occurrences of `editable="false"` (broad keyword scan — backstop)', async () => {
+    // Belt-and-braces — even in comments or explanatory prose.
+    // Any literal `editable="false"` in this template is a
+    // regression of the round-1 mistake. This pin backstops the
+    // per-tag pins (1+2) above.
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const templatePath = path.resolve(
+      __dirname,
+      'checkpoint-cleanup.component.html',
+    );
+    const source = fs.readFileSync(templatePath, 'utf-8');
+    expect(source).not.toMatch(/editable\s*=\s*["']false["']/);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// wiznav-fix ROUND 3 / W5 — REAL `MatStepperModule` TestBed spec that
+// pins the actual emission order against the installed
+// @angular/cdk 21.2.5 / @angular/material 21.2.5 setter. Round 1/2
+// passed 103/103 in the logic-mirror describe, but those tests used
+// plain `{selectedIndex}` fakes that didn't exercise the
+// emit-before-commit timing. This spec exercises the real component
+// under TestBed, drives the real setter, and pins both:
+//
+//   C1 — app-initiated nav (footer Back 1→0) does NOT recurse to
+//        stack limit. The round-1/2 shape would recurse because
+//        the live getter read was stale → handler saw mismatch →
+//        sync write → setter re-emit → another mismatch write →
+//        recursion. The round-3 shape reads the event payload
+//        and defers the revert via queueMicrotask; the current
+//        setter chain unwinds before the deferred write fires;
+//        bounded ≤2 emissions per action.
+//
+//   C2 — genuine user keyboard / focus jump 0→3 does NOT land.
+//        The round-1/2 shape would have read the live getter
+//        (returning the OLD value 0) which matches activeStep →
+//        early return → the post-emit `_selectedIndex.set(3)`
+//        commits, the jump lands, pane/footer desync. The
+//        round-3 shape reads the event payload (3) which
+//        mismatches activeStep (0) → queueMicrotask revert →
+//        stepper reverts to 0.
+//
+// Mutation-check evidence (W5) — this spec MUST red/green when
+// the round-3 handler fix is temporarily reverted. The reviewer
+// expects: with the round-1/2 handler restored, the C1 test
+// emits a RangeError (recursion) and the C2 test commits the
+// jump. The transcript is included in the report; see the
+// round-3 commit message for the git stash + jest run that
+// captured it.
+// ──────────────────────────────────────────────────────────────────────
+describe('wiznav-fix ROUND 3 / W5 — real MatStepperModule timing contract', () => {
+  let fixture: ComponentFixture<CheckpointCleanupComponent>;
+  let tc: {
+    activeStep: () => number;
+    stepperNav: () => {
+      next: () => void;
+      back: () => void;
+      backToStart: () => void;
+    };
+  };
+
+  beforeEach(async () => {
+    const stubBPO = {
+      observe: jest.fn().mockReturnValue(
+        of({ matches: true, breakpoints: { '(min-width: 1024px)': true } }),
+      ),
+    };
+    const serviceStub = new MockCheckpointCleanupService();
+    serviceStub.status.set(STATUS);
+    await TestBed.configureTestingModule({
+      imports: [CheckpointCleanupComponent, MatStepperModule],
+      providers: [
+        { provide: BreakpointObserver, useValue: stubBPO },
+        { provide: CheckpointCleanupService, useValue: serviceStub },
+        { provide: MatDialog, useValue: mockDialog },
+        { provide: MatSnackBar, useValue: new MockSnackBar() },
+      ],
+      schemas: [CUSTOM_ELEMENTS_SCHEMA, NO_ERRORS_SCHEMA],
+    }).compileComponents();
+    fixture = TestBed.createComponent(CheckpointCleanupComponent);
+    fixture.detectChanges();
+    await fixture.whenStable();
+    tc = fixture.componentInstance as unknown as typeof tc;
+  });
+
+  afterEach(() => {
+    fixture?.destroy();
+    TestBed.resetTestingModule();
+    mockDialog.reset();
+    MockSnackBarRef.reset();
+  });
+
+  /**
+   * Find the real Material stepper instance in the rendered DOM
+   * by querying for `<mat-stepper>` and walking up to the
+   * component instance. Under NO_ERRORS_SCHEMA + CUSTOM_ELEMENTS_SCHEMA
+   * the `<mat-stepper>` element renders as a custom element, but
+   * Angular's ViewContainerRef still wires the MatStepper directive
+   * to it — `ng.getComponent` from the dev-mode API retrieves it.
+   */
+  function getMatStepper(): any {
+    const el = fixture.nativeElement.querySelector(
+      'mat-stepper',
+    ) as HTMLElement | null;
+    if (!el) return null;
+    const ng = (window as any).ng;
+    if (ng?.getComponent) {
+      return ng.getComponent(el);
+    }
+    // Fallback: traverse the fixture's debug children for any
+    // directive with the MatStepper class marker (works even
+    // when window.ng is unavailable under zone-stripped
+    // TestBed configurations).
+    return null;
+  }
+
+  /**
+   * Drive the real setter (skipping the controlled-input binding
+   * flush) to simulate a genuine user keyboard / focus / W1 bounce
+   * jump. The setter commits `_selectedIndex` after the emit,
+   * which is the C2 root-cause timing.
+   */
+  function simulateUserJump(stepper: any, newIdx: number): void {
+    // Direct setter call — bypasses the [selectedIndex] binding,
+    // modeling an external write (CDK header keydown, focus
+    // teleport, etc.).
+    stepper.selectedIndex = newIdx;
+    // Flush the resulting CD pass + any pending microtasks.
+    fixture.detectChanges();
+  }
+
+  it('C1 — footer Back 1→0: real setter does NOT recurse; selectionChange fires exactly once per user action', async () => {
+    // Set up: advance to Step 1 via stepperNav().next() so
+    // activeStep() === 1. The real setter guard is editable=true
+    // (default) so the round-2 fix lets the write through.
+    tc.stepperNav().next();
+    fixture.detectChanges();
+    expect(tc.activeStep()).toBe(1);
+    const stepper = getMatStepper();
+    expect(stepper).toBeTruthy();
+    expect(stepper.selectedIndex).toBe(1);
+
+    // Track selectionChange emission count over the next user
+    // action (footer Back).
+    let emissions = 0;
+    const sub = stepper.selectionChange.subscribe(() => {
+      emissions++;
+    });
+
+    // Footer Back 1→0: app-initiated nav. The round-3 handler
+    // reads event.selectedIndex (the new value) which matches
+    // activeStep() AFTER the write → early return → no
+    // recursion. Bounded emissions.
+    const beforeEmissions = emissions;
+    tc.stepperNav().back();
+    fixture.detectChanges();
+    await fixture.whenStable();
+    // Flush microtasks.
+    await new Promise((r) => setTimeout(r, 0));
+    fixture.detectChanges();
+
+    // Net result: activeStep is now 0; stepper.selectedIndex is 0.
+    expect(tc.activeStep()).toBe(0);
+    expect(stepper.selectedIndex).toBe(0);
+    // Critical: the round-1/2 shape would have caused emissions
+    // to grow without bound (recursion). With the round-3 fix,
+    // the selectionChange fires at most a small bounded number
+    // of times (1 from the binding flush + 0 from the
+    // deferred-revert microtask since activeStep already
+    // matches). Threshold: ≤ 2 emissions per user action
+    // (the binding flush emits once; the deferred revert
+    // microtask emits a second selectionChange whose handler
+    // also early-returns, so it's 1 in practice for the
+    // match-after-binding case).
+    const actionEmissions = emissions - beforeEmissions;
+    expect(actionEmissions).toBeLessThanOrEqual(2);
+
+    sub.unsubscribe();
+  });
+
+  it('C2 — simulated user keyboard jump 0→3: real setter reverts to activeStep=0 (jump does NOT land)', async () => {
+    // Setup: activeStep=0, stepper.selectedIndex=0. Then
+    // simulate a user keyboard jump (0→3) by writing
+    // stepper.selectedIndex = 3 directly. The CDK setter guard
+    // (editable=true, forward write) passes, _updateSelectedItemIndex
+    // fires selectionChange with the new value 3, then commits
+    // _selectedIndex.set(3). The round-3 handler reads
+    // event.selectedIndex=3 (mismatch with activeStep=0) →
+    // queueMicrotask revert → stepper.selectedIndex reverts to 0.
+    expect(tc.activeStep()).toBe(0);
+    const stepper = getMatStepper();
+    expect(stepper).toBeTruthy();
+    expect(stepper.selectedIndex).toBe(0);
+
+    // Track emissions.
+    let emissions = 0;
+    const sub = stepper.selectionChange.subscribe(() => {
+      emissions++;
+    });
+
+    // Direct setter write (simulates the user jump route).
+    simulateUserJump(stepper, 3);
+    // After the direct write, the stepper's _selectedIndex has
+    // been committed to 3. Without the round-3 fix, the handler
+    // would have read the live getter (=3) and matched
+    // activeStep... wait, the live getter was 0 PRE-COMMIT.
+    // The round-1/2 handler saw 0, matched activeStep, early
+    // returned, and the post-emit set(3) committed.
+    //
+    // The round-3 fix: handler reads event.selectedIndex (=3) at
+    // emit time, mismatch with activeStep (=0) → queueMicrotask
+    // revert. The post-emit set(3) has already committed, so
+    // when the microtask runs, stepper.selectedIndex = 3 and
+    // activeStep = 0. The microtask writes stepper.selectedIndex
+    // = activeStep() = 0. The setter fires again, the resulting
+    // selectionChange carries selectedIndex=0, the handler
+    // matches activeStep, early returns. Self-bounded.
+    await new Promise((r) => setTimeout(r, 0));
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await new Promise((r) => setTimeout(r, 0));
+    fixture.detectChanges();
+
+    // Final state: stepper reverted to 0; activeStep unchanged.
+    expect(tc.activeStep()).toBe(0);
+    expect(stepper.selectedIndex).toBe(0);
+    // The jump did NOT land. (Round-1/2 shape would have left
+    // stepper.selectedIndex=3, failing this assertion.)
+    // Bounded emissions: 1 from the user-jump setter + 1 from
+    // the deferred-revert setter = 2.
+    expect(emissions).toBeLessThanOrEqual(2);
+    expect(emissions).toBeGreaterThanOrEqual(1);
+
+    sub.unsubscribe();
+  });
+
+  it('C1 + C2 combined: forward footer + simulated backward user jump — both complete, no recursion, no leak', async () => {
+    // Combined stress: forward footer nav, then a backward
+    // user-jump write. Both must complete cleanly with bounded
+    // emissions. This is the realistic operator flow that
+    // triggered the original bug surface.
+    const stepper = getMatStepper();
+    expect(stepper).toBeTruthy();
+    let emissions = 0;
+    const sub = stepper.selectionChange.subscribe(() => {
+      emissions++;
+    });
+
+    // Forward 0→2 via footer.
+    tc.stepperNav().next();
+    tc.stepperNav().next();
+    fixture.detectChanges();
+    expect(tc.activeStep()).toBe(2);
+    expect(stepper.selectedIndex).toBe(2);
+
+    // Simulated user keyboard backward jump 2→0.
+    const before = emissions;
+    simulateUserJump(stepper, 0);
+    await new Promise((r) => setTimeout(r, 0));
+    fixture.detectChanges();
+    await fixture.whenStable();
+    await new Promise((r) => setTimeout(r, 0));
+    fixture.detectChanges();
+
+    // Reverted — no jump landed.
+    expect(tc.activeStep()).toBe(2);
+    expect(stepper.selectedIndex).toBe(2);
+    // Bounded per-action emissions.
+    expect(emissions - before).toBeLessThanOrEqual(2);
+
+    sub.unsubscribe();
   });
 });

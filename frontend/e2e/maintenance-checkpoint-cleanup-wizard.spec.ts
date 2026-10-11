@@ -196,14 +196,16 @@ async function advanceToStep2(page: Page) {
 }
 
 async function advanceToStep3(page: Page) {
-  // Navigate to Step 3 by clicking the mat-step HEADER (tab). Material
-  // stepper's selectionChange handler races with [selectedIndex] during
-  // the dry-run click cycle (the redesigned component binds
-  // [selectedIndex]="activeStep()" + (selectionChange) — focus
-  // restoration after clicking a button inside Step 2 bounces the
-  // selectedIndex). The header click bypasses the race. The Continue
-  // button visibility is still asserted via AC-15 at 1024×768.
-  await page.locator('mat-step-header').nth(2).click();
+  // wiznav-fix — Step 2 → Step 3 advances via the FOOTER Continue
+  // button, not the mat-step header. The pre-fix selector
+  // (`page.locator('mat-step-header').nth(2).click()`) was a race
+  // workaround that depended on a header mouse click routing to
+  // `selectionChange` despite the [selectedIndex]="activeStep()"
+  // two-way sync. With the controlled-input revert (component.ts
+  // `onStepperSelectionChange`) and `pointer-events: none` on
+  // `.mat-step-header`, header clicks are intentionally inert;
+  // the footer button is now the single deterministic path.
+  await page.locator('[data-testid="ck-continue-btn"]').first().click();
   await page.locator('[data-testid="ck-execute-btn"]').waitFor({ state: 'visible', timeout: 5000 });
 }
 
@@ -484,12 +486,16 @@ test.describe('Maintenance — Checkpoint Cleanup WIZARD (ck-redesign-2026q4, 5 
     });
 
     // 4. After execute POST + 202, the polling resolves to RUN_SUCCEEDED.
-    // ck-redesign-2026q4 — explicit navigation to Step 4 via the
-    // mat-step-header click. The component's auto-advance on
-    // `succeeded` (`activeStep.set(3)`) races with Material stepper's
-    // focus-restoration in the test browser; the header click is the
-    // robust path that mirrors the operator's manual navigation.
-    await page.locator('mat-step-header').nth(3).click();
+    // wiznav-fix — the pre-fix selector
+    // (`page.locator('mat-step-header').nth(3).click()`) was a
+    // race-workaround that depended on header nav reaching
+    // `selectionChange` despite the [selectedIndex]="activeStep()"
+    // two-way sync. With the controlled-input revert (the component
+    // now reverts on mismatch) and `pointer-events: none` on
+    // `.mat-step-header`, header clicks are inert; the by-design
+    // poll auto-advance (`activeStep.set(3)` in TS:647 on
+    // `succeeded`) is the SINGLE deterministic path to Step 4. The
+    // wait below resolves against that auto-advance.
     // Redesigned §2.6 — banner wording is "Run completed" (was wire-status
     // "succeeded" pre-redesign); banner class is ck-result-banner-completed.
     await expect(page.locator('[data-testid="ck-result"]')).toContainText('Run completed');
@@ -505,8 +511,10 @@ test.describe('Maintenance — Checkpoint Cleanup WIZARD (ck-redesign-2026q4, 5 
 
     // Verify the wire contract — execute POSTed once with the AM-17 shape.
     expect(executeCalled).toBe(true);
-    // The Step 4 footer renders `ck-back-to-start-btn` (visible because
-    // we explicitly navigated to Step 4 above).
+    // The Step 4 footer renders `ck-back-to-start-btn` (visible
+    // because the poll auto-advance on `succeeded` lands the
+    // operator on Step 4 — no explicit click needed; see the
+    // wiznav-fix rationale comment block above).
     await expect(page.locator('[data-testid="ck-back-to-start-btn"]')).toBeVisible();
   });
 });
