@@ -21,6 +21,7 @@ from daemon.models import (
     SourceType,
     SourceUpdate,
 )
+from daemon.auth.decorators import scope_required
 from daemon.constants import CHAT_SOURCE_PREFIXES, MAX_CREDENTIALS_SIZE
 from daemon.routers.schemas import JobValidationError
 from daemon.utils import parse_utc_datetime, validate_instance_mode
@@ -122,7 +123,7 @@ def _source_to_info(source) -> SourceInfo:
 # ==================== Endpoints ====================
 
 
-@router.get("", response_model=SourceListResponse)
+@router.get("", response_model=SourceListResponse, dependencies=[scope_required("sources:write")])
 async def list_sources(request: Request):
     """List all configured message sources."""
     manager = _get_manager(request)
@@ -131,7 +132,7 @@ async def list_sources(request: Request):
     return SourceListResponse(sources=sources)
 
 
-@router.post("", response_model=SourceInfo, status_code=201)
+@router.post("", response_model=SourceInfo, status_code=201, dependencies=[scope_required("sources:write")])
 async def create_source(source_create: SourceCreate, request: Request):
     """Create a new message source."""
     manager = _get_manager(request)
@@ -277,7 +278,7 @@ async def create_source(source_create: SourceCreate, request: Request):
     return _source_to_info(source)
 
 
-@router.post("/test", response_model=SourceTestResponse)
+@router.post("/test", response_model=SourceTestResponse, dependencies=[scope_required("sources:write")])
 async def test_source(test_request: SourceTestRequest):
     """Test a source configuration without saving it.
     
@@ -320,7 +321,7 @@ async def test_source(test_request: SourceTestRequest):
     return SourceTestResponse(success=success, message=message)
 
 
-@router.get("/{source_id}", response_model=SourceInfo)
+@router.get("/{source_id}", response_model=SourceInfo, dependencies=[scope_required("sources:write")])
 async def get_source(source_id: str, request: Request):
     """Get a specific message source."""
     manager = _get_manager(request)
@@ -338,7 +339,7 @@ async def get_source(source_id: str, request: Request):
     return _source_to_info(source)
 
 
-@router.put("/{source_id}", response_model=SourceInfo)
+@router.put("/{source_id}", response_model=SourceInfo, dependencies=[scope_required("sources:write")])
 async def update_source(source_id: str, source_update: SourceUpdate, request: Request):
     """Update a message source configuration."""
     manager = _get_manager(request)
@@ -420,7 +421,7 @@ async def update_source(source_id: str, source_update: SourceUpdate, request: Re
     return _source_to_info(updated)
 
 
-@router.delete("/{source_id}", response_model=DeleteResponse)
+@router.delete("/{source_id}", response_model=DeleteResponse, dependencies=[scope_required("sources:write")])
 async def delete_source(source_id: str, request: Request):
     """Delete a message source."""
     manager = _get_manager(request)
@@ -464,7 +465,7 @@ async def delete_source(source_id: str, request: Request):
     return DeleteResponse(deleted=True, message=f"Source {source_id} deleted")
 
 
-@router.post("/{source_id}/start", response_model=SourceActionResponse)
+@router.post("/{source_id}/start", response_model=SourceActionResponse, dependencies=[scope_required("sources:write")])
 async def start_source(source_id: str, request: Request):
     """Start a message source adapter."""
     from daemon.sources.base import SourceConfig
@@ -568,7 +569,7 @@ async def start_source(source_id: str, request: Request):
     )
 
 
-@router.post("/{source_id}/stop", response_model=SourceActionResponse)
+@router.post("/{source_id}/stop", response_model=SourceActionResponse, dependencies=[scope_required("sources:write")])
 async def stop_source(source_id: str, request: Request):
     """Stop a message source adapter."""
     manager = _get_manager(request)

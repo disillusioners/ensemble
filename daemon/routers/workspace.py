@@ -16,6 +16,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
+from daemon.auth.decorators import scope_required
 from daemon.constants import SSE_PING_INTERVAL, SSE_TIMEOUT_S
 from daemon.repositories import SQLModelProjectRepository
 from daemon.services.workspace_guard import WorkspaceGuard
@@ -62,7 +63,7 @@ def _get_guard(workdir: str) -> WorkspaceGuard:
         )
 
 
-@router.get("/{project_id}/tree", response_model=FileTreeResponse)
+@router.get("/{project_id}/tree", response_model=FileTreeResponse, dependencies=[scope_required("workspace:read")])
 async def get_file_tree(
     project_id: str,
     path: str = Query(default=".", description="Directory path relative to workdir"),
@@ -78,7 +79,7 @@ async def get_file_tree(
     return FileTreeResponse(project_id=project_id, path=path, tree=tree)
 
 
-@router.get("/{project_id}/file", response_model=FileContentResponse)
+@router.get("/{project_id}/file", response_model=FileContentResponse, dependencies=[scope_required("workspace:read")])
 async def get_file_content(
     project_id: str,
     path: str = Query(..., description="File path relative to workdir"),
@@ -145,7 +146,7 @@ async def put_file_content(
     )
 
 
-@router.get("/{project_id}/diff", response_model=GitDiffResponse)
+@router.get("/{project_id}/diff", response_model=GitDiffResponse, dependencies=[scope_required("workspace:read")])
 async def get_file_diff(
     project_id: str,
     path: str = Query(..., description="File path relative to workdir"),
@@ -162,7 +163,7 @@ async def get_file_diff(
     return GitDiffResponse(project_id=project_id, path=path, **diff_data)
 
 
-@router.get("/{project_id}/events")
+@router.get("/{project_id}/events", dependencies=[scope_required("workspace:read")])
 async def stream_file_events(project_id: str, request: Request):
     """SSE stream of file-change events for the project workspace."""
     workdir = await _get_workdir(project_id)

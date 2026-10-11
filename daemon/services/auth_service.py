@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from daemon.auth.context import AUTH_METHOD_SESSION, AuthContext
 from daemon.auth.cookie import SESSION_COOKIE_NAME, csrf_token_for_session
+from daemon.auth.scopes import SESSION_OPERATOR_SCOPES
 from daemon.config import AuthConfig
 from daemon.repositories.auth_session.models import AuthSession, AuthState
 from daemon.repositories.auth_session.repository import (
@@ -388,16 +389,26 @@ class AuthService:
         client_ip: str | None = None,
         user_agent: str | None = None,
     ) -> AuthSession:
-        """Insert a fully-populated ``auth_sessions`` row (AC-10)."""
+        """Insert a fully-populated ``auth_sessions`` row (AC-10).
+
+        P4 grant model: the persisted scope set is the configured OIDC
+        scopes UNION the operator family
+        (:data:`daemon.auth.scopes.SESSION_OPERATOR_SCOPES`) — the
+        browser lane IS the operator, and the real-grant decorator
+        (D3.7 + P4) checks this set by membership like any other lane.
+        """
         now_iso = self._now_iso_fn()
         ip_subnet = (
             _ip_subnet(client_ip) if self._config.fingerprint_by_ip_subnet else None
+        )
+        granted = sorted(
+            set(self._config.scopes) | set(SESSION_OPERATOR_SCOPES)
         )
         row = AuthSession(
             id=secrets.token_urlsafe(SESSION_ID_BYTES),
             subject=subject,
             email=email,
-            scopes=" ".join(self._config.scopes),
+            scopes=" ".join(granted),
             auth_method=AUTH_METHOD_SESSION,
             user_agent=user_agent,
             ip_subnet=ip_subnet,
@@ -509,16 +520,26 @@ class AuthService:
             )
         return deleted
 
-    # ── machine lane (FR-16/17 groundwork — P4 mints via CLI) ──────
+    # ── machine lane (FR-16/17 — P4 T4.3 bearer verify path) ───────
 
-    async def verify_static_token(self, token: str) -> AuthContext | None:
-        """Bearer-lane validation: SHA-256 the presented token and look
-        it up hash-only in ``auth_bearer_tokens`` (P2 store).
+    async def lookup_bearer(self, token: str) -> AuthContext | None:
+        """Bearer-lane verification (T4.3 / D4.3) → :class:`AuthContext`.
 
-        Full surface in P3 for the middleware lane; the MINT path is the
-        P4 CLI — this method is a pure delegate to the P2 repository.
-        Revoked/expired rows return ``None`` (repo contract).
+        Constant-time per D4.3: the presented token is SHA-256'd and the
+        digest looked up as the ``auth_bearer_tokens`` PRIMARY KEY — a
+        single indexed hit; hash equality IS the comparison (no
+        plaintext column, no LIKE scan, no candidate loop). Expired and
+        revoked rows return ``None`` exactly like a miss (the
+        enumeration-resistance contract: absent, expired, revoked and
+        unknown all collapse to the SAME uniform middleware 401 — no
+        token-enumeration oracle, no timing/status differentiation).
+
+        The 1-minute-batched ``last_used_at`` touch rides the existing
+        P2 seam. The MINT path is the P4 CLI
+        (:mod:`daemon.auth.cli`).
         """
+        if not token:
+            return None
         id_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         row = await asyncio.to_thread(
             self._repository.get_bearer_by_hash,
@@ -539,6 +560,15 @@ class AuthService:
             auth_method="bearer",
             expires_at=row.expires_at,
         )
+
+    async def verify_static_token(self, token: str) -> AuthContext | None:
+        """P3 name for :meth:`lookup_bearer` — kept as a thin alias.
+
+        The P3 middleware and tests consume this name; T4.3 names the
+        canonical method ``lookup_bearer`` and the middleware now calls
+        that directly. Any alias is byte-equivalent.
+        """
+        return await self.lookup_bearer(token)
 
     # ── readiness (T3.9 / FR-30 / OD-9) ────────────────────────────
 

@@ -11,6 +11,13 @@ D3.6 shape (NORMATIVE — do not narrow): ``subject``, ``scopes: set[str]``,
 (v1 always ``{}``). The fixed-closed-dataclass alternative was REJECTED —
 ``meta`` is the S-1 reserved seam that lets v2 attach per-request extras
 (e.g. share-token provenance) without changing every construction site.
+
+P4 grant model (daemon/auth/scopes.py is the authority): ``scopes`` is
+the lane's GRANTED set under the real-grant contract — the session lane
+persists the OIDC scopes ∪ the operator family (the browser lane IS the
+operator); the bearer lane carries exactly its minted scopes. No lane
+satisfies a ``@require_scope`` check by identity alone (the P3
+session-blanket branch is gone — M-3 close).
 """
 
 from __future__ import annotations
@@ -32,9 +39,11 @@ class AuthContext:
     Attributes:
         subject: Principal identity — OIDC ``sub`` claim for the session
             lane, the owner label (e.g. ``operator-cli``) for bearer rows.
-        scopes: Granted scope set. The session lane grants the configured
-            ``auth.scopes``; the bearer lane grants the token row's CSV
-            scopes. ``@require_scope`` consumes this set (D3.7).
+        scopes: GRANTED scope set (P4 real-grant model). The session lane
+            grants the configured OIDC scopes ∪ the operator family
+            (:data:`daemon.auth.scopes.SESSION_OPERATOR_SCOPES`); the
+            bearer lane grants the token row's minted scopes exactly.
+            ``@require_scope`` consumes this set (D3.7 + P4).
         auth_method: ``"session"`` | ``"bearer"`` — which lane produced
             the context (drives CSRF enforcement + audit fields).
         expires_at: Credential expiry as ``now_utc_iso()``-format UTC

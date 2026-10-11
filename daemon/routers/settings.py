@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from sqlmodel import Session
 from zoneinfo import available_timezones
 
+from daemon.auth.decorators import scope_required
 from daemon.repositories import SQLModelProjectRepository
 from daemon.registry import get_registry
 from daemon.services.language_utils import get_language_preference, LANGUAGE_METADATA_KEY, DEFAULT_LANGUAGE
@@ -657,7 +658,7 @@ async def get_plane_config():
 # inversion (the utils live in ``daemon/services/``).
 
 
-@router.get("/snapshot-create", response_model=SnapshotCreatePreferenceResponse)
+@router.get("/snapshot-create", response_model=SnapshotCreatePreferenceResponse, dependencies=[scope_required("snapshot:write")])
 async def get_snapshot_create_preference():
     """Read the R15 settings toggle for ``snapshot_create``.
 
@@ -671,7 +672,7 @@ async def get_snapshot_create_preference():
     return SnapshotCreatePreferenceResponse(enabled=enabled)
 
 
-@router.put("/snapshot-create", response_model=SnapshotCreatePreferenceResponse)
+@router.put("/snapshot-create", response_model=SnapshotCreatePreferenceResponse, dependencies=[scope_required("snapshot:write")])
 async def set_snapshot_create_preference(request: SnapshotCreatePreferenceUpdate):
     """Persist the R15 settings toggle for ``snapshot_create``.
 
@@ -721,6 +722,7 @@ async def set_snapshot_create_preference(request: SnapshotCreatePreferenceUpdate
 @router.get(
     "/snapshot-usage-metrics",
     response_model=SnapshotUsageMetricsResponse,
+    dependencies=[scope_required("snapshot:write")],
     deprecated=True,
 )
 async def get_snapshot_usage_metrics_deprecated(

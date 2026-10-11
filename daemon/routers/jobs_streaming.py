@@ -9,6 +9,7 @@ from typing import Any, AsyncGenerator
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
+from daemon.auth.decorators import scope_required
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.mission_resolver import (
     mission_projection_to_dict as _mission_projection_to_dict,
@@ -306,6 +307,7 @@ async def _resolve(service: JobQueueService, work_id: str, use_resolver: bool): 
 
 @router.get(
     "/{job_id}/events",
+    dependencies=[scope_required("jobs:read")],
     responses={
         200: {"description": "SSE stream for job events"},
         404: {"model": JobNotFoundResponse, "description": "Job not found"},

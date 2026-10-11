@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Request
 from mcp.shared.exceptions import McpError
 
+from daemon.auth.decorators import scope_required
 from daemon.models import (
     McpServerCreate,
     McpServerInfo,
@@ -300,7 +301,7 @@ def _mcp_server_to_info(mcp_server) -> McpServerInfo:
 # ==================== Endpoints ====================
 
 
-@router.get("", response_model=McpServerListResponse)
+@router.get("", response_model=McpServerListResponse, dependencies=[scope_required("mcp:read")])
 async def list_mcp_servers(request: Request):
     """List all MCP servers."""
     manager = _get_manager(request)
@@ -311,7 +312,7 @@ async def list_mcp_servers(request: Request):
     return McpServerListResponse(mcp_servers=mcp_servers)
 
 
-@router.post("/test-connection", response_model=McpServerTestConnectionResponse)
+@router.post("/test-connection", response_model=McpServerTestConnectionResponse, dependencies=[scope_required("mcp:read")])
 async def test_mcp_server_connection(test_request: McpServerTestConnectionRequest):
     """
     Test MCP server connectivity before saving.
@@ -417,7 +418,7 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
         )
 
 
-@router.post("", response_model=McpServerInfo, status_code=201)
+@router.post("", response_model=McpServerInfo, status_code=201, dependencies=[scope_required("mcp:read")])
 async def create_mcp_server(mcp_server_create: McpServerCreate, request: Request):
     """Create a new MCP server."""
     manager = _get_manager(request)
@@ -467,7 +468,7 @@ async def create_mcp_server(mcp_server_create: McpServerCreate, request: Request
     return _mcp_server_to_info(mcp_server)
 
 
-@router.get("/builtin-templates", response_model=BuiltinTemplateListResponse)
+@router.get("/builtin-templates", response_model=BuiltinTemplateListResponse, dependencies=[scope_required("mcp:read")])
 async def list_builtin_templates():
     """List all available built-in server templates."""
     registry = get_registry()
@@ -482,7 +483,7 @@ async def list_builtin_templates():
     return BuiltinTemplateListResponse(templates=templates)
 
 
-@router.post("/configure-builtin", response_model=McpServerInfo, status_code=201)
+@router.post("/configure-builtin", response_model=McpServerInfo, status_code=201, dependencies=[scope_required("mcp:read")])
 async def configure_builtin_server(request: Request, config_request: BuiltinServerConfigure):
     """Configure a built-in MCP server from a template."""
     manager = _get_manager(request)
@@ -695,7 +696,7 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
             raise
 
 
-@router.get("/{server_id}", response_model=McpServerInfo)
+@router.get("/{server_id}", response_model=McpServerInfo, dependencies=[scope_required("mcp:read")])
 async def get_mcp_server(server_id: str, request: Request):
     """Get a specific MCP server."""
     manager = _get_manager(request)
@@ -716,7 +717,7 @@ async def get_mcp_server(server_id: str, request: Request):
     return _mcp_server_to_info(mcp_server)
 
 
-@router.put("/{server_id}", response_model=McpServerInfo)
+@router.put("/{server_id}", response_model=McpServerInfo, dependencies=[scope_required("mcp:read")])
 async def update_mcp_server(
     server_id: str,
     mcp_server_update: McpServerUpdate,
@@ -807,7 +808,7 @@ async def update_mcp_server(
     return _mcp_server_to_info(updated)
 
 
-@router.delete("/{server_id}", response_model=McpServerDeleteResponse)
+@router.delete("/{server_id}", response_model=McpServerDeleteResponse, dependencies=[scope_required("mcp:read")])
 async def delete_mcp_server(server_id: str, request: Request):
     """Delete an MCP server (STOP-then-DELETE, arch §7.4).
 
@@ -869,7 +870,7 @@ async def delete_mcp_server(server_id: str, request: Request):
     return McpServerDeleteResponse(deleted=result["deleted"], id=server_id)
 
 
-@router.post("/{server_id}/reset-builtin", response_model=McpServerInfo)
+@router.post("/{server_id}/reset-builtin", response_model=McpServerInfo, dependencies=[scope_required("mcp:read")])
 async def reset_builtin_server(server_id: str, request: Request):
     """Reset a built-in MCP server to its default configuration."""
     manager = _get_manager(request)

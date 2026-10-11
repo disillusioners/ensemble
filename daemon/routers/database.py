@@ -24,6 +24,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from daemon.auth.decorators import scope_required
 from daemon.ensemble_config import EnsembleConfig
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ class DatabaseSwitchResponse(BaseModel):
 @router.post(
     "/switch",
     response_model=DatabaseSwitchResponse,
+    dependencies=[scope_required("auth:admin")],
     responses={
         200: {"description": "Database switched; restart required"},
         400: {

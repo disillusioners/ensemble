@@ -432,6 +432,34 @@ class AuthSessionRepository:
         )
 
 
+
+    # ── Bearer label lookup (P4 T4.1 revoke --label) ─────────────────
+
+    def get_bearer_hashes_by_label(self, label: str) -> list[BearerToken]:
+        """All bearer rows carrying ``label`` (any revocation state).
+
+        The P4 CLI ``revoke --label`` surface: returns the rows so the
+        caller can report per-row outcomes (already-revoked rows keep
+        their FIRST ``revoked_at`` — :meth:`revoke_bearer` is
+        idempotent). Hash-only rows; plaintext never exists here.
+        """
+        stmt = select(BearerToken).where(col(BearerToken.label) == label)
+        with Session(self._engine) as session:
+            return list(session.exec(stmt).all())
+
+    def get_bearer_by_hash_any_state(self, id_hash: str) -> BearerToken | None:
+        """Raw PK lookup WITHOUT the revoked/expired filtering.
+
+        The P4 CLI's duplicate-mint guard: a re-mint of the identical
+        token material must refuse even when the existing row is
+        expired/revoked (the credential material is burned either way).
+        Not used by the request path — ``get_bearer_by_hash`` remains
+        the runtime lookup.
+        """
+        with Session(self._engine) as session:
+            return session.get(BearerToken, id_hash)
+
+
 def _iso_minus_seconds(iso: str, seconds: int) -> str:
     """Return ``iso`` shifted back by ``seconds``, same canonical format.
 

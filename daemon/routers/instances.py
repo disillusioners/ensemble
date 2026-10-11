@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from daemon.auth.decorators import scope_required
 from daemon.constants import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT
 from daemon.models import (
     ErrorCodes,
@@ -296,7 +297,7 @@ def _get_manager(request: Request) -> Any:
 
 
 # 1. POST /instances - Spawn instance
-@router.post("", response_model=InstanceInfo, status_code=201)
+@router.post("", response_model=InstanceInfo, status_code=201, dependencies=[scope_required("instances:write")])
 async def create_instance(
     instance_create: InstanceCreate,
     request: Request,
@@ -358,7 +359,7 @@ async def create_instance(
 
 
 # 2. GET /instances - List instances
-@router.get("", response_model=InstanceListResponse)
+@router.get("", response_model=InstanceListResponse, dependencies=[scope_required("instances:read")])
 async def list_instances(
     request: Request,
     limit: int = DEFAULT_PAGE_LIMIT,
@@ -529,7 +530,7 @@ async def list_instances(
 
 
 # 3. GET /instances/{instance_id} - Get instance info
-@router.get("/{instance_id}", response_model=InstanceInfo)
+@router.get("/{instance_id}", response_model=InstanceInfo, dependencies=[scope_required("instances:read")])
 async def get_instance(
     instance_id: str,
     request: Request,
@@ -580,7 +581,7 @@ async def get_instance(
 
 
 # 4. DELETE /instances/{instance_id} - Terminate instance
-@router.delete("/{instance_id}")
+@router.delete("/{instance_id}", dependencies=[scope_required("instances:write")])
 async def terminate_instance(
     instance_id: str,
     request: Request,
@@ -673,7 +674,7 @@ async def terminate_instance(
 
 
 # 5. POST /instances/{instance_id}/pause - Pause instance
-@router.post("/{instance_id}/pause")
+@router.post("/{instance_id}/pause", dependencies=[scope_required("instances:write")])
 async def pause_instance(
     instance_id: str,
     request: Request,
@@ -704,7 +705,7 @@ async def pause_instance(
 
 
 # 6. POST /instances/{instance_id}/resume - Resume instance
-@router.post("/{instance_id}/resume")
+@router.post("/{instance_id}/resume", dependencies=[scope_required("instances:write")])
 async def resume_instance(
     instance_id: str,
     request: Request,
@@ -920,7 +921,7 @@ async def resume_instance(
 #   tool threads are uncancellable). For maximum safety, activate
 #   watchover BEFORE starting autonomous work, or pause manually
 #   first.
-@router.post("/{instance_id}/watchover")
+@router.post("/{instance_id}/watchover", dependencies=[scope_required("instances:write")])
 async def toggle_watchover(
     instance_id: str,
     body: WatchoverRequest,
@@ -1059,7 +1060,7 @@ async def toggle_watchover(
 # ``pause_instance_cascade`` cascades to children — the answer endpoint
 # must mirror this fan-out. The target instance gets the formatted
 # Q↔A HumanMessage; children resume silently from checkpoint.
-@router.post("/{instance_id}/answer")
+@router.post("/{instance_id}/answer", dependencies=[scope_required("instances:write")])
 async def answer_questions(
     instance_id: str,
     body: AnswerRequest,
@@ -1117,7 +1118,7 @@ async def answer_questions(
 # and that the answer endpoint reads from. The absence of a pending
 # pack is a valid steady state (IDLE / answered / cleared instances),
 # so the endpoint returns ``question_pack=null`` rather than 404.
-@router.get("/{instance_id}/question")
+@router.get("/{instance_id}/question", dependencies=[scope_required("instances:read")])
 async def get_pending_question(instance_id: str, request: Request) -> dict:
     """Return the pending question pack for ``instance_id``, if any.
 
@@ -1174,7 +1175,7 @@ async def get_pending_question(instance_id: str, request: Request) -> dict:
 # (manager.py:2238-2245). The only difference is that we do NOT touch
 # ``_graph_tasks`` / ``_pending_injections`` / ``_request_registry`` —
 # the instance keeps running, just past the pause barrier.
-@router.post("/{instance_id}/question/dismiss")
+@router.post("/{instance_id}/question/dismiss", dependencies=[scope_required("instances:write")])
 async def dismiss_question(
     instance_id: str,
     request: Request,
@@ -1383,7 +1384,7 @@ async def dismiss_question(
 # is NOT modified. The 5 internal callers (instance_messaging ×2,
 # watchover_service ×2, manager facade) keep the default True whole-tree
 # behavior — see phase3-plan §Architect Flags AF-B5.
-@router.post("/{instance_id}/stop", deprecated=True)
+@router.post("/{instance_id}/stop", deprecated=True, dependencies=[scope_required("instances:write")])
 async def stop_instance_deprecated(
     instance_id: str,
     request: Request,
@@ -1425,7 +1426,7 @@ async def stop_instance_deprecated(
 
 
 # 7. GET /instances/{instance_id}/messages - Get message history
-@router.get("/{instance_id}/messages")
+@router.get("/{instance_id}/messages", dependencies=[scope_required("instances:read")])
 async def get_messages(
     instance_id: str,
     request: Request,
@@ -1509,7 +1510,7 @@ async def get_messages(
 # caller parity is exact.
 
 
-@router.get("/{instance_id}/commands/active")
+@router.get("/{instance_id}/commands/active", dependencies=[scope_required("instances:read")])
 async def get_active_command(
     instance_id: str,
     request: Request,
@@ -1602,7 +1603,7 @@ async def _check_instance_exists(manager: Any, instance_id: str) -> None:
 
 
 # 8. GET /instances/{instance_id}/todos - Get the instance's todo list
-@router.get("/{instance_id}/todos")
+@router.get("/{instance_id}/todos", dependencies=[scope_required("instances:read")])
 async def get_instance_todos(
     instance_id: str,
     request: Request,
@@ -1635,7 +1636,7 @@ async def get_instance_todos(
 
 
 # 8a. GET /instances/{instance_id}/todos/graph - Structured {nodes, edges}
-@router.get("/{instance_id}/todos/graph")
+@router.get("/{instance_id}/todos/graph", dependencies=[scope_required("instances:read")])
 async def get_instance_todo_graph(
     instance_id: str,
     request: Request,
@@ -1668,7 +1669,7 @@ async def get_instance_todo_graph(
 # ``POST /{instance_id}/todos/{node_id}/comment`` catch-all so the
 # literal segment ``edges`` is never captured by the ``{node_id}``
 # path parameter. FastAPI's route matching is order-sensitive.
-@router.post("/{instance_id}/todos/edges")
+@router.post("/{instance_id}/todos/edges", dependencies=[scope_required("instances:write")])
 async def add_todo_edge(
     instance_id: str,
     body: TodoEdgeRequest,
@@ -1728,7 +1729,7 @@ async def add_todo_edge(
 
 
 # 8c. DELETE /instances/{instance_id}/todos/edges - Remove a directed edge
-@router.delete("/{instance_id}/todos/edges")
+@router.delete("/{instance_id}/todos/edges", dependencies=[scope_required("instances:write")])
 async def remove_todo_edge(
     instance_id: str,
     body: TodoEdgeRequest,
@@ -1786,7 +1787,7 @@ async def remove_todo_edge(
 #
 # Declared BEFORE the ``/todos/{node_id}/comment`` catch-all so FastAPI's
 # order-sensitive matcher prefers this literal ``subtasks`` segment.
-@router.post("/{instance_id}/todos/{node_id}/subtasks")
+@router.post("/{instance_id}/todos/{node_id}/subtasks", dependencies=[scope_required("instances:write")])
 async def add_todo_subtask(
     instance_id: str,
     node_id: str,
@@ -1859,7 +1860,7 @@ async def add_todo_subtask(
 # Declared BEFORE the ``/todos/{node_id}/comment`` catch-all so FastAPI's
 # order-sensitive matcher treats ``subtasks`` as a literal segment, not
 # a ``node_id`` value.
-@router.patch("/{instance_id}/todos/{node_id}/subtasks/{subtask_id}")
+@router.patch("/{instance_id}/todos/{node_id}/subtasks/{subtask_id}", dependencies=[scope_required("instances:write")])
 async def update_todo_subtask(
     instance_id: str,
     node_id: str,
@@ -1947,7 +1948,7 @@ async def update_todo_subtask(
 #
 # Declared BEFORE the ``/todos/{node_id}/comment`` catch-all so FastAPI's
 # order-sensitive matcher treats ``subtasks`` as a literal segment.
-@router.delete("/{instance_id}/todos/{node_id}/subtasks/{subtask_id}")
+@router.delete("/{instance_id}/todos/{node_id}/subtasks/{subtask_id}", dependencies=[scope_required("instances:write")])
 async def remove_todo_subtask(
     instance_id: str,
     node_id: str,
@@ -2005,7 +2006,7 @@ async def remove_todo_subtask(
 # Declared AFTER the literal ``/todos/edges`` routes so the static
 # ``edges`` segment is matched first by FastAPI's order-sensitive route
 # matcher.
-@router.post("/{instance_id}/todos/{node_id}/comment")
+@router.post("/{instance_id}/todos/{node_id}/comment", dependencies=[scope_required("instances:write")])
 async def set_todo_comment(
     instance_id: str,
     node_id: str,
@@ -2118,7 +2119,7 @@ async def set_todo_comment(
 # ---------------------------------------------------------------------------
 
 
-@router.put("/{instance_id}/ui-prefs", response_model=InstanceUiPrefsResponse)
+@router.put("/{instance_id}/ui-prefs", response_model=InstanceUiPrefsResponse, dependencies=[scope_required("instances:write")])
 async def set_instance_ui_prefs(
     instance_id: str,
     body: InstanceUiPrefsUpdateRequest,
@@ -2170,7 +2171,7 @@ async def set_instance_ui_prefs(
     )
 
 
-@router.delete("/{instance_id}/ui-prefs")
+@router.delete("/{instance_id}/ui-prefs", dependencies=[scope_required("instances:write")])
 async def delete_instance_ui_prefs(
     instance_id: str,
     request: Request,

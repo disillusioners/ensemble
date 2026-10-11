@@ -59,9 +59,19 @@ class TestIssueAndValidate:
         row = asyncio.run(
             service.issue_session(subject="u1", email="u1@example.com")
         )
+        cfg = service._config
         assert row.id and row.subject == "u1"
         assert row.auth_method == "session"
-        assert row.scopes == "openid profile email"
+        # P4 real-grant model (M-3 close): the session persists the
+        # OIDC scopes UNION the operator family (daemon/auth/scopes.py)
+        # — the P3 posture ("openid profile email" only, blanket
+        # session-satisfies-all in the decorator) is superseded.
+        from daemon.auth.scopes import SESSION_OPERATOR_SCOPES
+
+        assert row.scopes == " ".join(
+            sorted(set(cfg.scopes) | set(SESSION_OPERATOR_SCOPES))
+        )
+        assert "openid" in row.scopes and "auth:admin" in row.scopes
         assert row.created_at and row.last_used_at
         created = datetime.fromisoformat(row.created_at)
         expires = datetime.fromisoformat(row.expires_at)

@@ -441,7 +441,10 @@ class AuthMiddleware:
         service = self._auth_service(scope)
         if service is None or not token:
             return None
-        return await service.verify_static_token(token)
+        # T4.3: the canonical bearer-verify path (constant-time PK hit,
+        # uniform None for absent/expired/revoked — the enumeration-
+        # resistance contract lives in AuthService.lookup_bearer).
+        return await service.lookup_bearer(token)
 
     async def _validate_cookie(
         self, scope: dict[str, Any], session_id: str
