@@ -295,3 +295,17 @@ Follow-up: audit instance INSERT/creation paths for
 creation-path stamping. Flagged needs-investigation; surfaced
 during the e8a61da3 stale-fixture diagnosis (fixtures defaulted to
 running+NULL and relied on the data-gap hold).
+
+## (m) `_rearm_watchers_in_txn` return-docstring misleads — parked to preserve daemon/ byte-identity (e8a61da3)
+
+The return-docstring at ``daemon/services/turn_transitions.py:830-833``
+documents per-row ``stored_watch:<watcher8>`` side-effect tokens without
+noting that ``run()`` collapses them into the single flat gate token
+``rearm_stored_watches`` on ``cross_turn_side_effects`` (:749-752); this
+mismatch misled the E4 vfy probe's author into asserting a never-emitted
+token shape.
+
+Comment-only hardening (append the collapse note to the docstring) is
+deliberately deferred to preserve ``daemon/`` byte-identity with the
+2026-10-11 verification-gate SHA; bundle it into any future lane already
+touching ``turn_transitions.py``.

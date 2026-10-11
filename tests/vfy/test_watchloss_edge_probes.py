@@ -149,7 +149,12 @@ def _edge_seed_instance(
     *,
     parent_id: str | None = None,
     status: str = "running",
+    last_activity: str | None = None,
 ) -> None:
+    # Fresh default anchor: the mission-live guard's 6h zombie-backstop
+    # must see the seeded instance as active at any wall-clock run time.
+    if last_activity is None:
+        last_activity = (_now_naive() - timedelta(minutes=5)).isoformat()
     with eng.begin() as c:
         c.execute(
             text(
@@ -158,9 +163,14 @@ def _edge_seed_instance(
                 "version, last_activity_at) VALUES "
                 "(:iid, :pid, 'developer', 'agents/developer', :status, "
                 "'p', '2026-10-11T07:00:00', '2026-10-11T07:00:00', 1, "
-                "'2026-10-11T08:00:00')"
+                ":la)"
             ),
-            {"iid": instance_id, "pid": parent_id, "status": status},
+            {
+                "iid": instance_id,
+                "pid": parent_id,
+                "status": status,
+                "la": last_activity,
+            },
         )
 
 
@@ -666,9 +676,7 @@ class TestE4EmptyStringInstanceId:
         # OBSERVED: the hook ran (side effects present) — "" passed
         # the None-gate.
         side_effects = list(getattr(result, "cross_turn_side_effects", []) or [])
-        assert any(
-            str(tok).startswith("stored_watch:") for tok in side_effects
-        ), f"expected a stored_watch side-effect token, got {side_effects}"
+        assert "rearm_stored_watches" in side_effects and "migrate_job_watchers" in side_effects, f"got {side_effects}"
 
         # OBSERVED: mission_instance_id bound as "" (NOT NULL
         # satisfied by the empty string); work_instance_id likewise.

@@ -104,8 +104,14 @@ def _seed_instance(
     *,
     parent_id: str | None = None,
     status: str = "running",
-    last_activity: str | None = "2026-10-11T08:00:00",
+    last_activity: str | None = None,
 ) -> None:
+    # Fresh default anchor: the mission-live guard's 6h zombie-backstop
+    # must see the seeded instance as active at any wall-clock run time.
+    from daemon.services.timestamps import now_utc_naive
+
+    if last_activity is None:
+        last_activity = (now_utc_naive() - timedelta(minutes=5)).isoformat()
     with eng.begin() as c:
         c.execute(
             text(
