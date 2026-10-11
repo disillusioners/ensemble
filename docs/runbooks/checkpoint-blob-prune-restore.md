@@ -252,10 +252,30 @@ DELETE) is bounded by the §5 backup as the recovery of record.
 There is **no on/off switch** for the destructive prune. To
 stop the pruning while preserving the daemon:
 
-1. Disable the auto cycle (env-flag, separate from prune):
-   `MAINTENANCE_ENDPOINTS_ENABLED=0` does NOT stop the auto
-   cycle (INV-1) — use `CHECKPOINT_CLEANUP_INTERVAL=0` or
-   stop the maintenance timer via your normal ops path.
+1. Disable the auto cycle. `MAINTENANCE_ENDPOINTS_ENABLED=0`
+   does NOT stop the auto cycle (INV-1) — it only kill-switches
+   the manual API. The emergency stops, in order of authority:
+   * **PRIMARY — stop the daemon** (halts a cycle already in
+     flight, not just future ticks):
+     `sudo systemctl stop <unit>` where `<unit>` follows the
+     install (`~/agents-ensemble` → `ensemble-main.service`,
+     `~/agents-ensemble-demo` → `ensemble-demo.service`; some
+     hosts carry a hand-provisioned unit instead — e.g. the
+     `ensemble-live.service` precedent on ensemble-vm).
+     Discover the actual unit with
+     `systemctl list-units --type=service 'ensemble-*'`.
+   * **SECONDARY — config stop** (requires the fix-cycle-1
+     never-due guard on `feature/blob-prune-default-on`
+     forward): set `PERSISTENCE_CHECKPOINT_CLEANUP_INTERVAL=0`
+     in the install's `.env` and restart the daemon. The
+     `MaintenanceService._is_due` guard treats an interval
+     `<= 0` as DISABLED — the job never becomes due.
+     (Historical note: a pre-fix revision of this runbook told
+     operators to set an UNPREFIXED interval name to 0 — that
+     name reads nothing (`PersistenceConfig` uses the
+     `PERSISTENCE_` env prefix), and pre-fix a 0 interval meant
+     due-EVERY-tick: an accelerator, not a stop. If the stale
+     unprefixed var exists in an install's `.env`, remove it.)
 2. The manual API can still block all entry via
    `MAINTENANCE_ENDPOINTS_ENABLED=0` (kill-switch on the
    dry-run / execute endpoints).
