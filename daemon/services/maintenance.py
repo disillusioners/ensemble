@@ -1493,17 +1493,17 @@ class CheckpointCleanupJob:
         ever lands (INV-13) — the AM-2 regression pin (test 57 + case
         44 freed-bytes) is the catcher.
 
-        The manual dry-run's blob arm is FORCED ``destructive=False``
-        even when the operator has the env dual-arm armed: the env
-        default is dry-run, but an armed env must not leak
-        destructivity into the manual preview (INV-2 + the dry-run
-        fidelity rule). Dry-run E→D mirrors destructive E→D for
-        preview fidelity (both dry-run arms are read-only; ordering is
-        immaterial for correctness there, but the preview should not
-        lie about the order it will run in). Residual cost of E-first
-        (accepted per decision-log AM-2): blobs referenced only by
-        excess rows survive one extra cycle — conservative under-delete,
-        self-healing.
+        The manual dry-run's blob arm is still FORCED
+        ``destructive=False`` (read-only preview fidelity). There is
+        no env inheritance to guard against anymore — the env dual-arm
+        was removed by ``feature/blob-prune-default-on``, so the
+        explicit kwarg is the sole arbiter. Dry-run E→D mirrors
+        destructive E→D for preview fidelity (both dry-run arms are
+        read-only; ordering is immaterial for correctness there, but
+        the preview should not lie about the order it will run in).
+        Residual cost of E-first (accepted per decision-log AM-2):
+        blobs referenced only by excess rows survive one extra cycle —
+        conservative under-delete, self-healing.
         """
         t0 = time.perf_counter()
         # MANUAL entry-point blob arm — destructive-by-default

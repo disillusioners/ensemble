@@ -21,8 +21,12 @@ which stays SELECT-only.
 
 The reference-aware prune executes Operation E of the maintenance
 cycle (`CheckpointCleanupJob.execute`, `daemon/services/maintenance.py::execute`).
-It runs after the 50-cap retention prune (Operation D) on the same
-15-minute cadence; per-(thread, ns) failures are isolated and
+It runs in the same checkpoint-cleanup job execution as the 50-cap
+retention prune (Operation D), whenever that job is due — default
+every 24 hours (`CHECKPOINT_CLEANUP_INTERVAL_HOURS`, overridable via
+`PERSISTENCE_CHECKPOINT_CLEANUP_INTERVAL`; never-due at <=0) — with
+the 15-minute maintenance tick (`MAINTENANCE_CHECK_INTERVAL_MINUTES`)
+only evaluating due-ness; per-(thread, ns) failures are isolated and
 logged — they never break Operations A–D.
 
 ```

@@ -287,9 +287,8 @@ class MaintenanceApiService:
                 raise await self._conflict_error()
 
             # Run — manual entry point; ``destructive=False`` is
-            # explicit (the manual preview never inherits an armed
-            # env, even when the operator has the env dual-arm
-            # armed — INV-2 + dry-run fidelity rule).
+            # explicit; no env inheritance exists (the env dual-arm is
+            # gone — the kwarg is the sole arbiter).
             try:
                 result = await self._cleanup_job.run_checkpoint_prunes(
                     destructive=False

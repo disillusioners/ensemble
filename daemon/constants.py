@@ -252,8 +252,13 @@ CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES: int = 3
 # to chunks of this size; the next chunk is a separate SERIALIZABLE
 # transaction. Sized to bound the worst-case per-statement footprint of the
 # pool (× row-size × per-row byte-slice cost in asyncpg RETURNING) while
-# keeping the per-pair round-trip count amortized into the 15-min maintenance
-# cadence — see commit message rationale in ``feature/blob-prune-default-on``.
+# amortizing the per-pair round-trip count across the chunked per-pair
+# delete, which runs whenever the checkpoint-cleanup job is due (default
+# 24h via ``CHECKPOINT_CLEANUP_INTERVAL_HOURS`` / env knob
+# ``PERSISTENCE_CHECKPOINT_CLEANUP_INTERVAL``) — the 15-min
+# ``MAINTENANCE_CHECK_INTERVAL_MINUTES`` is only the maintenance tick
+# that evaluates due-ness, not the prune cadence. See commit message
+# rationale in ``feature/blob-prune-default-on``.
 CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE: int = 1000
 
 # ── PG-only VACUUM (ANALYZE) maintenance (commission backend-db-space-reclamation) ──
