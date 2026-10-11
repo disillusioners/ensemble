@@ -309,9 +309,17 @@ class TestMultiChunkExhaustionDialedBatch:
     to return the true targets when the whole table fits inside the
     first ``batch`` ctids. Here the batch size is DIALED DOWN to 5
     and a 12+ orphan set is staged, so the per-pair loop MUST cross
-    >= 3 data-bearing chunks — with an unconstrained subquery the
-    tail targets would never delete and the pair would never
-    exhaust.
+    >= 3 data-bearing chunks. Staging keeps the 2 OLDEST
+    checkpoints so the live anchors LEAD the physical ctid order on
+    this fresh append-only table: an unconstrained first-batch
+    window would cover the live ctids, match nothing against the
+    anti-join predicate, and delete 0 — the chunk-count, totals,
+    and exhaustion assertions then fail deterministically on the
+    buggy SQL. (Under keep-NEWEST staging the orphans LEAD instead
+    — the one layout where the buggy window slides through them
+    identically to the fixed predicate-bound one, so the previous
+    staging had no discriminative power over this bug class.
+    Review W1.)
 
     Acceptance:
     * >= 3 data-bearing chunks observed, each within the batch bound;
@@ -360,7 +368,18 @@ class TestMultiChunkExhaustionDialedBatch:
         tid = "t-dialed-multichunk"
         _run, _ = _build_graph(saver, thread_id=tid, turns=12)
         await _run()
-        keep = set(await adapter.get_checkpoint_ids(tid, "", 2))
+        # keep the 2 OLDEST, not the newest (get_checkpoint_ids is
+        # newest-first, so slice the tail of the full list). On this
+        # fresh append-only table insertion order ≈ ctid order, so
+        # oldest-retention puts the LIVE blobs at the physical HEAD:
+        # an unconstrained first-batch window (the review-C1 bug
+        # class) would cover live ctids, delete 0, and fail the
+        # assertions below deterministically. keep-NEWEST would
+        # stage orphans LEADING instead — the one layout where the
+        # buggy window is indistinguishable from the fixed
+        # predicate-bound one (no discriminative power).
+        all_ids = await adapter.get_checkpoint_ids(tid, "", 12)
+        keep = set(all_ids[-2:])
         await adapter.delete_checkpoints_excluding(tid, "", keep)
         await adapter.delete_writes_excluding(tid, "", keep)
 
