@@ -4860,6 +4860,7 @@ class TaskRepository:
         *,
         next_retry_at: datetime | None = None,
         bypass_retry_budget: bool = False,
+        rearm_watchers: bool = False,
     ) -> Task | None:
         """Phase 5 (DQ increment3-plan §5.7 / §6.5 / §9 Phase 5):
         thin wrapper around the ``RetryTurn`` named transition.
@@ -4913,6 +4914,13 @@ class TaskRepository:
           negotiable. ``retry_count`` still increments monotonically on
           the child (observability; the episode grows ~26/episode — the
           consumer audit lives in the plan's risk table).
+        * ``rearm_watchers`` — Option A (fix e8a61da3): pass ``True``
+          ONLY from the usage-limit deferral lane. Threads through to
+          ``RetryTurn`` so the F6 re-key transaction ALSO quarantines
+          each re-keyed watcher into ``stored_watches`` and arms
+          ``mission_terminal`` onto the row (survival event set). All
+          other callers keep the default ``False`` — the M2 opt-in
+          contract stays opt-in outside the single recovery path.
 
         Returns the new retry task, or None if no retry was scheduled.
         """
@@ -5050,6 +5058,7 @@ class TaskRepository:
                 task_repo=self,
                 instance_id=parent_row.instance_id,
                 child_kwargs=child_kwargs,
+                rearm_watchers=rearm_watchers,
             )
             transition.run(conn)
 

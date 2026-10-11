@@ -6,6 +6,9 @@ transaction and post-commit dispatch.
 """
 from __future__ import annotations
 
+import json
+import uuid
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,6 +18,7 @@ from typing import Any, ClassVar
 from sqlalchemy import text
 
 from daemon.repositories.task.models import SuspensionReason, TaskStatus
+from daemon.services.timestamps import now_utc_naive
 
 ALL_8_MIRRORS: frozenset[str] = frozenset({
     "task", "job_queue_items", "message_queue", "job_locks",
@@ -607,17 +611,35 @@ class RetryTurn(_Transition):
             When ``None``, the parent's ``error`` column is left
             untouched; the gate UPDATE in the wrapper is the
             authoritative writer of the parent's error column.
+        rearm_watchers: Option A depth 1+2 (fix e8a61da3, usage-limit
+            retry-supersede double-silence) — when ``True`` the F6
+            re-key is preceded, INSIDE this same transaction, by the
+            recovery re-arm hook: each watcher row keyed on the parent
+            is (a) persisted into ``stored_watches`` (quarantine
+            provenance + GC carrier, first-store-wins fence) and (b)
+            upgraded with ``mission_terminal`` appended to its
+            ``watch_events`` (the survival event set — verified
+            admissible within the C1 three-bucket rules: mid-mission
+            the row is delivered-but-kept, at true mission terminal it
+            is claimed exactly once). The flag is threaded ONLY from
+            the usage-limit deferral lane (``worker_pool`` →
+            ``schedule_retry``) — the timeout lane, the stale-recovery
+            lanes, and ``force_cancel_and_schedule_retry`` keep the
+            default ``False`` so the M2 opt-in contract stays opt-in
+            everywhere except this single recovery path.
     """
     MIRROR_SET = ALL_8_MIRRORS
 
     def __init__(self, parent_work_id, child_work_id, task_repo=None,
-                 child_kwargs=None, parent_error=None, **kwargs):
+                 child_kwargs=None, parent_error=None,
+                 rearm_watchers: bool = False, **kwargs):
         self.parent_work_id = parent_work_id
         self.child_work_id = child_work_id
         self.task_repo = task_repo
         self.instance_id = kwargs.get("instance_id")
         self.child_kwargs = child_kwargs or {}
         self.parent_error = parent_error
+        self.rearm_watchers = rearm_watchers
 
     def run(self, session):
         # 1. Defensive parent UPDATE. The wrapper's gate UPDATE has
@@ -688,6 +710,22 @@ class RetryTurn(_Transition):
         #    migration without the child row would leave
         #    ``get_watchers_for_job`` returning zero rows on the (non-
         #    existent) child work_id, silently losing notifications.
+        #
+        #    Option A depth 1+2 (fix e8a61da3): when ``rearm_watchers``
+        #    is set (usage-limit deferral lane ONLY), the re-key is
+        #    preceded — inside this SAME transaction — by the recovery
+        #    re-arm hook: quarantine each parent-keyed watcher into
+        #    ``stored_watches`` (first-store-wins fence) and arm
+        #    ``mission_terminal`` onto the row BEFORE the re-key moves
+        #    it. In-transaction placement is the load-bearing choice
+        #    (matrix depth 1): the worker-pool side travels on the
+        #    fire-and-forget MainLoopBridge with no ordering guarantee
+        #    against this transaction or the child's later settle CAS;
+        #    here, cancel → persist → re-arm is atomic by construction
+        #    (daemon death = all-or-nothing).
+        rearm_side_effects: list[str] = []
+        if self.rearm_watchers:
+            rearm_side_effects = self._rearm_watchers_in_txn(session)
         session.execute(
             text(
                 "UPDATE job_watchers SET job_id = :child_work_id "
@@ -706,12 +744,188 @@ class RetryTurn(_Transition):
             new_status="pending",
             mirrors_touched=self.MIRROR_SET,
             rowcount=getattr(status_result, "rowcount", 1),
-            cross_turn_side_effects=("migrate_job_watchers",),
+            cross_turn_side_effects=(
+                ("migrate_job_watchers", "rearm_stored_watches")
+                if rearm_side_effects
+                else ("migrate_job_watchers",)
+            ),
             wakeup_payload={
                 "event": "turn_retried",
                 "parent_work_id": self.parent_work_id,
                 "child_work_id": self.child_work_id,
             },
         )
+
+    # ── Option A recovery re-arm (fix e8a61da3) ────────────────────
+
+    #: Bounded depth for the mission-root walk (defensive: a corrupt
+    #: ``instances.parent_id`` cycle must not pin the retry
+    #: transaction open). 64 covers any sane mission tree depth.
+    _MISSION_WALK_MAX_HOPS: int = 64
+
+    @classmethod
+    def _resolve_mission_instance_id(cls, session, work_instance_id):
+        """Walk ``instances.parent_id`` up to the permanent-tree ROOT.
+
+        The root is the GC leg's ``evaluate_mission_live`` anchor:
+        walking from the true root covers the WHOLE mission (siblings
+        + ancestors); walking from the deferred worker would answer
+        "terminal" while the leader is still driving. Cycle-safe and
+        hop-bounded; on a broken chain the deepest reachable instance
+        is returned (fail-soft — the quarantine row still records the
+        best-available linkage).
+        """
+        current = work_instance_id
+        seen: set[str] = set()
+        for _ in range(cls._MISSION_WALK_MAX_HOPS):
+            if not current or current in seen:
+                break
+            seen.add(current)
+            row = session.execute(
+                text(
+                    "SELECT parent_id FROM instances "
+                    "WHERE instance_id = :iid"
+                ),
+                {"iid": current},
+            ).fetchone()
+            if row is None or row.parent_id is None:
+                break
+            current = row.parent_id
+        return current
+
+    def _rearm_watchers_in_txn(self, session) -> list[str]:
+        """Quarantine + arm every parent-keyed watcher (in-txn, never
+        raises past the caller's transaction semantics).
+
+        For each ``job_watchers`` row still keyed on the parent:
+
+        1. Parse the row's original ``watch_events`` (raw SELECT —
+           SQLite returns JSON text, PostgreSQL returns the parsed
+           list; handle both).
+        2. INSERT the quarantine row into ``stored_watches`` with
+           ``ON CONFLICT DO NOTHING`` against
+           ``uq_stored_watches_original_work_watcher`` — the
+           first-store-wins fence for duplicate deferrals on one
+           parent.
+        3. Append ``mission_terminal`` to the row's events (dedup,
+           add-only, idempotent) via a dialect-aware JSON write —
+           PostgreSQL needs the explicit ``CAST(:v AS JSONB)``;
+           SQLite's TEXT-affinity JSON takes the bind verbatim.
+
+        Returns the list of side-effect tokens (one
+        ``stored_watch:<watcher8>`` per quarantined row; empty when
+        the parent had no watchers — the plain F6 re-key below still
+        runs and remains a no-op in that case).
+        """
+        rows = session.execute(
+            text(
+                "SELECT watch_id, instance_id, watch_events "
+                "FROM job_watchers WHERE job_id = :parent_work_id"
+            ),
+            {"parent_work_id": self.parent_work_id},
+        ).fetchall()
+        if not rows:
+            return []
+
+        dialect_name = getattr(
+            getattr(session, "dialect", None), "name", ""
+        )
+        is_pg = dialect_name == "postgresql"
+        events_literal = (
+            "CAST(:events AS JSONB)" if is_pg else ":events"
+        )
+        original_events_literal = (
+            "CAST(:original_events AS JSONB)"
+            if is_pg
+            else ":original_events"
+        )
+        mission_instance_id = self._resolve_mission_instance_id(
+            session, self.instance_id
+        )
+        now_naive = now_utc_naive()
+
+        side_effects: list[str] = []
+        for row in rows:
+            original_events = _parse_watch_events(row.watch_events)
+            armed_events = list(original_events)
+            if "mission_terminal" not in armed_events:
+                armed_events.append("mission_terminal")
+
+            # First-store-wins fence: a concurrent duplicate deferral
+            # for the same (original work, watcher) pair inserts
+            # nothing here and never creates a second quarantine row.
+            session.execute(
+                text(
+                    "INSERT INTO stored_watches ("
+                    "stored_watch_id, original_work_id, retry_work_id, "
+                    "watcher_instance_id, original_watch_events, "
+                    "mission_instance_id, work_instance_id, status, "
+                    "created_at, updated_at) VALUES ("
+                    ":stored_watch_id, :original_work_id, :retry_work_id, "
+                    ":watcher_instance_id, "
+                    + original_events_literal
+                    + ", :mission_instance_id, :work_instance_id, "
+                    "'armed', :now, :now) "
+                    "ON CONFLICT (original_work_id, watcher_instance_id) "
+                    "DO NOTHING"
+                ),
+                {
+                    "stored_watch_id": str(uuid.uuid4()),
+                    "original_work_id": self.parent_work_id,
+                    "retry_work_id": self.child_work_id,
+                    "watcher_instance_id": row.instance_id,
+                    "original_events": json.dumps(list(original_events)),
+                    "mission_instance_id": mission_instance_id,
+                    "work_instance_id": self.instance_id,
+                    "now": now_naive,
+                },
+            )
+            # Survival arming (depth 2): the row carries
+            # ``mission_terminal`` when the re-key moves it, so the
+            # retry's own settle delivers-but-KEEPS (C1
+            # matching_readonly) and the true mission terminal claims
+            # it exactly once.
+            session.execute(
+                text(
+                    "UPDATE job_watchers SET watch_events = "
+                    + events_literal
+                    + " WHERE watch_id = :watch_id"
+                ),
+                {
+                    "events": json.dumps(armed_events),
+                    "watch_id": row.watch_id,
+                },
+            )
+            side_effects.append(
+                f"stored_watch:{row.instance_id[:8]}"
+            )
+        return side_effects
+
+
+def _parse_watch_events(raw: Any) -> list[str]:
+    """Parse a raw ``job_watchers.watch_events`` value into a list.
+
+    Raw-SQL SELECTs return dialect-dependent shapes: SQLite's JSON
+    (TEXT storage) yields a JSON **string**; PostgreSQL's JSONB comes
+    back already-parsed (a list) via the driver's typecaster. Handle
+    both, plus the defensive fallbacks (None / malformed JSON → empty
+    list — the recovery hook must never crash the retry transaction
+    over an unreadable event list; the armed row then carries only
+    ``mission_terminal``, which is the survival minimum).
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(e) for e in raw]
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        if isinstance(parsed, list):
+            return [str(e) for e in parsed]
+        return []
+    return []
+
 
 TRANSITIONS: tuple[type[_Transition], ...] = (BeginTurn, ClaimTurn, SuspendTurn, ResumeTurn, CompleteTurn, AbortTurn, DeadLetterTurn, RetryTurn)
