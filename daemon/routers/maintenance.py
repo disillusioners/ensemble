@@ -34,6 +34,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from daemon.auth.decorators import scope_required
 from daemon.constants import MAINTENANCE_ENDPOINTS_ENABLED
 from daemon.routers.maintenance_origin_guard import (
     require_trusted_origin as _require_origin,
@@ -210,7 +211,7 @@ async def get_status(
     "/dry-run",
     response_model=CheckpointCleanupDryRunResponse,
     status_code=200,
-    dependencies=[Depends(_require_origin)],
+    dependencies=[Depends(_require_origin), scope_required("maintenance:read")],
     responses={
         200: {"description": "Dry-run result (would-delete counts/bytes/skipped)"},
         403: {"model": CheckpointCleanupErrorResponse, "description": "Origin guard refused"},
@@ -251,7 +252,7 @@ async def post_dry_run(
     "/execute",
     response_model=CheckpointCleanupExecuteResponse,
     status_code=202,
-    dependencies=[Depends(_require_origin)],
+    dependencies=[Depends(_require_origin), scope_required("maintenance:read")],
     responses={
         202: {"description": "Run started (poll /runs/{run_id})"},
         400: {

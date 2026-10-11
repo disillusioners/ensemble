@@ -262,6 +262,126 @@ class TestListSchedules:
         assert "interval-schedule" in schedule_ids
         assert "onetime-schedule" in schedule_ids
 
+    @pytest.mark.asyncio
+    async def test_list_schedules_masks_webhook_secret(self, client, mock_manager):
+        """M-2 (2026-10-11 review): the scheduler-source config echo
+        goes through the SAME read-side mask as the sources router —
+        webhook_secret must never leave in plaintext on a GET."""
+        scheduler_source = create_scheduler_source(
+            "scheduler-secret",
+            "Secret Bearer Schedule",
+            {
+                "schedule": "0 9 * * *",
+                "agent": "./agents/developer",
+                "message": "Report",
+                "webhook_secret": "super-secret-value",
+            },
+        )
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[scheduler_source]
+        )
+
+        response = await client.get("/schedules")
+
+        assert response.status_code == 200
+        entry = response.json()["schedules"][0]
+        assert entry["config"]["webhook_secret"] == "********"
+        assert "super-secret-value" not in response.text
+
+
+
+class TestR1PutResponseMask:
+    """R1 (2026-10-11 merge gate): the PUT /schedules/{id} response
+    echoes the persisted config through the SAME read-side mask as GET
+    (sibling-verb defeat of the M-2 GET mask) — webhook_secret plaintext
+    must never leave via ANY serialized schedule response."""
+
+    @pytest.mark.asyncio
+    async def test_put_response_never_contains_plaintext_webhook_secret(self, client, mock_manager):
+        scheduler_source = create_scheduler_source(
+            "scheduler-secret-put",
+            "Secret Bearer Schedule",
+            {
+                "schedule": "0 9 * * *",
+                "agent": "./agents/developer",
+                "message": "Report",
+                "webhook_secret": "super-secret-value",
+            },
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+        # The repository returns the PERSISTED row (plaintext inside the
+        # daemon) — the response serialization must still mask it.
+        mock_manager._source_repository.update_source_config = Mock(
+            return_value=scheduler_source
+        )
+        mock_registry = Mock()
+        mock_registry.get = Mock(return_value=None)
+        mock_manager.source_registry = mock_registry
+
+        response = await client.put(
+            "/schedules/scheduler-secret-put",
+            json={"name": "Renamed Schedule"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["config"]["webhook_secret"] == "********"
+        assert "super-secret-value" not in response.text
+
+
+class TestPutSentinelRoundTrip:
+    """Cheap minor (2026-10-11 merge gate): the ML-3 PUT-sentinel guard
+    — an incoming webhook_secret equal to the mask sentinel means
+    "unchanged" and must round-trip the STORED value, never persist the
+    mask over the real secret (schedules router leg; sources router leg
+    lives in tests/unit/test_oauth2_merge_gate_riders.py)."""
+
+    @pytest.mark.asyncio
+    async def test_put_mask_sentinel_keeps_stored_secret(self, client, mock_manager):
+        stored = "the-real-secret"
+        scheduler_source = create_scheduler_source(
+            "scheduler-sentinel",
+            "Sentinel Schedule",
+            {
+                "schedule": "0 9 * * *",
+                "agent": "./agents/developer",
+                "message": "Report",
+                "webhook_secret": stored,
+            },
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+        updated_source = create_scheduler_source(
+            "scheduler-sentinel",
+            "Sentinel Schedule",
+            {
+                "schedule": "0 9 * * *",
+                "agent": "./agents/developer",
+                "message": "Report",
+                "webhook_secret": stored,
+            },
+        )
+        mock_manager._source_repository.update_source_config = Mock(
+            return_value=updated_source
+        )
+        mock_registry = Mock()
+        mock_registry.get = Mock(return_value=None)
+        mock_manager.source_registry = mock_registry
+
+        response = await client.put(
+            "/schedules/scheduler-sentinel",
+            # The GET-then-PUT-back shape: the client echoes the mask.
+            json={"config": {"message": "Report", "webhook_secret": "********"}},
+        )
+
+        assert response.status_code == 200
+        call_kwargs = mock_manager._source_repository.update_source_config.call_args
+        persisted = call_kwargs.kwargs["config"]
+        # The STORED secret rode through — the mask never persisted.
+        assert persisted["webhook_secret"] == stored
+        assert persisted["webhook_secret"] != "********"
+        # And the response still masks it (R1 composing with the guard).
+        assert response.json()["config"]["webhook_secret"] == "********"
+
 
 # ==================== POST /schedules/{id}/trigger Tests ====================
 

@@ -220,6 +220,10 @@ class ReadinessComposite:
     checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     forced_degraded: bool = False
     inflight_turns: Optional[int] = None
+    # OAuth2 auth advisory sub-field (P3 T3.9 / FR-30 enum). None =
+    # auth disabled (field absent from the payload — OFF-state body
+    # byte-identical) or state unknown. NEVER feeds `ready`/`reasons`.
+    auth_dependency_status: Optional[str] = None
 
     @property
     def ready(self) -> bool:
@@ -239,8 +243,14 @@ class ReadinessComposite:
         caller passes false in Phase 1. ``inflight_turns`` rides
         ``detail`` as an ADVISORY field — it never participates in
         the status/components/reasons contract.
+
+        ``auth_dependency_status`` (P3 T3.9) rides BOTH as the formal
+        optional top-level field (ReadyzResponse schema) and as the
+        additive ``detail`` key (inflight_turns precedent); it is OMITTED
+        entirely when None (auth disabled) so the OFF-state body stays
+        byte-identical (NFR-1). NEVER affects the verdict (OD-9).
         """
-        return {
+        payload = {
             "status": "ready" if self.ready else "degraded",
             "components": {
                 "database": self.database,
@@ -256,6 +266,12 @@ class ReadinessComposite:
             },
             "draining": draining,
         }
+        if self.auth_dependency_status is not None:
+            payload["auth_dependency_status"] = self.auth_dependency_status
+            payload["detail"]["auth_dependency_status"] = (
+                self.auth_dependency_status
+            )
+        return payload
 
 
 def evaluate_queue_freshness(
@@ -286,6 +302,7 @@ def compute_readiness_composite(
     extra_reasons: Optional[list[str]] = None,
     inflight_turns: Optional[int] = None,
     checkpoint_saver_ok: bool = True,
+    auth_dependency_status: Optional[str] = None,
 ) -> ReadinessComposite:
     """Assemble a composite from component outcomes.
 
@@ -298,6 +315,10 @@ def compute_readiness_composite(
     case): callers that DO run the probe (PG path, incident 2026-10-10
     fix) pass the probe outcome; callers that don't run it (SQLite,
     or tests that don't construct a probe) get the safe default.
+
+    ``auth_dependency_status`` (P3 T3.9) is advisory-only in the same
+    way: the FR-30 enum value (``ok``/``degraded``/``unconfigured``)
+    rides the composite verbatim and never enters ``ready``/``reasons``.
     """
     reasons: list[str] = list(extra_reasons or [])
     if not database_ok:
@@ -325,6 +346,7 @@ def compute_readiness_composite(
         queue_max_age_seconds=queue_max_age_seconds,
         checked_at=checked_at or datetime.now(timezone.utc),
         inflight_turns=inflight_turns,
+        auth_dependency_status=auth_dependency_status,
     )
 
 
@@ -372,6 +394,7 @@ def apply_forced_degradation(
             queue_max_age_seconds=composite.queue_max_age_seconds,
             checked_at=composite.checked_at,
             forced_degraded=True,
+            auth_dependency_status=composite.auth_dependency_status,
         )
     return ReadinessComposite(
         database=composite.database,
@@ -384,6 +407,7 @@ def apply_forced_degradation(
         queue_max_age_seconds=composite.queue_max_age_seconds,
         checked_at=composite.checked_at,
         forced_degraded=True,
+        auth_dependency_status=composite.auth_dependency_status,
     )
 
 
@@ -395,6 +419,7 @@ async def refresh_readiness_composite(
     queue_freshness_threshold_seconds: float,
     now: Optional[Callable[[], datetime]] = None,
     checkpoint_saver_probe: Optional[Callable[[], bool]] = None,
+    auth_dependency_status: Optional[str] = None,
 ) -> ReadinessComposite:
     """Run one refresh cycle and return the composite.
 
@@ -533,6 +558,7 @@ async def refresh_readiness_composite(
         extra_reasons=extra_reasons,
         inflight_turns=inflight_turns,
         checkpoint_saver_ok=checkpoint_saver_ok,
+        auth_dependency_status=auth_dependency_status,
     )
 
 

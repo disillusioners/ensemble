@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
+from daemon.auth.decorators import scope_required
 from daemon.services.job_queue_service import JobQueueService, normalize_statuses
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.project_normalizer import normalize_project_id
@@ -446,6 +447,7 @@ def _derive_m2_mission_ref(
 
 @router.post(
     "",
+    dependencies=[scope_required("jobs:write")],
     response_model=JobResponse,
     responses={
         201: {"description": "Job created"},
@@ -656,6 +658,7 @@ async def create_job(
 
 @router.get(
     "/{job_id}",
+    dependencies=[scope_required("jobs:read")],
     responses={
         200: {"description": "Job details"},
         404: {"model": JobNotFoundResponse, "description": "Job not found"},
@@ -721,6 +724,7 @@ async def get_job(
 
 @router.get(
     "",
+    dependencies=[scope_required("jobs:read")],
     response_model=JobListResponse,
 )
 async def list_jobs(

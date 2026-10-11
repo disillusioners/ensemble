@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
+from daemon.auth.decorators import scope_required
 from daemon.models import (
     InstanceMappingCreate,
     InstanceMappingInfo,
@@ -28,7 +29,7 @@ def _get_manager(request: Request) -> Any:
 
 
 # GET /sources/{source_id}/mappings - List mappings for a source
-@router.get("/{source_id}/mappings", response_model=InstanceMappingListResponse)
+@router.get("/{source_id}/mappings", response_model=InstanceMappingListResponse, dependencies=[scope_required("sources:write")])
 async def list_mappings(source_id: str, request: Request):
     """List all instance mappings for a source."""
     manager = _get_manager(request)
@@ -62,7 +63,7 @@ async def list_mappings(source_id: str, request: Request):
 
 
 # POST /sources/{source_id}/mappings - Create or update a mapping
-@router.post("/{source_id}/mappings", response_model=InstanceMappingInfo, status_code=201)
+@router.post("/{source_id}/mappings", response_model=InstanceMappingInfo, status_code=201, dependencies=[scope_required("sources:write")])
 async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate, request: Request):
     """Create an instance mapping for an external user."""
     import uuid
@@ -165,7 +166,7 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate, 
 
 
 # DELETE /sources/{source_id}/mappings/{mapping_id} - Delete a mapping
-@router.delete("/{source_id}/mappings/{mapping_id}", response_model=DeleteResponse)
+@router.delete("/{source_id}/mappings/{mapping_id}", response_model=DeleteResponse, dependencies=[scope_required("sources:write")])
 async def delete_mapping(source_id: str, mapping_id: str, request: Request):
     """Delete an instance mapping."""
     manager = _get_manager(request)

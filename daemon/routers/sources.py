@@ -21,6 +21,7 @@ from daemon.models import (
     SourceType,
     SourceUpdate,
 )
+from daemon.auth.decorators import scope_required
 from daemon.constants import CHAT_SOURCE_PREFIXES, MAX_CREDENTIALS_SIZE
 from daemon.routers.schemas import JobValidationError
 from daemon.utils import parse_utc_datetime, validate_instance_mode
@@ -72,13 +73,43 @@ async def _reject_scheduler_lifecycle(source_id: str, manager: Any, hint: str | 
         )
 
 
+WEBHOOK_SECRET_MASK = "********"
+
+# ML-3 (OAuth2 phase-3 rider, user instruction): `webhook_secret` rides
+# the generic config column and was returned IN PLAINTEXT on every
+# GET /api/sources* response (pre-existing exposure — [REQ] §5.0 row 2
+# risk ML-3). Read-side masking below replaces the value with the mask
+# sentinel on every serialized response.
+#
+# Round-trip guard: the PUT path treats an incoming webhook_secret that
+# EQUALS the mask sentinel as "unchanged" (keeps the stored value) —
+# without this, a client that GETs and PUTs back the whole object would
+# silently overwrite the real secret with the mask.
+
+
+def _mask_source_config(config: dict | None) -> dict:
+    """Return a copy of ``config`` with ``webhook_secret`` masked."""
+    if not config:
+        return dict(config or {})
+    masked = dict(config)
+    secret = masked.get("webhook_secret")
+    if isinstance(secret, str) and secret:
+        masked["webhook_secret"] = WEBHOOK_SECRET_MASK
+    return masked
+
+
 def _source_to_info(source) -> SourceInfo:
-    """Convert source config to SourceInfo response model."""
+    """Convert source config to SourceInfo response model.
+
+    ML-3: ``webhook_secret`` is masked in the serialized config — the
+    plaintext value is write-only through this API (set it via POST/PUT
+    with a real value; read-backs carry the mask sentinel).
+    """
     return SourceInfo(
         source_id=source.source_id,
         source_type=SourceType(source.source_type),
         name=source.name,
-        config=source.config,
+        config=_mask_source_config(source.config),
         enabled=source.enabled,
         autostart=getattr(source, "autostart", True),
         status=SourceStatus(source.status),
@@ -92,7 +123,7 @@ def _source_to_info(source) -> SourceInfo:
 # ==================== Endpoints ====================
 
 
-@router.get("", response_model=SourceListResponse)
+@router.get("", response_model=SourceListResponse, dependencies=[scope_required("sources:write")])
 async def list_sources(request: Request):
     """List all configured message sources."""
     manager = _get_manager(request)
@@ -101,7 +132,7 @@ async def list_sources(request: Request):
     return SourceListResponse(sources=sources)
 
 
-@router.post("", response_model=SourceInfo, status_code=201)
+@router.post("", response_model=SourceInfo, status_code=201, dependencies=[scope_required("sources:write")])
 async def create_source(source_create: SourceCreate, request: Request):
     """Create a new message source."""
     manager = _get_manager(request)
@@ -247,7 +278,7 @@ async def create_source(source_create: SourceCreate, request: Request):
     return _source_to_info(source)
 
 
-@router.post("/test", response_model=SourceTestResponse)
+@router.post("/test", response_model=SourceTestResponse, dependencies=[scope_required("sources:write")])
 async def test_source(test_request: SourceTestRequest):
     """Test a source configuration without saving it.
     
@@ -290,7 +321,7 @@ async def test_source(test_request: SourceTestRequest):
     return SourceTestResponse(success=success, message=message)
 
 
-@router.get("/{source_id}", response_model=SourceInfo)
+@router.get("/{source_id}", response_model=SourceInfo, dependencies=[scope_required("sources:write")])
 async def get_source(source_id: str, request: Request):
     """Get a specific message source."""
     manager = _get_manager(request)
@@ -308,7 +339,7 @@ async def get_source(source_id: str, request: Request):
     return _source_to_info(source)
 
 
-@router.put("/{source_id}", response_model=SourceInfo)
+@router.put("/{source_id}", response_model=SourceInfo, dependencies=[scope_required("sources:write")])
 async def update_source(source_id: str, source_update: SourceUpdate, request: Request):
     """Update a message source configuration."""
     manager = _get_manager(request)
@@ -339,6 +370,19 @@ async def update_source(source_id: str, source_update: SourceUpdate, request: Re
     # Merge updates
     updated_name = source_update.name if source_update.name is not None else existing.name
     updated_config = source_update.config if source_update.config is not None else existing.config
+    # ML-3 round-trip guard: a config echoed back from a GET response
+    # carries the mask sentinel in webhook_secret — keep the stored
+    # value instead of persisting the mask over the real secret.
+    if isinstance(updated_config, dict):
+        stored_secret = (existing.config or {}).get("webhook_secret")
+        if (
+            updated_config.get("webhook_secret") == WEBHOOK_SECRET_MASK
+            and stored_secret
+        ):
+            updated_config = {
+                **updated_config,
+                "webhook_secret": stored_secret,
+            }
     updated_enabled = source_update.enabled if source_update.enabled is not None else existing.enabled
     updated_autostart = source_update.autostart if source_update.autostart is not None else getattr(existing, "autostart", True)
     
@@ -377,7 +421,7 @@ async def update_source(source_id: str, source_update: SourceUpdate, request: Re
     return _source_to_info(updated)
 
 
-@router.delete("/{source_id}", response_model=DeleteResponse)
+@router.delete("/{source_id}", response_model=DeleteResponse, dependencies=[scope_required("sources:write")])
 async def delete_source(source_id: str, request: Request):
     """Delete a message source."""
     manager = _get_manager(request)
@@ -421,7 +465,7 @@ async def delete_source(source_id: str, request: Request):
     return DeleteResponse(deleted=True, message=f"Source {source_id} deleted")
 
 
-@router.post("/{source_id}/start", response_model=SourceActionResponse)
+@router.post("/{source_id}/start", response_model=SourceActionResponse, dependencies=[scope_required("sources:write")])
 async def start_source(source_id: str, request: Request):
     """Start a message source adapter."""
     from daemon.sources.base import SourceConfig
@@ -525,7 +569,7 @@ async def start_source(source_id: str, request: Request):
     )
 
 
-@router.post("/{source_id}/stop", response_model=SourceActionResponse)
+@router.post("/{source_id}/stop", response_model=SourceActionResponse, dependencies=[scope_required("sources:write")])
 async def stop_source(source_id: str, request: Request):
     """Stop a message source adapter."""
     manager = _get_manager(request)

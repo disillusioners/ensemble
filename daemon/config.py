@@ -12,9 +12,20 @@ import os
 import re
 from pathlib import Path
 from typing import Annotated, Any, Callable, Dict, Literal
+from urllib.parse import urlparse
 
 import yaml
-from pydantic import AliasChoices, BaseModel, Field, ConfigDict, model_validator, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    Field,
+    ConfigDict,
+    HttpUrl,
+    SecretStr,
+    ValidationError,
+    model_validator,
+    field_validator,
+)
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Single source of truth for the non-status transient-channel pattern
@@ -2678,6 +2689,615 @@ class LiveViewsConfig(BaseSettings):
         return out
 
 
+class AuthConfig(BaseSettings):
+    """OAuth2 authentication settings (oauth2-auth Phase 1 config surface).
+
+    Owns the 23 `ENSEMBLE_AUTH_*` env vars from [REQ] §6.1 (phase1-plan
+    T1.1) plus two NON-env derived/reserved fields. Follows the
+    :class:`LiveViewsConfig` template (D1.1): a ``BaseSettings`` section
+    aggregated into root :class:`Config` via ``Field(default_factory=...)``.
+
+    OFF-state contract (NFR-2 / G1.3): when ``enabled`` is false the
+    ``@model_validator`` combination checks return early — every other
+    field still parses, but nothing is validated, nothing is logged, and
+    no behavior reads the section. ``OFF`` + everything-set (including
+    out-of-range values) boots byte-equivalent to the pre-feature state.
+
+    Secrets (D1.2): ``client_secret`` / ``bootstrap_token`` are
+    ``SecretStr`` — ``repr()``/``str()`` of the section never carries the
+    material, and no code path in this module logs it (NFR-12 groundwork;
+    pinned by ``tests/unit/test_auth_secret_hygiene.py``).
+
+    Non-env fields (mechanism: ``_strip_non_env_fields`` before-validator —
+    the :class:`CriticalNotesConfig` "no-env-by-construction" philosophy,
+    applied per-field): ``live_view_external_base_url_fallback`` is
+    populated ONCE at lifespan from ``config.live_views.external_base_url``
+    (AMEND v1.1/D2 one-shot-copy pattern) and ``kb_mcp_auth_enabled`` is a
+    reserved seam (AMEND v1.2/A3, default False). Both are stripped from
+    EVERY input source (env, yaml, init kwargs) inside the validator, so
+    the only legitimate writer is post-construction attribute assignment —
+    ``ENSEMBLE_AUTH_LIVE_VIEW_EXTERNAL_BASE_URL_FALLBACK`` /
+    ``ENSEMBLE_AUTH_KB_MCP_AUTH_ENABLED`` are deliberately NOT effective.
+
+    Typo guard (D1.3 completion): pydantic-settings' ``extra="forbid"``
+    sees yaml/dotenv/init extras but NOT bare ``os.environ`` typos (the
+    env source only reads field-derived names), so
+    ``_reject_unknown_auth_env_vars`` scans the process env for unknown
+    ``ENSEMBLE_AUTH_*`` keys — enabled-gated so an OFF deployment with a
+    stale var still boots byte-equivalent (NFR-2).
+
+    Validation (T1.2): the [REQ] §6.3 invalid-combination matrix runs in
+    ``_validate_combinations`` at config-load time (D1.5) — 14 active
+    rows (15 table rows, row 6 SQLite retracted per D17: inert-tables
+    posture, NO PG-only or SQLite-refusal boot behavior anywhere). The
+    cross-section rows (10, and 8's positive case) need the daemon bind
+    identity, which lives OUTSIDE this section — those are enumerated by
+    :func:`auth_config_boot_refusals` (the exit-78 helper), not here.
+    Discovery/JWKS fetch is P2+ lifespan behavior (WARN, NFR-7/C4) —
+    deliberately absent here: zero network I/O at config time.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="ENSEMBLE_AUTH_",
+        extra="forbid",
+        case_sensitive=False,
+    )
+
+    # ── 23 env vars ([REQ] §6.1 table order) ─────────────────────────
+    enabled: bool = Field(
+        default=False,
+        description="Master switch. Default OFF — the whole subsystem is "
+        "inert and the section is silently ignored.",
+    )
+    client_id: str | None = Field(
+        default=None,
+        description="OAuth2 client id (RFC 6749 §2.2). Required when enabled.",
+    )
+    client_secret: SecretStr | None = Field(
+        default=None,
+        description="OAuth2 client secret. SecretStr — never logged (D1.2). "
+        "Required when enabled.",
+    )
+    issuer: HttpUrl | None = Field(
+        default=None,
+        description="The IdP issuer URL. Required when enabled; must be "
+        "https:// unless allow_insecure_cookie=true (§6.3 row 4).",
+    )
+    discovery_url: HttpUrl | None = Field(
+        default=None,
+        description="Optional OIDC discovery override. Default derives as "
+        "<issuer>/.well-known/openid-configuration. Must share the issuer "
+        "origin (§6.3 row 11). Fetch is P2+ lifespan (WARN) — never here.",
+    )
+    external_redirect_base: str | None = Field(
+        default=None,
+        description="AMEND v1.2/A2 — CANONICAL tier-1 operator override for "
+        "the redirect_uri base. scheme+host[:port] only (no path). Wins over "
+        "live_view_external_base_url_fallback (tier-2) and Host-capture "
+        "(tier-3) in the D3.5 chain.",
+    )
+    redirect_uri: str | None = Field(
+        default=None,
+        description="EXACT-URI override ONLY (operator needs a path-different "
+        "callback, e.g. reverse-proxy URI rewrite). Not redundant with "
+        "external_redirect_base: the base mints the redirect URI; this "
+        "overrides the whole mint.",
+    )
+    scopes: Annotated[list[str], NoDecode] = Field(
+        default=["openid", "profile", "email"],
+        description="Requested scopes. CSV or JSON list (NoDecode + "
+        "_parse_csv_or_json_list, D1.4). 'openid' is mandatory for OIDC.",
+    )
+    session_ttl_seconds: int = Field(
+        default=28800,
+        description="Server-side session TTL (8h). Range [60, 86400] when "
+        "enabled. Sliding renewal OFF keeps audits clean.",
+    )
+    sliding_renewal: bool = Field(
+        default=False,
+        description="When true, expires_at is extended on each validate.",
+    )
+    clock_skew_seconds: int = Field(
+        default=60,
+        description="Tolerance for exp/nbf checks. Range [0, 300].",
+    )
+    discovery_cache_ttl_seconds: int = Field(
+        default=3600,
+        description="Discovery doc cache window. Range [60, 86400].",
+    )
+    jwks_cache_ttl_seconds: int = Field(
+        default=3600,
+        description="JWKS cache window. Range [60, 86400].",
+    )
+    cookie_samesite: Literal["Lax", "Strict", "None"] = Field(
+        default="Lax",
+        description="Session cookie SameSite. Strict breaks the top-level "
+        "POST callback redirect — WARN, not refuse (§6.3 row 14).",
+    )
+    cookie_secure: bool = Field(
+        default=True,
+        description="Session cookie Secure flag. false is a security "
+        "regression — requires allow_insecure_cookie=true (§6.3 row 15).",
+    )
+    allow_insecure_cookie: bool = Field(
+        default=False,
+        description="LAN-only deployment opt-in: drops the cookie Secure "
+        "flag and permits http:// issuer/redirect URLs.",
+    )
+    fingerprint_by_ip_subnet: bool = Field(
+        default=False,
+        description="When true, the /24 of the client IP is bound to the "
+        "session. Carrier-grade-NAT false positives are common; OFF default.",
+    )
+    bearer_token_ttl_seconds: int = Field(
+        default=2592000,
+        description="Default static-bearer token TTL at mint time (30d). "
+        "Range [60, 31536000].",
+    )
+    docs_enabled: bool = Field(
+        default=True,
+        description="When false, FastAPI docs/redoc/openapi URLs are "
+        "disabled (OQ-11).",
+    )
+    vscode_protected: bool = Field(
+        default=False,
+        description="When true, /vscode/* is PROTECTED with bearer auth. "
+        "Off in v1 (loopback posture unchanged; OQ-9). Requires "
+        "auth.enabled=true — the combination with enabled=false is "
+        "refused at boot (R3, 2026-10-11 merge gate: the flag would "
+        "disable the /vscode loopback peer gate with no middleware "
+        "behind it).",
+    )
+    allowed_origins: Annotated[list[str], NoDecode] = Field(
+        default=[],
+        description="Explicit CORS origins replacing the wildcard+credentials "
+        "posture while auth is ON (D15/FR-27, §6.3 row 5). CSV or JSON list.",
+    )
+    bootstrap_token: SecretStr | None = Field(
+        default=None,
+        description="One-time mint path for the first admin bearer (C2: "
+        "consumed at first mint). SecretStr — never logged (D1.2). NOT "
+        "required at boot: the refusal is the CLI mint lane's helpful "
+        "message (§6.3 row 12).",
+    )
+    anonymous_view_paths: Annotated[tuple[str, ...], NoDecode] = Field(
+        default=(),
+        description="AMENDED v1.1/S-19 — anonymous-public /views subpath "
+        "prefixes, consulted by the P3 middleware BEFORE session validation. "
+        "v1 ships empty + regression-cage entry; v2 auto-populates from "
+        "view_shares rows. CSV or JSON list.",
+    )
+
+    # ── non-env derived/reserved fields (stripped from every source) ──
+    live_view_external_base_url_fallback: str | None = Field(
+        default=None,
+        description="NOT an env var. Populated once at lifespan from "
+        "config.live_views.external_base_url (AMEND v1.1/D2 one-shot-copy "
+        "pattern) so the D3.5 chain's tier-2 fallback is consulted. Tier-1 "
+        "is external_redirect_base (env-populatable); this field is the "
+        "tier-2 fallback for proxy-fronted deployments that only set "
+        "ENSEMBLE_LIVE_VIEWS_EXTERNAL_BASE_URL.",
+    )
+    kb_mcp_auth_enabled: bool = Field(
+        default=False,
+        description="NOT an env var. AMEND v1.2/A3 reserved seam placeholder "
+        "only; the v1 posture is /api/mcp/kb and /api/mcp/kb/sse pass "
+        "through untouched (D1 as amended; module-lane per the v1.4 "
+        "ruling, D19/D20). NOT the module-lane switch (§6.6).",
+    )
+
+    @field_validator("scopes", "allowed_origins", "anonymous_view_paths", mode="before")
+    @classmethod
+    def _parse_auth_csv_or_json_list(cls, v: object) -> object:
+        """CSV/JSON list parsing for the NoDecode list fields (D1.4).
+
+        Delegates to the shared ``_parse_csv_or_json_list`` — the SAME
+        parser the ``llm.allowed_models`` field uses — so CSV env values
+        (``openid,profile,email``) and JSON array strings both parse.
+        The returned list coerces to ``tuple[str, ...]`` for
+        ``anonymous_view_paths`` via the annotation.
+        """
+        return _parse_csv_or_json_list(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_non_env_fields(cls, data: Any) -> Any:
+        """Make the two derived/reserved fields non-env-populatable.
+
+        Stripped from EVERY input source (env read by pydantic-settings,
+        yaml passthrough via init kwargs, direct construction). The only
+        legitimate writer is the documented post-construction lifespan
+        assignment — see the class docstring for the mechanism rationale.
+        """
+        if isinstance(data, dict):
+            data.pop("live_view_external_base_url_fallback", None)
+            data.pop("kb_mcp_auth_enabled", None)
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_unknown_auth_env_vars(cls, data: Any) -> Any:
+        """D1.3 completion: fail loudly on unknown ``ENSEMBLE_AUTH_*`` env vars.
+
+        ``extra="forbid"`` covers yaml/dotenv/init extras, but
+        pydantic-settings' env source only reads field-derived names, so a
+        typo'd or stale os.environ var would otherwise be silently
+        ignored — exactly the failure the plan's Phase-1 risk table calls
+        out ("Error message names the offending key"). Enabled-gated: an
+        OFF deployment carrying a stale var must keep booting
+        byte-equivalent (NFR-2 zero-disruption).
+        """
+        if not isinstance(data, dict):
+            return data
+        raw_enabled = data.get("enabled")
+        if isinstance(raw_enabled, bool):
+            enabled = raw_enabled
+        elif isinstance(raw_enabled, str):
+            enabled = raw_enabled.strip().lower() in ("true", "1", "yes", "on")
+        else:
+            enabled = False
+        if not enabled:
+            return data
+        prefix = "ENSEMBLE_AUTH_"
+        known = {name.upper() for name in cls.model_fields}
+        stale = sorted(
+            key
+            for key in os.environ
+            if key.upper().startswith(prefix)
+            and key[len(prefix):].upper() not in known
+        )
+        if stale:
+            raise ValueError(
+                f"unknown ENSEMBLE_AUTH_* env var(s): {', '.join(stale)} — "
+                "typo'd or stale; no such auth config field exists"
+            )
+        return data
+
+    @model_validator(mode="after")
+    def _validate_combinations(self) -> "AuthConfig":
+        """[REQ] §6.3 invalid-combination matrix (T1.2) — config-load fast-fail.
+
+        Row numbering below follows the §6.3 table (rows 1-15; row 6
+        retracted per D17). All checks are enabled-gated: the OFF state is
+        silently ignored (§6.3 row 9 / NFR-2). Cross-section rows (10;
+        8's positive case) live in :func:`auth_config_boot_refusals` —
+        they compare against the daemon bind identity, which is not part
+        of this section.
+        """
+        if not self.enabled:
+            return self
+
+        # Rows 1-3: required credentials/issuer. Empty/whitespace counts
+        # as missing (§6.3's "CLIENT_SECRET= (empty)" rows); SecretStr
+        # must be unwrapped — bool(SecretStr("")) is True, the naive
+        # sketch check `if not self.client_secret` would MISS it.
+        missing: list[str] = []
+        if not (self.client_id or "").strip():
+            missing.append("client_id")
+        if _secret_str_missing(self.client_secret):
+            missing.append("client_secret")
+        if self.issuer is None:
+            missing.append("issuer")
+        if missing:
+            env_names = ", ".join(f"ENSEMBLE_AUTH_{name.upper()}" for name in missing)
+            raise ValueError(
+                f"auth.enabled=true but missing: {missing} — "
+                f"set env var(s): {env_names}"
+            )
+
+        # §6.1 URL-scheme validation (rows 4 + discovery/redirect
+        # siblings): https everywhere unless the operator opted into the
+        # LAN-only insecure posture. Messages name the offending env var
+        # exactly — the exit-78 lane prints them verbatim.
+        insecure_ok = self.allow_insecure_cookie
+        if not insecure_ok and not str(self.issuer).lower().startswith("https://"):
+            raise ValueError(
+                "auth.issuer must be https:// unless allow_insecure_cookie=true "
+                "(env var ENSEMBLE_AUTH_ISSUER)"
+            )
+        if self.discovery_url is not None:
+            if not insecure_ok and not str(self.discovery_url).lower().startswith("https://"):
+                raise ValueError(
+                    "auth.discovery_url must be https:// unless "
+                    "allow_insecure_cookie=true "
+                    "(env var ENSEMBLE_AUTH_DISCOVERY_URL)"
+                )
+            # Row 11: a discovery doc hosted on a different origin than
+            # the issuer can never carry the configured issuer — refuse
+            # statically. (Same-origin/different-path stays legal: the
+            # post-fetch issuer check is the P2+ lifespan WARN lane.)
+            if _url_origin(str(self.discovery_url)) != _url_origin(str(self.issuer)):
+                raise ValueError(
+                    "discovery document issuer does not match auth.issuer "
+                    f"(discovery_url origin {_url_origin(str(self.discovery_url))} "
+                    f"!= issuer origin {_url_origin(str(self.issuer))}; "
+                    "env vars ENSEMBLE_AUTH_DISCOVERY_URL, ENSEMBLE_AUTH_ISSUER)"
+                )
+        if self.external_redirect_base is not None:
+            _validate_redirect_base_shape(self.external_redirect_base)
+        if self.redirect_uri is not None and not insecure_ok and not str(
+            self.redirect_uri
+        ).lower().startswith("https://"):
+            raise ValueError(
+                "auth.redirect_uri must be https:// unless "
+                "allow_insecure_cookie=true "
+                "(env var ENSEMBLE_AUTH_REDIRECT_URI)"
+            )
+
+        # Row 5: the daemon's CORS posture is allow_origins=['*'] +
+        # allow_credentials=True by construction (api.py) — cookies under
+        # wildcard CORS is the canonical XSRF recipe. auth ON must name
+        # its origins (D15; wildcard replacement is wired in a later
+        # phase; this is the static refusal half).
+        if not self.allowed_origins:
+            raise ValueError(
+                "auth.allowed_origins must replace wildcard + credentials "
+                "(the daemon CORS is allow_origins=['*'] + "
+                "allow_credentials=true; wildcard CORS + cookies is the "
+                "canonical XSRF recipe — set ENSEMBLE_AUTH_ALLOWED_ORIGINS)"
+            )
+
+        # Row 13: 'openid' is mandatory for OIDC (empty list included).
+        if "openid" not in self.scopes:
+            raise ValueError(
+                "auth.scopes must include 'openid' "
+                "(env var ENSEMBLE_AUTH_SCOPES)"
+            )
+
+        # Row 7 (section-local half): when BOTH the exact-URI override and
+        # the tier-1 base are set, they must agree on origin. (When the
+        # base is unset the effective origin is Host-capture/bind — a
+        # runtime quantity; the login path handles it per D6.)
+        if self.redirect_uri is not None and self.external_redirect_base is not None:
+            if _url_origin(self.redirect_uri) != _url_origin(
+                self.external_redirect_base
+            ):
+                raise ValueError(
+                    "auth.redirect_uri must be same-origin "
+                    f"({_url_origin(self.redirect_uri)} != "
+                    f"external_redirect_base origin "
+                    f"{_url_origin(self.external_redirect_base)}; "
+                    "env vars ENSEMBLE_AUTH_REDIRECT_URI, "
+                    "ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE)"
+                )
+
+        # Row 14: Strict breaks the top-level POST callback redirect —
+        # WARN and proceed, never refuse.
+        if self.cookie_samesite == "Strict":
+            logger.warning(
+                "auth.cookie_samesite=Strict will break OAuth POST callback — "
+                "use Lax (SameSite=Strict will break OAuth callback; env var "
+                "ENSEMBLE_AUTH_COOKIE_SAMESITE)"
+            )
+
+        # Row 15: cookie_secure=false is a security regression — explicit
+        # opt-in required.
+        if not self.cookie_secure and not self.allow_insecure_cookie:
+            raise ValueError(
+                "cookie_secure=false requires allow_insecure_cookie=true "
+                "(env vars ENSEMBLE_AUTH_COOKIE_SECURE, "
+                "ENSEMBLE_AUTH_ALLOW_INSECURE_COOKIE)"
+            )
+
+        # Security-review minor #2 (2026-10-11): SameSite=None WITHOUT
+        # Secure is a REFUSAL, not a warn — deliberately row-15-shaped
+        # (a security regression gets the boot fast-fail; row 14's
+        # Strict stays a WARN because that one is a functional break,
+        # not a security hole). Browsers reject insecure None cookies
+        # outright, and a client that did honor one would ship the
+        # session credential on every cross-site request.
+        if self.cookie_samesite == "None" and not self.cookie_secure:
+            raise ValueError(
+                "cookie_samesite=None requires cookie_secure=true "
+                "(browsers reject SameSite=None without Secure; env vars "
+                "ENSEMBLE_AUTH_COOKIE_SAMESITE, ENSEMBLE_AUTH_COOKIE_SECURE)"
+            )
+
+        # §6.1 range validation (enabled-gated — an OFF deployment may
+        # carry out-of-range values and must still boot, NFR-2).
+        if not 60 <= self.session_ttl_seconds <= 86400:
+            raise ValueError(
+                f"auth.session_ttl_seconds out of range [60, 86400]: "
+                f"{self.session_ttl_seconds} "
+                "(env var ENSEMBLE_AUTH_SESSION_TTL_SECONDS)"
+            )
+        if not 0 <= self.clock_skew_seconds <= 300:
+            raise ValueError(
+                f"auth.clock_skew_seconds out of range [0, 300]: "
+                f"{self.clock_skew_seconds} "
+                "(env var ENSEMBLE_AUTH_CLOCK_SKEW_SECONDS)"
+            )
+        if not 60 <= self.discovery_cache_ttl_seconds <= 86400:
+            raise ValueError(
+                f"auth.discovery_cache_ttl_seconds out of range [60, 86400]: "
+                f"{self.discovery_cache_ttl_seconds} "
+                "(env var ENSEMBLE_AUTH_DISCOVERY_CACHE_TTL_SECONDS)"
+            )
+        if not 60 <= self.jwks_cache_ttl_seconds <= 86400:
+            raise ValueError(
+                f"auth.jwks_cache_ttl_seconds out of range [60, 86400]: "
+                f"{self.jwks_cache_ttl_seconds} "
+                "(env var ENSEMBLE_AUTH_JWKS_CACHE_TTL_SECONDS)"
+            )
+        if not 60 <= self.bearer_token_ttl_seconds <= 31536000:
+            raise ValueError(
+                f"auth.bearer_token_ttl_seconds out of range [60, 31536000]: "
+                f"{self.bearer_token_ttl_seconds} "
+                "(env var ENSEMBLE_AUTH_BEARER_TOKEN_TTL_SECONDS)"
+            )
+        return self
+
+
+def _secret_str_missing(value: SecretStr | None) -> bool:
+    """True when a SecretStr field is unset OR empty/whitespace.
+
+    ``SecretStr`` never defines ``__bool__``, so ``not secret`` is False
+    even for ``SecretStr("")`` — the §6.2 sketch's missing-check would
+    silently accept an empty ``ENSEMBLE_AUTH_CLIENT_SECRET=``. Unwrap
+    before the emptiness test.
+    """
+    if value is None:
+        return True
+    return not value.get_secret_value().strip()
+
+
+def _url_origin(url: str) -> str:
+    """scheme://host[:port] of a URL string, lower-cased (origin identity)."""
+    parts = urlparse(url)
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+
+
+def _validate_redirect_base_shape(value: str) -> None:
+    """§6.1 EXTERNAL_REDIRECT_BASE shape: scheme+host[:port] only, no path.
+
+    The tier-1 base mints ``<base>/api/auth/callback``; a path component
+    would silently double-prefix. Raised as ValueError so it surfaces in
+    the same ValidationError lane as the other matrix rows.
+    """
+    parts = urlparse(value)
+    if not parts.scheme or not parts.netloc:
+        raise ValueError(
+            f"auth.external_redirect_base must be a parseable URL with "
+            f"scheme+host[:port] (got {value!r})"
+        )
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        raise ValueError(
+            f"auth.external_redirect_base must be scheme+host[:port] only "
+            f"— no path/query/fragment (got {value!r})"
+        )
+
+
+# §6.3 row 12 — the bootstrap-token refusal is NOT a boot refusal (the
+# token is "recommended", not required); it is the helpful message the
+# first-admin-mint CLI lane emits when the env var is unset (P2+ CLI
+# consumes this constant — config stays valid without the token).
+AUTH_BOOTSTRAP_TOKEN_REQUIRED_MESSAGE: str = (
+    "set ENSEMBLE_AUTH_BOOTSTRAP_TOKEN to mint first admin token"
+)
+
+
+def _is_auth_config_validation_error(exc: ValidationError) -> bool:
+    """True when a ValidationError originated in the auth config section.
+
+    Matches both shapes the boot path can produce: a direct
+    ``AuthConfig`` construction failure (``title == "AuthConfig"``) and a
+    root ``Config`` failure on the nested ``auth`` field
+    (``loc[:1] == ("auth",)``).
+    """
+    if exc.title == "AuthConfig":
+        return True
+    errors = exc.errors()
+    return bool(errors) and len(errors[0].get("loc", ())) >= 1 and errors[0]["loc"][0] == "auth"
+
+
+def _format_auth_env_var_error_lines(exc: ValidationError) -> list[str]:
+    """Format an auth-section ValidationError into operator-readable lines.
+
+    Every line names the offending ``ENSEMBLE_AUTH_*`` env var exactly —
+    the exit-78 preflight logs one line per refusal (phase1-plan T1.3).
+    Model-level matrix messages already embed the env-var names (see
+    ``_validate_combinations`` rows 1-3); field-level errors get the env
+    name appended from the error location.
+    """
+    lines: list[str] = []
+    for err in exc.errors():
+        msg = str(err.get("msg", "")).removeprefix("Value error, ")
+        loc = err.get("loc", ())
+        # Root-Config shape: loc starts with ("auth", ...) — strip the
+        # section prefix so the field name is what remains.
+        field_loc = loc[1:] if (loc and loc[0] == "auth") else loc
+        if field_loc:
+            field_name = str(field_loc[0])
+            env_var = f"ENSEMBLE_AUTH_{field_name.upper()}"
+            lines.append(f"auth.{field_name}: {msg} (env var {env_var})")
+        else:
+            # Model-level validator message (rows 1-3 et al.) — already
+            # carries the env-var names.
+            lines.append(msg)
+    return lines
+
+
+def auth_config_boot_refusals(config: "Config | None" = None) -> list[str]:
+    """Enumerate operator-actionable auth-config boot refusals.
+
+    The SINGLE authority for the exit-78 lane (phase1-plan T1.3 + §6
+    risk 3 — P2+ callers invoke THIS helper; there is no second exit
+    site). Static validation only: yaml/env reads, zero network I/O.
+
+    Two lanes, one return shape (a list of operator-readable refusal
+    lines, each naming the offending env var):
+
+    * The config-load lane: a misconfigured auth section raises
+      ``ValidationError`` during :func:`load_config` (D1.5 config-load
+      fast-fail). This helper catches the auth-section error,
+      formats it via :func:`_format_auth_env_var_error_lines`, and
+      returns the lines. Non-auth validation errors RE-RAISE — this
+      lane must never swallow or re-frame unrelated config breakage.
+    * The cross-section lane: rows that need the daemon bind identity
+      (row 10, and row 8's positive case) run on the loaded config —
+      they cannot live inside :meth:`AuthConfig._validate_combinations`
+      because the bind host/port belong to ``config.daemon``, not the
+      section. When the bind host is a wildcard (0.0.0.0 / ::) the
+      daemon has no static self-origin to compare against, so the
+      operator override IS the origin declaration and the check is
+      skipped (the documented reverse-proxy wire-up — technical-analysis
+      §Operator-facing wire-up — sets a public hostname over a wildcard
+      bind; runtime enforcement stays with the P3 resolver/D6).
+
+    OFF state (enabled=false): returns ``[]`` — silently, no log lines
+    (G1.3 OFF-state silence) — WITH ONE EXCEPTION (R3, 2026-10-11 merge
+    gate): ``vscode_protected=true ∧ enabled=false`` is refused even in
+    the OFF state. The flag claims bearer protection for /vscode, but
+    with auth disabled the OAuth2 middleware never constructs
+    (``create_app`` skips it) while ``api.py`` sizes the proxy's
+    loopback peer gate as ``not vscode_protected`` — i.e. the
+    protective-sounding flag would DISABLE the only gate on /vscode and
+    open it to remote peers with nothing behind it. The refusal names
+    both env vars; each var alone (either flag value with a consistent
+    auth state) never refuses.
+    """
+    if config is None:
+        try:
+            config = load_config()
+        except ValidationError as exc:
+            if not _is_auth_config_validation_error(exc):
+                raise
+            return _format_auth_env_var_error_lines(exc)
+    section = config.auth
+    # R3 (2026-10-11 merge gate): cross-field refusal — evaluated BEFORE
+    # the OFF-state silence, because the dangerous combination is
+    # precisely ``enabled=false``. Reuses THIS helper (the single
+    # exit-78 lane); there is no second exit site.
+    if section.vscode_protected and not section.enabled:
+        return [
+            "auth.vscode_protected=true requires auth.enabled=true: with "
+            "auth disabled the OAuth2 middleware does not exist and the "
+            "/vscode loopback peer gate would be disabled with nothing "
+            "behind it (remote-open under a protective-sounding flag). "
+            "Set ENSEMBLE_AUTH_ENABLED=true (and its required pair "
+            "ENSEMBLE_AUTH_VSCODE_PROTECTED=true), or clear "
+            "ENSEMBLE_AUTH_VSCODE_PROTECTED."
+        ]
+    if not section.enabled:
+        return []
+    refusals: list[str] = []
+    # Row 10: the operator override cannot redirect to a foreign origin
+    # — it must point at the daemon itself (loopback-trust model, §6.3).
+    if section.external_redirect_base is not None:
+        bind_host = (config.daemon.host or "").strip()
+        wildcard_bind = bind_host in ("", "0.0.0.0", "::")
+        if not wildcard_bind:
+            bind_origin = _url_origin(f"http://{bind_host}:{config.daemon.port}")
+            base_origin = _url_origin(section.external_redirect_base)
+            if base_origin != bind_origin:
+                refusals.append(
+                    "auth.external_redirect_base must be same-origin as the "
+                    f"daemon bind host (external_redirect_base origin "
+                    f"{base_origin} != bind origin {bind_origin})"
+                )
+    return refusals
+
+
 class EmbeddingConfig(BaseSettings):
     """Shared embedding configuration for all subsystems (skills, blueprints, future).
 
@@ -3439,6 +4059,10 @@ class Config(BaseSettings):
     critical_notes: CriticalNotesConfig = Field(
         default_factory=CriticalNotesConfig
     )
+    # OAuth2 auth section (phase1-plan T1.1, D1.1): additive aggregation,
+    # same default_factory pattern as every sibling section. Default OFF —
+    # an auth-less yaml/env boots byte-equivalent to the pre-feature state.
+    auth: AuthConfig = Field(default_factory=AuthConfig)
 
 
 # Warn-only deprecation guard for the removed reasoning-echo allowlist env
@@ -5027,6 +5651,34 @@ def load_config(config_path: str | None = None) -> Config:
         critical_notes_config.get("llm_select")
     )
     config_dict["critical_notes"] = critical_notes_config
+
+    # OAuth2 auth section (phase1-plan T1.1/T1.4): yaml passthrough with
+    # the house None-strip (skill_evolution/blueprint precedent — a yaml
+    # ``key: null`` must not shadow the env var via the
+    # init-kwarg-beats-env inversion). ``enabled`` gets an EXPLICIT
+    # env-over-yaml resolution (QUEUE_DISCARD_ON_STARTUP precedent):
+    # the shipped config.yaml carries ``auth.enabled: false`` as an
+    # active key, and a bare passthrough would make that init kwarg
+    # silently defeat an operator's ENSEMBLE_AUTH_ENABLED=true.
+    auth_config: Dict[str, Any] = {}
+    raw_auth = processed_config.get("auth")
+    if raw_auth is not None:
+        if not isinstance(raw_auth, dict):
+            # Loud guard, critical_notes precedent: a non-dict auth
+            # section (``auth: 5``) must not silently fall through to
+            # defaults — name the offending value.
+            raise ValueError(
+                f"config.auth must be a mapping (got "
+                f"{type(raw_auth).__name__}: {raw_auth!r}). "
+                f"Fix the yaml — e.g. ``auth:\\n  enabled: false``."
+            )
+        auth_config = {k: v for k, v in raw_auth.items() if v is not None}
+    _env_auth_enabled = _clean_env_value(os.environ.get("ENSEMBLE_AUTH_ENABLED"))
+    if _env_auth_enabled is not None:
+        auth_config["enabled"] = _env_auth_enabled.lower() in (
+            "true", "1", "yes", "on",
+        )
+    config_dict["auth"] = auth_config
     # Boot-time validation for the injected-notes absorb kill-switch
     # (``ENSEMBLE_INJECTED_NOTES_ABSORB``). The resolver is read-at-call by
     # ``daemon/compaction.py::_injected_note_absorbed_ids``; invoking it
