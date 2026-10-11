@@ -253,6 +253,13 @@ def _classify_sql(sql: str) -> str:
 
     Lightweight first-word heuristic — used by the repair tool to
     decide which validation path to run.
+
+    Note: ``VACUUM`` and ``ANALYZE`` are classified as
+    ``"DDL"`` because PG treats them as utility commands alongside
+    DDL (they share the ``ALTER`` + ``CREATE`` + ``DROP`` bucket
+    above). The idempotency exemption in
+    :func:`_is_idempotent` handles the narrow allow-list (plain
+    VACUUM / VACUUM ANALYZE / ANALYZE — VACUUM FULL stays rejected).
     """
     cleaned = sql.strip().lstrip("(").lstrip()
     if not cleaned:
@@ -268,6 +275,120 @@ def _classify_sql(sql: str) -> str:
     }:
         return "DDL"
     return "OTHER"
+
+
+# VACUUM / ANALYZE exemption — see ``_statement_is_vacuum_analyze``
+# below. The ``_is_idempotent`` gate calls that helper BEFORE the
+# strict DDL heuristic so plain VACUUM / VACUUM (ANALYZE) / bare
+# ANALYZE pass without needing ``IF NOT EXISTS`` (VACUUM does not
+# accept that form anyway). ``VACUUM FULL`` is DELIBERATELY kept in
+# the rejection bucket — PG takes an ACCESS EXCLUSIVE lock on the
+# table and the commission forbids it cluster-wide.
+
+
+def _statement_is_vacuum_analyze(sql: str) -> bool:
+    """Return True iff ``sql`` (after leading whitespace + ``;``
+    stripping) is an allow-listed VACUUM/ANALYZE statement.
+
+    The grammar we accept:
+
+    * ``ANALYZE`` (no args)
+    * ``ANALYZE [VERBOSE] [<table_identifier>]``
+
+    * ``VACUUM`` (no args)
+    * ``VACUUM <table_identifier>``
+    * ``VACUUM (option_list) [<table_identifier>]`` —
+      where ``option_list`` must lead with ``ANALYZE`` and may
+      contain only uppercase-identifier tokens
+      (the FULL keyword is rejected via the scan below)
+
+    The grammar rejects:
+
+    * ``VACUUM FULL``, ``VACUUM FULL table``, ``VACUUM (FULL ...)``
+    * ``VACUUM (option, FULL, ...)`` — any FULL keyword anywhere
+      in the remainder of the statement
+    * schema-qualified table names (``schema.table``) — out of
+      scope today (the vacuum job only ever references unqualified
+      PG catalog ``relname`` strings from ``pg_stat_user_tables``).
+      A future commission that extends the job to schema-qualified
+      tables would need to expand the grammar below.
+    * any non-leading whitespace / comment we do not expect (the
+      regex below accepts the conventional form only)
+    """
+    # Strip leading/trailing whitespace and a trailing ``;``; PG
+    # accepts both, the SQLAlchemy ``text(...)`` wrapper often adds
+    # a trailing ``;`` through Python source, and the
+    # ``ens_db_repair`` tool's callers are allowed to wrap their
+    # statement either way.
+    cleaned = sql.strip().rstrip(";").strip()
+    if not cleaned:
+        return False
+    upper = cleaned.upper()
+
+    # ── ANALYZE branch ─────────────────────────────────────────────
+    # ANALYZE has no FULL form, so no FULL scan is needed here.
+    # Order: optional VERBOSE first, then optional identifier.
+    # The whole statement must be consumed (anchored regex).
+    if re.match(
+        r"ANALYZE(?:\s+VERBOSE)?(?:\s+[A-Z_][A-Z0-9_]*)?\s*$",
+        upper,
+    ):
+        return True
+
+    # ── VACUUM branch ──────────────────────────────────────────────
+    # Must start with the head-word ``VACUUM`` followed by exactly
+    # one of: nothing, ``(<option_list>)`` (optional), ``<identifier>``
+    # (optional after the parens or directly), and NOTHING ELSE.
+    if not upper.startswith("VACUUM"):
+        return False
+    # FULL-keyword scan in the entire remainder of the statement.
+    # The scan is intentionally over the WHOLE statement (not just
+    # the leading tokens) so a FULL inside a parens option-list is
+    # also rejected.
+    if re.search(r"\bFULL\b", upper):
+        return False
+    # Drop the leading ``VACUUM`` keyword + its trailing space(s).
+    # After stripping whitespace, the remainder is either empty,
+    # a parenthesised option list, an identifier, or a parens
+    # followed by an identifier.
+    rest = upper[len("VACUUM"):].lstrip()
+
+    # ── Option-list branch ──────────────────────────────────────────
+    # PG's grammar permits `VACUUM [ ( option [, option ...] ) ]`.
+    # For the non-FULL form, the only meaningful option is
+    # ``ANALYZE`` (optionally + ``VERBOSE``); any other option
+    # token (e.g. ``PARALLEL N``) is rare in practice. We accept
+    # ANALYZE / VERBOSE here; the FULL rejection above catches the
+    # only forbidden option. We do NOT accept a FREEZE option
+    # because the vacuum job never emits it (and an operator who
+    # adds FREEZE can hoist it through a maintenance window
+    # outside the agent-facing repair lane).
+    paren_re = re.compile(
+        r"\((?P<opts>[A-Z]+(?:\s*,\s*[A-Z]+)*)\)"
+    )
+    m = paren_re.match(rest)
+    if m is not None:
+        opts = m.group("opts")
+        # The option list MUST lead with ANALYZE for the
+        # non-FULL form. An optional comma-list of uppercase
+        # identifiers may follow. ``FULL`` would have already
+        # failed the FULL-scan above (the literal FULL inside the
+        # parens is also caught — see the test
+        # ``VACUUM (FULL, ANALYZE) → False``).
+        if not opts.startswith("ANALYZE"):
+            return False
+        after = rest[m.end():].lstrip()
+        # After the parens we may have an optional table identifier.
+        # No more options / no chained statements.
+        if not re.match(
+            r"(?:[A-Z_][A-Z0-9_]*)?\s*$", after,
+        ):
+            return False
+        return True
+
+    # ── Bare-table branch (no parens) ───────────────────────────────
+    # ``VACUUM <table>`` or just ``VACUUM``.
+    return bool(re.match(r"(?:[A-Z_][A-Z0-9_]*)?\s*$", rest))
 
 
 def _is_idempotent(sql: str, sql_class: str) -> tuple[bool, str]:
@@ -286,12 +407,23 @@ def _is_idempotent(sql: str, sql_class: str) -> tuple[bool, str]:
     * SELECT: not validated here (the SELECT-only guard runs upstream).
     """
     if sql_class == "DDL":
+        # Section 1 / vacuum-maintenance: maintenance-command
+        # allow-list. VACUUM and ANALYZE are re-runnable in PG (PG
+        # marks the dead-tuple reclaim as complete or no-ops on
+        # already-reclaimed tuples). The allow-list MUST be checked
+        # BEFORE the strict DDL heuristic so a plain "VACUUM foo"
+        # passes without needing "IF NOT EXISTS" (it has no such
+        # qualifier — VACUUM does not accept that form anyway).
+        if _statement_is_vacuum_analyze(sql):
+            return True, ""
         if _IDEMPOTENT_DDL_RE.search(sql):
             return True, ""
         return False, (
             "non-idempotent-DDL: repair DDL must include at least one of "
-            "DO $$, CREATE OR REPLACE, DROP IF EXISTS, or "
-            "ALTER TABLE ... DROP CONSTRAINT IF EXISTS"
+            "DO $$, CREATE OR REPLACE, DROP IF EXISTS, "
+            "ALTER TABLE ... DROP CONSTRAINT IF EXISTS, or a maintenance "
+            "command (VACUUM [table], VACUUM (ANALYZE [table]), ANALYZE "
+            "[table]) — VACUUM FULL is rejected"
         )
     if sql_class == "DML":
         m = _NON_IDEMPOTENT_RE.search(sql)

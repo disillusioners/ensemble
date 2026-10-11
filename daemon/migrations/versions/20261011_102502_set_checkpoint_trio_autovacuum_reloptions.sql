@@ -1,0 +1,102 @@
+-- Migration: set autovacuum_vacuum_scale_factor on checkpoint tables
+-- Created: 2026-10-11
+-- Author: dev-coder-fix-backend-db-space
+-- Description:
+--   Tightens autovacuum cadence on the LangGraph checkpoint trio
+--   (checkpoints / checkpoint_writes / checkpoint_blobs) — the
+--   documented prod-scale bloat source (~206MB / 42s instance-history
+--   walk). Stock autovacuum threshold is
+--   ``autovacuum_vacuum_scale_factor = 0.2`` (20% of
+--   ``n_live_tup``), which is too coarse for tables that experience
+--   ~10x-100x more dead-tuple churn than live inserts — autovacuum
+--   lags on the high-water mark and the next maintenance sweep sees
+--   an oversized dead-tuple queue.
+--
+--   This migration is evidence-PROPORTIONAL: it ONLY touches the
+--   checkpoint trio. All other user tables keep the PG-stock
+--   ``0.20`` scale factor (autovacuum handles them fine; evidence
+--   per dev-DB assessment 2026-10-11 — ~2MB dead tuples vs 128MB
+--   database on a healthy ensemble_dev install).
+--
+-- PLACEMENT RATIONALE:
+--   The checkpoint tables are NOT in the SQLModel
+--   metadata.create_all path — they are owned by
+--   ``AsyncPostgresSaver.setup()`` (langgraph 1.0.9) which runs an
+--   embedded MIGRATIONS list of CREATE TABLE statements. The
+--   ``daemon.migrations.runner`` APPLIES ``*.sql`` files to SQLite
+--   only (runner.py:719-727); the canonical PG schema evolution
+--   hook is ``EnsembleManager._ensure_postgres_columns`` in
+--   manager.py. The checkpoint tables live ABOVE the SQLModel
+--   metadata layer, so the canonical hook is the right place — and
+--   the same hook is already used for ``maintenance_runs.expected_bytes``
+--   widening (per migration: ``20260928_000001_widen_maintenance_runs_expected_bytes.sql``,
+--   same author logic). The .sql file is documented here for the
+--   standard 79-file history convention; see runtime hook below.
+--
+-- SAFETY / IDEMPOTENCY:
+--   ``ALTER TABLE ... SET (autovacuum_vacuum_scale_factor = 0.05)``
+--   is a metadata-only operation. PG does NOT take an ACCESS
+--   EXCLUSIVE lock and does NOT rewrite the table. Multiple
+--   re-applications of the same setting are idempotent. The
+--   threshold bump (``autovacuum_vacuum_threshold = 1000``) keeps
+--   small-table behavior sane (a 50-row table does not get vacuumed
+--   every 5 live-tuple inserts).
+--
+-- DUAL-DRIVER NOTES:
+--   SQLite path (this file): no checkpoint-trio equivalent exists
+--   (SQLite uses AsyncSqliteSaver + 2 tables, not 4); the
+--   ``*.sql`` file in this directory is documentation-only.
+--   PostgreSQL: the canonical evolution lives in
+--   ``EnsembleManager._ensure_postgres_columns`` (manager.py) as a
+--   probe-gated ALTER applying the same settings. Fresh PG
+--   databases (where the tables are missing) skip the ALTER; the
+--   runtime hook's probe (``reloptions`` does not contain the
+--   desired key) gates every statement so the loop is a no-op
+--   on pre-existing ALTERed tables AND on missing tables alike.
+
+-- UP
+
+-- Documentation for the canonical evolution that lives in
+-- ``EnsembleManager._ensure_postgres_columns`` (manager.py). The
+-- per-loop probe ensures the ALTER is a no-op on re-run; the
+-- ``IF EXISTS`` clause on the table probe makes it a no-op on
+-- yet-to-be-created tables (the saver.setup() call may not have
+-- run yet). Operators who apply this file manually against PG
+-- must run the same statements the runtime applies — those go
+-- to the runtime hook, not here.
+--
+--   DO $body$
+--   DECLARE
+--       tbl TEXT;
+--       tables TEXT[] := ARRAY['checkpoints', 'checkpoint_writes', 'checkpoint_blobs'];
+--   BEGIN
+--       FOREACH tbl IN ARRAY tables LOOP
+--           IF EXISTS (
+--               SELECT 1 FROM pg_class
+--               WHERE relname = tbl AND relkind IN ('r', 'p')
+--           ) THEN
+--               EXECUTE format(
+--                   'ALTER TABLE %I SET ('
+--                   'autovacuum_vacuum_scale_factor = 0.05, '
+--                   'autovacuum_vacuum_threshold = 1000'
+--                   ')',
+--                   tbl
+--               );
+--           END IF;
+--       END LOOP;
+--   END
+--   $body$;
+--
+-- SQLite side: no checkpoint-trio equivalent exists; this file is
+-- a no-op on SQLite engines (the runner is a no-op on non-SQLite
+-- regardless; ``runner.py:719-727``).
+
+-- DOWN
+
+-- Reset to PG stock (0.20 scale factor). The DEFAULT
+-- ``autovacuum_vacuum_threshold`` of 50 keeps small-table behavior
+-- intact without the explicit override.
+--
+--   ALTER TABLE checkpoints RESET (autovacuum_vacuum_scale_factor);
+--   ALTER TABLE checkpoint_writes RESET (autovacuum_vacuum_scale_factor);
+--   ALTER TABLE checkpoint_blobs RESET (autovacuum_vacuum_scale_factor);

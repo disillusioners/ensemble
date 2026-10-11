@@ -3044,6 +3044,49 @@ class InstanceManager:
             checkpoint_cleanup.execute,
         )
 
+        # Section 1 / vacuum-maintenance (commission
+        # ``backend-db-space-reclamation``): a PG-only threshold-gated
+        # VACUUM (ANALYZE) sweep. Plain VACUUM only — NEVER VACUUM
+        # FULL — see ``daemon/services/vacuum_maintenance.py`` for the
+        # full contract. Wired with the same single-flight lock +
+        # audit-row plumbing as ``checkpoint_cleanup`` so the two
+        # jobs share ``MaintenanceRunLock`` (process-wide) AND a
+        # per-section audit discriminator on the maintenance_runs
+        # partial unique index. The env kill-switch
+        # ``PERSISTENCE_VACUUM_ENABLED=0`` flips the registration off
+        # at boot without touching code.
+        if self.config.persistence.vacuum_enabled:
+            from .services.vacuum_maintenance import VacuumMaintenanceJob
+
+            vacuum_job = VacuumMaintenanceJob(
+                shared_engine=self._engine,
+                dead_tup_min=self.config.persistence.vacuum_dead_tup_min,
+                dead_tup_scale_fraction=(
+                    self.config.persistence.vacuum_dead_tup_scale_fraction
+                ),
+                run_lock=self._maintenance_run_lock,
+                runs_repo=self._maintenance_runs_repo,
+            )
+            self._vacuum_job = vacuum_job
+            self._maintenance_service.register(
+                "vacuum_maintenance",
+                self.config.persistence.vacuum_interval_hours,
+                vacuum_job.execute,
+            )
+            logger.debug(
+                "vacuum_maintenance registered: "
+                "interval=%sh, dead_tup_min=%d, "
+                "dead_tup_scale_fraction=%.4f",
+                self.config.persistence.vacuum_interval_hours,
+                self.config.persistence.vacuum_dead_tup_min,
+                self.config.persistence.vacuum_dead_tup_scale_fraction,
+            )
+        else:
+            logger.debug(
+                "vacuum_maintenance disabled by config "
+                "(PERSISTENCE_VACUUM_ENABLED=0); skipping registration"
+            )
+
         # Skill Evolution Phase 4: seed the default Tier 1 trigger
         # rules + register the periodic metric-scan maintenance job.
         # Both are guarded by the ``skill_evolution`` config flag so a
@@ -7600,6 +7643,131 @@ class InstanceManager:
             "ix_drift_events_observed_at — CREATE INDEX IF NOT EXISTS is "
             "idempotent)"
         )
+
+        # ── Section 1 / vacuum-maintenance: ensure autovacuum reloptions ──
+        # Backend-DB-space reclamation (commission
+        # ``backend-db-space-reclamation``). Tightens the
+        # autovacuum cadence on the LangGraph checkpoint trio
+        # (checkpoints / checkpoint_writes / checkpoint_blobs) — the
+        # documented prod-scale bloat source. PG stock
+        # ``autovacuum_vacuum_scale_factor = 0.20`` (20% of
+        # ``n_live_tup``) is too coarse for tables that experience
+        # ~10x-100x more dead-tuple churn than live inserts; the
+        # observed behavior is autovacuum lagging on the high-water
+        # mark and the next manual sweep seeing an oversized
+        # dead-tuple queue.
+        #
+        # Why the reloptions live here (not in the .sql migration
+        # ledger): the checkpoint tables are NOT in the SQLModel
+        # ``metadata.create_all`` path — they are created by
+        # ``AsyncPostgresSaver.setup()`` (langgraph 1.0.9
+        # ``MIGRATIONS`` list, embedded DDL). The ``*.sql``
+        # migration runner is a SQLite-only by-design (runner.py:
+        # 719-727); PG schema evolution lands here. The .sql file
+        # (``daemon/migrations/versions/20261011_102502_set_checkpoint
+        # _trio_autovacuum_reloptions.sql``) exists for the standard
+        # 79-file discoverability contract — the runtime block
+        # below is the source of truth.
+        #
+        # PLACEMENT OF EXECUTION: the reloptions ALTER targets tables
+        # that may not exist yet at this point. On first boot the
+        # PG checkpoint tables are created LATER, by
+        # ``AsyncPostgresSaver.setup()`` which runs inside
+        # ``EnsembleManager.initialize()`` (called by the lifespan
+        # startup, AFTER ``__init__`` returns). The per-table probe
+        # (``pg_class WHERE relname = tbl``) makes the runtime
+        # tolerant of both orderings: on first boot the probe finds
+        # no rows → skip; on subsequent boots the probe finds the
+        # tables → apply. ``ALTER TABLE ... SET (...)`` is
+        # metadata-only (no ACCESS EXCLUSIVE lock, no rewrite), so
+        # applying it any time after the saver runs is safe — we
+        # don't need to chase the saver-setup timing exactly.
+        #
+        # IDEMPOTENCY: ``ALTER TABLE ... SET (...)`` is fully
+        # idempotent on PG (matches PG stock's settable-reloptions
+        # semantics — re-applying the same value is a no-op). The
+        # per-table probe + ``reloptions``-presence check adds
+        # belt-and-braces against (a) tables missing because the
+        # saver setup never ran (e.g. dev boot with no agent
+        # activity), (b) prior runs that already applied the
+        # settings.
+        if not (
+            self._ensemble_config is not None
+            and self._ensemble_config.is_postgres
+        ):
+            pass  # SQLite path: no checkpoint trio, no-op
+        else:
+            # ``autovacuum_vacuum_scale_factor=0.05`` + ``autovacuum_vacuum_threshold=1000``
+            # The threshold floor (1000) keeps small-table behavior sane:
+            # a 50-row table does not get vacuumed every 5 live-tuple
+            # inserts. ``format(%I, tbl)`` quotes identifiers — the
+            # catalog enforces identifier chars but table names with
+            # mixed case MUST be quoted.
+            checkpoint_reloptions = (
+                "autovacuum_vacuum_scale_factor = 0.05, "
+                "autovacuum_vacuum_threshold = 1000"
+            )
+            checkpoint_trio = (
+                "checkpoints",
+                "checkpoint_writes",
+                "checkpoint_blobs",
+            )
+            applied = 0
+            skipped_missing = 0
+            skipped_pre_set = 0
+            with self._engine.begin() as conn:
+                for tbl in checkpoint_trio:
+                    present = conn.execute(
+                        text(
+                            "SELECT 1 FROM pg_class "
+                            "WHERE relname = :t AND relkind IN ('r', 'p')"
+                        ),
+                        {"t": tbl},
+                    ).first()
+                    if present is None:
+                        skipped_missing += 1
+                        continue
+                    # Probe reloptions for the desired key to avoid a
+                    # no-op ALTER storm on every boot. The probe reads
+                    # ``pg_class.reloptions`` and matches the literal
+                    # key. NOT present => apply the SET; present =>
+                    # skip (already configured by a prior boot).
+                    relopt = conn.execute(
+                        text(
+                            "SELECT reloptions FROM pg_class "
+                            "WHERE relname = :t AND relkind IN ('r', 'p')"
+                        ),
+                        {"t": tbl},
+                    ).first()
+                    already_set = False
+                    if relopt is not None and relopt[0] is not None:
+                        # reloptions is an array of ``key=value`` strings.
+                        # Check if the desired key is already configured.
+                        for raw in relopt[0]:
+                            if raw.startswith(
+                                "autovacuum_vacuum_scale_factor="
+                            ):
+                                already_set = True
+                                break
+                    if already_set:
+                        skipped_pre_set += 1
+                        continue
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE {tbl} "
+                            f"SET ({checkpoint_reloptions})"
+                        )
+                    )
+                    applied += 1
+            if applied or skipped_missing or skipped_pre_set:
+                logger.info(
+                    "_ensure_postgres_columns: checkpoint trio "
+                    "autovacuum reloptions ensure complete "
+                    "(applied=%d, already_set=%d, table_missing=%d)",
+                    applied,
+                    skipped_pre_set,
+                    skipped_missing,
+                )
 
     def _migrate_overloaded_image_refs_rows(self) -> None:
         """One-time migration: move refs out of ``images`` into
