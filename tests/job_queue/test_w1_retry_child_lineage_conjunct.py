@@ -711,10 +711,20 @@ class TestW1LineageConjunctRegression:
         """
         from daemon.repositories.job_queue.models import Decision
 
+        # E1 contract sync (fix e8a61da3, 2026-10-11): the f1 lane now
+        # gates on canonical MISSION liveness after the W1 conjunct —
+        # a RUNNING instance means the mission is live and the finalize
+        # MUST hold (the 043d64a8 premature-finalize class). This AC2
+        # pin's intent is "lineage quiescent → the W1 conjunct does
+        # NOT block and the boundary finalize runs"; seeding the
+        # instance TERMINAL keeps that intent verifiable under the
+        # new gate (pre-E1 this fixture seeded a RUNNING instance and
+        # finalized anyway — the exact behavior E1 retires).
         _insert_instance(
             engine,
             "inst-w1-ac2-failed",
             project_id="test-project",
+            status=InstanceStatus.COMPLETED.value,
             created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
         )
         _insert_job_item(

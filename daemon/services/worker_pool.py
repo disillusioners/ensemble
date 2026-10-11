@@ -998,6 +998,13 @@ class Worker(threading.Thread):
                 max_retries=self._max_retries,
                 next_retry_at=next_wake,
                 bypass_retry_budget=True,
+                # Option A (fix e8a61da3): the usage-limit deferral is
+                # the ONE retry lane that re-arms watch coverage in the
+                # F6 re-key transaction — the silent supersede here was
+                # silence #1 of the double-silence chain. The timeout
+                # lane (worker_pool.py:835) deliberately does NOT pass
+                # this flag (parked family, separate confirmation).
+                rearm_watchers=True,
             )
             if retry_task is None:
                 # Gate closed — a concurrent retry-creating actor won
