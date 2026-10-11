@@ -35,6 +35,10 @@ from .constants import (
     MAX_INSTANCE_HISTORY,
     MAINTENANCE_CHECK_INTERVAL_MINUTES,
     REPORT_REPAIR_EXCLUDED_AGENTS,
+    VACUUM_DEAD_TUP_MIN,
+    VACUUM_DEAD_TUP_SCALE_FRACTION,
+    VACUUM_ENABLED,
+    VACUUM_INTERVAL_HOURS,
 )
 
 logger = logging.getLogger(__name__)
@@ -627,6 +631,52 @@ class PersistenceConfig(BaseSettings):
     checkpoint_cleanup_interval: int = Field(default=CHECKPOINT_CLEANUP_INTERVAL_HOURS)
     maintenance_check_interval_minutes: int = Field(default=MAINTENANCE_CHECK_INTERVAL_MINUTES)
     max_instance_history: int = Field(default=MAX_INSTANCE_HISTORY)
+
+    # ── VACUUM maintenance knobs (PG-only) ──────────────────────────────
+    # The plain-VACUUM (ANALYZE) job registered on MaintenanceService
+    # (daemon/services/maintenance.py). Plain VACUUM is non-blocking
+    # (no table-level ACCESS EXCLUSIVE lock) so this defaults ON; the
+    # operator can flip the kill-switch via
+    # ``PERSISTENCE_VACUUM_ENABLED=0`` without a code change. The
+    # SQLite path short-circuits inside the job (pg-only guard) so the
+    # flags are harmless on dev installs.
+    vacuum_enabled: bool = Field(default=VACUUM_ENABLED)
+    vacuum_interval_hours: float = Field(
+        default=VACUUM_INTERVAL_HOURS,
+        ge=0.25,  # 15min floor — a sub-15-min maintenance cycle is abusive on its own
+        description=(
+            "Hours between VACUUM (ANALYZE) maintenance cycles. Default 24. "
+            "Floor 0.25 (15min). Override via env: PERSISTENCE_VACUUM_INTERVAL_HOURS."
+        ),
+    )
+    # Dead-tuple threshold gate. A table qualifies for VACUUM (ANALYZE)
+    # when n_dead_tup >= max(vacuum_dead_tup_min, ceil(vacuum_dead_tup_scale_fraction * n_live_tup)).
+    # The floor guards against false-positives on tiny tables; the
+    # scale-fraction guards against false-positives on huge tables where
+    # 1000 dead tuples is statistical noise (e.g. a 50M-row table with
+    # 1000 dead tuples still has <0.002% bloat — autovacuum will catch up).
+    vacuum_dead_tup_min: int = Field(
+        default=VACUUM_DEAD_TUP_MIN,
+        ge=1,
+        description=(
+            "Floor for the dead-tuple threshold (a table qualifies only "
+            "when n_dead_tup >= this floor). Default 1000. Override "
+            "via env: PERSISTENCE_VACUUM_DEAD_TUP_MIN. Floor is 1 "
+            "(ge=1) — accepting 0 would let an operator override qualify "
+            "an empty / cold table on every cycle (n_dead_tup >= 0 is "
+            "always true), defeating the threshold gate."
+        ),
+    )
+    vacuum_dead_tup_scale_fraction: float = Field(
+        default=VACUUM_DEAD_TUP_SCALE_FRACTION,
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "Scale-fraction for the dead-tuple threshold (a table "
+            "qualifies when n_dead_tup >= ceil(fraction * n_live_tup)). "
+            "Default 0.05. Override via env: PERSISTENCE_VACUUM_DEAD_TUP_SCALE_FRACTION."
+        ),
+    )
 
     # ── Per-thread retention cap (Op D prune, daemon/services/maintenance.py) ─
     # Max checkpoints to keep per (thread_id, checkpoint_ns). The cleanup job

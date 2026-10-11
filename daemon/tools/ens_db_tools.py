@@ -94,8 +94,14 @@ from sqlmodel import Session
 from ._tool_registry import register_tool_category
 from .db_tools import _validate_select_only
 from .upgrade_journal import iso_plus, mint_nonce, now_iso, parse_iso_utc
+from daemon.constants import (
+    VACUUM_IDLE_IN_TXN_TIMEOUT_MS,
+    VACUUM_LOCK_TIMEOUT_MS,
+    VACUUM_STATEMENT_TIMEOUT_MS,
+)
 from daemon.repositories.ens_db.models import RepairLog
 from daemon.repositories.factory import PG_SESSION_CONNECT_ARGS
+from sqlalchemy.pool import NullPool
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -253,6 +259,13 @@ def _classify_sql(sql: str) -> str:
 
     Lightweight first-word heuristic — used by the repair tool to
     decide which validation path to run.
+
+    Note: ``VACUUM`` and ``ANALYZE`` are classified as
+    ``"DDL"`` because PG treats them as utility commands alongside
+    DDL (they share the ``ALTER`` + ``CREATE`` + ``DROP`` bucket
+    above). The idempotency exemption in
+    :func:`_is_idempotent` handles the narrow allow-list (plain
+    VACUUM / VACUUM ANALYZE / ANALYZE — VACUUM FULL stays rejected).
     """
     cleaned = sql.strip().lstrip("(").lstrip()
     if not cleaned:
@@ -268,6 +281,111 @@ def _classify_sql(sql: str) -> str:
     }:
         return "DDL"
     return "OTHER"
+
+
+# VACUUM / ANALYZE exemption — see ``_statement_is_vacuum_analyze``
+# below. The ``_is_idempotent`` gate calls that helper BEFORE the
+# strict DDL heuristic so plain VACUUM / VACUUM (ANALYZE) / bare
+# ANALYZE pass without needing ``IF NOT EXISTS`` (VACUUM does not
+# accept that form anyway). ``VACUUM FULL`` is DELIBERATELY kept in
+# the rejection bucket — PG takes an ACCESS EXCLUSIVE lock on the
+# table and the commission forbids it cluster-wide.
+
+
+def _statement_is_vacuum_analyze(sql: str) -> bool:
+    """Return True iff ``sql`` (after leading whitespace + ``;``
+    stripping) is an allow-listed VACUUM/ANALYZE statement.
+
+    The grammar we accept:
+
+    * ``ANALYZE`` (no args)
+    * ``ANALYZE [VERBOSE] [<table_identifier>]``
+
+    * ``VACUUM`` (no args)
+    * ``VACUUM <table_identifier>``
+    * ``VACUUM (option_list) [<table_identifier>]`` —
+      where ``option_list`` must lead with ``ANALYZE`` and may
+      contain only uppercase-identifier tokens
+      (the FULL keyword is rejected via the scan below)
+
+    The grammar rejects:
+
+    * ``VACUUM FULL``, ``VACUUM FULL table``, ``VACUUM (FULL ...)``
+    * ``VACUUM (option, FULL, ...)`` — any FULL keyword anywhere
+      in the remainder of the statement
+    * schema-qualified table names (``schema.table``) — out of
+      scope today (the vacuum job only ever references unqualified
+      PG catalog ``relname`` strings from ``pg_stat_user_tables``).
+      A future commission that extends the job to schema-qualified
+      tables would need to expand the grammar below.
+    * any non-leading whitespace / comment we do not expect (the
+      regex below accepts the conventional form only)
+    """
+    # Strip leading/trailing whitespace and a trailing ``;``; PG
+    # accepts both, the SQLAlchemy ``text(...)`` wrapper often adds
+    # a trailing ``;`` through Python source, and the
+    # ``ens_db_repair`` tool's callers are allowed to wrap their
+    # statement either way.
+    cleaned = sql.strip().rstrip(";").strip()
+    if not cleaned:
+        return False
+    upper = cleaned.upper()
+
+    # ── ANALYZE branch ─────────────────────────────────────────────
+    # ANALYZE has no FULL form, so no FULL scan is needed here.
+    # Order: optional VERBOSE first, then optional identifier.
+    # The whole statement must be consumed (anchored regex).
+    if re.match(
+        r"ANALYZE(?:\s+VERBOSE)?(?:\s+[A-Z_][A-Z0-9_]*)?\s*$",
+        upper,
+    ):
+        return True
+
+    # ── VACUUM branch ──────────────────────────────────────────────
+    # Must start with the head-word ``VACUUM`` followed by exactly
+    # one of: nothing, ``(<option_list>)`` (optional), ``<identifier>``
+    # (optional after the parens or directly), and NOTHING ELSE.
+    if not upper.startswith("VACUUM"):
+        return False
+    # FULL-keyword scan in the entire remainder of the statement.
+    # The scan is intentionally over the WHOLE statement (not just
+    # the leading tokens) so a FULL inside a parens option-list is
+    # also rejected.
+    if re.search(r"\bFULL\b", upper):
+        return False
+    # Drop the leading ``VACUUM`` keyword + its trailing space(s).
+    # After stripping whitespace, the remainder is either empty,
+    # a parenthesised option list, an identifier, or a parens
+    # followed by an identifier.
+    rest = upper[len("VACUUM"):].lstrip()
+
+    # ── Option-list branch ──────────────────────────────────────────
+    # PG's grammar permits `VACUUM [ ( option [, option ...] ) ]`.
+    # For the repair-lane exemption we accept the LITERAL option list
+    # ``(ANALYZE)`` only — VERBOSE, FREEZE, PARALLEL N, and any other
+    # option are rejected (fail-closed). An operator who needs
+    # VERBOSE / FREEZE must hoist it through a maintenance window
+    # outside the agent-facing repair lane; FREEZE in particular is a
+    # load-bearing rewrite hint that we never want smuggled into a
+    # short-window exempt path.
+    #
+    # Note: ``(FULL, ...)`` is rejected upstream by the FULL scan
+    # above (literal FULL inside the parens is also caught — see the
+    # test ``VACUUM (FULL, ANALYZE) → False``).
+    m = re.match(r"\(ANALYZE\)", rest)
+    if m is not None:
+        after = rest[m.end():].lstrip()
+        # After the parens we may have an optional table identifier.
+        # No more options / no chained statements.
+        if not re.match(
+            r"(?:[A-Z_][A-Z0-9_]*)?\s*$", after,
+        ):
+            return False
+        return True
+
+    # ── Bare-table branch (no parens) ───────────────────────────────
+    # ``VACUUM <table>`` or just ``VACUUM``.
+    return bool(re.match(r"(?:[A-Z_][A-Z0-9_]*)?\s*$", rest))
 
 
 def _is_idempotent(sql: str, sql_class: str) -> tuple[bool, str]:
@@ -286,12 +404,23 @@ def _is_idempotent(sql: str, sql_class: str) -> tuple[bool, str]:
     * SELECT: not validated here (the SELECT-only guard runs upstream).
     """
     if sql_class == "DDL":
+        # Section 1 / vacuum-maintenance: maintenance-command
+        # allow-list. VACUUM and ANALYZE are re-runnable in PG (PG
+        # marks the dead-tuple reclaim as complete or no-ops on
+        # already-reclaimed tuples). The allow-list MUST be checked
+        # BEFORE the strict DDL heuristic so a plain "VACUUM foo"
+        # passes without needing "IF NOT EXISTS" (it has no such
+        # qualifier — VACUUM does not accept that form anyway).
+        if _statement_is_vacuum_analyze(sql):
+            return True, ""
         if _IDEMPOTENT_DDL_RE.search(sql):
             return True, ""
         return False, (
             "non-idempotent-DDL: repair DDL must include at least one of "
-            "DO $$, CREATE OR REPLACE, DROP IF EXISTS, or "
-            "ALTER TABLE ... DROP CONSTRAINT IF EXISTS"
+            "DO $$, CREATE OR REPLACE, DROP IF EXISTS, "
+            "ALTER TABLE ... DROP CONSTRAINT IF EXISTS, or a maintenance "
+            "command (VACUUM [table], VACUUM (ANALYZE [table]), ANALYZE "
+            "[table]) — VACUUM FULL is rejected"
         )
     if sql_class == "DML":
         m = _NON_IDEMPOTENT_RE.search(sql)
@@ -515,6 +644,56 @@ def _build_repair_engine(shared_engine: Engine) -> Engine:
 
     _REPAIR_ENGINE_CACHE[cache_key] = repair_engine
     return repair_engine
+
+
+def _build_vacuum_autocommit_engine(shared_engine: Engine) -> Engine:
+    """Build a DEDICATED autocommit engine for vacuum/analyze statements.
+
+    Mirrors the proven pattern in
+    :func:`daemon.services.vacuum_maintenance._build_vacuum_engine`
+    (services/vacuum_maintenance.py:515-548). Required because PG
+    refuses VACUUM / ANALYZE inside an explicit transaction
+    (``25001 — VACUUM cannot be executed inside a transaction
+    block``); the existing pooled repair engine opens an implicit
+    txn on every session (``SQLAlchemy autobegin``), which would
+    deterministically trip that error and leak a misleading
+    "DRY-RUN DDL FAILED … fix the SQL" into the agent lane.
+
+    Distinct from :func:`_build_repair_engine`:
+
+    * ``autocommit=True`` on the PG ``connect_args`` so each VACUUM
+      lives in its own implicit transaction.
+    * ``NullPool`` — per-invocation engine. The caller MUST
+      ``dispose()`` in a ``finally``; pooling would persist a
+      session's timeouts across calls and smudge the per-call
+      timeout budget.
+    * VACUUM_TIMEOUT constants from :mod:`daemon.constants` (10min
+      statement / 45s lock / 60s idle-in-txn) — same as the
+      maintenance job; the existing repair constants are 60s
+      statement / 10s lock / 60s idle-in-txn, which are too tight
+      for a real-table VACUUM.
+    * UTC session option rides the same ``options`` string so
+      SQL-side ``now()`` calls align with the daemon engine's
+      UTC frame.
+
+    Returns:
+        A fresh SQLAlchemy ``Engine`` with ``autocommit=True``
+        ready to connect. Caller MUST ``dispose()``.
+    """
+    url = shared_engine.url.render_as_string(hide_password=False)
+    options_str = (
+        f"-c statement_timeout={VACUUM_STATEMENT_TIMEOUT_MS} "
+        f"-c lock_timeout={VACUUM_LOCK_TIMEOUT_MS} "
+        f"-c idle_in_transaction_session_timeout="
+        f"{VACUUM_IDLE_IN_TXN_TIMEOUT_MS} "
+        f"{PG_SESSION_CONNECT_ARGS['options']}"
+    )
+    return create_engine(
+        url,
+        echo=False,
+        connect_args={"options": options_str, "autocommit": True},
+        poolclass=NullPool,
+    )
 
 
 # Process-level cache for repair engines (keyed by shared-engine URL).
@@ -839,6 +1018,52 @@ def create_ens_db_tools(
         sql_hash = _sql_hash(sql)
 
         def _run_repair() -> str:
+            # ── Maintenance-command branch (FIX-1) ──────────────────
+            # VACUUM / ANALYZE statements are dispatched to a DEDICATED
+            # autocommit engine. PG forbids them inside a transaction
+            # block (25001); the standard ``Session(repair_engine)``
+            # context below opens an implicit txn on the pooled repair
+            # engine, which would deterministically fail. The branch
+            # is fire-and-forget from the audit-row's perspective —
+            # the VACUUM runs on the autocommit engine, the audit
+            # row lands via ``_write_audit_outcome`` (best-effort) on
+            # the regular repair engine, and the autocommit engine is
+            # disposed in ``finally`` (per the proven
+            # ``_build_vacuum_engine`` pattern in vacuum_maintenance).
+            is_maintenance = _statement_is_vacuum_analyze(sql)
+            if is_maintenance and not dry_run:
+                vacuum_engine = _build_vacuum_autocommit_engine(manager.engine)
+                try:
+                    try:
+                        with Session(vacuum_engine) as vsession:
+                            vsession.execute(text(sql))
+                        audit_id = _write_audit_outcome(
+                            repair_engine,
+                            current_instance_id, agent_id,
+                            sql, sql_class, sql_hash,
+                            target_label, nonce,
+                            outcome="committed",
+                            error_message=None,
+                        )
+                        return (
+                            f"REPAIR COMMITTED (autocommit maintenance) — id={audit_id}\n"
+                            f"target={target_label!r} sql_class={sql_class} "
+                            f"sql_hash={sql_hash} nonce={'<consumed>' if nonce else 'n/a'}\n"
+                            f"rows_after=0 (no row image for VACUUM / ANALYZE)"
+                        )
+                    except Exception as exc:
+                        _write_audit_outcome(
+                            repair_engine,
+                            current_instance_id, agent_id,
+                            sql, sql_class, sql_hash,
+                            target_label, nonce,
+                            outcome="error",
+                            error_message=f"{type(exc).__name__}: {str(exc)[:200]}",
+                        )
+                        raise
+                finally:
+                    vacuum_engine.dispose()
+
             with Session(repair_engine) as session:
                 try:
                     # DML pre-image: shadow plain SELECT (rows NOT locked).
@@ -1185,54 +1410,110 @@ def _dry_run_sqlite_safe(
     own audit row). Mints a confirm nonce bound to
     ``(instance_id, target_label)``.
 
+    Maintenance commands (VACUUM / ANALYZE — allow-listed by
+    :func:`_statement_is_vacuum_analyze`) NEVER enter the
+    BEGIN/ROLLBACK wrapper. PG refuses them inside an explicit
+    transaction (``25001 — VACUUM cannot be executed inside a
+    transaction block``); running them through the standard wrapper
+    deterministically raises that error and would leak a misleading
+    "DRY-RUN DDL FAILED … fix the SQL" message into the agent lane.
+    The wrapper short-circuits with an honest preview note that
+    names the maintenance command, the target table(s), and tells
+    the agent the dry-run is non-applicable (the confirm lane uses
+    a dedicated autocommit engine and is the place that actually
+    runs the command).
+
     Returns the preview markdown + the nonce for the agent to relay.
     """
     # Mint the nonce first — bound to (instance, target).
     nonce_record = nonce_store.mint(current_instance_id, target_label)
 
     preview_lines: list[str] = []
-    try:
-        if sql_class == "DDL":
-            # Dry-run the DDL — wrapped in BEGIN/ROLLBACK so it does
-            # NOT commit.
-            session.execute(text("BEGIN"))
-            try:
-                session.execute(text(sql))
-                preview_lines.append("DRY-RUN DDL EXECUTED INSIDE BEGIN/ROLLBACK — no commit")
-            except Exception as exc:
-                preview_lines.append(
-                    f"DRY-RUN DDL FAILED ({type(exc).__name__}): "
-                    f"{str(exc)[:200]} — fix the SQL and re-run."
-                )
-            session.rollback()
-        elif sql_class == "DML":
-            # DML dry-run — same wrapper + row-count projection.
-            session.execute(text("BEGIN"))
-            try:
-                result = session.execute(text(sql))
-                previews = _rows_to_dicts(result)
-                preview_lines.append(
-                    f"DRY-RUN DML EXECUTED INSIDE BEGIN/ROLLBACK — projected "
-                    f"affected rows (first {DRY_RUN_PREVIEW_ROWS}):"
-                )
-                for i, row in enumerate(previews, 1):
-                    preview_lines.append(f"  [{i}] {row}")
-                session.rollback()
-            except Exception as exc:
-                session.rollback()
-                preview_lines.append(
-                    f"DRY-RUN DML FAILED ({type(exc).__name__}): "
-                    f"{str(exc)[:200]} — fix the SQL and re-run."
-                )
-        else:
-            preview_lines.append(
-                f"DRY-RUN: sql_class={sql_class} — preview skipped "
-                f"(only DDL/DML produce meaningful dry-run output)"
-            )
-    except Exception as exc:
+
+    # ── Maintenance-command short-circuit (FIX-1) ───────────────────
+    # VACUUM / ANALYZE bypass the BEGIN/ROLLBACK wrapper. They
+    # would fail PG 25001 if forced into the wrapper, and there is
+    # no row-count projection that applies. The dry-run only needs
+    # to admit the grammar check already cleared it, name the
+    # target, and tell the agent to confirm via the autocommit
+    # lane. The audit row lands at the bottom of this function
+    # exactly as for any other dry-run (same shape, same fields).
+    if _statement_is_vacuum_analyze(sql):
+        cleaned = sql.strip().rstrip(";").strip()
+        # Extract the target table from the cleaned form for the
+        # preview note. Grammar allows ``VACUUM``, ``VACUUM t``,
+        # ``VACUUM (ANALYZE)``, ``VACUUM (ANALYZE) t``, and the
+        # ANALYZE mirror forms. A ``(no target)`` form is shown
+        # as ``<whole DB>``.
+        target_token = ""
+        rest = cleaned.upper()
+        for kw in ("VACUUM (ANALYZE)", "VACUUM", "ANALYZE"):
+            if rest.startswith(kw + " "):
+                rest = rest[len(kw):].lstrip()
+                target_token = rest
+                break
+            if rest == kw:
+                target_token = ""
+                break
         preview_lines.append(
-            f"DRY-RUN WRAPPER ERROR ({type(exc).__name__}): {str(exc)[:200]}"
+            "DRY-RUN MAINTENANCE — recognized autocommit maintenance command"
         )
+        preview_lines.append(
+            f"  target_table: {target_token!r}"
+            + (" (whole database)" if not target_token else "")
+        )
+        preview_lines.append(
+            "  no transactional preview applicable — autocommit "
+            "maintenance command (PG forbids VACUUM inside a "
+            "transaction block, 25001)"
+        )
+        preview_lines.append(
+            "  confirm-path executes on a dedicated autocommit engine "
+            "(per-invocation, NullPool, dispose() in finally)"
+        )
+    else:
+        try:
+            if sql_class == "DDL":
+                # Dry-run the DDL — wrapped in BEGIN/ROLLBACK so it does
+                # NOT commit.
+                session.execute(text("BEGIN"))
+                try:
+                    session.execute(text(sql))
+                    preview_lines.append("DRY-RUN DDL EXECUTED INSIDE BEGIN/ROLLBACK — no commit")
+                except Exception as exc:
+                    preview_lines.append(
+                        f"DRY-RUN DDL FAILED ({type(exc).__name__}): "
+                        f"{str(exc)[:200]} — fix the SQL and re-run."
+                    )
+                session.rollback()
+            elif sql_class == "DML":
+                # DML dry-run — same wrapper + row-count projection.
+                session.execute(text("BEGIN"))
+                try:
+                    result = session.execute(text(sql))
+                    previews = _rows_to_dicts(result)
+                    preview_lines.append(
+                        f"DRY-RUN DML EXECUTED INSIDE BEGIN/ROLLBACK — projected "
+                        f"affected rows (first {DRY_RUN_PREVIEW_ROWS}):"
+                    )
+                    for i, row in enumerate(previews, 1):
+                        preview_lines.append(f"  [{i}] {row}")
+                    session.rollback()
+                except Exception as exc:
+                    session.rollback()
+                    preview_lines.append(
+                        f"DRY-RUN DML FAILED ({type(exc).__name__}): "
+                        f"{str(exc)[:200]} — fix the SQL and re-run."
+                    )
+            else:
+                preview_lines.append(
+                    f"DRY-RUN: sql_class={sql_class} — preview skipped "
+                    f"(only DDL/DML produce meaningful dry-run output)"
+                )
+        except Exception as exc:
+            preview_lines.append(
+                f"DRY-RUN WRAPPER ERROR ({type(exc).__name__}): {str(exc)[:200]}"
+            )
 
     # Repository-methods-first warning (architect §3.4).
     preview_lines.append("")
@@ -1285,14 +1566,19 @@ def _write_audit_outcome(
     error_message: str | None = None,
     before_snapshot: dict[str, Any] | None = None,
     after_snapshot: list[dict[str, Any]] | None = None,
-) -> None:
+) -> int | None:
     """Write a ``repair_log`` row in a fresh session (best-effort).
 
-    Called from the rolled-back DML error path and from the dry-run
-    audit-write step. Failures here are logged but never block the
-    caller (the commit-path audit-write is fail-closed — that one
-    IS in the same tx; the rolled-back-path audit-write is
-    best-effort because the tx is already gone).
+    Called from the rolled-back DML error path, the dry-run
+    audit-write step, and the vacuum/analyze committed-path
+    (which must use a different connection from the autocommit
+    engine that ran the VACUUM). Failures here are logged but
+    never block the caller — the inline same-tx audit-write in
+    the DDL/DML committed-path is the fail-closed one (architect
+    §3.2); this helper is best-effort by design.
+
+    Returns the ``repair_log.id`` of the inserted row on success,
+    or ``None`` if the write failed.
     """
     try:
         with Session(engine) as session:
@@ -1313,5 +1599,7 @@ def _write_audit_outcome(
             )
             session.add(row)
             session.commit()
+            return row.id
     except Exception as exc:
         logger.warning("ens_db_repair_execute: audit write failed: %s", exc)
+        return None

@@ -230,6 +230,30 @@ CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD: int = 100_000  # safety cap — skip 
 # daemon/checkpoint_adapter.py::PostgresCheckpointerAdapter.delete_blobs_anti_join.
 CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES: int = 3
 
+# ── PG-only VACUUM (ANALYZE) maintenance (commission backend-db-space-reclamation) ──
+# Section: threshold-gated VACUUM (ANALYZE) sweep on user tables. Plain
+# VACUUM only — NEVER VACUUM FULL (would take ACCESS EXCLUSIVE locks and
+# is forbidden by commission constraints). When ``VACUUM_ENABLED`` is
+# False the maintenance job short-circuits without touching the DB (env
+# kill-switch via ``PERSISTENCE_VACUUM_ENABLED=0``).
+VACUUM_ENABLED: bool = True  # default ON; plain VACUUM is safe + non-blocking; env kill-switch via PERSISTENCE_VACUUM_ENABLED=0
+VACUUM_INTERVAL_HOURS: int = 24  # maintenance cycle; matches the 24h checkpoint_cleanup cadence
+# Threshold for vacuum candidacy. A table qualifies when
+# ``n_dead_tup >= max(VACUUM_DEAD_TUP_MIN, ceil(VACUUM_DEAD_TUP_SCALE_FRACTION * n_live_tup))``
+# The floor ``VACUUM_DEAD_TUP_MIN`` keeps the sweep proportional on tiny
+# tables (50 rows churned per day can still qualify on small tables,
+# but not on a 100M-row fact table where 50 is statistical noise).
+VACUUM_DEAD_TUP_MIN: int = 1000
+VACUUM_DEAD_TUP_SCALE_FRACTION: float = 0.05  # 5% of n_live_tup
+# Lock + idle timeouts for the dedicated vacuum engine. Vacuum cannot
+# wedge production — statement_timeout caps the worst-case footprint of
+# a single VACUUM (10min), lock_timeout caps how long VACUUM waits for
+# a contending lock (45s), idle_in_transaction_session_timeout caps how
+# long the connection sits idle between cycles.
+VACUUM_STATEMENT_TIMEOUT_MS: int = 10 * 60 * 1000  # 10min per VACUUM (ANALYZE)
+VACUUM_LOCK_TIMEOUT_MS: int = 45 * 1000  # 45s — release contended tables fast
+VACUUM_IDLE_IN_TXN_TIMEOUT_MS: int = 60 * 1000  # 60s
+
 # ── Graph & LLM ──────────────────────────────────────────────────────────────────
 GRAPH_RECURSION_LIMIT: int = 100  # LangGraph recursion limit
 LLM_CONCURRENCY: int = 10  # Max concurrent LLM calls
