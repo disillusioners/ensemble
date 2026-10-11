@@ -1,7 +1,7 @@
 """Reference-aware ``checkpoint_blobs`` prune — Phase 1 C3 (PR4, LD-D1 Rev 2).
 
-Single module owning the blob-prune algorithm + the fail-safe. The
-destructive SQL itself lives in
+Single module owning the blob-prune algorithm + the fail-safe + the
+per-pair destruction loop. The destructive SQL itself lives in
 ``daemon/checkpoint_adapter.py::PostgresCheckpointerAdapter`` (the
 ``count_blobs_anti_join`` / ``delete_blobs_anti_join`` pair sharing one
 ``_BLOB_ANTI_JOIN_PREDICATE``); this module decides WHO gets pruned and
@@ -23,20 +23,18 @@ Design invariants (phase1-plan.md §C3, Hard Constraint 6):
    (the ERROR log) and prevention (the ``continue`` before any counting /
    deleting call) are separate, individually tested behaviors.
 
-3. **Conservative ladder** — the operation is DRY-RUN by default. The
-   destructive arm is reachable when ``blob_prune_destructive_enabled()``
-   holds at call time (BOTH ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` AND
-   ``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0``) **OR** the caller passes
-   ``destructive=True`` explicitly (the Maintenance API manual path —
-   :meth:`prune_unreferenced_blobs`'s ``destructive`` override kwarg;
-   INV-2: the explicit kwarg reaches the DELETE arm with the env flags
-   absent). With the gate off AND no explicit kwarg, the only arm the
-   loop can reach is ``count_blobs_anti_join`` (a SELECT); the
-   ``delete_blobs_anti_join`` call site sits textually AFTER the
-   ``if not destructive: ... continue`` guard, so no call path reaches a
-   DELETE. This is structural, not merely conventional —
-   ``tests/unit/services/test_maintenance_prune_direct_anti_join.py``
-   enforces it at the AST level.
+3. **Destructive-by-default** — the anti-join DELETE is the unconditional
+   destructive path. No env-var, config-flag, or on/off switch disables
+   it. The auto cycle (operation E of the maintenance timer) and the
+   manual ``/execute`` endpoint both invoke it; only the manual preview
+   ``/dry-run`` opts out via ``destructive=False`` (the kwarg reaches the
+   SELECT-only ``count_blobs_anti_join`` arm with an explicit override;
+   the ``if not destructive: ... continue`` guard stays in the
+   destructive code path so the dry-run arm remains structurally
+   unreachable to a DELETEs). This is structural, not merely
+   conventional — ``tests/unit/services/
+   test_maintenance_prune_direct_anti_join.py`` enforces the
+   guard-If dominance at the AST level.
 
 4. **Failure isolation** — a per-pair exception is logged and skipped;
    the prune never raises into the maintenance loop, and a failure here
@@ -51,61 +49,16 @@ Design invariants (phase1-plan.md §C3, Hard Constraint 6):
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 
 from daemon.checkpoint_adapter import PostgresCheckpointerAdapter
 from daemon.checkpoint_perf import log_blob_prune
 from daemon.constants import (
-    CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE,
-    CHECKPOINT_BLOB_PRUNE_DRY_RUN,
     CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD,
 )
 
 logger = logging.getLogger(__name__)
-
-# Env-flag names (the conservative ladder's only configuration surface —
-# this is config, NOT a public API).
-ENV_BLOB_PRUNE_DRY_RUN = "CHECKPOINT_BLOB_PRUNE_DRY_RUN"
-ENV_BLOB_PRUNE_DESTRUCTIVE = "CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE"
-
-
-def blob_prune_destructive_enabled() -> bool:
-    """True ONLY when BOTH env flags arm the destructive path.
-
-    ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` AND
-    ``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0`` — evaluated at CALL time (not
-    import time) so tests and operators can flip the ladder without
-    reloading the daemon. Defaults come from ``daemon.constants``
-    (destructive OFF, dry-run ON).
-    """
-    dry_run_default = "1" if CHECKPOINT_BLOB_PRUNE_DRY_RUN else "0"
-    destructive_default = "1" if CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE else "0"
-    dry_run = os.environ.get(ENV_BLOB_PRUNE_DRY_RUN, dry_run_default)
-    destructive = os.environ.get(ENV_BLOB_PRUNE_DESTRUCTIVE, destructive_default)
-    return destructive.strip() == "1" and dry_run.strip() == "0"
-
-
-def blob_prune_env_state() -> dict[str, bool]:
-    """Raw dual-arm env state for the ``maintenance_runs`` audit row (AM-15).
-
-    Returns the two env arms' CURRENT effective values — NOT the
-    combined gate (see :func:`blob_prune_destructive_enabled`).
-    ``maintenance_runs.env_flags_json`` records these alongside
-    ``destructive_override`` to prove INV-2: which mechanism (env
-    dual-arm vs explicit override kwarg) armed the DELETE arm for a
-    given run. Parsing mirrors the gate function exactly (``.strip()``
-    comparisons against the canonical "0"/"1" tokens).
-    """
-    dry_run_default = "1" if CHECKPOINT_BLOB_PRUNE_DRY_RUN else "0"
-    destructive_default = "1" if CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE else "0"
-    dry_run = os.environ.get(ENV_BLOB_PRUNE_DRY_RUN, dry_run_default)
-    destructive = os.environ.get(ENV_BLOB_PRUNE_DESTRUCTIVE, destructive_default)
-    return {
-        "blob_prune_dry_run": dry_run.strip() != "0",
-        "blob_prune_destructive": destructive.strip() == "1",
-    }
 
 
 @dataclass
@@ -177,26 +130,34 @@ async def prune_unreferenced_blobs(
     checkpointer,
     *,
     max_refs_per_thread: int = CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD,
-    destructive: bool | None = None,
+    destructive: bool = True,
 ) -> BlobPruneSummary:
     """Run one reference-aware blob-prune cycle over all (thread, ns) pairs.
 
-    Dry-run by default (reports would-delete counts + bytes, deletes
-    nothing). Destructive when
-    :func:`blob_prune_destructive_enabled` holds at call time OR when
-    the caller passes ``destructive=True`` explicitly (INV-2: the manual
-    Maintenance API path passes the kwarg so an operator does NOT need
-    to pre-arm the env flags). See the module docstring for the
-    structural-gate argument.
+    **Destructive by default.** The anti-join DELETE is the unconditional
+    destructive path; the auto cycle and the manual ``/execute`` endpoint
+    invoke it without an opt-in. Only the manual preview
+    ``/dry-run`` opts out via ``destructive=False`` (the kwarg reaches the
+    SELECT-only ``count_blobs_anti_join`` arm). The historical dual-arm
+    env-flag gate (``CHECKPOINT_BLOB_PRUNE_DRY_RUN`` /
+    ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE``) and the conservative ladder
+    that gated it are gone — see feature/blob-prune-default-on.
 
-    The override kwarg is read-only; the env dual-arm gate function
-    :func:`blob_prune_destructive_enabled` itself is untouched. The
-    ``destructive`` LOCAL NAME is preserved (shadowed from the kwarg at
-    the gate feed) so the AST dominance pin in
-    ``tests/unit/services/test_maintenance_prune_direct_anti_join.py::
-    test_delete_call_is_structurally_gated_by_destructive_flag`` stays
-    green (the pin keys on ``ast.Name(id="destructive")`` — see INV-3,
-    R-9).
+    The ``destructive`` kwarg is the SOLE control surface on this
+    function. ``True`` is the default for every caller that does not
+    explicitly opt out; ``False`` forces the SELECT-only dry-run arm. The
+    local name ``destructive`` is preserved (rebinds at the gate feed)
+    so the AST dominance pin in
+    ``tests/unit/services/test_maintenance_prune_direct_anti_join.py``
+    keeps its ``ast.Name(id="destructive")`` predicate green — see R-9
+    in the override work that established the pin.
+
+    Per-pair destruction is bounded: the destructive arm invokes
+    ``delete_blobs_anti_join`` (PG) which breaks the per-pair DELETE
+    into chunks of at most
+    ``CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE`` rows, each chunk a
+    separate SERIALIZABLE transaction with the bounded retry wrap. No
+    single statement is unbounded — pool-hazard class closed.
 
     Never raises: per-pair failures are logged and skipped; the outer
     try/except makes even candidate-enumeration failures non-fatal (the
@@ -214,12 +175,6 @@ async def prune_unreferenced_blobs(
             summary.backend = "sqlite"
             return summary
 
-        # T2: gate feed — explicit kwarg wins over env (manual preview /
-        # INV-2 manual destructive execute), env wins over nothing (auto
-        # cycle), ``None`` → env dual-arm (unchanged behavior). The local
-        # ``destructive`` name is preserved for the structural pin (R-9).
-        if destructive is None:
-            destructive = blob_prune_destructive_enabled()  # env dual-arm — AUTO path, unchanged
         summary.dry_run = not destructive
 
         # D21: ALL (thread_id, checkpoint_ns) pairs — find_excess_checkpoint_

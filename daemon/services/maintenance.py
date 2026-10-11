@@ -635,11 +635,15 @@ class CheckpointCleanupJob:
         Single-flight (T3 / AM-4): when ``_run_lock`` is wired, the
         lock is acquired BEFORE the conditional INSERT and released in
         ``finally``. The auto call site passes no kwargs to the blob
-        arm (``_prune_unreferenced_blobs(destructive=None)``) so the
-        env dual-arm gate is the destructive arbiter for the auto cycle
-        — INV-1 / INV-9. The lock-holder LOSES path (no ops, NO row,
-        DEBUG with the in-flight run_id, ``job.last_run`` updated by
-        the caller to re-arm the interval — the skip is non-raising)
+        arm (lands on the ``destructive=True`` default — the
+        unconditional destructive prune is the auto cycle's behavior
+        since feature/blob-prune-default-on retired the env-flag gate;
+        INV-1 / INV-9 — the destructive ``if not destructive: ...
+        continue`` guard structurally contains the dry-run SELECT-only
+        arm, NOT the other way around). The lock-holder LOSES path
+        (no ops, NO row, DEBUG with the in-flight run_id,
+        ``job.last_run`` updated by the caller to re-arm the interval
+        — the skip is non-raising)
         is the AM-4 / Focus Area 6 non-raising skip path. An INSERT
         CONFLICT on the partial unique index (the two-dev-daemons-
         on-shared-PG class, AM-5) takes the same skip path — the DB
@@ -653,7 +657,6 @@ class CheckpointCleanupJob:
         # checkpoint_prune/timestamps imports are call-frequency
         # trivial but stay lazy for the same cold-import-cycle reason —
         # see daemon/config.py→services cold-import cycle precedent).
-        from daemon.services.checkpoint_prune import blob_prune_env_state
         from daemon.services.maintenance_run_identity import new_maintenance_run_id
         from daemon.services.timestamps import now_utc_iso
         from daemon.services.maintenance_run_lock import MaintenanceRunContext
@@ -720,8 +723,13 @@ class CheckpointCleanupJob:
                         status="running",
                         triggered_by=ctx.triggered_by,
                         env_flags_json={
-                            **blob_prune_env_state(),
-                            "destructive_override": False,  # auto never passes the kwarg
+                            # Auto cycle: destructive is the unconditional
+                            # default since feature/blob-prune-default-on.
+                            # The audit row records the kwarg value the
+                            # cycle ran with (always True here — the auto
+                            # cycle never opts out); the previous
+                            # dual-arm env-state fields are gone.
+                            "destructive": True,
                         },
                     )
                 )
@@ -771,8 +779,9 @@ class CheckpointCleanupJob:
             # ``prune_unreferenced_blobs`` itself never raises; this
             # belt-and-braces wrapper guarantees the isolation even if
             # that contract regresses. T1.6 — captures the summary for
-            # the audit row; the destructive kwarg is NOT passed (auto
-            # cycle uses the env gate — INV-1).
+            # the audit row; no ``destructive`` kwarg — auto cycle uses
+            # the unconditional default ``destructive=True`` since
+            # feature/blob-prune-default-on retired the env-flag gate.
             blobs_summary = BlobPruneSummary()
             try:
                 blobs_summary = await self._prune_unreferenced_blobs()
@@ -1287,29 +1296,41 @@ class CheckpointCleanupJob:
     async def _prune_unreferenced_blobs(
         self, *, destructive: bool | None = None
     ) -> "BlobPruneSummary":
-        """(E) Phase 1 C3 — reference-aware checkpoint_blobs prune (dry-run default).
+        """(E) Phase 1 C3 — reference-aware checkpoint_blobs prune.
+
+        **Destructive-by-default** (feature/blob-prune-default-on). The
+        anti-join DELETE is the unconditional destructive path; the
+        historical dual-arm env-flag gate
+        (``CHECKPOINT_BLOB_PRUNE_DRY_RUN`` /
+        ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE``) is gone — no env-var,
+        config-flag, or on/off switch of any kind disables the prune.
+        The auto cycle omits the kwarg and lands on the
+        ``destructive=True`` default; the manual ``/execute`` API path
+        passes ``destructive=True``; the manual ``/dry-run`` preview
+        path passes ``destructive=False`` (the only way to opt out, and
+        it stays SELECT-only).
 
         Deletes blobs whose (channel, version) is not referenced by
         ``checkpoint->'channel_versions'`` of any REMAINING checkpoint row
         in the same (thread_id, checkpoint_ns) — the direct anti-join
         (decision D1: no reference-table machinery). The algorithm, the
-        zero-refs fail-safe, and the destructive env-flag gate all live in
+        zero-refs fail-safe, and the per-pair ``if not destructive: ...
+        continue`` guard all live in
         ``daemon/services/checkpoint_prune.py`` (single owner per the C3
         file table); this wrapper only delegates to it.
-
-        Conservative ladder: DRY-RUN ONLY by default (reports would-delete
-        counts + bytes, deletes nothing). The destructive arm requires
-        BOTH ``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0`` AND
-        ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` (the auto cycle's
-        env-arming path; auto call sites pass no kwarg → env gate) OR
-        an explicit ``destructive=True`` kwarg (the manual Maintenance
-        API execute path; INV-2 — see T2 / T1.6). PostgreSQL-only — no-ops
-        with a WARNING on SQLite backends.
 
         Candidates are enumerated via ``find_all_thread_ns_pairs`` (D21) —
         ALL (thread_id, checkpoint_ns) pairs, NOT
         ``find_excess_checkpoint_groups`` whose HAVING clause would skip
         single-checkpoint threads.
+
+        Per-pair destruction is LIMIT-batched:
+        ``delete_blobs_anti_join`` (PG) breaks the DELETE into chunks of
+        ``CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE`` rows, each chunk its
+        own SERIALIZABLE transaction with bounded retry on SQLSTATE 40001
+        / 40P01 (pool-hazard class closed by construction — see the
+        chunk-loop comment in ``daemon/checkpoint_adapter.py``).
+        PostgreSQL-only — no-ops with a WARNING on SQLite backends.
 
         T1.6 — the previous shape discarded the returned ``BlobPruneSummary``
         (was ``await prune_unreferenced_blobs(self._checkpointer)`` — the
@@ -1319,7 +1340,13 @@ class CheckpointCleanupJob:
         audit row.
         """
         return await prune_unreferenced_blobs(
-            self._checkpointer, destructive=destructive
+            self._checkpointer,
+            # ``None`` → service-side default (destructive=True since
+            # feature/blob-prune-default-on); pass-through preserves the
+            # pre-existing call-site signature ``destructive: bool |
+            # None`` for the manual ``/dry-run`` (False) and ``/execute``
+            # (True / None) paths.
+            destructive=destructive if destructive is not None else True,
         )
 
     async def _compute_row_prune_dry_run(
@@ -1465,10 +1492,14 @@ class CheckpointCleanupJob:
         self-healing.
         """
         t0 = time.perf_counter()
-        # MANUAL dry-run blob arm: forced dry-run (NOT the env gate —
-        # operator's manual preview must NOT inherit an armed env).
-        # Manual destructive execute: explicit ``destructive=True``;
-        # INV-2 — no env pre-arming required.
+        # MANUAL entry-point blob arm — destructive-by-default
+        # (feature/blob-prune-default-on). ``None`` lands on
+        # ``destructive=True`` (the auto cycle path); ``False`` keeps
+        # the manual preview read-only; ``True`` is the
+        # ``/execute`` confirmation path. The historical INV-2 rule
+        # (``manual preview never inherits an armed env``) is now
+        # trivial — there is no env to inherit from; the kwarg is the
+        # sole arbiter.
         blob_destructive = bool(destructive)
         blobs = await self._prune_unreferenced_blobs(destructive=blob_destructive)
         if not isinstance(blobs, BlobPruneSummary):  # belt-and-braces typing guard

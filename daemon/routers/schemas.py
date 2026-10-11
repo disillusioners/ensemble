@@ -1869,13 +1869,15 @@ class CheckpointCleanupAvailabilityResponse(BaseModel):
 
 
 class CheckpointCleanupConfigBlock(BaseModel):
-    """The ``config`` block of ``/status`` — LIVE env at request time.
+    """The ``config`` block of ``/status`` — LIVE effective config at request time.
 
-    ``blob_prune_destructive_armed`` reflects the EFFECTIVE dual-arm
-    state (BOTH ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` AND
-    ``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0``) — read via
-    ``blob_prune_destructive_enabled()`` at request time, NOT
-    boot-cached config ([R-6, leader ruling (a)]).
+    ``blob_prune_destructive_default`` reflects the unconditional
+    default of the reference-aware blob prune — destructive-on by
+    construction since the dual-arm env-flag gate was retired
+    (feature/blob-prune-default-on). There is no per-env override;
+    operators can still opt out per-call only via the manual
+    ``POST /api/maintenance/checkpoint-cleanup/dry-run`` path, which
+    stays SELECT-only.
     """
 
     checkpoint_max_per_thread: int = Field(..., description="Persisted retention cap")
@@ -1883,11 +1885,11 @@ class CheckpointCleanupConfigBlock(BaseModel):
         ..., description="Floor constant (CHECKPOINT_MAX_PER_THREAD_FLOOR)"
     )
     cleanup_interval_hours: float = Field(..., description="Auto-cycle interval (hours)")
-    blob_prune_dry_run_env_default: str = Field(
-        ..., description="CHECKPOINT_BLOB_PRUNE_DRY_RUN env value as '0'|'1'"
-    )
-    blob_prune_destructive_armed: bool = Field(
-        ..., description="Effective dual-arm state at request time"
+    blob_prune_destructive_default: bool = Field(
+        ..., description=(
+            "Always true — destructive prune is the unconditional default "
+            "since feature/blob-prune-default-on."
+        )
     )
 
 
