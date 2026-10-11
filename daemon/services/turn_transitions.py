@@ -794,8 +794,21 @@ class RetryTurn(_Transition):
         return current
 
     def _rearm_watchers_in_txn(self, session) -> list[str]:
-        """Quarantine + arm every parent-keyed watcher (in-txn, never
-        raises past the caller's transaction semantics).
+        """Quarantine + arm every parent-keyed watcher in this
+        transaction.
+
+        A DB-level failure here does NOT get swallowed — it
+        propagates out of this method, the surrounding
+        ``engine.begin()`` block rolls back, and the entire retry
+        transaction is aborted atomically. The parent ``task``
+        UPDATE, the child ``task`` INSERT, the F6 watcher re-key,
+        and the quarantine INSERTs are one all-or-nothing unit
+        (daemon death = all-or-nothing). In-transaction placement
+        is the load-bearing choice: cancel → persist → re-arm must
+        commit together or not at all, so a mid-flight failure
+        cannot leave the watch table half-migrated (re-key without
+        quarantine or quarantine without re-key) — both would
+        re-open the silent-loss class this hook was built to close.
 
         For each ``job_watchers`` row still keyed on the parent:
 

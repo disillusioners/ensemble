@@ -44,6 +44,7 @@ files read as one family.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -483,3 +484,165 @@ class TestE1MissionLiveFinalizeGate:
                 )
             ).fetchone()[0]
         assert state != AdmissionState.ACTIVE.value
+
+    @pytest.mark.asyncio
+    async def test_e1_guard_error_fails_open_to_finalize_f1(
+        self,
+        engine,
+        repository,
+        lock_repo,
+        task_repository,
+        caplog,
+    ):
+        """Reviewer direction-pin (rider, post-review) — the E1
+        mission-live guard's fail-open contract is FROZEN: when
+        ``evaluate_mission_live`` reports an internal error
+        (``live=False, error=True`` — any exception inside the guard
+        collapses to this verdict by the wrapper at
+        ``mission_live_guard.py:210-226``), the f1 finalize
+        PROCEEDS with a logged WARN rather than refusing the
+        finalize.
+
+        Rationale: a missing terminal report is WORSE than an extra
+        premature one — at-least-once terminal delivery is preserved.
+        A flip to fail-closed here would wedge instance-less orphans
+        ACTIVE forever (the guard's seam-error path is exactly the
+        case where the row has no other resolution path — fail-closed
+        = stranded row).
+
+        This test pins the direction so it can never silently flip:
+
+        (a) the f1 finalize PROCEEDS anyway (fail-open) — the
+            boundary ``_finalize_terminal`` IS awaited, the JobItem
+            leaves ACTIVE;
+        (b) a WARN is logged at the f1 lane (operator visibility on
+            the direction — distinguishes a guard error from a
+            clean all-terminal verdict);
+        (c) the ``live=True`` skip detail family
+            (``orphan_active_skipped_mission_live_f1``) MUST NOT
+            fire — that detail is for a guard verdict of
+            ``live=True``; on ``error=True`` the f1 lane proceeds
+            and the WARN is the only signal.
+        """
+        import daemon.services.job_recovery_service as jrs_module
+        from daemon.services.mission_live_guard import (
+            MissionLiveVerdict,
+        )
+
+        instance_repo = SQLModelInstanceRepository(engine=engine)
+        # All-terminal tree: the natural E1 path would already open
+        # the door. We force the ERROR state via monkeypatch so the
+        # test exercises the f1 lane's fail-open branch (the
+        # ``error=True / timed_out=True`` log + skip-finalize guard
+        # at job_recovery_service.py:2700-2711), NOT the clean
+        # all-terminal branch. W1 conjunct passes naturally (no live
+        # retry child on the seeded instance).
+        _seed_043d64a8_shape(engine, mission_live=False)
+        jq = _boundary_mock(repository)
+        witness_manager = _witness_manager(instance_repo)
+        service = _make_service(
+            engine=engine,
+            repository=repository,
+            lock_repo=lock_repo,
+            instance_repo=instance_repo,
+            task_repository=task_repository,
+            job_queue_service_mock=jq,
+            witness_manager=witness_manager,
+        )
+
+        # Force the E1 guard into the ERROR state — the canonical
+        # ``evaluate_mission_live`` wrapper collapses any internal
+        # exception (``RuntimeError`` from the unwired-seam check at
+        # ``mission_live_guard.py:277-281`` or any other guard
+        # internal) to ``live=False, error=True``. The f1 lane
+        # MUST proceed (fail-open) and emit a WARN.
+        original_eval = jrs_module.evaluate_mission_live
+        jrs_module.evaluate_mission_live = AsyncMock(
+            return_value=MissionLiveVerdict(
+                live=False,
+                reason=(
+                    "FORCED E1 ERROR — guard returned error=True "
+                    "(test injection; mirrors the RuntimeError "
+                    "seam-error collapse at "
+                    "mission_live_guard.py:277-281)"
+                ),
+                error=True,
+                timed_out=False,
+            )
+        )
+        try:
+            with caplog.at_level(
+                logging.WARNING,
+                logger="daemon.services.job_recovery_service",
+            ):
+                stats = await service.reconcile_drift_states(
+                    min_pending_age_seconds=0,
+                    min_orphan_age_seconds=60,
+                )
+            details = (
+                stats.get("details", [])
+                if isinstance(stats, dict) else []
+            )
+        finally:
+            jrs_module.evaluate_mission_live = original_eval
+
+        # (a) f1 finalize PROCEEDS — fail-open. The boundary was
+        # called exactly once (cancelled target — the Task's
+        # terminal status is authoritative).
+        jq._finalize_terminal.assert_awaited_once()
+        # The JobItem left ACTIVE.
+        with engine.begin() as conn:
+            state = conn.execute(
+                text(
+                    "SELECT admission_state FROM job_queue_items "
+                    "WHERE job_id = 'job-e1-043d'"
+                )
+            ).fetchone()[0]
+        assert state != AdmissionState.ACTIVE.value
+
+        # (c) the ``live=True`` skip detail family MUST NOT fire —
+        # that detail is for ``mission_verdict.live == True`` only.
+        # On ``error=True`` the f1 lane proceeds and the WARN is
+        # the only signal.
+        assert not any(
+            d.get("pattern")
+            == "orphan_active_skipped_mission_live_f1"
+            for d in details
+        ), details
+        # The terminal-routed detail DID fire (the boundary was
+        # called) — sanity check that the fail-open branch hit
+        # the expected follow-on path, not some other short-circuit.
+        assert any(
+            d.get("pattern") == "orphan_active_failed_terminal"
+            for d in details
+        ), details
+
+        # (b) WARN logged at the f1 lane — operator visibility on
+        # the fail-open direction. The dedicated log line at
+        # ``job_recovery_service.py:2704-2711`` distinguishes
+        # ``error=True`` / ``timed_out=True`` from a clean
+        # all-terminal verdict (which emits no log line at the f1
+        # lane — the post-boundary DONE log at :2742 fires for
+        # BOTH).
+        fail_open_warnings = [
+            record for record in caplog.records
+            if record.levelno == logging.WARNING
+            and "mission-live guard opened the finalize door"
+            in record.getMessage()
+        ]
+        assert fail_open_warnings, (
+            "FAIL-OPEN contract: the f1 lane MUST emit a WARN when "
+            "the E1 guard returns error=True (operator visibility "
+            "on the direction). Got none. Pinning this prevents a "
+            "silent flip to fail-closed (which would wedge "
+            "instance-less orphans ACTIVE forever — the guard's "
+            "seam-error path is exactly the case where the row "
+            "has no other resolution path)."
+        )
+        # The WARN MUST carry error=True (not timed_out) — the
+        # injection's ``error=True, timed_out=False`` shape.
+        assert any(
+            "error=True" in record.getMessage()
+            and "timed_out=False" in record.getMessage()
+            for record in fail_open_warnings
+        ), fail_open_warnings
