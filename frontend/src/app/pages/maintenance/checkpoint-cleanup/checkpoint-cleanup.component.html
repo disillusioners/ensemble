@@ -106,10 +106,9 @@
       [linear]="false"
       [selectedIndex]="activeStep()"
       (selectionChange)="onStepperSelectionChange(desktopStepper)"
-      editable="false"
     >
       <!-- -- Step 1: Review (spec §2.3) ----------------------------------- -->
-      <mat-step label="1. Review">
+      <mat-step label="1. Review" editable="false">
         <div class="ck-step-content">
           <section class="ck-card ck-status" data-testid="ck-status">
             <h3>Configuration</h3>
@@ -188,7 +187,7 @@
       </mat-step>
 
       <!-- -- Step 2: Dry-run (spec §2.4) ---------------------------------- -->
-      <mat-step label="2. Dry-run">
+      <mat-step label="2. Dry-run" editable="false">
         <div class="ck-step-content">
           <section class="ck-card ck-dry-run" data-testid="ck-dry-run">
             <h3>Dry-run check</h3>
@@ -291,7 +290,7 @@
       </mat-step>
 
       <!-- -- Step 3: Confirm & Execute (spec §2.5) ------------------------ -->
-      <mat-step label="3. Confirm & Execute">
+      <mat-step label="3. Confirm & Execute" editable="false">
         <div class="ck-step-content">
           <section class="ck-card ck-execute" data-testid="ck-execute">
             <h3>Confirm cleanup</h3>
@@ -352,7 +351,7 @@
       </mat-step>
 
       <!-- -- Step 4: Result (spec §2.6) ----------------------------------- -->
-      <mat-step label="4. Result">
+      <mat-step label="4. Result" editable="false">
         <div class="ck-step-content">
           @if (lastExecuteResult(); as res) {
             <section class="ck-card ck-result-panel" data-testid="ck-result">
@@ -494,10 +493,9 @@
       [linear]="false"
       [selectedIndex]="activeStep()"
       (selectionChange)="onStepperSelectionChange(mobileStepper)"
-      editable="false"
     >
       <!-- -- Step 1: Review (spec §2.3) ----------------------------------- -->
-      <mat-step label="1. Review">
+      <mat-step label="1. Review" editable="false">
         <div class="ck-step-content">
           <section class="ck-card ck-status" data-testid="ck-status">
             <h3>Configuration</h3>
@@ -576,7 +574,7 @@
       </mat-step>
 
       <!-- -- Step 2: Dry-run (spec §2.4) ---------------------------------- -->
-      <mat-step label="2. Dry-run">
+      <mat-step label="2. Dry-run" editable="false">
         <div class="ck-step-content">
           <section class="ck-card ck-dry-run" data-testid="ck-dry-run">
             <h3>Dry-run check</h3>
@@ -679,7 +677,7 @@
       </mat-step>
 
       <!-- -- Step 3: Confirm & Execute (spec §2.5) ------------------------ -->
-      <mat-step label="3. Confirm & Execute">
+      <mat-step label="3. Confirm & Execute" editable="false">
         <div class="ck-step-content">
           <section class="ck-card ck-execute" data-testid="ck-execute">
             <h3>Confirm cleanup</h3>
@@ -740,7 +738,7 @@
       </mat-step>
 
       <!-- -- Step 4: Result (spec §2.6) ----------------------------------- -->
-      <mat-step label="4. Result">
+      <mat-step label="4. Result" editable="false">
         <div class="ck-step-content">
           @if (lastExecuteResult(); as res) {
             <section class="ck-card ck-result-panel" data-testid="ck-result">

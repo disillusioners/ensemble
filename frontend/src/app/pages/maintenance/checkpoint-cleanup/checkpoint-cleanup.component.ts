@@ -181,13 +181,38 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   });
 
   /**
-   * W1 — sync `activeStep()` with Material's `<mat-stepper>` selection.
-   * Bound to `(selectionChange)` on BOTH orientation branches in the
-   * template. Without this, header-driven step jumps leave the custom
-   * footer rendering the WRONG active-step buttons (per-step branch
-   * in the template reads `activeStep()`, but the stepper's internal
-   * `selectedIndex` would diverge). The handler clamps to the valid
-   * 0..3 range as a defensive belt — the stepper already clamps.
+   * Selection-change gate — wiznav-fix. Was previously a sync handler
+   * that mirrored any `selectionChange` into `activeStep()`; that
+   * shape propagated header-driven jumps (mouse clicks on the 72px
+   * cursor:pointer header strip, CDK `Enter`/`Space`/arrow on a
+   * roving-tabindex focused header, focus-loss teleport via
+   * `_containsFocus()`, and the W1 two-way `[selectedIndex]`
+   * `↔ (selectionChange)` bounce after `@if` button-destroy swaps)
+   * straight into `activeStep()`. Per the spec, navigation is FOOTER-
+   * ONLY with one app-driven exception (poll auto-advance on
+   * `succeeded` runs at TS:614); every other path must be a no-op.
+   *
+   * Controlled-input shape: `[selectedIndex]="activeStep()"` is the
+   * one-way binding that drives the stepper's index from the
+   * component-side signal. This handler only verifies the invariant
+   * `stepper.selectedIndex === activeStep()` and REVERTS on mismatch
+   * — no signal write, no propagation. Net effect:
+   *
+   *   - App-initiated change (footer click / `stepperNav()` /
+   *     poll auto-advance): binding pushes the new index into the
+   *     stepper → selectionChange fires → handler sees
+   *     `selectedIndex === activeStep()` → no-op.
+   *   - User-initiated change (header mouse / keyboard / focus
+   *     teleport / W1 bounce): stepper updates `selectedIndex` on
+   *     its own → selectionChange fires → handler sees
+   *     `selectedIndex !== activeStep()` → REVERTS by writing
+   *     `stepper.selectedIndex = activeStep()`. CD cycle then
+   *     re-aligns via the binding.
+   *
+   * Mouse is also fenced upstream by `pointer-events: none` on
+   * `.mat-step-header` (see component.scss), but the revert here is
+   * the load-bearing guarantee — keyboard and focus-teleport still
+   * reach the stepper's selectionChange emitter.
    */
   onStepperSelectionChange(stepper: MatStepper | undefined): void {
     if (!stepper) {
@@ -197,9 +222,16 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     if (idx < 0 || idx > 3) {
       return;
     }
-    if (idx !== this.activeStep()) {
-      this.activeStep.set(idx);
+    if (idx === this.activeStep()) {
+      return; // already in sync (app-initiated change flushed via binding)
     }
+    // Mismatch: someone moved the stepper without our permission.
+    // Revert to our state — the controlled-input shape makes
+    // stepper.selectedIndex the dependent, activeStep() the source.
+    // Angular's `[selectedIndex]="activeStep()"` binding stabilizes
+    // on the next CD cycle; we set the property synchronously to
+    // short-circuit the visible jump.
+    stepper.selectedIndex = this.activeStep();
   }
 
   // ── Status Strip render helpers (spec §2.1) ────────────────────────────

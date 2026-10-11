@@ -491,15 +491,32 @@ mat-progress-bar {
       background: transparent;
     }
 
+    // wiznav-fix — the wizard's stepper is nav-by-footer only
+    // (spec §2.2 + footer-only nav stipulation; cf. designer spec
+    // .agents/designer/specs/maintenance-checkpoint-cleanup-redesign.md
+    // :397,:450). Visual-only progress indicators: every input
+    // affordance is disabled here.
+    //
+    //   - `pointer-events: none` blocks MOUSE clicks on the 72px
+    //     header strip (Material default is `cursor: pointer`, our
+    //     override below removes the visual cue too).
+    //   - `cursor: default` removes Material's default `cursor:
+    //     pointer` so the element doesn't advertise as clickable.
+    //   - The cdk-program-focused / cdk-keyboard-focused background
+    //     tints are zeroed so keyboard roving tabindex doesn't
+    //     produce a "this header looks selected" hint — the header
+    //     strip is a progress bar, not a nav target.
     .mat-step-header {
       padding: 0.75rem 1rem;
       border-radius: 6px;
+      pointer-events: none;
+      cursor: default;
     }
 
     .mat-step-header.cdk-program-focused,
     .mat-step-header.cdk-keyboard-focused,
     .mat-step-header:hover {
-      background: rgba($bg-card-hover, 0.5);
+      background: transparent;
     }
 
     .mat-step-header .mat-step-icon {

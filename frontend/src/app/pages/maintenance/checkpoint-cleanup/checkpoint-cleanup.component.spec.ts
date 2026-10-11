@@ -272,19 +272,25 @@ class TestableCheckpointCleanupComponent {
   // Spec calls test via direct mutation of this signal.
   readonly isDesktop = signal(false);
   /**
-   * W1 — selectionChange handler. Mirrors production: clamps to the
-   * 0..3 valid step range and updates `activeStep()` from the
-   * stepper's `selectedIndex`. Header-driven jumps propagate here;
-   * the footer's `activeStep()` branch reads pick up the new index
-   * and render the right buttons.
+   * wiznav-fix — controlled-input revert. Mirrors production
+   * verbatim. Was previously a sync handler that mirrored any
+   * `selectionChange` into `activeStep()` — that shape
+   * propagated header-driven jumps (mouse/keyboard/focus
+   * teleport/W1 bounce). The new shape is: invariant check + REVERT
+   * the stepper back to `activeStep()` on mismatch. App-initiated
+   * changes (footer buttons + poll auto-advance) flush via the
+   * `[selectedIndex]="activeStep()"` binding and arrive as a
+   * matching index → no-op. User-initiated header routes arrive as
+   * a mismatched index → revert. See production component.ts
+   * `onStepperSelectionChange` docstring for the full rationale.
    */
   onStepperSelectionChange(stepper: { selectedIndex: number } | undefined): void {
     if (!stepper) return;
     const idx = stepper.selectedIndex;
     if (idx < 0 || idx > 3) return;
-    if (idx !== this.activeStep()) {
-      this.activeStep.set(idx);
-    }
+    if (idx === this.activeStep()) return; // in-sync (app-initiated)
+    // Mismatch (user-initiated) → revert the stepper back to our state.
+    stepper.selectedIndex = this.activeStep();
   }
   // canContinueFromStep1 / Step2 / Step3 are pure functions of the
   // service-exposed signals + local UI state. Mirror production.
@@ -1939,23 +1945,55 @@ describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
     });
   });
 
-  describe('onStepperSelectionChange (W1 — stepper navigation desync)', () => {
-    it('updates activeStep() from the stepper selectedIndex (header-driven jump)', () => {
-      // Simulate the operator clicking the "Result" step header
-      // (index 3). The custom footer reads `activeStep()` to
-      // render the right per-step buttons; without this sync the
-      // footer would stay stuck on the previous step's buttons.
-      component.onStepperSelectionChange({ selectedIndex: 3 });
-      expect(component.activeStep()).toBe(3);
+  describe('onStepperSelectionChange (wiznav-fix — controlled-input revert)', () => {
+    // The handler is the load-bearing guarantee for the bug:
+    // previously it propagated any `selectionChange` into
+    // `activeStep()`. After the fix, navigation is footer-only (plus
+    // poll auto-advance) and the handler REVERTS the stepper back
+    // to `activeStep()` on any mismatch. Mouse is also fenced
+    // upstream by `pointer-events: none` on `.mat-step-header`
+    // (component.scss), but the revert here is what blocks keyboard
+    // and focus-teleport.
+
+    it('mismatch (user-initiated header nav) reverts stepper.selectedIndex to activeStep() and does NOT propagate to activeStep()', () => {
+      // The pre-fix bug: a header click drove activeStep to the
+      // header's index. The fix: stepper's selectionChange arrives,
+      // we see idx !== activeStep(), we WRITE stepper.selectedIndex
+      // BACK to activeStep() and leave activeStep untouched.
+      component.activeStep.set(0);
+      const stepper: { selectedIndex: number } = { selectedIndex: 3 };
+      component.onStepperSelectionChange(stepper);
+      // activeStep unchanged
+      expect(component.activeStep()).toBe(0);
+      // stepper reverted back to the component's source of truth
+      expect(stepper.selectedIndex).toBe(0);
     });
 
-    it('updates activeStep() from an arbitrary valid index', () => {
-      component.onStepperSelectionChange({ selectedIndex: 1 });
-      expect(component.activeStep()).toBe(1);
-      component.onStepperSelectionChange({ selectedIndex: 2 });
+    it('match (app-initiated via [selectedIndex] binding flush) is a no-op — no signal write, no revert', () => {
+      // App writes activeStep.set(N); Angular's binding pushes
+      // stepper.selectedIndex = N; selectionChange fires with
+      // selectedIndex === activeStep(); handler short-circuits.
+      // Verifies the controlled-input shape does NOT write
+      // activeStep on the app-initiated route.
+      component.activeStep.set(2);
+      const stepper: { selectedIndex: number } = { selectedIndex: 2 };
+      component.onStepperSelectionChange(stepper);
       expect(component.activeStep()).toBe(2);
-      component.onStepperSelectionChange({ selectedIndex: 0 });
-      expect(component.activeStep()).toBe(0);
+      expect(stepper.selectedIndex).toBe(2);
+    });
+
+    it('arbitrary mismatch index is reverted back to the current activeStep', () => {
+      component.activeStep.set(1);
+      const stepper: { selectedIndex: number } = { selectedIndex: 0 };
+      component.onStepperSelectionChange(stepper);
+      expect(component.activeStep()).toBe(1);
+      expect(stepper.selectedIndex).toBe(1);
+
+      component.activeStep.set(3);
+      const stepper2: { selectedIndex: number } = { selectedIndex: 2 };
+      component.onStepperSelectionChange(stepper2);
+      expect(component.activeStep()).toBe(3);
+      expect(stepper2.selectedIndex).toBe(3);
     });
 
     it('is a no-op when the stepper arg is undefined', () => {
@@ -1964,23 +2002,128 @@ describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
       expect(component.activeStep()).toBe(2);
     });
 
-    it('clamps out-of-range selectedIndex (does not write activeStep)', () => {
+    it('clamps out-of-range selectedIndex (does not write activeStep or revert)', () => {
       component.activeStep.set(1);
       // Negative or >3 should be ignored — Material stepper already
-      // clamps, but the handler defends defensively.
+      // clamps, but the handler defends defensively. The revert is
+      // also gated on the clamp so an out-of-range value never
+      // drives a bogus stepper write.
       component.onStepperSelectionChange({ selectedIndex: -1 });
       expect(component.activeStep()).toBe(1);
       component.onStepperSelectionChange({ selectedIndex: 4 });
       expect(component.activeStep()).toBe(1);
     });
+  });
 
-    it('is idempotent when selectedIndex === activeStep()', () => {
+  describe('wiznav-fix — full flow invariants (mouse / keyboard / focus / footer / poll)', () => {
+    // The contract after wiznav-fix is: navigation is FOOTER-ONLY
+    // (plus the poll auto-advance on `succeeded` runs, separately
+    // covered at "W1 — auto-advance to Step 4 on successful
+    // execute"). The handler reverts ANY user-initiated stepper
+    // change back to activeStep(). These tests document the
+    // behaviors that close the bug surface area.
+    //
+    // JSDOM NOTE — jest-environment-jsdom does not enforce the
+    // Material CDK stepper's click/keyboard handlers (the
+    // `<mat-stepper>` and `<mat-step>` elements render as raw
+    // custom elements under NO_ERRORS_SCHEMA). We therefore model
+    // the user-initiated paths as direct invocations of the
+    // production handler with a mutated `selectedIndex`, which is
+    // the load-bearing assertion — the handler IS the gate. The
+    // TestBed describe below (orientation locator contract) pins
+    // the structural conditions (editable=false on every mat-step,
+    // no editable on the mat-stepper, pointer-events:none in SCSS)
+    // that close the upstream paths.
+
+    it('footer click path: stepperNav().next() sets activeStep, binding flush is a no-op when handler runs', () => {
+      // Simulate an operator clicking ck-continue-btn (footer). The
+      // real path is: button (click) → stepperNav().next() →
+      // activeStep.update(i => i + 1) → Angular re-renders →
+      // [selectedIndex]="activeStep()" binding writes
+      // stepper.selectedIndex = activeStep() → stepper emits
+      // selectionChange → handler called with matching index →
+      // no-op (in-sync invariant). We model the tail of that
+      // chain by manually setting activeStep, building a stepper
+      // whose selectedIndex matches (the post-binding-flush state),
+      // and asserting the handler is a no-op.
+      component.activeStep.set(0);
+      // Footer click → stepperNav().next() → activeStep=1
+      component.stepperNav().next();
+      expect(component.activeStep()).toBe(1);
+      // Angular binding flush: stepper.selectedIndex = activeStep()
+      const stepper: { selectedIndex: number } = { selectedIndex: 1 };
+      // Handler sees matching index → no-op (does NOT mutate
+      // anything; doesn't cause a re-emit loop).
+      component.onStepperSelectionChange(stepper);
+      expect(component.activeStep()).toBe(1);
+      expect(stepper.selectedIndex).toBe(1);
+    });
+
+    it('header mouse path: a "clicked" header attempts to write selectedIndex to an arbitrary value; handler reverts', () => {
+      // Simulates a mouse click on the 72px header strip (pre-fix
+      // observable). Material CDK would emit selectionChange with
+      // the clicked header's index; we hand-craft that here.
+      component.activeStep.set(0);
+      // Imagine operator clicked "Result" (index 3) — CDK writes
+      // stepper.selectedIndex = 3 and emits selectionChange.
+      const stepper: { selectedIndex: number } = { selectedIndex: 3 };
+      component.onStepperSelectionChange(stepper);
+      // Bug-fix invariant: activeStep did NOT advance.
+      expect(component.activeStep()).toBe(0);
+      // And the stepper was REVERTED back to the component's
+      // source of truth — the visible jump never happens.
+      expect(stepper.selectedIndex).toBe(0);
+    });
+
+    it('header keyboard path: Enter/Space on a focused header attempts selectionChange; handler reverts', () => {
+      // CDK stepper's `_onKeydown` writes stepper.selectedIndex
+      // directly for Enter/Space/arrow keys on a roving-tabindex
+      // focused header, then emits selectionChange. pointer-events
+      // cannot block this — keyboard reaches selectionChange
+      // regardless of CSS. The revert is the load-bearing
+      // guarantee for the keyboard path.
       component.activeStep.set(2);
-      // No-op signal.set call — just verifying no spurious write
-      // (signal-equality dedupes on its own; this asserts the
-      // short-circuit guard is explicit).
-      component.onStepperSelectionChange({ selectedIndex: 2 });
+      const stepper: { selectedIndex: number } = { selectedIndex: 0 }; // arrow-left simulation
+      component.onStepperSelectionChange(stepper);
       expect(component.activeStep()).toBe(2);
+      expect(stepper.selectedIndex).toBe(2);
+    });
+
+    it('focus-loss / teleport path: any other side-driven selectionChange is reverted', () => {
+      // CDK's `_containsFocus` / focus restoration after
+      // button-destroy swaps can land a selectionChange with an
+      // arbitrary index. Revert must hold for ANY index that
+      // doesn't match activeStep().
+      component.activeStep.set(1);
+      const cases = [0, 2, 3];
+      for (const idx of cases) {
+        const stepper: { selectedIndex: number } = { selectedIndex: idx };
+        component.onStepperSelectionChange(stepper);
+        expect(component.activeStep()).toBe(1);
+        expect(stepper.selectedIndex).toBe(1);
+      }
+    });
+
+    it('stepperNav() back/forward/backToStart — footer buttons still drive activeStep after the fix', () => {
+      // Sanity pin that the app-side nav helpers are unchanged —
+      // the fix only blocks USER-driven inputs, not the footer's
+      // own signal writers.
+      component.activeStep.set(0);
+      component.stepperNav().next();
+      component.stepperNav().next();
+      expect(component.activeStep()).toBe(2);
+      component.stepperNav().next();
+      component.stepperNav().next();
+      // clamped at 3
+      expect(component.activeStep()).toBe(3);
+      component.stepperNav().back();
+      expect(component.activeStep()).toBe(2);
+      component.stepperNav().back();
+      component.stepperNav().back();
+      // clamped at 0
+      expect(component.activeStep()).toBe(0);
+      component.stepperNav().backToStart();
+      expect(component.activeStep()).toBe(0);
     });
   });
 
@@ -2403,5 +2546,91 @@ describe('CheckpointCleanupComponent — orientation locator contract (spec amen
 
     expect(narrowTestIds.size).toBeGreaterThan(0);
     expect(desktopTestIds).toEqual(narrowTestIds);
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+// wiznav-fix — structural-contract pins against the source
+// template HTML. JSDOM does NOT preserve `<mat-step>` host
+// elements (Material's CdkStep collapses the host — only the
+// content wrappers remain in the rendered DOM), so DOM-level
+// querySelector('mat-step') is not a viable probe. The contract
+// is verifiable via the SOURCE template (the literal attribute
+// placement lands on the compiled step input). These two tests
+// read the template file and assert the placement invariant.
+//
+// JSDOM NOTE — the SCSS contract (`pointer-events: none` on
+// `.mat-step-header`) is also not enforceable under JSDOM (no CSS
+// rendering effects). That guarantee lives in component.scss with
+// a comment explaining the rationale; it ships with the SCSS
+// contract round described in the wiznav-fix commission.
+// ──────────────────────────────────────────────────────────────────────
+
+  it('wiznav-fix: source template places editable="false" on every <mat-step> in BOTH orientation branches (8 placements total)', async () => {
+    // The source template has two <mat-stepper> blocks (desktop
+    // horizontal + mobile vertical), each with four byte-identical
+    // <mat-step> children. The invariant: each <mat-step> tag
+    // carries `editable="false"`. Total expected placements = 2
+    // branches × 4 steps = 8.
+    //
+    // Use line-anchored grep so `editable="false"` appearing in a
+    // TEMPLATE COMMENT at the mat-stepper level (the pre-fix inert
+    // attribute once lived there) does not match. We require the
+    // pattern to land on the same line as a `<mat-step` opener.
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const templatePath = path.resolve(
+      __dirname,
+      'checkpoint-cleanup.component.html',
+    );
+    const source = fs.readFileSync(templatePath, 'utf-8');
+    const lines = source.split('\n');
+    // Match `<mat-step ... editable="false" ...>` on a single line.
+    // Step labels `1. Review` / `2. Dry-run` / `3. Confirm & Execute`
+    // / `4. Result` are the discriminator between the four steps.
+    const labelRe = /<mat-step\s+label="([^"]+)"\s+editable="false"\s*>/;
+    const matches: string[] = [];
+    for (const ln of lines) {
+      const m = labelRe.exec(ln);
+      if (m) {
+        matches.push(m[1]);
+      }
+    }
+    // 2 branches × 4 labels × per-branch dedupe = expect the 4
+    // unique labels to each appear exactly twice (once per branch).
+    expect(matches.length).toBe(8);
+    const labels = ['1. Review', '2. Dry-run', '3. Confirm & Execute', '4. Result'];
+    for (const lbl of labels) {
+      const count = matches.filter((l) => l === lbl).length;
+      expect(count).toBe(2);
+    }
+  });
+
+  it('wiznav-fix: source template has no editable="false" on the <mat-stepper> tags (was inert placement pre-fix)', async () => {
+    // Pre-fix: `editable="false"` was a literal attribute on
+    // <mat-stepper>, but `editable` is a CdkStep/<mat-step> input,
+    // NOT a MatStepper input — Material's stepper never read it.
+    // The fix moves the attribute to every <mat-step> instead.
+    //
+    // Source-template pin: the two <mat-stepper> openings (desktop
+    // horizontal + mobile vertical) MUST NOT carry the attribute.
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const templatePath = path.resolve(
+      __dirname,
+      'checkpoint-cleanup.component.html',
+    );
+    const source = fs.readFileSync(templatePath, 'utf-8');
+    const lines = source.split('\n');
+    const stepperOpenRe = /<mat-stepper\b[^>]*>/g;
+    let stepperOpenings = 0;
+    for (const ln of lines) {
+      const m = stepperOpenRe.exec(ln);
+      if (!m) continue;
+      stepperOpenings += 1;
+      // Each opener line MUST NOT contain `editable="false"`.
+      expect(ln).not.toContain('editable="false"');
+    }
+    // Sanity: exactly two <mat-stepper> opening tags (desktop + mobile).
+    expect(stepperOpenings).toBe(2);
   });
 });
