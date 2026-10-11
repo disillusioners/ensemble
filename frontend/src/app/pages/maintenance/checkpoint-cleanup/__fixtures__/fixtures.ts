@@ -184,8 +184,10 @@ export const STATUS: CheckpointCleanupStatus = {
     checkpoint_max_per_thread: 3,
     checkpoint_max_per_thread_floor: 1,
     cleanup_interval_hours: 24,
-    blob_prune_dry_run_env_default: '1',
-    blob_prune_destructive_armed: false,
+    // feature/blob-prune-default-on: the dual-arm env-flag surface
+    // is gone; ``blob_prune_destructive_default`` (always true) is
+    // the sole prune knob on the /status config block.
+    blob_prune_destructive_default: true,
   },
   last_run: null,
   in_flight: null,

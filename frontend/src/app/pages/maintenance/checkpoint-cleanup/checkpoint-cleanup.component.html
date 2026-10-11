@@ -121,16 +121,11 @@
                 <dd>{{ status()?.config?.checkpoint_max_per_thread }}</dd>
                 <dt>Cleanup interval</dt>
                 <dd>{{ status()?.config?.cleanup_interval_hours }} hours</dd>
-                <dt>Blob-prune dry-run default</dt>
-                <dd>
-                  {{
-                    status()?.config?.blob_prune_dry_run_env_default === '1'
-                      ? 'ON (safe)'
-                      : 'OFF (destructive)'
-                  }}
-                </dd>
-                <dt>Blob-prune destructive armed</dt>
-                <dd>{{ status()?.config?.blob_prune_destructive_armed ? 'YES' : 'no' }}</dd>
+                <!-- Blob-prune destructive default is unconditional
+                     since feature/blob-prune-default-on (env-flag
+                     gate retired); surfaced on /status as
+                     ``blob_prune_destructive_default`` (always true).
+                     No operator-facing toggle. -->
               </dl>
             } @else {
               <p class="ck-muted">Loading status…</p>
@@ -508,16 +503,11 @@
                 <dd>{{ status()?.config?.checkpoint_max_per_thread }}</dd>
                 <dt>Cleanup interval</dt>
                 <dd>{{ status()?.config?.cleanup_interval_hours }} hours</dd>
-                <dt>Blob-prune dry-run default</dt>
-                <dd>
-                  {{
-                    status()?.config?.blob_prune_dry_run_env_default === '1'
-                      ? 'ON (safe)'
-                      : 'OFF (destructive)'
-                  }}
-                </dd>
-                <dt>Blob-prune destructive armed</dt>
-                <dd>{{ status()?.config?.blob_prune_destructive_armed ? 'YES' : 'no' }}</dd>
+                <!-- Blob-prune destructive default is unconditional
+                     since feature/blob-prune-default-on (env-flag
+                     gate retired); surfaced on /status as
+                     ``blob_prune_destructive_default`` (always true).
+                     No operator-facing toggle. -->
               </dl>
             } @else {
               <p class="ck-muted">Loading status…</p>
