@@ -68,10 +68,19 @@ SEAMS: dict[str, tuple[str, str, str]] = {
     ),
     # S-12 (v2 — view shares)
     "view_shares.sql": ("daemon/migrations/versions", r"create_view_shares", "pending:v2 share tokens"),
-    # S-14/S-15/S-16 (v2 modules)
+    # S-16 (v2 modules)
     "rate_limit.py": ("daemon/middleware", r"rate_limit", "pending:v2 rate limiting"),
     "audit_log_sink.py": ("daemon/services", r"audit_log_sink", "pending:v2 audit sink"),
     "mtls.py": ("daemon/middleware", r"mtls", "pending:v2 mTLS"),
+    # S-17 (v2 — cookie scope binding; §10 verification row: static
+    # grep of cookie.py for cookie_use_host_prefix — the ``__Host-``
+    # prefix hardening toggle. SKIP-pending: the v1 cookie layer ships
+    # without the flag; flips to hard assert when v2 hardening lands.)
+    "cookie_use_host_prefix": (
+        "daemon/auth/cookie.py",
+        "cookie_use_host_prefix",
+        "pending:v2 cookie scope binding (__Host- prefix) (S-17)",
+    ),
     # S-19 (P1 config + P3 middleware consult — BUILT)
     "config.anonymous_view_paths": ("daemon/config.py", "anonymous_view_paths", "live"),
     "middleware anonymous_view_paths consult": (
@@ -127,9 +136,10 @@ def test_seam_present(name: str):
 
 
 def test_seam_count_unchanged():
-    """NFR-11: the registry stays 20 canonical seams + 1 flag entry
-    (21 dict entries)."""
-    assert len(SEAMS) == 20
+    """NFR-11: the registry stays 20 canonical seams (S-1…S-20) covered
+    by 21 dict entries (S-20 contributes 2 grep assertions + the T3.11
+    enabling-flag entry — requirements §10.1)."""
+    assert len(SEAMS) == 21
 
 
 def test_kb_mcp_seam_mechanism_built():

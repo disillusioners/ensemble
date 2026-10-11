@@ -129,8 +129,12 @@ def clear_session_cookies(response: Any, *, auth_config: AuthConfig) -> None:
 
 
 def parse_cookies_from_scope(scope: Any) -> dict[str, str]:
-    """Parse the ASGI ``Cookie`` headers into a dict (lowercase names).
+    """Parse the ASGI ``Cookie`` headers into a dict.
 
+    Only the header KEY lookup is lowercase (ASGI requires lowercase
+    header names); cookie NAMES are preserved verbatim as sent — the
+    parser does not case-fold them (``ensemble_sid`` /
+    ``ensemble_csrf`` are lowercase by convention, not by coercion).
     Never raises: malformed pairs are skipped (the middleware's
     never-raise contract, D3.9).
     """

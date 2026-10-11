@@ -232,8 +232,6 @@ class AuthMiddleware:
                             template, "public", prefix_match=is_mount
                         )
                     )
-                    if not is_mount and "{" not in template:
-                        public_exact.add(template)
                 else:
                     public_exact.add(template)
             elif is_module:

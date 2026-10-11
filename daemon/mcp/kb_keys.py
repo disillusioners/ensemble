@@ -41,6 +41,7 @@ partial boot) = empty-store posture (pass-through).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -176,11 +177,14 @@ class KbKeyGuardApp:
             return
         app_ref = scope.get("app")
         store = getattr(getattr(app_ref, "state", None), "mcp_kb_key_store", None)
-        if store is None or not store.has_active_keys():
+        # Availability (P3 review): the store is synchronous SQLModel —
+        # bridge through asyncio.to_thread (auth_service.py precedent)
+        # so the guard never blocks the event loop on PG.
+        if store is None or not await asyncio.to_thread(store.has_active_keys):
             await self._wrapped(scope, receive, send)
             return
         presented = _header_value(scope, KB_KEY_HEADER)
-        ok, reject_code = store.verify(presented)
+        ok, reject_code = await asyncio.to_thread(store.verify, presented)
         if ok:
             await self._wrapped(scope, receive, send)
             return

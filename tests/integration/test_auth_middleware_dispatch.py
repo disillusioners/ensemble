@@ -245,3 +245,77 @@ class TestSanitizeReturnTo:
     def test_backslash_normalizes_before_prefix_check(self):
         # "\\agents" → "/agents" (legal after normalization)
         assert sanitize_return_to("\\agents") == "/agents"
+
+
+class TestAC19LifoOrder:
+    """AC-19 (FR-19 + AMEND v1.2 / A5) — the FULL four-step execution
+    sequence, asserted against the REAL ``create_app`` composition.
+
+    The middleware chain is instrumented IN PLACE (recorders spliced
+    into the built ``app.middleware_stack`` linked list — no hand-built
+    stack), so a silent registration reordering in ``create_app``
+    trips this test.
+    """
+
+    EXPECTED_ORDER = [
+        "AuthMiddleware",  # runs FIRST (outermost — last registered)
+        "HostCaptureMiddleware",
+        "SelectiveAccessLogMiddleware",
+        "CORSMiddleware",  # innermost — auth decides BEFORE CORS mutates
+    ]
+
+    def test_four_middleware_execution_order_auth_outermost(self, tmp_path):
+        warnings.filterwarnings("ignore")
+        stub = FakeOidcStub()
+        cfg = on_auth_config()
+        app = create_app(auth_config=cfg)
+        attach_auth_state(app, cfg, stub, tmp_path)
+        client = TestClient(app, base_url="http://testserver")
+
+        # Warmup — builds the lazy middleware stack from the REAL
+        # registration order (public path; no credentials needed).
+        assert client.get("/livez").status_code == 200
+
+        order: list[str] = []
+        _instrument_middleware_stack(app, order)
+        order.clear()
+
+        r = client.get("/livez")
+        assert r.status_code == 200
+        # Exact-list equality asserts BOTH the order AND that each of
+        # the four ran exactly once (AMEND v1.2 / A5: FULL sequence).
+        assert order == self.EXPECTED_ORDER
+
+
+def _instrument_middleware_stack(app, order: list[str]) -> None:
+    """Splice a recording wrapper in front of each of the four
+    registered middlewares in the app's BUILT middleware chain.
+
+    The stack is a linked list of middleware instances (each node's
+    ``.app`` points to the next); the outermost node is
+    ``app.middleware_stack``. Rewiring parents' ``.app`` pointers to
+    recorders keeps every real middleware instance byte-identical —
+    only the call path gains an observation point.
+    """
+    wanted = set(TestAC19LifoOrder.EXPECTED_ORDER)
+    chain = []
+    node = app.middleware_stack
+    while node is not None and getattr(node, "app", None) is not None:
+        chain.append(node)
+        node = node.app
+    assert chain, "middleware stack not built — run a warmup request first"
+
+    class _Recorder:
+        def __init__(self, name: str, target):
+            self._name = name
+            self._target = target
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] == "http":
+                order.append(self._name)
+            await self._target(scope, receive, send)
+
+    for i, node in enumerate(chain):
+        name = type(node).__name__
+        if name in wanted and i > 0:
+            chain[i - 1].app = _Recorder(name, node)

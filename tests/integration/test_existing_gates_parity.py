@@ -195,14 +195,43 @@ class TestMaintenanceOriginGuard:
     def test_origin_guard_unchanged_cross_origin_403(self, env, monkeypatch):
         """NFR-14: cross-origin POST to a guarded maintenance endpoint
         without a trusted origin → the SAME 403 as pre-build (the
-        guard runs at the route layer, beneath the OAuth2 gate)."""
-        client, app, _ = env
-        r = client.post(
-            "/api/maintenance/checkpoint-cleanup/run",
-            headers={"Origin": "http://evil.example"},
+        guard runs at the route layer, beneath the OAuth2 gate).
+
+        P3-review tightening: the probe uses a SAME-origin Origin (the
+        middleware's C1 CSRF guard passes it — cookie + Origin ==
+        Host) with a route-level poison (the maintenance guard's C1
+        Host allowlist refuses the non-loopback ``testserver`` host,
+        so its rule 2 cannot vouch and rule 5 fires). The pinned
+        envelope is the ROUTE guard's ``detail.error ==
+        origin_not_trusted`` — NOT the middleware's flat
+        ``CSRF_ORIGIN_MISMATCH`` body (any-403 assertions pass on
+        either guard since both bodies contain "origin")."""
+        monkeypatch.delenv("MAINTENANCE_TRUSTED_ORIGINS", raising=False)
+        monkeypatch.delenv("MAINTENANCE_ALLOWED_HOSTS", raising=False)
+        from daemon.routers.maintenance_origin_guard import (
+            reset_allowed_hosts_cache,
+            reset_trusted_origins_cache,
         )
-        assert r.status_code == 403
-        assert "origin" in str(r.json()).lower()
+
+        reset_trusted_origins_cache()
+        reset_allowed_hosts_cache()
+        try:
+            client, app, _ = env
+            r = client.post(
+                "/api/maintenance/checkpoint-cleanup/dry-run",
+                headers={"Origin": "http://testserver"},  # same-origin
+            )
+            assert r.status_code == 403
+            body = r.json()
+            # The ROUTE guard's HTTPException envelope — a "detail"
+            # wrapper the middleware's CSRF 403 never produces.
+            assert body["detail"]["error"] == "origin_not_trusted"
+            assert body["detail"]["message"] == "Origin guard refused the request"
+            # Negative pin: the middleware CSRF guard did NOT fire.
+            assert "CSRF" not in str(body)
+        finally:
+            reset_trusted_origins_cache()
+            reset_allowed_hosts_cache()
 
     def test_maintenance_availability_canary_still_public(self, env):
         """§5.1: /api/maintenance/checkpoint-cleanup/availability is

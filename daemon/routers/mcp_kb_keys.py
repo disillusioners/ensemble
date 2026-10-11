@@ -24,6 +24,7 @@ ordered resolution classifies them PROTECTED even though the
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Optional
 
@@ -100,9 +101,10 @@ async def list_keys(request: Request) -> KbKeyList:
     include_revoked = (
         request.query_params.get("include_revoked", "").lower() in ("1", "true", "yes")
     )
-    return KbKeyList(
-        keys=[_to_info(row) for row in store.list_keys(include_revoked=include_revoked)]
+    rows = await asyncio.to_thread(
+        store.list_keys, include_revoked=include_revoked
     )
+    return KbKeyList(keys=[_to_info(row) for row in rows])
 
 
 @router.post("", response_model=KbKeyCreated, status_code=201)
@@ -111,7 +113,7 @@ async def create_key(request: Request, body: KbKeyUpdate | None = None) -> KbKey
     """Mint a key — the ``key`` field of the response is shown ONCE."""
     store = _get_store(request)
     label = body.label if body is not None else None
-    row, plaintext = store.create_key(label)
+    row, plaintext = await asyncio.to_thread(store.create_key, label)
     return KbKeyCreated(
         id=row.id,
         label=row.label,
@@ -124,7 +126,7 @@ async def create_key(request: Request, body: KbKeyUpdate | None = None) -> KbKey
 @require_scope("mcpkb:admin")
 async def get_key(key_id: str, request: Request) -> KbKeyInfo:
     store = _get_store(request)
-    row = store.get_key(key_id)
+    row = await asyncio.to_thread(store.get_key, key_id)
     if row is None:
         raise HTTPException(
             status_code=404,
@@ -139,7 +141,7 @@ async def update_key(key_id: str, body: KbKeyUpdate, request: Request) -> KbKeyI
     """Rename a key (keys are immutable beyond the label — rotate by
     minting a new key and revoking/deleting the old one)."""
     store = _get_store(request)
-    row = store.update_label(key_id, body.label)
+    row = await asyncio.to_thread(store.update_label, key_id, body.label)
     if row is None:
         raise HTTPException(
             status_code=404,
@@ -154,7 +156,7 @@ async def delete_key(key_id: str, request: Request):
     """Hard-delete a key row. Prefer ``POST .../{key_id}/revoke`` for
     audit-trail rotation (soft revoke keeps the row visible)."""
     store = _get_store(request)
-    if not store.delete_key(key_id):
+    if not await asyncio.to_thread(store.delete_key, key_id):
         raise HTTPException(
             status_code=404,
             detail={"error": "KB_KEY_NOT_FOUND", "message": f"No key {key_id}"},
@@ -167,15 +169,16 @@ async def delete_key(key_id: str, request: Request):
 async def revoke_key(key_id: str, request: Request) -> KbKeyInfo:
     """Soft-revoke (idempotent) — the auditable rotation half."""
     store = _get_store(request)
-    if not store.revoke_key(key_id):
-        row = store.get_key(key_id)
+    if not await asyncio.to_thread(store.revoke_key, key_id):
+        row = await asyncio.to_thread(store.get_key, key_id)
         if row is None:
             raise HTTPException(
                 status_code=404,
                 detail={"error": "KB_KEY_NOT_FOUND", "message": f"No key {key_id}"},
             )
         return _to_info(row)  # already revoked — idempotent echo
-    return _to_info(store.get_key(key_id))  # type: ignore[arg-type]
+    row = await asyncio.to_thread(store.get_key, key_id)
+    return _to_info(row)  # type: ignore[arg-type]
 
 
 def tag_keys_router_protected(app: Any) -> None:
