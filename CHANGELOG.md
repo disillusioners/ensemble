@@ -64,6 +64,53 @@ FE additions:
 
 ---
 
+## [0.19.0] — 2026-10-11
+
+### Added — Snapshots page v2 redesign, frozen Design A (`feature/snapshots-redesign-v2`, merge `c7b467444`)
+
+> **CHANGELOG (feature release):** *The `/snapshots` page is rebuilt to the frozen Design A v2 spec: plain-HTML table in a dedicated scroll viewport, full-height side-mode drawer with sticky header + 2-region rail, click-triggered info/metrics popovers, persisted filter/URL state with a byte-identical dedup key, and the accessibility fixes (drawer focus trap, component-scoped Esc that never fires under open popovers). v1 contracts (metrics-capture-card hook, `/api/snapshots` surface) are preserved.*
+
+- **Page shell** (`532996ac9`) — control row + filter row + stats strip + URL `queryParams` state; **table** (`27a8909db`) — plain HTML, scroll viewport, status icons, selected-row state; **drawer** (`495ffb8c7`) — side-mode full-height, sticky header, 2-region content rail with `flex:1.5` lock (`2a8349802`, AC-4.2; `.table-area` height-chain completion, AC-3.1–3.5).
+- **Click-triggered info + metrics popovers** per spec §2.2 (`a6b44f42d`, S2); **URL-sync key** seeded from post-seed signals with back/forward coverage (`f6ed6aaa9`, S1) and made byte-identical via a single shared key computation (`2111438fa`, AC-6.3 parity).
+- **Accessibility** — drawer focus trap + Esc + focus restore on the drawer root, component-scoped (`43e5f2be2` / `a05d4ae9d`, AC-A11Y-3); document-level Esc handler gated so popover closes never double-fire drawer closes (`95d57adb2`, AC-A11Y.3b).
+- **v1 contracts preserved** — the metrics-capture-card `data-test` hook survives (`5ec3ddd92`, AC-5.2); unit tests for the new v2 chrome + URL persistence (`bf5a36bc7`); Design A v2 spec finalized with Design B kept as reference (`8c1534f9a`).
+
+### Tested — Snapshots v2 daemon-lane E2E: v1 12-test pack rebased to Design A, 12/12 GREEN (`feature/snapshots-v2-spec-rebase`, merge `baacdd6a4`)
+
+- The five v1-locator snapshots legs rebased to the Design A v2 contracts (pin `53fa39ec` (spec blob sha), `64b351b8b`), response-arming made race-immune (`b5cafd3f7`), and the anchored `hasText` locators unanchored against raw `textContent` (`5dc834706` — the root cause was anchored-text matching against `mat-icon` ligature glyphs).
+- Full-daemon-depth lane closed at **12/12 PASS** (81.6s, flaky=0) after a 4-run loop (7/12 → 11/12 → 11/12 → 12/12) with **zero product failures** — every red proven test-side. Citation-integrity pass re-attributed 3 evidence claims (`7947ffeeb`, review F1–F4). Loop record: `c2c226725`; entrypoint `cd frontend && npx playwright test --config playwright.snapshots.config.ts e2e/snapshots.spec.ts` (12 tests, self-boots daemon :18279 + FE :14199).
+
+### Changed — Designer→sketcher→critic design pipeline; designer holds zero od.* tools (`feature/designer-critic-orchestration`, merge `4f70415d2`)
+
+> **CHANGELOG (feature release):** *Designer becomes a brief-authoring orchestrator with ZERO `od.*` tools; the new `sketcher` agent is the SOLE generation lane (all four `od.*` tools stay tool-internal per D1); a new read-only `critic` agent is the design-QA gate (verdict PASS/NEEDS-REVISION, tiers critical/advisory/[BRIEF-LEVEL], `pinned_spec_sha`). Pipeline: designer → sketcher → critic → designer decides (≤3 rounds/page, severity-gated) → accept/save. Supersedes the sketcher pilot dual-run/parity deprecation gates (user decision 2026-10-10). Ships at this release's promote; NOT live before.*
+
+- **Phase 1 — designer od.* surgery** (`a29ae3391`): every `od.*` token removed from designer's toolset/prompts; brief-authoring + lane routing only.
+- **Phase 2 — critic agent build** (`7530712b4`): read-only design-QA leaf, vision lane, resolved set exactly `{read_file, image_get, image_list, explain_image, compare_images}` (write-leak invariant; `image_save` denied), verdict schema at `.agents/shared/planning/designer-critic-orchestration/critic-verdict-schema.md`.
+- **Phase 3 — pipeline wiring** (`dd949c4c2`): designer → sketcher → critic → accept/save; severity-gated ≤3 rounds/page (advisory-only at cap → accept-with-disclosure `[REVIEW-CAVEAT]`; any critical → escalate-only; all-`[BRIEF-LEVEL]` → brief revision without sketcher re-dispatch). Designer-side **KV `round_count` pin + revival re-bind Cardinal** (`agents/designer/rule.md` Guideline (e) — re-bind from `shared_meta_kv` on `send_message` revival, NEVER reset; `(critic_instance_id, verdict_sha)` recorded per iteration).
+- **Phase 4 — planning reconcile** (`ff7e288bd`): pilot-gates superseded, parity schema v2, deferred-debt journal; review one-liners (`6b9eec0e6`, `36ecf5473`, `35d7e9c5d`); tier-1 wiring asserts aligned to the sketcher-sole lane (`be586c6ad`); final-gate records `cc7b03d41`.
+
+### Fixed — od.generate consumer-side streaming past the 120s proxy read window (CF-524) (`feature/od-generate-async-poll`, merge `c63f93e30`)
+
+> **CHANGELOG (fix release):** *The `od.generate` chat call is issued with `stream=True` + `stream_options={"include_usage": True}` and consumed synchronously inside the factory attempt, so SSE headers land at t=0 and the Cloudflare edge read window (~100–125s) never 524s a long generation mid-flight. The factory returns a ChatCompletion-SHAPED envelope (`StreamedChatCompletion`) so extraction and the three completeness gates stay byte-identical. ZERO proxy code changes. Live promoted before this release remain exposed until they pick up this vehicle.*
+
+- **Streaming call + envelope invariant** (`00e826f91`, plan §6.1): `delta.content` joins the answer, `delta.reasoning_content` accumulates separately (MiniMax-M3 thinking verified), last non-null `finish_reason` + terminal `usage` chunk captured.
+- **Atomic 200k budget-chain reconciliation** (`40d1083da`, §6.2): adapter wall clock 600s at the 200k budget; **bounded retry-on-truncation** (`3937970f1`, §6.3): exactly ONE same-prompt re-attempt on `finish_reason="length"`, second truncation fails typed; designer workflow wait chain pinned to ≥660s for synchronous waits (`b97819628`).
+- **Phase-0 probe GO** (`f758c7c3a` + `probe-evidence-phase0.md`): real streamed vision call through the production proxy survived **154.0s** (> the ~120s CF window) with terminal `finish_reason` + `usage` chunks delivered and `: heartbeat` comments tolerated; test hardening `a78204f16` + `60a21d7cc`; §4 close-out `48890c423` (merged `0afd28ff3`).
+
+### Fixed — Checkpoint saver connection resilience (incident 2026-10-10) (`feature/checkpoint-conn-resilience`, merge `c8b3b09f2`)
+
+- **Pool-backed `AsyncPostgresSaver` + retry proxy + sentinel readiness probe** (`eb71f34df`): the saver rides a connection pool with a retry wrapper; `/readyz`'s checkpoint component reads via a sentinel probe instead of `pool.check()` (`cea8a4c73`, W1); explicit forwarders for every concrete `BaseCheckpointSaver` member per the MRO rule (`0122db579`, K1/K2); exception log lines redact server identifiers (`97862499e`, W2); review fixes `1af1a1da2` + `f19803dc3`; incident doc + root-fix addendum `2eb5c8178`; test coverage `285d4578f`, `0f376f63d`, `5f8c20b3f`, `fb72bae84`.
+
+### Added — Live-views Phase 2: clickable fully-qualified URLs + content-aware rendering (`feature/live-views`, merge `7189a28ce`)
+
+- **Fully-qualified URL resolution chain** (`cb81ec8d0`) — config > Host-capture > bind > path-relative; **`HostCaptureMiddleware`** records the request host (`c7296d4da`; extracted to `daemon/middleware/` in `e6b240e22`); **content-aware rendering** — `.md` artifacts served through a sanitized CDN-markdown wrapper with CSP nonce + SRI (`a1acb10fc`, `bf13abc26`); IPv6 hosts bracketed + `X-Forwarded-Proto` chains tokenized (`f8eb688ea`); operator downgrade/fallback warnings + wrapper hardening (`76bd49e0c`); runbook + config knob docs (`65a163484`, `docs/runbooks/live-views.md`).
+
+### Changed — Close-out ledger landings (`chore/land-parked-notes`, merge `fc42eb20d`; `7e39fa9ef`; `0afd28ff3`)
+
+- Parked note/ledger content landed for merged lanes: QUARANTINE rows for the live-views phase-2 gate + project_manager prompt-tests (`8be6abdfa`), live-views finalize non-deliverables (`b40d964b7`), upgrade-executor-resilience KMS runtime audit appends (`323176538`), tool-pairing-full-history-heal quality-pass notes (`259a85f37`). Sketcher 2026-10-09 PACKS.md ledger entry landed via timestamp-ordered manual union from stash@{0} (`7e39fa9ef`; stash retained). od-generate-agent-lane §4 close-out note (Option C supersede) merged (`48890c423` → `0afd28ff3`). Documentation-only; zero product change. (The code-fix skill-seed flag from the Snapshots v2 loop was adjudicated NOT-A-DEFECT — misattributed evidence; adjudication recorded in project history, no product change.)
+
+---
+
 ## [0.17.2] — 2026-10-06
 
 ### Fixed — Designer OD-lane: MCP preload at all bare spawn lanes (`feature/designer-od-lane-fix`)
