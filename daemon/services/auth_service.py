@@ -140,12 +140,15 @@ class CallbackSuccess:
         self,
         session: AuthSession,
         csrf_token: str,
-        return_to: str = "/",
+        return_to: str | None = None,
     ) -> None:
         self.session = session
         self.csrf_token = csrf_token
         #: The sanitized pre-login path recovered from the consumed
-        #: state row (the browser bounce target).
+        #: state row (the browser bounce target). ``None`` = the state
+        #: row carried none — the route's LEGACY query-param fallback
+        #: then decides (minor #3 precedence: state-bound wins, the
+        #: query param only fills an absent state value).
         self.return_to = return_to
 
     @property
@@ -362,8 +365,16 @@ class AuthService:
         return CallbackSuccess(
             session,
             csrf_token_for_session(session.id),
-            return_to=_clamp_return_to(
-                state_row.redirect_to if state_row else None
+            # Minor #3 (2026-10-11 review): the state-bound value is the
+            # ONLY trusted return_to — surfaced VERBATIM (already
+            # sanitized at login). When the state row carries none, the
+            # field is None (NOT a clamped "/") so the route's LEGACY
+            # fallback (the callback query param) stays reachable; a
+            # coerced "/" here would dead-code that fallback.
+            return_to=(
+                _clamp_return_to(state_row.redirect_to)
+                if state_row is not None and state_row.redirect_to
+                else None
             ),
         )
 
@@ -576,13 +587,23 @@ def _parse_scopes(stored: str | None) -> set[str]:
 
 
 def _ip_subnet(client_ip: str | None) -> str | None:
-    """/24 for IPv4, /64 for IPv6 (the AuthSession.ip_subnet contract)."""
+    """/24 for IPv4, /64 for IPv6 (the AuthSession.ip_subnet contract).
+
+    Minor #7 (2026-10-11 security review): an IPv4-mapped IPv6 address
+    (``::ffff:a.b.c.d``) normalizes to its MAPPED IPv4 address FIRST —
+    the previous fall-through put it in the /64 branch, so the same
+    NAT-neighborhood client could present as a /64 (2^64 addresses)
+    instead of a /24 and defeat the fingerprint by switching address
+    families mid-session.
+    """
     if not client_ip:
         return None
     try:
         addr = ipaddress.ip_address(client_ip.split("%")[0])
     except ValueError:
         return None
+    if addr.version == 6 and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
     if addr.version == 4:
         return str(ipaddress.ip_network(f"{addr}/24", strict=False).network_address) + "/24"
     return str(ipaddress.ip_network(f"{addr}/64", strict=False).network_address) + "/64"

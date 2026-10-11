@@ -330,6 +330,44 @@ class TestRow15CookieSecure:
         assert section.cookie_secure is False
 
 
+# ── minor #2 (2026-10-11 review): SameSite=None without Secure ───────────────
+
+
+class TestMinor2SameSiteNoneRequiresSecure:
+    """REFUSAL (not warn) — deliberately row-15-shaped: an insecure
+    None cookie is a security regression (browsers reject it outright;
+    a client that honors one ships the session credential cross-site).
+    Row 14 (Strict) stays a WARN because that one breaks function, not
+    security."""
+
+    def test_samesite_none_without_secure_refused(self):
+        """The legal permissive combo (row 15 satisfied via the
+        allow_insecure opt-in) still refuses the None-without-Secure
+        pair — the minor-#2 check is its own row, not row-15 fallout."""
+        text = _refusal_for(
+            cookie_samesite="None",
+            cookie_secure=False,
+            allow_insecure_cookie=True,
+        )
+        assert "cookie_samesite=None requires cookie_secure=true" in text
+        assert "ENSEMBLE_AUTH_COOKIE_SAMESITE" in text
+
+    def test_samesite_none_with_secure_passes(self):
+        section = AuthConfig(**_valid_kwargs(), cookie_samesite="None")
+        assert section.cookie_samesite == "None"
+        assert section.cookie_secure is True
+
+    def test_samesite_none_insecure_without_optin_hits_row15_first(self):
+        """Row 15 fires before the minor-#2 check — either refusal is
+        correct; pin that at least one names the cookie posture."""
+        text = _refusal_for(
+            cookie_samesite="None",
+            cookie_secure=False,
+            allow_insecure_cookie=False,
+        )
+        assert "cookie_secure" in text or "cookie_samesite" in text
+
+
 # ── row 9: OFF + everything-set boots normally (positive) ────────────────────
 
 

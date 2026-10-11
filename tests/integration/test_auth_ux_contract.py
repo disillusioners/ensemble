@@ -98,6 +98,15 @@ class TestReturnToSanitizationTable:
             ("//evil.com", "/"),
             ("/\\evil.com", "/"),  # /\evil.com → //evil.com → rejected
             ("\\\\/evil.com", "/"),
+            # C-1 (2026-10-11 review): control characters — the CRLF
+            # header-injection / log-forgery class — reject to the
+            # normalized default. Raw and percent-decoded forms.
+            ("/x\r\nSet-Cookie: pwned=1", "/"),
+            ("/x\nSet-Cookie: pwned=1", "/"),
+            ("/x\rSet-Cookie: pwned=1", "/"),
+            ("/a\x00b", "/"),
+            ("/a\x1fb", "/"),
+            ("/a\x7fb", "/"),
             # Scheme vectors.
             ("https://evil.com", "/"),
             ("http://evil.com/x", "/"),
@@ -147,3 +156,71 @@ class TestReturnToSanitizationTable:
         )
         assert r.status_code == 302
         assert r.headers["location"] == "/"
+
+
+class TestC1ControlCharReturnTo:
+    """C-1 (2026-10-11 review): CRLF / control-char ``return_to`` is
+    rejected to ``/`` at the REAL middleware leg — asserted against the
+    SANITIZED result (D3.8 invalid→``/`` semantics), never the raw
+    echo. Both the redirect target and the audit-log line consume the
+    sanitized output, so a control-char payload can never ride a
+    ``Location:`` header or the log."""
+
+    def test_encoded_crlf_return_to_normalizes_to_root(self, fresh):
+        r = fresh.get(
+            "/api/agents",
+            params={"return_to": "%0D%0A//evil.com"},
+            headers={"Accept": "text/html"},
+        )
+        assert r.status_code == 302
+        assert r.headers["location"].startswith("/api/auth/login?")
+        assert parse_qs(urlsplit(r.headers["location"]).query)[
+            "return_to"
+        ] == ["/"]
+
+    def test_raw_crlf_is_rejected_at_the_unit_level(self):
+        """The raw (non-percent-encoded) CRLF form cannot ride an httpx
+        request URL at all (InvalidURL) — the raw form is pinned by the
+        unit table rows in TestReturnToSanitizationTable instead."""
+        from daemon.middleware.auth import sanitize_return_to
+
+        assert sanitize_return_to("/x\r\nSet-Cookie: pwned=1") == "/"
+
+    def test_audit_log_leg_logs_sanitized_and_truncated(self, fresh, caplog):
+        """Minor #5: the audit-log leg logs the SANITIZED value truncated
+        at 256 with an explicit marker — a max-length path never rides
+        the log whole."""
+        import logging as _logging
+
+        long_path = "/" + "a" * 1000  # inside the 1024 cap, over 256
+        with caplog.at_level(_logging.INFO, logger="daemon.middleware.auth"):
+            r = fresh.get(
+                "/api/agents",
+                params={"return_to": long_path},
+                headers={"Accept": "text/html"},
+            )
+        assert r.status_code == 302
+        audit = [
+            rec.getMessage()
+            for rec in caplog.records
+            if "request_denied_302" in rec.getMessage()
+        ]
+        assert audit, "expected the request_denied_302 audit line"
+        line = audit[-1]
+        assert "return_to=" in line
+        logged_value = line.split("return_to=", 1)[1]
+        assert logged_value.endswith("...[TRUNCATED]")
+        assert len(logged_value) <= 256 + len("...[TRUNCATED]")
+        assert long_path not in line  # never the full payload
+
+    def test_crlf_never_reaches_the_audit_log(self, fresh, caplog):
+        import logging as _logging
+
+        with caplog.at_level(_logging.INFO, logger="daemon.middleware.auth"):
+            fresh.get(
+                "/api/agents",
+                params={"return_to": "/x\r\nINJECTED=1"},
+                headers={"Accept": "text/html"},
+            )
+        for rec in caplog.records:
+            assert "INJECTED" not in rec.getMessage()

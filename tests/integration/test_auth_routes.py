@@ -89,6 +89,62 @@ class TestCallback:
         # D8/NFR-6: Secure flag present unless allow_insecure_cookie
         # (this fixture sets allow_insecure_cookie=True → dropped).
 
+    def test_state_bound_return_to_beats_callback_query_param(self, tmp_path):
+        """Minor #3 (2026-10-11 review): the STATE-BOUND return_to
+        (persisted on the auth_states row at LOGIN) wins; a hostile
+        ``?return_to=`` on the callback URL can no longer override
+        where the login actually started."""
+        warnings.filterwarnings("ignore")
+        stub = FakeOidcStub()
+        cfg = on_auth_config()
+        app = create_app(auth_config=cfg)
+        attach_auth_state(app, cfg, stub, tmp_path)
+        client = TestClient(app, base_url="http://testserver", follow_redirects=False)
+        r = client.get(
+            "/api/auth/login",
+            params={"return_to": "/agents"},
+            follow_redirects=False,
+        )
+        state = parse_qs(urlsplit(r.headers["location"]).query)["state"][0]
+        r = client.get(
+            f"/api/auth/callback?code=abc&state={state}"
+            "&return_to=%2F%2Fevil.example%2Fsteal",
+            follow_redirects=False,
+        )
+        assert r.status_code == 302
+        assert r.headers["location"] == "/agents"
+
+    def test_callback_query_param_is_legacy_fallback_only(self, tmp_path):
+        """Minor #3 — the fallback half: when the state row carries no
+        return_to (pre-P3 hand-forged link), the callback query param
+        still resolves (sanitized). The state row is emptied directly
+        (the ``test_state_expired`` Session pattern)."""
+        warnings.filterwarnings("ignore")
+        from sqlmodel import Session
+
+        from daemon.repositories.auth_session.models import AuthState
+
+        stub = FakeOidcStub()
+        cfg = on_auth_config()
+        app = create_app(auth_config=cfg)
+        attach_auth_state(app, cfg, stub, tmp_path)
+        client = TestClient(app, base_url="http://testserver", follow_redirects=False)
+        # Login WITHOUT return_to → the state row stores the default "/".
+        state = _login(client)
+        engine = app.state.auth_session_repository._engine
+        with Session(engine) as session:
+            row = session.get(AuthState, state)
+            assert row is not None
+            row.redirect_to = None
+            session.add(row)
+            session.commit()
+        r = client.get(
+            f"/api/auth/callback?code=abc&state={state}&return_to=/legacy",
+            follow_redirects=False,
+        )
+        assert r.status_code == 302
+        assert r.headers["location"] == "/legacy"
+
     def test_cookie_secure_flag_when_not_insecure(self, tmp_path):
         warnings.filterwarnings("ignore")
         stub = FakeOidcStub()
@@ -103,6 +159,49 @@ class TestCallback:
             f"/api/auth/callback?code=abc&state={state}", follow_redirects=False
         )
         set_cookie = r.headers["set-cookie"].lower()
+        assert "secure" in set_cookie
+
+    def test_cookie_secure_false_drops_secure_flag(self, tmp_path):
+        """Minor #1: cookie_secure=false (+ the required
+        allow_insecure_cookie=true) ⇒ NO Secure flag — the flag
+        actually drives the attribute. The default-shape absence case
+        (this fixture's on_auth_config sets cookie_secure=False) is
+        asserted explicitly here rather than left implicit."""
+        warnings.filterwarnings("ignore")
+        stub = FakeOidcStub()
+        cfg = on_auth_config()  # cookie_secure=False + allow_insecure=True
+        assert cfg.cookie_secure is False
+        app = create_app(auth_config=cfg)
+        attach_auth_state(app, cfg, stub, tmp_path)
+        client = TestClient(app, base_url="http://testserver", follow_redirects=False)
+        state = _login(client)
+        r = client.get(
+            f"/api/auth/callback?code=abc&state={state}", follow_redirects=False
+        )
+        assert r.status_code == 302
+        assert "ensemble_sid=" in r.headers["set-cookie"]
+        assert "secure" not in r.headers["set-cookie"].lower()
+
+    def test_cookie_secure_true_wins_over_insecure_optin(self, tmp_path):
+        """Minor #1 — the combo the PRE-FIX keying got wrong:
+        ``cookie_secure=true`` + ``allow_insecure_cookie=true`` (the
+        legal permissive combo) MUST still ship Secure. The old setter
+        keyed Secure off ``not allow_insecure_cookie``, silently
+        dropping it."""
+        warnings.filterwarnings("ignore")
+        stub = FakeOidcStub()
+        cfg = on_auth_config(
+            allow_insecure_cookie=True, cookie_secure=True
+        )
+        app = create_app(auth_config=cfg)
+        attach_auth_state(app, cfg, stub, tmp_path)
+        client = TestClient(app, base_url="https://testserver", follow_redirects=False)
+        state = _login(client)
+        r = client.get(
+            f"/api/auth/callback?code=abc&state={state}", follow_redirects=False
+        )
+        set_cookie = r.headers["set-cookie"].lower()
+        assert "ensemble_sid=" in set_cookie
         assert "secure" in set_cookie
 
     def test_state_replayed_double_callback(self, env):

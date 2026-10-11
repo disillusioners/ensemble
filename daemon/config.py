@@ -3025,6 +3025,20 @@ class AuthConfig(BaseSettings):
                 "ENSEMBLE_AUTH_ALLOW_INSECURE_COOKIE)"
             )
 
+        # Security-review minor #2 (2026-10-11): SameSite=None WITHOUT
+        # Secure is a REFUSAL, not a warn — deliberately row-15-shaped
+        # (a security regression gets the boot fast-fail; row 14's
+        # Strict stays a WARN because that one is a functional break,
+        # not a security hole). Browsers reject insecure None cookies
+        # outright, and a client that did honor one would ship the
+        # session credential on every cross-site request.
+        if self.cookie_samesite == "None" and not self.cookie_secure:
+            raise ValueError(
+                "cookie_samesite=None requires cookie_secure=true "
+                "(browsers reject SameSite=None without Secure; env vars "
+                "ENSEMBLE_AUTH_COOKIE_SAMESITE, ENSEMBLE_AUTH_COOKIE_SECURE)"
+            )
+
         # §6.1 range validation (enabled-gated — an OFF deployment may
         # carry out-of-range values and must still boot, NFR-2).
         if not 60 <= self.session_ttl_seconds <= 86400:

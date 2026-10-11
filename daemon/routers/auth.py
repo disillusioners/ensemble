@@ -114,8 +114,16 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         return _error(401, exc.code, str(exc))
 
     auth_config = request.app.state.auth_config
+    # Security-review minor #3 (2026-10-11): the STATE-BOUND return_to
+    # (persisted on the auth_states row at LOGIN time — already
+    # sanitized via _clamp_return_to) is the trusted value and WINS.
+    # The callback query param is a LEGACY FALLBACK consulted only when
+    # the state row carries none (pre-P3 hand-forged links); a hostile
+    # ?return_to= on the callback URL can no longer override where the
+    # login actually started. sanitize_return_to is idempotent, so the
+    # single choke point stays authoritative for both legs.
     return_to = sanitize_return_to(
-        request.query_params.get("return_to") or result.return_to
+        result.return_to or request.query_params.get("return_to")
     )
     response = RedirectResponse(url=return_to, status_code=302)
     set_session_cookie(response, result.session_id, auth_config=auth_config)

@@ -49,8 +49,13 @@ from typing import Any
 
 from daemon.auth.cookie import (
     SESSION_COOKIE_NAME,
+    CSRFOriginPolicy,
+    _host_is_localhost,
+    _split_host_header as cookie_split_host_header,
     csrf_applies,
     parse_cookies_from_scope,
+    parse_operator_audience,
+    peer_is_loopback,
     validate_browser_lane_origin,
     validate_csrf_header,
 )
@@ -89,17 +94,25 @@ _WWW_AUTHENTICATE = 'Bearer realm="ensemble"'
 
 
 def sanitize_return_to(raw: str | None) -> str:
-    """D3.8 ``return_to`` sanitization (AMENDED v1.1 / OD-12).
+    """D3.8 ``return_to`` sanitization (AMENDED v1.1 / OD-12; C-1 added).
 
     Order is LOAD-BEARING: backslashes are normalized to slashes FIRST
     (legacy browsers treat ``\\\\``/``//`` interchangeably in a
     ``Location:`` header — ``return_to=\\\\evil.com`` and
     ``return_to=//evil.com`` are the same open-redirect vector, so the
-    prefix tests must judge the NORMALIZED value). Then: same-origin
-    path-prefixed only (starts with ``/``; never ``//``, never ``/\\``),
-    no scheme, ≤1024 chars; anything else → ``/``.
+    prefix tests must judge the NORMALIZED value). Then (C-1, 2026-10-11
+    security review): ANY control character — ``ord(c) < 0x20`` or
+    ``0x7f`` — rejects the value outright. The CRLF class
+    (``%0D%0A`` decoded or raw) is the header-injection /
+    log-forgery vector: because BOTH the redirect call sites AND the
+    audit-log leg consume this function's OUTPUT, a rejected value can
+    never be logged or forwarded — only the normalized ``/``. Then:
+    same-origin path-prefixed only (starts with ``/``; never ``//``,
+    never ``/\\``), no scheme, ≤1024 chars; anything else → ``/``.
     """
     value = (raw or "/").replace("\\", "/")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+        return "/"
     if len(value) > 1024:
         return "/"
     if not value.startswith("/"):
@@ -107,6 +120,16 @@ def sanitize_return_to(raw: str | None) -> str:
     if value.startswith("//"):
         return "/"
     return value
+
+
+def _audit_truncate(value: str, *, cap: int = 256) -> str:
+    """Audit-log truncation (minor #5): never emit more than ``cap``
+    chars of a client-supplied path, with an explicit marker when the
+    value was cut. A >cap value is capped, never dropped — the operator
+    still sees the shape."""
+    if len(value) <= cap:
+        return value
+    return value[:cap] + "...[TRUNCATED]"
 
 
 class _ClassifiedTemplate:
@@ -416,20 +439,18 @@ class AuthMiddleware:
         cookies: dict[str, str],
         method: str,
     ) -> tuple[Any, ...] | None:
-        """C1 predicate (D8 v1.2) — browser-lane state-changing requests.
+        """C1 predicate (D8 v1.2) + C-2 comparator (2026-10-11 review).
 
-        Origin/Referer same-origin check; plus the token-echo check ONLY
-        when ``X-CSRF-Token`` is present (OD-15 timing). Returns a
-        ("403", error) action on rejection, None when the request may
-        proceed.
+        Origin/Referer same-origin check against a SERVER-derived
+        :class:`CSRFOriginPolicy` (never a bare client-Host comparison —
+        C-2a); plus the token-echo check ONLY when ``X-CSRF-Token`` is
+        present (OD-15 timing). Returns a ("403", error) action on
+        rejection, None when the request may proceed.
         """
         if not csrf_applies(method, headers):
             return None
-        host = headers.get("host", "")
-        scheme = scope.get("scheme", "http")
-        if not validate_browser_lane_origin(
-            headers, request_host=host, request_scheme=scheme
-        ):
+        policy = self._csrf_origin_policy(scope, headers)
+        if not validate_browser_lane_origin(headers, policy=policy):
             logger.warning(
                 "[AuthAudit] event=csrf_origin_rejected path=%s method=%s",
                 scope.get("path", "?"),
@@ -444,6 +465,59 @@ class AuthMiddleware:
             )
             return ("403", "CSRF_TOKEN_MISMATCH")
         return None
+
+    # ── C-2 policy derivation (server-side facts only) ──────────────
+
+    def _operator_audience(
+        self, external_base: str | None
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        """The C-2a operator audience ``(hosts, origins)``, cached.
+
+        Cache key includes the live-views fallback value: the lifespan
+        one-shot copy lands on the SAME AuthConfig object this
+        middleware holds, so a cache formed before the copy would go
+        stale — re-derive whenever the fallback value changes.
+        """
+        cached = getattr(self, "_audience_cache", None)
+        if cached is not None and cached[0] == (external_base or ""):
+            return cached[1], cached[2]
+        hosts, origins = parse_operator_audience(self._auth_config)
+        self._audience_cache = ((external_base or ""), hosts, origins)
+        return hosts, origins
+
+    def _csrf_origin_policy(
+        self, scope: dict[str, Any], headers: dict[str, str]
+    ) -> "CSRFOriginPolicy":
+        """Build the per-request comparator policy (C-2a/b/c)."""
+        cfg = self._auth_config
+        host_header = (headers.get("host") or "").strip().lower()
+        dev = bool(cfg is not None and cfg.allow_insecure_cookie)
+        peer_loopback = peer_is_loopback(scope.get("client"))
+        # (c) Trust switch — ALIGNED WITH live-views: the configured
+        # ``live_views.external_base_url`` (its one-shot AuthConfig
+        # copy) is the operator declaring a proxy front. NO parallel
+        # flag; unset ⇒ scope scheme only (fail-closed behind proxies
+        # that do not declare).
+        external_base = (
+            getattr(cfg, "live_view_external_base_url_fallback", None)
+            if cfg is not None
+            else None
+        )
+        scheme = _effective_request_scheme(scope, headers, external_base)
+        audience_hosts, audience_origins = self._operator_audience(
+            external_base
+        )
+        host_name = _split_host_header(host_header)
+        host_trusted = host_name in audience_hosts or (
+            dev and peer_loopback and _host_is_localhost(host_name)
+        )
+        return CSRFOriginPolicy(
+            request_host=host_header,
+            request_scheme=scheme,
+            host_is_trusted=host_trusted,
+            localhost_carve_allowed=dev and peer_loopback,
+            allowlisted_origins=audience_origins,
+        )
 
     # ── responses ──────────────────────────────────────────────────
 
@@ -481,7 +555,10 @@ class AuthMiddleware:
                 "return_to=%s",
                 path,
                 method,
-                return_to,
+                # Minor #5: the audit leg logs the SANITIZED value
+                # (≤1024 by construction) truncated at 256 — a long
+                # client-supplied path can never ride the log whole.
+                _audit_truncate(return_to),
             )
             return ("302", location)
         logger.info(
@@ -515,6 +592,43 @@ class AuthMiddleware:
 
 
 # ── module-level pure helpers ────────────────────────────────────────
+
+
+def _effective_request_scheme(
+    scope: dict[str, Any],
+    headers: dict[str, str],
+    external_base: str | None,
+) -> str:
+    """C-2c scheme resolution — live-views-aligned trust chain.
+
+    * External base configured (the operator declared a proxy front via
+      ``live_views.external_base_url``): a well-formed
+      ``X-Forwarded-Proto`` (first hop of a comma list) is TRUSTED for
+      that audience; without one, the operator-declared base scheme is
+      the trusted fallback (BaseURLResolver tier-1 semantics).
+    * No external base: ``scope["scheme"]`` — an XFP header from a
+      client nobody declared is UNTRUSTED (fail-closed: an https Origin
+      behind an undeclared TLS proxy 403s until the operator sets the
+      base — the runbook mandate, not a new flag).
+    """
+    if external_base:
+        xfp = (headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+        if xfp in ("http", "https"):
+            return xfp
+        from urllib.parse import urlsplit
+
+        base_scheme = urlsplit(external_base.strip()).scheme.lower()
+        if base_scheme in ("http", "https"):
+            return base_scheme
+    return (scope.get("scheme") or "http").lower()
+
+
+def _split_host_header(host_header: str) -> str:
+    """Hostname part of a ``Host`` header value (brackets + port off).
+
+    Delegates to the cookie-module parser — one implementation of the
+    Host-header shape rule for both middleware and policy legs."""
+    return cookie_split_host_header(host_header)
 
 
 def _looks_like_browser(accept: str) -> bool:

@@ -235,6 +235,9 @@ class TestSanitizeReturnTo:
             ("/\\evil.com", "/"),
             ("https://evil.com", "/"),
             ("/" + "a" * 2000, "/"),
+            # C-1 (2026-10-11 review): control characters reject.
+            ("/x\r\nEvil: 1", "/"),
+            ("/x\x7f", "/"),
             ("", "/"),
             (None, "/"),
         ],

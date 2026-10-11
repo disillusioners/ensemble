@@ -187,6 +187,45 @@ class TestIssueAndValidate:
         assert ctx is not None  # IP changes are irrelevant when OFF
 
 
+class TestIpSubnetNormalization:
+    """Minor #7 (2026-10-11 review): IPv4-mapped IPv6 addresses
+    normalize to their MAPPED IPv4 address and take the /24 branch —
+    the pre-fix fall-through put them in the /64 branch, letting the
+    same client defeat the fingerprint by switching address families."""
+
+    def test_mapped_v4_takes_the_ipv4_24_branch(self):
+        from daemon.services.auth_service import _ip_subnet
+
+        assert _ip_subnet("::ffff:203.0.113.7") == "203.0.113.0/24"
+        assert _ip_subnet("::ffff:198.51.100.9") == "198.51.100.0/24"
+
+    def test_pure_ipv6_stays_64(self):
+        from daemon.services.auth_service import _ip_subnet
+
+        assert _ip_subnet("2001:db8::1").endswith("/64")
+        assert _ip_subnet("2001:db8::1") == "2001:db8::/64"
+
+    def test_mapped_v4_fingerprint_matches_its_ipv4(self, tmp_path):
+        """End-to-end: a session issued from the mapped-v6 spelling of
+        an IPv4 client validates from the plain IPv4 spelling (same
+        /24) and refuses a foreign /24 — one identity, one family."""
+        service, repository, engine = _service(
+            tmp_path, fingerprint_by_ip_subnet=True
+        )
+        row = asyncio.run(
+            service.issue_session(subject="u9", client_ip="::ffff:203.0.113.7")
+        )
+        assert row.ip_subnet == "203.0.113.0/24"
+        ctx = asyncio.run(
+            service.validate_session(row.id, client_ip="203.0.113.42")
+        )
+        assert ctx is not None
+        ctx2 = asyncio.run(
+            service.validate_session(row.id, client_ip="198.51.100.1")
+        )
+        assert ctx2 is None
+
+
 class TestBearerDelegate:
     def test_verify_static_token_roundtrip(self, tmp_path):
         service, repository, engine = _service(tmp_path)
