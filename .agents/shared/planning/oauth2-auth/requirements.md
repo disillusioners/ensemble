@@ -1069,6 +1069,8 @@ This is the "fail loudly, not fail silently" contract — operators see credenti
 
 The split-proves-the-contract: `auth_disabled_app` test pass demonstrates NFR-1 (zero disruption); `auth_enabled_app` test pass demonstrates NFR-3 + NFR-5 (everything works as designed).
 
+> **AMEND v1.4 / P6 ground-truth annotation (2026-10-11):** the fixture names above are STALE relative to the shipped code — the test estate ships TWO fixture estates that COEXIST BY DESIGN: (1) `tests/helpers/auth_fixture.py` + `FakeOidcStub` (`tests/helpers/fake_oidc_stub.py`, httpx MockTransport) serves the P3/P4 unit + integration packs (no ASGI tree needed); (2) `tests/fakes/fake_oidc_provider.py` + `tests/conftest_auth.py` (pure ASGI sub-app, `auth_disabled_app()` / `auth_enabled_app(tmp_path=...)` context managers + `mint_test_token` / `mint_bearer_token`) serves the P5 e2e packs (PKCE, 302 redirect, failure-toggle scenarios need a mounted IdP). The `auth_disabled_app` / `auth_enabled_app` fixture NAMES survive in both estates; §7.5 text preserved verbatim per annotate-don't-rewrite.
+
 ### 7.6 /vscode consumer inventory (AMEND v1.3 / B1 closure)
 
 **Status: N/A-loopback (no repo machine consumer hits /vscode).** The `/vscode` Starlette Mount at `daemon/api.py:1821` (backed by `vscode_proxy.py:965`) is **operator-browser-only** — it serves the VSCode-in-the-browser IDE to operators opening it interactively. A repo-internal grep confirms zero daemon-API scripts / e2e tests / operator tooling make HTTP calls into `/vscode/*`:
