@@ -172,3 +172,60 @@ class TestMountedPosture:
         assert r_loop.status_code == 503  # proxy handled it
         assert r_remote.status_code == 403  # gate refused it
         assert r_remote.json()["error"] == "VSCODE_LOOPBACK_ONLY"
+
+
+class TestR2WebSocketGateRegardlessOfFlag:
+    """R2 (2026-10-11 merge gate): the WS peer gate survives the
+    ``vscode_protected=true`` wiring (``loopback_only=False``). The
+    AuthMiddleware passes WEBSOCKET scopes through untouched (FR-21 v1
+    seam), so if the flag also disarmed the WS gate, the opt-in
+    "protected" state would accept unauthenticated REMOTE /vscode WS
+    upgrades. [REQ] §5.5 matrix: WS loopback unchanged in v1 — both
+    flag states refuse remote WS; loopback WS unaffected."""
+
+    def test_remote_ws_refused_when_loopback_only_true(self):
+        app = create_vscode_proxy_app(_manager(running=True, port=1))
+        with TestClient(app, client=REMOTE) as client:
+            with pytest.raises(WebSocketDisconnect) as excinfo:
+                with client.websocket_connect("/ws-proxy"):
+                    pass  # pragma: no cover
+        assert excinfo.value.code == 1008
+
+    def test_remote_ws_refused_when_loopback_only_false(self):
+        """THE R2 leg: the flag opens HTTP only — remote WS is still
+        handshake-refused 1008 (previously the gate was removed
+        entirely and this handshake would have been ACCEPTED)."""
+        app = create_vscode_proxy_app(
+            _manager(running=True, port=1), loopback_only=False
+        )
+        with TestClient(app, client=REMOTE) as client:
+            with pytest.raises(WebSocketDisconnect) as excinfo:
+                with client.websocket_connect("/ws-proxy"):
+                    pass  # pragma: no cover
+        assert excinfo.value.code == 1008
+
+    def test_remote_http_still_opens_under_flag(self):
+        """The flag's PURPOSE is intact: remote HTTP peers reach the
+        proxy (readiness 503 proves the proxy answered, not a gate)."""
+        app = create_vscode_proxy_app(
+            _manager(running=False), loopback_only=False
+        )
+        with TestClient(app, client=REMOTE, follow_redirects=False) as client:
+            r = client.get("/workbench.html")
+        assert r.status_code == 503
+
+    def test_loopback_ws_unaffected_by_flag(self):
+        """Loopback WS handshakes pass the gate in BOTH flag states
+        (the gate never over-refuses its own side)."""
+        for kwargs in ({}, {"loopback_only": False}):
+            app = create_vscode_proxy_app(_manager(running=True, port=1), **kwargs)
+            with TestClient(app, client=LOOPBACK) as client:
+                try:
+                    ws = client.websocket_connect("/ws-proxy")
+                    ws.close()
+                except WebSocketDisconnect as exc:
+                    assert exc.code != 1008, (
+                        f"gate refused loopback WS under {kwargs}: {exc}"
+                    )
+                except Exception:  # noqa: BLE001 — upstream failure OK
+                    pass

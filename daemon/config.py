@@ -2792,7 +2792,11 @@ class AuthConfig(BaseSettings):
     vscode_protected: bool = Field(
         default=False,
         description="When true, /vscode/* is PROTECTED with bearer auth. "
-        "Off in v1 (loopback posture unchanged; OQ-9).",
+        "Off in v1 (loopback posture unchanged; OQ-9). Requires "
+        "auth.enabled=true — the combination with enabled=false is "
+        "refused at boot (R3, 2026-10-11 merge gate: the flag would "
+        "disable the /vscode loopback peer gate with no middleware "
+        "behind it).",
     )
     allowed_origins: Annotated[list[str], NoDecode] = Field(
         default=[],
@@ -3191,7 +3195,16 @@ def auth_config_boot_refusals(config: "Config | None" = None) -> list[str]:
       bind; runtime enforcement stays with the P3 resolver/D6).
 
     OFF state (enabled=false): returns ``[]`` — silently, no log lines
-    (G1.3 OFF-state silence).
+    (G1.3 OFF-state silence) — WITH ONE EXCEPTION (R3, 2026-10-11 merge
+    gate): ``vscode_protected=true ∧ enabled=false`` is refused even in
+    the OFF state. The flag claims bearer protection for /vscode, but
+    with auth disabled the OAuth2 middleware never constructs
+    (``create_app`` skips it) while ``api.py`` sizes the proxy's
+    loopback peer gate as ``not vscode_protected`` — i.e. the
+    protective-sounding flag would DISABLE the only gate on /vscode and
+    open it to remote peers with nothing behind it. The refusal names
+    both env vars; each var alone (either flag value with a consistent
+    auth state) never refuses.
     """
     if config is None:
         try:
@@ -3201,6 +3214,20 @@ def auth_config_boot_refusals(config: "Config | None" = None) -> list[str]:
                 raise
             return _format_auth_env_var_error_lines(exc)
     section = config.auth
+    # R3 (2026-10-11 merge gate): cross-field refusal — evaluated BEFORE
+    # the OFF-state silence, because the dangerous combination is
+    # precisely ``enabled=false``. Reuses THIS helper (the single
+    # exit-78 lane); there is no second exit site.
+    if section.vscode_protected and not section.enabled:
+        return [
+            "auth.vscode_protected=true requires auth.enabled=true: with "
+            "auth disabled the OAuth2 middleware does not exist and the "
+            "/vscode loopback peer gate would be disabled with nothing "
+            "behind it (remote-open under a protective-sounding flag). "
+            "Set ENSEMBLE_AUTH_ENABLED=true (and its required pair "
+            "ENSEMBLE_AUTH_VSCODE_PROTECTED=true), or clear "
+            "ENSEMBLE_AUTH_VSCODE_PROTECTED."
+        ]
     if not section.enabled:
         return []
     refusals: list[str] = []

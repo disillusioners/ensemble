@@ -1902,8 +1902,14 @@ async def lifespan(app: FastAPI):
             # previously-claimed "loopback posture" was FALSE in code;
             # this flag makes it TRUE in both auth states. When the
             # operator opts into ENSEMBLE_AUTH_VSCODE_PROTECTED=true
-            # the gate OPENS (remote peers allowed) because the OAuth2
-            # middleware then owns /vscode (bearer lane).
+            # the HTTP gate OPENS (remote peers allowed) because the
+            # OAuth2 middleware then owns /vscode (bearer lane).
+            # R2 (2026-10-11 merge gate): the flag opens HTTP ONLY —
+            # the proxy keeps its WEBSOCKET peer gate in BOTH flag
+            # states (AuthMiddleware passes WS scopes untouched, so
+            # without the always-on WS gate the opt-in "protected"
+            # state would accept unauthenticated remote /vscode WS
+            # upgrades; [REQ] §5.5 matrix: WS loopback unchanged v1).
             loopback_only=not config.auth.vscode_protected,
         )
         app.mount("/vscode", vscode_app)

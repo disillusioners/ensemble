@@ -447,3 +447,52 @@ class TestShippedYamlStillOff:
         config = load_config(str(REPO_ROOT / "config.yaml"))
         assert config.auth.enabled is False
         assert auth_config_boot_refusals(config) == []
+
+
+# ── R3 (2026-10-11 merge gate): vscode_protected ∧ enabled=false ────────────
+
+
+class TestR3VscodeProtectedCrossField:
+    """The protective-sounding flag must never open /vscode to remote
+    peers: with auth disabled the OAuth2 middleware does not construct
+    while api.py sizes the proxy's loopback peer gate as
+    ``not vscode_protected`` — i.e. flag ∧ ¬auth disables the only
+    gate. Refused by the exit-78 helper (the SINGLE refusal site);
+    each variable alone never refuses."""
+
+    def test_combo_refused_naming_both_vars(self):
+        config = Config(
+            daemon={"host": "127.0.0.1", "port": 8088},
+            auth={**_valid_kwargs(), "enabled": False, "vscode_protected": True},
+        )
+        lines = auth_config_boot_refusals(config)
+        assert len(lines) == 1
+        assert "ENSEMBLE_AUTH_VSCODE_PROTECTED" in lines[0]
+        assert "ENSEMBLE_AUTH_ENABLED" in lines[0]
+        assert "vscode_protected=true requires auth.enabled=true" in lines[0]
+
+    def test_flag_alone_with_auth_on_does_not_refuse(self):
+        config = Config(
+            daemon={"host": "127.0.0.1", "port": 8088},
+            auth={**_valid_kwargs(), "vscode_protected": True},
+        )
+        assert auth_config_boot_refusals(config) == []
+
+    def test_auth_off_alone_does_not_refuse(self):
+        config = Config(
+            daemon={"host": "127.0.0.1", "port": 8088},
+            auth={**_valid_kwargs(), "enabled": False},
+        )
+        assert auth_config_boot_refusals(config) == []
+
+    def test_combo_via_helper_load_lane(self, tmp_path, monkeypatch):
+        """The config-load lane (helper called with no config) surfaces
+        the same refusal — the exit-78 preflight consumes exactly this
+        return shape."""
+        yaml_file = _tmp_yaml(tmp_path, "daemon:\n  host: 127.0.0.1\n  port: 8088\n")
+        monkeypatch.setenv("ENSEMBLE_CONFIG", str(yaml_file))
+        monkeypatch.setenv("ENSEMBLE_AUTH_ENABLED", "false")
+        monkeypatch.setenv("ENSEMBLE_AUTH_VSCODE_PROTECTED", "true")
+        lines = auth_config_boot_refusals()
+        assert len(lines) == 1
+        assert "ENSEMBLE_AUTH_VSCODE_PROTECTED" in lines[0]

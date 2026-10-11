@@ -45,6 +45,20 @@ from daemon.services.auth_service import (
 
 logger = logging.getLogger(__name__)
 
+
+def _audit_truncate(value: str, *, cap: int = 256) -> str:
+    """Audit-log truncation (cheap minor, 2026-10-11 merge gate).
+
+    Mirrors the middleware's minor-#5 discipline: the callback audit
+    legs log client-influenced values bounded only by
+    ``sanitize_return_to`` (≤1024 by construction) — this caps the log
+    line at the same 256-char audit budget with an explicit cut marker,
+    so a long value can never ride the audit log whole.
+    """
+    if len(value) <= cap:
+        return value
+    return value[:cap] + "...[TRUNCATED]"
+
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
@@ -131,7 +145,9 @@ async def callback(request: Request, code: str | None = None, state: str | None 
     logger.info(
         "[AuthAudit] event=callback_success subject=%s return_to=%s",
         result.session.subject,
-        return_to,
+        # Cheap minor: ≤1024-by-construction, truncated at the 256
+        # audit cap (same budget as the middleware's 302 audit leg).
+        _audit_truncate(return_to),
     )
     return response
 

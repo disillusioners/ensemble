@@ -175,6 +175,18 @@ def parse_cookies_from_scope(scope: Any) -> dict[str, str]:
     ``ensemble_csrf`` are lowercase by convention, not by coercion).
     Never raises: malformed pairs are skipped (the middleware's
     never-raise contract, D3.9).
+
+    Duplicate-name policy (minor-6, 2026-10-11 merge gate — was
+    residual last-wins): **FIRST occurrence wins**, per the RFC 6265
+    §5.4 cookie-header algorithm ("if the cookie-name ... already
+    appears in the list, ignore this pair") — the browser-sent order
+    is preserved by every major client, so the first pair is the one
+    the cookie jar considered authoritative. Deterministic either way;
+    first-wins is the RFC posture and closes the last-wins ambiguity
+    where a smuggled second ``ensemble_sid=`` pair would silently
+    override the legitimate one. (Blast radius under double-submit is
+    low — the session id must still validate server-side — but the
+    parsing must not be attacker-steerable.)
     """
     headers = _header_dict(scope)
     raw = headers.get("cookie", "")
@@ -185,7 +197,7 @@ def parse_cookies_from_scope(scope: Any) -> dict[str, str]:
         name, _, value = part.partition("=")
         name = name.strip()
         if name:
-            cookies[name] = value.strip()
+            cookies.setdefault(name, value.strip())
     return cookies
 
 
@@ -262,17 +274,28 @@ def validate_browser_lane_origin(
     # Leg 1 — same-origin exact, vouched only by a trusted Host. The
     # Host header's port (when explicitly sent) participates, mirroring
     # the browser's own Origin composition (port only when non-default).
+    # Cheap-minor hardening (2026-10-11 merge gate): the comparison is
+    # a constant-time BYTES compare (hmac.compare_digest over the
+    # normalized UTF-8 encodings) — the comparator's allow decisions
+    # are textual equality checks, and the 401/403-noise taxonomy they
+    # feed should never be able to leak match-prefix timing.
     if policy.host_is_trusted:
         expected = _normalize_origin(
             policy.request_scheme,
             _split_host_header(policy.request_host),
             _port_of_host_header(policy.request_host),
         )
-        if expected is not None and hmac.compare_digest(supplied, expected):
+        if expected is not None and _origin_bytes_eq(supplied, expected):
             return True
-    # Leg 2 — explicit operator-named origin.
-    if supplied in policy.allowlisted_origins:
-        return True
+    # Leg 2 — explicit operator-named origin. Constant-time over the
+    # allowlist entries (same cheap-minor discipline as leg 1); length
+    # differences still gate (compare_digest is length-sensitive by
+    # design — a mismatched length is a non-match, never a prefix hint
+    # that matters here: the allowlist is server-configured, not
+    # secret-bearing).
+    for allowed in sorted(policy.allowlisted_origins):
+        if _origin_bytes_eq(supplied, allowed):
+            return True
     # Leg 3 — dev-gated, peer-gated EXACT loopback carve.
     if policy.localhost_carve_allowed and _host_is_localhost(
         parts.hostname or ""
@@ -369,6 +392,21 @@ def peer_is_loopback(client: Any) -> bool:
     if addr.version == 6 and addr.ipv4_mapped is not None:
         addr = addr.ipv4_mapped
     return addr.is_loopback
+
+
+def _origin_bytes_eq(left: str, right: str) -> bool:
+    """Constant-time equality over normalized origin strings.
+
+    Cheap-minor (2026-10-11 merge gate): the C-2 comparator's textual
+    equality checks (leg-1 same-origin, leg-2 allowlist) compare the
+    UTF-8 encodings via ``hmac.compare_digest`` instead of ``str ==
+``/set membership, so the 401/403 rejection taxonomy the comparator
+    feeds cannot leak match-prefix timing from short-circuiting string
+    comparison.
+    """
+    return hmac.compare_digest(
+        left.encode("utf-8"), right.encode("utf-8")
+    )
 
 
 def _normalize_origin(

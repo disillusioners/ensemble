@@ -428,7 +428,13 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
     return ScheduleInfo(
         id=updated.source_id,
         name=updated.name,
-        config=updated.config,
+        # R1 (2026-10-11 merge gate): mask the RESPONSE like every other
+        # read-back — the sibling-verb defeat of the M-2 GET mask. The
+        # PUT handler legitimately touches the persisted plaintext
+        # internally (sentinel round-trip above), but the serialized
+        # ScheduleInfo must carry the WEBHOOK_SECRET_MASK sentinel, not
+        # the secret (ML-3 write-only discipline).
+        config=_mask_source_config(updated.config),
         status=SourceStatus(updated.status),
         created_at=parse_utc_datetime(updated.created_at),
         updated_at=parse_utc_datetime(updated.updated_at),

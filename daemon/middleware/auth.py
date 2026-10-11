@@ -93,6 +93,17 @@ _401_HEURISTIC_PREFIXES = (
 _WWW_AUTHENTICATE = 'Bearer realm="ensemble"'
 
 
+#: Control characters the C-1 check rejects outright: the C0 range,
+#: DEL (0x7F), plus the unicode line/paragraph-separator class that
+#: log forgers and header injectors use because ASCII-only filters
+#: miss them (cheap-minor hardening, 2026-10-11 merge gate):
+#: U+0085 (NEL), U+2028 (LINE SEPARATOR), U+2029 (PARAGRAPH
+#: SEPARATOR). Several log tailers and terminal emitters treat all
+#: three as line breaks, so a value carrying them can forge audit
+#: lines even though ``ord(c) >= 0x20``.
+_LINE_BREAK_CONTROLS = frozenset({0x85, 0x2028, 0x2029})
+
+
 def sanitize_return_to(raw: str | None) -> str:
     """D3.8 ``return_to`` sanitization (AMENDED v1.1 / OD-12; C-1 added).
 
@@ -101,8 +112,10 @@ def sanitize_return_to(raw: str | None) -> str:
     ``Location:`` header — ``return_to=\\\\evil.com`` and
     ``return_to=//evil.com`` are the same open-redirect vector, so the
     prefix tests must judge the NORMALIZED value). Then (C-1, 2026-10-11
-    security review): ANY control character — ``ord(c) < 0x20`` or
-    ``0x7f`` — rejects the value outright. The CRLF class
+    security review): ANY control character — ``ord(c) < 0x20``,
+    ``0x7f``, or the unicode line-break control set (U+0085, U+2028,
+    U+2029 — cheap-minor hardening, 2026-10-11 merge gate) — rejects
+    the value outright. The CRLF class
     (``%0D%0A`` decoded or raw) is the header-injection /
     log-forgery vector: because BOTH the redirect call sites AND the
     audit-log leg consume this function's OUTPUT, a rejected value can
@@ -111,7 +124,10 @@ def sanitize_return_to(raw: str | None) -> str:
     never ``/\\``), no scheme, ≤1024 chars; anything else → ``/``.
     """
     value = (raw or "/").replace("\\", "/")
-    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+    if any(
+        ord(c) < 0x20 or ord(c) == 0x7F or ord(c) in _LINE_BREAK_CONTROLS
+        for c in value
+    ):
         return "/"
     if len(value) > 1024:
         return "/"
@@ -357,8 +373,13 @@ class AuthMiddleware:
             return (
                 "401",
                 "invalid_bearer",
+                # Cheap-minor taxonomy fix (2026-10-11 merge gate): the
+                # bearer lane's challenge text was session-lane
+                # vocabulary ("Session expired or invalid") — the 401
+                # taxonomy is lane-neutral now (no credential-class
+                # hint; enumeration-resistance-friendly, T4.3).
                 'Bearer realm="ensemble", error="invalid_token", '
-                'error_description="Session expired or invalid"',
+                'error_description="Credential expired or invalid"',
             )
 
         # Cookie lane.

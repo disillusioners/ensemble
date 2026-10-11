@@ -952,7 +952,7 @@ _VSCODE_LOOPBACK_403 = (
 
 
 class _LoopbackPeerGate:
-    """M-1: client-peer loopback gate over the /vscode proxy app.
+    """M-1 (+R2) client-peer loopback gate over the /vscode proxy app.
 
     The plan's "loopback posture" claim was FALSE in code: the daemon
     binds 0.0.0.0 and nothing restricted the unprotected ``/vscode``
@@ -966,19 +966,32 @@ class _LoopbackPeerGate:
     spoof ``Host: localhost``; it cannot spoof its peer address. A
     local reverse proxy keeps working (its peer IS loopback).
 
-    ``loopback_only=False`` disables the gate entirely — the
-    ``vscode_protected=true`` wiring, where the OAuth2 middleware owns
-    /vscode (bearer lane) and remote peers are the point.
+    R2 (2026-10-11 merge gate): **the WEBSOCKET gate is unconditional.**
+    ``gate_http=False`` (the ``vscode_protected=true`` wiring) opens the
+    gate for HTTP peers only — the OAuth2 middleware owns the protected
+    HTTP surface (bearer lane). The middleware, however, passes
+    WEBSOCKET scopes through untouched (FR-21 v1 seam), so disabling
+    the WS gate too would leave remote ``/vscode`` WS handshakes
+    unauthenticated in the opt-in "protected" state. The WS loopback
+    posture is UNCHANGED in v1 ([REQ] §5.5 matrix: vscode WebSocket =
+    PUBLIC + loopback in both flag states) — websocket scopes are
+    gated REGARDLESS of the flag.
+
+    ``gate_http`` defaults True (the fail-safe: everything gated).
     """
 
-    def __init__(self, wrapped: Any) -> None:
+    def __init__(self, wrapped: Any, *, gate_http: bool = True) -> None:
         self._wrapped = wrapped
+        self._gate_http = gate_http
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] not in ("http", "websocket"):
             await self._wrapped(scope, receive, send)
             return
-        if not _peer_is_loopback(scope.get("client")):
+        peer_must_be_loopback = (
+            scope["type"] == "websocket" or self._gate_http
+        )
+        if peer_must_be_loopback and not _peer_is_loopback(scope.get("client")):
             if scope["type"] == "http":
                 await send(
                     {
@@ -1031,19 +1044,34 @@ def create_vscode_proxy_app(
             ``?folder=`` query parameter (C1 security fix). When ``None``,
             the folder param is dropped (fail-closed).
         loopback_only: M-1 (2026-10-11 security review) — when True
-            (the fail-safe DEFAULT), the app refuses every request
-            whose ASGI client peer is not loopback (403; WS handshake
-            close 1008). The real daemon wiring passes
-            ``not auth.vscode_protected``: unprotected /vscode is
-            loopback-only, protected /vscode is bearer-gated instead.
+            (the fail-safe DEFAULT), the app refuses every HTTP request
+            whose ASGI client peer is not loopback (403). R2 (merge
+            gate): WEBSOCKET scopes are loopback-gated REGARDLESS of
+            this flag — the AuthMiddleware passes WS untouched (FR-21),
+            so the WS peer gate must never disarm. The real daemon
+            wiring passes ``not auth.vscode_protected``: unprotected
+            /vscode is loopback-only for HTTP+WS; protected /vscode
+            opens HTTP to the bearer lane while WS stays loopback-only
+            ([REQ] §5.5: WS loopback unchanged in v1).
 
     Returns:
-        An independent FastAPI sub-application (loopback-gated when
-        ``loopback_only``).
+        An independent FastAPI sub-application. The client-peer
+        loopback gate is ALWAYS installed: websocket scopes are gated
+        in BOTH flag states (R2 — the AuthMiddleware passes WS
+        untouched, so the WS gate is the only remote-peer defense);
+        HTTP scopes are gated only when ``loopback_only`` (M-1 default;
+        the ``vscode_protected=true`` wiring opens HTTP to the OAuth2
+        bearer lane).
     """
     app = FastAPI(title="VS Code proxy")
-    if loopback_only:
-        app.add_middleware(_LoopbackPeerGate)
+    # R2 (2026-10-11 merge gate): the gate is UNCONDITIONAL now —
+    # previously ``loopback_only=False`` (the vscode_protected=true
+    # wiring) removed the middleware entirely, which also disarmed the
+    # WS handshake gate while AuthMiddleware passes WS scopes through
+    # untouched (FR-21) — unauthenticated remote /vscode WS upgrades in
+    # the opt-in "protected" state. gate_http=loopback_only keeps the
+    # HTTP posture flag-driven; websocket stays loopback-only in v1.
+    app.add_middleware(_LoopbackPeerGate, gate_http=loopback_only)
 
     def readiness() -> JSONResponse | None:
         if not manager.is_running():
