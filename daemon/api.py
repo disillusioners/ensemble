@@ -1624,6 +1624,17 @@ async def lifespan(app: FastAPI):
         "[KbKeys] module key store ready (active_keys=%d)",
         len(app.state.mcp_kb_key_store.list_keys()),
     )
+    # M-4 (2026-10-11 security review): name the empty-store window at
+    # boot — while the store is empty the KB mounts are in bootstrap
+    # pass-through (no key required). The WARN is the operator-visible
+    # half; GET /api/mcp/kb/keys/guard-status is the runtime probe.
+    if not app.state.mcp_kb_key_store.has_active_keys():
+        daemon_logger.warning(
+            "[KbKeys] key store EMPTY — /api/mcp/kb and /api/mcp/kb/sse "
+            "are in bootstrap pass-through (requests NOT key-gated). "
+            "Mint the first key via POST /api/mcp/kb/keys to activate "
+            "the guard; probe posture via GET /api/mcp/kb/keys/guard-status."
+        )
 
     # ─────────────────────────────────────────────────────────────
     # v0.15.3 P1 Item 4 — UpgradeJournalSweepService: periodic
@@ -1882,7 +1893,18 @@ async def lifespan(app: FastAPI):
         # C1: pass project_repo so the proxy can validate ?folder= queries
         # against known project workdirs (prevents arbitrary FS access).
         vscode_app = create_vscode_proxy_app(
-            vscode_manager, project_repo=manager._project_repository
+            vscode_manager,
+            project_repo=manager._project_repository,
+            # M-1 (2026-10-11 security review / leader ruling): the
+            # UNPROTECTED /vscode path is loopback-PEER-gated at the
+            # proxy itself — scope["client"] must be loopback or the
+            # request is refused 403. The daemon binds 0.0.0.0, so the
+            # previously-claimed "loopback posture" was FALSE in code;
+            # this flag makes it TRUE in both auth states. When the
+            # operator opts into ENSEMBLE_AUTH_VSCODE_PROTECTED=true
+            # the gate OPENS (remote peers allowed) because the OAuth2
+            # middleware then owns /vscode (bearer lane).
+            loopback_only=not config.auth.vscode_protected,
         )
         app.mount("/vscode", vscode_app)
 
@@ -1919,11 +1941,13 @@ async def lifespan(app: FastAPI):
         # OAuth2 Phase 3 (§5.5 / OQ-9): the /vscode Mount is a
         # lifespan-registered surface, so it is tagged here (not in
         # create_app) for the middleware's route-metadata derivation.
-        # v1 default (flag false): PUBLIC + loopback — the loopback-only
-        # restriction lives in the vscode proxy itself (pre-existing
-        # posture unchanged). Operator opt-in
-        # ENSEMBLE_AUTH_VSCODE_PROTECTED=true leaves it UNTAGGED ⇒
-        # oauth2-protected (bearer lane).
+        # v1 default (flag false): PUBLIC + LOOPBACK-GATED — the
+        # loopback restriction is the client-PEER gate the proxy itself
+        # enforces (M-1, 2026-10-11 security review: the prior comment
+        # claimed a pre-existing proxy loopback posture that did not
+        # exist in code; the gate now makes the claim TRUE). Operator
+        # opt-in ENSEMBLE_AUTH_VSCODE_PROTECTED=true leaves it UNTAGGED
+        # ⇒ oauth2-protected (bearer lane) and the proxy gate opens.
         if config.auth.enabled and not config.auth.vscode_protected:
             from daemon.auth.route_meta import tag_public
 

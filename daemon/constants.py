@@ -1097,37 +1097,18 @@ ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX: str = "ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX"
 # CONSTANTS ONLY — no runtime consumer ships in Phase 1. Per the leaf-module
 # invariant above these are raw literals; P2 (token mint/verify) consumes the
 # scope names and P3 (middleware construction) consumes the public-path
-# fallback list. Placement rationale: daemon/constants.py (the consolidated
+# derivation. Placement rationale: daemon/constants.py (the consolidated
 # constants registry) instead of a daemon/auth/ package skeleton — the auth
 # package materializes in P2/P3 and these values stay import-anything,
 # grep-able, and consistent with every other named constant.
 #
-# AUTH_DEFAULT_PUBLIC_PATHS is the EXPLICIT list-of-prefixes fallback per
-# D18 (the operative public_path_set is derived from route metadata at
-# middleware construction; this tuple covers routes that cannot be tagged —
-# the /api/auth/* prefix family and the untagged probes). Per D1 as amended
-# (v1.1) it INCLUDES the MCP KB Mount surfaces /api/mcp/kb and /api/mcp/kb/sse
-# (pass-through in v1); the v1.4 module-lane ruling re-classes those paths
-# into the distinct module_lane_path_set at P3 classification time (D19/D20)
-# — the behavioral pass-through is identical, so the tuple entries stay.
-AUTH_DEFAULT_PUBLIC_PATHS: tuple[str, ...] = (
-    # Health-probe publicness invariant (FR-22 / NFR-3 / AC-22 — all 5
-    # must stay reachable by unauthenticated curl with auth ON):
-    "/livez",
-    "/readyz",
-    "/api/health",
-    "/api/info",
-    "/api/maintenance/checkpoint-cleanup/availability",
-    # Live-views liveness probe (D11 public inventory):
-    "/views/livez",
-    # Auth endpoints implement auth itself (D18 prefix rule for the
-    # untaggable dynamic family — login/callback/logout/me):
-    "/api/auth/",
-    # MCP KB Mount surfaces (D1 amended v1.1; module-lane re-class at P3
-    # per the v1.4 ruling — behavioral pass-through identical):
-    "/api/mcp/kb",
-    "/api/mcp/kb/sse",
-)
+# (AUTH_DEFAULT_PUBLIC_PATHS DELETED — security-review code-minor #4,
+# 2026-10-11: unreferenced since the D18 derivation replaced the
+# hand-listed fallback with route-metadata tagging; its "/api/auth/"
+# PREFIX entry was a future hazard — a consumer resurrecting the tuple
+# would silently re-publicize the reserved /api/auth/admin/* family.
+# The operative public/module-lane sets are derived at
+# daemon/middleware/auth.py from the route tags only.)
 
 # Scope-name taxonomy (§7.3 v1 minimum set; FR-18 groundwork). P2's
 # token-mint CLI and the P3 route-level scope check consume these names —

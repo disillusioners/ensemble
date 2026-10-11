@@ -70,6 +70,26 @@ class KbKeyList(BaseModel):
     keys: list[KbKeyInfo]
 
 
+class KbKeyGuardStatus(BaseModel):
+    """M-4 guard-status probe (2026-10-11 security review).
+
+    The admin-visible answer to "is the KB mount enforcing keys right
+    now?". ``bootstrap_passthrough`` = the empty-store window the
+    boot-time WARN also names: the mounts accept unkeyed traffic until
+    the first key is minted.
+    """
+
+    guard_active: bool = Field(
+        ..., description="True when ≥1 active (non-revoked) key exists"
+    )
+    active_keys: int = Field(..., description="Active key row count")
+    posture: str = Field(
+        ...,
+        description="'enforcing' when the mount requires X-KB-Key; "
+        "'bootstrap_passthrough' while the store is empty",
+    )
+
+
 def _get_store(request: Request) -> Any:
     store = getattr(request.app.state, "mcp_kb_key_store", None)
     if store is None:
@@ -119,6 +139,27 @@ async def create_key(request: Request, body: KbKeyUpdate | None = None) -> KbKey
         label=row.label,
         created_at=row.created_at,
         key=plaintext,
+    )
+
+
+@router.get("/guard-status", response_model=KbKeyGuardStatus)
+@require_scope("mcpkb:admin")
+async def guard_status(request: Request) -> KbKeyGuardStatus:
+    """M-4 (2026-10-11 security review): is the KB mount enforcing?
+
+    Admin-only (same ``mcpkb:admin`` scope as the CRUD — the probe
+    discloses guard posture, which is exactly what key administrators
+    may see). Registered BEFORE the ``/{key_id}`` family so the static
+    segment wins Starlette first-match. Read-only: counts active keys,
+    no row mutation.
+    """
+    store = _get_store(request)
+    keys = await asyncio.to_thread(store.list_keys)
+    active = len(keys)
+    return KbKeyGuardStatus(
+        guard_active=active > 0,
+        active_keys=active,
+        posture="enforcing" if active > 0 else "bootstrap_passthrough",
     )
 
 

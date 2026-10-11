@@ -25,6 +25,7 @@ from daemon.models import (
 )
 from daemon.services.scheduling_service import ScheduleCreatePayload
 from daemon.utils import parse_utc_datetime, validate_instance_mode
+from daemon.routers.sources import WEBHOOK_SECRET_MASK, _mask_source_config
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,12 @@ async def list_schedules(request: Request, include_cancelled: bool = False):
             schedules.append(ScheduleInfo(
                 id=src.source_id,
                 name=src.name,
-                config=src.config,
+                # M-2 (2026-10-11 security review): the scheduler-source
+                # config echo goes through the SAME read-side mask as
+                # the sources router (ML-3) — webhook_secret rides the
+                # generic config column and must never leave in
+                # plaintext on a GET.
+                config=_mask_source_config(src.config),
                 status=SourceStatus(src.status),
                 created_at=parse_utc_datetime(src.created_at),
                 updated_at=parse_utc_datetime(src.updated_at),
@@ -354,12 +360,27 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
     # Merge updates
     updated_name = schedule_update.name if schedule_update.name is not None else existing.name
     updated_config = schedule_update.config if schedule_update.config is not None else existing.config
-    
+
     # Handle partial config update (merge with existing config)
     if schedule_update.config is not None and existing.config:
         # Merge partial config with existing config
         merged_config = {**existing.config, **schedule_update.config}
         updated_config = merged_config
+
+    # ML-3 round-trip guard (M-2 rider, 2026-10-11): the GET echo masks
+    # webhook_secret with the sentinel — an incoming config that still
+    # carries the sentinel means "unchanged", NOT a literal value. A
+    # client that GETs and PUTs back the whole object would otherwise
+    # silently overwrite the real secret with "********". Mirrors the
+    # sources.py PUT guard.
+    if isinstance(updated_config, dict) and existing.config:
+        if (
+            updated_config.get("webhook_secret") == WEBHOOK_SECRET_MASK
+            and existing.config.get("webhook_secret")
+        ):
+            updated_config["webhook_secret"] = existing.config[
+                "webhook_secret"
+            ]
     
     # Validate and process instance_mode
     instance_mode_config = validate_instance_mode(

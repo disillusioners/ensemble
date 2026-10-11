@@ -262,6 +262,32 @@ class TestListSchedules:
         assert "interval-schedule" in schedule_ids
         assert "onetime-schedule" in schedule_ids
 
+    @pytest.mark.asyncio
+    async def test_list_schedules_masks_webhook_secret(self, client, mock_manager):
+        """M-2 (2026-10-11 review): the scheduler-source config echo
+        goes through the SAME read-side mask as the sources router —
+        webhook_secret must never leave in plaintext on a GET."""
+        scheduler_source = create_scheduler_source(
+            "scheduler-secret",
+            "Secret Bearer Schedule",
+            {
+                "schedule": "0 9 * * *",
+                "agent": "./agents/developer",
+                "message": "Report",
+                "webhook_secret": "super-secret-value",
+            },
+        )
+        mock_manager._source_repository.list_source_configs = Mock(
+            return_value=[scheduler_source]
+        )
+
+        response = await client.get("/schedules")
+
+        assert response.status_code == 200
+        entry = response.json()["schedules"][0]
+        assert entry["config"]["webhook_secret"] == "********"
+        assert "super-secret-value" not in response.text
+
 
 # ==================== POST /schedules/{id}/trigger Tests ====================
 

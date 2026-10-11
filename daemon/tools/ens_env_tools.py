@@ -166,6 +166,18 @@ _DEFAULT_KEYS: tuple[str, ...] = (
     "ENSEMBLE_DATA_DIR",
 )
 
+# OAuth2 FR-16a deny-list (security-review minor-8, hard-sequenced
+# BEFORE any P4 mint-CLI code exists): ``ENSEMBLE_AUTH_*`` is the
+# OAuth2 configuration surface — client secrets, ``BOOTSTRAP_TOKEN``,
+# issuer/redirect material. ``ens_env_read`` is an UNMASKED reader;
+# letting it surface auth env values would turn any opted-in agent
+# into a one-call exfiltration path for the bootstrap token. Refusal
+# is a structured error naming the refused keys — the values are never
+# read, never logged, never returned. Prefix is matched
+# case-insensitively (env names are uppercase by convention; the deny
+# must not hinge on that convention).
+_AUTH_ENV_DENY_PREFIX = "ENSEMBLE_AUTH_"
+
 
 def _audit(
     current_instance_id: str,
@@ -290,6 +302,33 @@ def create_ens_env_tools(
                         deduped.append(k)
                 effective_keys = tuple(deduped)
 
+            # FR-16a deny-list (minor-8): refuse ENSEMBLE_AUTH_* BEFORE
+            # any value read. Fail-closed even if the deny set were
+            # ever removed from the default keys — this check runs on
+            # every explicit ``keys`` request too.
+            denied = [
+                k for k in effective_keys
+                if isinstance(k, str)
+                and k.upper().startswith(_AUTH_ENV_DENY_PREFIX)
+            ]
+            if denied:
+                _audit(
+                    caller_instance_id,
+                    effective_keys,
+                    result_size=1,
+                    missing_count=0,
+                )
+                return json.dumps(
+                    {
+                        "error": (
+                            "denied: ENSEMBLE_AUTH_* values are never "
+                            "surfaced via ens_env_read (oauth2 FR-16a — "
+                            "client_secret / BOOTSTRAP_TOKEN class); "
+                            "refused keys: " + ", ".join(denied)
+                        )
+                    }
+                )
+
             # Read at call time — the live truth. The ``os.environ``
             # mapping is updated as the daemon's process env changes
             # (e.g. via launcher.sh ``load_env_file`` re-export),
@@ -379,6 +418,13 @@ Args:
         before reading. Non-string entries (e.g. ``None``/``int``)
         return a single ``{"error": ...}`` envelope — never partial
         output.
+
+    **OAuth2 deny-list (FR-16a):** any key whose name starts with
+    ``ENSEMBLE_AUTH_`` (case-insensitive) is REFUSED with a structured
+    error envelope naming the refused keys — the values are never
+    read. That prefix is the OAuth2 configuration surface
+    (``..._CLIENT_SECRET``, ``..._BOOTSTRAP_TOKEN``, ...); this tool
+    is unmasked by design, so the auth class is denied outright.
 
 Returns:
 A JSON object with the following shape::

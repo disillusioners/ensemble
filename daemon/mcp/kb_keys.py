@@ -50,6 +50,10 @@ from typing import Any
 
 from daemon.repositories.mcp_kb_keys.models import McpKbKey
 from daemon.repositories.mcp_kb_keys.repository import McpKbKeyRepository
+# Pure-function import only (minor #9): the 60s touch-batch predicate
+# is the P2 bearer-touch precedent. No store/engine coupling — D20a
+# module isolation is about credential STORES, not shared pure helpers.
+from daemon.services.auth_service import touch_is_due
 from daemon.services.timestamps import now_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -96,13 +100,20 @@ class McpKbKeyStore:
         it). Hash-vs-hash comparison: the presented value is SHA-256'd
         and looked up — no plaintext secret ever sits in a comparison
         against a stored value it could leak.
+
+        The ``last_used_at`` touch is 60s-batched (security-review
+        minor #9): the P2 ``touch_is_due`` precedent — one UPDATE per
+        key per minute instead of one per verified request, so a hot
+        mount loop cannot turn verification into write amplification.
         """
         if not presented:
             return False, "KB_KEY_REQUIRED"
         row = self._repository.get_active_by_hash(hash_kb_key(presented))
         if row is None:
             return False, "KB_KEY_INVALID"
-        self._repository.touch_key(row.id_hash, now_iso=self._now_iso_fn())
+        now_iso = self._now_iso_fn()
+        if touch_is_due(row.last_used_at, now_iso):
+            self._repository.touch_key(row.id_hash, now_iso=now_iso)
         return True, ""
 
     # ── mint / manage (T3.12 CRUD path) ─────────────────────────────

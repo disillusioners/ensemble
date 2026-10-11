@@ -338,7 +338,7 @@ class TestHTTPProxyGate:
         manager = _make_mock_manager(running=False, port=None)
         app = create_vscode_proxy_app(manager)
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get("/index.html")
 
         assert resp.status_code == 503
@@ -357,7 +357,7 @@ class TestHTTPProxyGate:
         manager = _make_mock_manager(running=True, port=None)
         app = create_vscode_proxy_app(manager)
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get("/healthz")
 
         assert resp.status_code == 503
@@ -374,7 +374,7 @@ class TestHTTPProxyGate:
         manager.is_running.return_value = False
         app = create_vscode_proxy_app(manager)
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.post("/api/echo", json={"x": 1})
 
         assert resp.status_code == 503
@@ -384,7 +384,7 @@ class TestHTTPProxyGate:
         manager = _make_mock_manager(running=False, port=None)
         app = create_vscode_proxy_app(manager)
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             for method, url in [
                 ("GET", "/"),
                 ("POST", "/"),
@@ -415,7 +415,7 @@ class TestHTTPProxyGate:
 
         oversized = b"x" * (MAX_BODY_BYTES + 1024)
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.post(
                 "/upload",
                 content=oversized,
@@ -442,7 +442,7 @@ class TestHTTPProxyGate:
         # we want to confirm the boundary direction).
         one_over = b"x" * (MAX_BODY_BYTES + 1)
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.post("/upload", content=one_over)
 
         assert resp.status_code == 413
@@ -487,7 +487,7 @@ class TestHTTPProxyGate:
 
         monkeypatch.setattr(httpx, "AsyncClient", fake_async_client)
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get("/index.html")
 
         assert resp.status_code == 503, resp.text
@@ -529,7 +529,7 @@ class TestHTTPProxyGate:
 
         monkeypatch.setattr(httpx, "AsyncClient", fake_async_client)
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get("/healthz")
 
         assert resp.status_code == 503, resp.text
@@ -569,7 +569,7 @@ class TestHTTPProxyGate:
 
         monkeypatch.setattr(httpx, "AsyncClient", fake_async_client)
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             # HTTPStatusError is NOT caught by the proxy (it only catches
             # RequestError), so it propagates as an unhandled exception.
             # TestClient re-raises unhandled server exceptions — so we
@@ -598,7 +598,7 @@ class TestWebSocketProxyGate:
         manager = _make_mock_manager(running=False, port=None)
         app = create_vscode_proxy_app(manager)
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             with pytest.raises(Exception) as exc_info:
                 with client.websocket_connect("/") as ws:
                     # If we got here, the proxy accepted — that is the
@@ -622,7 +622,7 @@ class TestWebSocketProxyGate:
         manager = _make_mock_manager(running=True, port=None)
         app = create_vscode_proxy_app(manager)
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             with pytest.raises(Exception) as exc_info:
                 with client.websocket_connect("/ws") as ws:
                     ws.receive_text()
@@ -656,7 +656,7 @@ class TestWebSocketProxyGate:
 
         websockets_module.connect = _explode
         try:
-            with TestClient(app) as client:
+            with TestClient(app, client=("127.0.0.1", 50000)) as client:
                 with pytest.raises(Exception):
                     with client.websocket_connect("/") as ws:
                         ws.receive_text()
@@ -1093,7 +1093,7 @@ class TestUpstreamToBrowserCrashResilience:
             manager = _make_mock_manager(running=True, port=1)
             app = create_vscode_proxy_app(manager)
 
-            with TestClient(app) as client:
+            with TestClient(app, client=("127.0.0.1", 50000)) as client:
                 # The proxy should accept, run TaskGroup, and the
                 # upstream's RuntimeError must be caught by the
                 # ``except*``. From the client side this just looks
@@ -1135,7 +1135,7 @@ class TestUpstreamToBrowserCrashResilience:
             manager = _make_mock_manager(running=True, port=1)
             app = create_vscode_proxy_app(manager)
 
-            with TestClient(app) as client:
+            with TestClient(app, client=("127.0.0.1", 50000)) as client:
                 with client.websocket_connect("/ws") as ws:
                     # Server should send us the first message, then
                     # close when upstream dies.
@@ -1334,7 +1334,7 @@ class TestWebviewCspRewrite:
             ),
         )
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get(
                 "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
                 "browser/pre/index.html?id=x&extensionId=vscode.media-preview",
@@ -1374,7 +1374,7 @@ class TestWebviewCspRewrite:
             ),
         )
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get(
                 "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
                 "browser/pre/index.html?id=x&extensionId=vscode.media-preview"
@@ -1419,7 +1419,7 @@ class TestWebviewCspRewrite:
             path="/vscode/stable-abc/index.html",
         )
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get("/vscode/stable-abc/index.html")
         assert resp.status_code == 200
         # Pass-through — the proxy does not buffer+rewrite for this path.
@@ -1449,7 +1449,7 @@ class TestWebviewCspRewrite:
             ),
         )
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get(
                 "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
                 "browser/pre/styles.css"
@@ -1478,7 +1478,7 @@ class TestWebviewCspRewrite:
             ),
         )
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get(
                 "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
                 "browser/pre/index.html?id=x",
@@ -1505,7 +1505,7 @@ class TestWebviewCspRewrite:
             ),
         )
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get(
                 "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
                 "browser/pre/index.html?id=x"
@@ -1544,7 +1544,7 @@ class TestWebviewCspRewrite:
             ),
         )
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get(
                 "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
                 "browser/pre/index.html?id=x",
@@ -1608,7 +1608,7 @@ class TestWebviewCspRewrite:
             ),
         )
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get(
                 "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
                 "browser/pre/index.html?id=x",
@@ -1660,7 +1660,7 @@ class TestWebviewCspRewrite:
             ),
         )
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get(
                 "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
                 "browser/pre/index.html?id=x",
@@ -1716,7 +1716,7 @@ class TestWebviewCspRewrite:
             ),
         )
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get(
                 "/vscode/stable-abc/static/out/vs/workbench/contrib/webview/"
                 "browser/pre/index.html?id=x",
@@ -1855,7 +1855,7 @@ class TestWebviewCspRewrite:
         app = create_vscode_proxy_app(manager)
 
         try:
-            with TestClient(app) as client:
+            with TestClient(app, client=("127.0.0.1", 50000)) as client:
                 resp = client.get(
                     "/vscode/stable-abc/static/out/vs/workbench/contrib/"
                     "webview/browser/pre/index.html?id=x",
@@ -2167,7 +2167,7 @@ class TestWebviewCspRewrite:
         try:
             manager = _make_mock_manager(running=True, port=8081)
             app = create_vscode_proxy_app(manager)
-            with TestClient(app) as client:
+            with TestClient(app, client=("127.0.0.1", 50000)) as client:
                 client.get(
                     "/vscode/stable-abc/static/out/vs/workbench/"
                     "contrib/webview/browser/pre/index.html?id=x",
@@ -2262,7 +2262,7 @@ class TestWebviewCspRewrite:
         try:
             manager = _make_mock_manager(running=True, port=8081)
             app = create_vscode_proxy_app(manager)
-            with TestClient(app) as client:
+            with TestClient(app, client=("127.0.0.1", 50000)) as client:
                 client.get(
                     "/vscode/stable-abc/static/out/vs/workbench/"
                     "workbench.js",
@@ -2392,7 +2392,7 @@ class TestWebviewCspRewrite:
             ),
         )
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get(
                 "/vscode/stable-abc/static/out/vs/workbench/contrib/"
                 "webview/browser/pre/index.html?id=x",
@@ -2473,7 +2473,7 @@ class TestWebviewCspRewrite:
             ),
         )
 
-        with TestClient(app) as client:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
             resp = client.get(
                 "/vscode/stable-abc/static/out/vs/workbench/"
                 "contrib/webview/browser/pre/index.html?id=x",
