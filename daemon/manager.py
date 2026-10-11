@@ -610,6 +610,23 @@ class InstanceManager:
             DriftEvent,
         )
 
+        # OAuth2 auth Phase 2 (T2.2): register the four auth models
+        # with ``SQLModel.metadata`` BEFORE ``create_all`` so the
+        # auth_sessions / auth_states / auth_bearer_tokens /
+        # auth_bootstrap_consumption tables (+ their __table_args__
+        # indexes) are created on BOTH drivers at manager init
+        # (snapshot/maintenance_runs precedent for brand-new tables —
+        # no _ensure_postgres_columns mirror; D17 inert-tables posture:
+        # created on both backends, never touched while auth is OFF).
+        # The SQLite-side canonical DDL auto-applies via the migration
+        # runner from ``daemon/migrations/versions/20261011_0300*.sql``.
+        from .repositories.auth_session.models import (  # noqa: F401
+            AuthBootstrapConsumption,
+            AuthSession,
+            AuthState,
+            BearerToken,
+        )
+
         SQLModel.metadata.create_all(self._engine)
 
         # Run file-based migrations using MigrationRunner

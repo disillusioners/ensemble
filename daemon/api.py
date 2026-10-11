@@ -1560,6 +1560,25 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # OAuth2 auth background machinery (Phase 2, T2.4/T2.8).
+    # Config-gated by settings.auth.enabled: with auth OFF this
+    # constructs NOTHING (FR-2 / D5 not-registered — no sweeper task,
+    # no OAuthClient, no app.state attributes). With auth ON: the
+    # sweeper task follows the readiness-refresher pattern above
+    # (created in lifespan, cancelled AND awaited in the shutdown
+    # sequence via stop_auth_background), and the boot-time discovery
+    # fetch rides the task's first tick — WARN-not-fatal (NFR-7/C4):
+    # an unreachable IdP NEVER fails boot and NEVER adds a second
+    # exit-78 site (the P1 preflight remains the single owner).
+    # ─────────────────────────────────────────────────────────────
+    from daemon.services.auth_session.lifecycle import (  # noqa: F401
+        start_auth_background,
+        stop_auth_background,
+    )
+
+    await start_auth_background(app.state, config.auth, manager.engine)
+
+    # ─────────────────────────────────────────────────────────────
     # v0.15.3 P1 Item 4 — UpgradeJournalSweepService: periodic
     # reconcile_pending_op (the pending_op previously reconciled ONLY
     # at tool entry — a stale armed op starved re-arm ~20min) +
@@ -2052,6 +2071,11 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning(f"Readiness refresher shutdown error: {e}")
         app.state.readiness_refresher_task = None
+
+    # Stop the OAuth2 auth background machinery (Phase 2, T2.4 — the
+    # cancel-AND-await tail of the readiness-refresher pattern; safe
+    # no-op when auth is OFF — nothing was ever constructed).
+    await stop_auth_background(app.state)
 
     # Stop the periodic drift reconciler (Phase 3 F5/F10). The
     # task is fire-and-forget under the lifespan; cancel and await
