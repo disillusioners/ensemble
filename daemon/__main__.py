@@ -35,6 +35,11 @@ from .config import load_config, warn_default_allowed_models_applied, warn_depre
 #         loop on 78. The auth-refusal half is LIVE as of Phase 1
 #         (see _boot_db_preflight); the schema/version guard remains
 #         DEFERRED to Phase 5 (migration guard + daemon_meta).
+#         OAuth2 Phase 1 (AMEND v1.1 / C4) adds the auth-CONFIG
+#         misconfig half to the same code: auth.enabled=true with a
+#         misconfigured ENSEMBLE_AUTH_* section exits 78 at the
+#         preflight, BEFORE the port bind (see
+#         _boot_auth_config_preflight).
 #   1   = crash (unhandled exception). Restart with backoff. The
 #         default crash path; no explicit code needed.
 # ───────────────────────────────────────────────────────────────────────────
@@ -46,6 +51,12 @@ _EXIT_BOOT_DB_TEMPFAIL = 75
 # wrong credentials can never be fixed by retrying, so the launcher
 # must stop instead of looping on the budget-exempt 75 track.
 _EXIT_BOOT_DB_AUTH_REFUSED = 78
+
+# OAuth2 Phase 1 (AMEND v1.1 / C4): the auth-CONFIG misconfig lane shares
+# the same EX_CONFIG contract — a misconfigured ENSEMBLE_AUTH_* section
+# cannot be fixed by restarting either. Alias keeps the call sites
+# self-documenting without forking the numeric contract.
+_EXIT_BOOT_AUTH_CONFIG_REFUSED = _EXIT_BOOT_DB_AUTH_REFUSED
 
 # libpq SQLSTATE codes for permanent authentication/authorization
 # failure. 28P01 = invalid_password, 28000 =
@@ -209,6 +220,63 @@ def _boot_db_preflight() -> None:
         )
 
 
+def _boot_auth_config_preflight() -> None:
+    """Boot preflight: OAuth2 auth-config misconfig enumeration (Phase 1, C4).
+
+    AMEND v1.1 / C4 siting: the exit-78 misconfig lane lives at the BOOT
+    PREFLIGHT — BEFORE ``uvicorn.run`` (pre-port-bind) — never at
+    lifespan (a lifespan RuntimeError exits via uvicorn's generic path:
+    exit 1, post-port-bind; NFR-7's code-78 contract would be
+    unreachable there). Discovery/JWKS reachability is deliberately NOT
+    checked here: that is network I/O and stays a lifespan WARN (P2+).
+
+    Static only: the single helper
+    :func:`daemon.config.auth_config_boot_refusals` loads the config
+    (yaml + env, no network) and returns operator-readable refusal lines
+    — each naming the offending ``ENSEMBLE_AUTH_*`` env var exactly — or
+    an empty list. It is also the SINGLE owner of the auth-refusal exit
+    path (phase1-plan §6 risk 3): later phases call the helper, never a
+    second ``sys.exit`` site.
+
+    Ordering note: this runs as the FIRST statement of ``main()``,
+    before ``load_config()`` — the config-load itself is the raising
+    step for an auth misconfig, so a lane placed after it (beside the
+    DB probe call site) would be unreachable for every
+    validator-refused configuration. Fail-open posture mirrors
+    ``_boot_db_preflight``: a broken check (non-auth config error,
+    import failure) logs and proceeds — the normal load_config path
+    surfaces unrelated config errors with its own traceback.
+    OFF state: the helper returns ``[]`` and this function is fully
+    silent — zero auth log lines (G1.3).
+    """
+    try:
+        from .config import auth_config_boot_refusals
+
+        refusals = auth_config_boot_refusals()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Boot preflight: auth config check skipped "
+            "(fail-open, proceeding): %s",
+            exc,
+        )
+        return
+    if not refusals:
+        return
+    for line in refusals:
+        logger.error("Auth config misconfig: %s", line)
+    logger.error(
+        "  → auth misconfiguration at boot: fix the ENSEMBLE_AUTH_* "
+        "settings (or set ENSEMBLE_AUTH_ENABLED=false to disable auth) "
+        "and restart\n"
+        "  → exiting %d (EX_CONFIG); launcher must NOT retry — "
+        "restarting cannot fix a config refusal",
+        _EXIT_BOOT_AUTH_CONFIG_REFUSED,
+    )
+    sys.exit(_EXIT_BOOT_AUTH_CONFIG_REFUSED)
+
+
 def main(run_preflight: bool = True):
     """Main entry point.
 
@@ -217,6 +285,14 @@ def main(run_preflight: bool = True):
     earlier, before this function's config steps — so the probe fires
     exactly once per boot on every entry (F-DR1-1, P2.3 B5.6).
     """
+    # Auth-config preflight (OAuth2 Phase 1, AMEND v1.1 / C4): static
+    # misconfig enumeration + exit 78 BEFORE any config-driven wiring,
+    # the DB probe, or uvicorn.run (pre-port-bind). Runs on EVERY entry
+    # (it is static — unlike the DB probe there is no once-per-entry
+    # budget concern). See _boot_auth_config_preflight for why this
+    # must precede load_config().
+    _boot_auth_config_preflight()
+
     # Load config to get host/port
     config = load_config()
 

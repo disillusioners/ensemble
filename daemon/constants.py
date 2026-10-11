@@ -1092,3 +1092,66 @@ ENSEMBLE_AMBIENT_KV_FRESH: str = "ENSEMBLE_AMBIENT_KV_FRESH"
 # binding lands — B.S.8 registry discipline, same as the KV-ambient
 # names above.
 ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX: str = "ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX"
+
+# ── Auth (OAuth2) — Phase 1 constants (oauth2-auth phase1-plan T1.5) ─────────
+# CONSTANTS ONLY — no runtime consumer ships in Phase 1. Per the leaf-module
+# invariant above these are raw literals; P2 (token mint/verify) consumes the
+# scope names and P3 (middleware construction) consumes the public-path
+# fallback list. Placement rationale: daemon/constants.py (the consolidated
+# constants registry) instead of a daemon/auth/ package skeleton — the auth
+# package materializes in P2/P3 and these values stay import-anything,
+# grep-able, and consistent with every other named constant.
+#
+# AUTH_DEFAULT_PUBLIC_PATHS is the EXPLICIT list-of-prefixes fallback per
+# D18 (the operative public_path_set is derived from route metadata at
+# middleware construction; this tuple covers routes that cannot be tagged —
+# the /api/auth/* prefix family and the untagged probes). Per D1 as amended
+# (v1.1) it INCLUDES the MCP KB Mount surfaces /api/mcp/kb and /api/mcp/kb/sse
+# (pass-through in v1); the v1.4 module-lane ruling re-classes those paths
+# into the distinct module_lane_path_set at P3 classification time (D19/D20)
+# — the behavioral pass-through is identical, so the tuple entries stay.
+AUTH_DEFAULT_PUBLIC_PATHS: tuple[str, ...] = (
+    # Health-probe publicness invariant (FR-22 / NFR-3 / AC-22 — all 5
+    # must stay reachable by unauthenticated curl with auth ON):
+    "/livez",
+    "/readyz",
+    "/api/health",
+    "/api/info",
+    "/api/maintenance/checkpoint-cleanup/availability",
+    # Live-views liveness probe (D11 public inventory):
+    "/views/livez",
+    # Auth endpoints implement auth itself (D18 prefix rule for the
+    # untaggable dynamic family — login/callback/logout/me):
+    "/api/auth/",
+    # MCP KB Mount surfaces (D1 amended v1.1; module-lane re-class at P3
+    # per the v1.4 ruling — behavioral pass-through identical):
+    "/api/mcp/kb",
+    "/api/mcp/kb/sse",
+)
+
+# Scope-name taxonomy (§7.3 v1 minimum set; FR-18 groundwork). P2's
+# token-mint CLI and the P3 route-level scope check consume these names —
+# no scope string literal may appear outside this block once those phases
+# wire (same registry discipline as the env-name block above).
+AUTH_SCOPE_SYSTEM_READ: str = "system:read"
+AUTH_SCOPE_MCP_READ: str = "mcp:read"
+AUTH_SCOPE_INSTANCES_READ: str = "instances:read"
+AUTH_SCOPE_INSTANCES_WRITE: str = "instances:write"
+AUTH_SCOPE_JOBS_READ: str = "jobs:read"
+AUTH_SCOPE_JOBS_WRITE: str = "jobs:write"
+AUTH_SCOPE_MESSAGES_WRITE: str = "messages:write"
+AUTH_SCOPE_SOURCES_WRITE: str = "sources:write"
+AUTH_SCOPE_AUTH_ADMIN: str = "auth:admin"
+
+# Aggregate of the per-consumer minimum scopes above (§7.3 table rows).
+AUTH_KNOWN_SCOPES: tuple[str, ...] = (
+    AUTH_SCOPE_SYSTEM_READ,
+    AUTH_SCOPE_MCP_READ,
+    AUTH_SCOPE_INSTANCES_READ,
+    AUTH_SCOPE_INSTANCES_WRITE,
+    AUTH_SCOPE_JOBS_READ,
+    AUTH_SCOPE_JOBS_WRITE,
+    AUTH_SCOPE_MESSAGES_WRITE,
+    AUTH_SCOPE_SOURCES_WRITE,
+    AUTH_SCOPE_AUTH_ADMIN,
+)
