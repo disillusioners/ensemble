@@ -176,6 +176,9 @@ action_start() {
     export ENSEMBLE_AUTH_ISSUER="${ENSEMBLE_AUTH_ISSUER:-https://idp.example.com}"
   fi
   export ENSEMBLE_AUTH_ALLOWED_ORIGINS="${ENSEMBLE_AUTH_ALLOWED_ORIGINS:-http://127.0.0.1:${DAEMON_PORT}}"
+  # Fail-closed (auth-ON boot exit-78 contract): an empty ALLOWED_ORIGINS
+  # aborts the boot explicitly — not implied by the :- idiom above.
+  [ -z "$ENSEMBLE_AUTH_ALLOWED_ORIGINS" ] && { echo "FATAL: ENSEMBLE_AUTH_ALLOWED_ORIGINS empty" >&2; exit 78; }
   export ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE="${ENSEMBLE_AUTH_EXTERNAL_REDIRECT_BASE:-http://127.0.0.1:${DAEMON_PORT}}"
   export ENSEMBLE_AUTH_ALLOW_INSECURE_COOKIE="${ENSEMBLE_AUTH_ALLOW_INSECURE_COOKIE:-true}"
   export ENSEMBLE_AUTH_COOKIE_SECURE="${ENSEMBLE_AUTH_COOKIE_SECURE:-false}"

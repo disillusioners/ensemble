@@ -166,6 +166,7 @@ class TestAuthOnProviderHealthy:
                 "/readyz",
                 "/api/health",
                 "/api/info",
+                "/api/maintenance/checkpoint-cleanup/availability",
             ):
                 # These don't require a manager fixture to answer;
                 # we just assert NOT 401/302.

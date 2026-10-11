@@ -17,12 +17,14 @@ The matrix (per FR-40 / D20):
     │ OAuth2 bearer      │ ❌ 401 (module guard)│ ✅ 200 (open posture)   │ ✅ 200 (positive)    │
     └────────────────────┴──────────────────────┴─────────────────────────┴──────────────────────┘
 
-The "OAuth2 cookie/bearer at MCP-KB mount" legs use the empty-store
-posture (the guard is pass-through until the operator mints the first
-key); the contract is verified via the path-classification + the
-no-auth-header dispatch order (the middleware passes the request
-through; the guard decides). The P3 ``test_mcp_kb_public.py`` covers
-the populated-store path; we exercise the empty-store here per FR-41
+The "OAuth2 cookie/bearer at MCP-KB mount" legs (NOTE 5, per the
+approver binding) send REAL requests carrying a real session cookie /
+real bearer token at the mount with the guard ACTIVATED (one key
+minted into the module-owned store) and assert the 401 originates
+from the MODULE guard (``KB_KEY_REQUIRED`` vocabulary), never from
+the OAuth2 layer (``AUTH_REQUIRED`` + ``WWW-Authenticate``). The P3
+``test_mcp_kb_public.py`` covers the guard mechanism + populated-store
+CRUD; the empty-store open posture is covered there too per FR-41
 ("open posture until the first key").
 """
 
@@ -407,54 +409,167 @@ class TestWebhookSecretMaskingAC42:
         pytest.skip("masking decision pending")
 
 
-# ── (a leg fixture-stub per NOTE 5) MCP-KB negative legs ──────────
+# ── (a) MCP-KB negative legs (NOTE 5: real credential-through-to-─
+#      module-rejection routing, not classification-only) ────────────
 
 
 class TestMcpKbNegativeLegs:
-    """T5.11(a) NOTE 5: the MCP-KB negative-leg stub EXERCISES the
-    lane-classification rejection routing — even when the module
-    key-check mechanism is fixture-stubbed (the v1 plan defers the
-    full implementation to a separate commission per FR-41 / ML-4),
-    the OAuth2 layer's classification must REJECT OAuth2 credentials
-    at the MCP-KB lane (it is module-lane, not OAuth2-protected).
+    """T5.11(a) NOTE 5: the MCP-KB negative legs EXERCISE the
+    lane-classification REJECTION ROUTING with real requests — a real
+    OAuth2 session cookie / a real bearer token is carried to a
+    module-lane KB mount path and the 401 that comes back originates
+    from the MODULE guard (``KbKeyGuardApp``; vocabulary
+    ``KB_KEY_REQUIRED`` / ``KB_KEY_INVALID``), never from the OAuth2
+    layer (whose vocabulary is ``AUTH_REQUIRED`` + a
+    ``WWW-Authenticate`` challenge; its scope evaluation never runs).
+
+    The guard is activated by minting one real KB key into the
+    module-owned store (``app.state.mcp_kb_key_store`` — the fixture
+    DB carries the ``mcp_kb_keys`` table): the empty-store bootstrap
+    posture passes everything through, and only an ACTIVE store makes
+    the guard the rejecting authority. The KB mounts are registered
+    statically in ``create_app`` (no lifespan dependency), so the real
+    guard is hittable in this fixture.
+
+    Regression property: if the middleware's lane classification ever
+    regresses (mount re-classified PROTECTED), these legs FAIL — the
+    OAuth2 layer would consume the credential and answer with its own
+    ``AUTH_REQUIRED`` (401 + WWW-Authenticate) / ``SCOPE_INSUFFICIENT``
+    (403) vocabulary instead of passing the request through to the
+    module guard.
     """
 
-    def test_oauth2_credential_passes_through_to_module_layer(
+    #: Module-lane KB mount paths — the classification leg drives all
+    #: three; the real-request legs hit the http mount shape.
+    KB_MOUNT_PATHS = ("/api/mcp/kb", "/api/mcp/kb/sse", "/api/mcp/kb/mcp")
+
+    def test_kb_mounts_classify_module_lane(self, tmp_path):
+        """Classification extra leg: every KB mount path classifies
+        ``module_lane`` — the middleware's cookie/bearer check is never
+        consulted for this lane (kept from the pre-note5 stub)."""
+        from daemon.middleware.auth import AuthMiddleware
+
+        with auth_enabled_app(tmp_path=tmp_path) as (app, fake, transport):
+            mw = AuthMiddleware(None, auth_config=app.state.auth_config)
+            mw._ensure_derived({"app": app})
+            for path in self.KB_MOUNT_PATHS:
+                assert mw._resolve_tagged(path) == "module_lane", path
+
+    def test_oauth2_cookie_at_kb_mount_rejected_by_module_guard(self, tmp_path):
+        """A real OAuth2 session cookie at the KB mount is passed
+        through untouched and the MODULE guard rejects the request:
+        401 ``KB_KEY_REQUIRED`` — no ``AUTH_REQUIRED``, no
+        ``WWW-Authenticate``. Positive control: the same client with a
+        VALID module key passes the guard (the rejection is
+        key-gating, not credential-gating)."""
+        with auth_enabled_app(tmp_path=tmp_path) as (app, fake, transport):
+            store = app.state.mcp_kb_key_store
+            store.create_key("p5-note5-cookie-leg")  # activates the guard
+            sid = _complete_flow(app, fake)
+            assert sid
+            client = TestClient(
+                _WrappedApp(app, fake),
+                base_url="http://testserver",
+                follow_redirects=False,
+                cookies={"ensemble_sid": sid},
+                raise_server_exceptions=False,
+            )
+            r = client.get(
+                "/api/mcp/kb/mcp", headers={"Accept": "application/json"}
+            )
+            assert r.status_code == 401, r.text
+            # Module-guard vocabulary, NOT the OAuth2 layer's:
+            assert r.json() == {"error": "KB_KEY_REQUIRED"}, r.text
+            assert r.headers.get("www-authenticate") is None, dict(r.headers)
+            assert "AUTH_REQUIRED" not in r.text
+
+            # Positive control — valid module key ⇒ the guard lets the
+            # same credentialed request through to the mount (the
+            # sub-app's own outcome surfaces; never a KB_KEY_* 401).
+            _, kb_plaintext = store.create_key("p5-note5-cookie-positive")
+            r2 = client.get(
+                "/api/mcp/kb/mcp",
+                headers={
+                    "X-KB-Key": kb_plaintext,
+                    "Accept": "application/json",
+                },
+            )
+            assert "KB_KEY_REQUIRED" not in r2.text, r2.text
+            assert "KB_KEY_INVALID" not in r2.text, r2.text
+
+    def test_oauth2_bearer_at_kb_mount_rejected_by_module_guard(self, tmp_path):
+        """A real OAuth2 bearer token at the KB mount is passed through
+        untouched and the MODULE guard rejects the request: 401
+        ``KB_KEY_REQUIRED`` — the bearer is never consulted (no scope
+        evaluation, no ``WWW-Authenticate`` challenge)."""
+        with auth_enabled_app(tmp_path=tmp_path) as (app, fake, transport):
+            store = app.state.mcp_kb_key_store
+            store.create_key("p5-note5-bearer-leg")
+            plaintext, _ = mint_bearer_token(
+                subject="machine-1",
+                scopes=("mcpkb:admin",),
+                label="p5-note5-kb-bearer",
+                engine=app.state.auth_session_repository._engine,
+            )
+            client = _new_client(app, fake)
+            r = client.get(
+                "/api/mcp/kb/mcp",
+                headers={
+                    "Authorization": f"Bearer {plaintext}",
+                    "Accept": "application/json",
+                },
+            )
+            assert r.status_code == 401, r.text
+            assert r.json() == {"error": "KB_KEY_REQUIRED"}, r.text
+            assert r.headers.get("www-authenticate") is None, dict(r.headers)
+            assert "AUTH_REQUIRED" not in r.text
+
+    def test_invalid_oauth2_credentials_still_reach_module_rejection(
         self, tmp_path
     ):
-        """OAuth2 credentials at the MCP-KB lane are NOT accepted by
-        the OAuth2 layer's classification (the lane is module-lane,
-        the middleware passes the request through — the module guard
-        then decides; the OAuth2 layer's auth decision is NEVER applied
-        at this path).
-
-        This test exercises the DISPATCH ORDER: a request with a
-        valid OAuth2 credential to the MCP-KB mount path must NOT
-        trigger the OAuth2 auth decision (the request must NOT return
-        a 401 AUTH_REQUIRED response). The OAuth2 middleware never
-        gates this path."""
-        from daemon.middleware.auth import AuthMiddleware
-
+        """The ROUTING probe: credentials the OAuth2 layer would
+        REJECT (a stale session cookie / a bearer lacking
+        ``mcpkb:admin``) are NEVER consulted at the module-lane mount
+        — they pass through untouched and the MODULE guard rejects
+        with ``KB_KEY_REQUIRED``. If the lane classification ever
+        regresses to PROTECTED, this leg FAILS: the OAuth2 layer would
+        answer with ``AUTH_REQUIRED`` (401 + WWW-Authenticate) /
+        ``SCOPE_INSUFFICIENT`` (403) instead."""
         with auth_enabled_app(tmp_path=tmp_path) as (app, fake, transport):
-            mw = AuthMiddleware(None, auth_config=app.state.auth_config)
-            mw._ensure_derived({"app": app})
-            # /api/mcp/kb and /api/mcp/kb/sse MUST classify as
-            # module_lane in BOTH auth states.
-            assert mw._resolve_tagged("/api/mcp/kb") == "module_lane"
-            assert mw._resolve_tagged("/api/mcp/kb/sse") == "module_lane"
-            assert mw._resolve_tagged("/api/mcp/kb/mcp") == "module_lane"
-
-    def test_oauth2_cookie_does_not_gate_kb_mount(self, tmp_path):
-        """A request with a valid OAuth2 cookie at the MCP-KB mount
-        path is NOT gated by the OAuth2 auth decision (the lane is
-        module-lane, the middleware passes through; the cookie is never
-        consulted at this path)."""
-        from daemon.middleware.auth import AuthMiddleware
-
-        with auth_enabled_app(tmp_path=tmp_path) as (app, fake, transport):
-            mw = AuthMiddleware(None, auth_config=app.state.auth_config)
-            mw._ensure_derived({"app": app})
-            # The resolution returns "module_lane" — the middleware's
-            # cookie/bearer check is NEVER consulted for this lane.
-            assert mw._resolve_tagged("/api/mcp/kb") == "module_lane"
-            assert mw._resolve_tagged("/api/mcp/kb/sse") == "module_lane"
+            store = app.state.mcp_kb_key_store
+            store.create_key("p5-note5-routing-probe")
+            # Stale/unknown session cookie — constructed on the client
+            # (per-request cookies= is deprecated in starlette).
+            stale_client = TestClient(
+                _WrappedApp(app, fake),
+                base_url="http://testserver",
+                follow_redirects=False,
+                cookies={"ensemble_sid": "stale-or-forged"},
+            )
+            r = stale_client.get(
+                "/api/mcp/kb/mcp",
+                headers={"Accept": "application/json"},
+            )
+            assert r.status_code == 401, r.text
+            assert r.json() == {"error": "KB_KEY_REQUIRED"}, r.text
+            assert r.headers.get("www-authenticate") is None, dict(r.headers)
+            assert "AUTH_REQUIRED" not in r.text
+            # Insufficient-scope bearer — scope evaluation never runs:
+            plaintext, _ = mint_bearer_token(
+                subject="machine-1",
+                scopes=("system:read",),  # missing mcpkb:admin
+                label="p5-note5-insuf-bearer",
+                engine=app.state.auth_session_repository._engine,
+            )
+            bearer_client = _new_client(app, fake)
+            r = bearer_client.get(
+                "/api/mcp/kb/mcp",
+                headers={
+                    "Authorization": f"Bearer {plaintext}",
+                    "Accept": "application/json",
+                },
+            )
+            assert r.status_code == 401, r.text
+            assert r.json() == {"error": "KB_KEY_REQUIRED"}, r.text
+            assert "SCOPE_INSUFFICIENT" not in r.text
+            assert r.headers.get("www-authenticate") is None, dict(r.headers)

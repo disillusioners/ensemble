@@ -42,6 +42,34 @@ def _glob_contains(dir_glob: str, pattern: str) -> bool:
     return False
 
 
+def _split_sql_trailing_comment(line: str) -> tuple[str, str]:
+    """Split a SQL line at the first ``--`` OUTSIDE single-quoted
+    string literals → ``(code, trailing_comment_or_empty)``.
+
+    The migration runner strips FULL-LINE comments and then splits
+    statements on ``;`` — it has no string/comment awareness on the
+    remainder, so the comment boundary here must respect SQL string
+    literals (a ``--`` inside ``'…'`` is data, not a comment).
+    """
+    in_string = False
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if in_string:
+            if ch == "'":
+                if i + 1 < n and line[i + 1] == "'":
+                    i += 2  # escaped '' inside the literal
+                    continue
+                in_string = False
+        elif ch == "'":
+            in_string = True
+        elif ch == "-" and line[i : i + 2] == "--":
+            return line[:i], line[i:]
+        i += 1
+    return line, ""
+
+
 # ── T5.9 cage: the 3 EMPTY reserved `.sql` stubs ──────────────────────
 
 
@@ -92,24 +120,38 @@ class TestReservedSqlStubs:
         ],
     )
     def test_stub_no_inline_semicolon_comment(self, stub_glob):
-        """The runner strips full-line comments and then splits on ``;``;
-        an INLINE ``;`` (after SQL on the same line) would corrupt the
-        statement boundaries. The stub is label-only so this constraint
-        is automatic, but the assertion still binds."""
+        """The runner strips FULL-LINE comments, then splits statements
+        on ``;`` — so a ``;`` inside an inline TRAILING comment on a
+        DDL line corrupts the statement boundaries (the split sees the
+        comment's semicolon as a terminator). The rule flags exactly
+        that shape. A statement-terminating ``;`` on a DDL line is
+        LEGITIMATE real DDL and is NOT flagged; ``;`` / ``--`` inside
+        string literals are data and are not treated as boundaries."""
+        # Anti-tautology self-check — the rule can actually FAIL on
+        # the corrupting shape and does NOT flag legitimate shapes.
+        _, comment = _split_sql_trailing_comment(
+            "ALTER TABLE t ADD COLUMN a int; -- note; with semicolon"
+        )
+        assert ";" in comment  # the shape the rule below rejects
+        code, comment = _split_sql_trailing_comment("CREATE TABLE t (a int);")
+        assert comment == "" and code.rstrip().endswith(";")
+        code, comment = _split_sql_trailing_comment(
+            "INSERT INTO t VALUES ('a;--b'); -- trailing"
+        )
+        assert comment == "-- trailing" and ";" in code
+
         for path in (REPO_ROOT / "daemon/migrations/versions").glob(stub_glob):
             text = path.read_text(encoding="utf-8")
             for line in text.splitlines():
                 stripped = line.lstrip()
                 if stripped.startswith("--"):
-                    continue  # full-line comment — runner strips
-                if ";" in line:
-                    # Inline ``;`` is OK for actual SQL; the rule is
-                    # about semicolons inside trailing comments.
-                    # Since the stub has no SQL at all, no line has ``;``.
-                    raise AssertionError(
-                        f"{path.name}: semicolon outside a full-line "
-                        f"comment: {line!r}"
-                    )
+                    continue  # full-line comment — runner strips it whole
+                _, comment = _split_sql_trailing_comment(line)
+                assert not comment or ";" not in comment, (
+                    f"{path.name}: semicolon inside an inline trailing "
+                    f"comment corrupts the runner's ``;``-split "
+                    f"statement boundaries: {line!r}"
+                )
 
 
 # ── S-7/S-11 admin route-shape seams (live in P3; verify in P5) ──────
