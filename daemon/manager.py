@@ -627,6 +627,16 @@ class InstanceManager:
             BearerToken,
         )
 
+        # OAuth2 auth Phase 3 (T3.11 / D20a): register the MODULE-OWNED
+        # MCP-KB key model — a separate lane's store (own per-table
+        # migration 20261011_030100_create_mcp_kb_keys.sql), created on
+        # BOTH drivers, INDEPENDENT of auth.enabled (FR-42: the module
+        # lane exists identically in both auth states; D20a: no
+        # cross-store lookups — the auth lanes never read this table).
+        from .repositories.mcp_kb_keys.models import (  # noqa: F401
+            McpKbKey,
+        )
+
         SQLModel.metadata.create_all(self._engine)
 
         # Run file-based migrations using MigrationRunner

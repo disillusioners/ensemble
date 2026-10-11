@@ -142,6 +142,46 @@ class AuthSessionRepository:
             session.commit()
             return result.rowcount or 0
 
+    def renew_sessions(
+        self,
+        session_ids: Sequence[str],
+        *,
+        now_iso: str,
+        ttl_seconds: int,
+        min_interval_seconds: int = TOUCH_MIN_INTERVAL_SECONDS,
+    ) -> int:
+        """Sliding-renewal extension (P3 ``auth.sliding_renewal=true``).
+
+        Same shape and same min-interval gating as
+        :meth:`touch_sessions` — one UPDATE over the id batch, rows
+        already touched within ``min_interval_seconds`` are skipped by
+        the WHERE clause so a hot validate path still does not write per
+        request. Sets ``expires_at = now + ttl`` and ``last_used_at =
+        now`` in the same statement (a renewal IS a use).
+
+        Additive Phase-3 consumer of the P2 batched-touch seam — the
+        WHERE-clause shape is byte-identical to ``touch_sessions`` so
+        the two share the dialect-agnostic behavior pinned by the P2
+        tests.
+        """
+        if not session_ids:
+            return 0
+        floor_iso = _iso_minus_seconds(now_iso, min_interval_seconds)
+        new_expiry = _iso_plus_seconds(now_iso, ttl_seconds)
+        stmt = (
+            update(AuthSession)
+            .where(
+                col(AuthSession.id).in_(list(session_ids)),
+                col(AuthSession.last_used_at).is_(None)
+                | (col(AuthSession.last_used_at) < floor_iso),
+            )
+            .values(last_used_at=now_iso, expires_at=new_expiry)
+        )
+        with Session(self._engine) as session:
+            result = session.exec(stmt)
+            session.commit()
+            return result.rowcount or 0
+
     def invalidate_session(self, session_id: str) -> bool:
         """Logout: DELETE the session row ([TA] §Logout single-CAS
         delete). Returns True when a row was removed."""
@@ -259,6 +299,36 @@ class AuthSessionRepository:
             return None
         return row
 
+    def touch_bearer_tokens(
+        self,
+        token_id_hashes: Sequence[str],
+        *,
+        now_iso: str,
+        min_interval_seconds: int = TOUCH_MIN_INTERVAL_SECONDS,
+    ) -> int:
+        """Batched bearer ``last_used_at`` touch (P3 middleware lane).
+
+        Byte-identical shape to :meth:`touch_sessions` over the bearer
+        table — same min-interval gating (rows touched within the
+        window are skipped by the WHERE clause), one UPDATE per call.
+        """
+        if not token_id_hashes:
+            return 0
+        floor_iso = _iso_minus_seconds(now_iso, min_interval_seconds)
+        stmt = (
+            update(BearerToken)
+            .where(
+                col(BearerToken.id_hash).in_(list(token_id_hashes)),
+                col(BearerToken.last_used_at).is_(None)
+                | (col(BearerToken.last_used_at) < floor_iso),
+            )
+            .values(last_used_at=now_iso)
+        )
+        with Session(self._engine) as session:
+            result = session.exec(stmt)
+            session.commit()
+            return result.rowcount or 0
+
     def revoke_bearer(self, id_hash: str, *, now_iso: str) -> bool:
         """Soft revoke: set ``revoked_at`` once (idempotent — an
         already-revoked row keeps its FIRST revocation timestamp).
@@ -375,6 +445,19 @@ def _iso_minus_seconds(iso: str, seconds: int) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     shifted = dt - timedelta(seconds=seconds)
+    return shifted.isoformat()
+
+
+def _iso_plus_seconds(iso: str, seconds: int) -> str:
+    """Return ``iso`` shifted FORWARD by ``seconds`` (sliding-renewal
+    expiry extension). Same canonical-format contract as
+    :func:`_iso_minus_seconds`."""
+    from datetime import datetime, timedelta, timezone
+
+    dt = datetime.fromisoformat(iso)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    shifted = dt + timedelta(seconds=seconds)
     return shifted.isoformat()
 
 

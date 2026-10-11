@@ -219,6 +219,63 @@ class TestPgCreateAllIndexParity:
         assert table_names_in_files == set(AUTH_TABLE_NAMES)
 
 
+class TestKbKeysModuleLaneMigration:
+    """Phase 3 / T3.11: the module-OWNED ``mcp_kb_keys`` table — same
+    dual-driver discipline as the auth tables (D20a: module-owned store,
+    own per-table migration, index-name parity)."""
+
+    def test_sqlite_migration_applies_and_drops(self, fresh_sqlite):
+        versions_dir = Path(tempfile.mkdtemp()) / "versions"
+        versions_dir.mkdir()
+        shutil.copy(
+            _VERSIONS_DIR / "20261011_030100_create_mcp_kb_keys.sql",
+            versions_dir / "20261011_030100_create_mcp_kb_keys.sql",
+        )
+        runner = MigrationRunner(fresh_sqlite, migrations_dir=versions_dir)
+        assert runner.run_pending_migrations() == ["20261011_030100"]
+        with fresh_sqlite.connect() as conn:
+            cols = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(mcp_kb_keys)"))
+            }
+            assert {
+                "id", "id_hash", "label", "created_at", "last_used_at", "revoked_at",
+            } <= cols
+            indexes = {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        "SELECT name FROM sqlite_master WHERE type='index' "
+                        "AND tbl_name='mcp_kb_keys' AND name NOT LIKE 'sqlite_%'"
+                    )
+                )
+            }
+            assert "idx_mcp_kb_keys_id_hash" in indexes
+        # DOWN
+        runner.rollback_migration("20261011_030100")
+        with fresh_sqlite.connect() as conn:
+            assert not conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE "
+                    "type='table' AND name='mcp_kb_keys'"
+                )
+            ).fetchone()
+
+    def test_model_and_sql_index_name_parity_kb_keys(self):
+        """Model ``__table_args__`` ↔ ``.sql`` CREATE UNIQUE INDEX name
+        identical (the auth-tables parity contract, module lane)."""
+        content = (
+            _VERSIONS_DIR / "20261011_030100_create_mcp_kb_keys.sql"
+        ).read_text()
+        assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_kb_keys_id_hash" in content
+        from daemon.repositories.mcp_kb_keys.models import McpKbKey
+
+        model_index_names = {
+            ix.name for ix in McpKbKey.__table_args__
+        }
+        assert model_index_names == {"idx_mcp_kb_keys_id_hash"}
+
+
 class TestEmptyStubBehaviorPlanOverview12Item1:
     """Confirm-at-implementation item 1 (plan-overview §12) — pinned
     answer: D5.5 comment-labeled empty stubs apply as no-ops WITH a

@@ -72,13 +72,43 @@ async def _reject_scheduler_lifecycle(source_id: str, manager: Any, hint: str | 
         )
 
 
+WEBHOOK_SECRET_MASK = "********"
+
+# ML-3 (OAuth2 phase-3 rider, user instruction): `webhook_secret` rides
+# the generic config column and was returned IN PLAINTEXT on every
+# GET /api/sources* response (pre-existing exposure — [REQ] §5.0 row 2
+# risk ML-3). Read-side masking below replaces the value with the mask
+# sentinel on every serialized response.
+#
+# Round-trip guard: the PUT path treats an incoming webhook_secret that
+# EQUALS the mask sentinel as "unchanged" (keeps the stored value) —
+# without this, a client that GETs and PUTs back the whole object would
+# silently overwrite the real secret with the mask.
+
+
+def _mask_source_config(config: dict | None) -> dict:
+    """Return a copy of ``config`` with ``webhook_secret`` masked."""
+    if not config:
+        return dict(config or {})
+    masked = dict(config)
+    secret = masked.get("webhook_secret")
+    if isinstance(secret, str) and secret:
+        masked["webhook_secret"] = WEBHOOK_SECRET_MASK
+    return masked
+
+
 def _source_to_info(source) -> SourceInfo:
-    """Convert source config to SourceInfo response model."""
+    """Convert source config to SourceInfo response model.
+
+    ML-3: ``webhook_secret`` is masked in the serialized config — the
+    plaintext value is write-only through this API (set it via POST/PUT
+    with a real value; read-backs carry the mask sentinel).
+    """
     return SourceInfo(
         source_id=source.source_id,
         source_type=SourceType(source.source_type),
         name=source.name,
-        config=source.config,
+        config=_mask_source_config(source.config),
         enabled=source.enabled,
         autostart=getattr(source, "autostart", True),
         status=SourceStatus(source.status),
@@ -339,6 +369,19 @@ async def update_source(source_id: str, source_update: SourceUpdate, request: Re
     # Merge updates
     updated_name = source_update.name if source_update.name is not None else existing.name
     updated_config = source_update.config if source_update.config is not None else existing.config
+    # ML-3 round-trip guard: a config echoed back from a GET response
+    # carries the mask sentinel in webhook_secret — keep the stored
+    # value instead of persisting the mask over the real secret.
+    if isinstance(updated_config, dict):
+        stored_secret = (existing.config or {}).get("webhook_secret")
+        if (
+            updated_config.get("webhook_secret") == WEBHOOK_SECRET_MASK
+            and stored_secret
+        ):
+            updated_config = {
+                **updated_config,
+                "webhook_secret": stored_secret,
+            }
     updated_enabled = source_update.enabled if source_update.enabled is not None else existing.enabled
     updated_autostart = source_update.autostart if source_update.autostart is not None else getattr(existing, "autostart", True)
     

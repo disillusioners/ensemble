@@ -1579,6 +1579,53 @@ async def lifespan(app: FastAPI):
     await start_auth_background(app.state, config.auth, manager.engine)
 
     # ─────────────────────────────────────────────────────────────
+    # OAuth2 auth Phase 3 (T3.7 lifespan half): the AuthService +
+    # the D3.5 tier-2 fallback one-shot copy (AMEND v1.1 / D2).
+    # Auth ON only — with auth OFF neither the config mutation nor
+    # the app.state attributes exist (G2.3 introspection contract).
+    # The fallback is a ONE-SHOT copy of
+    # config.live_views.external_base_url onto the SAME AuthConfig
+    # object create_app stashed on app.state (DI-clean: AuthService
+    # never imports live_views — it receives the plain string).
+    # ─────────────────────────────────────────────────────────────
+    if config.auth.enabled:
+        config.auth.live_view_external_base_url_fallback = (
+            config.live_views.external_base_url
+        )
+        app.state.auth_config = config.auth
+        from daemon.services.auth_service import AuthService
+
+        app.state.auth_service = AuthService(
+            config=config.auth,
+            repository=app.state.auth_session_repository,
+            oauth_client=app.state.oauth_client,
+            bind_host=config.daemon.host,
+            bind_port=config.daemon.port,
+            host_recorder=host_recorder,
+        )
+        daemon_logger.info(
+            "[Auth] AuthService ready (session validate is PG-only; "
+            "redirect chain tier-1=%s tier-2=%s)",
+            "set" if config.auth.external_redirect_base else "unset",
+            "set" if config.auth.live_view_external_base_url_fallback else "unset",
+        )
+
+    # ─────────────────────────────────────────────────────────────
+    # OAuth2 auth Phase 3 (T3.11): the MCP-KB MODULE-OWNED key store —
+    # constructed in BOTH auth states (FR-42 module-lane independence;
+    # D20a module-owned storage). While the store is empty the mounts
+    # behave byte-identically to the pre-build open posture; the first
+    # minted key (T3.12 CRUD) activates the guard.
+    # ─────────────────────────────────────────────────────────────
+    from daemon.mcp.kb_keys import McpKbKeyStore
+
+    app.state.mcp_kb_key_store = McpKbKeyStore(manager.engine)
+    daemon_logger.info(
+        "[KbKeys] module key store ready (active_keys=%d)",
+        len(app.state.mcp_kb_key_store.list_keys()),
+    )
+
+    # ─────────────────────────────────────────────────────────────
     # v0.15.3 P1 Item 4 — UpgradeJournalSweepService: periodic
     # reconcile_pending_op (the pending_op previously reconciled ONLY
     # at tool entry — a stale armed op starved re-arm ~20min) +
@@ -1868,6 +1915,22 @@ async def lifespan(app: FastAPI):
         ):
             _mount = _routes.pop(_vscode_idx)
             _routes.insert(_catchall_idx, _mount)
+
+        # OAuth2 Phase 3 (§5.5 / OQ-9): the /vscode Mount is a
+        # lifespan-registered surface, so it is tagged here (not in
+        # create_app) for the middleware's route-metadata derivation.
+        # v1 default (flag false): PUBLIC + loopback — the loopback-only
+        # restriction lives in the vscode proxy itself (pre-existing
+        # posture unchanged). Operator opt-in
+        # ENSEMBLE_AUTH_VSCODE_PROTECTED=true leaves it UNTAGGED ⇒
+        # oauth2-protected (bearer lane).
+        if config.auth.enabled and not config.auth.vscode_protected:
+            from daemon.auth.route_meta import tag_public
+
+            for _r in app.routes:
+                if getattr(_r, "path", None) == "/vscode":
+                    tag_public(_r)
+                    break
 
         logger.info("VS Code proxy mounted at /vscode")
 
@@ -2483,6 +2546,22 @@ async def _periodic_readiness_refresh_loop(
                 getattr(app_state, "job_processor", None)
                 and getattr(app_state, "live_hub", None)
             )
+            # OAuth2 auth advisory state (P3 T3.9 / FR-30 enum) — read
+            # per tick from the lifespan-constructed AuthService. None
+            # when auth is OFF (attribute absent → field absent → the
+            # OFF-state /readyz body stays byte-identical, NFR-1).
+            # Never raises into the refresh cycle (OD-9: verdict never
+            # flips due to auth state).
+            auth_dependency_status = None
+            auth_service = getattr(app_state, "auth_service", None)
+            if auth_service is not None:
+                try:
+                    auth_dependency_status = auth_service.get_readiness_state()
+                except Exception as auth_state_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[Readiness] auth_dependency_status probe failed: %s",
+                        auth_state_exc,
+                    )
             composite = await refresh_readiness_composite(
                 db_probe=make_db_probe(manager.engine),
                 queue_probe=make_queue_probe(
@@ -2506,6 +2585,7 @@ async def _periodic_readiness_refresh_loop(
                     if getattr(manager, "checkpointer", None) is not None
                     else None
                 ),
+                auth_dependency_status=auth_dependency_status,
             )
             # Drill knob (deferred tester probe P7): read PER TICK from
             # the environment so flipping it between ticks of an
@@ -2930,16 +3010,145 @@ async def shutdown_dependency_bus(app) -> None:
         set_dependency_bus(None)
 
 
-def create_app() -> FastAPI:
-    """Create and configure the FastAPI application."""
+def _tag_route_classes(app: FastAPI) -> None:
+    """Set the D18/v1.4 route-class attributes (T3.8/T3.10 tagging pass).
+
+    Called from ``create_app`` AFTER every registration (middleware
+    construction derives the sets from exactly these attributes —
+    see ``daemon/auth/route_meta.py``). Everything NOT tagged here is
+    oauth2-protected by default (default-deny, AC-23).
+    """
+    from daemon.auth.route_meta import tag_routes_by_path
+    from daemon.routers.mcp_kb_keys import tag_keys_router_protected
+
+    # ── PUBLIC (public-probe tag) ───────────────────────────────────
+    # Health/app-level ([REQ] §5.1 — FR-22 invariant, exact templates).
+    for exact in (
+        "/livez",
+        "/readyz",
+        "/api/health",
+        "/api/info",
+        "/views/livez",
+        # Maintenance canary (§5.1 — boot-e2e dependency; EXEMPT from
+        # the Origin guard, likewise EXEMPT from auth).
+        "/api/maintenance/checkpoint-cleanup/availability",
+        # OD-1 docs trio (absent when docs_enabled=false — no-op then).
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        # SPA shell (§5.1; the asset family is the §5.7 middleware rule,
+        # NOT a tagged route — see the D4.7/C1 manifest in create_app).
+        "/",
+        # Auth-self (§5.3) — EXACT templates only: a /api/auth/* prefix
+        # rule would make the reserved /api/auth/admin/* seam PUBLIC,
+        # which §5.3 forbids (admin = PROTECTED + auth:admin).
+        "/api/auth/login",
+        "/api/auth/callback",
+        "/api/auth/logout",
+        "/api/auth/session",
+        "/api/auth/me",
+    ):
+        tag_routes_by_path(app, exact_path=exact)
+
+    # ── MODULE-LANE (v1.4 / D19) ────────────────────────────────────
+    # Webhook ingest — X-Webhook-Secret is the SOLE credential
+    # (webhooks.py guard); OAuth2 never gates it and is never accepted
+    # as a webhook credential (FR-40).
+    tag_routes_by_path(app, path_prefix="/api/webhooks", module_lane=True)
+    # MCP-KB mounts — tagged EXPLICITLY (Mounts DO traverse the parent
+    # middleware, D1; the classifier must classify them). Own-key
+    # enforcement is the module's (T3.11 KbKeyGuardApp).
+    tag_routes_by_path(app, exact_path="/api/mcp/kb", module_lane=True)
+    tag_routes_by_path(app, exact_path="/api/mcp/kb/sse", module_lane=True)
+
+    # ── PROTECTED (explicit tag) ────────────────────────────────────
+    # /api/mcp/kb/keys — OAuth2 human lane (T3.12): the explicit tag
+    # puts its templates BEFORE the prefixing module-lane Mount in the
+    # middleware's ordered resolution (Starlette first-match mirror).
+    tag_keys_router_protected(app)
+
+    logger.info("[Auth] route classes tagged (public/module-lane/protected)")
+
+
+def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
+    """Create and configure the FastAPI application.
+
+    OAuth2 auth Phase 3 (T3.7): the optional ``auth_config`` kwarg is
+    the test/DI seam — ``None`` (production) loads the real config via
+    ``load_config()``. When ``auth.enabled`` is TRUE the app gains:
+    the fourth (outermost) ``AuthMiddleware`` (D3.1/D3.2), the five
+    public auth routes (T3.6), the OAuth2-gated ``/api/mcp/kb/keys``
+    CRUD (T3.12), docs kill-switch (OD-1), and CORS origin tightening
+    when ``auth.allowed_origins`` is set. When FALSE: NONE of that —
+    the middleware list and route table are byte-identical to the
+    pre-build app (G3.2 / FR-2 / D3.2 not-registered).
+
+    Route-class tagging (T3.8/T3.10 — D18/D3.3 v1.4): the protection
+    matrix is EXECUTED by the middleware's derived sets, which read the
+    route attributes set here. The D4.7/C1 router-scope manifest with
+    the class column:
+
+        ┌────────────────────────────┬──────────────────────────────┐
+        │ family (api_router mount)  │ class                        │
+        ├────────────────────────────┼──────────────────────────────┤
+        │ /api/auth/{login,callback, │ PUBLIC (public-probe tag,    │
+        │   logout,session,me}       │ exact templates — NOT a      │
+        │                            │ /api/auth/* prefix: the      │
+        │                            │ reserved /api/auth/admin/*   │
+        │                            │ seam stays protected §5.3)   │
+        │ /api/webhooks/*            │ MODULE-LANE (module guard =  │
+        │                            │ X-Webhook-Secret is the SOLE │
+        │                            │ credential — D19; OAuth2     │
+        │                            │ never gates it, FR-40)       │
+        │ /api/mcp/kb, /api/mcp/kb/  │ MODULE-LANE (explicit Mount  │
+        │   sse   [Mounts]           │ tags — Mounts DO traverse    │
+        │                            │ parent middleware, D1; own   │
+        │                            │ keys per T3.11)              │
+        │ /api/mcp/kb/keys[/...]     │ PROTECTED (explicit tag —    │
+        │  [T3.12]                   │ beats the module-lane Mount  │
+        │                            │ prefix at ordered resolution)│
+        │ /livez /readyz /api/health │ PUBLIC (public-probe tags —  │
+        │ /api/info /views/livez     │ the FR-22 health invariant)  │
+        │ /api/maintenance/.../      │ PUBLIC (boot-e2e canary)     │
+        │   availability             │                              │
+        │ /docs /redoc /openapi.json │ PUBLIC (OD-1 kill-switch:    │
+        │                            │ routes ABSENT when           │
+        │                            │ docs_enabled=false)          │
+        │ / + /{path:path} assets    │ PUBLIC-ASSETS via the §5.7   │
+        │  [SPA]                     │ middleware rule (NOT derived │
+        │                            │ from the catch-all template  │
+        │                            │ — that would default-ALLOW   │
+        │                            │ smuggle, AC-23)              │
+        │ ALL other api_router       │ PROTECTED (untagged default- │
+        │ families (30) + /views/*   │ deny — D18; scope decorators │
+        │ + maintenance siblings     │ begin in P4 per D3.7)        │
+        └────────────────────────────┴──────────────────────────────┘
+    """
+    # Auth config: load when not injected (production path). Fail-closed:
+    # an unreadable config LOUDLY breaks app construction rather than
+    # silently constructing an auth-less app (a silent OFF here would be
+    # an auth-bypass footgun).
+    if auth_config is None:
+        from daemon.config import load_config
+
+        auth_config = load_config().auth
+    auth_enabled = bool(auth_config.enabled)
+
+    # OD-1: docs kill-switch — routes absent (404) when flipped off.
+    # OFF-state (auth disabled) keeps FastAPI defaults verbatim.
+    docs_kwargs: dict = {}
+    if auth_enabled and not auth_config.docs_enabled:
+        docs_kwargs = {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
     app = FastAPI(
         title="Ensemble Daemon",
         version=__version__,
-        lifespan=lifespan
+        lifespan=lifespan,
+        **docs_kwargs,
     )
-    
+
     logger.info(f"Starting Ensemble v{__version__}")
-    
+
     # Create API router with /api prefix
     api_router = APIRouter(prefix="/api")
     
@@ -3036,9 +3245,18 @@ def create_app() -> FastAPI:
             logger.info(log_msg)
 
     # Add CORS
+    # OAuth2 Phase 3 (T3.7 / D15 / OOS-5): when auth is ON and the
+    # operator set explicit origins, they REPLACE the wildcard+credentials
+    # posture. When auth is OFF (or origins unset) the pre-build posture
+    # below is preserved VERBATIM (no CORS hardening in this build).
+    cors_kwargs: dict = {}
+    if auth_enabled and auth_config.allowed_origins:
+        cors_kwargs = {
+            "allow_origins": list(auth_config.allowed_origins),
+        }
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=cors_kwargs.get("allow_origins", ["*"]),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -3054,6 +3272,22 @@ def create_app() -> FastAPI:
     # does not modify the request, so registration order has
     # no functional impact — ordering for clarity.
     app.add_middleware(HostCaptureMiddleware)
+
+    # OAuth2 auth Phase 3 (T3.5/T3.7 / D3.1): FOURTH registration — LIFO
+    # makes AuthMiddleware run OUTERMOST (execution order: Auth →
+    # HostCapture → SelectiveAccessLog → CORS), so a rejected request
+    # 401s/302s BEFORE CORS mutates headers (D4 binding rule 2) and the
+    # public-path decision precedes everything (zero-I/O fast path).
+    # D3.2: auth OFF ⇒ this call is SKIPPED — not-registered, never
+    # registered-as-passthrough.
+    if auth_enabled:
+        from daemon.middleware.auth import AuthMiddleware
+
+        app.add_middleware(AuthMiddleware, auth_config=auth_config)
+        # The canonical AuthConfig object for the request path (routes +
+        # middleware read app.state.auth_config; the lifespan populates
+        # the D3.5 tier-2 fallback and rebinds the SAME object).
+        app.state.auth_config = auth_config
 
     # Global exception handler
     @app.exception_handler(Exception)
@@ -3165,14 +3399,40 @@ def create_app() -> FastAPI:
     # index.html fallback (architect phase1-plan.md risk #1).
     api_router.include_router(tmp_images_router)       # /api/tmp_images
 
+    # OAuth2 Phase 3 (T3.12 / FR-41): the MCP-KB key-management CRUD —
+    # the ONE new OAuth2-human-lane family (§5.6: 30 legacy + 1 new).
+    # Registered ONLY when auth is ON (untouched OFF-state route table,
+    # G3.2). Registered inside api_router BEFORE the KB Mounts below so
+    # Starlette first-match-wins resolves /api/mcp/kb/keys to this
+    # router, and the middleware's ordered tagged-resolution classes it
+    # PROTECTED (its templates precede the module-lane Mounts).
+    if auth_enabled:
+        from daemon.routers.mcp_kb_keys import router as mcp_kb_keys_router
+
+        api_router.include_router(mcp_kb_keys_router)  # /api/mcp/kb/keys (OAuth2 human lane)
+
+    # OAuth2 Phase 3 (T3.6): the auth-self router (login/callback/
+    # logout+alias/me) — all PUBLIC per §5.3.
+    if auth_enabled:
+        from daemon.routers.auth import router as auth_router
+
+        api_router.include_router(auth_router)         # /api/auth/*
+
     app.include_router(api_router)
 
     # --- MCP KB server mounts (MUST be before catch-all SPA route) ---
     # Initialize KB MCP server first (creates FastMCP and session manager)
     kb_mcp = create_kb_mcp_server()
-    # Mount SSE and StreamableHTTP apps
-    app.mount("/api/mcp/kb/sse", get_kb_mcp_sse_app("/api/mcp/kb/sse"))
-    app.mount("/api/mcp/kb", get_kb_mcp_http_app())
+    # Mount SSE and StreamableHTTP apps.
+    # OAuth2 Phase 3 (T3.11 / D20a): each mount sits behind the MODULE-
+    # OWNED key guard (KbKeyGuardApp — pass-through while the key store
+    # is empty, the pre-existing fully-open posture). The guard runs in
+    # BOTH auth states (FR-42 module-lane independence) and is invisible
+    # to the OAuth2 middleware (module-lane pass-through, FR-39).
+    from daemon.mcp.kb_keys import KbKeyGuardApp
+
+    app.mount("/api/mcp/kb/sse", KbKeyGuardApp(get_kb_mcp_sse_app("/api/mcp/kb/sse")))
+    app.mount("/api/mcp/kb", KbKeyGuardApp(get_kb_mcp_http_app()))
 
     # UI serving endpoints (production)
     @app.get("/")
@@ -3228,28 +3488,49 @@ def create_app() -> FastAPI:
             # this app runs without the full lifespan — e.g. probe
             # tests with a mocked manager). Fail closed: not ready
             # until a computed composite exists.
+            # OAuth2 auth advisory sub-field (P3 T3.9): present when the
+            # lifespan built the AuthService (auth ON), absent otherwise
+            # (OFF-state body byte-identical). Advisory only — the 503
+            # here is the readiness composite being uncomputed, never an
+            # auth verdict (OD-9).
+            auth_service = getattr(request.app.state, "auth_service", None)
+            auth_dependency_status = None
+            if auth_service is not None:
+                try:
+                    auth_dependency_status = auth_service.get_readiness_state()
+                except Exception:  # noqa: BLE001 — advisory only
+                    auth_dependency_status = None
+            detail = {
+                "reasons": ["readiness composite not yet computed"],
+                "queue_max_age_seconds": None,
+                "checked_at": None,
+                "inflight_turns": None,
+            }
+            body = ReadyzResponse(
+                status="degraded",
+                components={
+                    "database": False,
+                    "queue_freshness": False,
+                    "services": False,
+                    # incident 2026-10-10: when no composite
+                    # exists, fail closed on the new component
+                    # too — readiness never reports green on
+                    # "haven't checked yet".
+                    "checkpoint_saver": False,
+                },
+                detail=detail,
+                draining=False,
+            ).model_dump()
+            if auth_dependency_status is not None:
+                body["auth_dependency_status"] = auth_dependency_status
+                detail["auth_dependency_status"] = auth_dependency_status
+            else:
+                # Auth OFF → field ABSENT (model_dump would emit null —
+                # popped so the OFF-state body stays byte-identical).
+                body.pop("auth_dependency_status", None)
             return JSONResponse(
                 status_code=503,
-                content=ReadyzResponse(
-                    status="degraded",
-                    components={
-                        "database": False,
-                        "queue_freshness": False,
-                        "services": False,
-                        # incident 2026-10-10: when no composite
-                        # exists, fail closed on the new component
-                        # too — readiness never reports green on
-                        # "haven't checked yet".
-                        "checkpoint_saver": False,
-                    },
-                    detail={
-                        "reasons": ["readiness composite not yet computed"],
-                        "queue_max_age_seconds": None,
-                        "checked_at": None,
-                        "inflight_turns": None,
-                    },
-                    draining=False,
-                ).model_dump(),
+                content=body,
                 headers={"Retry-After": "5"},
             )
         payload = composite.to_payload(draining=False)
@@ -3332,6 +3613,17 @@ def create_app() -> FastAPI:
             status_code=404,
             content={"error": "Asset not found"}
         )
+
+    # OAuth2 Phase 3 (T3.8/T3.10): the route-class tagging pass runs
+    # AFTER every registration (including the late /livez, /readyz,
+    # /views/livez and SPA-shell routes above) so the middleware's
+    # derivation sees the complete tagged route table. It runs in BOTH
+    # auth states: the tags are inert metadata while auth is OFF (no
+    # middleware consumes them — G2.3/G3.2 introspection contracts are
+    # about app.state/middleware, not route attributes), and tagging
+    # unconditionally makes the three-class classification OBSERVABLE
+    # and provably static across auth states (FR-42 / AC-41).
+    _tag_route_classes(app)
 
     return app
 

@@ -215,6 +215,13 @@ class OAuthClient:
         self._discovery_cached_at: float | None = None
         self._jwks_cache: dict[str, Any] | None = None
         self._jwks_cached_at: float | None = None
+        # IdP-reachability signal for the readiness composite (P3 T3.9 /
+        # FR-30): tri-state — None = never attempted, True = last
+        # discovery attempt succeeded, False = last attempt failed after
+        # the full backoff. Bookkeeping only; NEVER gates a request path
+        # (the enforcing boundaries stay at the fetch/validate sites).
+        self._last_discovery_attempted: bool = False
+        self._last_discovery_reachable: bool | None = None
 
     # ── internals ───────────────────────────────────────────────────
 
@@ -254,6 +261,17 @@ class OAuthClient:
 
     # ── discovery (T2.5) ────────────────────────────────────────────
 
+    def last_discovery_reachable(self) -> bool | None:
+        """Tri-state IdP reachability for the readiness composite (T3.9).
+
+        ``None`` = no discovery attempt made yet (the sweeper boot hook
+        has not fired); ``True`` = the most recent attempt succeeded
+        (manual-override docs count — no fetch needed means nothing to
+        be unreachable); ``False`` = the most recent attempt exhausted
+        the backoff schedule. Pure read — never fetches.
+        """
+        return self._last_discovery_reachable
+
     def _manual_overrides_complete(self) -> bool:
         return all(
             (
@@ -283,6 +301,10 @@ class OAuthClient:
         ``iss`` check is the enforcing boundary.
         """
         if self._manual_overrides_complete():
+            # Manual-override posture: no network fetch exists, so
+            # "reachable" is vacuously true (readiness 'ok' semantics).
+            self._last_discovery_attempted = True
+            self._last_discovery_reachable = True
             return self._manual_doc()
 
         now = self._monotonic()
@@ -366,6 +388,8 @@ class OAuthClient:
                     doc_issuer,
                     expected,
                 )
+            self._last_discovery_attempted = True
+            self._last_discovery_reachable = True
             return DiscoveryDoc(
                 issuer=doc_issuer,
                 authorization_endpoint=str(payload["authorization_endpoint"]),
@@ -377,6 +401,8 @@ class OAuthClient:
         # Persistent failure: invalidate any stale cache, raise typed.
         self._discovery_cache = None
         self._discovery_cached_at = None
+        self._last_discovery_attempted = True
+        self._last_discovery_reachable = False
         raise DiscoveryUnreachableError(
             f"OIDC discovery unreachable after backoff ({last_error}): {url}"
         )
