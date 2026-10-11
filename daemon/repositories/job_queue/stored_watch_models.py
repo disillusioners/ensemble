@@ -5,7 +5,7 @@ user-picked Option A+E per the architect options review at
 ``.agents/shared/planning/watch-loss-fix-options/options-matrix.md``).
 
 One row per watcher per re-arm executed by the in-transaction F6 hook
-(``RetryTurn.apply`` step 4, ``turn_transitions.py``) when a
+(``RetryTurn.run`` step 4, ``turn_transitions.py``) when a
 usage-limit deferral re-keys ``job_watchers`` from the cancelled
 parent's ``work_id`` onto the retry child's fresh ``work_id``. The row
 is the durable provenance + recovery record for that coverage move:

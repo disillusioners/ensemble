@@ -4,7 +4,7 @@
 -- Phase: watch-loss fix, user-picked Option A+E per the architect
 -- options review (.agents/shared/planning/watch-loss-fix-options/
 -- options-matrix.md). One row per recovery-armed watch executed by
--- the in-transaction F6 hook in RetryTurn.apply (turn_transitions.py)
+-- the in-transaction F6 hook in RetryTurn.run (turn_transitions.py)
 -- when a usage-limit deferral re-keys job_watchers from the cancelled
 -- parent work_id onto the retry child's fresh work_id.
 --

@@ -43,7 +43,6 @@ files read as one family.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -51,15 +50,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy import text
 
-from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import (
     AdmissionState,
     JobItem,
 )
-from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.task.models import TaskStatus, TaskType
+from daemon.repositories.task.models import TaskStatus
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services.job_recovery_service import JobRecoveryService
 from daemon.services.stale_task_recovery import StaleTaskRecovery

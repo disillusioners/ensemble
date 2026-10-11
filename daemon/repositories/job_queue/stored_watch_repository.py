@@ -1,7 +1,7 @@
 """Repository for StoredWatch rows (Option A depth 3, fix e8a61da3).
 
 The WRITE side of the quarantine table is owned by the in-transaction
-F6 hook (``RetryTurn.apply`` — raw SQL inside the caller's
+F6 hook (``RetryTurn.run`` — raw SQL inside the caller's
 ``engine.begin()`` transaction, atomic with the re-key by
 construction). This repository owns everything OUTSIDE that
 transaction:

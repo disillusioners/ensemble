@@ -17,6 +17,9 @@ from typing import Any, ClassVar
 
 from sqlalchemy import text
 
+from daemon.repositories.job_queue.stored_watch_models import (
+    STORED_WATCH_STATUS_ARMED,
+)
 from daemon.repositories.task.models import SuspensionReason, TaskStatus
 from daemon.services.timestamps import now_utc_naive
 
@@ -885,7 +888,7 @@ class RetryTurn(_Transition):
                     ":watcher_instance_id, "
                     + original_events_literal
                     + ", :mission_instance_id, :work_instance_id, "
-                    "'armed', :now, :now) "
+                    ":status, :now, :now) "
                     "ON CONFLICT (original_work_id, watcher_instance_id) "
                     "DO NOTHING"
                 ),
@@ -897,6 +900,7 @@ class RetryTurn(_Transition):
                     "original_events": json.dumps(list(original_events)),
                     "mission_instance_id": mission_instance_id,
                     "work_instance_id": self.instance_id,
+                    "status": STORED_WATCH_STATUS_ARMED,
                     "now": now_naive,
                 },
             )

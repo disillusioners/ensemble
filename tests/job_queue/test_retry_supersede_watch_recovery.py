@@ -16,7 +16,7 @@ CAS-consumed the row (C1 shape (1) — fully claimable), and the true
 mission terminal found NO row → ZERO terminal events (the
 double-silence).
 
-The fix (Option A): the F6 re-key transaction (``RetryTurn.apply``)
+The fix (Option A): the F6 re-key transaction (``RetryTurn.run``)
 quarantines each re-keyed watcher into ``stored_watches`` AND arms
 ``mission_terminal`` onto the row BEFORE the re-key. The re-armed row
 survives the retry's settle (C1 matching_readonly — deliver-but-keep)
@@ -47,7 +47,7 @@ A/B convention: every test fails on the pre-fix tree (no
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest

@@ -25,6 +25,10 @@ from daemon.repositories.job_queue import (
     JobQueueRepository,
     JobItem,
 )
+from daemon.repositories.job_queue.stored_watch_models import (
+    STORED_WATCH_STATUS_REHYDRATED,
+    STORED_WATCH_STATUS_RELEASED,
+)
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.task.models import TaskStatus
@@ -1171,7 +1175,7 @@ class JobQueueService:
                     if await asyncio.to_thread(
                         stored_watch_repo.transition_status,
                         row.stored_watch_id,
-                        "released",
+                        STORED_WATCH_STATUS_RELEASED,
                     ):
                         released += 1
                     continue
@@ -1213,7 +1217,7 @@ class JobQueueService:
                         if await asyncio.to_thread(
                             stored_watch_repo.transition_status,
                             row.stored_watch_id,
-                            "released",
+                            STORED_WATCH_STATUS_RELEASED,
                         ):
                             released += 1
                         continue
@@ -1229,7 +1233,7 @@ class JobQueueService:
                 if await asyncio.to_thread(
                     stored_watch_repo.transition_status,
                     row.stored_watch_id,
-                    "rehydrated",
+                    STORED_WATCH_STATUS_REHYDRATED,
                 ):
                     rehydrated += 1
                 logger.warning(
