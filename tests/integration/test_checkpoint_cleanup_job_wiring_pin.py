@@ -16,9 +16,9 @@
 * the AUTO ``execute()`` body must NEVER call ``run_checkpoint_prunes``
   (the manual entry point is MANUAL-ONLY — the auto cycle must never
   route through it; INV-1/INV-9);
-* the auto blob-arm call passes NO ``destructive`` kwarg (auto = env
-  dual-arm only; INV-1) — the integration suite's case 47 pins the
-  behavioral half.
+* the auto blob-arm call passes NO ``destructive`` kwarg (auto
+  lands on the unconditional destructive default — the env-flag
+  ladder is gone; feature/blob-prune-default-on).
 """
 from __future__ import annotations
 
@@ -251,8 +251,9 @@ class TestManualOnlyEntryPoint:
         """Case-47 AST replacement (tidier fix pass — was a substring
         pin in the integration suite): the AUTO ``execute()``'s call to
         ``_prune_unreferenced_blobs`` passes NO ``destructive`` kwarg —
-        the env dual-arm is the auto cycle's only destructive arbiter
-        (INV-1). AST-level: a comment can never satisfy it."""
+        the kwarg-less call lands on the unconditional destructive
+        default (feature/blob-prune-default-on retired the env-flag
+        ladder). AST-level: a comment can never satisfy it."""
         fn = self._auto_execute_fn()
         for sub in ast.walk(fn):
             if (
@@ -263,7 +264,8 @@ class TestManualOnlyEntryPoint:
                 kw_names = [kw.arg for kw in sub.keywords if kw.arg]
                 assert "destructive" not in kw_names, (
                     "AUTO execute() must NOT pass destructive= to the "
-                    "blob arm (env dual-arm is the arbiter — INV-1)"
+                    "blob arm — let it land on the unconditional "
+                    "destructive default (feature/blob-prune-default-on)."
                 )
                 return
         raise AssertionError(

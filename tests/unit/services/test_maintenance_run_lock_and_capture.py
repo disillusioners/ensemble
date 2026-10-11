@@ -285,12 +285,15 @@ class TestAutoCycleWiring:
         assert row.triggered_by == "system"
         assert row.status == "succeeded"
         assert row.completed_at is not None
-        # env_flags: default env → dry_run arm on, destructive arm off,
-        # no override on the auto path (INV-1).
+        # env_flags: auto cycle on the unconditional destructive
+        # default (``destructive: True``); the historical dual-arm
+        # env-state fields are gone (feature/blob-prune-default-on).
         assert row.env_flags_json == {
-            "blob_prune_dry_run": True,
-            "blob_prune_destructive": False,
-            "destructive_override": False,
+            # feature/blob-prune-default-on: the dual-arm env-state
+            # trio is gone; the audit row records the kwarg value the
+            # cycle ran with (True for the auto cycle, which lands on
+            # the unconditional destructive default).
+            "destructive": True,
         }
         # summary_json carries the FROZEN shape.
         summary = row.summary_json

@@ -214,21 +214,52 @@ MAINTENANCE_ALLOWED_HOSTS: str = ""  # [C1 fix pass 2026-09-27] CSV of bare HOST
 CHECKPOINT_MAX_PER_THREAD_FLOOR: int = 1
 
 # ── Checkpoint Blob Prune (Phase 1 C3 — reference-aware checkpoint_blobs prune) ───
-# Conservative ladder: the maintenance blob prune starts DRY-RUN ONLY (reports
-# what would be deleted, deletes nothing). Destructive execution requires BOTH
-# env flags set together — CHECKPOINT_BLOB_PRUNE_DRY_RUN=0 AND
-# CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1 — and even then the destructive code
-# path is structurally unreachable unless that conjunction holds at call time
-# (daemon/services/checkpoint_prune.py::blob_prune_destructive_enabled).
-CHECKPOINT_BLOB_PRUNE_DRY_RUN: bool = True  # default dry-run; set false only via env (CHECKPOINT_BLOB_PRUNE_DRY_RUN=0)
-CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE: bool = False  # destructive kill-switch; env-overridden (CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1); default OFF
+# Destructive-by-default. The maintenance blob prune's anti-join DELETE
+# (checkpoints → checkpoint_blobs) is the unconditional destructive path; no
+# env-var, config-flag, or on/off switch disables it. The auto cycle and the
+# manual execute path invoke it without an opt-in; only the manual preview
+# (POST /api/maintenance/checkpoint-cleanup/dry-run) opts out via the
+# ``destructive=False`` kwarg and stays SELECT-only.
+#
+# Operational guardrails (still load-bearing — the dual-arm gate is gone but the
+# safety invariants it expressed live on):
+#  1. Per-pair row cap — pairs whose (channel, version) ref-count exceeds
+#     ``CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD`` are SKIPPED with the
+#     ``MAX_REFS_EXCEEDED`` log (schema-drift / unexpected shape).
+#  2. Zero-refs fail-safe — a pair whose checkpoints have zero extracted refs
+#     is SKIPPED with the ``ZERO_REFS_FAIL_SAFE`` ERROR log (the anti-join
+#     would nuke every blob of the pair; do not delete on that signal).
+#  3. Per-pair SERIALIZABLE wrap + bounded retry (SQLSTATE 40001 / 40P01) —
+#     converts SSI-detectable conflicts into abort-and-retry on a fresh
+#     snapshot; never-raises into the maintenance loop.
+#  4. **LIMIT-batching within a pair** — the destructive DELETE per pair is
+#     broken into chunks of at most ``CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE``
+#     rows, each chunk its own SERIALIZABLE transaction with the retry wrap
+#     above. The pool-hazard class (unbounded per-pair DELETE) is closed by
+#     construction: no single statement touches more than
+#     ``CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE`` rows.
 CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD: int = 100_000  # safety cap — skip pairs with more refs than this
 # Max RETRY attempts for the destructive anti-join DELETE after a PostgreSQL
 # serialization failure (SQLSTATE 40001) or deadlock (SQLSTATE 40P01); total
 # attempts = 1 + this. Exhaustion logs ERROR and skips the pair with zero rows
-# deleted (never raises into the maintenance loop). See
-# daemon/checkpoint_adapter.py::PostgresCheckpointerAdapter.delete_blobs_anti_join.
+# deleted (never raises into the maintenance loop). Per-chunk retry budget (the
+# chunk loop calls the DELETE repeatedly under the same retry budget per
+# chunk). See daemon/checkpoint_adapter.py::PostgresCheckpointerAdapter.
+# delete_blobs_anti_join.
 CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES: int = 3
+# Max rows touched by a single DELETE statement on the destructive anti-join
+# path. The pruning loop within each (thread_id, checkpoint_ns) pair is bound
+# to chunks of this size; the next chunk is a separate SERIALIZABLE
+# transaction. Sized to bound the worst-case per-statement footprint of the
+# pool (× row-size × per-row byte-slice cost in asyncpg RETURNING) while
+# amortizing the per-pair round-trip count across the chunked per-pair
+# delete, which runs whenever the checkpoint-cleanup job is due (default
+# 24h via ``CHECKPOINT_CLEANUP_INTERVAL_HOURS`` / env knob
+# ``PERSISTENCE_CHECKPOINT_CLEANUP_INTERVAL``) — the 15-min
+# ``MAINTENANCE_CHECK_INTERVAL_MINUTES`` is only the maintenance tick
+# that evaluates due-ness, not the prune cadence. See commit message
+# rationale in ``feature/blob-prune-default-on``.
+CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE: int = 1000
 
 # ── PG-only VACUUM (ANALYZE) maintenance (commission backend-db-space-reclamation) ──
 # Section: threshold-gated VACUUM (ANALYZE) sweep on user tables. Plain

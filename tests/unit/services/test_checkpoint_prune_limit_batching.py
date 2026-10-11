@@ -1,0 +1,633 @@
+"""Unit tests — feature/blob-prune-default-on LIMIT-batching.
+
+Proves the chunk-loop in
+``daemon/checkpoint_adapter.py::PostgresCheckpointerAdapter.delete_blobs_anti_join``:
+
+(a) single-chunk case — per-pair DELETE that fits under
+    ``CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE`` exits the chunk loop
+    after exactly one DELETE call (no extra round-trip on a healthy
+    pair);
+(b) multi-chunk case — a per-pair DELETE that exceeds the chunk size
+    progresses through chunks; every chunk is a separate DELETE
+    statement; all rows eventually deleted; audit-row totals match the
+    mock-supplied chunk payload;
+(c) empty-case — no candidate rows means zero DELETE statements and
+    ``(0, 0)`` returned;
+(d) audit correctness — the per-chunk breakdown sums to the totals
+    the caller observes on the ``BlobPruneSummary``;
+(e) chunk-count safety guard — the per-statement LIMIT-bounded chunk
+    never exceeds ``CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE`` (else
+    the pool-hazard class would reopen); the guard is an -O-proof
+    explicit branch (ERROR log + chunk-loop stop), not an ``assert``
+    (asserts vanish under ``python -O``);
+(f) static alias pin — the chunk DELETE's inner subquery must
+    SELF-ALIAS to the alias ``_BLOB_ANTI_JOIN_PREDICATE`` is written
+    against (b2-vs-b regression guard — review C1).
+
+The test subclasses ``PostgresCheckpointerAdapter`` to override the
+SQL primitive (``_delete_blobs_anti_join_chunk``) so no PG connection
+is required — the chunk loop is the SEAM. The real PG integration
+test for the chunk SQL lives in
+``tests/integration/checkpoint_prune_limit_batching_real_pg.py`` and
+SKIPS LOUDLY when PG is unreachable (do not silently substitute a mock).
+"""
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+import daemon.constants
+from daemon.checkpoint_adapter import PostgresCheckpointerAdapter
+from daemon.services.checkpoint_prune import prune_unreferenced_blobs
+
+
+BATCH_SIZE = daemon.constants.CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE
+
+
+class FakeChunkRow:
+    """A minimal asyncpg-record-like — exposes ``n`` like
+    ``RETURNING OCTET_LENGTH(blob) AS n`` does on the real adapter."""
+
+    def __init__(self, n: int) -> None:
+        self._n = n
+
+    def __getitem__(self, key: str):
+        if key != "n":
+            raise KeyError(key)
+        return self._n
+
+
+def _chunk_response(rows_per_chunk: list[list[int]]):
+    """Return an async function that consumes the queue and returns the
+    next ``OCTET_LENGTH(blob)`` row list per call. The chunk loop
+    terminates on the first empty list (the production iterator
+    shape)."""
+    queue = list(rows_per_chunk) + [[]]  # terminator
+
+    async def _call(*args, **kwargs):
+        return [FakeChunkRow(n) for n in queue.pop(0)]
+
+    return _call
+
+
+def _adapter_mock(pairs, refs=5) -> MagicMock:
+    """PostgresCheckpointerAdapter-shaped mock — bypasses the
+    isinstance gate by patching the symbol on the calling module.
+    Returns ``refs`` per pair (healthy enough to pass the zero-refs
+    fail-safe) so the loop reaches the destructive arm.
+
+    The destructive arm is itself the chunk loop on
+    ``PostgresCheckpointerAdapter.delete_blobs_anti_join``. The
+    test exercises the loop via a SUBCLASS that overrides the SQL
+    primitive — see ``_LoopAdapter`` below — so the adapter mock here
+    satisfies only the ``isinstance`` check + the helper-method calls
+    (``find_all_thread_ns_pairs``, ``count_refs_for_blob_thread``)."""
+    m = MagicMock()
+    m.find_all_thread_ns_pairs = AsyncMock(return_value=list(pairs))
+    m.count_refs_for_blob_thread = AsyncMock(return_value=refs)
+    return m
+
+
+class _LoopAdapter(PostgresCheckpointerAdapter):
+    """Adapts PostgresCheckpointerAdapter's chunk-loop to a mock SQL
+    primitive — overrides only ``_delete_blobs_anti_join_chunk`` to
+    return rows from a pre-loaded queue. The chunk-loop body in
+    ``delete_blobs_anti_join`` runs against this mock primitive.
+
+    Constructor takes the candidate pairs and refs directly (no
+    nested MagicMock attribute) so the helper methods do not have
+    to round-trip through ``self._mock.find_*()`` and risk the
+    MagicMock auto-async attributes. The ``_saver`` attribute is
+    left unset — the methods we override don't touch it.
+    """
+
+    def __init__(self, rows_per_chunk, pairs=(), refs=5):
+        # PostgresCheckpointerAdapter.__init__ requires a saver AND a
+        # pool; the helpers we override never touch either, so we
+        # pass placeholders.
+        super().__init__(saver=None, pool=None)  # type: ignore[arg-type]
+        self._rows_per_chunk = rows_per_chunk
+        self._pairs = list(pairs)
+        self._refs = refs
+
+    async def find_all_thread_ns_pairs(self):
+        return list(self._pairs)
+
+    async def count_refs_for_blob_thread(self, thread_id, checkpoint_ns):
+        return self._refs
+
+    async def _delete_blobs_anti_join_chunk(self, thread_id, checkpoint_ns, batch_size):
+        # The real signature returns ``(rows, stop_reason)`` — rows list
+        # plus a stop reason only when the chunk was abandoned (W1 fix
+        # cycle 1); mock chunks always return normally (reason None).
+        if not self._rows_per_chunk:
+            return [], None
+        chunk = self._rows_per_chunk.pop(0)
+        return [FakeChunkRow(n) for n in chunk], None
+
+
+@pytest.fixture
+def as_pg(monkeypatch):
+    """Make the service's ``isinstance(checkpointer,
+    PostgresCheckpointerAdapter)`` test happy: ``_LoopAdapter`` is a
+    real subclass, so the isinstance check passes WITHOUT patching.
+    The fixture stays for parity with the other suite and for any
+    future refactors that auto-mock the class symbol."""
+    return
+
+
+class TestLimitBatchingSingleChunk:
+    async def test_pair_smaller_than_batch_single_chunk(self, as_pg, caplog):
+        """(a) one pair, payload of 25 deletes × 1024 bytes → the
+        chunk loop returns 25 rows on the first SQL primitive call,
+        totals 25 deletes × 1024 bytes, then loops once more on the
+        empty terminator and exits. Total chunk calls: 2 (one
+        data-bearing + one terminator probe)."""
+        rows = [[1024] * 25]  # 1 chunk of 25 rows × 1024 bytes each
+        adapter = _LoopAdapter(rows, pairs=[("t-1", "", 3)])
+        summary = await prune_unreferenced_blobs(adapter)
+        assert summary.destructive is True
+        assert summary.total_deleted == 25
+        assert summary.total_bytes_freed == 25 * 1024
+        # Chunk queue drained — the loop must have asked again on the
+        # empty terminator (which my chunk-primitive returns ``[]``
+        # for an empty input). The terminator call emptied the queue
+        # entirely (pop-then-detect-empty idiom).
+        assert adapter._rows_per_chunk == [], (
+            "loop must probe once more after the data-bearing chunk "
+            "to detect the empty terminator"
+        )
+
+
+class TestLimitBatchingMultiChunk:
+    async def test_pair_larger_than_batch_uses_multiple_chunks(self, as_pg):
+        """(b) stage 8 chunks (7 × 10 + 1 × 4) → loop iterates
+        through all of them, total = 74. The loop terminates on the
+        first empty chunks-list probe."""
+        rows = [
+            [100] * 10,  # chunk 1
+            [100] * 10,  # chunk 2
+            [100] * 10,  # chunk 3
+            [100] * 10,  # chunk 4
+            [100] * 10,  # chunk 5
+            [100] * 10,  # chunk 6
+            [100] * 10,  # chunk 7
+            [100] * 4,   # chunk 8 (partial)
+        ]
+        adapter = _LoopAdapter(rows, pairs=[("t-1", "", 3)])
+        summary = await prune_unreferenced_blobs(adapter)
+        assert summary.total_deleted == 74
+        assert summary.total_bytes_freed == 74 * 100
+        # The chunk list was fully drained — the loop iteration
+        # consumed all 8 chunks and then saw ``[]`` on the next
+        # call. The terminator-call CHANGED the queue to ``[]``.
+        assert adapter._rows_per_chunk == [], (
+            "chunk loop must have drained all 8 data-bearing chunks "
+            "and exited on the empty probe (not busy-spinning)"
+        )
+
+
+class TestLimitBatchingEmpty:
+    async def test_no_candidates_short_circuits_before_chunk_loop(self, as_pg):
+        """(c) candidate enumeration returns an empty set → no chunk
+        DELETE is issued (the per-pair loop short-circuits BEFORE
+        the destructive arm). The chunk method stays untouched."""
+        rows = [["1"] * 5]  # staged but never consumed
+        adapter = _LoopAdapter(rows, pairs=[], refs=0)
+        summary = await prune_unreferenced_blobs(adapter)
+        assert summary.total_deleted == 0
+        assert summary.total_bytes_freed == 0
+        assert summary.scanned_pairs == 0
+        # Chunk list untouched (the destructive arm was never reached).
+        assert len(adapter._rows_per_chunk) == 1, (
+            "empty candidates must short-circuit BEFORE the chunk loop "
+            "touches any SQL primitive"
+        )
+
+
+class TestAuditTotalsAcrossChunks:
+    async def test_blob_prune_summary_totals_match_chunk_sum(self, as_pg):
+        """(d) the ``BlobPruneSummary`` totals are the sums of the
+        per-chunk returns — defensive against a refactor that flips
+        the per-chunk counter to e.g. report only the last chunk's
+        count."""
+        rows = [
+            [10] * 3,    # 3 rows × 10 = 30
+            [20] * 7,    # 7 rows × 20 = 140
+            [40] * 2,    # 2 rows × 40 = 80
+        ]
+        adapter = _LoopAdapter(rows, pairs=[("t-1", "", 3)])
+        summary = await prune_unreferenced_blobs(adapter)
+        assert summary.total_deleted == 12  # 3 + 7 + 2
+        assert summary.total_bytes_freed == 250
+
+
+class TestPerChunkLimitBounded:
+    async def test_chunk_strictly_respects_batch_size(self, as_pg, caplog):
+        """(e) the chunk loop enforces the per-statement LIMIT via the
+        -O-proof explicit guard branch (``if chunk_count > batch_size:
+        logger.error(...); break``) — NOT an ``assert`` (asserts
+        vanish under ``python -O`` and the pool-hazard bound must
+        survive optimized interpreters). A future refactor that drops
+        the LIMIT clause would silently reopen the pool-hazard class —
+        this test pins the guard by staging a chunk whose size
+        exceeds the (real) batch size constant and asserting:
+
+        (i) the adapter module's logger emits an ERROR carrying the
+            LIMIT-violation message (never-raise conversion: the loop
+            stops; no exception propagates to the per-pair catch);
+        (ii) the pair is NOT recorded as SKIPPED — the guard converts
+            to a chunk-loop stop and the accumulated chunk totals are
+            kept (the violating chunk's rows WERE deleted at the DB
+            level, so the audit reflects reality);
+        (iii) the loop BREAKS — a subsequently staged data-bearing
+            chunk is never consumed (no terminator probe either)."""
+        import logging
+
+        # Default BATCH_SIZE is 1000 — stage 1001 rows to trip the
+        # bound, then a further data-bearing chunk to prove the loop
+        # stopped rather than probing on.
+        rows = [[1] * (BATCH_SIZE + 1), [7] * 5]
+        adapter = _LoopAdapter(rows, pairs=[("t-1", "", 3)])
+        with caplog.at_level(
+            logging.ERROR, logger="daemon.checkpoint_adapter"
+        ):
+            summary = await prune_unreferenced_blobs(adapter)
+        # (iii) the guard broke the loop: the second staged chunk was
+        # never consumed.
+        assert adapter._rows_per_chunk == [[7] * 5], (
+            "the LIMIT guard must BREAK the chunk loop — the "
+            "over-limit chunk's successor must never be consumed"
+        )
+        # (i) the ERROR log carries the LIMIT-violation message.
+        limit_errors = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.ERROR and "LIMIT violated" in r.getMessage()
+        ]
+        assert limit_errors, (
+            "the -O-proof guard must log an ERROR carrying the "
+            f"LIMIT-violation message; got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+        # (ii) totals accumulate and the pair is NOT skipped (no
+        # exception was raised — the per-pair catch stays out of the
+        # path).
+        assert summary.total_deleted == BATCH_SIZE + 1
+        assert summary.total_bytes_freed == BATCH_SIZE + 1
+        assert summary.skipped == [], (
+            f"the explicit guard must NOT raise — the per-pair catch "
+            f"must stay out of the path; got skipped: {summary.skipped}"
+        )
+
+
+class TestPartialCompletionSignal:
+    """W1 (fix cycle 1): a pair whose destructive chunk loop stopped
+    early — retry exhaustion or the LIMIT-guard break — must NOT read
+    as ordinary completion. The partial totals stay REAL (those
+    deletes committed), and the stop reason + abandoned-chunk count
+    surface on the ``BlobPruneSummary`` (and its wire dict) so the
+    ``maintenance_runs`` audit row carries an explicit
+    partial-completion signal."""
+
+    async def test_retry_exhaustion_keeps_partials_and_surfaces_reason(
+        self, as_pg, monkeypatch, caplog
+    ):
+        """The chunk primitive's SERIALIZABLE retry wrap exhausts
+        (1 + ``CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES`` failing attempts)
+        on a 40001-staged ``conn.fetch`` → the chunk returns
+        ``([], "retry_exhausted")`` → the pair loop breaks with the
+        healthy first chunk's totals KEPT and the stop reason landed
+        on the summary + wire dict."""
+        import logging
+
+        # Dial the retry budget down — the primitive binds the
+        # constant by import, so patch the adapter module's binding.
+        retries = 1
+        monkeypatch.setattr(
+            "daemon.checkpoint_adapter.CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES",
+            retries,
+        )
+
+        class _SQLSTATEError(Exception):
+            def __init__(self, sqlstate: str) -> None:
+                super().__init__(f"sqlstate {sqlstate}")
+                self.sqlstate = sqlstate
+
+        class _FakeTxCM:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class _FakeConnCM:
+            def __init__(self, conn):
+                self._conn = conn
+
+            async def __aenter__(self):
+                return self._conn
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class _StickyRaisingConn:
+            """fetch: call #1 serves the staged healthy chunk; every
+            later call raises the staged SQLSTATE error (sticky)."""
+
+            def __init__(self, first_rows, exc):
+                self._first_rows = first_rows
+                self._exc = exc
+                self.fetch_calls = 0
+                self._served_first = False
+
+            def transaction(self, isolation=None):
+                return _FakeTxCM()
+
+            async def fetch(self, *args, **kwargs):
+                self.fetch_calls += 1
+                if self._served_first:
+                    raise self._exc
+                self._served_first = True
+                return [FakeChunkRow(n) for n in self._first_rows]
+
+        class _FakePool:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def acquire(self):
+                return _FakeConnCM(self._conn)
+
+        class _RetryAdapter(PostgresCheckpointerAdapter):
+            """Real chunk primitive (retry wrap exercised) against a
+            fake pool; only the enumeration helpers are stubbed."""
+
+            def __init__(self, conn, pairs=(), refs=5):
+                super().__init__(saver=None, pool=_FakePool(conn))
+                self._pairs = list(pairs)
+                self._refs = refs
+
+            async def find_all_thread_ns_pairs(self):
+                return list(self._pairs)
+
+            async def count_refs_for_blob_thread(self, thread_id, checkpoint_ns):
+                return self._refs
+
+        conn = _StickyRaisingConn([10] * 5, _SQLSTATEError("40001"))
+        adapter = _RetryAdapter(conn, pairs=[("t-1", "", 3)])
+        with caplog.at_level(
+            logging.ERROR, logger="daemon.checkpoint_adapter"
+        ):
+            summary = await prune_unreferenced_blobs(adapter)
+
+        # Retry budget actually spent: 1 healthy chunk fetch + (1 +
+        # retries) failing attempts on the abandoned chunk.
+        assert conn.fetch_calls == 1 + (1 + retries), (
+            f"expected 1 healthy fetch + (1 + {retries}) failing "
+            f"attempts, got {conn.fetch_calls}"
+        )
+        # Partial totals KEPT — the healthy chunk's deletes are real.
+        assert summary.total_deleted == 5
+        assert summary.total_bytes_freed == 50
+        # The stop signal lands on the summary object (exact fields
+        # threaded by the fix).
+        assert summary.partial_pairs == [("t-1", "", "retry_exhausted")]
+        assert summary.partial_chunks_skipped == 1
+        assert adapter.last_pair_stop_reason == "retry_exhausted"
+        assert adapter.last_pair_chunks_skipped == 1
+        # ...and on the wire dict the audit row persists.
+        pc = summary.to_summary_blobs_dict()["partial_completion"]
+        assert pc["stopped_early_pairs"] == 1
+        assert pc["chunks_skipped"] == 1
+        assert pc["pairs"] == [
+            {"thread_id": "t-1", "checkpoint_ns": "", "reason": "retry_exhausted"}
+        ]
+        assert pc["truncated"] is False
+        # The exhaustion ERROR from the real primitive fired.
+        assert any(
+            "SERIALIZABLE_RETRY_EXHAUSTED" in r.getMessage()
+            for r in caplog.records
+        )
+        # The pair is NOT in skipped (nothing raised — partial, not skip).
+        assert summary.skipped == []
+
+    async def test_limit_guard_break_surfaces_over_batch_limit(self, as_pg):
+        """The LIMIT-guard break (chunk rows > batch size) must record
+        ``over_batch_limit`` on the summary + wire dict, with the
+        violating chunk's (real) deletes kept in the totals."""
+        rows = [[1] * (BATCH_SIZE + 1), [7] * 5]
+        adapter = _LoopAdapter(rows, pairs=[("t-1", "", 3)])
+        summary = await prune_unreferenced_blobs(adapter)
+        assert summary.total_deleted == BATCH_SIZE + 1
+        assert summary.total_bytes_freed == BATCH_SIZE + 1
+        assert summary.partial_pairs == [("t-1", "", "over_batch_limit")]
+        assert summary.partial_chunks_skipped == 0
+        assert adapter.last_pair_stop_reason == "over_batch_limit"
+        pc = summary.to_summary_blobs_dict()["partial_completion"]
+        assert pc["stopped_early_pairs"] == 1
+        assert pc["chunks_skipped"] == 0
+        assert pc["pairs"] == [
+            {"thread_id": "t-1", "checkpoint_ns": "", "reason": "over_batch_limit"}
+        ]
+
+    async def test_healthy_run_has_no_partial_block(self, as_pg):
+        """Frozen-shape guard: a fully-completed pair emits NO
+        ``partial_completion`` key — the wire shape stays
+        byte-identical on healthy runs."""
+        adapter = _LoopAdapter([[5] * 20], pairs=[("t-1", "", 3)])
+        summary = await prune_unreferenced_blobs(adapter)
+        assert summary.total_deleted == 20
+        assert summary.total_bytes_freed == 100
+        assert summary.partial_pairs == []
+        assert summary.partial_chunks_skipped == 0
+        assert "partial_completion" not in summary.to_summary_blobs_dict()
+
+    async def test_duck_adapter_without_side_channel_never_phantoms(
+        self, monkeypatch
+    ):
+        """The side-channel read is duck-typed with a str/int guard: an
+        adapter-shaped MagicMock (isinstance gate bypassed the way the
+        service suites do) whose auto-attrs are neither str nor int
+        must read as NEUTRAL — no phantom partial pairs."""
+        import daemon.services.checkpoint_prune as cp
+
+        monkeypatch.setattr(cp, "PostgresCheckpointerAdapter", object)
+        m = MagicMock()
+        m.find_all_thread_ns_pairs = AsyncMock(return_value=[("t-1", "", 3)])
+        m.count_refs_for_blob_thread = AsyncMock(return_value=5)
+        m.delete_blobs_anti_join = AsyncMock(return_value=(7, 700))
+        summary = await prune_unreferenced_blobs(m)
+        assert summary.total_deleted == 7
+        assert summary.partial_pairs == []
+        assert summary.partial_chunks_skipped == 0
+        assert "partial_completion" not in summary.to_summary_blobs_dict()
+
+    async def test_dry_run_flavor_never_carries_partial_signal(self, monkeypatch):
+        """The dry-run arm never deletes — its wire flavor must never
+        gain a ``partial_completion`` block even in principle."""
+        import daemon.services.checkpoint_prune as cp
+
+        monkeypatch.setattr(cp, "PostgresCheckpointerAdapter", object)
+        m = MagicMock()
+        m.find_all_thread_ns_pairs = AsyncMock(return_value=[("t-1", "", 3)])
+        m.count_refs_for_blob_thread = AsyncMock(return_value=5)
+        m.count_blobs_anti_join = AsyncMock(return_value=(4, 4096))
+        summary = await prune_unreferenced_blobs(m, destructive=False)
+        assert summary.destructive is False
+        assert summary.partial_pairs == []
+        d = summary.to_summary_blobs_dict()
+        assert "partial_completion" not in d
+        assert d["destructive"] is False
+
+
+class TestChunkSubqueryAliasBinding:
+    """(f) STATIC pin — the chunk DELETE's inner subquery must
+    SELF-ALIAS to the blob-side alias that
+    ``_BLOB_ANTI_JOIN_PREDICATE`` is written against.
+
+    The predicate references blob rows by alias ``b`` ONLY at its top
+    level (``b.thread_id = $1 AND b.checkpoint_ns = $2``). The chunk
+    DELETE wraps it in ``DELETE FROM checkpoint_blobs b WHERE b.ctid
+    IN (SELECT <a>.ctid FROM checkpoint_blobs <a> WHERE <predicate>
+    LIMIT $batch)`` — for the predicate to bind to the CHUNK
+    CANDIDATES, the subquery's self-alias must BE ``b`` (the inner
+    ``b`` shadows the outer DELETE alias). If the subquery declares
+    any other alias (the ``b2`` of the first LIMIT-batching revision —
+    review C1), the predicate's ``b`` resolves to the OUTER alias,
+    ``b2`` stays unconstrained, and the subquery returns the first
+    ``batch`` ctids of the WHOLE table in arbitrary scan order:
+    safety holds by accident, but per-pair exhaustion silently never
+    completes on production-scale tables (targets outside the leading
+    window never delete → the loop exits believing the pair is
+    exhausted).
+
+    Structural check at source level — no PG needed;
+    implementation-tolerant (regex over the method source) but
+    load-bearing: it FAILS on the b2 bug by construction.
+    """
+
+    def test_chunk_subquery_self_alias_matches_predicate_alias(self):
+        import inspect
+        import re
+
+        from daemon.checkpoint_adapter import _BLOB_ANTI_JOIN_PREDICATE
+
+        # 1. The blob-side alias the predicate binds its parameters on.
+        m_pred = re.search(
+            r"\b([A-Za-z_][A-Za-z0-9_]*)\.thread_id\s*=\s*\$1\b",
+            _BLOB_ANTI_JOIN_PREDICATE,
+        )
+        assert m_pred, (
+            "predicate must bind $1 on an alias-qualified thread_id "
+            "(the blob-side top-level condition)"
+        )
+        pred_alias = m_pred.group(1)
+        # The $2 condition must qualify the SAME alias.
+        m_ns = re.search(
+            r"\b([A-Za-z_][A-Za-z0-9_]*)\.checkpoint_ns\s*=\s*\$2\b",
+            _BLOB_ANTI_JOIN_PREDICATE,
+        )
+        assert m_ns is not None and m_ns.group(1) == pred_alias, (
+            "predicate's $1/$2 conditions must qualify the SAME alias"
+        )
+
+        # 2. The chunk method's SQL source: the inner subquery must
+        #    self-alias to that same alias.
+        src = inspect.getsource(
+            PostgresCheckpointerAdapter._delete_blobs_anti_join_chunk
+        )
+        m_sub = re.search(
+            r"SELECT\s+([A-Za-z_][A-Za-z0-9_]*)\.ctid\s+"
+            r"FROM\s+checkpoint_blobs\s+([A-Za-z_][A-Za-z0-9_]*)\s+WHERE",
+            src,
+        )
+        assert m_sub, (
+            "chunk SQL must contain 'SELECT <a>.ctid FROM "
+            "checkpoint_blobs <a> WHERE' — the LIMIT-batching shape "
+            "drifted"
+        )
+        select_alias, from_alias = m_sub.group(1), m_sub.group(2)
+        assert select_alias == from_alias, (
+            f"subquery SELECT alias ({select_alias!r}) must equal its "
+            f"FROM alias ({from_alias!r})"
+        )
+        assert from_alias == pred_alias, (
+            f"chunk subquery self-alias {from_alias!r} must MATCH the "
+            f"alias {pred_alias!r} referenced by "
+            f"_BLOB_ANTI_JOIN_PREDICATE — a mismatch binds the "
+            f"predicate to the OUTER DELETE alias inside the subquery, "
+            f"leaving chunk candidates unconstrained (b2-vs-b bug, "
+            f"review C1)"
+        )
+
+        # 3. The outer DELETE must use the same alias too — the
+        #    shadowing story only holds when outer and inner agree
+        #    (a renamed outer would silently re-expose the bug class).
+        m_outer = re.search(
+            r"DELETE\s+FROM\s+checkpoint_blobs\s+"
+            r"([A-Za-z_][A-Za-z0-9_]*)\s+WHERE",
+            src,
+        )
+        assert m_outer, (
+            "chunk SQL must be 'DELETE FROM checkpoint_blobs <a> "
+            "WHERE ... ctid IN (...)'"
+        )
+        assert m_outer.group(1) == pred_alias, (
+            f"outer DELETE alias {m_outer.group(1)!r} must equal the "
+            f"predicate alias {pred_alias!r}"
+        )
+
+
+class TestPostgresCheckpointerAdapterSymbol:
+    """The chunk method is defined on ``PostgresCheckpointerAdapter``
+    — the seam must exist for the chunk loop to call into it."""
+
+    def test_chunk_method_present_on_pg_adapter(self):
+        assert hasattr(PostgresCheckpointerAdapter, "_delete_blobs_anti_join_chunk"), (
+            "_delete_blobs_anti_join_chunk must live on the PG adapter; "
+            "its absence means the chunk-loop seam is broken"
+        )
+        assert hasattr(PostgresCheckpointerAdapter, "delete_blobs_anti_join"), (
+            "the public delete entry point must continue to exist; "
+            "its absence breaks the pruned-blobs call site in "
+            "daemon/services/checkpoint_prune.py"
+        )
+
+    def test_chunk_method_signature_takes_batch_size(self):
+        import inspect
+
+        sig = inspect.signature(
+            PostgresCheckpointerAdapter._delete_blobs_anti_join_chunk
+        )
+        params = list(sig.parameters.keys())
+        # thread_id, checkpoint_ns, batch_size — the third param must
+        # exist and accept the LIMIT size. Future refactors adding a
+        # new positional would silently break the chunk-loop binding.
+        assert "batch_size" in params, (
+            "chunk signature drifted; the chunk loop binds to "
+            "batch_size positionally"
+        )
+
+
+class TestConstantsPublic:
+    """The new constants must exist; their names are part of the
+    module's public surface (audit-row schema, runbooks, and the
+    chunk-loop's safety guard all reference them by name)."""
+
+    def test_constant_present_and_int(self):
+        assert hasattr(daemon.constants, "CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE")
+        assert isinstance(
+            daemon.constants.CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE, int
+        )
+        # Sane lower bound — under ~50 rows, the LIMIT-batching churn
+        # is worse than the unbounded DELETE; over ~10_000 rows, the
+        # chunk footprint approaches the old unbounded footprint.
+        assert 50 <= daemon.constants.CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE <= 10_000
+
+    def test_retired_env_flag_constants_gone(self):
+        # The dual-arm gate is gone — the constants must not exist
+        # any longer (their presence means the gate is reachable
+        # accidentally).
+        assert not hasattr(daemon.constants, "CHECKPOINT_BLOB_PRUNE_DRY_RUN")
+        assert not hasattr(daemon.constants, "CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE")

@@ -38,6 +38,10 @@ def _real_langgraph():
 
 @pytest.fixture(autouse=True)
 def _default_ladder(monkeypatch):
+    # Sentinel — no env vars named for the destructive ladder exist
+    # anymore (feature/blob-prune-default-on retired
+    # ``CHECKPOINT_BLOB_PRUNE_DRY_RUN`` and ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE``).
+    # Tripwire keeps future env-state-reintroduction regressions visible.
     monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", raising=False)
     monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", raising=False)
 
@@ -125,13 +129,13 @@ class TestRestoreRehearsalRoundtrip:
                     "SELECT * FROM checkpoint_blobs"
                 )
 
-            # Orphan blobs via the REAL retention arm, then destructive prune.
+            # Orphan blobs via the REAL retention arm, then destructive prune
+            # (the kwarg-less default path is destructive since
+            # feature/blob-prune-default-on retired the env-flag gate).
             keep = set(await adapter.get_checkpoint_ids(T, "", 2))
             await adapter.delete_checkpoints_excluding(T, "", keep)
             await adapter.delete_writes_excluding(T, "", keep)
 
-            monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", "0")
-            monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", "1")
             summary = await prune_unreferenced_blobs(adapter)
             assert summary.dry_run is False
             assert summary.total_deleted >= 1, "prune must delete orphans here"

@@ -213,9 +213,15 @@ class TestStatus:
             "checkpoint_max_per_thread",
             "checkpoint_max_per_thread_floor",
             "cleanup_interval_hours",
-            "blob_prune_dry_run_env_default",
-            "blob_prune_destructive_armed",
+            # feature/blob-prune-default-on: replaced the dual-arm
+            # env-flag surface (``blob_prune_dry_run_env_default`` /
+            # ``blob_prune_destructive_armed``) with a single
+            # ``blob_prune_destructive_default`` (always True).
+            "blob_prune_destructive_default",
         }
+        # The new field is always True — destructive prune is the
+        # unconditional default since the env-flag gate retired.
+        assert empty["config"]["blob_prune_destructive_default"] is True
 
         terminal = MaintenanceRun(
             run_id="ckpt-20260927_031409123456-1f4a8c2e",
@@ -480,9 +486,11 @@ class TestExecuteHappyPath:
             "peer_ip": "127.0.0.1", "user_agent": "pytest", "origin": None,
         }
         assert row.env_flags_json == {
-            "blob_prune_dry_run": True,
-            "blob_prune_destructive": False,
-            "destructive_override": True,  # INV-2 — the kwarg, not env
+            # feature/blob-prune-default-on: the dual-arm env-state
+            # trio is gone; the audit row records the kwarg value the
+            # cycle ran with (True for the manual execute confirmation
+            # path, which matches the unconditional destructive default).
+            "destructive": True,
         }
         assert set(row.summary_json.keys()) == {
             "checkpoint_rows", "writes", "blobs", "duration_ms"

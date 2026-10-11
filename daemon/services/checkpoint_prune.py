@@ -1,7 +1,7 @@
 """Reference-aware ``checkpoint_blobs`` prune — Phase 1 C3 (PR4, LD-D1 Rev 2).
 
-Single module owning the blob-prune algorithm + the fail-safe. The
-destructive SQL itself lives in
+Single module owning the blob-prune algorithm + the fail-safe + the
+per-pair destruction loop. The destructive SQL itself lives in
 ``daemon/checkpoint_adapter.py::PostgresCheckpointerAdapter`` (the
 ``count_blobs_anti_join`` / ``delete_blobs_anti_join`` pair sharing one
 ``_BLOB_ANTI_JOIN_PREDICATE``); this module decides WHO gets pruned and
@@ -23,20 +23,18 @@ Design invariants (phase1-plan.md §C3, Hard Constraint 6):
    (the ERROR log) and prevention (the ``continue`` before any counting /
    deleting call) are separate, individually tested behaviors.
 
-3. **Conservative ladder** — the operation is DRY-RUN by default. The
-   destructive arm is reachable when ``blob_prune_destructive_enabled()``
-   holds at call time (BOTH ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` AND
-   ``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0``) **OR** the caller passes
-   ``destructive=True`` explicitly (the Maintenance API manual path —
-   :meth:`prune_unreferenced_blobs`'s ``destructive`` override kwarg;
-   INV-2: the explicit kwarg reaches the DELETE arm with the env flags
-   absent). With the gate off AND no explicit kwarg, the only arm the
-   loop can reach is ``count_blobs_anti_join`` (a SELECT); the
-   ``delete_blobs_anti_join`` call site sits textually AFTER the
-   ``if not destructive: ... continue`` guard, so no call path reaches a
-   DELETE. This is structural, not merely conventional —
-   ``tests/unit/services/test_maintenance_prune_direct_anti_join.py``
-   enforces it at the AST level.
+3. **Destructive-by-default** — the anti-join DELETE is the unconditional
+   destructive path. No env-var, config-flag, or on/off switch disables
+   it. The auto cycle (operation E of the maintenance timer) and the
+   manual ``/execute`` endpoint both invoke it; only the manual preview
+   ``/dry-run`` opts out via ``destructive=False`` (the kwarg reaches the
+   SELECT-only ``count_blobs_anti_join`` arm with an explicit override;
+   the ``if not destructive: ... continue`` guard stays in the
+   destructive code path so the dry-run arm remains structurally
+   unreachable to a DELETEs). This is structural, not merely
+   conventional — ``tests/unit/services/
+   test_maintenance_prune_direct_anti_join.py`` enforces the
+   guard-If dominance at the AST level.
 
 4. **Failure isolation** — a per-pair exception is logged and skipped;
    the prune never raises into the maintenance loop, and a failure here
@@ -51,61 +49,16 @@ Design invariants (phase1-plan.md §C3, Hard Constraint 6):
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 
 from daemon.checkpoint_adapter import PostgresCheckpointerAdapter
 from daemon.checkpoint_perf import log_blob_prune
 from daemon.constants import (
-    CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE,
-    CHECKPOINT_BLOB_PRUNE_DRY_RUN,
     CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD,
 )
 
 logger = logging.getLogger(__name__)
-
-# Env-flag names (the conservative ladder's only configuration surface —
-# this is config, NOT a public API).
-ENV_BLOB_PRUNE_DRY_RUN = "CHECKPOINT_BLOB_PRUNE_DRY_RUN"
-ENV_BLOB_PRUNE_DESTRUCTIVE = "CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE"
-
-
-def blob_prune_destructive_enabled() -> bool:
-    """True ONLY when BOTH env flags arm the destructive path.
-
-    ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` AND
-    ``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0`` — evaluated at CALL time (not
-    import time) so tests and operators can flip the ladder without
-    reloading the daemon. Defaults come from ``daemon.constants``
-    (destructive OFF, dry-run ON).
-    """
-    dry_run_default = "1" if CHECKPOINT_BLOB_PRUNE_DRY_RUN else "0"
-    destructive_default = "1" if CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE else "0"
-    dry_run = os.environ.get(ENV_BLOB_PRUNE_DRY_RUN, dry_run_default)
-    destructive = os.environ.get(ENV_BLOB_PRUNE_DESTRUCTIVE, destructive_default)
-    return destructive.strip() == "1" and dry_run.strip() == "0"
-
-
-def blob_prune_env_state() -> dict[str, bool]:
-    """Raw dual-arm env state for the ``maintenance_runs`` audit row (AM-15).
-
-    Returns the two env arms' CURRENT effective values — NOT the
-    combined gate (see :func:`blob_prune_destructive_enabled`).
-    ``maintenance_runs.env_flags_json`` records these alongside
-    ``destructive_override`` to prove INV-2: which mechanism (env
-    dual-arm vs explicit override kwarg) armed the DELETE arm for a
-    given run. Parsing mirrors the gate function exactly (``.strip()``
-    comparisons against the canonical "0"/"1" tokens).
-    """
-    dry_run_default = "1" if CHECKPOINT_BLOB_PRUNE_DRY_RUN else "0"
-    destructive_default = "1" if CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE else "0"
-    dry_run = os.environ.get(ENV_BLOB_PRUNE_DRY_RUN, dry_run_default)
-    destructive = os.environ.get(ENV_BLOB_PRUNE_DESTRUCTIVE, destructive_default)
-    return {
-        "blob_prune_dry_run": dry_run.strip() != "0",
-        "blob_prune_destructive": destructive.strip() == "1",
-    }
 
 
 @dataclass
@@ -130,6 +83,17 @@ class BlobPruneSummary:
     would_delete_count: int = 0   # [AM-11] dry-run arm accumulation (canonical name)
     would_free_bytes: int = 0     # [AM-11] dry-run arm accumulation (canonical name)
     skipped: list[tuple[str, str, str]] = field(default_factory=list)
+    # W1 partial-completion signal (fix cycle 1): pairs whose DESTRUCTIVE
+    # chunk loop stopped early — ``"retry_exhausted"`` (isolation-family
+    # retry budget spent) or ``"over_batch_limit"`` (LIMIT-guard break).
+    # Tuples mirror ``skipped``: (thread_id, checkpoint_ns, reason). The
+    # deletes that DID happen stay counted in total_deleted /
+    # total_bytes_freed; this list makes the incompleteness explicit so
+    # a partially-pruned pair can no longer read as ordinary completion
+    # in the ``maintenance_runs`` audit row. Dry-run sweeps never
+    # populate it (the dry-run arm never deletes).
+    partial_pairs: list[tuple[str, str, str]] = field(default_factory=list)
+    partial_chunks_skipped: int = 0
 
     @property
     def destructive(self) -> bool:
@@ -153,7 +117,7 @@ class BlobPruneSummary:
         ]
         truncated = len(self.skipped) > skipped_cap
         if self.destructive:
-            return {
+            payload = {
                 "scanned_pairs": self.scanned_pairs,
                 "deleted": self.total_deleted,
                 "bytes_freed": self.total_bytes_freed,
@@ -161,6 +125,22 @@ class BlobPruneSummary:
                 "skipped": skipped_list,
                 "skipped_truncated": truncated,
             }
+            # W1 partial-completion signal (fix cycle 1) — emitted ONLY
+            # when at least one destructive pair stopped early, so the
+            # frozen wire shape stays byte-identical on healthy runs
+            # and the dry-run flavor (which never deletes) can never
+            # carry a phantom partial block.
+            if self.partial_pairs:
+                payload["partial_completion"] = {
+                    "stopped_early_pairs": len(self.partial_pairs),
+                    "chunks_skipped": self.partial_chunks_skipped,
+                    "pairs": [
+                        {"thread_id": t, "checkpoint_ns": ns, "reason": r}
+                        for (t, ns, r) in self.partial_pairs[:skipped_cap]
+                    ],
+                    "truncated": len(self.partial_pairs) > skipped_cap,
+                }
+            return payload
         return {
             "scanned_pairs": self.scanned_pairs,
             "would_delete_count": self.would_delete_count,
@@ -177,26 +157,34 @@ async def prune_unreferenced_blobs(
     checkpointer,
     *,
     max_refs_per_thread: int = CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD,
-    destructive: bool | None = None,
+    destructive: bool = True,
 ) -> BlobPruneSummary:
     """Run one reference-aware blob-prune cycle over all (thread, ns) pairs.
 
-    Dry-run by default (reports would-delete counts + bytes, deletes
-    nothing). Destructive when
-    :func:`blob_prune_destructive_enabled` holds at call time OR when
-    the caller passes ``destructive=True`` explicitly (INV-2: the manual
-    Maintenance API path passes the kwarg so an operator does NOT need
-    to pre-arm the env flags). See the module docstring for the
-    structural-gate argument.
+    **Destructive by default.** The anti-join DELETE is the unconditional
+    destructive path; the auto cycle and the manual ``/execute`` endpoint
+    invoke it without an opt-in. Only the manual preview
+    ``/dry-run`` opts out via ``destructive=False`` (the kwarg reaches the
+    SELECT-only ``count_blobs_anti_join`` arm). The historical dual-arm
+    env-flag gate (``CHECKPOINT_BLOB_PRUNE_DRY_RUN`` /
+    ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE``) and the conservative ladder
+    that gated it are gone — see feature/blob-prune-default-on.
 
-    The override kwarg is read-only; the env dual-arm gate function
-    :func:`blob_prune_destructive_enabled` itself is untouched. The
-    ``destructive`` LOCAL NAME is preserved (shadowed from the kwarg at
-    the gate feed) so the AST dominance pin in
-    ``tests/unit/services/test_maintenance_prune_direct_anti_join.py::
-    test_delete_call_is_structurally_gated_by_destructive_flag`` stays
-    green (the pin keys on ``ast.Name(id="destructive")`` — see INV-3,
-    R-9).
+    The ``destructive`` kwarg is the SOLE control surface on this
+    function. ``True`` is the default for every caller that does not
+    explicitly opt out; ``False`` forces the SELECT-only dry-run arm. The
+    local name ``destructive`` is preserved (rebinds at the gate feed)
+    so the AST dominance pin in
+    ``tests/unit/services/test_maintenance_prune_direct_anti_join.py``
+    keeps its ``ast.Name(id="destructive")`` predicate green — see R-9
+    in the override work that established the pin.
+
+    Per-pair destruction is bounded: the destructive arm invokes
+    ``delete_blobs_anti_join`` (PG) which breaks the per-pair DELETE
+    into chunks of at most
+    ``CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE`` rows, each chunk a
+    separate SERIALIZABLE transaction with the bounded retry wrap. No
+    single statement is unbounded — pool-hazard class closed.
 
     Never raises: per-pair failures are logged and skipped; the outer
     try/except makes even candidate-enumeration failures non-fatal (the
@@ -214,12 +202,6 @@ async def prune_unreferenced_blobs(
             summary.backend = "sqlite"
             return summary
 
-        # T2: gate feed — explicit kwarg wins over env (manual preview /
-        # INV-2 manual destructive execute), env wins over nothing (auto
-        # cycle), ``None`` → env dual-arm (unchanged behavior). The local
-        # ``destructive`` name is preserved for the structural pin (R-9).
-        if destructive is None:
-            destructive = blob_prune_destructive_enabled()  # env dual-arm — AUTO path, unchanged
         summary.dry_run = not destructive
 
         # D21: ALL (thread_id, checkpoint_ns) pairs — find_excess_checkpoint_
@@ -321,6 +303,32 @@ async def prune_unreferenced_blobs(
                 deleted, bytes_freed = await checkpointer.delete_blobs_anti_join(
                     thread_id, checkpoint_ns
                 )
+                # W1 (fix cycle 1): read the adapter's per-pair stop
+                # state, published by the PG chunk loop
+                # (``last_pair_stop_reason`` / ``last_pair_chunks_skipped``).
+                # Duck-typed read with a str/int guard so mocks that
+                # don't define the channel (MagicMock auto-attrs are
+                # neither) read as neutral — no phantom partials.
+                raw_reason = getattr(checkpointer, "last_pair_stop_reason", None)
+                pair_stop = raw_reason if isinstance(raw_reason, str) else None
+                raw_chunks = getattr(
+                    checkpointer, "last_pair_chunks_skipped", 0
+                )
+                pair_chunks_skipped = (
+                    raw_chunks
+                    if isinstance(raw_chunks, int)
+                    and not isinstance(raw_chunks, bool)
+                    else 0
+                )
+                if pair_stop is not None:
+                    # Early-stopped pair: partial totals above are REAL
+                    # (those deletes committed) but the pair is NOT
+                    # exhausted — surface it so the audit row cannot
+                    # read as ordinary completion.
+                    summary.partial_pairs.append(
+                        (thread_id, checkpoint_ns, pair_stop)
+                    )
+                    summary.partial_chunks_skipped += pair_chunks_skipped
                 duration_ms = int((time.perf_counter() - t0) * 1000)
                 log_blob_prune(
                     thread_id,
@@ -333,10 +341,16 @@ async def prune_unreferenced_blobs(
                 summary.total_bytes_freed += bytes_freed
                 logger.debug(
                     "[CheckpointPerf] blob_prune pair done in %dms "
-                    "(deleted=%d bytes=%d)",
+                    "(deleted=%d bytes=%d%s)",
                     duration_ms,
                     deleted,
                     bytes_freed,
+                    (
+                        f" stopped_early={pair_stop} "
+                        f"chunks_skipped={pair_chunks_skipped}"
+                        if pair_stop is not None
+                        else ""
+                    ),
                 )
             except Exception as inner_exc:  # noqa: BLE001
                 # Per-pair failure never breaks the cycle (risk table:
@@ -368,7 +382,8 @@ async def prune_unreferenced_blobs(
         logger.info(
             "[CheckpointPerf] op=blob_prune_summary threads=%d deleted=%d "
             "bytes=%d would_delete=%d would_free=%d dry_run=%d "
-            "duration_ms=%d scanned_pairs=%d skipped=%d backend=%s",
+            "duration_ms=%d scanned_pairs=%d skipped=%d "
+            "stopped_early=%d backend=%s",
             len(unique_threads),
             summary.total_deleted,
             summary.total_bytes_freed,
@@ -378,6 +393,7 @@ async def prune_unreferenced_blobs(
             duration_ms,
             summary.scanned_pairs,
             len(summary.skipped),
+            len(summary.partial_pairs),
             summary.backend,
         )
         return summary

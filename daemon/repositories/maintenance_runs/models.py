@@ -19,7 +19,7 @@ prior sketch and the research-findings §4.1 draft. Verbatim from
     dry_run_summary_json   JSONBType NULL full dry-run snapshot incl. skipped[] [AM-15]
     confirm                BOOLEAN NULL   [AM-15]
     advisory               TEXT NULL     'system_busy' | NULL [AM-12/AM-15]
-    env_flags_json         JSONBType NULL {blob_prune_dry_run, blob_prune_destructive, destructive_override}
+    env_flags_json         JSONBType NULL {destructive} — proves whether the run executed DELETEs
     summary_json           JSONBType NULL outcome: BlobPruneSummary + Op D counts + duration_ms
     error_json             JSONBType NULL {code, message}
 
@@ -171,8 +171,10 @@ class MaintenanceRun(SQLModel, table=True):
         default=None,
         sa_column=Column("env_flags_json", JSONBType, nullable=True, default=None),
         description=(
-            "{blob_prune_dry_run, blob_prune_destructive, destructive_override} — "
-            "proves INV-2 (override kwarg armed the DELETE, not env) [AM-15]"
+            "{destructive} — proves whether this run executed DELETEs (the "
+            "single kwarg value the cycle ran with; replaces the dual-arm "
+            "env-state + destructive_override trio retired in "
+            "feature/blob-prune-default-on) [AM-15]"
         ),
     )
     summary_json: Optional[dict] = Field(

@@ -84,14 +84,26 @@ def _real_langgraph():
 
 @pytest.fixture(autouse=True)
 def _default_ladder(monkeypatch):
-    """Env ladder fixture — every test starts with BOTH env flags deleted."""
+    """Sentinel — no env vars named for the destructive ladder exist
+    anymore (feature/blob-prune-default-on retired
+    ``CHECKPOINT_BLOB_PRUNE_DRY_RUN`` and ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE``).
+    The fixture stays here as a tripwire so any future re-introduction
+    of env-state dependency in the prune module surfaces as a stale
+    ``delenv`` against an undefined name — which is what we want."""
     monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", raising=False)
     monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", raising=False)
 
 
 def _arm_destructive(monkeypatch):
-    monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", "0")
-    monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", "1")
+    # feature/blob-prune-default-on: the env-flag ladder is gone;
+    # destructive is the unconditional default — this helper is now
+    # a no-op kept only for any test that historically depended on a
+    # ``monkeypatch``-aware arming step. Asserts the env vars do NOT
+    # exist so a future re-introduction of env-state dependency would
+    # immediately trip here (not silently change behavior under the
+    # hood).
+    monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", raising=False)
+    monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", raising=False)
 
 
 # ── disposable-PG + app fixtures ───────────────────────────────────────────────
@@ -571,7 +583,12 @@ class TestExecuteIntegration:
             assert row.kind == "manual_execute"
             assert row.dry_run_run_id == dry["run_id"]
             assert row.expected_bytes == expected_bytes
-            assert row.env_flags_json["destructive_override"] is True
+            # feature/blob-prune-default-on: the dual-arm env-state
+            # fields are gone; the audit row carries the kwarg value
+            # the cycle ran with — ``destructive: True`` for the
+            # manual execute confirmation path (matches the
+            # unconditional default).
+            assert row.env_flags_json["destructive"] is True
             assert row.dry_run_summary_json["would_delete"]["bytes"] == (
                 expected_bytes
             )
@@ -610,10 +627,16 @@ class TestExecuteIntegration:
             # The drifted pair's blobs SURVIVED the destructive run.
             assert await blob_stats(st.pool, "thread-z") == before
 
-    async def test_auto_cycle_unchanged_default_dry_run(self, pg_db):
-        """Case 46 — env scrubbed; wired job; run execute() → blob rows
-        byte-identical; auto row written with blobs.destructive=false
-        (INV-1 live proof)."""
+    async def test_auto_cycle_destructive_is_unconditional_default(self, pg_db):
+        """Case 46 — feature/blob-prune-default-on: env scrubbed, no
+        kwarg, no manual opt-out; the auto cycle's blob prune is the
+        unconditional destructive path. Wired job runs ``execute()``
+        → blob rows decrease (orphans deleted); auto row written with
+        ``blobs.destructive=True`` and
+        ``env_flags_json["destructive"] == True``. (Replaces the
+        historical ``test_auto_cycle_unchanged_default_dry_run`` which
+        proved the OPPOSITE under the now-retired dual-arm
+        conservative ladder.)"""
         async with api_stack(pg_db) as st:
             await write_turns(st.saver, "thread-auto", 6)
             keep = set(await st.adapter.get_checkpoint_ids("thread-auto", "", 3))
@@ -632,18 +655,28 @@ class TestExecuteIntegration:
             assert row.kind == "auto"
             assert row.triggered_by == "system"
             assert row.status == "succeeded"
-            assert row.summary_json["blobs"]["destructive"] is False
-            # Blob rows byte-identical — the auto cycle stayed dry-run.
-            assert await blob_stats(st.pool, "thread-auto") == before
+            # The auto cycle now destructive by default — orphans deleted.
+            assert row.summary_json["blobs"]["destructive"] is True
+            assert row.summary_json["blobs"]["deleted"] >= 1
+            # Audit row carries the kwarg value the cycle ran with.
+            assert row.env_flags_json["destructive"] is True
+            # Blob-row count decreased — orphan bytes reclaimed.
+            after = await blob_stats(st.pool, "thread-auto")
+            assert after["cnt"] < before["cnt"]
 
-    async def test_auto_env_dual_arm_unchanged(self, pg_db, monkeypatch):
-        """Case 47 — BOTH flags armed; no-kwarg auto path → deletes happen
-        (env path intact). [tidier fix pass] the former substring
-        source pins (no-kwarg blob arm / D→E order / never-routes-
-        through-manual) moved to AST pins in
-        test_checkpoint_cleanup_job_wiring_pin.py — a comment or
-        docstring mention can never satisfy an AST pin."""
-        _arm_destructive(monkeypatch)
+    async def test_manual_dry_run_still_select_only(self, pg_db, monkeypatch):
+        """Case 47 (replaces the historical "auto env dual arm" test) —
+        the manual preview path is the ONLY opt-out: ``destructive=False``
+        explicitly reaches the SELECT-only count arm and the blobs
+        row count is byte-identical pre/post. Defends the
+        ``feature/blob-prune-default-on`` invariant that the
+        ``/dry-run`` endpoint stays read-only.
+
+        [tidier fix pass] the former substring source pins (no-kwarg
+        blob arm / D→E order / never-routes-through-manual) moved to
+        AST pins in ``test_checkpoint_cleanup_job_wiring_pin.py`` —
+        a comment or docstring mention can never satisfy an AST pin."""
+        _arm_destructive(monkeypatch)  # no-op tripwire (env vars are gone)
         async with api_stack(pg_db) as st:
             await write_turns(st.saver, "thread-arm", 6)
             keep = set(await st.adapter.get_checkpoint_ids("thread-arm", "", 3))
@@ -652,14 +685,13 @@ class TestExecuteIntegration:
             orphans = await orphan_stats(st.pool, "thread-arm")
             assert orphans["cnt"] > 0
 
-            await st.job.execute()
+            # Manual dry-run — destructive=False is the only opt-out;
+            # auto execute() is not called.
+            dry = (await st.client.post(f"{SECTION_PREFIX}/dry-run")).json()
+            assert dry["would_delete"]["blobs"] >= 1  # the orphans
 
-            # Env path intact: the armed dual-arm deleted the orphans.
-            after = await orphan_stats(st.pool, "thread-arm")
-            assert after["cnt"] == 0
-            row = st.repo.list_all()[0]
-            assert row.summary_json["blobs"]["destructive"] is True
-            assert row.env_flags_json["destructive_override"] is False
+            # Blob rows byte-identical — the preview stayed SELECT-only.
+            assert await orphan_stats(st.pool, "thread-arm") == orphans
 
 
 # ── cases 48–50 — contention on the single global lane ─────────────────────────
@@ -1154,7 +1186,11 @@ class TestAuditAndShapes:
                 row for row in rows if row.kind == "manual_execute"
             )
             assert exec_row.requester_json is not None
-            assert exec_row.env_flags_json["destructive_override"] is True
+            # feature/blob-prune-default-on: audit row kwarg value;
+            # the dual-arm env-state + ``destructive_override`` field
+            # are gone — the surviving flag is ``destructive``, matching
+            # the kwarg value the execute confirmation path passed.
+            assert exec_row.env_flags_json["destructive"] is True
             assert exec_row.dry_run_summary_json is not None
 
     async def test_structured_error_body_shape_integration(self, pg_db):
@@ -1652,25 +1688,29 @@ class TestBootSweepIntegration:
 # ── case 62 — dual-arm contention ──────────────────────────────────────────────
 
 
-class TestDualArmContention:
-    async def test_dual_arm_contention_409_and_auto_skip(
+class TestDestructiveUnconditionalContention:
+    async def test_unconditional_destructive_contention_409_and_auto_skip(
         self, pg_db, monkeypatch, caplog
     ):
         """Case 62 — [AM-16h/Focus Area 6] (i) auto running + manual
         dry-run/execute → 409 naming the auto run; (ii) manual running
         (blocked execute holds the lane) + auto tick → auto skips (no
-        row, DEBUG, last_run re-arm semantics); (iii) dual-arm env armed
-        during both — auto stays destructive-if-armed while the manual
-        path 409s (INV-1 cell)."""
-        _arm_destructive(monkeypatch)
+        row, DEBUG, last_run re-arm semantics); (iii) with the lane
+        free, the auto tick (real job, no kwarg) IS destructive
+        unconditionally — feature/blob-prune-default-on retired the
+        dual-arm env flag, so the explicit ``_arm_destructive`` call
+        here is a tripwire no-op (asserting the env vars do NOT
+        re-appear)."""
+        _arm_destructive(monkeypatch)  # tripwire no-op after the default-on flip
         async with api_stack(pg_db) as st:
             await write_turns(st.saver, "thread-62", 4)
             # A terminal dry-run FIRST (valid reference for the execute).
             dry = (await st.client.post(f"{SECTION_PREFIX}/dry-run")).json()
 
-            # (i) auto holds the lane → manual dry-run 409s (env armed:
-            # the manual API still refuses — the claim gates the surface).
-            auto_row_id = "ckpt-20260927_033333333333-auto000001"
+            # (i) auto holds the lane → manual dry-run 409s (the
+            # DB-side single-flight claim gates the surface, regardless
+            # of the destructive kwarg).
+            auto_row_id = "ckpt-20261011_033333333333-auto000001"
             seed_row(
                 st.repo, run_id=auto_row_id, kind="auto", status="running",
                 started_at=datetime.now(timezone.utc).isoformat(),
@@ -1721,14 +1761,18 @@ class TestDualArmContention:
             await drain_tasks(st.svc)
             assert st.repo.get(manual_id).status == "succeeded"
 
-            # (iii) INV-1 cell — with the dual-arm env armed and the lane
-            # free, the AUTO tick (real job, no kwarg) IS destructive.
+            # (iii) Unconditional-destructive auto — with the lane free,
+            # the auto tick (no kwarg) IS destructive. Feature/
+            # blob-prune-default-on flipped the default; this case is
+            # the live proof that no env arming is required (the
+            # _arm_destructive call above is intentionally a no-op now).
             await st.job.execute()
             auto_rows = [
                 row for row in st.repo.list_all() if row.kind == "auto"
             ]
             assert auto_rows
             assert auto_rows[-1].summary_json["blobs"]["destructive"] is True
+            assert auto_rows[-1].env_flags_json["destructive"] is True
 
 
 # ── case 63 — 409-adoption payload + AM-17 absence pin ─────────────────────────

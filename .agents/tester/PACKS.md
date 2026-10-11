@@ -2276,3 +2276,24 @@ Fix worktree `/home/nea/ensemble-src-wt-designer-model-vision-fix` (branch `fix/
 | `dmv_seam_probe` (ad-hoc, /tmp) | real `_build_openai_client` via `OdGenerate._CLIENT_FACTORY`, sha256-guarded | 3 env shapes incl. live failure shape | <1 min | 2026-10-07 @ 806ba42c9 | ✅ PASS 3/3 — agentic+vision → `vision`; fallback `vision`; custom passthrough |
 | `plugin_dir` (registered) | tests/unit/plugin_subsystem/ | 567 collected (563 + 4 new pinned) | ~1 min | 2026-10-07 @ 806ba42c9 | ✅ PASS-effectively 563/567 (4 pre-existing, base-identical @ c600af60d, ledger families unchanged) |
 | `dmv_modelcfg_unit_test` (ad-hoc) | test_llm_config_override.py + test_llm_allowed_models_precedence.py + test_compaction_model_config.py + test_scripted_chat_model.py | 101 model-config items | <1 min | 2026-10-07 @ 806ba42c9 AND @ c600af60d | ✅ PASS 101/0 both commits (dev "90P/1F" claim = different set; no base→HEAD delta) |
+
+---
+
+## Gate log 2026-10-11 — blobprune REAL-PG gate (`feature/blob-prune-default-on` @ `0a2e78a0a`, base `1bab756c6`)
+
+Ad-hoc gate packs (report-only; disposable PG16 initdb clusters, `PG_TEST_*` wiring, env-scrubbed; full evidence: `RESULTS/2026-10-11-blobprune-realpg-gate.md`):
+
+| Pack (ad-hoc) | Invocation essence | Result | Runtime |
+|---|---|---|---|
+| blobprune_pg_limit_batching | `timeout 300 env <scrub> PG_TEST_*=:15432 pytest tests/integration/checkpoint_prune_limit_batching_real_pg.py --override-ini="addopts=" --override-ini="timeout=240" -v` | PASS 4P/0F/0S (multi-chunk exhaustion LIVE, first time at HEAD) | 4.93s |
+| blobprune_pg_real_saver | same shape, :15433, `checkpoint_prune_real_saver.py` | PASS 9P/0F/0S (QUAR #15 pair passes on-branch) | 5.98s |
+| blobprune_pg_restore_rehearsal | same shape, :15434, `checkpoint_prune_restore_rehearsal.py` | PASS 1P/0F/0S | 2.44s |
+| blobprune_pg_cleanup_api | same shape + `-m "integration and postgres"`, :15435, `test_maintenance_checkpoint_cleanup_api.py` | PASS-WITH-PREEXISTING 45P/1F/1S (drift_events RED base-attributed via A/B @1bab756c6 — QUAR 2026-10-11 row; 1S = documented designed skip) | 76.19s |
+| blobprune_units_battery | `timeout 300 env <scrub> pytest <6 fixed unit files: limit_batching, destructive_override, prune_direct_anti_join, run_lock_and_capture, cleanup_service, job_wiring_pin> --timeout=240 -q` | PASS 150/150 (incl. TestPartialCompletionSignal 5/5) | 56.22s |
+| blobprune_maintenance | `timeout 300 env <scrub> pytest tests/test_maintenance.py --timeout=240 -q` | PASS 81/81 | 1.63s |
+| blobprune_acceptance | `timeout 120 env <scrub -u CHECKPOINT_BLOB_PRUNE_*> pytest <4 pins + 3 companions> -v` + `pytest tests/unit/test_no_env_flag_remnants.py -v` | PASS 7/7 + 10/10 — acceptance criterion PROVEN | 14.9s |
+| blobprune_fe_focused | `frontend/: npm ci` → `npm test -- src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.spec.ts` → `./node_modules/.bin/ng build` | PASS 119/119 Jest + build exit 0 (Playwright skipped: disproportionate) | ~119s |
+| blobprune_smoke (registered row mc_be_smoke) | `timeout 300 env <scrub> PATH=/usr/lib/postgresql/16/bin:$PATH bash tests/manual/maintenance_console_smoke.sh` | PASS 12/12 | 23s |
+| concurrency_atomic_unit_test (registered) | `timeout 300 env <scrub> bash test/packs/concurrency_atomic_unit_test.sh` | PASS 99P/0F/74S (baseline-exact) | 76s |
+
+Lane-keeper note: bump Last Run on the two registered rows above (`concurrency_atomic_unit_test`, `mc_be_smoke`/`maintenance_smoke_test`) at next PACKS.md maintenance pass.

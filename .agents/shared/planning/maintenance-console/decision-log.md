@@ -56,3 +56,36 @@ The **AM-2 rationale paragraph above has the mismatch direction inverted** and m
 ## Leader ruling 7 — B (single-run full reclaim) deferred as v3.3 candidate; preconditions P1+P2; refs-alias negative result [v3.2, B-deferred]
 
 **Ruling: DEFERRED — structured v3.3 candidate, NOT a rejection (recorded 2026-09-28).** B is the only option that eliminates the two-run journey, but aggregation found its safety and verifiability stories each carry a hole that must close before ratification. **P1 — close the Step A→B live-data-loss window:** a write committed between the pair's Step A (CTE keep-set compute + row DELETE, one snapshot) and Step B (blob DELETE vs keep-set, later statement, fresh snapshot) loses its NEW blob (its checkpoint row survives D invisible to A's snapshot; nothing in the keep-set references `(channel, V_new)`). Closure requires either (i) wrapping the pair's compute+D+E in ONE SERIALIZABLE transaction (SSI detects the rw-antidependency; retry re-adjudicates the keep-set), or (ii) a post-snapshot new-rows guard before E's delete (re-check for checkpoint rows created after Step A's snapshot; re-derive/defer). **P2 — INV-13-compatible pre-run projection-recompute gate:** execute recomputes the post-D projection and refuses `byte_count_mismatch` on drift vs stored (pre-run, not post-run — INV-13-compatible; makes B's promise verifiable at the cost of doubling the projection scan — minutes-scale on the incident DB). **Permanent negative result (carries forward; retires one objection to B permanently):** LangGraph `aput` keys blobs by `(thread, ns, channel, version)` with fresh per-channel monotonic versions (`langgraph/checkpoint/postgres/aio.py:230-296`) → a late checkpoint can NEVER reference an old blob → the refs-alias corruption class is **structurally impossible** (verified negative; recorded for any future B revisitation). Flip assumption: if the product owner rules one-run reclamation mandatory for v0.17, B's P1+P2 become the v3.3 workstream and the v3.2 field names/delta semantics carry over unchanged (`after` collapses into the single delivery number).
+---
+
+## Superseded (2026-10-11)
+
+The dual-arm env-flag ladder described in this document — the
+``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0`` AND ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1``
+conservative ladder that gated the destructive blob prune — is
+**gone**. As of `feature/blob-prune-default-on` (merged
+2026-10-11), destructive pruning of superseded checkpoint
+blobs is the **unconditional default** in the ensemble daemon.
+There is no env-var, config-flag, or on/off switch of any
+kind that disables it.
+
+The audits, hypotheses, and contracts recorded in this
+document are preserved as historical evidence (not
+rewritten), but the operational reality is now:
+
+* auto cycle + manual ``/execute`` confirmation → destructive,
+  no operator action required;
+* manual ``/dry-run`` preview path → SELECT-only (the only
+  remaining opt-out);
+* per-pair anti-join is LIMIT-batched within each (thread, ns)
+  pair (chunk size = `CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE`,
+  default 1000 rows per chunk, each chunk a separate
+  SERIALIZABLE transaction with bounded retry on SQLSTATE
+  40001 / 40P01).
+
+The current contract lives in
+`docs/runbooks/checkpoint-blob-prune-restore.md` (the
+rewrite for the default-on reality). For the historical
+record of the dual-arm gate being the only-arm path that
+reached the DELETE arm, see git log for the pre-default
+version of this document.

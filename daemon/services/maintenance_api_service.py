@@ -39,11 +39,15 @@ from daemon.checkpoint_adapter import (
     PostgresCheckpointerAdapter,
 )
 from daemon.config import PersistenceConfig
-from daemon.constants import MAINTENANCE_DRY_RUN_FRESH_SECONDS
-from daemon.services.checkpoint_prune import (
-    blob_prune_destructive_enabled,
-    blob_prune_env_state,
+from daemon.constants import (
+    CHECKPOINT_MAX_PER_THREAD_FLOOR,
+    MAINTENANCE_DRY_RUN_FRESH_SECONDS,
 )
+# feature/blob-prune-default-on — the dual-arm env flag gate is gone
+# (``blob_prune_destructive_enabled`` / ``blob_prune_env_state``
+# deleted); destructive is the unconditional default. The
+# ``env_flags_json`` audit-row stamp now carries a single ``destructive``
+# bool matching the kwarg value the cycle ran with.
 from daemon.services.maintenance_run_identity import new_maintenance_run_id
 from daemon.services.maintenance_run_lock import (
     MaintenanceRunContext,
@@ -172,27 +176,25 @@ class MaintenanceApiService:
     async def status(self) -> dict[str, Any]:
         """FROZEN ``/status`` shape — AM-9 + AM-12 + AM-13.
 
-        ``config`` block is read from the LIVE effective env at
-        request time (NOT boot-cached config — [R-6, leader ruling
-        (a)]). ``last_run`` semantics: latest ``succeeded|failed``
+        ``config`` block is the LIVE effective prune config at request
+        time (NOT boot-cached config — the historical [R-6] rationale
+        is unchanged; just the env-flag surface is gone).
+        ``last_run`` semantics: latest ``succeeded|failed``
         of ``kind ∈ {auto, manual_execute}``; ``manual_dry_run``
         NEVER surfaces. ``in_flight``: any ``running`` row (any
         kind).
         """
-        # Config block — LIVE env read at request time.
-        from daemon.constants import (
-            CHECKPOINT_BLOB_PRUNE_DRY_RUN,
-            CHECKPOINT_MAX_PER_THREAD_FLOOR,
-        )
-
+        # Config block — LIVE effective config at request time.
+        # Destructive prune is the unconditional default since
+        # feature/blob-prune-default-on; the two env-flag-derived
+        # ``blob_prune_dry_run_env_default`` /
+        # ``blob_prune_destructive_armed`` fields are removed (no env
+        # to read).
         config_block = {
             "checkpoint_max_per_thread": self._config.checkpoint_max_per_thread,
             "checkpoint_max_per_thread_floor": CHECKPOINT_MAX_PER_THREAD_FLOOR,
             "cleanup_interval_hours": self._config.checkpoint_cleanup_interval,
-            "blob_prune_dry_run_env_default": (
-                "1" if CHECKPOINT_BLOB_PRUNE_DRY_RUN else "0"
-            ),
-            "blob_prune_destructive_armed": blob_prune_destructive_enabled(),
+            "blob_prune_destructive_default": True,
         }
 
         # ``last_run`` — AM-9
@@ -272,13 +274,10 @@ class MaintenanceApiService:
                     "user_agent": requester.user_agent,
                     "origin": requester.origin,
                 },
-                # Raw dual-arm env state at dry-run time + the
-                # override flag (False — the manual preview never arms
-                # the DELETE arm regardless of env).
-                env_flags_json={
-                    **blob_prune_env_state(),
-                    "destructive_override": False,
-                },
+                # Manual preview — destructive=False keeps the cycle
+                # SELECT-only (the only way to opt out;
+                # feature/blob-prune-default-on).
+                env_flags_json={"destructive": False},
             )
             inserted = await asyncio.to_thread(self._runs_repo.insert, row)
             if not inserted:
@@ -288,9 +287,8 @@ class MaintenanceApiService:
                 raise await self._conflict_error()
 
             # Run — manual entry point; ``destructive=False`` is
-            # explicit (the manual preview never inherits an armed
-            # env, even when the operator has the env dual-arm
-            # armed — INV-2 + dry-run fidelity rule).
+            # explicit; no env inheritance exists (the env dual-arm is
+            # gone — the kwarg is the sole arbiter).
             try:
                 result = await self._cleanup_job.run_checkpoint_prunes(
                     destructive=False
@@ -556,14 +554,11 @@ class MaintenanceApiService:
                 dry_run_summary_json=dry_run_row.summary_json,
                 confirm=True,
                 advisory=advisory,
-                # INV-2 audit proof: the RAW dual-arm env state at
-                # execute time + the override flag (the kwarg, not
-                # env, armed the DELETE — blob_prune_env_state reads
-                # the same env vars the gate function does).
-                env_flags_json={
-                    **blob_prune_env_state(),
-                    "destructive_override": True,
-                },
+                # Manual execute confirmation — destructive=True (the
+                # unconditional default; the explicit kwarg merely
+                # surfaces the path taken for operator forensics;
+                # feature/blob-prune-default-on).
+                env_flags_json={"destructive": True},
             )
             inserted = await asyncio.to_thread(self._runs_repo.insert, row)
             if not inserted:

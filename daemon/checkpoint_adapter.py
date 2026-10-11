@@ -45,6 +45,7 @@ except ImportError:
 
 from daemon._redact import redact_exc_str
 from daemon.constants import (
+    CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE,
     CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES,
     CHECKPOINT_SENTINEL_THREAD_ID,
 )
@@ -655,17 +656,22 @@ class CheckpointerAdapter(ABC):
         The PostgreSQL implementation runs the DELETE inside an explicit
         SERIALIZABLE transaction with bounded retry on SQLSTATE 40001 /
         40P01 (budget: ``CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES``); on
-        exhaustion it logs ERROR, skips the pair and returns ``(0, 0)``
-        — isolation-family failures never raise into maintenance. The
-        dry-run arm (``count_blobs_anti_join``) stays READ COMMITTED:
+        exhaustion it logs ERROR, skips the chunk and returns the
+        REAL PARTIAL totals accumulated so far — isolation-family
+        failures never raise into maintenance. The early-stop reason
+        is additionally published on the PG instance
+        (``last_pair_stop_reason`` / ``last_pair_chunks_skipped``) so
+        the caller can surface a partial-completion signal in the
+        audit summary (W1, fix cycle 1). The dry-run arm
+        (``count_blobs_anti_join``) stays READ COMMITTED:
         a read-only report has no concurrency hazard to defend against.
 
         DANGER — data-destroying. The ONLY sanctioned call site is behind
-        the structural gate ``blob_prune_destructive_enabled()`` in
-        ``daemon/services/checkpoint_prune.py`` (requires BOTH
-        ``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0`` AND
-        ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1``). When that gate is off,
-        no call path reaches this method.
+        the ``if not destructive: ... continue`` guard in
+        ``daemon/services/checkpoint_prune.py::prune_unreferenced_blobs``;
+        with ``destructive=False`` (manual preview path) no call path
+        reaches this method. The dual-arm env-flag gate is gone — see
+        feature/blob-prune-default-on.
 
         SQLite: no ``checkpoint_blobs`` table exists — returns ``(0, 0)``
         after logging a warning.
@@ -929,6 +935,19 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
     Uses an asyncpg connection pool for direct SQL access, adapting
     SQLite query patterns to PostgreSQL syntax.
     """
+
+    # ── W1 partial-completion side channel (fix cycle 1) ─────────────
+    # Reset at EVERY ``delete_blobs_anti_join`` ENTRY and written at
+    # every return; read by the single sanctioned caller
+    # (``daemon/services/checkpoint_prune.py::prune_unreferenced_blobs``)
+    # immediately after each await in its SERIAL per-pair loop. The
+    # public ``(int, int)`` return shape is frozen, so the per-pair
+    # stop state (``"retry_exhausted"`` / ``"over_batch_limit"`` /
+    # ``None`` + abandoned-chunk count) rides here instead.
+    # Class-level defaults keep duck-typed readers defined before the
+    # first call; instances shadow them from the first call on.
+    last_pair_stop_reason: str | None = None
+    last_pair_chunks_skipped: int = 0
 
     def __init__(self, saver: Any, pool: Any) -> None:
         """Initialize the PostgreSQL checkpointer adapter.
@@ -1305,21 +1324,48 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         Deletes blobs of (thread_id, checkpoint_ns) not referenced by any
         remaining checkpoint's ``channel_versions`` in the same
         (thread_id, checkpoint_ns). Returns ``(deleted_count,
-        bytes_freed)`` via ``DELETE ... RETURNING OCTET_LENGTH(blob)``.
+        bytes_freed)`` summed across the per-pair LIMIT-batched chunks
+        (``DELETE FROM checkpoint_blobs WHERE ctid IN (SELECT ctid
+        FROM ... WHERE <anti-join> LIMIT $batch) RETURNING
+        OCTET_LENGTH(blob)``; loop until the chunk returns 0 rows).
 
-        The DELETE runs inside an explicit SERIALIZABLE transaction with
-        bounded retry on SQLSTATE 40001 (serialization_failure) / 40P01
-        (deadlock_detected) — see the wrap rationale block at the method
-        body. Retry budget: ``CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES``
-        (daemon/constants.py); on exhaustion the pair is SKIPPED with an
-        ERROR log and ``(0, 0)`` returned — this method never raises an
-        isolation-family failure into the maintenance loop (Operation E's
-        never-raise contract).
+        The pre-PR4 shape used a single unbounded DELETE per pair —
+        ~100k rows per pair worst case (daemon/checkpoint_adapter.py:
+        -1376 -- the line range where the unbounded DELETE lived).
+        feature/blob-prune-default-on promotes destructive-on to the
+        unconditional default; the very first production run after the
+        promote faces the accumulated pair-excess backlog. Bounding
+        the per-pair DELETE into chunks of
+        ``CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE`` (default 1000)
+        rows prevents a single statement from holding an asyncpg pool
+        connection for the entire per-pair payload (pool-hazard class).
+        Each chunk is its own SERIALIZABLE transaction with bounded
+        retry on SQLSTATE 40001 (serialization_failure) / 40P01
+        (deadlock_detected) — see the wrap rationale block at the
+        method body. Retry budget per chunk:
+        ``CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES`` (daemon/constants.py);
+        on exhaustion the chunk is SKIPPED with an ERROR log and the
+        outer loop EXITS with the partial totals accumulated so far
+        (the next cycle retries whatever's left — never raises into
+        the maintenance loop, Operation E's never-raise contract).
 
-        DANGER — data-destroying. The only sanctioned call site is behind
-        the structural gate in ``daemon/services/checkpoint_prune.py``
-        (``blob_prune_destructive_enabled()``); with the env flags off no
-        call path reaches this method.
+        PARTIAL-COMPLETION VISIBILITY (W1, fix cycle 1): an
+        early-stopped pair (``"retry_exhausted"`` / LIMIT-guard
+        ``"over_batch_limit"``) no longer reads as ordinary
+        completion — the stop reason + abandoned-chunk count are
+        published on the instance (``last_pair_stop_reason`` /
+        ``last_pair_chunks_skipped``, reset every call) for the
+        sanctioned caller to thread into ``BlobPruneSummary`` and the
+        ``maintenance_runs`` audit row. The
+        ``(deleted_count, bytes_freed)`` return remains the REAL
+        partial totals.
+
+        DANGER — data-destroying. The only sanctioned call site is
+        behind the ``if not destructive: ... continue`` guard in
+        ``daemon/services/checkpoint_prune.py::prune_unreferenced_blobs``;
+        with ``destructive=False`` (manual preview path) no call path
+        reaches this method. The dual-arm env-flag gate is gone —
+        see feature/blob-prune-default-on.
         """
         # ── SERIALIZABLE wrap rationale (PR4 external-review CRITICAL #1) ──
         #
@@ -1363,6 +1409,132 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         # precondition + the §6 backup
         # (docs/runbooks/checkpoint-blob-prune-restore.md). Do NOT
         # restate this wrap as eliminating the race.
+        #
+        # ── LIMIT-batching rationale (feature/blob-prune-default-on) ──
+        #
+        # POOL-HAZARD class: with the dual-arm env gate retired
+        # (destructive unconditional), the very first production prune
+        # after promote faces the accumulated pair-excess backlog
+        # (~100k refs per pair worst case at the old unbounded-D DELETE
+        # call site). A single statement of that size holds an asyncpg
+        # pool connection for the entire per-pair payload and exposes
+        # the maintenance window to pool exhaustion across the rest of
+        # the maintenance loop. The chunk loop here bounds each
+        # DELETE statement to ``CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE``
+        # rows (default 1000) — each chunk is its own SERIALIZABLE
+        # transaction so the retry wrap re-acquires a fresh connection
+        # per chunk AND the per-chunk row count is small enough to
+        # classify SSI aborts cheaply. The chunk predicate uses
+        # ``ctid IN (SELECT ctid FROM checkpoint_blobs WHERE
+        # <anti-join> LIMIT $batch)`` — ``ctid`` is the PG physical
+        # row id; it is stable within a transaction and does not need
+        # a surrogate ``id`` column on the composite-PK table. The
+        # chunk loop exits as soon as one chunk returns 0 rows
+        # (full pair exhausted) and propagates a non-isolation-family
+        # exception by re-raising (the outer per-pair catch in
+        # checkpoint_prune.py converts it to a SKIP — the
+        # never-raise contract lives there, not here).
+        total_deleted = 0
+        total_bytes_freed = 0
+        # W1 (fix cycle 1): reset the partial-completion side channel
+        # at ENTRY — a mid-loop raise (non-isolation family) must not
+        # leave the PREVIOUS pair's stop reason readable for the next
+        # call's caught-and-skipped pair (misattribution). The write
+        # site after the loop publishes the reason on normal returns.
+        self.last_pair_stop_reason = None
+        self.last_pair_chunks_skipped = 0
+        # W1 (fix cycle 1): partial-completion accounting. A chunk that
+        # comes back with a stop reason (retry exhaustion) or the
+        # LIMIT-guard break below both leave residual rows — the pair
+        # must NOT read as ordinary completion. The stop state rides
+        # the instance side channel (see the write site below); the
+        # public ``(int, int)`` return shape stays frozen.
+        chunks_skipped = 0
+        stop_reason: str | None = None
+        while True:
+            rows, chunk_stop = await self._delete_blobs_anti_join_chunk(
+                thread_id, checkpoint_ns, CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE
+            )
+            if chunk_stop is not None:
+                # The chunk primitive abandoned this chunk with ZERO
+                # rows deleted (retry exhaustion). NOT natural pair
+                # exhaustion — record why the loop stopped, keep the
+                # accumulated partial totals, and stop THIS pair's
+                # loop (residual rows stay for the next maintenance
+                # cycle; never raises — same conversion philosophy as
+                # the per-pair catch in checkpoint_prune.py).
+                chunks_skipped += 1
+                stop_reason = chunk_stop
+                break
+            chunk_count = len(rows)
+            if chunk_count == 0:
+                break
+            total_deleted += chunk_count
+            total_bytes_freed += sum(
+                int(r["n"]) for r in rows if r["n"] is not None
+            )
+            # Chunk-size sanity guard — the per-statement upper bound
+            # must hold. asyncpg cannot refuse the LIMIT clause, but a
+            # future refactor that drops it would silently grow the
+            # per-statement footprint back into the pool-hazard class.
+            # Explicit branch, NOT an ``assert`` — asserts vanish under
+            # ``python -O`` and this bound must survive optimized
+            # interpreters. On violation: log ERROR and stop THIS
+            # pair's chunk loop (skip-rest-of-pair is the safe
+            # direction — residual rows stay for the next maintenance
+            # cycle; never raises, same conversion philosophy as the
+            # per-pair catch in checkpoint_prune.py). W1 (fix cycle 1):
+            # the break now also records ``over_batch_limit`` so the
+            # partial pair is visible in the audit summary instead of
+            # reading as ordinary completion.
+            if chunk_count > CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE:
+                logger.error(
+                    "chunk DELETE returned %d rows > batch size %d — "
+                    "LIMIT violated, pool-hazard class reopened; "
+                    "stopping this pair's chunk loop (residual rows "
+                    "stay for the next maintenance cycle)",
+                    chunk_count,
+                    CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE,
+                )
+                stop_reason = "over_batch_limit"
+                break
+        # W1 (fix cycle 1): publish the per-pair stop state for the
+        # single sanctioned caller
+        # (``daemon/services/checkpoint_prune.py::prune_unreferenced_blobs``).
+        # The public return shape is FROZEN (ABC contract + SQLite
+        # no-op sibling + the ``test_no_env_flag_remnants`` signature
+        # pin), so the signal rides instance attributes: reset at
+        # EVERY call entry (below) and read immediately after each
+        # await in the caller's SERIAL per-pair loop — no cross-pair
+        # staleness is possible on the sanctioned path.
+        self.last_pair_stop_reason = stop_reason
+        self.last_pair_chunks_skipped = chunks_skipped
+        return (total_deleted, total_bytes_freed)
+
+    async def _delete_blobs_anti_join_chunk(
+        self, thread_id: str, checkpoint_ns: str, batch_size: int
+    ) -> tuple[list[Any], str | None]:
+        """One LIMIT-bounded chunk of the destructive anti-join DELETE.
+
+        Returns ``(rows, stop_reason)`` — the ``OCTET_LENGTH(blob)``
+        rows of the chunk (0..N) plus a stop reason when this chunk was
+        abandoned BEFORE any of its rows deleted: ``"retry_exhausted"``
+        on isolation-family retry exhaustion, ``None`` on a normal
+        return (including the natural empty chunk that ends the pair).
+        The outer caller (:meth:`delete_blobs_anti_join`) loops until a
+        chunk returns zero rows with no stop reason; the per-chunk
+        SERIALIZABLE wrap + bounded retry on SQLSTATE 40001 / 40P01
+        lives here so the retry budget is per-chunk, not per-pair (a
+        chunk that hits a retryable conflict yields its connection and
+        re-enters on a fresh snapshot — the pair loop re-issues with
+        the same predicate on a possibly-shrunk candidate set).
+
+        On isolation-family retry exhaustion: logs ERROR, returns
+        ``([], "retry_exhausted")`` — the outer loop exits with
+        whatever it already accumulated AND a recorded stop reason
+        (surfaced as a partial-completion signal by the caller), never
+        raising into the maintenance loop.
+        """
         retries_left = CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES
         attempt = 0
         while True:
@@ -1372,19 +1544,43 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                 # pool connection per attempt (a fresh connection ⇒ fresh
                 # snapshot on retry) and let asyncpg's transaction context
                 # issue BEGIN ISOLATION LEVEL SERIALIZABLE … COMMIT/ROLLBACK.
+                #
+                # LIMIT-batching (feature/blob-prune-default-on): the
+                # chunk SELECT picks at most ``batch_size`` ctids matching
+                # the anti-join predicate; the DELETE only touches those
+                # ctids in the same transaction. Pool-hazard class is
+                # closed by construction — the per-statement footprint is
+                # bounded regardless of how much pair-excess backlog the
+                # first post-promote cycle walks into. ``ctid`` is the PG
+                # physical row id; stable within the same transaction and
+                # usable as a DELETE filter without a surrogate ``id``
+                # column on the composite-PK table.
                 async with self._pool.acquire() as conn:
                     async with conn.transaction(isolation="serializable"):
                         rows = await conn.fetch(
-                            "DELETE FROM checkpoint_blobs b WHERE"
+                            "DELETE FROM checkpoint_blobs b WHERE b.ctid IN ("
+                            # The subquery SELF-ALIASES as ``b`` — the SAME
+                            # alias ``_BLOB_ANTI_JOIN_PREDICATE`` is written
+                            # against. Inside the subquery the inner ``b``
+                            # shadows the outer DELETE alias, so the
+                            # predicate binds to the chunk candidates.
+                            # (Review C1: a prior revision declared ``b2``
+                            # here — the predicate's ``b`` then resolved to
+                            # the OUTER DELETE alias, ``b2`` stayed
+                            # unconstrained, and the subquery returned the
+                            # first ``batch`` ctids of the WHOLE table in
+                            # arbitrary scan order: per-pair exhaustion
+                            # silently never completed on production-scale
+                            # tables.)
+                            "SELECT b.ctid FROM checkpoint_blobs b WHERE"
                             + _BLOB_ANTI_JOIN_PREDICATE
-                            + " RETURNING OCTET_LENGTH(blob) AS n",
+                            + " LIMIT $3"
+                            ") RETURNING OCTET_LENGTH(blob) AS n",
                             thread_id,
                             checkpoint_ns,
+                            batch_size,
                         )
-                bytes_freed = sum(
-                    int(r["n"]) for r in rows if r["n"] is not None
-                )
-                return (len(rows), bytes_freed)
+                return list(rows), None
             except Exception as exc:
                 # Duck-typed on the SQLSTATE so the check holds for any
                 # driver exposing .sqlstate (asyncpg's SerializationError /
@@ -1399,21 +1595,24 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                     # isolation failures into skip-not-raise).
                     raise
                 if retries_left <= 0:
-                    # Exhausted: SKIP the pair — zero rows deleted, never
-                    # raise. Skipping is the SAFE direction (blobs survive;
-                    # the next maintenance cycle retries in 15 min).
+                    # Exhausted: SKIP the chunk — zero rows deleted for
+                    # this chunk, never raise. Skipping is the SAFE
+                    # direction (blobs survive; the next maintenance
+                    # cycle retries whatever is left).
                     logger.error(
                         "[CheckpointPerf] blob_prune "
-                        "SERIALIZABLE_RETRY_EXHAUSTED thread=%s ns=%s — "
-                        "anti-join DELETE aborted with SQLSTATE %s on all "
-                        "%d attempts; skipping pair, zero rows deleted "
-                        "(safe direction; next maintenance cycle retries)",
+                        "SERIALIZABLE_RETRY_EXHAUSTED thread=%s ns=%s "
+                        "batch=%d — anti-join DELETE chunk aborted with "
+                        "SQLSTATE %s on all %d attempts; skipping chunk, "
+                        "zero rows deleted (safe direction; next "
+                        "maintenance cycle retries)",
                         thread_id[:8],
                         checkpoint_ns,
+                        batch_size,
                         sqlstate,
                         attempt,
                     )
-                    return (0, 0)
+                    return [], "retry_exhausted"
                 retries_left -= 1
                 backoff_s = 0.05 * (2 ** (attempt - 1))
                 logger.warning(

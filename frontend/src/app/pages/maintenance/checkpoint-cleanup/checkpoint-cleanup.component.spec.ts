@@ -2597,8 +2597,8 @@ describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
         config: {
           checkpoint_max_per_thread: 6,
           cleanup_interval_hours: 6,
-          blob_prune_dry_run_env_default: '1',
-          blob_prune_destructive_armed: false,
+          // feature/blob-prune-default-on: env-flag surface retired
+          blob_prune_destructive_default: true,
         },
       });
       expect(component.statusStripKeepN()).toBe('6');
@@ -2616,8 +2616,8 @@ describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
         config: {
           checkpoint_max_per_thread: 6,
           cleanup_interval_hours: 6,
-          blob_prune_dry_run_env_default: '1',
-          blob_prune_destructive_armed: false,
+          // feature/blob-prune-default-on: env-flag surface retired
+          blob_prune_destructive_default: true,
         },
       });
       expect(component.statusStripKeepN()).toBe('—');

@@ -911,3 +911,37 @@ Deduped register (FE and BE flags describing the same seam are merged) — **DIS
 | A-12 | Migration wording | BE-CF-8 | repo pattern: raw `.sql` (doc + manual apply) + `SQLModel.metadata.create_all` + `_ensure_postgres_columns` mirror; runner is NO-OP on PG | **CONFIRMED** (AM-15). The new table is built by `SQLModel.metadata.create_all` on BOTH drivers at boot; **no `_ensure_postgres_columns` entries** (new tables need none). `-- MANUAL: TRUE` on the raw `.sql` for canonical doc. |
 
 **Re-freeze rule (INV-5):** this document carries the **API Contract v3 — frozen 2026-09-27** marker (v2→v3: C-1/C-2 literals + shape unified; W-1 mechanism restated + completion-gate prohibition added; counts reconciled). Any further drift must update this document and re-freeze.
+
+---
+
+## Superseded (2026-10-11)
+
+The dual-arm env-flag ladder described in this document — the
+``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0`` AND ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1``
+conservative ladder that gated the destructive blob prune — is
+**gone**. As of `feature/blob-prune-default-on` (merged
+2026-10-11), destructive pruning of superseded checkpoint
+blobs is the **unconditional default** in the ensemble daemon.
+There is no env-var, config-flag, or on/off switch of any
+kind that disables it.
+
+The audits, hypotheses, and contracts recorded in this
+document are preserved as historical evidence (not
+rewritten), but the operational reality is now:
+
+* auto cycle + manual ``/execute`` confirmation → destructive,
+  no operator action required;
+* manual ``/dry-run`` preview path → SELECT-only (the only
+  remaining opt-out);
+* per-pair anti-join is LIMIT-batched within each (thread, ns)
+  pair (chunk size = `CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE`,
+  default 1000 rows per chunk, each chunk a separate
+  SERIALIZABLE transaction with bounded retry on SQLSTATE
+  40001 / 40P01).
+
+The current contract lives in
+`docs/runbooks/checkpoint-blob-prune-restore.md` (the
+rewrite for the default-on reality). For the historical
+record of the dual-arm gate being the only-arm path that
+reached the DELETE arm, see git log for the pre-default
+version of this document.

@@ -758,3 +758,37 @@ The Contract v3 (frozen 2026-09-27) resolves every item below; the dispositions 
 ### Implementation note (R-1 computation, doc-side)
 
 Projection is computed **per excess pair**: one anti-join of that pair's blobs against the **simulated newest-N survivor set** (what survives Op D of this pass), **minus the pair's current-orphan contribution** (the dry-run already computes the current-orphan number per pair — subtract it; or compute directly as "referenced-by-excess-only"). Skipped pairs short-circuit to 0 (R-4). The numbers travel on the §3 response and via `dry_run_summary_json` onto the execute row; the `manual_execute` run summary carries the additive `projection` echo block (R-5). **Auto-cycle untouched (R-5, unanimous): no projection scans in the scheduled tick, auto summary shape unchanged, `/status` §2 frozen shape untouched.** Gate binding UNCHANGED: `expected_bytes` binds `would_free_bytes` only; no new gate, no re-binding, no post-run gate (INV-13 reaffirmed; R-6 formal rule: the echo gate may only bind a number the composition actually delivers — E→D ⇒ `now`).
+
+---
+
+## Superseded (2026-10-11)
+
+The dual-arm env-flag ladder described in this document — the
+``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0`` AND ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1``
+conservative ladder that gated the destructive blob prune — is
+**gone**. As of `feature/blob-prune-default-on` (merged
+2026-10-11), destructive pruning of superseded checkpoint
+blobs is the **unconditional default** in the ensemble daemon.
+There is no env-var, config-flag, or on/off switch of any
+kind that disables it.
+
+The audits, hypotheses, and contracts recorded in this
+document are preserved as historical evidence (not
+rewritten), but the operational reality is now:
+
+* auto cycle + manual ``/execute`` confirmation → destructive,
+  no operator action required;
+* manual ``/dry-run`` preview path → SELECT-only (the only
+  remaining opt-out);
+* per-pair anti-join is LIMIT-batched within each (thread, ns)
+  pair (chunk size = `CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE`,
+  default 1000 rows per chunk, each chunk a separate
+  SERIALIZABLE transaction with bounded retry on SQLSTATE
+  40001 / 40P01).
+
+The current contract lives in
+`docs/runbooks/checkpoint-blob-prune-restore.md` (the
+rewrite for the default-on reality). For the historical
+record of the dual-arm gate being the only-arm path that
+reached the DELETE arm, see git log for the pre-default
+version of this document.

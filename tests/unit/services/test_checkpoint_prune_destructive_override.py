@@ -1,15 +1,19 @@
 """Unit tests — Section 1 (Maintenance Console) T2 destructive override kwarg.
 
-``phase1-backend.md`` §4.1 (cases 1–9a) — the ``destructive`` override
-kwarg on :func:`prune_unreferenced_blobs` plus the T1 dry-run
-accumulation fields and the AM-2 ordering pin:
+``phase1-backend.md`` §4.1 — the ``destructive`` override kwarg on
+:func:`prune_unreferenced_blobs` plus the T1 dry-run accumulation
+fields and the AM-2 ordering pin. The historical dual-arm env-flag
+gate is GONE (feature/blob-prune-default-on); the kwarg is the only
+arbiter — explicit ``True`` matches the auto-cycle default,
+explicit ``False`` is the only opt-out (manual preview / dry-run).
 
-* INV-1 — the default (``destructive=None``) keeps the env dual-arm as
-  the ONLY auto-cycle arming path (single-arm stays dry-run).
-* INV-2 — ``destructive=True`` reaches the DELETE arm with the env
-  flags ABSENT (manual execute needs no env pre-arming).
-* INV-3 — the zero-refs fail-safe and MAX_REFS cap hold under the
-  override kwarg (the structural gate + fail-safes are untouched).
+* INV-1 — the default (``destructive`` kwarg omitted) reaches the
+  DELETE arm (the auto cycle path lands here unconditionally).
+* INV-2 — ``destructive=True`` reaches the DELETE arm (manual execute
+  matching the default).
+* INV-3 — the zero-refs fail-safe and MAX_REFS cap hold under both
+  ``True`` (default and explicit) and the historical ``False`` kwarg
+  (the structural gate + fail-safes are untouched).
 * AM-11 — the dry-run arm accumulates the canonical
   ``would_delete_count`` / ``would_free_bytes`` fields.
 * AM-2 (case 9a) — the MANUAL entry point
@@ -62,9 +66,13 @@ def as_pg(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _default_ladder(monkeypatch):
-    """Env ladder fixture — every test starts with BOTH env flags deleted
-    (the ``_default_ladder`` pattern, ``checkpoint_prune_real_saver.py``).
-    Arming is per-test explicit via ``monkeypatch.setenv``."""
+    """Sentinel — no env vars named for the destructive ladder exist
+    anymore (feature/blob-prune-default-on retired
+    ``CHECKPOINT_BLOB_PRUNE_DRY_RUN`` and ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE``).
+    The fixture stays here as a tripwire so any future re-introduction
+    of env-state dependency in the prune module surfaces as a stale
+    ``delenv`` against an undefined name — which is what we want.
+    """
     monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", raising=False)
     monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", raising=False)
 
@@ -75,71 +83,53 @@ def _boom_delete() -> AsyncMock:
     return sentinel
 
 
-# ── §4.1 cases 1–8 — the override kwarg vs the env dual-arm ───────────────────
+# ── §4.1 cases 1–6 — the override kwarg vs the destructive default ────────────
 
 
 class TestDestructiveOverrideKwarg:
-    async def test_default_none_uses_env_gate_off(self, as_pg):
-        """Case 1 — no kwarg, env off → dry-run; count arm awaited,
-        DELETE sentinel untouched."""
-        adapter = _pg_adapter_mock([("t-1", "", 3)])
-        adapter.delete_blobs_anti_join = _boom_delete()
-        summary = await prune_unreferenced_blobs(adapter)
-        assert summary.dry_run is True
-        assert summary.destructive is False
-        adapter.count_blobs_anti_join.assert_awaited_once()
-        adapter.delete_blobs_anti_join.assert_not_awaited()
-
-    async def test_default_none_uses_env_dual_arm(self, as_pg, monkeypatch):
-        """Case 2 — BOTH env flags armed, no kwarg → DELETE arm reached
-        (env path intact for the AUTO cycle — INV-1)."""
-        monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", "0")
-        monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", "1")
+    async def test_default_reaches_delete_unconditionally(self, as_pg):
+        """Case 1 — no kwarg, default = destructive=True → DELETE arm
+        is reached (the gate is gone; the auto cycle path lands here)."""
         adapter = _pg_adapter_mock([("t-1", "", 3)])
         summary = await prune_unreferenced_blobs(adapter)
+        assert summary.dry_run is False
         assert summary.destructive is True
-        adapter.delete_blobs_anti_join.assert_awaited_once()
+        adapter.count_blobs_anti_join.assert_not_awaited()
+        adapter.delete_blobs_anti_join.assert_awaited_once_with("t-1", "")
 
-    async def test_env_single_arm_stays_dry_run(self, as_pg, monkeypatch):
-        """Case 3 — ``DESTRUCTIVE=1`` alone (dry-run arm still on), no
-        kwarg → dry-run (dual-arm NOT loosened by the override work)."""
-        monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", "1")
-        adapter = _pg_adapter_mock([("t-1", "", 3)])
-        adapter.delete_blobs_anti_join = _boom_delete()
-        summary = await prune_unreferenced_blobs(adapter)
-        assert summary.dry_run is True
-        adapter.delete_blobs_anti_join.assert_not_awaited()
-
-    async def test_destructive_true_reaches_delete_with_env_off(self, as_pg):
-        """Case 4 — INV-2 PROOF: ``destructive=True`` kwarg + env absent →
-        the DELETE arm is reached (exactly one await)."""
+    async def test_explicit_destructive_true_matches_default(self, as_pg):
+        """Case 2 — explicit ``destructive=True`` produces the same
+        observable result as the kwarg-less default. Defends against
+        a refactor that flips the default without leaving the
+        explicit-True path behind."""
         adapter = _pg_adapter_mock([("t-1", "", 3)])
         summary = await prune_unreferenced_blobs(adapter, destructive=True)
         assert summary.destructive is True
-        adapter.delete_blobs_anti_join.assert_awaited_once()
+        adapter.delete_blobs_anti_join.assert_awaited_once_with("t-1", "")
 
-    async def test_destructive_false_overrides_armed_env(self, as_pg, monkeypatch):
-        """Case 5 — kwarg False + BOTH env flags armed → dry-run (the
-        kwarg wins over env for the manual preview)."""
-        monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", "0")
-        monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", "1")
+    async def test_explicit_destructive_false_overrides_default(self, as_pg):
+        """Case 3 — ``destructive=False`` is the SOLE way to opt out;
+        the explicit kwarg reaches the SELECT-only count arm and the
+        DELETE sentinel is untouched."""
         adapter = _pg_adapter_mock([("t-1", "", 3)])
         adapter.delete_blobs_anti_join = _boom_delete()
         summary = await prune_unreferenced_blobs(adapter, destructive=False)
         assert summary.dry_run is True
+        assert summary.destructive is False
+        adapter.count_blobs_anti_join.assert_awaited_once_with("t-1", "")
         adapter.delete_blobs_anti_join.assert_not_awaited()
 
-    async def test_destructive_true_preserves_zero_refs_fail_safe(
+    async def test_destructive_false_preserves_zero_refs_fail_safe(
         self, as_pg, caplog
     ):
-        """Case 6 — INV-3: kwarg True + refs=0 staged → ERROR log + skip,
-        DELETE untouched (fail-safe fires BEFORE the destructive arm)."""
+        """Case 4 — INV-3: kwarg False + refs=0 staged → ERROR log + skip,
+        DELETE untouched (fail-safe fires BEFORE the dry-run guard)."""
         import logging
 
         adapter = _pg_adapter_mock([("t-1", "", 3)], refs=0)
         adapter.delete_blobs_anti_join = _boom_delete()
         with caplog.at_level(logging.ERROR, logger="daemon.services.checkpoint_prune"):
-            summary = await prune_unreferenced_blobs(adapter, destructive=True)
+            summary = await prune_unreferenced_blobs(adapter, destructive=False)
         assert summary.skipped == [("t-1", "", "ZERO_REFS_FAIL_SAFE")]
         assert summary.total_deleted == 0
         adapter.delete_blobs_anti_join.assert_not_awaited()
@@ -147,15 +137,31 @@ class TestDestructiveOverrideKwarg:
             "zero rows deleted" in r.message for r in caplog.records
         )
 
-    async def test_destructive_true_preserves_max_refs_skip(self, as_pg):
-        """Case 7 — INV-3: kwarg True + refs over the cap → MAX_REFS_EXCEEDED
-        skip, DELETE untouched."""
+    async def test_destructive_default_preserves_zero_refs_fail_safe(
+        self, as_pg, caplog
+    ):
+        """Case 5 — INV-3: default path (destructive) + refs=0 staged →
+        same fail-safe fires (the destructive default never short-circuits
+        the zero-refs pre-check)."""
+        import logging
+
+        adapter = _pg_adapter_mock([("t-1", "", 3)], refs=0)
+        adapter.delete_blobs_anti_join = _boom_delete()
+        with caplog.at_level(logging.ERROR, logger="daemon.services.checkpoint_prune"):
+            summary = await prune_unreferenced_blobs(adapter)
+        assert summary.skipped == [("t-1", "", "ZERO_REFS_FAIL_SAFE")]
+        assert summary.total_deleted == 0
+        adapter.delete_blobs_anti_join.assert_not_awaited()
+
+    async def test_destructive_default_preserves_max_refs_skip(self, as_pg):
+        """Case 6 — INV-3: default path + refs over the cap →
+        MAX_REFS_EXCEEDED skip, DELETE untouched."""
         adapter = _pg_adapter_mock(
             [("t-1", "", 3)],
             refs=checkpoint_prune.CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD + 1,
         )
         adapter.delete_blobs_anti_join = _boom_delete()
-        summary = await prune_unreferenced_blobs(adapter, destructive=True)
+        summary = await prune_unreferenced_blobs(adapter)
         assert summary.skipped == [("t-1", "", "MAX_REFS_EXCEEDED")]
         adapter.delete_blobs_anti_join.assert_not_awaited()
 
@@ -231,14 +237,15 @@ class TestDestructiveOverrideKwarg:
 
 class TestDryRunAccumulation:
     async def test_dry_run_accumulation_fields_populated(self, as_pg):
-        """Case 9 — dry-run sweep fills ``would_delete_count`` /
-        ``would_free_bytes`` (canonical AM-11 names); destructive sweep
-        fills ``total_deleted`` / ``total_bytes_freed`` and leaves the
-        would-fields at 0."""
+        """Case 9 — dry-run sweep (manual preview path with
+        ``destructive=False``) fills ``would_delete_count`` /
+        ``would_free_bytes`` (canonical AM-11 names); destructive
+        sweep (the new default) fills ``total_deleted`` /
+        ``total_bytes_freed`` and leaves the would-fields at 0."""
         adapter = _pg_adapter_mock(
             [("t-1", "", 3), ("t-2", "", 3)], count_result=(4, 2048)
         )
-        dry = await prune_unreferenced_blobs(adapter)
+        dry = await prune_unreferenced_blobs(adapter, destructive=False)
         assert dry.would_delete_count == 8  # 2 pairs × 4
         assert dry.would_free_bytes == 4096  # 2 pairs × 2048
         assert dry.total_deleted == 0
@@ -249,7 +256,7 @@ class TestDryRunAccumulation:
             count_result=(4, 2048),
         )
         adapter2.delete_blobs_anti_join = AsyncMock(return_value=(4, 2048))
-        destructive = await prune_unreferenced_blobs(adapter2, destructive=True)
+        destructive = await prune_unreferenced_blobs(adapter2)  # default
         assert destructive.total_deleted == 8
         assert destructive.total_bytes_freed == 4096
         assert destructive.would_delete_count == 0
@@ -329,12 +336,78 @@ class TestManualEntryPointOrdering:
         assert isinstance(result.rows, object)
         assert result.duration_ms >= 0
 
+    def test_manual_none_kwarg_lands_destructive_true(self):
+        """FIX C (fix cycle 1) pin — ``destructive=None`` must land on
+        ``destructive=True`` end-to-end through the manual entry point.
+
+        The docblock documents ``None`` → the auto-cycle (destructive)
+        semantics, but the old ``bool(destructive)`` coercion made
+        ``None`` → ``False`` (dry-run) — silently inverting the
+        contract. The fixed coercion
+        (``destructive if destructive is not None else True``) must
+        drive the blob arm (asserted here through the real
+        ``_prune_unreferenced_blobs`` call) AND the row-arm branch.
+        """
+        import asyncio
+
+        from daemon.config import PersistenceConfig
+        from daemon.services.maintenance import CheckpointCleanupJob
+
+        adapter = MagicMock()
+        adapter.list_thread_ids = AsyncMock(return_value=[])
+        adapter.find_excess_checkpoint_groups = AsyncMock(return_value=[])
+        adapter.find_all_thread_ns_pairs = AsyncMock(return_value=[])
+        adapter.get_checkpoint_ids = AsyncMock(return_value=["ck-1"])
+
+        job = CheckpointCleanupJob(
+            config=PersistenceConfig(),
+            checkpointer=adapter,
+            instance_repo=MagicMock(),
+        )
+        seen_kwargs: list[dict] = []
+        real_e = job._prune_unreferenced_blobs
+
+        async def wrap_e(*a, **k):
+            seen_kwargs.append(k)
+            return await real_e(*a, **k)
+
+        job._prune_unreferenced_blobs = wrap_e  # type: ignore[method-assign]
+
+        row_calls: list[bool] = []
+        real_d = job._prune_per_thread_checkpoints
+
+        async def wrap_d(*a, **k):
+            row_calls.append(True)
+            return await real_d(*a, **k)
+
+        job._prune_per_thread_checkpoints = wrap_d  # type: ignore[method-assign]
+
+        result = asyncio.run(job.run_checkpoint_prunes(destructive=None))
+
+        # The blob arm received destructive=True (the documented None
+        # semantics) — not the old bool(None) → False.
+        assert seen_kwargs and seen_kwargs[0].get("destructive") is True, (
+            "None must land on destructive=True (fix C); "
+            f"got {seen_kwargs[0] if seen_kwargs else 'no call'}"
+        )
+        # The row-arm branch follows the SAME coerced value — None
+        # must not compose a destructive blob arm with a dry-run row
+        # projection: the DESTRUCTIVE compose (not
+        # _compute_row_prune_dry_run) is the branch taken.
+        assert row_calls == [True], (
+            "None must compose the destructive row arm "
+            "(coerced value drives BOTH arms)"
+        )
+        assert result.duration_ms >= 0
+
     def test_manual_dry_run_entry_point_is_read_only(self):
-        """Companion to 9a (§4.2 case 17 lives in the lock/capture suite;
-        this pins the entry-point composition cheaply here too):
+        """Companion to 9a (§4.2 case 17 lives in the lock/capture
+        suite; this pins the entry-point composition cheaply here too):
         ``destructive=False`` passes ``destructive=False`` to the blob
-        arm — never ``None`` — so an armed env cannot leak into the
-        manual preview."""
+        arm so the manual preview stays SELECT-only. With the
+        destructive env-flag gate gone, the explicit ``False`` kwarg
+        is the only opt-out path — the entry point must never collapse
+        to ``None`` for the dry-run compose."""
         import asyncio
 
         from daemon.config import PersistenceConfig
@@ -359,5 +432,5 @@ class TestManualEntryPointOrdering:
         asyncio.run(job.run_checkpoint_prunes(destructive=False))
         assert seen_kwargs and seen_kwargs[0].get("destructive") is False, (
             "the manual dry-run blob arm must pass destructive=False "
-            "explicitly (env must not arm the preview)"
+            "explicitly"
         )

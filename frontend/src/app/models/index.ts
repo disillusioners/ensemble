@@ -735,17 +735,18 @@ export type CheckpointCleanupRunStatus =
   | 'interrupted';
 
 /**
- * Effective auto-cycle config block read from LIVE env at request time
- * (`blob_prune_destructive_enabled()`, `checkpoint_prune.py:75-84`).
- * `blob_prune_destructive_armed` is informational; the manual path
- * never reads it (INV-2).
+ * Auto-cycle config block. ``blob_prune_destructive_default`` is the
+ * unconditional destructive prune default since
+ * feature/blob-prune-default-on retired the dual-arm env-flag gate;
+ * the field is informational (the manual preview path stays
+ * SELECT-only via the explicit ``destructive=False`` kwarg; the
+ * auto cycle / execute path lands on the destructive default).
  */
 export interface CheckpointCleanupConfig {
   checkpoint_max_per_thread: number;
   checkpoint_max_per_thread_floor: number;
   cleanup_interval_hours: number;
-  blob_prune_dry_run_env_default: '0' | '1';
-  blob_prune_destructive_armed: boolean;
+  blob_prune_destructive_default: boolean;
 }
 
 /**

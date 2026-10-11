@@ -18,10 +18,26 @@ post-run banner surfaces the recovery CTA.
 
 `MAINTENANCE_ENDPOINTS_ENABLED=0` (boot-read — restart the daemon after
 editing) → endpoints 2–5 return `503 maintenance_disabled`; `/availability`
-returns `200 {state: "kill_switched"}`. The auto cycle's env dual-arm
-(`CHECKPOINT_BLOB_PRUNE_DRY_RUN` / `CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE`) is
-UNAFFECTED by this switch (INV-1): auto stays destructive-if-armed while the
-manual API refuses. That split is by design.
+returns `200 {state: "kill_switched"}`. The auto cycle's blob prune is
+**not** affected by this switch — destructive is the unconditional
+default since feature/blob-prune-default-on (the env-flag ladder
+``CHECKPOINT_BLOB_PRUNE_DRY_RUN`` / ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE``
+is gone). To stop the auto cycle entirely: **PRIMARY** — stop the
+daemon (`sudo systemctl stop <unit>`; unit naming per
+`docs/runbooks/systemd-adoption.md` — `~/agents-ensemble` →
+`ensemble-main.service`, `~/agents-ensemble-demo` →
+`ensemble-demo.service`; discover with
+`systemctl list-units --type=service 'ensemble-*'`). **SECONDARY**
+(config stop; requires the fix-cycle-1 never-due guard on
+`feature/blob-prune-default-on` forward) — set
+`PERSISTENCE_CHECKPOINT_CLEANUP_INTERVAL=0` in the install's `.env`
+and restart: `_is_due` treats an interval `<= 0` as disabled, so the
+job never fires. (A previous revision of this runbook suggested an
+UNPREFIXED interval env name here — nothing reads such a name:
+`PersistenceConfig` uses the `PERSISTENCE_` env prefix, so the env
+var MUST carry it. If the stale unprefixed var was set on an install,
+remove it.) The manual API surface stays
+kill-switched independently.
 
 ## Origin guard (AM-1 + C1 hardening)
 

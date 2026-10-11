@@ -71,3 +71,36 @@ Both queries are READ-ONLY SELECTs — no destructive operations. Safe for runbo
 The runbook is operator-facing — it documents the contract between "PR4 ships" and "destructive arm flipped". Per C-19 + FR-8, the formal re-review of the SERIALIZABLE wrap + retraction + race tests will happen in Phase 5 T5.7 (a reviewer instance dispatched against the artifact), not here. The Phase 4 work is the LANDING of the runbook + its code counterpart; the re-review is Phase 5.
 
 **Phase 4 T4.5 complete.**
+---
+
+## Superseded (2026-10-11)
+
+The dual-arm env-flag ladder described in this document — the
+``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0`` AND ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1``
+conservative ladder that gated the destructive blob prune — is
+**gone**. As of `feature/blob-prune-default-on` (merged
+2026-10-11), destructive pruning of superseded checkpoint
+blobs is the **unconditional default** in the ensemble daemon.
+There is no env-var, config-flag, or on/off switch of any
+kind that disables it.
+
+The audits, hypotheses, and contracts recorded in this
+document are preserved as historical evidence (not
+rewritten), but the operational reality is now:
+
+* auto cycle + manual ``/execute`` confirmation → destructive,
+  no operator action required;
+* manual ``/dry-run`` preview path → SELECT-only (the only
+  remaining opt-out);
+* per-pair anti-join is LIMIT-batched within each (thread, ns)
+  pair (chunk size = `CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE`,
+  default 1000 rows per chunk, each chunk a separate
+  SERIALIZABLE transaction with bounded retry on SQLSTATE
+  40001 / 40P01).
+
+The current contract lives in
+`docs/runbooks/checkpoint-blob-prune-restore.md` (the
+rewrite for the default-on reality). For the historical
+record of the dual-arm gate being the only-arm path that
+reached the DELETE arm, see git log for the pre-default
+version of this document.

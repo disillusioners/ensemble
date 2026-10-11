@@ -2,7 +2,14 @@
 
 Tracking note 9 (approver, 2026-08-25): "Real-saver integration test is a
 BINDING gate before PR4 merge/destructive enable." This file BLOCKS the
-PR4 merge AND any ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` enable.
+PR4 merge. The historical ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`` enable
+gate language is no longer applicable — destructive is the unconditional
+default since feature/blob-prune-default-on (the env-flag ladder
+``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0`` AND ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1``
+was retired). This file's binding-gate status is preserved as the load-bearing
+destructive-delete proof: the destructive arm is the auto path now, so the
+binding gate covers ``execute()``/``prune_unreferenced_blobs()`` directly
+without any pre-arming step.
 
 HONESTY CONTRACT: "real saver" means a REAL ``AsyncPostgresSaver``
 exercising REAL blob storage — a real psycopg connection + ``setup()``
@@ -92,14 +99,24 @@ def _real_langgraph():
 
 @pytest.fixture(autouse=True)
 def _default_ladder(monkeypatch):
-    """Start every test in the shipped default state (dry-run, destructive off)."""
+    """Sentinel — no env vars named for the destructive ladder exist
+    anymore (feature/blob-prune-default-on retired
+    ``CHECKPOINT_BLOB_PRUNE_DRY_RUN`` and ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE``).
+    The fixture stays here as a tripwire so any future re-introduction
+    of env-state dependency in the prune module surfaces as a stale
+    ``delenv`` against an undefined name — which is what we want.
+    """
     monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", raising=False)
     monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", raising=False)
 
 
 def _arm_destructive(monkeypatch):
-    monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", "0")
-    monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", "1")
+    # feature/blob-prune-default-on: the env-flag ladder is gone;
+    # destructive is the unconditional default. Kept as a tripwire
+    # so any future re-introduction of env-state dependency surfaces
+    # immediately (instead of silently changing behavior).
+    monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", raising=False)
+    monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", raising=False)
 
 
 # ── fixtures ───────────────────────────────────────────────────────────────────
@@ -114,9 +131,9 @@ async def _probe_pg_or_skip():
     except Exception as exc:  # noqa: BLE001
         pytest.skip(
             f"BINDING GATE SKIPPED — PostgreSQL not available at {ADMIN_DSN} "
-            f"({type(exc).__name__}: {exc}). Do NOT merge PR4 or enable "
-            "CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE on a skip: start PostgreSQL "
-            "and re-run tests/integration/checkpoint_prune_real_saver.py."
+            f"({type(exc).__name__}: {exc}). Do NOT merge PR4 on a skip: "
+            "start PostgreSQL and re-run "
+            "tests/integration/checkpoint_prune_real_saver.py."
         )
 
 
@@ -300,7 +317,8 @@ class TestRealSaverWritePruneResume:
         assert orphans, "retention prune must orphan some blobs for this test"
         assert expected_survivors, "healthy thread must keep referenced blobs"
 
-        # 3) DRY-RUN (default env): reports would-delete > 0, deletes NOTHING.
+        # 3) DRY-RUN (manual preview, ``destructive=False``):
+        # reports would-delete > 0, deletes NOTHING.
         # The sweep summary (``op=blob_prune_summary``) is emitted by the
         # prune module's OWN logger (daemon.services.checkpoint_prune),
         # NOT daemon.checkpoint_perf (which only carries the per-pair
@@ -309,7 +327,7 @@ class TestRealSaverWritePruneResume:
         with caplog.at_level(
             logging.INFO, logger="daemon.services.checkpoint_prune"
         ):
-            summary = await prune_unreferenced_blobs(adapter)
+            summary = await prune_unreferenced_blobs(adapter, destructive=False)
         assert summary.dry_run is True
         assert summary.total_deleted == 0
         assert summary.scanned_pairs >= 1
@@ -944,11 +962,14 @@ class TestRealSaverDryRunReport:
         fp_before = await blob_fingerprint(adapter, T)
         # Same logger correction as the dry-run test above: the summary
         # line comes from daemon.services.checkpoint_prune, not
-        # daemon.checkpoint_perf.
+        # daemon.checkpoint_perf. Manual preview path
+        # (``destructive=False``) — kwarg-less call lands on the
+        # destructive default since
+        # feature/blob-prune-default-on.
         with caplog.at_level(
             logging.INFO, logger="daemon.services.checkpoint_prune"
         ):
-            summary = await prune_unreferenced_blobs(adapter)
+            summary = await prune_unreferenced_blobs(adapter, destructive=False)
         assert summary.dry_run is True and summary.total_deleted == 0
         assert await blob_fingerprint(adapter, T) == fp_before
         # Per-pair line is now DEBUG; assert the per-sweep INFO summary

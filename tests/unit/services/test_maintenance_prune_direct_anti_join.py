@@ -8,10 +8,12 @@ Mirrors phase1-plan.md §C3 file-table row for
 * verify candidate iteration goes through ``find_all_thread_ns_pairs``
   (D21) and NOT ``find_excess_checkpoint_groups`` (whose HAVING clause
   would skip single-checkpoint threads);
-* verify the conservative ladder: dry-run by default, destructive only
-  when BOTH env flags are set, and — structurally — that the
-  ``delete_blobs_anti_join`` call site is unreachable when the gate is
-  off (AST dominance check + runtime sentinel);
+* verify the new destructive-default contract (the conservative dual-arm
+  env flag ladder is GONE — feature/blob-prune-default-on). The
+  ``delete_blobs_anti_join`` call site is structurally unreachable when
+  the kwarg is explicitly ``False``; with the kwarg omitted (the auto
+  cycle path) the DELETE arm is the unconditional default. AST dominance
+  check + runtime sentinel enforce both halves of the contract;
 * verify per-pair failure isolation and the maintenance wiring
   (Operation E after D, isolation of blob-bucket failures).
 """
@@ -25,10 +27,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import daemon.services.checkpoint_prune as checkpoint_prune
-from daemon.services.checkpoint_prune import (
-    blob_prune_destructive_enabled,
-    prune_unreferenced_blobs,
-)
+from daemon.services.checkpoint_prune import prune_unreferenced_blobs
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PRUNE_MODULE = REPO_ROOT / "daemon" / "services" / "checkpoint_prune.py"
@@ -67,40 +66,72 @@ def as_pg(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    """Every test starts with the ladder in its default (dry-run) state."""
+    """Sentinel — no env vars named for the destructive ladder exist
+    anymore (feature/blob-prune-default-on retired ``CHECKPOINT_BLOB_PRUNE_DRY_RUN``
+    and ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE``). The fixture stays here as a
+    tripwire: any future re-introduction of env-state dependency in the
+    prune module will surface here as a stale ``delenv`` against an
+    undefined name, which is what we want.
+    """
     monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", raising=False)
     monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", raising=False)
 
 
-# ── env-flag matrix ────────────────────────────────────────────────────────────
+# ── destructive-default contract (replaces the historical env-flag matrix) ─
 
 
-class TestDestructiveGateMatrix:
-    """blob_prune_destructive_enabled() — the conservative ladder's keyhole."""
+class TestDestructiveDefaultContract:
+    """The blob prune is destructive-by-default since
+    feature/blob-prune-default-on. No env flag exists to opt out; the
+    ``destructive`` kwarg on ``prune_unreferenced_blobs`` is the only
+    arbiter."""
 
-    @pytest.mark.parametrize(
-        "dry,des,expected",
-        [
-            (None, None, False),   # defaults: dry-run ON, destructive OFF
-            ("1", None, False),
-            ("0", None, False),    # dry-run off alone is NOT enough
-            (None, "1", False),    # destructive alone is NOT enough
-            ("1", "1", False),     # both set but dry-run still on
-            ("0", "1", True),      # the ONLY arming combination
-            ("0", "0", False),
-            ("true", "1", False),  # only the literal "0" disarms dry-run
-        ],
-    )
-    def test_flag_matrix(self, monkeypatch, dry, des, expected):
-        if dry is None:
-            monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", raising=False)
-        else:
-            monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", dry)
-        if des is None:
-            monkeypatch.delenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", raising=False)
-        else:
-            monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", des)
-        assert blob_prune_destructive_enabled() is expected
+    def test_kwarg_default_is_destructive_true(self):
+        """The function signature is the contract — a default of
+        ``True`` proves the unconditional destructive path is the only
+        path the auto cycle and the manual execute (no kwarg) take."""
+        import inspect
+
+        sig = inspect.signature(prune_unreferenced_blobs)
+        assert sig.parameters["destructive"].default is True, (
+            "destructive kwarg default flipped away from True — "
+            "the auto cycle path is now silent"
+        )
+
+    async def test_no_kwargs_reaches_delete_arm_by_default(self, as_pg):
+        """ACCEPTANCE — case (a): no kwarg, no env vars set → the
+        DELETE arm is reached (proves the gate is gone)."""
+        adapter = _pg_adapter_mock([("t-1", "", 3)])
+        summary = await prune_unreferenced_blobs(adapter)
+        assert summary.dry_run is False
+        assert summary.destructive is True
+        adapter.count_blobs_anti_join.assert_not_awaited()
+        adapter.delete_blobs_anti_join.assert_awaited_once()
+
+    async def test_kwarg_false_overrides_destructive_default(self, as_pg):
+        """The ``destructive=False`` kwarg is the SOLE way to opt out;
+        with it set, the SELECT-only dry-run arm is reached and the
+        DELETE sentinel stays untouched."""
+        adapter = _pg_adapter_mock([("t-1", "", 3)])
+        adapter.delete_blobs_anti_join = AsyncMock(
+            side_effect=AssertionError("DELETE reached with kwarg False")
+        )
+        summary = await prune_unreferenced_blobs(adapter, destructive=False)
+        assert summary.dry_run is True
+        assert summary.destructive is False
+        adapter.count_blobs_anti_join.assert_awaited_once()
+        adapter.delete_blobs_anti_join.assert_not_awaited()
+
+    async def test_kwarg_true_explicit_matches_default(self, as_pg):
+        """``destructive=True`` explicit must match the kwarg-less default
+        in observable terms — protects against a refactor that changes
+        the default but leaves the explicit-True path behind."""
+        adapter = _pg_adapter_mock([("t-1", "", 3)])
+        summary_explicit = await prune_unreferenced_blobs(adapter, destructive=True)
+        assert summary_explicit.destructive is True
+        adapter2 = _pg_adapter_mock([("t-1", "", 3)])
+        summary_default = await prune_unreferenced_blobs(adapter2)
+        assert summary_default.destructive is True
 
 
 # ── structural unreachability of the DELETE ────────────────────────────────────
@@ -203,26 +234,31 @@ class TestStructuralGate:
         assert len(call_forms) == 1
 
     def test_runtime_gate_off_delete_never_called(self, as_pg, monkeypatch):
-        """Runtime half: flags OFF (default) → the mock's delete arm is
-        replaced by an exploding sentinel; the prune completes in dry-run
-        and the sentinel is never touched."""
+        """Runtime half: ``destructive=False`` kwarg → the mock's delete
+        arm is replaced by an exploding sentinel; the prune completes
+        in dry-run and the sentinel is never touched. (Negative half of
+        the contract: only the explicit ``False`` kwarg makes the
+        DELETE arm unreachable.)"""
         import asyncio
 
         adapter = _pg_adapter_mock([("t1", "", 3)], refs=4)
         adapter.delete_blobs_anti_join = AsyncMock(
-            side_effect=AssertionError("DELETE reached with gate OFF")
+            side_effect=AssertionError("DELETE reached with kwarg False")
         )
-        summary = asyncio.run(prune_unreferenced_blobs(adapter))
+        summary = asyncio.run(
+            prune_unreferenced_blobs(adapter, destructive=False)
+        )
         assert summary.dry_run is True
         assert summary.total_deleted == 0
         adapter.count_blobs_anti_join.assert_awaited_once_with("t1", "")
         adapter.delete_blobs_anti_join.assert_not_awaited()
 
-    def test_runtime_gate_armed_delete_called(self, as_pg, monkeypatch):
+    def test_runtime_default_destructive_delete_called(self, as_pg):
+        """Positive half of the contract: kwarg omitted (the auto
+        cycle path) → DELETE arm reached unconditionally. The OLD
+        "armed env ⇒ DELETE" test retired; this is the new contract."""
         import asyncio
 
-        monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", "0")
-        monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", "1")
         adapter = _pg_adapter_mock([("t1", "", 3)], refs=4)
         adapter.delete_blobs_anti_join = AsyncMock(return_value=(7, 1234))
         summary = asyncio.run(prune_unreferenced_blobs(adapter))
@@ -240,6 +276,10 @@ class TestZeroRefsFailSafe:
     """0 refs + remaining checkpoints ⇒ SKIP + ERROR + zero deletes."""
 
     def test_detection_error_log_and_prevention_zero_deletes(self, as_pg, caplog):
+        # Use ``destructive=False`` so the healthy thread goes down the
+        # dry-run arm (test follows the existing SELECT-only path on the
+        # count side; the destructive default is exercised by other
+        # tests in this file).
         adapter = _pg_adapter_mock([("thread-a", "", 2), ("thread-b", "", 2)])
         # thread-a: extraction broken (0 refs); thread-b: healthy.
         adapter.count_refs_for_blob_thread = AsyncMock(side_effect=[0, 9])
@@ -248,7 +288,9 @@ class TestZeroRefsFailSafe:
         import asyncio
 
         with caplog.at_level(logging.ERROR, logger="daemon.services.checkpoint_prune"):
-            summary = asyncio.run(prune_unreferenced_blobs(adapter))
+            summary = asyncio.run(
+                prune_unreferenced_blobs(adapter, destructive=False)
+            )
 
         # DETECTION — an ERROR line naming the fail-safe and the thread.
         error_lines = [
@@ -264,10 +306,10 @@ class TestZeroRefsFailSafe:
         assert adapter.count_blobs_anti_join.await_count == 1
         assert adapter.delete_blobs_anti_join.assert_not_awaited() is None
 
-    def test_fail_safe_trips_even_when_destructive(self, as_pg, monkeypatch, caplog):
-        """The fail-safe outranks the destructive flag: zero refs ⇒ no delete."""
-        monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DRY_RUN", "0")
-        monkeypatch.setenv("CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE", "1")
+    def test_fail_safe_trips_even_when_destructive(self, as_pg, caplog):
+        """The fail-safe outranks the destructive kwarg: zero refs ⇒ no
+        delete — even on the unconditional default path (no env, no
+        kwarg)."""
         adapter = _pg_adapter_mock([("thread-x", "", 4)], refs=0)
         adapter.delete_blobs_anti_join = AsyncMock(return_value=(42, 4200))
         import asyncio
@@ -315,13 +357,18 @@ class TestCandidateIteration:
         adapter.find_excess_checkpoint_groups.assert_not_awaited()
 
     def test_single_checkpoint_threads_are_candidates(self, as_pg):
-        """D21: pairs with count == 1 are enumerated (HAVING would drop)."""
+        """D21: pairs with count == 1 are enumerated (HAVING would drop).
+
+        Under the new destructive-default contract, the lone pair
+        reaches the destructive DELETE arm; the assertion checks the
+        DELETE arm fired and the SELECT arm did not."""
         adapter = _pg_adapter_mock([("only", "", 1)])
         import asyncio
 
         summary = asyncio.run(prune_unreferenced_blobs(adapter))
         assert summary.scanned_pairs == 1
-        adapter.count_blobs_anti_join.assert_awaited_once()
+        adapter.delete_blobs_anti_join.assert_awaited_once_with("only", "")
+        adapter.count_blobs_anti_join.assert_not_awaited()
 
     def test_max_refs_cap_skips_pair(self, as_pg):
         adapter = _pg_adapter_mock([("big", "", 10)], refs=100_001)
@@ -329,20 +376,23 @@ class TestCandidateIteration:
 
         summary = asyncio.run(prune_unreferenced_blobs(adapter))
         assert ("big", "", "MAX_REFS_EXCEEDED") in summary.skipped
-        adapter.count_blobs_anti_join.assert_not_awaited()
+        adapter.delete_blobs_anti_join.assert_not_awaited()
 
     def test_per_pair_error_isolation(self, as_pg):
-        """One exploding pair never breaks the cycle for the others."""
+        """One exploding pair never breaks the cycle for the others.
+
+        Under the destructive default, the healthy pair reaches the
+        DELETE arm (not the count arm)."""
         adapter = _pg_adapter_mock([("bad", "", 2), ("good", "", 2)])
         adapter.count_refs_for_blob_thread = AsyncMock(
             side_effect=[RuntimeError("boom"), 3]
         )
-        adapter.count_blobs_anti_join = AsyncMock(return_value=(1, 10))
+        adapter.delete_blobs_anti_join = AsyncMock(return_value=(1, 10))
         import asyncio
 
         summary = asyncio.run(prune_unreferenced_blobs(adapter))  # must not raise
         assert ("good", "",) not in [(s[0], s[1]) for s in summary.skipped]
-        adapter.count_blobs_anti_join.assert_awaited_once_with("good", "")
+        adapter.delete_blobs_anti_join.assert_awaited_once_with("good", "")
 
     def test_empty_candidates_short_circuits(self, as_pg):
         adapter = _pg_adapter_mock([])
