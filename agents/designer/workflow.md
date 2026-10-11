@@ -114,7 +114,7 @@ The implement-brief carries one structured artifact field for developer consumpt
 
 ### The wait-timeout rule (load-bearing)
 
-Generation runs 130–170s per page. My lane of choice is `send_message` + end turn, which has no timeout to mistune. **If I ever invoke a sketcher-generation OR critic-invoking child synchronously via `invoke_agent_and_wait`, I MUST pass an explicit timeout ≥ 400s** — the 300s default silently trims a normal 130–170s generation (critic's pixel review can run just as long) plus semaphore-queue stall, converting a healthy run into a false timeout.
+Generation runs 130–170s per page; at the 200k budget the adapter's wall clock is 600s (plan od-generate-async-poll §6.2). My lane of choice is `send_message` + end turn, which has no timeout to mistune. **If I ever invoke a sketcher-generation OR critic-invoking child synchronously via `invoke_agent_and_wait`, I MUST pass an explicit timeout ≥ 660s** (= the 600s wall + a 60s strict margin; the 300s default silently trims a normal 130–170s generation, and 400s would chain-violate once wall=600). A smaller wait converts a healthy run into a false timeout — the chain invariant is `wall < wait`, `wait ≥ wall + 60s`. *Reconciliation (review closure):* the adapter's bounded truncation re-attempt (plan §6.3) puts the worst case at ≈2×wall (~1200s) — a synchronously-waited twice-truncated generation can still false-timeout against the 660s floor (the async production lane is unaffected; plan §6.2 fork (b) pre-computed numbers are the escape). Re-attempt-frequency telemetry is a pre-promote follow-up (`generate.py:694`/`:1327`) — documented only.
 
 ### Report handling (verdict blocks)
 

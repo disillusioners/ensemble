@@ -4,7 +4,7 @@ Mirrors the closure-injection pattern of ``daemon.tools.chart_tools``:
 ``create_compare_tools(manager, current_instance_id)`` is invoked from
 ``create_instance_tools`` to assemble the per-instance tool list. The
 generated ``compare_images`` tool delegates to the ``image-comparator``
-agent via ``invoke_agent_and_wait`` (600 s, never-raise) and returns
+agent via ``invoke_agent_and_wait`` (660 s, never-raise) and returns
 a structured findings artifact.
 
 Category contract
@@ -50,7 +50,7 @@ wired — see ``_ensure_monitor_kv_recorded`` for the precedence rule.
 
 Expected latency (recorded in the tool docstring per AC-6)
 ----------------------------------------------------------
-One 600 s-capped blocking call per compare. The shared 4-slot
+One 660 s-capped blocking call per compare. The shared 4-slot
 invoke semaphore serializes compares behind any concurrent
 charter / explorer / image-reader call — no day-1 fan-out compare
 loops. If a refinement turn needs a second compare, the
@@ -94,6 +94,15 @@ if TYPE_CHECKING:
     from daemon.manager import InstanceManager
 
 logger = logging.getLogger(__name__)
+
+# Synchronous comparator-dispatch wait (plan od-generate-async-poll §6.2:
+# the pipeline's in-code synchronous child-dispatch wait — the ONLY
+# invoke_agent_and_wait site in the designer→sketcher→critic lane —
+# rides the same workflow.md wait-timeout rule as a sketcher-generation
+# child: wait ≥ adapter wall (600 s) + 60 s strict margin. Bumped
+# 600→660 in the SAME atomic changeset as the §6.2 budget chain so the
+# chain invariant (wall < wait, wait ≥ wall + 60s) holds code-side.)
+_COMPARATOR_DISPATCH_WAIT_S: float = 660.0
 
 # ── Comparator-reuse module state ────────────────────────────────────────────
 #
@@ -360,7 +369,7 @@ async def _reuse_comparator(
     comparator_id: str,
     message: str,
     caller_id: str,
-    timeout: float = 600.0,
+    timeout: float = _COMPARATOR_DISPATCH_WAIT_S,
 ) -> str:
     """Register → enqueue → wait on the caller's EXISTING comparator instance.
 
@@ -1236,7 +1245,7 @@ def create_compare_tools(
         criteria reference an approved spec (D6 hard rule).
 
         The tool blocks until the comparator produces its findings
-        (default timeout = 600 s) and returns the agent's text —
+        (default timeout = 660 s) and returns the agent's text —
         the JSON-encoded findings schema — directly to the caller.
         Paste it into your response without re-wrapping.
 
@@ -1424,7 +1433,7 @@ def create_compare_tools(
                     comparator_id=comparator_id,
                     message=compare_message,
                     caller_id=current_instance_id,
-                    timeout=600.0,
+                    timeout=_COMPARATOR_DISPATCH_WAIT_S,
                 )
                 # Busy / paused / enqueue / timeout paths return an
                 # ``Error: ...`` string. Schema success returns the
@@ -1475,7 +1484,7 @@ def create_compare_tools(
                 instance_name=(
                     f"compare-{image_a[:6]}-vs-{image_b[:6]}"
                 ),
-                timeout=600.0,
+                timeout=_COMPARATOR_DISPATCH_WAIT_S,
                 return_instance_id=True,
                 images=images_param,
             )
@@ -1491,7 +1500,7 @@ def create_compare_tools(
         if raw is None:
             return _envelope(
                 _KIND_TIMEOUT,
-                message="Comparator timed out after 600s.",
+                message=f"Comparator timed out after {_COMPARATOR_DISPATCH_WAIT_S:g}s.",
             )
         if isinstance(raw, str) and raw.startswith("Error:"):
             return _envelope(

@@ -1,9 +1,9 @@
 # Approver Active State
 
-Plan: Snapshot UI/UX Dedicated Page (dedicated /snapshots page: relocate snapshot-creation toggle + usage metrics out of Settings; new server-paginated snapshot list filterable by project/agent/tag/status/age with detail drawer; read-only BE list/detail/metrics endpoints per existing API conventions) — plan package .agents/shared/planning/snapshot-uiux/ (plan-overview, be-plan, fe-plan, sequencing, design/ spec+amendment+mockup), worktree /home/nea/ensemble-src-wt-snapshot-uiux, branch feature/snapshot-uiux
-Slug: snapshot-uiux
-Status: ESCALATED
-Iteration: 003 (001 REJECTED 10-05 · 002 REJECTED 10-05 · 003 REJECTED 10-05 → ESCALATED)
-Started: 2026-10-05T20:05:38Z
-Last Verdict: REJECTED (iteration 003, 2026-10-05 — MAX ITERATIONS REACHED (3), ESCALATED. Fresh workers: A f4b99283 REJECTED 3 blocking / B 6b89ca00 REJECTED 4 blocking / C 5da65cf2 REJECTED 2 blocking → 8 blocking after merge. All iter-002 fixes verified applied; residual defects: 1 stale count word (overview:47 "36" vs pinned 44 — 3rd recurrence of the class), 2 non-executable gate commands (pytest cwd/venv; playwright testDir + missing npm bootstrap + port hygiene), 3 BE skeleton symbol-surface gaps (imports Snapshot/SnapshotUsageMetricsResponse/Response + undefined _proxy helper), 2 FE wiring contradictions (drawer data-flow owner; seenAgents unwirable+untested). Full detail: snapshot-uiux-tracking.md)
-Note: ESCALATED after 3 rejections — no further approver iterations without user/Leader direction (re-approval would require explicit reset to Iteration 001). Prior: scheduled-tasks APPROVED 001 2026-10-01; maintenance-console APPROVED 001 2026-09-26; midflight-qa-channel APPROVED 001 2026-09-21; clipboard-image-chat APPROVED 001 2026-09-19.
+Plan: od-generate-async-poll — fix the 120s proxy read-window ceiling that kills long OD (OpenDesign) generation calls (130-170s natural budget; Cloudflare 524 at 120s). Artifact: .agents/shared/planning/od-generate-async-poll/architecture-decision.md (252 lines; decision core + implementation brief). Dual-repo scope: ensemble worktree /home/nea/ensemble-src-wt-od-generate-async-poll + Go proxy worktree /home/nea/Code/opensource-projects/llm-supervisor-proxy-wt-od-generate-async-poll, branch feature/od-generate-async-poll. Hard constraints: NO deploy/restart of live proxy (user-gated), 100% backward-compatible clients, no ensemble promote.
+Slug: od-generate-async-poll
+Status: APPROVED
+Iteration: 002 APPROVED 2026-10-10T21:14Z — workers 9392595f (decision-approval) APPROVED / 7a6db6fd (plan-approval) APPROVED, 0 blocking, closure verified. (001 REJECTED 2026-10-10 — 1 blocking: §6.2 max_tokens touch-list incomplete; workers 61b38619 APPROVED / 3b2119e5 REJECTED)
+Started: 2026-10-10T20:50:00Z
+Last Verdict: APPROVED (iteration 002, 2026-10-10T21:14Z — 0 blocking; iteration-001 blocking closed and verified in code; 4 deduped notes, all non-blocking citation-hygiene; full detail: od-generate-async-poll-tracking.md)
+Note: Hybrid artifact -> 2 workers (decision-approval on decision core / plan-approval on implementation brief). Prior worktree active.md record (superseded): snapshot-uiux ESCALATED 10-05 after 3 rejections, superseded by v2 lane shipped 10-10.

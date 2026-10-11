@@ -782,7 +782,12 @@ class TestCompareImagesReuse:
         kwargs = mock_invoke.call_args.kwargs
         assert kwargs["agent_id"] == "image-comparator"
         assert kwargs["return_instance_id"] is True
-        assert kwargs["timeout"] == 600.0
+        # §6.2 chain: the dispatch wait rides the module constant
+        # (wall 600 + 60 strict margin = 660) — assert against the
+        # constant + the chain invariant so they cannot drift apart.
+        from daemon.tools.compare_tools import _COMPARATOR_DISPATCH_WAIT_S
+        assert kwargs["timeout"] == _COMPARATOR_DISPATCH_WAIT_S
+        assert kwargs["timeout"] >= 660.0
         assert kwargs["parent_id"] == "test-instance-id"
         manager.enqueue_message.assert_not_awaited()
 

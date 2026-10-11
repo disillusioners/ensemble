@@ -46,7 +46,17 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-__all__ = ["declared_opendesign_ports"]
+__all__ = ["declared_opendesign_ports", "DEFAULT_MAX_TOKENS"]
+
+# The Port's declared max_tokens default — the 200k vision-target budget
+# (plan od-generate-async-poll §6.2: the ATOMIC budget-chain
+# reconciliation; 64K was the pre-Phase-2 default). Single shared
+# constant: generate.py's dataclass default + execute_dict fallbacks
+# reference THIS declaration so the four live sites can never drift
+# (any link left behind silently becomes the new min() killer — the
+# Oct-9 failure family). The 200000 upper clamp in the schema below is
+# the Port's hard ceiling (also the inner-timeout divisor input).
+DEFAULT_MAX_TOKENS: int = 200000
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +99,7 @@ _PORT_GENERATE: Dict[str, Any] = {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 200000,
-                    "default": 64000,
+                    "default": DEFAULT_MAX_TOKENS,
                 },
                 "skip_discovery_brief": {"type": "boolean", "default": False},
                 "design_system": {"type": "string"},
