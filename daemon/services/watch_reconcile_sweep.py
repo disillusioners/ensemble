@@ -252,6 +252,8 @@ class WatchReconcileSweepService:
         fired = 0
         retired = 0
         scanned = 0
+        stored_released = 0
+        stored_rehydrated = 0
         try:
             result = (
                 await self._job_queue_service
@@ -280,11 +282,36 @@ class WatchReconcileSweepService:
                 exc_info=True,
             )
 
-        if fired or retired:
+        # Option A depth 4 (fix e8a61da3): stored-watch GC leg — the
+        # retry-never-arrives carrier. Runs AFTER the held-watch
+        # reconcile in its OWN log-and-continue fence: a failure in
+        # either leg must not starve the other. CancelledError is NOT
+        # caught here (bare ``except Exception``) so the loop's
+        # shutdown re-raise contract (``_run`` at the CancelledError
+        # handler) stays intact.
+        try:
+            stored = (
+                await self._job_queue_service.reconcile_stored_watches()
+            )
+            stored_released = int(stored.get("released", 0))
+            stored_rehydrated = int(stored.get("rehydrated", 0))
+        except Exception as stored_err:  # noqa: BLE001 — log-and-continue
+            self._errors_total += 1
+            logger.warning(
+                f"WatchReconcileSweepService: tick "
+                f"{self._ticks_total} stored-watch GC leg failed: "
+                f"{type(stored_err).__name__}: {stored_err} — "
+                "next tick will retry",
+                exc_info=True,
+            )
+
+        if fired or retired or stored_released or stored_rehydrated:
             logger.info(
                 f"WatchReconcileSweepService: tick "
                 f"{self._ticks_total} scanned={scanned} "
                 f"fired={fired} retired={retired} "
+                f"stored_released={stored_released} "
+                f"stored_rehydrated={stored_rehydrated} "
                 f"(cumulative_fired={self._fired_total}, "
                 f"cumulative_retired={self._retired_total})"
             )
@@ -319,6 +346,8 @@ class WatchReconcileSweepService:
             "fired": fired,
             "retired": retired,
             "scanned": scanned,
+            "stored_released": stored_released,
+            "stored_rehydrated": stored_rehydrated,
             "cumulative_fired": self._fired_total,
             "cumulative_retired": self._retired_total,
             "cumulative_errors": self._errors_total,

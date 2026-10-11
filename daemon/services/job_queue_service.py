@@ -309,6 +309,17 @@ class JobQueueService:
         """
         self._watcher_repo = watcher_repo
 
+    def set_stored_watch_repo(self, stored_watch_repo: Any) -> None:
+        """Set the stored-watch quarantine repository (Option A, fix
+        e8a61da3).
+
+        Wired in the api lifespan next to ``set_watcher_repo``. The GC
+        leg (:meth:`reconcile_stored_watches`) no-ops (zero-counters
+        dict) while unset — the same silent-no-op contract the held-
+        watch reconcile uses for its unwired seams.
+        """
+        self._stored_watch_repo = stored_watch_repo
+
     def set_work_resolver(self, work_resolver: Any) -> None:
         """Set the WorkResolverService for kind-agnostic notification routing.
 
@@ -1044,6 +1055,218 @@ class JobQueueService:
             "retired": retired,
             "scanned": scanned,
             "orphan_released": orphan_released,
+        }
+
+    async def reconcile_stored_watches(
+        self,
+        *,
+        limit: int = 64,
+    ) -> dict[str, int]:
+        """GC leg for recovery-armed stored watches (Option A depth 4,
+        fix e8a61da3 — the retry-never-arrives carrier).
+
+        Bounded, time-boxed candidate scan (oldest-first, capped at
+        ``limit`` rows) over ``stored_watches`` rows still ``armed``
+        whose ``created_at`` is older than
+        ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (6h — the same
+        zombie-backstop window the mission-live guard uses, so this
+        leg only ever touches watches whose coverage window has
+        genuinely expired). Per row, in order:
+
+        1. **Carrier fence (late-child-arrival marker)** — if a
+           ``job_watchers`` row still exists on ``retry_work_id`` for
+           the watcher, the natural path owns coverage: CAS
+           ``armed → released`` and move on.
+        2. **Legitimate-consume check** — carrier gone but the retry
+           work resolves TERMINAL and the mission (evaluated from the
+           stored ``mission_instance_id`` root via the canonical
+           ``evaluate_mission_live``) is ALSO terminal: the carrier was
+           consumed at the true mission-terminal moment (C1 shape 4 —
+           that delivery WAS the coverage). CAS ``armed → released``.
+        3. **Loss case → rehydrate** — everything else (retry never
+           arrived / was purged / carrier lost while the mission or
+           the retry is still live): re-insert a PURE
+           ``mission_terminal`` carrier row on ``original_work_id``
+           (``add_watch`` UPSERT), then CAS ``armed → rehydrated``.
+           The pure-``mission_terminal`` row is held (never delivered)
+           while the mission is live, claimed + delivered exactly once
+           at true mission terminal by the existing held-watch
+           reconcile, and is IMMUNE to the zombie-GC retire branch
+           because ``original_work_id`` always resolves (the cancelled
+           parent task row persists).
+
+        Ordering: the UPSERT runs BEFORE the status CAS. A concurrent
+        tick that already transitioned the row makes the CAS lose —
+        but the UPSERT is idempotent (same events list), so the
+        double-run is harmless. The reverse order would mark
+        ``rehydrated`` without a carrier on an UPSERT throw.
+
+        Guard-error direction on the legitimate-consume check: the
+        canonical guard fails OPEN (``live=False, error=True``) —
+        combined with a terminal retry this RELEASES the row (no
+        rehydrate) with a WARN. Releasing risks a rare silent loss;
+        rehydrating would risk a DOUBLE terminal delivery — the
+        zombie-GC precedent (which retires, never double-delivers)
+        picks at-most-once here. Documented deliberately.
+
+        Sweep contract: this method NEVER raises for per-row failures
+        (log-and-continue per row); a seam-level failure returns the
+        zero-counters dict. ``asyncio.CancelledError`` propagates (the
+        caller's loop re-raises it at shutdown).
+
+        Returns:
+            ``{"scanned", "released", "rehydrated", "errors"}``.
+        """
+        released = 0
+        rehydrated = 0
+        errors = 0
+        # ``getattr`` defensive: at least one commission pin test
+        # constructs JobQueueService-shaped doubles that bypass
+        # ``__init__`` (the sweep's log-and-continue contract must
+        # hold for those too — the GC leg no-ops, never raises).
+        stored_watch_repo = getattr(self, "_stored_watch_repo", None)
+        if (
+            stored_watch_repo is None
+            or self._watcher_repo is None
+            or self._work_resolver is None
+        ):
+            return {
+                "scanned": 0,
+                "released": 0,
+                "rehydrated": 0,
+                "errors": 0,
+            }
+
+        try:
+            candidates = await asyncio.to_thread(
+                stored_watch_repo.list_aged_armed,
+                older_than_seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+                limit=limit,
+            )
+        except Exception as scan_err:  # noqa: BLE001 — log-and-continue
+            logger.warning(
+                "reconcile_stored_watches: candidate scan failed: %s "
+                "— tick continues with zero rows touched",
+                scan_err,
+            )
+            return {
+                "scanned": 0,
+                "released": 0,
+                "rehydrated": 0,
+                "errors": 1,
+            }
+
+        for row in candidates:
+            try:
+                # 1. Carrier fence — does the re-armed row still live?
+                carriers = await asyncio.to_thread(
+                    self._watcher_repo.get_watchers_for_job,
+                    row.retry_work_id,
+                )
+                carrier_alive = any(
+                    w.instance_id == row.watcher_instance_id
+                    for w in carriers or []
+                )
+                if carrier_alive:
+                    if await asyncio.to_thread(
+                        stored_watch_repo.transition_status,
+                        row.stored_watch_id,
+                        "released",
+                    ):
+                        released += 1
+                    continue
+
+                # 2. Legitimate-consume check (carrier gone).
+                record = await asyncio.to_thread(
+                    self._work_resolver.resolve_work,
+                    row.retry_work_id,
+                )
+                retry_terminal = (
+                    record is not None
+                    and _work_status_is_terminal(
+                        getattr(record, "status", None)
+                    )
+                )
+                if retry_terminal:
+                    verdict = await evaluate_mission_live(
+                        instance_repository=getattr(
+                            self._instance_manager,
+                            "_instance_repository",
+                            None,
+                        ),
+                        instance_id=row.mission_instance_id,
+                        bus_pending_count=None,
+                    )
+                    if not verdict.live:
+                        if verdict.error:
+                            logger.warning(
+                                "reconcile_stored_watches: guard "
+                                "fail-open decided RELEASE for stored "
+                                "watch %s (orig=%s retry=%s) — "
+                                "at-most-once direction per zombie-GC "
+                                "precedent: %s",
+                                row.stored_watch_id[:8],
+                                row.original_work_id[:8],
+                                row.retry_work_id[:8],
+                                verdict.reason,
+                            )
+                        if await asyncio.to_thread(
+                            stored_watch_repo.transition_status,
+                            row.stored_watch_id,
+                            "released",
+                        ):
+                            released += 1
+                        continue
+
+                # 3. Loss case — rehydrate a pure mission_terminal
+                #    carrier on the ORIGINAL work_id (see docstring).
+                await asyncio.to_thread(
+                    self._watcher_repo.add_watch,
+                    job_id=row.original_work_id,
+                    instance_id=row.watcher_instance_id,
+                    watch_events=["mission_terminal"],
+                )
+                if await asyncio.to_thread(
+                    stored_watch_repo.transition_status,
+                    row.stored_watch_id,
+                    "rehydrated",
+                ):
+                    rehydrated += 1
+                logger.warning(
+                    "reconcile_stored_watches: rehydrated stored watch "
+                    "(orig=%s retry=%s watcher=%s) — carrier was lost "
+                    "without a legitimate mission-terminal consume; "
+                    "pure mission_terminal row re-armed on the "
+                    "original work_id",
+                    row.original_work_id[:8],
+                    row.retry_work_id[:8],
+                    row.watcher_instance_id[:8],
+                )
+            except Exception as row_err:  # noqa: BLE001 — per-row fence
+                errors += 1
+                logger.warning(
+                    "reconcile_stored_watches: per-row failure for "
+                    "stored watch %s (orig=%s): %s — row left armed "
+                    "for the next tick",
+                    getattr(row, "stored_watch_id", "?")[:8],
+                    getattr(row, "original_work_id", "?")[:8],
+                    row_err,
+                )
+
+        if released or rehydrated or errors:
+            logger.info(
+                "reconcile_stored_watches: scanned=%d released=%d "
+                "rehydrated=%d errors=%d",
+                len(candidates),
+                released,
+                rehydrated,
+                errors,
+            )
+        return {
+            "scanned": len(candidates),
+            "released": released,
+            "rehydrated": rehydrated,
+            "errors": errors,
         }
 
     # ========== Public API ==========
