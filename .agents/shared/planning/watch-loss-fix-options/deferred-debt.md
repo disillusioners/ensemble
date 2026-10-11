@@ -197,3 +197,79 @@ trivial — add ``event_kind IN ('JOB_COMPLETED',
 'JOB_COMPLETED_RECOVERY')`` (or the equivalent at the time)
 to the TTL exempt list — but it MUST land BEFORE the TTL
 itself, not after.
+
+## (g) watch-events JSON parse helper duality — two production parsers
+
+The tidier verdict flagged that ``watch_events`` JSON decoding exists
+as two production parsers with DIVERGENT malformed-JSON edges: the F6
+hook's ``_parse_watch_events`` (``turn_transitions.py:925`` — parses
+raw SELECT values inside the retry transaction) and the notify-lane's
+``watch_events`` subscription handling in ``work_notifier.py`` (the
+C1 partition filter). Unifying them into one shared helper is a
+BEHAVIOR decision (which malformed-JSON direction wins for each
+lane), not a mechanical fold — deferred so the direction is chosen
+deliberately, not smuggled in by a refactor.
+
+**Trigger to revisit.** The next commission that touches either lane
+(the F6 hook, the C1 partition, or the watch-events column format).
+
+## (h) dead `get_by_original_work` — delete-or-consume decision pending
+
+``StoredWatchRepository.get_by_original_work``
+(``stored_watch_repository.py:110``) has ZERO callers — production or
+test (grep-verified during the tidier round, 2026-10-11); its own
+docstring claims "tests + audit" but no test exercises it. Two clean
+outs: delete the method, or make a consumer real (the GC leg could
+use it for provenance lookup when logging rehydrate decisions).
+Decision pending; recorded so the next repository-touching lane does
+not re-triage it as a fresh finding.
+
+## (i) sweep docstring return-contract extension + cumulative stored counters
+
+``reconcile_stored_watches`` documents its return contract as
+``{"scanned", "released", "rehydrated", "errors"}``
+(``job_queue_service.py:1117-1118``); the counters are per-tick,
+never cumulative. Any new counter MUST extend that documented
+contract in the same commit — the docstring is the contract. If
+operators ever need cross-tick totals (cumulative stored/rehydrated
+counts), that is a persistent-stats decision (event-table rows or a
+metrics lane), not a return-dict extension. Deferred; no current
+consumer asks for cumulative numbers.
+
+## (j) three tidier observations — deferred to reviewer/architect
+
+Each needs a design ruling, not a mechanical fix; recorded from the
+tidier verdict with anchors verified on disk:
+
+1. **Unique-enforcement duality on fresh SQLite.** The model declares
+   a ``UniqueConstraint`` (``stored_watch_models.py``) while the
+   migration declares a same-named ``CREATE UNIQUE INDEX`` — the two
+   fresh-DB paths (``create_all`` vs migration runner) yield
+   different enforcement objects (inline constraint vs standalone
+   unique index). Behaviorally equivalent for the hook's
+   ``ON CONFLICT`` target today; unifying the declaration style is a
+   schema-contract decision.
+2. **``instance_id or ""`` coercion in E2 witness rows**
+   (``job_recovery_service.py:758``) — a None instance_id is coerced
+   to empty string on the recovery finalize boundary. Deliberate
+   sentinel vs data-fidelity gap — needs an owner ruling.
+3. **Dialect-sniff fallback direction** (``turn_transitions.py:850-853``;
+   ruling cited :848-850) — ``dialect_name == "postgresql"`` gates
+   the JSONB CAST; an unknown/absent dialect silently takes the
+   non-CAST (SQLite) branch. Fail-open-to-TEXT vs fail-closed is a
+   deliberate choice to confirm.
+
+## (k) remaining Lows (tidier verdict, batch-recorded)
+
+Cosmetic, zero behavioral content; bundle into any future lane
+already touching these files rather than spending a dedicated
+commit:
+
+- unused tokens left from earlier fix rounds;
+- ``_if`` CAS marker rename (the marker name reads like a conditional);
+- ``getattr`` uniformity in the GC leg's repo/seam access;
+- Engine typing on the sweep seam parameters;
+- ``_resolve_mission_instance_id`` return annotation;
+- deferred-debt section ordering — the "Related out-of-scope
+  threads" block sits between (d) and (e); on the next substantive
+  edit, move it to the end so the lettering runs unbroken.
