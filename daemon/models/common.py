@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -177,6 +177,20 @@ class ReadyzResponse(BaseModel):
     draining: bool = Field(
         default=False,
         description="Reserved Phase-4 drain-controller flag. Always false in Phase 1.",
+    )
+    auth_dependency_status: Optional[str] = Field(
+        default=None,
+        description=(
+            "OAuth2 auth-subsystem advisory state (T3.9 / FR-30 enum): "
+            "'ok' (IdP reachable, sessions validate), 'degraded' (IdP "
+            "unreachable — existing sessions still validate PG-only; new "
+            "logins 503), 'unconfigured' (auth enabled but no redirect "
+            "base). ABSENT (null) when auth is disabled — the OFF-state "
+            "body stays byte-identical to the pre-build contract. "
+            "ADVISORY ONLY: never affects status/components/reasons — the "
+            "verdict NEVER flips due to auth state (OD-9 / AC-31). Also "
+            "mirrored into detail.auth_dependency_status."
+        ),
     )
 
     model_config = ConfigDict(

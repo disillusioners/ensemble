@@ -24,6 +24,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
+from daemon.auth.decorators import scope_required
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/recovery", tags=["recovery"])
@@ -36,6 +38,7 @@ def _get_manager(request: Request) -> Any:
 
 @router.post(
     "/recover_report_delivery",
+    dependencies=[scope_required("auth:admin")],
     responses={
         200: {
             "description": (

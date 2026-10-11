@@ -498,3 +498,90 @@ class TestEnsEnvReadSourceOfTruth:
         )
         second = json.loads(second_json)
         assert second["OPENAI_BASE_URL"] == "https://second.example/v1"
+
+
+# ─── OAuth2 FR-16a deny-list (security-review minor-8) ────────────────────────
+
+
+class TestEnsembleAuthDenyList:
+    """``ENSEMBLE_AUTH_*`` is the OAuth2 configuration surface —
+    client secrets, ``BOOTSTRAP_TOKEN``, issuer/redirect material. The
+    tool is an UNMASKED reader, so the whole class is refused with a
+    structured error: values are never read, never returned. This deny
+    is hard-sequenced BEFORE any P4 mint-CLI code exists (FR-16a)."""
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_token_refused_even_when_set(
+        self, tool_by_name, env_snapshot
+    ):
+        """THE leg: a set ENSEMBLE_AUTH_BOOTSTRAP_TOKEN must never
+        surface — the refusal, not the value."""
+        env_snapshot.setenv(
+            "ENSEMBLE_AUTH_BOOTSTRAP_TOKEN", "ens_boot_super_secret_value"
+        )
+        result_json = await tool_by_name["ens_env_read"].ainvoke(
+            {"keys": ["ENSEMBLE_AUTH_BOOTSTRAP_TOKEN"]}
+        )
+        decoded = json.loads(result_json)
+        assert "error" in decoded
+        assert "ENSEMBLE_AUTH_BOOTSTRAP_TOKEN" in decoded["error"]
+        # The value never rides the result, in any shape.
+        assert "ens_boot_super_secret_value" not in result_json
+        assert decoded.get("ENSEMBLE_AUTH_BOOTSTRAP_TOKEN") is None
+
+    @pytest.mark.asyncio
+    async def test_client_secret_refused(self, tool_by_name, env_snapshot):
+        env_snapshot.setenv("ENSEMBLE_AUTH_CLIENT_SECRET", "s3cret-oauth")
+        result_json = await tool_by_name["ens_env_read"].ainvoke(
+            {"keys": ["ENSEMBLE_AUTH_CLIENT_SECRET"]}
+        )
+        decoded = json.loads(result_json)
+        assert "error" in decoded
+        assert "s3cret-oauth" not in result_json
+
+    @pytest.mark.asyncio
+    async def test_denied_keys_in_a_mixed_request_refuse_whole_call(
+        self, tool_by_name, env_snapshot
+    ):
+        """Fail-closed: one denied key poisons the whole request — the
+        allowed keys are NOT partially surfaced."""
+        env_snapshot.setenv("OPENAI_BASE_URL", "https://test.example/v1")
+        env_snapshot.setenv("ENSEMBLE_AUTH_ISSUER", "https://idp.example")
+        result_json = await tool_by_name["ens_env_read"].ainvoke(
+            {"keys": ["OPENAI_BASE_URL", "ENSEMBLE_AUTH_ISSUER"]}
+        )
+        decoded = json.loads(result_json)
+        assert "error" in decoded
+        assert "ENSEMBLE_AUTH_ISSUER" in decoded["error"]
+        assert "OPENAI_BASE_URL" not in decoded
+
+    @pytest.mark.asyncio
+    async def test_deny_prefix_is_case_insensitive(
+        self, tool_by_name, env_snapshot
+    ):
+        env_snapshot.setenv("ensemble_auth_bootstrap_token", "lower-secret")
+        result_json = await tool_by_name["ens_env_read"].ainvoke(
+            {"keys": ["ensemble_auth_bootstrap_token"]}
+        )
+        decoded = json.loads(result_json)
+        assert "error" in decoded
+        assert "lower-secret" not in result_json
+
+    @pytest.mark.asyncio
+    async def test_default_set_carries_no_denied_keys(
+        self, tool_by_name, env_snapshot
+    ):
+        """The curated default set stays deny-clean — a default call
+        never trips the refusal."""
+        result_json = await tool_by_name["ens_env_read"].ainvoke({})
+        decoded = json.loads(result_json)
+        assert "error" not in decoded
+        assert not any(
+            k.upper().startswith("ENSEMBLE_AUTH_")
+            for k in decoded["_keys_requested"]
+        )
+
+    def test_default_keys_constant_is_deny_clean(self):
+        assert not any(
+            k.upper().startswith("ENSEMBLE_AUTH_") for k in _DEFAULT_KEYS
+        )

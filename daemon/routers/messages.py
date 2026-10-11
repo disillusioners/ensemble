@@ -10,6 +10,7 @@ from typing import Any, AsyncGenerator
 from fastapi import APIRouter, HTTPException, Request, Response
 from langchain_core.messages import HumanMessage
 
+from daemon.auth.decorators import scope_required
 from daemon.constants import (
     INJECTION_ELIGIBLE_STATUSES,
     SSE_PING_INTERVAL,
@@ -157,7 +158,7 @@ async def _emit_injection_sse(
 
 
 # 1. POST /instances/{instance_id}/messages - Send message
-@router.post("/{instance_id}/messages")
+@router.post("/{instance_id}/messages", dependencies=[scope_required("messages:write")])
 async def send_message(
     instance_id: str,
     message: MessageCreate,
@@ -752,7 +753,7 @@ async def send_message(
 # contents can call this endpoint repeatedly and correlate via the
 # SSE ``injection_pending`` stream (which surfaces the queue depth on
 # every message).
-@router.get("/{instance_id}/injection")
+@router.get("/{instance_id}/injection", dependencies=[scope_required("instances:read")])
 async def get_pending_injection(instance_id: str, request: Request) -> dict:
     """Return the pending injection queue for ``instance_id``, if any.
 
@@ -802,7 +803,7 @@ async def get_pending_injection(instance_id: str, request: Request) -> dict:
 
 
 # 2. GET /instances/{instance_id}/messages/{message_id} - Get message status
-@router.get("/{instance_id}/messages/{message_id}")
+@router.get("/{instance_id}/messages/{message_id}", dependencies=[scope_required("instances:read")])
 async def get_message_status(instance_id: str, message_id: str, request: Request):
     """Get the status of a queued message.
 
@@ -911,7 +912,7 @@ async def get_message_status(instance_id: str, message_id: str, request: Request
 
 
 # 3. GET /instances/{instance_id}/events - SSE stream
-@router.get("/{instance_id}/events")
+@router.get("/{instance_id}/events", dependencies=[scope_required("instances:read")])
 async def stream_events(instance_id: str, request: Request):
     """SSE stream delivering checkpoint events."""
     manager = _get_manager(request)

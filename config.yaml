@@ -111,6 +111,45 @@ daemon:
   port: ${PORT:-8088}
 
 # ─────────────────────────────────────────────────────────────────────────
+# OAuth2 Authentication (Phase 1 config surface) — default OFF
+# ─────────────────────────────────────────────────────────────────────────
+# Auth is DISABLED by default: the shipped ``enabled: false`` keeps boot
+# behavior byte-identical to the pre-auth state, and every other auth
+# setting keeps its documented default (see the ENSEMBLE_AUTH_* table in
+# docs — requirements §6.1). With auth OFF the block below is silently
+# ignored and may be deleted entirely (pydantic handles absence).
+#
+# NOTE ON ENV VS YAML: only ``enabled`` is an active key here, and env
+# wins over this yaml for it (ENSEMBLE_AUTH_ENABLED=true enables auth
+# without touching this file). Every OTHER field is intentionally
+# commented out — uncommenting a literal would make the yaml value beat
+# the matching env var for that field. Prefer env vars for secrets.
+auth:
+  enabled: false
+
+# Operator-enable example (commented — flip ``enabled`` and provide the
+# rest to turn auth on; restart required, no live toggle in v1):
+#
+#   auth:
+#     enabled: true
+#     client_id: "ensemble-prod"                      # or env ENSEMBLE_AUTH_CLIENT_ID
+#     client_secret: "${ENSEMBLE_AUTH_CLIENT_SECRET}" # secret in env, not yaml
+#     issuer: "https://idp.example.com/"
+#     scopes: ["openid", "profile", "email"]
+#     session_ttl_seconds: 28800                      # 8h
+#     allowed_origins:                                # REQUIRED while auth is ON
+#       - "https://ensemble.example.com"              # (replaces wildcard+credentials CORS)
+#     # redirect_uri: "https://ensemble.example.com/api/auth/callback"  # EXACT-URI override
+#     # external_redirect_base: "https://ensemble.example.com"          # tier-1 base override (proxy deployments)
+#     cookie_samesite: "Lax"
+#     cookie_secure: true
+#     bearer_token_ttl_seconds: 2592000               # 30d
+#     docs_enabled: true
+#
+# Boot refuses (exit 78) when enabled=true is misconfigured — the ERROR
+# names each offending ENSEMBLE_AUTH_* env var exactly.
+
+# ─────────────────────────────────────────────────────────────────────────
 # Live-Views Subsystem (Phase 1 + Phase 2) — operator override model
 # ─────────────────────────────────────────────────────────────────────────
 # The daemon ships with sensible live_views defaults: the subsystem is

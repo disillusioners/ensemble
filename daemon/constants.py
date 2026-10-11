@@ -1116,3 +1116,47 @@ ENSEMBLE_AMBIENT_KV_FRESH: str = "ENSEMBLE_AMBIENT_KV_FRESH"
 # binding lands — B.S.8 registry discipline, same as the KV-ambient
 # names above.
 ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX: str = "ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX"
+
+# ── Auth (OAuth2) — Phase 1 constants (oauth2-auth phase1-plan T1.5) ─────────
+# CONSTANTS ONLY — no runtime consumer ships in Phase 1. Per the leaf-module
+# invariant above these are raw literals; P2 (token mint/verify) consumes the
+# scope names and P3 (middleware construction) consumes the public-path
+# derivation. Placement rationale: daemon/constants.py (the consolidated
+# constants registry) instead of a daemon/auth/ package skeleton — the auth
+# package materializes in P2/P3 and these values stay import-anything,
+# grep-able, and consistent with every other named constant.
+#
+# (AUTH_DEFAULT_PUBLIC_PATHS DELETED — security-review code-minor #4,
+# 2026-10-11: unreferenced since the D18 derivation replaced the
+# hand-listed fallback with route-metadata tagging; its "/api/auth/"
+# PREFIX entry was a future hazard — a consumer resurrecting the tuple
+# would silently re-publicize the reserved /api/auth/admin/* family.
+# The operative public/module-lane sets are derived at
+# daemon/middleware/auth.py from the route tags only.)
+
+# Scope-name taxonomy (§7.3 v1 minimum set; FR-18 groundwork). P2's
+# token-mint CLI and the P3 route-level scope check consume these names —
+# no scope string literal may appear outside this block once those phases
+# wire (same registry discipline as the env-name block above).
+AUTH_SCOPE_SYSTEM_READ: str = "system:read"
+AUTH_SCOPE_MCP_READ: str = "mcp:read"
+AUTH_SCOPE_INSTANCES_READ: str = "instances:read"
+AUTH_SCOPE_INSTANCES_WRITE: str = "instances:write"
+AUTH_SCOPE_JOBS_READ: str = "jobs:read"
+AUTH_SCOPE_JOBS_WRITE: str = "jobs:write"
+AUTH_SCOPE_MESSAGES_WRITE: str = "messages:write"
+AUTH_SCOPE_SOURCES_WRITE: str = "sources:write"
+AUTH_SCOPE_AUTH_ADMIN: str = "auth:admin"
+
+# Aggregate of the per-consumer minimum scopes above (§7.3 table rows).
+AUTH_KNOWN_SCOPES: tuple[str, ...] = (
+    AUTH_SCOPE_SYSTEM_READ,
+    AUTH_SCOPE_MCP_READ,
+    AUTH_SCOPE_INSTANCES_READ,
+    AUTH_SCOPE_INSTANCES_WRITE,
+    AUTH_SCOPE_JOBS_READ,
+    AUTH_SCOPE_JOBS_WRITE,
+    AUTH_SCOPE_MESSAGES_WRITE,
+    AUTH_SCOPE_SOURCES_WRITE,
+    AUTH_SCOPE_AUTH_ADMIN,
+)

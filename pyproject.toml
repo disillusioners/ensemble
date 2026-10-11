@@ -52,6 +52,13 @@ dependencies = [
     # transitive path cannot silently downgrade the manifest validation
     # pipeline (daemon.plugin_subsystem.manifest_reader dual-path primary).
     "jsonschema>=4.0.0",
+    # OAuth2 auth Phase 2 (T2.7 / AMEND v1.3 / F1): pyjwt was transitive
+    # only (via mcp). Declare it explicitly — same jsonschema-promotion
+    # precedent — so the ID-token validation lane
+    # (daemon/services/oauth_client.py) cannot silently lose its JWT
+    # library to a transitive-path change. The [crypto] extra pulls
+    # `cryptography` for RS256 verification of ID-tokens.
+    "pyjwt[crypto]>=2.8.0",
 ]
 
 [project.scripts]

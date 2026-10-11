@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from daemon.auth.decorators import scope_required
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.dead_letter_service import DeadLetterService
 # Defer-pending count and resolver access (``defer_pending_count`` /
@@ -92,6 +93,7 @@ async def _resolve_job_status(service: JobQueueService, job_id: str) -> str | No
 
 @router.delete(
     "/{job_id}",
+    dependencies=[scope_required("jobs:write")],
     responses={
         200: {"description": "Job cancelled or soft-deleted successfully"},
         400: {"description": "Job already deleted"},
@@ -224,6 +226,7 @@ async def delete_job(
 
 @router.post(
     "/{job_id}/cancel",
+    dependencies=[scope_required("jobs:write")],
     responses={
         200: {"description": "Job cancelled successfully"},
         400: {"description": "Job cannot be cancelled"},
@@ -352,6 +355,7 @@ async def cancel_job_endpoint(
 
 @router.post(
     "/{job_id}/restore",
+    dependencies=[scope_required("jobs:write")],
     responses={
         200: {"description": "Job restored successfully"},
         400: {"description": "Job cannot be restored (not deleted or terminal)"},
@@ -437,6 +441,7 @@ async def restore_job_endpoint(
 
 @router.post(
     "/{job_id}/retry",
+    dependencies=[scope_required("jobs:write")],
     responses={
         200: {"description": "Job requeued for retry"},
         400: {"description": "Job cannot be retried"},
@@ -598,6 +603,7 @@ async def retry_job(
 
 @router.get(
     "/cleanup/preflight",
+    dependencies=[scope_required("jobs:read")],
     response_model=CleanupPreflightResponse,
     responses={
         200: {"description": "System-wide bad-state + zombie instance counts"},
@@ -831,6 +837,7 @@ async def cleanup_preflight(request: Request):
 
 @router.post(
     "/cleanup",
+    dependencies=[scope_required("jobs:write")],
     response_model=JobCleanupResponse,
     responses={
         200: {"description": "Cleanup completed (counts of cancelled jobs)"},
@@ -950,6 +957,7 @@ async def cleanup_jobs(
 
 @router.post(
     "/defer-holders/{instance_id}/force-complete",
+    dependencies=[scope_required("jobs:write")],
     response_model=DeferHolderForceCompleteResponse,
     responses={
         200: {"description": "Holder terminated (or refused by the guard — see body)"},
@@ -1020,6 +1028,7 @@ async def force_complete_defer_holder(
 
 @router.post(
     "/defer-holders/{instance_id}/resend-foreground",
+    dependencies=[scope_required("jobs:write")],
     response_model=DeferHolderResendResponse,
     responses={
         200: {"description": "Deferred job(s) cancelled and re-sent foreground"},
@@ -1108,6 +1117,7 @@ async def resend_deferred_foreground(
 
 @router.post(
     "/{work_id}/answer",
+    dependencies=[scope_required("jobs:write")],
     responses={
         200: {"description": "Answer stored and delivered"},
         400: {"description": "question_pack_id mismatch (QUESTION_PACK_MISMATCH)"},

@@ -174,7 +174,7 @@ class TestMountRoutingIsolation:
         async def _spa_fallback(path: str):
             return JSONResponse({"error": "SPA fallback"}, status_code=200)
 
-        with TestClient(parent) as client:
+        with TestClient(parent, client=("127.0.0.1", 50000)) as client:
             response = client.get("/vscode/some-path")
 
         assert response.status_code == 503, (
@@ -218,7 +218,7 @@ class TestMountRoutingIsolation:
                 return JSONResponse({"error": "Not found"}, status_code=404)
             return JSONResponse({"error": "SPA fallback"}, status_code=200)
 
-        with TestClient(parent) as client:
+        with TestClient(parent, client=("127.0.0.1", 50000)) as client:
             response = client.get("/vscode/")
 
         # The mount matches /vscode/ before the catch-all does, so the
@@ -248,7 +248,7 @@ class TestMountRoutingIsolation:
         async def _spa_fallback(path: str):
             return JSONResponse({"error": "SPA fallback"}, status_code=200)
 
-        with TestClient(parent) as client:
+        with TestClient(parent, client=("127.0.0.1", 50000)) as client:
             response = client.get("/vscodefoo")
 
         # /vscodefoo must NOT reach the proxy mount (which would 503).
@@ -279,7 +279,7 @@ class TestMountRoutingIsolation:
         async def _spa_fallback(path: str):
             return JSONResponse({"error": "SPA fallback"}, status_code=200)
 
-        with TestClient(parent) as client:
+        with TestClient(parent, client=("127.0.0.1", 50000)) as client:
             # Manager reports running=True but port=1 is unreachable;
             # proxy will try httpx and fail. We just need to confirm
             # the SPA did NOT respond.
