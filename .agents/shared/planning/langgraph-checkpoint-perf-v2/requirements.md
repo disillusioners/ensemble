@@ -576,3 +576,37 @@ For backfill (Solution N), v2 MUST define explicit "coverage sufficient" criteri
 | NFR-10, NFR-11 | process-closure gap (v1 stopped at `c37c870c`) | C-1, C-20 |
 | NFR-12 | v1 PR2 review doc §3 (never-under-record) | C-11, C-12, C-13 |
 | NFR-13, NFR-14 | tester conventions (file-backed SQLite recipe, PEP 735) | C-6, C-7 |
+
+---
+
+## Superseded (2026-10-11)
+
+The dual-arm env-flag ladder described in this document — the
+``CHECKPOINT_BLOB_PRUNE_DRY_RUN=0`` AND ``CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1``
+conservative ladder that gated the destructive blob prune — is
+**gone**. As of `feature/blob-prune-default-on` (merged
+2026-10-11), destructive pruning of superseded checkpoint
+blobs is the **unconditional default** in the ensemble daemon.
+There is no env-var, config-flag, or on/off switch of any
+kind that disables it.
+
+The audits, hypotheses, and contracts recorded in this
+document are preserved as historical evidence (not
+rewritten), but the operational reality is now:
+
+* auto cycle + manual ``/execute`` confirmation → destructive,
+  no operator action required;
+* manual ``/dry-run`` preview path → SELECT-only (the only
+  remaining opt-out);
+* per-pair anti-join is LIMIT-batched within each (thread, ns)
+  pair (chunk size = `CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE`,
+  default 1000 rows per chunk, each chunk a separate
+  SERIALIZABLE transaction with bounded retry on SQLSTATE
+  40001 / 40P01).
+
+The current contract lives in
+`docs/runbooks/checkpoint-blob-prune-restore.md` (the
+rewrite for the default-on reality). For the historical
+record of the dual-arm gate being the only-arm path that
+reached the DELETE arm, see git log for the pre-default
+version of this document.

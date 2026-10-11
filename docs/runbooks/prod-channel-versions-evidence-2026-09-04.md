@@ -216,3 +216,15 @@ Nuances recorded (expected behavior, not drift — documented here so a future r
 - Status: **EVIDENCE CAPTURED** (§2 of the pre-enable checklist: query executed against prod, layout as expected, round-trip verified).
 - This does NOT by itself flip the destructive-enable flag: §1 (saver schema), §3 (7-day dry-run soak), §4 (real-saver suite), §5 (restore rehearsal), §6 (blob snapshot) still govern the ladder, and `CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE` remains default OFF.
 - No code change: this file is documentation-only.
+
+---
+
+## Historical note (2026-10-11)
+
+This doc is preserved as dated prod-channel evidence (the §2
+layout check + round-trip verification that gated the original
+PR4 enable flow). The conservative ladder it guarded
+(`CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE=1`) is GONE
+post-feature/blob-prune-default-on — destructive prune is
+unconditional. The current pre-flight checklist lives in
+`docs/runbooks/checkpoint-blob-prune-restore.md`.
