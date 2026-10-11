@@ -657,11 +657,14 @@ class PersistenceConfig(BaseSettings):
     # 1000 dead tuples still has <0.002% bloat — autovacuum will catch up).
     vacuum_dead_tup_min: int = Field(
         default=VACUUM_DEAD_TUP_MIN,
-        ge=0,
+        ge=1,
         description=(
             "Floor for the dead-tuple threshold (a table qualifies only "
             "when n_dead_tup >= this floor). Default 1000. Override "
-            "via env: PERSISTENCE_VACUUM_DEAD_TUP_MIN."
+            "via env: PERSISTENCE_VACUUM_DEAD_TUP_MIN. Floor is 1 "
+            "(ge=1) — accepting 0 would let an operator override qualify "
+            "an empty / cold table on every cycle (n_dead_tup >= 0 is "
+            "always true), defeating the threshold gate."
         ),
     )
     vacuum_dead_tup_scale_fraction: float = Field(

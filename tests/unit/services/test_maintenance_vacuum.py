@@ -531,13 +531,13 @@ class TestRepairLaneVacuumExemption:
             _is_idempotent,
         )
 
+        # FIX-2 narrowed the parens option list to literal ANALYZE —
+        # VERBOSE / FREEZE / any other option are rejected (fail-closed).
         for sql in [
             "VACUUM",
             "VACUUM (ANALYZE)",
-            "VACUUM (ANALYZE, VERBOSE)",
             "VACUUM foo",
             "VACUUM (ANALYZE) foo",
-            "VACUUM (ANALYZE, VERBOSE) foo",
         ]:
             cls = _classify_sql(sql)
             ok, reason = _is_idempotent(sql, cls)
@@ -615,16 +615,23 @@ class TestRepairLaneVacuumExemption:
             _statement_is_vacuum_analyze,
         )
 
-        # Allowed
+        # Allowed (FIX-2 narrowed the option list to literal ANALYZE only —
+        # VERBOSE / FREEZE / any other option are rejected below).
         assert _statement_is_vacuum_analyze("VACUUM") is True
         assert _statement_is_vacuum_analyze("VACUUM (ANALYZE)") is True
-        assert _statement_is_vacuum_analyze("VACUUM (ANALYZE, VERBOSE)") is True
         assert _statement_is_vacuum_analyze("VACUUM foo") is True
         assert _statement_is_vacuum_analyze("VACUUM (ANALYZE) foo") is True
         assert _statement_is_vacuum_analyze("ANALYZE") is True
         assert _statement_is_vacuum_analyze("ANALYZE foo") is True
         assert _statement_is_vacuum_analyze("ANALYZE VERBOSE") is True
         assert _statement_is_vacuum_analyze("ANALYZE VERBOSE foo") is True
+
+        # Rejected (FIX-2: parens option list must be literal ANALYZE)
+        assert _statement_is_vacuum_analyze("VACUUM (ANALYZE, VERBOSE)") is False
+        assert _statement_is_vacuum_analyze("VACUUM (ANALYZE, VERBOSE) foo") is False
+        assert _statement_is_vacuum_analyze("VACUUM (ANALYZE, FREEZE)") is False
+        assert _statement_is_vacuum_analyze("VACUUM (FREEZE)") is False
+        assert _statement_is_vacuum_analyze("VACUUM (PARALLEL 4)") is False
 
         # Rejected (FULL anywhere)
         assert _statement_is_vacuum_analyze("VACUUM FULL") is False
@@ -639,6 +646,158 @@ class TestRepairLaneVacuumExemption:
         assert _statement_is_vacuum_analyze(
             "VACUUM (ANALYZE, VERBOSE, FULL)"
         ) is False
+
+    # ── FIX-4: pinned adversarial grammar edges ─────────────────────────
+    #
+    # The FIX-4 review pin-tests adversarial inputs so the grammar's
+    # perimeter is documented and any future regression trips a fast
+    # test instead of a silent PG 25001 / DRY-RUN-DDL-FAILED leak.
+    #
+    # The helper's grammar covers the canonical allow-list. Cases
+    # below pin the actual post-FIX-2 / FIX-4 behavior — accepted,
+    # rejected, and accepted-asymmetry — so the perimeter is
+    # explicit. The asymmetric cases (e.g. ``VACUUM(ANALYZE) t``
+    # unspaced, lowercase ``vacuum analyze t``) are flagged in
+    # comments; future tightening is welcome but out of scope for
+    # this commission (DEFERRED by leader).
+
+    def test_lowercase_rejected_asymmetry(self):
+        """``vacuum analyze t`` (no parens, lowercase) is REJECTED.
+
+        Asymmetry: the helper requires the parens form
+        ``VACUUM (ANALYZE)`` to express ANALYZE. The bare
+        ``VACUUM ANALYZE`` (no parens) is not valid PG syntax
+        anyway, and the helper short-circuits on the missing
+        parens. Pinned: lowercased or not, the no-parens form
+        returns ``False``. Post-FIX-4 behavior — confirmed.
+        """
+        from daemon.tools.ens_db_tools import (
+            _statement_is_vacuum_analyze,
+        )
+        # Lowercased, no parens — rejected (asymmetry: bare ANALYZE
+        # on VACUUM requires parens to be recognized).
+        assert _statement_is_vacuum_analyze("vacuum analyze t") is False
+        # Lowercased with parens — accepted (helper upper-cases).
+        assert _statement_is_vacuum_analyze("vacuum (analyze) t") is True
+
+    def test_trailing_semicolon_stripped(self):
+        """Trailing ``;`` is stripped by ``sql.strip().rstrip(";")``
+        before the grammar matches. Pin the post-strip behavior.
+
+        Post-FIX-4 behavior — confirmed.
+        """
+        from daemon.tools.ens_db_tools import (
+            _statement_is_vacuum_analyze,
+        )
+        # Trailing semi on canonical form — accepted (semi stripped).
+        assert _statement_is_vacuum_analyze("VACUUM (ANALYZE) t;") is True
+        # Multi-statement with mid-statement semi — rejected (mid
+        # ; survives the strip; the identifier regex demands end
+        # of input).
+        assert _statement_is_vacuum_analyze(
+            "VACUUM t; DROP TABLE x"
+        ) is False
+
+    def test_schema_qualified_rejected(self):
+        """Schema-qualified ``public.t`` is REJECTED.
+
+        The grammar's identifier regex matches a single
+        ``[A-Z_][A-Z0-9_]*`` token; the ``.`` between
+        schema/table is not part of the alphabet. Pinned:
+        DEFERRED-by-leader (A1.2/A2.2 — single-public-schema
+        reality).
+        """
+        from daemon.tools.ens_db_tools import (
+            _statement_is_vacuum_analyze,
+        )
+        assert _statement_is_vacuum_analyze(
+            "VACUUM (ANALYZE) public.t"
+        ) is False
+        assert _statement_is_vacuum_analyze("VACUUM myschema.foo") is False
+
+    def test_comment_smuggling_rejected(self):
+        """SQL line / block comments smuggled after the table
+        identifier break the regex (the ``--`` and ``/* */`` tokens
+        are not part of the identifier alphabet). REJECTED.
+
+        Post-FIX-4 behavior — confirmed.
+        """
+        from daemon.tools.ens_db_tools import (
+            _statement_is_vacuum_analyze,
+        )
+        assert _statement_is_vacuum_analyze(
+            "VACUUM (ANALYZE) t -- comment"
+        ) is False
+        assert _statement_is_vacuum_analyze(
+            "VACUUM (ANALYZE) t /* block */"
+        ) is False
+
+    def test_freeze_option_rejected(self):
+        """FREEZE is REJECTED post-FIX-2 (parens option list must be
+        literal ``ANALYZE``). PG's FREEZE hint is a load-bearing
+        rewrite trigger that we never want smuggled into the
+        repair-lane exemption.
+        """
+        from daemon.tools.ens_db_tools import (
+            _statement_is_vacuum_analyze,
+        )
+        assert _statement_is_vacuum_analyze("VACUUM (ANALYZE, FREEZE)") is False
+        assert _statement_is_vacuum_analyze("VACUUM (FREEZE)") is False
+        assert _statement_is_vacuum_analyze("VACUUM (FREEZE, ANALYZE)") is False
+
+    def test_quoted_identifier_rejected(self):
+        """Quoted PG identifiers (``"foo"``) are REJECTED.
+
+        The grammar's identifier regex does not include the
+        ``"`` character; only bare ``[A-Z_][A-Z0-9_]*`` tokens.
+        Mixed-case or special-char table names must be quoted in
+        PG, so they cannot be repaired via the agent-facing
+        exempt path — the operator should hoist them through a
+        maintenance window instead.
+        """
+        from daemon.tools.ens_db_tools import (
+            _statement_is_vacuum_analyze,
+        )
+        assert _statement_is_vacuum_analyze(
+            "VACUUM (ANALYZE) \"weird\""
+        ) is False
+        assert _statement_is_vacuum_analyze(
+            'VACUUM (ANALYZE) "MixedCase"'
+        ) is False
+
+    def test_multi_table_rejected(self):
+        """``VACUUM t, s`` (comma-list) is REJECTED.
+
+        The grammar accepts a single table identifier; the comma
+        is not part of the identifier alphabet.
+        """
+        from daemon.tools.ens_db_tools import (
+            _statement_is_vacuum_analyze,
+        )
+        assert _statement_is_vacuum_analyze("VACUUM t, s") is False
+        assert _statement_is_vacuum_analyze("ANALYZE t, s") is False
+
+    def test_unspaced_parens_accepted_asymmetry(self):
+        """``VACUUM(ANALYZE) t`` (no whitespace between VACUUM and
+        ``(``) is ACCEPTED.
+
+        Asymmetry: PG's grammar requires a whitespace boundary
+        here, so this form would fail at execution time. The
+        helper's regex matches the parens block regardless of the
+        leading whitespace; rejecting this case would require a
+        second regex anchor on the VACUUM/``(`` boundary, which
+        is out of scope for this commission (DEFERRED-by-leader).
+
+        PIN: current behavior is ``True``. The downstream
+        confirm-lane sends the literal SQL to PG; PG would
+        reject it, and the resulting 42601 lands in the audit
+        row's error_message. The asymmetry is documented so a
+        future tightening can be scoped (and pinned).
+        """
+        from daemon.tools.ens_db_tools import (
+            _statement_is_vacuum_analyze,
+        )
+        assert _statement_is_vacuum_analyze("VACUUM(ANALYZE) t") is True
 
 
 # ── additional: cycle summary + audit row lifecycle ──────────────────────────

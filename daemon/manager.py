@@ -7715,50 +7715,68 @@ class InstanceManager:
             applied = 0
             skipped_missing = 0
             skipped_pre_set = 0
-            with self._engine.begin() as conn:
-                for tbl in checkpoint_trio:
-                    present = conn.execute(
-                        text(
-                            "SELECT 1 FROM pg_class "
-                            "WHERE relname = :t AND relkind IN ('r', 'p')"
-                        ),
-                        {"t": tbl},
-                    ).first()
-                    if present is None:
-                        skipped_missing += 1
-                        continue
-                    # Probe reloptions for the desired key to avoid a
-                    # no-op ALTER storm on every boot. The probe reads
-                    # ``pg_class.reloptions`` and matches the literal
-                    # key. NOT present => apply the SET; present =>
-                    # skip (already configured by a prior boot).
-                    relopt = conn.execute(
-                        text(
-                            "SELECT reloptions FROM pg_class "
-                            "WHERE relname = :t AND relkind IN ('r', 'p')"
-                        ),
-                        {"t": tbl},
-                    ).first()
-                    already_set = False
-                    if relopt is not None and relopt[0] is not None:
-                        # reloptions is an array of ``key=value`` strings.
-                        # Check if the desired key is already configured.
-                        for raw in relopt[0]:
-                            if raw.startswith(
-                                "autovacuum_vacuum_scale_factor="
-                            ):
-                                already_set = True
-                                break
-                    if already_set:
-                        skipped_pre_set += 1
-                        continue
-                    conn.execute(
-                        text(
-                            f"ALTER TABLE {tbl} "
-                            f"SET ({checkpoint_reloptions})"
+            # FIX-3: tuning-only ALTERs (autovacuum reloptions) MUST
+            # never boot-block. A permission-denied ALTER would
+            # otherwise propagate through ``_ensure_postgres_columns``
+            # into ``InstanceManager.__init__`` and brick the daemon
+            # at boot. Log WARNING on failure and continue — the
+            # daemon comes up without the tuning and the operator
+            # can grant + retry on the next boot.
+            try:
+                with self._engine.begin() as conn:
+                    for tbl in checkpoint_trio:
+                        present = conn.execute(
+                            text(
+                                "SELECT 1 FROM pg_class "
+                                "WHERE relname = :t AND relkind IN ('r', 'p')"
+                            ),
+                            {"t": tbl},
+                        ).first()
+                        if present is None:
+                            skipped_missing += 1
+                            continue
+                        # Probe reloptions for the desired key to avoid a
+                        # no-op ALTER storm on every boot. The probe reads
+                        # ``pg_class.reloptions`` and matches the literal
+                        # key. NOT present => apply the SET; present =>
+                        # skip (already configured by a prior boot).
+                        relopt = conn.execute(
+                            text(
+                                "SELECT reloptions FROM pg_class "
+                                "WHERE relname = :t AND relkind IN ('r', 'p')"
+                            ),
+                            {"t": tbl},
+                        ).first()
+                        already_set = False
+                        if relopt is not None and relopt[0] is not None:
+                            # reloptions is an array of ``key=value`` strings.
+                            # Check if the desired key is already configured.
+                            for raw in relopt[0]:
+                                if raw.startswith(
+                                    "autovacuum_vacuum_scale_factor="
+                                ):
+                                    already_set = True
+                                    break
+                        if already_set:
+                            skipped_pre_set += 1
+                            continue
+                        conn.execute(
+                            text(
+                                f"ALTER TABLE {tbl} "
+                                f"SET ({checkpoint_reloptions})"
+                            )
                         )
-                    )
-                    applied += 1
+                        applied += 1
+            except Exception as exc:
+                logger.warning(
+                    "_ensure_postgres_columns: checkpoint trio "
+                    "autovacuum reloptions ensure FAILED (%s: %s) — "
+                    "continuing boot without tuning; fix on next boot "
+                    "after granting permission or resolving the cause",
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
+                return  # do not emit the success summary line below
             if applied or skipped_missing or skipped_pre_set:
                 logger.info(
                     "_ensure_postgres_columns: checkpoint trio "
