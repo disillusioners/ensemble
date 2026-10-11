@@ -3,7 +3,8 @@
 Implements the AC-40 negative matrix (every token type × every wrong
 lane → 401/403, positive controls hold) + the AC-41 ON/OFF
 byte-equivalence for module-lane paths + the AC-42 masking round-trip
-(skip-guarded per NOTE 7 — the §12 item 4(c) decision is unresolved).
+(§12 item 4(c) RULED (a) 2026-10-11 — mask-on-read +
+PUT-with-masked-no-clobber; the round-trip test is live).
 
 The matrix (per FR-40 / D20):
 
@@ -40,6 +41,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session
 
 from daemon.mcp.kb_keys import KB_KEY_HEADER, KB_KEY_PREFIX, mint_kb_key
+from daemon.repositories.source.models import SourceConfig
 from daemon.repositories.auth_session.models import BearerToken
 from tests.conftest_auth import (
     AUTH_TABLES,
@@ -369,44 +371,197 @@ class TestModuleLaneOnOffEquivalence:
         assert on_r.text == off_r.text
 
 
-# ── (c) AC-42 masking round-trip (skip-guarded per NOTE 7) ────────
+# ── (c) AC-42 masking round-trip (§12 4(c) RULED (a) 2026-10-11) ──
+
+
+class _RoundTripRepo:
+    """In-memory stand-in for SourceRepository — just the CRUD surface
+    the /api/sources routes drive (create/get/update). Rows are real
+    ``SourceConfig`` models so route serialization (``_source_to_info``)
+    and the stored-value assertions hit the same shapes production
+    uses."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, SourceConfig] = {}
+
+    def get_source_config(self, source_id: str) -> SourceConfig | None:
+        return self.rows.get(source_id)
+
+    def create_source_config(
+        self,
+        *,
+        source_type: str,
+        name: str,
+        config: dict,
+        credentials: str | None = None,
+        enabled: bool = True,
+        autostart: bool = True,
+        source_id: str | None = None,
+    ) -> SourceConfig:
+        row = SourceConfig(
+            source_id=source_id or "src-ac42",
+            source_type=source_type,
+            name=name,
+            config=dict(config),
+            credentials=credentials,
+            enabled=enabled,
+            autostart=autostart,
+        )
+        self.rows[row.source_id] = row
+        return row
+
+    def update_source_config(
+        self,
+        *,
+        source_id: str,
+        source_type: str | None = None,
+        name: str | None = None,
+        config: dict | None = None,
+        credentials: str | None = None,
+        enabled: bool | None = None,
+        autostart: bool | None = None,
+    ) -> SourceConfig | None:
+        row = self.rows.get(source_id)
+        if row is None:
+            return None
+        if source_type is not None:
+            row.source_type = source_type
+        if name is not None:
+            row.name = name
+        if config is not None:
+            row.config = config
+        if credentials is not None:
+            row.credentials = credentials
+        if enabled is not None:
+            row.enabled = enabled
+        if autostart is not None:
+            row.autostart = autostart
+        return row
+
+
+class _RoundTripManager:
+    """Manager stand-in exposing only what the sources routes touch."""
+
+    def __init__(self, repo: _RoundTripRepo) -> None:
+        self.is_write_paused = False
+        self._source_repository = repo
+
+        class _Registry:
+            async def start_adapter(self, source_id: str) -> None:
+                return None
+
+        self.source_registry = _Registry()
 
 
 class TestWebhookSecretMaskingAC42:
-    """AC-42 / FR-41: webhook_secret masking round-trip on the OAuth2
-    governed GET /api/sources surface.
+    """AC-42 / FR-41: the webhook_secret masking round-trip on the
+    OAuth2-governed /api/sources surface (plan-overview §12 item 4(c)
+    RULED (a) — mask-on-read + PUT-with-masked-no-clobber,
+    2026-10-11).
 
-    Skip-guarded (NOTE 7): the §12 item 4(c) decision is unresolved.
-    When the plan-overview confirms the masking decision (mask-on-read
-    vs explicit plaintext retention), the test target becomes definite
-    — until then the test is a SKIP placeholder, NEVER a lie.
+    Contract pinned against shipped behavior
+    (daemon/routers/sources.py):
+      1. GET never returns the plaintext — ``webhook_secret`` reads
+         back as the ``********`` sentinel (``_mask_source_config``);
+      2. a GET→PUT echo carrying the sentinel in place (the
+         wholesale config-replace shape) does NOT clobber the stored
+         secret — the PUT ML-3 round-trip guard keeps the stored
+         value;
+      3. PUT with a NEW plaintext rotates it (the guard must not
+         block real rotation).
 
-    The skip reason string is the only assertion; the test is a
-    stub until the §12 item 4(c) decision lands.
+    The STORED value is asserted via the repository layer directly —
+    the API masks on read, so the API can never witness the stored
+    plaintext. Driven as an authenticated operator (session-cookie
+    lane, the SPA's own path).
     """
 
-    @pytest.mark.skip(
-        reason=(
-            "AC-42 masking decision deferred (plan-overview §12 item 4(c) — "
-            "confirm-at-implementation; NOTE 7 in the approver tracking). "
-            "Once the masking decision lands, replace this skip with the "
-            "actual PUT-with-masked-read round-trip test."
-        )
-    )
     def test_put_with_masked_read_does_not_clobber_stored_secret(
         self, tmp_path
     ):
-        # Intentionally empty — see the skip reason above. When the
-        # §12 decision lands, this test asserts:
-        #   1. GET /api/sources returns the secret MASKED (or PLAIN
-        #      — decision-dependent);
-        #   2. PUT /api/sources/{id} with the masked value in the
-        #      config does NOT clobber the stored secret at
-        #      sources.py:341 wholesale-config-replace (the v1 plan
-        #      acknowledges this as the hazard).
-        # Until the decision lands, this test exists as a documented
-        # stub — better than a silent gap in the plan-tracking.
-        pytest.skip("masking decision pending")
+        from daemon.routers.sources import WEBHOOK_SECRET_MASK
+
+        original = "whsec-ac42-original-9f2c"
+        rotated = "whsec-ac42-rotated-4b7d"
+
+        from daemon.sources.credentials import CredentialManager
+
+        with auth_enabled_app(tmp_path=tmp_path) as (app, fake, transport):
+            repo = _RoundTripRepo()
+            app.state.manager = _RoundTripManager(repo)
+            # The auth harness builds create_app() WITHOUT the full
+            # lifespan wiring, so app.state.credential_manager (set at
+            # daemon/api.py:1526 in production) is absent — the
+            # /api/sources create/update routes fetch it unconditionally.
+            app.state.credential_manager = CredentialManager()
+            sid = _complete_flow(app, fake)
+            assert sid
+            client = TestClient(
+                _WrappedApp(app, fake),
+                base_url="http://testserver",
+                follow_redirects=False,
+                cookies={"ensemble_sid": sid},
+            )
+
+            # (a) create a source carrying a plaintext webhook_secret.
+            r = client.post(
+                "/api/sources",
+                json={
+                    "source_id": "src-ac42",
+                    "source_type": "webhook",
+                    "name": "AC-42 Round-Trip",
+                    "config": {"webhook_secret": original, "url": "/hook"},
+                    "enabled": False,
+                },
+            )
+            assert r.status_code == 201, r.text
+            assert (
+                r.json()["config"]["webhook_secret"] == WEBHOOK_SECRET_MASK
+            )
+
+            # (b) GET reads back MASKED — never the plaintext.
+            r = client.get("/api/sources/src-ac42")
+            assert r.status_code == 200, r.text
+            echoed = r.json()["config"]
+            assert echoed["webhook_secret"] == WEBHOOK_SECRET_MASK
+            assert original not in r.text
+
+            # (c) PUT the echoed object back UNCHANGED (sentinel in
+            # place — the wholesale config-replace shape) must NOT
+            # clobber the stored secret (verified at the repository
+            # layer — the API masks on read).
+            r = client.put(
+                "/api/sources/src-ac42",
+                json={"config": echoed},
+            )
+            assert r.status_code == 200, r.text
+            assert (
+                r.json()["config"]["webhook_secret"] == WEBHOOK_SECRET_MASK
+            )
+            stored = repo.rows["src-ac42"].config["webhook_secret"]
+            assert stored == original, (
+                f"PUT-with-masked-read clobbered the stored secret: "
+                f"stored={stored!r}"
+            )
+            assert stored != WEBHOOK_SECRET_MASK
+
+            # (d) rotation control: a NEW plaintext must go through.
+            r = client.put(
+                "/api/sources/src-ac42",
+                json={"config": {**echoed, "webhook_secret": rotated}},
+            )
+            assert r.status_code == 200, r.text
+            stored_after = repo.rows["src-ac42"].config["webhook_secret"]
+            assert stored_after == rotated, (
+                f"PUT with a new plaintext failed to rotate: "
+                f"stored={stored_after!r}"
+            )
+            r = client.get("/api/sources/src-ac42")
+            assert r.status_code == 200, r.text
+            assert (
+                r.json()["config"]["webhook_secret"] == WEBHOOK_SECRET_MASK
+            )
+            assert rotated not in r.text
 
 
 # ── (a) MCP-KB negative legs (NOTE 5: real credential-through-to-─
