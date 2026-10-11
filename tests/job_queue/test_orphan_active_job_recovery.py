@@ -1270,10 +1270,12 @@ class TestPatternFCouncilCritical1Guard:
         """
         from unittest.mock import AsyncMock
 
+        # E1 sync (e8a61da3): seed terminal so mission is not live
         _insert_instance(
             engine,
             "inst-f-failed",
             project_id="test-project",
+            status=InstanceStatus.COMPLETED.value,
             created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
         )
         _insert_job_item(
@@ -1391,10 +1393,12 @@ class TestPatternFCouncilCritical1Guard:
         from unittest.mock import AsyncMock
         from daemon.repositories.job_queue.models import Decision
 
+        # E1 sync (e8a61da3): seed terminal so mission is not live
         _insert_instance(
             engine,
             "inst-f-cancelled",
             project_id="test-project",
+            status=InstanceStatus.COMPLETED.value,
             created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
         )
         _insert_job_item(
@@ -1787,10 +1791,12 @@ class TestPatternFCouncilCritical1Guard:
         # backdated past grace, FAILED Task (Task
         # reached terminal but the JobItem side never
         # transitioned — the orphan signature).
+        # E1 sync (e8a61da3): seed terminal so mission is not live
         _insert_instance(
             engine,
             "inst-f-failed-real",
             project_id="test-project",
+            status=InstanceStatus.COMPLETED.value,
             created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
         )
         _insert_job_item(

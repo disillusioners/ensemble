@@ -273,3 +273,25 @@ commit:
 - deferred-debt section ordering — the "Related out-of-scope
   threads" block sits between (d) and (e); on the next substantive
   edit, move it to the end so the lettering runs unbroken.
+
+## (l) NULL-anchor non-terminal rows can hold the f1 finalize indefinitely (needs-investigation)
+
+Instance rows that are non-terminal with ``last_activity_at`` NULL
+hit the mission-live guard's data-gap branch
+(``mission_live_guard.py:357-369`` — "backstop disarmed (data gap,
+not zombie evidence); the live leg holds by default") which has NO
+timeout; the zombie-break leg (``:374-385``,
+``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS=21600``) requires an activity
+anchor to fire, so such trees never resolve ``live=False``.
+
+``daemon/manager.py:8627`` stamps ``last_activity_at`` on activity
+only — the instance-creation path's stamping is UNTRACED. If
+production can create non-terminal rows with NULL anchors, E1
+(Pattern (f) lane, ``job_recovery_service.py:2666-2699``) holds
+their finalize forever.
+
+Follow-up: audit instance INSERT/creation paths for
+``last_activity_at`` stamping; consider bounded data-gap hold or
+creation-path stamping. Flagged needs-investigation; surfaced
+during the e8a61da3 stale-fixture diagnosis (fixtures defaulted to
+running+NULL and relied on the data-gap hold).
