@@ -77,7 +77,7 @@ FE additions:
 
 ### Tested — Snapshots v2 daemon-lane E2E: v1 12-test pack rebased to Design A, 12/12 GREEN (`feature/snapshots-v2-spec-rebase`, merge `baacdd6a4`)
 
-- The five v1-locator snapshots legs rebased to the Design A v2 contracts (pin `53fa39ec`, `64b351b8b`), response-arming made race-immune (`b5cafd3f7`), and the anchored `hasText` locators unanchored against raw `textContent` (`5dc834706` — the root cause was anchored-text matching against `mat-icon` ligature glyphs).
+- The five v1-locator snapshots legs rebased to the Design A v2 contracts (pin `53fa39ec` (spec blob sha), `64b351b8b`), response-arming made race-immune (`b5cafd3f7`), and the anchored `hasText` locators unanchored against raw `textContent` (`5dc834706` — the root cause was anchored-text matching against `mat-icon` ligature glyphs).
 - Full-daemon-depth lane closed at **12/12 PASS** (81.6s, flaky=0) after a 4-run loop (7/12 → 11/12 → 11/12 → 12/12) with **zero product failures** — every red proven test-side. Citation-integrity pass re-attributed 3 evidence claims (`7947ffeeb`, review F1–F4). Loop record: `c2c226725`; entrypoint `cd frontend && npx playwright test --config playwright.snapshots.config.ts e2e/snapshots.spec.ts` (12 tests, self-boots daemon :18279 + FE :14199).
 
 ### Changed — Designer→sketcher→critic design pipeline; designer holds zero od.* tools (`feature/designer-critic-orchestration`, merge `4f70415d2`)
