@@ -190,7 +190,7 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
    * `↔ (selectionChange)` bounce after `@if` button-destroy swaps)
    * straight into `activeStep()`. Per the spec, navigation is FOOTER-
    * ONLY with one app-driven exception (poll auto-advance on
-   * `succeeded` runs at TS:614); every other path must be a no-op.
+   * `succeeded` runs at TS:647); every other path must be a no-op.
    *
    * Controlled-input shape: `[selectedIndex]="activeStep()"` is the
    * one-way binding that drives the stepper's index from the
@@ -213,6 +213,31 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
    * `.mat-step-header` (see component.scss), but the revert here is
    * the load-bearing guarantee — keyboard and focus-teleport still
    * reach the stepper's selectionChange emitter.
+   *
+   * ─── CDK SETTER-RATCHET CAVEAT (do NOT add `editable="false"`
+   * on any <mat-step>) ─────────────────────────────────────────────
+   * The installed `@angular/cdk` 21.2.5
+   * (`node_modules/@angular/cdk/fesm2022/stepper.mjs:415-419`) has a
+   * silent guard in the `selectedIndex` setter:
+   *
+   *     if (!this._anyControlsInvalidOrPending(index)
+   *         && (index >= this.selectedIndex
+   *             || this.steps.toArray()[index].editable)) {
+   *       this._updateSelectedItemIndex(index);
+   *     }
+   *
+   * The `|| ...editable` arm is the asymmetric one: with any
+   * `<mat-step editable="false">` in the stepper, BACKWARD writes
+   * (index < selectedIndex) are silently DROPPED. The revert
+   * (`stepper.selectedIndex = this.activeStep()`) for any backward
+   * step would also be dropped — locking the stepper out of sync with
+   * the component and breaking footer Back / backToStart / forward-
+   * then-revert paths. Do not reintroduce `editable="false"` here.
+   * The structural pin is the source-template test in
+   * `checkpoint-cleanup.component.spec.ts` (asserts `editable`
+   * appears NOWHERE in this wizard) — read it before adding new
+   * `<mat-step>` attributes.
+   * ─────────────────────────────────────────────────────────────────
    */
   onStepperSelectionChange(stepper: MatStepper | undefined): void {
     if (!stepper) {
@@ -639,10 +664,14 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
           // without a manual navigation. `succeeded` only — `failed`
           // surfaces inline on Step 3, `interrupted` surfaces inline on
           // Step 3 (the rerun card); both stay on the Confirm step.
-          // The header `(selectionChange)` handler is the read-side
-          // back-pressure: any stepper-side jump propagates back into
-          // `activeStep()` so the footer always renders the active
-          // step's buttons.
+          // wiznav-fix — the header `(selectionChange)` handler is the
+          // CONTROLLED-INPUT gate: any stepper-side jump is REVERTED
+          // (selectionChange handler writes stepper.selectedIndex =
+          // activeStep() instead of mirroring into activeStep), so
+          // user-driven attempts on header clicks / keyboard / focus
+          // teleport / W1 bounce cannot escape the activeStep value.
+          // See onStepperSelectionChange docstring for the full
+          // rationale + the CDK setter-ratchet caveat.
           if (run.status === 'succeeded') {
             this.activeStep.set(3);
             this.snackBar.open('Cleanup succeeded.', 'Dismiss', {

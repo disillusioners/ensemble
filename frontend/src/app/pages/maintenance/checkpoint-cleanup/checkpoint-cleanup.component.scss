@@ -506,6 +506,23 @@ mat-progress-bar {
     //     tints are zeroed so keyboard roving tabindex doesn't
     //     produce a "this header looks selected" hint — the header
     //     strip is a progress bar, not a nav target.
+    //
+    // ─── A11Y NOTE (keyboard-tab stops) ──────────────────────────
+    // Material's CDK only marks the ACTIVE header `[tabIndex]=0`
+    // (others = -1), so tab from a header lands on the next
+    // interactive element (footer button). Enter/Space on a header
+    // reaches CdkStepper's `_onKeydown` → writes `stepper.selectedIndex`
+    // → `selectionChange` fires → the TS handler (see
+    // `onStepperSelectionChange` setter-ratchet caveat) reverts the
+    // stepper back to `activeStep()`. The visible focus ring on the
+    // active header stays as the affordance; a no-op Enter/Space is
+    // the symptom of the controlled-input shape — keyboard operators
+    // learn to use the footer buttons (which AREN'T tab-stops on
+    // inactive headers either, by spec). A future enhancement would
+    // wire `aria-disabled="true"` + a `(click)` block on the headers
+    // via a directive; the minimal cost here is the documenting
+    // comment + the TS handler revert, which together close every
+    // nav path symmetrically.
     .mat-step-header {
       padding: 0.75rem 1rem;
       border-radius: 6px;

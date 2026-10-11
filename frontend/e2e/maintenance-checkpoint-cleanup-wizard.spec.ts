@@ -493,7 +493,7 @@ test.describe('Maintenance — Checkpoint Cleanup WIZARD (ck-redesign-2026q4, 5 
     // two-way sync. With the controlled-input revert (the component
     // now reverts on mismatch) and `pointer-events: none` on
     // `.mat-step-header`, header clicks are inert; the by-design
-    // poll auto-advance (`activeStep.set(3)` in TS:614 on
+    // poll auto-advance (`activeStep.set(3)` in TS:647 on
     // `succeeded`) is the SINGLE deterministic path to Step 4. The
     // wait below resolves against that auto-advance.
     // Redesigned §2.6 — banner wording is "Run completed" (was wire-status
