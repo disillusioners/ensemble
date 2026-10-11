@@ -93,11 +93,14 @@
        instances" static validation true. The custom footer (Back /
        Continue / Cleanup now) is rendered ONCE outside the
        at-if/at-else`, so footer testids never duplicate. The
-       `(selectionChange)` handler (W1) syncs header-driven jumps
-       into `activeStep()`. Parity guard: the spec parity test
-       asserts the set of `[data-testid]` attributes rendered in
-       desktop mode equals the set in narrow mode -- it FAILS the
-       moment the duplicated branches drift. -->
+       `(selectionChange)` handler is the wiznav-fix controlled-
+       input gate (event-payload read + queueMicrotask revert)
+       — see component.ts `onStepperSelectionChange` for the full
+       rationale + the C1/C2 stale-read context. Parity guard:
+       the spec parity test asserts the set of `[data-testid]`
+       attributes rendered in desktop mode equals the set in
+       narrow mode -- it FAILS the moment the duplicated branches
+       drift. -->
 
   @if (isDesktop()) {
     <mat-stepper
@@ -105,7 +108,7 @@
       orientation="horizontal"
       [linear]="false"
       [selectedIndex]="activeStep()"
-      (selectionChange)="onStepperSelectionChange(desktopStepper)"
+      (selectionChange)="onStepperSelectionChange(desktopStepper, $event)"
     >
       <!-- -- Step 1: Review (spec §2.3) ----------------------------------- -->
       <mat-step label="1. Review">
@@ -492,7 +495,7 @@
       orientation="vertical"
       [linear]="false"
       [selectedIndex]="activeStep()"
-      (selectionChange)="onStepperSelectionChange(mobileStepper)"
+      (selectionChange)="onStepperSelectionChange(mobileStepper, $event)"
     >
       <!-- -- Step 1: Review (spec §2.3) ----------------------------------- -->
       <mat-step label="1. Review">
@@ -934,6 +937,30 @@
         >
           ← Back
         </button>
+        <!-- wiznav-fix ROUND 3 / W4 — View result affordance. Shown
+             ONLY when a run reached a terminal failed/interrupted
+             state (per the leader's product ruling for the
+             non-succeeded navigation gap). Renders next to the
+             Back button on Step 3 — the operator sees the inline
+             error card on Step 3 and this button to navigate to
+             the Step 4 post-mortem (the failed/interrupted result
+             panel + re-run-to-converge card). Invokes the
+             sanctioned `viewResult()` helper, which writes
+             activeStep=3 (source of truth) — the binding flows
+             the new index to the stepper, the round-3 handler
+             no-ops on the post-commit matching event. Hidden
+             when canNavigateToResult() is false (e.g. during
+             executing — would race with the in-flight run). -->
+        @if (canNavigateToResult()) {
+          <button
+            mat-raised-button
+            color="primary"
+            (click)="viewResult()"
+            data-testid="ck-view-result-btn"
+          >
+            View result →
+          </button>
+        }
       } @else if (activeStep() === 3) {
         <!-- Step 4: <- Back to start -- resets activeStep() to 0 (AC-9). -->
         <button

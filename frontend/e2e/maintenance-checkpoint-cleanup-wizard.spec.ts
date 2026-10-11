@@ -511,8 +511,10 @@ test.describe('Maintenance — Checkpoint Cleanup WIZARD (ck-redesign-2026q4, 5 
 
     // Verify the wire contract — execute POSTed once with the AM-17 shape.
     expect(executeCalled).toBe(true);
-    // The Step 4 footer renders `ck-back-to-start-btn` (visible because
-    // we explicitly navigated to Step 4 above).
+    // The Step 4 footer renders `ck-back-to-start-btn` (visible
+    // because the poll auto-advance on `succeeded` lands the
+    // operator on Step 4 — no explicit click needed; see the
+    // wiznav-fix rationale comment block above).
     await expect(page.locator('[data-testid="ck-back-to-start-btn"]')).toBeVisible();
   });
 });

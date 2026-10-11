@@ -277,17 +277,15 @@ async function advanceToStep2(page: Page) {
 }
 
 async function advanceToStep3(page: Page) {
-  // From Step 2, navigate to Step 3 via the mat-step HEADER (tab-like
-  // navigation). The footer Continue is gated on `canContinueFromStep2`
-  // (would_delete_count > 0 AND !dryRunning AND !executing AND !in_flight)
-  // which the test exercises via DRY_RUN_FIXTURE. Both routes work, but
-  // the header click is more robust under the redesigned component
-  // because Material stepper's focus-restoration handler (which fires
-  // `(selectionChange)` when a button inside a non-active step body
-  // receives focus) can race with the [selectedIndex]="activeStep()"
-  // binding during the dry-run click cycle — clicking the header skips
-  // the race entirely.
-  await page.locator('mat-step-header').nth(2).click();
+  // wiznav-fix ROUND 3 / W3 — From Step 2, navigate to Step 3 via
+  // the FOOTER Continue button (header clicks are inert under the
+  // `pointer-events: none` fence on `.mat-step-header` — see
+  // component.scss). The footer Continue is gated on
+  // `canContinueFromStep2` (would_delete_count > 0 AND !dryRunning
+  // AND !executing AND !in_flight) which the test exercises via
+  // DRY_RUN_FIXTURE. Footer is the only sanctioned nav path
+  // (round-3 spec).
+  await page.locator('[data-testid="ck-continue-btn"]').first().click();
   await page.locator('[data-testid="ck-execute-btn"]').waitFor({ state: 'visible', timeout: 5000 });
 }
 
@@ -514,12 +512,12 @@ test.describe('Maintenance — Checkpoint Cleanup (15 cases, AM-16 amendments + 
     // AM-12 — "Expected duration" copy appears in the executing card.
     await expect(page.locator('[data-testid="ck-expected-duration"]')).toBeVisible();
 
-    // ck-redesign-2026q4 — explicit navigation to Step 4 via the
-    // mat-step-header click. The component's auto-advance on
-    // `succeeded` (`activeStep.set(3)`) races with Material stepper's
-    // focus-restoration in the test browser; the header click is the
-    // robust path that mirrors what the operator does.
-    await page.locator('mat-step-header').nth(3).click();
+    // ck-redesign-2026q4 — the by-design poll auto-advance on
+    // `succeeded` (`activeStep.set(3)` in component.ts) is the
+    // single deterministic path to Step 4 — no explicit click
+    // needed. wiznav-fix ROUND 3 / W3 — header clicks are inert
+    // under the `pointer-events: none` fence; the wait below
+    // resolves against the auto-advance.
     // Poll resolves to terminal; result panel renders.
     // The redesigned result banner (§2.6) renders "Run completed"
     // instead of the wire status literal "succeeded" (banner tone:
@@ -592,10 +590,12 @@ test.describe('Maintenance — Checkpoint Cleanup (15 cases, AM-16 amendments + 
     await expect(page.locator('[data-testid="ck-error-banner"]')).toHaveCount(0);
     // Poll begins against the ADOPTED run_id.
     await expect.poll(() => pollCount, { timeout: 5000 }).toBeGreaterThan(0);
-    // ck-redesign-2026q4 — explicit navigation to Step 4 via the
-    // mat-step-header click (auto-advance on `succeeded` races with
-    // Material stepper's focus-restoration in the test browser).
-    await page.locator('mat-step-header').nth(3).click();
+    // ck-redesign-2026q4 — the by-design poll auto-advance on
+    // `succeeded` (`activeStep.set(3)` in component.ts) is the
+    // single deterministic path to Step 4 — no explicit click
+    // needed. wiznav-fix ROUND 3 / W3 — header clicks are inert
+    // under the `pointer-events: none` fence; the wait below
+    // resolves against the auto-advance.
     // Result panel renders with "Run completed" — redesigned §2.6 banner wording.
     await expect(page.locator('[data-testid="ck-result"]')).toContainText('Run completed');
   });
@@ -627,10 +627,14 @@ test.describe('Maintenance — Checkpoint Cleanup (15 cases, AM-16 amendments + 
     // component does NOT auto-advance activeStep to 3 (§2.6 W1: only
     // `succeeded` auto-advances; `interrupted`/`failed` stay on Step 3
     // per spec). The interrupted-card and rerun-btn live inside Step 4
-    // content (ck-result-panel), so we click the Step 4 tab header to
-    // expose them — this matches what the operator does to see the
-    // post-mortem.
-    await page.locator('mat-step-header').nth(3).click();
+    // content (ck-result-panel), so we drive Step 4 via the
+    // wiznav-fix ROUND 3 / W4 footer "View result" button — the
+    // sanctioned nav path for non-succeeded states. (Header clicks
+    // are inert under the `pointer-events: none` fence.)
+    // The button is rendered on Step 3 (next to `← Back`) ONLY when
+    // lastExecuteResult is in failed/interrupted state.
+    await expect(page.locator('[data-testid="ck-view-result-btn"]')).toBeVisible();
+    await page.locator('[data-testid="ck-view-result-btn"]').click();
     // Result panel renders "Run interrupted" — redesigned §2.6 banner uses
     // the human-readable wording (amber + ck-result-banner-interrupted,
     // role=alert). The wire status literal `interrupted` does not appear

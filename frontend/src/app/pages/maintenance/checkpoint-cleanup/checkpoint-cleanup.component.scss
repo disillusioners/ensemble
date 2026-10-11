@@ -510,19 +510,30 @@ mat-progress-bar {
     // ─── A11Y NOTE (keyboard-tab stops) ──────────────────────────
     // Material's CDK only marks the ACTIVE header `[tabIndex]=0`
     // (others = -1), so tab from a header lands on the next
-    // interactive element (footer button). Enter/Space on a header
-    // reaches CdkStepper's `_onKeydown` → writes `stepper.selectedIndex`
-    // → `selectionChange` fires → the TS handler (see
-    // `onStepperSelectionChange` setter-ratchet caveat) reverts the
-    // stepper back to `activeStep()`. The visible focus ring on the
-    // active header stays as the affordance; a no-op Enter/Space is
-    // the symptom of the controlled-input shape — keyboard operators
-    // learn to use the footer buttons (which AREN'T tab-stops on
-    // inactive headers either, by spec). A future enhancement would
-    // wire `aria-disabled="true"` + a `(click)` block on the headers
-    // via a directive; the minimal cost here is the documenting
-    // comment + the TS handler revert, which together close every
-    // nav path symmetrically.
+    // interactive element (footer button). Enter/Space on a
+    // header reaches CdkStepper's `_onKeydown` (stepper.mjs:535)
+    // → writes `stepper.selectedIndex` → `_updateSelectedItemIndex`
+    // (stepper.mjs:521) emits `selectionChange` BEFORE committing
+    // `_selectedIndex.set` (the C1/C2 timing root cause) → the TS
+    // handler reads `event.selectedIndex` (the NEW index) and
+    // checks against `activeStep()`. On mismatch, the revert write
+    // is deferred via `queueMicrotask` so the current setter
+    // chain unwinds first; the deferred write's selectionChange
+    // carries the matching post-revert value, the handler
+    // early-returns, and the cascade self-terminates at ≤2
+    // emissions (see component.ts `onStepperSelectionChange`
+    // docstring for the full C1/C2 fix rationale). The visible
+    // focus ring on the active header stays as the affordance;
+    // a no-op Enter/Space is the symptom of the controlled-input
+    // shape — keyboard operators learn to use the footer buttons.
+    //
+    // A future enhancement would wire `aria-disabled="true"` on
+    // non-active headers via a directive + a `(click)` block to
+    // preempt the keyboard route at the source. Out of scope for
+    // this round; the minimal cost here is the documenting
+    // comment + the round-3 TS handler with queueMicrotask
+    // deferral, which together close every nav path symmetrically
+    // without recursion.
     .mat-step-header {
       padding: 0.75rem 1rem;
       border-radius: 6px;
