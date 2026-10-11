@@ -1424,9 +1424,23 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
             # must hold. asyncpg cannot refuse the LIMIT clause, but a
             # future refactor that drops it would silently grow the
             # per-statement footprint back into the pool-hazard class.
-            assert chunk_count <= CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE, (
-                "chunk DELETE violated LIMIT — pool-hazard class reopened"
-            )
+            # Explicit branch, NOT an ``assert`` — asserts vanish under
+            # ``python -O`` and this bound must survive optimized
+            # interpreters. On violation: log ERROR and stop THIS
+            # pair's chunk loop (skip-rest-of-pair is the safe
+            # direction — residual rows stay for the next maintenance
+            # cycle; never raises, same conversion philosophy as the
+            # per-pair catch in checkpoint_prune.py).
+            if chunk_count > CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE:
+                logger.error(
+                    "chunk DELETE returned %d rows > batch size %d — "
+                    "LIMIT violated, pool-hazard class reopened; "
+                    "stopping this pair's chunk loop (residual rows "
+                    "stay for the next maintenance cycle)",
+                    chunk_count,
+                    CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE,
+                )
+                break
         return (total_deleted, total_bytes_freed)
 
     async def _delete_blobs_anti_join_chunk(
@@ -1472,7 +1486,20 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                     async with conn.transaction(isolation="serializable"):
                         rows = await conn.fetch(
                             "DELETE FROM checkpoint_blobs b WHERE b.ctid IN ("
-                            "SELECT b2.ctid FROM checkpoint_blobs b2 WHERE"
+                            # The subquery SELF-ALIASES as ``b`` — the SAME
+                            # alias ``_BLOB_ANTI_JOIN_PREDICATE`` is written
+                            # against. Inside the subquery the inner ``b``
+                            # shadows the outer DELETE alias, so the
+                            # predicate binds to the chunk candidates.
+                            # (Review C1: a prior revision declared ``b2``
+                            # here — the predicate's ``b`` then resolved to
+                            # the OUTER DELETE alias, ``b2`` stayed
+                            # unconstrained, and the subquery returned the
+                            # first ``batch`` ctids of the WHOLE table in
+                            # arbitrary scan order: per-pair exhaustion
+                            # silently never completed on production-scale
+                            # tables.)
+                            "SELECT b.ctid FROM checkpoint_blobs b WHERE"
                             + _BLOB_ANTI_JOIN_PREDICATE
                             + " LIMIT $3"
                             ") RETURNING OCTET_LENGTH(blob) AS n",

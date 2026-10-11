@@ -17,7 +17,12 @@ Proves the chunk-loop in
     the caller observes on the ``BlobPruneSummary``;
 (e) chunk-count safety guard — the per-statement LIMIT-bounded chunk
     never exceeds ``CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE`` (else
-    the pool-hazard class would reopen).
+    the pool-hazard class would reopen); the guard is an -O-proof
+    explicit branch (ERROR log + chunk-loop stop), not an ``assert``
+    (asserts vanish under ``python -O``);
+(f) static alias pin — the chunk DELETE's inner subquery must
+    SELF-ALIAS to the alias ``_BLOB_ANTI_JOIN_PREDICATE`` is written
+    against (b2-vs-b regression guard — review C1).
 
 The test subclasses ``PostgresCheckpointerAdapter`` to override the
 SQL primitive (``_delete_blobs_anti_join_chunk``) so no PG connection
@@ -218,38 +223,158 @@ class TestAuditTotalsAcrossChunks:
 
 class TestPerChunkLimitBounded:
     async def test_chunk_strictly_respects_batch_size(self, as_pg, caplog):
-        """(e) the chunk loop enforces the per-statement LIMIT via
-        the ``assert chunk_count <= batch_size`` safety guard. A
-        future refactor that drops the LIMIT clause would silently
-        reopen the pool-hazard class — this test pins the guard by
-        staging a single chunk whose size exceeds the (real) batch
-        size constant and asserting (i) the per-pair WARNING log
-        carries the safety-guard message (the service's per-pair
-        never-raise catch downgrades the ``AssertionError`` into a
-        per-pair SKIP), and (ii) the pair is recorded as SKIPPED."""
+        """(e) the chunk loop enforces the per-statement LIMIT via the
+        -O-proof explicit guard branch (``if chunk_count > batch_size:
+        logger.error(...); break``) — NOT an ``assert`` (asserts
+        vanish under ``python -O`` and the pool-hazard bound must
+        survive optimized interpreters). A future refactor that drops
+        the LIMIT clause would silently reopen the pool-hazard class —
+        this test pins the guard by staging a chunk whose size
+        exceeds the (real) batch size constant and asserting:
+
+        (i) the adapter module's logger emits an ERROR carrying the
+            LIMIT-violation message (never-raise conversion: the loop
+            stops; no exception propagates to the per-pair catch);
+        (ii) the pair is NOT recorded as SKIPPED — the guard converts
+            to a chunk-loop stop and the accumulated chunk totals are
+            kept (the violating chunk's rows WERE deleted at the DB
+            level, so the audit reflects reality);
+        (iii) the loop BREAKS — a subsequently staged data-bearing
+            chunk is never consumed (no terminator probe either)."""
         import logging
 
-        # Default BATCH_SIZE is 1000 — stage 1001 rows to trip the bound.
-        rows = [[1] * (BATCH_SIZE + 1)]
+        # Default BATCH_SIZE is 1000 — stage 1001 rows to trip the
+        # bound, then a further data-bearing chunk to prove the loop
+        # stopped rather than probing on.
+        rows = [[1] * (BATCH_SIZE + 1), [7] * 5]
         adapter = _LoopAdapter(rows, pairs=[("t-1", "", 3)])
         with caplog.at_level(
-            logging.WARNING, logger="daemon.services.checkpoint_prune"
+            logging.ERROR, logger="daemon.checkpoint_adapter"
         ):
             summary = await prune_unreferenced_blobs(adapter)
-        # The safety guard fires — total_deleted is 0 (the pair was
-        # skipped before any deletes were committed).
-        assert summary.total_deleted == 0
-        # The per-pair WARNING log carries the safety-guard failure
-        # reason (the never-raise contract converts the
-        # ``AssertionError`` into a per-pair SKIP with the exception
-        # class name in the reason string).
-        skipped_reasons = [s[2] for s in summary.skipped]
-        assert any(
-            "AssertionError" in reason for reason in skipped_reasons
-        ), (
-            f"the per-statement LIMIT safety guard must convert the "
-            f"AssertionError into a per-pair SKIP; got skipped: "
-            f"{summary.skipped}"
+        # (iii) the guard broke the loop: the second staged chunk was
+        # never consumed.
+        assert adapter._rows_per_chunk == [[7] * 5], (
+            "the LIMIT guard must BREAK the chunk loop — the "
+            "over-limit chunk's successor must never be consumed"
+        )
+        # (i) the ERROR log carries the LIMIT-violation message.
+        limit_errors = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.ERROR and "LIMIT violated" in r.getMessage()
+        ]
+        assert limit_errors, (
+            "the -O-proof guard must log an ERROR carrying the "
+            f"LIMIT-violation message; got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+        # (ii) totals accumulate and the pair is NOT skipped (no
+        # exception was raised — the per-pair catch stays out of the
+        # path).
+        assert summary.total_deleted == BATCH_SIZE + 1
+        assert summary.total_bytes_freed == BATCH_SIZE + 1
+        assert summary.skipped == [], (
+            f"the explicit guard must NOT raise — the per-pair catch "
+            f"must stay out of the path; got skipped: {summary.skipped}"
+        )
+
+
+class TestChunkSubqueryAliasBinding:
+    """(f) STATIC pin — the chunk DELETE's inner subquery must
+    SELF-ALIAS to the blob-side alias that
+    ``_BLOB_ANTI_JOIN_PREDICATE`` is written against.
+
+    The predicate references blob rows by alias ``b`` ONLY at its top
+    level (``b.thread_id = $1 AND b.checkpoint_ns = $2``). The chunk
+    DELETE wraps it in ``DELETE FROM checkpoint_blobs b WHERE b.ctid
+    IN (SELECT <a>.ctid FROM checkpoint_blobs <a> WHERE <predicate>
+    LIMIT $batch)`` — for the predicate to bind to the CHUNK
+    CANDIDATES, the subquery's self-alias must BE ``b`` (the inner
+    ``b`` shadows the outer DELETE alias). If the subquery declares
+    any other alias (the ``b2`` of the first LIMIT-batching revision —
+    review C1), the predicate's ``b`` resolves to the OUTER alias,
+    ``b2`` stays unconstrained, and the subquery returns the first
+    ``batch`` ctids of the WHOLE table in arbitrary scan order:
+    safety holds by accident, but per-pair exhaustion silently never
+    completes on production-scale tables (targets outside the leading
+    window never delete → the loop exits believing the pair is
+    exhausted).
+
+    Structural check at source level — no PG needed;
+    implementation-tolerant (regex over the method source) but
+    load-bearing: it FAILS on the b2 bug by construction.
+    """
+
+    def test_chunk_subquery_self_alias_matches_predicate_alias(self):
+        import inspect
+        import re
+
+        from daemon.checkpoint_adapter import _BLOB_ANTI_JOIN_PREDICATE
+
+        # 1. The blob-side alias the predicate binds its parameters on.
+        m_pred = re.search(
+            r"\b([A-Za-z_][A-Za-z0-9_]*)\.thread_id\s*=\s*\$1\b",
+            _BLOB_ANTI_JOIN_PREDICATE,
+        )
+        assert m_pred, (
+            "predicate must bind $1 on an alias-qualified thread_id "
+            "(the blob-side top-level condition)"
+        )
+        pred_alias = m_pred.group(1)
+        # The $2 condition must qualify the SAME alias.
+        m_ns = re.search(
+            r"\b([A-Za-z_][A-Za-z0-9_]*)\.checkpoint_ns\s*=\s*\$2\b",
+            _BLOB_ANTI_JOIN_PREDICATE,
+        )
+        assert m_ns is not None and m_ns.group(1) == pred_alias, (
+            "predicate's $1/$2 conditions must qualify the SAME alias"
+        )
+
+        # 2. The chunk method's SQL source: the inner subquery must
+        #    self-alias to that same alias.
+        src = inspect.getsource(
+            PostgresCheckpointerAdapter._delete_blobs_anti_join_chunk
+        )
+        m_sub = re.search(
+            r"SELECT\s+([A-Za-z_][A-Za-z0-9_]*)\.ctid\s+"
+            r"FROM\s+checkpoint_blobs\s+([A-Za-z_][A-Za-z0-9_]*)\s+WHERE",
+            src,
+        )
+        assert m_sub, (
+            "chunk SQL must contain 'SELECT <a>.ctid FROM "
+            "checkpoint_blobs <a> WHERE' — the LIMIT-batching shape "
+            "drifted"
+        )
+        select_alias, from_alias = m_sub.group(1), m_sub.group(2)
+        assert select_alias == from_alias, (
+            f"subquery SELECT alias ({select_alias!r}) must equal its "
+            f"FROM alias ({from_alias!r})"
+        )
+        assert from_alias == pred_alias, (
+            f"chunk subquery self-alias {from_alias!r} must MATCH the "
+            f"alias {pred_alias!r} referenced by "
+            f"_BLOB_ANTI_JOIN_PREDICATE — a mismatch binds the "
+            f"predicate to the OUTER DELETE alias inside the subquery, "
+            f"leaving chunk candidates unconstrained (b2-vs-b bug, "
+            f"review C1)"
+        )
+
+        # 3. The outer DELETE must use the same alias too — the
+        #    shadowing story only holds when outer and inner agree
+        #    (a renamed outer would silently re-expose the bug class).
+        m_outer = re.search(
+            r"DELETE\s+FROM\s+checkpoint_blobs\s+"
+            r"([A-Za-z_][A-Za-z0-9_]*)\s+WHERE",
+            src,
+        )
+        assert m_outer, (
+            "chunk SQL must be 'DELETE FROM checkpoint_blobs <a> "
+            "WHERE ... ctid IN (...)'"
+        )
+        assert m_outer.group(1) == pred_alias, (
+            f"outer DELETE alias {m_outer.group(1)!r} must equal the "
+            f"predicate alias {pred_alias!r}"
         )
 
 

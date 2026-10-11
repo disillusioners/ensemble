@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS maintenance_runs (
     dry_run_summary_json JSON,               -- full dry-run snapshot (incl. skipped[])
     confirm              BOOLEAN,            -- execute confirm flag
     advisory             TEXT,               -- 'system_busy' | NULL
-    env_flags_json       JSON,               -- {destructive} — kwarg value the cycle ran with (audit / forensic; replaces the dual-arm env-state trio retired in feature/blob-prune-default-on)
+    env_flags_json       JSON,               -- {blob_prune_dry_run, blob_prune_destructive, destructive_override}
     summary_json         JSON,               -- outcome: BlobPruneSummary + Op D counts + duration_ms
     error_json           JSON                -- {code, message}
 );

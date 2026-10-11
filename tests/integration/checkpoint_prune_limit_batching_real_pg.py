@@ -19,11 +19,16 @@ Coverage:
   observed before and after the prune;
 * per-statement LIMIT is honest — the chunk SQL uses ``ctid IN
   (SELECT ctid FROM ... LIMIT $batch)``; the per-statement upper
-  bound holds at the PG level (we do not dial the batch size
-  down because the production default 1000 is what the pool-hazard
-  class test pinned at the unit level; here we exercise the
-  production default end-to-end so a regression that flattens the
-  LIMIT to ``LIMIT ALL`` would surface here).
+  bound holds at the PG level. The production default 1000 is
+  exercised end-to-end so a regression that flattens the LIMIT to
+  ``LIMIT ALL`` would surface; a separate test DIALS the batch size
+  down (~5) against a small staged orphan set to drive the per-pair
+  loop across MULTIPLE data-bearing chunks and prove full
+  exhaustion plus count/bytes totals across chunk boundaries (the
+  b2-vs-b alias bug — review C1 — passed every <1000-row test while
+  silently never exhausting large pairs, because an unconstrained
+  subquery still happens to return the true targets when the whole
+  table fits inside the first batch of ctids).
 
 HONESTY CONTRACT: real saver only. If PostgreSQL is unreachable
 these tests SKIP LOUDLY — a mock is never substituted.
@@ -155,6 +160,16 @@ async def _blob_count_global(pool) -> int:
         return await conn.fetchval("SELECT COUNT(*) FROM checkpoint_blobs")
 
 
+async def _blob_bytes(pool, thread_id: str, checkpoint_ns: str) -> int:
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT COALESCE(SUM(OCTET_LENGTH(blob)), 0) FROM checkpoint_blobs "
+            "WHERE thread_id = $1 AND checkpoint_ns = $2",
+            thread_id,
+            checkpoint_ns,
+        )
+
+
 class TestLimitBatchingRealPG:
     async def test_chunked_delete_drains_all_orphans(self, stack):
         """Span more than one chunk: 8 turns, retain 2 checkpoints
@@ -283,3 +298,132 @@ class TestLimitBatchingExhaustsAllOrphansUnderCap:
         # combinations that the 3 remaining checkpoints share).
         assert summary.total_deleted == before - after
         assert after < before
+
+
+class TestMultiChunkExhaustionDialedBatch:
+    """Multi-CHUNK exhaustion on real PG — the behavioral counterpart
+    of the unit-level static alias pin (review C1 regression guard).
+
+    The b2-vs-b alias bug passed every test that staged fewer
+    orphans than one batch: an unconstrained subquery still happens
+    to return the true targets when the whole table fits inside the
+    first ``batch`` ctids. Here the batch size is DIALED DOWN to 5
+    and a 12+ orphan set is staged, so the per-pair loop MUST cross
+    >= 3 data-bearing chunks — with an unconstrained subquery the
+    tail targets would never delete and the pair would never
+    exhaust.
+
+    Acceptance:
+    * >= 3 data-bearing chunks observed, each within the batch bound;
+    * count AND bytes totals match the live table deltas across
+      chunk boundaries;
+    * full per-pair exhaustion — a second prune deletes 0 (the
+      chunk loop exits on a genuinely empty candidate set, not on a
+      truncated leading window);
+    * zero live blobs touched — global count conservation on the
+      fresh disposable DB (this pair is the only data).
+    """
+
+    BATCH = 5
+    MIN_ORPHANS = 12  # >= 3 data-bearing chunks at batch 5
+
+    async def test_pair_exhausts_across_multiple_dialed_chunks(
+        self, stack, monkeypatch
+    ):
+        import daemon.checkpoint_adapter as adapter_module
+
+        saver, pool, adapter = stack
+
+        # Dial the per-pair chunk size DOWN — the adapter binds the
+        # constant by import (``from daemon.constants import ...``),
+        # so patch the adapter module's own binding.
+        monkeypatch.setattr(
+            adapter_module, "CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE", self.BATCH
+        )
+
+        # Instrument the SQL primitive to observe per-chunk row counts
+        # (instance-level wrapper; the original bound method is
+        # captured BEFORE patching).
+        chunk_sizes: list[int] = []
+        primitive = adapter._delete_blobs_anti_join_chunk
+
+        async def _counting(thread_id, checkpoint_ns, batch_size):
+            rows = await primitive(thread_id, checkpoint_ns, batch_size)
+            chunk_sizes.append(len(rows))
+            return rows
+
+        monkeypatch.setattr(adapter, "_delete_blobs_anti_join_chunk", _counting)
+
+        # Stage 12 turns → 10 excess checkpoints (keep=2) × 2 blobs
+        # each = ~20 orphans — comfortably above MIN_ORPHANS at
+        # batch 5.
+        tid = "t-dialed-multichunk"
+        _run, _ = _build_graph(saver, thread_id=tid, turns=12)
+        await _run()
+        keep = set(await adapter.get_checkpoint_ids(tid, "", 2))
+        await adapter.delete_checkpoints_excluding(tid, "", keep)
+        await adapter.delete_writes_excluding(tid, "", keep)
+
+        before_count = await _blob_count(pool, tid, "")
+        before_bytes = await _blob_bytes(pool, tid, "")
+        global_before = await _blob_count_global(pool)
+        assert before_count >= self.MIN_ORPHANS + 4, (
+            f"staging under-delivered: {before_count} blobs staged, "
+            f"need >= {self.MIN_ORPHANS} orphans (+ the retained "
+            f"checkpoint set) for a >= 3-chunk run at batch "
+            f"{self.BATCH}"
+        )
+
+        summary = await prune_unreferenced_blobs(adapter)
+
+        after_count = await _blob_count(pool, tid, "")
+        after_bytes = await _blob_bytes(pool, tid, "")
+        global_after = await _blob_count_global(pool)
+
+        # (1) multi-chunk crossing — >= 3 data-bearing chunks, each
+        # within the dialed batch bound.
+        data_chunks = [n for n in chunk_sizes if n > 0]
+        assert len(data_chunks) >= 3, (
+            f"expected >= 3 data-bearing chunks at batch={self.BATCH} "
+            f"(staged {before_count} blobs); got chunk sizes "
+            f"{chunk_sizes} — the batch dial-down or staging regressed"
+        )
+        assert all(0 < n <= self.BATCH for n in data_chunks), (
+            f"per-chunk bound violated at batch={self.BATCH}: "
+            f"{data_chunks}"
+        )
+
+        # (2) totals match the live table deltas ACROSS chunk
+        # boundaries (count and bytes).
+        assert summary.total_deleted == before_count - after_count, (
+            f"deleted-count total ({summary.total_deleted}) != live "
+            f"row delta ({before_count - after_count}) — chunk loop "
+            f"leaked, double-counted, or truncated"
+        )
+        assert summary.total_bytes_freed == before_bytes - after_bytes, (
+            f"bytes-freed total ({summary.total_bytes_freed}) != live "
+            f"OCTET_LENGTH delta ({before_bytes - after_bytes}) — "
+            f"RETURNING aggregation drifted across chunk boundaries"
+        )
+
+        # (3) full exhaustion — a second prune finds nothing left.
+        second = await prune_unreferenced_blobs(adapter)
+        assert second.total_deleted == 0, (
+            f"pair NOT exhausted by the first prune: second run "
+            f"deleted {second.total_deleted} more rows — the chunk "
+            f"loop exited early (b2-vs-b unconstrained-subquery "
+            f"symptom)"
+        )
+
+        # (4) zero live blobs touched — global conservation on the
+        # fresh disposable DB (this pair is the only data; survivors
+        # are exactly the retained checkpoints' referenced set).
+        assert global_before - summary.total_deleted == global_after, (
+            f"global blob count changed by more than the pair's "
+            f"deletion total — blobs outside the target pair were "
+            f"touched"
+        )
+        assert summary.skipped == [], (
+            f"multi-chunk prune produced unexpected skips: "
+            f"{summary.skipped}"
+        )
