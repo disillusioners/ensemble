@@ -336,6 +336,70 @@ class TestManualEntryPointOrdering:
         assert isinstance(result.rows, object)
         assert result.duration_ms >= 0
 
+    def test_manual_none_kwarg_lands_destructive_true(self):
+        """FIX C (fix cycle 1) pin — ``destructive=None`` must land on
+        ``destructive=True`` end-to-end through the manual entry point.
+
+        The docblock documents ``None`` → the auto-cycle (destructive)
+        semantics, but the old ``bool(destructive)`` coercion made
+        ``None`` → ``False`` (dry-run) — silently inverting the
+        contract. The fixed coercion
+        (``destructive if destructive is not None else True``) must
+        drive the blob arm (asserted here through the real
+        ``_prune_unreferenced_blobs`` call) AND the row-arm branch.
+        """
+        import asyncio
+
+        from daemon.config import PersistenceConfig
+        from daemon.services.maintenance import CheckpointCleanupJob
+
+        adapter = MagicMock()
+        adapter.list_thread_ids = AsyncMock(return_value=[])
+        adapter.find_excess_checkpoint_groups = AsyncMock(return_value=[])
+        adapter.find_all_thread_ns_pairs = AsyncMock(return_value=[])
+        adapter.get_checkpoint_ids = AsyncMock(return_value=["ck-1"])
+
+        job = CheckpointCleanupJob(
+            config=PersistenceConfig(),
+            checkpointer=adapter,
+            instance_repo=MagicMock(),
+        )
+        seen_kwargs: list[dict] = []
+        real_e = job._prune_unreferenced_blobs
+
+        async def wrap_e(*a, **k):
+            seen_kwargs.append(k)
+            return await real_e(*a, **k)
+
+        job._prune_unreferenced_blobs = wrap_e  # type: ignore[method-assign]
+
+        row_calls: list[bool] = []
+        real_d = job._prune_per_thread_checkpoints
+
+        async def wrap_d(*a, **k):
+            row_calls.append(True)
+            return await real_d(*a, **k)
+
+        job._prune_per_thread_checkpoints = wrap_d  # type: ignore[method-assign]
+
+        result = asyncio.run(job.run_checkpoint_prunes(destructive=None))
+
+        # The blob arm received destructive=True (the documented None
+        # semantics) — not the old bool(None) → False.
+        assert seen_kwargs and seen_kwargs[0].get("destructive") is True, (
+            "None must land on destructive=True (fix C); "
+            f"got {seen_kwargs[0] if seen_kwargs else 'no call'}"
+        )
+        # The row-arm branch follows the SAME coerced value — None
+        # must not compose a destructive blob arm with a dry-run row
+        # projection: the DESTRUCTIVE compose (not
+        # _compute_row_prune_dry_run) is the branch taken.
+        assert row_calls == [True], (
+            "None must compose the destructive row arm "
+            "(coerced value drives BOTH arms)"
+        )
+        assert result.duration_ms >= 0
+
     def test_manual_dry_run_entry_point_is_read_only(self):
         """Companion to 9a (§4.2 case 17 lives in the lock/capture
         suite; this pins the entry-point composition cheaply here too):

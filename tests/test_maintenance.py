@@ -202,6 +202,81 @@ class TestIsDue:
 
         assert service._is_due(job) is True
 
+    # ── FIX A (fix cycle 1, feature/blob-prune-default-on): the
+    #    never-due guard. interval <= 0 DISABLES the job — the
+    #    documented emergency-stop knob
+    #    (PERSISTENCE_CHECKPOINT_CLEANUP_INTERVAL=0) depends on it.
+    #    The guard sits ABOVE the last_run-is-None branch, which these
+    #    two cases pin (a never-run disabled job must not fire on its
+    #    first tick).
+
+    def test_is_due_zero_interval_never_due_when_never_run(self):
+        """interval=0 + never run → NEVER due (disabled). Guards the
+        guard placement: pre-fix this returned True via the
+        last_run-is-None branch (the 'stop' knob fired every tick)."""
+        service = MaintenanceService()
+        job = MaintenanceJob(
+            name="test",
+            min_interval_hours=0,
+            last_run=None,
+            execute_fn=AsyncMock(),
+        )
+
+        assert service._is_due(job) is False
+
+    def test_is_due_zero_interval_never_due_when_previously_run(self):
+        """interval=0 + previously run → NEVER due (disabled)."""
+        service = MaintenanceService()
+        job = MaintenanceJob(
+            name="test",
+            min_interval_hours=0,
+            last_run=utcnow() - timedelta(hours=48),
+            execute_fn=AsyncMock(),
+        )
+
+        assert service._is_due(job) is False
+
+    def test_is_due_negative_interval_never_due(self):
+        """Negative interval is also disabled (never due) — the guard
+        is ``<= 0``, not ``== 0``."""
+        service = MaintenanceService()
+        job = MaintenanceJob(
+            name="test",
+            min_interval_hours=-1.0,
+            last_run=None,
+            execute_fn=AsyncMock(),
+        )
+
+        assert service._is_due(job) is False
+
+    def test_is_due_positive_interval_prior_behavior_unchanged(self):
+        """interval > 0 keeps the exact prior semantics — due on the
+        elapsed>=interval boundary, immediate when never run (pinned
+        here explicitly next to the new guard tests)."""
+        service = MaintenanceService()
+        never_run = MaintenanceJob(
+            name="test",
+            min_interval_hours=2.0,
+            last_run=None,
+            execute_fn=AsyncMock(),
+        )
+        due = MaintenanceJob(
+            name="test",
+            min_interval_hours=2.0,
+            last_run=utcnow() - timedelta(hours=2),
+            execute_fn=AsyncMock(),
+        )
+        not_due = MaintenanceJob(
+            name="test",
+            min_interval_hours=2.0,
+            last_run=utcnow() - timedelta(minutes=90),
+            execute_fn=AsyncMock(),
+        )
+
+        assert service._is_due(never_run) is True
+        assert service._is_due(due) is True
+        assert service._is_due(not_due) is False
+
 
 class TestIsIdle:
     """Tests for idle detection logic."""

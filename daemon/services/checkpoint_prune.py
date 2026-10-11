@@ -83,6 +83,17 @@ class BlobPruneSummary:
     would_delete_count: int = 0   # [AM-11] dry-run arm accumulation (canonical name)
     would_free_bytes: int = 0     # [AM-11] dry-run arm accumulation (canonical name)
     skipped: list[tuple[str, str, str]] = field(default_factory=list)
+    # W1 partial-completion signal (fix cycle 1): pairs whose DESTRUCTIVE
+    # chunk loop stopped early — ``"retry_exhausted"`` (isolation-family
+    # retry budget spent) or ``"over_batch_limit"`` (LIMIT-guard break).
+    # Tuples mirror ``skipped``: (thread_id, checkpoint_ns, reason). The
+    # deletes that DID happen stay counted in total_deleted /
+    # total_bytes_freed; this list makes the incompleteness explicit so
+    # a partially-pruned pair can no longer read as ordinary completion
+    # in the ``maintenance_runs`` audit row. Dry-run sweeps never
+    # populate it (the dry-run arm never deletes).
+    partial_pairs: list[tuple[str, str, str]] = field(default_factory=list)
+    partial_chunks_skipped: int = 0
 
     @property
     def destructive(self) -> bool:
@@ -106,7 +117,7 @@ class BlobPruneSummary:
         ]
         truncated = len(self.skipped) > skipped_cap
         if self.destructive:
-            return {
+            payload = {
                 "scanned_pairs": self.scanned_pairs,
                 "deleted": self.total_deleted,
                 "bytes_freed": self.total_bytes_freed,
@@ -114,6 +125,22 @@ class BlobPruneSummary:
                 "skipped": skipped_list,
                 "skipped_truncated": truncated,
             }
+            # W1 partial-completion signal (fix cycle 1) — emitted ONLY
+            # when at least one destructive pair stopped early, so the
+            # frozen wire shape stays byte-identical on healthy runs
+            # and the dry-run flavor (which never deletes) can never
+            # carry a phantom partial block.
+            if self.partial_pairs:
+                payload["partial_completion"] = {
+                    "stopped_early_pairs": len(self.partial_pairs),
+                    "chunks_skipped": self.partial_chunks_skipped,
+                    "pairs": [
+                        {"thread_id": t, "checkpoint_ns": ns, "reason": r}
+                        for (t, ns, r) in self.partial_pairs[:skipped_cap]
+                    ],
+                    "truncated": len(self.partial_pairs) > skipped_cap,
+                }
+            return payload
         return {
             "scanned_pairs": self.scanned_pairs,
             "would_delete_count": self.would_delete_count,
@@ -276,6 +303,32 @@ async def prune_unreferenced_blobs(
                 deleted, bytes_freed = await checkpointer.delete_blobs_anti_join(
                     thread_id, checkpoint_ns
                 )
+                # W1 (fix cycle 1): read the adapter's per-pair stop
+                # state, published by the PG chunk loop
+                # (``last_pair_stop_reason`` / ``last_pair_chunks_skipped``).
+                # Duck-typed read with a str/int guard so mocks that
+                # don't define the channel (MagicMock auto-attrs are
+                # neither) read as neutral — no phantom partials.
+                raw_reason = getattr(checkpointer, "last_pair_stop_reason", None)
+                pair_stop = raw_reason if isinstance(raw_reason, str) else None
+                raw_chunks = getattr(
+                    checkpointer, "last_pair_chunks_skipped", 0
+                )
+                pair_chunks_skipped = (
+                    raw_chunks
+                    if isinstance(raw_chunks, int)
+                    and not isinstance(raw_chunks, bool)
+                    else 0
+                )
+                if pair_stop is not None:
+                    # Early-stopped pair: partial totals above are REAL
+                    # (those deletes committed) but the pair is NOT
+                    # exhausted — surface it so the audit row cannot
+                    # read as ordinary completion.
+                    summary.partial_pairs.append(
+                        (thread_id, checkpoint_ns, pair_stop)
+                    )
+                    summary.partial_chunks_skipped += pair_chunks_skipped
                 duration_ms = int((time.perf_counter() - t0) * 1000)
                 log_blob_prune(
                     thread_id,
@@ -288,10 +341,16 @@ async def prune_unreferenced_blobs(
                 summary.total_bytes_freed += bytes_freed
                 logger.debug(
                     "[CheckpointPerf] blob_prune pair done in %dms "
-                    "(deleted=%d bytes=%d)",
+                    "(deleted=%d bytes=%d%s)",
                     duration_ms,
                     deleted,
                     bytes_freed,
+                    (
+                        f" stopped_early={pair_stop} "
+                        f"chunks_skipped={pair_chunks_skipped}"
+                        if pair_stop is not None
+                        else ""
+                    ),
                 )
             except Exception as inner_exc:  # noqa: BLE001
                 # Per-pair failure never breaks the cycle (risk table:
@@ -323,7 +382,8 @@ async def prune_unreferenced_blobs(
         logger.info(
             "[CheckpointPerf] op=blob_prune_summary threads=%d deleted=%d "
             "bytes=%d would_delete=%d would_free=%d dry_run=%d "
-            "duration_ms=%d scanned_pairs=%d skipped=%d backend=%s",
+            "duration_ms=%d scanned_pairs=%d skipped=%d "
+            "stopped_early=%d backend=%s",
             len(unique_threads),
             summary.total_deleted,
             summary.total_bytes_freed,
@@ -333,6 +393,7 @@ async def prune_unreferenced_blobs(
             duration_ms,
             summary.scanned_pairs,
             len(summary.skipped),
+            len(summary.partial_pairs),
             summary.backend,
         )
         return summary

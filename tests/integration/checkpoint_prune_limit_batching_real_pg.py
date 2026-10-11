@@ -351,14 +351,16 @@ class TestMultiChunkExhaustionDialedBatch:
 
         # Instrument the SQL primitive to observe per-chunk row counts
         # (instance-level wrapper; the original bound method is
-        # captured BEFORE patching).
+        # captured BEFORE patching). The primitive returns
+        # ``(rows, stop_reason)`` since the W1 partial-signal fix —
+        # unwrap for the counter, pass the pair through unchanged.
         chunk_sizes: list[int] = []
         primitive = adapter._delete_blobs_anti_join_chunk
 
         async def _counting(thread_id, checkpoint_ns, batch_size):
-            rows = await primitive(thread_id, checkpoint_ns, batch_size)
+            rows, stop_reason = await primitive(thread_id, checkpoint_ns, batch_size)
             chunk_sizes.append(len(rows))
-            return rows
+            return rows, stop_reason
 
         monkeypatch.setattr(adapter, "_delete_blobs_anti_join_chunk", _counting)
 

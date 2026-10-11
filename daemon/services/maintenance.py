@@ -286,12 +286,26 @@ class MaintenanceService:
     def _is_due(self, job: MaintenanceJob) -> bool:
         """Check if a job is due to run.
 
+        An interval of ``<= 0`` DISABLES the job (never due) — the
+        documented emergency-stop knob
+        (``PERSISTENCE_CHECKPOINT_CLEANUP_INTERVAL=0``, see
+        ``docs/runbooks/checkpoint-blob-prune-restore.md`` §ROLLBACK)
+        relies on this. The guard is the FIRST check, ABOVE the
+        ``last_run is None`` branch, so a never-run disabled job does
+        not fire on its first tick either (fix cycle 1, feature/
+        blob-prune-default-on: pre-fix, ``0`` meant due-EVERY-tick —
+        the "stop" knob was an accelerator).
+
         Args:
             job: The maintenance job to check.
 
         Returns:
-            True if job has never run or enough time has elapsed since last run.
+            True only when the job is enabled (interval > 0) AND it has
+            never run or enough time has elapsed since last run.
         """
+        if job.min_interval_hours <= 0:
+            return False
+
         if job.last_run is None:
             return True
 
@@ -1454,7 +1468,7 @@ class CheckpointCleanupJob:
         return summary
 
     async def run_checkpoint_prunes(
-        self, *, destructive: bool
+        self, *, destructive: bool | None
     ) -> CheckpointRunResult:
         """MANUAL-ONLY entry point — Op E → Op D (AM-2, BLOCKING).
 
@@ -1500,11 +1514,20 @@ class CheckpointCleanupJob:
         # (``manual preview never inherits an armed env``) is now
         # trivial — there is no env to inherit from; the kwarg is the
         # sole arbiter.
-        blob_destructive = bool(destructive)
-        blobs = await self._prune_unreferenced_blobs(destructive=blob_destructive)
+        # FIX C (fix cycle 1): the coercion must actually deliver the
+        # documented None→True semantics — the old ``bool(destructive)``
+        # coerced None to False (dry-run), silently inverting the
+        # contract. The coerced value drives BOTH arms so a None call
+        # composes identically to an explicit True call.
+        destructive_effective = (
+            destructive if destructive is not None else True
+        )
+        blobs = await self._prune_unreferenced_blobs(
+            destructive=destructive_effective
+        )
         if not isinstance(blobs, BlobPruneSummary):  # belt-and-braces typing guard
             blobs = BlobPruneSummary()
-        if destructive:
+        if destructive_effective:
             rows = await self._prune_per_thread_checkpoints()
         else:
             # v3.2 (R-4): pass the blob prune's ``skipped[]`` so the
