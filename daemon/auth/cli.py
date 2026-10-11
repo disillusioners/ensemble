@@ -96,7 +96,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--ttl",
         type=int,
         default=None,
-        help="TTL seconds (default: auth.bearer_token_ttl_seconds, 30d).",
+        help="TTL seconds (default: auth.bearer_token_ttl_seconds, 30d; "
+        "accepted range 60..31536000 — aligned with the config ceiling).",
     )
     issue.add_argument(
         "--scopes",
@@ -284,6 +285,23 @@ def main(
     )
 
     if args.command == "issue-token":
+        # ADV-4 rider (2026-10-11 review): validate --ttl BEFORE any
+        # mint. Defect being closed: a negative TTL slipped through
+        # ``ttl or bearer_ttl_default`` (non-zero → truthy) and minted
+        # an already-expired token with exit 0; 0 silently meant
+        # "default". Bounds AGREE with the §6.1 config ceiling
+        # (auth.bearer_token_ttl_seconds ∈ [60, 31536000],
+        # daemon/config.py) — the two sides are intentionally
+        # identical; do not weaken either.
+        if args.ttl is not None and not 60 <= args.ttl <= 31536000:
+            print(
+                f"invalid --ttl {args.ttl}: accepted range is "
+                "60..31536000 seconds (aligned with the "
+                "auth.bearer_token_ttl_seconds config ceiling); "
+                "omit --ttl to use the configured default",
+                file=err,
+            )
+            return 1
         scopes: tuple[str, ...] = ()
         if args.scopes:
             scopes = normalize_scope_list(args.scopes)

@@ -135,7 +135,8 @@ class TestCrossLaneMatrix:
     no partial honor; positive controls hold.
 
     Test plan:
-    * webhook secret at MCP-KB mount → 401 (no MCP key present)
+    * webhook secret at MCP-KB mount → classification-only assert
+      (live 401 pinned in tests/integration/test_mcp_kb_public.py)
     * webhook secret at general PROTECTED → 401 (not a valid OAuth2 credential)
     * MCP-KB key at webhook ingest → 401 (not a webhook credential)
     * MCP-KB key at general PROTECTED → 401 (not a valid OAuth2 credential)
@@ -148,10 +149,16 @@ class TestCrossLaneMatrix:
       pass-through)
     """
 
-    def test_webhook_secret_at_mcp_kb_mount_401(self, tmp_path):
+    def test_webhook_secret_at_mcp_kb_mount_classify(self, tmp_path):
         """A webhook secret is NOT an MCP-KB key. The webhook secret
         at the MCP-KB mount path is NOT accepted by the module guard
         — the guard consults the X-KB-Key header (not X-Webhook-Secret).
+
+        RENAMED (ADV-7 rider, 2026-10-11): this test asserts the
+        dispatch-order CLASSIFICATION only — it drives no request; the
+        honest ``_classify`` suffix replaces the ``_401`` claim. The
+        live 401 at the mount is the module guard's behavior, covered
+        by tests/integration/test_mcp_kb_public.py.
 
         The OAuth2 layer's classification of the mount path is
         module_lane (the middleware passes through); the module guard

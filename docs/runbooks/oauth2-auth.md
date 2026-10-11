@@ -165,7 +165,12 @@ python -m daemon.auth.cli issue-token \
 ```
 
 `--ttl` is an **integer number of SECONDS** (default:
-`ENSEMBLE_AUTH_BEARER_TOKEN_TTL_SECONDS`, 30d; ceiling 1y). Scope
+`ENSEMBLE_AUTH_BEARER_TOKEN_TTL_SECONDS`, 30d). Accepted range is
+**60..31536000** seconds (60s floor, 1y ceiling); values ≤0 or
+>31536000 are REFUSED with a clear error and non-zero exit (CLI
+bounds agree with the `auth.bearer_token_ttl_seconds` §6.1 config
+ceiling — negative TTLs previously minted an already-expired token
+with exit 0, closed by the 2026-10-11 review riders). Scope
 names are the closed v1 taxonomy (`daemon/auth/scopes.py`):
 `system:read`, `system:probe`, `instances:read`, `instances:write`,
 `jobs:read`, `jobs:write`, `messages:write`, `sources:write`,
@@ -286,6 +291,14 @@ the manifest). Insufficient scope is a `403 SCOPE_INSUFFICIENT` (never
 a 404). Browser sessions carry the operator grant family
 automatically — the SPA needs no token.
 
+**Interim v1 scope-trust disclosure (2026-10-11 review riders — no
+scope/code change in this build):**
+(i) `mcp:read` is WRITE-CAPABLE in v1 (it guards all mutating MCP
+routes); mint mcp tokens with minimal scopes; the `mcp:write` split
+arrives in v2.
+(ii) ~100 write routes are default-`*` (any-scope bearer) in v1 —
+treat every bearer as full-trust; the v2 taxonomy pass is tracked.
+
 ## 4. Rotation & maintenance
 
 **Client secret rotation:** replace `ENSEMBLE_AUTH_CLIENT_SECRET` in
@@ -391,9 +404,19 @@ port binds — and each refusal line names the offending
 * `enabled=true` without `client_id` / `client_secret` / discovery
   or issuer; `openid` missing from `ENSEMBLE_AUTH_SCOPES`;
   `redirect_uri` non-HTTPS without the insecure-cookie opt-in;
-  `SameSite=None` without `Secure=false`; session/JWKS/discovery TTL
+  `SameSite=None` without `Secure=true` (the guard REJECTS that
+  combination: `cookie_samesite=None` REQUIRES `cookie_secure=true`);
+  session/JWKS/discovery TTL
   bounds violations; unknown `ENSEMBLE_AUTH_*` env vars (stale names
   are refused loudly rather than ignored).
+* Auth-OFF conjunction (R3, 2026-10-11): `vscode_protected=true ∧
+  auth.enabled=false` ALSO refuses boot with exit 78 — even though
+  auth itself is disabled. `ENSEMBLE_AUTH_VSCODE_PROTECTED=true`
+  requires `ENSEMBLE_AUTH_ENABLED=true`: with auth off the OAuth2
+  middleware never constructs and the /vscode loopback peer gate
+  would be disabled with nothing behind it (remote-open under a
+  protective-sounding flag). The refusal names BOTH vars; either var
+  alone with a consistent auth state never refuses.
 
 Exit 78 is EX_CONFIG: the launcher must NOT retry — fix the env and
 restart manually (restart cannot fix config).
@@ -481,9 +504,26 @@ Current posture, disclosed plainly:
     open-ingest posture (`webhooks.py`), NOT auth configuration —
     webhook senders never present OAuth2 credentials.
 * Secret read-back masking on the management surface (GET
-  `/api/sources`) is a deliberately deferred decision — plan §12 item
-  4(c) / AC-42, adjudicated by the leader; the shipped posture is
-  unchanged in this build.
+  `/api/sources`) is SHIPPED: **mask-on-read + PUT-with-masked-no-clobber**
+  (plan §12 item 4(c) option (a)) — RULED 2026-10-11 by the leader.
+  GET redacts `webhook_secret` to the bare `********` mask sentinel;
+  a PUT carrying the masked value back keeps the stored secret (the
+  round-trip no-clobber guard); a PUT carrying new plaintext rotates.
+  Exercised by the AC-42 round-trip test
+  (`tests/integration/test_module_lane_isolation.py::TestWebhookSecretMaskingAC42`).
+* **Pinned sentinel semantics (exactly as shipped — council-ratified
+  ACCEPT-AS-PINNED, 2026-10-11):**
+  * The bare `********` sentinel is the SOLE set-ness signal on
+    read-backs — no `has_webhook_secret` boolean exists.
+  * Sentinel-equality semantics (PUT path):
+    * A stored-literal echo — a PUT carrying back the same masked
+      value read from a GET — is a SELF-HEALING NO-OP: the stored
+      secret is preserved (never clobbered by the mask).
+    * A literal `********` CANNOT be set as a NEW secret while a
+      secret exists.
+    * BUT on a SECRET-LESS source, a sentinel PUT PERSISTS the mask
+      literal as a real (weak, 8-char) secret — operator-class
+      action, `sources:write` scope required.
 
 ## Annex C — Decisions & defaults (OD annex)
 
