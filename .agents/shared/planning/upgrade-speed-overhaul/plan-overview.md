@@ -152,7 +152,7 @@ P1 (rollback + polish)
 
 ### Test-strategy.md arithmetic evidence (test-strategy.md §1 row T-AC2c)
 
-Today: 19 append sites × ~280 s/event ≈ **28–46 min journal-dominated** at 87 KB (139 s/read × ≥2 reads per update, ×N events). Post-splice: ≤ 19 s total journal cost. E6 non-journal budgets 536 s; typical observed non-journal ≈ 221 s. With adaptive soak 60–120 s: **typical 4.7–5.7 min (≤ 10 min with ~2x margin)**; **non-stop worst 870 s + 30 s slack inside 900 s ceiling**; all-budgets-max ceiling 1400 s (halt). E6 clean design budget 8–13 min at 300 s soak reconciles (536 + 300 ≈ 836 s ≈ 13 min).
+Today: 19 append sites × ~280 s/event ≈ **88–89 min journal-dominated** (19 events × 2 reads × 139 s/read at 87 KB; the prior "28–46 min" was a unit/typo error). Post-splice: ≤ 19 s total journal cost. E6 non-journal budgets 536 s; typical observed non-journal ≈ 221 s. With adaptive soak 60–120 s: **typical 4.7–5.7 min (≤ 10 min with ~2x margin)**; **non-stop worst 870 s + 30 s slack inside 900 s ceiling**; all-budgets-max ceiling 1400 s (halt). E6 clean design budget **8–13 min at 300 s soak** reconciles as **typical observed non-journal ≈ 221 s + 300 s = 521 s ≈ 8.7 min** (the design target), NOT the all-budgets-max 536+300 ≈ 836 s ≈ 14 min (the worst-case envelope).
 
 ---
 
