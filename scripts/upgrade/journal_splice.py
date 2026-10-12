@@ -184,7 +184,32 @@ def _pipeline_lock_held(jp: Path) -> bool:
     somehow runs while the SANCTIONED pipeline holds the lock passes
     the same check the lock itself grants — the lock is the trust
     anchor, not the caller's identity (mkdir-locks carry no
-    inheritable fd to attest with)."""
+    inheritable fd to attest with).
+
+    C4 pid-reuse residual (LANE-1 yellow, council 2026-10-12; accepted,
+    NOT mitigated here): a lock-owner pid written to
+    ``rollback.lock.d/owner`` can be recycled by an unrelated process
+    after the original owner dies but before the sweep adopts/breaks
+    the stale dir — i.e., the waiver could be granted to a non-owner.
+    The harness of the residual is bounded by two mitigations working
+    in concert: (i) the mkdir-lock EPERM liveness semantics — a
+    recycled pid only "owns" the lock dir if it can also recreate it,
+    which is gated by the OS directory-mode check; (ii) the waiver
+    window is short — the live owner is the genuine pipeline
+    (``promote.sh`` / ``rollback.sh``) which holds the dir for the
+    duration of one ceremony (<≈600s on stop-spans), and any pid
+    recycled inside that window would also have to land inside the
+    same install. Neither mitigation closes the residual in the
+    abstract; we accept it because the residual is bounded to the
+    ceremony window AND because tightening it would require an
+    inheritable fd across exec (a deep, cross-platform change) or a
+    signed witness from the lock helper (a new artifact). The blast
+    radius is bounded to a single ``append-history`` /
+    ``set-in-flight-field`` / ``unset-field`` against the live journal
+    during the brief window — equivalent in failure mode to the
+    pre-C4 sanctioned pipeline writing the same op, which is the
+    trust anchor by construction. Do NOT change behavior here — the
+    docstring only documents why we accept the residual."""
     releases = jp.parent
     if releases.name != "releases":
         return False

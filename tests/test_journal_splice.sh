@@ -195,15 +195,51 @@ RC=$?; assert_eq "refusal-quarantine-rc" "78" "$RC"
 "$PY" "$HELPER" "$INSTALL_DIR/releases/state.json" set-field rollback_window_count '{}' >/dev/null 2>&1
 RC=$?; assert_eq "refusal-rollback-window-rc" "78" "$RC"
 
-# Live-install refusal (decision (a) precedence, ledger_check.py:46-55)
-HOME_BACKUP="$HOME"
-export HOME="$HOME"
+# Live-install refusal (decision (a) precedence, ledger_check.py:46-55).
+#
+# FENCED (F1 fix, 2026-10-12): a prior incarnation of this block ran
+# `export HOME="$HOME"` (self-referential no-op — looks like a save,
+# saves nothing) followed by `mkdir -p "$HOME/agents-ensemble/releases"`
+# and `rm -rf "$HOME/agents-ensemble"`. If HOME resolved to the real
+# home, the rm destroyed the live install. The fix isolates ALL
+# HOME-relative destructive or creating ops under a throwaway
+# /tmp/<FAKE_HOME>; a preflight guard aborts loudly BEFORE the first
+# creating/destructive op if the export failed or the canonicalized
+# target escapes /tmp or touches /home/nea. Behavior under test is
+# preserved: with HOME pinned to FAKE_HOME, the helper still sees
+# "$HOME/agents-ensemble" as the literal live-install path and refuses
+# (78) — exactly what the original block asserted. After the section
+# finishes, HOME is restored to TRUE_HOME and FAKE_HOME is removed;
+# the EXIT trap is dropped so subsequent sections see the real $HOME.
+#
 # The literal live dir NAME is a substring of many paths (e.g.
 # "$HOME/agents-ensemble-must-not-exist-sh-$$"). Our refusal compares
-# the RESOLVED path; we put the test-fixture dir under HOME so the
-# resolve() walks the same root, but we give it a name that
+# the RESOLVED path; we put the test-fixture dir under FAKE_HOME so
+# the resolve() walks the same root, but we give it a name that
 # canonicalizes to exactly the live install dir OR sits directly
 # under it.
+TRUE_HOME="$HOME"
+FAKE_HOME="$(mktemp -d /tmp/ens-splice-home.XXXXXX)"
+export HOME="$FAKE_HOME"
+# Preflight guard (DEFENSIVE — runs BEFORE any mkdir/rm/create).
+# If any condition fails the section aborts loud with non-zero rc.
+if [ "$HOME" = "$TRUE_HOME" ]; then
+    printf 'FATAL F1: HOME export did not take (HOME=%s == TRUE_HOME=%s) — refusing to run section 2 live-install cells\n' "$HOME" "$TRUE_HOME" >&2
+    exit 1
+fi
+case "$HOME" in
+    /tmp/*) ;;
+    *) printf 'FATAL F1: FAKE_HOME escapes /tmp (HOME=%s) — refusing to run section 2 live-install cells\n' "$HOME" >&2; exit 1 ;;
+esac
+LIVE_PARENT_TARGET="$(cd "$HOME" && pwd -P)/agents-ensemble"
+case "$LIVE_PARENT_TARGET" in
+    /tmp/*) ;;
+    *) printf 'FATAL F1: resolved LIVE_PARENT escapes /tmp (%s) — refusing to run section 2 live-install cells\n' "$LIVE_PARENT_TARGET" >&2; exit 1 ;;
+esac
+case "$LIVE_PARENT_TARGET" in
+    *"/home/nea"*) printf 'FATAL F1: resolved LIVE_PARENT touches /home/nea (%s) — refusing to run section 2 live-install cells\n' "$LIVE_PARENT_TARGET" >&2; exit 1 ;;
+esac
+trap 'rm -rf "$FAKE_HOME"' EXIT
 LIVE_PARENT="$HOME/agents-ensemble"
 LIVE_DIR="$LIVE_PARENT/releases"
 mkdir -p "$LIVE_DIR"
@@ -214,7 +250,9 @@ rm -rf "$LIVE_PARENT"
 assert_eq "refusal-live-install-rc" "78" "$RC"
 
 # Same-fixture, different spelling — resolved path is identical and
-# still refused (case-fold defense-in-depth)
+# still refused (case-fold defense-in-depth). The case-fold check
+# resolves the literal "$HOME/agents-ENSEMBLE" against the same
+# FAKE_HOME root (still under /tmp per the preflight guard above).
 LIVE_PARENT2="$HOME/agents-ENSEMBLE"  # case-fold equivalent
 mkdir -p "$LIVE_PARENT2/releases"
 printf '%s\n' '{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' > "$LIVE_PARENT2/releases/state.json"
@@ -222,6 +260,13 @@ printf '%s\n' '{"current":null,"previous":null,"in_flight":null,"rollback_window
 RC=$?
 rm -rf "$LIVE_PARENT2"
 assert_eq "refusal-live-install-casefold-rc" "78" "$RC"
+
+# FENCE teardown: restore HOME, drop the EXIT trap, remove FAKE_HOME
+# (the trap would have done the same on exit; we tear down eagerly so
+# subsequent sections see the real $HOME and never touch the fixture).
+trap - EXIT
+rm -rf "$FAKE_HOME"
+export HOME="$TRUE_HOME"
 
 # ===========================================================================
 # Section 3 — T-NEG-python3-missing (fail-closed exit 78)
