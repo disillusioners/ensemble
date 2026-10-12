@@ -1019,84 +1019,236 @@ class SQLModelMessageQueueRepository:
             
             return result.rowcount
 
+    def capture_doomed_ids_and_audit(
+        self,
+        preserve_in_flight: bool = False,
+        *,
+        boot_epoch: datetime | None = None,
+    ) -> list[str]:
+        """CAPTURE_PHASE: read the doomed-id set + emit audit log line.
+
+        P3 / decision (f) / D-P3.9, D-P3.10 — synchronous, in-band,
+        stays pre-pool at ``daemon/manager.py:843``. Returns the
+        doomed-id list (the rows the deferred DELETE will remove
+        later). The audit log line shape at :1136-1143 (the
+        env-poison dev-boot-on-prod incident family audit trail) is
+        PRESERVED VERBATIM — only the deletion is deferred, never
+        the audit.
+
+        State location decision: this method lives on the same
+        repository as the existing ``clear_all`` (not on the
+        InstanceManager) because (a) the audit log line shape is
+        the queue repo's contract, (b) the doomed-id set is derived
+        from the SAME predicate each boot and the repository
+        already owns that predicate, (c) idempotency is local —
+        a 2nd boot's capture sees the same doomed set if the
+        deferred delete didn't complete.
+
+        Returns: list of doomed message_id strings. Empty list
+        when the operator's config gate disables the wipe
+        (QUEUE_DISCARD_ON_STARTUP=false) or no rows match the
+        doomed predicate.
+
+        boot_epoch is retained for parity with ``clear_all`` (the
+        F-1 arm-3 predicate doesn't consume it; passing None is
+        safe).
+        """
+        # m1 (2026-10-03) — lazy import (circular-dep safe).
+        from daemon.repositories.task.repository import (
+            _capped_doomed_id_repr as _capped_doomed_id_repr_fn,
+        )
+
+        arm3_active = _message_queue_boot_auto_continued_preserve_enabled()
+        with Session(self.engine) as session:
+            if preserve_in_flight:
+                if arm3_active:
+                    _terminal_instance_statuses_sql = (
+                        "(" + ",".join(
+                            f"'{s}'" for s in sorted(TERMINAL_INSTANCE_STATUSES)
+                        ) + ")"
+                    )
+                    _arm3_keep_sql = (
+                        " OR ("
+                        "auto_continued_at IS NOT NULL "
+                        "AND EXISTS ("
+                        "SELECT 1 FROM instances "
+                        "WHERE instances.instance_id = task.instance_id "
+                        f"AND instances.status NOT IN {_terminal_instance_statuses_sql}"
+                        ")"
+                        ")"
+                    )
+                else:
+                    _arm3_keep_sql = ""
+                    logger.warning(
+                        "JOURNAL: MessageQueueRepository.clear_all "
+                        "kill-switch %s=0 — arm 3 DISABLED; "
+                        "preserve predicate reverts to pre-F-1 "
+                        "(arm 1 only).",
+                        MESSAGE_QUEUE_BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV,
+                    )
+                # Capture doomed ids BEFORE the wipe.
+                doomed_rows = session.exec(
+                    text(
+                        "SELECT message_id FROM message_queue "
+                        "WHERE message_id NOT IN "
+                        "(SELECT message_id FROM task "
+                        "WHERE status IN ('running', 'paused')"
+                        f"{_arm3_keep_sql}"
+                        ")"
+                    )
+                ).all()
+                doomed_ids = [r[0] for r in doomed_rows]
+                logger.warning(
+                    "JOURNAL: MessageQueueRepository.clear_all "
+                    "preserve_in_flight=True about to DELETE "
+                    "%d message_queue row(s) (env-poison family "
+                    "audit). doomed_message_ids=%s",
+                    len(doomed_ids),
+                    _capped_doomed_id_repr_fn(doomed_ids),
+                )
+            else:
+                doomed_rows = session.exec(
+                    text("SELECT message_id FROM message_queue")
+                ).all()
+                doomed_ids = [r[0] for r in doomed_rows]
+                logger.warning(
+                    "JOURNAL: MessageQueueRepository.clear_all "
+                    "preserve_in_flight=False about to DELETE "
+                    "%d message_queue row(s) (nuclear wipe — "
+                    "env-poison family audit). doomed_message_ids=%s",
+                    len(doomed_ids),
+                    _capped_doomed_id_repr_fn(doomed_ids),
+                )
+            # NOTE: a bare commit here would publish the doomed-id
+            # capture without a matching DELETE — the new split shape
+            # intentionally does NOT commit. The doomed_ids are
+            # returned to the caller (manager.py:843) which threads
+            # them into the deferred-DELETE call below. The
+            # transaction boundary stays INVISIBLE to the database
+            # (the doomed set is in-memory only) so a crash between
+            # capture and deferred-DELETE is handled by the
+            # idempotency rule: the next boot's capture re-derives
+            # the same doomed set (the predicate is stable).
+            return doomed_ids
+
+    def delete_doomed_ids(
+        self,
+        doomed_ids: list[str],
+        *,
+        preserve_in_flight: bool = False,
+        chunk_size: int = 1000,
+    ) -> int:
+        """DELETE_PHASE: actually remove the doomed-id rows.
+
+        P3 / decision (f) / D-P3.9 — the deferred half of the
+        audit-after-soak sequencing. Called from the lifespan
+        startup hook AFTER ``/readyz`` first returns green AND
+        ``+1 s`` OR ``+5 s`` have elapsed (D-P3.9 precedence:
+        (readyz-green still true AND +1 s) OR (+5 s) — the
+        cheap-still-green re-check rides an already-warm pool +
+        a single boolean; the +5 s hard floor guarantees the
+        deferred DELETE cannot pile up faster than the queue
+        can drain).
+
+        Args:
+            doomed_ids: list from ``capture_doomed_ids_and_audit``.
+            preserve_in_flight: passed through so the DELETE SQL
+                matches the audit log's predicate exactly (the
+                audit and the DELETE must agree, per the F-1
+                contract).
+            chunk_size: rows per DELETE statement (default 1000;
+                preserves the existing per-chunk DELETE-where-in
+                pattern). Bounded by the existing pool.
+
+        Returns: total number of rows deleted (sum across chunks).
+
+        Crash-safety: a partial DELETE leaves the next boot's
+        capture with a SHORTER doomed set (the deleted rows are
+        already gone). The next boot's CAPTURE_PHASE re-logs
+        audit + DELETE re-runs the residual set; bounded
+        divergence is "remaining doomed ids" — at most
+        chunk_size per cycle.
+        """
+        if not doomed_ids:
+            logger.info(
+                "JOURNAL: MessageQueueRepository.delete_doomed_ids "
+                "(DELETE_PHASE) — empty doomed list (no rows to "
+                "delete; possibly the prior boot's DELETE already "
+                "completed, or QUEUE_DISCARD_ON_STARTUP=false)"
+            )
+            return 0
+
+        total_deleted = 0
+        # Chunk the doomed-id list; bounded DELETE-where-in per
+        # chunk (matches the existing pre-P3 single-shot DELETE
+        # shape, just chunked for safety on large doomed sets).
+        for i in range(0, len(doomed_ids), chunk_size):
+            chunk = doomed_ids[i : i + chunk_size]
+            # Build a SQL IN clause safely with parameterized
+            # values; the doomed_ids are server-side UUIDs we
+            # captured ourselves — no untrusted input.
+            placeholders = ",".join(
+                f":id_{j}" for j in range(len(chunk))
+            )
+            params = {f"id_{j}": cid for j, cid in enumerate(chunk)}
+            sql = f"DELETE FROM message_queue WHERE message_id IN ({placeholders})"
+            with Session(self.engine) as session:
+                result = session.exec(text(sql), params=params)
+                session.commit()
+                total_deleted += result.rowcount or 0
+        logger.info(
+            "JOURNAL: MessageQueueRepository.delete_doomed_ids "
+            "(DELETE_PHASE) — DELETED %d message_queue row(s) "
+            "in %d chunk(s) (chunk_size=%d; deferred per D-P3.9; "
+            "post-readyz background, ordered after (readyz-green "
+            "still true AND +1 s) OR (+5 s) wall-clock floor)",
+            total_deleted,
+            (len(doomed_ids) + chunk_size - 1) // chunk_size,
+            chunk_size,
+        )
+        return total_deleted
+
     def clear_all(
         self,
         preserve_in_flight: bool = False,
         *,
         boot_epoch: datetime | None = None,
     ) -> int:
-        """Delete messages, optionally preserving resumable / in-flight work.
+        """Synchronous coordinator: capture + DELETE in one shot.
+
+        P3 / decision (f) — preserves the v0.18-era synchronous
+        semantics (capture + DELETE in a single Session, audit log
+        at :1136-1143) for non-boot callers and tests. The boot
+        path now goes through :meth:`capture_doomed_ids_and_audit`
+        + :meth:`delete_doomed_ids` separately so the DELETE moves
+        off the boot critical path (D-P3.9 / D-P3.10).
 
         Args:
-            preserve_in_flight: When ``False`` (default) every message is
-                deleted. When ``True``, only messages that are NOT backing
-                a RUNNING or PAUSED task are deleted — i.e. the message
-                rows that keep a paused instance resumable (and an
-                in-flight instance recoverable) survive. This mirrors
-                :meth:`TaskRepository.clear_all`'s preserve mode so the
-                ``discard_on_startup`` startup hook can clear the backlog
-                without orphaning paused/running instances. The kept set
-                is resolved via ``task.message_id`` linkage.
-
-                F-1 (durability-f1-f2 / phase1, plan §2, §13b): the
-                keep set gains a second arm — terminal task rows with
-                an ``auto_continued_at`` marker whose owning instance
-                is still non-terminal
-                (``instances.status NOT IN TERMINAL_INSTANCE_STATUSES``)
-                also retain their backing messages across the
-                boot-wipe. This is the queue-side symmetric extension
-                of the task-side arm 3; the wipe is joint
-                (task-side + queue-side) so the join ``message_id``
-                path must agree. Gated by
-                ``ENSEMBLE_BOOT_AUTO_CONTINUED_PRESERVE`` (default ON;
-                ``=0`` restores the exact pre-F-1 predicate).
-
-            boot_epoch: Captured boot epoch (naive-UTC, ``None`` when
-                capture failed). The F-1 predicate does NOT consume
-                it (arm 3's ``EXISTS instances`` co-condition is on
-                ``instances.status`` only). RETAINED for the
-                auto-continue consumer; passing ``None`` is safe.
+            preserve_in_flight: When ``False`` (default) every
+                message is deleted. When ``True``, only messages
+                that are NOT backing a RUNNING or PAUSED task are
+                deleted (mirrors :meth:`TaskRepository.clear_all`'s
+                preserve mode; the F-1 arm-3 still applies).
+            boot_epoch: Captured boot epoch (naive-UTC, ``None``
+                when capture failed). The F-1 arm-3 does NOT
+                consume it (the EXISTS co-condition is on
+                ``instances.status`` only).
 
         Returns:
             Number of messages deleted.
         """
-        # m1 (2026-10-03, report-delivery-bug-family) — lazy
-        # import to break the circular dependency on
-        # ``daemon.repositories.task.repository`` (see the
-        # module-level note above). The helper is a pure
-        # function and safe to import here.
+        # m1 (2026-10-03) — lazy import (circular-dep safe).
         from daemon.repositories.task.repository import (
             _capped_doomed_id_repr as _capped_doomed_id_repr_fn,
         )
 
-        # PP1-adjacent (2026-10-03, report-delivery-bug-family) —
-        # JOURNAL the doomed-id list BEFORE the wipe so the
-        # env-poison dev-boot-on-prod incident family
-        # (occurrence #5 producer-deleter) leaves an audit trail
-        # even though the underlying rows are gone. Pure
-        # observability, zero behavior change. The doomed set is
-        # the preserve-complement of the keep-set keying
-        # (linked TASK status ∈ (running, paused) — survivor
-        # message 06b9f41f lived because its task 5803 was
-        # running). Logging BEFORE the DELETE means a wipe that
-        # crashes mid-flight still has the audit line; the
-        # post-delete rowcount alone is not enough to
-        # reconstruct the impact.
-        # F-1 (durability-f1-f2 / phase1) — read the arm-3
-        # kill-switch ONCE per wipe so the mirror SQL and the
-        # DELETE predicate agree.
         arm3_active = _message_queue_boot_auto_continued_preserve_enabled()
         with Session(self.engine) as session:
             if preserve_in_flight:
                 if arm3_active:
                     # F-1 arm 3 SQL fragment — terminal-stamped
                     # rows of non-terminal instances (symmetric to
-                    # the task-side predicate). The terminal
-                    # status list is sourced from the canonical
-                    # ``TERMINAL_INSTANCE_STATUSES`` constant at
-                    # ``daemon/constants.py:584-589`` (mirrors the
-                    # task-side predicate at
-                    # ``task/repository.py:4394-4405``).
+                    # the task-side predicate).
                     _terminal_instance_statuses_sql = (
                         "(" + ",".join(
                             f"'{s}'" for s in sorted(TERMINAL_INSTANCE_STATUSES)

@@ -829,6 +829,14 @@ class InstanceManager:
         # truth) — lets the per-LLM-call drain skip the DB round-trip
         # for instances with no pending reports.
         self._report_injection_pending: set[str] = set()
+
+        # P3 / decision (f) / D-P3.9 — the deferred DELETE_PHASE
+        # doomed-id list (set by discard_on_startup's CAPTURE_PHASE;
+        # consumed by the lifespan startup hook's deferred DELETE).
+        # Empty list when the operator's config gate disables the
+        # wipe (QUEUE_DISCARD_ON_STARTUP=false) or no rows match
+        # the doomed predicate.
+        self._pending_doomed_ids: list[str] = []
         
         # discard_on_startup: safe "backlog clear". Clears only unstarted
         # / terminal work (PENDING tasks + their messages); RUNNING and
@@ -871,14 +879,63 @@ class InstanceManager:
                     f"wipe; consumers fall back to None boot_epoch.",
                     exc_info=True,
                 )
-            msg_count = self._queue_repository.clear_all(
-                preserve_in_flight=True,
-                boot_epoch=_boot_epoch,
-            )
-            logger.info(
-                f"Cleared {msg_count} backlog message(s) "
-                f"(discard_on_startup=backlog-clear; in-flight/paused preserved)"
-            )
+            # P3 / decision (f) / D-P3.9 — split the env-poison
+            # purge: CAPTURE_PHASE (sync, pre-pool, this call) +
+            # DELETE_PHASE (background, post-readyz-green, fires
+            # from the lifespan startup hook on
+            # (readyz-green still true AND +1 s elapsed) OR
+            # (+5 s elapsed) per D-P3.9 precedence). The original
+            # synchronous ``clear_all(preserve_in_flight=True)``
+            # was the boot-storm class: capturing + deleting in
+            # one pre-pool shot left the daemon DOWN until the
+            # wipe completed. The capture-and-defer split moves
+            # the slow part (row DELETE) off the boot critical
+            # path while preserving:
+            #   - boot_epoch ordering (capture pre-wipe + again
+            #     post-init api.py:424-426) preserved verbatim
+            #   - queue_freshness readiness uses post-init
+            #     boot_epoch; unchanged
+            #   - StaleTaskRecovery runs against the post-
+            #     capture, pre-delete state — slightly different
+            #     window than today (today it's pre-delete, after
+            #     the fix it's "between capture and delete"), but
+            #     the wipe assumption that the task table is
+            #     intact is preserved (the task-table wipe below
+            #     still runs synchronously in-band)
+            #   - audit log at repository.py:1136-1143 preserved
+            #     verbatim — the env-poison family audit trail
+            #     is the queue repo's contract
+            #   - idempotency: 2nd boot's CAPTURE_PHASE sees the
+            #     same doomed set if DELETE didn't complete
+            #   - config gate QUEUE_DISCARD_ON_STARTUP preserved
+            #     (no-ops the whole flow when false; the
+            #     capture returns [] and DELETE no-ops)
+            try:
+                self._pending_doomed_ids = (
+                    self._queue_repository.capture_doomed_ids_and_audit(
+                        preserve_in_flight=True,
+                        boot_epoch=_boot_epoch,
+                    )
+                )
+                logger.info(
+                    f"discard_on_startup: CAPTURE_PHASE complete — "
+                    f"stashed {len(self._pending_doomed_ids)} doomed "
+                    f"id(s) for the deferred DELETE_PHASE (D-P3.9; "
+                    f"DELETE moves off the boot critical path)"
+                )
+            except Exception as _capture_err:
+                # Capture failure is NON-FATAL — the rows remain
+                # on disk; the next boot's CAPTURE_PHASE will
+                # re-derive the same doomed set (predicate stable)
+                # and DELETE will run. Idempotency preserved.
+                logger.warning(
+                    f"discard_on_startup: CAPTURE_PHASE failed "
+                    f"({_capture_err!r}) — the next boot will "
+                    f"re-capture and retry; rows remain in the "
+                    f"queue until then",
+                    exc_info=True,
+                )
+                self._pending_doomed_ids = []
 
             # Also discard backlog tasks (linked to messages).
             # Restart-wipe coherence probe (f1-misfire batch,
