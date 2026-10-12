@@ -14,7 +14,8 @@
  * 15 cases that exercise the redesigned testids under the wizard
  * gating. This file owns the wizard-shape contract and runtime budget.
  *
- * 8 cases in this file (sized to honor the 5-min hard cap):
+ * 8 cases in this file (sized to honor the 90s per-case cap — see
+ * the budget rationale at the end of this header):
  *   w1. status-strip is visible above the stepper on every viewport
  *   w2. AC-15 runtime budget at 1024×768 — Status Strip + horizontal
  *       stepper + Continue button all toBeInViewport; full-page
@@ -32,6 +33,28 @@
  *   w7. tab bar structure + lazy-mount instance count — 2 tabs,
  *       Tab 1 active, Tab 2 aria-disabled, click + keyboard do not
  *       mount a second wizard.
+ *
+ * Wall-clock budget rationale (tidier pass T5): Playwright's
+ * per-case cap in this project is 90 SECONDS
+ * (playwright.maintenance.config.ts `timeout: 90000` — "second-daemon
+ * boot + canary"; NOT the 5 minutes this header once claimed — the
+ * config has never carried a 300s per-test timeout). The suite is
+ * sized so EVERY case sits well under that ceiling with headroom
+ * for cold-browser + dev-server jitter:
+ *   - w1/w3/w6/w6.5/w7 are navigation-or-interaction cases — they
+ *     boot the SPA once and assert DOM/state; ~5-15s each.
+ *   - w2 carries the AC-15 budget asserts + a screenshot baseline
+ *     compare (maxDiffPixelRatio 0.02) — the screenshot diff is the
+ *     slow leg; ~20-30s.
+ *   - w4 runs a full axe-core scan of the whole page — the single
+ *     slowest case (~30-60s cold, still under the 90s cap).
+ *   - w5 is the multi-step happy path (4 wizard steps + 2 awaits on
+ *     the DB-backed dry-run/execute round-trips) — the DB round-trip
+ *     latency is the variable leg; ~60-90s.
+ * Nothing here approaches the cap, so the suite needs NO per-case
+ * timeout overrides; revisit this budget if a case starts exceeding
+ * ~60s (add a dedicated `test.setTimeout` + a comment naming
+ * the slow leg) rather than raising the global cap.
  */
 
 import { test, expect, type Page } from '@playwright/test';

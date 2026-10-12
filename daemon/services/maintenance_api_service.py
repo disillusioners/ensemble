@@ -24,6 +24,23 @@ done-callback discard (R-5 — GC-safe, memory O(1)). Manager
 shutdown cancels + awaits the live task; a graceful shutdown marks
 the row ``failed`` with ``error_json.code='run_interrupted_by_shutdown'``
 per [AM-6/AM-7] state machine.
+
+Size rationale (tidier pass T5): the manual lanes — ``dry_run``,
+``execute``, ``_execute_run``, and the ENOSPC discriminator pair
+(``_has_pgcode_attr`` / ``_is_vacuum_full_enospc``) — stay
+co-located in this ONE file because they share the single-flight
+sequence (lock → conditional INSERT → run → finalize-in-finally),
+the same ``MaintenanceError`` carrier, and the same audit-row
+lifecycle; splitting the ENOSPC classifier or the background
+``_execute_run`` into a sibling module would sever that shared
+state (the classifier is consumed ONLY by ``_execute_run``'s
+exception stamping today) for zero dedup. Revisit trigger: extract
+when a THIRD escalation flag joins ``vacuum_full`` in the execute
+payload (a second discriminator family worth its own module), OR
+when a second caller of ``run_checkpoint_prunes`` appears outside
+this service (the classifier + run-row stamping would then need to
+be callable from two homes — extract to a shared error-classifier
+module at that point).
 """
 
 from __future__ import annotations

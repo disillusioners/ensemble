@@ -19,6 +19,21 @@
 * the auto blob-arm call passes NO ``destructive`` kwarg (auto
   lands on the unconditional destructive default — the env-flag
   ladder is gone; feature/blob-prune-default-on).
+
+Size rationale (tidier pass T5 — N-4 lane-placement consolidation):
+ALL of Section 1's pins live in this ONE integration lane because
+the N-4 rule assigns every cross-module wiring pin (manager
+construction site + CheckpointCleanupJob internals + the VACUUM
+FULL structural guard) to a single AST-pinning home — a pin that
+spans manager.py AND maintenance.py cannot live in a
+class-local unit-test lane without splitting one contract across
+two files. The file currently carries 4 pin families (construction/
+kwargs, manager-handles, auto-execute order, VACUUM-FULL
+structural guard F1+BL). Revisit trigger: a 4th pin FAMILY
+(beyond those four) joining this file means the lane has outgrown
+"Section 1 wiring" — split it into per-family pin files
+(construction / ordering / structural-guard) rather than appending
+a fifth family here.
 """
 from __future__ import annotations
 
