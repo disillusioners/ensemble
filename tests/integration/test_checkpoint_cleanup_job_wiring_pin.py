@@ -863,9 +863,22 @@ class TestVacuumFullStructuralGuard:
         # sequence of adapter calls + repo writes that we'll stub
         # via the engine. For the SQL-recording contract, we wrap
         # the text() invocation in a recorder.
+        #
+        # R3 hardening (2026-10-12): the recorder also fires
+        # ``AssertionError("VACUUM FULL reached execute()")`` if any
+        # statement contains "VACUUM FULL" (case-insensitive). The
+        # previous fixture constructed ``CheckpointCleanupJob``
+        # WITHOUT ``shared_engine``, so the engine-availability gate
+        # refused BEFORE any SQL could execute — a future
+        # vacuum-in-execute() regression stayed GREEN (the test was
+        # vacuous). With the shared-engine stub in place, the gate
+        # passes and the recorder IS reached; a regression that
+        # actually issues a VACUUM FULL statement trips the
+        # AssertionError loudly. Non-VACUUM-FULL statements pass
+        # through as no-ops.
         recorded_sqls: list[str] = []
         conn = MagicMock()
-        # conn.execute(text(sql)) — record the SQL string.
+
         def _record_execute(stmt, *args, **kwargs):
             # stmt may be a sqlalchemy TextClause or a string;
             # extract its textual form for the assertion.
@@ -874,18 +887,37 @@ class TestVacuumFullStructuralGuard:
             except Exception:
                 sql_str = repr(stmt)
             recorded_sqls.append(sql_str)
+            # R3 — trip loudly on any VACUUM FULL statement. This
+            # is the test's failure signal: the assertion below
+            # (``assert not vacuum_full_records``) is the
+            # belt-and-braces; the AssertionError is the braces.
+            if "vacuum full" in sql_str.lower():
+                raise AssertionError(
+                    "VACUUM FULL reached execute() — structural guard "
+                    "tripped (decisions.md §D-4 F1(iv))"
+                )
             result = MagicMock()
             result.scalar.return_value = 0
             result.fetchone.return_value = None
             result.fetchall.return_value = []
             result.rowcount = 0
             return result
+
         conn.execute.side_effect = _record_execute
         # Support `with engine.connect() as conn:` pattern.
         engine = MagicMock()
         engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
         engine.connect.return_value.__exit__ = MagicMock(return_value=False)
         engine.dispose = MagicMock()
+
+        # R3 — give the recording engine a postgresql ``dialect`` so
+        # ``CheckpointCleanupJob._shared_engine.dialect.name ==
+        # "postgresql"`` passes the gate. Without this, the gate
+        # refuses at maintenance.py:1773 and the test never reaches
+        # any SQL execution path — making the F1(iv) pin vacuous.
+        # The engine URL is irrelevant for the recorder; only the
+        # dialect.name attribute matters.
+        engine.dialect.name = "postgresql"
 
         # Stubbed adapter — CheckpointCleanupJob.execute() walks
         # instance/cascade trees + adapter operations. We stub every
@@ -915,6 +947,12 @@ class TestVacuumFullStructuralGuard:
             config=config,
             checkpointer=adapter,
             instance_repo=instance_repo,
+            # R3 — wire the stubbed engine so the engine-availability
+            # gate at maintenance.py:1773 PASSES; the recorder IS
+            # reached; a regression that issues VACUUM FULL trips
+            # the AssertionError above. Without this, the gate
+            # refuses pre-SQL and the pin is vacuous.
+            shared_engine=engine,
         )
 
         # Inject the poisoned env + config. Even with VACUUM_FULL_FORCE=1
@@ -942,6 +980,13 @@ class TestVacuumFullStructuralGuard:
         with patch.dict(os.environ, poisoned_env.__dict__, clear=False):
             try:
                 asyncio.run(job.execute())
+            except AssertionError:
+                # R3 — the recorder fires AssertionError when any
+                # VACUUM FULL statement is issued. Re-raise so the
+                # test fails loudly with the trip message (the
+                # ``assert not vacuum_full_records`` below is the
+                # belt-and-braces; the AssertionError is the braces).
+                raise
             except Exception:
                 # The auto execute() may raise on a stubbed repo
                 # write — the test only cares about VACUUM FULL SQL
