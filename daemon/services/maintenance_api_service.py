@@ -72,6 +72,34 @@ logger = logging.getLogger(__name__)
 # directory / tablespace during a VACUUM FULL rewrite).
 _PG_SQLSTATE_DISK_FULL = "53100"
 
+# Phrases the raw-string fallback requires IN ADDITION to the SQLSTATE
+# substring. A bare "53100" byte-count in a message (e.g. an unrelated
+# row count or byte counter) MUST NOT match — only messages that ALSO
+# carry a disk-full phrase qualify. Kept tight on purpose: phrases a
+# PG error message would naturally include for a real disk-full
+# failure ("no space left on device", "disk full"); the SQLSTATE alone
+# is NOT sufficient.
+_DISK_FULL_PHRASES: tuple[str, ...] = (
+    "no space left on device",
+    "disk full",
+)
+
+
+def _has_pgcode_attr(candidate: object) -> bool:
+    """True when ``candidate`` exposes a ``pgcode`` attribute, even if
+    its value is ``None`` (the driver explicitly reports "no
+    SQLSTATE"). ``hasattr`` would conflate this with the attribute
+    being absent; the DBAPI contract requires we distinguish:
+      * present-but-``None`` → authoritative "no SQLSTATE" (driver is
+        telling us the truth; do not reclassify via the string
+        fallback).
+      * attribute-absent → exotic wrapper dropped the DBAPI surface
+        (async driver / pooled retry wrapper); keep walking
+        candidates, and the final string-fallback decision is taken
+        only if NO candidate exposes the attribute at all.
+    """
+    return hasattr(candidate, "pgcode")
+
 
 def _is_vacuum_full_enospc(exc: BaseException) -> bool:
     """True when ``exc`` is a PG disk-full failure (SQLSTATE 53100).
@@ -84,35 +112,52 @@ def _is_vacuum_full_enospc(exc: BaseException) -> bool:
     so operators/dashboards can distinguish "free space and re-run"
     from generic infra faults.
 
-    Discriminator contract (pgcode-first):
-      1. Walk the DBAPI ``orig`` chain; the FIRST candidate that
-         carries a non-empty ``.pgcode`` is authoritative.
-      2. If that pgcode equals ``"53100"`` → return ``True``.
-      3. If that pgcode is set to ANY other SQLSTATE → return ``False``
-         (a confirmed non-disk-full error MUST NOT be reclassified via
-         the substring fallback; this is the fix for the previous
-         over-broad behaviour that matched any message containing
-         ``"53100"``).
-      4. The raw-string ``"53100" in str(exc)`` fallback ONLY fires
-         when no candidate exposes a ``.pgcode`` attribute at all
-         (driver-wrapped errors that drop the DBAPI attribute, e.g.
-         exotic async drivers / pooled connection retry wrappers).
+    Discriminator contract (pgcode-presence-first, then
+    pgcode-value, then phrase-gated substring):
+      1. Walk the DBAPI ``orig`` chain. For each candidate:
+           a. ``pgcode`` attribute ABSENT (exotic wrapper dropped the
+              DBAPI surface) → keep walking.
+           b. ``pgcode`` attribute PRESENT but value ``None`` →
+              authoritative "no SQLSTATE" → return ``False``
+              immediately (the driver told us there is no SQLSTATE;
+              never fall through to the substring fallback).
+           c. ``pgcode`` attribute PRESENT with a string value ==
+              ``"53100"`` → return ``True``.
+           d. ``pgcode`` attribute PRESENT with ANY OTHER value →
+              return ``False`` (a confirmed non-disk-full error MUST
+              NOT be reclassified via the substring fallback).
+      2. NO candidate exposed a ``pgcode`` attribute at all → raw
+         string fallback. The substring "53100" alone is NOT
+         sufficient (an unrelated row count or byte counter could
+         carry it): the message MUST also contain at least one of
+         the disk-full phrases in ``_DISK_FULL_PHRASES``. This gates
+         out false positives while keeping the contract tight.
     """
     for candidate in (getattr(exc, "orig", None), exc):
         if candidate is None:
             continue
-        pgcode = getattr(candidate, "pgcode", None)
-        if pgcode is None:
-            # No SQLSTATE attribute → keep walking; string fallback
-            # is decided below only if NONE of the candidates expose
-            # a pgcode attribute at all.
+        if not _has_pgcode_attr(candidate):
+            # Attribute absent → exotic wrapper dropped the DBAPI
+            # surface; keep walking.
             continue
-        # pgcode present: authoritative. Match → True; any other value
-        # → False (must not fall through to substring matching).
+        # Attribute is PRESENT (per ``hasattr``). Whether the value is
+        # ``None`` or a SQLSTATE, the driver is authoritative.
+        pgcode = candidate.pgcode
+        if pgcode is None:
+            # Present-but-``None`` → authoritative "no SQLSTATE" →
+            # hard ``False``; must not fall through to the substring
+            # fallback (over-broad match is the very bug this fix
+            # closes).
+            return False
         return pgcode == _PG_SQLSTATE_DISK_FULL
-    # No candidate exposed a pgcode attribute → string-substring
-    # fallback for driver-wrapped errors that drop the DBAPI surface.
-    return _PG_SQLSTATE_DISK_FULL in str(exc)
+    # No candidate exposed the ``pgcode`` attribute at all (driver-
+    # wrapped errors that drop the DBAPI surface, e.g. exotic async
+    # drivers / pooled connection retry wrappers). String-substring
+    # fallback: BOTH the SQLSTATE AND a disk-full phrase must appear.
+    msg = str(exc)
+    if _PG_SQLSTATE_DISK_FULL not in msg:
+        return False
+    return any(phrase in msg for phrase in _DISK_FULL_PHRASES)
 
 
 # ── Requester forensics (T5.2) ──────────────────────────────────────────────────
@@ -596,9 +641,7 @@ class MaintenanceApiService:
 
             # v1.1 — the escalation flag: None (absent) → False; the
             # row records the value the cycle ran with (never None).
-            vacuum_full = bool(
-                getattr(payload, "vacuum_full", None) or False
-            )
+            vacuum_full = bool(getattr(payload, "vacuum_full", None))
 
             row = MaintenanceRun(
                 run_id=ctx.run_id,

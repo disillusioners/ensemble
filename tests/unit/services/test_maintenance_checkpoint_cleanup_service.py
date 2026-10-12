@@ -44,6 +44,7 @@ from daemon.services.maintenance_api_service import (
     MaintenanceApiService,
     MaintenanceError,
     RequesterInfo,
+    _is_vacuum_full_enospc,
 )
 from daemon.services.timestamps import now_utc_iso
 from daemon.config import PersistenceConfig
@@ -719,6 +720,56 @@ class TestVacuumFullThreading:
         assert row.error_json["retriable"] is True
         assert svc._run_lock.in_flight is None
 
+    async def test_execute_unarmed_with_pgcode_53100_stamps_execution_error(
+        self, runs_repo, as_pg
+    ):
+        """R2 red-flag — UN-armed run (vacuum_full=False) whose prune
+        raises ``OperationalError`` with pgcode "53100" MUST NOT
+        stamp ``vacuum_full_enospc``: the FULL arm was not
+        exercised, so a disk-full error here is a generic infra
+        fault, NOT a FULL-phase residual. Stamps the byte-identical
+        generic ``execution_error`` shape (the discriminator is
+        armed-gated — the previous handler stamped the FULL code
+        unconditionally on any 53100; this regression test pins
+        the un-armed 53100 path as generic infra).
+        """
+
+        class _EnospcOrig(Exception):
+            pgcode = "53100"
+
+        fresh = _seed_dry_run_row(runs_repo)
+        svc = _service(
+            runs_repo,
+            job_raises=OperationalError(
+                "VACUUM FULL checkpoints", {}, _EnospcOrig()
+            ),
+        )
+        # vacuum_full=None/absent → coerced False → un-armed
+        # execute. Even though pgcode="53100" matches, the
+        # audit row MUST stamp ``execution_error`` (not
+        # ``vacuum_full_enospc``) because the FULL arm was not
+        # exercised — the error came from the destructive prune.
+        resp = await svc.execute(
+            _ExecutePayload(
+                confirm=True,
+                dry_run_run_id=fresh.run_id,
+                expected_bytes=268435456,
+                # vacuum_full absent → un-armed.
+            ),
+            REQUESTER,
+        )
+        await asyncio.gather(*list(svc._executing_tasks))
+        row = runs_repo.get(resp["run_id"])
+        assert row.status == "failed"
+        assert row.error_json["code"] == "execution_error", (
+            "un-armed run with pgcode=53100 must stamp the GENERIC "
+            "execution_error code, not the FULL-phase residual "
+            "vacuum_full_enospc — the FULL arm was not exercised "
+            "(decisions.md §D-9.5.4 B4 — armed-gated discriminator)"
+        )
+        assert "retriable" not in row.error_json
+        assert svc._run_lock.in_flight is None
+
     async def test_dry_run_ignores_vacuum_full(self, runs_repo, as_pg):
         """decisions §D-2/§D-7.2 + N7(a): the dry-run IGNORES
         ``vacuum_full`` — STRUCTURALLY, not by branching: (a) the
@@ -756,6 +807,124 @@ class TestVacuumFullThreading:
         got2 = await svc.dry_run(REQUESTER)
         assert set(got1.keys()) == set(got2.keys())
         assert not any("vacuum" in k for k in got1)
+
+
+class TestEnospcDiscriminatorMatrix:
+    """R2 OPTIONAL — discriminator matrix tests for
+    ``_is_vacuum_full_enospc`` (pure function, no service).
+
+    Pins the R1 contract:
+      * pgcode attribute ABSENT + "53100" substring but NO
+        disk-full phrase → ``False`` (phrase gate is mandatory
+        under the new contract).
+      * pgcode attribute ABSENT + "53100" + "no space left on
+        device" / "disk full" phrase → ``True`` (driver-wrapped
+        path; only path the raw-string fallback can match).
+      * pgcode attribute PRESENT, value "53100" → ``True``
+        (the canonical path).
+      * pgcode attribute PRESENT, value OTHER (e.g. "57014") →
+        ``False`` even when the message contains "53100" — the
+        substring fallback MUST NOT reclassify a confirmed
+        non-disk-full error.
+      * pgcode attribute PRESENT, value ``None`` → ``False``
+        immediately. The driver explicitly says "no SQLSTATE";
+        the substring fallback MUST NOT fire. This is the R1
+        conflation-fix contract (the previous over-broad match).
+    """
+
+    def test_attr_absent_53100_substring_no_phrase_is_false(self):
+        """No ``pgcode`` attribute anywhere + bare "53100" substring
+        (e.g. an unrelated row-count byte counter) → ``False`` under
+        the new phrase gate."""
+
+        class _Wrapper(Exception):
+            """No pgcode attribute; carries "53100" as a count."""
+
+            def __init__(self, msg: str) -> None:
+                super().__init__(msg)
+
+        assert _is_vacuum_full_enospc(
+            _Wrapper("rows affected: 53100, no error")
+        ) is False
+
+    def test_attr_absent_53100_with_disk_full_phrase_is_true(self):
+        """No ``pgcode`` attribute + "53100" + "disk full" phrase →
+        ``True`` (driver-wrapped disk-full, raw-string path)."""
+
+        class _Wrapper(Exception):
+            def __init__(self, msg: str) -> None:
+                super().__init__(msg)
+
+        assert _is_vacuum_full_enospc(
+            _Wrapper("VACUUM FULL failed: 53100, disk full")
+        ) is True
+
+    def test_attr_absent_53100_with_no_space_left_phrase_is_true(self):
+        """No ``pgcode`` attribute + "53100" + "no space left on
+        device" phrase → ``True`` (alternate PG phrasing)."""
+
+        class _Wrapper(Exception):
+            def __init__(self, msg: str) -> None:
+                super().__init__(msg)
+
+        assert _is_vacuum_full_enospc(
+            _Wrapper(
+                "pg writer: 53100, no space left on device"
+            )
+        ) is True
+
+    def test_attr_present_pgcode_53100_is_true(self):
+        """``pgcode`` attribute present with value "53100" → ``True``
+        (the canonical path; the orig chain is irrelevant)."""
+
+        class _Enospc(Exception):
+            pgcode = "53100"
+
+        assert _is_vacuum_full_enospc(_Enospc("any msg")) is True
+
+    def test_attr_present_other_pgcode_with_53100_substring_is_false(self):
+        """``pgcode`` attribute present with a NON-53100 value +
+        message containing "53100" → ``False``. The confirmed
+        non-disk-full SQLSTATE must NOT be reclassified via the
+        substring fallback (over-broad match is the very bug R1
+        closes)."""
+
+        class _OtherSqlstate(Exception):
+            pgcode = "57014"  # statement timeout, not disk full
+
+        assert _is_vacuum_full_enospc(
+            _OtherSqlstate("aborted at byte 53100 of the WAL stream")
+        ) is False
+
+    def test_attr_present_pgcode_none_is_false_immediately(self):
+        """R1 conflation-fix — ``pgcode`` attribute PRESENT but value
+        ``None`` → ``False`` IMMEDIATELY. The driver is explicit
+        that there is no SQLSTATE; the substring fallback MUST
+        NOT fire (the previous ``if pgcode is None: continue``
+        conflated this with attribute-absent and fell through to
+        substring matching — the very bug this test pins as
+        closed)."""
+
+        class _NoSqlstate(Exception):
+            pgcode = None
+
+        # Even with a "53100" substring AND a disk-full phrase
+        # in the message, present-but-None pgcode MUST short-
+        # circuit to False.
+        assert _is_vacuum_full_enospc(
+            _NoSqlstate("53100 disk full no space left on device")
+        ) is False
+
+    def test_orig_chain_present_pgcode_only_on_orig_walks_correctly(self):
+        """OperationalError(orig=_Enospc(pgcode="53100")) → the
+        discriminator walks the orig chain; the FIRST candidate
+        with a present pgcode is authoritative."""
+
+        class _EnospcOrig(Exception):
+            pgcode = "53100"
+
+        exc = OperationalError("VACUUM FULL checkpoints", {}, _EnospcOrig())
+        assert _is_vacuum_full_enospc(exc) is True
 
 
 class TestDryRun:
