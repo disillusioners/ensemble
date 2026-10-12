@@ -1,0 +1,13 @@
+# ── REPO SOURCE OF TRUTH — mirror of deployed host artifact ─────────────
+# Host path: /etc/systemd/system/ensemble-install-snapshot.service
+# Commission: install-dir protection layers 1+3+4 (incident 891820f3 followup,
+# 2026-10-12). Edit HERE, then redeploy to the host path above — see
+# scripts/protection/README.md for the deployment map + enable commands.
+# ────────────────────────────────────────────────────────────────────────
+[Unit]
+Description=Ensemble install-tree hardlink snapshot (Layer 3) — 2026-10-12 incident backstop: install dir deleted 2x by agent test code (test-script defect, user-fixed same day); this is defense-in-depth for the damage class. See protection-plan-install-dir-20261012.md
+Documentation=file:/home/nea/ensemble-src/.agents/shared/protection-plan-install-dir-20261012.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ensemble-install-snapshot.sh

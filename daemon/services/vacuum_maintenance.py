@@ -73,7 +73,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from daemon.constants import (
@@ -81,8 +81,8 @@ from daemon.constants import (
     VACUUM_LOCK_TIMEOUT_MS,
     VACUUM_STATEMENT_TIMEOUT_MS,
 )
-from daemon.repositories.factory import PG_SESSION_CONNECT_ARGS
 from daemon.services.timestamps import now_utc_iso
+from daemon.services.vacuum_engine import create_vacuum_engine
 
 # NOTE: ``MaintenanceRunLock``, ``MaintenanceRunsRepository``, and
 # ``MaintenanceRun`` are imported lazily inside the methods that
@@ -515,7 +515,14 @@ class VacuumMaintenanceJob:
     def _build_vacuum_engine(self) -> Engine:
         """Build the per-cycle dedicated VACUUM engine.
 
-        Mirrors ``_build_repair_engine`` in
+        Thin consumer of the shared
+        ``daemon.services.vacuum_engine.create_vacuum_engine``
+        (tidier pass T1) — the engine shape (URL rendered with
+        credentials from the shared engine, ``autocommit=True``,
+        ``NullPool``, ``echo=False``, timeouts + the UTC session
+        frame merged in one libpq ``options`` string) now lives
+        there; the timeout VALUES remain this lane's own
+        (``VACUUM_*`` constants). Mirrors ``_build_repair_engine`` in
         ``daemon/tools/ens_db_tools.py`` for the timeout shape but
         with ``autocommit=True`` (VACUUM cannot run inside an
         explicit transaction). The UTC session option rides the
@@ -528,23 +535,11 @@ class VacuumMaintenanceJob:
             pooled — one engine per cycle, ``dispose()`` in
             ``finally``.
         """
-        url = self._shared_engine.url.render_as_string(hide_password=False)
-        options_str = (
-            f"-c statement_timeout={VACUUM_STATEMENT_TIMEOUT_MS} "
-            f"-c lock_timeout={VACUUM_LOCK_TIMEOUT_MS} "
-            f"-c idle_in_transaction_session_timeout="
-            f"{VACUUM_IDLE_IN_TXN_TIMEOUT_MS} "
-            f"{PG_SESSION_CONNECT_ARGS['options']}"
-        )
-        return create_engine(
-            url,
-            echo=False,
-            connect_args={"options": options_str, "autocommit": True},
-            # Per-cycle engine — no pool. ``NullPool`` ensures every
-            # connect/dispose is fresh; pooling the VACUUM engine
-            # would persist a connection's session timeouts and
-            # smudge the per-cycle timeouts across cycles.
-            poolclass=_null_pool(),
+        return create_vacuum_engine(
+            self._shared_engine,
+            statement_ms=VACUUM_STATEMENT_TIMEOUT_MS,
+            lock_ms=VACUUM_LOCK_TIMEOUT_MS,
+            idle_ms=VACUUM_IDLE_IN_TXN_TIMEOUT_MS,
         )
 
     # ── Audit row plumbing (mirrors CheckpointCleanupJob) ────────────────
@@ -678,12 +673,6 @@ def _new_vacuum_run_id() -> str:
 def _HEX8() -> str:
     import secrets
     return secrets.token_hex(4)
-
-
-def _null_pool():
-    """Lazy import of ``NullPool`` to keep the module import graph slim."""
-    from sqlalchemy.pool import NullPool
-    return NullPool
 
 
 # Public re-exports for tests + callers.

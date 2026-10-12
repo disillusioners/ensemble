@@ -25,6 +25,11 @@
 //   16. `projection-fields-render` (v3.2 amendment, R-1/R-4)
 //   17. `confirm-message-journey-copy` (v3.2 amendment)
 //   18. `run-again-banner-when-projection-nonzero` (v3.2 amendment, R-5)
+//   ── Cluster 1 + Cluster 5 additions (Plan Review F2 + F3 + N3') ────
+//   19. `MatTabsModule-imported` (Cluster 1.6, pin-count 18 → 22)
+//   20. `section-disabled-optional` (Cluster 1.6)
+//   21. `mat-tab-not-eager-section` (Cluster 1.6)
+//   22. `sticky-tabs-host` (Cluster 1.6)
 
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -42,6 +47,15 @@ const sectionComponentTemplate = readFileSync(
   join(componentDir, 'checkpoint-cleanup/checkpoint-cleanup.component.html'),
   'utf-8',
 );
+// Cluster 1.6 — Pin 22 `sticky-tabs-host` reads the SCSS file too.
+// The sticky wrapper rule `.maintenance-tabs-host { position: sticky }`
+// lives in `maintenance.component.scss`; the SCSS file is read here
+// so Pin 22 can assert both the template + scss contract surfaces
+// in one place.
+const pageShellScss = readFileSync(
+  join(maintenanceDir, 'maintenance.component.scss'),
+  'utf-8',
+);
 // Item 19 — `sectionComponentScss` was a dead read (loaded but never
 // asserted against). Deleted. The SCSS file carries no critical
 // contract surface worth a source-grep pin (no token selectors
@@ -55,8 +69,9 @@ const modelsSrc = readFileSync(join(__dirname, '../../models/index.ts'), 'utf-8'
 const appRoutesSrc = readFileSync(join(__dirname, '../../app.routes.ts'), 'utf-8');
 const appSrc = readFileSync(join(__dirname, '../../app.ts'), 'utf-8');
 
-describe('Maintenance console — source-grep pins (18 pins)', () => {
-  // ── Pin 1: sections-registry-load-bearing (R-addition, v3 fix pass) ─────
+describe('Maintenance console — source-grep pins (22 pins)', () => {
+  // ── Pin 1: sections-registry-load-bearing (R-addition, v3 fix pass, ─────
+  // ──         ADAPTED for mat-tab-group shape per Plan Review F2) ──────
   describe('1. sections-registry-load-bearing', () => {
     it('MaintenanceComponent declares readonly sections array', () => {
       expect(pageShellSrc).toMatch(
@@ -64,11 +79,27 @@ describe('Maintenance console — source-grep pins (18 pins)', () => {
       );
     });
 
-    it('MaintenanceComponent template uses @for + *ngComponentOutlet (registry-driven)', () => {
+    // ADAPT per Plan Review F2 — the template's `*ngComponentOutlet`
+    // now lives INSIDE `<mat-tab>`. The pin retains BOTH the iteration
+    // assertion AND the outlet assertion: a hard-coded tab + a
+    // kept-but-unused section property would otherwise pass while
+    // making the registry dead weight (violates AC-3 load-bearing
+    // registry). The regex matches the new template shape:
+    //   <mat-tab ... *ngComponentOutlet="section.component" ... />
+    it('MaintenanceComponent template uses @for + mat-tab + *ngComponentOutlet (registry-driven)', () => {
+      // (i) Iteration — the registry is still the source of truth.
       expect(pageShellTemplate).toMatch(
         /@for\s*\(\s*section\s+of\s+sections\s*;\s*track\s+section\.id\s*\)/,
       );
-      expect(pageShellTemplate).toMatch(/\*ngComponentOutlet\s*=\s*"section\.component"/);
+      // (ii) Outlet inside mat-tab. The regex requires the
+      // `<mat-tab` opener and the `*ngComponentOutlet=` binding to
+      // both appear with `section.component` as the outlet value.
+      // We use a non-greedy `[\s\S]*?` to match any content
+      // between the opener and the binding (e.g. `[label]=`,
+      // `[disabled]=`, `[matTooltip]=`).
+      expect(pageShellTemplate).toMatch(
+        /<mat-tab[\s\S]*?\*ngComponentOutlet\s*=\s*["']section\.component["']/,
+      );
     });
 
     it('Negative arm: no hard-coded section tag outside the @for loop', () => {
@@ -80,7 +111,7 @@ describe('Maintenance console — source-grep pins (18 pins)', () => {
     });
   });
 
-  // ── Pin 2: confirm-dialog-wired ────────────────────────────────────────
+  // ── Pin 2: confirm-dialog-wired (T6.3, EXTENDED per Plan Review F3) ──
   describe('2. confirm-dialog-wired', () => {
     it('component opens ConfirmDialogComponent with destructive + dark-modal-panel', () => {
       expect(sectionComponentSrc).toMatch(
@@ -89,6 +120,75 @@ describe('Maintenance console — source-grep pins (18 pins)', () => {
       expect(sectionComponentSrc).toMatch(/panelClass\s*:\s*['"]dark-modal-panel['"]/);
       expect(sectionComponentSrc).toMatch(/destructive\s*:\s*true/);
       expect(sectionComponentSrc).toMatch(/afterClosed\(\)\.subscribe/);
+    });
+
+    // Plan Review 2026-10-12 F3 — 4 NEW vacuum-aware sub-assertions
+    // for the §D-7.6 canonical copy. The dialog's `data.message`
+    // payload branches on `vacuumFullEnabled()`:
+    //   - ticked=true  → §D-7.6 copy + R-A daemon-stall sentence +
+    //                    R-C plain-VACUUM job collision sentence
+    //   - ticked=false → existing destructive copy (NO vacuum-aware
+    //                    extensions)
+    // The pins are source-grep assertions on the conditional copy
+    // construction (the production code reads `vacuumFullEnabled()`
+    // to decide which message body to build).
+    it('(a) vacuum-aware confirm message — when ticked: includes "VACUUM FULL rewrites the affected tables" + "60-minute hard ceiling" + all 3 affected table names', () => {
+      // (a) The §D-7.6 canonical wording — single sub-assertion
+      // covers all three substrings (rewording + ceiling +
+      // table-name enumeration) because they live in the SAME
+      // message build path. A future reword of any substring is
+      // caught here.
+      expect(sectionComponentSrc).toMatch(/VACUUM FULL rewrites the affected tables/);
+      expect(sectionComponentSrc).toMatch(/60-minute hard ceiling/);
+      // All 3 affected tables named in the dialog-message
+      // construction site (§D-7.6 — checkpoints,
+      // checkpoint_writes, checkpoint_blobs).
+      expect(sectionComponentSrc).toMatch(/checkpoints/);
+      expect(sectionComponentSrc).toMatch(/checkpoint_writes/);
+      expect(sectionComponentSrc).toMatch(/checkpoint_blobs/);
+    });
+
+    it('(b) when NOT ticked (vacuumFullEnabled() === false): message build does NOT include "VACUUM FULL rewrites" (NEGATIVE — the existing destructive copy is unchanged)', () => {
+      // The conditional copy construction reads `vacuumFullEnabled()`;
+      // when false, the message build path skips the vacuum-aware
+      // extension. We anchor on the REAL production gate — an
+      // `if (this.vacuumFullEnabled()) {` block that inlines the
+      // §D-7.6 copy into `message` — the NEGATIVE arm asserts the
+      // unticked branch (the `else` arm) does NOT contain the
+      // §D-7.6 substring.
+      //
+      // Source-grep approach: match the real conditional shape
+      // (no contrived comment-anchoring). The regex requires
+      // `if (this.vacuumFullEnabled()) {` followed (non-greedy)
+      // by the unique "VACUUM FULL rewrites" substring that
+      // appears only inside the ticked consequent. The pin
+      // asserts BOTH the presence of the gate AND that the
+      // gate encloses the §D-7.6 copy (vs. always-on copy).
+      const vacuumBlock = sectionComponentSrc.match(
+        /if\s*\(\s*this\.vacuumFullEnabled\s*\(\s*\)\s*\)\s*\{[\s\S]*?VACUUM FULL rewrites/,
+      );
+      // The negative arm asserts the conditional exists in the
+      // unticked-branch shape — without the gate, the copy is
+      // always on (a regression that loses the gate trips this
+      // pin loudly).
+      expect(vacuumBlock).not.toBeNull();
+    });
+
+    it('(c) vacuum-aware confirm message — R-A: includes "in-flight agent turns will pause at the next node boundary"', () => {
+      // The R-A daemon self-write stall sentence — the operator
+      // sees this in the confirm dialog so consent-time copy
+      // matches runtime behavior.
+      expect(sectionComponentSrc).toMatch(
+        /in-flight agent turns will pause at the next node boundary/,
+      );
+    });
+
+    it('(d) vacuum-aware confirm message — R-C: includes "24h plain-VACUUM job waiting out the FULL\'s lock"', () => {
+      // The R-C plain-VACUUM job collision sentence — operator
+      // sees this so log-line confusion during FULL is preempted.
+      expect(sectionComponentSrc).toMatch(
+        /24h plain-VACUUM job waiting out the FULL's lock/,
+      );
     });
   });
 
@@ -110,9 +210,20 @@ describe('Maintenance console — source-grep pins (18 pins)', () => {
     });
   });
 
-  // ── Pin 4: no-idempotency-key (AM-17 — NEGATIVE pin) ───────────────────
+  // ── Pin 4: no-idempotency-key (AM-17 — NEGATIVE pin, EXTENDED per F8 + ─
+  // ──         N3' — Pin 4's POSITIVE arm (iv)) ──────────────────────
   describe('4. no-idempotency-key (NEGATIVE pin — AM-17)', () => {
-    it('execute payload type does NOT contain `idempotency_key` field', () => {
+    // Plan Review N3' enumerates the 4 sub-assertions as:
+    //   (i)   idempotency_key absent in the request interface (NEGATIVE)
+    //   (ii)  no crypto.randomUUID() in the execute flow (NEGATIVE)
+    //   (iii) no idempotency_key: in the execute payload literal (NEGATIVE)
+    //   (iv)  vacuum_full?: is in the request interface AND the
+    //         performExecute payload literal includes `vacuum_full:`
+    //         (POSITIVE — per Plan Review F8 + F3 cycle N3')
+    // The meta-pin count is still 22 (Pin 4 is ONE pin with 4
+    // sub-assertions, not 4 pins).
+
+    it('(i) execute payload type does NOT contain `idempotency_key` field', () => {
       expect(modelsSrc).toMatch(/CheckpointCleanupExecuteRequest/);
       // Negative pin: no `idempotency_key` anywhere in the request
       // interface.
@@ -123,19 +234,37 @@ describe('Maintenance console — source-grep pins (18 pins)', () => {
       expect(reqInterfaceMatch![1]).not.toMatch(/idempotency_key/);
     });
 
-    it('execute flow does NOT call crypto.randomUUID (no client-side UUID generation)', () => {
+    it('(ii) execute flow does NOT call crypto.randomUUID (no client-side UUID generation)', () => {
       // Strict regex — `crypto.randomUUID()` (with the parens). The
       // comment text mentions the literal; we want to catch an
       // actual CALL to the API.
       expect(sectionComponentSrc).not.toMatch(/crypto\.randomUUID\s*\(/);
     });
 
-    it('execute payload object literal does NOT contain idempotency_key', () => {
+    it('(iii) execute payload object literal does NOT contain idempotency_key', () => {
       // The mirror in the spec already verifies the runtime payload.
       // This pin guards the production source's literal shape:
       // grep for an execute-payload object literal that lacks the
       // idempotency_key field.
       expect(sectionComponentSrc).not.toMatch(/idempotency_key\s*:/);
+    });
+
+    it('(iv) execute payload type carries `vacuum_full?:` AND performExecute() payload literal includes `vacuum_full:` (POSITIVE arm — Cluster 3.5 + Plan Review N3\'/F8)', () => {
+      // (iv-a) The FE model interface (Cluster 3.1) declares the
+      // new optional field `vacuum_full?: boolean`. The
+      // `CheckpointCleanupExecuteRequest` interface MUST carry it.
+      const reqInterfaceMatch = modelsSrc.match(
+        /export interface CheckpointCleanupExecuteRequest\s*\{([\s\S]*?)\n\}/,
+      );
+      expect(reqInterfaceMatch).not.toBeNull();
+      // The `?` modifier on the field makes it optional; the regex
+      // matches the optional-declaration shape `vacuum_full?: boolean`.
+      expect(reqInterfaceMatch![1]).toMatch(/vacuum_full\?\s*:\s*boolean/);
+      // (iv-b) The component's performExecute() payload object
+      // literal (Cluster 3.3) includes `vacuum_full:` — the field
+      // is threaded into the runtime payload (per
+      // `vacuumFullEnabled()` signal read at task 3.3).
+      expect(sectionComponentSrc).toMatch(/vacuum_full\s*:/);
     });
   });
 
@@ -509,6 +638,74 @@ describe('Maintenance console — source-grep pins (18 pins)', () => {
     });
   });
 
+  // ── Pin 19: MatTabsModule-imported (Cluster 1.6) ──────────────────────
+  describe('19. MatTabsModule-imported (Cluster 1.6 — tabs shell rewrite)', () => {
+    it('MaintenanceComponent imports array contains MatTabsModule', () => {
+      // Cluster 1.1 — `MatTabsModule` is added to the
+      // `imports` array of `MaintenanceComponent`. The pin
+      // asserts the named import is wired (Material runtime
+      // dependency for `<mat-tab-group>` + `<mat-tab>`). A
+      // future regression that drops the import trips the pin.
+      expect(pageShellSrc).toMatch(/MatTabsModule/);
+      // Belt-and-braces: the import statement carries
+      // `from '@angular/material/tabs'` so a typo'd path or
+      // a wrong-module import is caught loudly.
+      expect(pageShellSrc).toMatch(/from\s+['"]@angular\/material\/tabs['"]/);
+    });
+  });
+
+  // ── Pin 20: section-disabled-optional (Cluster 1.6) ───────────────────
+  describe('20. section-disabled-optional (Cluster 1.6 — tabs shell rewrite)', () => {
+    it('MaintenanceSection interface declares `readonly disabled?:` (optional)', () => {
+      // Cluster 1.2 — `MaintenanceSection` interface gains
+      // `readonly disabled?: boolean` (optional, default false).
+      // The `?` modifier on the field is what makes it optional;
+      // a future regression that drops the `?` trips the pin.
+      const sectionInterfaceMatch = pageShellSrc.match(
+        /interface\s+MaintenanceSection\s*\{([\s\S]*?)\n\}/,
+      );
+      expect(sectionInterfaceMatch).not.toBeNull();
+      expect(sectionInterfaceMatch![1]).toMatch(/readonly\s+disabled\?\s*:\s*boolean/);
+    });
+  });
+
+  // ── Pin 21: mat-tab-not-eager-section (Cluster 1.6) ───────────────────
+  describe('21. mat-tab-not-eager-section (Cluster 1.6 — tabs shell rewrite)', () => {
+    it('template uses <mat-tab> for per-entry block (NOT <section class="maintenance-section">)', () => {
+      // Cluster 1.4 — the per-entry block is a Material
+      // `<mat-tab>` (lazy-mount via Material's projection). The
+      // legacy `<section class="maintenance-section">` is
+      // REMOVED; using `<section>` would mount every entry
+      // eagerly and bypass Material's lazy projection
+      // (violates AC-3 load-bearing registry + lazy-mount).
+      expect(pageShellTemplate).toMatch(/<mat-tab[\s>]/);
+      expect(pageShellTemplate).not.toMatch(/<section[^>]*class\s*=\s*["']maintenance-section["']/);
+    });
+  });
+
+  // ── Pin 22: sticky-tabs-host (Cluster 1.6) ────────────────────────────
+  describe('22. sticky-tabs-host (Cluster 1.6 — tabs shell rewrite)', () => {
+    it('template renders the sticky wrapper <div class="maintenance-tabs-host">', () => {
+      // The sticky wrapper hosts the `<mat-tab-group>` so the
+      // tab bar stays in-frame as the wizard body scrolls
+      // (the page-header scrolls out first; the tab bar
+      // pins to the top of the content area).
+      expect(pageShellTemplate).toMatch(/<div[^>]*class\s*=\s*["']maintenance-tabs-host["']/);
+    });
+
+    it('SCSS rule pins .maintenance-tabs-host to sticky positioning', () => {
+      // The SCSS file carries the ADV-2 sticky rule. The
+      // `position: sticky` declaration is the load-bearing
+      // piece — a regression that drops `position: sticky`
+      // (or moves the property to a different selector)
+      // breaks the sticky-tab contract surface and trips
+      // the pin.
+      expect(pageShellScss).toMatch(
+        /\.maintenance-tabs-host\s*\{[\s\S]*?position\s*:\s*sticky/,
+      );
+    });
+  });
+
   // ── Pin count assertion ────────────────────────────────────────────────
   describe('pin count', () => {
     // Item 2 — derive the pin-count from this file's OWN describe
@@ -519,6 +716,10 @@ describe('Maintenance console — source-grep pins (18 pins)', () => {
     // source via `readFileSync`, counts the numeric-prefix describes,
     // and asserts the count is > 0 — removing a describe('N. …')
     // block breaks the count automatically.
+    //
+    // Cluster 1.6 / §D-7.7 — the anchor moves from 18 → 22 in this
+    // same dispatch (per Plan Review F8(d) reconcile). The 4 new
+    // pins (19–22) are appended to the existing 18-pin set.
     it('pin-count derives from this file\'s own describe blocks (no self-tautology)', () => {
       const selfSrc = readFileSync(__filename, 'utf-8');
       // Match the pin describes — anchored to line start + 2-space
@@ -531,9 +732,9 @@ describe('Maintenance console — source-grep pins (18 pins)', () => {
       // count itself stays in sync because every describe('N. …')
       // increment adds one match.
       expect(pinDescribes.length).toBeGreaterThan(0);
-      // Anchor: the file ships with 18 pin describes (1–18); if you
-      // add a new describe('19. …'), update this anchor.
-      expect(pinDescribes.length).toBe(18);
+      // Anchor: the file ships with 22 pin describes (1–22); if you
+      // add a new describe('23. …'), update this anchor.
+      expect(pinDescribes.length).toBe(22);
     });
   });
 });

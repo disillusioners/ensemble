@@ -10,6 +10,7 @@ import {
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
+import { MatCheckboxModule } from '@angular/material/checkbox';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
@@ -99,6 +100,7 @@ import type {
   imports: [
     CommonModule,
     MatButtonModule,
+    MatCheckboxModule,
     MatIconModule,
     MatProgressBarModule,
     MatProgressSpinnerModule,
@@ -164,6 +166,23 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   readonly dryRunIsStale = computed(() =>
     this.service.isDryRunStale(this.lastDryRun()),
   );
+
+  /**
+   * Cluster 3.3 — `vacuumFullEnabled` signal. Default `true`
+   * (always-ticked checkbox per decisions §D-7.3, NO per-user
+   * persistence — the FE default is a presentation choice; the
+   * server default is `None` = no escalation per §D-2). The
+   * operator can untick to opt out; the signal's value threads
+   * into the execute payload as `vacuum_full: <boolean>`. The
+   * signal is RESET to `true` on every fresh dry-run
+   * (`onDryRun()`, the "fresh dry-run clears state" pattern) so
+   * the operator's untick does not persist across dry-runs.
+   *
+   * Server-side symmetry: `true` → server runs VACUUM FULL on
+   * the three checkpoint tables after the destructive prune;
+   * `false` → server explicitly skips (symmetric with `true`).
+   */
+  readonly vacuumFullEnabled = signal(true);
 
   // ── Wizard state (spec ck-redesign-2026q4 §2.2 / AC-9) ─────────────────
   /** Index of the currently visible step (0..3). Backs `<mat-stepper [selectedIndex]>`. */
@@ -542,6 +561,12 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
       return;
     }
     this.dryRunning.set(true);
+    // Cluster 3.3 — "fresh dry-run clears state" pattern. The
+    // operator's untick of the VACUUM FULL checkbox does NOT
+    // persist across dry-runs; the signal is restored to its
+    // default `true` here. §D-7.3 — no per-user persistence;
+    // every fresh dry-run reverts to the always-ticked default.
+    this.vacuumFullEnabled.set(true);
     // Item 14 — optimistic lastError clear at the top of onDryRun().
     // The dry-run request MAY clear an existing banner before it
     // even fires; if the request then fails, the new error replaces
@@ -581,11 +606,32 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
       return;
     }
 
+    // Cluster 3.6 — vacuum-aware confirm-dialog copy. When the
+    // operator has the VACUUM FULL checkbox ticked, append the
+    // §D-7.6 canonical lock/duration warning + the R-A daemon
+    // self-write stall sentence + the R-C plain-VACUUM job
+    // collision sentence to the destructive base message. When
+    // unticked, the message is the EXISTING destructive copy
+    // byte-unchanged (the existing buildConfirmMessage() return
+    // value, no vacuum-aware extensions). The full vacuum-aware
+    // sentence lives in buildVacuumFullCopyAddendum() — placed
+    // BELOW this method so the Pin 2(b) gate anchor
+    // (`if (this.vacuumFullEnabled()) {` … "VACUUM FULL rewrites")
+    // still matches in source order; the method body carries the
+    // single copy instance (Pin 2 a/c/d grep it verbatim).
+    const baseMessage = this.buildConfirmMessage(dryRun);
+    let message: string;
+    if (this.vacuumFullEnabled()) {
+      message = `${baseMessage} ${this.buildVacuumFullCopyAddendum()}`;
+    } else {
+      message = baseMessage;
+    }
+
     const ref = this.dialog.open(ConfirmDialogComponent, {
       panelClass: 'dark-modal-panel',
       data: {
         title: 'Run checkpoint cleanup',
-        message: this.buildConfirmMessage(dryRun),
+        message,
         confirmLabel: 'Cleanup now',
         cancelLabel: 'Cancel',
         destructive: true,
@@ -617,6 +663,28 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Cluster 3.6 — the vacuum-aware confirm-dialog copy addendum
+   * (extracted from onExecute's ticked branch, tidier pass T7; the
+   * dialog message is `${baseMessage} ${buildVacuumFullCopyAddendum()}`
+   * — byte-identical to the former inline literal).
+   *
+   * COPY IS PINNED — DO NOT REWORD:
+   *   - Pin 2(a): "VACUUM FULL rewrites the affected tables" +
+   *     "60-minute hard ceiling" + the 3 table names;
+   *   - Pin 2(b): requires a "VACUUM FULL rewrites" occurrence
+   *     AFTER the onExecute if-gate in SOURCE ORDER (this method
+   *     sits below onExecute to keep that anchor true);
+   *   - Pin 2(c): "in-flight agent turns will pause at the next
+   *     node boundary"; Pin 2(d): "24h plain-VACUUM job waiting
+   *     out the FULL's lock";
+   *   - e2e w6 asserts the same canonical copy on the rendered
+   *     dialog (§D-7.6 canonical + R-A + R-C sentences).
+   */
+  private buildVacuumFullCopyAddendum(): string {
+    return `VACUUM FULL rewrites the affected tables to reclaim disk space. The affected tables (checkpoints, checkpoint_writes, checkpoint_blobs) will be locked briefly while the rewrite runs. Duration depends on database size; a 60-minute hard ceiling applies. While VACUUM FULL runs, in-flight agent turns will pause at the next node boundary for the duration (up to 60 minutes); this is expected behavior, not an outage. If you see \`vacuum job failed/skipped\` log lines during a FULL, that is the 24h plain-VACUUM job waiting out the FULL's lock and skipping — it is benign and will retry on the next cycle.`;
+  }
+
   private performExecute(dryRun: CheckpointCleanupDryRun): void {
     if (this.executing()) {
       return; // belt + braces against double-click
@@ -640,10 +708,15 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
 
     // AM-17 — payload is EXACTLY `{dry_run_run_id, expected_bytes,
     // confirm: true}` — NO idempotency key, NO client-side UUID generation.
+    // Cluster 3.3 — v1.1 additive `vacuum_full?: boolean` (the
+    // signal's value threads into the payload; absent/`undefined`
+    // would be a server `None` per §D-2 but we send the signal's
+    // boolean explicitly for symmetry — `true` = tick, `false` = untick).
     const payload: CheckpointCleanupExecuteRequest = {
       dry_run_run_id: dryRun.run_id,
       expected_bytes: dryRun.would_free_bytes,
       confirm: true,
+      vacuum_full: this.vacuumFullEnabled(),
     };
 
     this.service.execute(payload).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({

@@ -3115,6 +3115,12 @@ class InstanceManager:
             # Section 1 / T3 — gate + audit kwargs.
             run_lock=self._maintenance_run_lock,
             runs_repo=self._maintenance_runs_repo,
+            # maintenance-tabs-vacuum v1.1 — the MANUAL-ONLY VACUUM
+            # FULL escalation derives its per-cycle dedicated engine
+            # URL from the daemon's shared engine (the interactive
+            # lane only; the auto cycle never reaches the FULL arm —
+            # AST pins F1 i-iv in the wiring-pin file).
+            shared_engine=self._engine,
         )
         # Section 1 / T5 — hold the job handle for the
         # MaintenanceApiService wiring (api.py lifespan reads it via

@@ -64,6 +64,31 @@ set -u
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STOP_SCRIPT="$REPO_ROOT/scripts/stop-ensemble.sh"
 
+# 2026-10-12: install dir deleted twice by agent-authored test code; immediate
+# cause (test-script defect) fixed same day by user; this change is part of
+# the Layer 1 ownership-separation backstop.
+#
+# _deploy_install_root <name> — PINNED MIRROR of lib.sh _resolve_install_root
+# (deploy.sh is an entry script and deliberately does not source lib.sh; same
+# pin discipline as _supervision_derive_unit_name). Layer-1 tolerant install
+# root: legacy shape → $HOME/<name>; post-Layer-1 service user
+# (Environment=HOME=<install dir>) → $HOME itself, plus the sibling <name>
+# next to it. The naive $HOME/<name> would WRONGLY NEST post-flip.
+_deploy_install_root() {
+    local name="$1" home="${HOME%/}" base cand
+    case "$home" in
+        */"$name") printf '%s' "$home"; return 0 ;;
+    esac
+    base="$(basename "$home")"
+    case "$base" in
+        agents-ensemble|agents-ensemble-demo)
+            cand="$(dirname "$home")/$name"
+            [ "$base" = "$name" ] || { printf '%s' "$cand"; return 0; }
+            ;;
+    esac
+    printf '%s' "$home/$name"
+}
+
 # ── Flags ───────────────────────────────────────────────────────────────────
 DRY_RUN=0
 FORCE_BUILD=0
@@ -89,14 +114,14 @@ done
 TARGET="${TARGET_ARG:-${TARGET:-demo}}"
 case "$TARGET" in
     demo)
-        INSTALL_DIR="$HOME/agents-ensemble-demo"
+        INSTALL_DIR="$(_deploy_install_root agents-ensemble-demo)"
         PORT=7979
         ENV_SOURCE="$REPO_ROOT/.env.prod.demo"
         ENV_BASE="$REPO_ROOT/.env.prod"     # generator input (demo only)
         DB_NAME=ensemble_demo
         ;;
     live)
-        INSTALL_DIR="$HOME/agents-ensemble"
+        INSTALL_DIR="$(_deploy_install_root agents-ensemble)"
         PORT=9797
         ENV_SOURCE="$REPO_ROOT/.env.prod"
         ENV_BASE=""
