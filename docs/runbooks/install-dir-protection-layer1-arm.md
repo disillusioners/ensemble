@@ -199,7 +199,27 @@ touch /home/nea/agents-ensemble/releases/x          # → Permission denied
 One agent turn end-to-end (message → tool → reply), DB connectivity, and
 `ens_env_read` (daemon runs as ensemble → still reads its own .env).
 
-### Step 8 — OPTIONAL sudoers for the pipeline lane (only when wiring the wrapper)
+### ⛔ GATE — C1 WRAPPER HARDENING (HARD PRECONDITION before step 8 and ANY sudoers installation; 2026-10-12)
+
+NO sudoers entry may be installed — and step 8 must NOT run — while a
+pre-C1 wrapper is deployed at `/usr/local/bin/ensemble-promote` (review
+finding C1: a `*.sh` glob over the nea-writable dev checkout under NOPASSWD
+is a latent ensemble-user ACE = the exact incident damage class). The
+DEPLOYED copy must contain the C1 fix: exact enumerated allowlist
+(promote.sh / rollback.sh / restart.sh dev-lane + staged-payload promote.sh
+shapes only) + invocation-time writability refusal (group/other-writable, or
+owner-writable while owned by the invoking user → exit 76). Verify BOTH
+refusals against the deployed copy — both must be refused AND journaled:
+
+```bash
+# (a) non-allowlisted script under the dev lane → exit 77 + journal line
+sudo /usr/local/bin/ensemble-promote /home/nea/ensemble-src/scripts/upgrade/lib.sh
+# (b) allowlisted but agent-writable → exit 76 + journal line
+sudo /usr/local/bin/ensemble-promote /home/nea/ensemble-src/scripts/upgrade/promote.sh
+sudo journalctl -t ensemble-promote --since "-2 min" --no-pager   # both C1 refusals visible
+```
+
+### Step 8 — OPTIONAL sudoers for the pipeline lane (GATED: only after the ⛔ C1 gate above passes)
 
 ```bash
 echo 'nea ALL=(root) NOPASSWD: /usr/local/bin/ensemble-promote' \
@@ -218,6 +238,13 @@ sudo /usr/local/bin/ensemble-promote \
      /home/nea/ensemble-src/scripts/upgrade/promote.sh <args per upgrade lane>
 journalctl -t ensemble-promote --no-pager           # invocation audit trail
 ```
+
+C1 note (2026-10-12): the hardened wrapper additionally refuses scripts
+writable by the invoking user — the dev-lane scripts are nea:nea 755, so an
+invocation as nea is refused BY DESIGN (exit 76; that is the protection
+working, not a failure). Run the drill from a non-nea operator account, or
+stage the script root-owned first (allowlist additions = explicit commission
++ commit only).
 
 ## R — ROLLBACK (any failed step)
 
