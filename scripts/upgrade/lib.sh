@@ -75,6 +75,18 @@ LOG_TAG="${LOG_TAG:-upgrade}"
 # before halt on a genuinely-dead boot (still halts); too-short budget
 # = false halt on a healthy boot (the worse outcome — every verify-
 # budget halt is a LIVE promote halt).
+#
+# P3 / decision (c) (forward-looking note, P1 polish — comment-only
+# refresh; values land unchanged in P3): the per-phase budgets above
+# (livez 180, readyz 120) are preserved through the adaptive-soak
+# trio. The default soak is adaptive: 60s floor, 120s cap, 3
+# consecutive greens at 15s cadence, fail-fast on red. Override
+# with `ENSEMBLE_PROMOTE_SOAK_S` or revert to conservative via
+# `ENSEMBLE_SOAK_CONSERVATIVE=1`. The total ceremony budget is 900s
+# (15 min) wall-clock — breach routes to halt, not commit.
+# See decisions.md (c)/(d), phase3-plan.md D-P3.1/D-P3.2, plan-overview
+# §4. C-5: this comment refresh rides the P1 PR as a discoverability
+# win for operators BEFORE P3 lands the behavior.
 LIVEZ_BUDGET_S="${LIVEZ_BUDGET_S:-180}"
 READYZ_BUDGET_S="${READYZ_BUDGET_S:-120}"
 # Subprocess-wait budgets (2.2b, upgrade-resilience 2026-10-07). Rationale
@@ -117,9 +129,9 @@ HEARTBEAT_STALE_S=300
 # Retention (ADR-004): keep 3 releases; previous pinned.
 RETENTION_KEEP=3
 
-_log()  { printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*"; }
-_logv() { printf '%s\n' "$*"; }                       # verbatim (JSON etc.)
-_warn() { printf '%s[%s]: WARN: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" >&2; }
+_log()  { printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" 2>/dev/null; }
+_logv() { printf '%s\n' "$*" 2>/dev/null; }                # verbatim (JSON etc.)
+_warn() { printf '%s[%s]: WARN: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" >&2 2>/dev/null; }
 
 # _now_epoch — seconds since epoch (BSD-safe).
 _now_epoch() { date +%s; }
@@ -687,26 +699,53 @@ journal_history_append() {
 }
 
 # journal_open_txn <kind> <target> — set in_flight {kind,target,started_at,
-# flipped:false,owner_pid,last_heartbeat}. Refuses (returns 1) if a txn
-# is already open. ADDITIVE field: last_heartbeat is the epoch the txn
-# was opened — readers that don't know about it (legacy launchers,
-# Python twin pre-comp3) ignore the extra key (json.loads last-wins on
-# duplicates; lib.sh's textual splice at the LAST occurrence picks up
-# the embedded `last_heartbeat` naturally because it appears ONCE per
-# txn object). Refreshed by lock_heartbeat (see below) so a live owner
-# keeps its heartbeat < HEARTBEAT_STALE_S; a dead owner's heartbeat
-# ages to stale, and the new owner-liveness fast path in adopt_stale_txn
-# + _journal_sweep can reclaim/observe it before the 600s age boundary.
+# flipped:false,owner_pid,last_heartbeat,displaced_version}. Refuses
+# (returns 1) if a txn is already open. ADDITIVE field: last_heartbeat
+# is the epoch the txn was opened — readers that don't know about it
+# (legacy launchers, Python twin pre-comp3) ignore the extra key
+# (json.loads last-wins on duplicates; lib.sh's textual splice at the
+# LAST occurrence picks up the embedded `last_heartbeat` naturally
+# because it appears ONCE per txn object). Refreshed by lock_heartbeat
+# (see below) so a live owner keeps its heartbeat < HEARTBEAT_STALE_S;
+# a dead owner's heartbeat ages to stale, and the new owner-liveness
+# fast path in adopt_stale_txn + _journal_sweep can reclaim/observe it
+# before the 600s age boundary.
+#
+# ADDITIVE field (P1, decision (g) / C-4): `displaced_version` is the
+# version THIS txn is about to displace (i.e. journal.current at the
+# moment the txn is opened), preserved as a version STRING (e.g.
+# "v0.20.1" or "null" / empty for a fresh install). Type-distinct from
+# `last_heartbeat` (epoch int). The boot_sweep_commit_and_continue path
+# (launcher.sh:1020-1037) reads `in_flight.displaced_version` and
+# writes `previous = displaced_version` before closing the txn — this
+# is the ONLY path in launcher.sh that may update `previous` from
+# boot-sweep land (FORWARD semantic: `previous` = the version displaced
+# by the most recent terminal event). Old-format in_flight (no
+# `displaced_version` field) → halt-for-human in the boot_sweep path
+# (ambiguous state, consistent with the "halt-for-human is BY DESIGN"
+# recovery invariant). The bash whole-object writer pattern below is
+# preserved (no helper dependency, no python in boot path).
 journal_open_txn() {
-    local kind="$1" target="$2" json existing
+    local kind="$1" target="$2" json existing displaced
     json="$(journal_read)" || return 1
     existing="$(_json_sub "$json" "in_flight")"
     if [ -n "$existing" ] && [ "$existing" != "null" ]; then
         _warn "journal_open_txn: an in_flight txn already exists — refusing (pipeline-busy)"
         return 1
     fi
+    # C-4: capture journal.current BEFORE the new txn is opened on top
+    # of it. Anchored on the QUOTED-key form (`"current":`) via
+    # _json_field_quoted — same defense-in-depth as the lib.sh:1355-1364
+    # migration, defeats the bare-substring first-occurrence hazard
+    # (a future key like `"current_previous_candidate"` substring would
+    # otherwise match ahead of the top-level `"current":`).
+    displaced="$(_json_field_quoted "$json" '"current":' 2>/dev/null)" || displaced=""
+    case "$displaced" in
+        null|"") displaced_raw="null" ;;
+        *)       displaced_raw="\"$displaced\"" ;;
+    esac
     journal_update "in_flight" \
-        "{\"kind\":\"$kind\",\"target\":\"$target\",\"started_at\":\"$(_now_iso)\",\"flipped\":false,\"owner_pid\":$$,\"last_heartbeat\":$(_now_epoch)}"
+        "{\"kind\":\"$kind\",\"target\":\"$target\",\"started_at\":\"$(_now_iso)\",\"flipped\":false,\"owner_pid\":$$,\"last_heartbeat\":$(_now_epoch),\"displaced_version\":$displaced_raw}"
 }
 
 # journal_mark_flipped — in_flight.flipped = true (raw splice inside the

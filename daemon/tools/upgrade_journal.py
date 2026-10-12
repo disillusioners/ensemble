@@ -738,6 +738,21 @@ class PendingOp:
     armed_by_instance: str = ""
     owner_pid: int = 0
     owner_kind: str = "tool-arm"  # tool-arm | executor
+    # Field-type discipline (deferred from doc-only, P1 polish — N5):
+    # `owner_heartbeat_at` is an ISO-8601 UTC timestamp STRING
+    # (parseable via `uj.parse_iso_utc`) — NOT an epoch int, NOT a
+    # None-as-stale marker, NOT a `last_heartbeat` alias. Today this
+    # field has ZERO writers (P1, decision (b) — the python twin
+    # owns `pending_op`; the helper MUST NOT touch it per D-P2.2);
+    # the sweep's three-signal defense-in-depth reads it as a
+    # FALLBACK only (daemon/services/upgrade_journal_sweep.py:1590:
+    # `evidence = op.owner_heartbeat_at or op.armed_at`). The shell
+    # lane writes `in_flight.last_heartbeat` (epoch int, distinct
+    # type) via the splice path — that is the LOAD-BEARING freshness
+    # signal. Adding a writer for `owner_heartbeat_at` here is a
+    # separate future op owned by the python reconciler (NOT P2, NOT
+    # the splice helper). If you change the type, also update the
+    # `parse_iso_utc` call site at upgrade_journal_sweep.py:1591.
     owner_heartbeat_at: str | None = None
     trigger: str = "post-turn-callback"  # post-turn-callback | manual
     nonce: str | None = None

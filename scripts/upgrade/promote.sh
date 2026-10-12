@@ -18,9 +18,14 @@
 #   5 journal     flipped:true
 #   6 restart     launcher.sh (journal sweep runs before binary resolution —
 #                T7, separate owner)
-#   7 gate        /livez ≤60s → /readyz ≤120s → version verify (/livez
-#                version == manifest binary_version, D2/ADR-027) → 300s soak
-#                (re-probed every 30s) — all inside the 10-min outer window
+#   7 gate        /livez ≤180s → /readyz ≤120s → version verify (/livez
+#                version == manifest binary_version, D2/ADR-027) →
+#                ADAPTIVE soak (default 60s floor / 120s cap / 3
+#                consecutive greens @ 15s cadence / fail-fast on red
+#                per P3 decision (c); revert to 300s via
+#                ENSEMBLE_SOAK_CONSERVATIVE=1; override via
+#                ENSEMBLE_PROMOTE_SOAK_S) — all inside the 900s
+#                (15 min) wall-clock ceiling (P3 decision (d))
 #   8a commit     journal current/previous update · history 'commit' ·
 #                retention (keep 3, previous pinned — T8) · lock release
 #   8b rollback   T5 auto-rollback: manifest gate on previous FIRST (else
@@ -224,7 +229,11 @@ promote_plugin_staleness_check
 # 1e. integrity (D-FA4.4): CURRENT (drift detection) + TARGET + manifest
 # fields + no-.env invariant. Same-version re-promote verifies once.
 CUR_JSON="$(journal_read)"
-CUR="$(_json_field "$CUR_JSON" current)"
+# Anchored on the QUOTED-key form (`"current":`) via _json_field_quoted
+# (lib.sh:1355-1364 precedent) — defends against a future key-naming
+# collision where a top-level field named e.g. "current_previous_candidate"
+# would otherwise substring-match ahead of the real `"current":` field.
+CUR="$(_json_field_quoted "$CUR_JSON" '"current":' 2>/dev/null)" || CUR=""
 [ "$CUR" = "null" ] && CUR=""
 if [ -n "$CUR" ] && [ "$CUR" != "$VERSION" ]; then
     if [ ! -L "$INSTALL_DIR/current" ]; then
@@ -433,7 +442,30 @@ if [ -z "$gate_fail_reason" ]; then
     # commit — M5: every journal write is checked; a failed write must
     # never let the promote exit 0 with the symlink/journal diverged (see
     # journal_fail_loud in lib.sh).
+    # OLD_CUR is the version THIS run displaced (captured at the flip-prep
+    # moment above; decision (g) A — single source of truth for the
+    # auto-rollback target below). The journal's `previous` field is
+    # deliberately NOT consulted here because it can be stale whenever
+    # the previous run halted AFTER the flip and BEFORE commit (the Oct 9
+    # arc — N-2 walk bug). The set-previous write below carries OLD_CUR
+    # so the journal's `previous` matches THIS run's displaced version
+    # (FORWARD semantic).
     OLD_CUR="$CUR"
+    # Immediacy assertion (decision (g) D-P1.2): if journal.current does
+    # NOT equal $VERSION at the commit-set-previous moment, the journal
+    # has drifted out of sync with the symlink / preflight invariant —
+    # refuse with exit 78 rather than write a misleading `previous`.
+    # The anchor is the QUOTED-key form (`"current":`) via
+    # _json_field_quoted (lib.sh:1355-1364 precedent) — defeats the
+    # bare-substring first-occurrence hazard.
+    PREV_JSON="$(journal_read)" || journal_fail_loud "commit: journal_read"
+    current_now="$(_json_field_quoted "$PREV_JSON" '"current":' 2>/dev/null)" || current_now=""
+    if [ "$current_now" != "$VERSION" ]; then
+        journal_history_append halt "immediacy breach at commit: journal current=$current_now ≠ $VERSION — refusing to set previous" \
+                                              || true
+        _warn "immediacy breach at commit: journal current=$current_now ≠ $VERSION — halting (exit 78); txn left open for sweep recovery"
+        exit 78
+    fi
     journal_set_current "$VERSION"        || journal_fail_loud "commit: journal_set_current $VERSION"
     journal_set_previous "${OLD_CUR:-null}" || journal_fail_loud "commit: journal_set_previous ${OLD_CUR:-null}"
     journal_close_txn                     || journal_fail_loud "commit: journal_close_txn"
@@ -449,8 +481,16 @@ fi
 # ── 8b. AUTO-ROLLBACK (T5) — the recovery NEVER refuses on cap/cooldown ────
 _log "GATE FAILED: $gate_fail_reason — auto-rollback initiating (ADR-005)"
 
+# Decision (g) D-P1.1 / D-P1.3 — auto-rollback target = $OLD_CUR, NOT the
+# journal's `previous` field. The bug class is "reading the wrong
+# field" — `journal.previous` is stale whenever the previous run halted
+# AFTER the flip and BEFORE commit (N-2 walk). $OLD_CUR was captured at
+# the flip-prep moment above and is THIS run's displaced version. The
+# PREV_JSON read below is kept for the immediacy-correctness check
+# (the gate below still consults `journal.previous` as a defense-in-
+# depth sanity read; the real target remains $OLD_CUR).
 PREV_JSON="$(journal_read)"
-PREV="$(_json_field "$PREV_JSON" previous)"
+PREV="$OLD_CUR"
 [ "$PREV" = "null" ] && PREV=""
 
 # T5 manifest gate FIRST (D-FA4.5): previous must EXIST, be rollback_safe,

@@ -94,7 +94,13 @@ EOF
     fi
 }
 
-# Helper: write a journal with the shape _journal_sweep expects
+# Helper: write a journal with the shape _journal_sweep expects.
+# P1 / decision (g) C-4: the in_flight MUST carry `displaced_version`
+# (the C-4 stamp from journal_open_txn at lib.sh:700-712). The
+# boot_sweep_commit_and_continue path reads it and writes
+# `previous = displaced_version`; missing the field triggers
+# halt-for-human. Seed it to $prev (the journal's current at the
+# hypothetical open_txn time).
 seed_journal() {
     # args: <fix_dir> <target> <prev> <flipped> <include_intent_flip>
     local fix="$1" target="$2" prev="$3" flipped="$4" include_intent="$5"
@@ -103,7 +109,21 @@ seed_journal() {
         intent=',{"ts":"2026-10-07T10:00:00Z","event":"intent_flip","detail":"preflight: intentional promote target '"$target"' — integrity verified (CURRENT drift-check + TARGET manifest match); operator-initiated"}'
     fi
     cat > "$fix/releases/state.json" <<EOF
-{"current":"$prev","previous":"$prev","in_flight":{"kind":"promote","target":"$target","started_at":"2026-10-07T09:00:00Z","flipped":$flipped,"owner_pid":99999,"last_heartbeat":1728000000},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T09:00:00Z","event":"open_txn","detail":"test seeded"}$intent]}
+{"current":"$prev","previous":"$prev","in_flight":{"kind":"promote","target":"$target","started_at":"2026-10-07T09:00:00Z","flipped":$flipped,"owner_pid":99999,"last_heartbeat":1728000000,"displaced_version":"$prev"},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T09:00:00Z","event":"open_txn","detail":"test seeded"}$intent]}
+EOF
+}
+
+# seed_journal_old_format — variant: in_flight has NO `displaced_version`
+# field (pre-C-4 format). Used to assert the halt-for-human branch.
+seed_journal_old_format() {
+    # args: <fix_dir> <target> <prev> <flipped> <include_intent_flip>
+    local fix="$1" target="$2" prev="$3" flipped="$4" include_intent="$5"
+    local intent=""
+    if [ "$include_intent" = "1" ]; then
+        intent=',{"ts":"2026-10-07T10:00:00Z","event":"intent_flip","detail":"preflight: intentional promote target '"$target"' — integrity verified; operator-initiated"}'
+    fi
+    cat > "$fix/releases/state.json" <<EOF
+{"current":"$prev","previous":"$prev","in_flight":{"kind":"promote","target":"$target","started_at":"2026-10-07T09:00:00Z","flipped":$flipped,"owner_pid":99999,"last_heartbeat":1728000000},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T09:00:00Z","event":"open_txn","detail":"old-format txn seeded"}$intent]}
 EOF
 }
 
@@ -149,6 +169,17 @@ C1_JOURNAL="$(cat "$C1_FIX/releases/state.json")"
 case "$C1_JOURNAL" in
     *'"current":"v9.9.9-test-target"'*|*"\"current\": \"v9.9.9-test-target\""*) _pass "C1 journal current → target (committed)" ;;
     *) _fail "C1 journal current → target (committed)" '"current":"v9.9.9-test-target"' "$(printf '%s' "$C1_JOURNAL" | grep -oE '"current":[^,}]*')" ;;
+esac
+# P1 / C-4 NEW assertion: the patch ADDS the previous-write that
+# launcher.sh:1020-1037 lacked. journal.previous MUST be written to
+# in_flight.displaced_version (N-1 = test-prev), and the source MUST
+# be the in_flight field (not the journal's stale pre-existing
+# previous). We seeded previous=test-prev AND displaced_version=test-
+# prev, so the post-sweep previous MUST equal test-prev (the same
+# value, but written from the new source).
+case "$C1_JOURNAL" in
+    *'"previous":"v9.9.9-test-prev"'*|*"\"previous\": \"v9.9.9-test-prev\""*) _pass "C1 journal previous → in_flight.displaced_version (C-4 fix writes previous=N-1)" ;;
+    *) _fail "C1 journal previous → in_flight.displaced_version (C-4 fix writes previous=N-1)" '"previous":"v9.9.9-test-prev"' "$(printf '%s' "$C1_JOURNAL" | grep -oE '"previous":[^,}]*')" ;;
 esac
 case "$C1_JOURNAL" in
     *'"in_flight":null'*|*"\"in_flight\": null"*) _pass "C1 journal in_flight cleared" ;;
@@ -343,6 +374,43 @@ if [ -n "$COOLDOWN_EPOCH" ] && [ "$COOLDOWN_EPOCH" -gt "$NOW_E" ]; then
 else
     _fail "C7 cooldown produces a future timestamp on GNU" ">now ($NOW_E)" "got '$COOLDOWN_EPOCH'"
 fi
+
+# ===========================================================================
+section "C8 — old-format in_flight (no displaced_version) → halt-for-human (P1 / C-4)"
+
+# The C-4 fix in launcher.sh:1020-1037 ADDS a halt-for-human branch for
+# txns that lack the `displaced_version` field (pre-C-4 format from
+# earlier releases). Seed an old-format txn with intent_flip +
+# prev.rollback_safe:false (all the OTHER gates hold) and assert the
+# sweep halts with no silent commit.
+C8_FIX="$(mktemp -d -t c8.XXXXXX)"
+make_install_fixture "$C8_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "false"
+seed_journal_old_format "$C8_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "1"
+ln -sfn "releases/v9.9.9-test-target" "$C8_FIX/current"
+printf 'PORT=19999\n' > "$C8_FIX/.env"
+printf '#!/bin/bash\nexit 0\n' > "$C8_FIX/launcher.sh"
+chmod +x "$C8_FIX/launcher.sh"
+
+C8_OUT="$(run_sweep "$C8_FIX")"
+
+C8_JOURNAL="$(cat "$C8_FIX/releases/state.json")"
+# journal.current must STAY at test-prev (no silent commit).
+case "$C8_JOURNAL" in
+    *'"current":"v9.9.9-test-prev"'*|*"\"current\": \"v9.9.9-test-prev\""*) _pass "C8 journal.current stays at prev (no silent commit on old-format txn)" ;;
+    *) _fail "C8 journal.current stays at prev (no silent commit on old-format txn)" '"current":"v9.9.9-test-prev"' "$(printf '%s' "$C8_JOURNAL" | grep -oE '"current":[^,}]*')" ;;
+esac
+# halt event MUST be in history.
+assert_contains "C8 halt event in history (old-format in_flight)" '"event":"halt"' "$C8_JOURNAL"
+# boot_sweep_commit_and_continue MUST NOT be in history.
+assert_not_contains "C8 NO boot_sweep_commit_and_continue event" '"event":"boot_sweep_commit_and_continue"' "$C8_JOURNAL"
+# In_flight MUST remain (B4 leave-txn-open) — the field still has
+# content (not null).
+case "$C8_JOURNAL" in
+    *'"in_flight":null'*|*"\"in_flight\": null"*) _fail "C8 in_flight NOT cleared (B4 leave-txn-open)" "object" "null" ;;
+    *) _pass "C8 in_flight NOT cleared (B4 leave-txn-open)" ;;
+esac
+
+rm -rf "$C8_FIX"
 
 # ===========================================================================
 section "Final — summary"
