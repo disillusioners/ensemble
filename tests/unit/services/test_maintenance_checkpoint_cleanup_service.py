@@ -26,6 +26,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from sqlmodel import SQLModel
 
 import daemon.services.maintenance_api_service as mas
@@ -43,6 +44,7 @@ from daemon.services.maintenance_api_service import (
     MaintenanceApiService,
     MaintenanceError,
     RequesterInfo,
+    _is_vacuum_full_enospc,
 )
 from daemon.services.timestamps import now_utc_iso
 from daemon.config import PersistenceConfig
@@ -164,10 +166,18 @@ REQUESTER = RequesterInfo(peer_ip="127.0.0.1", user_agent="pytest", origin=None)
 class _ExecutePayload:
     """Duck-typed stand-in for CheckpointCleanupExecuteRequest."""
 
-    def __init__(self, dry_run_run_id=None, expected_bytes=None, confirm=False):
+    def __init__(
+        self,
+        dry_run_run_id=None,
+        expected_bytes=None,
+        confirm=False,
+        vacuum_full=None,
+    ):
         self.dry_run_run_id = dry_run_run_id
         self.expected_bytes = expected_bytes
         self.confirm = confirm
+        # v1.1 additive optional escalation flag (absent == None).
+        self.vacuum_full = vacuum_full
 
 
 # ── case 18 — availability state enum ──────────────────────────────────────────
@@ -471,7 +481,10 @@ class TestExecuteHappyPath:
         await asyncio.gather(*list(svc._executing_tasks))
 
         svc._cleanup_job.run_checkpoint_prunes.assert_awaited_once_with(
-            destructive=True
+            # v1.1 — the escalation flag rides the call; the default
+            # (absent payload flag) is the coerced False.
+            destructive=True,
+            vacuum_full=False,
         )
         row = runs_repo.get(resp["run_id"])
         assert row.kind == "manual_execute"
@@ -487,10 +500,13 @@ class TestExecuteHappyPath:
         }
         assert row.env_flags_json == {
             # feature/blob-prune-default-on: the dual-arm env-state
-            # trio is gone; the audit row records the kwarg value the
+            # trio is gone; the audit row records the kwarg values the
             # cycle ran with (True for the manual execute confirmation
-            # path, which matches the unconditional destructive default).
+            # path, which matches the unconditional destructive default;
+            # v1.1 — vacuum_full stamped alongside, False for the
+            # non-escalated default run).
             "destructive": True,
+            "vacuum_full": False,
         }
         assert set(row.summary_json.keys()) == {
             "checkpoint_rows", "writes", "blobs", "duration_ms"
@@ -545,123 +561,370 @@ class TestExecuteHappyPath:
         assert resp2["expected_duration_ms_hint"] == 412
 
 
-class TestProjectionEchoBothOrNeither:
-    """v3.2 fix-pass O2 — the manual_execute ``projection`` echo is
-    BOTH-OR-NEITHER + legacy-row safe.
+class TestVacuumFullThreading:
+    """Cluster 2.2 — ``vacuum_full`` threading through
+    ``MaintenanceApiService.execute`` → ``run_checkpoint_prunes`` +
+    the audit-row stamps (test-plan.md §2.5, be-vacuum-full.md 2.2).
 
-    ``_execute_run`` sources the echo from the EXECUTE row's
-    ``dry_run_summary_json`` snapshot. A snapshot whose dict predates
-    the v3.2 projection fields (legacy), carries only ONE of the two
-    values, or is not even a dict must surface NO ``projection`` block
-    — never a partial echo, never a KeyError/TypeError from any legacy
-    row shape. Only a BOTH-present snapshot emits the block.
+    The dry-run is UNTOUCHED (decisions §D-2/§D-7.2): ``dry_run``
+    takes NO payload and structurally cannot honor the flag.
     """
 
-    @staticmethod
-    def _with_summary(runs_repo, row, mutation: dict) -> str:
-        """Re-save the seeded dry-run row with extra summary keys
-        (mutating a dict the gate does not read — ``would_delete``
-        stays intact so the execute gate still passes). Returns the
-        row's run_id — the commit expires the passed instance, so
-        callers must use the returned id (never touch ``row`` after)."""
-        from sqlalchemy.orm import Session
-
-        summary = dict(row.summary_json)
-        summary.update(mutation)
-        run_id = row.run_id
-        row.summary_json = summary
-        with Session(runs_repo.engine) as s:
-            s.add(row)
-            s.commit()
-        return run_id
-
-    async def _execute_and_fetch(self, runs_repo, run_id: str):
+    async def test_execute_threads_vacuum_full_to_run_checkpoint_prunes(
+        self, runs_repo, as_pg
+    ):
+        """Payload ``vacuum_full=True`` → the background task awaits
+        ``run_checkpoint_prunes(destructive=True, vacuum_full=True)``
+        (the manual-only kwarg flows through to the job)."""
+        fresh = _seed_dry_run_row(runs_repo)
         svc = _service(runs_repo, job_result=_result(destructive=True))
         resp = await svc.execute(
             _ExecutePayload(
                 confirm=True,
-                dry_run_run_id=run_id,
+                dry_run_run_id=fresh.run_id,
                 expected_bytes=268435456,
+                vacuum_full=True,
             ),
             REQUESTER,
         )
         await asyncio.gather(*list(svc._executing_tasks))
-        return runs_repo.get(resp["run_id"])
+        svc._cleanup_job.run_checkpoint_prunes.assert_awaited_once_with(
+            destructive=True, vacuum_full=True
+        )
+        row = runs_repo.get(resp["run_id"])
+        assert row.status == "succeeded"
 
-    async def test_legacy_row_absent_projection_fields_no_block(
+    async def test_execute_stamps_vacuum_full_in_audit_row_env_flags_json(
         self, runs_repo, as_pg
     ):
-        """Pre-v3.2 legacy snapshot (no ``*_reclaimable_*`` keys) →
-        summary keeps the FROZEN 4-key shape; NO projection block."""
+        """The audit row's ``env_flags_json`` carries the escalation
+        decision alongside the destructive stamp —
+        ``{'destructive': True, 'vacuum_full': True}`` for the ticked
+        checkbox; ``{'destructive': True, 'vacuum_full': False}`` for
+        the default (absent → coerced False) run. Never ``None`` —
+        the row records the value the cycle ran with."""
         fresh = _seed_dry_run_row(runs_repo)
-        row = await self._execute_and_fetch(runs_repo, fresh.run_id)
-        assert row.status == "succeeded"
-        assert "projection" not in row.summary_json
-        assert set(row.summary_json.keys()) == {
-            "checkpoint_rows", "writes", "blobs", "duration_ms",
+        svc = _service(runs_repo, job_result=_result(destructive=True))
+        resp = await svc.execute(
+            _ExecutePayload(
+                confirm=True,
+                dry_run_run_id=fresh.run_id,
+                expected_bytes=268435456,
+                vacuum_full=True,
+            ),
+            REQUESTER,
+        )
+        await asyncio.gather(*list(svc._executing_tasks))
+        row = runs_repo.get(resp["run_id"])
+        assert row.env_flags_json == {
+            "destructive": True,
+            "vacuum_full": True,
         }
 
-    async def test_now_only_snapshot_emits_no_block(self, runs_repo, as_pg):
-        """One-sided snapshot (``bytes_reclaimable_now`` only) → NO
-        projection block (BOTH-OR-NEITHER — no partial echo)."""
-        fresh = _seed_dry_run_row(runs_repo)
-        run_id = self._with_summary(runs_repo, fresh, {"bytes_reclaimable_now": 111})
-        row = await self._execute_and_fetch(runs_repo, run_id)
-        assert row.status == "succeeded"
-        assert "projection" not in row.summary_json
-
-    async def test_after_only_snapshot_emits_no_block(self, runs_repo, as_pg):
-        """One-sided snapshot (``..._after_row_prune`` only) → NO
-        projection block."""
-        fresh = _seed_dry_run_row(runs_repo)
-        run_id = self._with_summary(
-            runs_repo, fresh, {"bytes_reclaimable_after_row_prune": 222}
+        fresh2 = _seed_dry_run_row(runs_repo)
+        svc2 = _service(runs_repo, job_result=_result(destructive=True))
+        resp2 = await svc2.execute(
+            _ExecutePayload(
+                confirm=True,
+                dry_run_run_id=fresh2.run_id,
+                expected_bytes=268435456,
+            ),
+            REQUESTER,
         )
-        row = await self._execute_and_fetch(runs_repo, run_id)
-        assert row.status == "succeeded"
-        assert "projection" not in row.summary_json
+        await asyncio.gather(*list(svc2._executing_tasks))
+        row2 = runs_repo.get(resp2["run_id"])
+        assert row2.env_flags_json == {
+            "destructive": True,
+            "vacuum_full": False,
+        }
 
-    async def test_both_present_emits_both_at_dry_run(self, runs_repo, as_pg):
-        """BOTH values present → the echo block carries both
-        ``*_at_dry_run`` keys with the snapshotted values (R-5)."""
+    async def test_execute_stamps_vacuum_full_summary_block(
+        self, runs_repo, as_pg
+    ):
+        """The poll response's ``summary_json`` carries the FULL block
+        when the escalation ran (F9/§D-3 — the operator watches FULL
+        progress via ``summary_json.vacuum_full``). Non-escalated runs
+        keep the FROZEN 4-key summary shape (pinned by
+        ``test_execute_happy_path_mock``)."""
+        from daemon.services.maintenance import VacuumFullResult
+
         fresh = _seed_dry_run_row(runs_repo)
-        run_id = self._with_summary(
+        job_result = _result(destructive=True)
+        job_result.vacuum_full = VacuumFullResult(
+            escalated=True,
+            vacuumed_tables=(
+                "checkpoints", "checkpoint_writes", "checkpoint_blobs",
+            ),
+            duration_ms=900,
+            bytes_reclaimed=4096,
+        )
+        svc = _service(runs_repo, job_result=job_result)
+        resp = await svc.execute(
+            _ExecutePayload(
+                confirm=True,
+                dry_run_run_id=fresh.run_id,
+                expected_bytes=268435456,
+                vacuum_full=True,
+            ),
+            REQUESTER,
+        )
+        await asyncio.gather(*list(svc._executing_tasks))
+        row = runs_repo.get(resp["run_id"])
+        assert row.summary_json["vacuum_full"] == {
+            "vacuumed_tables": [
+                "checkpoints", "checkpoint_writes", "checkpoint_blobs",
+            ],
+            "duration_ms": 900,
+            "bytes_reclaimed": 4096,
+            "escalated": True,
+            "refusal_reason": None,
+            "free_bytes": None,
+            "required_bytes": None,
+            "headroom_check_skipped": False,
+        }
+
+    async def test_execute_residual_enospc_stamps_vacuum_full_enospc(
+        self, runs_repo, as_pg
+    ):
+        """Residual ENOSPC (task 2.11 / B4): the FULL phase raises
+        ``OperationalError`` wrapping PG SQLSTATE 53100 → the audit
+        row is ``failed`` with
+        ``error_json = {'code': 'vacuum_full_enospc', 'message': …,
+        'retriable': True}``. NO auto-retry — the operator frees
+        space and re-runs. The handler does NOT swallow: the failure
+        lands on the row; the gate is released."""
+
+        class _EnospcOrig(Exception):
+            pgcode = "53100"
+
+        fresh = _seed_dry_run_row(runs_repo)
+        svc = _service(
             runs_repo,
-            fresh,
-            {
-                "bytes_reclaimable_now": 111,
-                "bytes_reclaimable_after_row_prune": 222,
-            },
+            job_raises=OperationalError(
+                "VACUUM FULL checkpoints", {}, _EnospcOrig()
+            ),
         )
-        row = await self._execute_and_fetch(runs_repo, run_id)
-        assert row.summary_json["projection"] == {
-            "bytes_reclaimable_now_at_dry_run": 111,
-            "bytes_reclaimable_after_row_prune_at_dry_run": 222,
-        }
+        resp = await svc.execute(
+            _ExecutePayload(
+                confirm=True,
+                dry_run_run_id=fresh.run_id,
+                expected_bytes=268435456,
+                vacuum_full=True,
+            ),
+            REQUESTER,
+        )
+        await asyncio.gather(*list(svc._executing_tasks))
+        row = runs_repo.get(resp["run_id"])
+        assert row.status == "failed"
+        assert row.error_json["code"] == "vacuum_full_enospc"
+        assert row.error_json["retriable"] is True
+        assert svc._run_lock.in_flight is None
 
-    async def test_non_dict_snapshot_never_raises(self, runs_repo, as_pg):
-        """Corrupt snapshot shapes (JSON string / list) → _execute_run
-        completes, row succeeds, NO projection block, NO KeyError /
-        AttributeError / TypeError. Driven directly (the execute gate
-        cannot produce this shape — belt-and-braces for direct repo
-        writes)."""
-        for weird in ("not-a-dict", [1, 2, 3]):
-            run_id = f"ckpt-20260927_032000123456-{uuid4().hex[:8]}"
-            row = MaintenanceRun(
-                run_id=run_id,
-                section="checkpoint-cleanup",
-                kind="manual_execute",
-                started_at=now_utc_iso(),
-                status="running",
-                triggered_by="user",
-                dry_run_summary_json=weird,
+    async def test_execute_unarmed_with_pgcode_53100_stamps_execution_error(
+        self, runs_repo, as_pg
+    ):
+        """R2 red-flag — UN-armed run (vacuum_full=False) whose prune
+        raises ``OperationalError`` with pgcode "53100" MUST NOT
+        stamp ``vacuum_full_enospc``: the FULL arm was not
+        exercised, so a disk-full error here is a generic infra
+        fault, NOT a FULL-phase residual. Stamps the byte-identical
+        generic ``execution_error`` shape (the discriminator is
+        armed-gated — the previous handler stamped the FULL code
+        unconditionally on any 53100; this regression test pins
+        the un-armed 53100 path as generic infra).
+        """
+
+        class _EnospcOrig(Exception):
+            pgcode = "53100"
+
+        fresh = _seed_dry_run_row(runs_repo)
+        svc = _service(
+            runs_repo,
+            job_raises=OperationalError(
+                "VACUUM FULL checkpoints", {}, _EnospcOrig()
+            ),
+        )
+        # vacuum_full=None/absent → coerced False → un-armed
+        # execute. Even though pgcode="53100" matches, the
+        # audit row MUST stamp ``execution_error`` (not
+        # ``vacuum_full_enospc``) because the FULL arm was not
+        # exercised — the error came from the destructive prune.
+        resp = await svc.execute(
+            _ExecutePayload(
+                confirm=True,
+                dry_run_run_id=fresh.run_id,
+                expected_bytes=268435456,
+                # vacuum_full absent → un-armed.
+            ),
+            REQUESTER,
+        )
+        await asyncio.gather(*list(svc._executing_tasks))
+        row = runs_repo.get(resp["run_id"])
+        assert row.status == "failed"
+        assert row.error_json["code"] == "execution_error", (
+            "un-armed run with pgcode=53100 must stamp the GENERIC "
+            "execution_error code, not the FULL-phase residual "
+            "vacuum_full_enospc — the FULL arm was not exercised "
+            "(decisions.md §D-9.5.4 B4 — armed-gated discriminator)"
+        )
+        assert "retriable" not in row.error_json
+        assert svc._run_lock.in_flight is None
+
+    async def test_dry_run_ignores_vacuum_full(self, runs_repo, as_pg):
+        """decisions §D-2/§D-7.2 + N7(a): the dry-run IGNORES
+        ``vacuum_full`` — STRUCTURALLY, not by branching: (a) the
+        service ``dry_run`` signature has no ``vacuum_full``
+        parameter; (b) the ``/dry-run`` route handler takes NO request
+        body and never references the flag; (c) the dry-run response
+        shape is identical across successive calls — no flag-shaped
+        key anywhere in it."""
+        import inspect
+
+        import daemon.routers.maintenance as maintenance_router
+
+        # (a) service signature — no flag parameter to honor.
+        params = set(
+            inspect.signature(MaintenanceApiService.dry_run).parameters
+        )
+        assert "vacuum_full" not in params
+        assert params == {"self", "requester"}
+
+        # (b) route handler — no body parameter (the ``payload`` local
+        # is a hard-coded EMPTY dict: the route reads no request body,
+        # so the FE structurally cannot send ``vacuum_full`` here),
+        # and the flag never appears in the handler source.
+        route_src = inspect.getsource(maintenance_router.post_dry_run)
+        sig_params = set(
+            inspect.signature(maintenance_router.post_dry_run).parameters
+        )
+        assert sig_params == {"request", "_kill_switch", "svc"}
+        assert "vacuum_full" not in route_src
+        assert "payload: dict[str, Any] = {}" in route_src
+
+        # (c) response shape stable across calls (no flag-shaped key).
+        svc = _service(runs_repo, job_result=_result(duration_ms=100))
+        got1 = await svc.dry_run(REQUESTER)
+        got2 = await svc.dry_run(REQUESTER)
+        assert set(got1.keys()) == set(got2.keys())
+        assert not any("vacuum" in k for k in got1)
+
+
+class TestEnospcDiscriminatorMatrix:
+    """R2 OPTIONAL — discriminator matrix tests for
+    ``_is_vacuum_full_enospc`` (pure function, no service).
+
+    Pins the R1 contract:
+      * pgcode attribute ABSENT + "53100" substring but NO
+        disk-full phrase → ``False`` (phrase gate is mandatory
+        under the new contract).
+      * pgcode attribute ABSENT + "53100" + "no space left on
+        device" / "disk full" phrase → ``True`` (driver-wrapped
+        path; only path the raw-string fallback can match).
+      * pgcode attribute PRESENT, value "53100" → ``True``
+        (the canonical path).
+      * pgcode attribute PRESENT, value OTHER (e.g. "57014") →
+        ``False`` even when the message contains "53100" — the
+        substring fallback MUST NOT reclassify a confirmed
+        non-disk-full error.
+      * pgcode attribute PRESENT, value ``None`` → ``False``
+        immediately. The driver explicitly says "no SQLSTATE";
+        the substring fallback MUST NOT fire. This is the R1
+        conflation-fix contract (the previous over-broad match).
+    """
+
+    def test_attr_absent_53100_substring_no_phrase_is_false(self):
+        """No ``pgcode`` attribute anywhere + bare "53100" substring
+        (e.g. an unrelated row-count byte counter) → ``False`` under
+        the new phrase gate."""
+
+        class _Wrapper(Exception):
+            """No pgcode attribute; carries "53100" as a count."""
+
+            def __init__(self, msg: str) -> None:
+                super().__init__(msg)
+
+        assert _is_vacuum_full_enospc(
+            _Wrapper("rows affected: 53100, no error")
+        ) is False
+
+    def test_attr_absent_53100_with_disk_full_phrase_is_true(self):
+        """No ``pgcode`` attribute + "53100" + "disk full" phrase →
+        ``True`` (driver-wrapped disk-full, raw-string path)."""
+
+        class _Wrapper(Exception):
+            def __init__(self, msg: str) -> None:
+                super().__init__(msg)
+
+        assert _is_vacuum_full_enospc(
+            _Wrapper("VACUUM FULL failed: 53100, disk full")
+        ) is True
+
+    def test_attr_absent_53100_with_no_space_left_phrase_is_true(self):
+        """No ``pgcode`` attribute + "53100" + "no space left on
+        device" phrase → ``True`` (alternate PG phrasing)."""
+
+        class _Wrapper(Exception):
+            def __init__(self, msg: str) -> None:
+                super().__init__(msg)
+
+        assert _is_vacuum_full_enospc(
+            _Wrapper(
+                "pg writer: 53100, no space left on device"
             )
-            assert runs_repo.insert(row) is True
-            svc = _service(runs_repo, job_result=_result(destructive=True))
-            await svc._execute_run(run_id)
-            done = runs_repo.get(run_id)
-            assert done.status == "succeeded"
-            assert "projection" not in done.summary_json
+        ) is True
+
+    def test_attr_present_pgcode_53100_is_true(self):
+        """``pgcode`` attribute present with value "53100" → ``True``
+        (the canonical path; the orig chain is irrelevant)."""
+
+        class _Enospc(Exception):
+            pgcode = "53100"
+
+        assert _is_vacuum_full_enospc(_Enospc("any msg")) is True
+
+    def test_attr_present_other_pgcode_with_53100_substring_is_false(self):
+        """``pgcode`` attribute present with a NON-53100 value +
+        message containing "53100" → ``False``. The confirmed
+        non-disk-full SQLSTATE must NOT be reclassified via the
+        substring fallback (over-broad match is the very bug R1
+        closes)."""
+
+        class _OtherSqlstate(Exception):
+            pgcode = "57014"  # statement timeout, not disk full
+
+        assert _is_vacuum_full_enospc(
+            _OtherSqlstate("aborted at byte 53100 of the WAL stream")
+        ) is False
+
+    def test_attr_present_pgcode_none_is_false_immediately(self):
+        """R1 conflation-fix — ``pgcode`` attribute PRESENT but value
+        ``None`` → ``False`` IMMEDIATELY. The driver is explicit
+        that there is no SQLSTATE; the substring fallback MUST
+        NOT fire (the previous ``if pgcode is None: continue``
+        conflated this with attribute-absent and fell through to
+        substring matching — the very bug this test pins as
+        closed)."""
+
+        class _NoSqlstate(Exception):
+            pgcode = None
+
+        # Even with a "53100" substring AND a disk-full phrase
+        # in the message, present-but-None pgcode MUST short-
+        # circuit to False.
+        assert _is_vacuum_full_enospc(
+            _NoSqlstate("53100 disk full no space left on device")
+        ) is False
+
+    def test_orig_chain_present_pgcode_only_on_orig_walks_correctly(self):
+        """OperationalError(orig=_Enospc(pgcode="53100")) → the
+        discriminator walks the orig chain; the FIRST candidate
+        with a present pgcode is authoritative."""
+
+        class _EnospcOrig(Exception):
+            pgcode = "53100"
+
+        exc = OperationalError("VACUUM FULL checkpoints", {}, _EnospcOrig())
+        assert _is_vacuum_full_enospc(exc) is True
 
 
 class TestDryRun:

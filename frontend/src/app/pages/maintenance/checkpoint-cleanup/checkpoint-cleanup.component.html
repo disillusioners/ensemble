@@ -70,6 +70,47 @@
 </dl>
 </div>
 
+<!-- Cluster 3.2 — VACUUM FULL opt-in checkbox + helper, defined ONCE
+     and stamped into BOTH steppers' Step 3 via *ngTemplateOutlet
+     (tidier pass T6 — the former 2× 25-line duplicate). SAFETY vs
+     CRITICAL-3 (the mat-step duplication above): that prohibition
+     applies to STAMPING <mat-step> ELEMENTS through an outlet —
+     MatStepper's ContentChildren query only sees DIRECT mat-step
+     children, so an outlet-stamped step renders an empty stepper.
+     This template contains ORDINARY CONTENT (a checkbox + helper
+     paragraph) placed INSIDE an already-declared <mat-step> body —
+     content-level indirection renders normally. Template-ref scoping:
+     `#vacuumFullBlock` is declared at template TOP LEVEL, so both
+     stepper branches (inside @if/@else embedded views) resolve it.
+     Only ONE <mat-stepper> is in the DOM at a time, so the helper's
+     element id (`ck-vacuum-full-helper`) never duplicates. §D-7.6
+     helper text is byte-identical to the pre-extraction copy — the
+     e2e suite + parity test pin the rendered testids. INSIDE Step
+     3's form area (above the Cleanup now button, matching the
+     existing ck-warning-text placement pattern); NOT a new mat-step;
+     the wiznav envelope is preserved. Default state is ticked; the
+     signal is reset on every fresh dry-run (Cluster 3.3). -->
+<ng-template #vacuumFullBlock>
+  <mat-checkbox
+    data-testid="ck-vacuum-full-checkbox"
+    [checked]="vacuumFullEnabled()"
+    (change)="vacuumFullEnabled.set($event.checked)"
+  >
+    VACUUM FULL (reclaim disk space)
+  </mat-checkbox>
+  <p
+    class="ck-vacuum-full-helper"
+    id="ck-vacuum-full-helper"
+    data-testid="ck-vacuum-full-helper"
+  >
+    VACUUM FULL rewrites the affected tables to reclaim
+    disk space. The affected tables (checkpoints,
+    checkpoint_writes, checkpoint_blobs) will be locked
+    briefly while the rewrite runs. Duration depends on
+    database size; a 60-minute hard ceiling applies.
+  </p>
+</ng-template>
+
 <!-- Wizard container -- caps at 1100px (spec §3, AC-12). -->
 <div class="ck-wizard">
   <!-- 4-step Material stepper (spec §2.2, AC-2). Orientation is
@@ -308,6 +349,10 @@
               Destructive -- permanently deletes unreferenced blobs and excess
               checkpoint rows.
             </p>
+            <!-- Cluster 3.2 — VACUUM FULL opt-in (T6: stamped from the
+                 top-level #vacuumFullBlock template — testids, §D-7.6
+                 helper text and binding shape preserved there). -->
+            <ng-container *ngTemplateOutlet="vacuumFullBlock" />
             <!-- ck-execute-btn: gated on dry-run AND !executing AND
                  !isRunInFlight. Reuses the existing ConfirmDialogComponent
                  (destructive: true, panelClass: 'dark-modal-panel'); only
@@ -690,6 +735,10 @@
               Destructive -- permanently deletes unreferenced blobs and excess
               checkpoint rows.
             </p>
+            <!-- Cluster 3.2 — VACUUM FULL opt-in (T6: stamped from the
+                 top-level #vacuumFullBlock template — testids, §D-7.6
+                 helper text and binding shape preserved there). -->
+            <ng-container *ngTemplateOutlet="vacuumFullBlock" />
             <!-- ck-execute-btn: gated on dry-run AND !executing AND
                  !isRunInFlight. Reuses the existing ConfirmDialogComponent
                  (destructive: true, panelClass: 'dark-modal-panel'); only

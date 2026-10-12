@@ -2052,6 +2052,16 @@ class CheckpointCleanupExecuteRequest(BaseModel):
     ``details.run_id`` from a 409 and resumes polling
     ``GET /runs/{details.run_id}``). Fields are ``Optional`` so the
     router emits the frozen 400 codes, never FastAPI's bare 422.
+
+    v1.1 — additive optional ``vacuum_full: bool | None`` for
+    interactive escalation to VACUUM FULL after the destructive
+    prune. Default ``None`` = no escalation; ``True`` = run VACUUM
+    FULL on the three affected tables after the prune; ``False`` =
+    explicitly skip (preserved for symmetry). The three existing
+    fields are unchanged. The flag is EXECUTE-ONLY: the ``/dry-run``
+    route takes no request body and never honors it (decisions.md
+    §D-2/§D-7.2). The scheduled lane is structurally locked (AST
+    pins) and never sees this field.
     """
 
     dry_run_run_id: str | None = Field(
@@ -2067,12 +2077,27 @@ class CheckpointCleanupExecuteRequest(BaseModel):
         description="Must be True; otherwise the server returns 400 confirm_required",
     )
 
+    # v1.1 — additive optional escalation flag (interactive lane only;
+    # the scheduled lane is structurally locked and never sees this field).
+    vacuum_full: bool | None = Field(
+        default=None,
+        description=(
+            "v1.1 additive: True = run VACUUM FULL on checkpoints, "
+            "checkpoint_writes, checkpoint_blobs after the destructive "
+            "prune. False = explicit no-escalation. None (default) = "
+            "no escalation. Execute-only — the dry-run route takes no "
+            "body and never honors this flag. The scheduled lane is "
+            "structurally locked and never honors this flag."
+        ),
+    )
+
     model_config = {
         "json_schema_extra": {
             "example": {
                 "dry_run_run_id": "ckpt-20260927_032000123456-2a18f3c9",
                 "expected_bytes": 268435456,
                 "confirm": True,
+                "vacuum_full": True,
             }
         }
     }
@@ -2085,6 +2110,16 @@ class CheckpointCleanupExecuteResponse(BaseModel):
     expected_duration_ms_hint}``). Both ``advisory`` and
     ``expected_duration_ms_hint`` are ALWAYS present (AM-12). Hint
     unit is milliseconds.
+
+    v1.1 — ``expected_duration_ms_hint`` is the referenced dry-run's
+    ``duration_ms``: the LOWER BOUND when ``vacuum_full: true`` (the
+    dry-run does not project the FULL phase; watch the poll response's
+    ``summary_json.vacuum_full`` block). A residual-ENOSPC failure of
+    the FULL phase (SQLSTATE 53100) marks the run ``failed`` with
+    ``error_json.code = 'vacuum_full_enospc'`` and ``retriable: true``
+    — retriable after space is freed (free space, re-run the same
+    dry-run → execute cycle; the headroom check then passes). The
+    daemon does NOT auto-retry.
     """
 
     run_id: str = Field(..., description="ckpt-<...>-<hex8>")

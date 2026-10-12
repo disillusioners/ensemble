@@ -19,13 +19,31 @@ interface MaintenanceSection {
   readonly id: string;
   readonly label: string;
   readonly component: unknown;
+  // Cluster 1.6 — Pin 20 — the production interface gains the
+  // optional `disabled?: boolean` field for the disabled
+  // "Database" placeholder tab. The mirror copies the shape
+  // verbatim so any drift in production breaks the mirror.
+  readonly disabled?: boolean;
 }
 
 // Mirror of the production MaintenanceComponent.sections — copy verbatim
 // from the production source so the mirror doesn't drift.
+// Cluster 1.7 (test-plan.md §1.2) — the mirror now has 2 entries
+// per the AC-16 amendment:
+//   entry 1: { id: 'checkpoint-cleanup', label: 'Checkpoint', component: ... }
+//            — label RENAMED from 'Checkpoint Cleanup' to 'Checkpoint'
+//              per Plan Review 2026-10-12 B2' (spec AC-4 :68 +
+//              mockup :270 — the spec is normative).
+//   entry 2: { id: 'database', label: 'Database', component: ...,
+//              disabled: true }
+//            — placeholder for the future tabs (per N7' — the type
+//              field is kept uniform to satisfy TypeScript; the
+//              disabled tab's body never mounts, per Material's
+//              `[disabled]="true"` projection).
 class MaintenanceShell {
   readonly sections: readonly MaintenanceSection[] = [
-    { id: 'checkpoint-cleanup', label: 'Checkpoint Cleanup', component: 'CheckpointCleanupComponent' as unknown },
+    { id: 'checkpoint-cleanup', label: 'Checkpoint', component: 'CheckpointCleanupComponent' as unknown },
+    { id: 'database', label: 'Database', component: 'CheckpointCleanupComponent' as unknown, disabled: true },
   ];
 }
 
@@ -35,15 +53,22 @@ const templateSrc = readFileSync(join(maintenanceDir, 'maintenance.component.htm
 
 describe('MaintenanceComponent — page shell + section registry', () => {
   describe('mirror class shape', () => {
-    it('registry contains exactly one section (`checkpoint-cleanup`)', () => {
-      // Count pin: 1 section in v1. Phase 2 ships checkpoint-cleanup
-      // ONLY. Phase 3+ may add sections (db-vacuum, orphan-instances,
-      // …). The page shell is the load-bearing piece — the registry
-      // count pins here so a future section-2 append is a deliberate
-      // edit (the test fails until the mirror is updated).
+    it('registry contains exactly two sections (`checkpoint-cleanup` + `database` placeholder)', () => {
+      // Cluster 1.7 — AC-16 mirror count: 2 sections in v2
+      // (post-Cluster-1 tabs shell rewrite). Entry 1 is the
+      // real CheckpointCleanupComponent tab; entry 2 is the
+      // disabled "Database" placeholder tab (per spec AC-3
+      // extensibility + the scale proof of a second tab — the
+      // body never mounts because Material's `[disabled]="true"`
+      // skips projection).
+      //
+      // Plan Review 2026-10-12 N1 — the count assertion is at
+      // line 45 (verified; the prior citation at :38 was stale).
       const shell = new MaintenanceShell();
-      expect(shell.sections).toHaveLength(1);
+      expect(shell.sections).toHaveLength(2);
       expect(shell.sections[0].id).toBe('checkpoint-cleanup');
+      expect(shell.sections[1].id).toBe('database');
+      expect(shell.sections[1].disabled).toBe(true);
     });
 
     it('each section has the required fields (id, label, component)', () => {
@@ -57,11 +82,17 @@ describe('MaintenanceComponent — page shell + section registry', () => {
       }
     });
 
-    it('the single section is `Checkpoint Cleanup` with the correct label', () => {
+    it('the first section is `Checkpoint` with the spec-normative label (Plan Review B2\')', () => {
+      // Plan Review 2026-10-12 B2' — the production label is
+      // 'Checkpoint' (per spec AC-4 :68 + mockup :270), NOT
+      // 'Checkpoint Cleanup'. The mirror must reflect the
+      // spec-normative label. A future regression that renames
+      // the label back to 'Checkpoint Cleanup' trips this
+      // assertion loudly.
       const shell = new MaintenanceShell();
       const section = shell.sections[0];
       expect(section.id).toBe('checkpoint-cleanup');
-      expect(section.label).toBe('Checkpoint Cleanup');
+      expect(section.label).toBe('Checkpoint');
     });
   });
 

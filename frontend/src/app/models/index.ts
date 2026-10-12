@@ -913,11 +913,19 @@ export interface CheckpointCleanupDryRun {
  * AM-17 DROPPED — NO `idempotency_key` field. The 409-adoption
  * contract replaces it: on 409 from execute, FE adopts
  * `details.run_id` and resumes polling.
+ *
+ * v1.1 — Additive optional `vacuum_full?: boolean` for interactive
+ * escalation to VACUUM FULL after the destructive prune. When
+ * `undefined` (default), the server treats it as `None` = no
+ * escalation. When `true`, server runs VACUUM FULL on the three
+ * checkpoint tables. When `false`, server explicitly skips
+ * (symmetric with `true`). The 3 existing fields are unchanged.
  */
 export interface CheckpointCleanupExecuteRequest {
   dry_run_run_id: string;
   expected_bytes: number;
   confirm: true;
+  vacuum_full?: boolean;
 }
 
 /**
@@ -959,6 +967,17 @@ export interface CheckpointCleanupRun {
  * `(typeof MAINTENANCE_ERROR_CODES)[number]`. Adding a code = appending
  * a tuple member + the BE contract pin; the union updates automatically.
  * The wire-facing union stays EXACTLY its frozen 11 members.
+ *
+ * V1 (tidier pass 2026-10-12): codes OUTSIDE this union (e.g. the
+ * BE-only `vacuum_full_enospc` stamp on a failed FULL-escalated run)
+ * fall through GRACEFULLY at every FE consumption site — the failed-run
+ * render reads `CheckpointCleanupRun.error.code` (typed plain `string`)
+ * and prints it verbatim (checkpoint-cleanup.component.html:
+ * `<code>{{ err.code }}</code>: {{ err.message }}`), while the
+ * HTTP-banner path goes through `errorLabel()`, whose
+ * `Partial<Record<string, string>>` lookup has a `?? code` verbatim
+ * fallback. No exhaustive match exists → a new BE code needs NO union
+ * addition; add a member here only when the FE must BRANCH on it.
  */
 export const MAINTENANCE_ERROR_CODES = [
   'not_initialized',

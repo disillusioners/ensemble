@@ -24,6 +24,23 @@ done-callback discard (R-5 — GC-safe, memory O(1)). Manager
 shutdown cancels + awaits the live task; a graceful shutdown marks
 the row ``failed`` with ``error_json.code='run_interrupted_by_shutdown'``
 per [AM-6/AM-7] state machine.
+
+Size rationale (tidier pass T5): the manual lanes — ``dry_run``,
+``execute``, ``_execute_run``, and the ENOSPC discriminator pair
+(``_has_pgcode_attr`` / ``_is_vacuum_full_enospc``) — stay
+co-located in this ONE file because they share the single-flight
+sequence (lock → conditional INSERT → run → finalize-in-finally),
+the same ``MaintenanceError`` carrier, and the same audit-row
+lifecycle; splitting the ENOSPC classifier or the background
+``_execute_run`` into a sibling module would sever that shared
+state (the classifier is consumed ONLY by ``_execute_run``'s
+exception stamping today) for zero dedup. Revisit trigger: extract
+when a THIRD escalation flag joins ``vacuum_full`` in the execute
+payload (a second discriminator family worth its own module), OR
+when a second caller of ``run_checkpoint_prunes`` appears outside
+this service (the classifier + run-row stamping would then need to
+be callable from two homes — extract to a shared error-classifier
+module at that point).
 """
 
 from __future__ import annotations
@@ -67,6 +84,97 @@ if TYPE_CHECKING:
     from daemon.services.maintenance import CheckpointCleanupJob, MaintenanceService
 
 logger = logging.getLogger(__name__)
+
+# PG SQLSTATE for "disk full" (out of disk space on the data
+# directory / tablespace during a VACUUM FULL rewrite).
+_PG_SQLSTATE_DISK_FULL = "53100"
+
+# Phrases the raw-string fallback requires IN ADDITION to the SQLSTATE
+# substring. A bare "53100" byte-count in a message (e.g. an unrelated
+# row count or byte counter) MUST NOT match — only messages that ALSO
+# carry a disk-full phrase qualify. Kept tight on purpose: phrases a
+# PG error message would naturally include for a real disk-full
+# failure ("no space left on device", "disk full"); the SQLSTATE alone
+# is NOT sufficient.
+_DISK_FULL_PHRASES: tuple[str, ...] = (
+    "no space left on device",
+    "disk full",
+)
+
+
+def _has_pgcode_attr(candidate: object) -> bool:
+    """True when ``candidate`` exposes a ``pgcode`` attribute, even if
+    its value is ``None`` (the driver explicitly reports "no
+    SQLSTATE"). ``hasattr`` would conflate this with the attribute
+    being absent; the DBAPI contract requires we distinguish:
+      * present-but-``None`` → authoritative "no SQLSTATE" (driver is
+        telling us the truth; do not reclassify via the string
+        fallback).
+      * attribute-absent → exotic wrapper dropped the DBAPI surface
+        (async driver / pooled retry wrapper); keep walking
+        candidates, and the final string-fallback decision is taken
+        only if NO candidate exposes the attribute at all.
+    """
+    return hasattr(candidate, "pgcode")
+
+
+def _is_vacuum_full_enospc(exc: BaseException) -> bool:
+    """True when ``exc`` is a PG disk-full failure (SQLSTATE 53100).
+
+    The VACUUM FULL escalation's residual-ENOSPC contract (task 2.11,
+    decisions.md §D-9.5.4 B4): the headroom pre-flight narrows but
+    cannot eliminate the check-race window — when the rewrite still
+    hits disk-full, the caller stamps
+    ``error_json = {'code': 'vacuum_full_enospc', 'retriable': True}``
+    so operators/dashboards can distinguish "free space and re-run"
+    from generic infra faults.
+
+    Discriminator contract (pgcode-presence-first, then
+    pgcode-value, then phrase-gated substring):
+      1. Walk the DBAPI ``orig`` chain. For each candidate:
+           a. ``pgcode`` attribute ABSENT (exotic wrapper dropped the
+              DBAPI surface) → keep walking.
+           b. ``pgcode`` attribute PRESENT but value ``None`` →
+              authoritative "no SQLSTATE" → return ``False``
+              immediately (the driver told us there is no SQLSTATE;
+              never fall through to the substring fallback).
+           c. ``pgcode`` attribute PRESENT with a string value ==
+              ``"53100"`` → return ``True``.
+           d. ``pgcode`` attribute PRESENT with ANY OTHER value →
+              return ``False`` (a confirmed non-disk-full error MUST
+              NOT be reclassified via the substring fallback).
+      2. NO candidate exposed a ``pgcode`` attribute at all → raw
+         string fallback. The substring "53100" alone is NOT
+         sufficient (an unrelated row count or byte counter could
+         carry it): the message MUST also contain at least one of
+         the disk-full phrases in ``_DISK_FULL_PHRASES``. This gates
+         out false positives while keeping the contract tight.
+    """
+    for candidate in (getattr(exc, "orig", None), exc):
+        if candidate is None:
+            continue
+        if not _has_pgcode_attr(candidate):
+            # Attribute absent → exotic wrapper dropped the DBAPI
+            # surface; keep walking.
+            continue
+        # Attribute is PRESENT (per ``hasattr``). Whether the value is
+        # ``None`` or a SQLSTATE, the driver is authoritative.
+        pgcode = candidate.pgcode
+        if pgcode is None:
+            # Present-but-``None`` → authoritative "no SQLSTATE" →
+            # hard ``False``; must not fall through to the substring
+            # fallback (over-broad match is the very bug this fix
+            # closes).
+            return False
+        return pgcode == _PG_SQLSTATE_DISK_FULL
+    # No candidate exposed the ``pgcode`` attribute at all (driver-
+    # wrapped errors that drop the DBAPI surface, e.g. exotic async
+    # drivers / pooled connection retry wrappers). String-substring
+    # fallback: BOTH the SQLSTATE AND a disk-full phrase must appear.
+    msg = str(exc)
+    if _PG_SQLSTATE_DISK_FULL not in msg:
+        return False
+    return any(phrase in msg for phrase in _DISK_FULL_PHRASES)
 
 
 # ── Requester forensics (T5.2) ──────────────────────────────────────────────────
@@ -417,6 +525,19 @@ class MaintenanceApiService:
         On success: spawn the executing task (background); respond
         202 with ``{run_id, status, started_at, advisory,
         expected_duration_ms_hint}``.
+
+        v1.1 (maintenance-tabs-vacuum) — ``payload.vacuum_full``
+        (``None`` → coerced ``False``) threads to the background
+        ``_execute_run`` and onward to
+        ``run_checkpoint_prunes(destructive=True, vacuum_full=...)``.
+        F9 LOWER-BOUND note: the ``expected_duration_ms_hint`` in the
+        202 response is the referenced dry-run's ``duration_ms`` (the
+        LOWER BOUND). When ``vacuum_full: true``, the actual run
+        includes a VACUUM FULL phase that the dry-run does not
+        project; the operator watches the FULL phase via the polling
+        response's ``summary_json.vacuum_full`` block. The dry-run
+        (``dry_run()``) is UNCHANGED — it takes no payload and
+        structurally ignores the flag (decisions §D-2/§D-7.2).
         """
         # 1. Backend gate (service-layer; the router's not_initialized
         # check comes BEFORE this when ``app.state`` is unwired).
@@ -535,6 +656,10 @@ class MaintenanceApiService:
                 idle = await self._maintenance_service.is_idle()
             advisory = None if idle else "system_busy"
 
+            # v1.1 — the escalation flag: None (absent) → False; the
+            # row records the value the cycle ran with (never None).
+            vacuum_full = bool(getattr(payload, "vacuum_full", None))
+
             row = MaintenanceRun(
                 run_id=ctx.run_id,
                 section="checkpoint-cleanup",
@@ -557,8 +682,13 @@ class MaintenanceApiService:
                 # Manual execute confirmation — destructive=True (the
                 # unconditional default; the explicit kwarg merely
                 # surfaces the path taken for operator forensics;
-                # feature/blob-prune-default-on).
-                env_flags_json={"destructive": True},
+                # feature/blob-prune-default-on). v1.1 — vacuum_full
+                # stamped alongside the same convention (the escalation
+                # decision is operator-forensics-visible on the row).
+                env_flags_json={
+                    "destructive": True,
+                    "vacuum_full": vacuum_full,
+                },
             )
             inserted = await asyncio.to_thread(self._runs_repo.insert, row)
             if not inserted:
@@ -585,8 +715,11 @@ class MaintenanceApiService:
             # the TASK owns the lock (its ``finally`` releases — see
             # ``_execute_run``); the sentinel flips so this method's
             # ``finally`` below does NOT release on the happy return.
+            # v1.1 — the escalation flag threads to the background task
+            # and onward to run_checkpoint_prunes(vacuum_full=...).
             task = asyncio.create_task(
-                self._execute_run(ctx.run_id), name=f"maintenance-execute-{ctx.run_id}"
+                self._execute_run(ctx.run_id, vacuum_full=vacuum_full),
+                name=f"maintenance-execute-{ctx.run_id}",
             )
             self._executing_tasks.add(task)
             task.add_done_callback(self._executing_tasks.discard)
@@ -617,7 +750,9 @@ class MaintenanceApiService:
             if not task_spawned and self._run_lock.in_flight is ctx:
                 self._run_lock.release()
 
-    async def _execute_run(self, run_id: str) -> None:
+    async def _execute_run(
+        self, run_id: str, *, vacuum_full: bool = False
+    ) -> None:
         """Run the destructive cycle + terminal write in the background.
 
         On exception: row → ``failed`` with ``error_json.code =
@@ -631,6 +766,20 @@ class MaintenanceApiService:
         crash; the boot sweep's ``interrupted`` state is reserved for
         restart-orphaned rows) — then the CancelledError re-raises.
 
+        v1.1 — ``vacuum_full`` (from the execute payload via
+        ``execute()``) threads to
+        ``run_checkpoint_prunes(destructive=True, vacuum_full=...)``.
+        When the operator opted in, the returned result carries the
+        FULL-phase block: ``summary_json.vacuum_full`` is the
+        ``VacuumFullResult.to_summary_dict()`` payload (refusals
+        included — the operator sees WHY no FULL ran). A residual
+        ENOSPC failure of the FULL phase (PG SQLSTATE 53100 escaping
+        the headroom pre-flight) stamps
+        ``error_json = {'code': 'vacuum_full_enospc', 'message': …,
+        'retriable': True}`` — retriable after space is freed (the
+        operator re-runs the dry-run → execute cycle; NO auto-retry;
+        the failure is never swallowed).
+
         The lock is released in ``finally`` — the router already
         returned 202 to the caller, so the caller never sees the
         lock state.
@@ -638,7 +787,8 @@ class MaintenanceApiService:
         try:
             try:
                 result = await self._cleanup_job.run_checkpoint_prunes(
-                    destructive=True
+                    destructive=True,
+                    vacuum_full=vacuum_full,
                 )
                 # v3.2 (R-5): the manual_execute summary gains ONE
                 # additive ``projection`` block sourced from the
@@ -711,21 +861,59 @@ class MaintenanceApiService:
                     )
                 raise
             except Exception as exc:
+                # v1.1 (task 2.11 / B4) — a residual ENOSPC escaping
+                # the FULL phase (headroom check-race / concurrent
+                # growth / degrade-to-skip run that hit the ceiling)
+                # carries PG SQLSTATE 53100: stamp the STRUCTURED
+                # retriable error code instead of the generic infra
+                # code. NO auto-retry — the operator frees space and
+                # re-runs the dry-run → execute cycle. The failure is
+                # never swallowed: it lands on the audit row.
+                #
+                # Armed-gate (enospc-scope fix): the FULL-phase
+                # residual-ENOSPC contract is meaningful ONLY when the
+                # run actually exercised the FULL phase — i.e.
+                # ``vacuum_full=True``. On a plain destructive prune
+                # (``vacuum_full=False``) a disk-full error is a
+                # generic infra fault, NOT a FULL-phase residual:
+                # stamping ``vacuum_full_enospc`` next to
+                # ``env_flags_json.vacuum_full=False`` misled
+                # forensic + dashboard consumers. The error still
+                # lands on the audit row, just under the byte-identical
+                # generic ``execution_error`` shape.
+                enospc = vacuum_full and _is_vacuum_full_enospc(exc)
                 logger.error(
                     f"maintenance execute_run failed (run_id={run_id}): "
-                    f"{type(exc).__name__}: {exc}",
+                    f"{type(exc).__name__}: {exc}"
+                    + (
+                        " [vacuum_full_enospc — retriable after space "
+                        "is freed]"
+                        if enospc
+                        else ""
+                    ),
                     exc_info=True,
                 )
+                if enospc:
+                    error_json = {
+                        "code": "vacuum_full_enospc",
+                        "message": (
+                            "VACUUM FULL failed: disk full (PG SQLSTATE "
+                            f"53100): {exc}"
+                        ),
+                        "retriable": True,
+                    }
+                else:
+                    error_json = {
+                        "code": "execution_error",
+                        "message": f"{type(exc).__name__}: {exc}",
+                    }
                 try:
                     await asyncio.to_thread(
                         self._runs_repo.mark_terminal,
                         run_id,
                         "failed",
                         now_utc_iso(),
-                        error_json={
-                            "code": "execution_error",
-                            "message": f"{type(exc).__name__}: {exc}",
-                        },
+                        error_json=error_json,
                     )
                 except Exception as mark_exc:  # noqa: BLE001
                     logger.warning(
