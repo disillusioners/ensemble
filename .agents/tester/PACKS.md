@@ -1,5 +1,19 @@
 # Test Packs
 
+## Commission CLOSED — MAINTENANCE-TABS-VACUUM GATE @ fe5efcd58→c35d54a46 (2026-10-12) — 🟢 VERDICT: PASS-WITH-FLAGS (all commissioned checks green; flags = baseline-refresh adjudication + test-debt) — full evidence: RESULTS/2026-10-12-maintenance-tabs-vacuum-gate.md
+
+Worktree `/home/nea/ensemble-src-wt-maint-tabs-vacuum` (branch feature/maintenance-tabs-vacuum, 19 commits from base c8a3fbf6a). 6 workers, 0 re-dispatches; adversarial probes 4/4 on real PG :15433 + daemon :8101 (scheduled-lane poison ignored, FULL strictly post-prune, dry-run structurally ignores flag); w2 baseline refreshed under chrome-ripple classification (old ec268fc2… → new 455e0168…, commit c35d54a46, single PNG); neighborhood 9F = documented pre-existing families, zero new.
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `be_vacuum_full_6file` (ad-hoc) | `.venv/bin/pytest` on the 6 commissioned files (2 integration wiring/no-full + 4 unit) | 122 tests @ fe5efcd58 | ~2 min | 2026-10-12 @ fe5efcd58 (74s) | ✅ PASS 122/122 |
+| `be_maintenance_neighborhood` (ad-hoc) | `.venv/bin/pytest tests/unit/services` (dir-wide) | 2647 tests; 9F pre-existing (QUARANTINE-documented) | ~4 min | 2026-10-12 @ fe5efcd58 (245s) | ✅ PASS-with-preexisting 2638P/9F |
+| `concurrency_atomic_unit_test` (registered) | `test/packs/concurrency_atomic_unit_test.sh` | ensure.md Core deadlock/concurrency | ~2 min | 2026-10-12 @ fe5efcd58 (69s) | ✅ PASS 99P/0F/74S |
+| `fe_jest_maintenance_4suite` (ad-hoc) | `cd frontend && ./node_modules/.bin/jest src/app/pages/maintenance` | 4 suites / 230 tests | <1 min | 2026-10-12 @ fe5efcd58 (7s) | ✅ PASS 230/230 |
+| `fe_tsc_app` (ad-hoc) | `cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.app.json` | FE typecheck | <1 min | 2026-10-12 @ fe5efcd58 (6s) | ✅ PASS exit 0 |
+| `maint_wizard_e2e_focused` (ad-hoc) | `playwright test --config playwright.maintenance.config.ts --project maintenance -g "w6\.5\.|w6\.|w7"` (+ w2 refresh/verify legs) | w6/w6.5/w7 + w2 baseline @ c35d54a46 | ~1 min/leg | 2026-10-12 @ fe5efcd58→c35d54a46 | ✅ PASS (w6, w6.5, w7; w2 refreshed+verified) |
+| `maint_guard_probes_c1c4` (ad-hoc, real-PG) | boot-e2e-maintenance-daemon.sh w/ PG_PORT=15433 DAEMON_PORT=8101 + log_statement=all probes | black-box guard semantics C1-C4 | ~18 min | 2026-10-12 @ fe5efcd58 | ✅ PASS 4/4 (real PG log citations) |
+
 ## Commission CLOSED — SNAPSHOTS V2 DAEMON-LANE E2E FULL 12/12 GATE @ 5dc834706 (2026-10-10) — 🟢 GREEN 12/12 — LOOP CLOSED (7/12 → 11/12 → 11/12 → 12/12; zero product failures across all 4 runs) — RESULTS/2026-10-10-snapshots-v2-daemon-lane-e2e-12-12-gate.md
 
 `5dc834706` (parent b5cafd3f7, sole spec file +23/−3, unanchored locators at 3 sites, zero anchored hasText remaining — grep re-verified) → **12 passed / 0 failed / 0 flaky (81.6s, RC=0)**. Leg #3 first-ever full-leg green (walked (a)→(f) incl. status multi-select + age + sort); zero regressions vs run #3 (11 legs PASS→PASS); money census `PUT /api/settings/snapshot-create 200` @ 19:17:16 + `GET /api/snapshots 200` ×29. Branch `test/snapshots-v2-spec-rebase` @ `5dc834706` merge-ready from this lane's perspective. Evidence: /tmp/ens-snapv2-e2e-evidence-gate12/ (runs #1/#2/#3 dirs intact). Loop knowledge: 3 LESSONS files (contract-rot triage, arming race, anchored-locator family).

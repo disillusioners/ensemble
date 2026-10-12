@@ -1,5 +1,14 @@
 # Tidier Review Notes — agents-ensemble
 
+## 2026-10-12 — maintenance-tabs-vacuum tidy pass (worktree feature/maintenance-tabs-vacuum @ 240ceaf04, range c8a3fbf6a..HEAD, 25 files +4678/−159), Iteration 001
+- Commission: craftsmanship-only pass after deep-review council APPROVE-WITH-NOTES; guard LOGIC / correctness / security excluded from lane by dispatch contract. Do-not-re-flag list (12 next-cycle minors + adjudicated `.maintenance-section` SCSS retention) honored by all workers.
+- Dispatch: 3 parallel read-only workers (readable 6dc467a7, hygiene 2307652c, robustness b4b6c369); all reported fully, no gaps; todo graph wiped externally between turns — recreated all-done from in-transcript report evidence.
+- Verdict: NEEDS WORK (non-blocking; zero High). 16 findings after dedup: 8 Medium / 8 Low; zero file:line:category cross-worker collisions → no merges needed.
+- Headline Mediums: `_build_vacuum_full_engine`+`_null_pool` duplication vs vacuum_maintenance.py:515-548 (the extraction Q the caller asked — hygiene worker counter-noted mirror-as-house-consistency; both views surfaced); VACUUM FULL opt-in block duplicated desktop/mobile html 311-335/718-742; 635-char single-line confirm message (ts:623); 5× `_HeadroomOutcome` skip-outcome boilerplate in `_check_vacuum_full_headroom`; silent `bytes_reclaimed` swallow maintenance.py:1828-1832 vs in-file logged-degrade convention (:1906/:1986); 3 files crossed the 1000-line band sans size-rationale docstring (maintenance_api_service 1034, wiring-pin 1012, wizard e2e 1066).
+- Worker disagreement surfaced honestly: `_has_pgcode_attr` inline-vs-keep (readable Low-Consider vs robustness exemplary-positive) — left Low with both views.
+- Deferred to Reviewer ×5: vacuum_full_enospc not in FE MaintenanceErrorCode union (models/index.ts:971-983); retriable:true asymmetry vs execution_error (api_service:879-892); `_shared_engine` legacy-refuse path reachability note (maintenance.py:1758-1772); Database-tab placeholder component fake (maintenance.component.ts:23-26); `_sum_full_table_bytes` loose docstring (maintenance.py:2041-2042).
+- Aggregator promotion (stated): hygiene's out-of-scope note on `_vacuum_full_one_table(table: str)` → kept as 🟢 Low Type Cleanliness (Literal annotation) since the worker itself acknowledged type-cleanliness IS in scope.
+
 ## 2026-10-11 — watch-loss fix Option A+E tidy pass (worktree feature/fix-retry-supersede-fix @ fd73fca8f, range 45dc39e45~1..fd73fca8f, 13 files +2478), Iteration 001
 - Commission: complementary craftsmanship pass after 0-critical design review; do-not-reopen list (in-txn hook, fail-open E1, table shape, GC shape) honored by both workers.
 - Range correction: caller's `45dc39e45..fd73fca8f` excluded base commit 45dc39e45 itself — the commit ADDING stored_watches model/repo/migration listed in scope; dispatched workers with `~1` to cover described surface.
