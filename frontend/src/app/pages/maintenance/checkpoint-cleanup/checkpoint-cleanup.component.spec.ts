@@ -271,6 +271,22 @@ class TestableCheckpointCleanupComponent {
   // the mirror's default is `false` (vertical orientation, narrow).
   // Spec calls test via direct mutation of this signal.
   readonly isDesktop = signal(false);
+
+  // Cluster 3.3 — `vacuumFullEnabled` signal — the checkbox on
+  // the wizard's confirm step is bound to this signal. Default
+  // value is `true` (operator must explicitly opt out — per
+  // §D-7.3 "always-ticked checkbox, no per-user persistence").
+  // The signal is read in `performExecute()` to thread
+  // `vacuum_full: <value>` into the request payload. The signal
+  // is RESET to `true` on every fresh dry-run (`onDryRun()` per
+  // the "fresh dry-run clears state" pattern).
+  //
+  // The mirror pre-declares the signal so the Cluster 3 unit
+  // tests can reference `component.vacuumFullEnabled()` without
+  // a compile error — the tests are RED today because
+  // production does not yet read the signal in `performExecute()`
+  // (the cluster-2 BE schema + cluster-3 FE wiring are pending).
+  readonly vacuumFullEnabled = signal(true);
   /**
    * wiznav-fix ROUND 3 — controlled-input revert with event-payload
    * read. Mirrors production verbatim. Round 1/2 had a stale-read
@@ -1975,6 +1991,77 @@ describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
     it('can be flipped to true to model the horizontal-orientation branch', () => {
       component.isDesktop.set(true);
       expect(component.isDesktop()).toBe(true);
+    });
+  });
+
+  // ── Cluster 3.3 — `vacuumFullEnabled` signal + payload threading ──────
+  describe('vacuumFullEnabled signal (Cluster 3.3 — FE wizard checkbox)', () => {
+    // Pin anchors (per test-plan.md §1.3 + decisions.md §D-7.3):
+    //   (1) signal defaults to true
+    //   (2) performExecute() includes vacuum_full in payload
+    //       (spy on service.execute; assert payload.vacuum_full === true default)
+    //   (3) signal is reset to true on fresh dry-run
+    //   (4) performExecute() respects unchecked state
+    //
+    // These tests are RED today because (a) the FE `CheckpointCleanupExecuteRequest`
+    // model does NOT yet carry `vacuum_full?:` (cluster 3.1 pending), and
+    // (b) `performExecute()` does NOT yet read `vacuumFullEnabled()` to
+    // thread the value into the payload (cluster 3.3 pending). The
+    // expected red pattern is: tests assert that the payload includes
+    // `vacuum_full: true` (or `false`) — pre-cluster-3, the payload
+    // does NOT include the field at all (the AM-17 shape holds), so
+    // `expect(req.vacuum_full).toBe(true)` fails. After cluster 3
+    // lands, the field appears in the payload and the assertions pass.
+    //
+    // The mirror pre-declares the `vacuumFullEnabled` signal so the
+    // tests reference `component.vacuumFullEnabled()` without a
+    // compile error — the mirror copies the planned production shape
+    // verbatim per the mirror contract at the top of this file.
+    // A compile failure is acceptable red evidence if the production
+    // signal refactor lands differently (e.g. a writable `signal<boolean>`
+    // vs `model<boolean>` shape).
+
+    it('(1) vacuumFullEnabled signal defaults to true (always-ticked checkbox per §D-7.3)', () => {
+      expect(component.vacuumFullEnabled()).toBe(true);
+    });
+
+    it('(2) performExecute() includes vacuum_full in payload with default=true (spy on service.execute)', () => {
+      // Drive the confirm path — set a fresh dry-run + click confirm.
+      service.lastDryRun.set(DRY_RUN);
+      mockDialog.nextResult = true;
+      component.onExecute();
+      expect(service.executeCalls).toHaveLength(1);
+      const req = service.executeCalls[0];
+      // The payload MUST carry `vacuum_full: true` (the signal's
+      // default value) — today this assertion FAILS because the
+      // performExecute() method does not yet thread the field.
+      expect(req.vacuum_full).toBe(true);
+    });
+
+    it('(3) vacuumFullEnabled signal is reset to true on fresh dry-run (the "fresh dry-run clears state" pattern)', () => {
+      // Operator-unticked state — set the signal to false.
+      component.vacuumFullEnabled.set(false);
+      expect(component.vacuumFullEnabled()).toBe(false);
+      // Fire a fresh dry-run; the reset path restores the
+      // default `true` regardless of the operator's prior state.
+      component.onDryRun();
+      expect(component.vacuumFullEnabled()).toBe(true);
+    });
+
+    it('(4) performExecute() respects unchecked state — payload.vacuum_full === false when signal is false', () => {
+      // Set the signal to false (operator unticked the checkbox).
+      component.vacuumFullEnabled.set(false);
+      // Drive the confirm path.
+      service.lastDryRun.set(DRY_RUN);
+      mockDialog.nextResult = true;
+      component.onExecute();
+      expect(service.executeCalls).toHaveLength(1);
+      const req = service.executeCalls[0];
+      // The payload MUST carry `vacuum_full: false` when the
+      // signal is false — symmetric with the (2) default-true
+      // case. Today this assertion FAILS because performExecute()
+      // does not yet thread the field.
+      expect(req.vacuum_full).toBe(false);
     });
   });
 

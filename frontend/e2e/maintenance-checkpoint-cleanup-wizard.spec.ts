@@ -254,7 +254,22 @@ test.describe('Maintenance — Checkpoint Cleanup WIZARD (ck-redesign-2026q4, 5 
   });
 
   // ── w2. AC-15 runtime budget at 1024×768 ──────────────────────────────
-  test('w2. AC-15 no-overflow gate at 1024×768 (amend v5 GROUND TRUTH): status strip + horizontal stepper + Continue all in-viewport; scrollHeight ≤ clientHeight', async ({ page }) => {
+  // Per Plan Review 2026-10-12 B1 — the LIVE runtime gate is the v5
+  // no-overflow invariant `scrollHeight <= clientHeight` (the v3
+  // `scrollHeight ≤ 760` literal is structurally unsatisfiable: 760
+  // < 768 = clientHeight at 1024×768 — RETIRED as a runtime gate).
+  //
+  // The w2 case asserts THREE bounds (per test-plan §3.1 w2 row):
+  //   (a) v5 no-overflow invariant: full-page `scrollHeight <=
+  //       clientHeight` at viewport 1024×768 (LOAD-BEARING RUNTIME
+  //       GATE — content must NOT overflow)
+  //   (b) wizard-only static sub-assertion: wizard bbox height ≤
+  //       760px (INFORMATIONAL design target — the wizard-internal
+  //       design-budget ceiling; NOT a runtime gate)
+  //   (c) absolute cap: full-page `scrollHeight ≤ 808px` (HARD
+  //       UPPER BOUND — the absolute full-page stack cap with the
+  //       48px tab bar; per §D-6 risk 1.1.r2 mitigation)
+  test('w2. AC-15 budget at 1024×768 (Plan Review B1): v5 no-overflow runtime gate + wizard-only ≤760px design target + absolute full-page ≤808px cap; status strip + horizontal stepper + Continue all in-viewport', async ({ page }) => {
     await page.route('**/api/maintenance/checkpoint-cleanup/availability', (route) =>
       route.fulfill({ json: AVAILABILITY_READY, status: 200 }),
     );
@@ -316,6 +331,47 @@ test.describe('Maintenance — Checkpoint Cleanup WIZARD (ck-redesign-2026q4, 5 
     }));
     console.log(
       `[AC-15] viewport=1024x768 scrollHeight=${scrollHeight} clientHeight=${clientHeight} noOverflow=${scrollHeight <= clientHeight ? 'PASS' : 'FAIL'}`,
+    );
+
+    // AC-15 (f) — wizard-only static sub-assertion (informational
+    // design target, NOT a runtime gate). The 760px figure is the
+    // design-budget ceiling for the wizard BBox alone (NOT the
+    // full-page stack). The v3 `scrollHeight ≤ 760` literal at
+    // :8-11 is RETIRED as a runtime gate (structurally
+    // unsatisfiable: 760 < 768 = clientHeight at 1024×768). The
+    // 760px figure is RETAINED here as a wizard-only static
+    // sub-assertion per Plan Review 2026-10-12 B1 correction.
+    const wizardBbox = await page
+      .locator('app-checkpoint-cleanup')
+      .first()
+      .boundingBox();
+    if (wizardBbox) {
+      console.log(
+        `[AC-15 wizard-only] bbox height=${wizardBbox.height}px ` +
+          `design-target<=760px ${wizardBbox.height <= 760 ? 'PASS' : 'FAIL'}`,
+      );
+      // Informational assertion — does NOT block the e2e.
+      // Captured so the reviewer can correlate against the
+      // wizard-internal levers (e.g. wizard font-size, padding).
+      expect(wizardBbox.height).toBeLessThanOrEqual(760);
+    }
+
+    // AC-15 (g) — absolute full-page stack cap. The full-page
+    // stack (app header + page header + 48px tab bar + wizard +
+    // footer) at 1024×768 has a HARD UPPER BOUND of 808px (per
+    // Plan Review 2026-10-12 B1 + §D-6 risk 1.1.r2 mitigation).
+    // The 48px tab bar is the chrome the operator scrolls past;
+    // 808px is the absolute cap that MUST NOT be exceeded
+    // regardless of how much the wizard grows.
+    //
+    // Note ordering: the v5 no-overflow invariant (d) is the
+    // RUNTIME GATE; the ≤808 cap is the HARDER upper bound (the
+    // cap is binding only if the page also satisfies v5). If the
+    // page satisfies both, the cap is the load-bearing constraint.
+    expect(scrollHeight).toBeLessThanOrEqual(808);
+    console.log(
+      `[AC-15 absolute cap] full-page scrollHeight=${scrollHeight}px ` +
+        `cap<=808px ${scrollHeight <= 808 ? 'PASS' : 'FAIL'}`,
     );
 
     // AC-15 (e) — screenshot regression baseline catches
