@@ -1931,6 +1931,34 @@ class CheckpointCleanupJob:
                 tables_bytes=None,
                 refuse=False,
             )
+        # Tunnel-topology heuristic (R6 hardening 2026-10-12): a
+        # loopback listener AND a locally-resolvable tablespace /
+        # data_directory path is NOT proof of daemon/PG co-location —
+        # SSH-tunnel topologies (and similar port-forward shims) can
+        # false-positive: the statvfs below measures the DAEMON
+        # host's disk, not the PG host's. The pass/refuse decision
+        # still stands; residual ENOSPC (B4 / task 2.11) is the
+        # safety net — this WARNING is a HEURISTIC signal for
+        # operators / dashboards, not a refusal. Excludes the
+        # canonical <unix-socket> form (no host): unix-socket
+        # co-location is the same-host canonical case, not
+        # suspicious. ``os.path.exists`` is the "locally-resolvable"
+        # test — the warning fires exactly when the daemon is about
+        # to trust a daemon-side statvfs of the resolved path (a
+        # non-resolvable path fails statvfs below and takes the
+        # degrade-to-skip branch instead).
+        if not host.startswith("/") and os.path.exists(tablespace_path):
+            logger.warning(
+                "VACUUM FULL headroom heuristic: loopback listener "
+                "(host=%s) AND locally-resolvable path %r is NOT proof "
+                "of daemon/PG co-location; SSH-tunnel topologies can "
+                "false-positive (the statvfs measures the DAEMON host's "
+                "disk, not the PG host's). The residual ENOSPC catch "
+                "(B4 / task 2.11) is the safety net; the headroom "
+                "check still stands.",
+                host or "<loopback>",
+                tablespace_path,
+            )
         try:
             stat = os.statvfs(tablespace_path)
         except OSError as exc:
@@ -1971,6 +1999,20 @@ class CheckpointCleanupJob:
             )
         tables_bytes = int(tables_bytes or 0)
         required_bytes = int(tables_bytes * 1.5)
+        # R6 INFO-log at headroom-check completion — the resolved
+        # path + free_bytes + required_bytes + decision
+        # (pass/refuse). Lets operators / dashboards correlate
+        # refusal decisions with the underlying filesystem state
+        # without scraping the WARNING logs.
+        decision = "pass" if free_bytes >= required_bytes else "refuse"
+        logger.info(
+            "VACUUM FULL headroom check COMPLETED: path=%r free_bytes=%d "
+            "required_bytes=%d decision=%s",
+            tablespace_path,
+            free_bytes,
+            required_bytes,
+            decision,
+        )
         return _HeadroomOutcome(
             skipped=False,
             free_bytes=free_bytes,
