@@ -18,14 +18,14 @@
 | (c) | Adaptive soak default | **P2** — 60s floor · 120s cap · 3 consecutive green probes (livez+readyz+version) · 15s probe cadence · fail-fast on red; opt-out = `ENSEMBLE_PROMOTE_SOAK_S=300`; cap 900 preserved | Cut observed 300s soak to 60–120s while keeping version-drift detection and the anti-flapping ceiling |
 | (d) | Total ceremony budget | **P2** — hard 900s wall-clock ceiling enforced at phase boundaries (preflight 45s / stop 240s / flip 30s / handback 90s / livez 180s / readyz 120s / version 30s / soak adaptive / commit 30s); breach → journal `halt` + exit 78 | Honor the user's "TOTAL wall-clock budget honored fail-closed" hard constraint without skipping any safety gate |
 | (e) | Transient / boot handling | **P2** — classify HTTP 503 + curl exit 7/22/28 as transient; 3 bounded retries inside probe budget (1s/2s/4s backoff); 60s post-restart boot-window grace (auto-extends past transient probes); extend busy-amnesty to livez+soak by reading the **EXISTING** `readiness.py:198/222 detail.inflight_turns` (NO new `/run/ensemble/inflight_turns` file, NO new daemon writer) with `inflight_turns ≤ 5` bound; probe uses `curl -sS -o tmp -w '%{http_code}'` (NEVER body-sniff after `-f`) | Handle the v0.20.0 boot-storm race (1.5s transient window between pool-ready and gate-fire) without weakening any fail-closed path; the existing readyz `detail.inflight_turns` is the source of truth (no race-prone file) |
-| (f) | Audit-after-soak sequencing | **P2** — split `MessageQueueRepository.clear_all` into CAPTURE_PHASE (sync, pre-pool) and DELETE_PHASE (background, post-readyz green + 1s OR 5s); preserve boot_epoch ordering + task-table-intactness assumption + idempotency + config gate | Move the env-poison purge off the boot critical path while keeping every ordering guarantee and the QUEUE_DISCARD_ON_STARTUP knob |
+| (f) | Audit-after-soak sequencing | **P3** — split `MessageQueueRepository.clear_all` into CAPTURE_PHASE (sync, pre-pool) and DELETE_PHASE (background, post-readyz green + 1s OR 5s); preserve boot_epoch ordering + task-table-intactness assumption + idempotency + config gate | Move the env-poison purge off the boot critical path while keeping every ordering guarantee and the QUEUE_DISCARD_ON_STARTUP knob (was stale: tagged **P2** — superseded; per leader ruling + plan-overview §2 + the actual implementation site, (f) ships WITHIN-mission as part of PR-3 / P3, not as a later cycle) |
 | (g) | Rollback target fix | **P1** — `promote.sh:438` writes `journal.previous = $OLD_CUR` (captured at :227 / :436) instead of letting the auto-rollback branch read the journal `previous` field at `:452-453`; add an immediacy assertion at commit; update `launcher.sh:1009-1019` comment + boot_sweep_commit_and_continue path | Land N-1 on halt→re-promote chains (Oct 9 arc) instead of N-2 |
 | (h) | Adjacent smalls | include: G6 printf `:592`, stale comment `promote.sh:21-23`; defer: read-only systemctl probes `:2868/:3066/:4075-4082`, cosmetic `:3662` | Polish that rides the next promote; classify what is NOT scope-creep |
 
 **Tier mapping** (for the phase-plan worker; within-mission ordering — all ship in the first promote on this branch, none are deferred to a later cycle):
 
 - **P1** = ships in the FIRST promote on this branch (correctness + smallest-perf unlock)
-- **P2** = ships in the FIRST promote on this branch together (the perf-correctness trio: c, d, e + the dependency f)
+- **P2** = ships in the FIRST promote on this branch together (the perf-correctness trio: c, d, e; (f) is tier P3 — see next row — but ships in the same first promote)
 - **P3** = rides the FIRST promote on this branch together with P1/P2 — including (f) audit-after-soak sequencing, which interacts with (c)'s stable gate but is otherwise independent. The build does NOT defer (f) to a later promote.
 
 (a)–(f) all ship in the v0.20.1 vehicle. (g) and (h) ride PR-1; (a)+(b) ride PR-2; (c)+(d)+(e)+(f) ride PR-3.
@@ -138,7 +138,7 @@ python3 scripts/upgrade/journal_splice.py <journal_path> <op> [op-args...]
 
 ### Interactions
 
-- **(b) Pending-op liveness** — the heartbeat writer hooks into the same lock_heartbeat call sites that the helper migrates from bash to python. Co-design: P1 helper exposes `set-field last_heartbeat <int>` via the `set-field` op; P1 writes that too at the same sites.
+- **(b) Pending-op liveness** — the heartbeat writer hooks into the same lock_heartbeat call sites that the helper migrates from bash to python. Co-design: P2 helper exposes `set-in-flight-field last_heartbeat <raw-json-literal>` via the NESTED op (C-2 — a top-level `set-field last_heartbeat` would be invisible to the sweep's `in_flight.last_heartbeat` accessor); P2 writes that at the same sites via `lib.sh:1186-1197` lock_heartbeat extension. Note: this row previously stated "P1 helper exposes set-field last_heartbeat" — that was a stale pre-fold row (C-2 forbids the top-level form AND the phase was P2, not P1). Superseded by D-P2.6.
 - **(d) Total ceremony budget** — the helper makes per-event journal cost trivial, which lets `(d)` be enforced without paying quadratic costs on every retry.
 - **(g) Rollback target fix** — `set-previous` op lands in helper, called from `promote.sh:438` (commit block); immediacy assertion reads `journal_path + get-current` which stays bash.
 
@@ -592,7 +592,7 @@ Concretely, per the digest:
 |---|---|---|---|---|
 | (g) rollback target | — | P1 first | alone | Surgical; smallest payload; unblocks prior incident class; independent of (a) |
 | (a) journal splice | — | P1 second | (b) | Foundation for everything else |
-| (b) pending-op liveness | (a) | P1 second | (a) | Helper exposes `set-field last_heartbeat`; heartbeat writer is a 1-line extension |
+| (b) pending-op liveness | (a) | P1 second | (a) | Helper exposes `set-in-flight-field last_heartbeat` (C-2 NESTED op — a top-level `set-field last_heartbeat` is invisible to the sweep's `in_flight.last_heartbeat` accessor); the heartbeat writer is a 1-line extension to `lock_heartbeat` that REPLACES the bash walk at `lib.sh:1196` (C-3) — was stale: "P1 helper exposes set-field last_heartbeat". Superseded by D-P2.6. |
 | (c) adaptive soak | (a) (only for splash logs) | P1 third | (d), (e) | Tightly coupled trio — ship as one PR |
 | (d) total ceremony budget | — | P1 third | (c) | Adaptive cap derives from budget remaining |
 | (e) transient / boot handling | — | P1 third | (c) | Gate reads retries+grace; soak gate has its own retry caller |

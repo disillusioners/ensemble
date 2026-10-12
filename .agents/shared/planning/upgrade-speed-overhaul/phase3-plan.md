@@ -64,7 +64,7 @@ Ship the **fast-by-default + reliable promote** behavior as one PR. Adaptive soa
 | **AC3a** | `ENSEMBLE_PROMOTE_SOAK_S=300` + all budget knobs explicit resolves to the EXACT current tuple (soak 300, budgets `:78-79`/`:94-97` unchanged, fail-closed flags identical). Asserted as config-resolution equality test. |
 | **AC3b** | Stub ceremony in conservative mode emits a journal event sequence **byte-equivalent (modulo timestamps/ids)** to a golden fixture recorded from current HEAD behavior. |
 | **AC3c** | Exit-78 matrix (§5 pins) green and UNCHANGED in conservative mode. |
-| **G2a** | N-consecutive-green early-exit math at 30 s cadence (N=2→≥60 s, N=4→≥120 s; N parameterized); any probe fail resets green counter; version drift mid-soak fails (`:4258` pin); hard cap 900 unchanged (`:156`). |
+| **G2a** | N-consecutive-green early-exit math at **15 s cadence** (N=2→≥45 s, N=4→≥105 s; N parameterized); any probe fail resets green counter; version drift mid-soak fails (`:4258` pin); hard cap 900 unchanged (`:156`). Was stale: "30 s cadence (N=2→≥60 s, N=4→≥120 s)" — superseded by leader Q6a final. |
 | **G2b** | Conservative = 300 s, no early exit (**P-D2**: if conservative keeps early-exit, test the longer N instead). |
 | **G2c** | Busy-amnesty asymmetry proven: readyz has busy-amnesty today, soak/livez none — extended: amnesty is bounded (boot-window sentinel + hard expiry + journal event + count cap); wedged-forever scenario fails livez/soak after grace. |
 | **G1a** | Every NEW retry/backoff site bounded within budget; backoff sequence asserted; halt event appended on exhaustion (NOT infinite hang). |
