@@ -205,16 +205,20 @@ NO sudoers entry may be installed — and step 8 must NOT run — while a
 pre-C1 wrapper is deployed at `/usr/local/bin/ensemble-promote` (review
 finding C1: a `*.sh` glob over the nea-writable dev checkout under NOPASSWD
 is a latent ensemble-user ACE = the exact incident damage class). The
-DEPLOYED copy must contain the C1 fix: exact enumerated allowlist
-(promote.sh / rollback.sh / restart.sh dev-lane + staged-payload promote.sh
-shapes only) + invocation-time writability refusal (group/other-writable, or
-owner-writable while owned by the invoking user → exit 76). Verify BOTH
-refusals against the deployed copy — both must be refused AND journaled:
+DEPLOYED copy must contain the C1 fix (round 3: NEW-1 + NEW-2): exact
+enumerated allowlist (promote.sh / rollback.sh / restart.sh dev-lane +
+staged-payload promote.sh shapes only) + invocation-time control refusal —
+group/other-writable, or OWNED by the invoking user UNCONDITIONALLY (NEW-1:
+the owner write bit is NOT consulted; chmod needs ownership not write
+permission, so a self-owned chmod-444 script is still invoker-controlled) —
+plus canonicalization (readlink -f) BEFORE the allowlist match (NEW-2: the
+case-pattern * crosses "/" and traversal strings must resolve away). Verify
+BOTH refusals against the deployed copy — both must be refused AND journaled:
 
 ```bash
 # (a) non-allowlisted script under the dev lane → exit 77 + journal line
 sudo /usr/local/bin/ensemble-promote /home/nea/ensemble-src/scripts/upgrade/lib.sh
-# (b) allowlisted but agent-writable → exit 76 + journal line
+# (b) allowlisted but agent-OWNED (any mode — incl. chmod 444) → exit 76 + journal line
 sudo /usr/local/bin/ensemble-promote /home/nea/ensemble-src/scripts/upgrade/promote.sh
 sudo journalctl -t ensemble-promote --since "-2 min" --no-pager   # both C1 refusals visible
 ```
@@ -240,11 +244,12 @@ journalctl -t ensemble-promote --no-pager           # invocation audit trail
 ```
 
 C1 note (2026-10-12): the hardened wrapper additionally refuses scripts
-writable by the invoking user — the dev-lane scripts are nea:nea 755, so an
-invocation as nea is refused BY DESIGN (exit 76; that is the protection
-working, not a failure). Run the drill from a non-nea operator account, or
-stage the script root-owned first (allowlist additions = explicit commission
-+ commit only).
+OWNED by the invoking user — unconditionally, regardless of mode (a
+chmod-444 self-owned script is still invoker-controlled; NEW-1) — so the
+dev-lane scripts (nea:nea) invoked as nea are refused BY DESIGN (exit 76;
+that is the protection working, not a failure). Run the drill from a
+non-nea operator account, or stage the script root-owned first (allowlist
+additions = explicit commission + commit only).
 
 ## R — ROLLBACK (any failed step)
 

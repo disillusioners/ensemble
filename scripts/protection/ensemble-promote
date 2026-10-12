@@ -17,11 +17,25 @@
 # damage class. Hardening applied in this file:
 #   1. EXACT enumerated allowlist (no glob on script filenames); anything
 #      not enumerated → refusal, exit 77, journaled.
-#   2. Invocation-time writability refusal (exit 76, journaled): an
-#      allowlisted script that is group- or other-writable, or writable by
-#      the INVOKING user (SUDO_USER — the account that called sudo), is
-#      refused. The dev checkout is agent-writable by design; it must never
-#      feed code to the privileged lane.
+#   2. Invocation-time control refusal (exit 76, journaled): refuse when the
+#      script is group- or other-writable, or when it is OWNED by the
+#      invoking user (SUDO_USER) — UNCONDITIONALLY (review round 3, NEW-1).
+#      The owner write BIT is deliberately NOT consulted: on POSIX, chmod
+#      needs ownership, not write permission, so a self-owned chmod-444
+#      script is still fully under the invoker's control (chmod back at
+#      will). Ownership IS control; the write bit is not a proxy for it.
+#   3. Path canonicalization BEFORE the allowlist match (review round 3,
+#      NEW-2): case-pattern * crosses "/", so a traversal string like
+#      releases/../../tmp/evil/promote.sh would lexically match the staged-
+#      payload pattern. readlink -f resolves symlinks, dots and dot-dots;
+#      only the CANONICAL path is ever matched against the allowlist.
+#
+# Round-3 residual notes (documented per review; no action):
+#   NEW-3 (ACCEPTED): a ms-scale TOCTOU window remains between the
+#     ownership/mode check and exec; operator-gated lane — accepted.
+#   NEW-5 (cosmetic): a stat(1) failure after the canonicalization guard
+#     exits 1 via set -e WITHOUT a journal line — fail-closed, silent.
+#   NEW-4 (POSIX ACLs grant write beyond mode bits): no action per review.
 #
 # *** STATUS: STAGED 2026-10-12 — NOT WIRED INTO ANY ACTIVE FLOW. ***
 # No sudoers entry exists and no unit references this file. It becomes live
@@ -48,19 +62,21 @@
 # gate before its step 8). A pre-C1 wrapper under NOPASSWD is a latent
 # ensemble-user ACE — never leave one deployed.
 #
-# ALLOWLIST (exact; additions require an explicit commission + commit):
+# ALLOWLIST (exact; canonical paths only — see NEW-2; additions require an
+# explicit commission + commit):
 #   /home/nea/ensemble-src/scripts/upgrade/promote.sh    (operator lane today)
 #   /home/nea/ensemble-src/scripts/upgrade/rollback.sh   (operator lane today)
 #   /home/nea/ensemble-src/scripts/upgrade/restart.sh    (operator lane today)
-#   /home/nea/agents-ensemble/releases/*/scripts/upgrade/promote.sh
+#   /home/nea/agents-ensemble/releases/<ver>/scripts/upgrade/promote.sh
 #        (future staged-into-payload shape; only the promote.sh filename is
 #         accepted under release payload dirs — never a wildcard filename)
 #   /home/nea/agents-ensemble/current/scripts/upgrade/promote.sh
-#        (future staged-into-payload shape via the current symlink)
+#        (canonicalizes to the active release's promote.sh — same shape)
 #
 # Usage: sudo /usr/local/bin/ensemble-promote <allowlisted-script> [args...]
-# Exit codes: 0 ok | 1 not-root | 64 usage | 66 script-not-found |
-#             76 script-writable (C1 refusal) | 77 not-allowlisted (C1 refusal)
+# Exit codes: 0 ok | 1 not-root | 64 usage | 66 not-found/uncanonicalizable |
+#             76 invoker-controlled script (C1/NEW-1 refusal) |
+#             77 not-allowlisted (C1 refusal)
 # ============================================================================
 set -euo pipefail
 
@@ -76,35 +92,47 @@ invoker="${SUDO_USER:-$(id -un)}"
 [ "$(id -u)" -eq 0 ] || { echo "$TAG: must be invoked via sudo (root)" >&2; exit 1; }
 [ "$#" -ge 1 ] || { echo "usage: sudo $0 <allowlisted-script> [args...]" >&2; exit 64; }
 
-script="$1"; shift
+raw="$1"; shift
 
-# ── C1 gate 1: exact enumerated allowlist ────────────────────────────────
+# ── NEW-2 gate: canonicalize BEFORE the allowlist match ─────────────────
+# The case-pattern * crosses "/"; only the canonical path (symlinks, dots
+# and dot-dots resolved) may be matched. A path that cannot be canonicalized
+# is refused here — fail-closed, journaled.
+script="$(readlink -f -- "$raw" 2>/dev/null || true)"
+if [ -z "$script" ]; then
+    echo "$TAG: REFUSED — cannot canonicalize script path: $raw" >&2
+    logger -t "$TAG" -p daemon.warning \
+        "NEW-2 refusal: uncanonicalizable path: ${raw} (invoker=${invoker})"
+    exit 66
+fi
+
+# ── C1 gate 1: exact enumerated allowlist (canonical paths only) ────────
 case "$script" in
     "$DEV_LANE/promote.sh"|"$DEV_LANE/rollback.sh"|"$DEV_LANE/restart.sh") ;;
     "$INSTALL_DIR"/releases/*/scripts/upgrade/promote.sh)               ;;
     "$INSTALL_DIR"/current/scripts/upgrade/promote.sh)                  ;;
     *)
-        echo "$TAG: REFUSED (C1) — script not on the enumerated allowlist: $script" >&2
+        echo "$TAG: REFUSED (C1) — script not on the enumerated allowlist: $script (from: $raw)" >&2
         logger -t "$TAG" -p daemon.warning \
-            "C1 refusal: non-allowlisted path: ${script} (invoker=${invoker})"
+            "C1 refusal: non-allowlisted path: ${script} (raw=${raw} invoker=${invoker})"
         exit 77
         ;;
 esac
 
-[ -f "$script" ] || { echo "$TAG: script not found: $script" >&2; exit 66; }
+[ -f "$script" ] || { echo "$TAG: script not found (canonical): $script" >&2; exit 66; }
 
-# ── C1 gate 2: invocation-time writability refusal ──────────────────────
-# Refuse if the script is group- or other-writable, or owner-writable while
-# owned by the invoking user. Rationale: the dev checkout is nea-writable by
-# design; an agent-compromised script must never execute as the service user.
+# ── C1 gate 2 / NEW-1: invoker-control refusal ──────────────────────────
+# Refuse when the script is group- or other-writable, or when it is owned by
+# the invoking user — UNCONDITIONALLY (NEW-1): the owner write bit is not
+# consulted, because chmod needs ownership, not write permission. A self-
+# owned chmod-444 script remains fully under the invoker's control.
 perm="$(stat -c '%A' "$script")"
 owner="$(stat -c '%U' "$script")"
-owner_w="${perm:2:1}"; group_w="${perm:5:1}"; other_w="${perm:8:1}"
-if [ "$group_w" = "w" ] || [ "$other_w" = "w" ] \
-   || { [ "$owner_w" = "w" ] && [ "$owner" = "$invoker" ]; }; then
-    echo "$TAG: REFUSED (C1) — script writable by invoking user/group/other: $script (owner=${owner} mode=${perm} invoker=${invoker})" >&2
+group_w="${perm:5:1}"; other_w="${perm:8:1}"
+if [ "$group_w" = "w" ] || [ "$other_w" = "w" ] || [ "$owner" = "$invoker" ]; then
+    echo "$TAG: REFUSED (C1/NEW-1) — script is invoker-controlled (owned by invoker, or group/other-writable): $script (owner=${owner} mode=${perm} invoker=${invoker})" >&2
     logger -t "$TAG" -p daemon.warning \
-        "C1 refusal: writable script: ${script} (owner=${owner} mode=${perm} invoker=${invoker})"
+        "C1/NEW-1 refusal: invoker-controlled script: ${script} (owner=${owner} mode=${perm} invoker=${invoker})"
     exit 76
 fi
 
