@@ -82,14 +82,36 @@ def _is_vacuum_full_enospc(exc: BaseException) -> bool:
     hits disk-full, the caller stamps
     ``error_json = {'code': 'vacuum_full_enospc', 'retriable': True}``
     so operators/dashboards can distinguish "free space and re-run"
-    from generic infra faults. The SQLSTATE rides the DBAPI ``orig``
-    exception (``.pgcode``); a string fallback covers exotic drivers
-    that omit the attribute.
+    from generic infra faults.
+
+    Discriminator contract (pgcode-first):
+      1. Walk the DBAPI ``orig`` chain; the FIRST candidate that
+         carries a non-empty ``.pgcode`` is authoritative.
+      2. If that pgcode equals ``"53100"`` → return ``True``.
+      3. If that pgcode is set to ANY other SQLSTATE → return ``False``
+         (a confirmed non-disk-full error MUST NOT be reclassified via
+         the substring fallback; this is the fix for the previous
+         over-broad behaviour that matched any message containing
+         ``"53100"``).
+      4. The raw-string ``"53100" in str(exc)`` fallback ONLY fires
+         when no candidate exposes a ``.pgcode`` attribute at all
+         (driver-wrapped errors that drop the DBAPI attribute, e.g.
+         exotic async drivers / pooled connection retry wrappers).
     """
     for candidate in (getattr(exc, "orig", None), exc):
+        if candidate is None:
+            continue
         pgcode = getattr(candidate, "pgcode", None)
-        if isinstance(pgcode, str) and pgcode == _PG_SQLSTATE_DISK_FULL:
-            return True
+        if pgcode is None:
+            # No SQLSTATE attribute → keep walking; string fallback
+            # is decided below only if NONE of the candidates expose
+            # a pgcode attribute at all.
+            continue
+        # pgcode present: authoritative. Match → True; any other value
+        # → False (must not fall through to substring matching).
+        return pgcode == _PG_SQLSTATE_DISK_FULL
+    # No candidate exposed a pgcode attribute → string-substring
+    # fallback for driver-wrapped errors that drop the DBAPI surface.
     return _PG_SQLSTATE_DISK_FULL in str(exc)
 
 
@@ -787,7 +809,19 @@ class MaintenanceApiService:
                 # code. NO auto-retry — the operator frees space and
                 # re-runs the dry-run → execute cycle. The failure is
                 # never swallowed: it lands on the audit row.
-                enospc = _is_vacuum_full_enospc(exc)
+                #
+                # Armed-gate (enospc-scope fix): the FULL-phase
+                # residual-ENOSPC contract is meaningful ONLY when the
+                # run actually exercised the FULL phase — i.e.
+                # ``vacuum_full=True``. On a plain destructive prune
+                # (``vacuum_full=False``) a disk-full error is a
+                # generic infra fault, NOT a FULL-phase residual:
+                # stamping ``vacuum_full_enospc`` next to
+                # ``env_flags_json.vacuum_full=False`` misled
+                # forensic + dashboard consumers. The error still
+                # lands on the audit row, just under the byte-identical
+                # generic ``execution_error`` shape.
+                enospc = vacuum_full and _is_vacuum_full_enospc(exc)
                 logger.error(
                     f"maintenance execute_run failed (run_id={run_id}): "
                     f"{type(exc).__name__}: {exc}"
