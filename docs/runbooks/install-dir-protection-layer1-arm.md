@@ -65,6 +65,80 @@ vscode-user-data) becomes ensemble-writable via the chown automatically.
 The demo unit (`ensemble-demo.service`, tree `/home/nea/agents-ensemble-demo`,
 User=nea) is a SEPARATE tree — unaffected, no action.
 
+### Code-review prerequisites (2026-10-12 — executor-user mechanism review, commit c527cdd32)
+
+Hard prerequisites for the flip window — findings from the code-review pass on
+the executor-user mechanism, NOT optional:
+
+**P1 — polkit authorization for the service user.** Both existing grants gate
+on `subject.user == "nea"` (`/etc/polkit-1/rules.d/46-ensemble-transient-scope.rules`
+and `50-ensemble-units.rules`), so post-flip the promote executor (running as
+`ensemble`) loses transient-unit mint + reset-failed authorization and hits
+the existing loud fail-closed R6 refusal (by design). Before the flip, add a
+rule mirroring the 2026-09-28 pattern for the new subject — e.g.
+`/etc/polkit-1/rules.d/47-ensemble-user.rules`:
+
+```js
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (subject.user !== "ensemble") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    var unit = action.lookup("unit");
+    if (unit == null) {            // detail-less class: transient mint, ResetFailed
+        return polkit.Result.YES;
+    }
+    if (unit.match(/^ensemble-[0-9A-Za-z@._-]+\.scope$/) !== null) {
+        return polkit.Result.YES;  // our own transient scopes only
+    }
+    return polkit.Result.NOT_HANDLED;
+});
+```
+
+(polkitd 124 auto-reloads rules.d via inotify — no restart needed. If the
+ensemble user must also manage regular `ensemble-*` service units
+non-interactively, extend `50-ensemble-units.rules` to accept
+`subject.user == "ensemble"` in the same shape.) Verification — both must
+succeed pre-flip:
+
+```bash
+sudo -u ensemble systemd-run --scope --unit=ensemble-arm-drill-scope /bin/true
+sudo -u ensemble systemctl reset-failed
+```
+
+**P2 — real HOME with exact basename `agents-ensemble`.** The executor
+uid-pinning arming condition probes the LEXICAL basename of the service
+user's HOME: it must be a real directory (not a symlink) whose basename is
+exactly `agents-ensemble`. A mismatch does NOT error — the uid-pinning
+silently does NOT arm. The flip sets `HOME=/home/nea/agents-ensemble` via the
+drop-in, which satisfies the shape only while the path stays a real dir.
+Verify before the flip:
+
+```bash
+test "$(basename /home/nea/agents-ensemble)" = "agents-ensemble" \
+  && test -d /home/nea/agents-ensemble && ! test -L /home/nea/agents-ensemble \
+  && echo "HOME shape OK (real dir, basename exact)" \
+  || echo "HOME SHAPE MISMATCH — uid-pinning would silently NOT arm"
+```
+
+**P3 — uv resolvable PATH-first for the ensemble user.** stage.sh's
+`$HOME/.local/bin/uv` fallback probes the SERVICE-USER home post-flip:
+`/home/nea/agents-ensemble/.local/bin/uv` — absent today. The host's only uv
+copy (`/home/nea/.local/bin/uv`, nea:nea) is not executable by `ensemble`
+(parent traversal denied — verified 2026-10-12: `uv NOT resolvable for
+ensemble`, PATH-first). Before the flip, either provision uv at a system path
+on the ensemble user's PATH (e.g. root-owned symlink `/usr/local/bin/uv`) or
+provision `/home/nea/agents-ensemble/.local/bin/uv` (ensemble-owned, mode
+755). Verification — at least ONE branch must succeed:
+
+```bash
+sudo -u ensemble env HOME=/home/nea/agents-ensemble bash -c 'command -v uv && uv --version' \
+  || sudo -u ensemble test -x /home/nea/agents-ensemble/.local/bin/uv \
+  || echo "UV GAP — stage.sh fallback would miss post-flip"
+```
+
 ## ORDER IS LOAD-BEARING: chown FIRST, unit flip SECOND.
 
 ### Step 1 — fresh insurance snapshot
