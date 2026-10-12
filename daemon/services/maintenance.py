@@ -663,9 +663,12 @@ class CheckpointCleanupJob:
     (B) Delete checkpoint data for expired terminal instances
     (C) Enforce max_instance_history cap on terminal instances
     (D) Prune per-thread checkpoints to ``config.checkpoint_max_per_thread``
-    (E) Reference-aware checkpoint_blobs prune (Phase 1 C3 — dry-run by
-        default, PostgreSQL-only, isolated so blob-bucket failures can
-        never affect A-D)
+    (E) Reference-aware checkpoint_blobs prune (Phase 1 C3 — destructive
+        by default since v0.20.0; the auto cycle and the manual
+        ``/execute`` endpoint invoke it without an opt-in; only the
+        manual preview ``/dry-run`` opts out via ``destructive=False``.
+        PostgreSQL-only, isolated so blob-bucket failures can never
+        affect A-D)
 
     Error Handling:
     - Each operation is wrapped in its own try/except.
