@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added — OAuth2 authentication: OIDC browser sessions + static bearer lane (default-OFF) (`feature/oauth2-auth`)
+---
+
+## [0.20.0] — 2026-10-12
+
+> **Consolidation note:** v0.18.4 and v0.18.5 shipped via tag annotations without CHANGELOG sections; the entries that accumulated under [Unreleased] during that window (spawn tooling consolidation, dry-run projection v3.2, the `/api/snapshots` read surface + deprecation, and the tool-call pairing full-history heal) technically shipped in those tags and are carried here with per-entry attribution. This section also documents the five lanes merged between `v0.18.5` and this tag (`a5f75df11`): OAuth2 authentication, blob-prune default-on, DB vacuum maintenance, the usage-limit watcher silent-loss fix, and the checkpoint-cleanup wizard navigation fix.
+
+### Added — OAuth2 authentication: OIDC browser sessions + static bearer lane (default-OFF) (`feature/oauth2-auth`, merge `256631d86`; audit branch `origin/feature/oauth2-auth` @ `c4ad992c9`)
 
 > **CHANGELOG (feature release):** *Optional OAuth2/OIDC authentication for the daemon — browser sessions via an external IdP (Auth Code + PKCE, server-side PG/SQLite-backed sessions) plus a static-bearer lane for machine clients (operator-minted CLI, hash-only storage, closed 14-scope taxonomy). DEFAULT-OFF: with `ENSEMBLE_AUTH_ENABLED` unset the build is behaviorally inert — the middleware and auth routes are conditionally registered, and the full P5 estate (auth-ON + auth-OFF fixtures) proves zero disruption to existing consumers. Enabling is a pure operator config+restart act documented in `docs/runbooks/oauth2-auth.md`. Consumer compat: 0 BLOCKED / 0 code change — module-lane endpoints (webhook ingest, MCP-KB mounts) sit beyond OAuth2 with their own per-module keys and are unchanged whether auth is OFF or ON (lane-isolated per D19/D20); ZERO OAuth2 config delta for existing deployments.*
 
@@ -20,7 +26,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **R3 follow-up ticket (filed-not-closed):** auth does NOT close the forge-source lane — a stolen `jobs:write` bearer can still forge `source=api` (`daemon/routers/jobs_crud.py:595` client-supplied source; hard-coded `"api"` at `daemon/routers/messages.py:691`). Tracked as project critical note `257488dc-c0b1-42d4-8581-f97cb4d55f72` (2026-10-11); fix = derive source from `AuthContext.subject` when auth is ON. Ships as a filed follow-up, deliberately not closed by this feature.
 - **Operator docs:** `docs/runbooks/oauth2-auth.md` — enable procedure, default-OFF verification walkthrough, token mint + rotation, CORS notes, failure-mode troubleshooting, module-lane key-management annex. Rollout checklist: `.agents/shared/planning/oauth2-auth/rollout-verification.md`.
 
-### Changed — Spawn tooling consolidation (`feature/unify-spawn-tools`, branch only — merge pending)
+### Changed — Checkpoint blob prune is destructive-by-default; LIMIT-batching hardening (`feature/blob-prune-default-on`, merge `a5f75df11`; feature branch `112560904`)
+
+> **CHANGELOG (behavior change):** *The dual-arm `blob_prune_dry_run` config/env gate is REMOVED — the pair-excess blob prune is now destructive-by-default (the gate had never been disabled in recorded history; the 23GB prod `checkpoint_blobs` bloat was exactly this gate blocking reclamation). Pair deletes run LIMIT-batched (batch=1000 per chunk under SERIALIZABLE + retry) so large drains cannot stall the checkpoint lane; `partial_completion` lands in `summary_json` when a cycle stops early; the `_is_due <= 0` schedule value is a never-due guard. Emergency stop = `systemctl stop` (PRIMARY) or `PERSISTENCE_CHECKPOINT_CLEANUP_INTERVAL=0` (secondary), documented truthfully in `docs/runbooks/maintenance-console.md`. FIRST destructive drain on the ~23GB backlog fires on the 24h cleanup cycle after this release goes live — watch the first run per runbook §7 (backlog accrues ~460MB/day until the first cycle drains it; ~23k chunks expected).*
+
+- **Destructive-by-default** (`3ce50e8db`): dual-arm gate deleted (`constants.py` / `checkpoint_prune.py`); `None` → destructive coercion (`5ca8fc146` council fix cycle 1).
+- **LIMIT-batching** (`3ce50e8db` + `fad239734` review C1 alias-binding fix): batched anti-join deletes under SERIALIZABLE + retry; never-due guard for schedule `<= 0` (`5ca8fc146`).
+- **Tests** (`4da33b359`, `b5cbe30cf`, `385872a28`): grep-proof destructive-default contract + LIMIT-batching tests; REAL-PG gate PASS-WITH-PREEXISTING (`a422402a0a`, drift_events RED base-attributed + quarantined).
+- **Docs** (`3c06a2adf`, `0a2e78a0a`, `db9a20964`): runbooks rewritten for destructive-default reality; truthful emergency-stop procedures; tidier cadence/ghost-prose pass.
+- **FE** (`aa1c78684`): dead `/status` config-block fields dropped from the maintenance console.
+
+### Added — Threshold-gated DB vacuum maintenance + checkpoint-trio autovacuum tuning (`feature/db-vacuum-maintenance`, merge `1bab756c6`)
+
+> **CHANGELOG (feature release):** *A threshold-gated `VACUUM (ANALYZE)` maintenance job (dead-tuple ratio + bloat heuristics) plus tightened `autovacuum_vacuum_scale_factor` reloptions on the LangGraph checkpoint trio (`checkpoints` / `checkpoint_writes` / `checkpoint_blobs` — the documented prod-scale bloat source, ~206MB/42s instance-history walk). The repair lane is vacuum-exempt (repair transactions must not be blocked). Tester REAL-PG gate: 226/0 PASS.*
+
+- **Vacuum job** (`4f4ed5f09`): threshold-gated VACUUM (ANALYZE) maintenance run; autocommit lanes + grammar hardening (`0b660308e` review r2).
+- **Checkpoint-trio reloptions** (`20261011_102502` migration, additive `ALTER TABLE ... SET` only): evidence-proportional — only the trio is tightened; other tables keep PG-stock 0.20.
+- **Repair-lane exemption**: repair-path transactions skip the maintenance vacuum.
+
+### Fixed — Usage-limit watcher silent-loss: retry-supersede double-silence (merge `29651c06e`, mission `e8a61da3`)
+
+> **CHANGELOG (fix release):** *Closes job `043d64a8` RCA — "usage-limit retry-supersede double-silence" (silent cancel × F6 watch re-key × transport-only last-event CAS) + Pattern (f) premature finalize + witness no-publish. Option A depths 1-4 + E1/E2 per the user-picked options-matrix: stored watches quarantine/re-arm on retry-supersede, the E1 mission-live finalize gate, redirect-gate verification, and the `stored_watches` table (`20261011_000001` migration) as the durable watch registry. Tester gate ALL GREEN 7/7 stale-test closures; reviewer APPROVE-WITH-NOTES 0C/0W.*
+
+- **Stored-watch registry** (`20261011_000001`): durable `stored_watches` table (status/retry/original-work keys + unique watcher constraint) replacing transport-only watch state.
+- **Retry-supersede quarantine/re-arm**: a usage-limit retry that supersedes a watch no longer double-silences it — the stored row is quarantined and re-armed on the retry's own watcher.
+- **E1 mission-live finalize gate**: premature finalize (Pattern f) closed at the mission-terminal arm.
+- **Fixture hygiene** (`1797cc357`, `1910c2dbe`, `185f4461b`, `d737cfb79`, `e3fea4556`, `21cab581c`, `208e49122`): de-time-bombed vfy fixtures, E4 side-effect tokens + Pattern-F guard fixtures synced to the shipped contract, harvested artifacts from the dead-mission /tmp trees, tidier rounds.
+
+### Fixed — Checkpoint-cleanup wizard unintended stepper navigation (`feature/fix-step-page-unintended-nav`, merge `72b062000`; audit branch `bea2db5d3`)
+
+> **CHANGELOG (fix release):** *The checkpoint-cleanup wizard no longer advances/reverses steps on unintended triggers — original symptom CLOSED with A/B base-RED proof; 3 fix rounds (C1+C2 stale-read fix, CDK `editable="false"` setter-ratchet drop, W-dispositions). Playwright 20/20; reviewer APPROVED 0-critical.*
+
+- **Rounds** (`bea2db5d3`, `6205578da`, `c8b6f21f8`... family `72b062000`): unintended stepper navigation eliminated; stale-read C1+C2; `editable="false"` ratchet defect (CDK setter) dropped.
+
+### Changed — Spawn tooling consolidation (`feature/unify-spawn-tools`, merge `7e97e811d` — shipped in the v0.18.5 tag-annotation release; entry carried here from [Unreleased])
 
 > **CHANGELOG (feature release):** *`spawn_hot_instance` is removed; `spawn_instance` becomes the single spawn tool and gains optional params (`task`, `auto_dispatch`, `snapshot_id`, `tags`, `verify`, `allow_cross_project`) for one-step spawn+dispatch. Snapshot warm-start is gated per target agent by `meta.json` `snapshot_enabled: true` (enabled for tester + developer[v2]). The `spawn_hot_*` metric/log identifier family is renamed to a `spawn_instance_*` equivalent.*
 
@@ -29,7 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Metrics / log identifier rename** — exactly two renames: JSON log payload `event: spawn_hot_auto_dispatch → spawn_instance_auto_dispatch`, and log prefix `[SnapshotAutoDispatch] → [SpawnAutoDispatch]`. DB counter keys (`spawn:snapshot:<id>`) and the `[SnapshotSpawnWarm]` log line are UNCHANGED. Same underlying semantics, new surface name. Dashboards and grep recipes that target the old names need to migrate.
 - **Prompt/UI copy** — the 6 agent-prompt anchors (leader `rule.md` / `workflow.md`, ari `rule.md`, tester `workflow.md`, developer[v2] `rule.md` / `workflow.md`) and the settings page copy that named `spawn_hot_instance` are rewritten to describe the merged `spawn_instance` tool (snapshot warm-start gated per target agent by `meta.json` `snapshot_enabled: true`). Historical `spawn_hot_instance` mentions in older changelog entries and dated `.agents/` records are retained (append-only history).
 
-### Fixed — Dry-run projection v3.2 (`feature/dry-run-projection-v3.2`, branch only — merge pending)
+### Fixed — Dry-run projection v3.2 (`feature/dry-run-projection-v3.2`, merge `6011721d9` — shipped in the v0.18.5 tag-annotation release; entry carried here from [Unreleased])
 
 > **CHANGELOG (fix release):** *Maintenance console dry-run now reports the two-pass reality: `bytes_reclaimable_now` (what this run frees — unchanged semantics for `would_free_bytes` and the `expected_bytes` confirm echo), `bytes_reclaimable_after_row_prune` (labeled estimate of what a follow-up run frees), and their sum `bytes_reclaimable_total`. On a never-pruned database the first run deletes excess rows and frees 0 blob bytes **by design** (retention composition E→D); run cleanup a second time to reclaim the orphaned blob bytes — the console now says so explicitly and offers a "run cleanup again" affordance. The confirm-echo `expected_bytes` meaning is UNCHANGED — scripts and operators see no behavioral change. Auto-cycle behavior unchanged. Activation: rebuild + restart; no DB migration (additive JSON keys only).*
 
@@ -37,7 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **manual_execute run-summary projection echo block** — two-field additive `{"projection": {"bytes_reclaimable_now_at_dry_run": N, "bytes_reclaimable_after_row_prune_at_dry_run": N}}` sourced from the snapshotted `dry_run_summary_json` (NOT recomputed at execute). Auto rows: projection block ABSENT (R-5).
 - **Operator runbook** (`docs/runbooks/maintenance-console.md`): added "Two-pass reality on a never-pruned database" section explaining the two-run journey for first-time manual cleanups.
 
-### Added — `/api/snapshots` read surface (`feature/snapshot-uiux`)
+### Added — `/api/snapshots` read surface (`feature/snapshot-uiux`, merge `c55f2b0a0` — shipped in the v0.18.5 tag-annotation release; entry carried here from [Unreleased])
 
 New canonical HTTP surface for snapshot reads (relocated from `/api/settings/*` per the v0.16 R15/R16 follow-up). Three endpoints ship in this change:
 
@@ -54,7 +93,7 @@ FE additions:
 
 - **`GET /api/settings/snapshot-usage-metrics`** — kept as a 1-line re-export for one release window. The legacy handler emits three deprecation response headers on every response: `Deprecation: true`, `Sunset: Sun, 31 Dec 2026 23:59:59 GMT`, and `Link: </api/snapshots/metrics>; rel="successor-version"` (RFC 8594 Deprecation + RFC 8288 Link; hard Sunset date per the deprecation cycle). Removal planned for the next minor release (follow-up ticket to be filed at end of deprecation cycle).
 
-### Fixed — Tool-call pairing full-history healing (`fix/tool-pairing-full-history-heal`, branch only — merge pending)
+### Fixed — Tool-call pairing full-history healing (`fix/tool-pairing-full-history-heal`, merge `7dfb3c699` + round-2 `dca6beaf0` — shipped in the v0.18.4/v0.18.5 tag-annotation releases; entry carried here from [Unreleased])
 
 > **CHANGELOG (fix release):** *Closes the 2013-bricking bug class from incident 03d7657f. A full-history adjacency / immediacy check catches mid-history pairing violations the pre-existing O(1) tail-only helpers could not see (the forensic defect: an ``AIMessage(tool_calls)`` committed mid-history whose ``ToolMessage`` never arrived — interrupted-mid-tool shape, 1c/0r). Strict gateways enforce **IMMEDIACY** (every ``AIMessage(tc)`` answered by the IMMEDIATELY-adjacent following ``ToolMessage`` block, no intervening non-ToolMessage between call and answer), not count-pairing. The validator synthesizes a placeholder ``ToolMessage`` immediately after the issuing ``AIMessage`` (id format ``partner-synth-{tc_id}``) and removes any ``ToolMessage`` whose call-site is gone after the adjacency fix-up. The reactive recovery path detects pairing-invalid signatures in the gateway error (``tool call result does not follow tool call`` and three sibling shapes) and runs the same heal ONCE before retrying the LLM invoke. Hot-path cost is bounded by an O(n) probe that runs on every dispatch with O(n) auxiliary structure (a per-probe ``last_non_tool_tc_ids`` set and a ``_build_next_non_tool_after`` array — both O(n) memory, allocated per probe call); the full O(n) heal runs when the probe flags a real violation. The fix lands on this branch and rides the next release vehicle after the already-staged v0.18.3. Activation: rebuild + restart; no DB migration.*
 
