@@ -385,7 +385,7 @@ LPID=$!
 deadline=$(( $(date +%s) + 4 ))
 HELD=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    if ! flock -n 9 true 9>"$INSTALL_DIR/releases/state.lock" 2>/dev/null; then
+    if ! flock -n "$INSTALL_DIR/releases/state.lock" true 2>/dev/null; then
         HELD=1; break
     fi
     sleep 0.1
@@ -654,7 +654,8 @@ fi
 
 # Append a latency summary into the planning directory for the
 # post-splice capture.
-LATENCY_OUT="$REPO_ROOT/tests/measurements/splice-post-change-$(git -C "$REPO_ROOT" rev-parse --short HEAD)-$(date -u +%Y%m%dT%H%M%SZ).txt"
+LATENCY_OUT="${TMPDIR:-/tmp}/upgrade-overhaul-measurements/splice-post-change-$(git -C "$REPO_ROOT" rev-parse --short HEAD)-$(date -u +%Y%m%dT%H%M%SZ).txt"
+mkdir -p "$(dirname "$LATENCY_OUT")"
 {
     echo "# Splice post-change capture — generated $(date -u)"
     echo "# branch: $(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"

@@ -28,7 +28,7 @@ fi
 FIXTURE_DIR="$(mktemp -d -t upgbaseline-XXXXXX)"
 trap 'rm -rf "$FIXTURE_DIR"' EXIT
 
-OUT_DIR="$REPO_ROOT/tests/measurements"
+OUT_DIR="${TMPDIR:-/tmp}/upgrade-overhaul-measurements"
 mkdir -p "$OUT_DIR"
 
 . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1 || {

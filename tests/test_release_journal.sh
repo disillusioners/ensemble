@@ -239,9 +239,21 @@ for s in lib stage promote rollback status; do
 done
 
 # ─── 2. live-guard matrix (T1) ──────────────────────────────────────────────
+# SELF-SCRUB: cell env must NOT inherit any guard-flipping vars from the
+# runner. require_live_guard consults ENSEMBLE_UPGRADE_LIVE only, but
+# scrub the whole R1 list defensively (others are no-ops for these scripts).
+# POSTGRES_* family is NOT consulted by the guard, so it is omitted.
 section "live-guard matrix"
+_LIVE_GUARD_SCRUB=( \
+    -u ENSEMBLE_UPGRADE_LIVE \
+    -u ENSEMBLE_SELF_ENV \
+    -u ENSEMBLE_RESTART_UNIT \
+    -u ENSEMBLE_UPGRADE_SCRIPTS_DIR \
+    -u ENSEMBLE_JOB_SYSTEM_JOB_RETRY_SCHEDULER_ENABLED \
+)
 for s in stage promote rollback status; do
-    out="$(HOME="$FAKE_HOME" TARGET=live VERSION=x bash "$FAKE_REPO/scripts/upgrade/$s.sh" live 2>&1)"
+    out="$(env "${_LIVE_GUARD_SCRUB[@]}" \
+        HOME="$FAKE_HOME" TARGET=live VERSION=x bash "$FAKE_REPO/scripts/upgrade/$s.sh" live 2>&1)"
     rc=$?
     assert_eq "$s.sh live w/o guard exits 78" "78" "$rc"
     assert_contains "$s.sh live refusal names ENSEMBLE_UPGRADE_LIVE" "ENSEMBLE_UPGRADE_LIVE=1" "$out"
