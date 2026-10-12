@@ -614,13 +614,15 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     // unticked, the message is the EXISTING destructive copy
     // byte-unchanged (the existing buildConfirmMessage() return
     // value, no vacuum-aware extensions). The full vacuum-aware
-    // sentence is inlined in the conditional block so the
-    // substring pins (Pin 2 a/b/c/d) read the same construction
-    // site as a single source of truth.
+    // sentence lives in buildVacuumFullCopyAddendum() — placed
+    // BELOW this method so the Pin 2(b) gate anchor
+    // (`if (this.vacuumFullEnabled()) {` … "VACUUM FULL rewrites")
+    // still matches in source order; the method body carries the
+    // single copy instance (Pin 2 a/c/d grep it verbatim).
     const baseMessage = this.buildConfirmMessage(dryRun);
     let message: string;
     if (this.vacuumFullEnabled()) {
-      message = `${baseMessage} VACUUM FULL rewrites the affected tables to reclaim disk space. The affected tables (checkpoints, checkpoint_writes, checkpoint_blobs) will be locked briefly while the rewrite runs. Duration depends on database size; a 60-minute hard ceiling applies. While VACUUM FULL runs, in-flight agent turns will pause at the next node boundary for the duration (up to 60 minutes); this is expected behavior, not an outage. If you see \`vacuum job failed/skipped\` log lines during a FULL, that is the 24h plain-VACUUM job waiting out the FULL's lock and skipping — it is benign and will retry on the next cycle.`;
+      message = `${baseMessage} ${this.buildVacuumFullCopyAddendum()}`;
     } else {
       message = baseMessage;
     }
@@ -659,6 +661,28 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
       }
       this.performExecute(dryRun);
     });
+  }
+
+  /**
+   * Cluster 3.6 — the vacuum-aware confirm-dialog copy addendum
+   * (extracted from onExecute's ticked branch, tidier pass T7; the
+   * dialog message is `${baseMessage} ${buildVacuumFullCopyAddendum()}`
+   * — byte-identical to the former inline literal).
+   *
+   * COPY IS PINNED — DO NOT REWORD:
+   *   - Pin 2(a): "VACUUM FULL rewrites the affected tables" +
+   *     "60-minute hard ceiling" + the 3 table names;
+   *   - Pin 2(b): requires a "VACUUM FULL rewrites" occurrence
+   *     AFTER the onExecute if-gate in SOURCE ORDER (this method
+   *     sits below onExecute to keep that anchor true);
+   *   - Pin 2(c): "in-flight agent turns will pause at the next
+   *     node boundary"; Pin 2(d): "24h plain-VACUUM job waiting
+   *     out the FULL's lock";
+   *   - e2e w6 asserts the same canonical copy on the rendered
+   *     dialog (§D-7.6 canonical + R-A + R-C sentences).
+   */
+  private buildVacuumFullCopyAddendum(): string {
+    return `VACUUM FULL rewrites the affected tables to reclaim disk space. The affected tables (checkpoints, checkpoint_writes, checkpoint_blobs) will be locked briefly while the rewrite runs. Duration depends on database size; a 60-minute hard ceiling applies. While VACUUM FULL runs, in-flight agent turns will pause at the next node boundary for the duration (up to 60 minutes); this is expected behavior, not an outage. If you see \`vacuum job failed/skipped\` log lines during a FULL, that is the 24h plain-VACUUM job waiting out the FULL's lock and skipping — it is benign and will retry on the next cycle.`;
   }
 
   private performExecute(dryRun: CheckpointCleanupDryRun): void {

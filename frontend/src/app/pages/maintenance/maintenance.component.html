@@ -10,7 +10,7 @@
         <mat-tab
           [label]="section.label"
           [disabled]="section.disabled ?? false"
-          [matTooltip]="section.disabled ? 'Coming soon' : ''"
+          [matTooltip]="section.disabled ? 'Coming soon' : null"
         >
           <ng-container *ngComponentOutlet="section.component"></ng-container>
         </mat-tab>
