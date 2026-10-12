@@ -1,5 +1,21 @@
 # Test Packs
 
+## Commission TEST PHASE — INSTALL-DIR PROTECTION (Layers 1+3+4) @ f0c394388→ffb4acd6a (2026-10-12) — 🟢 VERDICT: PASS (zero branch-caused failures; all 72F+21E base-proven at c8a3fbf6a or ledger-matched pre-existing) — full evidence: RESULTS/2026-10-12-install-dir-protection-test-phase.md
+
+Worktree `/home/nea/ensemble-src-wt-install-dir-protection` (branch feature/install-dir-protection, 6 commits from base c8a3fbf6a; review round 3 `ffb4acd6a` landed mid-phase — layer-1 packs + tools complement re-verified at tip). 9 workers, 0 re-dispatches. Host armor verified read-only: L3 restore drill 3.02s/.env byte-identical, L4 treecheck CRIT drills green, L1 wrapper inert with refusal gates 77/76 journaled (0 executable-line drift vs deployed).
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `install_root_layer1_pytest` (ad-hoc) | `.venv/bin/pytest tests/unit/tools/test_upgrade_install_root_layer1.py -q` | L1 install-root resolution, 43 tests | <10s | 2026-10-12 @ f0c394388 AND ffb4acd6a | ✅ PASS 43/43 (both HEADs) |
+| `install_root_layer1_bash` (ad-hoc) | `bash tests/test_install_root_layer1.sh` | L1 HOME-shape mirrors + M1 edge shapes, 36 assertions | <5s | 2026-10-12 @ f0c394388 AND ffb4acd6a | ✅ PASS 36/36 (both HEADs) |
+| `upgrade_surface_regression` (ad-hoc) | pytest 8-file subset: tools/test_upgrade_{tools,journal,registration,executor_systemd_service,install_root_layer1} + promote_cgroup + test_install_audit + test_maintenancer_kb_coverage | branch-touched surface, 435 collected | ~30s | 2026-10-12 @ f0c394388 | ✅ PASS-with-preexisting 433P/1F-known/1S (24.3s) |
+| `unit_sweep_minus_tools` (ad-hoc) | pytest tests/unit --ignore=tools, 19 chunks ≤300s each | full unit complement, 12,827 run | ~21 min | 2026-10-12 @ f0c394388 | ✅ PASS-with-preexisting 12687P/64F/21E/55S (all reds base-proven) |
+| `tools_complement` (ad-hoc) | pytest remaining 56 tools files, 3 chunks | tools coverage closure, 3,137 collected | ~6 min | 2026-10-12 @ ffb4acd6a | ✅ PASS-with-preexisting 3124P/8F/5S (ledger-matched) |
+| `base_prove_legs` (ad-hoc, git) | temp detached worktrees @ c8a3fbf6a | maintenancer pin + 17-file failure families | ~8 min | 2026-10-12 | ✅ FAILS-AT-BASE both (pre-existing; 82≡82) |
+| `host_l3l4_armor` (verification) | read-only: timers, snapshots, restore drill into /tmp, treecheck drills | L3+L4 host armor | ~10 min | 2026-10-12 | ✅ ALL PASS (restore 3.02s, .env byte-identical, CRIT re-fire confirmed) |
+| `host_l1_inert` (verification) | read-only: user/wrapper/sudoers/units + refusal drills 77/76 | L1 staging inertness, 14 checks | ~8 min | 2026-10-12 | ✅ ALL PASS (0 executable-line drift; zero mutation proven) |
+
+
 ## Commission CLOSED — MAINTENANCE-TABS-VACUUM GATE @ fe5efcd58→c35d54a46 (2026-10-12) — 🟢 VERDICT: PASS-WITH-FLAGS (all commissioned checks green; flags = baseline-refresh adjudication + test-debt) — full evidence: RESULTS/2026-10-12-maintenance-tabs-vacuum-gate.md
 
 Worktree `/home/nea/ensemble-src-wt-maint-tabs-vacuum` (branch feature/maintenance-tabs-vacuum, 19 commits from base c8a3fbf6a). 6 workers, 0 re-dispatches; adversarial probes 4/4 on real PG :15433 + daemon :8101 (scheduled-lane poison ignored, FULL strictly post-prune, dry-run structurally ignores flag); w2 baseline refreshed under chrome-ripple classification (old ec268fc2… → new 455e0168…, commit c35d54a46, single PNG); neighborhood 9F = documented pre-existing families, zero new.
