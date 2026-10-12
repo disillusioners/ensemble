@@ -81,6 +81,19 @@ $strip-label-size: 0.6875rem;
   margin: 0;
 }
 
+// Cluster 3.2 — helper paragraph under the VACUUM FULL checkbox.
+// Parallel to .ck-warning-text (muted, smaller, no extra margin
+// to keep the 760px wizard sub-budget; the helper text is one
+// line + visual rule, the existing ck-warning-text already
+// pulls the operator's eye to the destructive action).
+.ck-vacuum-full-helper {
+  color: $text-secondary;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  margin: 0;
+  max-width: 64ch;
+}
+
 .ck-result,
 .ck-result-panel {
   dl {

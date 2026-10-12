@@ -308,6 +308,31 @@
               Destructive -- permanently deletes unreferenced blobs and excess
               checkpoint rows.
             </p>
+            <!-- Cluster 3.2 — VACUUM FULL opt-in checkbox + helper.
+                 INSIDE Step 3's form area (above the Cleanup now
+                 button, matching the existing ck-warning-text
+                 placement pattern); NOT a new mat-step; the
+                 wiznav envelope is preserved. Default state is
+                 ticked; the signal is reset on every fresh
+                 dry-run (Cluster 3.3). -->
+            <mat-checkbox
+              data-testid="ck-vacuum-full-checkbox"
+              [checked]="vacuumFullEnabled()"
+              (change)="vacuumFullEnabled.set($event.checked)"
+            >
+              VACUUM FULL (reclaim disk space)
+            </mat-checkbox>
+            <p
+              class="ck-vacuum-full-helper"
+              id="ck-vacuum-full-helper"
+              data-testid="ck-vacuum-full-helper"
+            >
+              VACUUM FULL rewrites the affected tables to reclaim
+              disk space. The affected tables (checkpoints,
+              checkpoint_writes, checkpoint_blobs) will be locked
+              briefly while the rewrite runs. Duration depends on
+              database size; a 60-minute hard ceiling applies.
+            </p>
             <!-- ck-execute-btn: gated on dry-run AND !executing AND
                  !isRunInFlight. Reuses the existing ConfirmDialogComponent
                  (destructive: true, panelClass: 'dark-modal-panel'); only
@@ -689,6 +714,31 @@
             <p class="ck-warning-text" id="ck-warning-text" data-testid="ck-warning-text">
               Destructive -- permanently deletes unreferenced blobs and excess
               checkpoint rows.
+            </p>
+            <!-- Cluster 3.2 — VACUUM FULL opt-in checkbox + helper.
+                 INSIDE Step 3's form area (above the Cleanup now
+                 button, matching the existing ck-warning-text
+                 placement pattern); NOT a new mat-step; the
+                 wiznav envelope is preserved. Default state is
+                 ticked; the signal is reset on every fresh
+                 dry-run (Cluster 3.3). -->
+            <mat-checkbox
+              data-testid="ck-vacuum-full-checkbox"
+              [checked]="vacuumFullEnabled()"
+              (change)="vacuumFullEnabled.set($event.checked)"
+            >
+              VACUUM FULL (reclaim disk space)
+            </mat-checkbox>
+            <p
+              class="ck-vacuum-full-helper"
+              id="ck-vacuum-full-helper"
+              data-testid="ck-vacuum-full-helper"
+            >
+              VACUUM FULL rewrites the affected tables to reclaim
+              disk space. The affected tables (checkpoints,
+              checkpoint_writes, checkpoint_blobs) will be locked
+              briefly while the rewrite runs. Duration depends on
+              database size; a 60-minute hard ceiling applies.
             </p>
             <!-- ck-execute-btn: gated on dry-run AND !executing AND
                  !isRunInFlight. Reuses the existing ConfirmDialogComponent

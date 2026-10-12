@@ -913,11 +913,19 @@ export interface CheckpointCleanupDryRun {
  * AM-17 DROPPED — NO `idempotency_key` field. The 409-adoption
  * contract replaces it: on 409 from execute, FE adopts
  * `details.run_id` and resumes polling.
+ *
+ * v1.1 — Additive optional `vacuum_full?: boolean` for interactive
+ * escalation to VACUUM FULL after the destructive prune. When
+ * `undefined` (default), the server treats it as `None` = no
+ * escalation. When `true`, server runs VACUUM FULL on the three
+ * checkpoint tables. When `false`, server explicitly skips
+ * (symmetric with `true`). The 3 existing fields are unchanged.
  */
 export interface CheckpointCleanupExecuteRequest {
   dry_run_run_id: string;
   expected_bytes: number;
   confirm: true;
+  vacuum_full?: boolean;
 }
 
 /**

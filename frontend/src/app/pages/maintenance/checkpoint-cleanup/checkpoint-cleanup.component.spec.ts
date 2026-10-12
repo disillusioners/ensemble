@@ -453,6 +453,12 @@ class TestableCheckpointCleanupComponent {
   onDryRun(): void {
     if (!this.canDryRun() || this.dryRunning()) return;
     this.dryRunning.set(true);
+    // Cluster 3.3 — "fresh dry-run clears state" pattern. Mirror
+    // production verbatim: reset the vacuumFullEnabled signal to
+    // the always-ticked default `true` so the operator's untick
+    // does not persist across dry-runs (§D-7.3 — no per-user
+    // persistence; every fresh dry-run reverts to default).
+    this.vacuumFullEnabled.set(true);
     // Item 14 — optimistic lastError clear (mirror production).
     this.service.clearLastError();
     this.service.dryRun().subscribe({
@@ -519,10 +525,16 @@ class TestableCheckpointCleanupComponent {
     // v3.2 B1 — anchor the banner's hide-on-convergence rule.
     // Mirrors production's performExecute verbatim.
     this.executedDryRunId.set(dryRun.run_id);
+    // Cluster 3.3 — v1.1 additive `vacuum_full?: boolean`
+    // (mirror production: the signal's value threads into the
+    // payload; absent/`undefined` would be a server `None` per
+    // §D-2 but we send the signal's boolean explicitly for
+    // symmetry — `true` = tick, `false` = untick).
     const payload: CheckpointCleanupExecuteRequest = {
       dry_run_run_id: dryRun.run_id,
       expected_bytes: dryRun.would_free_bytes,
       confirm: true,
+      vacuum_full: this.vacuumFullEnabled(),
     };
     this.service.execute(payload).subscribe({
       next: (body: CheckpointCleanupExecute) => {
@@ -1016,7 +1028,15 @@ describe('CheckpointCleanupComponent', () => {
       expect(service.executeCalls).toHaveLength(0);
     });
 
-    it('confirm (true) POSTs execute with EXACTLY {dry_run_run_id, expected_bytes, confirm:true} — no idempotency_key', () => {
+    it('confirm (true) POSTs execute with EXACTLY {dry_run_run_id, expected_bytes, confirm, vacuum_full} — no idempotency_key', () => {
+      // AM-17 negative pin's unit-test form. The 3-field shape
+      // was the pre-cluster-3 payload; cluster 3.3 adds the
+      // additive `vacuum_full?: boolean` (default `true` per
+      // §D-7.3 — the mirror's signal defaults to true). The
+      // AM-17 contract (no `idempotency_key`) is preserved; the
+      // shape moves from 3 → 4 fields. The keys assertion is
+      // updated to the new 4-key set; `idempotency_key` is still
+      // absent (the load-bearing AM-17 negative).
       mockDialog.nextResult = true;
       component.onExecute();
       expect(service.executeCalls).toHaveLength(1);
@@ -1025,9 +1045,13 @@ describe('CheckpointCleanupComponent', () => {
         dry_run_run_id: DRY_RUN.run_id,
         expected_bytes: DRY_RUN.would_free_bytes,
         confirm: true,
+        vacuum_full: true,
       });
       const keys = Object.keys(req).sort();
-      expect(keys).toEqual(['confirm', 'dry_run_run_id', 'expected_bytes']);
+      expect(keys).toEqual(['confirm', 'dry_run_run_id', 'expected_bytes', 'vacuum_full']);
+      // AM-17 negative — the load-bearing assertion: no
+      // idempotency_key field in the payload.
+      expect(req).not.toHaveProperty('idempotency_key');
     });
 
     it('confirm dialog echo: message contains formatted bytes AND checkpoint-row count (AM-16)', () => {
