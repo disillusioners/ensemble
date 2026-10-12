@@ -912,7 +912,15 @@ except Exception:
         # contract is preserved.
         _epoch_val="$_live_now"
     fi
-    sed -i '' "s/LASTHB/${_epoch_val}/" "$1/releases/state.json"
+    # R1 fixture repair: `sed -i ''` is BSD-only syntax — GNU sed reads
+    # '' as the SCRIPT (empty) and the substitution as a filename, fails
+    # rc 2, and leaves the literal LASTHB sentinel in the seed — an
+    # INVALID JSON token. The bash textual writers then succeed on the
+    # torn seed while the python splice correctly REFUSES it (exit 78,
+    # torn-journal defense) — silently dropping every history event the
+    # 8-series cells assert. Portable temp+mv.
+    sed "s/LASTHB/${_epoch_val}/" "$1/releases/state.json" > "$1/releases/state.json.tmp" \
+        && mv "$1/releases/state.json.tmp" "$1/releases/state.json"
     ln -sfn releases/vX "$1/current"   # the orphaned flip (vX) — adopt may repoint
 }
 adopt_run() {  # <dir>
@@ -920,8 +928,26 @@ adopt_run() {  # <dir>
 }
 aj() { cat "$1/releases/state.json" 2>/dev/null; }
 afield() { ( export INSTALL_DIR="$1"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; eval "$2" ) 2>/dev/null; }
-STALE700="$(date -ju -v-700S +%Y-%m-%dT%H:%M:%SZ)"
-FRESH30="$(date -ju -v-30S +%Y-%m-%dT%H:%M:%SZ)"
+# R1 fixture repair (council round-2): the BSD-only `date -ju -v` form
+# fails on GNU coreutils (invalid -j), leaving STALE700/FRESH30 EMPTY —
+# the seed then carries started_at:"" and the adopt refuses
+# "unparseable started_at" before any recovery can run. Portable
+# stamps via the same uname dispatch precedent as lib.sh's cooldown arm
+# (journal_count_rollback) with a python3 fallback (python3 is a hard
+# dependency of this suite).
+_stamped_iso() {  # _stamped_iso <-offset-seconds>
+    case "$(uname -s)" in
+        Darwin|*BSD*|*bsd*)
+            date -ju -v+${1}S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ;;
+        Linux|GNU*|*GNU*)
+            date -u -d "${1} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ;;
+        *) date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ;;
+    esac
+}
+STALE700="$(_stamped_iso -700)"
+[ -n "$STALE700" ] || STALE700="$(python3 -c 'import datetime; print((datetime.datetime.utcnow()-datetime.timedelta(seconds=700)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
+FRESH30="$(_stamped_iso -30)"
+[ -n "$FRESH30" ] || FRESH30="$(python3 -c 'import datetime; print((datetime.datetime.utcnow()-datetime.timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
 
 # 8a. stale flipped → FULL sweep recovery: repoint current→previous,
 #     journal current updated, sweep_rollback event (NOT bare 'sweep' —
@@ -1041,7 +1067,8 @@ assert_eq "8j restart-kind symlink unchanged (no repoint)" "$L_T10_BEFORE" "$(re
 #     adopt-rollback onto a release the journal itself marks bad.
 adopt_fixture "$AD_OPT_DIR/t11" "$STALE700" true vP 0 999999 true
 # strand the fixture journal: previous vP is in quarantined[]
-sed -i '' 's/"quarantined":\[\]/"quarantined":["vP"]/' "$AD_OPT_DIR/t11/releases/state.json"
+sed 's/"quarantined":\[\]/"quarantined":["vP"]/' "$AD_OPT_DIR/t11/releases/state.json" > "$AD_OPT_DIR/t11/releases/state.json.tmp" \
+    && mv "$AD_OPT_DIR/t11/releases/state.json.tmp" "$AD_OPT_DIR/t11/releases/state.json"
 J_T11_BEFORE="$(aj "$AD_OPT_DIR/t11")"
 adopt_run "$AD_OPT_DIR/t11"
 assert_eq "8k quarantined-previous adopt halts (rc 78)" "78" "$?"
@@ -1065,7 +1092,8 @@ assert_eq "8k control repointed to previous" "releases/vP" "$(readlink "$AD_OPT_
 #     via a blanket chmod 555 — that now trips the checked-write refusal
 #     at quarantine first; 8m below owns that shape.)
 adopt_fixture "$AD_OPT_DIR/t13" "$STALE700" true vP 0 999999 true
-sed -i '' 's/,"rollback_window_count":{"24h":0,"window_start":null}//' "$AD_OPT_DIR/t13/releases/state.json"
+sed 's/,"rollback_window_count":{"24h":0,"window_start":null}//' "$AD_OPT_DIR/t13/releases/state.json" > "$AD_OPT_DIR/t13/releases/state.json.tmp" \
+    && mv "$AD_OPT_DIR/t13/releases/state.json.tmp" "$AD_OPT_DIR/t13/releases/state.json"
 ( export INSTALL_DIR="$AD_OPT_DIR/t13"; . "$FAKE_REPO/scripts/upgrade/lib.sh"; adopt_stale_txn ) \
     >/dev/null 2>"$AD_OPT_DIR/t13-stderr.txt"
 RC_8L=$?
@@ -1378,11 +1406,19 @@ m4_field() { b4_inf "_json_field \"\$(journal_read)\" $1"; }
 ln -sfn "releases/$SBX_V1" "$SBX/current"
 m4_seed "$SBX_V1" "$SBX_V2" '[]'
 M4A_OUT="$(b4_run_promote "$SBX_V1")"; M4A_RC=$?
+# C3 conversion (council 2026-10-12): these cells previously encoded the
+# PRE-P1 8b semantics (rollback target = journal.previous) AND hand-fed
+# OLD_CUR to mask the unbound-variable crash. The ratified post-P1
+# semantics (decision (g), recorded in promote.sh 8b) targets
+# OLD_CUR = the displaced version — for a SAME-VERSION re-promote that
+# is v1 itself (nothing was displaced; staying on it is the honest
+# outcome). The M4 no-strand bookkeeping is UNCHANGED: previous keeps
+# its pre-promote value. OLD_CUR is NOT in the run env (unfed).
 assert_eq "12a same-version gate-fail halts at re-gate (78)" "78" "$M4A_RC"
 assert_eq "12a previous NOT the quarantined same-version (M4 no-strand)" "$SBX_V2" "$(m4_field previous)"
-assert_eq "12a current = the rolled-back-to previous" "$SBX_V2" "$(m4_field current)"
+assert_eq "12a current stays on the same-version (OLD_CUR==VERSION; nothing displaced)" "$SBX_V1" "$(m4_field current)"
 assert_contains "12a failed version quarantined" "\"$SBX_V1\"" "$(b4_inf '_json_sub "$(journal_read)" quarantined')"
-assert_eq "12a repointed to the safe previous" "releases/$SBX_V2" "$(readlink "$SBX/current")"
+assert_eq "12a repoint is the no-op same-version flip" "releases/$SBX_V1" "$(readlink "$SBX/current")"
 
 # 12b. M4 consumption gate: a (drifted/hand-edited) journal whose previous
 #      is QUARANTINED → promote auto-rollback halts, NO repoint (never
@@ -1391,11 +1427,16 @@ ln -sfn "releases/$SBX_V1" "$SBX/current"
 m4_seed "$SBX_V1" "$SBX_V2" "[\"$SBX_V2\"]"
 b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
 M4B_OUT="$(b4_run_promote "$SBX_V3")"; M4B_RC=$?
-assert_eq "12b quarantined-previous auto-rollback halts (78)" "78" "$M4B_RC"
-assert_contains "12b halt names the QUARANTINED previous (M4)" "QUARANTINED" "$M4B_OUT"
-assert_eq "12b NO repoint — current stays on the flipped target" "releases/$SBX_V3" "$(readlink "$SBX/current")"
-assert_contains "12b halt event recorded" '"event":"halt"' "$(cat "$JB")"
-assert_eq "12b journal current = degraded target" "$SBX_V3" "$(m4_field current)"
+# C3 conversion: pre-P1 this cell halted BECAUSE journal.previous was
+# quarantined (the old target source). The ratified post-P1 target is
+# OLD_CUR = the displaced v1 — NOT quarantined — so the auto-rollback
+# repoints to v1 and the M4 quarantine gate does not fire. The run must
+# still halt at the dead-port re-gate (78) with a clean journal.
+assert_eq "12b gate-fail auto-rollback halts at re-gate (78)" "78" "$M4B_RC"
+assert_eq "12b repointed to OLD_CUR (the displaced v1)" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+assert_eq "12b previous = the displaced version (C3 OLD_CUR pairing)" "$SBX_V1" "$(m4_field previous)"
+assert_contains "12b halt event recorded (re-gate halt)" '"event":"halt"' "$(cat "$JB")"
+assert_eq "12b journal current = the repointed OLD_CUR" "$SBX_V1" "$(m4_field current)"
 assert_eq "12b txn closed by the halt" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
 
 # 12c. M4 launcher-sweep gate: stale flipped txn + quarantined previous →
@@ -1460,6 +1501,38 @@ assert_eq "12d journal-write failure at commit exits 1 (NOT 0 — M5)" "1" "$M5_
 assert_contains "12d failure is a loud JOURNAL DIVERGENCE" "JOURNAL DIVERGENCE" "$M5_OUT"
 assert_eq "12d the flip itself completed (env on target)" "releases/$SBX_V2" "$(readlink "$SBX/current")"
 assert_contains "12d txn could not be closed under the read-only dir (message warns of the sweep risk)" '"kind":"promote"' "$(cat "$JB")"
+
+# 12f. C3 (council 2026-10-12): the 8b auto-rollback path with OLD_CUR
+#      NOT hand-fed — a real gate-failure run where the variable is
+#      absent from the caller's environment AND never seeded. Pre-fix,
+#      promote.sh read $OLD_CUR (assigned only in the 8a commit block)
+#      under set -u → EVERY gate failure crashed "unbound variable"
+#      (exit 1) BEFORE halt/quarantine/repoint. Post-fix, OLD_CUR is
+#      captured unconditionally at flip-prep; this run must reach the
+#      halt, REPOINT current to OLD_CUR, and journal the halt.
+ln -sfn "releases/$SBX_V1" "$SBX/current"
+m4_seed "$SBX_V1" "$SBX_V2" '[]'
+b4_inf 'journal_update cooldown_until "null"' > /dev/null 2>&1
+M4F_OUT="$(env -u OLD_CUR HOME="$FAKE_HOME" VERSION="$SBX_V3" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
+    LIVEZ_BUDGET_S=4 READYZ_BUDGET_S=4 ENSEMBLE_PROMOTE_SOAK_S=0 \
+    bash "$FAKE_REPO/scripts/upgrade/promote.sh" sandbox 2>&1)"; M4F_RC=$?
+rm -rf "$SBX/releases/rollback.lock.d" 2>/dev/null
+if [ "${OLD_CUR+x}" = x ]; then _fail "12f OLD_CUR leaked into the harness env" "unset" "set"; else _pass; fi
+if [ "$M4F_RC" = "1" ]; then
+    _fail "12f gate-fail exits 1 (the unbound-variable crash is BACK)" "!= 1" "1: $(printf '%s' "$M4F_OUT" | grep 'unbound' | head -1)"
+else
+    _pass
+fi
+if printf '%s' "$M4F_OUT" | grep -q 'unbound variable'; then
+    _fail "12f output names unbound variable" "absent" "present"
+else
+    _pass
+fi
+assert_contains "12f halt executed (halt-for-human on re-gate)" "HALT-FOR-HUMAN" "$M4F_OUT"
+assert_eq "12f REPOINT executed — current = OLD_CUR (the displaced v1)" "releases/$SBX_V1" "$(readlink "$SBX/current")"
+assert_eq "12f previous = the displaced version (8b pairing)" "$SBX_V1" "$(m4_field previous)"
+assert_contains "12f halt event journaled" '"event":"halt"' "$(cat "$JB")"
+assert_eq "12f txn closed by the halt" "null" "$(b4_inf '_json_field "$(journal_read)" in_flight')"
 
 # 12e. W2 (B4×B3): same-version re-promote abort (stop fails) → aged → the
 #      launcher sweep must CLEAR the pre-flip txn with NO rollback /

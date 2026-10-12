@@ -373,8 +373,11 @@ section "6. T2.4 / T2.4a — splice path is the SOLE writer in lock_heartbeat"
 # replacing is correct. The pin asserts the bash `sed -E "s/...
 # last_heartbeat..." pattern is gone from lock_heartbeat's
 # `journal_heartbeat` body.
-PATTERN_COUNT=$(grep -cE 'sed -E "s/\(""last_heartbeat""\):\[[0-9\]+\]/\\1\$hb_now/"' "$UPGRADE_DIR/lib.sh" || true)
-assert_eq "regression-pin-bash-walk-removed" "0" "$PATTERN_COUNT"
+# T2.4a (council 2026-10-12): the STATIC grep pin here was a masking
+# artifact — the pattern matched NEITHER pre- nor post-P2 lib.sh, so
+# the pin was vacuously green. It is replaced by the RUNTIME pin below
+# (marker file + heartbeat advance) — the only pin that can actually
+# fail when lock_heartbeat stops writing through the splice path.
 
 # Runtime pin — under a held lock, lock_heartbeat should write
 # `in_flight.last_heartbeat` via the splice path. We source lib.sh,
@@ -411,6 +414,48 @@ RT=$(cat "/tmp/splice-runtime-pin-$$")
 rm -f "/tmp/splice-runtime-pin-$$"
 assert_contains "runtime-pin-diverged" "DIVERGED=1" "$RT"
 rm -rf "$LOCK_TEST_DIR"
+
+# T2.4a behavioral pin (council): lock_heartbeat's journal write MUST
+# execute through the SPLICE PATH — proven by pinning SPLICE_PYTHON to
+# a wrapper that records the invocation to a marker file, then
+# asserting BOTH (a) the marker fired and (b) in_flight.last_heartbeat
+# actually advanced. A wrapper-free call would leave the marker empty;
+# a non-splice writer would leave the heartbeat stale.
+SPLICE_MARKER_DIR="$(mktemp -d -t splice-marker-XXXXXX)"
+MARKER="$SPLICE_MARKER_DIR/invocations.log"
+cat > "$SPLICE_MARKER_DIR/spy-python" <<SPYEOF
+#!/bin/bash
+printf 'splice-call: %s\n' "\$*" >> "$MARKER"
+exec "$(command -v python3)" "\$@"
+SPYEOF
+chmod +x "$SPLICE_MARKER_DIR/spy-python"
+: > "$MARKER"
+SPLICE_LOCK_DIR2="$(mktemp -d -t splice-lock2-XXXXXX)"
+mkdir -p "$SPLICE_LOCK_DIR2/releases"
+printf '%s\n' \
+    '{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' \
+    > "$SPLICE_LOCK_DIR2/releases/state.json"
+(
+    export INSTALL_DIR="$SPLICE_LOCK_DIR2"
+    export REPO_ROOT
+    export SPLICE_PYTHON="$SPLICE_MARKER_DIR/spy-python"
+    . "$UPGRADE_DIR/lib.sh" >/dev/null 2>&1
+    journal_init >/dev/null 2>&1
+    lock_acquire >/dev/null 2>&1
+    journal_open_txn executor v0.0.0 >/dev/null 2>&1
+    HB1=$(python3 -c "import json; print(json.load(open('$SPLICE_LOCK_DIR2/releases/state.json'))['in_flight']['last_heartbeat'])")
+    sleep 2
+    lock_heartbeat >/dev/null 2>&1
+    HB2=$(python3 -c "import json; print(json.load(open('$SPLICE_LOCK_DIR2/releases/state.json'))['in_flight']['last_heartbeat'])")
+    [ "$HB1" != "$HB2" ] && [ -n "$HB2" ] && echo "HB_ADVANCED=1" || echo "HB_ADVANCED=0"
+    lock_release >/dev/null 2>&1
+) > "/tmp/splice-marker-pin-$$" 2>&1
+RT2=$(cat "/tmp/splice-marker-pin-$$")
+rm -f "/tmp/splice-marker-pin-$$"
+assert_contains "T2.4a heartbeat-advanced" "HB_ADVANCED=1" "$RT2"
+MARKER_HITS=$(grep -c "set-in-flight-field last_heartbeat" "$MARKER" 2>/dev/null || true)
+if [ "${MARKER_HITS:-0}" -ge 1 ]; then _pass; else _fail "T2.4a splice-path-executed (marker)" ">=1 set-in-flight-field calls" "$MARKER_HITS hits: $(cat "$MARKER" 2>/dev/null)"; fi
+rm -rf "$SPLICE_LOCK_DIR2" "$SPLICE_MARKER_DIR"
 
 # ===========================================================================
 # Section 7 — T2.9 byte-compat round-trip
@@ -697,3 +742,73 @@ if [ "$FAIL" != "0" ]; then
     exit 1
 fi
 printf 'all tests passed.\n'
+
+
+# ===========================================================================
+# Section 11 — C4 (council 2026-10-12): live-HOME splice path scoping
+# ===========================================================================
+section "11. C4 live-install refusal: pipeline-lock-held waiver"
+# The refusal is scoped to OUT-of-pipeline writers: with the pipeline
+# lock (rollback.lock.d) HELD by a live owner, the splice IS the
+# promote/rollback pipeline writing its own journal and is allowed
+# through; without a live lock owner it refuses (78) — including the
+# crashed-owner (stale heartbeat, dead pid) case.
+#
+# SANDBOX ONLY: the live-HOME shape is replicated under a throwaway
+# $HOME (tmp/home-shaped/agents-ensemble/...) — the REAL live install
+# is never touched (constraint: no live install touches).
+LIVE_HOME="$(mktemp -d -t splice-live-home-XXXXXX)"
+# $HOME is the SANDBOX home-shaped dir; the install sits directly
+# beneath it — the exact shape _live_install_root() checks
+# (Path.home()/agents-ensemble). $TMP/home-shaped = this HOME.
+LIVE_HOME_ROOT="$LIVE_HOME/home-shaped"
+LIVE_INSTALL="$LIVE_HOME_ROOT/agents-ensemble"
+mkdir -p "$LIVE_INSTALL/releases"
+printf '%s\n' \
+    '{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' \
+    > "$LIVE_INSTALL/releases/state.json"
+
+splice_live() {  # splice_live <op> [args...] — runs with HOME pinned to the sandbox replica
+    HOME="$LIVE_HOME_ROOT" "$PY" "$HELPER" "$LIVE_INSTALL/releases/state.json" "$@" 2>&1
+}
+
+# 11a. no lock → refuse 78 (out-of-pipeline writer, deterministic)
+OUT=$(splice_live append-history c4_nolock x); RC=$?
+assert_eq "C4 no-lock refuses 78" "78" "$RC"
+assert_contains "C4 no-lock names live-install" "REFUSED: live-install" "$OUT"
+
+# 11b. lock held by THIS live pid → succeed (the pipeline is running)
+LOCK_D="$LIVE_INSTALL/releases/rollback.lock.d"
+mkdir -p "$LOCK_D"
+printf '%s\n' "$$" > "$LOCK_D/owner"
+printf '%s\n' "run-c4-test" > "$LOCK_D/run_id"
+printf '%s\n' "$(date +%s)" > "$LOCK_D/heartbeat"
+OUT=$(splice_live append-history c4_locked x); RC=$?
+assert_eq "C4 lock-held splice succeeds" "0" "$RC"
+
+# 11c. DEAD owner + fresh heartbeat → refuse again (fail-closed)
+printf '%s\n' "999999999" > "$LOCK_D/owner"
+OUT=$(splice_live append-history c4_dead x); RC=$?
+assert_eq "C4 dead-owner refuses 78" "78" "$RC"
+assert_contains "C4 dead-owner names live-install" "REFUSED: live-install" "$OUT"
+rm -rf "$LOCK_D" "$LIVE_HOME"
+
+# ===========================================================================
+# Section 12 — W5 (council 2026-10-12): history is append-only
+# ===========================================================================
+section "12. W5 set-field/unset-field on the history key REFUSES"
+W5_DIR="$(mktemp -d -t splice-w5-XXXXXX)"
+make_fixture "$W5_DIR"
+"$PY" "$HELPER" "$W5_DIR/releases/state.json" append-history w5_seed keep > /dev/null 2>&1
+
+OUT=$("$PY" "$HELPER" "$W5_DIR/releases/state.json" set-field history '[]' 2>&1); RC=$?
+assert_eq "W5 set-field history refuses 78" "78" "$RC"
+assert_contains "W5 set-field refusal names APPEND-ONLY" "APPEND-ONLY" "$OUT"
+OUT=$("$PY" "$HELPER" "$W5_DIR/releases/state.json" unset-field history 2>&1); RC=$?
+assert_eq "W5 unset-field history refuses 78" "78" "$RC"
+assert_contains "W5 unset-field refusal names APPEND-ONLY" "APPEND-ONLY" "$OUT"
+
+# the refusals must not have mutated the journal
+HIST_W5=$("$PY" -c "import json; print(len(json.load(open('$W5_DIR/releases/state.json'))['history']))")
+assert_eq "W5 history intact after refusals" "1" "$HIST_W5"
+rm -rf "$W5_DIR"

@@ -378,3 +378,35 @@ flavors of the parameter).
 - Every resolution matches what was ACTUALLY implemented in P1-P3 (read
   against the post-P3 HEAD `6a4cf2bf3`).
 - The P-Dx matrix is complete; the implementer's gate is satisfied.
+---
+
+## R1 Remediation rulings (council 2026-10-12 — the 8-critical fix pass)
+
+- **W4 — sweep is TWO-signal, not three** (AMENDED, not implemented):
+  the liveness predicate keeps (1) heartbeat-freshness and
+  (2) `os.kill(pid, 0)`; the planned third signal (systemd cgroup-leaf
+  match) is DEFERRED. What the leaf would add: pid-recycled-under-a-
+  foreign-unit discrimination for the stale-hb + alive-pid cell. Why
+  deferred: that cell is already leave-alone under the conservative
+  ruling (an unbounded conservatism — the op is swept later — never a
+  lossy reclaim), so the third signal buys precision, not safety.
+  Recorded in the predicate docstring (upgrade_journal_sweep.py) and
+  here. Implementation stays P3+.
+- **C8 — hb-first ordering is the SPEC** (no SKIP-and-file needed):
+  the AC4b trust-table cell "fresh heartbeat alone → leave alone even
+  when pid and cgroup are missing" is CORRECT for the pre-spawn-stamp
+  window (pending_op created before the executor stamped its pid —
+  owner_pid == 0 — while the live promote heartbeats
+  in_flight.last_heartbeat every 30s). The shipped predicate
+  short-circuited `owner_pid <= 0` BEFORE the hb read and the test
+  asserted the INVERTED value with a rationalizing comment. Code and
+  test now both implement the spec cell (hb-fresh ⇒ True; pid/cgroup
+  decide only on stale/unreadable hb).
+- **C4 — live-install splice waiver shape** (lock-held, option (b)):
+  the write-tool refusal now carries exactly one waiver — while the
+  owning install's `rollback.lock.d` is HELD by a live owner (dir
+  exists + owner pid alive per the bash protocol's EPERM-alive rule;
+  heartbeat age advisory per the never-break-a-live-owner ruling).
+  Out-of-pipeline writers stay refused deterministically (a crashed
+  owner's stale-lock dir does NOT waive). Option (a) fd-attestation
+  was unavailable: the lock is mkdir-based, no inheritable fd exists.

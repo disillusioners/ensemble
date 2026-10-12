@@ -239,7 +239,7 @@ def _register_upgrade_alert_sink(notification_broadcaster) -> None:
 # DELETE leaves rows on disk; the next boot's CAPTURE_PHASE
 # re-derives the same doomed set (predicate stable) and the
 # deferred DELETE re-runs.
-async def _deferred_delete_doomed_ids(manager, doomed_ids: list[str]) -> None:
+async def _deferred_delete_doomed_ids(manager, app, doomed_ids: list[str]) -> None:
     """Background DELETE_PHASE for the deferred env-poison purge.
 
     P3 / decision (f) / D-P3.9, D-P3.10, D-P3.11.
@@ -258,12 +258,30 @@ async def _deferred_delete_doomed_ids(manager, doomed_ids: list[str]) -> None:
     # (the cheap still-green re-check). A wedged readyz blocks the
     # +1 s arm but the +5 s arm fires regardless (fail-closed via
     # the wall-clock floor).
-    readyz_helper = getattr(manager, "_last_readiness_result", None)
+    # C5 (council 2026-10-12): the +1 s arm consults the readiness
+    # composite FRESH ON EVERY TICK — read inside the loop from
+    # app.state, never cached. The prior shape read
+    # manager._last_readiness_result once before the loop; that
+    # attribute has NO writer anywhere in the daemon, so the read was
+    # always None → `is None or ...` short-circuited → the +1 s arm
+    # fired UNCONDITIONALLY at t=+1 s (fail-OPEN: the DELETE could
+    # race a still-warming pool), the +5 s floor was unreachable, and
+    # _readyz_still_green was dead code.
+    # Port-bind note: this task is armed during lifespan startup —
+    # BEFORE uvicorn binds the port. That is safe BY CONSTRUCTION
+    # here: the composite is a plain in-process attribute written by
+    # the readiness refresh loop (never an HTTP read), and before the
+    # first refresh it is None → not-green → the +1 s arm cannot fire
+    # and the +5 s floor governs. The task therefore polls gracefully
+    # through the pre-bind window without touching the socket.
     while True:
         now_elapsed = time.monotonic() - start
-        # +1 s arm: readyz-green still true AND +1 s elapsed
+        # +1 s arm: readyz-green STILL true AND +1 s elapsed (fresh
+        # composite per tick; absent/unready → NOT green → the arm
+        # stays dormant and the +5 s floor governs).
         if now_elapsed >= _PLUS_1_S:
-            if readyz_helper is None or _readyz_still_green(readyz_helper):
+            composite = getattr(app.state, "readiness_composite", None)
+            if composite is not None and _readyz_still_green(composite):
                 fired_via = "+1s+readyz-green"
                 break
         # +5 s arm: hard wall-clock floor (fires regardless of readyz)
@@ -314,19 +332,19 @@ async def _deferred_delete_doomed_ids(manager, doomed_ids: list[str]) -> None:
         manager._pending_doomed_ids = []
 
 
-def _readyz_still_green(_readiness_result) -> bool:
-    """Cheap still-green re-check for the +1 s arm.
-
-    P3 / decision (f) / D-P3.9 — the +1 s arm is the cheap
-    "still-green" re-check. We consult the manager's cached
-    readiness composite (refreshed by the periodic readiness
-    refresh loop at daemon/api.py:_periodic_readiness_refresh_loop)
-    rather than re-fetching /readyz (which would defeat the
-    "cheap" purpose). The composite is the O(1) cached source
-    of truth for /readyz (ADR-003).
+def _readyz_still_green(readiness_composite) -> bool:
+    """Cheap still-green check for the +1 s arm (C5, council
+    2026-10-12): the CALLER polls app.state.readiness_composite fresh
+    on every tick (the composite has exactly one writer — the
+    periodic readiness refresh loop — and one initial None at app
+    setup). This predicate stays a pure O(1) attribute read; it never
+    re-fetches /readyz (which would defeat the "cheap" purpose) and
+    never touches the manager (the old manager._last_readiness_result
+    cache had no writer and was removed). A None composite means
+    "not green yet" — enforced at the call site.
     """
     try:
-        return bool(getattr(_readiness_result, "ready", False))
+        return bool(getattr(readiness_composite, "ready", False))
     except Exception:
         return False
 
@@ -620,7 +638,7 @@ async def lifespan(app: FastAPI):
     doomed_ids = getattr(manager, "_pending_doomed_ids", None) or []
     if doomed_ids:
         delete_doomed_task = asyncio.create_task(
-            _deferred_delete_doomed_ids(manager, doomed_ids),
+            _deferred_delete_doomed_ids(manager, app, doomed_ids),
             name="deferred-delete-doomed-ids",
         )
         app.state.delete_doomed_task = delete_doomed_task

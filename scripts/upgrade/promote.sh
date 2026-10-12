@@ -386,6 +386,16 @@ launcher_swap "$VERSION" || {
 # P3 / decision (d) — phase boundary (post-launcher-swap, pre-flip)
 _enforce_deadline "$promote_deadline" launcher_swap
 
+# C3 (council 2026-10-12): OLD_CUR — the version THIS run is about to
+# displace — is captured here at flip-prep, UNCONDITIONALLY, before
+# ANY branch that can read it. The prior shape assigned OLD_CUR only
+# inside the 8a commit-success block, so the 8b gate-failure path read
+# it under set -u → EVERY gate failure crashed "unbound variable"
+# (exit 1) BEFORE halt/quarantine/repoint — in-ceremony auto-rollback
+# was dead and the daemon served the unverified version until the
+# next-boot sweep. Live-confirmed (12a/12b/12d exit 1 ≠ 78).
+OLD_CUR="$CUR"
+
 # ═══════════════════════════ 4. ATOMIC FLIP ════════════════════════════════
 if ! atomic_flip "$VERSION"; then
     # B4 leave-txn-open (same policy): current untouched at LKG; the next
@@ -528,11 +538,20 @@ if [ -z "$gate_fail_reason" ]; then
     # arc — N-2 walk bug). The set-previous write below carries OLD_CUR
     # so the journal's `previous` matches THIS run's displaced version
     # (FORWARD semantic).
-    OLD_CUR="$CUR"
+    # (OLD_CUR capture moved to flip-prep above — C3: the 8b gate-failure
+    # path reads it, so it MUST exist before any branch that can fail.)
     # Immediacy assertion (decision (g) D-P1.2): if journal.current does
     # NOT equal $VERSION at the commit-set-previous moment, the journal
-    # has drifted out of sync with the symlink / preflight invariant —
-    # refuse with exit 78 rather than write a misleading `previous`.
+    journal_set_current "$VERSION"        || journal_fail_loud "commit: journal_set_current $VERSION"
+    # Immediacy assertion (decision (g) D-P1.2, per decisions.md:532 — the
+    # check lands AFTER set_current, guarding the previous-write): journal
+    # current must equal $VERSION at the set-previous moment. If it does
+    # NOT, the journal has drifted out of sync with the symlink /
+    # preflight invariant — refuse with exit 78 rather than write a
+    # misleading `previous`. (R1 round-2, council: the shipped order ran
+    # the check BEFORE set_current — journal.current still held the
+    # pre-commit value at that point, so the check breached on EVERY
+    # commit and made the M5 commit-write-failure path unreachable.)
     # The anchor is the QUOTED-key form (`"current":`) via
     # _json_field_quoted (lib.sh:1355-1364 precedent) — defeats the
     # bare-substring first-occurrence hazard.
@@ -544,7 +563,6 @@ if [ -z "$gate_fail_reason" ]; then
         _warn "immediacy breach at commit: journal current=$current_now ≠ $VERSION — halting (exit 78); txn left open for sweep recovery"
         exit 78
     fi
-    journal_set_current "$VERSION"        || journal_fail_loud "commit: journal_set_current $VERSION"
     journal_set_previous "${OLD_CUR:-null}" || journal_fail_loud "commit: journal_set_previous ${OLD_CUR:-null}"
     journal_close_txn                     || journal_fail_loud "commit: journal_close_txn"
     journal_history_append commit "promote $VERSION committed (gate+soak green; previous=${OLD_CUR:-none})" \

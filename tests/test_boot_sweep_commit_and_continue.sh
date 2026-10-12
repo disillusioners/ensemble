@@ -413,6 +413,125 @@ esac
 rm -rf "$C8_FIX"
 
 # ===========================================================================
+
+
+# ===========================================================================
+# W8 (council 2026-10-12) — T1.5 JOURNAL MUTATION ORDERING pin
+# ===========================================================================
+# The plan's T1.5 ordering assertion ("the previous write lands BETWEEN
+# the current update and the in_flight clear — a write after the
+# in_flight clear is invisible to the FORWARD semantic") was specified
+# but never landed. This pin lands it: a recording shim wraps
+# _js_journal_update and logs every journaled FIELD write in fire
+# order; the commit-and-continue sweep must emit current → previous →
+# in_flight in that relative order.
+
+run_sweep_ordered() {  # <fix_dir> <order_log>
+    local fix="$1" log="$2"
+    INSTALL_DIR="$fix" PORT=19999 ORDER_LOG="$log" \
+    SWEEP_STALE_S=0 HEARTBEAT_STALE_S=0 LOCK_HEARTBEAT_S=30 LOCK_STALE_S=300 \
+    bash -c '
+        . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
+        eval "$(declare -f _js_journal_update | sed "s/_js_journal_update/_js_journal_update_real/")"
+        _js_journal_update() {
+            printf "%s\n" "$2" >> "$ORDER_LOG"
+            _js_journal_update_real "$@"
+        }
+        _journal_sweep "$INSTALL_DIR"
+        echo "sweep-rc=$?"
+    ' 2>&1
+}
+
+section "W8 — T1.5 ordering: current → previous → in_flight"
+
+W8_FIX="$(mktemp -d -t w8-order.XXXXXX)"
+make_install_fixture "$W8_FIX" "v9.9.9-w8-target" "v9.9.9-w8-prev" "false"
+seed_journal "$W8_FIX" "v9.9.9-w8-target" "v9.9.9-w8-prev" "true" "1"
+ln -sfn "releases/v9.9.9-w8-target" "$W8_FIX/current"
+printf 'PORT=19999\n' > "$W8_FIX/.env"
+printf '#!/bin/bash\nexit 0\n' > "$W8_FIX/launcher.sh"
+chmod +x "$W8_FIX/launcher.sh"
+W8_LOG="$W8_FIX/order.log"; : > "$W8_LOG"
+W8_OUT="$(run_sweep_ordered "$W8_FIX" "$W8_LOG")"
+W8_RC=$(printf '%s' "$W8_OUT" | grep -oE 'sweep-rc=[0-9]+' | head -1 | sed 's/sweep-rc=//')
+assert_eq "W8 sweep returns 0" "0" "$W8_RC"
+
+ORD_CURRENT=$(grep -n '^current$' "$W8_LOG" | head -1 | cut -d: -f1)
+ORD_PREVIOUS=$(grep -n '^previous$' "$W8_LOG" | head -1 | cut -d: -f1)
+ORD_INFLIGHT=$(grep -n '^in_flight$' "$W8_LOG" | head -1 | cut -d: -f1)
+if [ -n "$ORD_CURRENT" ] && [ -n "$ORD_PREVIOUS" ] && [ -n "$ORD_INFLIGHT" ] \
+   && [ "$ORD_CURRENT" -lt "$ORD_PREVIOUS" ] && [ "$ORD_PREVIOUS" -lt "$ORD_INFLIGHT" ]; then
+    _pass
+else
+    _fail "W8 ordering: current → previous → in_flight" \
+        "current@$ORD_CURRENT < previous@$ORD_PREVIOUS < in_flight@$ORD_INFLIGHT" \
+        "$(tr '\n' ' ' < "$W8_LOG" 2>/dev/null)"
+fi
+W8_JOURNAL="$(cat "$W8_FIX/releases/state.json")"
+case "$W8_JOURNAL" in
+    *'"in_flight":null'*|*"\"in_flight\": null"*) _pass "W8 in_flight cleared (txn closed)" ;;
+    *) _fail "W8 in_flight cleared (txn closed)" '"in_flight":null' "$(printf '%s' "$W8_JOURNAL" | grep -oE '"in_flight":[^,}]*')" ;;
+esac
+rm -rf "$W8_FIX"
+
+
+
+# ===========================================================================
+# W6 (council 2026-10-12) — JSON-null displaced_version must NOT become
+# the quoted string "previous":"null"
+# ===========================================================================
+# _js_json_field returns the RAW token: a JSON null reads back as the
+# literal "null" (not empty), slipped past the old [ -z ] guard, and
+# the quoted write emitted "previous":"null" (QUOTED string) — vs
+# lib.sh's unquoted null. Every [ "$prev" != "null" ] consumer then
+# treats the quoted string as a REAL version. The fix null-fences the
+# read: absent OR null displaced_version ⇒ ambiguous pre-stamp state ⇒
+# halt-for-human, previous untouched.
+
+section "W6 — null displaced_version halts, previous NOT written as quoted null"
+
+W6B_FIX="$(mktemp -d -t w6b.XXXXXX)"
+make_install_fixture "$W6B_FIX" "v9.9.9-w6b-target" "v9.9.9-w6b-prev" "false"
+# same gates as C1 BUT displaced_version is JSON null (pre-stamp state)
+cat > "$W6B_FIX/releases/state.json" <<EOF
+{"current":"v9.9.9-w6b-prev","previous":"v9.9.9-w6b-prev","in_flight":{"kind":"promote","target":"v9.9.9-w6b-target","started_at":"2026-10-07T09:00:00Z","flipped":true,"owner_pid":99999,"last_heartbeat":1728000000,"displaced_version":null},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T09:00:00Z","event":"open_txn","detail":"test seeded"},{"ts":"2026-10-07T10:00:00Z","event":"intent_flip","detail":"preflight: intentional promote target v9.9.9-w6b-target — integrity verified; operator-initiated"}]}
+EOF
+ln -sfn "releases/v9.9.9-w6b-target" "$W6B_FIX/current"
+printf 'PORT=19998\n' > "$W6B_FIX/.env"
+printf '#!/bin/bash\nexit 0\n' > "$W6B_FIX/launcher.sh"
+chmod +x "$W6B_FIX/launcher.sh"
+W6B_BEFORE="$(cat "$W6B_FIX/releases/state.json")"
+W6B_OUT="$(run_sweep "$W6B_FIX")"
+W6B_JOURNAL="$(cat "$W6B_FIX/releases/state.json")"
+# previous must be UNCHANGED (still the seed's "v9.9.9-w6b-prev") and
+# must NOT be the quoted string "null"
+case "$W6B_JOURNAL" in
+    *'"previous":"null"'*|*'"previous": "null"'*)
+        _fail "W6 previous NOT written as quoted null" 'no quoted-null write' 'present' ;;
+    *'"previous":"v9.9.9-w6b-prev"'*|*'"previous": "v9.9.9-w6b-prev"'*)
+        _pass "W6 previous untouched (still the seeded value)" ;;
+    *) _fail "W6 previous untouched" '"previous":"v9.9.9-w6b-prev"' "$(printf '%s' "$W6B_JOURNAL" | grep -oE '"previous":[^,}]*')" ;;
+esac
+# the txn must NOT have been silently committed
+case "$W6B_JOURNAL" in
+    *'"in_flight":null'*|*'"in_flight": null'*)
+        _fail "W6 txn NOT committed on null displaced (halt-for-human)" "in_flight object kept" "null" ;;
+    *) _pass "W6 txn kept (halt-for-human, B4 leave-txn-open)" ;;
+esac
+# POSITIVE control: the sweep must have RUN and taken the
+# halt-for-human branch — a halt/halt-for-human event lands in history.
+# (Without this, a sweep that never started would pass the two cells
+# above vacuously — the seeded journal already has both shapes.)
+case "$W6B_JOURNAL" in
+    *'"event":"halt"'*|*'"event":"halt-for-human"'*|*'"event":"halt_for_human"'*)
+        _pass "W6 halt event recorded (the sweep ran and halted)" ;;
+    *)
+        _fail "W6 halt event recorded (the sweep ran and halted)" \
+            'a halt-class history event' \
+            "$(printf '%s' "$W6B_JOURNAL" | grep -oE '"event":"[a-z_]*"' | tr '\n' ' ')OUT=$W6B_OUT" ;;
+esac
+rm -rf "$W6B_FIX"
+
 section "Final — summary"
 
 printf '\n== summary ==\n'

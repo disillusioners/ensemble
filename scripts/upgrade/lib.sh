@@ -2872,37 +2872,48 @@ verify_current_release() {
 # Return: 0 on green, 1 on red, 2 on transient (the bash convention
 # for the three-state classification).
 _probe_once_classified() {
-    local path="$1" port="$2" tmp_body http_code
+    local path="$1" port="$2" tmp_body http_code curl_rc
     tmp_body="$(mktemp -t probe.XXXXXX 2>/dev/null || printf '/tmp/probe.%s.body' "$$")"
     # C-8a: the load-bearing change. curl -sS -o tmp -w '%{http_code}'
     # (NOT curl -fsS with body-sniff — exit 22 suppresses body, so a
     # body-sniffing classifier sees empty-stdout and classifies every
     # HTTP error as red, defeating the 503-transient path entirely).
+    #
+    # C1 (R1 remediation, council 2026-10-12): curl's exit code is
+    # captured AT THE ASSIGNMENT (`rc=$?` on the next line — the
+    # assignment's exit status IS the command substitution's status).
+    # The prior shape read `${PIPESTATUS[0]}` several commands LATER —
+    # PIPESTATUS is reset by every intervening command, so the read saw
+    # the rc of the last assignment (always 0) and every connection-
+    # level failure (refused/timeout — the v0.20.0 boot-storm classes)
+    # fell into the red bucket. Empirically proven twice by the council.
+    # Also: the old `|| http_code=""` handler DISCARDED curl's "000"
+    # no-response marker; the empty/000 shape is now classified from
+    # the captured curl_rc instead.
+    curl_rc=0
     http_code="$(curl -sS -o "$tmp_body" -w '%{http_code}' --max-time 5 \
-        "http://localhost:$port$path" 2>/dev/null)" || http_code=""
+        "http://localhost:$port$path" 2>/dev/null)"
+    curl_rc=$?
     # capture classification globals
     _PROBE_BODY=""
     _PROBE_CODE="$http_code"
-    if [ -z "$http_code" ]; then
-        # curl-level failure (no http response landed). Read curl's exit
-        # via the global $? at function entry (we re-derive it here
-        # because the && / || above may have flipped it; re-run a
-        # benign command and re-read $? does NOT work — use PIPESTATUS).
-        local curl_rc="${PIPESTATUS[0]}"
-        case "$curl_rc" in
-            7) _PROBE_STATUS="transient" ;;   # connection refused
-            28) _PROBE_STATUS="transient" ;;  # timeout
-            *) _PROBE_STATUS="red" ;;         # anything else is a hard fail
-        esac
-    else
-        case "$http_code" in
-            2*) _PROBE_STATUS="green" ;;
-            503) _PROBE_STATUS="transient" ;;
-            5*) _PROBE_STATUS="red" ;;
-            4*) _PROBE_STATUS="red" ;;
-            *) _PROBE_STATUS="red" ;;
-        esac
-    fi
+    case "$http_code" in
+        ""|000)
+            # curl-level failure: no HTTP response landed (or the
+            # 000 no-response marker). The captured rc separates the
+            # known transient classes from unknown hard failures.
+            case "$curl_rc" in
+                7) _PROBE_STATUS="transient" ;;   # connection refused
+                28) _PROBE_STATUS="transient" ;;  # timeout
+                *) _PROBE_STATUS="red" ;;         # unknown curl-level failure: fail-closed
+            esac
+            ;;
+        2*) _PROBE_STATUS="green" ;;
+        503) _PROBE_STATUS="transient" ;;
+        5*) _PROBE_STATUS="red" ;;
+        4*) _PROBE_STATUS="red" ;;
+        *) _PROBE_STATUS="red" ;;
+    esac
     # Read body for callers that need it (e.g. inflight_turns extraction
     # for the busy-amnesty reader; gate_version for the version field).
     # Skip the read for empty/connection-error results (no body landed).
@@ -2914,12 +2925,21 @@ _probe_once_classified() {
     # Red still counts. Green still counts. The 503/path-7/28 storm
     # observed in the v0.20.0 boot storm is the exact class silenced
     # here — pool still warming, the gate gets the quiet window.
-    if [ "$_PROBE_STATUS" = "transient" ] && _boot_grace_active; then
-        # Return 0 (green) but stamp _PROBE_STATUS="boot-grace-suppressed"
-        # so the caller can distinguish a real green from a silenced
-        # transient if it cares (the gate_soak counter does).
+    # W3 (council 2026-10-12): a SUPPRESSED transient is "ignored" —
+    # neither green nor red. The old shape returned 0 (pass), which
+    # callers could mistake for a green; the return is now the
+    # dedicated 3 (ignored) and _PROBE_STATUS carries the token so
+    # display paths can still distinguish it. Consumers: _probe_with_retry
+    # propagates 3; _probe treats 3 as no-green/no-fail (rides on);
+    # gate_soak counts it as "no green" (the consecutive counter
+    # resets — an ignored probe is not a green). Conservative mode
+    # (W1) sets _PROBE_SUPPRESSION_STRICT=1 and NEVER lands here —
+    # v0.18-identical strictness.
+    if [ "$_PROBE_STATUS" = "transient" ] \
+       && [ "${_PROBE_SUPPRESSION_STRICT:-0}" != "1" ] \
+       && _boot_grace_active; then
         _PROBE_STATUS="boot-grace-suppressed"
-        return 0
+        return 3
     fi
     # BUSY-AMNESTY: a transient that is NOT in boot-grace still
     # advances consecutive-green as a soft-green when the busy
@@ -2928,13 +2948,26 @@ _probe_once_classified() {
     # _read_inflight_turns_bounded below (C-8b: NO new file, NO
     # new daemon-side writer). The asymmetry between readyz (has
     # amnesty today) and livez/soak (extended now) is closed here.
-    if [ "$_PROBE_STATUS" = "transient" ] && _busy_amnesty_granted; then
+    # W1 (council): conservative mode sets _PROBE_SUPPRESSION_STRICT=1
+    # — NO amnesty/suppression, v0.18-identical strictness (503 and
+    # connection-level failures are red, not soft-greens).
+    if [ "$_PROBE_STATUS" = "transient" ] \
+       && [ "${_PROBE_SUPPRESSION_STRICT:-0}" != "1" ] \
+       && _busy_amnesty_granted; then
         _PROBE_STATUS="busy-amnesty"
         return 0
     fi
+    # C2 (council): the tail must implement the DOCUMENTED three-state
+    # contract (header above: "0 on green, 1 on red, 2 on transient").
+    # The prior shape returned 1 for transients, which the retry layer
+    # reads as hard-red — making the 1s/2s/4s backoff and the phase
+    # ride-out DEAD CODE (a single post-grace blip insta-failed the
+    # gate). Transients now return 2; the retry loop and _probe's
+    # phase-budget ride-out consume that state.
     case "$_PROBE_STATUS" in
         green) return 0 ;;
-        *) return 1 ;;
+        red) return 1 ;;
+        *) return 2 ;;   # transient (and any future soft class) — retryable
     esac
 }
 
@@ -2961,7 +2994,7 @@ _probe_with_retry() {
         rc=$?
         case "$rc" in
             0)
-                # green (or a silenced transient / busy-amnesty soft-green)
+                # green (or a soft-green)
                 case "$_PROBE_STATUS" in
                     green)
                         # Advance the boot-grace counter ONLY on real
@@ -2975,7 +3008,7 @@ _probe_with_retry() {
                         _boot_grace_record_green
                         return 0
                         ;;
-                    boot-grace-suppressed|busy-amnesty) return 0 ;;
+                    busy-amnesty) return 0 ;;
                 esac
                 ;;
             1)
@@ -2983,8 +3016,16 @@ _probe_with_retry() {
                 _boot_grace_record_non_green
                 return 1
                 ;;
+            3)
+                # W3: boot-grace-suppressed (ignored) — neither green
+                # nor red. Does NOT advance the green counter, does
+                # NOT retry (the grace window is ending on its own),
+                # does NOT fail. Propagate 3 so _probe keeps riding
+                # the phase budget.
+                return 3
+                ;;
         esac
-        # transient → bounded retry with backoff (also resets the
+        # rc=2 — transient → bounded retry with backoff (also resets the
         # boot-grace counter — a transient is not a non-transient
         # green, so the consecutive-counting invariant holds).
         _boot_grace_record_non_green
@@ -3099,15 +3140,22 @@ _boot_grace_active() {
 # busy-but-alive semantic — a silenced transient is the daemon
 # still warming, not a gate-fail.
 _probe() {
-    local path="$1" budget="$2" port="$3" deadline now body="" status rc
+    local path="$1" budget="$2" port="$3" deadline now body="" status rc remaining
     deadline=$(( $(_now_epoch) + budget ))
     lock_heartbeat
     while :; do
-        _probe_with_retry "$path" "$port" "$deadline" >/dev/null
+        # C2 (council): pass a RELATIVE budget (the remaining phase
+        # slice) — the prior shape passed the ABSOLUTE deadline, which
+        # _probe_with_retry added to _now_epoch again, producing a
+        # retry deadline ~1.7e9 s in the future (retry loop could
+        # never time out against its own budget).
+        remaining=$(( deadline - $(_now_epoch) ))
+        [ "$remaining" -lt 1 ] && remaining=1
+        _probe_with_retry "$path" "$port" "$remaining" >/dev/null
         rc=$?
         case "$rc" in
             0)
-                # green or soft-green (boot-grace-suppressed / busy-amnesty)
+                # green or soft-green (busy-amnesty)
                 if [ "$_PROBE_STATUS" = "green" ]; then
                     # Echo body for the green case so gate_livez /
                     # gate_readyz callers receive the JSON response
@@ -3122,28 +3170,26 @@ _probe() {
                         [ -n "$body" ] && printf '%s\n' "$body"
                     fi
                 fi
-                # busy-amnesty / boot-grace-suppressed: emit the
-                # body we captured (a readyz busy-but-alive still
-                # has a payload). The next-read body fetch above
-                # may have lost it; we kept _PROBE_BODY from the
-                # first classified call. Re-emit if present.
-                if [ "$_PROBE_STATUS" = "busy-amnesty" ] || \
-                   [ "$_PROBE_STATUS" = "boot-grace-suppressed" ]; then
+                # busy-amnesty: emit the captured body (a readyz
+                # busy-but-alive still has a payload).
+                if [ "$_PROBE_STATUS" = "busy-amnesty" ]; then
                     if [ -n "$_PROBE_BODY" ]; then
                         printf '%s\n' "$_PROBE_BODY"
                     fi
                 fi
                 return 0
                 ;;
+            3)
+                # W3: boot-grace-suppressed — ignored: not a green,
+                # not a fail. Keep riding the phase budget.
+                ;;
             2)
-                # transient-exhausted: do not fail the phase; return 1
-                # so the gate treats this iteration as "no green" (gate
-                # counter does not advance) and continues. Fail-closed
-                # on the phase-level deadline (the gate loop has its
-                # own per-phase timeout that bounds the "no green"
-                # state).
-                _warn "probe ${path}: 3 transient retries exhausted — counting as no green (continuing)"
-                return 1
+                # C2: transient-exhausted batch — DO NOT fail the
+                # phase. The approved design rides transients out
+                # inside LIVEZ_BUDGET_S/READYZ_BUDGET_S; the gate
+                # fails only when the PHASE budget is exhausted (or
+                # on a hard red below).
+                _warn "probe ${path}: transient — riding out inside the phase budget (${remaining}s left)"
                 ;;
             1)
                 _warn "probe ${path}: hard fail (red — non-transient error)"
@@ -3155,7 +3201,12 @@ _probe() {
         lock_heartbeat
         sleep 2
     done
-    return 1
+    # C2: phase budget exhausted without green — the transient
+    # ride-out ceiling. Return 2 (transient-exhausted-at-deadline)
+    # so callers can distinguish it from a hard red; both fail the
+    # gate (fail-closed), but the reason line says WHY.
+    _warn "probe ${path}: phase budget ${budget}s exhausted without green — gate fails (transient ride-out ceiling)"
+    return 2
 }
 
 # _probe_once <path> <port> — single fast fetch (status.sh display; no budget).
@@ -4916,13 +4967,18 @@ gate_version() {
 # stale-breaks a live owner's lock.
 gate_soak() {
     local soak_s="$1" expected="$2" ceremony_remaining_s="${3:-}"
-    local waited=0 now deadline rc consecutive_green=0
+    local waited=0 now deadline rc consecutive_green=0 soak_start
     local adaptive_floor="$ADAPTIVE_SOAK_FLOOR_S"
     local adaptive_cap="$ADAPTIVE_SOAK_CAP_S"
     local adaptive_n="$ADAPTIVE_SOAK_CONSECUTIVE"
     local adaptive_cadence="$ADAPTIVE_SOAK_CADENCE_S"
     local conservative=0
     local log_line
+    # C6 (council): record the WALL-CLOCK soak start at gate entry —
+    # the early-exit floor is elapsed = now - soak_start, NOT the
+    # green count and NOT the sleep-cadence-accumulated $waited
+    # (which drifts against real time).
+    soak_start="$(_now_epoch)"
     if [ "${ENSEMBLE_SOAK_CONSERVATIVE:-0}" = "1" ]; then
         conservative=1
     fi
@@ -4955,8 +5011,37 @@ gate_soak() {
         fi
     fi
 
+    # W2 (council): ENSEMBLE_PROMOTE_SOAK_S (soak_s) was claimed by the
+    # log line as the adaptive ceiling but never APPLIED — the env was
+    # silently ignored in adaptive mode. It is now a REAL cap:
+    # effective cap = min(ADAPTIVE_SOAK_CAP_S, ceremony-shrunk cap,
+    # soak_s). The floor is clamped to the effective cap so a short
+    # user ceiling still terminates (a floor ABOVE the cap would make
+    # the soak un-exitable on greens).
+    if [ "$soak_s" -lt "$adaptive_cap" ]; then
+        _log "soak: ENSEMBLE_PROMOTE_SOAK_S=${soak_s}s is BELOW the adaptive cap ${adaptive_cap}s — capping (W2: the env is a real ceiling now)"
+        adaptive_cap="$soak_s"
+    fi
+    if [ "$adaptive_floor" -gt "$adaptive_cap" ]; then
+        _log "soak: floor ${adaptive_floor}s > effective cap ${adaptive_cap}s — clamping floor to the cap"
+        adaptive_floor="$adaptive_cap"
+    fi
+
     if [ "$conservative" = "1" ]; then
-        _log "soak ${soak_s}s (CONSERVATIVE mode: ENSEMBLE_SOAK_CONSERVATIVE=1 — re-probe /livez + /readyz every 30s; no early exit; bit-identical to v0.18 era)"
+        # W1 (council): conservative mode is v0.18-identical STRICT —
+        # boot-grace suppression and busy-amnesty soft-greens are
+        # DISABLED for the conservative loop (the strict flag makes
+        # _probe_once_classified classify 503/connection-failures as
+        # plain transient→_probe_once non-zero→red, exactly the v0.18
+        # curl -fsS behavior). Delta vs v0.18 (documented, acceptable):
+        # (a) classification mechanism is -w status-code + captured
+        # curl_rc instead of -fsS body-sniff (outcome-identical for
+        # 503/5xx/4xx/refused/timeout); (b) probes heartbeats the
+        # pipeline lock each iteration (additive safety, no outcome
+        # change); (c) gate_version mid-soak re-check present (was
+        # absent in v0.18 — strictens, never loosens).
+        _PROBE_SUPPRESSION_STRICT=1
+        _log "soak ${soak_s}s (CONSERVATIVE mode: ENSEMBLE_SOAK_CONSERVATIVE=1 — re-probe /livez + /readyz every 30s; no early exit; v0.18-identical strict probes)"
         deadline=$(( $(_now_epoch) + soak_s ))
         while :; do
             lock_heartbeat
@@ -4980,6 +5065,7 @@ gate_soak() {
 
     # Adaptive default mode.
     _log "soak ${adaptive_cap}s (early-exit on ${adaptive_n} consecutive green probes @ ${adaptive_cadence}s cadence, floor ${adaptive_floor}s; user-set soak_s=${soak_s} — the adaptive CAP governs, soak_s is a hard ceiling)"
+    _PROBE_SUPPRESSION_STRICT=0   # W1: adaptive default re-enables grace/amnesty
     deadline=$(( $(_now_epoch) + adaptive_cap ))
     while :; do
         lock_heartbeat
@@ -5000,6 +5086,12 @@ gate_soak() {
                 # transient-exhausted — counted as "no green"
                 _log "soak: /livez transient-exhausted at ${waited}s (counted as no green)"
                 ;;
+            3)
+                # W3: boot-grace-suppressed — ignored: not a green,
+                # not a fail. The consecutive counter resets below
+                # (an ignored probe is not a green).
+                _log "soak: /livez boot-grace-suppressed at ${waited}s (ignored)"
+                ;;
         esac
         _probe_once_classified "/readyz" "$PORT"
         readyz_rc=$?
@@ -5012,12 +5104,23 @@ gate_soak() {
             2)
                 _log "soak: /readyz transient-exhausted at ${waited}s (counted as no green)"
                 ;;
+            3)
+                _log "soak: /readyz boot-grace-suppressed at ${waited}s (ignored)"
+                ;;
         esac
         # Version drift: same red semantics (lib.sh:4258 anchor —
-        # mid-soak version drift fails the gate).
-        if ! gate_version "$expected" > /dev/null; then
-            _warn "soak FAILURE: version drifted at ${waited}s (lib.sh:4258 pin)"
-            return 1
+        # mid-soak REAL version drift fails the gate). C2 (council):
+        # the version check runs ONLY on a green tick — during a
+        # transient window there is NO version evidence (empty probe
+        # body); reading that as "drift" turned every transient storm
+        # into an instant soak failure (the C2 violation). A genuine
+        # drift still arrives on a 200 tick and fails exactly per the
+        # pin.
+        if [ "$livez_rc" = "0" ] && [ "$readyz_rc" = "0" ]; then
+            if ! gate_version "$expected" > /dev/null; then
+                _warn "soak FAILURE: version drifted at ${waited}s (lib.sh:4258 pin)"
+                return 1
+            fi
         fi
         # Advance the consecutive-green counter ONLY on real green
         # results (boot-grace-suppressed and busy-amnesty soft-greens
@@ -5037,8 +5140,13 @@ gate_soak() {
         # DB churn). The pre-P3 behavior was instant red → auto-
         # rollback; the C-1 fix is that the gate MUST reach the cap
         # with consecutive_green >= 3 to commit.
-        if [ "$consecutive_green" -ge "$adaptive_n" ]; then
-            _log "soak SUCCESS at ${waited}s — ${consecutive_green} consecutive greens (adaptive early-exit; floor was wall-clock ${adaptive_floor}s)"
+        # C6 (council): early-exit ALSO requires the wall-clock floor —
+        # elapsed = now - soak_start (recorded at gate entry), NOT the
+        # green count alone. 3 fast greens must NOT end the soak before
+        # the approved floor.
+        local soak_elapsed=$(( $(_now_epoch) - soak_start ))
+        if [ "$consecutive_green" -ge "$adaptive_n" ] && [ "$soak_elapsed" -ge "$adaptive_floor" ]; then
+            _log "soak SUCCESS at ${waited}s — ${consecutive_green} consecutive greens (adaptive early-exit; floor ${adaptive_floor}s HELD: elapsed=${soak_elapsed}s)"
             return 0
         fi
         if [ "$now" -ge "$deadline" ]; then

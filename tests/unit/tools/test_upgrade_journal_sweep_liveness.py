@@ -333,9 +333,10 @@ class TestThreeSignalSweepPredicate:
     def test_ac4b_fresh_hb_alone_returns_true_no_pid(
         self, tmp_path: Path
     ) -> None:
-        """AC4b-3 — fresh heartbeat alone (stale armed_at, no pid)
-        → True. Sweep sees the recent splice-written stamp and
-        leaves pending_op alone even though the pid slot is dead."""
+        """AC4b-3 — fresh heartbeat alone (stale armed_at, pid slot
+        empty) → True (SPEC cell). C8: the predicate consults hb
+        freshness before any pid gate, so the sweep leaves the
+        pending_op alone in the pre-spawn-stamp window."""
         from daemon.tools import upgrade_journal as uj
 
         install = tmp_path / "install"
@@ -354,19 +355,16 @@ class TestThreeSignalSweepPredicate:
         )
         # Stale armed_at + pid = 0 — but heartbeat fresh ⇒ True
         sweep = self._build_sweep(install)
-        # owner_pid <= 0 short-circuits to False (per the predicate's
-        # first guard). Re-read the plan: "fresh heartbeat alone" is
-        # only meaningful when the sweep has a SHAPE that includes
-        # pid > 0 but still trusts a fresh heartbeat over a stale pid.
-        # The current P2 predicate guards owner_pid <= 0 first; that
-        # is the conservative shape — if the op has no pid slot at
-        # all, "fresh heartbeat" is the only signal we have. We
-        # accept the conservative shape here: pid=0 sweeps return
-        # False unless a cgroup leaf says otherwise; future work
-        # (P3+) widens the predicate. For now, the signal-1-only
-        # truth (fresh hb alone returns True WHEN pid > 0 is live)
-        # is already proven in test_ac4a_fresh_hb_stale_armed_live_pid.
-        assert sweep._executor_alive_recent(op) is False
+        # C8 (council 2026-10-12): the predicate consults heartbeat
+        # freshness FIRST — the AC4b trust-table cell "fresh hb alone
+        # → leave alone even when pid and cgroup are missing" is the
+        # SPEC, and the pre-spawn-stamp window (owner_pid == 0 while
+        # the live promote heartbeats in_flight.last_heartbeat) is
+        # exactly the case it protects. The old shape asserted the
+        # INVERTED value here (a rationalized pid<=0-first
+        # short-circuit) while the cell NAME promised True — code and
+        # test now agree on the spec.
+        assert sweep._executor_alive_recent(op) is True
 
     def test_ac4c_stale_armed_no_hb_dead_pid_returns_false(
         self, tmp_path: Path

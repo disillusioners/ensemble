@@ -1179,6 +1179,43 @@ class SQLModelMessageQueueRepository:
             return 0
 
         total_deleted = 0
+        # C7 (council 2026-10-12): preserve_in_flight was ACCEPTED but
+        # never USED — the DELETE was a bare WHERE message_id IN (...)
+        # with NO predicate re-check at fire time, so a message
+        # dispatched inside the capture→DELETE window lost its backing
+        # row mid-flight (the env-poison occ-#5 incident class — the
+        # exact thing this parameter was built to prevent). The
+        # preserve predicate is now RE-APPLIED at DELETE time: the
+        # same NOT-IN subquery the capture ran, re-evaluated per chunk
+        # against LIVE task state (F-1 contract: the audit and the
+        # DELETE must agree on the predicate).
+        preserve_sql = ""
+        if preserve_in_flight:
+            arm3_active = _message_queue_boot_auto_continued_preserve_enabled()
+            terminal_sql = (
+                "(" + ",".join(f"'{s}'" for s in sorted(TERMINAL_INSTANCE_STATUSES)) + ")"
+            )
+            preserve_sql = (
+                " AND message_id NOT IN (SELECT message_id FROM task "
+                "WHERE status IN ('running', 'paused')"
+            )
+            if arm3_active:
+                preserve_sql += (
+                    " OR (auto_continued_at IS NOT NULL AND EXISTS ("
+                    "SELECT 1 FROM instances "
+                    "WHERE instances.instance_id = task.instance_id "
+                    f"AND instances.status NOT IN {terminal_sql})"
+                    ")"
+                )
+            else:
+                logger.warning(
+                    "JOURNAL: MessageQueueRepository.delete_doomed_ids "
+                    "(DELETE_PHASE) preserve_in_flight=True but kill-switch "
+                    "%s=0 — arm 3 DISABLED for the DELETE re-check "
+                    "(predicate matches the capture-time shape)",
+                    MESSAGE_QUEUE_BOOT_AUTO_CONTINUED_PRESERVE_KILL_SWITCH_ENV,
+                )
+            preserve_sql += ")"
         # Chunk the doomed-id list; bounded DELETE-where-in per
         # chunk (matches the existing pre-P3 single-shot DELETE
         # shape, just chunked for safety on large doomed sets).
@@ -1191,7 +1228,10 @@ class SQLModelMessageQueueRepository:
                 f":id_{j}" for j in range(len(chunk))
             )
             params = {f"id_{j}": cid for j, cid in enumerate(chunk)}
-            sql = f"DELETE FROM message_queue WHERE message_id IN ({placeholders})"
+            sql = (
+                f"DELETE FROM message_queue WHERE message_id IN ({placeholders})"
+                f"{preserve_sql}"
+            )
             with Session(self.engine) as session:
                 result = session.exec(text(sql), params=params)
                 session.commit()

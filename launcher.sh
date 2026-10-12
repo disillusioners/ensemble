@@ -1069,8 +1069,20 @@ _journal_sweep() {
             # halt-for-human: ambiguous state, no silent commit.
             local displaced_v
             displaced_v="$(_js_json_field "$inf" "displaced_version" 2>/dev/null)" || displaced_v=""
+            # W6 (council 2026-10-12): a JSON-null displaced_version
+            # reads back through _js_json_field as the LITERAL "null"
+            # (the string walker returns the raw token; empty-check
+            # misses it). Left unfenced, the quoted write below turned
+            # it into `"previous":"null"` — a QUOTED string — diverging
+            # from lib.sh's unquoted JSON null and breaking every
+            # `prev != "null"` consumer on the next boot. A null/absent
+            # displaced_version is the SAME ambiguous pre-stamp state:
+            # halt-for-human.
+            if [ "$displaced_v" = "null" ]; then
+                displaced_v=""
+            fi
             if [ -z "$displaced_v" ]; then
-                # Old-format txn: no `displaced_version` field.
+                # Old-format txn: no (or null) `displaced_version`.
                 # Refuse to commit silently — halt-for-human, leave
                 # the txn in place for forensic review. The B4
                 # leave-txn-open policy means the next sweep will

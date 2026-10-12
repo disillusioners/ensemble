@@ -80,7 +80,7 @@ REL="$INSTALL_DIR/releases"
 
 # ── Target resolution ───────────────────────────────────────────────────────
 # Decision (g) D-P1.3: the caller MUST supply the target explicitly —
-# via --to <ver>, positional $1, the VERSION= env, or the new
+# via --to <ver>, the VERSION= env, or the ROLLBACK_TARGET= env (the
 # ROLLBACK_TARGET env. The journal's `previous` field is no longer the
 # silent fallback (it can be stale whenever the previous run halted
 # AFTER the flip and BEFORE commit — the N-2 walk bug). The caller's
@@ -97,16 +97,12 @@ if [ -z "$TO_VERSION" ] && [ -n "${ROLLBACK_TARGET:-}" ]; then
     TO_VERSION="$ROLLBACK_TARGET"
 fi
 
-# Positional $1 alternative: if no --to was given AND $1 is a non-flag
-# positional (not demo/live/sandbox/--to/--force/-h/--help), accept it
-# as the target. Bail with a structured error if $1 is a version-shaped
-# token that we ignored.
-if [ -z "$TO_VERSION" ] && [ -n "${1:-}" ]; then
-    case "${1}" in
-        demo|live|sandbox|--to|--force|-h|--help) ;;
-        *) TO_VERSION="${1}" ;;
-    esac
-fi
+# W7 (council 2026-10-12): the positional-$1 fallback was REMOVED — it
+# was dead/misleading (the arg parser already routes non-flag tokens to
+# the structured unknown-flag refusal, so a bare version-shaped $1
+# never reached the target resolution; the comment promised a supply
+# mechanism that could not fire). Remaining mechanisms: --to <ver>,
+# VERSION= env, ROLLBACK_TARGET= env.
 
 if [ -z "$TO_VERSION" ]; then
     # No caller-supplied target. The previous fallback to
@@ -114,7 +110,7 @@ if [ -z "$TO_VERSION" ]; then
     # stale (N-2 walk bug) and the caller's intent must drive the
     # rollback. Refuse with exit 78 and a clear pointer to the new
     # contract.
-    _warn "no rollback target supplied — caller MUST pass --to <ver> (or VERSION= / ROLLBACK_TARGET= / positional $1) per the D-P1.3 contract; the journal's previous field is no longer the silent fallback"
+    _warn "no rollback target supplied — caller MUST pass --to <ver> (or the VERSION= / ROLLBACK_TARGET= env) per the D-P1.3 contract; the journal's previous field is no longer the silent fallback"
     exit 78
 fi
 

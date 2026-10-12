@@ -492,6 +492,178 @@ rm -rf "$SUBTEST_TMPDIR"
 # Final tally
 # ============================================================================
 echo ""
+
+
+# ===========================================================================
+# C1/C2 (council 2026-10-12): connection-level classification + ride-out
+# ===========================================================================
+# The stub harness's STUB_FAIL=refuse mode (server exits → connection
+# refused → curl exit 7) and STUB_DELAY mode (> curl's 5s max-time →
+# curl exit 28) were UNUSED. These cells pin the C1 fix: refused /
+# timed-out probes are TRANSIENT (rc 2 from _probe_once_classified),
+# never red.
+
+section "C1a — connection refused (curl 7) → transient"
+
+# STUB_FAIL=refuse mode (previously unused): the stub boots WITH
+# refuse armed, serves exactly ONE request (the harness health-check
+# curls it — server exits mid-handler, _start_stub reports not-ready,
+# which is EXPECTED here and ignored), and from then on every
+# connection is refused — curl exit 7. The C1 defect classified this
+# red (stale PIPESTATUS read); it must be transient.
+_stub_set FAIL /livez "refuse"
+_start_stub 18776 || true   # health-check death is the point; rc ignored
+_setup_subtest C1a
+export PORT=18776
+sleep 0.5   # listener teardown after the health-check kill → refused
+_probe_once_classified /livez "$PORT"
+assert_eq "C1a refused → transient (was: red via stale PIPESTATUS)" "transient" "$_PROBE_STATUS"
+rm -rf "$SUBTEST_TMPDIR"
+_stop_stub || true
+
+section "C1b — probe timeout (curl 28) → transient"
+
+# Raw-launch a delay-only server (the _start_stub ready-check times
+# out against a 6s handler, so the harness path can't be used). Every
+# request hangs past curl's 5s max-time → curl exit 28.
+mkdir -p /tmp/soak-delay-stub-$$
+cat > /tmp/soak-delay-stub-$$/server.py <<'DPYEOF'
+import sys, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        time.sleep(6)
+        body = b'{"status":"ok","version":"vTEST"}'
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+DPYEOF
+python3 /tmp/soak-delay-stub-$$/server.py 18777 &
+DPID=$!
+sleep 0.7
+_setup_subtest C1b
+export PORT=18777
+t0=$SECONDS
+_probe_once_classified /livez "$PORT"
+rc=$?
+assert_eq "C1b timed-out → transient" "transient" "$_PROBE_STATUS"
+assert_eq "C1b rc 2 (three-state protocol)" "2" "$rc"
+kill $DPID 2>/dev/null
+rm -rf "$SUBTEST_TMPDIR" /tmp/soak-delay-stub-$$
+
+# ---------------------------------------------------------------------------
+# C2 pin — T+30s-then-green: sustained transients RIDE OUT inside the
+# phase budget and the gate PASSES once green. (The shipped defect:
+# a single post-grace blip returned 1 → instant gate fail — the
+# 1s/2s/4s retry + budget ride-out were dead code.)
+# ---------------------------------------------------------------------------
+section "C2 — T+30s transient storm then green → gate PASSES (ride-out)"
+
+STUB_TRANSIENT_PORT=18778
+# 503 for the first 30s, then 200 (STUB_TRANSIENT_UNTIL epoch).
+cat > /tmp/soak-transient-stub-$$/server.py 2>/dev/null || mkdir -p /tmp/soak-transient-stub-$$
+cat > /tmp/soak-transient-stub-$$/server.py <<'TPYEOF'
+import os, sys, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+UNTIL = int(os.environ.get("STUB_TRANSIENT_UNTIL", "0"))
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if int(time.time()) < UNTIL:
+            body = b'{"status":"degraded"}'
+            self.send_response(503)
+        else:
+            body = b'{"status":"ok","version":"vTEST"}'
+            self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+TPYEOF
+_setup_subtest C2ride
+export PORT="$STUB_TRANSIENT_PORT"
+T30_UNTIL=$(( $(date +%s) + ${T30_WINDOW_S:-30} ))
+STUB_TRANSIENT_UNTIL="$T30_UNTIL" python3 /tmp/soak-transient-stub-$$/server.py "$STUB_TRANSIENT_PORT" &
+TPID=$!
+t0=$SECONDS
+LIVEZ_BUDGET_S=${T30_BUDGET_S:-45} gate_livez >/dev/null 2>&1
+rc=$?
+elapsed=$((SECONDS - t0))
+kill $TPID 2>/dev/null
+assert_eq "C2 rides out 30s of 503s then PASSES" "0" "$rc"
+if [ "$elapsed" -ge $(( ${T30_WINDOW_S:-30} - 3 )) ]; then _pass; else
+    _fail "C2 ride-out took the full transient window" ">=27s" "${elapsed}s (gate passed too EARLY — transients were not being ridden)"
+fi
+rm -rf "$SUBTEST_TMPDIR" /tmp/soak-transient-stub-$$
+
+# C2 ceiling control: the ride-out is bounded — with a tiny budget and
+# a never-coming server, the gate fails AT the budget (not instantly).
+section "C2c — ride-out ceiling: tiny budget + dead port → fails at budget"
+
+_setup_subtest C2c
+PORT=19799   # nothing listens here
+t0=$SECONDS
+LIVEZ_BUDGET_S=6 gate_livez >/dev/null 2>&1
+rc=$?
+elapsed=$((SECONDS - t0))
+assert_eq "C2c bounded ride-out still fails (rc 2 at budget)" "2" "$rc"
+if [ "$elapsed" -ge 5 ]; then _pass; else
+    _fail "C2c gate failed at the budget, not instantly" ">=5s" "${elapsed}s"
+fi
+rm -rf "$SUBTEST_TMPDIR"
+
+# ---------------------------------------------------------------------------
+# C6 pin — floor-holds: 3 greens arriving at ~30s must NOT end the soak
+# before the 60s floor. (Shipped defect: early-exit was greens-count
+# only — soak exited at ~30s vs the approved 60s floor.)
+# ---------------------------------------------------------------------------
+section "C6 — floor-holds: greens at ~30s do not exit before the 60s floor"
+
+STUB_FLOOR_PORT=18780
+mkdir -p /tmp/soak-floor-stub-$$
+UNTIL=$(( $(date +%s) + 28 ))   # 503 until t+28 → first greens land ~28-30s
+cat > /tmp/soak-floor-stub-$$/server.py <<'FPYEOF'
+import os, sys, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+UNTIL = int(os.environ.get("STUB_TRANSIENT_UNTIL", "0"))
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if int(time.time()) < UNTIL:
+            body = b'{"status":"degraded"}'
+            self.send_response(503)
+        else:
+            body = b'{"status":"ok","version":"vTEST"}'
+            self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+FPYEOF
+STUB_TRANSIENT_UNTIL="$UNTIL" python3 /tmp/soak-floor-stub-$$/server.py "$STUB_FLOOR_PORT" &
+FPID=$!
+_setup_subtest C6floor
+export PORT="$STUB_FLOOR_PORT"
+sleep 0.5
+t0=$SECONDS
+ADAPTIVE_SOAK_CADENCE_S=2 ADAPTIVE_SOAK_FLOOR_S=${FLOOR_TEST_FLOOR_S:-60}     ADAPTIVE_SOAK_CAP_S=${FLOOR_TEST_CAP_S:-90}     gate_soak 120 "vTEST" "" >/dev/null 2>&1
+rc=$?
+elapsed=$((SECONDS - t0))
+kill $FPID 2>/dev/null
+assert_eq "C6 floor-holds: soak succeeds" "0" "$rc"
+if [ "$elapsed" -ge $(( ${FLOOR_TEST_FLOOR_S:-60} - 2 )) ]; then _pass; else
+    _fail "C6 soak did NOT exit before the floor"         ">=${FLOOR_TEST_FLOOR_S:-60}s"         "${elapsed}s (3 greens at ~30s ended the soak EARLY — floor not wired)"
+fi
+rm -rf "$SUBTEST_TMPDIR" /tmp/soak-floor-stub-$$
+
 echo "============================================================"
 echo "Test summary: $PASS passed / $FAIL failed"
 echo "============================================================"

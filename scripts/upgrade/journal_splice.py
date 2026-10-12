@@ -141,6 +141,65 @@ def _live_install_root() -> Path:
     return (home / LIVE_INSTALL_DIRNAME).resolve(strict=False)
 
 
+def _pid_alive(pid: int) -> bool:
+    """os.kill(pid, 0) liveness with the EPERM=ALIVE rule — mirrors the
+    bash twin `_pid_alive` (lib.sh) and `upgrade_journal._pid_alive`
+    (PermissionError → the process EXISTS under another user; killing
+    a live foreign owner's lock would trample its txn)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _pipeline_lock_held(jp: Path) -> bool:
+    """True when the promote/rollback pipeline lock for the install that
+    OWNS this journal is held by a LIVE owner (C4 remediation, council
+    2026-10-12).
+
+    Protocol (mirrors lib.sh lock_acquire / the launcher _js_lock
+    twin): the lock is the DIRECTORY
+    ``<install>/releases/rollback.lock.d``; contents: ``owner`` (pid),
+    ``run_id``, ``heartbeat`` (epoch, refreshed ~30s). HELD := the dir
+    exists AND the owner pid is alive. Heartbeat age is advisory — a
+    live owner is trusted even mid-un-heartbeated long ops (the stop
+    span runs un-heartbeated up to 600s; lib.sh never breaks a live
+    owner's lock on heartbeat age alone). A crashed owner leaves a
+    fresh-heartbeat dir with a dead pid → NOT held → the refusal
+    stands (fail-closed) until the sweep adopts/breaks the stale dir.
+
+    Why this shape: the live-install refusal (mirrored from
+    ledger_check.py:46-55) fences the READ/inspect tool out of the
+    live install — but the splice is the WRITE tool ON the promote
+    pipeline itself, and promote.sh live DETERMINISTICALLY refused at
+    its first splice call (the maiden ceremony was unusable as
+    shipped; a live manual rollback diverged the journal after
+    repoint). Waiving ONLY while the pipeline lock is genuinely held
+    keeps OUT-of-pipeline writers fail-closed: any splice call against
+    the live install while no pipeline action is running is refused
+    exactly as before. Residual (documented, accepted): a writer that
+    somehow runs while the SANCTIONED pipeline holds the lock passes
+    the same check the lock itself grants — the lock is the trust
+    anchor, not the caller's identity (mkdir-locks carry no
+    inheritable fd to attest with)."""
+    releases = jp.parent
+    if releases.name != "releases":
+        return False
+    lock_dir = releases / "rollback.lock.d"
+    if not lock_dir.is_dir():
+        return False
+    try:
+        owner_raw = (lock_dir / "owner").read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if not owner_raw.isdigit():
+        return False
+    return _pid_alive(int(owner_raw))
+
+
 def _is_under_live(resolved: Path) -> bool:
     live = _live_install_root()
     # String compare first (fast; sufficient on POSIX where the live path
@@ -301,6 +360,18 @@ def _op_set_field(jp: Path, args: list[str]) -> int:
             "set-field in_flight is fenced — use set-in-flight-field <key> <json> "
             "for the nested write path (decisions (b) / C-2)",
         )
+    if field == "history":
+        # W5 (council 2026-10-12): the history key is APPEND-ONLY —
+        # set-field (whole-object replace) on it could silently erase
+        # the audit trail (the only evidence surface promote/rollback
+        # debugging has). The sole writer is the append-history op;
+        # anything else refuses.
+        _die_refused(
+            "field-ownership",
+            "set-field history is APPEND-ONLY — history may only be written "
+            "via the append-history op (W5: a whole-object replace would "
+            "erase the audit trail)",
+        )
     # Parse the raw literal; on failure this is an argv-shape bug, refuse.
     try:
         parsed_raw = json.loads(raw)
@@ -353,6 +424,15 @@ def _op_unset_field(jp: Path, args: list[str]) -> int:
         _die_refused(
             "field-ownership",
             f"unset-field: target '{field}' is fenced out of helper",
+        )
+    if field == "history":
+        # W5 (council 2026-10-12): history is APPEND-ONLY — unsetting it
+        # would erase the audit trail wholesale. The only writer for the
+        # history key is the append-history op.
+        _die_refused(
+            "field-ownership",
+            "unset-field history is APPEND-ONLY — history may only be written "
+            "via the append-history op (W5)",
         )
     data = _read_journal(jp)
     _ensure_required_top_level(data, [field])
@@ -424,16 +504,24 @@ def main(argv: list[str]) -> int:
         return 2
 
     # Live-install refusal (mirrors ledger_check.py:46-55 — same file we
-    # mirrored the discipline from).
+    # mirrored the discipline from). C4 (council 2026-10-12): the
+    # refusal now carries ONE waiver — while the pipeline lock
+    # (rollback.lock.d) for the journal's own install is HELD by a
+    # live owner, the splice IS the promote/rollback pipeline writing
+    # to its own journal and is allowed through. Any other caller (or
+    # a crashed-owner stale lock dir) is refused exactly as before —
+    # fail-closed for out-of-pipeline writes.
     try:
         jp = Path(raw_jp).expanduser().resolve(strict=False)
     except RuntimeError as exc:
         _die_refused("argv", f"cannot expand journal path '{raw_jp}': {exc}")
-    if _is_under_live(jp):
+    if _is_under_live(jp) and not _pipeline_lock_held(jp):
         _die_refused(
             "live-install",
-            f"journal path '{jp}' resolves under the live install root — "
-            f"refusing (live environment is out of bounds for this writer)",
+            f"journal path '{jp}' resolves under the live install root and the "
+            f"pipeline lock (rollback.lock.d) is NOT held by a live owner — "
+            f"refusing (live environment is out of bounds for this writer "
+            f"unless the promote/rollback pipeline holds the lock)",
         )
     # Path must exist for the writer to have something to splice on top
     # of (the bash journal_init creates it; we expect the caller's

@@ -1582,18 +1582,28 @@ class UpgradeJournalSweepService:
         signals (heartbeat freshness / os.kill / cgroup) corroborates
         recent activity. P2 hardening (decisions (b) / C-7 / T2.5 / AC4).
 
-        Three signals, leave pending_op alone when ANY holds:
+        TWO signals, leave pending_op alone when EITHER holds (W4
+        amendment, council 2026-10-12 — the plan said three; the third
+        signal is NOT implemented, see the rationale below):
           (1) in_flight.last_heartbeat is FRESH (`OWNER_HEARTBEAT_FRESH_S`,
               default 60s — tightened from the EXECUTOR_STALENESS_WINDOW_S=900s
               backstop). The shell lane writes this via the splice path in
               lock_heartbeat; the accessor is `uj.journal_owner_heartbeat_fresh`.
+              Consulted FIRST (C8): hb-fresh ⇒ alive regardless of the pid
+              slot (the pre-spawn-stamp window has owner_pid == 0 while a
+              live promote heartbeats).
           (2) `os.kill(owner_pid, 0) == 0` — the executor process is still
-              in the process table.
-          (3) systemd cgroup leaf matches the expected unit — when systemd
-              supervision is in play (P3+ work; the helper is a thin shim
-              that returns True when the host has no /proc/<pid>/cgroup
-              or the unit is undeterminable, deferring the broader test to
-              future work).
+              in the process table (only reached when the hb signal is
+              stale/unreadable).
+          (3) systemd cgroup leaf — DEFERRED (not implemented). What it
+              would add: a pid-recycled-under-a-foreign-unit discrimination
+              for the stale-hb + alive-pid cell (a recycled pid would be
+              wrongly trusted by signal 2 alone). Why deferred: that cell
+              requires BOTH a stale hb AND a live pid, which the W1 ruling
+              already treats as leave-alone (conservative); the leak is an
+              unbounded conservatism (a swept-later op), not a lossy
+              reclaim. Amending the docs + this comment is the W4 ruling;
+              implementing the leaf match stays P3+ work.
 
         CLEAR-eligible (sweep may proceed) only when EVERY signal fails:
           pid ESRCH-dead (a heartbeat cannot resurrect a dead pid);
@@ -1605,8 +1615,34 @@ class UpgradeJournalSweepService:
         wedge scenario where the bash scribe is alive but the probe ran
         before pid+cgroup resolved.
         """
-        if op.owner_kind != "executor" or op.owner_pid <= 0:
+        if op.owner_kind != "executor":
             return False
+        # C8 (council 2026-10-12): heartbeat freshness is consulted
+        # FIRST — before any pid gate. The prior shape short-circuited
+        # `owner_pid <= 0` to False BEFORE the hb read, refuting the
+        # AC4 trust-table cell "fresh heartbeat alone → leave alone
+        # even when pid and cgroup are missing": a pending_op in the
+        # PRE-SPAWN-STAMP window (record created before the executor
+        # stamped its pid — owner_pid legitimately 0) had a live
+        # promote heartbeating in_flight.last_heartbeat right now, and
+        # the sweep cleared the op underneath it. hb-fresh ⇒ alive,
+        # REGARDLESS of the pid slot; only a stale/unreadable hb lets
+        # pid/cgroup decide.
+        try:
+            if self._install_dir is not None and uj.journal_owner_heartbeat_fresh(
+                self._install_dir
+            ):
+                return True
+        except Exception:
+            pass  # hb signal unavailable — fall through to the pid gates
+        if op.owner_pid <= 0:
+            # no pid slot AND no fresh hb — nothing says alive
+            return False
+        # Signal (2) preparation — pid liveness (os.kill(pid, 0);
+        # every OSError including ESRCH counts as not-alive here: the
+        # hb-first gate above already returned True for the wedge case,
+        # so this arm only runs on a STALE/unreadable hb where a dead
+        # pid genuinely means the owner is gone).
         pid_alive = False
         try:
             os.kill(op.owner_pid, 0)
@@ -1616,19 +1652,6 @@ class UpgradeJournalSweepService:
         # Defense-in-depth reads (epoch from in_flight) — falls back to
         # the legacy `op.owner_heartbeat_at or op.armed_at` only when
         # the journal-side signal is unreadable.
-        try:
-            if self._install_dir is not None and uj.journal_owner_heartbeat_fresh(
-                self._install_dir
-            ):
-                # Signal (1) — heartbeat fresh. Even if pid is gone
-                # (e.g. just-spawned transient unit scraping the file),
-                # a STALE heartbeat under the 60s window anchors "still
-                # here." Trust table: trust hierarchy accepts this.
-                return True
-        except Exception:
-            pass
-        # Signal (1) unavailable / unparseable — fall through to pid/
-        # cgroup checks.
         if pid_alive:
             # Signal (2) — pid alive. Combine with the (optional) cgroup
             # check below; the cgroup fail-closed default is "indeterminable
