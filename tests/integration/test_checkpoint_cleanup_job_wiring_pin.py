@@ -784,8 +784,17 @@ class TestVacuumFullStructuralGuard:
             "(decisions.md §D-9.5)"
         )
         # The call MUST live inside CheckpointCleanupJob.run_checkpoint_prunes.
-        # Walk the file AST and verify.
-        tree_maintenance = ast.parse(MAINTENANCE.read_text(encoding="utf-8"))
+        # Walk the SAME parsed tree the enumeration scan used — node
+        # IDENTITY (``is``) is only meaningful within ONE ast.parse()
+        # result: two parses of the same file yield distinct node
+        # objects, so ``sub is sole_call`` across a re-parse is
+        # unsatisfiable for ANY implementation. [pin repair 2026-10-12,
+        # cluster 2: semantics PRESERVED — the enumerated sole_call
+        # must be found, by identity, inside run_checkpoint_prunes;
+        # every other assertion in this test is untouched.]
+        tree_maintenance = next(
+            tree for path, tree in trees if path == MAINTENANCE
+        )
         inside_permitted_method = False
         for node in ast.walk(tree_maintenance):
             if isinstance(node, ast.ClassDef) and node.name == "CheckpointCleanupJob":
