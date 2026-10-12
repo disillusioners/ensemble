@@ -151,19 +151,21 @@ describe('Maintenance console — source-grep pins (22 pins)', () => {
     it('(b) when NOT ticked (vacuumFullEnabled() === false): message build does NOT include "VACUUM FULL rewrites" (NEGATIVE — the existing destructive copy is unchanged)', () => {
       // The conditional copy construction reads `vacuumFullEnabled()`;
       // when false, the message build path skips the vacuum-aware
-      // extension. We anchor on a `!vacuumFullEnabled() ? ... : ...`
-      // ternary OR an if/else around the §D-7.6 copy — the
-      // NEGATIVE arm asserts the unticked branch does NOT contain
-      // the §D-7.6 substring.
+      // extension. We anchor on the REAL production gate — an
+      // `if (this.vacuumFullEnabled()) {` block that inlines the
+      // §D-7.6 copy into `message` — the NEGATIVE arm asserts the
+      // unticked branch (the `else` arm) does NOT contain the
+      // §D-7.6 substring.
       //
-      // Source-grep approach: find the confirm-message build site
-      // (anchored on the unique "VACUUM FULL rewrites" substring)
-      // and check that the surrounding conditional reads
-      // `vacuumFullEnabled()` — the pin asserts BOTH the presence
-      // of the conditional AND that the conditional gates the
-      // vacuum-aware copy (vs. always-on copy).
+      // Source-grep approach: match the real conditional shape
+      // (no contrived comment-anchoring). The regex requires
+      // `if (this.vacuumFullEnabled()) {` followed (non-greedy)
+      // by the unique "VACUUM FULL rewrites" substring that
+      // appears only inside the ticked consequent. The pin
+      // asserts BOTH the presence of the gate AND that the
+      // gate encloses the §D-7.6 copy (vs. always-on copy).
       const vacuumBlock = sectionComponentSrc.match(
-        /vacuumFullEnabled\s*\(\s*\)\s*\{[^}]*VACUUM FULL rewrites/s,
+        /if\s*\(\s*this\.vacuumFullEnabled\s*\(\s*\)\s*\)\s*\{[\s\S]*?VACUUM FULL rewrites/,
       );
       // The negative arm asserts the conditional exists in the
       // unticked-branch shape — without the gate, the copy is

@@ -617,11 +617,6 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     // sentence is inlined in the conditional block so the
     // substring pins (Pin 2 a/b/c/d) read the same construction
     // site as a single source of truth.
-    //
-    // vacuumFullEnabled() { ... VACUUM FULL rewrites the affected
-    // tables to reclaim disk space ... (Pin 2 b source-grep anchor:
-    // the conditional gates the §D-7.6 copy; the `if` below reads
-    // the signal and inlines the vacuum-aware sentence into `message`).
     const baseMessage = this.buildConfirmMessage(dryRun);
     let message: string;
     if (this.vacuumFullEnabled()) {
