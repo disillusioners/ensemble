@@ -118,7 +118,25 @@ PIPELINE_LOCK_HELD="${PIPELINE_LOCK_HELD_BY_CALLER:-0}"   # lib.sh stop_via_stop
 STOP_LOCK_HELD_BY_ME=0               # set if this invocation acquired the lock itself
 _die() { echo "stop-ensemble: $*" >&2; exit 2; }
 
-INSTALL_DIR="${1:-$HOME/agents-ensemble}"
+# 2026-10-12: install dir deleted twice by agent-authored test code; immediate
+# cause (test-script defect) fixed same day by user; this change is part of
+# the Layer 1 ownership-separation backstop.
+#
+# _default_install_dir — PINNED MIRROR of the lib.sh Layer-1-tolerant install
+# root resolution (stop-ensemble.sh is an entry script and deliberately does
+# not source lib.sh; same pin discipline as lib.sh _supervision_derive_unit_name).
+# Legacy shape (operator user) → $HOME/agents-ensemble — byte-identical to the
+# historical default. Post-Layer-1 service user (Environment=HOME=<install
+# dir>) → $HOME itself; the naive $HOME/agents-ensemble would WRONGLY NEST.
+_default_install_dir() {
+    local home="${HOME%/}"
+    case "$(basename "$home")" in
+        agents-ensemble|agents-ensemble-demo) printf '%s' "$home" ;;
+        *) printf '%s' "$home/agents-ensemble" ;;
+    esac
+}
+
+INSTALL_DIR="${1:-$(_default_install_dir)}"
 REPORT_PORT="${2:-}"
 # Pre-parse --force in ANY position, REMOVING it from the positional list.
 # Walks the full argv; each non-flag arg is copied into the remaining
@@ -137,7 +155,7 @@ for arg in "$@"; do
         REMAINING+=("$arg")
     fi
 done
-INSTALL_DIR="${REMAINING[0]:-$HOME/agents-ensemble}"
+INSTALL_DIR="${REMAINING[0]:-$(_default_install_dir)}"
 REPORT_PORT="${REMAINING[1]:-}"
 
 [ -n "$INSTALL_DIR" ] || _die "empty INSTALL_DIR"

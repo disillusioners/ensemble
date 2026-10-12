@@ -336,6 +336,85 @@ def _read_env_value(env_file: Path, key: str) -> str | None:
     return None
 
 
+# 2026-10-12: install dir deleted twice by agent-authored test code; immediate
+# cause (test-script defect) fixed same day by user; this change is part of
+# the Layer 1 ownership-separation backstop.
+#
+# Canonical install dir names (live/demo). Used by the HOME-shape-tolerant
+# root resolution below so both Layer-1 shapes resolve identically:
+#   legacy      — user ``nea``, HOME=/home/nea → roots are
+#                 HOME/<name> (e.g. /home/nea/agents-ensemble);
+#   post-Layer-1 — dedicated service user (e.g. ``ensemble``) whose systemd
+#                 unit carries ``Environment=HOME=<install dir>`` → the root
+#                 IS ``HOME`` itself (nesting HOME/<name> would be WRONG).
+_LIVE_INSTALL_DIR_NAMES: tuple[str, ...] = ("agents-ensemble", "agents-ensemble-demo")
+
+
+# 2026-10-12: install dir deleted twice by agent-authored test code; immediate
+# cause (test-script defect) fixed same day by user; this change is part of
+# the Layer 1 ownership-separation backstop.
+def _normalized_home() -> Path:
+    """``Path.home()`` with an EXPLICIT trailing-slash strip (S1).
+
+    Mirrors the shell side's ``home="${HOME%/}"`` (lib.sh
+    ``_install_dir_candidates``) so the Python and bash resolvers are
+    auditable against each other line-by-line. pathlib already collapses
+    trailing slashes at construction time (``Path("/home/x/")`` IS
+    ``Path("/home/x")``), so this is a contract pin, NOT a behavior
+    change. The degenerate ``HOME=/`` keeps the absolute root — stripping
+    the only slash would produce a RELATIVE empty path, which would
+    silently change every downstream join.
+    """
+    home = Path.home()
+    stripped = str(home).rstrip("/")
+    return Path(stripped) if stripped else home
+
+
+def _install_root_candidates(install_name: str) -> list[Path]:
+    """Candidate install roots for ``install_name`` under the CURRENT HOME.
+
+    Layer-1 ownership-separation tolerant: the resolution must behave
+    correctly whether HOME is the operator's home (legacy shape →
+    ``HOME/<name>``) or the install dir itself (post-Layer-1 service user →
+    ``HOME``). Ordered most-preferred-first:
+
+    1. ``HOME`` itself, when ``HOME``'s basename IS the install name
+       (post-Layer-1 shape);
+    2. ``HOME / install_name`` (legacy shape — the historical resolution);
+    3. the sibling ``<HOME.parent> / install_name``, when HOME is itself a
+       canonical install dir of the OTHER name (e.g. the post-flip live
+       daemon resolving the demo install that still lives next door).
+
+    Pure function of ``Path.home()`` — tests redirect it with a fake HOME;
+    never construct fixtures at real live-resolved paths.
+    """
+    home = _normalized_home()
+    candidates: list[Path] = []
+    if home.name == install_name:
+        candidates.append(home)
+    candidates.append(home / install_name)
+    if home.name in _LIVE_INSTALL_DIR_NAMES and home.name != install_name:
+        candidates.append(home.parent / install_name)
+    return candidates
+
+
+def _canonical_install_root(install_name: str) -> Path:
+    """Resolve the canonical install root for ``install_name``.
+
+    Picks the first candidate from :func:`_install_root_candidates` that
+    actually looks like an install root (``.env`` file or ``releases/``
+    dir present); falls back to the first candidate (the shape implied by
+    HOME) when none verifies — preserving the historical behavior of
+    returning the legacy path when nothing exists (read tools then answer
+    honestly via the journal's absent/no-install-dir statuses).
+    """
+    candidates = _install_root_candidates(install_name)
+    for cand in candidates:
+        if (cand / ".env").is_file() or (cand / "releases").is_dir():
+            return cand
+    return candidates[0]
+
+
 def _auto_derive_env() -> str | None:
     """Auto-derive the daemon's own env from launch evidence (multi-signal).
 
@@ -356,7 +435,8 @@ def _auto_derive_env() -> str | None:
        binary: ``<ver>`` → ``releases`` → ``INSTALL_DIR``). If that
        install dir has a ``releases/`` subdirectory AND is NOT one of
        the canonical HOME installs (live ``~/agents-ensemble`` / demo
-       ``~/agents-ensemble-demo``), resolve ``sandbox``. The frozen-
+       ``~/agents-ensemble-demo`` — under BOTH Layer-1 HOME shapes, see
+       :func:`_install_root_candidates`), resolve ``sandbox``. The frozen-
        binary + releases/ pair is the single strongest sandbox signal
        because a sandbox daemon has no other reliable evidence (the
        staged payload carries no ``INSTALL_DIR`` env, the only
@@ -370,7 +450,11 @@ def _auto_derive_env() -> str | None:
        name (``ensemble_prod`` for live, ``ensemble_demo`` for demo). The
        DB cross-check is the reason a leftover .env from a prior install
        cannot falsely label a dev checkout as live (the original D-FA2.3
-       single-signal failure mode).
+       single-signal failure mode). W1 (review round 2): under the
+       POST-LAYER-1 HOME shape (HOME itself is a canonical install dir),
+       the daemon's OWN ``$POSTGRES_DB`` is evaluated against BOTH
+       expected DBs BEFORE any ``.env`` file read — a co-located sibling
+       install's ``.env`` can never relabel a flipped daemon.
 
     3. **Dev-shape POSTGRES_DB → ``dev``.** When no install-dir topology
        resolves AND the daemon's own ``$POSTGRES_DB`` (or a
@@ -396,28 +480,56 @@ def _auto_derive_env() -> str | None:
         if exe is not None:
             install_dir = exe.parent.parent.parent
             if (install_dir / "releases").is_dir():
-                home = Path.home()
-                if (
-                    install_dir != home / "agents-ensemble"
-                    and install_dir != home / "agents-ensemble-demo"
-                ):
+                canonical_roots: set[Path] = set()
+                for _name in _LIVE_INSTALL_DIR_NAMES:
+                    canonical_roots.update(_install_root_candidates(_name))
+                if install_dir not in canonical_roots:
                     return "sandbox"
 
     # 2. Install-dir topology + DB cross-check → live / demo.
-    home = Path.home()
     db_hint = (os.environ.get("POSTGRES_DB") or "").strip().lower()
 
-    live_env = home / "agents-ensemble" / ".env"
-    if live_env.is_file():
-        env_db = (_read_env_value(live_env, "POSTGRES_DB") or "").strip().lower()
-        if env_db == "ensemble_prod" or db_hint == "ensemble_prod":
+    # W1 (review round 2, 2026-10-12): under the post-Layer-1 HOME shape the
+    # daemon's OWN ``$POSTGRES_DB`` (db_hint) is the strongest self-signal —
+    # evaluate it against BOTH expected DBs BEFORE any .env cross-check file
+    # reads, so a co-located sibling install's .env can never relabel a
+    # flipped daemon (a flipped-DEMO daemon with a live sibling previously
+    # read the sibling's ensemble_prod .env first, derived ``live``, and
+    # targeted the live tree; the pre-branch behavior for that topology was
+    # fail-closed None). The gate is scoped to the flipped HOME shape so the
+    # legacy hierarchy stays byte-identical on every pre-flip lane:
+    # operator-HOME daemons keep the live→demo .env precedence (a pre-flip
+    # demo daemon on a two-install host still derives live), and a db_hint
+    # with NO install topology still fails closed to None.
+    #
+    # 2026-10-12: install dir deleted twice by agent-authored test code;
+    # immediate cause (test-script defect) fixed same day by user; this
+    # change is part of the Layer 1 ownership-separation backstop.
+    home = _normalized_home()
+    lanes = [
+        ("agents-ensemble", "ensemble_prod", "live"),
+        ("agents-ensemble-demo", "ensemble_demo", "demo"),
+    ]
+    if home.name in _LIVE_INSTALL_DIR_NAMES:
+        if db_hint == "ensemble_prod":
             return "live"
-
-    demo_env = home / "agents-ensemble-demo" / ".env"
-    if demo_env.is_file():
-        env_db = (_read_env_value(demo_env, "POSTGRES_DB") or "").strip().lower()
-        if env_db == "ensemble_demo" or db_hint == "ensemble_demo":
+        if db_hint == "ensemble_demo":
             return "demo"
+        # db_hint empty/unrecognized → the .env cross-check below runs, but
+        # with the HOME-anchored (own) install evaluated BEFORE any sibling
+        # candidate — the same own-signals-first rule (stable sort keeps
+        # the other lane's legacy order).
+        lanes.sort(key=lambda lane: lane[0] != home.name)
+
+    for install_name, expected_db, label in lanes:
+        for cand in _install_root_candidates(install_name):
+            env_file = cand / ".env"
+            if env_file.is_file():
+                env_db = (
+                    _read_env_value(env_file, "POSTGRES_DB") or ""
+                ).strip().lower()
+                if env_db == expected_db or db_hint == expected_db:
+                    return label
 
     # 3. Dev-shape POSTGRES_DB → dev.
     if db_hint == "ensemble_dev":
@@ -547,9 +659,12 @@ def _resolve_install_dir(self_env: str | None) -> Path | None:
     "not in staged mode").
     """
     if self_env == "demo":
-        return Path.home() / "agents-ensemble-demo"
+        # 2026-10-12: install dir deleted twice by agent-authored test code;
+        # immediate cause (test-script defect) fixed same day by user; this
+        # change is part of the Layer 1 ownership-separation backstop.
+        return _canonical_install_root("agents-ensemble-demo")
     if self_env == "live":
-        return Path.home() / "agents-ensemble"
+        return _canonical_install_root("agents-ensemble")
     if self_env == "sandbox" and getattr(sys, "frozen", False):
         try:
             exe = Path(sys.executable).resolve()
