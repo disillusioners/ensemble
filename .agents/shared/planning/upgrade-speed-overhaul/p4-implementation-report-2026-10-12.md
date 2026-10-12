@@ -231,7 +231,7 @@ When `_enforce_deadline` halts with `daemon-state=stopped`:
 
 ### Conservative mode escape
 
-`ENSEMBLE_SOAK_CONSERVATIVE=1` reverts to v0.18-era bit-identical behavior (per decision (c) D-P3.2). The env var is read at gate_soak invocation (`lib.sh:4926-4928`); the next promote's gate_soak applies it. No code revert, no daemon restart required. The 3-factor nonce ceremony remains user-gated per `upgrade_policy`.
+`ENSEMBLE_SOAK_CONSERVATIVE=1` reverts to v0.18-era bit-identical behavior (per decision (c) D-P3.2). The env var is read at `gate_soak` invocation (lib.sh `gate_soak` body — conservative-mode branch reading `ENSEMBLE_SOAK_CONSERVATIVE`); the next promote's gate_soak applies it. No code revert, no daemon restart required. The 3-factor nonce ceremony remains user-gated per `upgrade_policy`.
 
 ### Preflight checklist (10 sub-sections)
 

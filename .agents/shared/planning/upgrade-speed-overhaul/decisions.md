@@ -50,7 +50,7 @@
 - Perf: `os.replace` + `json.load/dump` is O(1) per event vs O(history-length) walk — measured delta is the difference between 28–46 min of journal overhead and <1 min. Source: live measurement on 87 KB state.json (digest; re-anchor at `lib.sh:546-584` `journal_read` per-char brace loop `:560` and `:609-666` `journal_update`'s re-read at `:611`).
 - Discipline match: `scripts/upgrade/ledger_check.py:18-26` is the existing template (stdlib-only, explicit inputs, exit 0/1/78, refuses live install via `expanduser+resolve+samefile` test at `:46-55`). Using the same template keeps the repo's python-flavored surface uniformly disciplined.
 - Lock interplay: every current journal-write call site already runs under pipeline lock (`promote.sh:165` `lock_acquire` → `:166-170` signal trap → `:177 :2526 :2532 :4249 :301 :342 :427 :503` `lock_heartbeat`). Helper inherits this — the caller holds the lock, helper does not acquire. Single-writer invariant preserved.
-- Interactive side: `LOCK_HEARTBEAT_S=30` (`lib.sh:108`) refresh cadence is unchanged; helper is invoked from the same call sites that already `lock_heartbeat`.
+- Interactive side: `LOCK_HEARTBEAT_S=30` (lib.sh `LOCK_HEARTBEAT_S` constant in the Lock-protocol constants block) refresh cadence is unchanged; helper is invoked from the same call sites that already `lock_heartbeat`.
 
 ### Helper contract (concrete — verbatim from `architecture-recommendation.md` §3; phase-plan worker builds from this, no re-derivation)
 
@@ -152,7 +152,7 @@ python3 scripts/upgrade/journal_splice.py <journal_path> <op> [op-args...]
 ### Options considered
 
 1. **A — Status quo (writer exists for `in_flight.last_heartbeat` since 2026-09-28 commit 31cd4fb59, but slow bash walk makes the cadence a fiction; sweep's `PendingOp.owner_heartbeat_at` reader points at a field with zero writers).** Sweep reads `owner_heartbeat_at or armed_at`; `owner_heartbeat_at` is always None → sweep behaves as if armed-time is the only signal, AND the `in_flight.last_heartbeat` stamp is rarely refreshed because the bash walk can't keep up with 30 s cadence. The 37-min window corrupts every promote that depends on the sweep.
-2. **B — REPLACE `journal_heartbeat`'s bash walk with the (a) helper's `set-in-flight-field last_heartbeat <epoch>` op (C-3 + C-2 corrections).** Single touch surface; with the splice path replacing the bash walk, the existing 30 s cadence (`LOCK_HEARTBEAT_S=30`, `lib.sh:108`) is actually achievable. Sweep now reads fresh evidence via the existing `in_flight.last_heartbeat` accessor (a `set-field last_heartbeat` at the top level would be **invisible** to the sweep — C-2 explicitly requires the NESTED write via `set-in-flight-field`). **The change MUST REPLACE the bash walk, not augment it** — augment keeps the slow walk on the 30 s loop and the perf premise dies (this is the C-3 correction). Defense in depth: sweep ALSO reads systemctl/cgroup liveness for executor-kind ops (already partially at `daemon/services/upgrade_journal_sweep.py:1579-1597` via `os.kill(pid, 0)` + evidence age; extend to cgroup leaf). The `PendingOp.owner_heartbeat_at` writer on the daemon-side is a separate, future op (the helper MUST NOT touch `pending_op` per the (a) field-ownership matrix).
+2. **B — REPLACE `journal_heartbeat`'s bash walk with the (a) helper's `set-in-flight-field last_heartbeat <epoch>` op (C-3 + C-2 corrections).** Single touch surface; with the splice path replacing the bash walk, the existing 30 s cadence (`LOCK_HEARTBEAT_S=30` in lib.sh Lock-protocol constants block) is actually achievable. Sweep now reads fresh evidence via the existing `in_flight.last_heartbeat` accessor (a `set-field last_heartbeat` at the top level would be **invisible** to the sweep — C-2 explicitly requires the NESTED write via `set-in-flight-field`). **The change MUST REPLACE the bash walk, not augment it** — augment keeps the slow walk on the 30 s loop and the perf premise dies (this is the C-3 correction). Defense in depth: sweep ALSO reads systemctl/cgroup liveness for executor-kind ops (already partially at `daemon/services/upgrade_journal_sweep.py:1579-1597` via `os.kill(pid, 0)` + evidence age; extend to cgroup leaf). The `PendingOp.owner_heartbeat_at` writer on the daemon-side is a separate, future op (the helper MUST NOT touch `pending_op` per the (a) field-ownership matrix).
 3. **C — Sweep-only fix: read `journal.in_flight.last_heartbeat` (which `journal_open_txn` already stamps at `lib.sh:709` via `journal_open_txn`) plus `os.kill(pid, 0)`.** No new writer — just read what's there. Misses the case where owner_pid is alive (kill -0 = 0) but the shell-side bash walk is wedged for 4.6 min; sweep still misclassifies.
 
 ### RECOMMENDATION: **B** (with a C-style defensive read)
@@ -181,7 +181,7 @@ python3 scripts/upgrade/journal_splice.py <journal_path> <op> [op-args...]
 
 - Document the protocol boundary in the existing comment at `:1009-1019`: "previous is NOT mutated here; promote.sh owns previous writes via the journal splice helper at commit. This boot-sweep commit_and_continue is the ONLY path that may update previous from boot-sweep land (P1 g-fix); see promote.sh:438."
 
-**Cadence table** (from `lib.sh:108 :113` and the verified call-site scan):
+**Cadence table** (from lib.sh Lock-protocol + Rollback-window constants blocks and the verified call-site scan):
 
 | Heartbeat | Cadence | Writer | Reader |
 |---|---|---|---|
@@ -210,7 +210,7 @@ python3 scripts/upgrade/journal_splice.py <journal_path> <op> [op-args...]
 ## (c) Adaptive soak default
 
 ### Problem
-`gate_soak` at `lib.sh:4240-4266` always uses `ENSEMBLE_PROMOTE_SOAK_S` (default 300s, hard cap 900 at `promote.sh:156`) with fixed `sleep 30` between probes. The "shorter soak by default" goal (G2) requires the gate to terminate as soon as the daemon is convincingly stable, not at fixed time. The hard constraints require: (1) version-drift detection stays (`:4258` — `gate_version` mid-soak drift fails soak); (2) anti-flapping cap 900 stays; (3) anti-flapping block `lib.sh:102-115` stays; (4) all current fail-closed paths inside `gate_soak` stay (livez/readyz non-2xx → red; version drift → red).
+`gate_soak` (lib.sh `gate_soak` function — adaptive-loop body, defined after `gate_version`) always uses `ENSEMBLE_PROMOTE_SOAK_S` (default 300s, hard cap 900 at `promote.sh` `ENSEMBLE_PROMOTE_SOAK_S` ceiling gate) with fixed `sleep 30` between probes. The "shorter soak by default" goal (G2) requires the gate to terminate as soon as the daemon is convincingly stable, not at fixed time. The hard constraints require: (1) version-drift detection stays (the `gate_version` mid-soak drift re-check inside the `gate_soak` loop — fails soak on drift); (2) anti-flapping cap 900 stays; (3) anti-flapping block (lib.sh Rollback-window constants block + `journal_cooldown_active` + ROLLBACK_CAP_24H/COOLDOWN_S) stays; (4) all current fail-closed paths inside `gate_soak` stay (livez/readyz non-2xx → red; version drift → red).
 
 ### Options considered
 
@@ -243,7 +243,7 @@ python3 scripts/upgrade/journal_splice.py <journal_path> <op> [op-args...]
   - **If `now >= adaptive_cap` AND `consecutive_green < 3` → exit 1 → auto-rollback** (C-1: under sustained DB churn — the recurring 2026-10-10 incident class; certain once the `feature/checkpoint-conn-resilience`'s checkpoint_saver 503 probe merges — the gate would otherwise reach cap with zero greens and silently commit, vs today's behavior of instant red → auto-rollback).
   - **Red at any iteration → exit 1 FAILURE immediately** (fail-fast; do NOT ride out — ride-out is anti-flapping direction reversed).
   - **Floor holds for one transient retry without flipping exit decision** (this is what gives the floor meaning; the C-1 math is `consecutive_green ≥ 3` ONLY counts a green if at least 3 probes were green across iterations, regardless of when they land — concrete: a transient storm can delay but not bypass the consecutive-green requirement).
-- Mid-soak version drift preserved (`lib.sh:4258` unchanged).
+- Mid-soak version drift preserved (lib.sh `gate_soak` loop body — mid-soak version drift check via re-invocation of `gate_version` against `$expected`).
 - Hard ceiling: `now >= ensemble_promote_soak_s_hard_cap=900` is enforced at `promote.sh:156` (already present); the adaptive loop respects this floor.
 
 **Conservative mode (opt-in):**
@@ -458,9 +458,9 @@ The v0.20.0 boot storm was caused (in part) by `InstanceManager.__init__` at `da
 
 **Refactor `MessageQueueRepository.clear_all`** (NEW shape):
 
-- `clear_all` becomes a two-stage coordinator: calls `capture_doomed_ids_and_audit` (synchronous, in-band) then schedules `delete_doomed_ids_async` (background, non-blocking).
+- `clear_all` becomes a two-stage coordinator: calls `capture_doomed_ids_and_audit` (synchronous, in-band) then schedules the background DELETE via `daemon.api._deferred_delete_doomed_ids` (which calls `MessageQueueRepository.delete_doomed_ids` in chunks).
 - `capture_doomed_ids_and_audit` (NEW public method): reads doomed ids, audits at `:1136-1143`, returns the doomed-id list. Stays pre-pool at `daemon/manager.py:843`.
-- `delete_doomed_ids_async` (NEW public method): runs in a daemon-internal asyncio task (use the existing pool-task pattern at `daemon/manager.py:407-413` lifespan startup); takes the doomed-id list as captured; DELETE in chunks; logs completion. Triggered by an event hook on `lifespan startup readyz-green` (NEW event hook) OR via sleep-and-poll fallback if event hook isn't ready.
+- `MessageQueueRepository.delete_doomed_ids` (NEW public method, in `daemon/repositories/message_queue/repository.py`): the actual DELETE-by-id routine (chunked, `chunk_size=1000`, `preserve_in_flight=True` by default). Called by `daemon.api._deferred_delete_doomed_ids` (the async coordination helper, lives in `daemon/api.py`); takes the doomed-id list as captured; DELETE in chunks; logs completion. Triggered by the lifespan-startup hook firing on `readyz-green` (with a `+1s still-green re-check OR +5s hard floor` precedence per D-P3.9) OR via sleep-and-poll fallback if the readiness hook isn't ready yet.
 - Per chunk size: 1000 rows (small; preserves existing DELETE-where-in-predicate pattern). Bounded by existing pool.
 - Idempotency: doomed-id set is derived from the SAME predicate each boot; the next boot's CAPTURE_PHASE will re-derive the same set if DELETE didn't run. Bounded divergence is "set of doomed ids" — bounded by max rows per delete pass.
 
@@ -475,7 +475,7 @@ The v0.20.0 boot storm was caused (in part) by `InstanceManager.__init__` at `da
 
 **Boot-path side-effects**:
 
-- `lifespan startup` at `daemon/api.py:406-412 → :413` now has TWO phases: `await instance_manager.initialize()` (which calls capture) then `await pool.start()` (existing), then `READY` event fires, then background `delete_doomed_ids_async` starts.
+- `lifespan startup` at `daemon/api.py:406-412 → :413` now has TWO phases: `await instance_manager.initialize()` (which calls capture) then `await pool.start()` (existing), then `READY` event fires, then background `daemon.api._deferred_delete_doomed_ids` (which calls `MessageQueueRepository.delete_doomed_ids`) starts.
 - The `INIT_DONE` event hook fires AFTER pool is up; readyz gates on this hook.
 - If DELETE hasn't completed by the time we exit the lifespan, a `__del__` cleanup OR an explicit `on_shutdown` hook logs a WARN ("deferred wipe incomplete at shutdown"); the next boot's predicate-based wipe cleans up.
 
@@ -556,7 +556,7 @@ Concretely, per the digest:
   - Promoting run N: commit-block succeeds; `journal_set_previous OLD_CUR` writes `previous = vN-1`. Inmediacy assertion: `journal.current == $VERSION == vN`. Pass.
   - Auto-rollback in run N (if it fails): reads `PREV = $OLD_CUR = vN-1` (NEW behavior). Correct.
 - Without the fix: auto-rollback reads `journal.previous = vN-2`. **Bug**: rolls back two versions.
-- **For the boot-sweep path (C-4):** at `journal_open_txn` time, `lib.sh:700-712` stamps `in_flight.displaced_version = journal.current`. When `boot_sweep_commit_and_continue` runs, it reads `in_flight.displaced_version` (not `journal.previous`) and writes `previous = vN-1`. A subsequent manual `rollback.sh --to` lands on N-1, not N-2. The two source paths (live vs boot-sweep) converge on the FORWARD semantic but use different writers; both are verified by AC5 cells 1-4.
+- **For the boot-sweep path (C-4):** inside `journal_open_txn` (lib.sh `journal_open_txn` body, AFTER the in-flight refusal check, BEFORE the `journal_update` that writes the new `in_flight`), the capture stamps `in_flight.displaced_version = journal.current`. When `boot_sweep_commit_and_continue` runs, it reads `in_flight.displaced_version` (not `journal.previous`) and writes `previous = vN-1`. A subsequent manual `rollback.sh --to` lands on N-1, not N-2. The two source paths (live vs boot-sweep) converge on the FORWARD semantic but use different writers; both are verified by AC5 cells 1-4.
 
 ### Interactions
 
@@ -666,10 +666,10 @@ It **rides the v0.20.1 vehicle as-is** without an extra merge commit. The P4.1 d
 - **Digest source**: agent-technical-analysis digest (planner-provided, 2-explorer verified) at HEAD `c8a3fbf6a48d6dd1bfea97d0fb41140501a552a9`
 - **Pre-existing runbook reference**: `docs/runbooks/upgrade-drills.md` §7 (live-debug procedure for the boot-storm incident)
 - **Pre-existing precedent**: `scripts/upgrade/ledger_check.py` (stdlib-only python helper; live-path refusal pattern at `:46-55`; exit code 0/1/78/2)
-- **Hard-cap anchors verified by re-read**: `promote.sh:156` (soak cap 900), `lib.sh:102-115` (anti-flapping block), `promote.sh:177 :301 :342 :427 :503 :2526 :2532 :4249` (lock_heartbeat call sites), `lib.sh:108 :113` (LOCK_HEARTBEAT_S=30 / rwlock separation), `lib.sh:4258` (mid-soak version drift fails soak), `launcher.sh:908-915 :925-936` (D5 defer + under-lock revalidation), `launcher.sh:1009-1019 :1020-1037` (boot_sweep_commit_and_continue), `daemon/manager.py:843 :859-873 :424-426` (boot ordering), `daemon/repositories/message_queue/repository.py:1136-1143 :1144-1148` (audit log + task-table assumption), `daemon/services/upgrade_journal_sweep.py:82 :1579-1597 :1590 :1602-1683` (sweep shapes), `daemon/api.py:415 :812 :2873-2895` (Stop-frozen heartbeat amnesty + busy-set witnesses via has_instance_busy)
+- **Hard-cap anchors verified by re-read**: `promote.sh` `ENSEMBLE_PROMOTE_SOAK_S` ceiling gate (soak cap 900, `SOAK_S_DEFAULT=300` in lib.sh), lib.sh Rollback-window constants block (anti-flapping: `ROLLBACK_CAP_24H` + `COOLDOWN_S=600`), `promote.sh` `lock_heartbeat` call sites (cadence-of-30s invocation points across the ceremony), lib.sh Lock-protocol constants block (`LOCK_HEARTBEAT_S=30` / `LOCK_STALE_S=300`), lib.sh `gate_soak` loop body (mid-soak version drift re-check via `gate_version`), `launcher.sh:908-915 :925-936` (D5 defer + under-lock revalidation), `launcher.sh:1009-1019 :1020-1037` (boot_sweep_commit_and_continue), `daemon/manager.py:843 :859-873 :424-426` (boot ordering), `daemon/repositories/message_queue/repository.py:1136-1143 :1144-1148` (audit log + task-table assumption), `daemon/services/upgrade_journal_sweep.py:82 :1579-1597 :1590 :1602-1683` (sweep shapes), `daemon/api.py:415 :812 :2873-2895` (Stop-frozen heartbeat amnesty + busy-set witnesses via has_instance_busy)
 - **JSON-field hardening precedent**: `lib.sh:293-322 :1355-1364` (`_json_field_quoted` migration from bare-substring `_json_field`)
 - **Plugin staleness precedent for python invocation in upgrade shell**: `lib.sh:2060-2085` (PLUGIN_STALENESS_PYTHON → REPO_ROOT/.venv/bin/python → python3 → python chain) — explicitly NOT used for the new helper (stdlib-only, plain `python3` is sufficient; this is the same approach `stage.sh:464` takes)
-- **Anti-flapping block & cooldown machinery**: `lib.sh:102-115` (cap arming)
+- **Anti-flapping block & cooldown machinery**: lib.sh Rollback-window constants block (cap arming: `ROLLBACK_CAP_24H` / `COOLDOWN_S=600`)
 - **E6 timing model**: preflight 35s · stop 120s · flip 1s · handback 75s · livez 180s · readyz 120s · version 5s · soak 300s · commit ≈ **8–13 min**; journal overhead today: 28–46 min on clean promote, 37m observed armed→flip arc on the failure case
 - **Mission source**: shared-meta-kv `wt.active.feature/upgrade-speed-overhaul.upg-overhaul` (mission object); shared-context `promote-ceremony-stall-executor-false-dead-handback-subprocess-wait-timeout-syst_20261012_072018.md` (debug-only; not match for threshold 10%)
 - **Plugin staleness policy reminder**: `plugin_staleness_policy.policy = "ALLOW-STALE IS THE DEFAULT"` (from project metadata) — these decisions do not affect plugin staleness rules
@@ -677,3 +677,4 @@ It **rides the v0.20.1 vehicle as-is** without an extra merge commit. The P4.1 d
 ---
 
 **End of decisions.md**
+ons.md**
