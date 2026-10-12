@@ -116,6 +116,12 @@ chmod +x "$FAKE_REPO/daemon/plugin_subsystem/promote_staleness.py"
 printf 'PORT=4999\n' > "$FAKE_HOME/agents-ensemble/.env"
 
 cp "$UPGRADE_DIR/lib.sh"        "$FAKE_REPO/scripts/upgrade/lib.sh"
+# P2 call-site migration: lib.sh's journal writers (journal_history_append /
+# journal_set_previous) and promote.sh's probe-OK event now delegate to the
+# splice helper — the fixture must ship it alongside lib.sh, matching the
+# real scripts/upgrade/ deployment shape, or every splice-backed write in
+# the fake repo refuses "cannot locate helper" and masks real regressions.
+cp "$UPGRADE_DIR/journal_splice.py" "$FAKE_REPO/scripts/upgrade/journal_splice.py"
 cp "$UPGRADE_DIR/stage.sh"      "$FAKE_REPO/scripts/upgrade/stage.sh"
 cp "$UPGRADE_DIR/promote.sh"    "$FAKE_REPO/scripts/upgrade/promote.sh"
 cp "$UPGRADE_DIR/rollback.sh"   "$FAKE_REPO/scripts/upgrade/rollback.sh"

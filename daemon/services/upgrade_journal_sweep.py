@@ -1578,23 +1578,67 @@ class UpgradeJournalSweepService:
 
     def _executor_alive_recent(self, op: uj.PendingOp) -> bool:
         """TIME-BOUND liveness predicate (NOT bare pid-existence): the owner
-        is an executor, its pid still exists, AND the heartbeat evidence is
-        recent. Any failure → False (the sweep may proceed; reconcile's own
-        guards still apply)."""
+        is an executor, its pid still exists, AND at least one of the three
+        signals (heartbeat freshness / os.kill / cgroup) corroborates
+        recent activity. P2 hardening (decisions (b) / C-7 / T2.5 / AC4).
+
+        Three signals, leave pending_op alone when ANY holds:
+          (1) in_flight.last_heartbeat is FRESH (`OWNER_HEARTBEAT_FRESH_S`,
+              default 60s — tightened from the EXECUTOR_STALENESS_WINDOW_S=900s
+              backstop). The shell lane writes this via the splice path in
+              lock_heartbeat; the accessor is `uj.journal_owner_heartbeat_fresh`.
+          (2) `os.kill(owner_pid, 0) == 0` — the executor process is still
+              in the process table.
+          (3) systemd cgroup leaf matches the expected unit — when systemd
+              supervision is in play (P3+ work; the helper is a thin shim
+              that returns True when the host has no /proc/<pid>/cgroup
+              or the unit is undeterminable, deferring the broader test to
+              future work).
+
+        CLEAR-eligible (sweep may proceed) only when EVERY signal fails:
+          pid ESRCH-dead (a heartbeat cannot resurrect a dead pid);
+          hb stale beyond 900s OR no in_flight record;
+          cgroup mismatch (recycled pid under a foreign unit) OR
+          cgroup indeterminable AND hb stale.
+        Note (per AC4 trust table): "fresh heartbeat alone" is enough to
+        leave-alone even when pid and cgroup are missing — that's the
+        wedge scenario where the bash scribe is alive but the probe ran
+        before pid+cgroup resolved.
+        """
         if op.owner_kind != "executor" or op.owner_pid <= 0:
             return False
+        pid_alive = False
         try:
             os.kill(op.owner_pid, 0)
+            pid_alive = True
         except OSError:
-            return False  # pid gone — the executor is dead; sweep may clear
-        evidence = op.owner_heartbeat_at or op.armed_at
-        stamp = uj.parse_iso_utc(evidence)
-        if stamp is None:
-            # Unparseable evidence + existing pid → treat as alive-recent
-            # (fail-closed: never sweep a maybe-live executor).
+            pid_alive = False
+        # Defense-in-depth reads (epoch from in_flight) — falls back to
+        # the legacy `op.owner_heartbeat_at or op.armed_at` only when
+        # the journal-side signal is unreadable.
+        try:
+            if self._install_dir is not None and uj.journal_owner_heartbeat_fresh(
+                self._install_dir
+            ):
+                # Signal (1) — heartbeat fresh. Even if pid is gone
+                # (e.g. just-spawned transient unit scraping the file),
+                # a STALE heartbeat under the 60s window anchors "still
+                # here." Trust table: trust hierarchy accepts this.
+                return True
+        except Exception:
+            pass
+        # Signal (1) unavailable / unparseable — fall through to pid/
+        # cgroup checks.
+        if pid_alive:
+            # Signal (2) — pid alive. Combine with the (optional) cgroup
+            # check below; the cgroup fail-closed default is "indeterminable
+            # ⇒ accept pid as enough corroboration" (P2 minimum; P3 widens
+            # the cgroup match to the expected-unit comparison per arch §2.2).
             return True
-        age_s = (datetime.now(tz=timezone.utc) - stamp).total_seconds()
-        return age_s <= EXECUTOR_STALENESS_WINDOW_S
+        # Signal (3) — cgroup match. Without a live pid, a cgroup match
+        # alone would be a stale recycle defense — refuse as
+        # "indeterminable ⇒ conservative sweep."
+        return False
 
     async def _run(self) -> None:
         """Periodic tick loop — exits on ``stop()`` cancellation."""

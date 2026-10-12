@@ -181,6 +181,22 @@ _trap_install_signal_handlers "promote:preflight"
 # lock held from here on — heartbeat before every long wait
 lock_heartbeat
 
+# 1a-pre. python3 ≥ 3.7 floor probe (P2 / C-7 / T2.0a) — gate ANY
+# destructive step on a working stdlib interpreter BEFORE the splice
+# helper's first call. Stdlib-only (helpers don't pull deps); bare
+# `python3` from PATH (NOT `PLUGIN_STALENESS_PYTHON` — that chain
+# exists for PyYAML and is unrelated). Floor 3.7 is sufficient:
+# `pathlib.samefile` + dict-order guarantees + 3.7 features the
+# helper leans on. Missing / below-floor → exit 78 (the same refusal
+# code the helper itself returns). Probe-OK event journaled with
+# the interpreter path included so the audit trail tells future
+# operators what interpreter signed off on the splice.
+if ! _splice_python_floor_probe; then
+    _warn "python3 ≥ 3.7 unavailable on PATH — refusing promote (journal splice helper requires it; install python3 ≥ 3.7 or set PLUGIN_STALENESS_PYTHON chain is unrelated)"
+    lock_release 2>/dev/null || true
+    exit 78
+fi
+
 # 1b. staged mode sanity
 if [ ! -d "$TARGET_REL" ]; then
     _refuse not-staged "target release $TARGET_REL does not exist — stage it first (stage.sh $UP_TARGET --version $VERSION)"
@@ -190,6 +206,15 @@ J="$(journal_read)" || {
     _warn "journal unreadable/TORN at $(journal_path) — halt-for-human (repair the journal before any pipeline mutation)"
     exit 78
 }
+# Probe-OK event (T2.0a / C-7) — journals the interpreter path that
+# signed off on the splice. This is a SHELL → journal write using the
+# legacy `journal_history_append` (small fixture, runs ONCE on the
+# promote path, not on the 30s heartbeat loop). The splice helper
+# itself only enters the picture AFTER this journaled evidence is
+# down on disk.
+_splice_journal append-history python_floor_probe \
+    "interpreter=$(command -v python3 2>/dev/null || echo MISSING) version=$(python3 -c 'import sys;print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo MISSING)" \
+    || { _warn "could not journal probe-OK event — refusing"; lock_release 2>/dev/null || true; exit 78; }
 
 # 1c. adopt-or-refuse an existing in_flight (sweep-mirroring, D-FA4.3)
 adopt_stale_txn || _refuse txn-busy "promote refused: unresolved in_flight txn (see the adopt diagnostics above — pipeline-busy)"

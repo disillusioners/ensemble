@@ -139,6 +139,31 @@ _now_epoch() { date +%s; }
 # _now_iso — UTC ISO-8601 timestamp (journal fields are ISO).
 _now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# _splice_python_floor_probe — bash preflight probe (P2 / C-7 / T2.0a).
+# Verifies that `python3` on PATH satisfies the 3.7 floor that
+# `journal_splice.py` leans on (`pathlib.samefile` + Python 3.7+ dict
+# ordering + json round-trip). Stdlib only — no venv, no `pip install`,
+# no `PLUGIN_STALENESS_PYTHON` chain (that chain exists for PyYAML and
+# is intentionally NOT used here). Refuses (returns 1) when:
+#   - `python3` not on PATH at all
+#   - `python3` below 3.7 (assertion inside the helper)
+#   - the helper cannot exec (broken interpreter path, signal)
+# The helper itself does NOT touch the journal — that's the WRAPPER's
+# job after `journal_init`. This function ONLY prints a single stderr
+# line on refusal and returns 1; on success returns 0 silently.
+_splice_python_floor_probe() {
+    local py
+    if ! py="$(command -v python3 2>/dev/null)" || [ -z "$py" ]; then
+        printf 'splice: REFUSED: python3-floor: python3 not on PATH\n' >&2
+        return 1
+    fi
+    if ! "$py" -c "import sys, json, os, pathlib; assert sys.version_info >= (3, 7)" 2>/dev/null; then
+        printf 'splice: REFUSED: python3-floor: %s below 3.7 or stdlib modules unavailable\n' "$py" >&2
+        return 1
+    fi
+    return 0
+}
+
 # _log_ts — UTC ISO-8601 timestamp prefix for log lines (comp6, r-f82e).
 # BSD/GNU-portable: ``date -u +format`` is IDENTICAL on both — the
 # format-string operand uses the SAME syntax in BSD and GNU date, and
@@ -685,17 +710,91 @@ journal_in_flight() {
 }
 
 # journal_history_append <event> <detail> — append to history (newest last).
+# P2 CALL-SITE MIGRATION (this commission): the body is now a single
+# `_splice_journal append-history` call — the O(1) python splice
+# (journal_splice.py) replaces the journal_read + bash brace-walk +
+# journal_update composition that cost ~280 s/event at the 126 KB /
+# 500-entry fixture. Caller contract UNCHANGED: same argv (event,
+# detail), 0 on success, nonzero on failure (helper refusals — exit 78,
+# e.g. torn journal / missing journal — are forwarded as 1 by
+# _splice_journal with the token-pinned `splice: REFUSED:` stderr line,
+# mirroring the old journal_read refusal; atomicity errors propagate
+# as-is). The ~35 promote.sh / rollback.sh / restart.sh call sites are
+# covered by this body swap — NO call-site edits. Byte-shape note: the
+# helper serializes compact (separators=(",", ":")) with 3.7+ dict-
+# order preservation, so non-target fields round-trip byte-identical
+# (T2.9 pin, test_journal_splice.sh §7); entries carry the same
+# {ts,event,detail} shape (helper builds them structurally).
 journal_history_append() {
-    local event="$1" detail="$2" json hist new
-    json="$(journal_read)" || return 1
-    hist="$(_json_sub "$json" "history")"
-    if [ -z "$hist" ] || [ "$hist" = "[]" ]; then
-        new="[{\"ts\":\"$(_now_iso)\",\"event\":\"$(_json_escape "$event")\",\"detail\":\"$(_json_escape "$detail")\"}]"
-    else
-        # hist is [ {...}, ... ] — strip the closing bracket, append entry
-        new="${hist%]}, {\"ts\":\"$(_now_iso)\",\"event\":\"$(_json_escape "$event")\",\"detail\":\"$(_json_escape "$detail")\"}]"
+    _splice_journal append-history "$1" "$2"
+}
+
+# _splice_python_path — resolve the python3 interpreter the splice helper
+# will run under. Explicit override ($SPLICE_PYTHON) wins (lets tests pin
+# a captured interpreter for `T-NEG-python3-missing` / `T-NEG-python3-version-low`),
+# else bare `command -v python3`. The preflight probe
+# (`_splice_python_floor_probe`, called once at promote.sh entry per C-7)
+# is the gate that rejects absent / below-floor interpreters; this
+# resolver is for any tool-side re-check.
+_splice_python_path() {
+    if [ -n "${SPLICE_PYTHON:-}" ]; then
+        printf '%s\n' "$SPLICE_PYTHON"
+        return 0
     fi
-    journal_update "history" "$new"
+    if command -v python3 >/dev/null 2>&1; then
+        command -v python3
+        return 0
+    fi
+    return 1
+}
+
+# _splice_journal_path — resolve the absolute path to the helper
+# script. Uses lib.sh's own location (BASH_SOURCE) so the helper is
+# found even when the caller changes PWD; falls back to a path relative
+# to $REPO_ROOT (which promote/stage/rollback all set, and which the
+# install paths also know).
+_splice_journal_path() {
+    local self_dir
+    self_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || self_dir=""
+    if [ -n "$self_dir" ] && [ -f "$self_dir/journal_splice.py" ]; then
+        printf '%s\n' "$self_dir/journal_splice.py"
+        return 0
+    fi
+    if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/scripts/upgrade/journal_splice.py" ]; then
+        printf '%s\n' "$REPO_ROOT/scripts/upgrade/journal_splice.py"
+        return 0
+    fi
+    return 1
+}
+
+# _splice_journal <op> [args…] — STDIO-FAITHFUL wrapper around the
+# python splice helper (decisions (a) / D-P2.4 / T2.2). Same ergonomics
+# as `journal_history_append` so the 19 promote.sh call-sites change
+# by replacing the function name only. Resolution:
+#   1) journal path  → journal_path (one fork via subshell)
+#   2) helper path   → _splice_journal_path (BASH_SOURCE-anchored)
+#   3) interpreter   → _splice_python_path (SPLICE_PYTHON override or
+#                      bare `python3`)
+#
+# Failure path: anything the helper refuses (exit 78) is forwarded as
+# exit 1 from the wrapper with a `_warn` line carrying the op + first
+# arg — operators see the same token-pinned stderr as a direct helper
+# invocation. Atomicity errors (exit 1) propagate as-is.
+_splice_journal() {
+    local op="$1"; shift || { _warn "_splice_journal: missing op"; return 1; }
+    local jp helper py
+    jp="$(journal_path)" || { _warn "_splice_journal: cannot resolve journal_path"; return 1; }
+    helper="$(_splice_journal_path)" || { _warn "_splice_journal: cannot locate helper (scripts/upgrade/journal_splice.py)"; return 1; }
+    py="$(_splice_python_path)" || { _warn "_splice_journal: python3 not on PATH and SPLICE_PYTHON unset"; return 1; }
+    # NOTE: do NOT word-split "$@" through eval — pass it as a literal
+    # argv slice; the helper parses explicit args.
+    "$py" "$helper" "$jp" "$op" "$@" 2>&1
+    local rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        78) _warn "_splice_journal: $op refused (exit 78 — see stderr above for splice: REFUSED: line)"; return 1 ;;
+        *)  _warn "_splice_journal: $op exited $rc"; return "$rc" ;;
+    esac
 }
 
 # journal_open_txn <kind> <target> — set in_flight {kind,target,started_at,
@@ -831,34 +930,48 @@ journal_close_txn() {
 # themselves — see test_promote_cgroup_survivorship.sh 3b for the
 # regression pin that caught this.
 journal_heartbeat() {
-    local json
-    json="$(journal_read 2>/dev/null)" || return 0
-    local inf
-    inf="$(_json_sub "$json" "in_flight")"
-    [ -n "$inf" ] || return 0
-    case "$inf" in ''|null) return 0 ;; esac
-    local owner
-    owner="$(_json_field "$inf" "owner_pid" 2>/dev/null)" || owner=""
-    # Ownership guard: refresh the heartbeat ONLY if WE are the owner
-    # recorded in the txn (mirrors lock_heartbeat's owner guard — a
-    # non-owner must never refresh a foreign owner's heartbeat).
-    if [ -n "$owner" ] && [ "$owner" != "$$" ]; then
-        return 0
-    fi
-    # Replace the last_heartbeat field; preserves every other field.
-    # The sed pattern is anchored to "last_heartbeat":<digits> with no
-    # trailing wildcard — bash parameter-substitution's glob would
-    # otherwise eat the closing `}` of the in_flight object (a real
-    # bug, not theoretical — see the BASH-PATTERN HAZARD comment above
-    # and the test pin in tests/test_promote_cgroup_survivorship.sh).
-    local new_inf hb_now
-    hb_now="$(_now_epoch)"
-    # heartbeat values are epoch-second integers; [0-9]+ assumes no
-    # sign/decimal/fractional — true for _now_epoch output.
-    new_inf="$(printf '%s' "$inf" \
-            | sed -E "s/(\"last_heartbeat\":)[0-9]+/\\1$hb_now/")"
-    [ "$new_inf" != "$inf" ] || return 0
-    journal_update "in_flight" "$new_inf"
+    # P2 (decision (b) / D-P2.6 / C-3): REPLACES the 139 s/call bash
+    # brace-walk that used to live here (this comment + the sed+journal_update
+    # body that followed). The splice path uses the
+    # `set-in-flight-field last_heartbeat` op (C-2 — the NESTED write that
+    # the sweep's `in_flight.last_heartbeat` accessor at
+    # daemon/services/upgrade_journal_sweep.py:1590 actually reads; a
+    # top-level `set-field last_heartbeat` would be invisible). Caller
+    # contract unchanged: ownership-guarded (the helper does NOT check
+    # the lock or the owner_pid; lock_heartbeat already enforced both),
+    # best-effort, never raises.
+    #
+    # OUTSIDE-A-TXN SAFEGUARD (preserves the legacy "no-op when no
+    # in_flight" semantic that the bash version enforced via
+    # `case "$inf" in ''|null) return 0 ;; esac`): the helper would
+    # CREATE an empty `in_flight={}` if absent (per the C-2 protocol),
+    # which would silently inject a half-formed txn record into the
+    # journal.
+    #
+    # CHEAP GUARD (P2 call-site migration, this commission): the
+    # interim guard called journal_in_flight → journal_read — a FULL
+    # bash brace-walk of the whole journal per 30 s heartbeat, which
+    # at the 126 KB / 500-entry fixture re-introduced the very
+    # ~139 s/call cost the splice removed (the heartbeat would have
+    # dominated the promote path again at scale). Replaced with a raw
+    # `grep -q` on the serialized byte shape. SAFE because every
+    # writer in the system emits this field COMPACT:
+    #   - bash journal_init       → "in_flight":null
+    #   - bash journal_open_txn   → "in_flight":{"kind":…  (field splice)
+    #   - python twin (upgrade_journal.py json.dumps
+    #     separators=(",", ":"))  → "in_flight":{…|null
+    #   - splice helper (_atomic_write, same separators) → ditto
+    # so `grep -q '"in_flight":{'` matches EXACTLY the open-txn case;
+    # in_flight null / file missing → no match → return 0 — the same
+    # no-op semantic. The splice call itself is UNCHANGED (ownership-
+    # guarded, best-effort, never raises). Known narrow divergence: a
+    # TORN journal that happens to contain the literal pattern now
+    # reaches the splice call, which refuses exit-78 on the torn parse
+    # (warn line, swallowed by `|| true`) — one stderr line of extra
+    # visibility vs the old silent no-op; harmless, because a torn
+    # journal halts the pipeline at the next journal_read anyway.
+    grep -q '"in_flight":{' "$(journal_path)" 2>/dev/null || return 0
+    _splice_journal set-in-flight-field last_heartbeat "$(_now_epoch)" || true
 }
 
 # journal_set_current <ver> — set current (string) + sanity echo.
@@ -867,12 +980,19 @@ journal_set_current() {
 }
 
 # journal_set_previous <ver> — set previous (string or null).
+# P2 CALL-SITE MIGRATION (this commission): single `_splice_journal
+# set-previous` call. The helper's set-previous op owns the
+# null-vs-version distinction itself — literal argv "null" → JSON null,
+# anything else → string (outer double-quotes stripped if present) —
+# VERIFIED in journal_splice.py::_op_set_previous — so the bash
+# branch collapses into a pass-through. `previous` is in the helper's
+# ALLOWED_TOP_LEVEL_WRITES (field-ownership matrix, decisions (a));
+# `current` stays FENCED (journal_set_current remains bash — flip-
+# moment writes are safety-critical and infrequent). Caller contract
+# unchanged: 0 on success, nonzero on failure (refusals forwarded
+# as 1 with the `splice: REFUSED:` stderr line).
 journal_set_previous() {
-    if [ "$1" = "null" ]; then
-        journal_update "previous" "null"
-    else
-        journal_update "previous" "\"$1\""
-    fi
+    _splice_journal set-previous "$1"
 }
 
 # journal_quarantine <ver> — append to quarantined[] (idempotent).
@@ -1218,10 +1338,22 @@ lock_acquire() {
 # paths (status.sh-style) and must be a no-op there.
 #
 # comp3 (r-20260928-005506-f82e): also refreshes the journal's
-# in_flight.last_heartbeat (journal_heartbeat). The two writes go
+# in_flight.last_heartbeat via journal_heartbeat. The two writes go
 # together so a live owner keeps BOTH fresh; a dead owner ages both.
 # journal_heartbeat is best-effort and ownership-guarded itself —
 # never raises.
+#
+# P2 (decisions (b) / D-P2.6 / C-2 + C-3): journal_heartbeat's body
+# was REPLACED (not augmented — the prior bash brace-walk was ~280 s
+# on the 87 KB state.json, leaving the 30 s heartbeat cadence a
+# fiction). The new body is a single splice call:
+#     _splice_journal set-in-flight-field last_heartbeat "$(_now_epoch)"
+# The NESTED op (C-2) is what the sweep's `in_flight.last_heartbeat`
+# accessor at daemon/services/upgrade_journal_sweep.py:1590 reads.
+# A top-level `set-field last_heartbeat` would be invisible to that
+# reader. The 30 s cadence now actually delivers — the sweep's
+# three-signal defense (heartbeat fresh + os.kill + cgroup leaf) sees
+# a recent stamp within the budget.
 lock_heartbeat() {
     local lock owner
     lock="$(lock_dir_path)"
@@ -1231,7 +1363,9 @@ lock_heartbeat() {
     printf '%s\n' "$(_now_epoch)" > "$lock/heartbeat" 2>/dev/null
     # companion journal refresh — same owner, same cadence. The
     # callers already invoke this helper in long loops (gate_soak,
-    # promote phase 3-8, stage assembly, restart grace).
+    # promote phase 3-8, stage assembly, restart grace). The body
+    # of journal_heartbeat itself is a single splice call now (C-3
+    # REPLACE — see comment block above).
     journal_heartbeat >/dev/null 2>&1 || true
 }
 

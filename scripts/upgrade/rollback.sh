@@ -61,6 +61,21 @@ resolve_env "${TARGET_ARG:-${TARGET:-demo}}"
 require_live_guard "$UP_TARGET"
 echo_env_triple
 
+# 0a-pre. python3 ≥ 3.7 floor probe (P2 / C-7 — mirrors promote.sh's
+# preflight probe): the P2 call-site migration moved
+# journal_history_append / journal_set_previous onto the splice helper
+# (python3 stdlib), so every journal write below requires a working
+# interpreter. Fail-closed BEFORE the first journal write: missing /
+# below-floor python3 → _warn + exit 78 (the same refusal code the
+# helper itself returns). The lock is not held yet at this point —
+# the release stays as a defensive no-op for pattern parity with
+# promote.sh.
+if ! _splice_python_floor_probe; then
+    _warn "python3 ≥ 3.7 unavailable on PATH — refusing rollback (journal splice helper requires it)"
+    lock_release 2>/dev/null || true
+    exit 78
+fi
+
 REL="$INSTALL_DIR/releases"
 
 # ── Target resolution ───────────────────────────────────────────────────────

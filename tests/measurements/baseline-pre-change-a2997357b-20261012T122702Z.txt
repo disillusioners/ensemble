@@ -1,0 +1,24 @@
+# ENVSIM_BASELINE pre-change capture — generated Mon Oct 12 12:27:02 UTC 2026
+# branch: feature/upgrade-speed-overhaul
+# sha:    a2997357b
+# python: Python 3.12.3
+# os:     Linux 6.8.0-139-generic x86_64
+# kernel: 6.8.0-139-generic
+
+## Spec headline (from decisions.md digest, decisions.md (a))
+- pre-change journal_read: ~139 s/event at 87 KB / 420 entries (real-shape)
+- pre-change journal event (full read+update+write): ~280 s/event
+- post-splice AC1 target: < 1.0 s hard, < 2.5 s warn-only headroom
+
+## Measured (pre-change HEAD, 3 calls per fixture)
+| fixture | bytes | entries | read median (s) | read max (s) | append median (s) | append max (s) |
+|---------|-------|---------|-----------------|--------------|-------------------|-----------------|
+| 5KB | 5402 | 20 | 0.783 | 0.836 | 4.884 | 5.167 |
+| 15KB | 18562 | 80 | 4.013 | 6.132 | 13.995 | 41.986 |
+
+## Scaling note (informational)
+Bash brace-walk is O(n) over the journal bytes — the largest
+measurement shows the cost climbing from KB to tens-of-KB.
+The 100 KB / 500-entry spec number (~139 s/read) is interpolated
+from the digest; this host's measurement at 15 KB / 80 entries
+scales predictably toward it.

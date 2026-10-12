@@ -130,6 +130,18 @@ PENDING_OP_EXPIRE_PROMOTE_S = 10 * 60    # D-FA1.1 promote +10min outer window
 RECONCILE_GRACE_S = 10 * 60     # grace past expires_at before a dead op is
                                 # cleared as crashed-pre-open
 
+# P2 (decision (b) / C-7 / D-P2.6): owner heartbeat freshness for the
+# sweep's THREE-signal defense. The shell lane writes
+# `in_flight.last_heartbeat` (epoch SECONDS — int) via the splice path
+# (`_splice_journal set-in-flight-field last_heartbeat "$(_now_epoch)"`).
+# The sweep reader here converts that epoch to an ISO-8601 form for
+# comparison with `datetime.now()`; the field-type contrast with
+# `PendingOp.owner_heartbeat_at` (ISO STRING) is intentional — the two
+# fields are TYPES-pinned separately. `OWNER_HEARTBEAT_FRESH_S = 60`
+# is the freshness window; `EXECUTOR_STALENESS_WINDOW_S` (sweep-side,
+# 900s) remains the upper bound for evidence-age, the wider backstop.
+OWNER_HEARTBEAT_FRESH_S: int = 60
+
 JOURNAL_EMPTY: dict[str, Any] = {
     "current": None,
     "previous": None,
@@ -251,6 +263,47 @@ def journal_read(install_dir: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise JournalTorn(f"journal at {jp} is not a JSON object")
     return data
+
+
+def journal_owner_heartbeat_fresh(install_dir: Path) -> bool:
+    """Three-signal defense #1 — heartbeat freshness (P2 / decisions (b) /
+    D-P2.6 / C-2 + C-3 + C-7 / T2.5 / AC4).
+
+    Re-reads the journal from disk and checks ``in_flight.last_heartbeat``.
+    Returns True iff the stamp exists AND is within ``OWNER_HEARTBEAT_FRESH_S``
+    (60s by default) of `datetime.now(tz=timezone.utc)`. Fail-closed: a
+    missing field, an unparseable stamp, a torn journal, or a missing file
+    ALL return False (the sweep falls through to ``os.kill`` + cgroup as the
+    OTHER two signals; any single signal true ⇒ leave pending_op alone).
+
+    The ``in_flight`` field is the JAVA-owned heartbeat (epoch int); the
+    Python-owned ``PendingOp.owner_heartbeat_at`` (ISO string) is the
+    defense-in-depth fallback reader at ``upgrade_journal_sweep.py:1590``
+    (`evidence = op.owner_heartbeat_at or op.armed_at`), unchanged. This
+    accessor is READ-ONLY — it never writes anything to the journal.
+    """
+    try:
+        data = journal_read(install_dir)
+    except JournalTorn:
+        return False
+    except OSError:
+        return False
+    inf = data.get("in_flight") if isinstance(data, dict) else None
+    if not isinstance(inf, dict):
+        return False
+    hb_raw = inf.get("last_heartbeat")
+    if not isinstance(hb_raw, (int, float)):
+        # The shell writer stamps epoch SECONDS as int (`_now_epoch`)
+        # per D-P2.6 — float values would be a foreign-writer drift.
+        # Anything else (string, None, bool) → not actionable; fall
+        # through.
+        return False
+    try:
+        stamp = datetime.fromtimestamp(int(hb_raw), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return False
+    age_s = (datetime.now(tz=timezone.utc) - stamp).total_seconds()
+    return 0 <= age_s <= OWNER_HEARTBEAT_FRESH_S
 
 
 def journal_init(install_dir: Path) -> None:

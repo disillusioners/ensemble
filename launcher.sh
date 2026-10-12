@@ -1027,6 +1027,23 @@ _journal_sweep() {
         # The cap/cooldown are anti-flapping responses to BAD outcomes;
         # a successful-and-declared flip is not a bad outcome.
         #
+        # P2 / R-08 (b) BLAST RADIUS — protocol boundary (D-P2.8 / C-4):
+        # launcher.sh is SELF-CONTAINED — it does NOT source lib.sh,
+        # has ZERO python3 dependency, and uses its OWN in-shell
+        # _js_json_field / _js_journal_update / _js_history_append
+        # writers for the boot-sweep commit path above. The promote
+        # lane's splice-based journal writes are scoped to promote.sh
+        # + lib.sh only — those calls land on
+        # `scripts/upgrade/journal_splice.py` (P2) and would NEVER
+        # reach this file. The boot_sweep_commit_and_continue path
+        # (this branch) is the ONLY path that may update `previous`
+        # from boot-sweep land; promote.sh owns `previous` writes
+        # from the live lane via `journal_set_previous ${OLD_CUR}`
+        # at promote.sh:438 (and will move to the splice helper
+        # `set-previous` op in P2 PR-2 — see
+        # scripts/upgrade/journal_splice.py). DO NOT add a python3
+        # dep here — launcher purity is a hard constraint (R-08).
+        #
         # Source of `previous` (C-4 / decision (g)):
         #   - LIVE lane (promote.sh commit): promote.sh owns `previous`
         #     via `journal_set_previous ${OLD_CUR}` at promote.sh:438,
