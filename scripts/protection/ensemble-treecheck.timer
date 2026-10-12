@@ -1,0 +1,21 @@
+# ── REPO SOURCE OF TRUTH — mirror of deployed host artifact ─────────────
+# Host path: /etc/systemd/system/ensemble-treecheck.timer
+# Commission: install-dir protection layers 1+3+4 (incident 891820f3 followup,
+# 2026-10-12). Edit HERE, then redeploy to the host path above — see
+# scripts/protection/README.md for the deployment map + enable commands.
+# ────────────────────────────────────────────────────────────────────────
+[Unit]
+Description=Run ensemble tree-loss check every 60s (Layer 4.2)
+# DEVIATION (documented): the plan named a systemd .path unit on
+# releases/state.json, but .path units cannot watch for ABSENCE —
+# PathExists= fires on presence. A 60s polling timer is the faithful
+# mechanism for "alert when the file disappears". Alert bar: journal CRIT.
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=5
+Unit=ensemble-treecheck.service
+
+[Install]
+WantedBy=timers.target

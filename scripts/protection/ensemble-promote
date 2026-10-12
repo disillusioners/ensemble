@@ -1,0 +1,80 @@
+#!/bin/bash
+# ── REPO SOURCE OF TRUTH — mirror of deployed host artifact ─────────────
+# Host path: /usr/local/bin/ensemble-promote
+# Commission: install-dir protection layers 1+3+4 (incident 891820f3 followup,
+# 2026-10-12). Edit HERE, then redeploy to the host path above — see
+# scripts/protection/README.md for the deployment map + enable commands.
+# ────────────────────────────────────────────────────────────────────────
+# ============================================================================
+# ensemble-promote — Layer 1 STAGED / INERT promote wrapper.
+#
+# *** STATUS: STAGED 2026-10-12 — NOT WIRED INTO ANY ACTIVE FLOW. ***
+# Nothing on this host invokes this file yet. It becomes live only during the
+# user-gated Layer 1 arm window (see /home/nea/.ensemble-layer1-arm-runbook.md)
+# after `chown -R ensemble:ensemble /home/nea/agents-ensemble` has completed
+# and the unit drop-in flips User=ensemble. Until then a promote run through
+# this wrapper would fail on permissions — expected and harmless (it is
+# unwired).
+#
+# INCIDENT NOTE (2026-10-12): the install dir /home/nea/agents-ensemble was
+# deleted twice in one day (≈12:14 and ≈19:11 UTC) by agent-authored test
+# code (instance e312eb09, worktree ensemble-src-wt-upg-overhaul,
+# tests/test_journal_splice.sh §2). Immediate root cause = TEST SCRIPT defect
+# in the upgrade-speed overhaul lane, ALREADY manually fixed by the user on
+# 2026-10-12. This wrapper is part of the DEFENSE-IN-DEPTH backstop against
+# the damage class (future script regressions, agent mistakes, human error).
+# Plan: protection-plan-install-dir-20261012.md (Layer 1).
+#
+# Purpose (plan §Layer 1): pipeline promotes execute as the dedicated service
+# user `ensemble` instead of the agent user. Root-owned, arg-validated:
+#   - must be invoked as root (via sudo by the pipeline lane)
+#   - only sanctioned script-path shapes are accepted (see case below);
+#     everything else is refused
+#   - arguments are passed as discrete argv entries to bash — no string
+#     interpolation, so no shell-injection surface by construction
+#   - every invocation is journaled (logger) with caller + args
+#
+# SANCTIONED LANES (verified against host reality 2026-10-12):
+#   1. /home/nea/ensemble-src/scripts/upgrade/promote.sh
+#      — the ACTUAL live lane today: releases carry no scripts/ payload and
+#        the live .env sets ENSEMBLE_UPGRADE_SCRIPTS_DIR to the dev checkout.
+#   2. /home/nea/agents-ensemble/releases/*/scripts/upgrade/promote.sh and
+#      .../current/scripts/upgrade/promote.sh
+#      — the future "stage-into-payload" shape (deferred per blueprint);
+#      allowed now so the wrapper does not need re-editing at that switch.
+#
+# Usage: sudo /usr/local/bin/ensemble-promote <promote-script> [args...]
+#
+# Sudoers (NOT installed — runbook-time only, validate with visudo -cf):
+#   nea ALL=(root) NOPASSWD: /usr/local/bin/ensemble-promote
+# ============================================================================
+set -euo pipefail
+
+INSTALL_DIR="/home/nea/agents-ensemble"
+DEV_LANE="/home/nea/ensemble-src/scripts/upgrade"
+SERVICE_USER="ensemble"
+TAG="ensemble-promote"
+
+[ "$(id -u)" -eq 0 ] || { echo "$TAG: must be invoked via sudo (root)" >&2; exit 1; }
+[ "$#" -ge 1 ] || { echo "usage: sudo $0 <promote-script-path> [args...]" >&2; exit 64; }
+
+script="$1"; shift
+
+case "$script" in
+    "$DEV_LANE"/promote.sh)                                 ;;
+    "$DEV_LANE"/*.sh)                                       ;;
+    "$INSTALL_DIR"/releases/*/scripts/upgrade/promote.sh)   ;;
+    "$INSTALL_DIR"/current/scripts/upgrade/promote.sh)      ;;
+    *)
+        echo "$TAG: REFUSED — script path outside sanctioned promote lanes: $script" >&2
+        logger -t "$TAG" -p daemon.warning "refused non-sanctioned script path: $script"
+        exit 77
+        ;;
+esac
+
+[ -f "$script" ] || { echo "$TAG: script not found: $script" >&2; exit 66; }
+
+logger -t "$TAG" -p daemon.info \
+    "promote starting as ${SERVICE_USER}: ${script} $* (invoked by $(id -un)[$$])"
+
+exec runuser -u "$SERVICE_USER" -- env HOME="$INSTALL_DIR" bash "$script" "$@"
