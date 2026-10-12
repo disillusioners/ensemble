@@ -5,6 +5,13 @@ $border-color: #334155;
 $text-primary: #f1f5f9;
 $text-secondary: #94a3b8;
 $accent-cyan: #10a7f7;
+// Cluster 1.5(c) — Plan Review 2026-10-12 B1' — `$bg-elevated` is
+// the SCSS lift of the mockup's `--bg-elevated` CSS custom prop at
+// `.agents/shared/planning/maintenance-tabs-ui/design/mockups/maintenance-tabs.html:14`
+// (value VERBATIM from the mockup — see the `$bg-elevated: ...`
+// line below). The single new hex literal in this file's diff —
+// every other reference reuses the existing tokens.
+$bg-elevated: #243044;
 
 :host {
   display: flex;
@@ -27,6 +34,15 @@ $accent-cyan: #10a7f7;
   flex-direction: column;
   gap: 1rem; /* AC-15 lever 7: 1.5rem→1rem — container inner gap (v4 §2.9) */
   overflow-y: auto;
+  // Cluster 1.5(d) — spec §3.2 layering delta. Establishes a
+  // stacking context so the sticky `.maintenance-tabs-host` z-index
+  // ladder is local to the page (does not collide with the
+  // app-shell overlay z-index ladder per the Frontend Architecture
+  // blueprint). The page header scrolls out first; the tab bar
+  // then pins to the top of the content area.
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
 }
 
 .maintenance-header {
@@ -60,4 +76,53 @@ $accent-cyan: #10a7f7;
     font-weight: 600;
     color: $text-primary;
   }
+}
+
+// ── Cluster 1.5 — Tabs shell (mat-tab-group) overrides (spec §4) ──
+// Appended after the legacy `.maintenance-section` rules; the legacy
+// block is dead code post-Cluster-1 (no template element carries
+// `class="maintenance-section"` anymore — Pin 21's negative arm
+// enforces that), but is retained for diff minimality + the AC-15
+// lever-8 comment provenance.
+
+// Sticky wrapper host (ADV-2) — the page header scrolls out first;
+// the tab bar pins to the top of `.maintenance-container`'s scroll
+// region. `position: sticky` requires a scrollable ancestor; the
+// container's `overflow-y: auto` + the just-added `isolation: isolate`
+// establish the local stacking context.
+.maintenance-tabs-host {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: $bg-card;
+}
+
+// Material `mat-tab` token overrides — spec §4 (active-tab indicator
+// color, active/inactive label colors). Tokens reuse the existing
+// SCSS variables; no new hex literals.
+.mat-mdc-tab .mdc-tab-indicator__content--underline {
+  border-color: $accent-cyan; // active-tab indicator
+}
+
+.mat-mdc-tab .mdc-tab__text-label {
+  color: $text-secondary; // inactive
+}
+
+.mat-mdc-tab.mdc-tab--active .mdc-tab__text-label {
+  color: $text-primary; // active
+  font-weight: 600; // 600 active vs 500 inactive (Material default)
+}
+
+// ADV-1 hover (Plan Review 2026-10-12 B1') — `$bg-elevated` is the
+// SCSS lift of the mockup's `--bg-elevated` CSS custom prop
+// (`.agents/shared/planning/maintenance-tabs-ui/design/mockups/maintenance-tabs.html:14`).
+// The label color shifts to `--text-primary` on hover; the
+// background tints to `--bg-elevated` ONLY for enabled (non-disabled)
+// tabs (Material's disabled state must not respond to hover).
+.mat-mdc-tab:hover .mdc-tab__text-label {
+  color: $text-primary;
+}
+
+.mat-mdc-tab:hover:not(.mdc-tab--disabled) {
+  background: $bg-elevated;
 }
