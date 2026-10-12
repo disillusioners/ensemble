@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Coroutine, NamedTuple
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from daemon.checkpoint_adapter import CheckpointerAdapter
@@ -64,7 +64,6 @@ from daemon.constants import (
     VACUUM_FULL_LOCK_TIMEOUT_MS,
     VACUUM_FULL_STATEMENT_TIMEOUT_MS,
 )
-from daemon.repositories.factory import PG_SESSION_CONNECT_ARGS
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.instance_ui_prefs.repository import (
     InstanceUiPrefsRepository,
@@ -77,18 +76,9 @@ from daemon.services.checkpoint_prune import (
     prune_unreferenced_blobs,
 )
 from daemon.services.job_queue_service import TERMINAL_STATUSES
+from daemon.services.vacuum_engine import create_vacuum_engine
 
 logger = logging.getLogger(__name__)
-
-
-def _null_pool():
-    """Lazy import of ``NullPool`` to keep the module import graph
-    slim (mirrors ``daemon/services/vacuum_maintenance._null_pool`` —
-    the FULL engine is per-cycle; pooling it would persist a
-    connection's session timeouts across cycles)."""
-    from sqlalchemy.pool import NullPool
-
-    return NullPool
 
 
 def utcnow() -> datetime:
@@ -559,6 +549,22 @@ class _HeadroomOutcome(NamedTuple):
     required_bytes: int | None
     tables_bytes: int | None
     refuse: bool
+
+
+# The single degrade-to-skip shape all five skip-return sites share
+# (tidier pass T2): ``skipped=True`` + ``refuse=False`` + everything
+# else ``None``. ``_HeadroomOutcome`` is an immutable NamedTuple, so a
+# module-level instance is safe to return from every site. The ONE
+# variant site (statvfs succeeded, then the table-size query failed)
+# uses ``_SKIP_OUTCOME._replace(free_bytes=free_bytes)`` so the
+# measured free bytes ride the same shape.
+_SKIP_OUTCOME = _HeadroomOutcome(
+    skipped=True,
+    free_bytes=None,
+    required_bytes=None,
+    tables_bytes=None,
+    refuse=False,
+)
 
 
 @dataclass
@@ -1829,7 +1835,15 @@ class CheckpointCleanupJob:
                     after_bytes = await asyncio.to_thread(
                         self._sum_full_table_bytes, engine
                     )
-                except Exception:  # noqa: BLE001 — informational
+                except Exception as exc:  # noqa: BLE001 — post-FULL accounting is best-effort: non-fatal by contract, logged for forensics
+                    logger.warning(
+                        "VACUUM FULL reclaim accounting SKIPPED: "
+                        "post-FULL table size query failed (%s: %s) — "
+                        "bytes_reclaimed stays None (best-effort "
+                        "accounting, never fatal)",
+                        type(exc).__name__,
+                        exc,
+                    )
                     after_bytes = None
                 if after_bytes is not None:
                     bytes_reclaimed = max(0, before_bytes - after_bytes)
@@ -1885,13 +1899,7 @@ class CheckpointCleanupJob:
                 "ENOSPC path",
                 host or "<unix-socket>",
             )
-            return _HeadroomOutcome(
-                skipped=True,
-                free_bytes=None,
-                required_bytes=None,
-                tables_bytes=None,
-                refuse=False,
-            )
+            return _SKIP_OUTCOME
         try:
             with engine.connect() as conn:
                 tablespace_path = conn.execute(
@@ -1911,26 +1919,14 @@ class CheckpointCleanupJob:
                 type(exc).__name__,
                 exc,
             )
-            return _HeadroomOutcome(
-                skipped=True,
-                free_bytes=None,
-                required_bytes=None,
-                tables_bytes=None,
-                refuse=False,
-            )
+            return _SKIP_OUTCOME
         if not tablespace_path:
             logger.warning(
                 "VACUUM FULL headroom check SKIPPED: tablespace path "
                 "unresolvable (empty pg_default location AND no data "
                 "directory) — relying on the residual ENOSPC path"
             )
-            return _HeadroomOutcome(
-                skipped=True,
-                free_bytes=None,
-                required_bytes=None,
-                tables_bytes=None,
-                refuse=False,
-            )
+            return _SKIP_OUTCOME
         # Tunnel-topology heuristic (R6 hardening 2026-10-12): a
         # loopback listener AND a locally-resolvable tablespace /
         # data_directory path is NOT proof of daemon/PG co-location —
@@ -1970,13 +1966,7 @@ class CheckpointCleanupJob:
                 tablespace_path,
                 exc.errno,
             )
-            return _HeadroomOutcome(
-                skipped=True,
-                free_bytes=None,
-                required_bytes=None,
-                tables_bytes=None,
-                refuse=False,
-            )
+            return _SKIP_OUTCOME
         free_bytes = stat.f_bavail * stat.f_frsize
         try:
             with engine.connect() as conn:
@@ -1990,13 +1980,9 @@ class CheckpointCleanupJob:
                 type(exc).__name__,
                 exc,
             )
-            return _HeadroomOutcome(
-                skipped=True,
-                free_bytes=free_bytes,
-                required_bytes=None,
-                tables_bytes=None,
-                refuse=False,
-            )
+            # Variant skip: statvfs already succeeded, so the measured
+            # free bytes ride the shared skip shape (T2).
+            return _SKIP_OUTCOME._replace(free_bytes=free_bytes)
         tables_bytes = int(tables_bytes or 0)
         required_bytes = int(tables_bytes * 1.5)
         # R6 INFO-log at headroom-check completion — the resolved
@@ -2038,43 +2024,37 @@ class CheckpointCleanupJob:
 
     def _sum_full_table_bytes(self, engine: Engine) -> int:
         """Post-FULL summed relation size of the 3 tables (one
-        round-trip) — the reclaim-accounting delta leg. Returns 0 on
-        an unexpected row shape; informational only."""
+        round-trip) — the reclaim-accounting delta leg. A ``NULL`` /
+        absent scalar coalesces to 0 (``scalar() or 0``); DB errors
+        PROPAGATE to the caller, which treats them as informational
+        (post-FULL accounting is best-effort, non-fatal, logged for
+        forensics)."""
         with engine.connect() as conn:
             return int(conn.execute(text(_VACUUM_FULL_TABLE_BYTES_SQL)).scalar() or 0)
 
     def _build_vacuum_full_engine(self) -> Engine:
         """Build the per-cycle dedicated VACUUM FULL engine (task 2.10).
 
-        Mirrors ``VacuumMaintenanceJob._build_vacuum_engine``
-        (``daemon/services/vacuum_maintenance.py``) shape-exactly: the
-        same URL source (the shared engine, rendered with
-        credentials), the same ``autocommit=True`` (VACUUM FULL cannot
-        run inside an explicit transaction) + ``NullPool`` (per-cycle,
-        disposed in the caller's ``finally``) + ``echo=False`` — but
-        with the LONGER ``VACUUM_FULL_*`` timeouts (60min / 5min /
-        2min) because a heap rewrite legitimately runs for many
-        minutes on a large table. The trailing
-        ``PG_SESSION_CONNECT_ARGS['options']`` preserves the daemon's
-        UTC session frame for the FULL connection.
+        Thin consumer of the shared
+        ``daemon.services.vacuum_engine.create_vacuum_engine`` (tidier
+        pass T1 — the shape formerly duplicated from
+        ``VacuumMaintenanceJob._build_vacuum_engine``): the same URL
+        source (the shared engine, rendered with credentials), the
+        same ``autocommit=True`` (VACUUM FULL cannot run inside an
+        explicit transaction) + ``NullPool`` (per-cycle, disposed in
+        the caller's ``finally``) + ``echo=False`` — but with the
+        LONGER ``VACUUM_FULL_*`` timeouts (60min / 5min / 2min)
+        because a heap rewrite legitimately runs for many minutes on
+        a large table. The trailing
+        ``PG_SESSION_CONNECT_ARGS['options']`` (inside the shared
+        builder) preserves the daemon's UTC session frame for the
+        FULL connection.
         """
-        url = self._shared_engine.url.render_as_string(hide_password=False)
-        options_str = (
-            f"-c statement_timeout={VACUUM_FULL_STATEMENT_TIMEOUT_MS} "
-            f"-c lock_timeout={VACUUM_FULL_LOCK_TIMEOUT_MS} "
-            f"-c idle_in_transaction_session_timeout="
-            f"{VACUUM_FULL_IDLE_IN_TXN_TIMEOUT_MS} "
-            f"{PG_SESSION_CONNECT_ARGS['options']}"
-        )
-        return create_engine(
-            url,
-            echo=False,
-            connect_args={"options": options_str, "autocommit": True},
-            # Per-cycle engine — no pool. ``NullPool`` ensures every
-            # connect/dispose is fresh; pooling the FULL engine would
-            # persist a connection's session timeouts and smudge the
-            # per-cycle timeouts across cycles.
-            poolclass=_null_pool(),
+        return create_vacuum_engine(
+            self._shared_engine,
+            statement_ms=VACUUM_FULL_STATEMENT_TIMEOUT_MS,
+            lock_ms=VACUUM_FULL_LOCK_TIMEOUT_MS,
+            idle_ms=VACUUM_FULL_IDLE_IN_TXN_TIMEOUT_MS,
         )
 
     # ── Helper Methods ─────────────────────────────────────────────────────────

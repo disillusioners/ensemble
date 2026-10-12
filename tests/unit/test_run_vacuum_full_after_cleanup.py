@@ -36,8 +36,9 @@ import pytest
 import sqlalchemy.exc
 from sqlalchemy import create_engine
 
-import daemon.services.maintenance as maintenance_module
+import daemon.services.vacuum_engine as vacuum_engine_module
 from daemon.config import PersistenceConfig
+from daemon.repositories.factory import PG_SESSION_CONNECT_ARGS
 from daemon.services.checkpoint_prune import BlobPruneSummary
 from daemon.services.maintenance import (
     CheckpointCleanupJob,
@@ -199,7 +200,7 @@ class TestVacuumFullEngineHasLongTimeouts:
             return MagicMock()
 
         monkeypatch.setattr(
-            maintenance_module, "create_engine", _fake_create_engine
+            vacuum_engine_module, "create_engine", _fake_create_engine
         )
         job = _job()
         built = job._build_vacuum_full_engine()
@@ -212,7 +213,7 @@ class TestVacuumFullEngineHasLongTimeouts:
         # The trailing UTC session options ride the SAME string (the
         # libpq ``options`` param merges server command-line options).
         assert options_str.rstrip().endswith(
-            maintenance_module.PG_SESSION_CONNECT_ARGS["options"]
+            PG_SESSION_CONNECT_ARGS["options"]
         )
         assert captured["connect_args"]["autocommit"] is True
         from sqlalchemy.pool import NullPool
