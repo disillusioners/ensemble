@@ -261,12 +261,44 @@ CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES: int = 3
 # rationale in ``feature/blob-prune-default-on``.
 CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE: int = 1000
 
-# ── PG-only VACUUM (ANALYZE) maintenance (commission backend-db-space-reclamation) ──
-# Section: threshold-gated VACUUM (ANALYZE) sweep on user tables. Plain
-# VACUUM only — NEVER VACUUM FULL (would take ACCESS EXCLUSIVE locks and
-# is forbidden by commission constraints). When ``VACUUM_ENABLED`` is
-# False the maintenance job short-circuits without touching the DB (env
-# kill-switch via ``PERSISTENCE_VACUUM_ENABLED=0``).
+# ── PG-only VACUUM maintenance (commissions: backend-db-space-reclamation + maintenance-tabs-vacuum) ──
+#
+# **Scheduled lane** (VacuumMaintenanceJob + CheckpointCleanupJob.execute()):
+#   plain VACUUM (ANALYZE) only — NEVER VACUUM FULL. The scheduled path is
+#   structurally locked by AST pins:
+#     - tests/integration/test_checkpoint_cleanup_job_wiring_pin.py (INV-1/INV-9 +
+#       the "auto execute never calls _run_vacuum_full_after_cleanup" pin)
+#     - tests/integration/test_vacuum_maintenance_job_no_full.py (the
+#       "VacuumMaintenanceJob SQL template never contains FULL" pin)
+#   The scheduled cycle is cadence-driven (24h) and operator-blind;
+#   VACUUM FULL is intentionally not in scope.
+#
+# **Interactive lane** (MaintenanceApiService.execute + CheckpointCleanupJob.run_checkpoint_prunes(vacuum_full=True)):
+#   MAY escalate to VACUUM FULL on the three checkpoint tables
+#   (checkpoints, checkpoint_writes, checkpoint_blobs) when the operator
+#   explicitly opts in via the FE checkbox (default-ticked for interactive
+#   runs; operator can untick). The interactive lane uses a SEPARATE
+#   constants block (VACUUM_FULL_*) with longer timeouts:
+#     - VACUUM_FULL_STATEMENT_TIMEOUT_MS = 60min
+#     - VACUUM_FULL_LOCK_TIMEOUT_MS = 5min
+#     - VACUUM_FULL_IDLE_IN_TXN_TIMEOUT_MS = 2min
+#   The interactive escalation runs on a dedicated autocommit NullPool engine,
+#   per-cycle (disposed in finally). The dry-run path IGNORES vacuum_full
+#   (the dry-run is destructive-preview only; FULL is an execute-time
+#   decision).
+#
+# Kill-switch for the scheduled lane: PERSISTENCE_VACUUM_ENABLED=0
+# (VACUUM_ENABLED = False). The interactive lane has no env kill-switch;
+# the operator untick is the off-switch (decisions.md §D-7.6 — the
+# structural guard is the AST pin, not configuration).
+#
+# amendment_history:
+#   - 2026-10-12: maintenance-tabs-vacuum commission — split the policy into
+#     the scheduled lane (UNCHANGED: plain VACUUM only) and the interactive
+#     lane (NEW: VACUUM FULL allowed on the checkpoint tables with explicit
+#     operator consent + the structural guard). Added the VACUUM_FULL_*
+#     constants and the _run_vacuum_full_after_cleanup method
+#     (CheckpointCleanupJob only).
 VACUUM_ENABLED: bool = True  # default ON; plain VACUUM is safe + non-blocking; env kill-switch via PERSISTENCE_VACUUM_ENABLED=0
 VACUUM_INTERVAL_HOURS: int = 24  # maintenance cycle; matches the 24h checkpoint_cleanup cadence
 # Threshold for vacuum candidacy. A table qualifies when
@@ -284,6 +316,13 @@ VACUUM_DEAD_TUP_SCALE_FRACTION: float = 0.05  # 5% of n_live_tup
 VACUUM_STATEMENT_TIMEOUT_MS: int = 10 * 60 * 1000  # 10min per VACUUM (ANALYZE)
 VACUUM_LOCK_TIMEOUT_MS: int = 45 * 1000  # 45s — release contended tables fast
 VACUUM_IDLE_IN_TXN_TIMEOUT_MS: int = 60 * 1000  # 60s
+# Lock + idle timeouts for the INTERACTIVE VACUUM FULL engine (NEW for
+# maintenance-tabs-vacuum). These are LONGER than the scheduled-lane values
+# because VACUUM FULL rewrites the heap and can take many minutes on a large
+# table. The dedicated engine is per-cycle (NullPool, disposed in finally).
+VACUUM_FULL_STATEMENT_TIMEOUT_MS: int = 60 * 60 * 1000  # 60min per VACUUM FULL
+VACUUM_FULL_LOCK_TIMEOUT_MS: int = 5 * 60 * 1000  # 5min — release contended tables
+VACUUM_FULL_IDLE_IN_TXN_TIMEOUT_MS: int = 2 * 60 * 1000  # 2min
 
 # ── Graph & LLM ──────────────────────────────────────────────────────────────────
 GRAPH_RECURSION_LIMIT: int = 100  # LangGraph recursion limit

@@ -46,17 +46,25 @@ Revisit only if a third cleanup section arrives.
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, NamedTuple
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 
 from daemon.checkpoint_adapter import CheckpointerAdapter
 from daemon.config import PersistenceConfig
 from daemon.constants import (
     CHECKPOINT_TTL_HOURS,
     MAX_INSTANCE_HISTORY,
+    VACUUM_FULL_IDLE_IN_TXN_TIMEOUT_MS,
+    VACUUM_FULL_LOCK_TIMEOUT_MS,
+    VACUUM_FULL_STATEMENT_TIMEOUT_MS,
 )
+from daemon.repositories.factory import PG_SESSION_CONNECT_ARGS
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.instance_ui_prefs.repository import (
     InstanceUiPrefsRepository,
@@ -71,6 +79,16 @@ from daemon.services.checkpoint_prune import (
 from daemon.services.job_queue_service import TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
+
+
+def _null_pool():
+    """Lazy import of ``NullPool`` to keep the module import graph
+    slim (mirrors ``daemon/services/vacuum_maintenance._null_pool`` —
+    the FULL engine is per-cycle; pooling it would persist a
+    connection's session timeouts across cycles)."""
+    from sqlalchemy.pool import NullPool
+
+    return NullPool
 
 
 def utcnow() -> datetime:
@@ -493,6 +511,106 @@ class CheckpointRowPruneSummary:
         }
 
 
+# ── VACUUM FULL escalation (maintenance-tabs-vacuum, MANUAL-ONLY) ───────────────
+
+# The FULL phase targets EXACTLY the three checkpoint tables, in this
+# order (decisions.md §D-7.5 — the tables the cleanup deletes from;
+# test-plan.md §2.3 test_vacuum_full_true_runs_full_on_three_tables).
+_VACUUM_FULL_TABLES: tuple[str, ...] = (
+    "checkpoints",
+    "checkpoint_writes",
+    "checkpoint_blobs",
+)
+
+# Headroom pre-flight SQL (task 2.9, Plan Review B3 re-spec). The
+# prior draft's pg_stat_file()/pg_tablespace_size() mechanism was
+# infeasible (directory-entry size / space-USED respectively — the
+# check would silently always-pass). This resolves the tablespace
+# PATH (reltablespace=0 → pg_default → empty string → the data
+# directory) and stats it daemon-side.
+_VACUUM_FULL_TABLESPACE_PATH_SQL = (
+    "SELECT COALESCE("
+    "pg_tablespace_location("
+    "  (SELECT reltablespace FROM pg_class"
+    "   WHERE oid = 'checkpoints'::regclass)), "
+    "pg_tablespace_location("
+    "  (SELECT oid FROM pg_tablespace WHERE spcname = 'pg_default'))"
+    ") AS tablespace_path"
+)
+_VACUUM_FULL_DATA_DIRECTORY_SQL = "SHOW data_directory"
+# One round-trip: summed relation size of the 3 FULL tables.
+_VACUUM_FULL_TABLE_BYTES_SQL = (
+    "SELECT COALESCE(SUM(pg_relation_size(c.oid)), 0) FROM pg_class c "
+    "WHERE c.oid IN ('checkpoints'::regclass, "
+    "'checkpoint_writes'::regclass, 'checkpoint_blobs'::regclass)"
+)
+
+
+class _HeadroomOutcome(NamedTuple):
+    """Result of the VACUUM FULL free-space headroom pre-flight.
+
+    ``skipped=True`` (degrade-to-skip) carries ``None`` free/required
+    and NEVER refuses — the check is informational when unavailable;
+    the residual ENOSPC path (task 2.11) is the only safety net then.
+    """
+
+    skipped: bool
+    free_bytes: int | None
+    required_bytes: int | None
+    tables_bytes: int | None
+    refuse: bool
+
+
+@dataclass
+class VacuumFullResult:
+    """Merged result of the manual-only VACUUM FULL escalation phase.
+
+    The SINGLE source of truth for the FULL-phase result (task 2.7,
+    Plan Review 2026-10-12 B4): 3 base fields + 5 optional
+    refusal/headroom fields. ``to_summary_dict()`` emits EXACTLY
+    those 8 keys in canonical order (explicit dict literal in field
+    order — NOT ``dataclasses.asdict``, whose order is
+    implementation-observed rather than contractual); the audit row's
+    ``summary_json.vacuum_full`` and the poll response carry it.
+
+    Escalated      → escalated=True, vacuumed_tables populated,
+                     refusal_reason=None.
+    Refused        → escalated=False, refusal_reason set (one of
+                     ``"insufficient_free_space"`` /
+                     ``"headroom_check_unavailable"``), free/required
+                     populated (refuse) or None (unavailable), ZERO
+                     VACUUM FULL issued.
+    Degrade-to-skip → escalated=True (FULL proceeds), refusal_reason
+                     None, headroom_check_skipped=True.
+    No-op          → escalated=False, vacuumed_tables=(),
+                     duration_ms=0, everything else default.
+    """
+
+    vacuumed_tables: tuple[str, ...] = ()
+    duration_ms: int = 0
+    bytes_reclaimed: int | None = None
+    escalated: bool = False
+    refusal_reason: str | None = None
+    free_bytes: int | None = None
+    required_bytes: int | None = None
+    headroom_check_skipped: bool = False
+
+    def to_summary_dict(self) -> dict[str, Any]:
+        """The canonical 8-key wire shape (order is load-bearing —
+        N2': the audit-row ``summary_json.vacuum_full`` consumers
+        detect missing fields positionally)."""
+        return {
+            "vacuumed_tables": list(self.vacuumed_tables),
+            "duration_ms": self.duration_ms,
+            "bytes_reclaimed": self.bytes_reclaimed,
+            "escalated": self.escalated,
+            "refusal_reason": self.refusal_reason,
+            "free_bytes": self.free_bytes,
+            "required_bytes": self.required_bytes,
+            "headroom_check_skipped": self.headroom_check_skipped,
+        }
+
+
 @dataclass
 class CheckpointRunResult:
     """One checkpoint-cleanup cycle result — wires into the audit table.
@@ -512,6 +630,11 @@ class CheckpointRunResult:
     blobs: BlobPruneSummary = field(default_factory=BlobPruneSummary)
     duration_ms: int = 0
     skipped_truncated: bool = False   # [AM-10/AM-15] 1000-entry cap fired
+    # v1.1 — the FULL-phase block rides the result ONLY when the
+    # manual escalation was requested (refusals included — the
+    # operator sees WHY no FULL ran). ``None`` (auto cycle, dry-run,
+    # non-escalated manual runs) keeps the FROZEN wire shape.
+    vacuum_full: VacuumFullResult | None = None
 
     def to_summary_dict(self) -> dict[str, Any]:
         """The FROZEN wire shape (plan-overview §2 — last_run.summary)."""
@@ -520,11 +643,16 @@ class CheckpointRunResult:
         # skipped_truncated inside the blobs block is the canonical flag;
         # the dataclass-level field is the same signal pre-serialization
         # (kept for the dry-run wire composer in MaintenanceApiService).
-        return {
+        summary: dict[str, Any] = {
             **rows_dict,
             "blobs": blobs_dict,
             "duration_ms": self.duration_ms,
         }
+        if self.vacuum_full is not None:
+            # v1.1 — additive 5th key, manual-escalated runs only
+            # (the auto-cycle FROZEN 4-key shape is untouched).
+            summary["vacuum_full"] = self.vacuum_full.to_summary_dict()
+        return summary
 
 
 class CheckpointCleanupJob:
@@ -561,6 +689,7 @@ class CheckpointCleanupJob:
         message_metadata_repo: MessageMetadataRepository | None = None,
         run_lock: "MaintenanceRunLock | None" = None,
         runs_repo: "MaintenanceRunsRepository | None" = None,
+        shared_engine: Engine | None = None,
     ):
         """Initialize the checkpoint cleanup job.
 
@@ -623,6 +752,14 @@ class CheckpointCleanupJob:
         # ``None`` is byte-identical to pre-T3.
         self._run_lock = run_lock
         self._runs_repo = runs_repo
+        # v1.1 — the shared engine (manager-wired) is the URL source
+        # for the MANUAL-ONLY VACUUM FULL escalation engine (task
+        # 2.10). ``None`` (legacy unwired constructors / the auto
+        # cycle's construction shape in tests) leaves the escalation
+        # unavailable — the FULL arm refuses with
+        # ``headroom_check_unavailable``; the auto execute() NEVER
+        # reaches it structurally (AST pins F1 i-iv).
+        self._shared_engine = shared_engine
 
     async def execute(self) -> None:
         """Run all 5 checkpoint cleanup operations.
@@ -1468,7 +1605,7 @@ class CheckpointCleanupJob:
         return summary
 
     async def run_checkpoint_prunes(
-        self, *, destructive: bool | None
+        self, *, destructive: bool | None, vacuum_full: bool = False
     ) -> CheckpointRunResult:
         """MANUAL-ONLY entry point — Op E → Op D (AM-2, BLOCKING).
 
@@ -1480,7 +1617,19 @@ class CheckpointCleanupJob:
         ``tests/integration/test_checkpoint_cleanup_job_wiring_pin.py``
         asserts ``execute()``'s body does not call this method.
 
-        Order rationale (W-1 mechanism restated v3 / AM-2 BLOCKER):
+        v1.1 — VACUUM FULL is a MANUAL-ONLY escalation. The
+        ``vacuum_full`` kwarg is threaded to
+        ``_run_vacuum_full_after_cleanup`` AFTER the destructive prune
+        completes (the single permitted intra-class call site —
+        F1(iii) EXACT-CHAIN pin). The auto ``execute()`` does NOT
+        accept or pass this kwarg (INV-1/INV-9 + the new AST pins);
+        the dry-run path never escalates — the FULL arm is gated on
+        ``destructive_effective`` as well, so even a stray
+        ``vacuum_full=True`` on a destructive=False call is a no-op
+        (defense-in-depth: the API service never passes the flag on
+        the preview path).
+
+        Order rationale (W-1 mechanism restated v3 / AM-2 BLOCKING):
         Op E runs BEFORE Op D in the manual path. The dry-run's
         anti-join counts blobs referenced by ANY REMAINING checkpoint
         row; under the old D-first order every server check PASSES (the
@@ -1537,12 +1686,350 @@ class CheckpointCleanupJob:
                 blobs_skipped=blobs.skipped,
             )
         skipped_truncated = len(blobs.skipped) > 1000
+        # v1.1 — the FULL phase runs LAST, strictly AFTER the
+        # destructive prune completes (F8a spy-order pin). Dry-runs
+        # never escalate; refusals ride the result so the operator
+        # sees WHY no FULL ran.
+        full_result: VacuumFullResult | None = None
+        if vacuum_full and destructive_effective:
+            full_result = await self._run_vacuum_full_after_cleanup(
+                vacuum_full=True
+            )
         duration_ms = int((time.perf_counter() - t0) * 1000)
         return CheckpointRunResult(
             rows=rows,
             blobs=blobs,
             duration_ms=duration_ms,
             skipped_truncated=skipped_truncated,
+            vacuum_full=full_result,
+        )
+
+    # ── VACUUM FULL escalation (MANUAL-ONLY, v1.1) ──────────────────────────
+
+    async def _run_vacuum_full_after_cleanup(
+        self, *, vacuum_full: bool
+    ) -> VacuumFullResult:
+        """MANUAL-ONLY — VACUUM FULL escalation after the destructive
+        prune (maintenance-tabs-vacuum v1.1).
+
+        NEVER reachable from the auto ``execute()``: the AST pin set
+        in ``tests/integration/test_checkpoint_cleanup_job_wiring_pin.py``
+        (class ``TestVacuumFullStructuralGuard``) enforces (BL-1/F1(i))
+        that ``execute()``'s intra-class closure cannot reach this
+        method, (BL-2) that this is the daemon's single definition
+        site, (F1(ii)) that no subclass exists, and (F1(iii)) that the
+        SOLE daemon-wide call site is inside
+        ``run_checkpoint_prunes``. The scheduled lane is structurally
+        incapable of escalation — this method exists for the
+        operator-opted interactive lane only (decisions.md §D-4).
+
+        Arms:
+        * ``vacuum_full=False`` → immediate no-op
+          (``escalated=False, vacuumed_tables=(), duration_ms=0``),
+          zero DB work, no engine built.
+        * Refuse — the headroom pre-flight (task 2.9) fails:
+          ``escalated=False`` + ``refusal_reason='insufficient_free_space'``
+          + free/required populated, ZERO VACUUM FULL issued.
+        * Degrade-to-skip — the headroom pre-flight is unavailable
+          (remote DB / unresolvable tablespace path / ``os.statvfs``
+          failure): log WARNING, ``headroom_check_skipped=True``, FULL
+          still proceeds (the residual ENOSPC path — task 2.11 — is
+          the only safety net).
+        * FULL — dedicated autocommit NullPool engine (task 2.10) with
+          the long VACUUM_FULL_* timeouts, ``VACUUM FULL <table>``
+          against exactly ``checkpoints``, ``checkpoint_writes``,
+          ``checkpoint_blobs`` IN THAT ORDER (§D-7.5); engine disposed
+          in ``finally`` even on a mid-sequence raise.
+
+        Co-location limitation (task 2.9, documented): the free-space
+        check stats the tablespace path from the DAEMON host, so it is
+        only meaningful when the daemon shares a filesystem view with
+        the PG server. Remote-DB topologies degrade-to-skip by design.
+
+        The per-statement FULL work runs via ``asyncio.to_thread`` —
+        a VACUUM FULL may legitimately hold its ACCESS EXCLUSIVE lock
+        for many minutes and must never block the event loop.
+
+        Raises:
+            sqlalchemy.exc.OperationalError: PG SQLSTATE 53100
+            (residual ENOSPC race) propagates UNSWALLOWED — the caller
+            ``MaintenanceApiService._execute_run`` stamps
+            ``error_json={'code': 'vacuum_full_enospc',
+            'retriable': True}`` on the audit row.
+        """
+        t0 = time.perf_counter()
+        # No-op arm — immediate, zero DB work, no engine built.
+        if not vacuum_full:
+            return VacuumFullResult()
+        # Engine gate — the escalation needs a PG shared engine to
+        # derive the FULL engine URL from (task 2.10). Unwired /
+        # non-PG constructors refuse the escalation outright; this is
+        # a legacy/test-shape defense, never hit on the wired daemon
+        # (manager.py passes ``shared_engine=self._engine`` and the
+        # API service execute() gate already ensures a PG backend).
+        if (
+            self._shared_engine is None
+            or self._shared_engine.dialect.name != "postgresql"
+        ):
+            logger.warning(
+                "VACUUM FULL escalation refused: no PostgreSQL shared "
+                "engine wired onto CheckpointCleanupJob (dialect=%r) "
+                "— the interactive FULL lane needs the manager wiring",
+                (
+                    None
+                    if self._shared_engine is None
+                    else self._shared_engine.dialect.name
+                ),
+            )
+            return VacuumFullResult(
+                escalated=False,
+                refusal_reason="headroom_check_unavailable",
+                headroom_check_skipped=True,
+            )
+        engine = self._build_vacuum_full_engine()
+        vacuumed: list[str] = []
+        try:
+            headroom = await asyncio.to_thread(
+                self._check_vacuum_full_headroom, engine
+            )
+            if headroom.refuse:
+                # Refuse-to-escalate — ZERO VACUUM FULL issued; the
+                # operator sees the refusal in the run result.
+                logger.warning(
+                    "VACUUM FULL escalation refused: insufficient free "
+                    "space (free=%s bytes < required=%s bytes = table "
+                    "bytes × 1.5 safety factor)",
+                    headroom.free_bytes,
+                    headroom.required_bytes,
+                )
+                return VacuumFullResult(
+                    escalated=False,
+                    refusal_reason="insufficient_free_space",
+                    free_bytes=headroom.free_bytes,
+                    required_bytes=headroom.required_bytes,
+                    headroom_check_skipped=False,
+                )
+            before_bytes = headroom.tables_bytes
+            for table in _VACUUM_FULL_TABLES:
+                await asyncio.to_thread(
+                    self._vacuum_full_one_table, engine, table
+                )
+                vacuumed.append(table)
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+            # Best-effort reclaim accounting: the headroom round-trip
+            # already measured the pre-FULL relation size; one more
+            # identical round-trip gives the post-FULL delta. Any
+            # failure here is informational (None), never fatal.
+            bytes_reclaimed: int | None = None
+            if before_bytes is not None:
+                try:
+                    after_bytes = await asyncio.to_thread(
+                        self._sum_full_table_bytes, engine
+                    )
+                except Exception:  # noqa: BLE001 — informational
+                    after_bytes = None
+                if after_bytes is not None:
+                    bytes_reclaimed = max(0, before_bytes - after_bytes)
+            return VacuumFullResult(
+                escalated=True,
+                vacuumed_tables=tuple(vacuumed),
+                duration_ms=duration_ms,
+                bytes_reclaimed=bytes_reclaimed,
+                headroom_check_skipped=headroom.skipped,
+            )
+        finally:
+            # Per-cycle engine — ALWAYS disposed (NullPool + dispose
+            # in ``finally``; task 2.4(e)). The ENOSPC raise path
+            # disposes too.
+            engine.dispose()
+
+    def _check_vacuum_full_headroom(
+        self, engine: Engine
+    ) -> _HeadroomOutcome:
+        """Free-space headroom pre-flight (task 2.9, B3 re-spec).
+
+        Resolves the tablespace PATH via ``pg_tablespace_location``
+        (``reltablespace=0`` → ``pg_default`` → empty string → falls
+        back to ``SHOW data_directory``), stats it DAEMON-side
+        (``os.statvfs`` → ``f_bavail * f_frsize`` — free bytes
+        available to non-root, NOT the reserved-space-agnostic
+        ``f_bfree``), and compares against
+        ``sum(pg_relation_size(3 tables)) × 1.5`` (one round-trip;
+        the safety factor covers WAL/CLOG churn during the rewrite).
+
+        DEGRADE-TO-SKIP (never refuses): remote DB (engine URL host
+        not local/unix-socket — the daemon-side statvfs would be
+        meaningless), unresolvable tablespace path, or ``os.statvfs``
+        raising OSError (permission / remote mount). Skips log one
+        WARNING and return ``skipped=True`` with ``refuse=False`` —
+        the FULL proceeds; the residual ENOSPC path is the only
+        safety net (task 2.11).
+        """
+        url = self._shared_engine.url
+        host = (url.host or "").lower()
+        local_host = host in {
+            "",
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "0.0.0.0",
+        } or host.startswith("/")
+        if not local_host:
+            logger.warning(
+                "VACUUM FULL headroom check SKIPPED: the DB is remote "
+                "(host=%s) — the daemon-side statvfs would not reflect "
+                "the PG host's filesystem; relying on the residual "
+                "ENOSPC path",
+                host or "<unix-socket>",
+            )
+            return _HeadroomOutcome(
+                skipped=True,
+                free_bytes=None,
+                required_bytes=None,
+                tables_bytes=None,
+                refuse=False,
+            )
+        try:
+            with engine.connect() as conn:
+                tablespace_path = conn.execute(
+                    text(_VACUUM_FULL_TABLESPACE_PATH_SQL)
+                ).scalar()
+                if not tablespace_path:
+                    # pg_default (reltablespace=0) lives IN the data
+                    # directory — the location comes back empty/NULL.
+                    tablespace_path = conn.execute(
+                        text(_VACUUM_FULL_DATA_DIRECTORY_SQL)
+                    ).scalar()
+        except Exception as exc:  # noqa: BLE001 — degrade, never refuse
+            logger.warning(
+                "VACUUM FULL headroom check SKIPPED: tablespace path "
+                "query failed (%s: %s) — relying on the residual "
+                "ENOSPC path",
+                type(exc).__name__,
+                exc,
+            )
+            return _HeadroomOutcome(
+                skipped=True,
+                free_bytes=None,
+                required_bytes=None,
+                tables_bytes=None,
+                refuse=False,
+            )
+        if not tablespace_path:
+            logger.warning(
+                "VACUUM FULL headroom check SKIPPED: tablespace path "
+                "unresolvable (empty pg_default location AND no data "
+                "directory) — relying on the residual ENOSPC path"
+            )
+            return _HeadroomOutcome(
+                skipped=True,
+                free_bytes=None,
+                required_bytes=None,
+                tables_bytes=None,
+                refuse=False,
+            )
+        try:
+            stat = os.statvfs(tablespace_path)
+        except OSError as exc:
+            logger.warning(
+                "VACUUM FULL headroom check SKIPPED: os.statvfs(%r) "
+                "raised OSError(%s) (permission / remote mount the "
+                "daemon cannot see) — relying on the residual ENOSPC "
+                "path",
+                tablespace_path,
+                exc.errno,
+            )
+            return _HeadroomOutcome(
+                skipped=True,
+                free_bytes=None,
+                required_bytes=None,
+                tables_bytes=None,
+                refuse=False,
+            )
+        free_bytes = stat.f_bavail * stat.f_frsize
+        try:
+            with engine.connect() as conn:
+                tables_bytes = conn.execute(
+                    text(_VACUUM_FULL_TABLE_BYTES_SQL)
+                ).scalar()
+        except Exception as exc:  # noqa: BLE001 — degrade, never refuse
+            logger.warning(
+                "VACUUM FULL headroom check SKIPPED: table size query "
+                "failed (%s: %s) — relying on the residual ENOSPC path",
+                type(exc).__name__,
+                exc,
+            )
+            return _HeadroomOutcome(
+                skipped=True,
+                free_bytes=free_bytes,
+                required_bytes=None,
+                tables_bytes=None,
+                refuse=False,
+            )
+        tables_bytes = int(tables_bytes or 0)
+        required_bytes = int(tables_bytes * 1.5)
+        return _HeadroomOutcome(
+            skipped=False,
+            free_bytes=free_bytes,
+            required_bytes=required_bytes,
+            tables_bytes=tables_bytes,
+            refuse=free_bytes < required_bytes,
+        )
+
+    def _vacuum_full_one_table(self, engine: Engine, table: str) -> None:
+        """Issue ONE ``VACUUM FULL <table>`` on the dedicated engine.
+
+        ``table`` comes from the hard-coded ``_VACUUM_FULL_TABLES``
+        tuple (§D-7.5 — no interpolation of caller-supplied names).
+        ``autocommit=True`` on the dedicated engine makes each FULL
+        its own implicit transaction (VACUUM cannot run inside an
+        explicit transaction block).
+        """
+        sql = f"VACUUM FULL {table}"
+        with engine.connect() as conn:
+            conn.execute(text(sql))
+            # The autocommit engine commits per-statement
+            # automatically; no manual commit needed.
+
+    def _sum_full_table_bytes(self, engine: Engine) -> int:
+        """Post-FULL summed relation size of the 3 tables (one
+        round-trip) — the reclaim-accounting delta leg. Returns 0 on
+        an unexpected row shape; informational only."""
+        with engine.connect() as conn:
+            return int(conn.execute(text(_VACUUM_FULL_TABLE_BYTES_SQL)).scalar() or 0)
+
+    def _build_vacuum_full_engine(self) -> Engine:
+        """Build the per-cycle dedicated VACUUM FULL engine (task 2.10).
+
+        Mirrors ``VacuumMaintenanceJob._build_vacuum_engine``
+        (``daemon/services/vacuum_maintenance.py``) shape-exactly: the
+        same URL source (the shared engine, rendered with
+        credentials), the same ``autocommit=True`` (VACUUM FULL cannot
+        run inside an explicit transaction) + ``NullPool`` (per-cycle,
+        disposed in the caller's ``finally``) + ``echo=False`` — but
+        with the LONGER ``VACUUM_FULL_*`` timeouts (60min / 5min /
+        2min) because a heap rewrite legitimately runs for many
+        minutes on a large table. The trailing
+        ``PG_SESSION_CONNECT_ARGS['options']`` preserves the daemon's
+        UTC session frame for the FULL connection.
+        """
+        url = self._shared_engine.url.render_as_string(hide_password=False)
+        options_str = (
+            f"-c statement_timeout={VACUUM_FULL_STATEMENT_TIMEOUT_MS} "
+            f"-c lock_timeout={VACUUM_FULL_LOCK_TIMEOUT_MS} "
+            f"-c idle_in_transaction_session_timeout="
+            f"{VACUUM_FULL_IDLE_IN_TXN_TIMEOUT_MS} "
+            f"{PG_SESSION_CONNECT_ARGS['options']}"
+        )
+        return create_engine(
+            url,
+            echo=False,
+            connect_args={"options": options_str, "autocommit": True},
+            # Per-cycle engine — no pool. ``NullPool`` ensures every
+            # connect/dispose is fresh; pooling the FULL engine would
+            # persist a connection's session timeouts and smudge the
+            # per-cycle timeouts across cycles.
+            poolclass=_null_pool(),
         )
 
     # ── Helper Methods ─────────────────────────────────────────────────────────

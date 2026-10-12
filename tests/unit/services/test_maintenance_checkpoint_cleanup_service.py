@@ -480,7 +480,10 @@ class TestExecuteHappyPath:
         await asyncio.gather(*list(svc._executing_tasks))
 
         svc._cleanup_job.run_checkpoint_prunes.assert_awaited_once_with(
-            destructive=True
+            # v1.1 — the escalation flag rides the call; the default
+            # (absent payload flag) is the coerced False.
+            destructive=True,
+            vacuum_full=False,
         )
         row = runs_repo.get(resp["run_id"])
         assert row.kind == "manual_execute"
@@ -739,6 +742,7 @@ class TestVacuumFullThreading:
         # is a hard-coded EMPTY dict: the route reads no request body,
         # so the FE structurally cannot send ``vacuum_full`` here),
         # and the flag never appears in the handler source.
+        route_src = inspect.getsource(maintenance_router.post_dry_run)
         sig_params = set(
             inspect.signature(maintenance_router.post_dry_run).parameters
         )
