@@ -215,7 +215,7 @@ fi
 # above is the gate's first long operation; we check the deadline
 # AFTER the probe succeeds (a missing python3 is a refusal, not a
 # deadline breach).
-_enforce_deadline promote_deadline preflight
+_enforce_deadline "$promote_deadline" preflight
 
 # 1b. staged mode sanity
 if [ ! -d "$TARGET_REL" ]; then
@@ -370,7 +370,7 @@ if ! stop_via_stop_script; then
     exit 1
 fi
 # P3 / decision (d) — phase boundary (post-stop, pre-launcher-swap)
-_enforce_deadline promote_deadline stop
+_enforce_deadline "$promote_deadline" stop
 
 # ═══════════════════ 3. LAUNCHER SWAP (stopped window) ═════════════════════
 launcher_swap "$VERSION" || {
@@ -384,7 +384,7 @@ launcher_swap "$VERSION" || {
     exit 1
 }
 # P3 / decision (d) — phase boundary (post-launcher-swap, pre-flip)
-_enforce_deadline promote_deadline launcher_swap
+_enforce_deadline "$promote_deadline" launcher_swap
 
 # ═══════════════════════════ 4. ATOMIC FLIP ════════════════════════════════
 if ! atomic_flip "$VERSION"; then
@@ -396,7 +396,7 @@ if ! atomic_flip "$VERSION"; then
 fi
 # P3 / decision (d) — phase boundary (post-flip, pre-restart). Daemon is
 # now DOWN; breach here leaves daemon-state=stopped (C-10b).
-_enforce_deadline promote_deadline flip
+_enforce_deadline "$promote_deadline" flip
 
 # ═══════════════════════════ 5. FLIPPED MARKER ═════════════════════════════
 journal_mark_flipped || { _warn "cannot mark flipped — halting for human (sweep will find the txn)"; exit 1; }
@@ -424,7 +424,7 @@ fi
 # daemon-state=handed-back (C-10b). The boot-grace window is ACTIVE
 # (started inside restart_via_launcher, D-P3.7) — the livez/readyz probes
 # in the gate below ride it.
-_enforce_deadline promote_deadline restart
+_enforce_deadline "$promote_deadline" restart
 
 # ═══════════════════════════ 7. HEALTH GATE (D2) ═══════════════════════════
 gate_fail_reason=""
@@ -432,7 +432,7 @@ gate_fail_reason=""
 # P3 / decision (d) — phase boundary (pre-livez). The boot-grace
 # window is ACTIVE; the livez probe rides it. The deadline check
 # here is the per-phase-decomposition entry to the gate section.
-_enforce_deadline promote_deadline livez
+_enforce_deadline "$promote_deadline" livez
 
 if LIVEZ_JSON="$(gate_livez)"; then
     _log "livez OK:"; _logv "$LIVEZ_JSON"
@@ -441,7 +441,7 @@ else
 fi
 
 # P3 / decision (d) — phase boundary (pre-readyz)
-_enforce_deadline promote_deadline readyz
+_enforce_deadline "$promote_deadline" readyz
 if [ -z "$gate_fail_reason" ] && READYZ_JSON="$(gate_readyz)"; then
     _log "readyz OK:"; _logv "$READYZ_JSON"
     # M7 (commission v0.16.6 component 2, interface contract): /readyz MAY
@@ -494,7 +494,7 @@ elif [ -z "$gate_fail_reason" ]; then
 fi
 
 # P3 / decision (d) — phase boundary (pre-version)
-_enforce_deadline promote_deadline version
+_enforce_deadline "$promote_deadline" version
 if [ -z "$gate_fail_reason" ]; then
     gate_version "$BIN_VERSION" || gate_fail_reason="version verify mismatch"
 fi
@@ -503,7 +503,7 @@ fi
 # gate_soak so the adaptive cap shrinks against the remaining
 # budget (the "-60" preserves a 60s audit tail for commit bookkeeping
 # + retention_evict + lock_release).
-_enforce_deadline promote_deadline soak
+_enforce_deadline "$promote_deadline" soak
 if [ -z "$gate_fail_reason" ]; then
     lock_heartbeat
     ceremony_remaining_s="$(_effective_ceremony_remaining_s "$promote_deadline")"
@@ -515,7 +515,7 @@ fi
 # leaves daemon-state=handed-back (C-10b); the txn is flipped:true
 # so a halt routes to the sweep-rollback path on the next launcher
 # start (the existing B4 leave-txn-open contract).
-_enforce_deadline promote_deadline commit
+_enforce_deadline "$promote_deadline" commit
 if [ -z "$gate_fail_reason" ]; then
     # commit — M5: every journal write is checked; a failed write must
     # never let the promote exit 0 with the symlink/journal diverged (see

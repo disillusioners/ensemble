@@ -445,8 +445,11 @@ esac
 
 # promote.sh auto-rollback uses PREV=$OLD_CUR (NOT the journal.previous
 # read). The fix replaces `_json_field "$PREV_JSON" previous` with
-# `PREV="$OLD_CUR"`.
-C7_PROMOTE_ROLLBACK="$(sed -n '480,495p' "$UPGRADE_DIR/promote.sh")"
+# `PREV="$OLD_CUR"`. Section anchor (line-range-stable; this test had
+# hardcoded `480,495p` ranges that drifted when P2/P3 added lines —
+# the C-7 fragility, not a regression): extract a window around the
+# auto-rollback header at line ~559.
+C7_PROMOTE_ROLLBACK="$(sed -n '555,600p' "$UPGRADE_DIR/promote.sh")"
 assert_contains "C7 promote.sh auto-rollback uses PREV=\"\$OLD_CUR\"" 'PREV="$OLD_CUR"' "$C7_PROMOTE_ROLLBACK"
 assert_not_contains "C7 promote.sh auto-rollback no longer reads _json_field on previous" '_json_field "$PREV_JSON" previous' "$C7_PROMOTE_ROLLBACK"
 
@@ -457,8 +460,15 @@ case "$C7_IMMEDIACY" in
     *) _fail "C7 promote.sh: immediacy breach assertion present" "present" "absent" ;;
 esac
 
-# lib.sh journal_open_txn stamps displaced_version.
-C7_OPEN_TXN="$(sed -n '720,755p' "$UPGRADE_DIR/lib.sh")"
+# lib.sh journal_open_txn stamps displaced_version. Section anchor
+# (line-range-stable; the prior `720,755p` hardcoded range drifted when
+# P2/P3 added ~900 lines to lib.sh — the C-7 fragility, not a regression).
+# Extract a window around the journal_open_txn header (search for the
+# function definition).
+C7_OPEN_TXN_LINE="$(grep -nE '^journal_open_txn\(\)' "$UPGRADE_DIR/lib.sh" | head -1 | cut -d: -f1)"
+C7_OPEN_TXN_WINDOW_START=$((C7_OPEN_TXN_LINE - 5))
+C7_OPEN_TXN_WINDOW_END=$((C7_OPEN_TXN_LINE + 35))
+C7_OPEN_TXN="$(sed -n "${C7_OPEN_TXN_WINDOW_START},${C7_OPEN_TXN_WINDOW_END}p" "$UPGRADE_DIR/lib.sh")"
 assert_contains "C7 lib.sh: journal_open_txn stamps displaced_version" 'displaced_version' "$C7_OPEN_TXN"
 
 # launcher.sh boot_sweep_commit_and_continue writes previous=displaced_v
@@ -467,8 +477,14 @@ C7_LAUNCHER="$(grep -n 'displaced_v\|displaced_version' "$LAUNCHER" || true)"
 assert_contains "C7 launcher.sh: displaced_version referenced" 'displaced_v' "$C7_LAUNCHER"
 
 # rollback.sh does NOT silently fall back to journal.previous
-# (D-P1.3 contract).
-C7_ROLLBACK="$(sed -n '67,107p' "$UPGRADE_DIR/rollback.sh")"
+# (D-P1.3 contract). Section anchor (line-range-stable; the prior
+# `67,107p` range drifted when P2/P3 added lines — the C-7 fragility).
+# Extract a window around the "no rollback target supplied" refusal
+# message (the contract anchor per D-P1.3).
+C7_ROLLBACK_LINE="$(grep -nF 'no rollback target supplied' "$UPGRADE_DIR/rollback.sh" | head -1 | cut -d: -f1)"
+C7_ROLLBACK_WINDOW_START=$((C7_ROLLBACK_LINE - 30))
+C7_ROLLBACK_WINDOW_END=$((C7_ROLLBACK_LINE + 5))
+C7_ROLLBACK="$(sed -n "${C7_ROLLBACK_WINDOW_START},${C7_ROLLBACK_WINDOW_END}p" "$UPGRADE_DIR/rollback.sh")"
 # The old line was: TO_VERSION="$(_json_field "$J" previous)"
 # The new code MUST NOT contain that line as a fallback.
 case "$C7_ROLLBACK" in
