@@ -211,6 +211,41 @@ assert_eq "stop default layer1 live → HOME itself" "$LAYER1_LIVE_HOME" "$out"
 out="$(HOME="$LAYER1_DEMO_HOME" _default_install_dir)"
 assert_eq "stop default layer1 demo → HOME itself" "$LAYER1_DEMO_HOME" "$out"
 
+# ─── M1 (review round 2): HOME edge shapes ─────────────────────────────────
+section "M1 — HOME edge shapes (unset / root / trailing slash / symlink)"
+
+# unset HOME: lib.sh is sourced WITHOUT `set -u`, so ${HOME%/} degenerates
+# to the empty string and the candidate join lands at the filesystem root —
+# the historical shell behavior, pinned (hermetic subshell via env -u).
+out="$(env -u HOME bash -c ". '$LIB'; _install_dir_candidates agents-ensemble" | tr '\n' '|')"
+assert_eq "unset HOME candidates join at root" "/agents-ensemble|" "$out"
+
+# HOME=/ : the ${HOME%/} strip removes the only slash → same root join
+# (basename of the stripped value is empty → no sibling candidate either).
+out="$(HOME=/ bash -c ". '$LIB'; _install_dir_candidates agents-ensemble-demo" | tr '\n' '|')"
+assert_eq "HOME=/ candidates join at root" "/agents-ensemble-demo|" "$out"
+
+# trailing-slash HOME: stripped → byte-identical to the canonical legacy join.
+out="$(HOME="$LEGACY_HOME/" _install_dir_candidates agents-ensemble | tr '\n' '|')"
+assert_eq "trailing-slash HOME strips to canonical" \
+    "$LEGACY_HOME/agents-ensemble|" "$out"
+
+# trailing-slash flipped HOME keeps HOME-self first (same strip applies).
+out="$(HOME="$LAYER1_LIVE_HOME/" _install_dir_candidates agents-ensemble | tr '\n' '|')"
+assert_eq "trailing-slash layer1 HOME-self first" \
+    "$LAYER1_LIVE_HOME|$LAYER1_LIVE_HOME/agents-ensemble|" "$out"
+
+# symlinked HOME: verification follows the link (.env reachable through
+# it) but the resolved root keeps the LINK spelling (bash never
+# canonicalizes HOME) — current behavior, pinned.
+M1_REAL_HOME="$FIXTURE/m1-real-home"
+mkdir -p "$M1_REAL_HOME/agents-ensemble/releases"
+printf 'POSTGRES_DB=ensemble_prod\nPORT=9797\n' > "$M1_REAL_HOME/agents-ensemble/.env"
+ln -s "$M1_REAL_HOME" "$FIXTURE/m1-link-home"
+out="$(HOME="$FIXTURE/m1-link-home" _resolve_install_root agents-ensemble)"
+assert_eq "symlinked HOME resolves through the link" \
+    "$FIXTURE/m1-link-home/agents-ensemble" "$out"
+
 # ─── syntax gates ───────────────────────────────────────────────────────────
 section "syntax gates"
 bash -n "$LIB" && _pass || _fail "lib.sh bash -n"
