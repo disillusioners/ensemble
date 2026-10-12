@@ -1970,6 +1970,35 @@ _service_detect_fn: Callable[
 _UNIT_NAME_SAFE_RE = re.compile(r"^[A-Za-z0-9@._-]+$")
 _RESTART_LOAD_BEARING = "no"  # ruling R1 (doc §5.3 :114)
 
+# 2026-10-12: install dir deleted twice by agent-authored test code; immediate
+# cause (test-script defect) fixed same day by user; this change is part of
+# the Layer 1 ownership-separation backstop.
+#
+# Layer-1 install-dir basenames: when the daemon's OWN home is the install
+# dir, the process is running as the dedicated post-Layer-1 service user
+# (systemd ``User=<service user>`` + ``Environment=HOME=<install dir>``).
+_LAYER1_INSTALL_DIR_BASENAMES: tuple[str, ...] = (
+    "agents-ensemble", "agents-ensemble-demo",
+)
+
+
+def _layer1_service_shape() -> bool:
+    """True when THIS process runs as a post-Layer-1 install-dir service.
+
+    Runtime-context derivation ONLY — never a hardcoded username: the
+    signal is HOME's own basename (the systemd unit carries
+    ``Environment=HOME=<install dir>`` for the dedicated service user, per
+    the 2026-10-12 protection plan Layer 1). FALSE on every pre-flip lane
+    (root daemon with ``HOME=/root``, operator lane with
+    ``HOME=/home/<user>``, dev checkouts) — which is what keeps the
+    executor argv byte-identical until the host-side user flip actually
+    happens. Never raises.
+    """
+    try:
+        return Path.home().name in _LAYER1_INSTALL_DIR_BASENAMES
+    except Exception:  # noqa: BLE001 — topology probe must never raise
+        return False
+
 
 def build_service_argv(
     inner_argv: list[str],
@@ -1983,8 +2012,9 @@ def build_service_argv(
     SERVICE unit named ``ensemble-upgrade-<run_id>`` (rulings R1-R3).
 
     Layout: ``["systemd-run", ("--user")?, "--unit=<unit>", "--wait",
-    "--collect", "--property=Restart=no", "--property=…" …,
-    "--setenv=K=V" …, "--", <inner_argv...>]``.
+    "--collect", ("--uid=…" "--gid=…" — Layer-1 system-bus branch only,
+    see the comment at the insertion site), "--property=Restart=no",
+    "--property=…" …, "--setenv=K=V" …, "--", <inner_argv...>]``.
 
     ``unit_properties`` is the extension point for future callers; ANY
     attempt to override ``Restart`` to anything other than ``no`` raises
@@ -2027,6 +2057,19 @@ def build_service_argv(
     head.append(f"--unit={unit}")
     head.append("--wait")     # R5: client observes the UNIT to its exit
     head.append("--collect")  # GC the transient unit once it terminates
+    # Layer-1 executor-user consistency (2026-10-12 protection plan): a
+    # SYSTEM-bus transient service defaults to running as ROOT. When the
+    # daemon itself is the post-Layer-1 unprivileged service user
+    # (HOME topology — see _layer1_service_shape), pin the unit to OUR OWN
+    # runtime uid/gid (os.geteuid()/os.getegid(), runtime context, no
+    # hardcoded username) so the payload runs as the service user that owns
+    # the install tree. Pre-flip lanes (root daemon, operator-user daemon,
+    # dev, and the user-bus branch where user units already run as the
+    # invoking user and reject User= overrides) append NOTHING — argv stays
+    # byte-identical to the historical lane.
+    if bus_kind == "system" and os.geteuid() != 0 and _layer1_service_shape():
+        head.append(f"--uid={os.geteuid()}")
+        head.append(f"--gid={os.getegid()}")
     for prop in props:
         head.append(f"--property={prop}")
     log_str = str(Path(log_path).absolute())

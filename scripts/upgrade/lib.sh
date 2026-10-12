@@ -231,6 +231,68 @@ _sha256() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
 # it right after). Bash 3.2/BSD-safe (no readlink -f on stock macOS).
 _canon_dir() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
 
+# 2026-10-12: install dir deleted twice by agent-authored test code; immediate
+# cause (test-script defect) fixed same day by user; this change is part of
+# the Layer 1 ownership-separation backstop.
+#
+# _install_dir_candidates <name> — newline-separated candidate roots for a
+# canonical install name (agents-ensemble | agents-ensemble-demo) under the
+# CURRENT $HOME, most-preferred first. Layer-1 tolerant — two HOME shapes:
+#   legacy       HOME=/home/<user>           → $HOME/<name>
+#   post-Layer-1 HOME=<install dir> (dedicated service user whose systemd
+#                unit carries Environment=HOME=<install dir>) → $HOME itself,
+#                plus the sibling <name> next to it (cross-env resolution,
+#                e.g. the flipped live daemon resolving the demo install).
+# Under post-Layer-1 the naive $HOME/<name> would WRONGLY NEST — that
+# resolution class is exactly what this helper exists to fix. Bash 3.2-safe
+# (basename/dirname only, no readlink -f).
+_install_dir_candidates() {
+    local name="$1" home base
+    home="${HOME%/}"
+    case "$home" in
+        */"$name") printf '%s\n' "$home" ;;
+    esac
+    printf '%s\n' "$home/$name"
+    base="$(basename "$home")"
+    case "$base" in
+        agents-ensemble|agents-ensemble-demo)
+            [ "$base" = "$name" ] || printf '%s\n' "$(dirname "$home")/$name"
+            ;;
+    esac
+}
+
+# _resolve_install_root <name> — pick the first _install_dir_candidates entry
+# that actually looks like an install root (.env file or releases/ dir);
+# fall back to the legacy $HOME/<name> when none verifies (preserves the
+# pre-Layer-1 resolution verbatim when nothing exists).
+_resolve_install_root() {
+    local name="$1" cand
+    while IFS= read -r cand; do
+        [ -n "$cand" ] || continue
+        if [ -f "$cand/.env" ] || [ -d "$cand/releases" ]; then
+            printf '%s' "$cand"
+            return 0
+        fi
+    done < <(_install_dir_candidates "$name")
+    printf '%s' "$HOME/$name"
+}
+
+# _is_canonical_install_dir <canon-path> — true when the (already-canonical)
+# path equals the canonical form of ANY current-shape install candidate for
+# EITHER install name. Used by the sandbox refusal guard so a sandbox
+# INSTALL_DIR pointing at the real live/demo tree is refused under BOTH
+# HOME shapes.
+_is_canonical_install_dir() {
+    local target="$1" name cand
+    for name in agents-ensemble agents-ensemble-demo; do
+        while IFS= read -r cand; do
+            [ -n "$cand" ] || continue
+            [ "$target" = "$(_canon_dir "$cand")" ] && return 0
+        done < <(_install_dir_candidates "$name")
+    done
+    return 1
+}
+
 # _json_escape <string> — minimal JSON string escaper (quotes + backslash +
 # ALL control chars < 0x20 plus DEL 0x7F as standard \u00XX escapes). Bash
 # 3.2-safe, builtin-only (printf -v — no per-char subshell forks; reasons
@@ -371,7 +433,7 @@ resolve_env() {
     SELF_ENV_MARKER="$target"
     case "$target" in
         demo)
-            INSTALL_DIR="$HOME/agents-ensemble-demo"
+            INSTALL_DIR="$(_resolve_install_root agents-ensemble-demo)"
             PORT=7979
             POSTGRES_DB=ensemble_demo
             ;;
@@ -379,7 +441,7 @@ resolve_env() {
             # Live topology: install dir + DB from the table; PORT from the
             # staged live .env (ADR-014 — no literal live port in this tree,
             # test-strategy §5.2). Execution is USER-GATED (require_live_guard).
-            INSTALL_DIR="$HOME/agents-ensemble"
+            INSTALL_DIR="$(_resolve_install_root agents-ensemble)"
             POSTGRES_DB=ensemble_prod
             if [ -f "$INSTALL_DIR/.env" ]; then
                 PORT="$(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}PORT[[:space:]]*=[[:space:]]*//p' "$INSTALL_DIR/.env" | head -1 | tr -d '\r')"
@@ -414,17 +476,16 @@ resolve_env() {
             # through _canon_dir (cd + pwd -P), so aliases normalize to the
             # real install dir and are refused; an unresolvable INSTALL_DIR
             # falls back to its raw string and is rejected by the existence
-            # check below anyway.
-            local canon_sbx canon_live canon_demo
+            # check below anyway. The canonical side considers BOTH Layer-1
+            # HOME shapes (_is_canonical_install_dir) — under the
+            # post-Layer-1 service user the naive $HOME/agents-ensemble
+            # would wrongly nest and the refusal would MISS the real tree.
+            local canon_sbx
             canon_sbx="$(_canon_dir "$INSTALL_DIR")"
-            canon_live="$(_canon_dir "$HOME/agents-ensemble")"
-            canon_demo="$(_canon_dir "$HOME/agents-ensemble-demo")"
-            case "$canon_sbx" in
-                "$canon_live"|"$canon_demo")
-                    _warn "sandbox INSTALL_DIR must be a throwaway dir — refusing to operate on $INSTALL_DIR"
-                    exit 78
-                    ;;
-            esac
+            if _is_canonical_install_dir "$canon_sbx"; then
+                _warn "sandbox INSTALL_DIR must be a throwaway dir — refusing to operate on $INSTALL_DIR"
+                exit 78
+            fi
             if [ -z "$INSTALL_DIR" ] || [ ! -d "$INSTALL_DIR" ]; then
                 _warn "sandbox target requires an existing INSTALL_DIR (got '${INSTALL_DIR:-<empty>}') — e.g. TARGET=sandbox INSTALL_DIR=/tmp/ens-sbx PORT=8377"
                 exit 78
@@ -453,7 +514,9 @@ resolve_env() {
             # sandbox ends up on the live port. Unreadable/unsourcedable →
             # refuse the sandbox outright. An ABSENT .env means no live
             # install is staged on this host — nothing to collide with.
-            _live_env="$HOME/agents-ensemble/.env"
+            # Layer-1 HOME shapes (post-flip: HOME/.env, not the nested
+            # HOME/agents-ensemble/.env).
+            _live_env="$(_resolve_install_root agents-ensemble)/.env"
             if [ -e "$_live_env" ] || [ -L "$_live_env" ]; then
                 if [ -d "$_live_env" ] || [ ! -r "$_live_env" ] \
                    || [ ! -f "$_live_env" ]; then

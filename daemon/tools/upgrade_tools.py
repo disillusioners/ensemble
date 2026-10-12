@@ -336,6 +336,65 @@ def _read_env_value(env_file: Path, key: str) -> str | None:
     return None
 
 
+# 2026-10-12: install dir deleted twice by agent-authored test code; immediate
+# cause (test-script defect) fixed same day by user; this change is part of
+# the Layer 1 ownership-separation backstop.
+#
+# Canonical install dir names (live/demo). Used by the HOME-shape-tolerant
+# root resolution below so both Layer-1 shapes resolve identically:
+#   legacy      — user ``nea``, HOME=/home/nea → roots are
+#                 HOME/<name> (e.g. /home/nea/agents-ensemble);
+#   post-Layer-1 — dedicated service user (e.g. ``ensemble``) whose systemd
+#                 unit carries ``Environment=HOME=<install dir>`` → the root
+#                 IS ``HOME`` itself (nesting HOME/<name> would be WRONG).
+_LIVE_INSTALL_DIR_NAMES: tuple[str, ...] = ("agents-ensemble", "agents-ensemble-demo")
+
+
+def _install_root_candidates(install_name: str) -> list[Path]:
+    """Candidate install roots for ``install_name`` under the CURRENT HOME.
+
+    Layer-1 ownership-separation tolerant: the resolution must behave
+    correctly whether HOME is the operator's home (legacy shape →
+    ``HOME/<name>``) or the install dir itself (post-Layer-1 service user →
+    ``HOME``). Ordered most-preferred-first:
+
+    1. ``HOME`` itself, when ``HOME``'s basename IS the install name
+       (post-Layer-1 shape);
+    2. ``HOME / install_name`` (legacy shape — the historical resolution);
+    3. the sibling ``<HOME.parent> / install_name``, when HOME is itself a
+       canonical install dir of the OTHER name (e.g. the post-flip live
+       daemon resolving the demo install that still lives next door).
+
+    Pure function of ``Path.home()`` — tests redirect it with a fake HOME;
+    never construct fixtures at real live-resolved paths.
+    """
+    home = Path.home()
+    candidates: list[Path] = []
+    if home.name == install_name:
+        candidates.append(home)
+    candidates.append(home / install_name)
+    if home.name in _LIVE_INSTALL_DIR_NAMES and home.name != install_name:
+        candidates.append(home.parent / install_name)
+    return candidates
+
+
+def _canonical_install_root(install_name: str) -> Path:
+    """Resolve the canonical install root for ``install_name``.
+
+    Picks the first candidate from :func:`_install_root_candidates` that
+    actually looks like an install root (``.env`` file or ``releases/``
+    dir present); falls back to the first candidate (the shape implied by
+    HOME) when none verifies — preserving the historical behavior of
+    returning the legacy path when nothing exists (read tools then answer
+    honestly via the journal's absent/no-install-dir statuses).
+    """
+    candidates = _install_root_candidates(install_name)
+    for cand in candidates:
+        if (cand / ".env").is_file() or (cand / "releases").is_dir():
+            return cand
+    return candidates[0]
+
+
 def _auto_derive_env() -> str | None:
     """Auto-derive the daemon's own env from launch evidence (multi-signal).
 
@@ -356,7 +415,8 @@ def _auto_derive_env() -> str | None:
        binary: ``<ver>`` → ``releases`` → ``INSTALL_DIR``). If that
        install dir has a ``releases/`` subdirectory AND is NOT one of
        the canonical HOME installs (live ``~/agents-ensemble`` / demo
-       ``~/agents-ensemble-demo``), resolve ``sandbox``. The frozen-
+       ``~/agents-ensemble-demo`` — under BOTH Layer-1 HOME shapes, see
+       :func:`_install_root_candidates`), resolve ``sandbox``. The frozen-
        binary + releases/ pair is the single strongest sandbox signal
        because a sandbox daemon has no other reliable evidence (the
        staged payload carries no ``INSTALL_DIR`` env, the only
@@ -396,28 +456,27 @@ def _auto_derive_env() -> str | None:
         if exe is not None:
             install_dir = exe.parent.parent.parent
             if (install_dir / "releases").is_dir():
-                home = Path.home()
-                if (
-                    install_dir != home / "agents-ensemble"
-                    and install_dir != home / "agents-ensemble-demo"
-                ):
+                canonical_roots: set[Path] = set()
+                for _name in _LIVE_INSTALL_DIR_NAMES:
+                    canonical_roots.update(_install_root_candidates(_name))
+                if install_dir not in canonical_roots:
                     return "sandbox"
 
     # 2. Install-dir topology + DB cross-check → live / demo.
-    home = Path.home()
     db_hint = (os.environ.get("POSTGRES_DB") or "").strip().lower()
 
-    live_env = home / "agents-ensemble" / ".env"
-    if live_env.is_file():
-        env_db = (_read_env_value(live_env, "POSTGRES_DB") or "").strip().lower()
-        if env_db == "ensemble_prod" or db_hint == "ensemble_prod":
-            return "live"
-
-    demo_env = home / "agents-ensemble-demo" / ".env"
-    if demo_env.is_file():
-        env_db = (_read_env_value(demo_env, "POSTGRES_DB") or "").strip().lower()
-        if env_db == "ensemble_demo" or db_hint == "ensemble_demo":
-            return "demo"
+    for install_name, expected_db, label in (
+        ("agents-ensemble", "ensemble_prod", "live"),
+        ("agents-ensemble-demo", "ensemble_demo", "demo"),
+    ):
+        for cand in _install_root_candidates(install_name):
+            env_file = cand / ".env"
+            if env_file.is_file():
+                env_db = (
+                    _read_env_value(env_file, "POSTGRES_DB") or ""
+                ).strip().lower()
+                if env_db == expected_db or db_hint == expected_db:
+                    return label
 
     # 3. Dev-shape POSTGRES_DB → dev.
     if db_hint == "ensemble_dev":
@@ -547,9 +606,12 @@ def _resolve_install_dir(self_env: str | None) -> Path | None:
     "not in staged mode").
     """
     if self_env == "demo":
-        return Path.home() / "agents-ensemble-demo"
+        # 2026-10-12: install dir deleted twice by agent-authored test code;
+        # immediate cause (test-script defect) fixed same day by user; this
+        # change is part of the Layer 1 ownership-separation backstop.
+        return _canonical_install_root("agents-ensemble-demo")
     if self_env == "live":
-        return Path.home() / "agents-ensemble"
+        return _canonical_install_root("agents-ensemble")
     if self_env == "sandbox" and getattr(sys, "frozen", False):
         try:
             exe = Path(sys.executable).resolve()
