@@ -1,0 +1,26 @@
+# Whole-Mission Definition of Done — agent-base-v2 (Phase E rollup, 2026-10-13)
+
+Per phaseE §11 (18 criteria). Verdicts from executed evidence only.
+
+| # | Criterion | Verdict | Evidence |
+|---|---|---|---|
+| 1 | v2 zero-touch (5/5) | **PASS** | `post-mission-v2-manifests/*.manifest.txt` diff vs `pre-mission-v2-manifests/` EMPTY ×5 (digests byte-identical); `git status --porcelain -- 'agents/'` → 0 lines |
+| 2 | base == v2 (5/5) | **PASS** | `base-vs-v2-diffs/<name>.diff.txt` all zero-byte ×5 (rc=0, equal line counts), captured PRE-BOOT (R8) |
+| 3 | legacy/ archive intact (FULL STACK) | **PASS** | `legacy-reverify/legacy-tree.reverify.manifest.txt` (68 files) diff vs Phase A manifest EMPTY; stack-surface arithmetic checks all expected counts |
+| 4 | Full test wall green | **PASS-WITH-PREEXISTING (conditional-green per C.4 USER DECISION — still pending with user)** | `test-wall/full-wall-xdist.log`: 344 failed / 25,688 passed / 310 skipped / 5 xfailed / 25 errors in 562s. Classification: **0 opencode-related** · 353 pre-existing base-proven (identical failure set at base 885a19d4f) · 18 mission-drift (all within C.4's root-caused Phase-B-drift families) · 3 initially-new → investigated: 2 xdist flakes (pass serially), 1 CPython-3.14.7 sqlite3 `SystemError` environment flake (passes ×3 serially; zero mission diff on that path). Literal full-suite green is NOT achievable at this repo state — the conditional-green USER DECISION ITEM from C.4 remains open with the user; Phase E reports the wall factually per the plan's own criteria |
+| 5 | Boot-scan clean | **PASS** | `boot-scan/dev-lane-boot.log`: livez 200 (v0.20.1) + readyz 200 all-true; engine `127.0.0.1:5432/ensemble_dev` (0 `ensemble_prod` lines); **0 opencode boot-log lines**; `daemon-opencode-residue.txt` = 0 source hits (stale `__pycache__` bytecode transient noted — untracked D7-orphan class, invisible to the committed-tree gate); graceful shutdown captured; ps-verify 0 residuals, port freed |
+| 6 | `default_agent_versions` invariant | **PASS** | `default-agent-versions/compare.txt` EMPTY (pre == post `{"default_versions":{}}`); structural proof: `git log -S DEFAULT_AGENT_VERSIONS_METADATA_KEY 885a19d4f..HEAD` EMPTY + `settings.py` zero-diff + no DB record (234 unrelated records in table — query path verified live). Deviation note: literal pre-B GET was impossible (D8 permitted Phase E's GET lane only; B/C/D ran in earlier executors' turns); invariant proven via runtime pre/post within Phase E + commit-level proof the mission never wrote the key |
+| 7 | Skill-seed no-op | **PASS** | `skill-seed/per-agent-side-effects.md`: explicit `seed_all()` re-pass {new:0, updated:0, unchanged:84, errors:0}; per-agent ×5 (base AND v2 dir passes) new/updated/errors = 0; PRE==POST bank counts |
+| 8 | Docs-consistency sweep clean | **PASS** | `docs-consistency-sweep-final.md`: 31/3/0 case-sensitive (byte-matches Phase D baseline), 37 case-insensitive — every hit classified (D6/HIST); zero unclassified; zero mandatory-FIX leftovers |
+| 9 | Drift posture recorded | **PASS** | `drift-notes.md` (5 wrinkles incl. P5 content-only caveat) |
+| 10 | BEFORE/AFTER map | **PASS** | `before-after-map.md` + `.json`: full stack, three terminal states, retained-live EMPTY (verified), R8 note baked in |
+| 11 | Final residual-references audit | **PASS** | `residual-references-audit.md`: 3,504 hits across 7 surfaces, all classified; **0 must-fix**; Surface-5 MCP-config hits = 0 (addendum VERDICT 2 holds) |
+| 12 | Ordering constraint (B before opencode removal) | **PASS** | commit graph: `97f3ad43c` B precedes `2e3bf2b2a` C/1..C/4 |
+| 13 | Coder opencode-free test-wall invariant | **PASS** | `test_coder_agent.py` 39/39 PASS (serial re-run; 0 FAILED in wall) — guards at :144/:168/:369+/:510/:253 all green |
+| 14 | Ensemble unregressed | **PASS** | boot clean + test wall unchanged-vs-baseline (modulo classified flakes) + v2 live lane intact + only 2 fenced dev-lane runtime interactions |
+| 15 | R10 FINAL TESTER GATE | **PASS** (see `r10-gate-output.txt` — count=0) | verbatim 48-pathspec gate; allowlist reconciled + committed (true census recorded); case-insensitive supplementary also 0 |
+| 16 | Evidence pack committed | **PASS** | `.agents/shared/planning/agent-base-v2/evidence/` on `feature/agent-base-v2` (commits listed in the mission report) |
+| 17 | Footprint bounded | **PASS** | `git diff --stat 885a19d4f..HEAD` — bounded to agents/×5 base, legacy/**, daemon/** Phase-C sites, docs+CHANGELOG+README+AGENTS+testing-guide (D), planning dir; tests/ mutations bounded to the C.3/C.4 enumerated list; NO frontend/** mutation; NO release/** mutation |
+| 18 | Migrations append-only (N8) | **PASS** | `git diff --stat 885a19d4f..HEAD -- daemon/migrations/` → EMPTY (0 lines) |
+
+**Guardrail assertions (final, at Phase E HEAD):** zero writes under `agents/*[v2]*/` ✓ · `tests/conftest.py` untouched (not in mission diff) ✓ · migrations 0-diff ✓ · no promote (D8) ✓ · no live contact beyond the fenced dev-lane boot + read-only GETs ✓ · `git clean` never run ✓ · foreign runtime writes (`.agents/shared/planning/designer-agent/install-audit.jsonl`, `.agents/tidier/notes.md`) preserved uncommitted ✓.

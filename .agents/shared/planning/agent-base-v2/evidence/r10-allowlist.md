@@ -81,3 +81,44 @@ No orphan class remains (per R10 §11.8 census requirement). Every allowlist row
 - D6 rows were line-by-line strictly-upstream verified at edit time: no line in `docs/mcp-kb-usage.md` references our service.
 - R10.4#2 (vendored) lives under `plugins/` (per `stage.sh:407`); the vendored resource is the upstream `sst/opencode-ai` design-system content, not our wiring.
 - HIST rows either name retired files (e.g. `daemon/opencode/state.py`, `daemon/tools/external_opencode.py`) or describe past bugs/incidents/proposals; none refer to current active-stack behavior.
+
+---
+
+# PHASE E RECONCILIATION (2026-10-13, Step 13 pre-flight)
+
+Per phaseE Step 13 sub-step 1 ("one row per excluded path") + sub-step 3(b), the following rows complete the exclude→row mapping for the verbatim 48-pathspec gate command. Phase D's rows above are preserved verbatim. Census reconciliation appears in the file footer.
+
+## Added rows (one per gate exclude lacking a row; `X` + `X/**` pairs = one row)
+
+| Path (gate exclude) | Class | Justification (required by R10) |
+|---|---|---|
+| `legacy` + `legacy/**` | HIST | The Phase A archive itself — the retired opencode stack + opencode-era base agents live there by design; the gate excludes the archive's own contents. |
+| `CHANGELOG.md` | HIST | Release-record history; the mission's flip entry is a historical audit-trail record, not active-stack documentation. |
+| `.agents/shared/planning` + `/**` | HIST | Planning history (sibling phase plans + this mission's plans + prior missions'); out of mission scope for editing (W4-expanded row; plan §13 pre-written justification: "planning history; out of mission scope for editing"). |
+| `.agents/*/RESULTS*` | HIST | Tier-5 RESULT records — historical audit material; out of mission scope (W4-expanded row). |
+| `.agents/*/LESSONS*` | HIST | Tier-5 LESSONS records — historical audit material; out of mission scope (W4-expanded row). |
+| `.agents/*/memories` + `/**` | HIST | Per-agent runtime memory dirs (RAG-migration-era legacy memories + runtime-written files); agent-state, not active-stack surface. |
+| `.agents/*/working` + `/**` | HIST | Per-agent working notes (runtime-written scratch state); not active-stack surface. |
+| `.agents/*/EVIDENCE` + `/**` | HIST | Per-agent evidence captures (Tier-5 audit material, e.g. clipboard-gate transcripts); historical. |
+| `.agents/approver/active.md` + 5 `*-tracking.md` files | HIST | Approver mission-tracking/audit records (active.md + agent-base-v2 / opencode-native-python-tools / rename-coder-to-developer / context-injection-restructure / tester-skill-evolution tracking files); historical gate-time records of missions past and present. |
+| `.agents/reviewer` + `/**` | HIST | Reviewer agent's per-agent runtime/audit dir (Tier-5 records + memories); not active-stack surface. |
+| `.agents/tidier/notes.md` | HIST | Tidier runtime notes file (also a foreign runtime write in this worktree, preserved uncommitted per mission rules); historical scratch, not active-stack surface. |
+| `.agents/tester/QUARANTINE.md` | HIST | Tester quarantine record (historical log of quarantined tests); audit material. |
+| `.slim` + `/**` | HIST | Historical slim-snapshot tree (incl. `cartography.json` carrying retired-stack hash entries); archive of a past tool state. |
+| `LESSONS` + `/**` | HIST | Root LESSONS archive — historical lessons records; audit material. |
+| `backup` + `/**` | HIST | Backup archive (R10 §11.8 census: `backup` 12 → "historical archive → allowlist"); contains retired-era agent metas. |
+| `plugins/opendesign/snapshot_with_drift_alarm` + `/**` | R10.4#2 | Vendored OD-plugin snapshot files (provenance class `snapshot_with_drift_alarm`): `prompts/daemon/system.ts` (4 hits) + `prompts/daemon/media-contract.ts` (1 hit) + `prompts/contracts/system.ts` word-match are third-party upstream content OUTSIDE copy_freely; `plugins/` ships in release payloads (`stage.sh:407`); cannot move to `legacy/` without breaking the OD plugin snapshot. NOT a user-decision item. |
+| `docs/bugs` + `/**` (dir row; per-file rows above) | HIST | Conditional exclusion satisfied: every docs/bugs hit is a per-file HIST row above (or the two moved-to-legacy docs); NO row describes current active-stack behavior. |
+| `docs/plans` + `/**` (dir row; per-file rows above) | HIST | Past planning records (incl. `coder-selective-context-truncation.md:290` surfaced by the Phase E case-insensitive sweep); historical, out of mission scope. |
+| `docs/optimization` + `/**` (dir row; per-file rows above) | HIST | Past optimization proposals (workflow-context-load-optimization.md rows above); historical. |
+| `tests/unit/test_coder_agent.py` | negative-guard | Intentional-negative contamination guard (43 hits; guards at :144/:148/:168/:173/:253/:264/:268/:269/:369/:384 — D7 invariant: coder must NOT depend on opencode); the strings ARE the assertion — removing the strings removes the guard; guards verified PASSING 39/39 at Phase E. |
+| `tests/unit/test_devops_agent.py` | negative-guard | Intentional-negative contamination guard (31 hits; `test_no_opencode_skill_content_in_system_prompt` at :337 + `test_devops_does_not_have_opencode_tools` at :534 + deny-list fixtures); strings ARE the assertion. |
+| `tests/unit/test_reviewer_v2_agent.py` | negative-guard | Intentional-negative contamination guard (4 hits; `test_opencode_not_in_innate_skills` at :130 — D7 invariant: reviewer[v2] must NOT depend on opencode); strings ARE the assertion. |
+
+Class values used above: HIST (historical/audit material), R10.4#2 (vendored third-party), negative-guard (intentional-negative test invariant — sub-class of the plan's bucket (iii); removing the string removes the guard).
+
+## Census reconciliation (true census, Phase E determination)
+
+- Phase D's file-header claim: "37 rows / 6 classes (D6=7, R10.4#2=1, R10.4#3=1, R10.4#4=1, HIST=25, P4=2)". **Actual Phase D table: 39 data rows** (D6=7, HIST=27, P4=2, R10.4#2=1, R10.4#3=1, R10.4#4=1) — the header census undercounts HIST by 2 (39 vs 37; 27 vs 25). **The "5-vs-6" class-count inconsistency:** the file's closing "No orphan class" paragraph enumerated only FIVE classes (omitting R10.4#4/.kilo) while the exclusion-classes table and gate use SIX. TRUE Phase D census: **39 rows / 6 classes**.
+- Phase E additions: 22 rows (2 negative-guard-class files beyond reviewer + coder/devops = 3 negative-guard rows, 1 vendored-snapshot row, 14 HIST dir/file rows, 3 docs dir-glob rows, 1 legacy row). TRUE final census: **61 rows / 7 classes** (D6, R10.4#2, R10.4#3, R10.4#4, HIST, P4, negative-guard — the negative-guard class formalizes the plan's bucket (iii) as a first-class allowlist class).
+- Per the plan's census-drift acknowledgment (DoD #15): the gate is COMMAND-BASED, not count-based — pass criterion is `git grep` returning 0 matches under the executable exclude set, not any row count.

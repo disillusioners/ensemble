@@ -1,0 +1,71 @@
+{
+  "scope": "opencode-stack-full (single package; session/API role + comm role layer inside; per addendum VERDICT 1)",
+  "addendum_relay_received": "2026-10-13",
+  "terminal_states": {
+    "archived_to_legacy": "mirrored to legacy/<path> via copy-then-verify; active codebase no longer references it",
+    "edited_in_place_git_preserved": "edited in place to remove opencode wiring; pre-edit version in git history",
+    "retained_live_user_decision": "kept live because a live-used active agent depends on it; USER DECISION ITEM - expected EMPTY for this mission (VERIFIED EMPTY)"
+  },
+  "r8_capture_before_boot": {
+    "equality_proof_files": "evidence/base-vs-v2-diffs/*.diff.txt (written 15:55Z)",
+    "v2_manifests": "evidence/pre-mission-v2-manifests/ (15:54Z) + evidence/post-mission-v2-manifests/ (15:54Z)",
+    "legacy_reverify": "evidence/legacy-reverify/legacy-tree.reverify.manifest.txt (15:56Z)",
+    "boot_scan_first_write": "evidence/boot-scan/dev-lane-boot.log (15:58:33Z)",
+    "ordering_honored": true
+  },
+  "streams": {
+    "i_agents_base_copy": {
+      "description": "Phase B: agents/<base> == agents/<base>[v2] (byte copy); v2 zero-touch",
+      "rows": [
+        {"pre": "agents/{approver,developer,planner,reviewer,tidier}", "post": "overwritten with v2 byte-copy", "terminal_state": "edited-in-place, git-preserved", "manifest": "evidence/base-vs-v2-diffs/<name>.diff.txt (empty x5)"},
+        {"pre": "agents/<name>[v2] x5", "post": "unchanged (zero-touch)", "terminal_state": "kept live", "manifest": "pre==post manifests byte-equal x5"}
+      ]
+    },
+    "ii_opencode_stack_move": {
+      "description": "Phase A + Phase C: opencode stack archived to legacy/",
+      "terminal_state": "archived-to-legacy",
+      "rows": [
+        {"pre": "daemon/opencode/ (8 modules)", "post": "legacy/daemon/opencode/"},
+        {"pre": "daemon/tools/external_opencode.py", "post": "legacy/daemon/tools/external_opencode.py"},
+        {"pre": "agents/_prompt_system/innate-skills/opencode/ (2 files)", "post": "legacy/agents/_prompt_system/innate-skills/opencode/"},
+        {"pre": "tests/opencode/ (12 files)", "post": "legacy/tests/opencode/"},
+        {"pre": "test/packs opencode (3)", "post": "legacy/test/packs/"},
+        {"pre": ".agents/shared/planning/opencode-native-tools/ (7)", "post": "legacy/.agents/shared/planning/opencode-native-tools/"},
+        {"pre": "docs/bugs opencode (2)", "post": "legacy/docs/bugs/"},
+        {"pre": "example/SKILL.md", "post": "legacy/example/SKILL.md"},
+        {"pre": "opencode-era base agent dirs (32 files)", "post": "legacy/agents/"}
+      ],
+      "manifest": "evidence/legacy-reverify/legacy-tree.reverify.manifest.txt (68 files; diff vs Phase A EMPTY)"
+    },
+    "iii_opencode_stack_touch": {
+      "description": "Phase C + Phase D: TOUCH surfaces edited in place; git preserves pre-edit",
+      "terminal_state": "edited-in-place, git-preserved",
+      "rows": [
+        {"pre": "daemon/manager.py opencode blocks", "post": "removed; grep 0"},
+        {"pre": "daemon/tools/instance.py + _tool_registry.py opencode wiring", "post": "removed; grep 0"},
+        {"pre": "daemon/config.py:168, Makefile, pyproject.toml, .env.example", "post": "rephrased; grep 0"},
+        {"pre": "comment rephrases (7 files, D5 kept)", "post": "rephrased"},
+        {"pre": "cosmetic one-liners (3 files)", "post": "rephrased"},
+        {"pre": "tests: P1/R1/R2/coder-guards/P2/mocks/P7", "post": "rephrased; coder guards PASS"},
+        {"pre": "docs refresh (Phase D)", "post": "edited"}
+      ]
+    },
+    "iv_opencode_stack_retained_live": {"description": "EXPECTED EMPTY (addendum VERDICT 2) - VERIFIED EMPTY by executor", "terminal_state": "retained-live, USER DECISION ITEM", "rows": []},
+    "v_mcp_configs": {"description": "NO MCP configs anywhere reference opencode (executor-verified: daemon/mcp/ 0, config.yaml 0)", "rows": []},
+    "vi_leave_alone": {
+      "rows": [
+        {"surface": "agents/coder/", "reason": "opencode-free BY DESIGN (guards PASS 39/39)"},
+        {"surface": "daemon/services/keyword_extraction.py + context_injection.py", "reason": "D5 LIVE-SHARED infra; callers attested"},
+        {"surface": "docs/mcp-kb-usage.md", "reason": "D6 false positive"},
+        {"surface": ".agents/*/RESULTS|LESSONS", "reason": "Tier-5 historical"},
+        {"surface": "data/, data_dev/ DBs", "reason": "D7 orphan class; boot-recreate dies with code"},
+        {"surface": ".inspiration-projects/opencode_skill_src/", "reason": "gitignored"}
+      ]
+    }
+  },
+  "boundary_rule_exceptions": [],
+  "boundary_rule_exception_count": 0,
+  "mcp_configs_finding": "NO MCP configs anywhere reference opencode",
+  "ordering_constraint": "B (97f3ad43c) precedes opencode-stack move (2e3bf2b2a C/1..C/4) - commit-graph verified",
+  "open_item_status": "O1 RESOLVED; O2 RESOLVED; O3 moot; O4 RESOLVED"
+}

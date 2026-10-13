@@ -1,0 +1,2 @@
+# boot-log opencode residue (case-insensitive), exec 2026-10-13T15:59:11Z
+(0 matches — boot log clean)

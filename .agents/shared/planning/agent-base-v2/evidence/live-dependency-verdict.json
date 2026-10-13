@@ -1,0 +1,21 @@
+{
+  "scope": "opencode-stack-full (single package; session/API role + comm role layer inside; per addendum VERDICT 1)",
+  "addendum_relay_received": "2026-10-13",
+  "verdict_2_resolution": "NO surface requires isolation -> FULL STACK REMOVAL, no boundary-rule exception",
+  "sources": {
+    "primary": "leader exploration addendum VERDICT 1 + VERDICT 2 (RECEIVED 2026-10-13)",
+    "secondary": "Phase E executor grep re-verification 2026-10-13 (all patterns returned EMPTY as expected)"
+  },
+  "coder_agent_covered": true,
+  "coder_verdict": "opencode-free BY DESIGN; contamination guards at tests/unit/test_coder_agent.py must KEEP passing (test wall invariant, not a dependency)",
+  "boundary_rule_exceptions": [],
+  "boundary_rule_exception_count": 0,
+  "retained_live_surfaces_in_opencode_stack": [],
+  "retained_live_surfaces_outside_opencode_stack": [
+    "daemon/services/keyword_extraction.py (D5 LIVE-SHARED infra; live callers: attestation_report_judge.py:35-328, daemon/graph.py:10794, plugins/opendesign/generate.py:650)",
+    "daemon/services/context_injection.py (D5 LIVE-SHARED infra; same live callers)"
+  ],
+  "mcp_configs_finding": "NO MCP configs anywhere reference opencode (executor grep of daemon/mcp/ + config.yaml returned 0 hits)",
+  "ordering_constraint": "stack removal is coupled to base-retirement via the innate-skill loader; removal lands WITH or AFTER Phase B, never before (commit graph verified: 97f3ad43c B precedes 2e3bf2b2a C/1..C/4)",
+  "open_item_status": "O1 RESOLVED (one unit, two roles); O2 RESOLVED (uniform single legacy/tests/opencode/ tree); O3 moot; O4 RESOLVED (legacy/ root confirmed)"
+}

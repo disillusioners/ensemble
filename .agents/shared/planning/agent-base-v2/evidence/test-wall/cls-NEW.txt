@@ -1,0 +1,3 @@
+FAILED tests/services/test_skill_evolution_service.py::TestCheckABTestResolution::test_ab_resolution_threshold_met
+FAILED tests/test_memory_integration.py::TestFullLifecycleIntegration::test_concurrent_writes_no_corruption
+FAILED tests/unit/test_llm_allowed_models_precedence.py::TestLoadConfigAllowedModelsIntegration::test_neither_set_yields_documented_default

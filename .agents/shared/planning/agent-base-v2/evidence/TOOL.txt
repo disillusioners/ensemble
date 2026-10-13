@@ -1,0 +1,2 @@
+Linux
+/usr/bin/sha256sum
