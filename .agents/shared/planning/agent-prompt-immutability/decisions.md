@@ -664,14 +664,4 @@ Each risk carries severity (H/M/L), mitigation, owning phase.
 | D-SEED-EDGE | manual operator migration | **YES — second-most likely** |
 | D-IDENTITY-STAMPING | submitter tuple + AuthContext subject/method | No |
 
-**End of decisions.md.**uthContext subject/method | No |
-
-**End of decisions.md.**|
-
-**End of decisions.md.**| No |
-
-**End of decisions.md.**uthContext subject/method | No |
-
-**End of decisions.md.**|
-
 **End of decisions.md.**
