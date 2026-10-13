@@ -152,14 +152,10 @@ def _format_task_context(context: dict[str, Any]) -> str:
 # When an agent declares an innate skill, the matching tool categories are
 # automatically granted (merged into the agent's allow list) so the skill is
 # actually usable. This avoids requiring every agent to repeat
-# "external_opencode" in its `tools.allow` list just because it has
-# `innate_skills: ["opencode"]`.
-#
 # Add new entries here when introducing a new innate skill that requires
 # dedicated tool categories. The skill prompt is loaded separately by the
 # loader; this map only governs tool access.
 INNATE_SKILL_TOOL_CATEGORIES: dict[str, list[str]] = {
-    "opencode": ["external_opencode"],
     "chart": ["chart"],
     "todo": ["todo"],
     "dynamic-skill": ["dynamic-skill"],
@@ -256,7 +252,6 @@ from .snapshot_tools import (
     format_snapshot_citation,
     resolve_spawn_snapshot,
 )
-from .external_opencode import create_opencode_tools
 from .rag_tools import create_rag_tools
 from .critical_notes import create_critical_notes_tools
 from .project_history import create_project_history_tools
@@ -5812,11 +5807,6 @@ Returns:
         # when the caller is "coder").
         knowledge_tool_list = create_knowledge_tools(manager, current_instance_id, agent_id=agent_id)
         tools.extend(knowledge_tool_list)
-
-    # ── OpenCode tools (external system integration, always available) ──
-    # NOTE: NOT inside the is_rag_enabled() block — these are always available.
-    opencode_tool_list = create_opencode_tools(manager, current_instance_id)
-    tools.extend(opencode_tool_list)
 
     # ── Chart tools (delegates to Charter agent for Mermaid diagrams, always available) ──
     # NOTE: NOT inside the is_rag_enabled() block — these are always available,
