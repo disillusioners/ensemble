@@ -1,26 +1,16 @@
 # Memory
 
-## Known Patterns
+## v2 designer handoff contract — canonical home (D-1 fixup round, 2026-10-01)
 
-(To be filled through experience)
+The designer-sourced handoff contract (gate / verify / relay / collect / edge fields) lives in two places **on purpose**; they are not duplicates — each is the canonical contract for its version's idiom:
 
-- ## Phase 3 Implementation Experience — Job Queue Management API + Frontend
+- **`agents/developer/` (base, v1)** — carries the **implement-side** contract. v1 developer IS the implementer; workflow steps are *read spec → verify SHA → honor handoff fields → implement against pack-mapped ACs → cosmetic-skip awareness → report edge-contract fields*. The Cardinal in base `agents/developer/rule.md` is "NEVER implement until I verify the spec."
+- **`agents/developer[v2]/` (v2, live-resolved)** — carries the **dispatch-side** contract. v2 developer is a dispatcher/relay (Cardinal #1: ALWAYS dispatch coding work; v2 does not write source — implements via `coder`/`worker` dispatch). The Cardinal here is `1b.` ("gate the dispatch against an approved spec"), and the workflow section **Designer-Sourced Tasks (handoff contract)** expresses the gate → relay → collect → cosmetic-skip → re-conformance flow. v2 NEVER implements; it relays the pack-mapped ACs, the handoff fields, and the canonical artifact paths to a `coder`/`worker` executor, then collects `commit_sha`, `diff_stat`, `pages_changed`, `conformance_iter`, and capture paths from the executor's report.
 
-### Key Learnings:
-1. **queue_id filter propagation**: When adding a new filter parameter to a router, must ensure it flows through ALL layers: router → service → repository → SQL query. The review caught a critical bug where the router passed `queue_id` to service.list_jobs() but the service didn't accept it.
+**Why two files, not one with `if v2 else ...`:** cross-version file dependencies silently break when either dir is removed (a v2 dir pointing at a base file works only while base lives). The prompt-writing guide requires per-version canonical homes when the idiom diverges — v2 dispatcher semantics vs v1 implementer semantics are not the same contract; they are the same contract expressed in different roles.
 
-2. **ng-zorro-antd replacement**: The job-create-dialog was using `NzSelectModule` (ng-zorro). When replacing with Angular Material, use native `<select>` or `mat-select`. The constraint is clear: Angular Material ONLY.
+**Why a `memory.md` block here:** `memory.md` is outside the registry-test scanned prompt surface (`PROMPT_SURFACE = (rule.md, workflow.md, soul.md)`); the note doesn't risk the report-integrity fixture tripping on a prose token, and it survives prompt-file edits.
 
-3. **Signal-based project selection**: When a signal like `selectedProjectId` is needed in multiple places, prefer `computed()` deriving from existing state rather than duplicating signals. We derived it from `filters().project_id`.
+## Cross-references between versions
 
-4. **Queue name vs queue_id on UI**: Users see queue names, not UUIDs. Always maintain a lookup map (queue_id → queue_name) when displaying queue references in UI components.
-
-### Architecture:
-- Queue router follows the same dependency injection pattern as jobs router (module-level global + setter)
-- IDOR protection returns 404 (never 403) to prevent information leakage
-- Frontend components use signals throughout for reactive state management
-- Queue sidebar is a separate component with input/output bindings for loose coupling
-
-- Phase 1 refactoring plan read. Key constraint: use `from daemon.models import ...` NOT `from daemon.models.common import ...` for validate_agent_id (common module doesn't exist yet until Phase 2). Plan has detailed task breakdown for constants, utils, and validate_agent_id relocation.
-
-- Comprehensive agents-ensemble architecture investigation completed. Key findings documented in 2026-04-23-architecture-report.md memory. Tool system uses CATEGORY_MODULES registry with 9 categories. Job queue has 7-state lifecycle with lock-first pattern. Agent system uses markdown files (metadata, identity, rules, skills, etc.). Three event buses exist but agents cannot subscribe to events directly.
+v2 cardinal `1b.` says "See **Designer-Sourced Tasks (handoff contract)**" — that points at the v2 workflow section, NOT at base `agents/developer/workflow.md`. Base holds the implement-side Steps; v2 holds the dispatch-side Steps. Reading the base copy from v2 would teach the v2 developer to *implement*, which it must not.

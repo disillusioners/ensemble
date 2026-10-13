@@ -1,13 +1,18 @@
 {
   "id": "reviewer",
   "name": "Reviewer",
-  "description": "Experienced solution architect reviewing plans, architecture, and code for quality, compliance, and risks",
+  "description": "Review dispatcher — plans reviews, delegates to skill-equipped workers, convenes governor council for deep review",
   "icon": "🔍",
   "color": "accent-rose",
-  "innate_skills": ["opencode", "chart", "todo"],
+  "version": "2.0.0",
+  "innate_skills": ["todo", "chart", "dynamic-skill"],
+  "skill_injection": true,
   "no_force_explore": true,
-  "tools": {
-    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "blueprint", "service"]
+  "context_injection": {
+    "heuristic_match_shared_md_files": true
   },
-  "team_members": ["explorer"]
+  "tools": {
+    "allow": ["instance", "council", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "service"]
+  },
+  "team_members": ["worker", "explorer", "governor"]
 }

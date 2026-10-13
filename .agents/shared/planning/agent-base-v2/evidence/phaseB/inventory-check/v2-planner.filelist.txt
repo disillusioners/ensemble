@@ -1,0 +1,11 @@
+agents/planner[v2]/meta.json
+agents/planner[v2]/rule.md
+agents/planner[v2]/skill-set.yaml
+agents/planner[v2]/skills-template/plan-creation.md
+agents/planner[v2]/skills-template/planning-strategy.md
+agents/planner[v2]/skills-template/requirements-analysis.md
+agents/planner[v2]/skills-template/roadmap-strategy.md
+agents/planner[v2]/skills-template/technical-analysis.md
+agents/planner[v2]/soul.md
+agents/planner[v2]/tools_note.md
+agents/planner[v2]/workflow.md

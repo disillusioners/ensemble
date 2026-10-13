@@ -1,0 +1,45 @@
+PASS: v2 untouched
+--- All dirty agents/ entries ---
+ D agents/approver/memory.md
+ M agents/approver/meta.json
+ M agents/approver/rule.md
+ M agents/approver/soul.md
+ M agents/approver/tools_note.md
+ M agents/approver/workflow.md
+ D agents/developer/growth.md
+ M agents/developer/memory.md
+ M agents/developer/meta.json
+ M agents/developer/rule.md
+ M agents/developer/soul.md
+ M agents/developer/tools_note.md
+ D agents/developer/user.md
+ M agents/developer/workflow.md
+ D agents/planner/memory.md
+ M agents/planner/meta.json
+ M agents/planner/rule.md
+ M agents/planner/soul.md
+ M agents/planner/tools_note.md
+ M agents/planner/workflow.md
+ M agents/reviewer/memory.md
+ M agents/reviewer/meta.json
+ M agents/reviewer/rule.md
+ M agents/reviewer/soul.md
+ M agents/reviewer/tools_note.md
+ M agents/reviewer/workflow.md
+ D agents/tidier/memory.md
+ M agents/tidier/meta.json
+ M agents/tidier/rule.md
+ M agents/tidier/soul.md
+ M agents/tidier/tools_note.md
+ M agents/tidier/workflow.md
+?? agents/approver/skill-set.yaml
+?? agents/approver/skills-template/
+?? agents/developer/skill-set.yaml
+?? agents/developer/skills-template/
+?? agents/planner/skill-set.yaml
+?? agents/planner/skills-template/
+?? agents/reviewer/skill-set.yaml
+?? agents/reviewer/skills-template/
+?? agents/tidier/skill-set.yaml
+?? agents/tidier/skills-template/
+PASS: infra dirs untouched

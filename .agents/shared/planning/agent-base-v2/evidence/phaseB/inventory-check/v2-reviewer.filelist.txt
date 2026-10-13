@@ -1,0 +1,14 @@
+agents/reviewer[v2]/memory.md
+agents/reviewer[v2]/meta.json
+agents/reviewer[v2]/rule.md
+agents/reviewer[v2]/skill-set.yaml
+agents/reviewer[v2]/skills-template/architecture-review.md
+agents/reviewer[v2]/skills-template/business-logic-review.md
+agents/reviewer[v2]/skills-template/code-review.md
+agents/reviewer[v2]/skills-template/plan-review.md
+agents/reviewer[v2]/skills-template/pr-review.md
+agents/reviewer[v2]/skills-template/review-strategy.md
+agents/reviewer[v2]/skills-template/security-review.md
+agents/reviewer[v2]/soul.md
+agents/reviewer[v2]/tools_note.md
+agents/reviewer[v2]/workflow.md

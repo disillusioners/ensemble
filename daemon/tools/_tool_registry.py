@@ -600,7 +600,6 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "midflight": "daemon.tools.midflight_report",
     "rag": "daemon.tools.rag_tools",
     "mcp": "daemon.tools.mcp_tools",
-    "external_opencode": "daemon.tools.external_opencode",
     "context": "daemon.tools.context_tools",
     "shared_meta_kv": "daemon.tools.shared_meta_kv_tools",
     "db": "daemon.tools.db_tools",
@@ -761,14 +760,6 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "experience",
     "explain_image",
     "explore",
-    "external_opencode_abort_session",
-    "external_opencode_answer_question",
-    "external_opencode_get_status",
-    "external_opencode_init_session",
-    "external_opencode_resume_session",
-    "external_opencode_send_message",
-    "external_opencode_wait_any",
-    "external_opencode_wait_for_result",
     "generate_chart",
     # image_save / image_list / image_get — designer-agent substrate
     # (Phase 1 WP7/8/9) — factory-created per-instance alongside

@@ -151,15 +151,11 @@ def _format_task_context(context: dict[str, Any]) -> str:
 #
 # When an agent declares an innate skill, the matching tool categories are
 # automatically granted (merged into the agent's allow list) so the skill is
-# actually usable. This avoids requiring every agent to repeat
-# "external_opencode" in its `tools.allow` list just because it has
-# `innate_skills: ["opencode"]`.
-#
+# actually usable.
 # Add new entries here when introducing a new innate skill that requires
 # dedicated tool categories. The skill prompt is loaded separately by the
 # loader; this map only governs tool access.
 INNATE_SKILL_TOOL_CATEGORIES: dict[str, list[str]] = {
-    "opencode": ["external_opencode"],
     "chart": ["chart"],
     "todo": ["todo"],
     "dynamic-skill": ["dynamic-skill"],
@@ -256,7 +252,6 @@ from .snapshot_tools import (
     format_snapshot_citation,
     resolve_spawn_snapshot,
 )
-from .external_opencode import create_opencode_tools
 from .rag_tools import create_rag_tools
 from .critical_notes import create_critical_notes_tools
 from .project_history import create_project_history_tools
@@ -5813,15 +5808,10 @@ Returns:
         knowledge_tool_list = create_knowledge_tools(manager, current_instance_id, agent_id=agent_id)
         tools.extend(knowledge_tool_list)
 
-    # ── OpenCode tools (external system integration, always available) ──
-    # NOTE: NOT inside the is_rag_enabled() block — these are always available.
-    opencode_tool_list = create_opencode_tools(manager, current_instance_id)
-    tools.extend(opencode_tool_list)
-
     # ── Chart tools (delegates to Charter agent for Mermaid diagrams, always available) ──
-    # NOTE: NOT inside the is_rag_enabled() block — these are always available,
-    # matching the OpenCode pattern above. The chart category is auto-granted
-    # to agents with innate_skills:["chart"] via INNATE_SKILL_TOOL_CATEGORIES.
+    # NOTE: NOT inside the is_rag_enabled() block — these are always available.
+    # The chart category is auto-granted to agents with innate_skills:["chart"]
+    # via INNATE_SKILL_TOOL_CATEGORIES.
     chart_tool_list = create_chart_tools(manager, current_instance_id)
     tools.extend(chart_tool_list)
 
@@ -5856,8 +5846,8 @@ Returns:
     tools.extend(live_view_tool_list)
 
     # ── Todo tools (per-instance todo list with SSE emission, always available) ──
-    # NOTE: NOT inside the is_rag_enabled() block — these are always available,
-    # matching the chart/opencode pattern. The todo category is auto-granted to
+    # NOTE: NOT inside the is_rag_enabled() block — these are always available.
+    # The todo category is auto-granted to
     # agents with innate_skills:["todo"] via INNATE_SKILL_TOOL_CATEGORIES.
     # Pass manager._live_hub defensively via getattr so the factory still works
     # in tests/environments where the hub is not wired up.
@@ -6243,7 +6233,7 @@ def _apply_tool_filter(tools: list[Any], agent_id: str, mcp_tool_names: list[str
             all_tool_names.add(tool_name)
 
     # Resolve the filter with MCP-aware category expansion.
-    # Innate skills (e.g. "opencode") implicitly grant the tool categories
+    # Innate skills (e.g. "chart") implicitly grant the tool categories
     # they require, so the agent does not have to repeat them in `tools.allow`.
     effective_allow = expand_allow_for_innate_skills(
         agent_meta.tools.allow,

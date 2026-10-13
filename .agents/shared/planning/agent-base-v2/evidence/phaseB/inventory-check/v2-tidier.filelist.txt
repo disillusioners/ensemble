@@ -1,0 +1,10 @@
+agents/tidier[v2]/meta.json
+agents/tidier[v2]/rule.md
+agents/tidier[v2]/skill-set.yaml
+agents/tidier[v2]/skills-template/tidier-readable-code.md
+agents/tidier[v2]/skills-template/tidier-robustness.md
+agents/tidier[v2]/skills-template/tidier-static-hygiene.md
+agents/tidier[v2]/skills-template/tidier-strategy.md
+agents/tidier[v2]/soul.md
+agents/tidier[v2]/tools_note.md
+agents/tidier[v2]/workflow.md

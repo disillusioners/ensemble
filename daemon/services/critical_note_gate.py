@@ -5,7 +5,7 @@ external pass-through surfaces (R21, LOCKED-L 2026-09-15):
 
 * ``daemon/routers/projects.py::_get_critical_notes_safe``
 * ``daemon/services/context_injection.py`` (``_mcp_rag_hint`` filter)
-* ``daemon/tools/external_opencode.py`` (preload list-and-coerce path)
+* (the retired preload path, archived under ``legacy/`` post-Phase-C)
 
 An entry counts as ACTIVE iff its ``superseded_by_id`` is ``None``.
 Defensive against the empty-string class: a stray empty ``""`` pointer

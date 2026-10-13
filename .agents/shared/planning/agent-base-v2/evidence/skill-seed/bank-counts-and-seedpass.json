@@ -1,0 +1,113 @@
+{
+ "pre": {
+  "approver": 3,
+  "architect": 8,
+  "blueprinter": 7,
+  "coder": 5,
+  "designer": 1,
+  "developer": 1,
+  "maintenancer": 7,
+  "planner": 5,
+  "reviewer": 7,
+  "sketcher": 2,
+  "tester": 9,
+  "tidier": 4,
+  "wanderer": 5,
+  "worker": 2
+ },
+ "post": {
+  "approver": 3,
+  "architect": 8,
+  "blueprinter": 7,
+  "coder": 5,
+  "designer": 1,
+  "developer": 1,
+  "maintenancer": 7,
+  "planner": 5,
+  "reviewer": 7,
+  "sketcher": 2,
+  "tester": 9,
+  "tidier": 4,
+  "wanderer": 5,
+  "worker": 2
+ },
+ "seed_all": {
+  "new": 0,
+  "updated": 0,
+  "unchanged": 84,
+  "errors": 0
+ },
+ "detail": {
+  "approver": {
+   "resolved_agent_id": "approver",
+   "version_tag": null,
+   "new": 0,
+   "updated": 0,
+   "unchanged": 3,
+   "errors": 0,
+   "v2_dir_pass": {
+    "new": 0,
+    "updated": 0,
+    "unchanged": 3,
+    "errors": 0
+   }
+  },
+  "developer": {
+   "resolved_agent_id": "developer",
+   "version_tag": null,
+   "new": 0,
+   "updated": 0,
+   "unchanged": 1,
+   "errors": 0,
+   "v2_dir_pass": {
+    "new": 0,
+    "updated": 0,
+    "unchanged": 1,
+    "errors": 0
+   }
+  },
+  "planner": {
+   "resolved_agent_id": "planner",
+   "version_tag": null,
+   "new": 0,
+   "updated": 0,
+   "unchanged": 5,
+   "errors": 0,
+   "v2_dir_pass": {
+    "new": 0,
+    "updated": 0,
+    "unchanged": 5,
+    "errors": 0
+   }
+  },
+  "reviewer": {
+   "resolved_agent_id": "reviewer",
+   "version_tag": null,
+   "new": 0,
+   "updated": 0,
+   "unchanged": 7,
+   "errors": 0,
+   "v2_dir_pass": {
+    "new": 0,
+    "updated": 0,
+    "unchanged": 7,
+    "errors": 0
+   }
+  },
+  "tidier": {
+   "resolved_agent_id": "tidier",
+   "version_tag": null,
+   "new": 0,
+   "updated": 0,
+   "unchanged": 4,
+   "errors": 0,
+   "v2_dir_pass": {
+    "new": 0,
+    "updated": 0,
+    "unchanged": 4,
+    "errors": 0
+   }
+  }
+ },
+ "noop": true
+}

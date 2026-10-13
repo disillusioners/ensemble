@@ -1,9 +1,9 @@
 # Approver Active State
 
-Plan: OAuth2 Authentication Support (ensemble daemon) — v1.4 delta ("module-lanes") APPROVED. Lineage: core cycle 001 REJECTED -> 002 APPROVED (2026-10-10); delta cycle D001 APPROVED (2026-10-10) on the user module-lane ruling.
-Slug: oauth2-auth
+Plan: agent-base-v2 migration (BIG, 5 phases + decisions + architecture-recommendation; promote agent v2 to THE base agents + retire ENTIRE opencode stack to legacy/)
+Slug: agent-base-v2
 Status: APPROVED
-Iteration: D001 APPROVED 2026-10-10 (v1.4 delta cycle, 2 section-parallel workers, 0 blocking)
-Started: 2026-10-10T22:58:00Z
-Last Verdict: APPROVED (delta cycle D001, 2026-10-10 — workers 519630fe/e592c7ae both APPROVED 0 blocking; full detail: oauth2-auth-tracking.md)
-Note: Prior active plan snapshot-uiux ESCALATED 10-05, superseded by v2 lane (shipped 10-10), history in snapshot-uiux-tracking.md. Prior approvals: scheduled-tasks 2026-10-01, maintenance-console 2026-09-26, midflight-qa-channel 2026-09-21, clipboard-image-chat 2026-09-19.
+Iteration: 003 FINAL (001 REJECTED 4 blocking → all resolved; 002 REJECTED 4 blocking → all 4 verified RESOLVED by fresh iteration-003 pass: gate re-executed verbatim = 1,843 hits/98 files, 26/72/5 decomposition reconciles to the byte, independent sweep census complete, zero path-resolution failures. 003 APPROVED — 2 workers, 0 blocking, 12 non-blocking notes. Full detail: agent-base-v2-tracking.md)
+Started: 2026-10-13T10:02:00Z
+Last Verdict: APPROVED (iteration 003, 2026-10-13T09:37Z — approve-worker-gate-evidence APPROVED 0 blocking / approve-worker-plan APPROVED 0 blocking)
+Note: Prior approved plans: oauth2-auth v1.4 delta D001 (2026-10-10), scheduled-tasks 2026-10-01, maintenance-console 2026-09-26, midflight-qa-channel 2026-09-21, clipboard-image-chat 2026-09-19. snapshot-uiux ESCALATED 10-05 (superseded).

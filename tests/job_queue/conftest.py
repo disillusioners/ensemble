@@ -62,7 +62,7 @@ def _truncate_tables(engine):
         from sqlmodel import Session, text
         from sqlalchemy import inspect
         # Only truncate tables that actually exist in the engine. Some
-        # models (e.g. ``opencode_sessions``) get registered into
+        # models get registered into
         # ``SQLModel.metadata`` AFTER the session-scoped ``engine``
         # fixture ran ``create_all`` — they are imported lazily inside
         # test bodies. Iterating ``metadata.tables`` blindly would issue

@@ -138,8 +138,9 @@ def _detect_role(system_content: str) -> str:
     fallback so the helper still detects both spellings). The lcau/lca2
     helpers' keys ("Developer Agent" / "Coder Agent") are KEPT as belt-and-
     suspenders — older prompt revisions referenced those phrases; the
-    production developer soul uses "code orchestrator" + "opencode" (the
-    opencode-skill is the developer's only tool, agents/developer/soul.md).
+    production developer soul uses "code orchestrator" + "coding-worker
+    lane" (the coding-worker skill is the developer's only tool,
+    agents/developer/soul.md).
     """
     if "fused evidence bundle" in system_content:
         return "judge"

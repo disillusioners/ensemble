@@ -52,7 +52,7 @@ import pytest
 def _patch_heavy_helpers():
     """Patch the heavy ``create_instance_tools`` factory helpers so only the
     instance-management tools are built (RAG, knowledge, MCP, project, job,
-    mother, OpenCode, DB, infra, context all disabled).
+    mother, DB, infra, context all disabled).
 
     This is a verbatim copy of the helper used in
     ``tests/tools/test_send_message_status_guard.py`` and
@@ -74,7 +74,6 @@ def _patch_heavy_helpers():
         patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
         patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
         patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
         patch("daemon.tools.instance.create_db_tools", return_value=[]),
         patch("daemon.tools.instance.create_infra_tools", return_value=[]),
         patch("daemon.tools.instance.create_context_tools", return_value=[]),

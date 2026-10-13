@@ -23,7 +23,7 @@ class TestSkillDetectionInErrorMessage:
         """When input is a skill (not an agent), error message should list agents with that skill."""
         # Create mock metadata
         mock_meta = MagicMock(spec=AgentMetadata)
-        mock_meta.id = "opencode"
+        mock_meta.id = "coder"
         mock_meta.system = False
 
         # Create mock registry
@@ -39,7 +39,7 @@ class TestSkillDetectionInErrorMessage:
 
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             with pytest.raises(HTTPException) as exc_info:
-                validate_agent_id("opencode")
+                validate_agent_id("coder")
 
             assert exc_info.value.status_code == 404
             detail = exc_info.value.detail
@@ -47,7 +47,7 @@ class TestSkillDetectionInErrorMessage:
 
             # Should contain skill detection message
             assert "is a skill, not an agent" in message
-            assert "opencode" in message
+            assert "coder" in message
 
             # Should list agents with this skill
             assert "developer" in message
@@ -359,13 +359,13 @@ class TestManagerSpawnInstanceErrors:
                 manager._loop = None
 
                 with pytest.raises(ValueError) as exc_info:
-                    manager.spawn_instance("opencode")
+                    manager.spawn_instance("coder")
 
                 message = str(exc_info.value)
 
                 # Should mention skill
                 assert "is a skill, not an agent" in message
-                assert "opencode" in message
+                assert "coder" in message
 
                 # Should list agents with skill
                 assert "developer" in message

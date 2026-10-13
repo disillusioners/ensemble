@@ -5,9 +5,9 @@
 # joins the pack automatically.
 # Timeout: 1 minute (60s) — 22s solo per measurement 2026-09-19, ~60s with xdist under load
 #
-# Split from regression_integration_opencode_e2e_test.sh (P-12 in
-# PACKS.md) — chat-source-worker-lane integration family was
-# SILENTLY-DESELECTED by the default ``pyproject.toml`` addopts
+# Split from a combined regression_e2e pack (P-12 in PACKS.md) — the
+# chat-source-worker-lane integration family was SILENTLY-DESELECTED
+# by the default ``pyproject.toml`` addopts
 # (``addopts = "-m 'not integration and not postgres'"``); every
 # test in this family carries ``pytestmark = pytest.mark.integration``
 # and was therefore never executed under the default addopts. This

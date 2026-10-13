@@ -1,4 +1,4 @@
-"""Keyword extraction for the OpenCode context preloader.
+"""Keyword extraction for outgoing context preload.
 
 Two paths produce a focused query string for ``get_shared_context``:
 
@@ -6,7 +6,7 @@ Two paths produce a focused query string for ``get_shared_context``:
    ``model_keywords`` LLM (defaults to ``model``; ops typically pin this to
    ``"quick"`` to mirror the explorer agent's per-instance model). Bounded by
    :data:`KEYWORD_EXTRACTION_TIMEOUT_S` (40s — this is a harness platform, not
-   a chat UI, and the opencode call we are feeding dwarfs the extraction cost).
+   a chat UI, and the downstream caller dwarfs the extraction cost).
 
 2. **Heuristic** (``_heuristic_keywords``) — pure-Python fallback that
    extracts backtick-quoted terms, CamelCase tokens, the first non-empty line,
@@ -423,9 +423,9 @@ async def extract_keywords(
 
     except asyncio.TimeoutError:
         logger.debug(
-            "[OpenCode] Keyword extraction timed out after %.1fs", timeout_s,
+            "[keyword-extraction] timed out after %.1fs", timeout_s,
         )
         return []
     except Exception as e:
-        logger.debug("[OpenCode] Keyword extraction failed: %s", e)
+        logger.debug("[keyword-extraction] failed: %s", e)
         return []

@@ -1,0 +1,9 @@
+agents/approver[v2]/meta.json
+agents/approver[v2]/rule.md
+agents/approver[v2]/skill-set.yaml
+agents/approver[v2]/skills-template/approval-strategy.md
+agents/approver[v2]/skills-template/decision-approval.md
+agents/approver[v2]/skills-template/plan-approval.md
+agents/approver[v2]/soul.md
+agents/approver[v2]/tools_note.md
+agents/approver[v2]/workflow.md

@@ -167,7 +167,6 @@ def _patches():
             "daemon.tools.instance.create_project_history_tools",
             return_value=[],
         ),
-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
         patch("daemon.tools.instance.create_db_tools", return_value=[]),
         patch("daemon.tools.instance.create_infra_tools", return_value=[]),
         patch("daemon.tools.instance.create_context_tools", return_value=[]),

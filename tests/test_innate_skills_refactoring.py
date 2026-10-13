@@ -8,10 +8,10 @@ These tests verify the complete end-to-end behavior of the refactored skill syst
 - Registry behavior (including find_skill)
 
 This specifically tests against the REAL agents/ directory to ensure:
-- developer, reviewer, planner, tidier, approver all get opencode skill
+- developer, reviewer, planner, tidier, approver all get the chart/todo/dynamic-skill set
 - leader gets coordination skill
 - jober gets job-orchestration skill
-- tester gets test-pack, todo, and dynamic-skill (NO opencode after worker-only dispatch migration)
+- tester gets test-pack, todo, and dynamic-skill
 - giter has NO skills section
 """
 import json
@@ -53,20 +53,21 @@ class TestInnateSkillsSystemPromptIdentity:
         cache = PromptCache()
         
         # Test each agent
-        # Stale test: skill header uses hyphen (OpenCode-Skill) not underscore
-        # Updated for todo innate skill: all agents now have 'todo' appended.
+        # Skill header uses underscore (e.g. Dynamic_Skill).
+        # Updated for v2 base copy (Phase B): all 5 retiring base agents now declare
+        # ["todo", "chart", "dynamic-skill"].
         test_cases = [
-            ("developer", ["opencode", "chart", "todo"], "OpenCode-Skill"),
-            ("reviewer", ["opencode", "chart", "todo"], "OpenCode-Skill"),
-            ("tester", ["test-pack", "todo", "dynamic-skill"], "Dynamic Skill"),  # opencode removed (worker-only dispatch migration)
+            ("developer", ["todo", "chart", "dynamic-skill"], "Dynamic Skill"),
+            ("reviewer", ["todo", "chart", "dynamic-skill"], "Dynamic Skill"),
+            ("tester", ["test-pack", "todo", "dynamic-skill"], "Dynamic Skill"),
             ("tester", ["test-pack", "todo", "dynamic-skill"], "Test Pack Skill"),  # test-pack still innate
-            ("planner", ["opencode", "chart", "todo"], "OpenCode-Skill"),
-            ("tidier", ["opencode", "chart", "todo"], "OpenCode-Skill"),
-            ("approver", ["opencode", "chart", "todo"], "OpenCode-Skill"),
+            ("planner", ["todo", "chart", "dynamic-skill"], "Dynamic Skill"),
+            ("tidier", ["todo", "chart", "dynamic-skill"], "Dynamic Skill"),
+            ("approver", ["todo", "chart", "dynamic-skill"], "Dynamic Skill"),
             ("leader", ["coordination", "chart", "todo"], "Coordination Skill"),
             ("jober", ["job-orchestration", "todo"], "Job Orchestration"),
             ("giter", ["todo"], "Todo Skill"),  # giter only has todo
-        ] 
+        ]
         
         for agent_id, expected_skills, expected_skill_content in test_cases:
             agent_meta = real_registry.get(agent_id)
@@ -81,8 +82,7 @@ class TestInnateSkillsSystemPromptIdentity:
                 assert expected_skill_content in prompt, f"{agent_id} prompt should contain {expected_skill_content}"
             else:
                 # giter should NOT have any skill sections (no innate_skills, no legacy skills/)
-                # Stale test: skill header uses hyphen (OpenCode-Skill) not underscore
-                assert "OpenCode-Skill" not in prompt, f"giter should NOT have opencode skill"
+                # Skill header uses underscore (e.g. Dynamic_Skill).
                 assert "Coordination Skill" not in prompt, f"giter should NOT have coordination skill"
                 assert "# Skill" not in prompt, f"giter should have no skill sections"
             
@@ -91,7 +91,7 @@ class TestInnateSkillsSystemPromptIdentity:
             assert len(prompt) > 100, f"{agent_id} should have substantial prompt content"
     
     def test_tester_gets_three_innate_skills(self, real_agents_dir, real_registry):
-        """Verify tester gets test-pack, todo, and dynamic-skill (opencode removed after worker-only dispatch migration)."""
+        """Verify tester gets test-pack, todo, and dynamic-skill."""
         cache = PromptCache()
         tester_meta = real_registry.get("tester")
         assert tester_meta is not None
@@ -221,24 +221,25 @@ class TestEdgeCases:
         agent_dir.mkdir()
         
         # Create meta with non-existent skill
+        # Updated for v2 base copy (Phase B): use 'chart' as the canonical example.
         meta_content = {
             "id": "test_agent",
             "name": "Test",
-            "innate_skills": ["opencode", "nonexistent_skill"]
+            "innate_skills": ["chart", "nonexistent_skill"]
         }
         (agent_dir / "meta.json").write_text(json.dumps(meta_content))
         (agent_dir / "rule.md").write_text("# Rules\nTest")
         
-        # Create the innate-skills dir with only opencode
+        # Create the innate-skills dir with only chart
         innate_dir = tmp_path / "_prompt_system" / "innate-skills"
-        opencode_dir = innate_dir / "opencode"
-        opencode_dir.mkdir(parents=True)
-        (opencode_dir / "skill.md").write_text("# OpenCode-Skill\nThis exists.")
+        chart_dir = innate_dir / "chart"
+        chart_dir.mkdir(parents=True)
+        (chart_dir / "skill.md").write_text("# Chart-Skill\nThis exists.")
         
         with caplog.at_level("WARNING"):
             skills = load_agent_skills(agent_dir, meta_content)
         
-        assert "opencode" in skills
+        assert "chart" in skills
         assert "nonexistent_skill" not in skills
         assert any("nonexistent_skill" in record.message for record in caplog.records)
     
@@ -268,25 +269,26 @@ class TestEdgeCases:
         agent_dir.mkdir()
         
         # Create meta with innate_skills
-        meta = {"id": "conflict_agent", "innate_skills": ["opencode"]}
+        # Updated for v2 base copy (Phase B): 'chart' is the canonical example.
+        meta = {"id": "conflict_agent", "innate_skills": ["chart"]}
         (agent_dir / "meta.json").write_text(json.dumps(meta))
         
         # Create innate skill
-        innate_dir = tmp_path / "_prompt_system" / "innate-skills" / "opencode"
+        innate_dir = tmp_path / "_prompt_system" / "innate-skills" / "chart"
         innate_dir.mkdir(parents=True)
         (innate_dir / "skill.md").write_text("# From Innate\nInnate content wins.")
         
         # Create conflicting local skill
-        local_dir = agent_dir / "skills" / "opencode"
+        local_dir = agent_dir / "skills" / "chart"
         local_dir.mkdir(parents=True)
         (local_dir / "skill.md").write_text("# From Local\nThis should be ignored.")
         
         (agent_dir / "rule.md").write_text("# Rules")
         
         skills = load_agent_skills(agent_dir, meta)
-        assert "opencode" in skills
-        assert "Innate content wins" in skills["opencode"]
-        assert "From Local" not in skills["opencode"]
+        assert "chart" in skills
+        assert "Innate content wins" in skills["chart"]
+        assert "From Local" not in skills["chart"]
 
 
 class TestRegistryInnateSkills:
@@ -294,11 +296,18 @@ class TestRegistryInnateSkills:
     
     def test_find_skill_checks_innate_first(self, real_registry):
         """find_skill() should check innate-skills first, then legacy."""
-        # Test opencode skill - should find all agents that declare it via innate_skills
-        # tester was removed after worker-only dispatch migration
-        agents_with_opencode = real_registry.find_skill("opencode")
-        expected = ["approver", "developer", "planner", "reviewer", "tidier"]
-        assert sorted(agents_with_opencode) == sorted(expected)
+        # Test chart skill - should find all agents that declare it via innate_skills.
+        # Updated for v2 base copy (Phase B): 'chart' is the canonical example.
+        # Actual registry (post-B) returns 14 agents declaring chart in innate_skills
+        # (verified at exec-time via real_registry.find_skill('chart'); see
+        # evidence/phaseB/test-pin-sites.txt for the derivation).
+        agents_with_chart = real_registry.find_skill("chart")
+        expected_chart = sorted([
+            "approver", "architect", "ari", "coder", "developer", "devops",
+            "doc-writer", "governor", "leader", "maintenancer", "planner",
+            "reviewer", "tidier", "wanderer",
+        ])
+        assert sorted(agents_with_chart) == expected_chart
         
         # Test coordination skill
         agents_with_coordination = real_registry.find_skill("coordination")
@@ -350,7 +359,7 @@ class TestInnateSkillsIntegration:
         
         # Verify specific skill content is present for key agents
         tester_prompt, _ = load_and_cache_prompt("tester", real_registry.get("tester").path, cache)
-        # tester no longer has opencode (worker-only dispatch migration) — verify dynamic-skill instead
+        # tester has test-pack, todo, and dynamic-skill — verify dynamic-skill instead
         assert "Dynamic Skill" in tester_prompt
         assert "Test Pack Skill" in tester_prompt
         

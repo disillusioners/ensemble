@@ -1774,7 +1774,7 @@ class TaskRepository:
         heartbeat thread during a running turn. ``instances.last_activity_at``
         is touched by a subset of lifecycle writers (terminal
         transitions, instance.status flips) and is NOT updated by
-        in-flight tool calls, LLM turns, or OpenCode subprocess
+        in-flight tool calls, LLM turns, or background subprocess
         activity. A genuinely-working-but-DB-silent child turn can
         therefore have a very stale ``last_activity_at`` while its
         task row carries a freshly-beating heartbeat. Using the

@@ -1,0 +1,1 @@
+D-A7 (FINAL — addendum-resolved): EMPTY retained-live state per Verdict 2 (coder opencode-free; no callers). Schema retained for future-proofing. Any non-empty entry indicates a live-used surface found at execute time and flags for user decision.

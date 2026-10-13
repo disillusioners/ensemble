@@ -538,7 +538,7 @@ def _mcp_rag_hint(
             # R21 entry gate (LOCKED-L 2026-09-15): drop superseded rows
             # at THIS external pass-through surface (the renderer
             # received the raw list from an upstream caller — typically
-            # the ``external_opencode.py`` preload path, but defensively
+            # the context-preload path, but defensively
             # filter again here so any future caller shape can't leak
             # a superseded row into the hint). The superseded check is
             # routed through the shared predicate
@@ -843,8 +843,8 @@ def get_shared_context(
         audience: ``"internal"`` (default) shows the LangChain tool names in
             the "Need more?" hint. Pass ``"external"`` to show the hosted MCP
             tool names — used when the injection is being prepended to a
-            message that an external agent system (e.g. opencode via MCP)
-            will see.
+            message that an external agent system (e.g. an MCP-integrated
+            worker) will see.
         project_id: Optional project UUID forwarded to the external MCP RAG
             hint so the agent can scope ``ensemble_kb_*`` tool calls. Ignored
             for the internal audience.

@@ -1,0 +1,10 @@
+tests/test_innate_skills_refactoring.py:59:            ("developer", ["opencode", "chart", "todo"], "OpenCode-Skill"),
+tests/test_innate_skills_refactoring.py:299:        agents_with_opencode = real_registry.find_skill("opencode")
+tests/test_innate_skills_refactoring.py:227:            "innate_skills": ["opencode", "nonexistent_skill"]
+tests/test_innate_skills_refactoring.py:271:        meta = {"id": "conflict_agent", "innate_skills": ["opencode"]}
+tests/test_tool_filter.py:707:        assert expand_allow_for_innate_skills(None, ["opencode"]) is None
+tests/test_tool_filter.py:850:                mock_agent_meta.innate_skills = ["opencode"]
+tests/test_tool_filter.py:880:                mock_agent_meta.innate_skills = ["opencode"]
+tests/test_agents_api.py:40:            "version": "1.0.0"
+tests/conftest.py:443:        "version": "1.0.0",
+tests/test_registry.py:871:            "version": "1.0.0",

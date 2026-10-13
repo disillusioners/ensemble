@@ -165,7 +165,7 @@ class LLMConfig(BaseSettings):
     model_keywords: str | None = Field(
         default=None,
         description=(
-            "Model for keyword extraction from outgoing opencode prompts "
+            "Model for keyword extraction from outgoing prompts "
             "(falls back to model). Set to 'quick' to mirror the explorer agent's "
             "llm_model for cost/speed."
         ),

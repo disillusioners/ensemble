@@ -1,0 +1,444 @@
+# C.4 gate round-2 — full-suite xdist run at C.4-candidate tree (2026-10-13)
+# Invocation: ./.venv/bin/python -m pytest tests/ --ignore=tests/packs --timeout=120 -q -n auto (daemon up, fenced dev lane)
+# FULL LOG: /tmp/c4-gate-xdist.log (4.3MB, not committed)
+
+ERROR tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_registered_builtin_left_active
+ERROR tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_user_created_server_never_deactivated
+ERROR tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_sweep_idempotent
+ERROR tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_bootstrap_creates_context7_server
+ERROR tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_bootstrap_context7_schema_empty
+ERROR tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_bootstrap_context7_config_matches_base
+ERROR tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_schema_drift_refreshes_config
+362 failed, 25669 passed, 311 skipped, 5 xfailed, 12809 warnings, 25 errors in 876.52s (0:14:36)
+
+=== ALL FAILED/ERROR entries ===
+ERROR    daemon.services.job_feedback_observer:job_feedback_observer.py:2578 Failed to finalize job job-1234... status=completed: make_fake_sync.<locals>.fake_sync() takes 5 positional arguments but 6 were given
+ERROR    daemon.services.job_feedback_observer:job_feedback_observer.py:2578 Failed to finalize job job-1234... status=completed: make_fake_sync.<locals>.fake_sync() takes 5 positional arguments but 6 were given
+ERROR    daemon.services.job_feedback_observer:job_feedback_observer.py:2578 Failed to finalize job job-row6... status=completed: test_row6_n8_hot_path_real_settle_emits_settled_text.<locals>._fake_sync() takes 5 positional arguments but 6 were given
+ERROR    daemon.__main__:__main__.py:208 PostgreSQL unreachable at boot (timeout/conn refused): (psycopg.OperationalError) connection failed: connection to server at "127.0.0.1", port 5432 failed: fe_sendauth: no password supplied
+ERROR    daemon.__main__:__main__.py:208 PostgreSQL unreachable at boot (timeout/conn refused): (psycopg.OperationalError) connection failed: connection to server at "127.0.0.1", port 5432 failed: fe_sendauth: no password supplied
+ERROR    daemon.__main__:__main__.py:208 PostgreSQL unreachable at boot (timeout/conn refused): (psycopg.OperationalError) connection failed: connection to server at "127.0.0.1", port 5432 failed: fe_sendauth: no password supplied
+ERROR    daemon.services.job_feedback_observer:job_feedback_observer.py:2578 Failed to finalize job job-n8-m... status=completed: _build_observer_for_hot_path.<locals>._fake_sync() takes 5 positional arguments but 6 were given
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+ERROR    daemon.migrations.runner:runner.py:607 Migration 20260714_000001 failed: (sqlite3.OperationalError) near "EXISTS": syntax error
+FAILED tests/test_chart_image_delivery_e2e.py::TestPhaseDDoesNotModifySealedArtifacts::test_phase_d_does_not_modify_sealed_artifacts
+FAILED tests/api/test_instance_ui_prefs_api.py::test_get_instances_list_includes_prefs_fields
+FAILED tests/job_queue/test_in_progress_guard.py::TestJobFeedbackObserverWaitingForGuard::test_completed_with_no_waiting_runs_normal_path
+FAILED tests/job_queue/test_in_progress_guard.py::TestJobFeedbackObserverWaitingForGuard::test_waiting_for_none_treated_as_zero
+FAILED tests/api/test_instance_ui_prefs_api.py::test_get_instances_list_includes_icon_tag
+FAILED tests/repositories/test_turn_reconciler.py::TestJobQueueItems::test_missing_task_sets_admission_done_orphan_reason
+FAILED tests/repositories/test_turn_reconciler.py::TestJobLocks::test_missing_task_deletes_lock
+FAILED tests/job_queue/test_job_answer_tool.py::TestJobAnswerRegistration::test_create_job_tools_returns_job_answer
+FAILED tests/test_enqueue_shared.py::TestTitleGeneration::test_triggers_title_on_idle_to_running
+FAILED tests/repositories/test_turn_reconciler.py::TestJobWatchers::test_hard_deleted_task_watcher_deleted
+FAILED tests/integration/test_mission_final_vocab_runtime.py::test_row6_n8_hot_path_real_settle_emits_settled_text
+FAILED tests/test_charter_render_capture.py::test_install_skill_has_render_contract_section
+FAILED tests/test_charter_render_capture.py::test_install_skill_render_contract_encodes_all_six_fixes
+FAILED tests/test_charter_render_capture.py::test_install_skill_has_prewarm_invocation_section
+FAILED tests/test_checkpoint_adapter_resilience.py::TestSaverRetryProxyABCRegistration::test_ensure_valid_checkpointer_does_not_raise
+FAILED tests/test_checkpoint_adapter_resilience.py::TestSaverRetryProxyABCRegistration::test_stategraph_compile_accepts_proxy_as_checkpointer
+FAILED tests/test_config.py::TestPersistenceConfig::test_persistence_config_defaults
+FAILED tests/test_governor_integration.py::TestCouncilToolBinding::test_spawn_councilor_bound_on_governor_instance
+FAILED tests/test_governor_integration.py::TestCouncilToolBinding::test_spawn_councilor_survives_tool_filter_for_governor
+FAILED tests/test_governor_integration.py::TestClearCouncilorErrors::test_clear_councilor_errors_clears_sticky_flag
+FAILED tests/test_governor_integration.py::TestClearCouncilorErrors::test_clear_councilor_errors_warns_when_bus_missing
+FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_model_canonicalization_uppercase_input
+FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_model_canonicalization_mixed_case
+FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_strict_model_rejection_error_message
+FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_invalid_councilor_agent_raises
+FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_non_team_member_councilor_raises
+FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_empty_model_raises
+FAILED tests/test_governor_integration.py::TestModelCanonicalization::test_model_canonicalization_dedup_property
+FAILED tests/test_governor_integration.py::TestBackwardCompat::test_spawn_instance_bound_on_leader_instance
+FAILED tests/test_governor_integration.py::TestBackwardCompat::test_spawn_instance_model_is_optional
+FAILED tests/test_governor_integration.py::TestNonGovernorFiltering::test_leader_no_council_tools
+FAILED tests/test_governor_integration.py::TestNonGovernorFiltering::test_developer_no_council_tools
+FAILED tests/test_governor_integration.py::TestNonGovernorFiltering::test_governor_has_council_tools
+FAILED tests/e2e/test_answer_dismiss_flow.py::test_full_answer_lifecycle_pause_answer_resume_complete
+FAILED tests/services/test_instance_messaging_queue_routing.py::TestMessageRouteQueueIdForwarding::test_router_forwards_queue_id_to_enqueue_message_job
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_success_callback_path_records_succeeded_true
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_work_fn_error_path_records_succeeded_false
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_post_processing_error_path_records_succeeded_false
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_cancellation_path_operation_cancelled_does_not_fire_hook
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_cancellation_path_asyncio_cancelled_does_not_fire_hook
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_requeue_path_does_not_fire_hook
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_iterations_and_duration_are_non_zero
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_zero_iterations_when_no_agent_messages
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_compute_iterations_and_duration_extracts_task_message
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_compute_task_message_empty_when_no_human_message
+FAILED tests/job_queue/test_round2_council_fixes.py::TestStaleTaskRecoveryWedgeHook::test_wedge_resolver_end_to_end_for_dead_letter_root
+FAILED tests/test_dependency_bus.py::TestGenerationCounterBump::test_per_parent_lock_serializes_db_insert
+FAILED tests/e2e/test_pause_during_report_resume_turn_handle.py::test_resume_after_pause_during_report_consumes_handle
+FAILED tests/e2e/test_pause_during_report_resume_turn_handle.py::test_resume_does_not_create_new_task_or_jobitem
+FAILED tests/e2e/test_pause_during_report_turn_then_resume.py::test_pause_during_report_turn_then_resume_closes_orphan_path
+FAILED tests/test_llm_load_balance_meta_loading.py::TestRealAgentsBackwardCompat::test_coder_unchanged
+FAILED tests/message_queue_redesign/test_usage_limit_worker_seam.py::TestCarveOut::test_usage_limit_re_raised_no_cascade
+FAILED tests/message_queue_redesign/test_usage_limit_worker_seam.py::TestCarveOut::test_other_exceptions_cascade_unchanged
+FAILED tests/test_main_entry.py::test_uvicorn_run_receives_timeout_graceful_shutdown
+FAILED tests/test_main_entry.py::test_uvicorn_timeout_graceful_shutdown_env_override
+FAILED tests/test_main_entry.py::test_uvicorn_wiring_unchanged - SystemExit: 75
+FAILED tests/migration/test_attestation_migration.py::TestNoBooleanIntegerDefaultInShippedMigrations::test_no_boolean_int_literal_default
+FAILED tests/job_queue/test_jober_watch_integration.py::TestJoberWatchIntegration::test_tool_registration
+FAILED tests/job_queue/test_jober_watch_integration.py::TestJobWatcherRepository::test_add_watch_creates_record
+FAILED tests/integration/test_pause_race_w7_jobitem_skip.py::test_w7_marker_guard_skips_jobitem_creation
+FAILED tests/test_memory_integration.py::TestFullLifecycleIntegration::test_compound_request_with_mixed_intents
+FAILED tests/test_memory_integration.py::TestFullLifecycleIntegration::test_rag_redirect_with_compound_requests
+FAILED tests/test_memory_integration.py::TestEdgeCases::test_empty_string_request
+FAILED tests/test_memory_integration.py::TestEdgeCases::test_whitespace_only_request
+FAILED tests/test_memory_integration.py::TestEdgeCases::test_very_long_request_exceeds_limit
+FAILED tests/test_memory_integration.py::TestRegressionChecks::test_target_none_default_still_works
+FAILED tests/test_memory_integration.py::TestRegressionChecks::test_intent_none_default_still_works
+FAILED tests/test_memory_integration.py::TestRegressionChecks::test_inner_soul_with_content_parameter
+FAILED tests/test_memory_integration.py::TestRegressionChecks::test_access_memory_regular_files_still_work
+FAILED tests/test_memory_integration.py::TestRegressionChecks::test_compound_request_backward_compatibility
+FAILED tests/integration/test_armed_absence_alist.py::TestRepoWideGrepGuard::test_zero_alist_call_sites_outside_migrator
+FAILED tests/integration/test_attestation_attest_first_e2e.py::TestE2EAttestFirstPureToolcallTurnEvidence::test_e2e_attest_pure_toolcall_turn_evidence
+FAILED tests/integration/test_attestation_attest_first_e2e.py::TestE2EBundledCallCorrectedEvidence::test_e2e_bundled_call_corrected_evidence
+FAILED tests/integration/test_attestation_bound_escalation.py::test_bound_plus_one_escalates_once_without_fourth_nudge
+FAILED tests/integration/test_attestation_c2_both_branches.py::TestC2BothBranchesActivation::test_gate_invoked_on_both_branches[True]
+FAILED tests/integration/test_attestation_c2_both_branches.py::TestC2BothBranchesActivation::test_gate_invoked_on_both_branches[False]
+FAILED tests/integration/test_attestation_c2_both_branches.py::TestC2BothBranchesActivation::test_disabled_gate_never_invoked[True]
+FAILED tests/integration/test_attestation_c2_both_branches.py::TestC2BothBranchesActivation::test_disabled_gate_never_invoked[False]
+FAILED tests/static/test_chokepoint_callers.py::test_no_new_direct_chokepoint_callers
+FAILED tests/integration/test_attestation_c2_both_branches.py::TestC2BothBranchesActivation::test_dry_mode_passive_observer[True]
+FAILED tests/integration/test_attestation_c2_both_branches.py::TestC2BothBranchesActivation::test_dry_mode_passive_observer[False]
+FAILED tests/test_migration_api_comprehensive.py::TestIntegration::test_api_tests_pass
+FAILED tests/test_migration_api_comprehensive.py::TestIntegration::test_manager_tests_pass
+FAILED tests/integration/test_attestation_c2_both_branches.py::TestC3FailOpen::test_scanner_exception_allows_end_with_error_log[True]
+FAILED tests/integration/test_attestation_c2_both_branches.py::TestC3FailOpen::test_scanner_exception_allows_end_with_error_log[False]
+FAILED tests/integration/test_persistence_w1_markers.py::test_w1_markers_survive_real_checkpoint_round_trip
+FAILED tests/integration/test_persistence_w1_markers.py::test_w1_d12_structured_filter_drops_descendant_injected_context
+FAILED tests/integration/test_persistence_w1_markers.py::test_w1_d12_caller_keeps_own_injected_context
+FAILED tests/integration/test_attestation_c2_both_branches.py::TestR2AllowInGraph::test_pending_children_allow_end_without_nudge[True]
+FAILED tests/integration/test_attestation_c2_both_branches.py::TestR2AllowInGraph::test_pending_children_allow_end_without_nudge[False]
+FAILED tests/performance/test_message_api_cost.py::TestPerfMatrix::test_cell_runs_and_records_metrics[1x10k]
+FAILED tests/integration/test_attestation_delegation_allow.py::test_pending_wakeup_inputs_allow_without_nudge_or_reset[watcher]
+FAILED tests/performance/test_message_api_cost.py::TestPerfMatrix::test_cell_runs_and_records_metrics[10x1k]
+FAILED tests/integration/test_attestation_delegation_allow.py::test_pending_wakeup_inputs_allow_without_nudge_or_reset[wakeup]
+FAILED tests/integration/test_attestation_dry_mode.py::test_dry_mode_allows_end_with_full_decision_log[lang_check_on]
+FAILED tests/performance/test_message_api_cost.py::TestPerfMatrix::test_cell_runs_and_records_metrics[100x150-anchor]
+FAILED tests/integration/test_attestation_dry_mode.py::test_dry_mode_allows_end_with_full_decision_log[lang_check_off]
+FAILED tests/integration/test_attestation_dry_mode.py::test_dry_mode_no_counter_or_flag_change
+FAILED tests/integration/test_attestation_dry_mode.py::test_dry_mode_metrics_emitted
+FAILED tests/performance/test_message_api_cost.py::TestPerfMatrix::test_cell_runs_and_records_metrics[100x400-anchor]
+FAILED tests/integration/test_attestation_dry_mode.py::test_dry_mode_r2_inputs_unreadable_still_allows
+FAILED tests/integration/test_attestation_dry_mode.py::test_dry_mode_attested_allow_does_not_reset_counter
+FAILED tests/integration/test_attestation_fail_open.py::test_scanner_exception_allows_completion_and_logs_error
+FAILED tests/performance/test_message_api_cost.py::TestPerfMatrix::test_cell_runs_and_records_metrics[100x10k-variance]
+FAILED tests/integration/test_attestation_fail_open.py::test_ledger_operational_error_allows_completion_and_logs_db_error
+FAILED tests/performance/test_message_api_cost.py::TestPerfMatrix::test_cell_runs_and_records_metrics[1000x100]
+FAILED tests/static/test_chokepoint_callers.py::test_no_direct_sql_on_task_status_outside_transitions
+FAILED tests/integration/test_attestation_idle_orphan_incident.py::test_b08f40fe_idle_orphan_tree_denies_instead_of_branch5_allow
+FAILED tests/test_agents_api.py::test_list_agents_success - AssertionError: a...
+FAILED tests/test_agents_api.py::test_list_agents_empty_directory - Assertion...
+FAILED tests/property/test_turn_state_machine.py::TestTurnReconcilerStateMachine::test_state_machine
+FAILED tests/integration/test_attestation_idle_orphan_incident.py::test_b08f40fe_after_orphans_terminated_and_attested_allows
+FAILED tests/test_api.py::test_list_instances_no_project_id_filter - Assertio...
+FAILED tests/test_api.py::test_list_instances_filter_by_project_id - Assertio...
+FAILED tests/integration/test_attestation_idle_orphan_incident.py::test_b08f40fe_terminated_orphans_without_attestation_still_denies
+FAILED tests/test_api.py::test_list_instances_filter_by_nonexistent_project_id
+FAILED tests/test_api.py::test_list_instances_project_id_with_status_filter
+FAILED tests/integration/test_attestation_in_graph_nudge_flow.py::test_flagship_deny_nudge_routes_back_and_attests
+FAILED tests/integration/test_attestation_incident_acceptance_lca.py::test_lca_b08f40fe_phase1_incident_phrase_denies_no_silent_completion
+FAILED tests/test_api.py::test_send_message_success - TypeError: 'Mock' objec...
+FAILED tests/integration/test_attestation_incident_acceptance_lca.py::test_lca_b08f40fe_phase2_orphans_terminated_and_attested_allows_clears_escalation
+FAILED tests/integration/test_attestation_ledger_reset.py::test_attested_allow_resets_and_next_mission_starts_clean
+FAILED tests/job_queue/test_n8_hot_path_pin.py::TestN8HotPathPin::test_mirror_work_id_renders_settled_via_primary_event_path
+FAILED tests/integration/test_attestation_live_descendants.py::test_live_grandchild_allows_via_third_input_without_nudge_or_reset
+FAILED tests/test_api.py::test_global_exception_handler - TypeError: 'Mock' o...
+FAILED tests/integration/test_attestation_live_descendants.py::test_depth_two_descendant_grandchild_counts_via_third_input
+FAILED tests/test_innate_skills_refactoring.py::TestInnateSkillsSystemPromptIdentity::test_all_agents_get_correct_innate_skills_in_system_prompt
+FAILED tests/integration/test_attestation_live_descendants.py::test_all_descendants_terminal_still_denies
+FAILED tests/integration/test_attestation_live_descendants.py::test_error_and_failed_descendants_are_terminal
+FAILED tests/integration/test_attestation_mid_work_report_testcase.py::test_scenario_a_children_out_allow_with_hint
+FAILED tests/integration/test_attestation_mid_work_report_testcase.py::test_scenario_b_all_terminal_deny_nudge
+FAILED tests/integration/test_attestation_mid_work_report_testcase.py::test_scenario_c1_attested_no_scan_plain_allow
+FAILED tests/integration/test_spawn_intelligence_tier.py::TestSpawnIntelligenceTierSuccess::test_tier_high_resolves_to_agentic_with_visibility_line
+FAILED tests/integration/test_spawn_intelligence_tier.py::TestSpawnIntelligenceTierLoud::test_tier_high_with_agentic_excluded_raises_value_error
+FAILED tests/integration/test_attestation_mid_work_report_testcase.py::test_scenario_c2_long_benign_no_judge
+FAILED tests/integration/test_attestation_mid_work_report_testcase.py::test_scenario_a_live_judge
+FAILED tests/integration/test_spawn_intelligence_tier.py::TestBothParamsPrecedence::test_model_tier_wins_over_model_with_visible_note
+FAILED tests/integration/test_attestation_mid_work_report_testcase.py::test_scenario_b_live_judge
+FAILED tests/integration/test_spawn_intelligence_tier.py::TestBothParamsPrecedence::test_model_tier_wins_with_operator_overridden_default
+FAILED tests/integration/test_spawn_intelligence_tier.py::TestBothParamsInvalidLegacyModel::test_both_params_with_invalid_legacy_model_suppresses_notice
+FAILED tests/integration/test_attestation_mode_tri_state.py::test_tri_state_mode_semantics_are_separate[mode-off]
+FAILED tests/integration/test_attestation_mode_tri_state.py::test_tri_state_mode_semantics_are_separate[mode-dry]
+FAILED tests/integration/test_attestation_mode_tri_state.py::test_tri_state_mode_semantics_are_separate[mode-enforce]
+FAILED tests/integration/test_attestation_must_not_break.py::test_all_six_must_not_break_surfaces_under_each_mode[off-normal_completion]
+FAILED tests/integration/test_attestation_must_not_break.py::test_all_six_must_not_break_surfaces_under_each_mode[off-mission_finalize]
+FAILED tests/integration/test_attestation_must_not_break.py::test_all_six_must_not_break_surfaces_under_each_mode[dry-normal_completion]
+FAILED tests/integration/test_attestation_must_not_break.py::test_all_six_must_not_break_surfaces_under_each_mode[dry-mission_finalize]
+FAILED tests/test_models.py::TestErrorCodes::test_error_codes_values - Assert...
+FAILED tests/integration/test_attestation_must_not_break.py::test_all_six_must_not_break_surfaces_under_each_mode[enforce-normal_completion]
+FAILED tests/integration/test_attestation_must_not_break.py::test_all_six_must_not_break_surfaces_under_each_mode[enforce-mission_finalize]
+FAILED tests/job_queue/test_terminal_write_census.py::TestTerminalWriteCensus::test_every_terminal_write_site_is_classified
+FAILED tests/job_queue/test_terminal_write_census.py::TestTerminalWriteCensus::test_hooked_entries_point_at_live_notify_calls
+FAILED tests/integration/test_attestation_nudge_chaos.py::test_nudge_checkpoint_survives_restart_and_leads_to_attested_allow
+FAILED tests/test_progressive_dispatch.py::test_manager_streaming_extracts_string_content
+FAILED tests/integration/test_attestation_revive_after_escalation.py::test_terminal_reset_and_fresh_episode_rearm_next_mission
+FAILED tests/test_progressive_dispatch.py::test_manager_streaming_extracts_list_content
+FAILED tests/test_progressive_dispatch.py::test_manager_streaming_mixed_list_content_only_text_dispatched
+FAILED tests/integration/test_attestation_stale_watermark.py::test_stale_attestation_watermark_does_not_cross_mission_boundary[empty]
+FAILED tests/test_progressive_dispatch.py::test_manager_streaming_deduplication_by_message_id
+FAILED tests/test_progressive_dispatch.py::test_manager_streaming_multiple_messages_same_execution
+FAILED tests/test_progressive_dispatch.py::test_manager_streaming_empty_content_not_dispatched
+FAILED tests/integration/test_attestation_stale_watermark.py::test_stale_attestation_watermark_does_not_cross_mission_boundary[stale]
+FAILED tests/test_progressive_dispatch.py::test_manager_stores_original_source_in_metadata
+FAILED tests/test_progressive_dispatch.py::test_manager_uses_original_source_for_internal_report
+FAILED tests/test_progressive_dispatch.py::test_manager_skips_dispatch_when_no_original_source
+FAILED tests/test_progressive_dispatch.py::test_manager_uses_original_source_for_internal_error_report
+FAILED tests/test_progressive_dispatch.py::test_internal_agent_source_does_not_trigger_source_replacement
+FAILED tests/test_progressive_dispatch.py::test_source_inheritance_parent_to_child
+FAILED tests/test_progressive_dispatch.py::test_write_once_guard_original_source
+FAILED tests/test_progressive_dispatch.py::test_integration_external_source_child_report_dispatch
+FAILED tests/integration/test_vscode_routing_e2e.py::TestSpaCatchAll::test_unknown_route_serves_index_html
+FAILED tests/integration/test_vscode_routing_e2e.py::TestSpaCatchAll::test_root_serves_index_html
+FAILED tests/test_progressive_dispatch.py::test_manager_warns_when_original_source_not_found
+FAILED tests/test_progressive_dispatch.py::test_full_chain_external_msg_to_telegram_after_child_completion
+FAILED tests/test_progressive_dispatch.py::test_source_inheritance_grandchild_from_grandparent
+FAILED tests/test_progressive_dispatch.py::test_write_once_guard_persists_through_multiple_external_messages
+FAILED tests/integration/test_vscode_security_integration.py::TestC1PathTraversal::test_c1_valid_repo_folder_not_blocked
+FAILED tests/test_skill_evolution_config.py::TestDefaults::test_defaults - As...
+FAILED tests/test_skill_evolution_config.py::TestConfigIntegration::test_skill_evolution_defaults_via_config
+FAILED tests/test_job_queue_tools.py::TestResolverRoutedTools::test_watch_job_terminal_enriches_result_from_instance
+FAILED tests/test_job_queue_tools.py::TestResolverRoutedTools::test_watch_job_terminal_no_manager_is_best_effort
+FAILED tests/test_job_queue_tools.py::TestResolverRoutedTools::test_watch_job_terminal_manager_exception_is_swallowed
+FAILED tests/job_queue/test_watcher_repository_concurrent.py::TestSequentialAddWatch::test_first_call_inserts
+FAILED tests/test_job_queue_tools.py::TestResolverRoutedTools::test_watch_jobs_terminal_enriches_result_from_instance
+FAILED tests/tools/test_send_message_context_param.py::TestSendMessageContextParam::test_context_dict_populates_task_context_metadata
+FAILED tests/tools/test_send_message_context_param.py::TestSendMessageContextParam::test_context_none_yields_none_metadata
+FAILED tests/tools/test_send_message_context_param.py::TestSendMessageContextParam::test_context_empty_dict_yields_none_metadata
+FAILED tests/tools/test_send_message_context_param.py::TestSendMessageContextParam::test_context_and_load_skill_work_together
+FAILED tests/tools/test_send_message_context_param.py::TestSendMessageContextParam::test_non_dict_context_returns_error
+FAILED tests/tools/test_send_message_context_param.py::TestSendMessageContextParam::test_context_none_and_empty_dict_unchanged_after_fix
+FAILED tests/tools/test_send_message_load_skill.py::TestSendMessageLoadSkill::test_load_skill_appends_meta_tag
+FAILED tests/tools/test_send_message_load_skill.py::TestSendMessageLoadSkill::test_load_skill_none_omits_meta_tag
+FAILED tests/tools/test_send_message_load_skill.py::TestSendMessageLoadSkill::test_load_skill_default_param_omits_meta_tag
+FAILED tests/tools/test_send_message_load_skill.py::TestSendMessageLoadSkill::test_load_skill_strips_whitespace
+FAILED tests/tools/test_send_message_load_skill.py::TestSendMessageLoadSkill::test_load_skill_empty_string_is_no_op
+FAILED tests/tools/test_send_message_load_skill.py::TestSendMessageLoadSkill::test_load_skill_with_quote_is_valid_json
+FAILED tests/job_queue/test_watcher_repository_concurrent.py::TestConcurrentAddWatch::test_concurrent_threads_default_events_single_row
+FAILED tests/manager/test_phase4_metrics_trigger_init.py::TestPhase4SkillRepositories::test_phase4_repos_initialized_when_config_present
+FAILED tests/manager/test_phase4_metrics_trigger_init.py::TestPhase4SkillRepositories::test_phase4_repos_none_when_skill_evolution_disabled
+FAILED tests/manager/test_phase4_metrics_trigger_init.py::TestPhase4SkillServices::test_metrics_and_trigger_services_initialized
+FAILED tests/manager/test_phase4_metrics_trigger_init.py::TestPhase4SkillServices::test_metrics_service_has_correct_dependencies
+FAILED tests/manager/test_phase4_metrics_trigger_init.py::TestPhase4SkillServices::test_trigger_engine_has_correct_dependencies
+FAILED tests/manager/test_phase4_metrics_trigger_init.py::TestPhase4SkillServices::test_services_none_when_skill_evolution_disabled
+FAILED tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_hashes_file_count_matches_directory_entries
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_initialized_when_config_present
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_none_when_skill_evolution_disabled
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_have_correct_dependencies
+FAILED tests/message_queue_redesign/test_atomic_status_transitions.py::TestUpdateActivityAtomic::test_update_activity_concurrent_does_not_clobber_terminal_status
+FAILED tests/unit/plugin_subsystem/test_sync_runner.py::TestRealPluginSync::test_real_snapshot_dry_run_against_v0_24_1
+FAILED tests/unit/plugin_subsystem/test_sync_runner.py::TestRealPluginSync::test_real_full_3_class_manifest_validates
+FAILED tests/unit/plugin_subsystem/test_sync_runner.py::TestPinningTestReferentialIntegrity::test_no_duplicate_pinning_test_pointers
+FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_root_instance_bypasses_check_parent_id_none
+FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_root_instance_bypasses_check_parent_id_empty_string
+FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_parent_at_limit_raises_value_error
+FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_parent_below_limit_succeeds
+FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_error_message_includes_parent_id
+FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_count_children_called_with_correct_parent_id
+FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_edge_case_at_limit_minus_one
+FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_edge_case_at_limit
+FAILED tests/test_spawn_limit_edge_cases.py::TestSpawnLimitEdgeCases::test_edge_case_above_limit
+FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_valid_spawn_leader_can_spawn_developer
+FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_valid_spawn_leader_can_spawn_each_team_member
+FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_invalid_spawn_leader_cannot_spawn_leader
+FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_valid_spawn_leader_can_spawn_explorer
+FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_invalid_spawn_developer_cannot_spawn_non_team_targets
+FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_restricted_team_members_rejects_non_team_spawns
+FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_unknown_caller_agent_is_denied
+FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_unknown_requested_agent_is_denied
+FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_standalone_coder_rejected_by_leader_team_members
+FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_standalone_coder_caller_has_empty_team_members
+FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_empty_agent_id_request_rejected
+FAILED tests/test_spawn_team_members.py::TestTeamMembersAuthorization::test_missing_caller_agent_id_rejected
+FAILED tests/test_spawn_team_members.py::TestTeamMembersRegistryParsing::test_leader_team_members_parsed
+FAILED tests/test_spawn_team_members.py::TestTeamMembersRegistryParsing::test_developer_team_members_has_explorer
+FAILED tests/test_spawn_team_members.py::TestTeamMembersRegistryParsing::test_planner_team_members_has_explorer
+FAILED tests/test_spawn_team_members.py::TestCheckTeamMembershipUnit::test_returns_error_when_requested_not_in_restricted_team
+FAILED tests/test_spawn_team_members.py::TestSendMessageTeamMembersGate::test_send_message_blocks_pm_to_developer
+FAILED tests/test_spawn_team_members.py::TestSendMessageTeamMembersGate::test_send_message_allows_pm_to_leader
+FAILED tests/test_spawn_team_members.py::TestSendMessageTeamMembersGate::test_send_message_blocks_leader_to_pm
+FAILED tests/test_spawn_team_members.py::TestSendMessageTeamMembersGate::test_send_message_target_without_agent_id_fails_closed
+FAILED tests/test_spawn_team_members.py::TestSendMessageTeamMembersGate::test_send_message_denied_message_does_not_pollute_queue
+FAILED tests/unit/services/test_scheduling_service.py::TestUserTimezoneRung::test_user_setting_rung_covers_once_anchor_site
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestInstanceDerivedStatus::test_running_instance_overrides_pending_job_status
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestTimingColumnsFromInstance::test_completed_at_sourced_from_instance_updated_at_for_terminal
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestTimingColumnsFromInstance::test_completed_at_falls_back_to_jobitem_mirror_for_non_terminal
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestTimingColumnsFromInstance::test_completed_at_none_when_both_instance_and_mirror_missing
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestJobWithCompletedInstance::test_completed_instance_surfaces_completed_status
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestJobWithErrorInstance::test_error_instance_surfaces_failed_status
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestJobWithWaitingChildrenInstance::test_waiting_children_instance_surfaces_processing
+FAILED tests/unit/services/test_service_tool_manager.py::test_stop_pid_already_dead_returns_pid_dead
+FAILED tests/integration/test_complete_cancel_route_through_transitions.py::test_complete_task_direct_call_reconciles_all_8_mirrors
+FAILED tests/integration/test_complete_cancel_route_through_transitions.py::test_cancel_task_direct_call_reconciles_all_8_mirrors
+FAILED tests/integration/test_complete_cancel_route_through_transitions.py::test_fail_task_direct_call_reconciles_all_8_mirrors
+FAILED tests/integration/test_complete_cancel_route_through_transitions.py::test_fail_task_does_not_collapse_to_cancel_task
+FAILED tests/integration/test_critical_notes_embed_pipeline.py::TestRealMintPipeline::test_backfill_mints_rows_through_real_builder
+FAILED tests/unit/test_api_router_extraction.py::TestRouteRegistration::test_http_methods_are_correct
+FAILED tests/integration/test_empty_guard_error_lineage.py::TestContinuousEmptyGraphEndToEnd::test_a_continuous_empty_no_backup_bounded_no_empty_ai_in_state
+FAILED tests/integration/test_empty_guard_error_lineage.py::TestContinuousEmptyGraphEndToEnd::test_b_backup_configured_backup_also_empty_bounded_total_calls
+FAILED tests/integration/test_empty_guard_error_lineage.py::TestContinuousEmptyGraphEndToEnd::test_c_no_backup_loud_exhaustion_no_swap
+FAILED tests/unit/test_api_router_extraction.py::TestApiModuleSize::test_api_module_is_small
+FAILED tests/integration/test_empty_guard_error_lineage.py::TestContinuousEmptyGraphEndToEnd::test_d_normal_response_completes_normally
+FAILED tests/integration/test_empty_guard_error_lineage.py::TestContinuousEmptyGraphEndToEnd::test_e_loud_exhaustion_stamps_retry_budget_exhausted_marker
+FAILED tests/job_queue/test_event_driven_completion.py::TestSite1InlineMirrorFinalize::test_hook_fires_settled_and_dual_fire_is_deduped
+FAILED tests/job_queue/test_event_driven_completion.py::TestSite1InlineMirrorFinalize::test_pre_terminal_task_completes_on_success_fully
+FAILED tests/job_queue/test_event_driven_completion.py::TestSite1InlineMirrorFinalize::test_hook_skips_when_finalize_races_to_none
+FAILED tests/unit/test_caller_model_overrides_seam.py::TestModelTierPrecedence::test_model_tier_wins_over_model_with_visible_note
+FAILED tests/integration/test_explorer_shared_context_paths.py::TestFlagOnChildTreeRootPartitionViaEnqueue::test_non_opted_in_agent_gets_no_shared_context_block
+FAILED tests/unit/test_coder_developer_migration.py::TestRestoreInstanceWithCoderAgentId::test_restore_instance_with_coder_agent_id_does_not_raise
+FAILED tests/unit/test_coder_developer_migration.py::TestRestoreInstanceWithCoderAgentId::test_restore_instance_with_developer_agent_id_still_works
+FAILED tests/unit/test_coder_developer_migration.py::TestJobQueueEnqueueWithCoderAgentId::test_enqueue_with_coder_agent_id_succeeds
+FAILED tests/unit/test_coder_developer_migration.py::TestJobQueueEnqueueWithCoderAgentId::test_enqueue_with_coder_and_idempotency_key_succeeds
+FAILED tests/unit/test_coder_developer_migration.py::TestJobQueueEnqueueWithCoderAgentId::test_enqueue_with_developer_agent_id_still_works
+FAILED tests/integration/test_get_instance_messages_observed_count_zero.py::TestObservedCountZero::test_n_ten_threads_have_zero_metric_after_get_instance_messages
+FAILED tests/unit/test_devops_agent.py::TestDevopsMetaJsonValidation::test_innate_skills_is_dynamic_skill_and_todo
+FAILED tests/unit/test_devops_agent.py::TestDevopsMetaJsonValidation::test_skill_injection_enabled
+FAILED tests/unit/test_devops_agent.py::TestDevopsPromptComposition::test_no_opencode_skill_content_in_system_prompt
+FAILED tests/unit/test_bearer_p5.py::TestBootstrapConsumption::test_bootstrap_token_secret_str_no_leak_in_stdout
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestFreshInstall::test_create_stamps_idempotency_key_and_defaults
+FAILED tests/unit/test_gaia_agent.py::TestGaiaRegistryDiscovery::test_gaia_tools_config_in_registry
+FAILED tests/unit/test_gaia_agent.py::TestGaiaToolFiltering::test_gaia_tool_filter_from_registry
+FAILED tests/unit/test_gaia_agent.py::TestGaiaToolFiltering::test_gaia_tool_filter_config_parsed_correctly
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestFreshInstall::test_fresh_create_has_no_prev_snapshot
+FAILED tests/unit/test_governor_recursion_guard.py::TestLifecycleGovernorChainGuard::test_legit_leader_governor_councilors_passes
+FAILED tests/unit/test_governor_recursion_guard.py::TestLifecycleGovernorChainGuard::test_root_position_governor_spawn_allowed
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestIdempotentReplay::test_same_values_same_row_no_duplicate
+FAILED tests/unit/test_governor_recursion_guard.py::TestLifecycleGovernorChainGuard::test_k_zero_disables_guard
+FAILED tests/unit/test_governor_recursion_guard.py::TestLifecycleGovernorChainGuard::test_kill_switch_env_zero_disables
+FAILED tests/unit/test_governor_recursion_guard.py::TestToolLayerConveneRefusal::test_convene_council_governor_caller_refused
+FAILED tests/unit/test_governor_recursion_guard.py::TestToolLayerConveneRefusal::test_convene_council_with_skill_governor_caller_refused
+FAILED tests/unit/test_governor_recursion_guard.py::TestToolLayerConveneRefusal::test_convene_council_leader_caller_still_allowed
+FAILED tests/unit/test_governor_recursion_guard.py::TestChildRequestTemplateFix::test_convene_council_message_names_spawn_councilor
+FAILED tests/unit/test_governor_recursion_guard.py::TestChildRequestTemplateFix::test_convene_council_with_skill_message_names_spawn_councilor
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestIdempotentReplay::test_replay_key_matches_formula
+FAILED tests/unit/test_governor_recursion_guard.py::TestSpawnCouncilorGovernorBlocked::test_spawn_councilor_targeting_governor_hits_lifecycle_guard
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestInstallUpdate::test_changed_values_update_and_capture_snapshot
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestInstallUpdate::test_snapshot_ttl_is_seven_days
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestInstallUpdate::test_update_preserves_bound_handles_from_kms_attach
+FAILED tests/unit/test_loop_repairer.py::TestRepairFailureReturnsOriginal::test_repair_summary_failure_returns_original_messages
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestSchemaVersionMismatch::test_mismatch_refused_409_and_row_untouched
+FAILED tests/unit/test_mcp_tool_timeout.py::TestToolNodeIntegration::test_tool_node_handles_timeout
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestSchemaVersionMismatch::test_mismatch_beats_idempotent_replay
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestUserCreatedConflict::test_user_created_name_conflict_409
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestAuditLine::test_mutation_writes_section74_line
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestAuditLine::test_replay_writes_no_extra_line
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestAuditLine::test_update_writes_second_line_with_secret_ref
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestAuditLine::test_audit_failure_never_fails_request
+FAILED tests/unit/test_nudge_behavior.py::TestBuildInstanceGraph::test_graph_compiles_with_nudge_node
+FAILED tests/unit/test_nudge_behavior.py::TestBuildInstanceGraph::test_nudge_node_exists_in_graph
+FAILED tests/unit/test_nudge_behavior.py::TestBuildInstanceGraph::test_nudge_in_conditional_edges_mapping
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestDeleteFlow::test_delete_builtin_refused_403
+FAILED tests/integration/test_lcan_legacy_checkpoint.py::test_s1_legacy_note_in_pre_removal_shape_activates_a_band
+FAILED tests/unit/test_project_manager_agent.py::TestPromptComposition::test_soul_cites_rule_for_severity_framing
+FAILED tests/unit/test_project_manager_agent.py::TestPromptComposition::test_workflow_cites_soul_and_rule
+FAILED tests/unit/test_plane_sync.py::TestEdgeCaseConcurrentSync::test_service_concurrent_calls_dont_crash
+FAILED tests/unit/test_question_graph.py::TestBuildInstanceGraphWithManager::test_build_instance_graph_with_manager_does_not_raise_name_error
+FAILED tests/unit/test_repository_claim_lane.py::TestStrictTwoWay::test_chat_prefix_row_claimable_by_chat_lane
+FAILED tests/unit/test_repository_claim_lane.py::TestStrictTwoWay::test_chat_prefix_row_not_claimable_by_default_lane
+FAILED tests/unit/test_repository_claim_lane.py::TestStrictTwoWay::test_default_lane_skips_chat_row_and_claims_next_default
+FAILED tests/unit/test_repository_claim_lane.py::TestStrictTwoWay::test_all_three_chat_prefixes_route_to_chat_lane
+FAILED tests/integration/test_lcau_incident_e2e.py::test_scenario_a_conversational_full_answer_is_rescued_to_allow
+FAILED tests/unit/test_repository_claim_lane.py::TestB1ConditionalFailOpen::test_flag_true_restored_default_lane_excludes_again
+FAILED tests/integration/test_lcau_incident_e2e.py::test_scenario_b_formal_report_ignoring_question_denies_with_nudge
+FAILED tests/integration/test_long_tool_nudge_graph_smoke.py::test_tools_node_registered_with_callable
+FAILED tests/integration/test_long_tool_nudge_graph_smoke.py::test_wired_tools_node_stamps_the_singleton_and_clears
+FAILED tests/integration/test_long_tool_nudge_graph_smoke.py::test_wired_tools_node_registry_identity_is_the_module_singleton
+FAILED tests/unit/test_repository_claim_lane.py::TestLaneSignatureContract::test_flag_transport_is_shared_module_state_not_per_instance
+FAILED tests/integration/test_m2_missions_runtime_contract.py::test_liveness_dead_letter_alone_returns_400_with_accepted_set
+FAILED tests/unit/test_symptom_repair_ladder.py::TestL2PrecallSkipBehavioral::test_precall_not_fired_on_repair_superstep_fired_on_next
+FAILED tests/unit/test_terminal_reason_mirror_set_regression.py::test_no_new_terminal_reason_literals_without_mirror_set
+FAILED tests/unit/test_watchover_eval_timeout_fix.py::TestModelOverrideReachesLlmCall::test_model_override_applied_to_llm_construction
+FAILED tests/unit/test_watchover_eval_timeout_fix.py::TestModelOverrideReachesLlmCall::test_snapshot_model_override_distinct_from_eval
+FAILED tests/unit/test_watchover_eval_timeout_fix.py::TestCreateWatchoverCheckNodeResolvesModel::test_factory_resolves_quick_to_model_keywords
+FAILED tests/unit/test_watchover_eval_timeout_fix.py::TestCreateWatchoverCheckNodeResolvesModel::test_factory_falls_back_when_model_not_allowed
+FAILED tests/unit/tools/test_frozen_tool_name_discovery.py::test_registry_validation_zero_warnings_for_project_manager_frozen_mode
+FAILED tests/unit/test_watchover_eval_timeout_fix.py::TestRegenFailureKeepsStaleSnapshot::test_regen_failure_returns_previous_snapshot
+FAILED tests/unit/test_watchover_eval_timeout_fix.py::TestMetaCacheIsolation::test_factory_uses_passed_watcher_config_not_cache
+FAILED tests/unit/test_watchover_graph.py::TestWatchoverTopology::test_no_direct_agent_to_tools_edge_when_manager_provided
+FAILED tests/unit/test_watchover_graph.py::TestWatchoverTopology::test_direct_edge_preserved_when_no_manager
+FAILED tests/unit/test_watchover_graph.py::TestWatchoverTopology::test_no_direct_agent_to_tools_edge_when_manager_and_language_check_disabled
+FAILED tests/unit/test_maintenancer_kb_coverage.py::test_release_tag_pin_matches_pyproject
+FAILED tests/unit/test_watchover_integration.py::TestFullLifecycleIntegration::test_full_flow_three_denials_to_termination
+FAILED tests/unit/test_watchover_integration.py::TestKillSwitchBehavior::test_kill_switch_true_and_instance_enabled_runs_evaluator
+FAILED tests/unit/test_watchover_integration.py::TestSSEEventLifecycle::test_full_lifecycle_sse_sequence
+FAILED tests/unit/test_watchover_integration.py::TestSSEEventLifecycle::test_no_watchover_event_after_termination_marker
+FAILED tests/unit/tools/test_instance_tools.py::TestSubtreeStatusRegistration::test_leader_planner_tester_opt_in_via_production_seam
+FAILED tests/unit/tools/test_knowledge_tools.py::TestExploreCallerModelOverrides::test_coder_with_null_override_forwards_system_default_model
+FAILED tests/unit/tools/test_knowledge_tools.py::TestExploreCallerModelOverrides::test_coder_with_string_override_forwards_override_model
+FAILED tests/integration/test_message_metadata_prune.py::TestMessageMetadataPrune::test_prune_drops_side_table_rows_after_cleanup
+FAILED tests/integration/test_message_metadata_prune.py::TestMessageMetadataPrune::test_prune_failure_never_raises_out_of_cleanup
+FAILED tests/integration/test_message_metadata_prune.py::TestMessageMetadataPrune::test_prune_repo_none_is_backward_compatible_no_op
+FAILED tests/integration/test_message_metadata_retry_recovery.py::TestReadReviveRead::test_read_revive_read_preserves_shared_prefix
+FAILED tests/integration/test_message_metadata_send_message_revive.py::TestSendMessageRevive::test_send_message_revives_completed_instance_and_read_stays_aget_only
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[memory.md3]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[workflow.md11]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[memory.md5]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[workflow.md17]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_odd_fence_count_fails[rule.md3]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_odd_fence_count_fails[workflow.md3]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[install-mermaid-cli.md]
+FAILED tests/unit/tools/test_snapshot_tools.py::TestRegistrationChain::test_gate_flag_enabled_on_targets
+FAILED tests/unit/tools/test_instance_tools.py::TestRegistration::test_planner_and_tester_resolve_subtree_messages_via_registry
+FAILED tests/unit/tools/test_tool_config_validation_boot.py::test_source_mode_validation_project_manager_zero_warnings
+ERROR tests/integration/test_wc_wake_pure_hang.py::test_http_post_messages_wakes_parked_wc_parent
+ERROR tests/integration/test_wc_wake_pure_hang.py::test_agent_tool_send_message_wakes_parked_wc_parent
+ERROR tests/integration/test_wc_wake_pure_hang.py::test_job_inject_wakes_parked_wc_parent
+ERROR tests/integration/test_empty_guard_checkpoint_roundtrip.py::test_pg_round_trip_preserves_nudge_markers_and_guard_semantics
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_creates_servers
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_idempotent
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_schema_drift
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_fault_tolerant
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_skips_user_created_servers
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_disabled_skips_creation
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_disabled_deactivates_existing
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_reenable_reactivates
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_enabled_creates_new
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_disabled_with_user_server
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_reenable_with_schema_drift
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapSkipsUnavailable::test_bootstrap_skips_unavailable_builtin
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapSkipsUnavailable::test_bootstrap_no_exception_when_unavailable
+ERROR tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_orphaned_active_builtin_is_deactivated
+ERROR tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_registered_builtin_left_active
+ERROR tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_user_created_server_never_deactivated
+ERROR tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_sweep_idempotent
+ERROR tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_bootstrap_creates_context7_server
+ERROR tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_bootstrap_context7_schema_empty
+ERROR tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_bootstrap_context7_config_matches_base
+ERROR tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_schema_drift_refreshes_config

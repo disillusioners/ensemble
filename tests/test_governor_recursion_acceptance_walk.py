@@ -32,7 +32,7 @@ Mocks are confined to TRUE EXTERNALS only:
   * ``daemon.services.instance_lifecycle._apply_post_cache_appends`` —
     context/metadata/time append chain (external context injection).
   * ``daemon.tools.instance`` heavy factory helpers (RAG / knowledge /
-    project / job / MCP / opencode / db / infra / context / chart tool
+    project / job / MCP / db / infra / context / chart tool
     builders) — external tool categories; the 18-patch factory stack is the
     exact list proven in ``tests/unit/test_governor_recursion_guard.py``.
   * ``svc._get_mcp_tool_names`` — external MCP service.
@@ -333,7 +333,6 @@ def _heavy_factory_patches() -> list:
                 "daemon.tools.instance.create_project_history_tools",
                 return_value=[],
             ),
-            patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
             patch("daemon.tools.instance.create_db_tools", return_value=[]),
             patch("daemon.tools.instance.create_infra_tools", return_value=[]),
             patch("daemon.tools.instance.create_context_tools", return_value=[]),

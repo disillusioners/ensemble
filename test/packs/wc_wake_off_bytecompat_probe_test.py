@@ -290,7 +290,6 @@ def drive_agent_tool(manager: MagicMock) -> dict:
         patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
         patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
         patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
         patch("daemon.tools.instance.create_db_tools", return_value=[]),
         patch("daemon.tools.instance.create_infra_tools", return_value=[]),
         patch("daemon.tools.instance.create_context_tools", return_value=[]),

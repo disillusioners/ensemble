@@ -223,7 +223,7 @@ def load_tools_doc_for_agent(
         logger.debug(f"Including {len(mcp_tool_names)} MCP tools in tool filter resolution for {agent_id}")
 
     # Resolve filter to set of allowed tool names.
-    # Innate skills (e.g. "opencode") implicitly grant their tool categories
+    # Innate skills (e.g. "chart") implicitly grant their tool categories
     # so the system prompt lists them even when `tools.allow` omits them.
     if tool_filter is None:
         # No filter → all tools allowed — EXCEPT privileged categories

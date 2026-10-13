@@ -75,7 +75,6 @@ from .mcp.builtin_servers import get_registry as get_mcp_registry, is_builtin_di
 from .mcp.warmup_pool import McpWarmupPool, get_mcp_warmup_pool, build_pooled_stdio_config
 from .mcp import warmup_pool as _warmup_pool_module
 from .mcp.config import McpStdioConfig
-from .opencode import OpenCodeSessionRegistry, create_opencode_session_repository
 
 from .repositories.instance.repository import (
     emit_cascade_lineage_boot_log,
@@ -1415,24 +1414,6 @@ class InstanceManager:
 
         # Keep backward compatible name for tools
         self.project_store = self._project_repository
-
-        # ── OpenCode session integration (separate engine) ──────────────────
-        # Dedicated engine for opencode sessions — separate file at
-        # {data_dir}/opencode_sessions.db (per Critical Note: separate persistence).
-        # Uses create_engine_from_config consistent with the main engine above
-        # (handles SQLite pragmas: WAL mode, busy_timeout, foreign_keys=ON,
-        # check_same_thread=False automatically).
-        # Table created via __table__.create() inside the factory — creates
-        # ONLY the opencode_sessions table, NOT all ensemble tables.
-        opencode_db_path = self.data_dir / "opencode_sessions.db"
-        self._opencode_engine = create_engine_from_config(
-            DatabaseConfig.sqlite(db_path=str(opencode_db_path))
-        )
-        self._opencode_session_repository = create_opencode_session_repository(self._opencode_engine)
-        self._opencode_registry = OpenCodeSessionRegistry(
-            repository=self._opencode_session_repository,
-        )
-        logger.info(f"OpenCode session registry initialized at {opencode_db_path}")
 
         # NEW: Optional JobQueueService reference (set via set_job_queue_service)
         self._job_queue_service: Any = None
@@ -2899,15 +2880,6 @@ class InstanceManager:
         return self.db_path.parent
 
     @property
-    def opencode_registry(self) -> "OpenCodeSessionRegistry":
-        """Public read-only access to the opencode session registry.
-
-        Used by ``daemon/tools/external_opencode.py`` to access session
-        state from agent tool calls.
-        """
-        return self._opencode_registry
-
-    @property
     def write_guard(self) -> WritePauseGuard:
         """Public read-only access to the write-pause guard.
 
@@ -3321,20 +3293,6 @@ class InstanceManager:
                 )
         except Exception as seed_exc:
             logger.warning(f"Skill bank seeding (Phase 3) failed: {seed_exc}")
-
-        # ── Recover opencode sessions on startup ───────────────────────────
-        # Loads all persisted sessions from the dedicated opencode DB and
-        # starts their background state-machine loops. Must happen after
-        # the engine is ready but before agents can use the tools.
-        #
-        # DISABLED: loading all sessions on startup causes memory bloat.
-        # Sessions are now loaded lazily on-demand via load_session_into_memory().
-        # Uncomment below to re-enable recovery on startup.
-        # try:
-        #     recovered = await self._opencode_registry.recover_from_registry()
-        #     logger.info(f"Recovered {recovered} opencode session(s) from registry")
-        # except Exception as exc:
-        #     logger.warning(f"Failed to recover opencode sessions: {exc}")
 
         if self._ensemble_config is not None and self._ensemble_config.is_postgres:
             pg = self._ensemble_config.postgres
@@ -5945,15 +5903,6 @@ class InstanceManager:
                         f"{INSTANCE_CACHE_TTL_HOURS}h TTL"
                     )
 
-                # Evict idle opencode session managers (1h TTL)
-                if self._opencode_registry is not None:
-                    try:
-                        evicted = await self._opencode_registry.evict_idle_sessions(ttl_seconds=3600)
-                        if evicted > 0:
-                            logger.info(f"Evicted {evicted} idle opencode session managers")
-                    except Exception as e:
-                        logger.warning(f"Failed to evict idle opencode sessions: {e}")
-
                 # S1: TTL sweep orphaned injection queues. Runs in the same
                 # 10-minute cadence as the cached-instance cleanup so
                 # stranded ``_pending_injections`` entries (typical cause:
@@ -6746,9 +6695,7 @@ class InstanceManager:
                 "              ('message_queue','images'),\n"
                 "              ('message_queue','image_refs'),\n"
                 "              ('mcp_servers','config'),\n"
-                "              ('mcp_servers','config_schema'),\n"
-                "              ('opencode_sessions','latest_response'),\n"
-                "              ('opencode_sessions','questions')\n"
+                "              ('mcp_servers','config_schema')\n"
                 "          )\n"
                 "    LOOP\n"
                 "        BEGIN\n"
@@ -13030,7 +12977,6 @@ class InstanceManager:
             ("close_checkpointer", self.close_checkpointer()),
             ("drain_mcp_pool", self._drain_warmup_pool()),
             ("shutdown_mcp_service", self._mcp_service.close_all_connections()),
-            ("shutdown_opencode_registry", self._shutdown_opencode_registry()),
         ]
         
         for name, step_coro in steps:
@@ -13075,31 +13021,6 @@ class InstanceManager:
                 exc_info=True,
             )
 
-    async def _shutdown_opencode_registry(self) -> None:
-        """Shutdown the opencode session registry during daemon shutdown.
-
-        Stops all running session managers, clears the in-memory map, and
-        disposes the dedicated opencode engine to release file handles and
-        finalize the SQLite WAL checkpoint. Errors are logged but not raised
-        so the rest of the shutdown sequence can continue.
-        """
-        if hasattr(self, "_opencode_registry") and self._opencode_registry:
-            try:
-                await self._opencode_registry.shutdown()
-            except Exception as exc:
-                logger.warning(f"Error during opencode registry shutdown: {exc}")
-
-        # Dispose the dedicated opencode engine to release resources.
-        # create_engine_from_config returns a sync Engine, so dispose() is sync.
-        # On SQLite this releases file handles and lets the WAL checkpoint
-        # finalize, avoiding "database is locked" on the next start.
-        # On PostgreSQL this returns pooled connections to the pool.
-        if hasattr(self, "_opencode_engine") and self._opencode_engine:
-            try:
-                self._opencode_engine.dispose()
-            except Exception as exc:
-                logger.warning(f"Error disposing opencode engine: {exc}")
-    
     async def _wait_for_inflight(self, grace_period: float) -> None:
         """Wait for in-flight processing to finish.
         

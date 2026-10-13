@@ -38,11 +38,6 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     "mother": ["agent_list", "agent_create", "agent_read", "agent_modify", "agent_delete"],
     "todo": ["create_todo", "update_todo", "list_todos", "complete_todo"],
     "chart": ["render_chart", "list_chart_types"],
-    "external_opencode": [
-        "external_opencode_init_session", "external_opencode_send_message",
-        "external_opencode_get_status", "external_opencode_wait_for_result",
-        "external_opencode_abort_session",
-    ],
     "db": ["db_query", "db_execute", "db_schema"],
     "mcp": ["mcp_list_servers", "mcp_invoke"],
     "knowledge": ["explore", "experience"],

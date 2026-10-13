@@ -1,0 +1,6 @@
+agents/approver/memory.md
+agents/approver/meta.json
+agents/approver/rule.md
+agents/approver/soul.md
+agents/approver/tools_note.md
+agents/approver/workflow.md

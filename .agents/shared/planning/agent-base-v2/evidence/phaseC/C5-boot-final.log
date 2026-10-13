@@ -1,0 +1,337 @@
+[0;32mStarting Ensemble Daemon (Development Mode)...[0m
+[0;32mLoading environment from .env...[0m
+[0;32mStarting server with auto-reload...[0m
+[0;32mAPI Documentation: http://localhost:8079/docs[0m
+
+INFO:     Will watch for changes in these directories: ['/home/nea/ensemble-src-wt-agent-base-v2']
+INFO:     Uvicorn running on http://127.0.0.1:8079 (Press CTRL+C to quit)
+INFO:     Started reloader process [1365135] using WatchFiles
+15:29:36 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+15:29:36 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+15:29:36 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+15:29:36 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+15:29:36 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+15:29:36 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+15:29:36 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+15:29:36 - daemon.api - INFO - Starting Ensemble v0.20.1
+15:29:37 - daemon.api - INFO - [Auth] route classes tagged (public/module-lane/protected)
+15:29:37 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+15:29:37 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+15:29:37 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+15:29:37 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+15:29:37 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+15:29:37 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+15:29:37 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+15:29:37 - daemon.api - INFO - Starting Ensemble v0.20.1
+15:29:37 - daemon.api - INFO - [Auth] route classes tagged (public/module-lane/protected)
+INFO:     Started server process [1365137]
+INFO:     Waiting for application startup.
+15:29:37 - daemon.ensemble_config - INFO - Loaded ensemble config: database=postgres
+15:29:37 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+15:29:37 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+15:29:37 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+15:29:37 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+15:29:37 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+15:29:37 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+15:29:37 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+15:29:37 - daemon - INFO - [TmpImages] ready: dir=/home/nea/ensemble-src-wt-agent-base-v2/data_dev/tmp_images count=0 max_bytes=1073741824
+15:29:37 - daemon - INFO - [Config] reasoning_echo_disabled_models=[] (models matching these patterns will NOT echo reasoning_content; all others echo)
+15:29:37 - daemon - INFO - [Config] default_streaming=True (clean_llm_config injects streaming=True when callers don't pass an explicit flag; OPENAI_STREAMING env var controls it)
+15:29:37 - daemon - INFO - [Config] default_request_gzip=True (clean_llm_config attaches gzip httpx clients when True; OPENAI_REQUEST_GZIP env var controls it)
+15:29:37 - daemon - INFO - [Config] default_request_timeout=610s (clean_llm_config injects it when a site omits request_timeout — tightening ∞→610s; OPENAI_REQUEST_TIMEOUT controls it)
+15:29:37 - daemon - INFO - [Config] empty_degenerate_reinvoke_cap=3 (router stops re-invoking on reasoning-only/<think>-only empties at the cap)
+15:29:37 - daemon.rag.config - INFO - Running RAG auto-test...
+15:29:39 - daemon.rag.config - INFO - RAG auto-test passed: LightRAG is reachable
+15:29:39 - daemon.manager - INFO - Context compaction enabled: threshold=0.8, recent_window=10, min_window=3
+15:29:39 - daemon.repositories.factory - INFO - Creating PostgreSQL engine: 127.0.0.1:5432/ensemble_dev
+15:29:39 - daemon.migrations.runner - INFO - Skipping migrations for non-SQLite database (schema evolution handled by EnsembleManager._ensure_postgres_columns)
+15:29:39 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'queued' WHERE status = 'pending' A
+15:29:39 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'active' WHERE status IN ('processi
+15:29:39 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WH
+15:29:39 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WH
+15:29:39 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WH
+15:29:39 - daemon.manager - DEBUG - Legacy `status` column already dropped; skipping backfill statement: UPDATE job_queue_items SET admission_state = 'dead' WHERE status = 'dead_letter'
+15:29:39 - daemon.manager - DEBUG - Legacy `error_message` column already dropped (Phase 5+); skipping terminal_reason backfill statement: UPDATE job_queue_items SET terminal_reason = 'failed' WHERE admission_state = 'd
+15:29:39 - daemon.manager - INFO - _ensure_postgres_columns: drift_events index ensure complete (ix_drift_events_plugin, ix_drift_events_plugin_divergence, ix_drift_events_observed_at — CREATE INDEX IF NOT EXISTS is idempotent)
+15:29:39 - daemon.manager - INFO - _ensure_postgres_columns: checkpoint trio autovacuum reloptions ensure complete (applied=0, already_set=3, table_missing=0)
+15:29:39 - daemon.manager - DEBUG - Phase 4 column drop: ``waiting_for`` and ``children`` removed (or absent) on PostgreSQL
+15:29:39 - daemon.manager - DEBUG - Phase 5 column drop: seven legacy job_queue_items columns removed (or absent) on PostgreSQL
+15:29:39 - daemon.services.boot_epoch - INFO - Boot epoch captured (DB clock): 2026-10-13T15:29:39.773907
+15:29:39 - daemon.repositories.message_queue.repository - WARNING - JOURNAL: MessageQueueRepository.clear_all preserve_in_flight=True about to DELETE 0 message_queue row(s) (env-poison family audit). doomed_message_ids=[]
+15:29:39 - daemon.manager - INFO - discard_on_startup: CAPTURE_PHASE complete — stashed 0 doomed id(s) for the deferred DELETE_PHASE (D-P3.9; DELETE moves off the boot critical path)
+15:29:39 - daemon.repositories.task.repository - WARNING - JOURNAL: TaskRepository.clear_all preserve_in_flight=True about to DELETE 0 task row(s) (env-poison family audit). doomed_work_ids=[]
+15:29:39 - daemon.manager - INFO - Cleared 0 backlog task(s) (discard_on_startup=backlog-clear; running/paused preserved)
+15:29:39 - daemon.repositories.instance.repository - INFO - Cascade lineage mode resolved: permanent (env ENSEMBLE_CASCADE_LINEAGE=<unset>); permanent enumeration uses instances.parent_id, hierarchy fallback uses instance_hierarchy. Restart required to flip.
+15:29:39 - daemon.repositories.instance.repository - INFO - Governor recursion guard resolved: enabled (env LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=<unset>); refuses governor spawn when parent chain already contains ≥ K governors (K from LIMITS_MAX_GOVERNOR_ANCESTORS, default 1). Restart required to flip.
+15:29:39 - daemon.services.context_messages - INFO - Ambient KV freshness ENABLED (per-turn fresh)
+15:29:39 - daemon.services.report_integrity_guard - INFO - Report-integrity (b) terminal-waiting guard resolved: DISABLED (default — log-only mode: the [ReportIntegrityGuard] soak log still fires at completion stamps; no notice is ever injected) (env WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED=<unset>). Restart required to flip. See docs/setup.md (WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED).
+15:29:40 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+15:29:40 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+15:29:40 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+15:29:40 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+15:29:40 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+15:29:40 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+15:29:40 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+15:29:40 - daemon.services.attestation_resolver - INFO - Leader completion attestation resolved: mode=enforce window=3 deny_bound=3 attestation_enabled=true llm_judge_enabled=true llm_judge_model=quick llm_judge_timeout_s=180.0 N_le_min_recent_window=PASS (env ENSEMBLE_LEADER_ATTESTATION_MODE=<unset>, ENSEMBLE_LEADER_ATTESTATION_WINDOW=<unset>, ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=<unset>). Restart required to flip. See docs/setup.md (ENSEMBLE_LEADER_ATTESTATION_MODE).
+15:29:40 - daemon.sources.dispatcher - INFO - ResponseDispatcher initialized with subscriber_id=response_dispatcher
+15:29:40 - daemon.manager - INFO - G7: created partial unique index ux_blueprint_one_core (one core per project, active rows)
+15:29:41 - daemon.manager - INFO - [/compact] registered /compact command (availability predicate unpopulated — O-B6)
+15:29:41 - daemon.manager - INFO - Bootstrapping 3 built-in MCP servers...
+15:29:41 - daemon.manager - INFO - Built-in MCP server 'webfetch' disabled (MCP_DISABLE_BUILT_IN_WEBFETCH), skipping creation
+15:29:41 - daemon.manager - DEBUG - Built-in MCP server already exists: context7
+15:29:41 - daemon.manager - DEBUG - Built-in MCP server already exists: plane
+15:29:41 - daemon.manager - INFO - Built-in MCP server bootstrap complete
+15:29:41 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=datacenter (description=updated, schema_doc=updated)
+15:29:41 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=server (description=updated, schema_doc=updated)
+15:29:41 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=rack (description=updated, schema_doc=updated)
+15:29:41 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=k8s_cluster (description=updated, schema_doc=updated)
+15:29:41 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=k8s_node (description=updated, schema_doc=updated)
+15:29:41 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=network (description=updated, schema_doc=updated)
+15:29:41 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=load_balancer (description=updated, schema_doc=updated)
+15:29:41 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=database (description=updated, schema_doc=updated)
+15:29:41 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=storage (description=updated, schema_doc=updated)
+15:29:41 - daemon.repositories.infra.repository - INFO - Bootstrapped infra asset types: 9 total, 0 new, 9 updated
+15:29:41 - daemon.manager - DEBUG - Infra asset types already registered: 9 total, 9 updated
+15:29:41 - daemon.manager - INFO - Plugin registry boot-scan: 1 plugin(s) (opendesign), 2 plugin-skill(s)
+15:29:41 - daemon.manager - INFO - MCP server 'webfetch' disabled (env var), skipping warmup pool registration
+15:29:41 - daemon.mcp.warmup_pool - DEBUG - Registered server 'context7' with pool_size=1
+15:29:41 - daemon.manager - WARNING - MCP server 'plane' row config invalid for warmup pool: 2 validation errors for McpStdioConfig
+transport
+  Input should be 'stdio' [type=literal_error, input_value='streamable-http', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.12/v/literal_error
+command
+  Field required [type=missing, input_value={'transport': 'streamable...ug': 'nea'}, 'args': []}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.12/v/missing. Falling back to definition defaults.
+15:29:41 - daemon.manager - INFO - MCP warm-up pool initialized: 1 server(s) registered, warmup running in background
+15:29:41 - daemon.persistence - INFO - Creating PostgreSQL checkpointer for localhost:5432/ensemble
+15:29:42 - daemon.persistence - INFO - PostgreSQL checkpointer adapter ready (saver=AsyncPostgresSaver(pool=AsyncConnectionPool), adapter_pool=asyncpg.Pool)
+15:29:42 - daemon.services.maintenance - DEBUG - Registered maintenance job: checkpoint_cleanup (interval=24h)
+15:29:42 - daemon.services.maintenance - DEBUG - Registered maintenance job: vacuum_maintenance (interval=24.0h)
+15:29:42 - daemon.manager - DEBUG - vacuum_maintenance registered: interval=24.0h, dead_tup_min=1000, dead_tup_scale_fraction=0.0500
+15:29:42 - daemon.manager - INFO - Skill trigger seed (Phase 4): 0 new default triggers inserted
+15:29:42 - daemon.services.maintenance - DEBUG - Registered maintenance job: skill_metric_scan (interval=24.0h)
+15:29:42 - daemon.services.maintenance - DEBUG - Registered maintenance job: skill_orphan_sweep (interval=24.0h)
+15:29:42 - daemon.services.maintenance - DEBUG - Registered maintenance job: blueprint_daily_scan (interval=5.0h)
+15:29:42 - daemon.services.maintenance_boot_sweep - INFO - maintenance boot sweep: 0 interrupted run(s) in section=checkpoint-cleanup
+15:29:42 - daemon.services.maintenance - INFO - Maintenance service started
+15:29:43 - daemon.registry - WARNING - Tool config validation: Agent 'maintenancer': deny entry 'git_commit' is neither a known category nor a known tool
+15:29:43 - daemon.manager - DEBUG - Eager-warmed tool metadata + tiktoken encoder
+15:29:43 - daemon.services.skill_seed_service - INFO - No skills to seed for agent 'worker' (empty or unparseable skill-set file: skill-set.yaml)
+15:29:43 - daemon.services.skill_seed_service - INFO - Skill seeding complete: 0 new, 0 updated, 84 unchanged, 0 errors
+15:29:43 - daemon.manager - DEBUG - Skill bank seeding (Phase 3): {'new': 0, 'updated': 0, 'unchanged': 84, 'errors': 0}
+15:29:43 - daemon.manager - INFO - SessionManager initialized with PostgreSQL checkpointer (localhost:5432/ensemble)
+Context7 Documentation MCP Server v4.4.1 running on stdio
+15:29:44 - daemon.config - INFO - [CriticalNotes:state] tiered=true projects_with_pins=0/49 total_pinned=0 (gating active when projects_with_pins>=1 per §4.2 #8; projects without pins fall back to render-all)
+15:29:44 - daemon.services.main_loop_bridge - INFO - MainLoopBridge: event loop set to <uvloop.Loop running=True closed=False debug=False>
+15:29:44 - daemon.services.stale_task_recovery - INFO - Running startup crash recovery (no grace period)...
+15:29:44 - daemon.services.stale_task_recovery - INFO - Startup recovery complete: 0 tasks recovered
+15:29:44 - daemon.services.stale_task_recovery - INFO - StaleTaskRecovery started: threshold=10min, interval=60s, grace=30s, max_retries=3
+15:29:44 - daemon.services.report_delivery_recovery - INFO - ReportDeliveryRecoveryService started: interval=300s, age_bound=10min, batch_cap=100, retry=1min, lanes=[deferred=True, no_row_backstop=True, pending_age=True, recovery_retry=True, orphan=True, stuck_wake=True]
+15:29:44 - daemon.services.worker_pool - INFO - Starting WorkerPool with 5 workers...
+15:29:44 - daemon.services.worker_pool - INFO - Worker worker-0 started
+15:29:44 - daemon.services.worker_pool - INFO - Worker worker-1 started
+15:29:44 - daemon.services.worker_pool - INFO - Worker worker-2 started
+15:29:44 - daemon.services.worker_pool - INFO - Worker worker-3 started
+15:29:44 - daemon.services.worker_pool - INFO - Worker worker-4 started
+15:29:44 - daemon.services.worker_pool - INFO - WorkerPool started: 5 workers
+15:29:44 - daemon.services.worker_pool - INFO - Starting WorkerPool with 2 workers...
+15:29:44 - daemon.services.worker_pool - INFO - Worker chat-worker-0 started
+15:29:44 - daemon.services.worker_pool - INFO - Worker chat-worker-1 started
+15:29:44 - daemon.services.worker_pool - INFO - WorkerPool started: 2 workers
+15:29:44 - daemon.services.pool_orchestrator - INFO - ChatSourceWorkerPool started: workers=2, prefixes=telegram:,slack:,discord:
+15:29:44 - daemon.api - INFO - P3/decision-f deferred DELETE_PHASE: no doomed ids (operator gate QUEUE_DISCARD_ON_STARTUP may be off, or no rows matched the doomed predicate; DELETE no-ops)
+15:29:44 - daemon.services.report_delivery_recovery - INFO - RDRS lane 2: post-wipe recovery (no-row backstop; F-2 wedge closure per durability-f1-f2 / phase2 task 2.8)
+15:29:44 - daemon.services.report_delivery_recovery - INFO - RDRS lane 2: post-wipe recovery (no-row backstop; F-2 wedge closure per durability-f1-f2 / phase2 task 2.8)
+15:29:44 - daemon.api - INFO - WorkResolverService constructed and wired to InstanceManager
+15:29:44 - daemon.api - INFO - Phase 2 Batch 2: watcher_repo + work_resolver wired to TaskProcessor / WorkerPool / StaleTaskRecovery
+15:29:44 - daemon.api - INFO - RetryScheduler disabled (job_retry_scheduler_enabled is not set)
+15:29:44 - daemon.manager - INFO - JobQueueService wired into SourceRegistry for scheduler routing
+15:29:44 - daemon.manager - INFO - SkillJobDispatcher wired to manager
+15:29:44 - daemon.manager - INFO - JobQueueService connected to SessionManager
+15:29:44 - daemon.manager - INFO - JobQueueMgmtService connected to SessionManager
+15:29:44 - daemon.services.job_recovery_service - INFO - Starting job recovery — checking PROCESSING jobs...
+15:29:44 - daemon.services.job_recovery_service - INFO - Job recovery complete: 0 recovered, 0 alive, 0 total
+15:29:44 - daemon.api - INFO - Job recovery: {'recovered': 0, 'alive': 0, 'total': 0}
+15:29:44 - daemon.mcp.tool_adapter - DEBUG - Adapted MCP tool: resolve-library-id -> mcp_context7_resolve-library-id
+15:29:44 - daemon.mcp.tool_adapter - DEBUG - Adapted MCP tool: query-docs -> mcp_context7_query-docs
+15:29:44 - daemon.mcp.warmup_pool - INFO - Warmed up pool for 'context7' (1/1 connections)
+15:29:44 - daemon.mcp.warmup_pool - INFO - MCP warmup complete: 1 server(s) ready
+15:29:44 - daemon.manager - INFO - MCP warm-up pool ready: {'context7': {'available': 1, 'pool_size': 1, 'healthy': True}}
+15:29:44 - daemon.mcp.warmup_pool - INFO - Started MCP health check loop (interval=60s)
+15:29:44 - daemon.services.job_recovery_service - INFO - Pattern-f1 orphan-ACTIVE-JobItem recovery ENABLED (default; set ENSEMBLE_ORPHAN_F1_ENABLED=0 to disable — restart required to flip)
+15:29:44 - daemon.services.job_recovery_service - INFO - Pattern-g defer-self-witness autopromote ENABLED (default; ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED unset or set to a truthy value) — matched deferred PENDING tasks in the self-witness blind-spot will be unstuck by flipping task.is_deferred=false on the drift cadence. Set ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0 (or 00/-0/0./0x0/false/no/off) + restart to disable the bounded unstick
+15:29:44 - daemon.api - INFO - Drift reconciler started: interval=300s, min_pending_age=300s, min_orphan_age=900s, f1_tree_activity_max_age=900s
+15:29:44 - daemon.services.eligible_pending_sweep - INFO - EligiblePendingSweepService started: interval=90s, min_pending_age=60s
+15:29:44 - daemon.api - INFO - EligiblePendingSweepService started: interval=90s (default 90s), min_pending_age=60s (default 60s)
+15:29:44 - daemon.services.orphan_watcher_sweep - INFO - OrphanWatcherSweepService started: interval=90s
+15:29:44 - daemon.api - INFO - OrphanWatcherSweepService started: interval=90s (default 90s), grace=30s (default 30s)
+15:29:44 - daemon.services.job_lock_sweep - INFO - JobLockSweepService started: interval=90s (default 90s)
+15:29:44 - daemon.api - INFO - JobLockSweepService started: interval=90s (default 90s)
+15:29:44 - daemon.services.watch_reconcile_sweep - INFO - WatchReconcileSweepService started: interval=300s (default 300s)
+15:29:44 - daemon.api - INFO - WatchReconcileSweepService started: interval=300s (default 300s)
+15:29:44 - daemon.services.tmp_image_cleanup_service - INFO - TmpImageCleanupService started: interval=3600s retention=30d
+15:29:44 - daemon - INFO - [TmpImages] cleanup service started: interval=3600s retention=30d
+15:29:44 - daemon - INFO - [LiveViews] subsystem ready: enabled=True roots=['designer-artifact', 'planning', 'tmp-images']
+15:29:44 - daemon.services.plane_sync_watchdog_service - INFO - PlaneSyncWatchdogService started: interval=300s backoff_base=60s backoff_max=1800s max_attempts=5
+15:29:44 - daemon - INFO - [PlaneSync] watchdog started: interval=300s backoff_base=60s backoff_max=1800s max_attempts=5
+15:29:44 - daemon.api - INFO - Waiting-children watchdog started: interval=3600s, hang_threshold=3600s
+15:29:44 - daemon.api - INFO - Long-tool-nudge scanner started: interval=60s, default_threshold=900s
+15:29:44 - daemon.services.llm_stream_watchdog - INFO - [StreamWatchdog] loop started: threshold=45s interval=1.0s registry=0 live stream(s)
+15:29:44 - daemon.api - INFO - [StreamWatchdog] started: threshold=45s
+15:29:44 - daemon.manager - INFO - DeadLetterService connected to InstanceManager
+15:29:44 - daemon.services.job_feedback_observer - INFO - JobFeedbackObserver started
+15:29:44 - daemon.api - INFO - JobFeedbackObserver started
+15:29:44 - daemon.services.orphan_watcher_sweep - DEBUG - OrphanWatcherSweepService: tick 1, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+15:29:45 - daemon.services.plane_sync_watchdog_service - INFO - PlaneSyncWatchdogService tick: {'considered': 17, 're_drove': 0, 'skipped_backoff': 17, 'skipped_quarantine': 0, 'errors': 0, 'skipped_disabled': 0, 'recovered_stale_syncing': 0}
+15:29:45 - daemon.services.waiting_children_watchdog - INFO - [Watchdog] Starting periodic loop: interval=3600s, hang_threshold=3600s
+15:29:45 - daemon.services.long_tool_nudge - INFO - [LongToolNudge] Starting periodic loop: interval=60s default_threshold=900s
+15:29:45 - daemon.services.dependency_bus - DEBUG - sweep_orphan_watchers: no orphan PENDING watchers found (after grace filter)
+15:29:45 - daemon.services.dependency_bus - INFO - bus start: warmed=0 pending watchers, recovered=0 fired-but-unsent watchers, swept=0 orphan pending watcher(s)
+15:29:45 - daemon.services.dependency_bus - INFO - DependencyBus registered
+15:29:45 - daemon.api - INFO - DependencyBus started (recovered=0 FIRED-but-unsent watchers)
+15:29:45 - daemon.api - INFO - System default project bootstrapped: 71931ae0-0f25-5fbf-853b-2a78cc978d7e
+15:29:45 - daemon.services.job_processor - INFO - JobProcessor started
+15:29:45 - daemon.api - INFO - JobProcessor started
+15:29:45 - daemon.services.job_processor - INFO - JobProcessor: JobFeedbackObserver wired (MESSAGE jobs route through observer — sole dispatch path post-Phase-D)
+15:29:45 - daemon.api - INFO - JobFeedbackObserver wired into JobProcessor
+15:29:45 - daemon.manager - INFO - JobFeedbackObserver wired into InstanceManager
+15:29:45 - daemon.api - INFO - JobFeedbackObserver wired into InstanceManager (report_lane=ON)
+15:29:45 - daemon.manager - INFO - NotificationBroadcaster connected to InstanceManager
+15:29:45 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: started
+15:29:46 - daemon.mcp.stdio_wrapper - DEBUG - Inner context manager __aexit__ raised: unhandled errors in a TaskGroup (1 sub-exception)
+15:29:46 - daemon.mcp.connection_manager - ERROR - Failed to create session for 'plane': Connection closed
+15:29:46 - daemon.mcp.connection_manager - ERROR - Failed to connect MCP server: Connection closed
+15:29:46 - daemon.services.mcp_service - WARNING - Schema discovery: no session for MCP server 'plane' on attempt 1 — retrying once
+15:29:47 - daemon.api - INFO - Auto-provisioned system queues for 49 projects
+15:29:47 - daemon.sources.cleanup - INFO - SourceCleanup started (interval: 21600s)
+15:29:47 - daemon.sources.dispatcher - INFO - Starting ResponseDispatcher
+15:29:47 - daemon.sources.registry - INFO - Loading and scheduling auto-start for enabled adapters...
+15:29:47 - daemon.sources.registry - INFO - Scheduled auto-start for 0 adapters (delayed 60.0s)
+15:29:47 - daemon.manager - INFO - Message sources system started
+15:29:47 - daemon - INFO - [Readiness] Refresher started: interval=10s, queue_freshness_threshold=120s
+15:29:47 - daemon - INFO - [KbKeys] module key store ready (active_keys=0)
+15:29:47 - daemon - WARNING - [KbKeys] key store EMPTY — /api/mcp/kb and /api/mcp/kb/sse are in bootstrap pass-through (requests NOT key-gated). Mint the first key via POST /api/mcp/kb/keys to activate the guard; probe posture via GET /api/mcp/kb/keys/guard-status.
+15:29:47 - daemon.api - INFO - AutoContinue boot pass: ContinueResult(candidates=0, scheduled=0, skipped_no_checkpoint=0, skipped_resume_refused=0, skipped_kill_switch=0, skipped_no_boot_epoch=0, skipped_multi_task_instance=0, errors=0, duration_seconds=0.016780538950115442)
+15:29:47 - daemon.services.upgrade_journal_sweep - INFO - UpgradeJournalSweepService started: interval=90s (default 90s), reaper_timeout=660s (default 660s), install_dir=<none — dev/unresolved>
+15:29:47 - daemon.api - INFO - UpgradeJournalSweepService started: interval=90s (default 90s), reaper_timeout=660s (default 660s), install_dir=<none — dev/unresolved>
+15:29:47 - daemon.api - INFO - [ServiceTool] reconcile_boot_sweep alive=0 reaped=0 errors=0
+15:29:47 - daemon.api - INFO - ServiceReconciliationService started: interval=90s
+15:29:47 - daemon.api - INFO - VS Code proxy mounted at /vscode
+15:29:47 - daemon.api - DEBUG - Editor preference is 'builtin' — skipping code-server auto-start
+15:29:47 - daemon.api - INFO - Skills router wired: store=True search=True metrics=True evolution=True triggers=True dispatcher=True usage_repo=True
+15:29:47 - mcp.server.streamable_http_manager - INFO - StreamableHTTP session manager started
+INFO:     Application startup complete.
+15:29:47 - daemon.mcp.stdio_wrapper - DEBUG - Inner context manager __aexit__ raised: unhandled errors in a TaskGroup (1 sub-exception)
+15:29:47 - daemon.mcp.connection_manager - ERROR - Failed to create session for 'plane': Connection closed
+15:29:47 - daemon.mcp.connection_manager - ERROR - Failed to connect MCP server: Connection closed
+15:29:47 - daemon.services.mcp_service - WARNING - Schema discovery: no session for MCP server 'plane' after 2 attempt(s)
+15:29:47 - daemon.services.mcp_service - WARNING - Schema discovery returned no tools for MCP server 'plane' — result NOT cached; next lookup will retry discovery
+15:29:47 - daemon.services.mcp_service - INFO - eager_warm_schemas: primed 1/2 MCP server schema(s) (plane: 0 tools, context7: 2 tool(s))
+15:30:14 - daemon.repositories.job_queue.repository - DEBUG - reap_legacy_mirror_zombies: no legacy candidates (created_at < 2026-09-02T00:00:00+00:00); self-extinguishing
+15:30:14 - daemon.services.job_recovery_service - INFO - reconcile_drift_states: complete — reconciled=0, details=0
+15:30:14 - daemon.services.job_recovery_service - INFO - reconcile_drift_states: complete — reconciled=0, details=0
+15:30:15 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=1)
+15:30:15 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+15:30:15 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 0 queue(s) with admittable work
+15:30:42 - daemon.services.maintenance - INFO - Starting checkpoint cleanup job
+15:30:42 - daemon.services.maintenance - INFO - pinned_subtree_terminal_count=0 (sum of terminal descendants under pinned roots; P1 polarity change now visible)
+15:30:42 - daemon.services.maintenance - DEBUG - No orphaned checkpoint threads found
+15:30:42 - daemon.services.maintenance - DEBUG - No expired terminal instances found
+15:30:42 - daemon.services.maintenance - DEBUG - Terminal instance history within cap: 4/1000
+15:30:42 - daemon.services.maintenance - DEBUG - Per-thread checkpoint retention: max_per_thread=3 (CHECKPOINT_MAX_PER_THREAD env)
+15:30:42 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=prune threads=0 deleted=0 duration_ms=0 (no excess threads)
+15:30:42 - daemon.services.maintenance - DEBUG - No threads with excessive checkpoints found
+15:30:42 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=prune-exit threads=0 deleted=0 duration_ms=11
+15:30:42 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=1db643ad dry_run=0 deleted=0 bytes=0 refs_seen=17 observed_blob_count=0
+15:30:42 - daemon.services.checkpoint_prune - DEBUG - [CheckpointPerf] blob_prune pair done in 13ms (deleted=0 bytes=0)
+15:30:42 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=69a103fd dry_run=0 deleted=0 bytes=0 refs_seen=16 observed_blob_count=0
+15:30:42 - daemon.services.checkpoint_prune - DEBUG - [CheckpointPerf] blob_prune pair done in 8ms (deleted=0 bytes=0)
+15:30:42 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=d338e927 dry_run=0 deleted=0 bytes=0 refs_seen=18 observed_blob_count=0
+15:30:42 - daemon.services.checkpoint_prune - DEBUG - [CheckpointPerf] blob_prune pair done in 6ms (deleted=0 bytes=0)
+15:30:42 - daemon.checkpoint_perf - DEBUG - [CheckpointPerf] op=blob_prune thread=eead01db dry_run=0 deleted=0 bytes=0 refs_seen=16 observed_blob_count=0
+15:30:42 - daemon.services.checkpoint_prune - DEBUG - [CheckpointPerf] blob_prune pair done in 7ms (deleted=0 bytes=0)
+15:30:42 - daemon.services.checkpoint_prune - INFO - [CheckpointPerf] op=blob_prune_summary threads=4 deleted=0 bytes=0 would_delete=0 would_free=0 dry_run=0 duration_ms=39 scanned_pairs=4 skipped=0 stopped_early=0 backend=postgres
+15:30:42 - daemon.services.maintenance - INFO - Checkpoint cleanup job completed
+15:30:42 - daemon.services.maintenance - INFO - Maintenance job 'checkpoint_cleanup' completed successfully
+15:30:42 - daemon.services.vacuum_maintenance - INFO - vacuum_maintenance: no tables exceeded dead-tuple threshold (min=1000, scale=0.0500); cycle idle
+15:30:42 - daemon.services.vacuum_maintenance - INFO - vacuum_maintenance cycle complete: qualified=0 vacuumed=0 skipped=0 duration_ms=17
+15:30:42 - daemon.services.maintenance - INFO - Maintenance job 'vacuum_maintenance' completed successfully
+15:30:42 - daemon.services.maintenance - INFO - Maintenance job 'skill_metric_scan' completed successfully
+15:30:42 - daemon.services.maintenance - INFO - Maintenance job 'skill_orphan_sweep' completed successfully
+15:30:45 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=2)
+15:30:45 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+15:30:45 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 0 queue(s) with admittable work
+15:31:14 - daemon.services.orphan_watcher_sweep - DEBUG - OrphanWatcherSweepService: tick 2, but dependency_bus is not wired (legacy test fixture / pre-wiring lifespan) — relying on the startup sweep
+15:31:15 - daemon.services.job_processor - DEBUG - [TRACE] _process_loop: poll timeout, processing next job (immediate=0, polling=3)
+15:31:15 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: waking up to check for jobs
+15:31:15 - daemon.services.job_processor - DEBUG - [TRACE] _process_next_job: 0 queue(s) with admittable work
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+15:31:37 - mcp.server.streamable_http_manager - INFO - StreamableHTTP session manager shutting down
+15:31:37 - daemon.services.job_feedback_observer - INFO - JobFeedbackObserver stopped after processing 0 events
+15:31:37 - daemon.services.job_feedback_observer - INFO - JobFeedbackObserver stopped
+15:31:37 - daemon.services.dependency_bus - INFO - bus stop: cleared 0 cached watchers
+15:31:37 - daemon.services.dependency_bus - INFO - DependencyBus unregistered
+15:31:37 - daemon.services.job_processor - INFO - JobProcessor stopped
+15:31:37 - daemon.services.live_event_hub - INFO - LiveEventHub shutdown complete
+15:31:37 - daemon.services.notification_broadcaster - INFO - NotificationBroadcaster shutdown complete
+15:31:37 - daemon.services.llm_stream_watchdog - INFO - [StreamWatchdog] loop stopped
+15:31:37 - daemon.services.eligible_pending_sweep - INFO - EligiblePendingSweepService stopped
+15:31:37 - daemon.services.orphan_watcher_sweep - INFO - OrphanWatcherSweepService stopped
+15:31:37 - daemon.services.tmp_image_cleanup_service - INFO - TmpImageCleanupService stopped
+15:31:37 - daemon.services.plane_sync_watchdog_service - INFO - PlaneSyncWatchdogService stopped
+15:31:37 - daemon.services.watch_reconcile_sweep - INFO - WatchReconcileSweepService stopped
+15:31:37 - daemon.services.job_lock_sweep - INFO - JobLockSweepService stopped
+15:31:37 - daemon.services.upgrade_journal_sweep - INFO - UpgradeJournalSweepService stopped
+15:31:37 - daemon.api - INFO - ServiceReconciliationService stopped
+15:31:37 - daemon.manager - INFO - Starting graceful shutdown...
+15:31:37 - daemon.sources.dispatcher - INFO - Stopping ResponseDispatcher
+15:31:37 - daemon.sources.registry - INFO - Stopping all adapters...
+15:31:37 - daemon.sources.registry - INFO - All adapters stopped
+15:31:37 - daemon.sources.cleanup - INFO - SourceCleanup stopped
+15:31:37 - daemon.manager - INFO - Message sources system stopped
+15:31:37 - daemon.services.cancellation - DEBUG - All requests completed, proceeding with shutdown
+15:31:37 - daemon.services.worker_pool - INFO - Stopping WorkerPool (2 workers)...
+15:31:37 - daemon.services.worker_pool - DEBUG - Stopping worker chat-worker-0...
+15:31:37 - daemon.services.worker_pool - WARNING - Worker chat-worker-0 did not stop within 0s
+15:31:37 - daemon.services.worker_pool - DEBUG - Stopping worker chat-worker-1...
+15:31:37 - daemon.services.worker_pool - WARNING - Worker chat-worker-1 did not stop within 0s
+15:31:37 - daemon.services.worker_pool - INFO - Worker chat-worker-1 stopped: claimed=0, completed=0, failed=0
+15:31:37 - daemon.services.worker_pool - INFO - Worker chat-worker-0 stopped: claimed=0, completed=0, failed=0
+15:31:37 - daemon.services.worker_pool - INFO - WorkerPool stopped
+15:31:37 - daemon.services.pool_orchestrator - INFO - Chat worker pool stopped
+15:31:37 - daemon.services.worker_pool - INFO - Stopping WorkerPool (5 workers)...
+15:31:37 - daemon.services.worker_pool - DEBUG - Stopping worker worker-0...
+15:31:37 - daemon.services.worker_pool - WARNING - Worker worker-0 did not stop within 0s
+15:31:37 - daemon.services.worker_pool - DEBUG - Stopping worker worker-1...
+15:31:37 - daemon.services.worker_pool - WARNING - Worker worker-1 did not stop within 0s
+15:31:37 - daemon.services.worker_pool - DEBUG - Stopping worker worker-2...
+15:31:37 - daemon.services.worker_pool - WARNING - Worker worker-2 did not stop within 0s
+15:31:37 - daemon.services.worker_pool - DEBUG - Stopping worker worker-3...
+15:31:37 - daemon.services.worker_pool - WARNING - Worker worker-3 did not stop within 0s
+15:31:37 - daemon.services.worker_pool - DEBUG - Stopping worker worker-4...
+15:31:37 - daemon.services.worker_pool - WARNING - Worker worker-4 did not stop within 0s
+15:31:37 - daemon.services.worker_pool - INFO - Worker worker-0 stopped: claimed=0, completed=0, failed=0
+15:31:37 - daemon.services.worker_pool - INFO - Worker worker-2 stopped: claimed=0, completed=0, failed=0
+15:31:37 - daemon.services.worker_pool - INFO - Worker worker-3 stopped: claimed=0, completed=0, failed=0
+15:31:37 - daemon.services.worker_pool - INFO - Worker worker-4 stopped: claimed=0, completed=0, failed=0
+15:31:37 - daemon.services.worker_pool - INFO - Worker worker-1 stopped: claimed=0, completed=0, failed=0
+15:31:37 - daemon.services.worker_pool - INFO - WorkerPool stopped
+15:31:37 - daemon.services.pool_orchestrator - INFO - Worker pool stopped
+15:31:37 - daemon.services.stale_task_recovery - INFO - StaleTaskRecovery stopped
+15:31:37 - daemon.services.pool_orchestrator - INFO - Stale task recovery stopped
+15:31:37 - daemon.services.report_delivery_recovery - INFO - ReportDeliveryRecoveryService stopped
+15:31:37 - daemon.services.pool_orchestrator - INFO - Report delivery recovery stopped
+15:31:37 - daemon.services.event_bus - INFO - Shutting down EventBus
+15:31:37 - daemon.services.event_bus - INFO - EventBus shutdown complete
+15:31:37 - daemon.services.maintenance - INFO - Maintenance service stopped
+15:31:37 - daemon.checkpoint_adapter - DEBUG - PostgreSQL checkpointer asyncpg pool closed
+15:31:37 - daemon.checkpoint_adapter - DEBUG - PostgreSQL checkpointer saver resource closed (topology=pool)
+15:31:37 - daemon.manager - INFO - Checkpointer adapter closed
+15:31:37 - daemon.mcp.warmup_pool - INFO - MCP warm-up pool drained
+15:31:37 - daemon.manager - INFO - Cleaning up resources...
+15:31:37 - daemon.manager - INFO - Database engine disposed
+15:31:37 - daemon.manager - INFO - Graceful shutdown complete
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1365137]
+INFO:     Stopping reloader process [1365135]

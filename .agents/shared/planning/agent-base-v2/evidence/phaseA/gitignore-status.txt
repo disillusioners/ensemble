@@ -1,0 +1,1 @@
+legacy/ NOT in .gitignore — recommend adding (mirror backup/ pattern; backup/ is git-tracked so legacy/ SHOULD be too)

@@ -687,7 +687,7 @@ class TestMcpToolFiltering:
 class TestExpandAllowForInnateSkills:
     """Tests for expand_allow_for_innate_skills() helper.
 
-    Innate skills (e.g. "opencode") should implicitly grant the tool
+    Innate skills (e.g. "chart") should implicitly grant the tool
     categories they require, so the agent does not have to repeat them
     in `tools.allow`.
     """
@@ -704,23 +704,23 @@ class TestExpandAllowForInnateSkills:
 
     def test_none_allow_returns_none(self):
         """If allow is None, agent already has everything — no expansion."""
-        assert expand_allow_for_innate_skills(None, ["opencode"]) is None
+        assert expand_allow_for_innate_skills(None, ["chart"]) is None
         assert expand_allow_for_innate_skills(None, []) is None
 
-    def test_opencode_innate_skill_adds_external_opencode_category(self):
+    def test_chart_innate_skill_adds_chart_category(self):
         result = expand_allow_for_innate_skills(
-            ["bash", "filesystem"], ["opencode"]
+            ["bash", "filesystem"], ["chart"]
         )
-        assert "external_opencode" in result
+        assert "chart" in result
         assert "bash" in result
         assert "filesystem" in result
 
     def test_does_not_duplicate_existing_category(self):
-        """If external_opencode already in allow, leave it alone."""
+        """If chart already in allow, leave it alone."""
         result = expand_allow_for_innate_skills(
-            ["bash", "external_opencode"], ["opencode"]
+            ["bash", "chart"], ["chart"]
         )
-        assert result.count("external_opencode") == 1
+        assert result.count("chart") == 1
 
     def test_unknown_innate_skill_is_ignored(self):
         result = expand_allow_for_innate_skills(
@@ -754,12 +754,12 @@ class TestExpandAllowForInnateSkills:
         INNATE_SKILL_TOOL_CATEGORIES["test-skill"] = ["test-category"]
         try:
             result = expand_allow_for_innate_skills(
-                ["bash"], ["opencode", "test-skill"]
+                ["bash"], ["chart", "test-skill"]
             )
         finally:
             INNATE_SKILL_TOOL_CATEGORIES.clear()
             INNATE_SKILL_TOOL_CATEGORIES.update(original)
-        assert "external_opencode" in result
+        assert "chart" in result
         assert "test-category" in result
         assert "bash" in result
 
@@ -824,18 +824,18 @@ class TestExpandAllowForInnateSkills:
 
         assert result == ["bash"]
 
-    def test_apply_tool_filter_grants_opencode_tools_for_innate_skill(self):
-        """End-to-end: agent with innate_skills=['opencode'] gets opencode tools."""
+    def test_apply_tool_filter_grants_chart_tools_for_innate_skill(self):
+        """End-to-end: agent with innate_skills=['chart'] gets chart tools."""
         tools = [
             self._create_mock_tool("bash"),
-            self._create_mock_tool("external_opencode_init_session"),
-            self._create_mock_tool("external_opencode_send_message"),
+            self._create_mock_tool("chart_render"),
+            self._create_mock_tool("chart_list"),
         ]
         categories = {
             "bash": ["bash"],
-            "external_opencode": [
-                "external_opencode_init_session",
-                "external_opencode_send_message",
+            "chart": [
+                "chart_render",
+                "chart_list",
             ],
         }
         with patch("daemon.registry.get_registry") as mock_registry:
@@ -843,31 +843,31 @@ class TestExpandAllowForInnateSkills:
                 mock_list.return_value = categories
                 mock_agent_meta = MagicMock()
                 mock_filter = MagicMock()
-                # Allow list does NOT include external_opencode
+                # Allow list does NOT include chart
                 mock_filter.allow = ["bash"]
                 mock_filter.deny = None
                 mock_agent_meta.tools = mock_filter
-                mock_agent_meta.innate_skills = ["opencode"]
+                mock_agent_meta.innate_skills = ["chart"]
                 mock_registry.return_value.get_version.return_value = None
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
                 result = _apply_tool_filter(tools, "developer")
                 tool_names = {t.name for t in result}
 
-        # opencode tools should be auto-included
+        # chart tools should be auto-included
         assert "bash" in tool_names
-        assert "external_opencode_init_session" in tool_names
-        assert "external_opencode_send_message" in tool_names
+        assert "chart_render" in tool_names
+        assert "chart_list" in tool_names
 
     def test_explicit_deny_still_wins_over_innate_skill_grant(self):
         """If user explicitly denies a category, deny wins (per resolve_tool_filter)."""
         tools = [
             self._create_mock_tool("bash"),
-            self._create_mock_tool("external_opencode_init_session"),
+            self._create_mock_tool("chart_render"),
         ]
         categories = {
             "bash": ["bash"],
-            "external_opencode": ["external_opencode_init_session"],
+            "chart": ["chart_render"],
         }
         with patch("daemon.registry.get_registry") as mock_registry:
             with patch("daemon.tools.instance.list_tools_by_category") as mock_list:
@@ -875,9 +875,9 @@ class TestExpandAllowForInnateSkills:
                 mock_agent_meta = MagicMock()
                 mock_filter = MagicMock()
                 mock_filter.allow = ["bash"]
-                mock_filter.deny = ["external_opencode"]
+                mock_filter.deny = ["chart"]
                 mock_agent_meta.tools = mock_filter
-                mock_agent_meta.innate_skills = ["opencode"]
+                mock_agent_meta.innate_skills = ["chart"]
                 mock_registry.return_value.get_version.return_value = None
                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
 
@@ -885,7 +885,7 @@ class TestExpandAllowForInnateSkills:
                 tool_names = {t.name for t in result}
 
         assert "bash" in tool_names
-        assert "external_opencode_init_session" not in tool_names
+        assert "chart_render" not in tool_names
 
 
 

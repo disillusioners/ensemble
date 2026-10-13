@@ -12,7 +12,7 @@
 # PostgreSQL tests (requires live PG)
 .venv/bin/pytest --override-ini="addopts=" -m postgres
 
-# Integration tests (requires live OpenCode server)
+# Integration tests (requires live LLM/fenced dev lane)
 .venv/bin/pytest --override-ini="addopts=" -m integration
 
 # E2E tests (ONLY for big changes / explicit requirement)
@@ -91,7 +91,7 @@ RAM injection slot and consumed by the agent_node on its next LLM step.
 | Marker | What it covers | Default | When to run |
 |--------|---------------|---------|-------------|
 | (none) | Unit tests | ✅ Included | Always |
-| `integration` | Live OpenCode server tests | ❌ Excluded | Explicitly |
+| `integration` | Live LLM/fenced dev-lane tests | ❌ Excluded | Explicitly |
 | `postgres` | PostgreSQL-specific tests | ❌ Excluded | Explicitly |
 | `e2e` | End-to-end workflow tests | ❌ Excluded | Big changes only |
 

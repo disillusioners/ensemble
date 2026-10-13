@@ -1,0 +1,1 @@
+D-A8 ordering constraint: Phase C stack removal MUST land WITH or AFTER Phase B base := v2 retirement. Rationale: while base meta.json declares innate_skills: [opencode,...], the loader must resolve agents/_prompt_system/innate-skills/opencode/ AND the INNATE_SKILL_TOOL_CATEGORIES entry at daemon/tools/instance.py:162. Phase A pure-copy archive is safe anytime.

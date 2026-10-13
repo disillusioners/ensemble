@@ -1,0 +1,16 @@
+OK  .agents/shared/planning/opencode-native-tools/go-to-python-parity-check.md
+OK  .agents/shared/planning/opencode-native-tools/phase1-plan.md
+OK  .agents/shared/planning/opencode-native-tools/phase2-plan.md
+OK  .agents/shared/planning/opencode-native-tools/phase3-plan.md
+OK  .agents/shared/planning/opencode-native-tools/phase4-plan.md
+OK  .agents/shared/planning/opencode-native-tools/phase5-plan.md
+OK  .agents/shared/planning/opencode-native-tools/plan-overview.md
+OK  agents/_prompt_system/innate-skills/opencode/skill.md
+OK  agents/_prompt_system/innate-skills/opencode/skill.md.bak
+OK  daemon/tools/external_opencode.py
+OK  docs/bugs/external-opencode-wait-latency.md
+OK  docs/bugs/opencode-session-manager-memory-leak.md
+OK  example/SKILL.md
+OK  test/packs/ab/top_opencode_unit_test.sh
+OK  test/packs/opencode_native_tools_unit_test.sh
+OK  test/packs/regression_opencode_e2e_test.sh

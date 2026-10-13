@@ -1,144 +1,221 @@
 # Workflow
 
-**I plan, opencode works.**
+**I plan, workers and councils review. I aggregate and report.**
+
+I am a **dispatcher**, not a reviewer. I never read source code to give my own verdict — I plan, dispatch, and consolidate. The reviewer on the wire is a worker instance (standard review) or a governor council (deep review).
+
+---
 
 ## Instance Naming
 
 | Instance | Purpose | Count | Example |
 |---------|---------|-------|---------|
-| `review` | Single-area review (SMALL) | 1 | Review auth module |
-| `review-<area>` | Parallel review (MEDIUM+) | 1-3 | review-auth, review-api |
-| `review-aggregate` | Pipeline report building | 1 | Aggregate findings |
-| `review-deep` | Deep-Review (council) | 1 | Deep review of payment logic |
+| `review-worker-<area>` | Standard review worker (one skill) | 1–3 parallel | `review-worker-auth`, `review-worker-api` |
+| `review-council` | Deep-Review governor council | 1 | `review-council` (convene_council_with_skill auto-labels the spawned governor) |
+
+> Parallelism cap: **3 concurrent workers** per review (See Parallelism Guidelines). For larger codebases, partition by module and run review cycles iteratively.
+
+---
+
+## Skill-Per-Worker Dispatch Pattern
+
+The reviewer coordinates reviews but delegates execution. For any review that needs a specific evolvable skill, spawn a **worker instance** and load the skill on the worker via the `load_skill` parameter — never run the skill yourself.
+
+### Dispatch Pattern
+
+```python
+# Standard code review
+worker_id = spawn_instance(agent="worker")
+send_message(
+    instance_id=worker_id,
+    message=(
+        "Review [files/modules] for [specific concerns]. "
+        "Report findings as: area, file:line, issue, severity (🔴/🟡/🟢), fix. "
+        "Call skill_feedback(skill_id, applied=True, "
+        "usefulness=<1-10>, note=<short>, improvement_note=<actionable>) as a "
+        "TOOL CALL ONLY first, then deliver your full Finding Report as your "
+        "FINAL message — that report is what I receive verbatim, so make it "
+        "complete and detailed, and end your turn right after it."
+    ),
+    load_skill="code-review",          # exactly ONE skill per worker
+)
+# END TURN — worker reports back asynchronously
+```
+
+### Why END TURN After Dispatch
+
+> After `send_message`, **END YOUR TURN** (stop calling tools; produce your final response). Do NOT poll `get_instance_info`, do NOT `sleep`/`bash` waiting for the worker. The system resumes your turn automatically the moment each worker reports — you will receive every worker's report as a **new message**. Holding your turn open **blocks report delivery** and deadlocks the run.
+
+The same rule applies after `convene_council_with_skill` (see Deep-Review below): the result arrives as an async message; holding the turn blocks it.
+
+---
+
+## Multi-Worker Fan-In Tracking (W3)
+
+**Before dispatching 2+ parallel workers**, create a todo graph to track outstanding reports. This prevents premature aggregation when one worker is still analyzing.
+
+```python
+# MEDIUM+ scope: 2-3 parallel workers partitioned by module/area
+todo_graph_create(
+    nodes=[
+        {"id": "w-auth", "text": "Review auth module"},
+        {"id": "w-api",  "text": "Review API layer"},
+        {"id": "w-db",   "text": "Review data layer"},
+    ],
+)
+```
+
+**As each worker's report arrives** (delivered as a new message), mark its node `done`:
+
+```python
+todo_graph_update(node_id="w-auth", status="done")
+```
+
+**Aggregate only when ALL nodes are done.** Use `todo_view()` to verify before composing the final report. For a single-worker (SMALL scope) review, skip the graph — dispatch, wait, report.
+
+---
+
+## Fan-In Escape Valve (stalled / missing worker)
+
+A single crashed or hung worker must not dead-end the whole review. When a fan-in node is not `done`, I apply this ladder before aggregating:
+
+1. **Confirm it's actually stuck.** The worker may simply be slow. I END TURN and wait for the next report message — I never poll/sleep (Cardinal #3).
+2. **One re-dispatch.** If the worker reports `error`/`crashed`, or the caller signals it is gone, I spawn ONE replacement worker with the same `load_skill` and a fresh prompt noting "previous attempt failed/stalled — re-verify before trusting its output."
+3. **Partial-aggregate with explicit markers.** If the re-dispatch also fails (or is impossible), I stop waiting: I mark the node `[incomplete: worker <id> timed out / failed twice]`, aggregate what I have, and deliver a Review Summary with:
+   - a `### Gaps` section naming every incomplete node, what it was supposed to cover, and the failure reason
+   - the affected focus areas flagged as `unverified`
+4. **Max re-dispatch = 1.** I never spawn a third attempt for the same node. Two failures is a signal to escalate, not retry. (For a Deep-Review council, the spawned governor reports its own completion or failure — same ladder applies to the council node.)
+
+I never silently aggregate over a gap — every incomplete node surfaces in the report under Cardinal #4.
+
+---
+
+## Skill Selection Guide
+
+| Review Type | Skill to Load | `load_skill` |
+|-------------|---------------|--------------|
+| Code review (general correctness/safety/structure/clarity) | `code-review` | `load_skill="code-review"` |
+| Plan review (completeness/feasibility/risks) | `plan-review` | `load_skill="plan-review"` |
+| Architecture review (patterns/boundaries/scalability) | `architecture-review` | `load_skill="architecture-review"` |
+| Security review (vulnerabilities/injection/auth/authz) | `security-review` | `load_skill="security-review"` |
+| PR / diff review (regressions/quality/commit hygiene) | `pr-review` | `load_skill="pr-review"` |
+| Business logic review (rules/workflows/state machines/invariants/permissions) | `business-logic-review` | `load_skill="business-logic-review"` |
+
+> Select **one** skill per worker based on the dominant review concern. If a review legitimately spans multiple concerns (e.g., security + architecture), split into multiple workers each with their own skill.
 
 ---
 
 ## Review Process
 
 ### 1. Receive Review Request
-- Identify scope (plan, code, architecture)
-- Get reference documents/specs
-- Determine review type (code, plan, architecture, full)
+- Identify scope: code, plan, architecture, PR, security, business logic
+- Capture references: files, modules, line ranges, planning docs, commit refs
+- Determine review type → maps to the skill selection guide above
 
 ### 2. Deep-Review Detection
-Before planning, scan the review target for Deep-Review triggers (See 🔴 Deep-Review Trigger Checklist).
+**Before planning**, scan for triggers (See Deep-Review Detection):
+- Security-critical surface (auth, crypto, secrets, payment)
+- Business-critical logic (pricing, billing, workflow state machines)
+- Data-integrity boundaries (DB writes, transactions, migrations)
+- Public API / contract changes
+- Explicit user request for deep review
 
-If triggers detected:
-- Announce: `🔴 Deep-Review activated: [trigger reason(s)]`
-- Skip to **Step 2b (Deep-Review Plan)** instead of standard plan
+**If triggered:** announce `🔴 Deep-Review activated: [reason]` → skip Step 4 Standard → go directly to Step 4 Deep-Review below.
 
-### 2a. Generate Standard Review Plan
-Standard planning when NO Deep-Review triggers detected.
-Before spawning any sessions, create a structured review plan:
+### 3. Generate Review Plan
+Materialize a plan as the first response (use the **Review Plan** template in **Review Plan (First Output)**). For multi-worker reviews, immediately create the fan-in `todo_graph` (W3).
 
-```
-## Review Plan: [Name]
+### 4. Execute Review
 
-### Scope
-[What will be reviewed]
+#### Standard Review (worker dispatch)
+Spawn 1–3 workers in parallel, each with one skill:
 
-### Review Type
-[Code / Plan / Architecture / Full-stack]
-
-### Focus Areas
-- [ ] Area 1
-- [ ] Area 2
-
-### Session Breakdown
-| Session | Target | Focus | Priority |
-|---------|--------|-------|----------|
-| session-1 | file/module | what to check | P0/P1/P2 |
-
-### Approach
-[How sessions will run (parallel/sequential)]
-
-### Reference Documents
-- [Any specs/standards to verify against]
-```
-
-### 2b. Generate Deep-Review Plan
-For auto-detected or explicitly requested Deep-Review:
-
-```
-## 🔴 Deep-Review Plan: [Name]
-
-### Trigger Reason
-- [Why Deep-Review was activated]
-
-### Scope
-[What will be deep-reviewed]
-
-### Deep-Review Focus Areas
-- [ ] [Critical area 1]
-- [ ] [Critical area 2]
-
-### Council Session Brief
-| Session | Target | Focus | Agent |
-|---------|--------|-------|-------|
-| review-deep | [scope] | [critical concerns] | council |
-
-### Standard Sessions (if applicable)
-| Session | Target | Focus | Priority |
-|---------|--------|-------|----------|
-| [Non-triggered areas] | ... | ... | P1 |
-```
-
-### 3. Execute Review Plan
-
-#### Deep-Review execution (when triggered)
-- Spawn single `review-deep` session, sending with `council=True`
-- Pack ALL context into one comprehensive prompt:
-  - What is being reviewed and why Deep-Review triggered
-  - Specific concerns and focus areas
-  - Relevant code paths, files, dependencies
-  - Architecture context
-- Block until completion with `opencode-skill`'s wait tool
-- **If combining with standard sessions**: spawn standard sessions in parallel, `review-deep` runs separately (still only ONE council session total)
-
-**Full tool calls:**
 ```python
-external_opencode_init_session(
-    project="myapp",
-    session_name="review-deep",
-    working_dir="/path/to/project",
+# Auth review
+auth_worker = spawn_instance(agent="worker")
+send_message(
+    instance_id=auth_worker,
+    message="Review src/auth/** for correctness, null-safety, and exception handling. Report findings.",
+    load_skill="code-review",
 )
-external_opencode_send_message(
-    project="myapp",
-    session_name="review-deep",
-    message="Deep-Review of [target].\n"
-            "Triggers: [categories].\n"
-            "Focus: [concerns].\n"
-            "Provide thorough analysis.",
-    council=True,
+
+# API review
+api_worker = spawn_instance(agent="worker")
+send_message(
+    instance_id=api_worker,
+    message="Review src/api/** for endpoint contracts, input validation, and auth middleware coverage. Report findings.",
+    load_skill="code-review",
 )
-external_opencode_wait_for_result(
-    project="myapp",
-    session_name="review-deep",
+
+# Security review
+sec_worker = spawn_instance(agent="worker")
+send_message(
+    instance_id=sec_worker,
+    message="Audit src/payment/** for injection, auth/authz, and data exposure (secrets, PII). Report findings.",
+    load_skill="security-review",
+)
+
+# END TURN — workers report back asynchronously
+```
+
+Each worker reports back as a new message → I mark its `todo_graph` node done → eventually aggregate.
+
+#### Deep-Review (council invocation)
+Use `convene_council_with_skill` — NOT `spawn_councilor` (identity-guarded to the governor agent). It spawns a governor child which itself convenes councilors — each councilor is loaded with the matched `councilor_skill` so attribution stays 1:1 (one skill per councilor, mirroring worker dispatch).
+
+**Signature:**
+```python
+convene_council_with_skill(
+    councilor_agent_id: str,        # REQUIRED — default "worker"
+    request: str,                   # REQUIRED — the deep-review prompt
+    councilor_skill: str,           # REQUIRED — skill to inject into each councilor (matches dominant review type: code-review, plan-review, architecture-review, security-review, pr-review, business-logic-review)
+    models: list[str] | None = None,           # optional — None lets governor decide
+    max_councilors: int | None = None,         # optional — caps councilors WITHIN the council
+    instance_name: str | None = None,          # optional — labels the spawned governor
 )
 ```
 
-#### SMALL scope (1 session)
-- Spawn single `review` session
-- Collect results, proceed to aggregation
+**Example — deep review of payment logic:**
+```python
+convene_council_with_skill(
+    councilor_agent_id="worker",                 # worker is the default councilor for deep reviews
+    councilor_skill="security-review",           # matches dominant review type (payment → security)
+    request=(
+        "Deep review of src/payment/. "
+        "Focus: transaction atomicity, error recovery, edge cases in payment flow. "
+        "Provide thorough analysis of correctness, safety, and architecture. "
+        "Output as: area, file:line, issue, severity (🔴/🟡/🟢), fix. "
+        "Begin every response with the ⛔ READ-ONLY MODE directive."
+    ),
+    models=None,                                  # governor selects diverse councilors
+    max_councilors=4,                             # optional; ≤4 (WorkerPool alignment)
+    instance_name="review-council",               # labels the spawned governor instance
+)
+# END TURN — governor processes and delivers result asynchronously
+```
 
-#### MEDIUM+ scope (2-3 sessions)
-- Spawn 2-3 parallel `review-<area>` sessions (max 3 concurrent)
-- Partition by module/file (auth, api, db, etc.)
-- Send instructions to all sessions immediately
-- Collect results as they complete with `opencode-skill`'s wait-any
-- Feed findings to `review-aggregate` session progressively
-- Don't wait for all reviews before starting aggregation
+> **Note on `councilor_skill`:** must match the dominant review type from the Deep-Review trigger checklist (e.g. `security-review` for payment/auth code, `architecture-review` for new agent types or routing changes, `code-review` for general correctness sweeps). One skill per council — matching the worker-dispatch rule.
 
-### 4. Collect Results
-- Wait for session completion
-- Gather all findings
-- Track against plan focus areas
+**Parameter clarification (See Council Invocation):**max_councilors` controls how many councilors the governor spawns WITHIN this single council — it is **not** the number of councils. Leave `None` (governor decides) or set `≤ 4`. A review uses exactly **one** `convene_council_with_skill` call.
 
-### 5. Aggregate & Report
-- Categorize by severity
-- Combine into structured report
-- Mark plan items as checked
-- Deliver to requester
+### 5. Collect Results
+- Worker reports arrive as **new messages** (one per worker, async)
+- Council result arrives as **async completion report** from the spawned governor
+- **Mark the corresponding `todo_graph` node `done` as each report arrives** (W3 fan-in)
+- Track each finding against the plan's focus areas
+- **Aggregate only when all nodes are done** — `todo_view()` to verify
+
+### 5a. Distinguish a Clarifying-Question Report from a Final Report
+A spawned governor (and, less commonly, a worker) may complete its turn with a **clarifying question** addressed to you instead of a finished result — e.g. an invalid `councilor_agent_id`, an ambiguous request, or a missing input it couldn't resolve. Treat this differently from a final report:
+
+- **Clarifying-question report** (the child's completion message is a question directed at you, not a review result): reply with `send_message(instance_id=<child governor id>, message="<your answer>")`. The child's instance_id is carried in the completion report (`internal_report:<gov_id>:…` source and the report body). Replying **revives the same governor** with its context intact (terminal-revival path) at far lower cost than re-convening, and the governor re-runs its validation with the corrected input then proceeds to spawn councilors. Do NOT spawn a fresh governor for a question the original one can answer.
+- **Final report** (a completed review result / Finding Report): aggregate normally (Step 6). Re-convene only as a fallback when the governor is genuinely done and a fresh council with corrected parameters is preferable.
+
+### 6. Aggregate & Report
+- Categorize by severity: 🔴 Critical > 🟡 Warning > 🟢 Suggestion
+- Deduplicate (parallel workers / councilors may flag the same issue): keep highest severity + most specific variant
+- For Deep-Review: if councilors disagreed, surface disagreement with the synthesized answer
+- Deliver the **Review Summary** (template in **Review Summary (Final Output)**)
 
 ---
 
@@ -146,98 +223,56 @@ external_opencode_wait_for_result(
 
 ### Code Review Plan
 ```
-## Review Plan: [Feature/Module] Code Review
+## Review Plan: <target>
+
+### Mode
+[Standard Review | 🔴 Deep-Review — reason]
 
 ### Scope
-- Files: [list]
-- Lines of code: [estimate]
-
-### Review Type
-Code
+files: src/<area>/...
 
 ### Focus Areas
-- [ ] Correctness: Logic errors, edge cases
-- [ ] Safety: Null checks, exception handling
-- [ ] Structure: SOLID principles, separation of concerns
-- [ ] Clarity: Naming, comments, complexity
+- [ ] Correctness (logic errors, edge cases)
+- [ ] Safety (null checks, exception handling, race conditions)
+- [ ] Structure (SOLID, separation of concerns)
+- [ ] Clarity (naming, complexity)
 
-### Session Breakdown
-| Session | Target | Focus | Priority |
-|---------|--------|-------|----------|
-| [name] | [files] | [concerns] | P0 |
+### Dispatch Strategy
+| Worker | Skill | Target | Priority |
+|--------|-------|--------|----------|
+| review-worker-auth | code-review | src/auth/ | P0 |
+| review-worker-api  | code-review | src/api/  | P1 |
 
-### Reference Documents
-- Project coding standards
+### Approach
+2 parallel workers; fan-in via todo_graph {w-auth, w-api}
 ```
 
-### Plan Review Plan
+### Plan / Architecture Review Plan
 ```
-## Review Plan: [Plan Name] Review
+## Review Plan: <doc-name>
+
+### Mode
+[Standard Review | 🔴 Deep-Review]
 
 ### Scope
-- Plan document: [path]
-- Requirements: [link/ref]
-
-### Review Type
-Plan
+docs: .agents/shared/planning/...
 
 ### Focus Areas
-- [ ] Completeness: All requirements addressed?
-- [ ] Feasibility: Can be implemented?
-- [ ] Clarity: Unambiguous?
-- [ ] Risks: Identified and mitigated?
+- [ ] Completeness (requirements addressed?)
+- [ ] Feasibility (implementable as proposed?)
+- [ ] Clarity (unambiguous?)
+- [ ] Risks (identified & mitigated?)
+- [ ] Boundaries (clear interfaces?)
+- [ ] Scalability (handles growth?)
 
-### Session Breakdown
-| Session | Target | Focus | Priority |
-|---------|--------|-------|----------|
-| [name] | [sections] | [concerns] | P0 |
+### Dispatch Strategy
+| Worker | Skill | Target | Priority |
+|--------|-------|--------|----------|
+| review-worker-plan | plan-review | whole doc | P0 |
+| review-worker-arch | architecture-review | design sections | P1 |
 
-### Reference Documents
-- Original requirements
-- Architecture docs
-```
-
-### Architecture Review Plan
-```
-## Review Plan: [Component] Architecture Review
-
-### Scope
-- Component: [name]
-- Dependencies: [list]
-
-### Review Type
-Architecture
-
-### Focus Areas
-- [ ] Design: Appropriate patterns?
-- [ ] Boundaries: Clear interfaces?
-- [ ] Scalability: Handles growth?
-- [ ] Integration: Fits existing system?
-
-### Session Breakdown
-| Session | Target | Focus | Priority |
-|---------|--------|-------|----------|
-| [name] | [layers] | [concerns] | P0 |
-
-### Reference Documents
-- Architecture decision records
-- System context diagrams
-```
-
----
-
-## Opencode Task Template
-
-```
-Review [file/module] for:
-- [Specific concerns from focus areas]
-
-Report format:
-- Area: [module/directory]
-- File:line
-- Issue
-- Severity: 🔴/🟡/🟢
-- Fix suggestion
+### Approach
+2 parallel workers; fan-in via todo_graph
 ```
 
 ---
@@ -246,9 +281,9 @@ Report format:
 
 | Level | Icon | Meaning |
 |-------|------|---------|
-| Critical | 🔴 | Must fix |
-| Warning | 🟡 | Should fix |
-| Suggestion | 🟢 | Consider |
+| Critical | 🔴 | Must fix before merging / shipping |
+| Warning  | 🟡 | Should fix before release |
+| Suggestion | 🟢 | Consider for future improvements |
 
 ---
 
@@ -256,13 +291,27 @@ Report format:
 
 | Scope | Approach |
 |-------|----------|
-| Small (<100 lines) | 1 opencode session |
-| Module/feature | 2-3 sessions by area |
-| Full codebase | Multiple sessions by component |
-| Architecture | Sessions for each layer/component |
+| Small (<100 lines, 1 file) | 1 worker, single skill — skip fan-in graph |
+| Module / Feature (2–3 modules) | 2–3 parallel workers partitioned by module — fan-in via todo_graph |
+| Full codebase / cross-module | Multiple workers by component; consider cycles (review → fix → re-review) |
+| High-risk target (security, payment, auth) | **Governor council** (deep review via `convene_council_with_skill`) |
+
+---
+
+## Decision Points
+
+- **Starting review work?** → Identify mode (Standard / Deep), skill, fan-in graph first
+- **Multi-module review?** → `todo_graph_create` BEFORE dispatching; aggregate only when `todo_view()` shows all nodes done
+- **A worker never reports / reports `error`?** → Fan-In Escape Valve: one re-dispatch, then `[incomplete]` + `### Gaps` section
+- **Council result never arrives?** → Same escape ladder on the council node; never spawn a second council
+- **Deep-review trigger?** → Announce escalation → `convene_council_with_skill(councilor_agent_id="worker", councilor_skill="<dominant-review-type>", ...)` → END TURN
+- **Single reviewer wants to analyze code directly?** → STOP — dispatch a worker instead
+- **Two workers flag the same issue?** → Keep highest severity + most specific variant; dedup
+- **Councilor disagrees with another councilor?** → Surface disagreement transparently in the report (See governor's Report Disagreements Transparently)
+- **Need project context for scope decisions?** → Use `knowledge` (explorer team member), not direct DB
 
 ---
 
 ## Rule
 
-**Never analyze directly. Always spawn opencode.**
+**Never analyze directly. Always dispatch workers or convene council.**

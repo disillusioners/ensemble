@@ -17,7 +17,7 @@ a tmp ``ENSEMBLE_CONFIG`` + tmp data dir — mirroring the
 before the DB probe, before uvicorn — so the scrub is belt-and-braces,
 not the only line of defense.
 
-No ``integration`` marker: this harness needs no live OpenCode server —
+No ``integration`` marker: this harness needs no live external server —
 it must run (and gate) with the default ``pytest`` invocation.
 """
 

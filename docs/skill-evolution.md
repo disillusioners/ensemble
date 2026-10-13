@@ -171,7 +171,7 @@ To give an agent the 6 `dynamic-skill` tools, add `"dynamic-skill"` to both `inn
 ```json
 {
   "id": "developer",
-  "innate_skills": ["opencode", "dynamic-skill"],
+  "innate_skills": ["dynamic-skill"],
   "tools": {
     "allow": ["bash", "filesystem", "self", "help", "knowledge", "dynamic-skill", "skill-evolution"]
   }

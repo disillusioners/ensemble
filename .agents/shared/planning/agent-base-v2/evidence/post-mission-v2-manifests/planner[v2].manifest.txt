@@ -1,0 +1,11 @@
+57e37dc399ae67ee7d4c3b5728bd50a26f699816bab3849e5af33d432e386b86  agents/planner[v2]/meta.json
+40c21f9ba9b4745fca6de15521a90d9e89db71b61cdd97d5eaab7f57723d1778  agents/planner[v2]/rule.md
+7a95fcb494319522777cbc5654f4afc60370c7cee8b474eed1bf94bb128f2402  agents/planner[v2]/skill-set.yaml
+41870b5c64ef4893807c27885b09db34c7a7e6dd1a5f24188e5de588a0b33043  agents/planner[v2]/skills-template/plan-creation.md
+94b4ee6f1f83843edb12dc8983e25f8b410402aa6b11a689764abdc9800b3a04  agents/planner[v2]/skills-template/planning-strategy.md
+f221e68a68f820eed9dbd66c58e5899bd7cb4be1d13bdc6ff07455614493325b  agents/planner[v2]/skills-template/requirements-analysis.md
+edc5eb7ecd6d575b9d70f93c3c0e6327fb556f793d46d7fa3449bdc4af04ff72  agents/planner[v2]/skills-template/roadmap-strategy.md
+671038b780ab4443ca8deefcc0cf57bac8a4b1797635d52f3cf8125f9d1a9b4e  agents/planner[v2]/skills-template/technical-analysis.md
+8de1543576964686c671491d8e2ef7bec4a767b6f9acca4d49d93b5c8905b5ce  agents/planner[v2]/soul.md
+113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f  agents/planner[v2]/tools_note.md
+81a60f4e1f1e65cc039ae44c92ac3f096cd222594fee80327cda6cdd449bf6b8  agents/planner[v2]/workflow.md

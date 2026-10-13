@@ -1,0 +1,6 @@
+agents/reviewer/memory.md
+agents/reviewer/meta.json
+agents/reviewer/rule.md
+agents/reviewer/soul.md
+agents/reviewer/tools_note.md
+agents/reviewer/workflow.md

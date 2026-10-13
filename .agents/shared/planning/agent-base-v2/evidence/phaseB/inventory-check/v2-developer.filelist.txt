@@ -1,0 +1,8 @@
+agents/developer[v2]/memory.md
+agents/developer[v2]/meta.json
+agents/developer[v2]/rule.md
+agents/developer[v2]/skill-set.yaml
+agents/developer[v2]/skills-template/dev-strategy.md
+agents/developer[v2]/soul.md
+agents/developer[v2]/tools_note.md
+agents/developer[v2]/workflow.md

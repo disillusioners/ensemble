@@ -1,0 +1,12 @@
+{
+  "id": "tidier",
+  "name": "Tidier",
+  "description": "Code quality, conventions, and maintainability reviewer. Operates after implementation to ensure high standards without over-engineering.",
+  "icon": "🧹",
+  "color": "accent-purple",
+  "innate_skills": ["opencode", "chart", "todo"],
+  "tools": {
+    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "service"]
+  },
+  "team_members": ["explorer"]
+}

@@ -1,0 +1,19 @@
+# daemon/ opencode residue grep (Phase E Step 5, exec 2026-10-13T15:59:10Z)
+# expect: 0 hits (post-Phase-C contract; cross-checked with Step 4.5 greps)
+grep: daemon/__pycache__/config.cpython-313.pyc: binary file matches
+grep: daemon/tools/__pycache__/external_opencode.cpython-313.pyc: binary file matches
+grep: daemon/tools/__pycache__/instance.cpython-313.pyc: binary file matches
+grep: daemon/tools/__pycache__/_tool_registry.cpython-313.pyc: binary file matches
+grep: daemon/tools/__pycache__/external_opencode.cpython-314.pyc: binary file matches
+grep: daemon/services/__pycache__/context_injection.cpython-313.pyc: binary file matches
+grep: daemon/services/__pycache__/critical_note_gate.cpython-313.pyc: binary file matches
+grep: daemon/services/__pycache__/keyword_extraction.cpython-313.pyc: binary file matches
+grep: daemon/services/__pycache__/context_messages.cpython-313.pyc: binary file matches
+hit_count=0
+
+# EXEC NOTE (Phase E, 2026-10-13T16:00Z): source-tree text grep = 0 hits.
+# Transient "binary file matches" notices came from STALE pre-C.4 __pycache__
+# bytecode (*.cpython-313.pyc — untracked, gitignored, regenerated from the
+# clean sources by the running daemon's lazy imports). D7 orphan-artifact
+# class: noted, NOT a defect. The R10 FINAL GATE greps the COMMITTED tree
+# (git grep) — untracked .pyc files never reach it.

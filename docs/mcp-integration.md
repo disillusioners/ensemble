@@ -361,9 +361,9 @@ The ensemble-kb server is mounted at two paths:
 
 ### Connecting External Agents
 
-#### Example: OpenCode Configuration
+#### Example: MCP Client Configuration
 
-Add to your OpenCode configuration file:
+Add to your MCP client configuration file:
 
 ```json
 {
