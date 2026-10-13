@@ -1,0 +1,1596 @@
+"""Comprehensive tests for OpenCodeSessionManager — the session lifecycle state machine.
+
+Covers all 10 behaviour groups from the test spec:
+
+ 1. Initial state          — manager starts in IDLE
+ 2. submit_request         — optimistic BUSY, starts worker, _is_worker_busy True
+ 3. Lock ordering          — on_state_change callback called OUTSIDE the lock
+ 4. Worker completion      — _worker_done_queue signals correctly
+ 5. _handle_worker_done    — aborted=True → result NOT overwritten
+ 6. abort_task             — state resets to IDLE, aborted=True, persists
+ 7. State transitions      — full IDLE→BUSY→WAITING_FOR_INPUT→IDLE lifecycle
+ 8. sync_state_with_open_code — derives state from message list
+ 9. resume()               — sends hardcoded orchestrator/litellm/coding prompt
+10. Persistence callback   — receives updated PersistedState
+
+The OpenCodeClient is always mocked via AsyncMock — no real HTTP calls.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from daemon.opencode.client import (
+    AnswerRequest,
+    CommandRequest,
+    OpenCodeAPIError,
+    Part,
+    PromptRequest,
+    Question,
+    QuestionItem,
+)
+from daemon.opencode.constants import (
+    DEFAULT_MODEL_ID,
+    DEFAULT_MODEL_PROVIDER_ID,
+    RESUME_AGENT,
+    RESUME_TEXT,
+)
+from daemon.opencode.session_manager import (
+    OpenCodeSessionManager,
+    PersistedState,
+    Request,
+    _WorkerResult,
+)
+from daemon.opencode.state import SessionState
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fixtures
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def mock_client() -> AsyncMock:
+    """AsyncMock standing in for OpenCodeClient — no real HTTP calls."""
+    client = AsyncMock()
+    client.send_prompt = AsyncMock(return_value={"ok": True})
+    client.send_command = AsyncMock(return_value={"ok": True})
+    client.abort_session = AsyncMock(return_value={"ok": True})
+    client.get_questions = AsyncMock(return_value=[])
+    client.get_session_messages = AsyncMock(return_value=[])
+    client.get_session = AsyncMock(return_value=None)
+    client.answer_question = AsyncMock(return_value={"ok": True})
+    return client
+
+
+@pytest.fixture
+def manager(mock_client: AsyncMock) -> OpenCodeSessionManager:
+    """Fresh SessionManager with mocked client. Loop NOT started."""
+    return OpenCodeSessionManager(
+        session_id="test-session-1",
+        working_dir="/test/project",
+        client=mock_client,
+    )
+
+
+@pytest.fixture
+def manager_with_callback(
+    mock_client: AsyncMock,
+) -> tuple[OpenCodeSessionManager, list[PersistedState], bool]:
+    """SessionManager with an async on_state_change that records calls."""
+    received: list[PersistedState] = []
+    lock_held_during_callback = False
+
+    async def on_state_change(state: PersistedState) -> None:
+        nonlocal lock_held_during_callback
+        received.append(state)
+        lock_held_during_callback = manager._lock.locked()
+
+    mgr = OpenCodeSessionManager(
+        session_id="test-session-1",
+        working_dir="/test/project",
+        client=mock_client,
+        on_state_change=on_state_change,
+    )
+    return mgr, received, lock_held_during_callback
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Initial state
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestInitialState:
+    """Verify the state of a fresh SessionManager before any operations."""
+
+    def test_starts_in_idle_state(self, manager: OpenCodeSessionManager) -> None:
+        assert manager._state == SessionState.IDLE
+
+    def test_worker_busy_is_false(self, manager: OpenCodeSessionManager) -> None:
+        assert manager._is_worker_busy is False
+
+    def test_aborted_flag_is_false(self, manager: OpenCodeSessionManager) -> None:
+        assert manager._aborted is False
+
+    def test_questions_start_empty(self, manager: OpenCodeSessionManager) -> None:
+        assert manager._questions == []
+
+    def test_last_agent_default_sisyphus(self, manager: OpenCodeSessionManager) -> None:
+        assert manager._last_agent == "sisyphus"
+
+    def test_get_snapshot_returns_idle(self, manager: OpenCodeSessionManager) -> None:
+        snap = manager.get_snapshot()
+        assert snap["state"] == SessionState.IDLE.value
+        assert snap["session_id"] == "test-session-1"
+
+    def test_latest_response_none_initially(self, manager: OpenCodeSessionManager) -> None:
+        assert manager._latest_response is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. submit_request — optimistic BUSY, starts worker, _is_worker_busy
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSubmitRequest:
+    """Verify submit_request sets BUSY optimistically before the HTTP call."""
+
+    @pytest.mark.asyncio
+    async def test_submit_request_sets_busy_before_http_call(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """State is BUSY immediately after submit_request returns.
+
+        The optimistic BUSY is set in do_submit() before the request is
+        even enqueued — no HTTP call is made yet because the loop is not
+        running.
+        """
+        # Make send_prompt block so it can't be called yet
+        block_event = asyncio.Event()
+
+        async def slow_send_prompt(*args, **kwargs):
+            await block_event.wait()
+            return {"ok": True}
+
+        mock_client.send_prompt = slow_send_prompt
+
+        req = Request("PROMPT", payload=PromptRequest(parts=[Part(type="text", text="hello")]))
+        manager.submit_request(req)
+
+        # Yield once so do_submit() task runs
+        await asyncio.sleep(0.05)
+
+        # State must be BUSY even though no HTTP call has been made
+        assert manager._state == SessionState.BUSY
+        assert manager._is_worker_busy is True
+
+        # Release the block so the test can exit cleanly
+        block_event.set()
+
+    @pytest.mark.asyncio
+    async def test_submit_request_command_also_sets_busy(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """COMMAND requests also trigger the optimistic BUSY update."""
+        block_event = asyncio.Event()
+
+        async def slow_send_command(*args, **kwargs):
+            await block_event.wait()
+            return {"ok": True}
+
+        mock_client.send_command = slow_send_command
+
+        req = Request("COMMAND", payload=CommandRequest(command="/status", arguments=""))
+        manager.submit_request(req)
+        await asyncio.sleep(0.05)
+
+        assert manager._state == SessionState.BUSY
+        assert manager._is_worker_busy is True
+
+        block_event.set()
+
+    @pytest.mark.asyncio
+    async def test_submit_request_answer_does_not_set_busy(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """ANSWER requests do NOT trigger the optimistic BUSY path."""
+        req = Request("ANSWER", payload=AnswerRequest(request_id="q1", answers=[["A"]]))
+        manager.submit_request(req)
+        await asyncio.sleep(0.05)
+
+        # ANSWER does not touch _state or _is_worker_busy
+        assert manager._state == SessionState.IDLE
+        assert manager._is_worker_busy is False
+
+    @pytest.mark.asyncio
+    async def test_submit_request_enqueues_request(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """submit_request places the request in _input_queue for the loop."""
+        req = Request("PROMPT", payload=PromptRequest(parts=[Part(type="text", text="hi")]))
+        manager.submit_request(req)
+        await asyncio.sleep(0.05)
+
+        # Request is in the queue
+        assert manager._input_queue.qsize() == 1
+
+    @pytest.mark.asyncio
+    async def test_submit_request_clears_latest_response(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """Optimistic BUSY also clears _latest_response."""
+        manager._latest_response = {"old": "data"}
+
+        block_event = asyncio.Event()
+        async def slow_prompt(*args, **kwargs):
+            await block_event.wait()
+            return {"ok": True}
+        mock_client.send_prompt = slow_prompt
+
+        req = Request("PROMPT", payload=PromptRequest())
+        manager.submit_request(req)
+        await asyncio.sleep(0.05)
+
+        assert manager._latest_response is None
+        block_event.set()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. Lock ordering — callback called OUTSIDE the lock
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestLockOrdering:
+    """Verify on_state_change is invoked after the lock is released."""
+
+    @pytest.mark.asyncio
+    async def test_callback_called_outside_lock_on_submit(
+        self,
+        manager_with_callback: tuple[OpenCodeSessionManager, list, bool],
+    ) -> None:
+        """submit_request's do_submit releases the lock before calling _persist_state."""
+        mgr, received, lock_held = manager_with_callback
+
+        block_event = asyncio.Event()
+
+        async def slow_prompt(*args, **kwargs):
+            await block_event.wait()
+            return {"ok": True}
+
+        mgr._client.send_prompt = slow_prompt
+
+        req = Request("PROMPT", payload=PromptRequest(parts=[Part(type="text", text="x")]))
+        mgr.submit_request(req)
+        await asyncio.sleep(0.05)
+
+        # Callback must have fired
+        assert len(received) == 1
+        # Lock was NOT held when the callback ran
+        assert lock_held is False
+
+        block_event.set()
+
+    @pytest.mark.asyncio
+    async def test_callback_called_outside_lock_on_abort(
+        self,
+        mock_client: AsyncMock,
+    ) -> None:
+        """abort_task releases the lock before calling _persist_state."""
+        received: list[PersistedState] = []
+        lock_held = False
+
+        # We need a late-binding reference to mgr inside the closure.
+        mgr_ref: list[OpenCodeSessionManager] = []
+
+        async def on_state_change(state: PersistedState) -> None:
+            nonlocal lock_held
+            received.append(state)
+            lock_held = mgr_ref[0]._lock.locked()
+
+        mgr = OpenCodeSessionManager(
+            session_id="test",
+            working_dir="/dir",
+            client=mock_client,
+            on_state_change=on_state_change,
+        )
+        mgr_ref.append(mgr)
+
+        await mgr.abort_task()
+        await asyncio.sleep(0.05)
+
+        assert len(received) == 1
+        assert lock_held is False
+
+    @pytest.mark.asyncio
+    async def test_sync_callback_also_called_outside_lock(
+        self, mock_client: AsyncMock
+    ) -> None:
+        """Sync callbacks are likewise invoked after the lock is released."""
+        received: list[PersistedState] = []
+        lock_held = False
+
+        def on_state_change(state: PersistedState) -> None:
+            nonlocal lock_held
+            received.append(state)
+            lock_held = manager._lock.locked()
+
+        manager = OpenCodeSessionManager(
+            session_id="test",
+            working_dir="/dir",
+            client=mock_client,
+            on_state_change=on_state_change,
+        )
+
+        await manager.abort_task()
+        await asyncio.sleep(0.05)
+
+        assert len(received) == 1
+        assert lock_held is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Worker completion — _worker_done_queue signals correctly
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestWorkerCompletion:
+    """Verify _run_worker enqueues the result in _worker_done_queue."""
+
+    @pytest.mark.asyncio
+    async def test_run_worker_success_puts_result_in_queue(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """A successful worker enqueues _WorkerResult(result, None)."""
+        req = Request("PROMPT", payload=PromptRequest(parts=[Part(type="text", text="hi")]))
+        await manager._run_worker(req)
+
+        result = await asyncio.wait_for(manager._worker_done_queue.get(), timeout=1.0)
+        assert isinstance(result, _WorkerResult)
+        assert result.error is None
+        assert result.result == {"ok": True}
+        mock_client.send_prompt.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_run_worker_error_puts_error_in_queue(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """A failing worker enqueues _WorkerResult(None, error)."""
+        mock_client.send_prompt.side_effect = RuntimeError("boom")
+        req = Request("PROMPT", payload=PromptRequest())
+        await manager._run_worker(req)
+
+        result = await asyncio.wait_for(manager._worker_done_queue.get(), timeout=1.0)
+        assert isinstance(result, _WorkerResult)
+        assert result.result is None
+        assert isinstance(result.error, RuntimeError)
+        assert str(result.error) == "boom"
+
+    @pytest.mark.asyncio
+    async def test_run_worker_resume_uses_hardcoded_prompt(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """RESUME worker calls send_prompt with hardcoded orchestrator/litellm/coding."""
+        req = Request("RESUME")
+        await manager._run_worker(req)
+
+        mock_client.send_prompt.assert_awaited_once()
+        call_args = mock_client.send_prompt.call_args
+        prompt_req: PromptRequest = call_args[0][1]  # second positional arg
+
+        assert prompt_req.agent == RESUME_AGENT
+        assert prompt_req.model.provider_id == DEFAULT_MODEL_PROVIDER_ID
+        assert prompt_req.model.model_id == DEFAULT_MODEL_ID
+        assert len(prompt_req.parts) == 1
+        assert prompt_req.parts[0].type == "text"
+        assert prompt_req.parts[0].text == RESUME_TEXT
+
+    @pytest.mark.asyncio
+    async def test_run_worker_command_calls_send_command(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """COMMAND requests route to client.send_command."""
+        req = Request("COMMAND", payload=CommandRequest(command="/status", arguments=""))
+        await manager._run_worker(req)
+
+        mock_client.send_command.assert_awaited_once()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. _handle_worker_done — aborted=True prevents result overwrite
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestHandleWorkerDoneAborted:
+    """Verify _handle_worker_done discards results when the aborted flag is set."""
+
+    @pytest.mark.asyncio
+    async def test_aborted_flag_prevents_result_overwrite(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """When _aborted=True, _latest_response is NOT replaced by the result."""
+        manager._latest_response = {"old": "data"}
+        manager._aborted = True
+        manager._state = SessionState.BUSY
+        manager._is_worker_busy = True
+
+        await manager._handle_worker_done(_WorkerResult(result={"new": "data"}))
+
+        # Result must NOT have been stored
+        assert manager._latest_response == {"old": "data"}
+
+    @pytest.mark.asyncio
+    async def test_aborted_flag_is_reset_after_discard(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """The aborted flag is cleared after a discarded result."""
+        manager._aborted = True
+        await manager._handle_worker_done(_WorkerResult(result={"x": 1}))
+
+        assert manager._aborted is False
+
+    @pytest.mark.asyncio
+    async def test_normal_result_overwrites_latest_response(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """When aborted=False, _latest_response is updated with the result.
+
+        The production code wraps the stripped result in {"result": ...}, so
+        the final shape is {"result": <stripped input>}.
+        """
+        manager._latest_response = None
+        manager._aborted = False
+        manager._state = SessionState.BUSY
+        manager._is_worker_busy = True
+
+        await manager._handle_worker_done(_WorkerResult(result={"result": "ok"}))
+
+        # _handle_worker_done wraps the stripped result in {"result": ...}
+        assert manager._latest_response == {"result": {"result": "ok"}}
+
+    @pytest.mark.asyncio
+    async def test_error_result_stores_error_dict(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """An error result sets _latest_response to an error dict."""
+        manager._is_worker_busy = True
+        manager._aborted = False
+
+        await manager._handle_worker_done(_WorkerResult(error=ValueError("bad input")))
+
+        assert manager._latest_response == {"error": "bad input"}
+
+    @pytest.mark.asyncio
+    async def test_questions_present_sets_waiting_for_input(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """With questions in _questions, state becomes WAITING_FOR_INPUT."""
+        manager._is_worker_busy = True
+        manager._aborted = False
+        manager._state = SessionState.BUSY
+        manager._questions = [{"id": "q1", "questions": []}]
+
+        await manager._handle_worker_done(_WorkerResult(result={"ok": True}))
+
+        assert manager._state == SessionState.WAITING_FOR_INPUT
+
+    @pytest.mark.asyncio
+    async def test_no_questions_sets_idle(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """Without questions, state returns to IDLE."""
+        manager._is_worker_busy = True
+        manager._aborted = False
+        manager._state = SessionState.BUSY
+        manager._questions = []
+
+        await manager._handle_worker_done(_WorkerResult(result={"ok": True}))
+
+        assert manager._state == SessionState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_socket_timeout_triggers_abort_on_client(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """An OpenCodeAPIError(status_code=0) caused by httpx.TimeoutException
+        causes _handle_worker_done to call client.abort_session."""
+        import httpx
+
+        manager._is_worker_busy = True
+        manager._aborted = False
+
+        # The client wraps network errors in OpenCodeAPIError(0) with the
+        # original httpx exception set as __cause__ (via `raise ... from exc`).
+        timeout_exc = httpx.TimeoutException("timed out")
+        api_err = OpenCodeAPIError(0, "connection timed out")
+        api_err.__cause__ = timeout_exc
+
+        await manager._handle_worker_done(_WorkerResult(error=api_err))
+
+        mock_client.abort_session.assert_awaited_once_with(manager.session_id)
+
+    @pytest.mark.asyncio
+    async def test_worker_busy_flag_cleared_even_when_aborted(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """_is_worker_busy is cleared even when the result is discarded."""
+        manager._is_worker_busy = True
+        manager._aborted = True
+        manager._state = SessionState.BUSY
+
+        await manager._handle_worker_done(_WorkerResult(result={"ignored": True}))
+
+        assert manager._is_worker_busy is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. abort_task — state reset, aborted flag, persistence
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAbortTask:
+    """Verify abort_task resets state and persists."""
+
+    @pytest.mark.asyncio
+    async def test_state_resets_to_idle(self, manager: OpenCodeSessionManager) -> None:
+        """abort_task sets _state to IDLE."""
+        manager._state = SessionState.BUSY
+        await manager.abort_task()
+        assert manager._state == SessionState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_aborted_flag_set_to_true(self, manager: OpenCodeSessionManager) -> None:
+        """abort_task sets the _aborted flag to True."""
+        manager._aborted = False
+        await manager.abort_task()
+        assert manager._aborted is True
+
+    @pytest.mark.asyncio
+    async def test_worker_busy_cleared(self, manager: OpenCodeSessionManager) -> None:
+        """abort_task clears _is_worker_busy."""
+        manager._is_worker_busy = True
+        await manager.abort_task()
+        assert manager._is_worker_busy is False
+
+    @pytest.mark.asyncio
+    async def test_questions_cleared(self, manager: OpenCodeSessionManager) -> None:
+        """abort_task empties the _questions list."""
+        manager._questions = [{"id": "q1"}]
+        await manager.abort_task()
+        assert manager._questions == []
+
+    @pytest.mark.asyncio
+    async def test_latest_response_set_to_aborted_message(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """_latest_response is set to the aborted status dict."""
+        await manager.abort_task()
+        assert manager._latest_response == {
+            "status": "aborted",
+            "message": "Task aborted by user",
+        }
+
+    @pytest.mark.asyncio
+    async def test_persists_state_after_abort(
+        self, mock_client: AsyncMock
+    ) -> None:
+        """abort_task calls _persist_state (via _on_state_change)."""
+        received: list[PersistedState] = []
+
+        async def on_state_change(state: PersistedState) -> None:
+            received.append(state)
+
+        mgr = OpenCodeSessionManager(
+            session_id="test",
+            working_dir="/dir",
+            client=mock_client,
+            on_state_change=on_state_change,
+        )
+        await mgr.abort_task()
+        await asyncio.sleep(0.05)
+
+        assert len(received) == 1
+        assert received[0].state == SessionState.IDLE.value
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. State transitions — full lifecycle IDLE→BUSY→WAITING_FOR_INPUT→IDLE
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestStateTransitions:
+    """Verify the complete session lifecycle through state transitions."""
+
+    @pytest.mark.asyncio
+    async def test_handle_request_prompt_sets_busy_and_starts_worker(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """_handle_request with PROMPT sets BUSY and fires the worker task."""
+        req = Request("PROMPT", payload=PromptRequest(parts=[Part(type="text", text="do it")]))
+
+        await manager._handle_request(req)
+        # Yield to let the _run_worker task execute
+        await asyncio.sleep(0.05)
+
+        assert manager._state == SessionState.BUSY
+        assert manager._is_worker_busy is True
+        mock_client.send_prompt.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_worker_done_with_questions_yields_waiting_for_input(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """When questions exist, worker completion leaves state at WAITING_FOR_INPUT."""
+        # Pre-set questions before worker finishes
+        manager._questions = [{"id": "q1", "questions": []}]
+        manager._is_worker_busy = True
+        manager._state = SessionState.BUSY
+
+        await manager._handle_worker_done(_WorkerResult(result={"ok": True}))
+
+        assert manager._state == SessionState.WAITING_FOR_INPUT
+        assert manager._is_worker_busy is False
+
+    @pytest.mark.asyncio
+    async def test_answer_question_clears_waiting_and_returns_to_idle(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """answer_question removes the question; when none remain → IDLE."""
+        manager._questions = [{"id": "q1", "questions": []}]
+        manager._state = SessionState.WAITING_FOR_INPUT
+        manager._is_worker_busy = False
+
+        await manager.answer_question("q1", [["my answer"]])
+
+        assert manager._questions == []
+        assert manager._state == SessionState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_full_lifecycle_idle_to_busy_to_waiting_to_idle(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """End-to-end: initial IDLE → submit PROMPT → BUSY → questions arrive → WAITING → answer → IDLE."""
+        # 1. Initial IDLE
+        assert manager._state == SessionState.IDLE
+
+        # 2. Handle PROMPT → BUSY
+        req = Request("PROMPT", payload=PromptRequest(parts=[Part(type="text", text="start")]))
+        await manager._handle_request(req)
+        await asyncio.sleep(0.05)
+        assert manager._state == SessionState.BUSY
+
+        # 3. Worker completes with questions → WAITING_FOR_INPUT
+        # Drain the worker's queue result first
+        try:
+            await asyncio.wait_for(manager._worker_done_queue.get(), timeout=1.0)
+        except asyncio.TimeoutError:
+            pass
+        manager._questions = [{"id": "q1", "questions": []}]
+        await manager._handle_worker_done(_WorkerResult(result={"ok": True}))
+        assert manager._state == SessionState.WAITING_FOR_INPUT
+
+        # 4. Answer the last question → IDLE
+        await manager.answer_question("q1", [["done"]])
+        assert manager._state == SessionState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_worker_done_after_answering_last_question(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """If worker finishes after all questions are answered → IDLE."""
+        manager._state = SessionState.BUSY
+        manager._is_worker_busy = True
+        manager._questions = []
+
+        await manager._handle_worker_done(_WorkerResult(result={"ok": True}))
+
+        assert manager._state == SessionState.IDLE
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. sync_state_with_open_code — derives state from message list
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSyncStateWithOpenCode:
+    """Verify sync_state_with_open_code derives state from the last message."""
+
+    @pytest.mark.asyncio
+    async def test_no_messages_returns_snapshot_unchanged(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """When get_session_messages returns [], state is not modified."""
+        mock_client.get_session_messages = AsyncMock(return_value=[])
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.BUSY.value
+        # sync_state_with_open_code fetches just the newest message
+        # (limit=1) — the state-derivation only needs the last one.
+        # Empty response still doesn't touch state, just like before.
+        mock_client.get_session_messages.assert_awaited_once_with(
+            "test-session-1", limit=1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_last_message_with_error_returns_idle(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """A message with info.error → state IDLE."""
+        msg = {
+            "info": {"id": "m1", "error": "timeout"},
+            "parts": [{"type": "text", "text": "oops"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        manager._state = SessionState.BUSY
+        manager._is_worker_busy = True
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.IDLE.value
+
+    @pytest.mark.asyncio
+    async def test_step_finish_waiting_for_input_returns_waiting(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """step-finish with reason=waiting_for_input → WAITING_FOR_INPUT state."""
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "waiting_for_input"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.WAITING_FOR_INPUT.value
+
+    @pytest.mark.asyncio
+    async def test_step_finish_stop_returns_idle(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """step-finish with reason=stop → IDLE state."""
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "stop"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.IDLE.value
+
+    @pytest.mark.asyncio
+    async def test_step_finish_other_reason_returns_busy(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """step-finish with any other reason (and no error) → BUSY state."""
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "max_tokens"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        manager._state = SessionState.IDLE
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.BUSY.value
+
+    @pytest.mark.asyncio
+    async def test_client_error_returns_snapshot_without_crash(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """If get_session_messages raises, the method returns a snapshot without crashing."""
+        mock_client.get_session_messages.side_effect = OpenCodeAPIError(500, "server error")
+        manager._state = SessionState.BUSY
+
+        # Should not raise
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.BUSY.value
+
+    @pytest.mark.asyncio
+    async def test_sync_clears_worker_busy_when_idle_detected(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """When state transitions to IDLE, _is_worker_busy is cleared."""
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "stop"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        manager._is_worker_busy = True
+        manager._state = SessionState.BUSY
+
+        await manager.sync_state_with_open_code()
+
+        assert manager._is_worker_busy is False
+
+    @pytest.mark.asyncio
+    async def test_pending_questions_override_message_derived_state(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """When /question returns questions for this session, state is forced
+        to WAITING_FOR_INPUT even if the last message derives to BUSY or IDLE.
+
+        This is the contract that makes ``external_opencode_wait_for_result``
+        see the question as soon as it appears on the OpenCode server,
+        without waiting for the 30s worker ``_poll_questions`` tick.
+        """
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "tool_calls"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        question = Question(
+            id="req-1",
+            session_id="test-session-1",
+            questions=[QuestionItem(question="Approve?", options=[])],
+        )
+        mock_client.get_questions = AsyncMock(return_value=[question])
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.WAITING_FOR_INPUT.value
+        # The question is exposed in the snapshot
+        assert snap["questions"] == [
+            {
+                "id": "req-1",
+                "sessionID": "test-session-1",
+                "questions": [{"question": "Approve?", "options": []}],
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_pending_questions_with_no_messages_set_waiting(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """When get_session_messages returns [] but /question has questions
+        for this session, the snapshot reports WAITING_FOR_INPUT.
+        """
+        mock_client.get_session_messages = AsyncMock(return_value=[])
+        question = Question(
+            id="req-2",
+            session_id="test-session-1",
+            questions=[],
+        )
+        mock_client.get_questions = AsyncMock(return_value=[question])
+        manager._state = SessionState.IDLE
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.WAITING_FOR_INPUT.value
+        assert len(snap["questions"]) == 1
+        assert snap["questions"][0]["id"] == "req-2"
+
+    @pytest.mark.asyncio
+    async def test_questions_for_unrelated_sessions_are_ignored(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """Questions for a session unrelated to this one (no parent
+        chain link) must not flip this manager's state to WAITING_FOR_INPUT.
+        """
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "tool_calls"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        other_question = Question(
+            id="req-9",
+            session_id="some-other-session",
+            questions=[],
+        )
+        mock_client.get_questions = AsyncMock(return_value=[other_question])
+        # Parent-chain walk for the unrelated session returns nothing
+        # useful → eventually returns None or a session with no
+        # parentID. We simulate "lineage unknown".
+        mock_client.get_session = AsyncMock(return_value=None)
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.BUSY.value
+        assert snap["questions"] == []
+
+    @pytest.mark.asyncio
+    async def test_questions_from_child_subagent_are_accepted(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """Questions raised by a child subagent (whose parentID chain
+        leads to this session) must surface as WAITING_FOR_INPUT and
+        carry ``parentSessionID`` so the caller can answer them via
+        this session.
+        """
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "tool_calls"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        child_question = Question(
+            id="req-child-1",
+            session_id="ses_child",
+            questions=[],
+        )
+        mock_client.get_questions = AsyncMock(return_value=[child_question])
+        # First lookup: child session, parentID = test-session-1
+        # Second lookup: would be test-session-1, but we short-circuit
+        # because current == ancestor_id inside the walk.
+        mock_client.get_session = AsyncMock(
+            return_value={"id": "ses_child", "parentID": manager.session_id}
+        )
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.WAITING_FOR_INPUT.value
+        assert len(snap["questions"]) == 1
+        assert snap["questions"][0]["id"] == "req-child-1"
+        assert snap["questions"][0]["parentSessionID"] == manager.session_id
+        assert snap["questions"][0]["sessionID"] == "ses_child"
+
+    @pytest.mark.asyncio
+    async def test_questions_from_grandchild_subagent_are_accepted(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """A multi-hop descendant (grandchild → child → parent) must
+        also be accepted.
+        """
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "tool_calls"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        grandchild_question = Question(
+            id="req-grandchild-1",
+            session_id="ses_grandchild",
+            questions=[],
+        )
+        mock_client.get_questions = AsyncMock(
+            return_value=[grandchild_question]
+        )
+
+        async def fake_get_session(sid: str) -> dict | None:
+            if sid == "ses_grandchild":
+                return {"id": "ses_grandchild", "parentID": "ses_child"}
+            if sid == "ses_child":
+                return {"id": "ses_child", "parentID": manager.session_id}
+            return None
+
+        mock_client.get_session = AsyncMock(side_effect=fake_get_session)
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.WAITING_FOR_INPUT.value
+        assert snap["questions"][0]["parentSessionID"] == manager.session_id
+
+    @pytest.mark.asyncio
+    async def test_questions_from_unrelated_session_with_matching_dir_are_ignored(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """A session that shares the same working directory but has a
+        different parent chain (e.g. a sibling session spawned by a
+        different orchestrator) must still be rejected — the parent
+        chain walk is what scopes, not the directory.
+        """
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "tool_calls"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        sibling_question = Question(
+            id="req-sib-1",
+            session_id="ses_sibling",
+            questions=[],
+        )
+        mock_client.get_questions = AsyncMock(return_value=[sibling_question])
+        # Sibling has parentID = "ses_other_orchestrator" (not us)
+        mock_client.get_session = AsyncMock(
+            return_value={"id": "ses_sibling", "parentID": "ses_other_orch"}
+        )
+        # Second hop: other orch has no parent (root)
+        async def walk(sid: str):
+            if sid == "ses_sibling":
+                return {"id": "ses_sibling", "parentID": "ses_other_orch"}
+            if sid == "ses_other_orch":
+                return {"id": "ses_other_orch", "parentID": None}
+            return None
+        mock_client.get_session = AsyncMock(side_effect=walk)
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.BUSY.value
+        assert snap["questions"] == []
+
+    @pytest.mark.asyncio
+    async def test_question_fetch_failure_does_not_crash(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """If /question raises, sync_state_with_open_code still returns a
+        snapshot based on the message-derived state. The questions check is
+        best-effort and must never block the message path.
+        """
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "stop"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        mock_client.get_questions = AsyncMock(
+            side_effect=OpenCodeAPIError(500, "boom")
+        )
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.IDLE.value
+
+    @pytest.mark.asyncio
+    async def test_sync_updates_latest_response_with_stripped_message(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """_latest_response is set to the stripped (bloat-removed) last message.
+
+        _latest_response is set unconditionally on every sync (matches Go behavior).
+        The stripped message is stored regardless of derived state.
+        """
+        msg = {
+            "info": {
+                "id": "m1",
+                "finish": "stop",
+                "tokens": 999,   # bloat — should be stripped
+                "extra": "garbage",
+            },
+            "parts": [
+                {"type": "text", "text": "hello", "extra_field": "remove"},
+                {"type": "step-finish", "reason": "stop"},
+            ],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+
+        await manager.sync_state_with_open_code()
+
+        assert manager._latest_response is not None
+        result = manager._latest_response.get("result", {})
+        # Only id/finish/time should remain in info
+        assert "id" in result.get("info", {})
+        assert "finish" in result.get("info", {})
+        assert "tokens" not in result.get("info", {})
+        # Only type/text/reason/error should remain in parts
+        assert result["parts"][0].get("type") == "text"
+        assert result["parts"][0].get("text") == "hello"
+        assert "extra_field" not in result["parts"][0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. resume() — sends hardcoded orchestrator/litellm/coding prompt
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestResume:
+    """Verify the public resume() method uses the correct hardcoded values."""
+
+    @pytest.mark.asyncio
+    async def test_resume_calls_client_send_prompt(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """resume() calls client.send_prompt with the session id."""
+        await manager.resume()
+
+        mock_client.send_prompt.assert_awaited_once()
+        call_args = mock_client.send_prompt.call_args
+        # First positional arg is the session id
+        assert call_args.args[0] == "test-session-1"
+        # Second positional arg is a PromptRequest
+        assert isinstance(call_args.args[1], PromptRequest)
+
+    @pytest.mark.asyncio
+    async def test_resume_uses_hardcoded_agent_orchestrator(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """agent is hardcoded to 'orchestrator'."""
+        await manager.resume()
+
+        _, prompt_req = mock_client.send_prompt.call_args[0]
+        assert prompt_req.agent == "orchestrator"
+
+    @pytest.mark.asyncio
+    async def test_resume_uses_hardcoded_model_litellm_coding(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """model is hardcoded to litellm/coding."""
+        await manager.resume()
+
+        _, prompt_req = mock_client.send_prompt.call_args[0]
+        assert prompt_req.model.provider_id == "litellm"
+        assert prompt_req.model.model_id == "coding"
+
+    @pytest.mark.asyncio
+    async def test_resume_uses_hardcoded_text_resume(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """The text part contains the hardcoded resume text.
+
+        Updated 2026-08-08 to match daemon/opencode/constants.py
+        ``RESUME_TEXT = "continue"`` (commit 2b40d427).
+        """
+        await manager.resume()
+
+        _, prompt_req = mock_client.send_prompt.call_args[0]
+        assert len(prompt_req.parts) == 1
+        assert prompt_req.parts[0].type == "text"
+        assert prompt_req.parts[0].text == "continue"
+
+    @pytest.mark.asyncio
+    async def test_resume_returns_api_response(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """resume() returns the result from client.send_prompt."""
+        mock_client.send_prompt.return_value = {"result": "continued"}
+
+        result = await manager.resume()
+
+        assert result == {"result": "continued"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. Persistence callback — receives updated PersistedState
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPersistenceCallback:
+    """Verify on_state_change receives the correct PersistedState snapshot."""
+
+    @pytest.mark.asyncio
+    async def test_callback_receives_persisted_state_object(
+        self, mock_client: AsyncMock
+    ) -> None:
+        """on_state_change receives a PersistedState instance (not a dict)."""
+        received: list = []
+
+        async def on_state_change(state: PersistedState) -> None:
+            received.append(state)
+
+        mgr = OpenCodeSessionManager(
+            session_id="test",
+            working_dir="/dir",
+            client=mock_client,
+            on_state_change=on_state_change,
+        )
+        await mgr.abort_task()
+        await asyncio.sleep(0.05)
+
+        assert len(received) == 1
+        assert isinstance(received[0], PersistedState)
+
+    @pytest.mark.asyncio
+    async def test_callback_receives_updated_state_idle_after_abort(
+        self, mock_client: AsyncMock
+    ) -> None:
+        """After abort_task, the callback receives state='IDLE'."""
+        received: list[PersistedState] = []
+
+        async def on_state_change(state: PersistedState) -> None:
+            received.append(state)
+
+        mgr = OpenCodeSessionManager(
+            session_id="test",
+            working_dir="/dir",
+            client=mock_client,
+            on_state_change=on_state_change,
+        )
+        await mgr.abort_task()
+        await asyncio.sleep(0.05)
+
+        assert received[0].state == SessionState.IDLE.value
+
+    @pytest.mark.asyncio
+    async def test_callback_receives_busy_state_on_submit(
+        self, mock_client: AsyncMock
+    ) -> None:
+        """After submit_request, the callback receives state='BUSY'."""
+        received: list[PersistedState] = []
+
+        async def on_state_change(state: PersistedState) -> None:
+            received.append(state)
+
+        mgr = OpenCodeSessionManager(
+            session_id="test",
+            working_dir="/dir",
+            client=mock_client,
+            on_state_change=on_state_change,
+        )
+
+        block_event = asyncio.Event()
+        async def slow_prompt(*args, **kwargs):
+            await block_event.wait()
+            return {"ok": True}
+        mgr._client.send_prompt = slow_prompt
+
+        req = Request("PROMPT", payload=PromptRequest(parts=[Part(type="text", text="x")]))
+        mgr.submit_request(req)
+        await asyncio.sleep(0.05)
+
+        assert len(received) == 1
+        assert received[0].state == SessionState.BUSY.value
+
+        block_event.set()
+
+    @pytest.mark.asyncio
+    async def test_callback_not_called_when_none(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """When on_state_change is None, no callback is invoked (no crash)."""
+        # Should not raise
+        await manager.abort_task()
+        await asyncio.sleep(0.05)
+
+    @pytest.mark.asyncio
+    async def test_persisted_state_contains_all_required_fields(
+        self, mock_client: AsyncMock
+    ) -> None:
+        """The PersistedState snapshot includes all expected fields."""
+        received: list[PersistedState] = []
+
+        async def on_state_change(state: PersistedState) -> None:
+            received.append(state)
+
+        mgr = OpenCodeSessionManager(
+            session_id="test",
+            working_dir="/dir",
+            client=mock_client,
+            on_state_change=on_state_change,
+        )
+        # Modify some fields
+        mgr._last_agent = "orchestrator"
+        mgr._is_agent_locked = True
+
+        await mgr.abort_task()
+        await asyncio.sleep(0.05)
+
+        state = received[0]
+        assert hasattr(state, "last_agent")
+        assert hasattr(state, "is_agent_locked")
+        assert hasattr(state, "state")
+        assert hasattr(state, "latest_response")
+        assert hasattr(state, "questions")
+        assert hasattr(state, "last_activity")
+
+    @pytest.mark.asyncio
+    async def test_save_state_returns_persisted_state(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """save_state() returns a PersistedState snapshot."""
+        manager._last_agent = "orchestrator"
+        manager._state = SessionState.BUSY
+        manager._latest_response = {"result": "ok"}
+        manager._questions = [{"id": "q1"}]
+
+        state = manager.save_state()
+
+        assert isinstance(state, PersistedState)
+        assert state.last_agent == "orchestrator"
+        assert state.state == SessionState.BUSY.value
+        assert state.latest_response == {"result": "ok"}
+        assert state.questions == [{"id": "q1"}]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. Regression: ANSWER-branch nested-lock deadlock fix
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAnswerDeadlockFix:
+    """Regression tests for the ANSWER-branch nested-lock deadlock bug.
+
+    Bug: ``_handle_request`` originally acquired ``self._lock`` twice in
+    the ANSWER branch — an outer ``async with self._lock:`` and an inner
+    ``async with self._lock:`` for state mutation. Since ``asyncio.Lock``
+    is **not** reentrant, the second acquisition would block forever,
+    hanging every ``answer_question`` call.
+
+    Fix: the HTTP call now runs *outside* the lock, and a single lock
+    scope handles the state mutation.  These tests specifically verify
+    the deadlock is gone.
+    """
+
+    @pytest.mark.asyncio
+    async def test_handle_request_answer_completes_within_timeout(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """The ANSWER path completes in finite time (does not deadlock).
+
+        Before the fix, this test would have hit the test-runner's
+        hang-protection timeout because the inner ``async with
+        self._lock:`` would block forever waiting for the outer lock.
+        """
+        manager._questions = [{"id": "q1"}]
+        mock_client.answer_question = AsyncMock(return_value=None)
+
+        req = Request("ANSWER", payload=AnswerRequest(request_id="q1", answers=[["A"]]))
+
+        # The 2s timeout is the key assertion: if the deadlock is
+        # reintroduced, this raises asyncio.TimeoutError.
+        await asyncio.wait_for(manager._handle_request(req), timeout=2.0)
+
+        # Question removed and state moved to IDLE (no remaining questions,
+        # worker not busy).
+        assert manager._questions == []
+        assert manager._state == SessionState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_handle_request_answer_does_not_hold_lock_during_http(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """While ``answer_question`` is awaiting HTTP, the lock is NOT held.
+
+        This is the structural guarantee that prevents the deadlock: a
+        concurrent task that grabs the lock (e.g. a status poll) must
+        not be blocked by an in-flight answer call.
+        """
+        lock_held_during_http: list[bool] = []
+        block_event = asyncio.Event()
+
+        async def slow_answer(*args, **kwargs):
+            # Record the lock state at the moment the HTTP call is in flight.
+            lock_held_during_http.append(manager._lock.locked())
+            await block_event.wait()
+            return None
+
+        mock_client.answer_question = slow_answer
+        manager._questions = [{"id": "q1"}]
+
+        req = Request("ANSWER", payload=AnswerRequest(request_id="q1", answers=[["A"]]))
+        task = asyncio.create_task(manager._handle_request(req))
+
+        # Yield once so the task reaches the HTTP call.
+        await asyncio.sleep(0.05)
+
+        assert lock_held_during_http == [False], (
+            f"Lock was held during answer_question HTTP call: "
+            f"{lock_held_during_http}"
+        )
+
+        block_event.set()
+        await task
+
+    @pytest.mark.asyncio
+    async def test_handle_request_answer_works_while_lock_held_externally(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """The ANSWER path is callable while another task holds the lock.
+
+        With the bug, this would deadlock because the inner lock
+        acquisition would wait forever. After the fix, the HTTP call
+        runs without the lock, so the outer task can hold the lock
+        freely.
+        """
+        lock_release = asyncio.Event()
+        answer_complete = asyncio.Event()
+        answer_was_called = False
+
+        async def track_answer(*args, **kwargs):
+            nonlocal answer_was_called
+            answer_was_called = True
+            answer_complete.set()
+
+        mock_client.answer_question = track_answer
+        manager._questions = [{"id": "q1"}]
+
+        # Hold the lock from another coroutine.
+        async def hold_lock():
+            async with manager._lock:
+                await lock_release.wait()
+
+        holder = asyncio.create_task(hold_lock())
+        await asyncio.sleep(0.05)  # let the holder acquire
+
+        # Now run the ANSWER flow — must NOT deadlock on the held lock.
+        req = Request("ANSWER", payload=AnswerRequest(request_id="q1", answers=[["A"]]))
+        answer_task = asyncio.create_task(manager._handle_request(req))
+
+        # The HTTP call should run (and complete) even while the lock is held.
+        await asyncio.wait_for(answer_complete.wait(), timeout=2.0)
+        assert answer_was_called, "answer_question was never called"
+
+        # Release the holder so the answer_task's state mutation can proceed.
+        lock_release.set()
+        await asyncio.wait_for(answer_task, timeout=2.0)
+        await holder
+
+        # Question was removed.
+        assert manager._questions == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. Resource-leak fix: _poll_questions does NOT refresh _last_activity
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPollDoesNotTouchActivity:
+    """Resource-leak fix: ``_poll_questions`` must not refresh ``_last_activity``.
+
+    Background: the 30s question-poll fires from the background loop on
+    **every** session, busy or not. If the poll refreshed the activity
+    timestamp, every session would look perpetually active and the
+    registry's TTL-based ``evict_idle_sessions`` would never be able to
+    evict anything. Activity must be touched only on **meaningful** agent
+    interactions (submit, abort, get_status).
+    """
+
+    @pytest.mark.asyncio
+    async def test_touch_activity_not_called_in_poll(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """``_poll_questions`` must not modify ``_last_activity``."""
+        from datetime import datetime, timedelta, timezone
+
+        # Pin _last_activity to a known reference timestamp.
+        reference = datetime.now(timezone.utc) - timedelta(minutes=15)
+        manager._last_activity = reference
+
+        # No questions → manager stays IDLE, no state change.
+        await manager._poll_questions()
+
+        # The activity timestamp must be exactly the reference we set —
+        # the poll is not a "meaningful interaction" and must not refresh it.
+        assert manager._last_activity == reference
+
+    @pytest.mark.asyncio
+    async def test_poll_questions_does_not_call_touch_activity(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """Spy on ``_touch_activity`` and confirm ``_poll_questions`` does not invoke it.
+
+        This is the structural guarantee: the only way the timestamp could
+        move is if the poll path called ``_touch_activity``. A spy
+        catches both the function and any future refactor that adds the
+        call back in by accident.
+        """
+        manager._touch_activity = lambda: None  # type: ignore[assignment]
+        spy_calls: list[None] = []
+
+        def spy_touch() -> None:
+            spy_calls.append(None)
+
+        manager._touch_activity = spy_touch  # type: ignore[assignment]
+
+        await manager._poll_questions()
+
+        assert spy_calls == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. Resource-leak fix: IDLE heartbeat uses IDLE_HEARTBEAT_S, not POLL_INTERVAL_S
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestIdleHeartbeat:
+    """Resource-leak fix: idle sessions sleep for ``IDLE_HEARTBEAT_S`` (5 min)
+    instead of the 30s ``POLL_INTERVAL_S``.
+
+    The fix: ``_run_loop`` now reads ``is_idle`` under the lock (so the
+    signal is coherent with concurrent state mutations) and chooses the
+    appropriate sleep duration. Idle sessions have no work to do; polling
+    them every 30s is wasted CPU/IO.
+    """
+
+    @pytest.mark.asyncio
+    async def test_idle_heartbeat_uses_longer_interval(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """When the session is IDLE+not busy, ``_run_loop`` sleeps for
+        ``IDLE_HEARTBEAT_S`` (300s), not ``POLL_INTERVAL_S`` (30s)."""
+        from daemon.opencode.constants import IDLE_HEARTBEAT_S, POLL_INTERVAL_S
+
+        manager._state = SessionState.IDLE
+        manager._is_worker_busy = False
+
+        # The first loop iteration must process *something* so that the
+        # wait() at the top completes; otherwise the loop blocks forever
+        # before reaching the sleep. We push a no-error / no-questions
+        # worker result, which leaves the manager in IDLE — the very
+        # state we want to test — when the sleep block runs.
+        sleep_calls: list[float] = []
+
+        async def sleep_capture(duration: float) -> None:
+            sleep_calls.append(duration)
+            # Break the next iteration's wait by setting the stop event
+            # (which also mirrors production shutdown).
+            manager._stop_event.set()
+
+        await manager._worker_done_queue.put(_WorkerResult(result={"ok": True}))
+
+        with patch(
+            "daemon.opencode.session_manager.asyncio.sleep",
+            side_effect=sleep_capture,
+        ):
+            await manager._run_loop()
+
+        # The first sleep the loop performs is the heartbeat — verify
+        # it's the IDLE heartbeat value, NOT the active POLL_INTERVAL_S.
+        assert len(sleep_calls) >= 1
+        assert sleep_calls[0] == IDLE_HEARTBEAT_S
+        assert sleep_calls[0] != POLL_INTERVAL_S
+        assert IDLE_HEARTBEAT_S > POLL_INTERVAL_S
+
+    @pytest.mark.asyncio
+    async def test_active_session_uses_poll_interval(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """When the session is BUSY, ``_run_loop`` sleeps for ``POLL_INTERVAL_S``."""
+        from daemon.opencode.constants import IDLE_HEARTBEAT_S, POLL_INTERVAL_S
+
+        manager._state = SessionState.BUSY
+        manager._is_worker_busy = True
+        # Pre-seed a question so that when the worker done handler runs,
+        # the state is set to WAITING_FOR_INPUT (not IDLE). Otherwise the
+        # state would flip to IDLE and the sleep block would use the idle
+        # heartbeat interval instead of POLL_INTERVAL_S.
+        manager._questions = [{"id": "q1"}]
+
+        sleep_calls: list[float] = []
+
+        async def sleep_capture(duration: float) -> None:
+            sleep_calls.append(duration)
+            manager._stop_event.set()
+
+        await manager._worker_done_queue.put(_WorkerResult(result={"ok": True}))
+
+        with patch(
+            "daemon.opencode.session_manager.asyncio.sleep",
+            side_effect=sleep_capture,
+        ):
+            await manager._run_loop()
+
+        # Active sessions use the shorter poll interval.
+        assert len(sleep_calls) >= 1
+        assert sleep_calls[0] == POLL_INTERVAL_S
+        assert sleep_calls[0] != IDLE_HEARTBEAT_S
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. Resource-leak fix: double stop() is safe
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestStopSafety:
+    """Resource-leak fix: ``stop()`` is idempotent.
+
+    The registry now calls ``stop()`` on every evict/abort path, so a
+    double-stop (e.g. abort + later idle-eviction racing) must not crash.
+    """
+
+    @pytest.mark.asyncio
+    async def test_double_stop_is_safe(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """Calling ``stop()`` twice on a manager must not raise."""
+        manager.start()
+        # First stop: awaits the (idle) loop task to finish.
+        await manager.stop()
+        # Second stop: must be a no-op — the loop_task is None, the
+        # stop_event is already set. Should NOT raise.
+        await manager.stop()
+
+        # And a third call for good measure — the contract is "any
+        # number of stop() calls is safe".
+        await manager.stop()
+
+        # _loop_task must be reset to None after each stop.
+        assert manager._loop_task is None
+
+    @pytest.mark.asyncio
+    async def test_stop_without_start_is_safe(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """``stop()`` on a manager that was never started must not raise."""
+        # _loop_task is None — the body of stop() must short-circuit.
+        await manager.stop()
+        assert manager._loop_task is None

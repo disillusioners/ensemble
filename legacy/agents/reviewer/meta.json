@@ -1,0 +1,13 @@
+{
+  "id": "reviewer",
+  "name": "Reviewer",
+  "description": "Experienced solution architect reviewing plans, architecture, and code for quality, compliance, and risks",
+  "icon": "🔍",
+  "color": "accent-rose",
+  "innate_skills": ["opencode", "chart", "todo"],
+  "no_force_explore": true,
+  "tools": {
+    "allow": ["bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "blueprint", "service"]
+  },
+  "team_members": ["explorer"]
+}

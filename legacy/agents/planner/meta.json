@@ -1,0 +1,14 @@
+{
+  "id": "planner",
+  "name": "Planner",
+  "description": "Analyzes requests, creates structured execution plans, and tracks progress",
+  "icon": "📋",
+  "color": "accent-indigo",
+  "version": "1.0.0",
+  "innate_skills": ["opencode", "chart", "todo"],
+  "tools": {
+    "allow": ["instance", "bash", "proc", "filesystem", "time", "subtree_messages",
+    "subtree_status", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "blueprint", "service"]
+  },
+  "team_members": ["explorer"]
+}

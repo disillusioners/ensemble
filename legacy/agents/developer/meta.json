@@ -1,0 +1,13 @@
+{
+  "id": "developer",
+  "name": "Developer",
+  "description": "Specializes in code generation and debugging",
+  "icon": "💻",
+  "color": "accent-cyan",
+  "version": "1.0.0",
+  "innate_skills": ["opencode", "chart", "todo"],
+  "tools": {
+    "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "db", "blueprint", "service", "midflight"]
+  },
+  "team_members": ["explorer"]
+}
