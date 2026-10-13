@@ -231,13 +231,15 @@ Escalation across agents (e.g., developer → reviewer) is the **caller's** job 
 
 ---
 
-## 9. v1 → v2 Migration
+## 9. v1 → v2 Steady State (post-migration)
 
-When an agent is versioned (`agents/foo[v2]/` alongside `agents/foo/`), record what changed. A one-line deprecation note in `meta.json` or a `memory.md` block prevents the next author from relitigating settled decisions:
+After the `agent-base-v2` migration, the typical state for a versioned agent is: `agents/<name>/` (the base) is **byte-identical** to `agents/<name>[v2]/`. The v2 dir is the source of truth; the base dir is a frozen mirror. Editing either dir in isolation creates drift — both must move together, or the v2 dir must explicitly re-derive the base via the same copy-verify flow Phase B used.
+
+When evolving v2 content, decide explicitly whether the base mirrors or diverges and document the choice in `memory.md`. The default post-migration posture is **mirror**: v2 changes are copied to the base; the two stay in lockstep.
 
 > v2 changes: dispatcher pattern (was direct implementer in v1); cardinal rule split; fan-in escape valve added. Activation: `default_agent_versions` records the switch.
 
-If the agent reuses a v1 file (e.g., `reviewer[v2]` pointing at `agents/reviewer/memory.md`), **create a v2-local copy** and repoint the references. Cross-version file dependencies silently break when the v1 dir is removed.
+The cross-version file-reuse hazard is **inverted** post-migration. Pre-migration, `agents/<name>[v2]/` was the new lane and might have reused files from `agents/<name>/` (the v1 base) — the old advice was "create a v2-local copy." Post-migration, `agents/<name>/` IS the v2 copy; the base no longer carries v1 content. If anyone re-creates a v1-style `agents/<name>/` (e.g., as a new divergent version), they must NOT silently share files with `agents/<name>[v2]/` — the shared-file hazard now points the other way.
 
 ---
 

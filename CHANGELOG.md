@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — agent-base-v2 migration: base agents = copy of [v2] agents; opencode-era base + comm service archived to legacy/ (mission `agent-base-v2 migration`, branch `feature/agent-base-v2`)
+
+- **Phase A — legacy archive.** opencode-era `agents/developer`, `agents/reviewer`, `agents/planner`, `agents/tidier`, `agents/approver` (the v1 base) plus the opencode comm service were copy-verified into `legacy/` (root-level legacy source dir). Pre-mission and post-mission per-dir sorted sha256 manifests re-verified at mission end — archive intact.
+- **Phase B — base := v2 copy.** `agents/developer`, `agents/reviewer`, `agents/planner`, `agents/tidier`, `agents/approver` (the base, NOT the `[v2]` dirs) were replaced byte-for-byte with the content of their matching `[v2]` dirs. `version` in each base meta.json now reads `"2.0.0"`. v2 dirs untouched and remain the live operational lane; existing instances + ensembles notice NOTHING (v2 checksum invariance: pre == post).
+- **Phase C — opencode excision.** daemon code paths that wired the opencode service were removed. `default_agent_versions` runtime value unchanged (verified via read-only `GET /api/settings/default-agent-versions`).
+- **Phase D — references + docs refresh.** `docs/agents.md` §2/§3/§3.4/§3.5/§7, `docs/skill-evolution.md` example, `docs/agent-prompt-writing-guide.md` §9 refreshed to describe v2 reality. Active-tree guidance docs (`testing-guide.md`, `docs/mcp-integration.md`) updated to drop retired `OpenCode server` / `OpenCode configuration` phrasing. `docs/mcp-kb-usage.md` verified false positive (documents upstream `sst/opencode`, not our service) — UNTOUCHED. Drift implications (base is now a frozen mirror of v2) noted for maintainers; not solved in this mission. Full docs-consistency sweep and R10 allowlist committed at `evidence/docs-consistency-sweep.md` + `evidence/r10-allowlist.md`.
+- **Phase E — verification evidence.** Per-dir sha256 manifests prove v2 zero-touch (pre == post), base==v2 (per-agent diff empty), legacy/ archive intact, full test wall green, fenced dev-lane boot-scan clean, `default_agent_versions` runtime invariant. Evidence committed at `.agents/shared/planning/agent-base-v2/evidence/`.
+
+_No version bump (D8: no live-system contact this mission). Migration rides the next promote ceremony via the fast pipeline; stage.sh manifest machinery self-adapts (`agents_tree_sha256` / `agents_manifest` recompute automatically)._
+
 ---
 
 ## [0.20.0] — 2026-10-12

@@ -34,13 +34,13 @@ The following agents are available:
 | ID | Name | Icon | Role | Key Skills | Tools Access |
 |----|------|------|------|------------|--------------|
 | `leader` | Leader | 👑 | Coordinates tasks and manages workflow delegation | coordination | time, instance, self, project, help, knowledge, mcp, critical_notes, project_history |
-| `developer` | Developer | 💻 | Code generation and debugging via opencode sessions | opencode | bash, filesystem, time, self, help, knowledge, mcp |
+| `developer` | Developer | 💻 | Development orchestrator — plans coding work, delegates to coder/worker, aggregates results | todo, chart, dynamic-skill | bash, filesystem, time, self, help, knowledge, mcp |
 | `explorer` | Explorer | 🔍 | Queries RAG knowledge base and synthesizes project knowledge | — | rag, filesystem, help, time, mcp |
-| `reviewer` | Reviewer | 🔍 | Reviews plans, architecture, and code for quality | opencode | bash, filesystem, time, self, help, knowledge, mcp |
+| `reviewer` | Reviewer | 🔍 | Review dispatcher — plans reviews, delegates to skill-equipped workers, convenes governor council for deep review | todo, chart, dynamic-skill | bash, filesystem, time, self, help, knowledge, mcp |
 | `tester` | Tester | 🧪 | Test leader — dispatches test packs to workers and reports results | test-pack | instance, bash, proc, filesystem, time, self, help, image, knowledge, mcp, context, shared_context, db |
-| `tidier` | Tidier | 🧹 | Code quality, conventions, and maintainability reviewer | opencode | bash, filesystem, time, self, help, knowledge, mcp |
-| `approver` | Approver | ✅ | Independent second-pass reviewer with minimal context bias | opencode | bash, filesystem, time, self, help, knowledge, mcp |
-| `planner` | Planner | 📋 | Analyzes requests, creates execution plans, tracks progress | opencode | bash, filesystem, time, self, help, knowledge, mcp |
+| `tidier` | Tidier | 🧹 | Code craftsmanship dispatcher — reviews style, smells, readability, hygiene, types, error handling | todo, chart, dynamic-skill | bash, filesystem, time, self, help, knowledge, mcp |
+| `approver` | Approver | ✅ | Independent verification dispatcher — plans approvals, delivers binary APPROVED/REJECTED verdicts | todo, chart, dynamic-skill | bash, filesystem, time, self, help, knowledge, mcp |
+| `planner` | Planner | 📋 | Strategic planning dispatcher — researches codebase via explorer, delegates plan creation to skill-equipped workers | todo, chart, dynamic-skill | bash, filesystem, time, self, help, knowledge, mcp |
 | `giter` | Giter | 🔀 | Git operations — commits, branches, version control | — | bash, filesystem, time, self, help, knowledge, mcp |
 | `jober` | Job Orchestrator | 📋 | Creates and monitors jobs, never does tasks directly | job-orchestration | job, help, self, time, project, knowledge, mcp |
 | `gaia` | Gaia | 🌍 | Environment setup assistant | — | bash, filesystem, help, mcp |
@@ -96,8 +96,8 @@ agents/
   "description": "Specializes in code generation and debugging",
   "icon": "💻",
   "color": "accent-cyan",
-  "version": "1.0.0",
-  "innate_skills": ["opencode"],
+  "version": "2.0.0",
+  "innate_skills": ["todo", "chart", "dynamic-skill"],
   "llm_model": "gpt-4o",
   "system": false,
   "capabilities": [],
@@ -151,13 +151,13 @@ Defines who the agent is:
 ```markdown
 # Who I Am
 
-I am a code orchestrator. I control opencode sessions to handle all coding tasks.
+I am a development orchestrator. I plan coding work, dispatch `coder` instances for complex implementation and `worker` instances for skill-based tasks, and aggregate their results.
 
 ## My Role
 
 - Understanding requirements
-- Spawning opencode sessions
-- Reviewing results
+- Dispatching coder/worker instances
+- Reviewing and aggregating results
 
 I do NOT:
 - Read code files directly
@@ -175,7 +175,7 @@ Defines what the agent must and must not do:
 
 - Use `project_get` before starting any task
 - Identify project type before recommending tools
-- Spawn opencode for all code operations
+- Dispatch `coder` for complex tasks; dispatch `worker` (with a skill) for skill-based tasks
 
 ## Must Not
 
@@ -413,7 +413,6 @@ Innate skills are **shared prompt modules** stored in `agents/_prompt_system/inn
 
 | Skill | Agents Using | Description |
 |-------|--------------|-------------|
-| `opencode` | developer, planner, reviewer, tidier, approver | Controls opencode sessions for code operations |
 | `coordination` | leader | Coordinates work across specialized agents |
 | `job-orchestration` | jober | Creates, watches, and reacts to jobs |
 | `test-pack` | tester | Creates self-contained test scripts with subprocess timeout |
@@ -424,7 +423,7 @@ Innate skills are **shared prompt modules** stored in `agents/_prompt_system/inn
 
 ```json
 {
-  "innate_skills": ["opencode", "coordination"]
+  "innate_skills": ["coordination"]
 }
 ```
 
