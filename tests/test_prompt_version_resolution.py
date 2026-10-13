@@ -34,13 +34,29 @@ no-regression tests are appended by the parallel Phase A workers
 Test execution is fenced per the project critical notes:
 
 * ``ENSEMBLE_SELF_ENV=dev`` (no live ensemble posture);
-* ``POSTGRES_DB=ensemble_dev`` (sandbox DB only — abort if
-  resolved to ``ensemble_prod``);
+* ``POSTGRES_DB=ensemble_dev_test_only`` (daemon-identity fence —
+  abort if resolved to ``ensemble_prod``);
 * use file-SQLite with WAL + QueuePool for the concurrency
   tests (in-memory + StaticPool has single-connection race bugs
   documented in the test fixture docstrings);
 * run only the named file (``--tb=short -q``), never bare pytest,
   never ``-x``, never full-suite.
+
+SC8/SC9 PostgreSQL parity (2026-10-13, T10 close-out): the
+DB-layer test classes are parametrized over ``[sqlite, postgres]``.
+The PG leg runs against a DEDICATED SCRATCH DATABASE per test
+(``ensemble_promptver_test_<8hex>``, created + dropped per test —
+never ``ensemble_dev`` itself, never ``ensemble_prod``). The
+fixture deliberately reads ONLY ``PG_TEST_*`` env vars (the
+``tests/postgres/conftest.py`` convention) and NEVER ambient
+``POSTGRES_*`` — the ambient environment on ensemble hosts carries
+``POSTGRES_DB=ensemble_prod`` (env-poison 3-guard class), so
+inheriting it would point tests at prod. Two PG-specific
+production findings surfaced while closing this gap (F-1
+one-pointer invariant, F-2 retry budget) are documented at the
+``pg_known_defect`` fixture below — the affected PG legs are
+non-strict xfail (they EXECUTE; only the outcome is mapped), and
+the production fix is out of this test-only commission's scope.
 """
 
 from __future__ import annotations
@@ -49,6 +65,7 @@ import tempfile
 import threading
 import time
 import os
+import uuid
 from typing import Iterator
 
 import pytest
@@ -69,16 +86,158 @@ from daemon.repositories.prompt_version.repository import (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Engine fixture — file SQLite with WAL + QueuePool so the
-# concurrency tests use real per-thread connections (in-memory +
-# StaticPool serializes all threads on one connection and the
-# Session.get after engine.begin() returns None under contention,
-# even though the INSERT committed).
+# Engine fixtures — SC8 SQLite/PG parity.
+#
+# ``repo_engine(db_dialect)`` dispatches on the parametrized dialect:
+#   * ``sqlite``   — file SQLite with WAL + QueuePool so the
+#     concurrency tests use real per-thread connections (in-memory +
+#     StaticPool serializes all threads on one connection and the
+#     Session.get after engine.begin() returns None under contention,
+#     even though the INSERT committed). Byte-identical to the
+#     original pre-parametrization fixture.
+#   * ``postgres`` — a DEDICATED SCRATCH DATABASE per test on the
+#     local PG server (created via ``CREATE DATABASE`` on a
+#     maintenance connection to ``ensemble_dev``, dropped at
+#     teardown). Never writes into ``ensemble_dev`` itself; NEVER
+#     ``ensemble_prod`` (hard session-abort). Schema via
+#     ``SQLModel.metadata.create_all`` — the PG truth path (the
+#     migration runner is SQLite-only by design; PG receives new
+#     tables via create_all, mirroring api-lifespan behavior).
+#
+# Connection settings reuse the ``tests/postgres/conftest.py``
+# convention (``PG_TEST_HOST/PORT/USER/PASSWORD`` env overrides) so
+# CI can retarget without editing the file. The maintenance DB is
+# ``PG_TEST_MAINT_DB`` (default ``ensemble_dev`` — scratch DBs are
+# created from it; it is NEVER written to). Ambient ``POSTGRES_*``
+# vars are deliberately NOT read (env-poison 3-guard convention:
+# hosts carry ``POSTGRES_DB=ensemble_prod`` in the ambient env).
 # ─────────────────────────────────────────────────────────────────────────────
 
+_PG_HOST = os.environ.get("PG_TEST_HOST", "127.0.0.1")
+_PG_PORT = int(os.environ.get("PG_TEST_PORT", "5432"))
+_PG_USER = os.environ.get("PG_TEST_USER", "ensemble")
+_PG_PASSWORD = os.environ.get("PG_TEST_PASSWORD", "ensemble_dev")
+_PG_MAINT_DB = os.environ.get("PG_TEST_MAINT_DB", "ensemble_dev")
+_PG_SCRATCH_PREFIX = "ensemble_promptver_test_"
 
-@pytest.fixture
-def repo_engine() -> Iterator[tuple[Engine, str]]:
+# Hard-abort set — a resolved target in this set means the fixture is
+# pointed at a live database; fail the whole session (fail-closed,
+# env-poison 3-guard convention) instead of writing test rows into it.
+_PG_FORBIDDEN_DBS = frozenset({"ensemble_prod"})
+
+
+def _pg_admin_engine():
+    """Maintenance engine (AUTOCOMMIT) for CREATE/DROP DATABASE.
+
+    Probes connectivity first and distinguishes auth failures from
+    "PG is down" (pattern from ``tests/postgres/conftest.py``) so the
+    skip reason is diagnostic instead of misleading. Returns
+    ``None`` when PG is unreachable — the caller skips loudly.
+    """
+    if _PG_MAINT_DB in _PG_FORBIDDEN_DBS:
+        # Hard session-abort, not a skip: the fixture resolved to a
+        # live database. Never write test rows into it.
+        pytest.exit(
+            f"HARD ABORT: PG scratch fixture resolved maintenance DB "
+            f"{_PG_MAINT_DB!r} — refuse to point prompt-version tests "
+            f"at a live database (env-poison 3-guard convention).",
+            returncode=1,
+        )
+    from sqlalchemy.exc import DBAPIError, OperationalError
+
+    url = (
+        f"postgresql+psycopg://{_PG_USER}:{_PG_PASSWORD}"
+        f"@{_PG_HOST}:{_PG_PORT}/{_PG_MAINT_DB}"
+    )
+    engine = create_engine(url, isolation_level="AUTOCOMMIT", pool_pre_ping=True)
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except OperationalError as exc:
+        engine.dispose()
+        orig = getattr(exc, "orig", exc)
+        sqlstate = getattr(getattr(orig, "diag", None), "sqlstate", None)
+        kind = (
+            "auth failure (check PG_TEST_USER / PG_TEST_PASSWORD)"
+            if sqlstate in {"28000", "28P01"}
+            else "unreachable"
+        )
+        return None, f"PostgreSQL {kind} at {_PG_HOST}:{_PG_PORT}/{_PG_MAINT_DB}: {exc}"
+    except DBAPIError as exc:
+        engine.dispose()
+        return None, f"PostgreSQL DBAPI error at {_PG_HOST}:{_PG_PORT}: {exc}"
+    return engine, None
+
+
+def _postgres_repo_engine() -> Iterator[tuple[Engine, str]]:
+    """Yield a fresh scratch-PostgreSQL engine + scratch DB name.
+
+    Lifecycle: probe maintenance connection → CREATE DATABASE
+    ``ensemble_promptver_test_<8hex>`` → ``SQLModel.metadata
+    .create_all`` (PG truth path) → yield → dispose → terminate
+    stray backends → DROP DATABASE. Skips loudly (CI portability)
+    when PG is unreachable.
+    """
+    from sqlmodel import SQLModel
+
+    from daemon.repositories.prompt_version.models import (
+        PromptAuditEvent,
+        PromptVersion,
+    )
+    # Importing the model modules registers the tables on
+    # SQLModel.metadata BEFORE create_all (tests/postgres/conftest.py
+    # convention) — without this the scratch schema can come up
+    # empty when only part of the metadata was populated.
+    assert PromptVersion is not None and PromptAuditEvent is not None  # noqa: F821
+
+    admin, skip_reason = _pg_admin_engine()
+    if admin is None:
+        pytest.skip(skip_reason)
+
+    scratch_db = f"{_PG_SCRATCH_PREFIX}{uuid.uuid4().hex[:8]}"
+    if scratch_db in _PG_FORBIDDEN_DBS:
+        pytest.exit(
+            f"HARD ABORT: PG scratch fixture resolved scratch DB "
+            f"{scratch_db!r} — refuse to point prompt-version tests "
+            f"at a live database (env-poison 3-guard convention).",
+            returncode=1,
+        )
+
+    engine: Engine | None = None
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
+        scratch_url = (
+            f"postgresql+psycopg://{_PG_USER}:{_PG_PASSWORD}"
+            f"@{_PG_HOST}:{_PG_PORT}/{scratch_db}"
+        )
+        engine = create_engine(scratch_url, pool_pre_ping=True)
+        # Schema: the PG truth path — full-metadata create_all on a
+        # DEDICATED scratch DB (mirrors api-lifespan behavior). The
+        # .sql migration runner is SQLite-only by design; PG
+        # receives brand-new tables via create_all (dual-driver
+        # truth; stored_watches / snapshot precedent).
+        SQLModel.metadata.create_all(engine)
+        yield engine, scratch_db
+    finally:
+        if engine is not None:
+            engine.dispose()
+        try:
+            with admin.connect() as conn:
+                conn.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM "
+                        "pg_stat_activity WHERE datname = :d "
+                        "AND pid <> pg_backend_pid()"
+                    ),
+                    {"d": scratch_db},
+                )
+                conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+        finally:
+            admin.dispose()
+
+
+def _sqlite_repo_engine() -> Iterator[tuple[Engine, str]]:
     """Yield a fresh file-SQLite engine + repo, with WAL configured.
 
     Each test gets its own DB file under ``tempfile.gettempdir()``
@@ -118,6 +277,66 @@ def repo_engine() -> Iterator[tuple[Engine, str]]:
                 os.unlink(db_path + ext)
             except FileNotFoundError:
                 pass
+
+
+@pytest.fixture
+def db_dialect() -> str:
+    """Default dialect for DB-layer tests.
+
+    The SC8 parity tests are parametrized over this name via
+    ``@pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])``,
+    which OVERRIDES this default for those tests. The default keeps
+    anything not explicitly parametrized on SQLite — the historical
+    engine — so a missed parametrize can never silently introduce a
+    PG dependency (and loader/hook tests stay SQLite-only by design:
+    they test loader behavior, not dialect).
+    """
+    return "sqlite"
+
+
+@pytest.fixture
+def repo_engine(db_dialect: str) -> Iterator[tuple[Engine, str]]:
+    """Yield ``(engine, db_identifier)`` for the parametrized dialect."""
+    if db_dialect == "postgres":
+        yield from _postgres_repo_engine()
+    else:
+        yield from _sqlite_repo_engine()
+
+
+@pytest.fixture
+def pg_known_defect(db_dialect: str, request: pytest.FixtureRequest):
+    """Map the PG leg of a test with a known production defect to xfail.
+
+    Uses ``request.applymarker(pytest.mark.xfail(strict=False))`` —
+    NOT a body-level ``pytest.xfail()`` call — so the PG leg still
+    EXECUTES the full production code path (mission requirement: real
+    executed counts, not skips). The marker only remaps the outcome:
+    XFAIL when the defect reproduces, XPASS (reported, non-fatal)
+    once the production fix lands.
+
+    Findings (production fixes OUT of this test-only commission's
+    scope — report-only per the mission):
+
+    * **F-1** — one-selection-pointer invariant does not hold on PG
+      under concurrent ``set_selection``: the repo's plain
+      ``SELECT``+``UPDATE`` pairs inside ``engine.begin()`` rely on
+      SQLite's database-level write serialization; PG READ COMMITTED
+      lets each racer clear-and-set independently (probe 2026-10-13:
+      6 of 8 pointers left set). phaseA-plan.md R3 prescribes
+      ``SELECT … FOR UPDATE`` — not implemented in production.
+    * **F-2** — ``_MAX_INSERT_RETRIES = 8`` can be exhausted under
+      10-way PG contention: on PG the ``SELECT MAX(version)`` +
+      ``INSERT`` racers genuinely overlap (SQLite serializes
+      writers, so the race never fires there); probe 2026-10-13 saw
+      2 of 10 threads exhaust the budget and re-raise IntegrityError.
+    """
+    def _apply(reason: str) -> None:
+        if db_dialect == "postgres":
+            request.applymarker(
+                pytest.mark.xfail(reason=reason, strict=False)
+            )
+
+    return _apply
 
 
 @pytest.fixture
@@ -166,6 +385,12 @@ class TestStateMachine:
             ("draft", "archived"),
         })
 
+    # SC8: the DB-touching tests are parametrized over
+    # [sqlite, postgres] (``test_valid_transitions_exactly_five_pairs``
+    # below is a pure frozenset check — dialect-independent, not
+    # parametrized).
+
+    @pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
     def test_happy_path_draft_to_approved(
         self, repo, internal_actor, http_actor
     ):
@@ -189,6 +414,7 @@ class TestStateMachine:
                 approver_subject="x", approver_auth_method=AUTH_METHOD_SESSION,
             )
 
+    @pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
     def test_rejected_to_draft_is_dropped(
         self, repo, internal_actor, http_actor
     ):
@@ -201,6 +427,7 @@ class TestStateMachine:
                 v.version_id, "rejected", "draft", http_actor,
             )
 
+    @pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
     def test_rejected_to_anything_is_terminal(
         self, repo, internal_actor, http_actor
     ):
@@ -216,6 +443,7 @@ class TestStateMachine:
                     approver_auth_method=AUTH_METHOD_SESSION,
                 )
 
+    @pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
     def test_re_submit_after_reject_is_new_row(
         self, repo, internal_actor, http_actor
     ):
@@ -228,6 +456,7 @@ class TestStateMachine:
             "at max(version)+1 (A1 forensic-identity preservation)"
         )
 
+    @pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
     def test_internal_actor_cannot_approve_or_reject(
         self, repo, internal_actor
     ):
@@ -248,9 +477,27 @@ class TestStateMachine:
 class TestSelectionPointer:
     """F5 / R3 — exactly one is_selected per key under concurrency."""
 
+    # SC8: parametrized over [sqlite, postgres]. NOTE (F-1): the PG
+    # leg of ``test_one_selection_pointer_per_key_enforced`` is a
+    # documented non-strict xfail — see the ``pg_known_defect``
+    # fixture (production fix out of test scope).
+    pytestmark = pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
+
     def test_one_selection_pointer_per_key_enforced(
-        self, repo, internal_actor, http_actor
+        self, repo, internal_actor, http_actor, pg_known_defect
     ):
+        # F-1 (report-only production finding): on PostgreSQL the
+        # one-pointer invariant can be violated by concurrent
+        # set_selection (plain SELECT+UPDATE pairs rely on SQLite
+        # write serialization; PG READ COMMITTED does not
+        # serialize). The PG leg still executes fully; xfail is
+        # non-strict so an XPASS after the production fix is
+        # visible, not fatal.
+        pg_known_defect(
+            "F-1 (production, report-only): concurrent set_selection "
+            "can leave >1 pointer on PG (probe 2026-10-13: 6/8 left "
+            "set); repo lacks the R3-prescribed SELECT ... FOR UPDATE"
+        )
         # Create + approve N versions for the same (agent, artifact).
         n = 8
         approved = []
@@ -335,6 +582,10 @@ class TestSelectionPointer:
 class TestAuditStamping:
     """A3 — audit row stamped inside the same engine.begin() txn."""
 
+    # SC8: the DB-touching audit test is parametrized over
+    # [sqlite, postgres]; the three actor-validation tests below are
+    # pure Python (no engine) and stay unparametrized.
+    @pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
     def test_audit_event_stamped_with_actor_and_method(
         self, repo, internal_actor, http_actor
     ):
@@ -408,6 +659,10 @@ class TestAuditStamping:
 
 class TestPrecedence:
     """F6 — the three named resolution-path tests."""
+
+    # SC8: all four tests hit the repo — parametrized over
+    # [sqlite, postgres].
+    pytestmark = pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
 
     def test_template_file_fallback_when_no_db_rows(
         self, repo, internal_actor
@@ -484,6 +739,10 @@ class TestPrecedence:
 class TestCreateAndSubmit:
     """A5/C4 — create_draft + submit_for_approval atomically."""
 
+    # SC8: all three tests hit the repo — parametrized over
+    # [sqlite, postgres].
+    pytestmark = pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
+
     def test_create_and_submit_full_content(
         self, repo, internal_actor, http_actor
     ):
@@ -529,9 +788,25 @@ class TestCreateAndSubmit:
 class TestInsertRetry:
     """A7/C5 — UNIQUE-constraint INSERT-retry on ``create_draft``."""
 
+    # SC8: parametrized over [sqlite, postgres]. NOTE (F-2): the PG
+    # leg is a documented non-strict xfail — on PG the SELECT MAX +
+    # INSERT racers genuinely overlap (SQLite serializes writers, so
+    # the race never fires there) and _MAX_INSERT_RETRIES = 8 can be
+    # exhausted. See the ``pg_known_defect`` fixture.
+    pytestmark = pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
+
     def test_concurrent_create_draft_yields_distinct_versions(
-        self, repo, internal_actor
+        self, repo, internal_actor, pg_known_defect
     ):
+        # F-2 (report-only production finding): PG leg executes
+        # fully; non-strict xfail so an XPASS after the production
+        # fix (budget raise / advisory-lock serialization) is
+        # visible, not fatal.
+        pg_known_defect(
+            "F-2 (production, report-only): _MAX_INSERT_RETRIES=8 "
+            "exhaustible under 10-way PG contention (probe "
+            "2026-10-13: 2/10 threads re-raised IntegrityError)"
+        )
         n = 10
         results = {}
         errors = {}
@@ -565,6 +840,10 @@ class TestInsertRetry:
 
 class TestGetEffectiveRowsA8:
     """A8 — single SELECT returns selected + latest-approved atomically."""
+
+    # SC8: both tests hit the repo — parametrized over
+    # [sqlite, postgres].
+    pytestmark = pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
 
     def test_get_effective_rows_one_select_no_toctou(
         self, repo, internal_actor, http_actor, repo_engine
@@ -618,6 +897,219 @@ class TestGetEffectiveRowsA8:
         for t in threads: t.join()
         # All readers see the same selected content.
         assert observed == ["concurrent-read"] * 10
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S12 tag normalization (A7) — DB-layer pins, both dialects
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTagNormalizationS12:
+    """S12 / A7 — tag normalization at the DB write boundary.
+
+    Two halves of the S12 contract:
+
+    * ``NULL``/``""`` ``version_tag`` unify to the ``""`` convention
+      at write time (documented in
+      ``daemon/repositories/prompt_version/models.py`` — NULLs are
+      distinct in UNIQUE on BOTH drivers, so the column must never
+      hold NULL or the fence becomes ambiguous);
+    * ``[v2]``-shaped agent identities are stored as the PARSED pair
+      ``(agent_id, version_tag)`` (``registry._parse_agent_dir_name``
+      at every DB-write site) so a tagged sibling's rows never leak
+      into the base agent and vice versa (F9 keying).
+    """
+
+    # SC8: the two DB-touching tests are parametrized over
+    # [sqlite, postgres]; the parser-contract test is pure Python.
+
+    @pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
+    def test_null_and_empty_tag_unify_to_empty(
+        self, repo, internal_actor, repo_engine
+    ):
+        v1 = repo.create_draft("dev", None, "soul", "a", internal_actor)
+        v2 = repo.create_draft("dev", "", "soul", "b", internal_actor)
+        assert v1.version_tag == "" and v2.version_tag == "", (
+            "NULL/'' must normalize to '' at write time (S12)"
+        )
+        # Same key namespace: the version counter continues across
+        # the NULL/'' forms (they are ONE identity, not two).
+        assert v1.version == 1
+        assert v2.version == 2
+
+        # Raw DB check: NO NULL version_tag rows exist (NULLs are
+        # distinct in UNIQUE on both drivers — a NULL row would be
+        # invisible to the UNIQUE fence).
+        from sqlmodel import Session, select, col
+        from daemon.repositories.prompt_version.models import PromptVersion
+        engine, _ = repo_engine
+        with Session(engine) as session:
+            null_rows = session.exec(
+                select(col(PromptVersion.version_id)).where(
+                    col(PromptVersion.agent_id) == "dev",
+                    col(PromptVersion.version_tag).is_(None),
+                )
+            ).all()
+        assert null_rows == [], (
+            "version_tag must never persist as NULL (S12 normalization)"
+        )
+
+    @pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
+    def test_tagged_v2_identity_is_disjoint_from_base(
+        self, repo, internal_actor, http_actor
+    ):
+        # ``developer[v2]`` parses to (developer, v2) — the DB-write
+        # contract; the tagged key's version sequence and effective
+        # reads are fully disjoint from the base key (F9).
+        base = repo.create_draft(
+            "developer", "", "soul", "base v1", internal_actor
+        )
+        tagged = repo.create_draft(
+            "developer", "v2", "soul", "tagged v1", internal_actor
+        )
+        assert base.version == 1 and tagged.version == 1, (
+            "tagged and base keys hold INDEPENDENT version sequences"
+        )
+
+        # Approve + select ONLY the tagged row; the base key must
+        # not see it.
+        repo.submit_for_approval(tagged.version_id, internal_actor)
+        repo.approve(tagged.version_id, http_actor)
+        assert repo.get_effective("developer", "", "soul") is None, (
+            "tagged override must never leak into the base key (F9)"
+        )
+        assert repo.get_effective("developer", "v2", "soul") == "tagged v1"
+
+    def test_registry_tag_parser_contract(self):
+        # The parser DB-write sites rely on (A7 S12 clause) —
+        # pinned here so a parser regression cannot silently
+        # misfile tagged rows. Pure Python; not dialect-parametrized.
+        from daemon.registry import _parse_agent_dir_name
+
+        assert _parse_agent_dir_name("developer") == ("developer", None)
+        assert _parse_agent_dir_name("developer[v2]") == ("developer", "v2")
+        assert _parse_agent_dir_name("developer[test_version]") == (
+            "developer",
+            "test_version",
+        )
+        # Inner brackets / path chars do NOT match — treated as a
+        # plain agent id (never a tag).
+        assert _parse_agent_dir_name("dev[[v2]]") == ("dev[[v2]]", None)
+        assert _parse_agent_dir_name("dev[../etc]") == ("dev[../etc]", None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SC9 PG leg — fresh-PG create_all schema truth + repo round-trip
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPGSchemaSC9:
+    """SC9 PostgreSQL leg — the fresh-PG proof.
+
+    Asserts, against the dedicated scratch PG database the fixture
+    creates (fresh ``create_all``, never ``ensemble_dev`` itself):
+
+    * both prompt-version tables exist (information_schema);
+    * the A7/C5/G-4e UNIQUE fence exists with its exact name and
+      ordered column list (pg_constraint — ``uq_prompt_versions_
+      agent_tag_artifact_version`` on ``(agent_id, version_tag,
+      artifact, version)``);
+    * every named index from the parity contract exists
+      (pg_indexes — the same set
+      ``tests/migration/test_prompt_versions_index_parity.py``
+      pins for the models + migration sides);
+    * a fresh ``create_all`` → repository round-trip works
+      (create_draft → submit → approve → set_selection →
+      get_effective).
+
+    NOTE (dual-driver truth, documented): the ``.sql`` migration
+    runner is SQLite-ONLY by design (``daemon/migrations`` runner;
+    PG truth = ``SQLModel.metadata.create_all`` — the
+    stored_watches / snapshot precedent). There is intentionally NO
+    ``.sql`` execution leg here; the fresh-PG proof IS this
+    create_all-based schema inspection.
+    """
+
+    @pytest.mark.parametrize("db_dialect", ["postgres"])
+    def test_fresh_pg_create_all_schema_and_round_trip(
+        self, repo, repo_engine, internal_actor, http_actor
+    ):
+        from sqlalchemy import inspect
+
+        engine, scratch_db = repo_engine
+        assert scratch_db.startswith("ensemble_promptver_test_"), (
+            f"expected the dedicated scratch DB, got {scratch_db!r}"
+        )
+        assert scratch_db != "ensemble_prod"
+
+        insp = inspect(engine)
+        tables = set(insp.get_table_names())
+        assert {"prompt_versions", "prompt_audit_events"} <= tables, (
+            f"fresh-PG create_all must create both tables; saw {tables}"
+        )
+
+        # — UNIQUE fence (A7/C5/G-4e), exact name + ordered columns —
+        with engine.connect() as conn:
+            uq_rows = list(conn.execute(text(
+                "SELECT a.attname "
+                "FROM pg_constraint c "
+                "CROSS JOIN LATERAL unnest(c.conkey) "
+                "  WITH ORDINALITY AS k(attnum, ord) "
+                "JOIN pg_attribute a "
+                "  ON a.attrelid = c.conrelid AND a.attnum = k.attnum "
+                "WHERE c.conname = :name AND c.contype = 'u' "
+                "ORDER BY k.ord"
+            ), {"name": "uq_prompt_versions_agent_tag_artifact_version"}))
+        assert uq_rows, (
+            "UNIQUE constraint uq_prompt_versions_agent_tag_artifact_version "
+            "must exist on the fresh PG schema (A7/C5/G-4e)"
+        )
+        assert tuple(r[0] for r in uq_rows) == (
+            "agent_id", "version_tag", "artifact", "version",
+        ), f"UNIQUE fence columns drifted: {[r[0] for r in uq_rows]}"
+
+        # — named indexes via pg_indexes (parity-contract sets,
+        #    mirrored from
+        #    tests/migration/test_prompt_versions_index_parity.py) —
+        with engine.connect() as conn:
+            pv_indexes = {
+                r[0] for r in conn.execute(text(
+                    "SELECT indexname FROM pg_indexes "
+                    "WHERE tablename = 'prompt_versions'"
+                ))
+            }
+            pa_indexes = {
+                r[0] for r in conn.execute(text(
+                    "SELECT indexname FROM pg_indexes "
+                    "WHERE tablename = 'prompt_audit_events'"
+                ))
+            }
+        assert {
+            "idx_prompt_versions_key",
+            "idx_prompt_versions_key_state",
+            "idx_prompt_versions_state_updated",
+            # The UNIQUE fence's backing index carries the
+            # constraint name on PG.
+            "uq_prompt_versions_agent_tag_artifact_version",
+        } <= pv_indexes, f"prompt_versions indexes drifted: {sorted(pv_indexes)}"
+        assert {
+            "idx_prompt_audit_events_key_created",
+            "idx_prompt_audit_events_version",
+            "idx_prompt_audit_events_type",
+        } <= pa_indexes, (
+            f"prompt_audit_events indexes drifted: {sorted(pa_indexes)}"
+        )
+
+        # — fresh create_all → repo round-trip —
+        v = repo.create_draft("dev", "", "soul", "SC9 PG round-trip", internal_actor)
+        assert v.state == "draft" and v.version == 1
+        repo.submit_for_approval(v.version_id, internal_actor)
+        repo.approve(v.version_id, http_actor)
+        repo.set_selection("dev", "", "soul", v.version_id, http_actor)
+        assert repo.get_effective("dev", "", "soul") == "SC9 PG round-trip", (
+            "fresh-PG create_all → repo round-trip must resolve the "
+            "selected content (SC9)"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
