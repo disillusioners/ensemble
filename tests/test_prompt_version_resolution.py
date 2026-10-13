@@ -1167,9 +1167,9 @@ class TestLoaderHookFailOpenA6C7:
                 prompt, _tokens = load_and_cache_prompt(
                     "agent", agent_dir, PromptCache(),
                 )
-        # Failure counter bumped at least once — both the fingerprint
-        # helper (cache-hit check) and resolve_prompts_from_db
-        # (cache-miss reload) bump on any hook exception (A6/C7).
+        # Failure counter bumped at least once — N3 folded the cache-miss
+        # path's two ``get_effective_rows`` calls into one, so a single
+        # exception path bumps once per ``load_and_cache_prompt`` call.
         bumped = get_prompt_version_hook_failures() - before_failures
         assert bumped >= 1, (
             "FAIL-OPEN hook MUST bump the failure counter on every "
@@ -1487,8 +1487,9 @@ class TestLoaderFingerprintC1:
         with _LoaderHookFence(repo):
             cache = PromptCache()
 
-            # First call: no DB rows → fingerprint = "" (one-SELECT
-            # returns zero rows; sha256 of empty joined string).
+            # First call: no DB rows → fingerprint = "" (N4 unified
+            # sentinel — empty rows == missing repo == ""; no
+            # sha256("") boot-moment cache bust).
             prompt1, _ = load_and_cache_prompt("dev", agent_dir, cache)
             assert "FILE-SOUL" in prompt1
 

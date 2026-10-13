@@ -1,15 +1,20 @@
 """Markdown loader for agent prompts."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .rag.config import is_rag_enabled
 from .registry import ToolFilter
+
+if TYPE_CHECKING:  # pragma: no cover — runtime keeps zero DB imports (A6/C7)
+    from .repositories.prompt_version.repository import PromptVersionRepository
 
 logger = logging.getLogger(__name__)
 
@@ -84,18 +89,30 @@ _HOOK_ARTIFACT_KEYS: frozenset[str] = frozenset({
 })
 
 
-def _compute_db_versions_fingerprint(rows: list[Any]) -> str:
+def _compute_db_versions_fingerprint(rows: list[Any] | None) -> str:
     """Compute the synthetic ``db_versions_fingerprint`` from one
     ``get_effective_rows`` result.
 
     The fingerprint is the sha256 of the sorted, joined
     ``(artifact, selected_version_id, latest_approved_version_id)``
     triples. Stable across calls that return the same DB state;
-    changes on every transition (approve / reject / select / clear /
-    create new draft) — so the cache-hit equality check busts the
-    cache on any DB change. Pure function over the rows; does NOT
-    hit the DB.
+    it changes ONLY when the effective-content identity changes
+    — i.e. when a selected or latest-approved ``(artifact,
+    version_id)`` pair changes (approve a new version, change a
+    selection, clear a selection). Drafts / pending rows / non-final
+    state do NOT change the fingerprint (they have no selected /
+    approved IDs until they reach a terminal state). Empty / None
+    input yields the ``""`` sentinel — same as a missing repo —
+    so the cache-hit check stays symmetric.
+
+    Pure function over the rows; does NOT hit the DB.
     """
+    if not rows:
+        # N4 sentinel unification: empty rows == no DB rows == no
+        # fingerprint available. Keep the "" convention so a missing
+        # repo and a zero-rows repo produce the SAME fingerprint
+        # (no benign boot-moment cache bust).
+        return ""
     triples = []
     for r in rows:
         triples.append((
@@ -108,11 +125,39 @@ def _compute_db_versions_fingerprint(rows: list[Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _fetch_effective_rows_safe(
+    repo: "PromptVersionRepository", agent_id: str, version_tag: str,
+) -> list[Any] | None:
+    """Fetch effective rows with A6/C7 FAIL-OPEN semantics (N3 helper).
+
+    Wraps ``repo.get_effective_rows(agent_id, version_tag)`` so the
+    loader can call it ONCE per cache-miss and feed both the
+    fingerprint computation and the content replacement — closes
+    the two-SELECT waste (single-SELECT powers both, A8).
+
+    Returns:
+        The rows list on success (possibly empty — see N4). Returns
+        ``None`` on any hook exception (A6/C7 FAIL-OPEN): WARN
+        logged, failure counter bumped, caller falls through to
+        file-only content. NEVER re-raises.
+    """
+    try:
+        return repo.get_effective_rows(agent_id, version_tag)
+    except Exception as exc:  # noqa: BLE001 — A6/C7 FAIL-OPEN
+        logger.warning(
+            "prompt-version resolution unavailable, serving template: %s",
+            exc,
+        )
+        _bump_prompt_version_hook_failures()
+        return None
+
+
 def resolve_prompts_from_db(
     prompts: dict[str, str],
     agent_id: str,
     version_tag: str,
-    repo: Any,
+    repo: "PromptVersionRepository",
+    rows: list[Any] | None = None,
 ) -> dict[str, str]:
     """Replace prompts[artifact] with DB-effective content (A4 / T6).
 
@@ -137,6 +182,9 @@ def resolve_prompts_from_db(
     ``repo.get_effective_rows(agent_id, version_tag)`` powers the
     content replacement for ALL artifacts at once — no per-artifact
     queries. Closes the fingerprint×content TOCTOU window (C2).
+    The internal ``load_and_cache_prompt`` caller (N3) passes a
+    pre-fetched ``rows`` list so the fingerprint computation AND
+    this function share the SAME single SELECT.
 
     **A6/C7 FAIL-OPEN posture**: this function is the ONLY new
     hot-path DB dependency introduced by Phase A. Any exception
@@ -147,6 +195,18 @@ def resolve_prompts_from_db(
     timeout). The cache-hit check below also catches hook exceptions
     via its own try/except — this function is the LAST line of
     defense.
+
+    **T10 — F1 OVERRIDES-ONLY seeding (Phase B).** The template file
+    (``agents/<name>/<artifact>.md``) stays the LIVE FALLBACK — there
+    is NO boot-time full-seed and NO hash-guarded lazy-seed. The
+    first ``create_draft`` for a given ``(agent_id, version_tag,
+    artifact)`` key inserts ``version = 1`` (monotonic per the
+    ``Skill.generation`` precedent); the resolver above returns
+    ``selected_version.content`` → ``latest_approved.content`` →
+    ``None`` (and only then reads the file). Rejected alternatives
+    (full-seed-at-boot = boot blast radius on every template edit;
+    hash-guarded lazy-seed = more state, deferred) are documented
+    in ``phaseB-plan.md`` OQ2 for morning review.
 
     Args:
         prompts: The current prompts dict (output of
@@ -160,21 +220,22 @@ def resolve_prompts_from_db(
         repo: The sync :class:`PromptVersionRepository` (or a duck
             typed equivalent exposing ``get_effective_rows`` /
             ``get_effective``).
+        rows: Pre-fetched rows from a single ``get_effective_rows``
+            call (N3 — passed by the internal ``load_and_cache_prompt``
+            caller so the fingerprint and the resolution share ONE
+            SELECT). When ``None``, this function fetches its own
+            rows (backward-compat for external callers + tests).
 
     Returns:
         A new dict with DB-resolved content replacing file content
         for overridden artifacts. Falls through to the original
         prompts on any hook error.
     """
-    try:
-        rows = repo.get_effective_rows(agent_id, version_tag)
-    except Exception as exc:  # noqa: BLE001 — A6/C7 FAIL-OPEN
-        logger.warning(
-            "prompt-version resolution unavailable, serving template: %s",
-            exc,
-        )
-        _bump_prompt_version_hook_failures()
-        return prompts
+    if rows is None:
+        rows = _fetch_effective_rows_safe(repo, agent_id, version_tag)
+        if rows is None:
+            # A6/C7 FAIL-OPEN — already warned + counter bumped.
+            return prompts
 
     if not rows:
         # No DB rows → no-op; preserve pre-Phase-A contract.
@@ -195,30 +256,6 @@ def resolve_prompts_from_db(
             continue
         out[artifact] = resolved
     return out
-
-
-def _compute_fingerprint_via_repo(repo: Any, agent_id: str, version_tag: str) -> str:
-    """Compute the synthetic ``db_versions_fingerprint`` via the repo.
-
-    Standalone helper for the cache-hit equality check (C1) — does
-    NOT mutate prompts. Returns an empty string on any hook error
-    so the cache-hit check passes through (file-mtime check is
-    already the primary cache-bust mechanism).
-
-    Fail-open: any exception is caught and returns ``""``. The
-    caller treats ``""`` as "no fingerprint available; fall through
-    to file-mtime comparison only."
-    """
-    try:
-        rows = repo.get_effective_rows(agent_id, version_tag)
-    except Exception as exc:  # noqa: BLE001 — A6/C7 FAIL-OPEN
-        logger.warning(
-            "prompt-version fingerprint unavailable, serving template: %s",
-            exc,
-        )
-        _bump_prompt_version_hook_failures()
-        return ""
-    return _compute_db_versions_fingerprint(rows)
 
 
 # Path to shared files (injected into all agents)
@@ -1112,21 +1149,29 @@ def load_and_cache_prompt(
                 except (PermissionError, OSError):
                     pass  # Skip broken symlinks and permission issues
     
-    # Phase A T7 (C1): compute the synthetic ``db_versions_fingerprint``
-    # from the prompt-version DB so the cache self-heals on any DB
-    # change (approve / reject / select / clear). Folded into
-    # ``current_mtimes`` so the equality check at :915 busts the cache
-    # whenever the fingerprint changes — across every MCP-variant key
-    # that the single-key ``invalidate`` cannot reach. FAIL-OPEN: any
-    # hook exception → fingerprint = "" + WARN log + counter bump; the
-    # mtime equality check below still works.
+    # Phase A T7 (C1) + N3: compute the synthetic
+    # ``db_versions_fingerprint`` from the prompt-version DB so the
+    # cache self-heals on any DB change (approve / select / clear).
+    # Folded into ``current_mtimes`` so the equality check at the
+    # cache-hit step busts the cache whenever the fingerprint changes
+    # — across every MCP-variant key that the single-key
+    # ``invalidate`` cannot reach. FAIL-OPEN: any hook exception →
+    # fingerprint = "" + WARN log + counter bump; the mtime equality
+    # check below still works. N3 folds the cache-miss path's two
+    # ``get_effective_rows`` calls into ONE — fetch once here, feed
+    # both the fingerprint and the content replacement. N4 unifies
+    # the sentinel so missing repo and zero-rows both produce ``""``
+    # (no benign boot-moment cache bust).
     _repo = _get_prompt_version_repo()
+    _db_rows: list[Any] | None
     if _repo is not None:
-        _db_fp = _compute_fingerprint_via_repo(
+        _db_rows = _fetch_effective_rows_safe(
             _repo, agent_id, version_tag or "",
         )
     else:
-        _db_fp = ""
+        # N4: missing repo → no rows → fingerprint = "".
+        _db_rows = None
+    _db_fp = _compute_db_versions_fingerprint(_db_rows)
     current_mtimes["__prompt_versions_fingerprint__"] = _db_fp
 
     # Check cache (include mcp_tool_names and version_tag in cache key)
@@ -1151,10 +1196,11 @@ def load_and_cache_prompt(
     # DB-resolved content. The hook is FAIL-OPEN (A6/C7): any DB
     # exception returns the file-loaded prompts unchanged. The repo
     # is obtained lazily here so the loader has zero DB imports at
-    # module load time.
+    # module load time. N3: pass the pre-fetched ``_db_rows`` so the
+    # fingerprint and the content share ONE SELECT (A8).
     if _repo is not None:
         prompts = resolve_prompts_from_db(
-            prompts, agent_id, version_tag or "", _repo,
+            prompts, agent_id, version_tag or "", _repo, rows=_db_rows,
         )
 
     skills = load_agent_skills(agent_dir, meta)
