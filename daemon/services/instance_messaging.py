@@ -1058,9 +1058,15 @@ class InstanceMessagingService:
             )
             if not meta:
                 return 0
-            # Get cached token count from prompt cache using agent_id + mcp_tool_names
+            # Get cached token count from prompt cache using agent_id + mcp_tool_names.
+            # Phase A T7: thread ``meta.agent_tag`` as version_tag so the
+            # per-tag key (``developer[v2]``) is read — today's drop is a
+            # known bug; the fix closes it (F9 / decisions.md R10). The
+            # cache.get signature accepts ``None`` for backward compat
+            # with D15 callers that haven't been migrated yet.
             mcp_tool_names = meta.instance_metadata.get("mcp_tool_names")
-            cached = self._prompt_cache.get(meta.agent_id, mcp_tool_names)
+            version_tag = getattr(meta, "agent_tag", None)
+            cached = self._prompt_cache.get(meta.agent_id, mcp_tool_names, version_tag=version_tag)
             if cached is not None:
                 _, token_count = cached
                 return token_count

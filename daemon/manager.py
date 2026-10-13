@@ -24,6 +24,11 @@ from .config import Config
 from .ensemble_config import EnsembleConfig
 from .graph import build_instance_graph
 from .loader import PromptCache, load_and_cache_prompt  # re-exported: instance_lifecycle does `from ..manager import load_and_cache_prompt` and tests patch `daemon.manager.load_and_cache_prompt`
+from .loader import (  # Phase A T6 / T7 — re-exported for tests + the A6/C7 failure-counter observability surface
+    resolve_prompts_from_db,
+    set_prompt_version_repo,
+    get_prompt_version_hook_failures,
+)  # noqa: F401
 from .utils import parse_think_tags, serialize_message, find_near_instance, DEFAULT_FUZZY_MATCH_DISTANCE  # noqa: F401  # re-exported for backward compat with tests/tools
 from .persistence import (
     get_instance_messages,
@@ -1197,6 +1202,15 @@ class InstanceManager:
         self._prompt_version_service = PromptVersionService(
             repo=self._prompt_version_repo
         )
+        # Phase A T6 / T7: register the repo with the loader so the
+        # ``load_and_cache_prompt`` hook can lazily look it up. The
+        # loader MUST NOT import the repository class at module load
+        # (zero-DB-imports invariant — A6/C7); the manager is the
+        # sole writer to this module-level reference. Idempotent; the
+        # loader's setter overwrites on each manager re-init (e.g. in
+        # tests).
+        from . import loader as _loader_module
+        _loader_module.set_prompt_version_repo(self._prompt_version_repo)
 
         # NEW: Session repository for session management
         # Must be created before SourceRegistry for scheduler session mode

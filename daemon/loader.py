@@ -1,5 +1,6 @@
 """Markdown loader for agent prompts."""
 
+import hashlib
 import json
 import logging
 import re
@@ -11,6 +12,213 @@ from .rag.config import is_rag_enabled
 from .registry import ToolFilter
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Prompt-version DB hook (Phase A T6 / T7 / T8)
+# ---------------------------------------------------------------------------
+# Module-level singleton reference to the prompt-version repository. Set
+# by :class:`daemon.manager.InstanceManager` at init time (the manager
+# already owns the repo via ``create_prompt_version_repository`` at
+# manager.py:1171-1173). The loader MUST NOT import the repository class
+# at module load (it has zero DB imports today; A6/C7 keeps that invariant)
+# — the value is read lazily inside ``_get_prompt_version_repo`` on every
+# cache check. ``None`` means "DB layer unavailable" (test fixtures,
+# daemon pre-init, fresh-boot race) — the hook is a no-op in that case
+# (FAIL-OPEN).
+_PROMPT_VERSION_REPO: Any = None
+
+# Module-level failure counter (A6/C7) — incremented on every hook
+# exception so an operator can detect "DB layer keeps failing" without
+# scraping log lines. Reset on daemon restart.
+_PROMPT_VERSION_HOOK_FAILURES: int = 0
+
+
+def _get_prompt_version_repo() -> Any:
+    """Return the prompt-version repository (set at InstanceManager init).
+
+    Returns ``None`` when the manager has not yet initialized the repo
+    (early-boot race, test fixture without a manager, etc.). Callers
+    treat ``None`` as "DB layer unavailable" and fall back to file-only
+    content (FAIL-OPEN — A6/C7).
+    """
+    return _PROMPT_VERSION_REPO
+
+
+def set_prompt_version_repo(repo: Any) -> None:
+    """Register the prompt-version repo at InstanceManager init.
+
+    Idempotent; safe to call more than once (e.g. on manager re-init
+    in tests). The manager is the single writer; the loader only reads
+    via :func:`_get_prompt_version_repo`.
+    """
+    global _PROMPT_VERSION_REPO
+    _PROMPT_VERSION_REPO = repo
+
+
+def get_prompt_version_hook_failures() -> int:
+    """Return the cumulative hook failure counter (A6/C7)."""
+    return _PROMPT_VERSION_HOOK_FAILURES
+
+
+def _bump_prompt_version_hook_failures() -> None:
+    """Increment the hook failure counter (A6/C7)."""
+    global _PROMPT_VERSION_HOOK_FAILURES
+    _PROMPT_VERSION_HOOK_FAILURES += 1
+
+
+# The conservative artifact set the hook replaces. Mirrors the F2
+# set in ``daemon.repositories.prompt_version.models.PROMPT_ARTIFACTS``
+# (soul / rule / workflow / tools_note / tools / skill). memory.md /
+# user.md / growth.md are CARVED OUT (decisions.md D-ARTIFACT-DISPOSITION
+# — R7/R11) and never reach the DB layer. Keys in the returned prompts
+# dict are filenames WITHOUT the ``.md`` extension (matches the loader's
+# :func:`load_agent_prompts` convention).
+_HOOK_ARTIFACT_KEYS: frozenset[str] = frozenset({
+    "soul",
+    "rule",
+    "workflow",
+    "tools_note",
+    "tools",
+    "skill",
+})
+
+
+def _compute_db_versions_fingerprint(rows: list[Any]) -> str:
+    """Compute the synthetic ``db_versions_fingerprint`` from one
+    ``get_effective_rows`` result.
+
+    The fingerprint is the sha256 of the sorted, joined
+    ``(artifact, selected_version_id, latest_approved_version_id)``
+    triples. Stable across calls that return the same DB state;
+    changes on every transition (approve / reject / select / clear /
+    create new draft) — so the cache-hit equality check busts the
+    cache on any DB change. Pure function over the rows; does NOT
+    hit the DB.
+    """
+    triples = []
+    for r in rows:
+        triples.append((
+            r.artifact,
+            r.selected_version_id or "",
+            r.latest_approved_version_id or "",
+        ))
+    triples.sort()
+    payload = "|".join(f"{a}:{s}:{l}" for a, s, l in triples)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def resolve_prompts_from_db(
+    prompts: dict[str, str],
+    agent_id: str,
+    version_tag: str,
+    repo: Any,
+) -> dict[str, str]:
+    """Replace prompts[artifact] with DB-effective content (A4 / T6).
+
+    Single source of truth for the Phase A loader hook. Takes the
+    **SYNC repository** (NOT the async service facade — A4/C6/G-4b
+    pins this). All 4 call sites of ``load_and_cache_prompt``
+    (``instance_lifecycle.py:2098`` spawn, ``:4561`` restore,
+    ``persistence.py:1064`` and ``:1141`` reconstruction) are sync;
+    routing through the ``asyncio.to_thread`` facade would deadlock
+    the event loop or force a mid-build refactor.
+
+    Precedence (F6): ``selected_version.content`` >
+    ``latest_approved.content`` > ``None``. When the DB returns no
+    content for an artifact, the file's content is preserved (no
+    key deletion — just no replacement).
+
+    Conservative artifact set: ``{soul, rule, workflow, tools_note,
+    tools, skill}`` (``memory.md`` / ``user.md`` / ``growth.md`` are
+    CARVED OUT — disposition fork R7/R11).
+
+    **A8 single-SELECT guarantee**: ONE call to
+    ``repo.get_effective_rows(agent_id, version_tag)`` powers the
+    content replacement for ALL artifacts at once — no per-artifact
+    queries. Closes the fingerprint×content TOCTOU window (C2).
+
+    **A6/C7 FAIL-OPEN posture**: this function is the ONLY new
+    hot-path DB dependency introduced by Phase A. Any exception
+    (DB unreachable, schema drift, repo misconfigured) → log a WARN
+    with the exact message ``prompt-version resolution unavailable,
+    serving template`` + increment the failure counter + return the
+    original prompts UNMODIFIED. NO retries (rely on pool checkout
+    timeout). The cache-hit check below also catches hook exceptions
+    via its own try/except — this function is the LAST line of
+    defense.
+
+    Args:
+        prompts: The current prompts dict (output of
+            ``load_agent_prompts(agent_dir)``). NOT mutated in place;
+            a shallow copy is returned so the caller's reference is
+            preserved.
+        agent_id: Resolved agent identity (the registry base name,
+            e.g. ``"developer"`` — NOT ``"developer[v2]"``).
+        version_tag: Version tag (``""`` for base). Tag normalization
+            (NULL/empty → ``""``) is handled by the repo.
+        repo: The sync :class:`PromptVersionRepository` (or a duck
+            typed equivalent exposing ``get_effective_rows`` /
+            ``get_effective``).
+
+    Returns:
+        A new dict with DB-resolved content replacing file content
+        for overridden artifacts. Falls through to the original
+        prompts on any hook error.
+    """
+    try:
+        rows = repo.get_effective_rows(agent_id, version_tag)
+    except Exception as exc:  # noqa: BLE001 — A6/C7 FAIL-OPEN
+        logger.warning(
+            "prompt-version resolution unavailable, serving template: %s",
+            exc,
+        )
+        _bump_prompt_version_hook_failures()
+        return prompts
+
+    if not rows:
+        # No DB rows → no-op; preserve pre-Phase-A contract.
+        return prompts
+
+    out = dict(prompts)
+    for row in rows:
+        artifact = row.artifact
+        if artifact not in _HOOK_ARTIFACT_KEYS:
+            # Carved-out artifact (memory.md / user.md / growth.md) or
+            # an unknown key — leave the file content alone.
+            continue
+        # F6: selected > latest_approved > None.
+        resolved = row.selected_content or row.latest_approved_content
+        if resolved is None:
+            # Drafts / pending rows that never got approved → no DB
+            # content for this artifact; leave the file alone.
+            continue
+        out[artifact] = resolved
+    return out
+
+
+def _compute_fingerprint_via_repo(repo: Any, agent_id: str, version_tag: str) -> str:
+    """Compute the synthetic ``db_versions_fingerprint`` via the repo.
+
+    Standalone helper for the cache-hit equality check (C1) — does
+    NOT mutate prompts. Returns an empty string on any hook error
+    so the cache-hit check passes through (file-mtime check is
+    already the primary cache-bust mechanism).
+
+    Fail-open: any exception is caught and returns ``""``. The
+    caller treats ``""`` as "no fingerprint available; fall through
+    to file-mtime comparison only."
+    """
+    try:
+        rows = repo.get_effective_rows(agent_id, version_tag)
+    except Exception as exc:  # noqa: BLE001 — A6/C7 FAIL-OPEN
+        logger.warning(
+            "prompt-version fingerprint unavailable, serving template: %s",
+            exc,
+        )
+        _bump_prompt_version_hook_failures()
+        return ""
+    return _compute_db_versions_fingerprint(rows)
 
 
 # Path to shared files (injected into all agents)
@@ -904,6 +1112,23 @@ def load_and_cache_prompt(
                 except (PermissionError, OSError):
                     pass  # Skip broken symlinks and permission issues
     
+    # Phase A T7 (C1): compute the synthetic ``db_versions_fingerprint``
+    # from the prompt-version DB so the cache self-heals on any DB
+    # change (approve / reject / select / clear). Folded into
+    # ``current_mtimes`` so the equality check at :915 busts the cache
+    # whenever the fingerprint changes — across every MCP-variant key
+    # that the single-key ``invalidate`` cannot reach. FAIL-OPEN: any
+    # hook exception → fingerprint = "" + WARN log + counter bump; the
+    # mtime equality check below still works.
+    _repo = _get_prompt_version_repo()
+    if _repo is not None:
+        _db_fp = _compute_fingerprint_via_repo(
+            _repo, agent_id, version_tag or "",
+        )
+    else:
+        _db_fp = ""
+    current_mtimes["__prompt_versions_fingerprint__"] = _db_fp
+
     # Check cache (include mcp_tool_names and version_tag in cache key)
     cached = cache.get(agent_id, mcp_tool_names, version_tag)
     if cached is not None:
@@ -911,13 +1136,27 @@ def load_and_cache_prompt(
         cache_key = cache._make_key(agent_id, mcp_tool_names, version_tag)
         stored_mtimes = cache._cache.get(cache_key, (None, None, {}))[2]
 
-        # Compare mtimes
+        # Compare mtimes (incl. the synthetic db_versions_fingerprint —
+        # Phase A T7 / C1 mechanism: cache self-heals on any DB change)
         if stored_mtimes == current_mtimes:
             logger.debug(f"Prompt cache hit for {agent_id} (mcp_tools={len(mcp_tool_names) if mcp_tool_names else 0}, version_tag={version_tag})")
             return cached
 
     # Cache miss or files changed - reload
     prompts = load_agent_prompts(agent_dir)
+
+    # Phase A T6 / T7 / T8 — resolution hook. Inserted between the
+    # file-reload (:920 above) and ``compose_system_prompt`` (:926
+    # below) so spawn, restore, and reconstruction all see the same
+    # DB-resolved content. The hook is FAIL-OPEN (A6/C7): any DB
+    # exception returns the file-loaded prompts unchanged. The repo
+    # is obtained lazily here so the loader has zero DB imports at
+    # module load time.
+    if _repo is not None:
+        prompts = resolve_prompts_from_db(
+            prompts, agent_id, version_tag or "", _repo,
+        )
+
     skills = load_agent_skills(agent_dir, meta)
     dynamic_tools = load_tools_doc_for_agent(agent_id, mcp_tool_names, version_tag)
     project_experience = load_project_experience()
@@ -926,7 +1165,10 @@ def load_and_cache_prompt(
     system_prompt = compose_system_prompt(prompts, skills, dynamic_tools, project_experience, recent_memories, shared_knowledge)
     tokens = estimate_tokens(system_prompt)
 
-    # Update cache (include mcp_tool_names and version_tag in cache key)
+    # Update cache (include mcp_tool_names and version_tag in cache key).
+    # The mtime snapshot already carries the synthetic
+    # db_versions_fingerprint (Phase A T7 / C1) — see the
+    # current_mtimes build above.
     cache.set(agent_id, system_prompt, tokens, current_mtimes, mcp_tool_names, version_tag)
 
     return (system_prompt, tokens)

@@ -382,9 +382,14 @@ Returns:
         try:
             # Write new content
             file_path.write_text(content, encoding="utf-8")
-            
-            # Invalidate prompt cache so changes take effect immediately
-            manager.prompt_cache.invalidate(agent_name)
+
+            # Phase A T7: thread the resolved version_tag so the cache
+            # bust reaches the per-tag key (``developer[v2]``). Today
+            # the call drops the tag (base-key only) — known bug; the
+            # fix closes it (F9 / decisions.md R10).
+            from ..registry import _parse_agent_dir_name
+            _base_id, _resolved_tag = _parse_agent_dir_name(agent_name)
+            manager.prompt_cache.invalidate(agent_name, version_tag=_resolved_tag)
             
             return {
                 "success": True,

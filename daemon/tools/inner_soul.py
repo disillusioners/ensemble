@@ -650,7 +650,10 @@ def create_inner_soul_tool(
                 if "REJECT" in targets:
                     return _format_project_rejection(actual_request, classification)
 
-                # Execute updates
+                # Execute updates. Phase A T7: thread version_tag from
+                # the ``create_inner_soul_tool`` closure so the post-write
+                # ``manager.prompt_cache.invalidate`` busts the per-tag
+                # key (F9 / decisions.md R10).
                 results = []
                 for t in targets:
                     result = _execute_update(
@@ -661,7 +664,8 @@ def create_inner_soul_tool(
                         intent=intent,
                         rules=growth_rules,
                         manager=manager,
-                        classification=classification
+                        classification=classification,
+                        version_tag=version_tag,
                     )
                     results.append(result)
 
@@ -711,7 +715,8 @@ def create_inner_soul_tool(
                         all_results.append({"part": part, "rejected": True, "response": rejection_msg})
                         continue
 
-                    # Execute updates for this part
+                    # Execute updates for this part. Phase A T7: thread version_tag
+                    # from the closure (F9 / R10).
                     results = []
                     for t in targets:
                         result = _execute_update(
@@ -722,7 +727,8 @@ def create_inner_soul_tool(
                             intent=intent,
                             rules=growth_rules,
                             manager=manager,
-                            classification=classification
+                            classification=classification,
+                            version_tag=version_tag,
                         )
                         results.append(result)
                     
@@ -1034,25 +1040,32 @@ def _execute_update(
     intent: str | None,
     rules: dict,
     manager: "InstanceManager",
-    classification: dict
+    classification: dict,
+    version_tag: str | None = None,
 ) -> dict:
-    """Execute an update to a specific target."""
-    
+    """Execute an update to a specific target.
+
+    Phase A T7: ``version_tag`` threaded so the post-write
+    ``manager.prompt_cache.invalidate(agent_id, ...)`` busts the
+    per-tag key (``developer[v2]``) — closes the base-key-only bug
+    (F9 / decisions.md R10).
+    """
+
     if target == "memories":
-        return _update_memories(agent_id, agent_path, request, classification, manager)
+        return _update_memories(agent_id, agent_path, request, classification, manager, version_tag=version_tag)
     elif target == "memory":
-        return _update_memory_md(agent_id, agent_path, request, rules, manager)
+        return _update_memory_md(agent_id, agent_path, request, rules, manager, version_tag=version_tag)
     elif target == "soul":
-        return _update_soul(agent_id, agent_path, request, rules, manager)
+        return _update_soul(agent_id, agent_path, request, rules, manager, version_tag=version_tag)
     elif target == "user":
-        return _update_user(agent_id, agent_path, request, manager)
+        return _update_user(agent_id, agent_path, request, manager, version_tag=version_tag)
     elif target == "workflow":
-        return _update_workflow(agent_id, agent_path, request, rules, manager)
+        return _update_workflow(agent_id, agent_path, request, rules, manager, version_tag=version_tag)
     else:
         return {"success": False, "target": target, "error": f"Unknown target: {target}"}
 
 
-def _update_memories(agent_id: str, agent_path: Path, request: str, classification: dict, manager: "InstanceManager" | None = None) -> dict:
+def _update_memories(agent_id: str, agent_path: Path, request: str, classification: dict, manager: "InstanceManager" | None = None, version_tag: str | None = None) -> dict:
     """Create timestamped memory file."""
     memories_dir = agent_path / "memories"
     memories_dir.mkdir(exist_ok=True)
@@ -1083,10 +1096,14 @@ def _update_memories(agent_id: str, agent_path: Path, request: str, classificati
 {request}
 """
     filepath.write_text(file_content, encoding="utf-8")
-    
-    # Invalidate prompt cache so new memory appears in next prompt
+
+    # Invalidate prompt cache so new memory appears in next prompt.
+    # Phase A T7: thread version_tag so the bust reaches the per-tag
+    # key (``developer[v2]``) — closes the base-key-only bug
+    # (F9 / decisions.md R10). ``version_tag`` is captured in the
+    # ``create_inner_soul_tool`` closure.
     if manager:
-        manager.prompt_cache.invalidate(agent_id)
+        manager.prompt_cache.invalidate(agent_id, version_tag=version_tag)
     
     return {
         "success": True,
@@ -1105,7 +1122,7 @@ def _format_rejection(target: str, max_words: int, word_count: int, rules: dict 
     }
 
 
-def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None) -> dict:
+def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None, version_tag: str | None = None) -> dict:
     """Add to core memory.md with file locking and compaction support."""
     memory_file = agent_path / "memory.md"
     
@@ -1157,10 +1174,11 @@ def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict
             
             # Use atomic write instead of direct write
             _atomic_write_memory(memory_file, new_content)
-            
-            # Invalidate prompt cache so next prompt sees the updated memory
+
+            # Invalidate prompt cache so next prompt sees the updated
+            # memory. Phase A T7: thread version_tag (F9 / R10).
             if manager and hasattr(manager, 'prompt_cache'):
-                manager.prompt_cache.invalidate(agent_id)
+                manager.prompt_cache.invalidate(agent_id, version_tag=version_tag)
             
             return {
                 "success": True,
@@ -1178,7 +1196,7 @@ def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict
         }
 
 
-def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None) -> dict:
+def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None, version_tag: str | None = None) -> dict:
     """Apply soul.md change directly - identity updates are applied immediately."""
     soul_file = agent_path / "soul.md"
 
@@ -1258,10 +1276,11 @@ def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, man
             "error": "Could not acquire lock on soul.md - please retry"
         }
     
-    # Invalidate cache if manager provided
+    # Invalidate cache if manager provided. Phase A T7: thread version_tag
+    # (F9 / decisions.md R10 — closes the base-key-only bug).
     if manager:
-        manager.prompt_cache.invalidate(agent_id)
-    
+        manager.prompt_cache.invalidate(agent_id, version_tag=version_tag)
+
     # Log to history for audit trail
     timestamp = now.strftime("%Y%m%d_%H%M%S")
     history_file = history_dir / f"{timestamp}_soul_change.md"
@@ -1292,7 +1311,7 @@ def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, man
     }
 
 
-def _update_user(agent_id: str, agent_path: Path, request: str, manager: "InstanceManager" | None = None) -> dict:
+def _update_user(agent_id: str, agent_path: Path, request: str, manager: "InstanceManager" | None = None, version_tag: str | None = None) -> dict:
     """Add user information to user.md."""
     user_file = agent_path / "user.md"
     
@@ -1317,8 +1336,8 @@ def _update_user(agent_id: str, agent_path: Path, request: str, manager: "Instan
         }
     
     if manager:
-        manager.prompt_cache.invalidate(agent_id)
-    
+        manager.prompt_cache.invalidate(agent_id, version_tag=version_tag)
+
     return {
         "success": True,
         "target": "user",
@@ -1326,7 +1345,7 @@ def _update_user(agent_id: str, agent_path: Path, request: str, manager: "Instan
     }
 
 
-def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None) -> dict:
+def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None, version_tag: str | None = None) -> dict:
     """Add workflow change."""
     workflow_file = agent_path / "workflow.md"
 
@@ -1359,8 +1378,8 @@ def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict,
         }
     
     if manager:
-        manager.prompt_cache.invalidate(agent_id)
-    
+        manager.prompt_cache.invalidate(agent_id, version_tag=version_tag)
+
     return {
         "success": True,
         "target": "workflow",
