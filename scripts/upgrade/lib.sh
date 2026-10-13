@@ -21,8 +21,10 @@
 #   _probe                    health-gate probe (2s sleep, curl max-time 5s —
 #                             the same budget as deploy.sh phase 5)
 #
-# Size rationale: ~3140 lines (crossed the >3000 tier during the
-# supervision-detection + 3-layer adoption-protocol growth) is still the
+# Size rationale: ~5560 lines (crossed >3000 during the supervision-
+# detection + 3-layer adoption-protocol growth, then ~2400 more across
+# the W5 journal-splice shell helpers, C4 live-waiver refusal, F2 gate
+# plumbing and the fast-by-default promote lane) is still the
 # single shared substrate for the five entry scripts (stage/promote/
 # rollback/restart/status) plus the SOURCED consumers stop-ensemble.sh /
 # adopt-unit.sh; splitting would duplicate cross-cutting contracts
@@ -1104,16 +1106,10 @@ journal_close_txn() {
 #
 # No-op when in_flight is null/absent (no txn to heartbeat — race-safe).
 #
-# BASH-PATTERN HAZARD (the reason this uses sed, not $var//pattern):
-# bash's parameter-substitution glob ``[0-9]*`` is GREEDY — it matches
-# a digit then ANY CHARACTERS until the regex engine stops, including
-# the closing ``}`` of the in_flight object. A pure-digit pattern
-# (e.g. ``[0-9]``) would replace one char at a time and corrupt the
-# field's trailing bytes. The portable fix is a sed anchored to the
-# field name (``"last_heartbeat":[0-9]+`` with no trailing wildcard)
-# so the substitution's match-length is bounded to the digits
-# themselves — see test_promote_cgroup_survivorship.sh 3b for the
-# regression pin that caught this.
+# BASH-PATTERN HAZARD: bash parameter-substitution globs ([0-9]*) are
+# GREEDY and can eat past the digits — this must stay a sed anchored to
+# the field name ("last_heartbeat":[0-9]+); regression pin in
+# test_promote_cgroup_survivorship.sh 3b.
 journal_heartbeat() {
     # P2 (decision (b) / D-P2.6 / C-3): REPLACES the 139 s/call bash
     # brace-walk that used to live here (this comment + the sed+journal_update
@@ -2569,7 +2565,7 @@ _verify_artifact_provenance() {
     # gate (status=ok, content on stdout); rc 1 means one of the three
     # failure states — read the globals to learn which.
     local _pr_tmp _pr_status _pr_detail _pr_json=""
-    _pr_tmp="$(mktemp)"
+    _pr_tmp="$(mktemp -t ens-prov-read.XXXXXX)"
     if _provenance_read "$art" > "$_pr_tmp" 2>/dev/null; then
         _pr_status="ok"
         _pr_json="$(cat "$_pr_tmp")"

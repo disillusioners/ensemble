@@ -1,4 +1,15 @@
-"""SQLModel-based MessageQueue Repository implementation."""
+"""SQLModel-based MessageQueue Repository implementation.
+
+Size rationale (~1470 lines): every queue mutation path lives here so
+the capture/DELETE disjunction (C7, audit-after-soak split, decision
+(f)) cannot drift — capture_doomed_ids_and_audit() is the sync in-band
+capture (returns the doomed list + audit line), delete_doomed_ids()
+is the bounded chunked DELETE fired post-readyz. Both share the
+session/engine handling, the stub-tested SQL shapes, and the
+terminal-status filters; splitting the file would let a future editor
+reunify capture+delete into one transaction — exactly the wedge this
+split exists to prevent. Do NOT split."""
+
 
 from __future__ import annotations
 

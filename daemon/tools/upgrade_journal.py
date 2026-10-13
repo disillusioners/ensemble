@@ -87,6 +87,14 @@ the single journal protocol home. Splitting the protocol twin from the
 tool surface would force every contract change to touch two modules.
 """
 
+# Size rationale (~3050 lines, crossed >3000 during the P2 journal
+# hardening): single-source-of-truth for the upgrade journal — schema
+# (JOURNAL_EMPTY + PendingOp), atomic I/O, reconcile/expiry, F2 nonce
+# state, owner-heartbeat accessor (journal_owner_heartbeat_fresh, the
+# W4/C8 two-signal sweep input) and the R1 sweep-refusal rulings'
+# journal-side state. The growth is the audit surface consolidating;
+# splitting would spread the schema across importers. Do NOT split.
+
 from __future__ import annotations
 
 import asyncio

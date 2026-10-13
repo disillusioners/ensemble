@@ -39,6 +39,9 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# M4: shared helpers (assertions, M1 fixture registry, F1 fake-HOME fence)
+. "$REPO_ROOT/tests/upgrade_test_lib.sh"
 UPGRADE_DIR="$REPO_ROOT/scripts/upgrade"
 HELPER="$UPGRADE_DIR/journal_splice.py"
 
@@ -54,6 +57,7 @@ PASS=0
 FAIL=0
 FAILED_TESTS=""
 
+
 _pass() { PASS=$((PASS + 1)); }
 _fail() {
     FAIL=$((FAIL + 1))
@@ -68,21 +72,7 @@ assert_eq() {
     if [ "$expected" = "$actual" ]; then _pass; else _fail "$name" "$expected" "$actual"; fi
 }
 
-assert_contains() {
-    local name="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*) _pass ;;
-        *) _fail "$name" "contains '$needle'" "$haystack" ;;
-    esac
-}
 
-assert_not_contains() {
-    local name="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*) _fail "$name" "absent '$needle'" "$haystack" ;;
-        *) _pass ;;
-    esac
-}
 
 section() { printf '\n== %s ==\n' "$1"; }
 
@@ -112,8 +102,7 @@ make_fixture() {
 # ===========================================================================
 section "1. helper smoke (op grammar from arch §3)"
 
-INSTALL_DIR="$(mktemp -d -t splice-fix-XXXXXX)"
-trap 'rm -rf "$INSTALL_DIR"' EXIT
+INSTALL_DIR="$(mktemp -d -t splice-fix-XXXXXX)"; _register_fixture "$INSTALL_DIR"
 make_fixture "$INSTALL_DIR"
 
 # append-history
@@ -218,28 +207,12 @@ RC=$?; assert_eq "refusal-rollback-window-rc" "78" "$RC"
 # the resolve() walks the same root, but we give it a name that
 # canonicalizes to exactly the live install dir OR sits directly
 # under it.
-TRUE_HOME="$HOME"
-FAKE_HOME="$(mktemp -d /tmp/ens-splice-home.XXXXXX)"
-export HOME="$FAKE_HOME"
-# Preflight guard (DEFENSIVE — runs BEFORE any mkdir/rm/create).
-# If any condition fails the section aborts loud with non-zero rc.
-if [ "$HOME" = "$TRUE_HOME" ]; then
-    printf 'FATAL F1: HOME export did not take (HOME=%s == TRUE_HOME=%s) — refusing to run section 2 live-install cells\n' "$HOME" "$TRUE_HOME" >&2
-    exit 1
-fi
-case "$HOME" in
-    /tmp/*) ;;
-    *) printf 'FATAL F1: FAKE_HOME escapes /tmp (HOME=%s) — refusing to run section 2 live-install cells\n' "$HOME" >&2; exit 1 ;;
-esac
-LIVE_PARENT_TARGET="$(cd "$HOME" && pwd -P)/agents-ensemble"
-case "$LIVE_PARENT_TARGET" in
-    /tmp/*) ;;
-    *) printf 'FATAL F1: resolved LIVE_PARENT escapes /tmp (%s) — refusing to run section 2 live-install cells\n' "$LIVE_PARENT_TARGET" >&2; exit 1 ;;
-esac
-case "$LIVE_PARENT_TARGET" in
-    *"/home/nea"*) printf 'FATAL F1: resolved LIVE_PARENT touches /home/nea (%s) — refusing to run section 2 live-install cells\n' "$LIVE_PARENT_TARGET" >&2; exit 1 ;;
-esac
-trap 'rm -rf "$FAKE_HOME"' EXIT
+# F1 fence — now the shared lib helpers (M4): same 4-stage preflight,
+# same refusal messages, same eager teardown. FAKE_HOME registration
+# moved into setup_fake_home.
+setup_fake_home
+preflight_guard
+
 LIVE_PARENT="$HOME/agents-ensemble"
 LIVE_DIR="$LIVE_PARENT/releases"
 mkdir -p "$LIVE_DIR"
@@ -264,9 +237,10 @@ assert_eq "refusal-live-install-casefold-rc" "78" "$RC"
 # FENCE teardown: restore HOME, drop the EXIT trap, remove FAKE_HOME
 # (the trap would have done the same on exit; we tear down eagerly so
 # subsequent sections see the real $HOME and never touch the fixture).
-trap - EXIT
-rm -rf "$FAKE_HOME"
-export HOME="$TRUE_HOME"
+# (M1: the mid-script `trap - EXIT` is gone — it dropped the script's
+# only EXIT cleanup. The registry trap is never replaced or removed;
+# the eager teardown below still runs inline.)
+teardown_fake_home
 
 # ===========================================================================
 # Section 3 — T-NEG-python3-missing (fail-closed exit 78)
@@ -318,7 +292,7 @@ class _V:
 sys.version_info = _V()
 raise SystemExit(1)
 '
-PROBE_STUB_BIN="$(mktemp -d -t splice-probe-XXXXXX)"
+PROBE_STUB_BIN="$(mktemp -d -t splice-probe-XXXXXX)"; _register_fixture "$PROBE_STUB_BIN"
 cat > "$PROBE_STUB_BIN/python3" <<EOS
 #!/bin/sh
 exec "$PY" -c "$PROBE_FLOOR_SCRIPT"
@@ -427,7 +401,7 @@ section "6. T2.4 / T2.4a — splice path is the SOLE writer in lock_heartbeat"
 # Runtime pin — under a held lock, lock_heartbeat should write
 # `in_flight.last_heartbeat` via the splice path. We source lib.sh,
 # acquire the lock, open a txn, call lock_heartbeat, and verify.
-LOCK_TEST_DIR="$(mktemp -d -t splice-lock-XXXXXX)"
+LOCK_TEST_DIR="$(mktemp -d -t splice-lock-XXXXXX)"; _register_fixture "$LOCK_TEST_DIR"
 mkdir -p "$LOCK_TEST_DIR/releases"
 printf '%s\n' \
     '{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' \
@@ -466,7 +440,7 @@ rm -rf "$LOCK_TEST_DIR"
 # asserting BOTH (a) the marker fired and (b) in_flight.last_heartbeat
 # actually advanced. A wrapper-free call would leave the marker empty;
 # a non-splice writer would leave the heartbeat stale.
-SPLICE_MARKER_DIR="$(mktemp -d -t splice-marker-XXXXXX)"
+SPLICE_MARKER_DIR="$(mktemp -d -t splice-marker-XXXXXX)"; _register_fixture "$SPLICE_MARKER_DIR"
 MARKER="$SPLICE_MARKER_DIR/invocations.log"
 cat > "$SPLICE_MARKER_DIR/spy-python" <<SPYEOF
 #!/bin/bash
@@ -475,7 +449,7 @@ exec "$(command -v python3)" "\$@"
 SPYEOF
 chmod +x "$SPLICE_MARKER_DIR/spy-python"
 : > "$MARKER"
-SPLICE_LOCK_DIR2="$(mktemp -d -t splice-lock2-XXXXXX)"
+SPLICE_LOCK_DIR2="$(mktemp -d -t splice-lock2-XXXXXX)"; _register_fixture "$SPLICE_LOCK_DIR2"
 mkdir -p "$SPLICE_LOCK_DIR2/releases"
 printf '%s\n' \
     '{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}' \
@@ -507,8 +481,7 @@ rm -rf "$SPLICE_LOCK_DIR2" "$SPLICE_MARKER_DIR"
 # ===========================================================================
 section "7. T2.9 — byte-compat round-trip (key order + non-target fields)"
 
-ROUND_TRIP_DIR="$(mktemp -d -t splice-rt-XXXXXX)"
-trap 'rm -rf "$ROUND_TRIP_DIR"' EXIT
+ROUND_TRIP_DIR="$(mktemp -d -t splice-rt-XXXXXX)"; _register_fixture "$ROUND_TRIP_DIR"
 mkdir -p "$ROUND_TRIP_DIR/releases"
 
 # Build a 100 KB journal with EXACT key order — the helper must
@@ -605,8 +578,7 @@ assert_eq "round-trip-prev-now-null" "None" "$PREV_UNSET"
 # ===========================================================================
 section "8. T2.10 — splice latency (AC1: < 1 s hard on stdlib os.replace)"
 
-LAT_DIR="$(mktemp -d -t splice-lat-XXXXXX)"
-trap 'rm -rf "$LAT_DIR" "$ROUND_TRIP_DIR"' EXIT
+LAT_DIR="$(mktemp -d -t splice-lat-XXXXXX)"; _register_fixture "$LAT_DIR"
 mkdir -p "$LAT_DIR/releases"
 
 python3 "$REPO_ROOT/tests/fixtures/gen_state_json.py" \
@@ -703,8 +675,7 @@ assert_not_contains "migration-set-previous-no-bash-branch" \
 #     verify history has both entries in order with correct
 #     ts/event/detail (json parse), then journal_set_previous both
 #     branches (string, then null) through the wrapper.
-E2E_DIR="$(mktemp -d -t splice-mig-XXXXXX)"
-trap 'rm -rf "$E2E_DIR"' EXIT
+E2E_DIR="$(mktemp -d -t splice-mig-XXXXXX)"; _register_fixture "$E2E_DIR"
 make_fixture "$E2E_DIR"
 (
     export INSTALL_DIR="$E2E_DIR"
@@ -803,7 +774,7 @@ section "11. C4 live-install refusal: pipeline-lock-held waiver"
 # SANDBOX ONLY: the live-HOME shape is replicated under a throwaway
 # $HOME (tmp/home-shaped/agents-ensemble/...) — the REAL live install
 # is never touched (constraint: no live install touches).
-LIVE_HOME="$(mktemp -d -t splice-live-home-XXXXXX)"
+LIVE_HOME="$(mktemp -d -t splice-live-home-XXXXXX)"; _register_fixture "$LIVE_HOME"
 # $HOME is the SANDBOX home-shaped dir; the install sits directly
 # beneath it — the exact shape _live_install_root() checks
 # (Path.home()/agents-ensemble). $TMP/home-shaped = this HOME.
@@ -843,7 +814,7 @@ rm -rf "$LOCK_D" "$LIVE_HOME"
 # Section 12 — W5 (council 2026-10-12): history is append-only
 # ===========================================================================
 section "12. W5 set-field/unset-field on the history key REFUSES"
-W5_DIR="$(mktemp -d -t splice-w5-XXXXXX)"
+W5_DIR="$(mktemp -d -t splice-w5-XXXXXX)"; _register_fixture "$W5_DIR"
 make_fixture "$W5_DIR"
 "$PY" "$HELPER" "$W5_DIR/releases/state.json" append-history w5_seed keep > /dev/null 2>&1
 
@@ -858,3 +829,57 @@ assert_contains "W5 unset-field refusal names APPEND-ONLY" "APPEND-ONLY" "$OUT"
 HIST_W5=$("$PY" -c "import json; print(len(json.load(open('$W5_DIR/releases/state.json'))['history']))")
 assert_eq "W5 history intact after refusals" "1" "$HIST_W5"
 rm -rf "$W5_DIR"
+
+# ===========================================================================
+# Section 13 — M3 (Batch-2 tidier): _read_journal fresh-init shape pin
+# ===========================================================================
+# journal_splice._read_journal's absent-file path hard-codes the
+# canonical empty-journal shape; daemon/tools/upgrade_journal.py owns
+# JOURNAL_EMPTY. The helper is stdlib-only (no daemon imports —
+# dependency discipline), so the two definitions cannot share code.
+# This pin makes drift a LOUD failure: the fresh-init payload must be
+# JSON-equal (deep + canonical-serialization) to JOURNAL_EMPTY.
+section "13. M3 fresh-init shape ≡ daemon JOURNAL_EMPTY (cross-assert)"
+M3_OUT=$("$PY" - "$REPO_ROOT" "$HELPER" <<'M3PY'
+import importlib.util
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+repo_root, helper_path = Path(sys.argv[1]), sys.argv[2]
+sys.path.insert(0, str(repo_root))
+# File-load BOTH modules: bypasses daemon/tools/__init__.py (which drags
+# langchain into a stdlib-only runner) and pre-registers each module in
+# sys.modules BEFORE exec — the module-level @dataclass decorators
+# require sys.modules[cls.__module__] to exist while the class body runs.
+_uj_spec = importlib.util.spec_from_file_location(
+    "upgrade_journal_m3pin", repo_root / "daemon" / "tools" / "upgrade_journal.py"
+)
+_uj = importlib.util.module_from_spec(_uj_spec)
+sys.modules["upgrade_journal_m3pin"] = _uj
+_uj_spec.loader.exec_module(_uj)
+JOURNAL_EMPTY = _uj.JOURNAL_EMPTY
+
+spec = importlib.util.spec_from_file_location("journal_splice_m3pin", helper_path)
+js = importlib.util.module_from_spec(spec)
+sys.modules["journal_splice_m3pin"] = js
+spec.loader.exec_module(js)
+
+with tempfile.TemporaryDirectory() as td:
+    fresh = js._read_journal(Path(td) / "absent-state.json")
+
+if fresh != JOURNAL_EMPTY:
+    print("MISMATCH deep-equality: fresh=%r JOURNAL_EMPTY=%r" % (fresh, JOURNAL_EMPTY))
+    sys.exit(1)
+if json.dumps(fresh, sort_keys=True) != json.dumps(JOURNAL_EMPTY, sort_keys=True):
+    print("MISMATCH canonical serialization differs")
+    sys.exit(1)
+print("PIN OK")
+M3PY
+)
+if [ "$M3_OUT" = "PIN OK" ]; then
+    _pass
+else
+    _fail "M3 fresh-init shape ≡ JOURNAL_EMPTY (cross-assert)" "PIN OK" "$M3_OUT"
+fi

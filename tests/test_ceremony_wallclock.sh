@@ -19,9 +19,13 @@
 # ============================================================================
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# M4: shared helpers (assertions, M1 fixture registry, F1 fake-HOME fence)
+. "$REPO_ROOT/tests/upgrade_test_lib.sh"
 UPGRADE_DIR="$REPO_ROOT/scripts/upgrade"
 
 PASS=0
+
 FAIL=0
 FAILED_TESTS=""
 
@@ -140,7 +144,7 @@ section "T-G1b — deadline-breach routing (sleep-injected phase overrun → hal
 # path. The real exit path is exercised by the integration test layer
 # (tester-gate).
 
-INSTALL_DIR_FAKE="$(mktemp -d -t "ensemble-budget-fake.XXXXXX")"
+INSTALL_DIR_FAKE="$(mktemp -d -t "ensemble-budget-fake.XXXXXX")"; _register_fixture "$INSTALL_DIR_FAKE"
 mkdir -p "$INSTALL_DIR_FAKE/releases"
 export INSTALL_DIR="$INSTALL_DIR_FAKE"
 export PORT=18799

@@ -43,6 +43,14 @@ Lifecycle mirrors :class:`~daemon.services.job_lock_sweep.JobLockSweepService`:
 (CancelledError is the normal shutdown path — FM-11: never swallow it).
 """
 
+# Size rationale (~1890 lines): the sweep service owns FOUR janitor
+# lanes in one loop by design — periodic reconcile/GC tick, the
+# two-signal (W4) liveness predicate, the wake-record sweep, and the
+# bounded reaper (waitpid + signal attribution). They share the
+# install-dir lock + journal-read conventions; separating them would
+# re-introduce the tick-ordering races the single loop exists to
+# kill. Do NOT split.
+
 from __future__ import annotations
 
 import asyncio

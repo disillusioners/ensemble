@@ -41,11 +41,15 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# M4: shared helpers (assertions, M1 fixture registry, F1 fake-HOME fence)
+. "$REPO_ROOT/tests/upgrade_test_lib.sh"
 UPGRADE_DIR="$REPO_ROOT/scripts/upgrade"
 LAUNCHER="$REPO_ROOT/launcher.sh"
 ROLLBACK="$UPGRADE_DIR/rollback.sh"
 
 PASS=0
+
 FAIL=0
 FAILED_TESTS=""
 
@@ -61,20 +65,6 @@ _fail() {
 assert_eq() {
     local name="$1" expected="$2" actual="$3"
     if [ "$expected" = "$actual" ]; then _pass; else _fail "$name" "$expected" "$actual"; fi
-}
-assert_contains() {
-    local name="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*) _pass ;;
-        *) _fail "$name" "contains '$needle'" "$haystack" ;;
-    esac
-}
-assert_not_contains() {
-    local name="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*) _fail "$name" "absent '$needle'" "$haystack" ;;
-        *) _pass ;;
-    esac
 }
 section() { printf '\n== %s ==\n' "$1"; }
 
@@ -151,7 +141,7 @@ run_sweep() {
 # ===========================================================================
 section "C1 — fresh journal: previous written correctly at commit (AC5a cell 1)"
 
-C1_FIX="$(mktemp -d -t c1.XXXXXX)"
+C1_FIX="$(mktemp -d -t c1.XXXXXX)"; _register_fixture "$C1_FIX"
 mkdir -p "$C1_FIX/releases"
 # Initial journal: current=null (fresh install), no previous
 write_journal "$C1_FIX/releases/state.json" \
@@ -194,7 +184,7 @@ section "C2 — halt→re-promote (Oct 9 arc): previous == N-1 (AC5a cell 2 + T-
 #
 # Fixture: v0, v1, v2 all present; journal current=v1, previous=v0
 # (stale — this is the N-2 bug surface).
-C2_FIX="$(mktemp -d -t c2.XXXXXX)"
+C2_FIX="$(mktemp -d -t c2.XXXXXX)"; _register_fixture "$C2_FIX"
 mkdir -p "$C2_FIX/releases"
 make_release "$C2_FIX" "v0" "true"
 make_release "$C2_FIX" "v1" "true"
@@ -249,7 +239,7 @@ section "C3 — boot_sweep_commit_and_continue: previous==N-1 via displaced_vers
 # in_flight.displaced_version — which we set explicitly so we can prove
 # the FORWARD-semantic source is the in_flight field, not the journal's
 # stale pre-existing `previous`) AND journal.current lands at v1.
-C3_FIX="$(mktemp -d -t c3.XXXXXX)"
+C3_FIX="$(mktemp -d -t c3.XXXXXX)"; _register_fixture "$C3_FIX"
 make_release "$C3_FIX" "v1" "true"
 make_release "$C3_FIX" "v0" "false"   # rollback_safe:false → gates pass
 # Use v0 as the previous field (matches an existing release with
@@ -289,7 +279,7 @@ section "C4 — double-rollback: target stays N-1, no N-2 walk (AC5a cell 4)"
 # Without the fix, run 2 would read stale journal.previous=v2 and
 # fail. With the fix (caller-supplied target), rollback.sh rolls back
 # to v0 cleanly and writes previous=v1.
-C4_FIX="$(mktemp -d -t c4.XXXXXX)"
+C4_FIX="$(mktemp -d -t c4.XXXXXX)"; _register_fixture "$C4_FIX"
 mkdir -p "$C4_FIX/releases"
 make_release "$C4_FIX" "v0" "true"
 make_release "$C4_FIX" "v1" "true"
@@ -351,7 +341,7 @@ section "C5 — T-NEG-immediacy-breach: journal.current != VERSION → halt exit
 # manipulate the journal's current to a wrong value (simulating drift).
 # The new code captures current via _json_field_quoted and compares to
 # $VERSION — mismatch → halt.
-C5_FIX="$(mktemp -d -t c5.XXXXXX)"
+C5_FIX="$(mktemp -d -t c5.XXXXXX)"; _register_fixture "$C5_FIX"
 mkdir -p "$C5_FIX/releases"
 make_release "$C5_FIX" "v1" "true"
 make_release "$C5_FIX" "v2" "true"
@@ -402,7 +392,7 @@ section "C6 — old-format in_flight (no displaced_version) → halt-for-human (
 # The patch in launcher.sh:1020-1037 ADDS a halt-for-human branch for
 # old-format txns (no displaced_version field). Sweep must NOT silently
 # commit when the field is missing.
-C6_FIX="$(mktemp -d -t c6.XXXXXX)"
+C6_FIX="$(mktemp -d -t c6.XXXXXX)"; _register_fixture "$C6_FIX"
 make_release "$C6_FIX" "v1" "true"
 make_release "$C6_FIX" "v0" "false"
 # Seed an OLD-format in_flight: NO displaced_version field. Pre-C-4.
@@ -498,7 +488,7 @@ assert_contains "C7 rollback.sh: 'no rollback target supplied' refusal present" 
 section "C8 — D-P1.3 rollback.sh contract: target from caller only"
 
 # Build a minimal sandbox-shaped INSTALL_DIR for rollback.sh.
-C8_FIX="$(mktemp -d -t c8.XXXXXX)"
+C8_FIX="$(mktemp -d -t c8.XXXXXX)"; _register_fixture "$C8_FIX"
 mkdir -p "$C8_FIX/releases"
 make_release "$C8_FIX" "v0" "true"
 make_release "$C8_FIX" "v1" "true"

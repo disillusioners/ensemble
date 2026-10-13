@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -82,7 +83,6 @@ from typing import Any, NoReturn
 
 # ── Constants (single-source-of-truth per arch §3) ─────────────────────────
 LIVE_INSTALL_DIRNAME = "agents-ensemble"  # literal live install root: ~/agents-ensemble
-SCRIPT_VERSION = "1.0.0"
 
 # Helpers may write ONLY these top-level fields. Anything else (e.g.
 # pending_op, current, counters, cooldown_until, quarantine,
@@ -238,8 +238,18 @@ def _is_under_live(resolved: Path) -> bool:
         live_folded = os.path.normcase(str(live)).casefold()
         if resolved_folded == live_folded or resolved_folded.startswith(live_folded + os.sep):
             return True
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 — defensive fold, never gate-relevant
+        # M2 (Batch-2 tidier): the fold is a defense-in-depth alias check
+        # BEHIND the exact-path compare above; a fold failure must NOT
+        # change the refusal path (samefile walk + final False still
+        # decide). The catch stays deliberately broad (Path.__str__ /
+        # normcase oddities are the hazard being defended against), but
+        # the swallow is now VISIBLE at DEBUG instead of silent.
+        logging.getLogger(__name__).debug(
+            "journal_splice._is_under_live: case-fold alias check skipped "
+            "(resolved=%r live=%r): %s: %s",
+            resolved, live, type(exc).__name__, exc,
+        )
     if live.exists():
         probe = resolved if resolved.exists() else None
         cursor: Path | None = resolved

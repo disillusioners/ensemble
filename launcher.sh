@@ -5,6 +5,14 @@
 # Runs UNDER launchd (macOS) / systemd (Linux). No TTY, no shell env — every
 # path is absolute and derived from this script's own location.
 #
+# Size rationale (~1660 lines): this file is the whole supervisor in one
+# sourced unit BY CONTRACT — launchd/systemd exec a single interpreter
+# and the ADR-012 journal sweep + _pid_alive twin (byte-identical to
+# lib.sh's body, 11d pin in tests/test_launcher.sh) must live where the
+# restart loop lives. Growth here = state-file round-trip, backoff
+# classes, env parsing, and the bounded-subprocess waits (W5) — all
+# restart-loop-owned. Do NOT split: the twin-body pin and the source-
+# guard contract (`sourcing must not run anything`) span the file.
 # Division of labor (plan §4.1, ADR-001/002):
 #   OS supervisor (launchd): start at boot, SIGTERM stop, fixed 10s throttle,
 #                           re-engage only if THIS launcher itself dies.

@@ -6,7 +6,6 @@ instances.status). Kill-switch helper defaults ON (env unset).
 """
 from __future__ import annotations
 
-import pytest
 from sqlalchemy import create_engine, text
 
 from daemon.repositories.message_queue.repository import (

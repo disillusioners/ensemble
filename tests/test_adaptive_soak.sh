@@ -23,9 +23,13 @@
 # ============================================================================
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# M4: shared helpers (assertions, M1 fixture registry, F1 fake-HOME fence)
+. "$REPO_ROOT/tests/upgrade_test_lib.sh"
 UPGRADE_DIR="$REPO_ROOT/scripts/upgrade"
 
 PASS=0
+
 FAIL=0
 FAILED_TESTS=""
 
@@ -71,7 +75,7 @@ _stub_set() {
 _start_stub() {
     STUB_PORT="${1:-18765}"
     local stub_root
-    stub_root="$(mktemp -d -t ensemble-test-stub.XXXXXX)"
+    stub_root="$(mktemp -d -t ensemble-test-stub.XXXXXX)"; _register_fixture "$stub_root"
     cat > "$stub_root/server.py" <<'PYEOF'
 import os, sys, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -172,6 +176,9 @@ _stop_stub() {
 # known test ports so a previous test run cannot leak into a new
 # one. Fires on EXIT (normal completion OR error).
 _cleanup_orphans() {
+    # M1/M4: fixture-registry teardown rides the SAME EXIT trap as the
+    # orphan-port reaping (the lib's registry is the single source).
+    _cleanup_fixtures
     local port
     for port in 18765 18766 18767 18768 18769 18770 18771 18772 18773 18774 18775; do
         pids="$(ss -tnlp 2>/dev/null | grep ":$port " | grep -oP 'pid=\K[0-9]+' | sort -u || true)"
@@ -208,7 +215,7 @@ _stub_clear() {
 SUBTEST_TMPDIR=""
 _setup_subtest() {
     local subtest_name="$1"
-    SUBTEST_TMPDIR="$(mktemp -d -t "ensemble-soak-test-${subtest_name}.XXXXXX")"
+    SUBTEST_TMPDIR="$(mktemp -d -t "ensemble-soak-test-${subtest_name}.XXXXXX")"; _register_fixture "$SUBTEST_TMPDIR"
     mkdir -p "$SUBTEST_TMPDIR/releases"
     export INSTALL_DIR="$SUBTEST_TMPDIR"
     export PORT="$STUB_PORT"

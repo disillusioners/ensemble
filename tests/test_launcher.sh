@@ -17,6 +17,9 @@
 # ============================================================================
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# M4: shared helpers (assertions, M1 fixture registry, F1 fake-HOME fence)
+. "$REPO_ROOT/tests/upgrade_test_lib.sh"
 LAUNCHER="$REPO_ROOT/launcher.sh"
 
 PASS=0
@@ -53,13 +56,6 @@ assert_eq() {
 }
 
 # assert_contains <name> <needle> <haystack>
-assert_contains() {
-    local name="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*) _pass ;;
-        *) _fail "$name" "contains '$needle'" "$haystack" ;;
-    esac
-}
 
 section() {
     printf '\n== %s ==\n' "$1"

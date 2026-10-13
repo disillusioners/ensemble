@@ -47,6 +47,9 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# M4: shared helpers (assertions, M1 fixture registry, F1 fake-HOME fence)
+. "$REPO_ROOT/tests/upgrade_test_lib.sh"
 TESTS_DIR="$REPO_ROOT/tests"
 RESULTS_DIR="${TMPDIR:-/tmp}/upgrade-overhaul-aggregator"
 mkdir -p "$RESULTS_DIR"

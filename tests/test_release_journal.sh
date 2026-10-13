@@ -28,6 +28,9 @@
 # ============================================================================
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# M4: shared helpers (assertions, M1 fixture registry, F1 fake-HOME fence)
+. "$REPO_ROOT/tests/upgrade_test_lib.sh"
 UPGRADE_DIR="$REPO_ROOT/scripts/upgrade"
 
 PASS=0
@@ -49,19 +52,23 @@ assert_eq() {
     if [ "$expected" = "$actual" ]; then _pass; else _fail "$name" "$expected" "$actual"; fi
 }
 
-assert_contains() {
-    local name="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*) _pass ;;
-        *) _fail "$name" "contains '$needle'" "$haystack" ;;
-    esac
-}
 
 section() { printf '\n== %s ==\n' "$1"; }
+# Size rationale (~2520 lines): one pack covers the WHOLE release
+# ledger contract surface — stage/manifest/rollback_safe derivation,
+# the F2 gate ladder, cycle-ledger classification, the 24h rollback
+# window + eviction policy, demo/live lane guards, ENSEMBLE_SELF_ENV
+# marker resolution, and the journal splice interop. The tests share
+# one throwaway fixture tree (FAKE_REPO + FAKE_HOME under $FIXTURE);
+# splitting into per-contract packs would multiply fixture setup and
+# re-run the slow promote-matrix segments per pack. Do NOT split
+# without moving whole contract families (not individual asserts).
 
 # ─── fixture: throwaway repo (real scripts, stub payloads, git-tagged) ──────
 FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/upgrade-test.XXXXXX")"
 FIXTURE="$(cd "$FIXTURE" && pwd)"
+
+_register_fixture "$FIXTURE"
 FAKE_REPO="$FIXTURE/repo"
 FAKE_HOME="$FIXTURE/home"
 mkdir -p "$FAKE_REPO/scripts/upgrade" "$FAKE_REPO/agents/leader" \

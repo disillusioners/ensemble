@@ -23,7 +23,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
-import pytest
 
 from daemon.registry import AgentMetadata, ToolFilter, get_registry
 

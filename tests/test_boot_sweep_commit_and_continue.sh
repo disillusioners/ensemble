@@ -40,7 +40,11 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# M4: shared helpers (assertions, M1 fixture registry, F1 fake-HOME fence)
+. "$REPO_ROOT/tests/upgrade_test_lib.sh"
+
 PASS=0
+
 FAIL=0
 FAILED_TESTS=""
 
@@ -55,20 +59,6 @@ _fail() {
 assert_eq() {
     local name="$1" expected="$2" actual="$3"
     if [ "$expected" = "$actual" ]; then _pass; else _fail "$name" "$expected" "$actual"; fi
-}
-assert_contains() {
-    local name="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*) _pass "$name" ;;
-        *) _fail "$name" "contains '$needle'" "$haystack" ;;
-    esac
-}
-assert_not_contains() {
-    local name="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*) _fail "$name" "absent '$needle'" "$haystack" ;;
-        *) _pass "$name" ;;
-    esac
 }
 section() { printf '\n== %s ==\n' "$1"; }
 
@@ -146,7 +136,7 @@ run_sweep() {
 # ===========================================================================
 section "C1 — happy-path commit-and-continue (ALL gates hold)"
 
-C1_FIX="$(mktemp -d -t c1.XXXXXX)"
+C1_FIX="$(mktemp -d -t c1.XXXXXX)"; _register_fixture "$C1_FIX"
 make_install_fixture "$C1_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "false"
 # current=prev (pre-flip baseline), in_flight.flipped=true (post-flip
 # symlink evidence), intent_flip event for the target.
@@ -211,7 +201,7 @@ rm -rf "$C1_FIX"
 # ===========================================================================
 section "C2 — no intent_flip event → fail-closed (halt gate fires)"
 
-C2_FIX="$(mktemp -d -t c2.XXXXXX)"
+C2_FIX="$(mktemp -d -t c2.XXXXXX)"; _register_fixture "$C2_FIX"
 make_install_fixture "$C2_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "false"
 # Same as C1 but NO intent_flip event.
 seed_journal "$C2_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "0"
@@ -243,7 +233,7 @@ rm -rf "$C2_FIX"
 # ===========================================================================
 section "C3 — manifest missing → fail-closed (intent_flip present but no prev manifest)"
 
-C3_FIX="$(mktemp -d -t c3.XXXXXX)"
+C3_FIX="$(mktemp -d -t c3.XXXXXX)"; _register_fixture "$C3_FIX"
 make_install_fixture "$C3_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "__MISSING_MANIFEST__"
 # Intent_flip IS present.
 seed_journal "$C3_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "1"
@@ -267,7 +257,7 @@ rm -rf "$C3_FIX"
 # ===========================================================================
 section "C4 — rollback_safe key missing → fail-closed (manifest present, key absent)"
 
-C4_FIX="$(mktemp -d -t c4.XXXXXX)"
+C4_FIX="$(mktemp -d -t c4.XXXXXX)"; _register_fixture "$C4_FIX"
 make_install_fixture "$C4_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "__MISSING_KEY__"
 seed_journal "$C4_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "1"
 ln -sfn "releases/v9.9.9-test-target" "$C4_FIX/current"
@@ -288,7 +278,7 @@ rm -rf "$C4_FIX"
 # ===========================================================================
 section "C5 — rollback_safe TRUE → existing sweep-rollback path (commit branch skipped)"
 
-C5_FIX="$(mktemp -d -t c5.XXXXXX)"
+C5_FIX="$(mktemp -d -t c5.XXXXXX)"; _register_fixture "$C5_FIX"
 make_install_fixture "$C5_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true"
 seed_journal "$C5_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "1"
 ln -sfn "releases/v9.9.9-test-target" "$C5_FIX/current"
@@ -383,7 +373,7 @@ section "C8 — old-format in_flight (no displaced_version) → halt-for-human (
 # earlier releases). Seed an old-format txn with intent_flip +
 # prev.rollback_safe:false (all the OTHER gates hold) and assert the
 # sweep halts with no silent commit.
-C8_FIX="$(mktemp -d -t c8.XXXXXX)"
+C8_FIX="$(mktemp -d -t c8.XXXXXX)"; _register_fixture "$C8_FIX"
 make_install_fixture "$C8_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "false"
 seed_journal_old_format "$C8_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "1"
 ln -sfn "releases/v9.9.9-test-target" "$C8_FIX/current"
@@ -444,7 +434,7 @@ run_sweep_ordered() {  # <fix_dir> <order_log>
 
 section "W8 — T1.5 ordering: current → previous → in_flight"
 
-W8_FIX="$(mktemp -d -t w8-order.XXXXXX)"
+W8_FIX="$(mktemp -d -t w8-order.XXXXXX)"; _register_fixture "$W8_FIX"
 make_install_fixture "$W8_FIX" "v9.9.9-w8-target" "v9.9.9-w8-prev" "false"
 seed_journal "$W8_FIX" "v9.9.9-w8-target" "v9.9.9-w8-prev" "true" "1"
 ln -sfn "releases/v9.9.9-w8-target" "$W8_FIX/current"
@@ -490,7 +480,7 @@ rm -rf "$W8_FIX"
 
 section "W6 — null displaced_version halts, previous NOT written as quoted null"
 
-W6B_FIX="$(mktemp -d -t w6b.XXXXXX)"
+W6B_FIX="$(mktemp -d -t w6b.XXXXXX)"; _register_fixture "$W6B_FIX"
 make_install_fixture "$W6B_FIX" "v9.9.9-w6b-target" "v9.9.9-w6b-prev" "false"
 # same gates as C1 BUT displaced_version is JSON null (pre-stamp state)
 cat > "$W6B_FIX/releases/state.json" <<EOF
