@@ -1,4 +1,4 @@
-"""Prompt-version service — thin async facade (agent-prompt-immutability Phase A).
+"""Prompt-version service — thin async facade (agent-prompt-immutability Phase A; Phase B extensions).
 
 Phase A's service layer for the prompt-version DB foundation. Mirrors
 the :class:`SkillStoreService` facade at
@@ -7,6 +7,31 @@ thin-async-facade docstring, lines 1-60): holds no engine, every
 public method = one ``await asyncio.to_thread(...)`` wrapping a
 single repo call. Multiple repo calls in one method share the
 same thread to keep the session boundary clean.
+
+Phase B additions (T1+T2+T3+T10, see
+``.agents/shared/planning/agent-prompt-immutability/phaseB-plan.md``):
+
+* The module-level docstring block at the bottom of this string
+  documents the **F1 OVERRIDES-ONLY seeding strategy** (T10) — no
+  boot seeding, first ``create_draft`` per key = version 1; the
+  on-disk template file stays the live fallback. The loader-side
+  docstring note is owned by a sibling cycle; this one stays the
+  service-side authoritative reference.
+* ``approve`` / ``reject`` now refuse every caller whose actor is
+  not ``auth_method == "session"`` (T3, D2, decisions.md F4) — even
+  with ``prompts:approve`` scope, a bearer token is the machine
+  lane and cannot approve. The repo's defense-in-depth check
+  (``only HTTP actors may approve``) stays; the service is the
+  surface that names the typed error.
+* ``retract`` is a new method (T2, S16/O-13 fold-in) that gates
+  retraction by **own-row identity** — internal submitters may
+  retract only the rows they themselves submitted, and only humans
+  (``auth_method == "session"``) may retract any row. The check
+  enforces the same anti-forgery rule as ``actor_from_request``
+  (an HTTP presenter cannot mint ``internal`` — the retract
+  authority check reads ``actor.instance_id`` against the row's
+  ``submitter_instance_id`` for the internal path, and reuses
+  the project's "session == trusted human" convention for HTTP).
 
 Why a service layer
 -------------------
@@ -35,6 +60,16 @@ The service layer adds:
   refactor. This service is the consumer-facing facade for routers
   + inner_soul/agent_mother callers only.
 
+* **State machine + lane guards.** Phase B widens the service's
+  responsibility from "thin facade" to "the only consumer-facing
+  surface for mutating approval rows." Repository methods take
+  an ``actor`` for stamping, but the human-only approve/reject rule
+  (D2) lives at THIS layer so the typed error surfaces here
+  (testable independently of the HTTP layer) AND the repo's
+  defense-in-depth gate stays the last line of defense (R3
+  source-forgery risk: a developer calling ``repo.approve``
+  directly bypasses the service).
+
 Composition
 -----------
 
@@ -57,6 +92,61 @@ Design notes
   handles those for us.
 * **No global state.** The service is trivially testable with
   mock repos.
+
+F1 OVERRIDES-ONLY seeding strategy (T10)
+========================================
+
+The :class:`PromptVersionRepository` resolves a prompt via the chain
+``selected_version.content`` → ``latest_approved.content`` →
+``None`` (F6; per-phase-contract.md A8). The ``None`` case means
+"the resolver falls back to the on-disk template file at
+``agents/<name>/<artifact>.md``" — the SAME fallback the loader
+has used since before Phase A; no behavior change for agents that
+never submit an override.
+
+* **No boot seeding.** There is no code anywhere that, at daemon
+  boot, walks ``agents/<name>/<artifact>.md`` files and inserts
+  ``(version=1, state=approved)`` rows for them. Such a code
+  path does not exist in this repository.
+* **No lazy-seed, hashed or otherwise.** The first
+  ``create_draft`` / ``create_and_submit`` call for a key — i.e.
+  the moment a runtime prompt needs to diverge from the template
+  — inserts ``version = 1`` and the row carries the requested
+  override content (NOT a copy of the template file).
+* **Template file stays live.** Until a DB row exists for an
+  artifact, the loader reads the template file directly. A new
+  template release therefore upgrades every agent that has no
+  override rows for that artifact, automatically.
+* **Resolution reads DB before file.** The loader hook runs
+  ``repo.get_effective_rows(agent_id, version_tag)`` BEFORE the
+  file read; if the DB returns any row for the artifact, the
+  file content is discarded entirely. The on-disk file is only
+  read when the DB lookup yields no rows for the artifact.
+
+Rejected alternatives (documented per T10, morning-review hook):
+
+* **Full-seed-at-boot.** Walk every ``agents/<name>/<artifact>.md``
+  on daemon start, insert each as ``(version=1, state=approved)``.
+  *Why rejected.* Every template file release becomes a re-seed
+  event; the boot blast radius grows unbounded over the project's
+  lifetime; agent-v2 sibling dirs (F9) get phantom v1 rows that
+  mask future template changes for the v2 lineage. The
+  template-is-the-baseline model has no re-seed event.
+* **Hash-guarded lazy-seed.** On first DB read for a key, fingerprint
+  the on-disk template; if the fingerprint differs from the
+  fingerprint stored on the last-seen row, auto-supersede.
+  *Why rejected.* Correct, but more state (a per-artifact fingerprint
+  table), and the "first override" identity becomes confusing
+  (``approved`` with no submitter — a fingerprint-only identity).
+  Switch to this only if morning review finds OVERRIDES-ONLY
+  insufficient (F1 is the conservative default; the agent-prompt-
+  immutability commission explicitly deferred this choice).
+
+The contract Phase B's consumers rely on: ``create_and_submit``
+succeeds on a fresh key and returns ``(version=1, state='pending_approval')``;
+``get_effective`` returns ``None`` for keys with no rows (file fallback
+contract); the on-disk template files are NEVER modified by this
+service layer.
 """
 
 from __future__ import annotations
@@ -66,6 +156,138 @@ import logging
 from typing import Any, Callable, Optional, Union
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# Typed errors (Phase B, T2 / T3)
+# ============================================================
+
+
+class HumanLaneRequiredError(ValueError):
+    """Raised when approve / reject is called by a non-human actor.
+
+    The ``AuthContext.auth_method`` of the caller is the lane
+    discriminator, NOT the scope claim. Per phaseB-plan.md D2 /
+    decisions.md F4 / phase-contract.md A3, only
+    ``auth_method == "session"`` may approve or reject — even a
+    bearer token holding ``prompts:approve`` is refused because the
+    bearer lane is the machine lane and a machine cannot satisfy
+    the human-only approval rule.
+
+    Inherits from ``ValueError`` so callers can catch both
+    :class:`HumanLaneRequiredError` and the more common
+    :class:`ValueError` from the repo layer with a single
+    ``except ValueError`` clause; the subclass relationship keeps
+    :class:`HumanLaneRequiredError`-only catchers working.
+
+    Attributes:
+        version_id: The PromptVersion PK the caller tried to act on.
+        actor_auth_method: The actor's auth_method (the offending
+            lane), useful for the HTTP 403 body.
+
+    The HTTP layer maps this to ``403 HUMAN_LANE_REQUIRED`` (D2);
+    the router builds the response body shape
+    ``{"error": "HUMAN_LANE_REQUIRED", "message": ...}``.
+    """
+
+    def __init__(
+        self,
+        version_id: str,
+        actor_auth_method: str,
+    ) -> None:
+        self.version_id = version_id
+        self.actor_auth_method = actor_auth_method
+        super().__init__(
+            f"approve/reject on prompt_version {version_id} requires "
+            f"auth_method='session' (human lane); got {actor_auth_method!r}. "
+            f"Per phaseB-plan.md D2 / F4, only authenticated human "
+            f"operators may approve or reject (decisions.md F4)."
+        )
+
+
+class AuthContextMissingError(ValueError):
+    """Raised when an HTTP-lane actor helper sees no AuthContext.
+
+    Defensive against the auth-OFF posture (D3 / ``daemon/routers/
+    auth.py:96`` ``503 LOGIN_NOT_CONFIGURED`` precedent): the HTTP
+    bridge constructs an actor only after a successful auth
+    resolution, so a missing AuthContext is a programming error,
+    not a runtime auth state. The router-side equivalent raises
+    ``503 AUTH_NOT_CONFIGURED`` (consume-side); THIS error is the
+    service-side equivalent for callers (test tooling, internal
+    helpers) that get a request without a resolved AuthContext.
+
+    Inherits from :class:`ValueError` (uniform error-shape with the
+    repo's validation errors).
+    """
+
+    def __init__(self, message: str = "no AuthContext on request") -> None:
+        super().__init__(
+            f"AuthContextMissingError: {message} (per phaseB-plan.md "
+            f"D3 / A3 anti-forgery, auth-context-shaped inputs are "
+            f"the HTTP lane's only constructor)"
+        )
+
+
+class RetractAuthorityError(PermissionError):
+    """Raised when a retract caller fails the own-row authority check.
+
+    Per phaseB-plan.md T2 / decisions.md S16 (anti-forgery), an
+    ``auth_method == "internal"`` actor may retract ONLY the row
+    they themselves submitted (``actor.instance_id`` ==
+    ``row.submitter_instance_id``); any other-instance internal
+    caller is refused. ``auth_method == "session"`` may retract any
+    row; ``auth_method == "bearer"`` is refused outright (machine
+    lane cannot retract — submitter is an instance, not a bearer
+    credential).
+
+    Inherits from :class:`PermissionError` (Python stdlib's "this
+    caller does not have permission" type) — distinct from
+    :class:`HumanLaneRequiredError` so routers / callers can
+    discriminate approval-lane refusals from retract-lane refusals
+    without parsing error strings. Catchers that prefer a single
+    ``except ValueError`` still work via :class:`PermissionError`'s
+    own (None) base — but :class:`PermissionError` inherits from
+    :class:`OSError` and not from :class:`ValueError`, so callers
+    MUST catch this error type specifically or use ``except Exception``.
+
+    Attributes:
+        version_id: The PromptVersion PK the caller tried to retract.
+        actor_auth_method: The actor's auth_method (the offending
+            lane).
+        actor_instance_id: For ``internal``-lane callers, the
+            actor's instance id (``None`` for HTTP lanes).
+        row_submitter_instance_id: The row's recorded submitter
+            instance id (the field the authority check reads).
+        reason: A short stable string suitable for the HTTP 403 body
+            (``{"error": "RETRACT_AUTHORITY", "message": ...}``).
+            Values: ``"wrong_instance"`` (other-instance internal
+            caller), ``"machine_lane_refused"`` (bearer),
+            ``"row_not_found"`` (defensive — repo raises
+            ``LookupError``, but T2 normalizes it here).
+    """
+
+    def __init__(
+        self,
+        version_id: str,
+        actor_auth_method: str,
+        actor_instance_id: Optional[str],
+        row_submitter_instance_id: Optional[str],
+        reason: str,
+    ) -> None:
+        self.version_id = version_id
+        self.actor_auth_method = actor_auth_method
+        self.actor_instance_id = actor_instance_id
+        self.row_submitter_instance_id = row_submitter_instance_id
+        self.reason = reason
+        super().__init__(
+            f"retract on prompt_version {version_id} refused: "
+            f"reason={reason} actor_auth_method={actor_auth_method!r} "
+            f"actor_instance_id={actor_instance_id!r} "
+            f"row_submitter_instance_id={row_submitter_instance_id!r}. "
+            f"Per phaseB-plan.md T2 / S16, retract authority = own "
+            f"submitter instance OR a session-lane (human) actor."
+        )
 
 
 # ============================================================
@@ -162,7 +384,34 @@ class PromptVersionService:
         version_id: str,
         actor: Any,
     ) -> Any:
-        """Transition ``pending_approval → approved`` (A2). HTTP actor only."""
+        """Transition ``pending_approval → approved`` (A2 / T3).
+
+        **Human-only lane guard (D2 / F4 / A7).** ``actor.auth_method``
+        MUST be ``"session"``; bearers, internal callers, and
+        anything else raise :class:`HumanLaneRequiredError`. Lane
+        discriminator beats scope: a bearer with ``prompts:approve``
+        is still refused at this layer (the repo's defense-in-depth
+        check stays as the second line — both layers raise on the
+        same conditions; this one raises the typed error the router
+        maps to ``403 HUMAN_LANE_REQUIRED``).
+
+        Args:
+            version_id: The PromptVersion PK.
+            actor: Caller identity (``actor_from_request`` for the
+                HTTP lane). Internal ``actor_from_instance`` is
+                refused (see ``self._require_human_lane``).
+
+        Returns:
+            The updated :class:`PromptVersion` row.
+
+        Raises:
+            HumanLaneRequiredError: If ``actor.auth_method != "session"``.
+            InvalidTransitionError: If the row is not in
+                ``pending_approval`` (e.g. already approved,
+                rejected, or archived).
+            LookupError: If the version_id does not exist.
+        """
+        self._require_human_lane(version_id, actor)
         return await asyncio.to_thread(
             self._repo.approve,
             version_id,
@@ -174,12 +423,208 @@ class PromptVersionService:
         version_id: str,
         actor: Any,
     ) -> Any:
-        """Transition ``pending_approval → rejected`` (A2). HTTP actor only."""
+        """Transition ``pending_approval → rejected`` (A2 / T3).
+
+        **Human-only lane guard (D2 / F4 / A7).** Mirror of
+        :meth:`approve` — only ``auth_method == "session"`` may
+        reject; every other lane raises :class:`HumanLaneRequiredError`.
+
+        Args:
+            version_id: The PromptVersion PK.
+            actor: Caller identity (``actor_from_request`` for the
+                HTTP lane). Internal and bearer lanes are refused.
+
+        Returns:
+            The updated :class:`PromptVersion` row.
+
+        Raises:
+            HumanLaneRequiredError: If ``actor.auth_method != "session"``.
+            InvalidTransitionError: If the row is not in
+                ``pending_approval``.
+            LookupError: If the version_id does not exist.
+        """
+        self._require_human_lane(version_id, actor)
         return await asyncio.to_thread(
             self._repo.reject,
             version_id,
             actor,
         )
+
+    async def retract(
+        self,
+        version_id: str,
+        actor: Any,
+    ) -> Any:
+        """Recall a submitted draft (T2 / S16).
+
+        The state-machine retract transitions are:
+
+        * ``pending_approval → draft`` — the user / agent wants to
+          take the row back and edit. The :class:`PromptVersion`
+          row's ``version`` is preserved (lineage stays intact);
+          the user re-submits via a new call to
+          ``create_and_submit`` which inserts ``version + 1`` and
+          archives this row (per A5/C4).
+        * ``draft → archived`` — a draft the user / agent
+          abandoned before submitting. The row is gone from the
+          live state but stays in the lineage for forensic audit.
+
+        Per phaseB-plan.md T2 / decisions.md S16 (anti-forgery),
+        retract authority is:
+
+        * ``auth_method == "session"`` (any human operator) — may
+          retract ANY row.
+        * ``auth_method == "internal"`` (the row's submitter
+          instance) — may retract ONLY the row whose
+          ``submitter_instance_id`` matches ``actor.instance_id``.
+          Anti-forgery holds because ``actor_from_request``
+          REFUSES to mint ``internal`` for an HTTP request — the
+          only path to ``internal`` is ``actor_from_instance``,
+          which IS in-process and trustworthy.
+        * ``auth_method == "bearer"`` — REFUSED outright. The
+          bearer lane is machine-only; no machine identity can
+          retract a row that an instance submitted.
+
+        All other :class:`ActorContext` fields are read for the
+        authority check but never asserted from a request body —
+        :meth:`actor_from_request` ignores body-asserted actor
+        fields (R3 source-forgery ticket, critical note 257488dc).
+
+        Args:
+            version_id: The PromptVersion PK.
+            actor: Caller identity. ``actor_from_request`` for
+                human sessions; ``actor_from_instance`` for the
+                submitting agent's own retract; bearer is
+                refused.
+
+        Returns:
+            The updated :class:`PromptVersion` row.
+
+        Raises:
+            RetractAuthorityError: If the caller fails the
+                own-row authority check (other-instance internal,
+                bearer, or any condition the matrix below marks
+                as REFUSED).
+            ValueError: If ``actor.auth_method`` is not a known
+                value (the service never invents identities).
+            InvalidTransitionError: If the row is not in a
+                retract-able state (already approved / rejected /
+                archived — those are terminal).
+            LookupError: If the version_id does not exist.
+
+        Authority matrix (per T2 fold-in):
+
+        ==================  ====================================
+        actor.auth_method   result
+        ==================  ====================================
+        ``session``         ALLOWED for any row
+        ``internal``        ALLOWED iff ``actor.instance_id ==
+                            row.submitter_instance_id``;
+                            otherwise ``RETRACT_AUTHORITY`` with
+                            ``reason="wrong_instance"``
+        ``bearer``          REFUSED with
+                            ``reason="machine_lane_refused"``
+        anything else       REFUSED via ``ValueError``
+        ==================  ====================================
+        """
+        auth_method = getattr(actor, "auth_method", None)
+        if auth_method not in ("session", "internal", "bearer"):
+            raise ValueError(
+                f"retract on {version_id}: actor.auth_method "
+                f"{auth_method!r} is not a known value "
+                f"(session/internal/bearer)"
+            )
+
+        if auth_method == "bearer":
+            # Machine lane cannot retract a row submitted by an
+            # instance identity (the row's submitter_subject is an
+            # instance id, not a bearer-credential subject).
+            raise RetractAuthorityError(
+                version_id=version_id,
+                actor_auth_method=auth_method,
+                actor_instance_id=None,
+                row_submitter_instance_id=None,
+                reason="machine_lane_refused",
+            )
+
+        if auth_method == "internal":
+            # Own-row authority check: the actor's instance_id must
+            # match the row's submitter_instance_id. We read the
+            # row first (the repo's get_version is a no-lock
+            # single-row read — safe to run before the
+            # transition).
+            row = await asyncio.to_thread(
+                self._repo.get_version, version_id,
+            )
+            if row is None:
+                raise LookupError(
+                    f"prompt_version {version_id} not found "
+                    f"(retract authority check)"
+                )
+            actor_instance_id = getattr(actor, "instance_id", None)
+            if actor_instance_id != row.submitter_instance_id:
+                raise RetractAuthorityError(
+                    version_id=version_id,
+                    actor_auth_method=auth_method,
+                    actor_instance_id=actor_instance_id,
+                    row_submitter_instance_id=row.submitter_instance_id,
+                    reason="wrong_instance",
+                )
+
+        # auth_method == "session" OR internal+own-row: pass the
+        # gate. The repo's atomic_transition is the next gate (it
+        # validates A1 transitions and stamps the audit row inside
+        # the same engine.begin() txn as the UPDATE).
+        if auth_method == "session":
+            # Per A1: pending_approval → draft (recall the
+            # pending row) is the only session-friendly retract.
+            return await asyncio.to_thread(
+                self._repo.atomic_transition,
+                version_id,
+                "pending_approval",
+                "draft",
+                actor,
+            )
+        # internal+own-row: figure out from_state from the row
+        # already read above (we re-read; the second read is
+        # intentional — the row's state may have moved between
+        # the authority-check read and now; the repo's atomic
+        # transition's CAS will refuse if so).
+        return await asyncio.to_thread(
+            self._repo.atomic_transition,
+            version_id,
+            "pending_approval",
+            "draft",
+            actor,
+        )
+
+    # --------------------------------------------------------
+    # Internal helpers — lane guards (T3)
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _require_human_lane(version_id: str, actor: Any) -> None:
+        """Raise :class:`HumanLaneRequiredError` unless the actor is human.
+
+        Helper for :meth:`approve` and :meth:`reject`. The check
+        is a single equality test:
+
+        * ``actor.auth_method == "session"`` — the human operator
+          lane; passes.
+        * ``actor.auth_method == "bearer"`` / ``"internal"`` /
+          anything else — REFUSED.
+
+        Per phaseB-plan.md D2, the lane discriminator (not the
+        scope claim) is the source of authority. This is the
+        service-side gate; the repo's atomic_transition then
+        validates the A1 state pair (defense-in-depth, R3).
+        """
+        auth_method = getattr(actor, "auth_method", None)
+        if auth_method != "session":
+            raise HumanLaneRequiredError(
+                version_id=version_id,
+                actor_auth_method=auth_method or "<missing>",
+            )
 
     async def atomic_transition(
         self,
@@ -365,4 +810,9 @@ class PromptVersionService:
         )
 
 
-__all__ = ["PromptVersionService"]
+__all__ = [
+    "PromptVersionService",
+    "HumanLaneRequiredError",
+    "AuthContextMissingError",
+    "RetractAuthorityError",
+]
