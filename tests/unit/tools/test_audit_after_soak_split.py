@@ -22,17 +22,33 @@ Run:
 
 Or under pytest:
   pytest tests/unit/tools/test_audit_after_soak_split.py
+
+Stub isolation (TF2 fix, 2026-10-12): the stub install is LAZY and
+REVERSIBLE. It used to run at module import time and permanently
+replace ``sys.modules["daemon"]``/``["daemon.constants"]`` — which
+collides with the autouse fixtures in ``tests/conftest.py`` (e.g.
+``_ensure_system_default_project_id`` does ``from daemon import
+constants`` at setup) and errors every test under the standard
+runner. Now: ``_install_stubs()`` saves the originals, installs the
+stubs, and execs the repository module exactly once;
+``_restore_stubs()`` puts every touched ``sys.modules`` entry back.
+A function-scoped autouse fixture drives the pair under pytest, and
+``main()`` wraps the standalone ``python3`` run the same way. The
+``daemon.constants`` stub execs the REAL ``daemon/constants.py``
+(leaf module — imports nothing) so even a mid-stub read sees a
+functional constants module, not a drift-prone hand-copy.
 """
 
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import os
 import sys
 import unittest
-from contextlib import contextmanager
 from typing import Any
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 # Add the repo root to sys.path so the test can import the queue
 # repository module. The P2 pattern is --noconftest + PYTHONPATH
@@ -46,20 +62,29 @@ if _REPO_ROOT not in sys.path:
 
 
 # Minimal stub of the SQLModel / sqlmodel bits the repository
-# module references at import time. We patch these BEFORE importing
-# the repository module.
+# module references at import time. These are BUILT lazily (see
+# _install_stubs) — never at module import time (TF2: a module-level
+# install permanently replaced sys.modules["daemon"]* and collided
+# with the autouse fixtures in tests/conftest.py under the standard
+# runner).
 _STUB_MODULES: dict[str, Any] = {}
+# Pre-install snapshots: key -> original module object, or None when
+# the key was ABSENT before the stub install (restore = pop).
+_SAVED_MODULES: dict[str, Any] = {}
+# sys.modules key the repository module itself is registered under.
+_REPO_SYSMODULE_KEY = "daemon.repositories.message_queue.repository"
+# The exec'd repository module (set exactly once by _install_stubs;
+# the test classes reach it as the module-global ``_repo_mod``).
+_repo_mod: Any = None
 
 
-def _install_stub_modules() -> None:
-    """Install stub modules for sqlmodel / sqlalchemy so the
-    repository module imports cleanly without a real DB.
-
-    P2 pattern (per the task brief): --noconftest + PYTHONPATH
-    pinning. The audit-after-soak unit test runs in a worktree
-    that may not have a built venv; this stubbing keeps the test
-    hermetic and fast.
+def _build_stub_modules() -> None:
+    """Build the stub modules (pure — installs nothing into
+    sys.modules). Idempotent: a second call is a no-op.
     """
+    global _STUB_MODULES
+    if _STUB_MODULES:
+        return
     import types
 
     # sqlmodel stub
@@ -85,8 +110,17 @@ def _install_stub_modules() -> None:
     _STUB_MODULES["sqlalchemy.func"] = sqlalchemy_func_mod
     _STUB_MODULES["sqlalchemy.engine"] = sqlalchemy_engine_mod
 
-    # daemon.constants stub (TERMINAL_INSTANCE_STATUSES)
+    # daemon.constants stub (TERMINAL_INSTANCE_STATUSES). TF2: instead
+    # of a hand-copied fragment, exec the REAL daemon/constants.py into
+    # the stub module — constants.py is a documented leaf module (it
+    # imports NOTHING), so this is cheap and cannot drift. Rationale:
+    # tests/conftest.py's autouse fixtures read constants attributes
+    # (e.g. SYSTEM_DEFAULT_PROJECT_ID); if a fixture ever runs while
+    # the stub is installed, it must still see a functional module.
     daemon_constants_mod = types.ModuleType("daemon.constants")
+    _real_constants_path = os.path.join(_REPO_ROOT, "daemon", "constants.py")
+    with open(_real_constants_path, "r", encoding="utf-8") as _cf:
+        exec(compile(_cf.read(), _real_constants_path, "exec"), vars(daemon_constants_mod))
     daemon_constants_mod.TERMINAL_INSTANCE_STATUSES = frozenset(
         {"completed", "failed", "cancelled", "error", "dead"}
     )
@@ -128,33 +162,84 @@ def _install_stub_modules() -> None:
     repos_pkg_mod.__path__ = [os.path.join(_REPO_ROOT, "daemon", "repositories")]
     _STUB_MODULES["daemon.repositories"] = repos_pkg_mod
 
-    # daemon package init
+    # daemon package init. Belt-and-braces: expose the real-constants
+    # clone as an attribute too, so `from daemon import constants`
+    # resolves via getattr without touching the import machinery.
     daemon_pkg_mod = types.ModuleType("daemon")
     daemon_pkg_mod.__path__ = [os.path.join(_REPO_ROOT, "daemon")]
+    daemon_pkg_mod.constants = _STUB_MODULES["daemon.constants"]
     _STUB_MODULES["daemon"] = daemon_pkg_mod
 
+
+def _install_stubs() -> None:
+    """Lazily install the stub modules + exec the repository module.
+
+    SAVES every ``sys.modules`` entry it is about to replace into
+    ``_SAVED_MODULES`` (None = the key was absent). The repository
+    module is exec'd EXACTLY once (guarded by the ``_repo_mod``
+    global); later calls are no-ops because the test classes operate
+    on the module OBJECT (patch.object), not on re-imports.
+
+    Callers MUST pair this with ``_restore_stubs()`` (fixture
+    teardown / finally) so the standard pytest runner's conftest
+    fixtures never observe the stubbed namespace (TF2).
+    """
+    global _repo_mod
+    if _repo_mod is not None:
+        return  # already installed + exec'd; sys.modules restored
+    _build_stub_modules()
     for name, mod in _STUB_MODULES.items():
+        _SAVED_MODULES[name] = sys.modules.get(name)
         sys.modules[name] = mod
+    # Now we can exec the repository module. The Session is a MagicMock
+    # at this point; the repository module's import-time references
+    # (e.g. `from sqlmodel import Session, select, col`) are satisfied.
+    _repo_module_path = os.path.join(
+        _REPO_ROOT, "daemon", "repositories", "message_queue", "repository.py"
+    )
+    _spec = importlib.util.spec_from_file_location(
+        _REPO_SYSMODULE_KEY, _repo_module_path
+    )
+    assert _spec is not None
+    assert _spec.loader is not None
+    _repo_mod = importlib.util.module_from_spec(_spec)
+    _SAVED_MODULES[_REPO_SYSMODULE_KEY] = sys.modules.get(_REPO_SYSMODULE_KEY)
+    sys.modules[_REPO_SYSMODULE_KEY] = _repo_mod
+    _spec.loader.exec_module(_repo_mod)
 
 
-_install_stub_modules()
+def _restore_stubs() -> None:
+    """Restore every ``sys.modules`` entry the stub install touched
+    (absent-before → popped; present-before → original object back).
+    Idempotent — safe to call from fixture teardown and finally."""
+    global _repo_mod
+    if not _SAVED_MODULES:
+        return
+    for name, original in _SAVED_MODULES.items():
+        if original is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = original
+    _SAVED_MODULES.clear()
+    # Keep the exec'd module object alive for patch.object use; only
+    # the sys.modules registration is undone. A fresh install would
+    # re-exec only if we also dropped _repo_mod — we deliberately do
+    # not: re-exec per test would reset module-level caches the tests
+    # rely on being stable within a session.
 
-# Now we can import the repository module. The Session is a MagicMock
-# at this point; the repository module's import-time references
-# (e.g. `from sqlmodel import Session, select, col`) are satisfied.
-_repo_module_path = os.path.join(
-    _REPO_ROOT, "daemon", "repositories", "message_queue", "repository.py"
-)
-import importlib.util
 
-_spec = importlib.util.spec_from_file_location(
-    "daemon.repositories.message_queue.repository", _repo_module_path
-)
-assert _spec is not None
-assert _spec.loader is not None
-_repo_mod = importlib.util.module_from_spec(_spec)
-sys.modules["daemon.repositories.message_queue.repository"] = _repo_mod
-_spec.loader.exec_module(_repo_mod)
+@pytest.fixture(autouse=True)
+def _isolated_repo_module_namespace():
+    """TF2 restore discipline: stubs live ONLY for the duration of
+    each test. Setup installs (first test execs the repository
+    module); teardown restores the original ``sys.modules`` entries,
+    so tests/conftest.py's autouse fixtures — which run around every
+    test — never see a stubbed ``daemon`` / ``daemon.constants``."""
+    _install_stubs()
+    try:
+        yield
+    finally:
+        _restore_stubs()
 
 
 # ----------------------------------------------------------------------------
@@ -516,16 +601,25 @@ class TestAuditAfterSoakOrdering(unittest.TestCase):
 
 
 def main() -> int:
-    """Run the audit-after-soak split unit tests."""
-    loader = unittest.TestLoader()
-    suite = unittest.TestSuite()
-    suite.addTests(loader.loadTestsFromTestCase(TestCaptureDoomedIdsAndAudit))
-    suite.addTests(loader.loadTestsFromTestCase(TestDeleteDoomedIds))
-    suite.addTests(loader.loadTestsFromTestCase(TestClearAllSyncCoordinator))
-    suite.addTests(loader.loadTestsFromTestCase(TestAuditAfterSoakOrdering))
-    runner = unittest.TextTestRunner(verbosity=2)
-    result = runner.run(suite)
-    return 0 if result.wasSuccessful() else 1
+    """Run the audit-after-soak split unit tests.
+
+    Standalone path (TF2): install the stubs, run the suite, then
+    ALWAYS restore the original ``sys.modules`` entries — same
+    discipline the autouse fixture enforces under pytest.
+    """
+    _install_stubs()
+    try:
+        loader = unittest.TestLoader()
+        suite = unittest.TestSuite()
+        suite.addTests(loader.loadTestsFromTestCase(TestCaptureDoomedIdsAndAudit))
+        suite.addTests(loader.loadTestsFromTestCase(TestDeleteDoomedIds))
+        suite.addTests(loader.loadTestsFromTestCase(TestClearAllSyncCoordinator))
+        suite.addTests(loader.loadTestsFromTestCase(TestAuditAfterSoakOrdering))
+        runner = unittest.TextTestRunner(verbosity=2)
+        result = runner.run(suite)
+        return 0 if result.wasSuccessful() else 1
+    finally:
+        _restore_stubs()
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ LAUNCHER="$REPO_ROOT/launcher.sh"
 
 PASS=0
 FAIL=0
+SKIP=0
 FAILED_TESTS=""
 
 _pass() {
@@ -33,6 +34,12 @@ _fail() {
   ✗ $1"
     printf 'FAIL: %s\n' "$1" >&2
     [ $# -gt 1 ] && printf '      expected: %s\n      actual:   %s\n' "$2" "$3" >&2
+}
+
+# _skip <name> — informational skip: counted, never fails the suite.
+_skip() {
+    SKIP=$((SKIP + 1))
+    printf 'SKIP: %s\n' "$1" >&2
 }
 
 # assert_eq <name> <expected> <actual>
@@ -853,16 +860,15 @@ else
     _pass "8b-r1 _journal_sweep has no pipe reads (regression pin)"
 fi
 
-# 8b-r2: live-install launcher state (informational). The live install's
-# launcher copy at /home/nea/agents-ensemble/launcher.sh runs until the
-# NEXT successful v0.16.9 promote carries the fix payload. Until then the
-# live copy is byte-identical to the BASE commit (no fix), while HEAD has
-# the bounded-subprocess pass. This is informational — it does NOT fail
-# the suite; v0.16.9 promote closes it. Replaces the early 'drift guard'
-# (which was a strict equality check that fired BEFORE v0.16.9 promotes
-# — the wrong outcome to optimize against).
-LIVE_LAUNCHER="/home/nea/agents-ensemble/launcher.sh"
-if [ -f "$LIVE_LAUNCHER" ]; then
+# 8b-r2: live-install launcher state (informational). TF3 (2026-10-12):
+# the probe path is OPT-IN via ENS_TEST_LIVE_LAUNCHER — there is NO
+# default live-install path and NO default stat probe (zero-live-contact
+# bar for agent-driven test runs; the probe only ever fired when a live
+# install existed, but the hardcoded path made that unconditional).
+# Operators who want the live-copy comparison run:
+#   ENS_TEST_LIVE_LAUNCHER=/path/to/live/install/launcher.sh bash tests/test_launcher.sh
+LIVE_LAUNCHER="${ENS_TEST_LIVE_LAUNCHER:-}"
+if [ -n "$LIVE_LAUNCHER" ] && [ -f "$LIVE_LAUNCHER" ]; then
     # Compare the _journal_sweep function body between repo and live.
     LIVE_SWEEP_BODY="$(awk '
         /^_journal_sweep\(\)/ { in_fn=1; next }
@@ -870,19 +876,22 @@ if [ -f "$LIVE_LAUNCHER" ]; then
         in_fn { print }
     ' "$LIVE_LAUNCHER")"
     if [ "$SWEEP_BODY" = "$LIVE_SWEEP_BODY" ]; then
-        _pass "8b-r2 repo _journal_sweep body ≡ live-install copy (post-promote convergence)"
+        _pass
+        printf 'INFO: 8b-r2 repo _journal_sweep body ≡ live-install copy (post-promote convergence)\n'
     else
-        # informational pass — v0.16.9 promote will converge
-        printf 'INFO: 8b-r2 live-install _journal_sweep ≠ repo HEAD (v0.16.9 not promoted yet; v0.16.9 promote will close)\n'
+        # informational pass — the promote train converges the copies
+        printf 'INFO: 8b-r2 live-install _journal_sweep \u2260 repo HEAD (next promote will close)\n'
         LIVE_KILLS=$(printf '%s' "$LIVE_SWEEP_BODY" | sed -e 's/#.*$//' | grep -c '_js_pid_alive_bounded\|_js_run_bounded' || true)
         if [ "$LIVE_KILLS" -gt 0 ]; then
-            _pass "8b-r2 live-install _journal_sweep body has the bounded-subprocess pass (post-promote)"
+            _pass
+            printf 'INFO: 8b-r2 live-install _journal_sweep body has the bounded-subprocess pass\n'
         else
-            printf 'INFO: 8b-r2 live-install _journal_sweep body pre-promote (no bounded pass; will land at v0.16.9)\n'
+            _pass
+            printf 'INFO: 8b-r2 live-install _journal_sweep body pre-promote (no bounded pass; will land at next promote)\n'
         fi
     fi
 else
-    _skip "8b-r2 repo _journal_sweep body ≡ live-install copy — live install absent (no /home/nea/agents-ensemble/launcher.sh)"
+    _skip "8b-r2 repo _journal_sweep body ≡ live-install copy — no live-install path configured (set ENS_TEST_LIVE_LAUNCHER to opt in)"
 fi
 
 # 8b-c1: _js_run_bounded — fast command returns the inner rc (0 / nonzero)
@@ -1075,7 +1084,7 @@ rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \
 
 # ─── summary ────────────────────────────────────────────────────────────────
 printf '\n========================================\n'
-printf 'launcher tests: %d passed, %d failed\n' "$PASS" "$FAIL"
+printf 'launcher tests: %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 if [ "$FAIL" -gt 0 ]; then
     printf 'failed:%s\n' "$FAILED_TESTS"
     exit 1

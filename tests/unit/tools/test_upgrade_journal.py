@@ -1874,18 +1874,61 @@ class TestUpgradeJournalSweepService:
         assert (os.getpid(), 0) in kill_calls
         assert uj.read_pending_op(install) is not None  # NOT cleared
 
-    async def test_periodic_sweep_stale_evidence_does_not_block(
+    async def test_periodic_sweep_stale_evidence_dead_pid_reconciles(
         self, install: Path
     ) -> None:
-        """TIME-BOUND predicate is load-bearing (NOT bare pid-existence):
-        an alive pid with STALE heartbeat evidence no longer blocks the
-        sweep — reconcile's own expiry path clears the op."""
+        """W4 two-signal contract, arm (1): an EXPIRED op whose evidence is
+        stale (no fresh in_flight heartbeat) AND whose owner pid is
+        verifiably DEAD is clear-eligible — reconcile proceeds and the op
+        is cleared as crashed. A heartbeat cannot resurrect a dead pid
+        (upgrade_journal.py journal_owner_heartbeat_fresh is journal-side;
+        the stale PendingOp.owner_heartbeat_at is only a fallback reader),
+        so dead-pid + stale-hb means every liveness signal failed."""
+        uj.write_pending_op(
+            install,
+            PendingOp(
+                run_id="r-sweep-stale-dead", kind="promote", env="demo",
+                target="1.2.3",
+                owner_pid=_dead_pid(),  # verifiably dead right now
+                owner_kind="executor",
+                owner_heartbeat_at=uj.iso_plus(uj.now_iso(), -4 * 3600),  # stale
+                expires_at=uj.iso_plus(
+                    uj.now_iso(), -2 * uj.RECONCILE_GRACE_S
+                ),  # past expiry+grace
+            ),
+        )
+        svc = self._svc(install)
+        result = await svc.sweep_once()
+        assert result["skipped"] == 0
+        assert result["reconcile"] is not None
+        assert uj.read_pending_op(install) is None
+
+    async def test_periodic_sweep_stale_evidence_alive_pid_left_alone(
+        self, install: Path
+    ) -> None:
+        """W4 two-signal contract, arm (2): an EXPIRED op with STALE
+        heartbeat evidence but an ALIVE owner pid is LEFT ALONE — the
+        sweep must never orphan a live executor, even when the op is past
+        its expiry+grace window.
+
+        W4 rationale (decisions-resolution-2026-10-12.md, R1 rulings,
+        council 2026-10-12): the liveness predicate is two-signal —
+        (1) journal heartbeat freshness, (2) os.kill(pid, 0) — with the
+        systemd-cgroup third signal DEFERRED, and the stale-hb + alive-pid
+        cell deliberately ruled leave-alone. That ruling is the fix for
+        the 03:56Z orphan mis-sweep incident class (a time-bound-only
+        predicate cleared the pending_op underneath a LIVE, slow promote
+        executor once its heartbeat stamp aged past the window — the
+        operator lost the in-flight record while the promote was still
+        running). Do NOT re-add a time bound on the alive-pid arm: an
+        unbounded conservatism (the op is swept on a later tick once the
+        pid exits) is strictly safer than a lossy reclaim."""
         uj.write_pending_op(
             install,
             PendingOp(
                 run_id="r-sweep-stale-pid", kind="promote", env="demo",
                 target="1.2.3",
-                owner_pid=os.getpid(),  # alive, but…
+                owner_pid=os.getpid(),  # THIS process — verifiably alive
                 owner_kind="executor",
                 owner_heartbeat_at=uj.iso_plus(uj.now_iso(), -4 * 3600),  # stale
                 expires_at=uj.iso_plus(
@@ -1895,8 +1938,9 @@ class TestUpgradeJournalSweepService:
         )
         svc = self._svc(install)
         result = await svc.sweep_once()
-        assert result["skipped"] == 0
-        assert uj.read_pending_op(install) is None
+        assert result["skipped"] == 1
+        assert result["reconcile"] is None
+        assert uj.read_pending_op(install) is not None  # NOT cleared
 
     def test_enqueue_reaper_truncates_argv_summary(self, install: Path) -> None:
         svc = self._svc(install)
