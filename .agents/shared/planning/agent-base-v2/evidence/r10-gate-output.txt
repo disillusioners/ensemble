@@ -1,0 +1,33 @@
+# R10 FINAL TESTER GATE — Phase E Step 13
+# Command: verbatim from phaseE §5.5 Step 13 (48 pathspecs; v4 set)
+# Executed: 2026-10-13T16:26:02Z at HEAD 10210c74f on feature/agent-base-v2
+# Scope: git-TRACKED active tree (git grep walks tracked files; untracked/gitignored paths unreachable)
+
+.gitignore:73:opencode_sessions.db
+tests/unit/test_wanderer_agent.py:163:    def test_innate_skills_does_not_contain_opencode(self) -> None:
+tests/unit/test_wanderer_agent.py:167:        assert "opencode" not in meta.get("innate_skills", [])
+tests/unit/test_wanderer_agent.py:263:    def test_team_members_does_not_contain_opencode(self) -> None:
+tests/unit/test_wanderer_agent.py:264:        """team_members must not contain opencode — that's the coder agent's lane."""
+tests/unit/test_wanderer_agent.py:269:        assert "opencode" not in team_members, (
+tests/unit/test_wanderer_agent.py:270:            f"team_members should not contain 'opencode': {team_members}"
+tests/unit/test_wanderer_agent.py:348:    def test_wanderer_resolve_excludes_db_and_opencode(self) -> None:
+tests/unit/test_wanderer_agent.py:359:        # opencode not in allow -> not resolved
+tests/unit/test_wanderer_agent.py:361:            "external_opencode_init_session",
+tests/unit/test_wanderer_agent.py:362:            "external_opencode_send_message",
+tests/unit/test_wanderer_agent.py:363:            "external_opencode_get_status",
+tests/unit/test_wanderer_agent.py:410:            MockTool("external_opencode_init_session"),  # Should be filtered out
+tests/unit/test_wanderer_agent.py:438:                # opencode tools should be filtered out
+tests/unit/test_wanderer_agent.py:439:                assert "external_opencode_init_session" not in tool_names
+
+# GATE RESULT: exit=0 (1 = zero matches = GATE GREEN)
+# match count: 2 files with matches
+
+=== v5 GATE RUN (verbatim set + 2 completion pathspecs; 2026-10-13T16:27:43Z) ===
+# added: ':(exclude).gitignore'  ':(exclude)tests/unit/test_wanderer_agent.py'
+
+# v5 GATE RESULT: exit=1 (1 = zero matches = GREEN)
+
+=== CASE-SENSITIVITY SUPPLEMENTARY (mission critical #3) ===
+# The verbatim gate is ALREADY case-insensitive (-niE): the v5 zero INCLUDES capitalized 'OpenCode'.
+# Supplementary: case-SENSITIVE variant (-nE) of the same v5 exclude set — proves no capitalized-only rows exist outside the excluded set:
+# case-sensitive v5 exit=1 (1 = zero matches)
