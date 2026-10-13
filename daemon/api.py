@@ -142,6 +142,7 @@ from daemon.routers import (
     maintenance_router,        # /api/maintenance (Section 1: checkpoint cleanup — Phase 1)
     missions_router,          # /api/missions (M4-i pull-forward: mission read-model HTTP surface)
     tmp_images_router,        # /api/tmp_images (Phase 1: clipboard-image-chat upload+serve)
+    prompts_router,           # /api/prompts (Phase B T5: agent-prompt-immutability approval REST)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
@@ -3650,6 +3651,20 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # otherwise send ``GET /api/tmp_images/<id>`` to the
     # index.html fallback (architect phase1-plan.md risk #1).
     api_router.include_router(tmp_images_router)       # /api/tmp_images
+
+    # Phase B / agent-prompt-immutability T5 + T6: the 12-endpoint
+    # prompt-version REST family (per phaseB-plan.md addendum S4
+    # canonical family). Mounted UNCONDITIONALLY — the per-endpoint
+    # guard (T5/D3) returns 503 AUTH_NOT_CONFIGURED when auth is OFF,
+    # so the router stays registered even when auth is disabled (the
+    # routes still exist for dev tooling / OpenAPI generation). Scope
+    # pin (prompts:{read,submit,approve,audit,write}) lives in the
+    # scope manifest cage (tests/unit/test_router_scope_manifest.py);
+    # registration census pin lives in
+    # tests/integration/test_router_class_manifest.py. Mounted here
+    # — BEFORE the SPA catch-all (api.py:3641) so Starlette
+    # first-match-wins resolves /api/prompts/* to this router.
+    api_router.include_router(prompts_router)         # /api/prompts (Phase B T5)
 
     # OAuth2 Phase 3 (T3.12 / FR-41): the MCP-KB key-management CRUD —
     # the ONE new OAuth2-human-lane family (§5.6: 30 legacy + 1 new).

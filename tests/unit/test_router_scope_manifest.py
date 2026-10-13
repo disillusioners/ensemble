@@ -103,6 +103,14 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     "/api/auth": "*",                       # public-probe family (§5.3)
     "/api/health": "*",                     # PUBLIC
     "/api/info": "*",                       # PUBLIC
+    # Phase B / agent-prompt-immutability T5/T6 — the 12-endpoint
+    # prompt-version family. Every endpoint carries an explicit
+    # @require_scope of one of the five minted prompts:* scopes
+    # (T4 / phaseB-plan.md D11) — no wildcarded routes in this
+    # family. The cage's _parse_scope_manifest_entry validator
+    # confirms each named scope is in SCOPE_TAXONOMY at the
+    # dedicated validation leg below.
+    "/api/prompts": "prompts:read|prompts:submit|prompts:approve|prompts:audit|prompts:write",
 }
 
 #: The wildcard sentinel as stored in the manifest.
@@ -198,15 +206,20 @@ class TestSourceMatchTarget:
     """The F3-pinned cage match target: ``api_router.include_router(``."""
 
     def test_census_pinned(self):
-        """The textual census: 30 ``api_router.include_router(`` matches
-        at the current tree = 28 unconditional + 2 auth-ON-gated
+        """The textual census: 31 ``api_router.include_router(`` matches
+        at the current tree = 29 unconditional + 2 auth-ON-gated
         (mcp-kb keys, auth-self). A drift here fails the cage and
-        forces a manifest review."""
+        forces a manifest review.
+
+        Phase B / agent-prompt-immutability T6 added the prompts_router
+        (29 unconditional; was 28 pre-T6) — the cage must reflect this
+        with the new /api/prompts family pinned in the manifest above.
+        """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
-        assert len(matches) == 30, (
+        assert len(matches) == 31, (
             f"api_router.include_router( census drifted: {len(matches)} "
-            "(pinned 30 = 28 unconditional + 2 auth-ON-gated). New mount? "
+            "(pinned 31 = 29 unconditional + 2 auth-ON-gated). New mount? "
             "Declare its family in PINNED_SCOPE_MANIFEST above."
         )
 
@@ -228,8 +241,15 @@ class TestScopeManifestCage:
 
     def test_declared_route_count_pinned(self, app_routes):
         """The decoration census: 71 P4 T4.4 decorations + the 7 P3
-        T3.12 mcpkb:admin keys routes = 78 declared routes. A drift is
-        a decoration added/removed without a manifest row change."""
+        T3.12 mcpkb:admin keys routes + the 12 Phase B T5 prompts
+        routes = 90 declared routes. A drift is a decoration added/
+        removed without a manifest row change.
+
+        Phase B / agent-prompt-immutability T5 added 12
+        @require_scope-decorated routes under /api/prompts (the
+        canonical 12-endpoint family per phaseB-plan.md addendum
+        S4 / T5 acceptance) — the cage count was 78 pre-T6.
+        """
         declared = [
             r
             for r in app_routes
@@ -237,8 +257,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 78, (
-            f"declared-route census drifted: {len(declared)} (pinned 78)"
+        assert len(declared) == 90, (
+            f"declared-route census drifted: {len(declared)} (pinned 90)"
         )
 
     def test_manifest_entries_valid(self):

@@ -27,6 +27,7 @@ from .snapshots import router as snapshots_router  # /api/snapshots (snapshot-ui
 from .missions import router as missions_router
 from .tmp_images import router as tmp_images_router  # Phase 1: clipboard-image-chat
 from .maintenance import router as maintenance_router  # Section 1: checkpoint cleanup
+from .prompts import router as prompts_router  # Phase B T5: agent-prompt-immutability approval REST
 
 __all__ = [
     "agents_router",
@@ -56,4 +57,5 @@ __all__ = [
     "missions_router",
     "tmp_images_router",
     "maintenance_router",
+    "prompts_router",
 ]
