@@ -73,9 +73,13 @@ this layer (they go through dedicated tool paths, not ``write_file`` /
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import re
 import sys
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -286,9 +290,301 @@ def check_write(
         )
 
 
+# ---------------------------------------------------------------------------
+# Drift detection (Phase A T13 / S9 — the D-BASH-ESCAPE accepted-risk control)
+# ---------------------------------------------------------------------------
+# The bash tool cannot be code-level guarded (decisions.md D-BASH-ESCAPE);
+# the mitigating control is a committed sha256 baseline over the versioned
+# set, re-hashed at stage time (scripts/upgrade/stage.sh leg) and at daemon
+# boot (api.py lifespan, next to the prompt-version create_all). Both
+# consumers call into THIS module so the artifact set + depth-2 matcher +
+# path conventions stay single-sourced.
+#
+# Baseline format (deterministic, sha256sum -c compatible):
+#     "<hex sha256>  agents/<agent_dir>/<artifact>\n"
+# sorted by path, one line per existing artifact, NO comments/blank lines
+# (GNU sha256sum -c and perl shasum -c both flag non-conforming lines).
+# Paths are TREE-ROOT-relative (always "agents/..."), so the same file
+# validates a repo checkout (cd <repo> && sha256sum -c
+# agents/.prompt-artifacts.sha256) AND a staged release tree.
+#
+# Failure posture (allow-stale policy, plugin_staleness_policy parity):
+# drift is REPORTED (operator-visible WARN + stage journal entry) and
+# NEVER gates — no stage/boot failure on mismatch. A missing baseline is
+# a normal state (fresh checkout before first generation) → single INFO.
+
+# Baseline filename — lives INSIDE agents/ so it ships with the release
+# payload (stage.sh copies the repo agents/ tree verbatim; the manifest
+# per-file map covers it like any other agents/ file).
+BASELINE_FILENAME = ".prompt-artifacts.sha256"
+
+
+def iter_versioned_artifact_paths(agents_root: Path) -> Iterator[Path]:
+    """Yield existing depth-2 versioned-artifact paths under *agents_root*.
+
+    Same match rule as the guard (``_depth2_match``): exactly
+    ``<agents_root>/<dir>/<artifact>`` with *artifact* in
+    ``VERSIONED_PROMPT_ARTIFACTS`` — ``_``-dirs included, depth-3+
+    excluded, non-existent files skipped.
+    """
+    try:
+        if not agents_root.is_dir():
+            return
+        for child in sorted(agents_root.iterdir()):
+            if not child.is_dir():
+                continue
+            for artifact in sorted(VERSIONED_PROMPT_ARTIFACTS):
+                candidate = child / artifact
+                try:
+                    if candidate.is_file():
+                        yield candidate
+                except OSError:
+                    continue
+    except OSError:
+        return
+
+
+def compute_versioned_artifact_hashes(agents_root: Path) -> dict[str, str]:
+    """Hash every versioned artifact under *agents_root*.
+
+    Returns ``{"agents/<dir>/<artifact>": "<hex sha256>"}`` — keys are
+    TREE-ROOT-relative (the parent of *agents_root* is the tree root),
+    matching the committed baseline format.
+    """
+    hashes: dict[str, str] = {}
+    for path in iter_versioned_artifact_paths(agents_root):
+        rel = path.relative_to(agents_root)
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+        hashes[f"agents/{rel.as_posix()}"] = h.hexdigest()
+    return dict(sorted(hashes.items()))
+
+
+def parse_baseline(content: str) -> tuple[dict[str, str], list[str]]:
+    """Parse baseline text → (entries, malformed_lines).
+
+    Entries map ``agents/<dir>/<artifact>`` → hex digest. A line is
+    malformed unless it is exactly ``<64 lowercase hex>  <path>`` (the
+    sha256sum text-mode shape; binary-mode ``*`` separators and
+    comments/blank lines are rejected — the generator never emits them).
+    """
+    entries: dict[str, str] = {}
+    malformed: list[str] = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split("  ", 1)
+        if (
+            len(parts) != 2
+            or not re.fullmatch(r"[0-9a-f]{64}", parts[0])
+            or not parts[1].startswith("agents/")
+            or len(parts[1].split("/")) != 3
+        ):
+            malformed.append(line)
+            continue
+        entries[parts[1]] = parts[0]
+    return entries, malformed
+
+
+@dataclass(frozen=True)
+class BaselineCheckResult:
+    """Outcome of a baseline-vs-tree comparison (T13)."""
+
+    status: str  # "ok" | "drift" | "baseline_absent" | "no_agents_root"
+    agents_root: Path | None = None
+    baseline_path: Path | None = None
+    modified: tuple[str, ...] = ()
+    missing: tuple[str, ...] = ()
+    added: tuple[str, ...] = ()
+    malformed: tuple[str, ...] = ()
+    verified_count: int = 0
+
+    @property
+    def drift_count(self) -> int:
+        return len(self.modified) + len(self.missing) + len(self.added) + len(
+            self.malformed
+        )
+
+    def summary(self) -> str:
+        """One-line human summary (stable token order for log greps)."""
+        if self.status == "ok":
+            return (
+                f"PROMPT-BASELINE: OK — {self.verified_count} versioned "
+                f"artifact(s) match {BASELINE_FILENAME}"
+            )
+        if self.status == "baseline_absent":
+            return (
+                f"PROMPT-BASELINE: ABSENT — no {BASELINE_FILENAME} under any "
+                f"agents root (fresh tree before first baseline generation)"
+            )
+        if self.status == "no_agents_root":
+            return "PROMPT-BASELINE: SKIP — no agents root resolved"
+        return (
+            f"PROMPT-DRIFT: {self.drift_count} difference(s) vs "
+            f"{BASELINE_FILENAME} "
+            f"(modified={len(self.modified)} missing={len(self.missing)} "
+            f"added={len(self.added)} malformed={len(self.malformed)})"
+        )
+
+    def detail_lines(self, cap: int = 20) -> list[str]:
+        """Per-file drift lines, capped (operator-visible, journal-safe)."""
+        lines: list[str] = []
+        for path in self.modified:
+            lines.append(f"PROMPT-DRIFT-FILE: {path} (modified)")
+        for path in self.missing:
+            lines.append(f"PROMPT-DRIFT-FILE: {path} (missing)")
+        for path in self.added:
+            lines.append(f"PROMPT-DRIFT-FILE: {path} (added)")
+        for line in self.malformed:
+            lines.append(f"PROMPT-DRIFT-BASELINE-LINE: {line}")
+        if len(lines) > cap:
+            overflow = len(lines) - cap
+            lines = lines[:cap] + [f"... (+{overflow} more)"]
+        return lines
+
+
+def check_baseline_drift(
+    agents_roots: tuple[Path, ...] | None = None,
+) -> BaselineCheckResult:
+    """Compare the committed baseline against the live tree (read-only).
+
+    Uses the FIRST resolved agents root that carries a baseline file
+    (both canonical roots hold the same tree in practice; divergent-path
+    installs pick whichever root actually has the payload). Read-only by
+    construction — never writes. The *agents_roots* parameter is the
+    test seam (mirrors ``check_write``); production callers omit it.
+    """
+    if agents_roots is None:
+        agents_roots = get_agents_roots()
+
+    baseline_path: Path | None = None
+    agents_root: Path | None = None
+    for root in agents_roots:
+        candidate = root / BASELINE_FILENAME
+        if candidate.is_file():
+            baseline_path = candidate
+            agents_root = root
+            break
+
+    if baseline_path is None or agents_root is None:
+        if not any(root.is_dir() for root in agents_roots):
+            return BaselineCheckResult(status="no_agents_root")
+        return BaselineCheckResult(status="baseline_absent")
+
+    try:
+        baseline_text = baseline_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        # Unreadable baseline → treat as drift (fail-loud, not fail-silent).
+        return BaselineCheckResult(
+            status="drift",
+            agents_root=agents_root,
+            baseline_path=baseline_path,
+            malformed=(f"<unreadable baseline: {exc}>",),
+        )
+
+    expected, malformed = parse_baseline(baseline_text)
+    actual = compute_versioned_artifact_hashes(agents_root)
+
+    modified = sorted(
+        path
+        for path, digest in expected.items()
+        if path in actual and actual[path] != digest
+    )
+    missing = sorted(path for path in expected if path not in actual)
+    added = sorted(path for path in actual if path not in expected)
+
+    if modified or missing or added or malformed:
+        return BaselineCheckResult(
+            status="drift",
+            agents_root=agents_root,
+            baseline_path=baseline_path,
+            modified=tuple(modified),
+            missing=tuple(missing),
+            added=tuple(added),
+            malformed=tuple(malformed),
+        )
+    return BaselineCheckResult(
+        status="ok",
+        agents_root=agents_root,
+        baseline_path=baseline_path,
+        verified_count=len(actual),
+    )
+
+
+def log_baseline_drift_at_boot(logger_: logging.Logger | None = None) -> str:
+    """Boot-time drift report — WARN on drift, INFO otherwise (T13).
+
+    NEVER raises, NEVER blocks boot (allow-stale policy). Returns the
+    check status token ("ok" | "drift" | "baseline_absent" |
+    "no_agents_root") so the caller can log a non-fatal fallback line on
+    its own exceptions. The *logger_* parameter defaults to this module's
+    logger; api.py passes its own so the WARN lands in the operator's
+    usual log stream.
+    """
+    log = logger_ if logger_ is not None else logger
+    result = check_baseline_drift()
+    if result.status == "drift":
+        detail = "; ".join(result.detail_lines())
+        log.warning(
+            "[Startup] Prompt-artifact baseline DRIFT — %d file(s) differ "
+            "from the committed %s (allow-stale: informational, NOT "
+            "boot-blocking; regenerate via "
+            "scripts/protection/generate_prompt_artifact_baseline.py): %s",
+            result.drift_count,
+            BASELINE_FILENAME,
+            detail,
+        )
+    elif result.status == "baseline_absent":
+        log.info(
+            "[Startup] Prompt-artifact baseline absent (%s) — drift check "
+            "skipped (fresh checkout before first baseline generation)",
+            BASELINE_FILENAME,
+        )
+    elif result.status == "no_agents_root":
+        log.info(
+            "[Startup] Prompt-artifact drift check skipped: no agents root "
+            "resolved"
+        )
+    else:
+        log.info(
+            "[Startup] Prompt-artifact baseline clean: %d versioned "
+            "artifact(s) match %s",
+            result.verified_count,
+            BASELINE_FILENAME,
+        )
+    return result.status
+
+
+def generate_baseline_text(agents_root: Path) -> str:
+    """Render the deterministic baseline body for *agents_root*.
+
+    Sorted ``<sha256>  agents/<dir>/<artifact>`` lines, LF-terminated,
+    no header/comment/blank lines (sha256sum -c strict compatibility).
+    """
+    hashes = compute_versioned_artifact_hashes(agents_root)
+    return "".join(f"{digest}  {path}\n" for path, digest in hashes.items())
+
+
+def baseline_path_for(agents_root: Path) -> Path:
+    """Return the canonical baseline path inside *agents_root*."""
+    return agents_root / BASELINE_FILENAME
+
+
 __all__ = [
+    "BASELINE_FILENAME",
+    "BaselineCheckResult",
     "VERSIONED_PROMPT_ARTIFACTS",
+    "baseline_path_for",
+    "check_baseline_drift",
     "check_write",
+    "compute_versioned_artifact_hashes",
+    "generate_baseline_text",
     "get_agents_roots",
+    "iter_versioned_artifact_paths",
+    "log_baseline_drift_at_boot",
+    "parse_baseline",
     "reset_agents_roots_cache",
 ]

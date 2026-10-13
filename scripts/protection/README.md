@@ -30,6 +30,13 @@ deployed host path. Edit here, redeploy to the host, and keep both in sync.
 Snapshot data lives at `/home/nea/.install-snapshots` (root:root 700 —
 contains `.env`; the snapshot script creates/permissions it itself).
 
+**Repo-native exception:** `generate_prompt_artifact_baseline.py` (Phase A
+T13, agent-prompt-immutability S9) is NOT a host-armor mirror — it has no
+deployed host path. It generates/verifies the committed
+`agents/.prompt-artifacts.sha256` baseline consumed by the
+`scripts/upgrade/stage.sh` drift leg (read-only + journaled, never gating)
+and the daemon boot WARN (`daemon/api.py` lifespan).
+
 Full Layer 1 arm procedure (user-gated window): see
 `docs/runbooks/install-dir-protection-layer1-arm.md` (repo-canonical copy;
 host convenience copy at `/home/nea/.ensemble-layer1-arm-runbook.md`).
