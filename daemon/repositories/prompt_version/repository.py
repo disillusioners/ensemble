@@ -1355,6 +1355,127 @@ class PromptVersionRepository:
             assert row is not None
             return row
 
+    # 14. list_audit_events --------------------------------------------------
+
+    def list_audit_events(
+        self,
+        agent_id: Optional[str] = None,
+        version_tag: Optional[str] = None,
+        artifact: Optional[str] = None,
+        version_id: Optional[str] = None,
+        event_type: Optional[str] = None,
+        actor_subject: Optional[str] = None,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[PromptAuditEvent], int]:
+        """List audit events, newest first, with optional filters (Phase B T5 — endpoint 12).
+
+        Mirrors the ``list_versions`` / ``skill_bank.py:72-108``
+        pagination template: returns ``(items, total)`` where
+        ``items`` is the page of rows (DESC by ``created_at``) and
+        ``total`` is the unfiltered-by-pagination count for the same
+        filter set.
+
+        All filters are optional and combine with AND. The
+        ``version_tag`` filter passes through :func:`_normalize_version_tag`
+        so ``None`` and ``""`` resolve to ``""`` (the F9 / A7
+        normalization) and the query stays consistent with the
+        mutating methods.
+
+        Uses the Phase A indexes (query-friendly by design —
+        ``idx_prompt_audit_events_key_created`` covers
+        ``(agent_id, version_tag, artifact, created_at)``; the
+        ``version_id`` lookup rides ``idx_prompt_audit_events_version``;
+        the ``event_type`` lookup rides
+        ``idx_prompt_audit_events_type``). EXPLAIN QUERY PLAN on
+        SQLite for the filtered shape is part of T5 acceptance
+        (cheap sanity; reported alongside the implementation).
+
+        Args:
+            agent_id: Optional — match the row's ``agent_id``.
+            version_tag: Optional — match the row's ``version_tag``
+                (``""`` normalizes to ``""``).
+            artifact: Optional — match the row's ``artifact``.
+            version_id: Optional — match the row's ``version_id``
+                (the per-version timeline lookup).
+            event_type: Optional — match the row's ``event_type``
+                (one of ``PROMPT_AUDIT_EVENT_TYPES``; not validated
+                here so a bad value returns ``[]`` like a no-match
+                query — the repo treats ``event_type`` as data, not
+                as a privileged column).
+            actor_subject: Optional — match the row's
+                ``actor_subject`` (HTTP lane subject or in-process
+                instance id).
+            limit: Page size (default 50, matching the
+                ``audit_endpoint`` contract).
+            offset: Page offset (default 0).
+
+        Returns:
+            ``(items, total)`` — ``items`` is a list of
+            :class:`PromptAuditEvent` rows ordered by ``created_at
+            DESC`` (newest first); ``total`` is the unfiltered-by-
+            pagination count for the same WHERE clause.
+        """
+        if event_type is not None:
+            # Match the mutating-method shape — a known event type
+            # is the only valid filter value; the endpoint layer
+            # also has the path-param allowlist (S4) so a malformed
+            # value never reaches here.
+            self._validate_event_type(event_type)
+        norm_version_tag = (
+            _normalize_version_tag(version_tag) if version_tag is not None else None
+        )
+
+        with Session(self.engine) as session:
+            where_clauses = []
+            if agent_id is not None:
+                where_clauses.append(col(PromptAuditEvent.agent_id) == agent_id)
+            if norm_version_tag is not None:
+                where_clauses.append(
+                    col(PromptAuditEvent.version_tag) == norm_version_tag
+                )
+            if artifact is not None:
+                where_clauses.append(col(PromptAuditEvent.artifact) == artifact)
+            if version_id is not None:
+                where_clauses.append(
+                    col(PromptAuditEvent.version_id) == version_id
+                )
+            if event_type is not None:
+                where_clauses.append(
+                    col(PromptAuditEvent.event_type) == event_type
+                )
+            if actor_subject is not None:
+                where_clauses.append(
+                    col(PromptAuditEvent.actor_subject) == actor_subject
+                )
+
+            # Total count for the same WHERE clause (no LIMIT/OFFSET).
+            # ``select(func.count(col))`` returns a single-column
+            # scalar SELECT — ``session.exec(...).one()`` returns
+            # the int directly (sqlmodel ``Session.exec`` unwraps
+            # single-column selects into ``ScalarResult``; the
+            # existing repo pattern at :1457 doesn't apply to
+            # sqlmodel ``Session``).
+            count_stmt = select(func.count(col(PromptAuditEvent.event_id)))
+            if where_clauses:
+                count_stmt = count_stmt.where(*where_clauses)
+            total = int(session.exec(count_stmt).one() or 0)
+
+            # Page of rows (newest first).
+            items_stmt = select(PromptAuditEvent)
+            if where_clauses:
+                items_stmt = items_stmt.where(*where_clauses)
+            items_stmt = (
+                items_stmt
+                .order_by(col(PromptAuditEvent.created_at).desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            items = list(session.exec(items_stmt))
+
+        return items, total
+
     # A5/C4. create_and_submit ------------------------------------------------
 
     def create_and_submit(

@@ -283,6 +283,10 @@ def _make_service_mock(**overrides: Any) -> Any:
     svc.get_effective_rows = MagicMock(return_value=[])
     svc.get_selection = MagicMock(return_value=None)
     svc.append_audit_event = MagicMock(return_value=None)
+    # Phase B T5 endpoint 12 (audit list) — real path. Default empty
+    # result keeps every existing test green; per-test overrides swap
+    # in rows for the filter-matrix coverage.
+    svc.list_audit_events = MagicMock(return_value=([], 0))
     for k, v in overrides.items():
         setattr(svc, k, v)
     return svc
@@ -856,9 +860,11 @@ class TestScopeEnforcement:
 
 class TestAuditEndpoint:
     def test_audit_returns_empty_envelope(self, client):
-        """Phase A service facade has no list_audit method; the
-        endpoint returns a target-zero ``{items, total}`` envelope
-        so the SPA renders "no events yet" rather than 404."""
+        """When the service has no events to return, the endpoint
+        surfaces a target-zero ``{items, total}`` envelope so the
+        SPA renders "no events yet" rather than 404. The real
+        ``list_audit_events`` service method now backs the path
+        (Phase B T5 endpoint-12 gap closure)."""
         resp = client.get("/api/prompts/audit")
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -872,6 +878,121 @@ class TestAuditEndpoint:
             params={"event_type": "bad!chars"},
         )
         assert resp.status_code == 422
+
+    def test_audit_returns_filtered_events(
+        self, client, service_mock
+    ):
+        """Endpoint 12 (Phase B T5) — filters pass through to the
+        service; the envelope shape ``{items, total}`` matches the
+        skill_bank.py:72-108 template. The router serializes rows
+        via ``_audit_event_to_dict`` (D10 two-lane identity stamp
+        surfaces verbatim)."""
+        rows = [
+            _make_audit_event(event_id="e-3", event_type="APPROVED",
+                              actor_subject="operator-cli",
+                              actor_auth_method=AUTH_METHOD_SESSION,
+                              payload={"from_state": "pending_approval",
+                                       "to_state": "approved"}),
+            _make_audit_event(event_id="e-2", event_type="SUBMITTED",
+                              actor_subject="inst-1",
+                              actor_auth_method="internal",
+                              payload={"from_state": "draft",
+                                       "to_state": "pending_approval"}),
+            _make_audit_event(event_id="e-1", event_type="CREATED",
+                              actor_subject="inst-1",
+                              actor_auth_method="internal",
+                              payload={"state": "pending_approval",
+                                       "version": 1,
+                                       "via": "create_and_submit"}),
+        ]
+        service_mock.list_audit_events = MagicMock(return_value=(rows, 3))
+        resp = client.get(
+            "/api/prompts/audit",
+            params={
+                "agent_id": "developer",
+                "version_tag": "",
+                "artifact": "soul",
+                "event_type": "APPROVED",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["total"] == 3
+        assert len(body["items"]) == 3
+        # Rows are serialized in the order the service returned them
+        # (newest first by created_at DESC; the test data preserves
+        # that order).
+        ids = [item["event_id"] for item in body["items"]]
+        assert ids == ["e-3", "e-2", "e-1"]
+        # D10 two-lane identity stamp surfaces in the wire body.
+        assert body["items"][0]["actor_auth_method"] == AUTH_METHOD_SESSION
+        assert body["items"][1]["actor_auth_method"] == "internal"
+        assert body["items"][1]["actor_subject"] == "inst-1"
+        # The router must pass EVERY filter through unchanged.
+        kwargs = service_mock.list_audit_events.call_args.kwargs
+        assert kwargs["agent_id"] == "developer"
+        assert kwargs["version_tag"] == ""
+        assert kwargs["artifact"] == "soul"
+        assert kwargs["event_type"] == "APPROVED"
+        assert kwargs["limit"] == 50  # default
+        assert kwargs["offset"] == 0
+
+    def test_audit_pagination_limit_offset_pass_through(
+        self, client, service_mock
+    ):
+        """Limit/offset pass through to the service (skill_bank
+        pagination shape)."""
+        service_mock.list_audit_events = MagicMock(return_value=([], 0))
+        resp = client.get(
+            "/api/prompts/audit",
+            params={"limit": 10, "offset": 25},
+        )
+        assert resp.status_code == 200
+        kwargs = service_mock.list_audit_events.call_args.kwargs
+        assert kwargs["limit"] == 10
+        assert kwargs["offset"] == 25
+
+    def test_audit_version_id_filter(self, client, service_mock):
+        """Per-version timeline lookup — ``version_id`` filter rides
+        ``idx_prompt_audit_events_version`` (Phase A)."""
+        service_mock.list_audit_events = MagicMock(return_value=([], 0))
+        resp = client.get(
+            "/api/prompts/audit",
+            params={"version_id": "v-1"},
+        )
+        assert resp.status_code == 200
+        kwargs = service_mock.list_audit_events.call_args.kwargs
+        assert kwargs["version_id"] == "v-1"
+
+    def test_audit_actor_subject_filter(self, client, service_mock):
+        """D10 lane-discrimination filter — ``actor_subject`` lets a
+        UI find all rows submitted by a given instance or signed
+        by a given human operator."""
+        service_mock.list_audit_events = MagicMock(return_value=([], 0))
+        resp = client.get(
+            "/api/prompts/audit",
+            params={"actor_subject": "operator-cli"},
+        )
+        assert resp.status_code == 200
+        kwargs = service_mock.list_audit_events.call_args.kwargs
+        assert kwargs["actor_subject"] == "operator-cli"
+
+    def test_audit_default_filters_pass_none(self, client, service_mock):
+        """No filter → all query params are ``None`` and pass
+        through to the service unchanged (the repo applies the
+        optional filter clauses only for non-None values)."""
+        service_mock.list_audit_events = MagicMock(return_value=([], 0))
+        resp = client.get("/api/prompts/audit")
+        assert resp.status_code == 200
+        kwargs = service_mock.list_audit_events.call_args.kwargs
+        assert kwargs["agent_id"] is None
+        assert kwargs["version_tag"] is None
+        assert kwargs["artifact"] is None
+        assert kwargs["event_type"] is None
+        assert kwargs["version_id"] is None
+        assert kwargs["actor_subject"] is None
+        assert kwargs["limit"] == 50
+        assert kwargs["offset"] == 0
 
 
 # ────────────────────────────────────────────────────────────────────────────

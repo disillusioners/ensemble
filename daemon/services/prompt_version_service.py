@@ -809,6 +809,48 @@ class PromptVersionService:
             payload,
         )
 
+    async def list_audit_events(
+        self,
+        agent_id: Optional[str] = None,
+        version_tag: Optional[str] = None,
+        artifact: Optional[str] = None,
+        version_id: Optional[str] = None,
+        event_type: Optional[str] = None,
+        actor_subject: Optional[str] = None,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list, int]:
+        """List audit events, newest first, with optional filters (Phase B T5).
+
+        Thin ``await asyncio.to_thread(...)`` wrapper over
+        :meth:`PromptVersionRepository.list_audit_events`. Returns
+        ``(items, total)`` where ``items`` is the page of
+        :class:`PromptAuditEvent` rows ordered by ``created_at DESC``
+        and ``total`` is the unfiltered-by-pagination count for the
+        same WHERE clause (the ``{items, total}`` envelope — see
+        ``daemon/routers/skill_bank.py:72-108``).
+
+        All filters are optional and combine with AND. ``None``
+        means "no filter on this column." The router is the
+        authoritative validator of the filter values
+        (path-param allowlist ``^[A-Za-z0-9_-]+$`` from S4); the
+        service is a passthrough for them. The repo normalizes
+        ``version_tag=None`` / ``""`` to ``""`` so the query
+        semantics are stable across drivers.
+        """
+        return await asyncio.to_thread(
+            self._repo.list_audit_events,
+            agent_id,
+            version_tag,
+            artifact,
+            version_id,
+            event_type,
+            actor_subject,
+            limit=limit,
+            offset=offset,
+        )
+
 
 __all__ = [
     "PromptVersionService",

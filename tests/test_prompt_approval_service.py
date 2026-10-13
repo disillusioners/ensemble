@@ -394,14 +394,19 @@ class TestServiceStateMachine:
             row = asyncio.run(service.retract(v.version_id, http_session_actor))
             assert row.state == "draft"
         else:
-            # pending_approval -> pending_approval (no-op via service
-            # would be a same-state transition; covered by
-            # ``test_invalid_transition_raises_same_state`` below).
-            pytest.skip(
-                f"transition pair ({from_state}, {to_state}) needs a "
-                f"different setup; covered by direct happy_path test "
-                f"elsewhere"
-            )
+            # ``from_state == "draft"`` and ``to_state ==
+            # "pending_approval"`` — drive the
+            # ``service.submit_for_approval`` path to land the row
+            # back in ``pending_approval`` and verify the state
+            # machine round-trip. The previous shape of this branch
+            # unconditionally skipped (the draft→pending_approval
+            # happy path was never exercised through the service
+            # facade — fixed in Phase B T5 close-out so the PG leg
+            # executes and reports PASS, not SKIP).
+            row = asyncio.run(service.submit_for_approval(
+                v.version_id, own_internal_actor,
+            ))
+            assert row.state == "pending_approval"
 
     @pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
     def test_invalid_transition_raises_via_service(

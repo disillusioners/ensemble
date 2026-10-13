@@ -689,16 +689,34 @@ async def list_audit(
     version_tag: Optional[str] = Query(default=None),
     artifact: Optional[str] = Query(default=None),
     event_type: Optional[str] = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=500),
+    version_id: Optional[str] = Query(default=None),
+    actor_subject: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> _AuditListResponse:
-    """Audit log read with filters + pagination.
+    """Audit log read with filters + pagination (Phase B T5).
 
-    Phase A's service facade does NOT carry a list_audit method —
-    adding one is Phase D / follow-up (out of scope per
-    phaseB-plan.md §OOS). The endpoint keeps the
-    ``{items, total}`` envelope so the SPA can render a target-zero
-    state until the follow-up lands. The router never 500s.
+    All filters are optional and combine with AND. Response envelope
+    follows the ``skill_bank.py:72-108`` template: ``{items, total}``.
+
+    Filter surface:
+
+    * ``agent_id`` / ``version_tag`` / ``artifact`` — the (key, key,
+      key) filter; ``version_tag`` passes through the F9 / A7
+      normalization (``""`` is the base tag).
+    * ``event_type`` — one of ``PROMPT_AUDIT_EVENT_TYPES``
+      (UPPERCASE per addendum S3 / O-12).
+    * ``version_id`` — per-version timeline lookup; lets a UI render
+      the audit history of a single :class:`PromptVersion` row.
+    * ``actor_subject`` — internal vs HTTP lane stamp filter
+      (D10 — internal row's ``actor_subject`` is the instance id;
+      HTTP row's ``actor_subject`` is the ``AuthContext.subject``).
+
+    The service is the authoritative caller of
+    :meth:`PromptVersionRepository.list_audit_events`; the router
+    is a thin bridge that validates path-allowlist + scope and
+    serializes rows via :func:`_audit_event_to_dict` (D10's
+    two-lane identity stamp surfaces verbatim).
     """
     _require_auth_on(request)
     if agent_id is not None:
@@ -711,10 +729,26 @@ async def list_audit(
         # Audit event types are UPPERCASE per the addendum S3/O-12;
         # the path allowlist is the conservative fence.
         _require_path_param(event_type, "event_type")
-    # No list_audit on the Phase A service facade yet — return an
-    # empty envelope (target-zero). The endpoint is registered so
-    # the SPA can show "no events yet" rather than a 404.
-    return _AuditListResponse(items=[], total=0)
+    if version_id is not None:
+        _require_path_param(version_id, "version_id")
+    if actor_subject is not None:
+        _require_path_param(actor_subject, "actor_subject")
+    svc = _get_service(request)
+    items, total = await asyncio.to_thread(
+        svc.list_audit_events,
+        agent_id=agent_id,
+        version_tag=version_tag,
+        artifact=artifact,
+        event_type=event_type,
+        version_id=version_id,
+        actor_subject=actor_subject,
+        limit=limit,
+        offset=offset,
+    )
+    return _AuditListResponse(
+        items=[_audit_event_to_dict(r) for r in items],
+        total=total,
+    )
 
 
 # ────────────────────────────────────────────────────────────────────────────
