@@ -22,6 +22,7 @@ from contextlib import contextmanager
 
 from ._tool_registry import register_tool_category
 from ..rag.config import is_rag_enabled
+from .prompt_artifacts import check_write as _check_prompt_artifact_write
 
 logger = logging.getLogger(__name__)
 
@@ -1180,6 +1181,21 @@ def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict
 def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None) -> dict:
     """Apply soul.md change directly - identity updates are applied immediately."""
     soul_file = agent_path / "soul.md"
+
+    # Phase A T11 (S11, leader-accepted D-1): belt-and-braces shim —
+    # route the pre-write path through the shared guard. Closes the
+    # Phase-A unguarded window even if merge order shifts. The full
+    # DB-submission rewrite replaces this in Phase B (T7). memory/memories/
+    # user targets stay runtime-written (disposition defaults; user.md
+    # DB-joins at Phase B per phaseB D5).
+    guard_err = _check_prompt_artifact_write(soul_file)
+    if guard_err:
+        return {
+            "success": False,
+            "target": "soul",
+            "error": guard_err,
+        }
+
     history_dir = agent_path / "history"
     history_dir.mkdir(exist_ok=True)
     
@@ -1313,6 +1329,16 @@ def _update_user(agent_id: str, agent_path: Path, request: str, manager: "Instan
 def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None) -> dict:
     """Add workflow change."""
     workflow_file = agent_path / "workflow.md"
+
+    # Phase A T11 (S11, leader-accepted D-1): see _update_soul for the
+    # rationale — same belt-and-braces pre-write shim.
+    guard_err = _check_prompt_artifact_write(workflow_file)
+    if guard_err:
+        return {
+            "success": False,
+            "target": "workflow",
+            "error": guard_err,
+        }
     
     try:
         with _lock_memory_file(workflow_file):
