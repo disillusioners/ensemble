@@ -812,7 +812,7 @@ def test_r2_survivor_positive_controls(fixture_id: str, text: str, same_line: bo
 # whitelist contract of the 2a widening, each documented at BROKEN_PROSE_RE).
 LEGIT_SEE_SHAPE_FIXTURES = [
     ("sentence-initial", "Decision tree is a FALLBACK for quick decisions. See Implementation Workflow (domain routing)."),
-    ("parenthetical", "- MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, See Resource Constraint (STRICT))"),
+    ("parenthetical", "- MEDIUM+ scope: 2-3 background jobs — run SEQUENTIALLY (one at a time, See Resource Constraint (STRICT))"),
     ("blockquote-marker", "> See Why END TURN After Dispatch."),
     ("lowercase-see", "If execution returned an error, see Handle Skill System Errors Gracefully for recovery."),
     ("hyphen-compound-guard", "the See-layer marker and the See_X identifier are not splices"),

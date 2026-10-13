@@ -65,15 +65,12 @@ from daemon.repositories.event import models as _event_models  # noqa: F401
 from daemon.migrations.models import SchemaMigration as _SchemaMigration  # noqa: F401
 from daemon.repositories.infra import models as _infra_models  # noqa: F401
 
-# NOTE: ``OpenCodeSessionRecord`` is intentionally NOT in
-# ``SQLModel.metadata`` — its module uses ``OpenCodeSessionRecord
-# .__table__.create()`` to avoid polluting the dedicated opencode
-# engine with ensemble's other 22+ tables. See
-# ``daemon/opencode/repository.py`` docstring for the rationale.
-# This means the fresh-DB tests below must also call
-# ``__table__.create()`` explicitly for the opencode table.
-from daemon.opencode.repository import OpenCodeSessionRecord  # noqa: F401
-
+# NOTE: the retired session-store table (dropped from the schema
+# registry in Phase C; archived under ``legacy/``) is intentionally
+# absent here. The fresh-DB tests below cover the active schema only;
+# parity with the manager DO block is pinned by the
+# `JSONB_MIGRATION_PAIRS` list below (15 active pairs after Phase C,
+# formerly 17).
 from daemon.repositories.infra.types import JSONBType
 
 
@@ -103,12 +100,10 @@ JSONB_MIGRATION_PAIRS: list[tuple[str, str]] = [
     ("message_queue", "images"),
     ("mcp_servers", "config"),
     ("mcp_servers", "config_schema"),
-    ("opencode_sessions", "latest_response"),
-    ("opencode_sessions", "questions"),
 ]
 
-assert len(JSONB_MIGRATION_PAIRS) == 17, (
-    f"Expected 17 JSONB migration pairs, got {len(JSONB_MIGRATION_PAIRS)}. "
+assert len(JSONB_MIGRATION_PAIRS) == 15, (
+    f"Expected 15 JSONB migration pairs, got {len(JSONB_MIGRATION_PAIRS)}. "
     f"Update this list AND the DO block in daemon/manager.py to match."
 )
 
@@ -191,10 +186,6 @@ def fresh_pg_schema() -> Iterator[Engine]:
             conn.execute(text("CREATE SCHEMA public"))
 
         SQLModel.metadata.create_all(engine)
-        # ``OpenCodeSessionRecord`` is created separately because
-        # its module uses ``__table__.create()`` rather than
-        # ``SQLModel.metadata.create_all()`` (see module docstring).
-        OpenCodeSessionRecord.__table__.create(engine, checkfirst=True)
         yield engine
     finally:
         # Best-effort cleanup: drop the schema so the next test
@@ -220,10 +211,6 @@ def sqlite_engine() -> Iterator[Engine]:
         poolclass=StaticPool,
     )
     SQLModel.metadata.create_all(engine)
-    # ``OpenCodeSessionRecord`` is created separately because
-    # its module uses ``__table__.create()`` rather than
-    # ``SQLModel.metadata.create_all()`` (see module docstring).
-    OpenCodeSessionRecord.__table__.create(engine, checkfirst=True)
     try:
         yield engine
     finally:
@@ -362,9 +349,7 @@ BEGIN
               ('message_queue','metadata'),
               ('message_queue','images'),
               ('mcp_servers','config'),
-              ('mcp_servers','config_schema'),
-              ('opencode_sessions','latest_response'),
-              ('opencode_sessions','questions')
+              ('mcp_servers','config_schema')
           )
     LOOP
         BEGIN
@@ -494,7 +479,6 @@ class TestSQLiteRegression:
         from daemon.repositories.instance.models import Instance
         from daemon.repositories.mcp_server.models import McpServer
         from daemon.repositories.message_queue.models import MessageQueue
-        from daemon.opencode.repository import OpenCodeSessionRecord
         from daemon.repositories.project.models import (
             Project,
             ProjectHistoryEntry,
@@ -515,7 +499,6 @@ class TestSQLiteRegression:
             "instances": Instance,
             "message_queue": MessageQueue,
             "mcp_servers": McpServer,
-            "opencode_sessions": OpenCodeSessionRecord,
         }
 
         for table_name, column_name in JSONB_MIGRATION_PAIRS:

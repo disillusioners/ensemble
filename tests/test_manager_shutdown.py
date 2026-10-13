@@ -123,7 +123,6 @@ def _build_minimal_manager(mock_config, *, shutdown_steps_async=True):
     manager._drain_warmup_pool = AsyncMock()
     manager._mcp_service = MagicMock()
     manager._mcp_service.close_all_connections = AsyncMock()
-    manager._shutdown_opencode_registry = AsyncMock()
     manager.cleanup = MagicMock()
 
     # Mark the cancellation service as not-yet-shutting-down so the

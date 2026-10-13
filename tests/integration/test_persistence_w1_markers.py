@@ -12,7 +12,7 @@ LangGraph from inside the test body (after clearing the mock from
 ``sys.modules``) so the real checkpoint layer is exercised. The
 daemon modules are re-imported too so they bind to the real LangGraph.
 
-This test does NOT require a live OpenCode server — it only needs
+This test does NOT require a live external server — it only needs
 the file-backed ``AsyncSqliteSaver`` (provided by ``aiosqlite``, which
 is in the dev dependency group). It lives in ``tests/integration/`` so
 it can re-import the real LangGraph; pytest's default

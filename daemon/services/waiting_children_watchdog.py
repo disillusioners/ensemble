@@ -6,7 +6,7 @@ child completion reports, it sleeps on its dependency watcher until
 works for children that reach a terminal status (completed / error /
 terminated / failed). It does NOT work for children that *silently
 hang* — the child is still RUNNING in name, but its LLM call, tool
-invocation, or OpenCode subprocess is wedged. The watcher never
+invocation, or external subprocess is wedged. The watcher never
 fires; the parent sleeps forever; the user eventually gives up.
 
 This service is the safety net. Every ``interval_seconds`` (default
@@ -749,7 +749,7 @@ class WaitingChildrenWatchdog:
         The pre-W-B B3 escalation / release decision was gated only on
         the freshness proxy ``instances.last_activity_at`` — but that
         column is NOT refreshed by in-flight tool calls, LLM turns, or
-        OpenCode subprocess activity. Only ``task.last_heartbeat_at``
+        background subprocess activity. Only ``task.last_heartbeat_at``
         (which the worker pool's heartbeat thread updates on a bounded
         interval) moves during a running turn. A genuinely-working-but-
         DB-silent child turn can therefore have a very stale

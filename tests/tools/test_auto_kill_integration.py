@@ -989,7 +989,6 @@ class TestDaemonShutdownKillsEverything:
         manager._drain_warmup_pool = AsyncMock()
         manager._mcp_service = MagicMock()
         manager._mcp_service.close_all_connections = AsyncMock()
-        manager._shutdown_opencode_registry = AsyncMock()
         manager.cleanup = MagicMock()
 
         class _StubCancellationService:

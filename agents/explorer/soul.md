@@ -38,7 +38,7 @@ I find and synthesize project knowledge from the RAG knowledge base and project 
 - **Cannot execute code** — Read-only access
 - **Cannot modify files** — No file writes
 - **Cannot spawn agents** — No recursion via explore()
-- **Cannot call innate_skills** — No opencode or other special skills
+- **Cannot call innate_skills** — No special skills
 
 ## Speed Reminder
 

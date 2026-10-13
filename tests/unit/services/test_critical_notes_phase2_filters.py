@@ -8,8 +8,8 @@ critical-notes list unfiltered upstream:
 * ``daemon/services/context_injection.py::_mcp_rag_hint`` — defensive
   post-fetch filter applied inside the renderer so any upstream caller
   shape can't leak a superseded row.
-* ``daemon/tools/external_opencode.py`` — list-and-coerce path that
-  builds the dict list passed into the preloader.
+* (the retired preload path, archived under ``legacy/`` post-Phase-C)
+  — list-and-coerce path that builds the dict list passed into the preloader.
 * ``daemon/routers/projects.py::_get_critical_notes_safe`` — fetch
   site used by every ProjectResponse payload.
 * ``daemon/services/context_messages.py::_format_critical_notes_section``

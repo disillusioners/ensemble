@@ -32,11 +32,10 @@ Design follows the plan:
   prefix is applied, so the rebuilt message reads cleanly.
 * **ADR-11** — KV metadata merges into the same ``[SYSTEM CONTEXT:
   Related Project]`` message instead of a separate appender.
-* **ADR-13** — opencode path is OUT OF SCOPE. These builders are
-  consumed only by the ensemble ``agent_node`` path (Phase 3).
-
-Opencode single-message merging lives behind
-``external_opencode_send_message`` and is intentionally untouched.
+* **ADR-13** — pre-Phase-C stack is OUT OF SCOPE. These
+  builders are consumed only by the ensemble ``agent_node`` path
+  (Phase 3). Retired single-message merging is archived under
+  ``legacy/`` per Phase A.
 """
 
 from __future__ import annotations

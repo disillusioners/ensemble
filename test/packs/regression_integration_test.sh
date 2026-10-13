@@ -28,19 +28,18 @@
 #   * Inner guard 350s (was 290s, +60s)
 #   * Outer guard 360s (was 300s, +60s)
 #
-# Split from regression_integration_opencode_e2e_test.sh (P-12 in
-# PACKS.md) — that combined pack breached 300s solo at the merge
-# gate. The split shape is:
+# Split from a combined regression_e2e pack (P-12 in PACKS.md) — that
+# combined pack breached 300s solo at the merge gate. The split shape is:
 #
 #   * regression_chat_source_integration_test.sh — chat-source-only,
 #     --override-ini="addopts=" -m integration (fixes the addopts
 #     defect; 50 tests, ~22s).
 #   * regression_integration_test.sh (this pack) — non-chat-source
 #     integration slice (962 tests now actually executed, ≤350s).
-#   * regression_opencode_e2e_test.sh — tests/opencode/ + tests/e2e/
-#     (~520 tests, ~17s).
+#   * (the retired third split pack was archived to ``legacy/test/packs/``
+#     per Phase C, together with its test directory under ``legacy/tests/``).
 #
-# All three of the new packs fit under their respective dual-layer guards.
+# All remaining packs fit under their respective dual-layer guards.
 #
 # Invocation contract:
 #   timeout 360 bash test/packs/regression_integration_test.sh
