@@ -25,6 +25,7 @@ from langchain_core.tools import tool
 from daemon.services.workspace_guard import WorkspaceGuard
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_output
+from .prompt_artifacts import check_write as _check_prompt_artifact_write
 
 # ---------------------------------------------------------------------------
 # Walk-tool guardrail constants (2026-09-23 memory-leak incident fix)
@@ -890,6 +891,13 @@ def write_file(
     if err:
         return err
 
+    # Phase A T9 (C3 binding): refuse writes targeting versioned prompt
+    # artifacts under agents/<name>/*.md. Shared helper at the TWO post-resolve
+    # sites (write_file + edit_file). Reads are NOT guarded.
+    guard_err = _check_prompt_artifact_write(file_path)
+    if guard_err:
+        return guard_err
+
     try:
         # Create parent directories if they don't exist
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1243,6 +1251,15 @@ def edit_file(
     file_path, err = _resolve_within_workdir(path, workdir)
     if err:
         return err
+
+    # Phase A T9 (C3 binding, second site): refuse edits targeting versioned
+    # prompt artifacts under agents/<name>/*.md. Shared helper — must stay
+    # paired with the write_file guard so a single source of truth governs
+    # the immutability regime. Reads (read_file, list_directory) are NOT
+    # guarded (the resolver is shared).
+    guard_err = _check_prompt_artifact_write(file_path)
+    if guard_err:
+        return guard_err
 
     try:
         if not file_path.exists():
