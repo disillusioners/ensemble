@@ -36,18 +36,45 @@ Phase B consumes the public surface verbatim:
 Design choices
 --------------
 
+* **Per-key writer serialization (R3, PG-concurrency fix 2026-10-13)** —
+  every read-modify-write writer that can race on a key
+  (``create_draft``, ``create_and_submit``, ``set_selection``,
+  ``clear_selection``) takes a dialect-gated lock at the START of
+  its transaction. On PostgreSQL that is ``pg_advisory_xact_lock``
+  over a stable 63-bit hash of ``(agent_id, version_tag,
+  artifact)`` (see :func:`_lock_key` + :meth:`PromptVersionRepository._acquire_key_lock`);
+  on SQLite it is a no-op (the database-level single-writer
+  serialization already orders these writers). Two SC8/SC9
+  PG-parity defects this closes:
+
+  - **F-1** — concurrent ``set_selection`` on PG READ COMMITTED
+    left multiple ``is_selected`` pointers (plain SELECT+UPDATE
+    pairs serialize on SQLite but not on PG); the advisory lock
+    also covers the ABSENT-ROW gap that ``SELECT … FOR UPDATE``
+    cannot lock (the first-selection race on a key with no rows
+    yet).
+  - **F-2** — the A7 bounded INSERT-retry (``_MAX_INSERT_RETRIES
+    = 8``) was exhaustible under 10-way PG contention; with
+    per-key serialization the ``SELECT MAX(version)`` + INSERT
+    race window is closed, and the bounded retry remains as the
+    backstop (A7 amendment db9f9e371 — budget NOT raised).
 * **One-selection-pointer invariant** (F5, R3) — enforced
   transactionally via ``set_selection``/``clear_selection`` wrapped
-  in one ``engine.begin()``. NULL-distinct in UNIQUE on both
+  in one ``engine.begin()`` AND serialized per-key via the advisory
+  lock above (the transaction wrapper alone is necessary but not
+  sufficient on PG READ COMMITTED). NULL-distinct in UNIQUE on both
   drivers forbids a NULL-aware partial unique index; the repo
   holds the only enforcement path.
 * **A7/C5 new-row INSERT-retry** — ``create_draft`` and
   ``create_and_submit`` INSERT under the
   ``UNIQUE(agent_id, version_tag, artifact, version)`` constraint
   and retry on ``IntegrityError`` (recompute ``max(version)``,
-  retry ≤ 3). ``SELECT MAX(version)+1`` was REJECTED for the same
-  reason the one-selection-pointer invariant is transactional:
-  the read-modify-write race under concurrent submitters.
+  retry ≤ 8, bounded — NOT raised by the concurrency fix; the
+  per-key advisory lock removes the steady-state race, the budget
+  is the backstop). ``SELECT MAX(version)+1`` was REJECTED as the
+  sole mechanism for the same reason the one-selection-pointer
+  invariant is transactional: the read-modify-write race under
+  concurrent submitters.
 * **Tag normalization** (A7/S12) — ``NULL``/``""`` unify to ``""``
   at every write site (``version_tag`` column is
   ``NOT NULL DEFAULT ''``; the repo coerces ``None`` to ``""``
@@ -125,6 +152,52 @@ def _normalize_version_tag(version_tag: Optional[str]) -> str:
     if version_tag is None or version_tag == "":
         return ""
     return version_tag
+
+
+def _lock_key(agent_id: str, version_tag: str, artifact: str) -> int:
+    """Deterministic advisory-lock key for one ``(agent_id, version_tag,
+    artifact)`` prompt-version key (R3).
+
+    Returns a **63-bit non-negative int** — always a valid positive
+    signed bigint for ``pg_advisory_xact_lock(bigint)`` (the
+    two-int ``(int4, int4)`` variant was rejected: one truncation
+    instead of two, and a single-int call site reads cleaner in the
+    SQL).
+
+    Derivation: ``sha256`` over a canonical, **length-prefixed**
+    serialization of the three components (length prefixes make
+    delimiter collisions inside any component impossible —
+    ``("a:bc", "d")`` and ``("a", "bc:d")`` derive different
+    keys), truncated to the first 8 bytes and masked to 63 bits.
+    The ``"prompt-version\\x1f"`` prefix namespaces the key-space so
+    a future non-prompt advisory-lock user can never collide with
+    these keys by accident (2026-10-13 audit: no other
+    ``pg_advisory`` users exist in the codebase).
+
+    Collision posture: with realistic key counts (≤ 10⁴), the
+    birthday bound against the 2⁶³ space is ≈ (10⁴)² / 2⁶⁴ ≈
+    5×10⁻¹¹ — negligible. A collision would only mean two DIFFERENT
+    keys serialize against the same lock (a performance
+    interaction, never a correctness one): the invariants
+    (one-pointer, UNIQUE version) are enforced by the transaction
+    bodies + constraints; the lock is a serializer, not the
+    enforcement.
+
+    Args:
+        agent_id: Resolved agent id.
+        version_tag: Version tag — pass the NORMALIZED value
+            (``""`` for base); every lock call site normalizes
+            before locking.
+        artifact: Artifact key.
+    """
+    canonical = (
+        f"prompt-version\x1f"
+        f"{len(agent_id)}:{agent_id}\x1f"
+        f"{len(version_tag)}:{version_tag}\x1f"
+        f"{len(artifact)}:{artifact}"
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -369,6 +442,10 @@ class EffectiveRow:
 # same key) the first read of MAX(version) can lose multiple races
 # before a write succeeds. 8 absorbs the realistic contention
 # window; any deeper stall is a sign of contention worth surfacing.
+# 2026-10-13 PG-concurrency fix: the per-key advisory lock
+# (``_acquire_key_lock``) closes the steady-state race on PG, so
+# this budget is now the BACKSTOP (A7 amendment db9f9e371 —
+# bounded at 8, NOT raised; exhaustion still re-raises).
 _MAX_INSERT_RETRIES = 8
 
 
@@ -425,6 +502,51 @@ class PromptVersionRepository:
                 to_state=to_state,
             )
 
+    def _acquire_key_lock(
+        self,
+        conn: Any,
+        agent_id: str,
+        version_tag: str,
+        artifact: str,
+    ) -> None:
+        """Serialize per-key read-modify-write writers (R3, 2026-10-13).
+
+        Dialect-gated — MUST be the FIRST statement inside the
+        caller's ``engine.begin()`` transaction, before any read of
+        the key's rows:
+
+        * **PostgreSQL** — ``pg_advisory_xact_lock`` over
+          :func:`_lock_key(agent_id, version_tag, artifact)`. The
+          transaction-scoped advisory lock BLOCKS until acquired,
+          auto-releases at commit/rollback (no cleanup path, no
+          session-state leak on exceptions), and — unlike
+          ``SELECT … FOR UPDATE`` — locks the ABSENT-ROW case (a
+          key with no rows yet, e.g. the first-ever ``set_selection``
+          or first ``create_draft`` racing another writer on the
+          same key). Single lock per transaction ⇒ no lock-ordering
+          cycles ⇒ no deadlock posture. Writers on DIFFERENT keys
+          never contend (per-key granularity).
+        * **SQLite** — no-op. The database-level single-writer
+          serialization already orders these writers; the SC8
+          SQLite legs have never reproduced either defect (verified,
+          not assumed — both parity legs of the concurrency tests
+          run against real file-SQLite WAL engines).
+
+        Callers: every read-modify-write writer that can race on a
+        key — ``create_draft``, ``create_and_submit``,
+        ``set_selection``, ``clear_selection``. NOT taken by:
+        ``atomic_transition`` (pure single-statement CAS — the
+        ``UPDATE … WHERE state = from_state`` rowcount check is the
+        serialization), ``append_audit_event`` (insert-only), and
+        the readers (no RMW).
+        """
+        if self.engine.dialect.name != "postgresql":
+            return
+        conn.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": _lock_key(agent_id, version_tag, artifact)},
+        )
+
     # ─────────────────────────────────────────────────────────────────
     # A2 surface — Phase B's compile target
     # ─────────────────────────────────────────────────────────────────
@@ -478,6 +600,10 @@ class PromptVersionRepository:
         for attempt in range(_MAX_INSERT_RETRIES):
             try:
                 with self.engine.begin() as conn:
+                    # Per-key serialization first (R3) — the
+                    # MAX(version) read below must not overlap a
+                    # concurrent writer on the same key (F-2).
+                    self._acquire_key_lock(conn, agent_id, version_tag, artifact)
                     # Recompute max(version) under the txn; safe
                     # because the UNIQUE constraint enforces the
                     # final answer.
@@ -797,8 +923,11 @@ class PromptVersionRepository:
         """Set the per-key one-selection-pointer (A2 / F5 / R3).
 
         Wrapped in a single ``engine.begin()`` so the
-        clear-all-then-set-one sequence is atomic. NULL-distinct in
-        UNIQUE on both drivers forbids a NULL-aware partial unique
+        clear-all-then-set-one sequence is atomic, AND serialized
+        per-key via ``_acquire_key_lock`` (the atomic wrapper alone
+        does not order two concurrent selections on PG READ
+        COMMITTED — F-1). NULL-distinct in UNIQUE on both
+        drivers forbids a NULL-aware partial unique
         index (research-findings-db-api.md §1 PITFALLS) — the repo
         holds the only enforcement path.
 
@@ -825,6 +954,13 @@ class PromptVersionRepository:
         version_tag = _normalize_version_tag(version_tag)
         now = _now_iso()
         with self.engine.begin() as conn:
+            # Per-key serialization FIRST (R3 / F-1 fix) — the
+            # read-clear-set sequence below must not overlap a
+            # concurrent set_selection/clear_selection on the same
+            # key. pg_advisory_xact_lock also covers the absent-row
+            # gap (first selection on a key with no pointer yet)
+            # that SELECT … FOR UPDATE cannot lock.
+            self._acquire_key_lock(conn, agent_id, version_tag, artifact)
             # Verify target row exists + is approved.
             target = conn.execute(
                 select(
@@ -931,6 +1067,11 @@ class PromptVersionRepository:
         version_tag = _normalize_version_tag(version_tag)
         now = _now_iso()
         with self.engine.begin() as conn:
+            # Per-key serialization FIRST (R3) — a concurrent
+            # set_selection must not interleave between the read of
+            # previously-selected rows and the clear UPDATE (it
+            # would clear a pointer set after the read).
+            self._acquire_key_lock(conn, agent_id, version_tag, artifact)
             previously_selected = list(conn.execute(
                 select(col(PromptVersion.version_id))
                 .select_from(PromptVersion)
@@ -1230,7 +1371,9 @@ class PromptVersionRepository:
 
         Used by ``inner_soul`` and ``agent_mother.agent_modify``
         rewrites (Phase B) — the only submission path that goes
-        through this repo's atomic transition machinery.
+        through this repo's atomic transition machinery. Serialized
+        per-key via ``_acquire_key_lock`` inside the composite
+        transaction (R3).
 
         Composition rule: ``new_content = f(effective_now, ...)``
         where ``effective_now = selected.content > latest_approved.
@@ -1287,6 +1430,13 @@ class PromptVersionRepository:
         for attempt in range(_MAX_INSERT_RETRIES):
             try:
                 with self.engine.begin() as conn:
+                    # Per-key serialization first (R3) — the
+                    # prior-active read + MAX(version) + INSERT below
+                    # must not overlap a concurrent writer on the
+                    # same key (keeps "≤ 1 active pending per key"
+                    # and closes the F-2 race window; the retry
+                    # budget remains the backstop).
+                    self._acquire_key_lock(conn, agent_id, version_tag, artifact)
                     # Find the prior active (draft OR pending) row
                     # for archival (A5/C4 "≤ 1 active pending per key").
                     prior_active = conn.execute(

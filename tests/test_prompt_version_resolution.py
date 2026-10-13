@@ -53,10 +53,12 @@ fixture deliberately reads ONLY ``PG_TEST_*`` env vars (the
 ``POSTGRES_DB=ensemble_prod`` (env-poison 3-guard class), so
 inheriting it would point tests at prod. Two PG-specific
 production findings surfaced while closing this gap (F-1
-one-pointer invariant, F-2 retry budget) are documented at the
-``pg_known_defect`` fixture below — the affected PG legs are
-non-strict xfail (they EXECUTE; only the outcome is mapped), and
-the production fix is out of this test-only commission's scope.
+one-pointer invariant, F-2 INSERT-retry budget) were FIXED in the
+repository on 2026-10-13 (dialect-gated ``pg_advisory_xact_lock``
+per-key writer serialization — R3); the temporary non-strict
+xfail markers that mapped these defects have been REMOVED and
+both concurrency tests are now real assertions that must pass
+deterministically on BOTH dialects.
 """
 
 from __future__ import annotations
@@ -304,42 +306,6 @@ def repo_engine(db_dialect: str) -> Iterator[tuple[Engine, str]]:
 
 
 @pytest.fixture
-def pg_known_defect(db_dialect: str, request: pytest.FixtureRequest):
-    """Map the PG leg of a test with a known production defect to xfail.
-
-    Uses ``request.applymarker(pytest.mark.xfail(strict=False))`` —
-    NOT a body-level ``pytest.xfail()`` call — so the PG leg still
-    EXECUTES the full production code path (mission requirement: real
-    executed counts, not skips). The marker only remaps the outcome:
-    XFAIL when the defect reproduces, XPASS (reported, non-fatal)
-    once the production fix lands.
-
-    Findings (production fixes OUT of this test-only commission's
-    scope — report-only per the mission):
-
-    * **F-1** — one-selection-pointer invariant does not hold on PG
-      under concurrent ``set_selection``: the repo's plain
-      ``SELECT``+``UPDATE`` pairs inside ``engine.begin()`` rely on
-      SQLite's database-level write serialization; PG READ COMMITTED
-      lets each racer clear-and-set independently (probe 2026-10-13:
-      6 of 8 pointers left set). phaseA-plan.md R3 prescribes
-      ``SELECT … FOR UPDATE`` — not implemented in production.
-    * **F-2** — ``_MAX_INSERT_RETRIES = 8`` can be exhausted under
-      10-way PG contention: on PG the ``SELECT MAX(version)`` +
-      ``INSERT`` racers genuinely overlap (SQLite serializes
-      writers, so the race never fires there); probe 2026-10-13 saw
-      2 of 10 threads exhaust the budget and re-raise IntegrityError.
-    """
-    def _apply(reason: str) -> None:
-        if db_dialect == "postgres":
-            request.applymarker(
-                pytest.mark.xfail(reason=reason, strict=False)
-            )
-
-    return _apply
-
-
-@pytest.fixture
 def repo(repo_engine) -> PromptVersionRepository:
     """Yield a PromptVersionRepository bound to the fresh engine."""
     engine, _ = repo_engine
@@ -477,29 +443,22 @@ class TestStateMachine:
 class TestSelectionPointer:
     """F5 / R3 — exactly one is_selected per key under concurrency."""
 
-    # SC8: parametrized over [sqlite, postgres]. NOTE (F-1): the PG
-    # leg of ``test_one_selection_pointer_per_key_enforced`` is a
-    # documented non-strict xfail — see the ``pg_known_defect``
-    # fixture (production fix out of test scope).
+    # SC8: parametrized over [sqlite, postgres]. The PG leg was a
+    # non-strict xfail for F-1 until the 2026-10-13 repo fix
+    # (dialect-gated pg_advisory_xact_lock per-key serialization);
+    # the marker is REMOVED — this is now a real assertion on both
+    # dialects, with concurrency raised 8→16 to keep the fix
+    # provable under contention.
     pytestmark = pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
 
     def test_one_selection_pointer_per_key_enforced(
-        self, repo, internal_actor, http_actor, pg_known_defect
+        self, repo, internal_actor, http_actor
     ):
-        # F-1 (report-only production finding): on PostgreSQL the
-        # one-pointer invariant can be violated by concurrent
-        # set_selection (plain SELECT+UPDATE pairs rely on SQLite
-        # write serialization; PG READ COMMITTED does not
-        # serialize). The PG leg still executes fully; xfail is
-        # non-strict so an XPASS after the production fix is
-        # visible, not fatal.
-        pg_known_defect(
-            "F-1 (production, report-only): concurrent set_selection "
-            "can leave >1 pointer on PG (probe 2026-10-13: 6/8 left "
-            "set); repo lacks the R3-prescribed SELECT ... FOR UPDATE"
-        )
-        # Create + approve N versions for the same (agent, artifact).
-        n = 8
+        # F-1 regression guard: concurrent set_selection must leave
+        # EXACTLY one is_selected pointer on BOTH dialects (the
+        # repo serializes per-key writers via pg_advisory_xact_lock
+        # on PG; SQLite orders them via DB-level single-writer).
+        n = 16
         approved = []
         for i in range(n):
             v = repo.create_draft("dev", "", "soul", f"v{i}", internal_actor)
@@ -518,6 +477,11 @@ class TestSelectionPointer:
         threads = [threading.Thread(target=_select, args=(vi,)) for vi in approved]
         for t in threads: t.start()
         for t in threads: t.join()
+
+        # With per-key serialization no set_selection may fail at
+        # all (a swallowed IntegrityError/DBAPIError here would
+        # silently weaken the pointer assertion below).
+        assert errors == [], f"set_selection failures under contention: {errors}"
 
         # Exactly one pointer is set, regardless of contention.
         sel = repo.get_selection("dev", "", "soul")
@@ -788,26 +752,22 @@ class TestCreateAndSubmit:
 class TestInsertRetry:
     """A7/C5 — UNIQUE-constraint INSERT-retry on ``create_draft``."""
 
-    # SC8: parametrized over [sqlite, postgres]. NOTE (F-2): the PG
-    # leg is a documented non-strict xfail — on PG the SELECT MAX +
-    # INSERT racers genuinely overlap (SQLite serializes writers, so
-    # the race never fires there) and _MAX_INSERT_RETRIES = 8 can be
-    # exhausted. See the ``pg_known_defect`` fixture.
+    # SC8: parametrized over [sqlite, postgres]. The PG leg was a
+    # non-strict xfail for F-2 until the 2026-10-13 repo fix (the
+    # per-key advisory lock closes the SELECT MAX+INSERT race; the
+    # bounded retry budget stays as backstop, NOT raised); the
+    # marker is REMOVED — real assertion on both dialects, with
+    # concurrency raised 10→16 to keep the fix provable.
     pytestmark = pytest.mark.parametrize("db_dialect", ["sqlite", "postgres"])
 
     def test_concurrent_create_draft_yields_distinct_versions(
-        self, repo, internal_actor, pg_known_defect
+        self, repo, internal_actor
     ):
-        # F-2 (report-only production finding): PG leg executes
-        # fully; non-strict xfail so an XPASS after the production
-        # fix (budget raise / advisory-lock serialization) is
-        # visible, not fatal.
-        pg_known_defect(
-            "F-2 (production, report-only): _MAX_INSERT_RETRIES=8 "
-            "exhaustible under 10-way PG contention (probe "
-            "2026-10-13: 2/10 threads re-raised IntegrityError)"
-        )
-        n = 10
+        # F-2 regression guard: N concurrent create_draft calls on
+        # the same key must ALL succeed with distinct versions 1..n
+        # on BOTH dialects (no IntegrityError escapes; A7 retry
+        # budget untouched as the backstop).
+        n = 16
         results = {}
         errors = {}
 
