@@ -214,6 +214,141 @@ def _register_upgrade_alert_sink(notification_broadcaster) -> None:
         )
 
 
+# P3 / decision (f) / D-P3.9 — deferred DELETE_PHASE for the
+# env-poison purge. Runs as a background asyncio task spawned
+# from the lifespan startup hook. Fires on (readyz-green still
+# true AND +1 s elapsed) OR (+5 s elapsed) per D-P3.9 precedence.
+# The +1 s arm is the cheap still-green re-check (rides an
+# already-warm pool + a single boolean); the +5 s arm is the
+# hard wall-clock floor that guarantees the deferred DELETE
+# cannot pile up faster than the queue can drain (a wedged
+# readyz would otherwise block the +1 s arm forever).
+#
+# State-location decision: the doomed_ids come from the manager
+# (set by manager.initialize()'s CAPTURE_PHASE at manager.py:843).
+# The DELETE itself runs through the queue repo's
+# delete_doomed_ids method (decision (f) §Concrete Contract).
+# The reason this lives in api.py and not the queue repo: the
+# asyncio task scheduling is a lifespan concern, not a repo
+# concern. The repo stays pure (sync, returns a rowcount);
+# the lifespan wraps it in the deferred timing.
+#
+# Bounded: 5-min timeout (decisions (f) failure-modes table).
+# On timeout: WARN log + release; the next boot re-captures
+# and re-deletes. Crash-safe: a SIGKILL between capture and
+# DELETE leaves rows on disk; the next boot's CAPTURE_PHASE
+# re-derives the same doomed set (predicate stable) and the
+# deferred DELETE re-runs.
+async def _deferred_delete_doomed_ids(manager, app, doomed_ids: list[str]) -> None:
+    """Background DELETE_PHASE for the deferred env-poison purge.
+
+    P3 / decision (f) / D-P3.9, D-P3.10, D-P3.11.
+    """
+    # Constants for the precedence (D-P3.9 verbatim): the +1 s
+    # arm is the cheap still-green re-check; the +5 s arm is the
+    # hard wall-clock floor.
+    _PLUS_1_S = 1.0
+    _PLUS_5_S = 5.0
+    _DELETE_TIMEOUT_S = 300.0  # 5 min, per decisions (f) failure-modes
+    import time
+    start = time.monotonic()
+    fired_via: str = ""
+    # Polling loop: 100 ms ticks. Both arms are wall-clock checked
+    # each tick; the +1 s arm ALSO requires readyz-green-still-true
+    # (the cheap still-green re-check). A wedged readyz blocks the
+    # +1 s arm but the +5 s arm fires regardless (fail-closed via
+    # the wall-clock floor).
+    # C5 (council 2026-10-12): the +1 s arm consults the readiness
+    # composite FRESH ON EVERY TICK — read inside the loop from
+    # app.state, never cached. The prior shape read
+    # manager._last_readiness_result once before the loop; that
+    # attribute has NO writer anywhere in the daemon, so the read was
+    # always None → `is None or ...` short-circuited → the +1 s arm
+    # fired UNCONDITIONALLY at t=+1 s (fail-OPEN: the DELETE could
+    # race a still-warming pool), the +5 s floor was unreachable, and
+    # _readyz_still_green was dead code.
+    # Port-bind note: this task is armed during lifespan startup —
+    # BEFORE uvicorn binds the port. That is safe BY CONSTRUCTION
+    # here: the composite is a plain in-process attribute written by
+    # the readiness refresh loop (never an HTTP read), and before the
+    # first refresh it is None → not-green → the +1 s arm cannot fire
+    # and the +5 s floor governs. The task therefore polls gracefully
+    # through the pre-bind window without touching the socket.
+    while True:
+        now_elapsed = time.monotonic() - start
+        # +1 s arm: readyz-green STILL true AND +1 s elapsed (fresh
+        # composite per tick; absent/unready → NOT green → the arm
+        # stays dormant and the +5 s floor governs).
+        if now_elapsed >= _PLUS_1_S:
+            composite = getattr(app.state, "readiness_composite", None)
+            if composite is not None and _readyz_still_green(composite):
+                fired_via = "+1s+readyz-green"
+                break
+        # +5 s arm: hard wall-clock floor (fires regardless of readyz)
+        if now_elapsed >= _PLUS_5_S:
+            fired_via = "+5s_wallclock"
+            break
+        await asyncio.sleep(0.1)
+    logger.info(
+        f"deferred DELETE_PHASE firing via arm={fired_via} "
+        f"(elapsed={now_elapsed:.1f}s; doomed_ids={len(doomed_ids)})"
+    )
+    # Run the actual DELETE in a bounded asyncio task. The repo
+    # method is sync (it acquires its own Session); wrapping in
+    # to_thread keeps the event loop responsive during the chunked
+    # DELETE (the doomed set can be up to 10k rows per the
+    # task-table-intactness comment at
+    # daemon/repositories/message_queue/repository.py:1144-1148).
+    try:
+        deleted = await asyncio.wait_for(
+            asyncio.to_thread(
+                manager._queue_repository.delete_doomed_ids,
+                doomed_ids,
+                preserve_in_flight=True,
+            ),
+            timeout=_DELETE_TIMEOUT_S,
+        )
+        logger.info(
+            f"deferred DELETE_PHASE complete: {deleted} row(s) "
+            f"deleted (arm={fired_via}; doomed_ids={len(doomed_ids)})"
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"deferred DELETE_PHASE timed out after "
+            f"{_DELETE_TIMEOUT_S}s (arm={fired_via}; doomed_ids="
+            f"{len(doomed_ids)}) — the next boot's CAPTURE_PHASE "
+            f"will re-derive and retry; rows remain until then"
+        )
+    except Exception as _del_err:
+        logger.warning(
+            f"deferred DELETE_PHASE failed (arm={fired_via}; "
+            f"doomed_ids={len(doomed_ids)}; err={_del_err!r}) — "
+            f"the next boot's CAPTURE_PHASE will re-derive and retry",
+            exc_info=True,
+        )
+    finally:
+        # Clear the manager's stashed list so a re-entrant lifespan
+        # (tests that re-instantiate the manager) doesn't re-fire.
+        manager._pending_doomed_ids = []
+
+
+def _readyz_still_green(readiness_composite) -> bool:
+    """Cheap still-green check for the +1 s arm (C5, council
+    2026-10-12): the CALLER polls app.state.readiness_composite fresh
+    on every tick (the composite has exactly one writer — the
+    periodic readiness refresh loop — and one initial None at app
+    setup). This predicate stays a pure O(1) attribute read; it never
+    re-fetches /readyz (which would defeat the "cheap" purpose) and
+    never touches the manager (the old manager._last_readiness_result
+    cache had no writer and was removed). A None composite means
+    "not green yet" — enforced at the call site.
+    """
+    try:
+        return bool(getattr(readiness_composite, "ready", False))
+    except Exception:
+        return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan context manager.
@@ -479,6 +614,45 @@ async def lifespan(app: FastAPI):
     )
     manager._maintenance_api_service = maintenance_api_service
     app.state.maintenance_api_service = maintenance_api_service
+
+    # ─────────────────────────────────────────────────────────────────
+    # P3 / decision (f) / D-P3.9 — deferred DELETE_PHASE for the
+    # env-poison purge. The CAPTURE_PHASE ran synchronously during
+    # manager.initialize() (manager.py:843 → queue repo
+    # capture_doomed_ids_and_audit). The doomed-id list is stashed
+    # on the manager as ``_pending_doomed_ids``. We launch a
+    # background asyncio task that fires on (readyz-green still
+    # true AND +1 s elapsed) OR (+5 s elapsed) per D-P3.9 precedence:
+    #   - The +1 s arm is the cheap "still-green" re-check (rides
+    #     an already-warm pool + a single boolean). It guarantees
+    #     the DELETE never runs in the same readyz-green window
+    #     as the boot path.
+    #   - The +5 s arm is the hard wall-clock floor — guarantees
+    #     the deferred DELETE cannot pile up faster than the queue
+    #     can drain (a wedged readyz would otherwise block the
+    #     +1 s arm forever; the +5 s arm fires regardless).
+    # Bounded: 5-min timeout on the DELETE (matches the decisions
+    # (f) failure-modes table — DELETE blocking pool forever is
+    # logged WARN + releases).
+    # ─────────────────────────────────────────────────────────────────
+    doomed_ids = getattr(manager, "_pending_doomed_ids", None) or []
+    if doomed_ids:
+        delete_doomed_task = asyncio.create_task(
+            _deferred_delete_doomed_ids(manager, app, doomed_ids),
+            name="deferred-delete-doomed-ids",
+        )
+        app.state.delete_doomed_task = delete_doomed_task
+        logger.info(
+            f"P3/decision-f deferred DELETE_PHASE armed: "
+            f"{len(doomed_ids)} doomed id(s) — fires on "
+            f"(readyz-green AND +1s) OR (+5s) per D-P3.9"
+        )
+    else:
+        logger.info(
+            "P3/decision-f deferred DELETE_PHASE: no doomed ids "
+            "(operator gate QUEUE_DISCARD_ON_STARTUP may be off, or "
+            "no rows matched the doomed predicate; DELETE no-ops)"
+        )
 
     # Section 1 / T7 — kill-switch boot log (ONE INFO line when OFF,
     # the PlaneSyncWatchdog no-key precedent — AM-13). INV-1 note: the

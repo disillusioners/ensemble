@@ -18,9 +18,14 @@
 #   5 journal     flipped:true
 #   6 restart     launcher.sh (journal sweep runs before binary resolution —
 #                T7, separate owner)
-#   7 gate        /livez ≤60s → /readyz ≤120s → version verify (/livez
-#                version == manifest binary_version, D2/ADR-027) → 300s soak
-#                (re-probed every 30s) — all inside the 10-min outer window
+#   7 gate        /livez ≤180s → /readyz ≤120s → version verify (/livez
+#                version == manifest binary_version, D2/ADR-027) →
+#                ADAPTIVE soak (default 60s floor / 120s cap / 3
+#                consecutive greens @ 15s cadence / fail-fast on red
+#                per P3 decision (c); revert to 300s via
+#                ENSEMBLE_SOAK_CONSERVATIVE=1; override via
+#                ENSEMBLE_PROMOTE_SOAK_S) — all inside the 900s
+#                (15 min) wall-clock ceiling (P3 decision (d))
 #   8a commit     journal current/previous update · history 'commit' ·
 #                retention (keep 3, previous pinned — T8) · lock release
 #   8b rollback   T5 auto-rollback: manifest gate on previous FIRST (else
@@ -176,6 +181,42 @@ _trap_install_signal_handlers "promote:preflight"
 # lock held from here on — heartbeat before every long wait
 lock_heartbeat
 
+# P3 / decision (d) / D-P3.3 — initialize the top-level wall-clock
+# ceiling. Every phase boundary in this script calls
+# `_enforce_deadline promote_deadline <phase>` which journals
+# `deadline-breach-<phase> ... daemon-state=<...>` (C-10c + C-10b) +
+# releases the lock + exits 78 on breach. The breach routes to the
+# EXISTING halt machinery at promote.sh:459-496 — it does NOT
+# trigger auto-rollback (the existing auto-rollback is for gate-
+# fail halts, not for ceremony timing halts). C-10a arithmetic
+# (decisions.md (d) §C-10a, single source of truth):
+#   preflight 45 / stop 225 / flip 30 / handback 90 / livez 180 /
+#   readyz 120 / version 30 / soak 120 / commit 30 = 870s non-stop
+#   worst (+30s slack inside the 900s ceiling). All-budgets-max
+#   ceiling 1400s → halt.
+promote_deadline=$(( $(_now_epoch) + PROMOTE_TOTAL_DEADLINE_S ))
+
+# 1a-pre. python3 ≥ 3.7 floor probe (P2 / C-7 / T2.0a) — gate ANY
+# destructive step on a working stdlib interpreter BEFORE the splice
+# helper's first call. Stdlib-only (helpers don't pull deps); bare
+# `python3` from PATH (NOT `PLUGIN_STALENESS_PYTHON` — that chain
+# exists for PyYAML and is unrelated). Floor 3.7 is sufficient:
+# `pathlib.samefile` + dict-order guarantees + 3.7 features the
+# helper leans on. Missing / below-floor → exit 78 (the same refusal
+# code the helper itself returns). Probe-OK event journaled with
+# the interpreter path included so the audit trail tells future
+# operators what interpreter signed off on the splice.
+if ! _splice_python_floor_probe; then
+    _warn "python3 ≥ 3.7 unavailable on PATH — refusing promote (journal splice helper requires it; install python3 ≥ 3.7 or set PLUGIN_STALENESS_PYTHON chain is unrelated)"
+    lock_release 2>/dev/null || true
+    exit 78
+fi
+# P3 / decision (d) — first phase boundary (preflight). The probe
+# above is the gate's first long operation; we check the deadline
+# AFTER the probe succeeds (a missing python3 is a refusal, not a
+# deadline breach).
+_enforce_deadline "$promote_deadline" preflight
+
 # 1b. staged mode sanity
 if [ ! -d "$TARGET_REL" ]; then
     _refuse not-staged "target release $TARGET_REL does not exist — stage it first (stage.sh $UP_TARGET --version $VERSION)"
@@ -185,6 +226,15 @@ J="$(journal_read)" || {
     _warn "journal unreadable/TORN at $(journal_path) — halt-for-human (repair the journal before any pipeline mutation)"
     exit 78
 }
+# Probe-OK event (T2.0a / C-7) — journals the interpreter path that
+# signed off on the splice. This is a SHELL → journal write using the
+# legacy `journal_history_append` (small fixture, runs ONCE on the
+# promote path, not on the 30s heartbeat loop). The splice helper
+# itself only enters the picture AFTER this journaled evidence is
+# down on disk.
+_splice_journal append-history python_floor_probe \
+    "interpreter=$(command -v python3 2>/dev/null || echo MISSING) version=$(python3 -c 'import sys;print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo MISSING)" \
+    || { _warn "could not journal probe-OK event — refusing"; lock_release 2>/dev/null || true; exit 78; }
 
 # 1c. adopt-or-refuse an existing in_flight (sweep-mirroring, D-FA4.3)
 adopt_stale_txn || _refuse txn-busy "promote refused: unresolved in_flight txn (see the adopt diagnostics above — pipeline-busy)"
@@ -224,7 +274,11 @@ promote_plugin_staleness_check
 # 1e. integrity (D-FA4.4): CURRENT (drift detection) + TARGET + manifest
 # fields + no-.env invariant. Same-version re-promote verifies once.
 CUR_JSON="$(journal_read)"
-CUR="$(_json_field "$CUR_JSON" current)"
+# Anchored on the QUOTED-key form (`"current":`) via _json_field_quoted
+# (lib.sh:1355-1364 precedent) — defends against a future key-naming
+# collision where a top-level field named e.g. "current_previous_candidate"
+# would otherwise substring-match ahead of the real `"current":` field.
+CUR="$(_json_field_quoted "$CUR_JSON" '"current":' 2>/dev/null)" || CUR=""
 [ "$CUR" = "null" ] && CUR=""
 if [ -n "$CUR" ] && [ "$CUR" != "$VERSION" ]; then
     if [ ! -L "$INSTALL_DIR/current" ]; then
@@ -315,6 +369,8 @@ if ! stop_via_stop_script; then
     journal_history_append halt "promote aborted pre-flip: stop failed for $VERSION — txn left open for sweep recovery (current untouched at LKG)"
     exit 1
 fi
+# P3 / decision (d) — phase boundary (post-stop, pre-launcher-swap)
+_enforce_deadline "$promote_deadline" stop
 
 # ═══════════════════ 3. LAUNCHER SWAP (stopped window) ═════════════════════
 launcher_swap "$VERSION" || {
@@ -327,6 +383,18 @@ launcher_swap "$VERSION" || {
     journal_history_append halt "promote aborted pre-flip: launcher swap failed for $VERSION — txn left open for sweep recovery"
     exit 1
 }
+# P3 / decision (d) — phase boundary (post-launcher-swap, pre-flip)
+_enforce_deadline "$promote_deadline" launcher_swap
+
+# C3 (council 2026-10-12): OLD_CUR — the version THIS run is about to
+# displace — is captured here at flip-prep, UNCONDITIONALLY, before
+# ANY branch that can read it. The prior shape assigned OLD_CUR only
+# inside the 8a commit-success block, so the 8b gate-failure path read
+# it under set -u → EVERY gate failure crashed "unbound variable"
+# (exit 1) BEFORE halt/quarantine/repoint — in-ceremony auto-rollback
+# was dead and the daemon served the unverified version until the
+# next-boot sweep. Live-confirmed (12a/12b/12d exit 1 ≠ 78).
+OLD_CUR="$CUR"
 
 # ═══════════════════════════ 4. ATOMIC FLIP ════════════════════════════════
 if ! atomic_flip "$VERSION"; then
@@ -336,6 +404,9 @@ if ! atomic_flip "$VERSION"; then
     journal_history_append halt "promote aborted: flip failed for $VERSION (current untouched) — txn left open for sweep recovery"
     exit 1
 fi
+# P3 / decision (d) — phase boundary (post-flip, pre-restart). Daemon is
+# now DOWN; breach here leaves daemon-state=stopped (C-10b).
+_enforce_deadline "$promote_deadline" flip
 
 # ═══════════════════════════ 5. FLIPPED MARKER ═════════════════════════════
 journal_mark_flipped || { _warn "cannot mark flipped — halting for human (sweep will find the txn)"; exit 1; }
@@ -358,9 +429,20 @@ if ! restart_via_launcher; then
                               || true   # history is advisory; the open txn IS the B4 contract
     exit 1
 fi
+# P3 / decision (d) — phase boundary (post-restart, pre-gate). Daemon is
+# now up (per restart_via_launcher success); breach here leaves
+# daemon-state=handed-back (C-10b). The boot-grace window is ACTIVE
+# (started inside restart_via_launcher, D-P3.7) — the livez/readyz probes
+# in the gate below ride it.
+_enforce_deadline "$promote_deadline" restart
 
 # ═══════════════════════════ 7. HEALTH GATE (D2) ═══════════════════════════
 gate_fail_reason=""
+
+# P3 / decision (d) — phase boundary (pre-livez). The boot-grace
+# window is ACTIVE; the livez probe rides it. The deadline check
+# here is the per-phase-decomposition entry to the gate section.
+_enforce_deadline "$promote_deadline" livez
 
 if LIVEZ_JSON="$(gate_livez)"; then
     _log "livez OK:"; _logv "$LIVEZ_JSON"
@@ -368,6 +450,8 @@ else
     gate_fail_reason="/livez unreachable >${LIVEZ_BUDGET_S}s"
 fi
 
+# P3 / decision (d) — phase boundary (pre-readyz)
+_enforce_deadline "$promote_deadline" readyz
 if [ -z "$gate_fail_reason" ] && READYZ_JSON="$(gate_readyz)"; then
     _log "readyz OK:"; _logv "$READYZ_JSON"
     # M7 (commission v0.16.6 component 2, interface contract): /readyz MAY
@@ -419,22 +503,66 @@ elif [ -z "$gate_fail_reason" ]; then
     gate_fail_reason="/readyz unreachable >${READYZ_BUDGET_S}s"
 fi
 
+# P3 / decision (d) — phase boundary (pre-version)
+_enforce_deadline "$promote_deadline" version
 if [ -z "$gate_fail_reason" ]; then
     gate_version "$BIN_VERSION" || gate_fail_reason="version verify mismatch"
 fi
 
+# P3 / decision (d) / D-P3.5 — thread ceremony_remaining_s to
+# gate_soak so the adaptive cap shrinks against the remaining
+# budget (the "-60" preserves a 60s audit tail for commit bookkeeping
+# + retention_evict + lock_release).
+_enforce_deadline "$promote_deadline" soak
 if [ -z "$gate_fail_reason" ]; then
     lock_heartbeat
-    gate_soak "$SOAK_S" "$BIN_VERSION" || gate_fail_reason="soak failure"
+    ceremony_remaining_s="$(_effective_ceremony_remaining_s "$promote_deadline")"
+    gate_soak "$SOAK_S" "$BIN_VERSION" "$ceremony_remaining_s" || gate_fail_reason="soak failure"
 fi
 
 # ═════════════════ 8a. COMMIT — or 8b. AUTO-ROLLBACK (T5) ══════════════════
+# P3 / decision (d) — phase boundary (pre-commit). Breach here
+# leaves daemon-state=handed-back (C-10b); the txn is flipped:true
+# so a halt routes to the sweep-rollback path on the next launcher
+# start (the existing B4 leave-txn-open contract).
+_enforce_deadline "$promote_deadline" commit
 if [ -z "$gate_fail_reason" ]; then
     # commit — M5: every journal write is checked; a failed write must
     # never let the promote exit 0 with the symlink/journal diverged (see
     # journal_fail_loud in lib.sh).
-    OLD_CUR="$CUR"
+    # OLD_CUR is the version THIS run displaced (captured at the flip-prep
+    # moment above; decision (g) A — single source of truth for the
+    # auto-rollback target below). The journal's `previous` field is
+    # deliberately NOT consulted here because it can be stale whenever
+    # the previous run halted AFTER the flip and BEFORE commit (the Oct 9
+    # arc — N-2 walk bug). The set-previous write below carries OLD_CUR
+    # so the journal's `previous` matches THIS run's displaced version
+    # (FORWARD semantic).
+    # (OLD_CUR capture moved to flip-prep above — C3: the 8b gate-failure
+    # path reads it, so it MUST exist before any branch that can fail.)
+    # Immediacy assertion (decision (g) D-P1.2): if journal.current does
+    # NOT equal $VERSION at the commit-set-previous moment, the journal
     journal_set_current "$VERSION"        || journal_fail_loud "commit: journal_set_current $VERSION"
+    # Immediacy assertion (decision (g) D-P1.2, per decisions.md:532 — the
+    # check lands AFTER set_current, guarding the previous-write): journal
+    # current must equal $VERSION at the set-previous moment. If it does
+    # NOT, the journal has drifted out of sync with the symlink /
+    # preflight invariant — refuse with exit 78 rather than write a
+    # misleading `previous`. (R1 round-2, council: the shipped order ran
+    # the check BEFORE set_current — journal.current still held the
+    # pre-commit value at that point, so the check breached on EVERY
+    # commit and made the M5 commit-write-failure path unreachable.)
+    # The anchor is the QUOTED-key form (`"current":`) via
+    # _json_field_quoted (lib.sh:1355-1364 precedent) — defeats the
+    # bare-substring first-occurrence hazard.
+    PREV_JSON="$(journal_read)" || journal_fail_loud "commit: journal_read"
+    current_now="$(_json_field_quoted "$PREV_JSON" '"current":' 2>/dev/null)" || current_now=""
+    if [ "$current_now" != "$VERSION" ]; then
+        journal_history_append halt "immediacy breach at commit: journal current=$current_now ≠ $VERSION — refusing to set previous" \
+                                              || true
+        _warn "immediacy breach at commit: journal current=$current_now ≠ $VERSION — halting (exit 78); txn left open for sweep recovery"
+        exit 78
+    fi
     journal_set_previous "${OLD_CUR:-null}" || journal_fail_loud "commit: journal_set_previous ${OLD_CUR:-null}"
     journal_close_txn                     || journal_fail_loud "commit: journal_close_txn"
     journal_history_append commit "promote $VERSION committed (gate+soak green; previous=${OLD_CUR:-none})" \
@@ -449,8 +577,16 @@ fi
 # ── 8b. AUTO-ROLLBACK (T5) — the recovery NEVER refuses on cap/cooldown ────
 _log "GATE FAILED: $gate_fail_reason — auto-rollback initiating (ADR-005)"
 
+# Decision (g) D-P1.1 / D-P1.3 — auto-rollback target = $OLD_CUR, NOT the
+# journal's `previous` field. The bug class is "reading the wrong
+# field" — `journal.previous` is stale whenever the previous run halted
+# AFTER the flip and BEFORE commit (N-2 walk). $OLD_CUR was captured at
+# the flip-prep moment above and is THIS run's displaced version. The
+# PREV_JSON read below is kept for the immediacy-correctness check
+# (the gate below still consults `journal.previous` as a defense-in-
+# depth sanity read; the real target remains $OLD_CUR).
 PREV_JSON="$(journal_read)"
-PREV="$(_json_field "$PREV_JSON" previous)"
+PREV="$OLD_CUR"
 [ "$PREV" = "null" ] && PREV=""
 
 # T5 manifest gate FIRST (D-FA4.5): previous must EXIST, be rollback_safe,

@@ -40,7 +40,11 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# M4: shared helpers (assertions, M1 fixture registry, F1 fake-HOME fence)
+. "$REPO_ROOT/tests/upgrade_test_lib.sh"
+
 PASS=0
+
 FAIL=0
 FAILED_TESTS=""
 
@@ -55,20 +59,6 @@ _fail() {
 assert_eq() {
     local name="$1" expected="$2" actual="$3"
     if [ "$expected" = "$actual" ]; then _pass; else _fail "$name" "$expected" "$actual"; fi
-}
-assert_contains() {
-    local name="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*) _pass "$name" ;;
-        *) _fail "$name" "contains '$needle'" "$haystack" ;;
-    esac
-}
-assert_not_contains() {
-    local name="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*) _fail "$name" "absent '$needle'" "$haystack" ;;
-        *) _pass "$name" ;;
-    esac
 }
 section() { printf '\n== %s ==\n' "$1"; }
 
@@ -94,7 +84,13 @@ EOF
     fi
 }
 
-# Helper: write a journal with the shape _journal_sweep expects
+# Helper: write a journal with the shape _journal_sweep expects.
+# P1 / decision (g) C-4: the in_flight MUST carry `displaced_version`
+# (the C-4 stamp from journal_open_txn at lib.sh:700-712). The
+# boot_sweep_commit_and_continue path reads it and writes
+# `previous = displaced_version`; missing the field triggers
+# halt-for-human. Seed it to $prev (the journal's current at the
+# hypothetical open_txn time).
 seed_journal() {
     # args: <fix_dir> <target> <prev> <flipped> <include_intent_flip>
     local fix="$1" target="$2" prev="$3" flipped="$4" include_intent="$5"
@@ -103,7 +99,21 @@ seed_journal() {
         intent=',{"ts":"2026-10-07T10:00:00Z","event":"intent_flip","detail":"preflight: intentional promote target '"$target"' — integrity verified (CURRENT drift-check + TARGET manifest match); operator-initiated"}'
     fi
     cat > "$fix/releases/state.json" <<EOF
-{"current":"$prev","previous":"$prev","in_flight":{"kind":"promote","target":"$target","started_at":"2026-10-07T09:00:00Z","flipped":$flipped,"owner_pid":99999,"last_heartbeat":1728000000},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T09:00:00Z","event":"open_txn","detail":"test seeded"}$intent]}
+{"current":"$prev","previous":"$prev","in_flight":{"kind":"promote","target":"$target","started_at":"2026-10-07T09:00:00Z","flipped":$flipped,"owner_pid":99999,"last_heartbeat":1728000000,"displaced_version":"$prev"},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T09:00:00Z","event":"open_txn","detail":"test seeded"}$intent]}
+EOF
+}
+
+# seed_journal_old_format — variant: in_flight has NO `displaced_version`
+# field (pre-C-4 format). Used to assert the halt-for-human branch.
+seed_journal_old_format() {
+    # args: <fix_dir> <target> <prev> <flipped> <include_intent_flip>
+    local fix="$1" target="$2" prev="$3" flipped="$4" include_intent="$5"
+    local intent=""
+    if [ "$include_intent" = "1" ]; then
+        intent=',{"ts":"2026-10-07T10:00:00Z","event":"intent_flip","detail":"preflight: intentional promote target '"$target"' — integrity verified; operator-initiated"}'
+    fi
+    cat > "$fix/releases/state.json" <<EOF
+{"current":"$prev","previous":"$prev","in_flight":{"kind":"promote","target":"$target","started_at":"2026-10-07T09:00:00Z","flipped":$flipped,"owner_pid":99999,"last_heartbeat":1728000000},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T09:00:00Z","event":"open_txn","detail":"old-format txn seeded"}$intent]}
 EOF
 }
 
@@ -126,7 +136,7 @@ run_sweep() {
 # ===========================================================================
 section "C1 — happy-path commit-and-continue (ALL gates hold)"
 
-C1_FIX="$(mktemp -d -t c1.XXXXXX)"
+C1_FIX="$(mktemp -d -t c1.XXXXXX)"; _register_fixture "$C1_FIX"
 make_install_fixture "$C1_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "false"
 # current=prev (pre-flip baseline), in_flight.flipped=true (post-flip
 # symlink evidence), intent_flip event for the target.
@@ -149,6 +159,17 @@ C1_JOURNAL="$(cat "$C1_FIX/releases/state.json")"
 case "$C1_JOURNAL" in
     *'"current":"v9.9.9-test-target"'*|*"\"current\": \"v9.9.9-test-target\""*) _pass "C1 journal current → target (committed)" ;;
     *) _fail "C1 journal current → target (committed)" '"current":"v9.9.9-test-target"' "$(printf '%s' "$C1_JOURNAL" | grep -oE '"current":[^,}]*')" ;;
+esac
+# P1 / C-4 NEW assertion: the patch ADDS the previous-write that
+# launcher.sh:1020-1037 lacked. journal.previous MUST be written to
+# in_flight.displaced_version (N-1 = test-prev), and the source MUST
+# be the in_flight field (not the journal's stale pre-existing
+# previous). We seeded previous=test-prev AND displaced_version=test-
+# prev, so the post-sweep previous MUST equal test-prev (the same
+# value, but written from the new source).
+case "$C1_JOURNAL" in
+    *'"previous":"v9.9.9-test-prev"'*|*"\"previous\": \"v9.9.9-test-prev\""*) _pass "C1 journal previous → in_flight.displaced_version (C-4 fix writes previous=N-1)" ;;
+    *) _fail "C1 journal previous → in_flight.displaced_version (C-4 fix writes previous=N-1)" '"previous":"v9.9.9-test-prev"' "$(printf '%s' "$C1_JOURNAL" | grep -oE '"previous":[^,}]*')" ;;
 esac
 case "$C1_JOURNAL" in
     *'"in_flight":null'*|*"\"in_flight\": null"*) _pass "C1 journal in_flight cleared" ;;
@@ -180,7 +201,7 @@ rm -rf "$C1_FIX"
 # ===========================================================================
 section "C2 — no intent_flip event → fail-closed (halt gate fires)"
 
-C2_FIX="$(mktemp -d -t c2.XXXXXX)"
+C2_FIX="$(mktemp -d -t c2.XXXXXX)"; _register_fixture "$C2_FIX"
 make_install_fixture "$C2_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "false"
 # Same as C1 but NO intent_flip event.
 seed_journal "$C2_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "0"
@@ -212,7 +233,7 @@ rm -rf "$C2_FIX"
 # ===========================================================================
 section "C3 — manifest missing → fail-closed (intent_flip present but no prev manifest)"
 
-C3_FIX="$(mktemp -d -t c3.XXXXXX)"
+C3_FIX="$(mktemp -d -t c3.XXXXXX)"; _register_fixture "$C3_FIX"
 make_install_fixture "$C3_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "__MISSING_MANIFEST__"
 # Intent_flip IS present.
 seed_journal "$C3_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "1"
@@ -236,7 +257,7 @@ rm -rf "$C3_FIX"
 # ===========================================================================
 section "C4 — rollback_safe key missing → fail-closed (manifest present, key absent)"
 
-C4_FIX="$(mktemp -d -t c4.XXXXXX)"
+C4_FIX="$(mktemp -d -t c4.XXXXXX)"; _register_fixture "$C4_FIX"
 make_install_fixture "$C4_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "__MISSING_KEY__"
 seed_journal "$C4_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "1"
 ln -sfn "releases/v9.9.9-test-target" "$C4_FIX/current"
@@ -257,7 +278,7 @@ rm -rf "$C4_FIX"
 # ===========================================================================
 section "C5 — rollback_safe TRUE → existing sweep-rollback path (commit branch skipped)"
 
-C5_FIX="$(mktemp -d -t c5.XXXXXX)"
+C5_FIX="$(mktemp -d -t c5.XXXXXX)"; _register_fixture "$C5_FIX"
 make_install_fixture "$C5_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true"
 seed_journal "$C5_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "1"
 ln -sfn "releases/v9.9.9-test-target" "$C5_FIX/current"
@@ -345,6 +366,162 @@ else
 fi
 
 # ===========================================================================
+section "C8 — old-format in_flight (no displaced_version) → halt-for-human (P1 / C-4)"
+
+# The C-4 fix in launcher.sh:1020-1037 ADDS a halt-for-human branch for
+# txns that lack the `displaced_version` field (pre-C-4 format from
+# earlier releases). Seed an old-format txn with intent_flip +
+# prev.rollback_safe:false (all the OTHER gates hold) and assert the
+# sweep halts with no silent commit.
+C8_FIX="$(mktemp -d -t c8.XXXXXX)"; _register_fixture "$C8_FIX"
+make_install_fixture "$C8_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "false"
+seed_journal_old_format "$C8_FIX" "v9.9.9-test-target" "v9.9.9-test-prev" "true" "1"
+ln -sfn "releases/v9.9.9-test-target" "$C8_FIX/current"
+printf 'PORT=19999\n' > "$C8_FIX/.env"
+printf '#!/bin/bash\nexit 0\n' > "$C8_FIX/launcher.sh"
+chmod +x "$C8_FIX/launcher.sh"
+
+C8_OUT="$(run_sweep "$C8_FIX")"
+
+C8_JOURNAL="$(cat "$C8_FIX/releases/state.json")"
+# journal.current must STAY at test-prev (no silent commit).
+case "$C8_JOURNAL" in
+    *'"current":"v9.9.9-test-prev"'*|*"\"current\": \"v9.9.9-test-prev\""*) _pass "C8 journal.current stays at prev (no silent commit on old-format txn)" ;;
+    *) _fail "C8 journal.current stays at prev (no silent commit on old-format txn)" '"current":"v9.9.9-test-prev"' "$(printf '%s' "$C8_JOURNAL" | grep -oE '"current":[^,}]*')" ;;
+esac
+# halt event MUST be in history.
+assert_contains "C8 halt event in history (old-format in_flight)" '"event":"halt"' "$C8_JOURNAL"
+# boot_sweep_commit_and_continue MUST NOT be in history.
+assert_not_contains "C8 NO boot_sweep_commit_and_continue event" '"event":"boot_sweep_commit_and_continue"' "$C8_JOURNAL"
+# In_flight MUST remain (B4 leave-txn-open) — the field still has
+# content (not null).
+case "$C8_JOURNAL" in
+    *'"in_flight":null'*|*"\"in_flight\": null"*) _fail "C8 in_flight NOT cleared (B4 leave-txn-open)" "object" "null" ;;
+    *) _pass "C8 in_flight NOT cleared (B4 leave-txn-open)" ;;
+esac
+
+rm -rf "$C8_FIX"
+
+# ===========================================================================
+
+
+# ===========================================================================
+# W8 (council 2026-10-12) — T1.5 JOURNAL MUTATION ORDERING pin
+# ===========================================================================
+# The plan's T1.5 ordering assertion ("the previous write lands BETWEEN
+# the current update and the in_flight clear — a write after the
+# in_flight clear is invisible to the FORWARD semantic") was specified
+# but never landed. This pin lands it: a recording shim wraps
+# _js_journal_update and logs every journaled FIELD write in fire
+# order; the commit-and-continue sweep must emit current → previous →
+# in_flight in that relative order.
+
+run_sweep_ordered() {  # <fix_dir> <order_log>
+    local fix="$1" log="$2"
+    INSTALL_DIR="$fix" PORT=19999 ORDER_LOG="$log" \
+    SWEEP_STALE_S=0 HEARTBEAT_STALE_S=0 LOCK_HEARTBEAT_S=30 LOCK_STALE_S=300 \
+    bash -c '
+        . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
+        eval "$(declare -f _js_journal_update | sed "s/_js_journal_update/_js_journal_update_real/")"
+        _js_journal_update() {
+            printf "%s\n" "$2" >> "$ORDER_LOG"
+            _js_journal_update_real "$@"
+        }
+        _journal_sweep "$INSTALL_DIR"
+        echo "sweep-rc=$?"
+    ' 2>&1
+}
+
+section "W8 — T1.5 ordering: current → previous → in_flight"
+
+W8_FIX="$(mktemp -d -t w8-order.XXXXXX)"; _register_fixture "$W8_FIX"
+make_install_fixture "$W8_FIX" "v9.9.9-w8-target" "v9.9.9-w8-prev" "false"
+seed_journal "$W8_FIX" "v9.9.9-w8-target" "v9.9.9-w8-prev" "true" "1"
+ln -sfn "releases/v9.9.9-w8-target" "$W8_FIX/current"
+printf 'PORT=19999\n' > "$W8_FIX/.env"
+printf '#!/bin/bash\nexit 0\n' > "$W8_FIX/launcher.sh"
+chmod +x "$W8_FIX/launcher.sh"
+W8_LOG="$W8_FIX/order.log"; : > "$W8_LOG"
+W8_OUT="$(run_sweep_ordered "$W8_FIX" "$W8_LOG")"
+W8_RC=$(printf '%s' "$W8_OUT" | grep -oE 'sweep-rc=[0-9]+' | head -1 | sed 's/sweep-rc=//')
+assert_eq "W8 sweep returns 0" "0" "$W8_RC"
+
+ORD_CURRENT=$(grep -n '^current$' "$W8_LOG" | head -1 | cut -d: -f1)
+ORD_PREVIOUS=$(grep -n '^previous$' "$W8_LOG" | head -1 | cut -d: -f1)
+ORD_INFLIGHT=$(grep -n '^in_flight$' "$W8_LOG" | head -1 | cut -d: -f1)
+if [ -n "$ORD_CURRENT" ] && [ -n "$ORD_PREVIOUS" ] && [ -n "$ORD_INFLIGHT" ] \
+   && [ "$ORD_CURRENT" -lt "$ORD_PREVIOUS" ] && [ "$ORD_PREVIOUS" -lt "$ORD_INFLIGHT" ]; then
+    _pass
+else
+    _fail "W8 ordering: current → previous → in_flight" \
+        "current@$ORD_CURRENT < previous@$ORD_PREVIOUS < in_flight@$ORD_INFLIGHT" \
+        "$(tr '\n' ' ' < "$W8_LOG" 2>/dev/null)"
+fi
+W8_JOURNAL="$(cat "$W8_FIX/releases/state.json")"
+case "$W8_JOURNAL" in
+    *'"in_flight":null'*|*"\"in_flight\": null"*) _pass "W8 in_flight cleared (txn closed)" ;;
+    *) _fail "W8 in_flight cleared (txn closed)" '"in_flight":null' "$(printf '%s' "$W8_JOURNAL" | grep -oE '"in_flight":[^,}]*')" ;;
+esac
+rm -rf "$W8_FIX"
+
+
+
+# ===========================================================================
+# W6 (council 2026-10-12) — JSON-null displaced_version must NOT become
+# the quoted string "previous":"null"
+# ===========================================================================
+# _js_json_field returns the RAW token: a JSON null reads back as the
+# literal "null" (not empty), slipped past the old [ -z ] guard, and
+# the quoted write emitted "previous":"null" (QUOTED string) — vs
+# lib.sh's unquoted null. Every [ "$prev" != "null" ] consumer then
+# treats the quoted string as a REAL version. The fix null-fences the
+# read: absent OR null displaced_version ⇒ ambiguous pre-stamp state ⇒
+# halt-for-human, previous untouched.
+
+section "W6 — null displaced_version halts, previous NOT written as quoted null"
+
+W6B_FIX="$(mktemp -d -t w6b.XXXXXX)"; _register_fixture "$W6B_FIX"
+make_install_fixture "$W6B_FIX" "v9.9.9-w6b-target" "v9.9.9-w6b-prev" "false"
+# same gates as C1 BUT displaced_version is JSON null (pre-stamp state)
+cat > "$W6B_FIX/releases/state.json" <<EOF
+{"current":"v9.9.9-w6b-prev","previous":"v9.9.9-w6b-prev","in_flight":{"kind":"promote","target":"v9.9.9-w6b-target","started_at":"2026-10-07T09:00:00Z","flipped":true,"owner_pid":99999,"last_heartbeat":1728000000,"displaced_version":null},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T09:00:00Z","event":"open_txn","detail":"test seeded"},{"ts":"2026-10-07T10:00:00Z","event":"intent_flip","detail":"preflight: intentional promote target v9.9.9-w6b-target — integrity verified; operator-initiated"}]}
+EOF
+ln -sfn "releases/v9.9.9-w6b-target" "$W6B_FIX/current"
+printf 'PORT=19998\n' > "$W6B_FIX/.env"
+printf '#!/bin/bash\nexit 0\n' > "$W6B_FIX/launcher.sh"
+chmod +x "$W6B_FIX/launcher.sh"
+W6B_BEFORE="$(cat "$W6B_FIX/releases/state.json")"
+W6B_OUT="$(run_sweep "$W6B_FIX")"
+W6B_JOURNAL="$(cat "$W6B_FIX/releases/state.json")"
+# previous must be UNCHANGED (still the seed's "v9.9.9-w6b-prev") and
+# must NOT be the quoted string "null"
+case "$W6B_JOURNAL" in
+    *'"previous":"null"'*|*'"previous": "null"'*)
+        _fail "W6 previous NOT written as quoted null" 'no quoted-null write' 'present' ;;
+    *'"previous":"v9.9.9-w6b-prev"'*|*'"previous": "v9.9.9-w6b-prev"'*)
+        _pass "W6 previous untouched (still the seeded value)" ;;
+    *) _fail "W6 previous untouched" '"previous":"v9.9.9-w6b-prev"' "$(printf '%s' "$W6B_JOURNAL" | grep -oE '"previous":[^,}]*')" ;;
+esac
+# the txn must NOT have been silently committed
+case "$W6B_JOURNAL" in
+    *'"in_flight":null'*|*'"in_flight": null'*)
+        _fail "W6 txn NOT committed on null displaced (halt-for-human)" "in_flight object kept" "null" ;;
+    *) _pass "W6 txn kept (halt-for-human, B4 leave-txn-open)" ;;
+esac
+# POSITIVE control: the sweep must have RUN and taken the
+# halt-for-human branch — a halt/halt-for-human event lands in history.
+# (Without this, a sweep that never started would pass the two cells
+# above vacuously — the seeded journal already has both shapes.)
+case "$W6B_JOURNAL" in
+    *'"event":"halt"'*|*'"event":"halt-for-human"'*|*'"event":"halt_for_human"'*)
+        _pass "W6 halt event recorded (the sweep ran and halted)" ;;
+    *)
+        _fail "W6 halt event recorded (the sweep ran and halted)" \
+            'a halt-class history event' \
+            "$(printf '%s' "$W6B_JOURNAL" | grep -oE '"event":"[a-z_]*"' | tr '\n' ' ')OUT=$W6B_OUT" ;;
+esac
+rm -rf "$W6B_FIX"
+
 section "Final — summary"
 
 printf '\n== summary ==\n'

@@ -15,7 +15,6 @@ we verified the result by running `_classify_request()` against the
 real implementation.
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
 
 from daemon.tools.inner_soul import _classify_request

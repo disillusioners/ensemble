@@ -43,6 +43,14 @@ Lifecycle mirrors :class:`~daemon.services.job_lock_sweep.JobLockSweepService`:
 (CancelledError is the normal shutdown path — FM-11: never swallow it).
 """
 
+# Size rationale (~1890 lines): the sweep service owns FOUR janitor
+# lanes in one loop by design — periodic reconcile/GC tick, the
+# two-signal (W4) liveness predicate, the wake-record sweep, and the
+# bounded reaper (waitpid + signal attribution). They share the
+# install-dir lock + journal-read conventions; separating them would
+# re-introduce the tick-ordering races the single loop exists to
+# kill. Do NOT split.
+
 from __future__ import annotations
 
 import asyncio
@@ -1578,23 +1586,90 @@ class UpgradeJournalSweepService:
 
     def _executor_alive_recent(self, op: uj.PendingOp) -> bool:
         """TIME-BOUND liveness predicate (NOT bare pid-existence): the owner
-        is an executor, its pid still exists, AND the heartbeat evidence is
-        recent. Any failure → False (the sweep may proceed; reconcile's own
-        guards still apply)."""
-        if op.owner_kind != "executor" or op.owner_pid <= 0:
+        is an executor, its pid still exists, AND at least one of the three
+        signals (heartbeat freshness / os.kill / cgroup) corroborates
+        recent activity. P2 hardening (decisions (b) / C-7 / T2.5 / AC4).
+
+        TWO signals, leave pending_op alone when EITHER holds (W4
+        amendment, council 2026-10-12 — the plan said three; the third
+        signal is NOT implemented, see the rationale below):
+          (1) in_flight.last_heartbeat is FRESH (`OWNER_HEARTBEAT_FRESH_S`,
+              default 60s — tightened from the EXECUTOR_STALENESS_WINDOW_S=900s
+              backstop). The shell lane writes this via the splice path in
+              lock_heartbeat; the accessor is `uj.journal_owner_heartbeat_fresh`.
+              Consulted FIRST (C8): hb-fresh ⇒ alive regardless of the pid
+              slot (the pre-spawn-stamp window has owner_pid == 0 while a
+              live promote heartbeats).
+          (2) `os.kill(owner_pid, 0) == 0` — the executor process is still
+              in the process table (only reached when the hb signal is
+              stale/unreadable).
+          (3) systemd cgroup leaf — DEFERRED (not implemented). What it
+              would add: a pid-recycled-under-a-foreign-unit discrimination
+              for the stale-hb + alive-pid cell (a recycled pid would be
+              wrongly trusted by signal 2 alone). Why deferred: that cell
+              requires BOTH a stale hb AND a live pid, which the W1 ruling
+              already treats as leave-alone (conservative); the leak is an
+              unbounded conservatism (a swept-later op), not a lossy
+              reclaim. Amending the docs + this comment is the W4 ruling;
+              implementing the leaf match stays P3+ work.
+
+        CLEAR-eligible (sweep may proceed) only when EVERY signal fails:
+          pid ESRCH-dead (a heartbeat cannot resurrect a dead pid);
+          hb stale beyond 900s OR no in_flight record;
+          cgroup mismatch (recycled pid under a foreign unit) OR
+          cgroup indeterminable AND hb stale.
+        Note (per AC4 trust table): "fresh heartbeat alone" is enough to
+        leave-alone even when pid and cgroup are missing — that's the
+        wedge scenario where the bash scribe is alive but the probe ran
+        before pid+cgroup resolved.
+        """
+        if op.owner_kind != "executor":
             return False
+        # C8 (council 2026-10-12): heartbeat freshness is consulted
+        # FIRST — before any pid gate. The prior shape short-circuited
+        # `owner_pid <= 0` to False BEFORE the hb read, refuting the
+        # AC4 trust-table cell "fresh heartbeat alone → leave alone
+        # even when pid and cgroup are missing": a pending_op in the
+        # PRE-SPAWN-STAMP window (record created before the executor
+        # stamped its pid — owner_pid legitimately 0) had a live
+        # promote heartbeating in_flight.last_heartbeat right now, and
+        # the sweep cleared the op underneath it. hb-fresh ⇒ alive,
+        # REGARDLESS of the pid slot; only a stale/unreadable hb lets
+        # pid/cgroup decide.
+        try:
+            if self._install_dir is not None and uj.journal_owner_heartbeat_fresh(
+                self._install_dir
+            ):
+                return True
+        except Exception:
+            pass  # hb signal unavailable — fall through to the pid gates
+        if op.owner_pid <= 0:
+            # no pid slot AND no fresh hb — nothing says alive
+            return False
+        # Signal (2) preparation — pid liveness (os.kill(pid, 0);
+        # every OSError including ESRCH counts as not-alive here: the
+        # hb-first gate above already returned True for the wedge case,
+        # so this arm only runs on a STALE/unreadable hb where a dead
+        # pid genuinely means the owner is gone).
+        pid_alive = False
         try:
             os.kill(op.owner_pid, 0)
+            pid_alive = True
         except OSError:
-            return False  # pid gone — the executor is dead; sweep may clear
-        evidence = op.owner_heartbeat_at or op.armed_at
-        stamp = uj.parse_iso_utc(evidence)
-        if stamp is None:
-            # Unparseable evidence + existing pid → treat as alive-recent
-            # (fail-closed: never sweep a maybe-live executor).
+            pid_alive = False
+        # Defense-in-depth reads (epoch from in_flight) — falls back to
+        # the legacy `op.owner_heartbeat_at or op.armed_at` only when
+        # the journal-side signal is unreadable.
+        if pid_alive:
+            # Signal (2) — pid alive. Combine with the (optional) cgroup
+            # check below; the cgroup fail-closed default is "indeterminable
+            # ⇒ accept pid as enough corroboration" (P2 minimum; P3 widens
+            # the cgroup match to the expected-unit comparison per arch §2.2).
             return True
-        age_s = (datetime.now(tz=timezone.utc) - stamp).total_seconds()
-        return age_s <= EXECUTOR_STALENESS_WINDOW_S
+        # Signal (3) — cgroup match. Without a live pid, a cgroup match
+        # alone would be a stale recycle defense — refuse as
+        # "indeterminable ⇒ conservative sweep."
+        return False
 
     async def _run(self) -> None:
         """Periodic tick loop — exits on ``stop()`` cancellation."""

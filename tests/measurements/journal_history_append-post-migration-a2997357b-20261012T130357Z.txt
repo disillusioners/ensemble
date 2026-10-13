@@ -1,0 +1,17 @@
+# journal_history_append post-migration capture (P2 CALL-SITE migration) — generated Mon Oct 12 13:03:57 UTC 2026
+# branch: feature/upgrade-speed-overhaul
+# sha:    a2997357b (+ uncommitted P2 + this migration, no new commit)
+# python: Python 3.12.3
+# os:     Linux 6.8.0-139-generic x86_64
+# fixture: 131162 bytes / 500 entries (gen_state_json.py --entries 500 --approx-bytes 126000)
+# path measured: lib.sh journal_history_append (REWIRED body → _splice_journal
+#                append-history → journal_splice.py) — the true caller path,
+#                NOT the raw helper. Fixture pre-filled with 500 heartbeat
+#                entries; warm-up append then 5 timed appends.
+# pre-change reference (baseline-pre-change-a2997357b-*.txt):
+#   5.4KB/20 entries  append median 4.884 s ; 15KB/80 entries 13.995 s
+#   digest headline ~280 s/event at 126KB/500 (interpolated)
+# post-migration (this file):
+#   min 0.153 s · median-of-5 0.157 s · max-of-5 0.160 s
+# correctness: 500 fixture entries preserved + warmup + 5 runs appended in
+#   order, {ts,event,detail} shape intact (dict-order round-trip).

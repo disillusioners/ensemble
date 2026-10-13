@@ -5,6 +5,14 @@
 # Runs UNDER launchd (macOS) / systemd (Linux). No TTY, no shell env — every
 # path is absolute and derived from this script's own location.
 #
+# Size rationale (~1660 lines): this file is the whole supervisor in one
+# sourced unit BY CONTRACT — launchd/systemd exec a single interpreter
+# and the ADR-012 journal sweep + _pid_alive twin (byte-identical to
+# lib.sh's body, 11d pin in tests/test_launcher.sh) must live where the
+# restart loop lives. Growth here = state-file round-trip, backoff
+# classes, env parsing, and the bounded-subprocess waits (W5) — all
+# restart-loop-owned. Do NOT split: the twin-body pin and the source-
+# guard contract (`sourcing must not run anything`) span the file.
 # Division of labor (plan §4.1, ADR-001/002):
 #   OS supervisor (launchd): start at boot, SIGTERM stop, fixed 10s throttle,
 #                           re-engage only if THIS launcher itself dies.
@@ -1006,32 +1014,115 @@ _journal_sweep() {
         # unreadable anything): existing halt gates + rollback path
         # UNTOUCHED — the new branch ONLY fires when ALL gates hold.
         #
-        # Mutations performed (atomic temp+mv each, D4):
-        #   - journal current → target (the committed release)
-        #   - journal in_flight → null (close the txn)
-        #   - history append: boot_sweep_commit_and_continue
-        #     (target/prev/age/evidence detail)
+        # Mutations performed (atomic temp+mv each, D4) — in THIS order:
+        #   1. journal current → target (the committed release)
+        #   2. journal previous → in_flight.displaced_version (C-4, P1):
+        #      the FORWARD-semantic source for `previous` is the
+        #      `displaced_version` stamped at journal_open_txn time
+        #      (lib.sh:700-712), NOT the journal's stale `previous`
+        #      field (which can land N-2 on a halt→re-promote chain).
+        #      ORDERING PIN: this write MUST land between the
+        #      `current` update (above) and the `in_flight` clear
+        #      (below) — a write that lands after the in_flight clear
+        #      would be invisible to the FORWARD semantic.
+        #   3. journal in_flight → null (close the txn)
+        #   4. history append: boot_sweep_commit_and_continue
+        #      (target/prev/age/evidence detail)
         # NOT mutated: pending_op (Python reconciler owns that field;
         # the shell twin does not fight dev1's lane — if pending_op
         # exists, it stays as-is for the daemon's reconcile to clear).
         # NOT done: sweep-rollback, quarantine, counter+cooldown arming.
         # The cap/cooldown are anti-flapping responses to BAD outcomes;
         # a successful-and-declared flip is not a bad outcome.
+        #
+        # P2 / R-08 (b) BLAST RADIUS — protocol boundary (D-P2.8 / C-4):
+        # launcher.sh is SELF-CONTAINED — it does NOT source lib.sh,
+        # has ZERO python3 dependency, and uses its OWN in-shell
+        # _js_json_field / _js_journal_update / _js_history_append
+        # writers for the boot-sweep commit path above. The promote
+        # lane's splice-based journal writes are scoped to promote.sh
+        # + lib.sh only — those calls land on
+        # `scripts/upgrade/journal_splice.py` (P2) and would NEVER
+        # reach this file. The boot_sweep_commit_and_continue path
+        # (this branch) is the ONLY path that may update `previous`
+        # from boot-sweep land; promote.sh owns `previous` writes
+        # from the live lane via `journal_set_previous ${OLD_CUR}`
+        # at promote.sh:438 (and will move to the splice helper
+        # `set-previous` op in P2 PR-2 — see
+        # scripts/upgrade/journal_splice.py). DO NOT add a python3
+        # dep here — launcher purity is a hard constraint (R-08).
+        #
+        # Source of `previous` (C-4 / decision (g)):
+        #   - LIVE lane (promote.sh commit): promote.sh owns `previous`
+        #     via `journal_set_previous ${OLD_CUR}` at promote.sh:438,
+        #     with immediacy assertion on journal.current == $VERSION.
+        #   - BOOT-SWEEP lane (this path): `previous` comes from
+        #     `in_flight.displaced_version`, stamped at journal_open_txn
+        #     time = `journal.current` BEFORE the new txn is opened
+        #     on top of it. Preserved across the in-place `current`
+        #     flip, so it carries N-1 correctly even when the live
+        #     lane never reached the commit block (the Oct 9 arc).
+        #   - Old-format in_flight (no `displaced_version` field):
+        #     HALT-FOR-HUMAN below. Ambiguous state, consistent with
+        #     the "halt-for-human is BY DESIGN" recovery invariant.
         if [ -n "$prev" ] && [ "$prev" != "null" ] \
            && _js_history_has_intent_flip "$journal" "$target" \
            && _js_manifest_field "$install_dir" "$prev" "rollback_safe" 2>/dev/null \
              | grep -q '^false$'; then
             # All three gates hold — COMMIT AND CONTINUE.
+            #
+            # C-4: extract `in_flight.displaced_version` BEFORE we
+            # close the txn (the txn is the only place this lives).
+            # Old-format in_flight (no `displaced_version` field) →
+            # halt-for-human: ambiguous state, no silent commit.
+            local displaced_v
+            displaced_v="$(_js_json_field "$inf" "displaced_version" 2>/dev/null)" || displaced_v=""
+            # W6 (council 2026-10-12): a JSON-null displaced_version
+            # reads back through _js_json_field as the LITERAL "null"
+            # (the string walker returns the raw token; empty-check
+            # misses it). Left unfenced, the quoted write below turned
+            # it into `"previous":"null"` — a QUOTED string — diverging
+            # from lib.sh's unquoted JSON null and breaking every
+            # `prev != "null"` consumer on the next boot. A null/absent
+            # displaced_version is the SAME ambiguous pre-stamp state:
+            # halt-for-human.
+            if [ "$displaced_v" = "null" ]; then
+                displaced_v=""
+            fi
+            if [ -z "$displaced_v" ]; then
+                # Old-format txn: no (or null) `displaced_version`.
+                # Refuse to commit silently — halt-for-human, leave
+                # the txn in place for forensic review. The B4
+                # leave-txn-open policy means the next sweep will
+                # see the same state and re-evaluate; an operator
+                # can adopt via `dev.sh` fence + manual review.
+                _notify_once "sweep-halt-old-format" \
+                    "HALT-FOR-HUMAN: stale flipped $kind txn (target=$target) has no in_flight.displaced_version field (old-format txn from pre-C-4 release); boot proceeds on current; see $install_dir/releases/state.json"
+                _js_history_append "$journal" "halt" \
+                    "sweep: stale flipped $kind txn target=$target has no in_flight.displaced_version (old-format txn) — halt-for-human, txn left in place" \
+                    || rc=1
+                _log "HALT: journal sweep: flipped txn (age ${age}s) with no in_flight.displaced_version (old-format) — halt-for-human, boot proceeds on current"
+                _js_lock_release "$install_dir"
+                return 0
+            fi
             _notify_once "sweep-commit" \
-                "sweep-commit-and-continue: stale flipped $kind txn (target=$target, prev=$prev) — operator declared previous rollback_safe:false AND preflight emitted intent_flip evidence; commit+continue at target (NOT sweep-rollback)"
+                "sweep-commit-and-continue: stale flipped $kind txn (target=$target, prev=$prev, displaced_version=$displaced_v) — operator declared previous rollback_safe:false AND preflight emitted intent_flip evidence; commit+continue at target (NOT sweep-rollback)"
             _js_journal_update "$journal" "current" "\"$target\"" \
                 || { _log "WARN: journal sweep: commit-and-continue journal current update FAILED — boot proceeds on existing current"; _js_lock_release "$install_dir"; return 0; }
+            # C-4: write `previous = in_flight.displaced_version` AFTER
+            # the current update (above) and BEFORE the in_flight clear
+            # (below). ORDERING PIN — the in_flight txn MUST still be
+            # readable here, AND the previous-write must be persisted
+            # before the txn closes (otherwise the FORWARD semantic
+            # source vanishes on the next read).
+            _js_journal_update "$journal" "previous" "\"$displaced_v\"" \
+                || { _log "WARN: journal sweep: commit-and-continue previous=$displaced_v update FAILED — boot proceeds on existing previous"; rc=1; }
             _js_journal_update "$journal" "in_flight" "null" \
                 || { _log "WARN: journal sweep: commit-and-continue in_flight clear FAILED — boot proceeds"; rc=1; }
             _js_history_append "$journal" "boot_sweep_commit_and_continue" \
-                "sweep: flipped $kind txn (target=$target, prev=$prev, owner pid ${owner:-?}, age ${age}s) committed and continued — intent_flip evidence + prev rollback_safe:false (operator-declared incompatibility); boot proceeds at target" \
+                "sweep: flipped $kind txn (target=$target, prev=$prev, displaced_version=$displaced_v, owner pid ${owner:-?}, age ${age}s) committed and continued — intent_flip evidence + prev rollback_safe:false (operator-declared incompatibility); boot proceeds at target" \
                 || { _log "WARN: journal sweep: commit-and-continue history append FAILED — boot proceeds"; rc=1; }
-            _log "BOOT-SWEEP COMMIT-AND-CONTINUE: stale flipped $kind txn (age ${age}s, target=$target, prev=$prev) — operator declared prev rollback_safe:false + preflight emitted intent_flip evidence; boot proceeds at target (NOT sweep-rollback; txn closed, counter NOT incremented, no cooldown)"
+            _log "BOOT-SWEEP COMMIT-AND-CONTINUE: stale flipped $kind txn (age ${age}s, target=$target, prev=$prev, displaced_version=$displaced_v) — operator declared prev rollback_safe:false + preflight emitted intent_flip evidence; boot proceeds at target (NOT sweep-rollback; txn closed, counter NOT incremented, no cooldown)"
             _js_lock_release "$install_dir"
             return 0
         fi

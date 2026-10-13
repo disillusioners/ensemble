@@ -34,7 +34,6 @@ from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
 
 from daemon.routers.jobs_crud import _derive_m2_mission_ref, _job_to_response
 from daemon.routers.jobs_streaming import _ResolvedWork

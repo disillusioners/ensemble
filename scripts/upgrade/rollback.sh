@@ -61,23 +61,75 @@ resolve_env "${TARGET_ARG:-${TARGET:-demo}}"
 require_live_guard "$UP_TARGET"
 echo_env_triple
 
+# 0a-pre. python3 ≥ 3.7 floor probe (P2 / C-7 — mirrors promote.sh's
+# preflight probe): the P2 call-site migration moved
+# journal_history_append / journal_set_previous onto the splice helper
+# (python3 stdlib), so every journal write below requires a working
+# interpreter. Fail-closed BEFORE the first journal write: missing /
+# below-floor python3 → _warn + exit 78 (the same refusal code the
+# helper itself returns). The lock is not held yet at this point —
+# the release stays as a defensive no-op for pattern parity with
+# promote.sh.
+if ! _splice_python_floor_probe; then
+    _warn "python3 ≥ 3.7 unavailable on PATH — refusing rollback (journal splice helper requires it)"
+    lock_release 2>/dev/null || true
+    exit 78
+fi
+
 REL="$INSTALL_DIR/releases"
 
 # ── Target resolution ───────────────────────────────────────────────────────
+# Decision (g) D-P1.3: the caller MUST supply the target explicitly —
+# via --to <ver>, the VERSION= env, or the ROLLBACK_TARGET= env (the
+# ROLLBACK_TARGET env. The journal's `previous` field is no longer the
+# silent fallback (it can be stale whenever the previous run halted
+# AFTER the flip and BEFORE commit — the N-2 walk bug). The caller's
+# intent is the source of truth; rollback.sh trusts the caller, not
+# the journal's `previous`.
 journal_init || exit 1
 J="$(journal_read)" || { _warn "journal unreadable/TORN — halt-for-human"; exit 78; }
 
-if [ -z "$TO_VERSION" ]; then
-    TO_VERSION="$(_json_field "$J" previous)"
-    [ "$TO_VERSION" = "null" ] && TO_VERSION=""
-    if [ -z "$TO_VERSION" ]; then
-        _warn "no --to version given and the journal has no previous — nothing to roll back to"
-        exit 78
-    fi
-    _log "target: journal previous = $TO_VERSION"
-else
-    _log "target: explicit $TO_VERSION"
+# Resolve ROLLBACK_TARGET env as an additional supply mechanism
+# (the caller-captured value, e.g. captured at a flip-prep moment in
+# a different script, can be passed through env to honor the new
+# contract without requiring a wrapper).
+if [ -z "$TO_VERSION" ] && [ -n "${ROLLBACK_TARGET:-}" ]; then
+    TO_VERSION="$ROLLBACK_TARGET"
 fi
+
+# W7 (council 2026-10-12): the positional-$1 fallback was REMOVED — it
+# was dead/misleading (the arg parser already routes non-flag tokens to
+# the structured unknown-flag refusal, so a bare version-shaped $1
+# never reached the target resolution; the comment promised a supply
+# mechanism that could not fire). Remaining mechanisms: --to <ver>,
+# VERSION= env, ROLLBACK_TARGET= env.
+
+if [ -z "$TO_VERSION" ]; then
+    # No caller-supplied target. The previous fallback to
+    # `journal.previous` is intentionally REMOVED — that field can be
+    # stale (N-2 walk bug) and the caller's intent must drive the
+    # rollback. Refuse with exit 78 and a clear pointer to the new
+    # contract.
+    _warn "no rollback target supplied — caller MUST pass --to <ver> (or the VERSION= / ROLLBACK_TARGET= env) per the D-P1.3 contract; the journal's previous field is no longer the silent fallback"
+    exit 78
+fi
+
+# Gate-entry assertion (D-P1.3): the caller's target is the source of
+# truth. If the journal's `previous` is also set AND differs from the
+# caller's TO_VERSION, that's a drift signal — the journal record and
+# the caller's captured intent disagree. Log a journaled warning so the
+# forensic record captures the drift, but PROCEED with the caller's
+# value (caller knows best; the warning is the audit trail, not a
+# refusal — refusing on drift would re-introduce the halt-for-human
+# failure class on legitimate flows per R-07 / T-AC5c).
+JOURNAL_PREV="$(_json_field_quoted "$J" '"previous":' 2>/dev/null)" || JOURNAL_PREV=""
+[ "$JOURNAL_PREV" = "null" ] && JOURNAL_PREV=""
+if [ -n "$JOURNAL_PREV" ] && [ "$JOURNAL_PREV" != "$TO_VERSION" ]; then
+    journal_history_append warn "rollback target drift: caller target=$TO_VERSION but journal.previous=$JOURNAL_PREV — proceeding with caller target (audit trail)" \
+        || true
+    _log "target drift notice: caller target=$TO_VERSION differs from journal.previous=$JOURNAL_PREV — proceeding with caller target"
+fi
+_log "target: caller-supplied $TO_VERSION"
 
 if [ ! -d "$REL/$TO_VERSION" ]; then
     _warn "target release $REL/$TO_VERSION does not exist"

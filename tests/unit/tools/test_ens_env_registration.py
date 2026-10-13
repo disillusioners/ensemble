@@ -46,7 +46,6 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 
 from daemon.tools._tool_registry import (
     CATEGORY_MODULES,

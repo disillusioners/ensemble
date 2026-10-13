@@ -21,8 +21,10 @@
 #   _probe                    health-gate probe (2s sleep, curl max-time 5s —
 #                             the same budget as deploy.sh phase 5)
 #
-# Size rationale: ~3140 lines (crossed the >3000 tier during the
-# supervision-detection + 3-layer adoption-protocol growth) is still the
+# Size rationale: ~5560 lines (crossed >3000 during the supervision-
+# detection + 3-layer adoption-protocol growth, then ~2400 more across
+# the W5 journal-splice shell helpers, C4 live-waiver refusal, F2 gate
+# plumbing and the fast-by-default promote lane) is still the
 # single shared substrate for the five entry scripts (stage/promote/
 # rollback/restart/status) plus the SOURCED consumers stop-ensemble.sh /
 # adopt-unit.sh; splitting would duplicate cross-cutting contracts
@@ -75,8 +77,37 @@ LOG_TAG="${LOG_TAG:-upgrade}"
 # before halt on a genuinely-dead boot (still halts); too-short budget
 # = false halt on a healthy boot (the worse outcome — every verify-
 # budget halt is a LIVE promote halt).
+#
+# P3 / decision (c) (forward-looking note, P1 polish — comment-only
+# refresh; values land unchanged in P3): the per-phase budgets above
+# (livez 180, readyz 120) are preserved through the adaptive-soak
+# trio. The default soak is adaptive: 60s floor, 120s cap, 3
+# consecutive greens at 15s cadence, fail-fast on red. Override
+# with `ENSEMBLE_PROMOTE_SOAK_S` or revert to conservative via
+# `ENSEMBLE_SOAK_CONSERVATIVE=1`. The total ceremony budget is 900s
+# (15 min) wall-clock — breach routes to halt, not commit.
+# See decisions.md (c)/(d), phase3-plan.md D-P3.1/D-P3.2, plan-overview
+# §4. C-5: this comment refresh rides the P1 PR as a discoverability
+# win for operators BEFORE P3 lands the behavior.
 LIVEZ_BUDGET_S="${LIVEZ_BUDGET_S:-180}"
 READYZ_BUDGET_S="${READYZ_BUDGET_S:-120}"
+# P3 / decision (d) — total ceremony wall-clock ceiling. The
+# promote.sh top-level wraps every phase boundary in
+# `_enforce_deadline promote_deadline <phase-name>`. Breach → journal
+# `halt` event with `daemon-state` field (C-10b) + lock_release + exit
+# 78. The breach routes to the existing halt machinery at
+# promote.sh:459-496 — it does NOT trigger auto-rollback (current
+# behavior is fine — we timed out on ceremony procedures only). The
+# 900s ceiling is the absolute hard cap; all-budgets-max (stop worst
+# 755s + every budget max + adaptive soak squeeze) = 1400s → halt.
+# Per the C-10a reconciled arithmetic (decisions.md (d) §C-10a):
+#   preflight 45 / stop 225 / flip 30 / handback 90 / livez 180 /
+#   readyz 120 / version 30 / soak 120 / commit 30 = 870s non-stop
+#   worst (+30s slack inside the 900s ceiling). The conservative
+#   mode preserves the v0.18-era envelope (soak 300s flat) so
+#   total ≤ 900s + slack remains the conservative floor.
+PROMOTE_TOTAL_DEADLINE_S="${PROMOTE_TOTAL_DEADLINE_S:-900}"
+
 # Subprocess-wait budgets (2.2b, upgrade-resilience 2026-10-07). Rationale
 # (cite: §9 manual-push reproduction + incident ④ 2026-10-07 forensics):
 # the ceremony has multiple sites where a hung subprocess (systemctl/dbus
@@ -99,6 +130,43 @@ SCOPE_START_BUDGET_S="${SCOPE_START_BUDGET_S:-10}"      # scope-arm/opt-in launc
 # (ENSEMBLE_PROMOTE_SOAK_S); production default stays 300.
 SOAK_S_DEFAULT=300
 
+# P3 / decision (c) — adaptive soak (D-P3.1). The default-mode soak is
+# adaptive (60s floor, 120s cap, 3 consecutive greens at 15s cadence,
+# fail-fast on red). Operator can revert to the v0.18-era flat 300s
+# behavior via ENSEMBLE_SOAK_CONSERVATIVE=1 (D-P3.2). The conservative
+# path stays bit-identical to the pre-P3 behavior (soak_s=${SOAK_S}
+# or 300, sleep 30, no early exit). The total ceremony budget is
+# governed by PROMOTE_TOTAL_DEADLINE_S=900 at the top of promote.sh
+# (decision (d)); the soak phase gets its remaining budget from the
+# per-phase decomposition. C-1 corrected semantics: cap-reach with
+# consecutive_green < 3 → exit 1 → auto-rollback (the never-green
+# commit bug under sustained DB churn). Floor 60s is wall-clock
+# (3 greens at 15s cadence ≈ 45s, so the floor holds the window
+# long enough to clear one transient blip + one curl timeout).
+ADAPTIVE_SOAK_FLOOR_S="${ADAPTIVE_SOAK_FLOOR_S:-60}"
+ADAPTIVE_SOAK_CAP_S="${ADAPTIVE_SOAK_CAP_S:-120}"
+ADAPTIVE_SOAK_CONSECUTIVE="${ADAPTIVE_SOAK_CONSECUTIVE:-3}"
+ADAPTIVE_SOAK_CADENCE_S="${ADAPTIVE_SOAK_CADENCE_S:-15}"
+
+# P3 / decision (e) — boot-window grace (D-P3.7). Grace period starts
+# on restart_via_launcher returning 0; ends on earliest of (a) 60s
+# elapsed OR (b) 3 consecutive non-transient greens on livez. During
+# grace: transient probe classifications are silently ignored; green
+# is counted; red is counted as red (NOT blanket-suppressed — only
+# suppress transients). Operator override: PROMOTE_BOOT_GRACE_S.
+BOOT_GRACE_S="${BOOT_GRACE_S:-60}"
+PROMOTE_BOOT_GRACE_S="${PROMOTE_BOOT_GRACE_S:-${BOOT_GRACE_S}}"
+
+# P3 / decision (e) — busy-amnesty (D-P3.8, C-8b). Extend readyz's
+# inflight_turns > 0 semantic to livez + soak via a SHELL-SIDE READER
+# ONLY (NO new /run/ensemble/inflight_turns file; NO new daemon-side
+# counter writer). The reader pulls the EXISTING
+# readiness.py:198/222 detail.inflight_turns field via a readyz curl.
+# Bound: inflight_turns ≤ BUSY_INFLIGHT_BOUND. 0 or >bound → no
+# amnesty. The bound is BOUNDED — a wedged daemon (inflight_turns=0
+# but pool saturated) does NOT get amnesty.
+BUSY_INFLIGHT_BOUND="${BUSY_INFLIGHT_BOUND:-5}"
+
 # Rollback window / anti-flapping (ADR-005 D2, APPROVED).
 ROLLBACK_CAP_24H=3            # max rollbacks per 24h window (entry-side)
 COOLDOWN_S=600                # 10 min cooldown after an auto-rollback
@@ -117,15 +185,108 @@ HEARTBEAT_STALE_S=300
 # Retention (ADR-004): keep 3 releases; previous pinned.
 RETENTION_KEEP=3
 
-_log()  { printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*"; }
-_logv() { printf '%s\n' "$*"; }                       # verbatim (JSON etc.)
-_warn() { printf '%s[%s]: WARN: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" >&2; }
+_log()  { printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" 2>/dev/null; }
+_logv() { printf '%s\n' "$*" 2>/dev/null; }                # verbatim (JSON etc.)
+_warn() { printf '%s[%s]: WARN: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" >&2 2>/dev/null; }
 
 # _now_epoch — seconds since epoch (BSD-safe).
 _now_epoch() { date +%s; }
 
 # _now_iso — UTC ISO-8601 timestamp (journal fields are ISO).
 _now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# _enforce_deadline <deadline_epoch> <phase_name>
+# P3 / decision (d) — top-level wall-clock ceiling enforcement at
+# every phase boundary. On breach:
+#   - journal_history_append halt "<deadline-breach-<phase>> ... daemon-state=<live|stopped|handed-back>" (C-10c + C-10b)
+#   - lock_release (caller-held lock released)
+#   - exit 78 (the standard refusal code; reuses the existing halt
+#     machinery at promote.sh:459-496)
+# The breach does NOT trigger auto-rollback (the existing
+# auto-rollback is for gate-fail halts, not for ceremony timing
+# halts). A post-stop breach leaves the daemon DOWN — the runbook
+# first-recovery-step is to verify/restart current BEFORE re-promote.
+#
+# Returns 0 if not breached (caller continues). Exits 78 on breach
+# (caller NEVER sees the return path; the function terminates
+# the script with the standard halt shape).
+#
+# daemon-state derivation (C-10b):
+#   - "stopped" if past the stop-ensemble phase
+#   - "handed-back" if past the restart_via_launcher phase
+#   - "live" otherwise (pre-stop, pre-flip, or between flip and restart)
+#   The phase name is a coarse hint — the actual state at halt time
+# is the consumer's job to interpret. The journal field is the
+# single source of truth (runbook step 1 + post-mortem correlation).
+_enforce_deadline() {
+    local deadline="$1" phase="$2"
+    local now elapsed daemon_state="live"
+    now="$(_now_epoch)"
+    if [ "$now" -le "$deadline" ]; then
+        return 0
+    fi
+    elapsed=$(( now - deadline ))
+    # C-10b: derive daemon-state from the phase name. The mapping
+    # is conservative — the journal event is the audit truth, the
+    # runbook first-recovery-step reads it.
+    # Order matters: check "post-restart" phases FIRST so "restart"
+    # itself classifies as "handed-back" (the daemon was handed
+    # back to the unit/no-hup just before this phase; if the
+    # breach fires here the daemon is alive but we timed out on
+    # the gate). "stop"/"launcher"/"flip" come AFTER and are
+    # "stopped" (the daemon is DOWN).
+    case "$phase" in
+        livez|readyz|version|soak|commit|rollback|restart) daemon_state="handed-back" ;;
+        *stop*|*launcher*|*flip*) daemon_state="stopped" ;;
+        *) daemon_state="live" ;;
+    esac
+    journal_history_append halt "deadline-breach-${phase} (elapsed=${elapsed}s past ${deadline}) daemon-state=${daemon_state}" \
+                          || true   # history is advisory; the breach is already decided
+    _warn "CEREMONY DEADLINE BREACH at phase=${phase}: elapsed=${elapsed}s past deadline=${deadline} (daemon-state=${daemon_state}) — halt-for-human (C-10b/C-10c)"
+    lock_release 2>/dev/null || true
+    exit 78
+}
+
+# _effective_ceremony_remaining_s <deadline_epoch> — returns the
+# remaining seconds on the ceremony wall-clock ceiling, clamped at
+# zero. Used by gate_soak (D-P3.5) to shrink the adaptive cap
+# against the remaining budget. Returns "0" when the deadline has
+# passed (never a negative number; callers can compare against
+# ADAPTIVE_SOAK_FLOOR_S without underflow).
+_effective_ceremony_remaining_s() {
+    local deadline="$1" now remaining
+    now="$(_now_epoch)"
+    remaining=$(( deadline - now ))
+    if [ "$remaining" -lt 0 ]; then
+        remaining=0
+    fi
+    printf '%s\n' "$remaining"
+}
+
+# _splice_python_floor_probe — bash preflight probe (P2 / C-7 / T2.0a).
+# Verifies that `python3` on PATH satisfies the 3.7 floor that
+# `journal_splice.py` leans on (`pathlib.samefile` + Python 3.7+ dict
+# ordering + json round-trip). Stdlib only — no venv, no `pip install`,
+# no `PLUGIN_STALENESS_PYTHON` chain (that chain exists for PyYAML and
+# is intentionally NOT used here). Refuses (returns 1) when:
+#   - `python3` not on PATH at all
+#   - `python3` below 3.7 (assertion inside the helper)
+#   - the helper cannot exec (broken interpreter path, signal)
+# The helper itself does NOT touch the journal — that's the WRAPPER's
+# job after `journal_init`. This function ONLY prints a single stderr
+# line on refusal and returns 1; on success returns 0 silently.
+_splice_python_floor_probe() {
+    local py
+    if ! py="$(command -v python3 2>/dev/null)" || [ -z "$py" ]; then
+        printf 'splice: REFUSED: python3-floor: python3 not on PATH\n' >&2
+        return 1
+    fi
+    if ! "$py" -c "import sys, json, os, pathlib; assert sys.version_info >= (3, 7)" 2>/dev/null; then
+        printf 'splice: REFUSED: python3-floor: %s below 3.7 or stdlib modules unavailable\n' "$py" >&2
+        return 1
+    fi
+    return 0
+}
 
 # _log_ts — UTC ISO-8601 timestamp prefix for log lines (comp6, r-f82e).
 # BSD/GNU-portable: ``date -u +format`` is IDENTICAL on both — the
@@ -736,40 +897,141 @@ journal_in_flight() {
 }
 
 # journal_history_append <event> <detail> — append to history (newest last).
+# P2 CALL-SITE MIGRATION (this commission): the body is now a single
+# `_splice_journal append-history` call — the O(1) python splice
+# (journal_splice.py) replaces the journal_read + bash brace-walk +
+# journal_update composition that cost ~280 s/event at the 126 KB /
+# 500-entry fixture. Caller contract UNCHANGED: same argv (event,
+# detail), 0 on success, nonzero on failure (helper refusals — exit 78,
+# e.g. torn journal / missing journal — are forwarded as 1 by
+# _splice_journal with the token-pinned `splice: REFUSED:` stderr line,
+# mirroring the old journal_read refusal; atomicity errors propagate
+# as-is). The ~35 promote.sh / rollback.sh / restart.sh call sites are
+# covered by this body swap — NO call-site edits. Byte-shape note: the
+# helper serializes compact (separators=(",", ":")) with 3.7+ dict-
+# order preservation, so non-target fields round-trip byte-identical
+# (T2.9 pin, test_journal_splice.sh §7); entries carry the same
+# {ts,event,detail} shape (helper builds them structurally).
 journal_history_append() {
-    local event="$1" detail="$2" json hist new
-    json="$(journal_read)" || return 1
-    hist="$(_json_sub "$json" "history")"
-    if [ -z "$hist" ] || [ "$hist" = "[]" ]; then
-        new="[{\"ts\":\"$(_now_iso)\",\"event\":\"$(_json_escape "$event")\",\"detail\":\"$(_json_escape "$detail")\"}]"
-    else
-        # hist is [ {...}, ... ] — strip the closing bracket, append entry
-        new="${hist%]}, {\"ts\":\"$(_now_iso)\",\"event\":\"$(_json_escape "$event")\",\"detail\":\"$(_json_escape "$detail")\"}]"
+    _splice_journal append-history "$1" "$2"
+}
+
+# _splice_python_path — resolve the python3 interpreter the splice helper
+# will run under. Explicit override ($SPLICE_PYTHON) wins (lets tests pin
+# a captured interpreter for `T-NEG-python3-missing` / `T-NEG-python3-version-low`),
+# else bare `command -v python3`. The preflight probe
+# (`_splice_python_floor_probe`, called once at promote.sh entry per C-7)
+# is the gate that rejects absent / below-floor interpreters; this
+# resolver is for any tool-side re-check.
+_splice_python_path() {
+    if [ -n "${SPLICE_PYTHON:-}" ]; then
+        printf '%s\n' "$SPLICE_PYTHON"
+        return 0
     fi
-    journal_update "history" "$new"
+    if command -v python3 >/dev/null 2>&1; then
+        command -v python3
+        return 0
+    fi
+    return 1
+}
+
+# _splice_journal_path — resolve the absolute path to the helper
+# script. Uses lib.sh's own location (BASH_SOURCE) so the helper is
+# found even when the caller changes PWD; falls back to a path relative
+# to $REPO_ROOT (which promote/stage/rollback all set, and which the
+# install paths also know).
+_splice_journal_path() {
+    local self_dir
+    self_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || self_dir=""
+    if [ -n "$self_dir" ] && [ -f "$self_dir/journal_splice.py" ]; then
+        printf '%s\n' "$self_dir/journal_splice.py"
+        return 0
+    fi
+    if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/scripts/upgrade/journal_splice.py" ]; then
+        printf '%s\n' "$REPO_ROOT/scripts/upgrade/journal_splice.py"
+        return 0
+    fi
+    return 1
+}
+
+# _splice_journal <op> [args…] — STDIO-FAITHFUL wrapper around the
+# python splice helper (decisions (a) / D-P2.4 / T2.2). Same ergonomics
+# as `journal_history_append` so the 19 promote.sh call-sites change
+# by replacing the function name only. Resolution:
+#   1) journal path  → journal_path (one fork via subshell)
+#   2) helper path   → _splice_journal_path (BASH_SOURCE-anchored)
+#   3) interpreter   → _splice_python_path (SPLICE_PYTHON override or
+#                      bare `python3`)
+#
+# Failure path: anything the helper refuses (exit 78) is forwarded as
+# exit 1 from the wrapper with a `_warn` line carrying the op + first
+# arg — operators see the same token-pinned stderr as a direct helper
+# invocation. Atomicity errors (exit 1) propagate as-is.
+_splice_journal() {
+    local op="$1"; shift || { _warn "_splice_journal: missing op"; return 1; }
+    local jp helper py
+    jp="$(journal_path)" || { _warn "_splice_journal: cannot resolve journal_path"; return 1; }
+    helper="$(_splice_journal_path)" || { _warn "_splice_journal: cannot locate helper (scripts/upgrade/journal_splice.py)"; return 1; }
+    py="$(_splice_python_path)" || { _warn "_splice_journal: python3 not on PATH and SPLICE_PYTHON unset"; return 1; }
+    # NOTE: do NOT word-split "$@" through eval — pass it as a literal
+    # argv slice; the helper parses explicit args.
+    "$py" "$helper" "$jp" "$op" "$@" 2>&1
+    local rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        78) _warn "_splice_journal: $op refused (exit 78 — see stderr above for splice: REFUSED: line)"; return 1 ;;
+        *)  _warn "_splice_journal: $op exited $rc"; return "$rc" ;;
+    esac
 }
 
 # journal_open_txn <kind> <target> — set in_flight {kind,target,started_at,
-# flipped:false,owner_pid,last_heartbeat}. Refuses (returns 1) if a txn
-# is already open. ADDITIVE field: last_heartbeat is the epoch the txn
-# was opened — readers that don't know about it (legacy launchers,
-# Python twin pre-comp3) ignore the extra key (json.loads last-wins on
-# duplicates; lib.sh's textual splice at the LAST occurrence picks up
-# the embedded `last_heartbeat` naturally because it appears ONCE per
-# txn object). Refreshed by lock_heartbeat (see below) so a live owner
-# keeps its heartbeat < HEARTBEAT_STALE_S; a dead owner's heartbeat
-# ages to stale, and the new owner-liveness fast path in adopt_stale_txn
-# + _journal_sweep can reclaim/observe it before the 600s age boundary.
+# flipped:false,owner_pid,last_heartbeat,displaced_version}. Refuses
+# (returns 1) if a txn is already open. ADDITIVE field: last_heartbeat
+# is the epoch the txn was opened — readers that don't know about it
+# (legacy launchers, Python twin pre-comp3) ignore the extra key
+# (json.loads last-wins on duplicates; lib.sh's textual splice at the
+# LAST occurrence picks up the embedded `last_heartbeat` naturally
+# because it appears ONCE per txn object). Refreshed by lock_heartbeat
+# (see below) so a live owner keeps its heartbeat < HEARTBEAT_STALE_S;
+# a dead owner's heartbeat ages to stale, and the new owner-liveness
+# fast path in adopt_stale_txn + _journal_sweep can reclaim/observe it
+# before the 600s age boundary.
+#
+# ADDITIVE field (P1, decision (g) / C-4): `displaced_version` is the
+# version THIS txn is about to displace (i.e. journal.current at the
+# moment the txn is opened), preserved as a version STRING (e.g.
+# "v0.20.1" or "null" / empty for a fresh install). Type-distinct from
+# `last_heartbeat` (epoch int). The boot_sweep_commit_and_continue path
+# (launcher.sh:1020-1037) reads `in_flight.displaced_version` and
+# writes `previous = displaced_version` before closing the txn — this
+# is the ONLY path in launcher.sh that may update `previous` from
+# boot-sweep land (FORWARD semantic: `previous` = the version displaced
+# by the most recent terminal event). Old-format in_flight (no
+# `displaced_version` field) → halt-for-human in the boot_sweep path
+# (ambiguous state, consistent with the "halt-for-human is BY DESIGN"
+# recovery invariant). The bash whole-object writer pattern below is
+# preserved (no helper dependency, no python in boot path).
 journal_open_txn() {
-    local kind="$1" target="$2" json existing
+    local kind="$1" target="$2" json existing displaced
     json="$(journal_read)" || return 1
     existing="$(_json_sub "$json" "in_flight")"
     if [ -n "$existing" ] && [ "$existing" != "null" ]; then
         _warn "journal_open_txn: an in_flight txn already exists — refusing (pipeline-busy)"
         return 1
     fi
+    # C-4: capture journal.current BEFORE the new txn is opened on top
+    # of it. Anchored on the QUOTED-key form (`"current":`) via
+    # _json_field_quoted — same defense-in-depth as the lib.sh:1355-1364
+    # migration, defeats the bare-substring first-occurrence hazard
+    # (a future key like `"current_previous_candidate"` substring would
+    # otherwise match ahead of the top-level `"current":`).
+    displaced="$(_json_field_quoted "$json" '"current":' 2>/dev/null)" || displaced=""
+    case "$displaced" in
+        null|"") displaced_raw="null" ;;
+        *)       displaced_raw="\"$displaced\"" ;;
+    esac
     journal_update "in_flight" \
-        "{\"kind\":\"$kind\",\"target\":\"$target\",\"started_at\":\"$(_now_iso)\",\"flipped\":false,\"owner_pid\":$$,\"last_heartbeat\":$(_now_epoch)}"
+        "{\"kind\":\"$kind\",\"target\":\"$target\",\"started_at\":\"$(_now_iso)\",\"flipped\":false,\"owner_pid\":$$,\"last_heartbeat\":$(_now_epoch),\"displaced_version\":$displaced_raw}"
 }
 
 # journal_mark_flipped — in_flight.flipped = true (raw splice inside the
@@ -844,45 +1106,53 @@ journal_close_txn() {
 #
 # No-op when in_flight is null/absent (no txn to heartbeat — race-safe).
 #
-# BASH-PATTERN HAZARD (the reason this uses sed, not $var//pattern):
-# bash's parameter-substitution glob ``[0-9]*`` is GREEDY — it matches
-# a digit then ANY CHARACTERS until the regex engine stops, including
-# the closing ``}`` of the in_flight object. A pure-digit pattern
-# (e.g. ``[0-9]``) would replace one char at a time and corrupt the
-# field's trailing bytes. The portable fix is a sed anchored to the
-# field name (``"last_heartbeat":[0-9]+`` with no trailing wildcard)
-# so the substitution's match-length is bounded to the digits
-# themselves — see test_promote_cgroup_survivorship.sh 3b for the
-# regression pin that caught this.
+# BASH-PATTERN HAZARD: bash parameter-substitution globs ([0-9]*) are
+# GREEDY and can eat past the digits — this must stay a sed anchored to
+# the field name ("last_heartbeat":[0-9]+); regression pin in
+# test_promote_cgroup_survivorship.sh 3b.
 journal_heartbeat() {
-    local json
-    json="$(journal_read 2>/dev/null)" || return 0
-    local inf
-    inf="$(_json_sub "$json" "in_flight")"
-    [ -n "$inf" ] || return 0
-    case "$inf" in ''|null) return 0 ;; esac
-    local owner
-    owner="$(_json_field "$inf" "owner_pid" 2>/dev/null)" || owner=""
-    # Ownership guard: refresh the heartbeat ONLY if WE are the owner
-    # recorded in the txn (mirrors lock_heartbeat's owner guard — a
-    # non-owner must never refresh a foreign owner's heartbeat).
-    if [ -n "$owner" ] && [ "$owner" != "$$" ]; then
-        return 0
-    fi
-    # Replace the last_heartbeat field; preserves every other field.
-    # The sed pattern is anchored to "last_heartbeat":<digits> with no
-    # trailing wildcard — bash parameter-substitution's glob would
-    # otherwise eat the closing `}` of the in_flight object (a real
-    # bug, not theoretical — see the BASH-PATTERN HAZARD comment above
-    # and the test pin in tests/test_promote_cgroup_survivorship.sh).
-    local new_inf hb_now
-    hb_now="$(_now_epoch)"
-    # heartbeat values are epoch-second integers; [0-9]+ assumes no
-    # sign/decimal/fractional — true for _now_epoch output.
-    new_inf="$(printf '%s' "$inf" \
-            | sed -E "s/(\"last_heartbeat\":)[0-9]+/\\1$hb_now/")"
-    [ "$new_inf" != "$inf" ] || return 0
-    journal_update "in_flight" "$new_inf"
+    # P2 (decision (b) / D-P2.6 / C-3): REPLACES the 139 s/call bash
+    # brace-walk that used to live here (this comment + the sed+journal_update
+    # body that followed). The splice path uses the
+    # `set-in-flight-field last_heartbeat` op (C-2 — the NESTED write that
+    # the sweep's `in_flight.last_heartbeat` accessor at
+    # daemon/services/upgrade_journal_sweep.py:1590 actually reads; a
+    # top-level `set-field last_heartbeat` would be invisible). Caller
+    # contract unchanged: ownership-guarded (the helper does NOT check
+    # the lock or the owner_pid; lock_heartbeat already enforced both),
+    # best-effort, never raises.
+    #
+    # OUTSIDE-A-TXN SAFEGUARD (preserves the legacy "no-op when no
+    # in_flight" semantic that the bash version enforced via
+    # `case "$inf" in ''|null) return 0 ;; esac`): the helper would
+    # CREATE an empty `in_flight={}` if absent (per the C-2 protocol),
+    # which would silently inject a half-formed txn record into the
+    # journal.
+    #
+    # CHEAP GUARD (P2 call-site migration, this commission): the
+    # interim guard called journal_in_flight → journal_read — a FULL
+    # bash brace-walk of the whole journal per 30 s heartbeat, which
+    # at the 126 KB / 500-entry fixture re-introduced the very
+    # ~139 s/call cost the splice removed (the heartbeat would have
+    # dominated the promote path again at scale). Replaced with a raw
+    # `grep -q` on the serialized byte shape. SAFE because every
+    # writer in the system emits this field COMPACT:
+    #   - bash journal_init       → "in_flight":null
+    #   - bash journal_open_txn   → "in_flight":{"kind":…  (field splice)
+    #   - python twin (upgrade_journal.py json.dumps
+    #     separators=(",", ":"))  → "in_flight":{…|null
+    #   - splice helper (_atomic_write, same separators) → ditto
+    # so `grep -q '"in_flight":{'` matches EXACTLY the open-txn case;
+    # in_flight null / file missing → no match → return 0 — the same
+    # no-op semantic. The splice call itself is UNCHANGED (ownership-
+    # guarded, best-effort, never raises). Known narrow divergence: a
+    # TORN journal that happens to contain the literal pattern now
+    # reaches the splice call, which refuses exit-78 on the torn parse
+    # (warn line, swallowed by `|| true`) — one stderr line of extra
+    # visibility vs the old silent no-op; harmless, because a torn
+    # journal halts the pipeline at the next journal_read anyway.
+    grep -q '"in_flight":{' "$(journal_path)" 2>/dev/null || return 0
+    _splice_journal set-in-flight-field last_heartbeat "$(_now_epoch)" || true
 }
 
 # journal_set_current <ver> — set current (string) + sanity echo.
@@ -891,12 +1161,19 @@ journal_set_current() {
 }
 
 # journal_set_previous <ver> — set previous (string or null).
+# P2 CALL-SITE MIGRATION (this commission): single `_splice_journal
+# set-previous` call. The helper's set-previous op owns the
+# null-vs-version distinction itself — literal argv "null" → JSON null,
+# anything else → string (outer double-quotes stripped if present) —
+# VERIFIED in journal_splice.py::_op_set_previous — so the bash
+# branch collapses into a pass-through. `previous` is in the helper's
+# ALLOWED_TOP_LEVEL_WRITES (field-ownership matrix, decisions (a));
+# `current` stays FENCED (journal_set_current remains bash — flip-
+# moment writes are safety-critical and infrequent). Caller contract
+# unchanged: 0 on success, nonzero on failure (refusals forwarded
+# as 1 with the `splice: REFUSED:` stderr line).
 journal_set_previous() {
-    if [ "$1" = "null" ]; then
-        journal_update "previous" "null"
-    else
-        journal_update "previous" "\"$1\""
-    fi
+    _splice_journal set-previous "$1"
 }
 
 # journal_quarantine <ver> — append to quarantined[] (idempotent).
@@ -1242,10 +1519,22 @@ lock_acquire() {
 # paths (status.sh-style) and must be a no-op there.
 #
 # comp3 (r-20260928-005506-f82e): also refreshes the journal's
-# in_flight.last_heartbeat (journal_heartbeat). The two writes go
+# in_flight.last_heartbeat via journal_heartbeat. The two writes go
 # together so a live owner keeps BOTH fresh; a dead owner ages both.
 # journal_heartbeat is best-effort and ownership-guarded itself —
 # never raises.
+#
+# P2 (decisions (b) / D-P2.6 / C-2 + C-3): journal_heartbeat's body
+# was REPLACED (not augmented — the prior bash brace-walk was ~280 s
+# on the 87 KB state.json, leaving the 30 s heartbeat cadence a
+# fiction). The new body is a single splice call:
+#     _splice_journal set-in-flight-field last_heartbeat "$(_now_epoch)"
+# The NESTED op (C-2) is what the sweep's `in_flight.last_heartbeat`
+# accessor at daemon/services/upgrade_journal_sweep.py:1590 reads.
+# A top-level `set-field last_heartbeat` would be invisible to that
+# reader. The 30 s cadence now actually delivers — the sweep's
+# three-signal defense (heartbeat fresh + os.kill + cgroup leaf) sees
+# a recent stamp within the budget.
 lock_heartbeat() {
     local lock owner
     lock="$(lock_dir_path)"
@@ -1255,7 +1544,9 @@ lock_heartbeat() {
     printf '%s\n' "$(_now_epoch)" > "$lock/heartbeat" 2>/dev/null
     # companion journal refresh — same owner, same cadence. The
     # callers already invoke this helper in long loops (gate_soak,
-    # promote phase 3-8, stage assembly, restart grace).
+    # promote phase 3-8, stage assembly, restart grace). The body
+    # of journal_heartbeat itself is a single splice call now (C-3
+    # REPLACE — see comment block above).
     journal_heartbeat >/dev/null 2>&1 || true
 }
 
@@ -2274,7 +2565,7 @@ _verify_artifact_provenance() {
     # gate (status=ok, content on stdout); rc 1 means one of the three
     # failure states — read the globals to learn which.
     local _pr_tmp _pr_status _pr_detail _pr_json=""
-    _pr_tmp="$(mktemp)"
+    _pr_tmp="$(mktemp -t ens-prov-read.XXXXXX)"
     if _provenance_read "$art" > "$_pr_tmp" 2>/dev/null; then
         _pr_status="ok"
         _pr_json="$(cat "$_pr_tmp")"
@@ -2583,24 +2874,413 @@ verify_current_release() {
 #     stale-break a LIVE owner's lock mid-gate and double-rollback
 #     underneath it. lock_heartbeat is ownership-guarded — this is a no-op
 #     when the caller does not hold the pipeline lock.
+# P3 / decision (e) — classified probe (D-P3.6) + bounded retry +
+# boot-window grace (D-P3.7) + busy-amnesty extension (D-P3.8, C-8b).
+#
+# ─────────────────────────────────────────────────────────────────────
+# The v0.20.0 boot-storm race (incident 2026-10-10 boot storm) taught
+# us that the OLD `_probe` (curl -fsS --max-time 5) could not
+# distinguish a transient 503 / connection-refused from a real red —
+# the `-f` form suppresses the body on exit 22 (the 4xx/5xx branch),
+# so a body-sniffing classifier saw empty-stdout and classified every
+# HTTP error as red. The 1.5s transient window between pool-ready and
+# gate-fire flipped the gate to halt even when the daemon was alive
+# and about to serve a green. C-8a fix: status-code via -w + body to
+# tmp; classification on the integer exit + http_code; bounded retry
+# with 1s/2s/4s backoff (max 3); transient → "no green" (do not fail).
+# ─────────────────────────────────────────────────────────────────────
+
+# _probe_once_classified <path> <port> [body_out] [httpcode_out]
+#
+# Single fast classified fetch. Writes the response body to <body_out>
+# (or discards if empty) and the http_code string to <httpcode_out>
+# (or discards if empty). Sets globals on success:
+#   _PROBE_STATUS — "green" | "red" | "transient"
+#   _PROBE_BODY   — response body (empty on transient/connection errors)
+#   _PROBE_CODE   — http_code string (empty on curl-only exit failures)
+#
+# Classification table (decisions.md (e) Concrete Contract + C-8a):
+#   curl exit 0 + http_code 2xx         → green
+#   curl exit 0 + http_code 503         → transient
+#   curl exit 0 + http_code 5xx (other) → red
+#   curl exit 0 + http_code 4xx         → red
+#   curl exit 7 (connection refused)     → transient
+#   curl exit 28 (timeout)               → transient
+#   curl exit anything-else              → red
+# Curl exit 22 (HTTP 4xx/5xx with -f) is no longer reachable — the
+# invocation is curl -sS -o tmp -w '%{http_code}', so a non-2xx http
+# code lands as exit 0 with the body in <tmp-body>. The body is
+# preserved (per C-8a) so a future body-sniffing classifier can add
+# nuanced red-vs-transient logic without re-architecting the probe.
+#
+# BOOT-GRACE HOOK: when a boot-grace window is ACTIVE (the
+# _boot_grace_active function returns 0), transient results are
+# silenced (do not count as red, do not count as green). Red still
+# counts. Green still counts. This is the 60s post-restart window
+# (D-P3.7) that auto-extends past transient storms but ends on the
+# earliest of (a) elapsed OR (b) 3 consecutive non-transient greens.
+#
+# BUSY-AMNESTY HOOK: when a busy-amnesty applies (the
+# _busy_amnesty_granted function returns 0 for a busy-but-alive
+# daemon — inflight_turns 1..BUSY_INFLIGHT_BOUND), a transient that
+# would otherwise be "no green" advances the consecutive-green
+# counter as a SOFT-GREEN (the daemon is up; the gate is just under
+# load). This is the asymmetry-closer between readyz (already has
+# busy-amnesty) and livez/soak (now extended).
+#
+# Return: 0 on green, 1 on red, 2 on transient (the bash convention
+# for the three-state classification).
+_probe_once_classified() {
+    local path="$1" port="$2" tmp_body http_code curl_rc
+    tmp_body="$(mktemp -t probe.XXXXXX 2>/dev/null || printf '/tmp/probe.%s.body' "$$")"
+    # C-8a: the load-bearing change. curl -sS -o tmp -w '%{http_code}'
+    # (NOT curl -fsS with body-sniff — exit 22 suppresses body, so a
+    # body-sniffing classifier sees empty-stdout and classifies every
+    # HTTP error as red, defeating the 503-transient path entirely).
+    #
+    # C1 (R1 remediation, council 2026-10-12): curl's exit code is
+    # captured AT THE ASSIGNMENT (`rc=$?` on the next line — the
+    # assignment's exit status IS the command substitution's status).
+    # The prior shape read `${PIPESTATUS[0]}` several commands LATER —
+    # PIPESTATUS is reset by every intervening command, so the read saw
+    # the rc of the last assignment (always 0) and every connection-
+    # level failure (refused/timeout — the v0.20.0 boot-storm classes)
+    # fell into the red bucket. Empirically proven twice by the council.
+    # Also: the old `|| http_code=""` handler DISCARDED curl's "000"
+    # no-response marker; the empty/000 shape is now classified from
+    # the captured curl_rc instead.
+    curl_rc=0
+    http_code="$(curl -sS -o "$tmp_body" -w '%{http_code}' --max-time 5 \
+        "http://localhost:$port$path" 2>/dev/null)"
+    curl_rc=$?
+    # capture classification globals
+    _PROBE_BODY=""
+    _PROBE_CODE="$http_code"
+    case "$http_code" in
+        ""|000)
+            # curl-level failure: no HTTP response landed (or the
+            # 000 no-response marker). The captured rc separates the
+            # known transient classes from unknown hard failures.
+            case "$curl_rc" in
+                7) _PROBE_STATUS="transient" ;;   # connection refused
+                28) _PROBE_STATUS="transient" ;;  # timeout
+                *) _PROBE_STATUS="red" ;;         # unknown curl-level failure: fail-closed
+            esac
+            ;;
+        2*) _PROBE_STATUS="green" ;;
+        503) _PROBE_STATUS="transient" ;;
+        5*) _PROBE_STATUS="red" ;;
+        4*) _PROBE_STATUS="red" ;;
+        *) _PROBE_STATUS="red" ;;
+    esac
+    # Read body for callers that need it (e.g. inflight_turns extraction
+    # for the busy-amnesty reader; gate_version for the version field).
+    # Skip the read for empty/connection-error results (no body landed).
+    if [ -s "$tmp_body" ] && [ "$_PROBE_STATUS" = "green" ]; then
+        _PROBE_BODY="$(cat "$tmp_body" 2>/dev/null)"
+    fi
+    rm -f "$tmp_body" 2>/dev/null
+    # BOOT-GRACE: silence transients during the 60s post-restart window.
+    # Red still counts. Green still counts. The 503/path-7/28 storm
+    # observed in the v0.20.0 boot storm is the exact class silenced
+    # here — pool still warming, the gate gets the quiet window.
+    # W3 (council 2026-10-12): a SUPPRESSED transient is "ignored" —
+    # neither green nor red. The old shape returned 0 (pass), which
+    # callers could mistake for a green; the return is now the
+    # dedicated 3 (ignored) and _PROBE_STATUS carries the token so
+    # display paths can still distinguish it. Consumers: _probe_with_retry
+    # propagates 3; _probe treats 3 as no-green/no-fail (rides on);
+    # gate_soak counts it as "no green" (the consecutive counter
+    # resets — an ignored probe is not a green). Conservative mode
+    # (W1) sets _PROBE_SUPPRESSION_STRICT=1 and NEVER lands here —
+    # v0.18-identical strictness.
+    if [ "$_PROBE_STATUS" = "transient" ] \
+       && [ "${_PROBE_SUPPRESSION_STRICT:-0}" != "1" ] \
+       && _boot_grace_active; then
+        _PROBE_STATUS="boot-grace-suppressed"
+        return 3
+    fi
+    # BUSY-AMNESTY: a transient that is NOT in boot-grace still
+    # advances consecutive-green as a soft-green when the busy
+    # predicate grants amnesty. The busy-amnesty is read from the
+    # existing readyz detail.inflight_turns field via
+    # _read_inflight_turns_bounded below (C-8b: NO new file, NO
+    # new daemon-side writer). The asymmetry between readyz (has
+    # amnesty today) and livez/soak (extended now) is closed here.
+    # W1 (council): conservative mode sets _PROBE_SUPPRESSION_STRICT=1
+    # — NO amnesty/suppression, v0.18-identical strictness (503 and
+    # connection-level failures are red, not soft-greens).
+    if [ "$_PROBE_STATUS" = "transient" ] \
+       && [ "${_PROBE_SUPPRESSION_STRICT:-0}" != "1" ] \
+       && _busy_amnesty_granted; then
+        _PROBE_STATUS="busy-amnesty"
+        return 0
+    fi
+    # C2 (council): the tail must implement the DOCUMENTED three-state
+    # contract (header above: "0 on green, 1 on red, 2 on transient").
+    # The prior shape returned 1 for transients, which the retry layer
+    # reads as hard-red — making the 1s/2s/4s backoff and the phase
+    # ride-out DEAD CODE (a single post-grace blip insta-failed the
+    # gate). Transients now return 2; the retry loop and _probe's
+    # phase-budget ride-out consume that state.
+    case "$_PROBE_STATUS" in
+        green) return 0 ;;
+        red) return 1 ;;
+        *) return 2 ;;   # transient (and any future soft class) — retryable
+    esac
+}
+
+# _probe_with_retry <path> <port> <budget_s> — bounded retry inside
+# per-phase budget (D-P3.6). 3 retries max, 1s/2s/4s backoff. After
+# 3 retries: last=transient → "no green" (return 2; do not fail the
+# phase); last=red → fail the phase (return 1). Heartbeats the lock
+# between retries (D5/D-FA5.1) so a long retry never stale-breaks
+# the pipeline lock.
+#
+# Returns: 0 on green, 1 on red, 2 on transient-exhausted. The caller
+# (gate_livez / gate_readyz / gate_soak) interprets the three-state
+# outcome.
+_probe_with_retry() {
+    local path="$1" port="$2" budget="$3"
+    local deadline backoff=1 attempt=0 rc
+    deadline=$(( $(_now_epoch) + budget ))
+    while :; do
+        lock_heartbeat
+        if [ "$(_now_epoch)" -ge "$deadline" ]; then
+            return 2
+        fi
+        _probe_once_classified "$path" "$port"
+        rc=$?
+        case "$rc" in
+            0)
+                # green (or a soft-green)
+                case "$_PROBE_STATUS" in
+                    green)
+                        # Advance the boot-grace counter ONLY on real
+                        # green (boot-grace-suppressed and busy-amnesty
+                        # soft-greens do NOT count as a "non-transient
+                        # green" — the D-P3.7 invariant is "3 consecutive
+                        # non-transient greens" and a soft-green is
+                        # explicitly a transient class). This keeps the
+                        # 60s grace window from collapsing on
+                        # 503/7/22/28 storms.
+                        _boot_grace_record_green
+                        return 0
+                        ;;
+                    busy-amnesty) return 0 ;;
+                esac
+                ;;
+            1)
+                # red — hard fail, do not retry
+                _boot_grace_record_non_green
+                return 1
+                ;;
+            3)
+                # W3: boot-grace-suppressed (ignored) — neither green
+                # nor red. Does NOT advance the green counter, does
+                # NOT retry (the grace window is ending on its own),
+                # does NOT fail. Propagate 3 so _probe keeps riding
+                # the phase budget.
+                return 3
+                ;;
+        esac
+        # rc=2 — transient → bounded retry with backoff (also resets the
+        # boot-grace counter — a transient is not a non-transient
+        # green, so the consecutive-counting invariant holds).
+        _boot_grace_record_non_green
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 3 ]; then
+            return 2
+        fi
+        sleep "$backoff" 2>/dev/null
+        backoff=$(( backoff * 2 ))
+    done
+    return 2
+}
+
+# _read_inflight_turns_bounded — read the EXISTING
+# readiness.py:198/222 detail.inflight_turns field via a readyz
+# curl (D-P3.8, C-8b). NO new /run/ensemble/inflight_turns file;
+# NO new daemon-side counter writer; NO reuse of has_instance_busy
+# (a different predicate: PENDING+RUNNING+PAUSED tasks vs readiness
+# turns). The bound (≤ BUSY_INFLIGHT_BOUND) keeps amnesties
+# genuinely narrow. Returns:
+#   0  if inflight_turns in 1..BUSY_INFLIGHT_BOUND  (busy-but-alive)
+#   1  if inflight_turns == 0, > bound, or unreadable (no amnesty)
+_read_inflight_turns_bounded() {
+    local body detail_field inflight
+    body="$(curl -sS -o /dev/null -w '' --max-time 2 \
+        "http://localhost:$PORT/readyz" 2>/dev/null)" || return 1
+    # We need the body for inflight_turns extraction; do a second
+    # bounded fetch. The two-fetch shape costs <1s typical and
+    # keeps the busy-amnesty asymmetry close to "readyz has it
+    # today" without breaking the budgeted loop in gate_livez /
+    # gate_soak.
+    body="$(curl -sS --max-time 2 \
+        "http://localhost:$PORT/readyz" 2>/dev/null)" || return 1
+    [ -n "$body" ] || return 1
+    detail_field="$(_json_sub "$body" detail 2>/dev/null)" || return 1
+    [ -n "$detail_field" ] || return 1
+    inflight="$(_json_field "$detail_field" inflight_turns 2>/dev/null)" \
+        || return 1
+    case "$inflight" in
+        ''|null) return 1 ;;
+        *[!0-9]*) return 1 ;;
+        0) return 1 ;;
+    esac
+    if [ "$inflight" -gt "$BUSY_INFLIGHT_BOUND" ]; then
+        return 1
+    fi
+    return 0
+}
+
+# _busy_amnesty_granted — returns 0 (true) if the busy-amnesty
+# predicate grants amnesty, 1 (false) otherwise. Default predicate:
+# always 1 (no amnesty) so the gate stays strict by default; the
+# gate functions call _read_inflight_turns_bounded and treat a
+# non-error as a soft-green.
+_busy_amnesty_granted() {
+    _read_inflight_turns_bounded
+}
+
+# _boot_grace_active — returns 0 (grace is active, suppress
+# transients) if the post-restart grace window is still in effect,
+# 1 otherwise. The window starts on restart_via_launcher returning
+# 0 (D-P3.7) and ends on earliest of (a) grace_s elapsed OR
+# (b) 3 consecutive non-transient greens on livez. The window
+# stops short of the 900s hard ceiling (the grace is a sub-budget
+# within a single phase, not the ceremony).
+#
+# State is held in two globals set by _boot_grace_start and
+# advanced by _boot_grace_record_green. Default: no grace active
+# (the gate starts in strict mode and only enters grace after
+# restart_via_launcher succeeds).
+_BOOT_GRACE_START_EPOCH=""
+_BOOT_GRACE_CONSEC_GREEN=0
+_boot_grace_start() {
+    _BOOT_GRACE_START_EPOCH="$(_now_epoch)"
+    _BOOT_GRACE_CONSEC_GREEN=0
+}
+_boot_grace_record_green() {
+    _BOOT_GRACE_CONSEC_GREEN=$(( _BOOT_GRACE_CONSEC_GREEN + 1 ))
+}
+_boot_grace_record_non_green() {
+    _BOOT_GRACE_CONSEC_GREEN=0
+}
+_boot_grace_active() {
+    # Not started → no grace
+    [ -n "$_BOOT_GRACE_START_EPOCH" ] || return 1
+    local now elapsed
+    now="$(_now_epoch)"
+    elapsed=$(( now - _BOOT_GRACE_START_EPOCH ))
+    # (a) grace_s elapsed → no longer active
+    if [ "$elapsed" -ge "$PROMOTE_BOOT_GRACE_S" ]; then
+        return 1
+    fi
+    # (b) 3 consecutive non-transient greens on livez → no longer active
+    if [ "$_BOOT_GRACE_CONSEC_GREEN" -ge 3 ]; then
+        return 1
+    fi
+    return 0
+}
+
+# _probe <path> <budget_s> <port> — budgeted probe (D2) with
+# classified transient handling (D-P3.6). Replaces the v0.18-era
+# `curl -fsS` body-sniff approach: status code via -w, body to tmp,
+# 3-state classification (green / red / transient), bounded retry
+# inside the per-phase budget.
+#
+# Stdout: response body on green (gate_livez / gate_readyz consumers
+# depend on this contract). Return: 0 on green, 1 on red or
+# transient-exhausted (callers treat both as gate-fail; the
+# difference is the warn message + whether auto-rollback fires).
+#
+# The boot-grace hook is silent (no INFO line) per the
+# busy-but-alive semantic — a silenced transient is the daemon
+# still warming, not a gate-fail.
 _probe() {
-    local path="$1" budget="$2" port="$3" deadline now body=""
+    local path="$1" budget="$2" port="$3" deadline now body="" status rc remaining
     deadline=$(( $(_now_epoch) + budget ))
     lock_heartbeat
     while :; do
-        body="$(curl -fsS --max-time 5 "http://localhost:$port$path" 2>/dev/null)" \
-            && { printf '%s\n' "$body"; return 0; }
+        # C2 (council): pass a RELATIVE budget (the remaining phase
+        # slice) — the prior shape passed the ABSOLUTE deadline, which
+        # _probe_with_retry added to _now_epoch again, producing a
+        # retry deadline ~1.7e9 s in the future (retry loop could
+        # never time out against its own budget).
+        remaining=$(( deadline - $(_now_epoch) ))
+        [ "$remaining" -lt 1 ] && remaining=1
+        _probe_with_retry "$path" "$port" "$remaining" >/dev/null
+        rc=$?
+        case "$rc" in
+            0)
+                # green or soft-green (busy-amnesty)
+                if [ "$_PROBE_STATUS" = "green" ]; then
+                    # Echo body for the green case so gate_livez /
+                    # gate_readyz callers receive the JSON response
+                    if [ -n "$_PROBE_BODY" ]; then
+                        printf '%s\n' "$_PROBE_BODY"
+                    else
+                        # Body was discarded (gate_livez uses /livez
+                        # which returns the version + status — fetch
+                        # the body once for the green case).
+                        body="$(curl -sS --max-time 2 \
+                            "http://localhost:$port$path" 2>/dev/null)" || body=""
+                        [ -n "$body" ] && printf '%s\n' "$body"
+                    fi
+                fi
+                # busy-amnesty: emit the captured body (a readyz
+                # busy-but-alive still has a payload).
+                if [ "$_PROBE_STATUS" = "busy-amnesty" ]; then
+                    if [ -n "$_PROBE_BODY" ]; then
+                        printf '%s\n' "$_PROBE_BODY"
+                    fi
+                fi
+                return 0
+                ;;
+            3)
+                # W3: boot-grace-suppressed — ignored: not a green,
+                # not a fail. Keep riding the phase budget.
+                ;;
+            2)
+                # C2: transient-exhausted batch — DO NOT fail the
+                # phase. The approved design rides transients out
+                # inside LIVEZ_BUDGET_S/READYZ_BUDGET_S; the gate
+                # fails only when the PHASE budget is exhausted (or
+                # on a hard red below).
+                _warn "probe ${path}: transient — riding out inside the phase budget (${remaining}s left)"
+                ;;
+            1)
+                _warn "probe ${path}: hard fail (red — non-transient error)"
+                return 1
+                ;;
+        esac
         now="$(_now_epoch)"
         [ "$now" -lt "$deadline" ] || break
         lock_heartbeat
         sleep 2
     done
-    return 1
+    # C2: phase budget exhausted without green — the transient
+    # ride-out ceiling. Return 2 (transient-exhausted-at-deadline)
+    # so callers can distinguish it from a hard red; both fail the
+    # gate (fail-closed), but the reason line says WHY.
+    _warn "probe ${path}: phase budget ${budget}s exhausted without green — gate fails (transient ride-out ceiling)"
+    return 2
 }
 
 # _probe_once <path> <port> — single fast fetch (status.sh display; no budget).
+# P3 (decision (e)): classified shape (D-P3.6). Body to stdout on green;
+# otherwise nothing. Status.sh consumers tolerate empty body (they just
+# display "no response" on rc != 0).
 _probe_once() {
-    curl -fsS --max-time 5 "http://localhost:$2$1" 2>/dev/null
+    _probe_once_classified "$1" "$2"
+    case "$_PROBE_STATUS" in
+        green|busy-amnesty|boot-grace-suppressed)
+            [ -n "$_PROBE_BODY" ] && printf '%s\n' "$_PROBE_BODY"
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 # _run_bounded <budget_s> [--] <cmd> [args...] — run a foreground command
@@ -3551,6 +4231,14 @@ restart_via_launcher() {
     fi
     ( cd "$INSTALL_DIR" && nohup ./launcher.sh >> data/launcher.log 2>&1 & )
     _log "launcher started (nohup) — logs: $INSTALL_DIR/data/launcher.log"
+    # P3 / decision (e) / D-P3.7 — start the 60s boot-window grace.
+    # The grace silences transient probe classifications (503/7/22/28)
+    # for the post-restart window; ends on earliest of (a) 60s elapsed
+    # OR (b) 3 consecutive non-transient greens on livez. Wedged
+    # daemons fall back to existing red-fail (a real red is counted
+    # even during grace — only transients are suppressed).
+    _boot_grace_start
+    return 0
 }
 
 # ── Supervision classification (ownership-mode commission P1, 2026-09-29) ────
@@ -4294,38 +4982,243 @@ gate_version() {
     return 0
 }
 
-# gate_soak <seconds> <expected_version> — ADR-005 soak: keep probing both
-# endpoints through the window; any red → fail. Heartbeats the pipeline lock.
-# Wall-clock deadline (B2b, same as _probe): three probes × curl max-time 5
-# per iteration made the old iteration counter overcount sleeps and
-# undercount curl — a "300s" soak could stretch to ~450s wall and push the
-# promote outer window past SWEEP_STALE_S.
+# gate_soak <seconds> <expected_version> — ADR-005 soak with P3 adaptive
+# default + conservative opt-in.
+#
+# P3 (decision (c), D-P3.1) — adaptive default behavior:
+#   - Floor ADAPTIVE_SOAK_FLOOR_S=60, cap ADAPTIVE_SOAK_CAP_S=120,
+#     consecutive-green threshold ADAPTIVE_SOAK_CONSECUTIVE=3, probe
+#     cadence ADAPTIVE_SOAK_CADENCE_S=15 (NOT 30; per leader Q6a ruling).
+#   - Each iteration probes livez+readyz+version via the classified
+#     _probe_once_classified path (decision (e), D-P3.6): 503/7/22/28 are
+#     transient (do not fail the phase), everything else is red (fail
+#     fast — do NOT ride out).
+#   - Termination (C-1 corrected semantics):
+#       * now >= adaptive_cap AND consecutive_green >= 3 → exit 0 SUCCESS
+#       * now >= adaptive_cap AND consecutive_green <  3 → exit 1 → auto-rollback
+#         (C-1: under sustained DB churn, the gate would otherwise
+#         reach cap with zero greens and silently commit; the pre-P3
+#         behavior was instant red → auto-rollback, never silent)
+#       * any red at any iteration → exit 1 FAILURE immediately
+#       * early-exit SUCCESS requires consecutive_green >= 3 (the
+#         floor is wall-clock, not green-count — 3 greens at 15s cadence
+#         ≈ 45s cannot satisfy before the 60s floor anyway)
+#   - Mid-soak version drift preserved (gate_version failure → red,
+#     C-10 + lib.sh:4258 anchor).
+#   - The 900s hard ceiling at promote.sh:156 unchanged; the gate
+#     respects the per-phase budget floor (the soak phase gets its
+#     remaining budget from the per-phase decomposition).
+#
+# P3 (decision (c), D-P3.2) — conservative opt-in:
+#   ENSEMBLE_SOAK_CONSERVATIVE=1 → reverts to the v0.18-era flat
+#   behavior (no early exit, sleep 30, soak_s=300 unless overridden).
+#   Existing ENSEMBLE_PROMOTE_SOAK_S env var is the user-override
+#   knob in BOTH modes.
+#
+# P3 (decision (d), D-P3.5) — adaptive-soak coupling: if the caller
+# passes a 3rd arg (ceremony_remaining_s), the effective adaptive cap
+# is min(ADAPTIVE_SOAK_CAP_S, ceremony_remaining_s - 60). If
+# ceremony_remaining_s < 60, the gate runs with 0s and journals a
+# deferral event. The "-60" preserves a 60s audit tail (commit
+# bookkeeping + retention_evict + lock_release).
+#
+# Heartbeats the pipeline lock (D5/D-FA5.1) so a long soak never
+# stale-breaks a live owner's lock.
 gate_soak() {
-    local soak_s="$1" expected="$2" waited=0 now deadline rc
+    local soak_s="$1" expected="$2" ceremony_remaining_s="${3:-}"
+    local waited=0 now deadline rc consecutive_green=0 soak_start
+    local adaptive_floor="$ADAPTIVE_SOAK_FLOOR_S"
+    local adaptive_cap="$ADAPTIVE_SOAK_CAP_S"
+    local adaptive_n="$ADAPTIVE_SOAK_CONSECUTIVE"
+    local adaptive_cadence="$ADAPTIVE_SOAK_CADENCE_S"
+    local conservative=0
+    local log_line
+    # C6 (council): record the WALL-CLOCK soak start at gate entry —
+    # the early-exit floor is elapsed = now - soak_start, NOT the
+    # green count and NOT the sleep-cadence-accumulated $waited
+    # (which drifts against real time).
+    soak_start="$(_now_epoch)"
+    if [ "${ENSEMBLE_SOAK_CONSERVATIVE:-0}" = "1" ]; then
+        conservative=1
+    fi
+
     if [ "$soak_s" -le 0 ]; then
         _log "soak skipped (0s — drill knob)"
         return 0
     fi
-    _log "soak ${soak_s}s (re-probe /livez + /readyz every 30s)"
-    deadline=$(( $(_now_epoch) + soak_s ))
+
+    # D-P3.5: cap shrinks against the ceremony budget when the caller
+    # threads ceremony_remaining_s. Subtract a 60s audit tail
+    # (commit bookkeeping + retention_evict + lock_release). If
+    # remaining < 60, journal a deferral event and return 0.
+    if [ -n "$ceremony_remaining_s" ]; then
+        if ! printf '%s' "$ceremony_remaining_s" | grep -Eq '^[0-9]+$'; then
+            _warn "soak: ceremony_remaining_s='$ceremony_remaining_s' is non-numeric — falling back to ADAPTIVE_SOAK_CAP_S"
+            ceremony_remaining_s=""
+        else
+            local adj_cap
+            adj_cap=$(( ceremony_remaining_s - 60 ))
+            if [ "$adj_cap" -lt "$adaptive_cap" ]; then
+                if [ "$adj_cap" -lt "$adaptive_floor" ]; then
+                    _log "soak: ceremony_remaining_s=${ceremony_remaining_s} — cap=$adj_cap < floor=$adaptive_floor; journaling deferral and running 0s soak"
+                    journal_history_append soak_deferred "ceremony budget starvation: ceremony_remaining_s=$ceremony_remaining_s < adaptive_floor+60=${adaptive_floor}; cap shrinks to $adj_cap < floor $adaptive_floor — deferring (gates remain the source of truth)" \
+                                                      || true
+                    return 0
+                fi
+                adaptive_cap="$adj_cap"
+            fi
+        fi
+    fi
+
+    # W2 (council): ENSEMBLE_PROMOTE_SOAK_S (soak_s) was claimed by the
+    # log line as the adaptive ceiling but never APPLIED — the env was
+    # silently ignored in adaptive mode. It is now a REAL cap:
+    # effective cap = min(ADAPTIVE_SOAK_CAP_S, ceremony-shrunk cap,
+    # soak_s). The floor is clamped to the effective cap so a short
+    # user ceiling still terminates (a floor ABOVE the cap would make
+    # the soak un-exitable on greens).
+    if [ "$soak_s" -lt "$adaptive_cap" ]; then
+        _log "soak: ENSEMBLE_PROMOTE_SOAK_S=${soak_s}s is BELOW the adaptive cap ${adaptive_cap}s — capping (W2: the env is a real ceiling now)"
+        adaptive_cap="$soak_s"
+    fi
+    if [ "$adaptive_floor" -gt "$adaptive_cap" ]; then
+        _log "soak: floor ${adaptive_floor}s > effective cap ${adaptive_cap}s — clamping floor to the cap"
+        adaptive_floor="$adaptive_cap"
+    fi
+
+    if [ "$conservative" = "1" ]; then
+        # W1 (council): conservative mode is v0.18-identical STRICT —
+        # boot-grace suppression and busy-amnesty soft-greens are
+        # DISABLED for the conservative loop (the strict flag makes
+        # _probe_once_classified classify 503/connection-failures as
+        # plain transient→_probe_once non-zero→red, exactly the v0.18
+        # curl -fsS behavior). Delta vs v0.18 (documented, acceptable):
+        # (a) classification mechanism is -w status-code + captured
+        # curl_rc instead of -fsS body-sniff (outcome-identical for
+        # 503/5xx/4xx/refused/timeout); (b) probes heartbeats the
+        # pipeline lock each iteration (additive safety, no outcome
+        # change); (c) gate_version mid-soak re-check present (was
+        # absent in v0.18 — strictens, never loosens).
+        _PROBE_SUPPRESSION_STRICT=1
+        _log "soak ${soak_s}s (CONSERVATIVE mode: ENSEMBLE_SOAK_CONSERVATIVE=1 — re-probe /livez + /readyz every 30s; no early exit; v0.18-identical strict probes)"
+        deadline=$(( $(_now_epoch) + soak_s ))
+        while :; do
+            lock_heartbeat
+            if ! _probe_once "/livez" "$PORT" > /dev/null; then
+                _warn "soak FAILURE: /livez went red at ${waited}s (conservative mode)"
+                return 1
+            fi
+            if ! _probe_once "/readyz" "$PORT" > /dev/null; then
+                _warn "soak FAILURE: /readyz went red at ${waited}s (conservative mode)"
+                return 1
+            fi
+            gate_version "$expected" > /dev/null || { _warn "soak FAILURE: version drifted at ${waited}s (conservative mode)"; return 1; }
+            now="$(_now_epoch)"
+            [ "$now" -lt "$deadline" ] || break
+            sleep 30
+            waited=$((waited + 30))
+        done
+        _log "soak complete (${soak_s}s green; conservative mode)"
+        return 0
+    fi
+
+    # Adaptive default mode.
+    _log "soak ${adaptive_cap}s (early-exit on ${adaptive_n} consecutive green probes @ ${adaptive_cadence}s cadence, floor ${adaptive_floor}s; user-set soak_s=${soak_s} — the adaptive CAP governs, soak_s is a hard ceiling)"
+    _PROBE_SUPPRESSION_STRICT=0   # W1: adaptive default re-enables grace/amnesty
+    deadline=$(( $(_now_epoch) + adaptive_cap ))
     while :; do
         lock_heartbeat
-        if ! _probe_once "/livez" "$PORT" > /dev/null; then
-            _warn "soak FAILURE: /livez went red at ${waited}s"
-            return 1
+        # Classified probe path (D-P3.6): 503/7/22/28 → transient
+        # (counted as "no green" — does not advance counter, does not
+        # fail the phase). All other non-2xx → red (fail-fast).
+        local livez_rc readyz_rc
+        _probe_once_classified "/livez" "$PORT"
+        livez_rc=$?
+        case "$livez_rc" in
+            0) ;;  # green (or boot-grace-suppressed / busy-amnesty)
+            1)
+                # red — fail-fast, do not ride out
+                _warn "soak FAILURE: /livez went RED at ${waited}s (non-transient — fail-fast per D-P3.1)"
+                return 1
+                ;;
+            2)
+                # transient-exhausted — counted as "no green"
+                _log "soak: /livez transient-exhausted at ${waited}s (counted as no green)"
+                ;;
+            3)
+                # W3: boot-grace-suppressed — ignored: not a green,
+                # not a fail. The consecutive counter resets below
+                # (an ignored probe is not a green).
+                _log "soak: /livez boot-grace-suppressed at ${waited}s (ignored)"
+                ;;
+        esac
+        _probe_once_classified "/readyz" "$PORT"
+        readyz_rc=$?
+        case "$readyz_rc" in
+            0) ;;  # green (or busy-amnesty soft-green)
+            1)
+                _warn "soak FAILURE: /readyz went RED at ${waited}s (non-transient — fail-fast per D-P3.1)"
+                return 1
+                ;;
+            2)
+                _log "soak: /readyz transient-exhausted at ${waited}s (counted as no green)"
+                ;;
+            3)
+                _log "soak: /readyz boot-grace-suppressed at ${waited}s (ignored)"
+                ;;
+        esac
+        # Version drift: same red semantics (lib.sh:4258 anchor —
+        # mid-soak REAL version drift fails the gate). C2 (council):
+        # the version check runs ONLY on a green tick — during a
+        # transient window there is NO version evidence (empty probe
+        # body); reading that as "drift" turned every transient storm
+        # into an instant soak failure (the C2 violation). A genuine
+        # drift still arrives on a 200 tick and fails exactly per the
+        # pin.
+        if [ "$livez_rc" = "0" ] && [ "$readyz_rc" = "0" ]; then
+            if ! gate_version "$expected" > /dev/null; then
+                _warn "soak FAILURE: version drifted at ${waited}s (lib.sh:4258 pin)"
+                return 1
+            fi
         fi
-        if ! _probe_once "/readyz" "$PORT" > /dev/null; then
-            _warn "soak FAILURE: /readyz went red at ${waited}s"
-            return 1
+        # Advance the consecutive-green counter ONLY on real green
+        # results (boot-grace-suppressed and busy-amnesty soft-greens
+        # do NOT count — the C-1 invariant is "consecutive_green" is
+        # the count of NON-transient green probes; soft-greens are
+        # explicitly excluded so the floor requirement stays load-
+        # bearing).
+        if [ "$livez_rc" = "0" ] && [ "$_PROBE_STATUS" = "green" ] && \
+           [ "$readyz_rc" = "0" ] && [ "$_PROBE_STATUS" = "green" ]; then
+            consecutive_green=$((consecutive_green + 1))
+        else
+            consecutive_green=0
         fi
-        gate_version "$expected" > /dev/null || { _warn "soak FAILURE: version drifted at ${waited}s"; return 1; }
         now="$(_now_epoch)"
-        [ "$now" -lt "$deadline" ] || break
-        sleep 30
-        waited=$((waited + 30))
+        # C-1 corrected: cap-reach with insufficient greens → exit 1
+        # → auto-rollback (the never-green commit bug under sustained
+        # DB churn). The pre-P3 behavior was instant red → auto-
+        # rollback; the C-1 fix is that the gate MUST reach the cap
+        # with consecutive_green >= 3 to commit.
+        # C6 (council): early-exit ALSO requires the wall-clock floor —
+        # elapsed = now - soak_start (recorded at gate entry), NOT the
+        # green count alone. 3 fast greens must NOT end the soak before
+        # the approved floor.
+        local soak_elapsed=$(( $(_now_epoch) - soak_start ))
+        if [ "$consecutive_green" -ge "$adaptive_n" ] && [ "$soak_elapsed" -ge "$adaptive_floor" ]; then
+            _log "soak SUCCESS at ${waited}s — ${consecutive_green} consecutive greens (adaptive early-exit; floor ${adaptive_floor}s HELD: elapsed=${soak_elapsed}s)"
+            return 0
+        fi
+        if [ "$now" -ge "$deadline" ]; then
+            if [ "$consecutive_green" -ge "$adaptive_n" ]; then
+                _log "soak SUCCESS at cap (${waited}s) — ${consecutive_green} consecutive greens"
+                return 0
+            fi
+            _warn "soak FAILURE: cap-reach at ${waited}s with consecutive_green=$consecutive_green < $adaptive_n — auto-rollback route (C-1: never-green commit bug under sustained DB churn)"
+            return 1
+        fi
+        sleep "$adaptive_cadence" 2>/dev/null
+        waited=$(( waited + adaptive_cadence ))
     done
-    _log "soak complete (${soak_s}s green)"
-    return 0
 }
 
 # retention_evict — T8: keep RETENTION_KEEP newest (by manifest staged_at,

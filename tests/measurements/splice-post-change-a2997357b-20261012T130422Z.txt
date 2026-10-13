@@ -1,0 +1,17 @@
+# Splice post-change capture — generated Mon Oct 12 13:04:22 UTC 2026
+# branch: feature/upgrade-speed-overhaul
+# sha:    a2997357b
+# python: Python 3.12.3
+# os:     Linux 6.8.0-139-generic x86_64
+# fixture: 126662 bytes / 500 entries
+# ENVSIM_FULL: 0 (N_RUNS=3)
+
+## AC1 targets
+- median-of-N < 1.0 s (hard)
+- max-of-N    < 2.5 s (warn-only headroom)
+
+## Measured
+| metric       | seconds |
+|--------------|---------|
+| median-of-3 | 0.135   |
+| max-of-3    | 0.147   |

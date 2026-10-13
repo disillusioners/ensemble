@@ -101,6 +101,21 @@ case "$GRACE_S" in
 esac
 [ "$GRACE_S" -gt 600 ] && GRACE_S=600
 
+# 0-pre. python3 ≥ 3.7 floor probe (P2 / C-7 — mirrors promote.sh's
+# preflight probe): the P2 call-site migration moved
+# journal_history_append / journal_set_previous onto the splice helper
+# (python3 stdlib); the halt events in the lock-adoption checks below
+# are splice writes, so a working interpreter is required BEFORE the
+# first journal write. Fail-closed: missing / below-floor python3 →
+# _warn + exit 78 (the same refusal code the helper itself returns).
+# The lock is not adopted yet at this point — the release stays as a
+# defensive no-op for pattern parity with promote.sh.
+if ! _splice_python_floor_probe; then
+    _warn "python3 ≥ 3.7 unavailable on PATH — refusing restart (journal splice helper requires it)"
+    lock_release 2>/dev/null || true
+    exit 78
+fi
+
 # ═══════════════════════════ 0. PREFLIGHT ══════════════════════════════════
 _log "preflight: env triple · journal · pending_op run_id=$RUN_ID · lock adoption"
 

@@ -87,6 +87,14 @@ the single journal protocol home. Splitting the protocol twin from the
 tool surface would force every contract change to touch two modules.
 """
 
+# Size rationale (~3050 lines, crossed >3000 during the P2 journal
+# hardening): single-source-of-truth for the upgrade journal — schema
+# (JOURNAL_EMPTY + PendingOp), atomic I/O, reconcile/expiry, F2 nonce
+# state, owner-heartbeat accessor (journal_owner_heartbeat_fresh, the
+# W4/C8 two-signal sweep input) and the R1 sweep-refusal rulings'
+# journal-side state. The growth is the audit surface consolidating;
+# splitting would spread the schema across importers. Do NOT split.
+
 from __future__ import annotations
 
 import asyncio
@@ -129,6 +137,18 @@ PENDING_OP_EXPIRE_RESTART_S = 30 * 60    # D-FA1.1 restart +30min
 PENDING_OP_EXPIRE_PROMOTE_S = 10 * 60    # D-FA1.1 promote +10min outer window
 RECONCILE_GRACE_S = 10 * 60     # grace past expires_at before a dead op is
                                 # cleared as crashed-pre-open
+
+# P2 (decision (b) / C-7 / D-P2.6): owner heartbeat freshness for the
+# sweep's THREE-signal defense. The shell lane writes
+# `in_flight.last_heartbeat` (epoch SECONDS — int) via the splice path
+# (`_splice_journal set-in-flight-field last_heartbeat "$(_now_epoch)"`).
+# The sweep reader here converts that epoch to an ISO-8601 form for
+# comparison with `datetime.now()`; the field-type contrast with
+# `PendingOp.owner_heartbeat_at` (ISO STRING) is intentional — the two
+# fields are TYPES-pinned separately. `OWNER_HEARTBEAT_FRESH_S = 60`
+# is the freshness window; `EXECUTOR_STALENESS_WINDOW_S` (sweep-side,
+# 900s) remains the upper bound for evidence-age, the wider backstop.
+OWNER_HEARTBEAT_FRESH_S: int = 60
 
 JOURNAL_EMPTY: dict[str, Any] = {
     "current": None,
@@ -251,6 +271,47 @@ def journal_read(install_dir: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise JournalTorn(f"journal at {jp} is not a JSON object")
     return data
+
+
+def journal_owner_heartbeat_fresh(install_dir: Path) -> bool:
+    """Three-signal defense #1 — heartbeat freshness (P2 / decisions (b) /
+    D-P2.6 / C-2 + C-3 + C-7 / T2.5 / AC4).
+
+    Re-reads the journal from disk and checks ``in_flight.last_heartbeat``.
+    Returns True iff the stamp exists AND is within ``OWNER_HEARTBEAT_FRESH_S``
+    (60s by default) of `datetime.now(tz=timezone.utc)`. Fail-closed: a
+    missing field, an unparseable stamp, a torn journal, or a missing file
+    ALL return False (the sweep falls through to ``os.kill`` + cgroup as the
+    OTHER two signals; any single signal true ⇒ leave pending_op alone).
+
+    The ``in_flight`` field is the JAVA-owned heartbeat (epoch int); the
+    Python-owned ``PendingOp.owner_heartbeat_at`` (ISO string) is the
+    defense-in-depth fallback reader at ``upgrade_journal_sweep.py:1590``
+    (`evidence = op.owner_heartbeat_at or op.armed_at`), unchanged. This
+    accessor is READ-ONLY — it never writes anything to the journal.
+    """
+    try:
+        data = journal_read(install_dir)
+    except JournalTorn:
+        return False
+    except OSError:
+        return False
+    inf = data.get("in_flight") if isinstance(data, dict) else None
+    if not isinstance(inf, dict):
+        return False
+    hb_raw = inf.get("last_heartbeat")
+    if not isinstance(hb_raw, (int, float)):
+        # The shell writer stamps epoch SECONDS as int (`_now_epoch`)
+        # per D-P2.6 — float values would be a foreign-writer drift.
+        # Anything else (string, None, bool) → not actionable; fall
+        # through.
+        return False
+    try:
+        stamp = datetime.fromtimestamp(int(hb_raw), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return False
+    age_s = (datetime.now(tz=timezone.utc) - stamp).total_seconds()
+    return 0 <= age_s <= OWNER_HEARTBEAT_FRESH_S
 
 
 def journal_init(install_dir: Path) -> None:
@@ -738,6 +799,21 @@ class PendingOp:
     armed_by_instance: str = ""
     owner_pid: int = 0
     owner_kind: str = "tool-arm"  # tool-arm | executor
+    # Field-type discipline (deferred from doc-only, P1 polish — N5):
+    # `owner_heartbeat_at` is an ISO-8601 UTC timestamp STRING
+    # (parseable via `uj.parse_iso_utc`) — NOT an epoch int, NOT a
+    # None-as-stale marker, NOT a `last_heartbeat` alias. Today this
+    # field has ZERO writers (P1, decision (b) — the python twin
+    # owns `pending_op`; the helper MUST NOT touch it per D-P2.2);
+    # the sweep's three-signal defense-in-depth reads it as a
+    # FALLBACK only (daemon/services/upgrade_journal_sweep.py:1590:
+    # `evidence = op.owner_heartbeat_at or op.armed_at`). The shell
+    # lane writes `in_flight.last_heartbeat` (epoch int, distinct
+    # type) via the splice path — that is the LOAD-BEARING freshness
+    # signal. Adding a writer for `owner_heartbeat_at` here is a
+    # separate future op owned by the python reconciler (NOT P2, NOT
+    # the splice helper). If you change the type, also update the
+    # `parse_iso_utc` call site at upgrade_journal_sweep.py:1591.
     owner_heartbeat_at: str | None = None
     trigger: str = "post-turn-callback"  # post-turn-callback | manual
     nonce: str | None = None
