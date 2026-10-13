@@ -17,6 +17,7 @@ The composite passed reviewer verdict **APPROVE-CONDITIONAL**; the condition —
 - **Leader-accepted D-1**: Phase-A inner_soul 2-site write shim (soul/workflow sites route through the shared guard) → **phaseA T11**.
 - **Leader-accepted D-2 (extended)**: this doc-fix bundle = the **explicit FIRST Phase A commit** — decisions.md endpoint-family reconciliation (canonical 12-endpoint family), S8 403→503, S5 user.md carve-in, S19 restore-drift caveat, C1 R10 reword, S17 `modifiable_files=[memory.md]`, migration-count 92, plus the O-item register.
 - **SCOPE strike (S18)**: `soul_requires_approval` knob-wiring STRUCK from task lists (knob stays dead code pending morning review); only the rejection-hint update ships.
+- **D-3 (unchanged by triage)**: `memory.md` disposition + `D-SEED-EDGE` carryover remain the two user-flavored morning forks; both endorsed as-defaulted — the only forks the morning review is expected to move.
 
 ---
 

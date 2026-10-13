@@ -209,7 +209,7 @@ The alternative (agent_id-only with tag folded in) breaks D15: a `developer[v2]`
 
 **Question.** *(Research surfaced this fork — not in leader F1-F8 list. Most likely to flip in the morning.)* Beyond F2's `{soul, rule, workflow, tools_note, tools, skill}` baseline, does `memory.md` (boot prompt §8 AND runtime-written by `inner_soul` with compaction) join the set? What about `user.md` / `growth.md`?
 
-**Decision.** **Conservative default: carve `memory.md`, `user.md`, `growth.md` OUT of the versioned-immutable set.**
+**Decision.** **Conservative default: carve `memory.md` + `growth.md` OUT; `user.md` IN per S5 (phaseB D5, leader-accepted).**
 
 | Artifact | Carve decision | Reason |
 |---|---|---|
@@ -391,7 +391,7 @@ This section proves "existing agents unregressed" for the user's stated mission.
 **Compatibility behavior.**
 - `target="memories"` — preserved (file-based; F2 carve).
 - `target="memory"` — preserved (file-based; D-ARTIFACT-DISPOSITION carve).
-- `target="user"` — preserved (file-based; D-ARTIFACT-DISPOSITION carve).
+- `target="user"` — REMOVED file write; becomes DB submission per S5/phaseB D5 (pending-approval; behavior change). Phase B ships this.
 - `target="soul"` — REMOVED file write; becomes `service.create_draft(...)`. Phase B ships this; Phase A's inner_soul rewrite is incremental (Phase B scope).
 - `target="workflow"` — REMOVED file write; becomes `service.create_draft(...)`. Phase B.
 - Compound requests split on `AND`/semicolons/sentence boundaries (`inner_soul.py:842-879`) — preserved.
@@ -488,7 +488,7 @@ Phase A fixes these opportunistically (each is on the critical path; not address
 ### 2.9 Migration Sequencing
 
 **Phase A (this commission) — DB + hook + guards.**
-- Schema + repo + service + cache extension + loader hook + writer guards.
+- Schema + repo + service + cache extension + loader hook + writer guards — all conforming to the **frozen Phase A→B contract `phase-contract.md` (amendments A1–A8)**.
 - Net user-visible behavior: zero change for agents with no DB rows; zero change for non-versioned artifacts (memory/user/growth/meta).
 - Testable invariant: `test_no_db_rows_yields_identical_prompt_to_pre_phase_a`.
 
@@ -655,7 +655,7 @@ Each risk carries severity (H/M/L), mitigation, owning phase.
 | F7 UI | daemon API = core; UI = Phase 2 gated | No |
 | F8 Immutability | typed error + API-redirect hint | No |
 | F9 DB identity | `(agent_id, version_tag)` composite | No |
-| D-ARTIFACT-DISPOSITION | carve `memory/user/growth` OUT | **YES — highest likelihood** |
+| D-ARTIFACT-DISPOSITION | carve `memory`/`growth` OUT; `user.md` IN (S5, phaseB D5) | **YES — highest likelihood** (memory.md flip) |
 | D-AGENT-MOTHER | rewire to DB drafts | No |
 | D-AUTH-OFF | fail-closed 503 `AUTH_NOT_CONFIGURED` (S8) | No |
 | D-BASH-ESCAPE | documented accepted-risk | No |
@@ -663,6 +663,12 @@ Each risk carries severity (H/M/L), mitigation, owning phase.
 | D-RESTORE-DRIFT | hook covers restore; S19 three-case caveat | No |
 | D-SEED-EDGE | manual operator migration | **YES — second-most likely** |
 | D-IDENTITY-STAMPING | submitter tuple + AuthContext subject/method | No |
+
+**End of decisions.md.**uthContext subject/method | No |
+
+**End of decisions.md.**|
+
+**End of decisions.md.**| No |
 
 **End of decisions.md.**uthContext subject/method | No |
 
