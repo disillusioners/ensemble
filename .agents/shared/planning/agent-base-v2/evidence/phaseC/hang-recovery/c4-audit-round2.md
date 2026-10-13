@@ -1,6 +1,10 @@
 # Phase C Round-2 C.4 Audit — worker#2's recovery edits vs plan spec
 
 Auditor: Phase C executor #3 (round-2 recovery), 2026-10-13.
+[Attribution pin, post-review D-4 2026-10-13: the leader's contemporaneous recovery
+message referred to this executor as "#2" from stale telemetry; the terminated-during-
+recovery executor was #3. All evidence-side ledger attributions in this pack state #3 —
+this pin exists so the stale-telemetry message cannot be misread as the record.]
 Subject: the 43 tracked-modified C.4 files left by worker#2 (produced 11:54–13:15 per
 the hang-recovery brief; gate run killed by dispatcher telemetry error, edits unverified-
 but-supervised). Two additional tracked-modified files are FOREIGN runtime writes and are
