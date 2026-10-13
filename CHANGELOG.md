@@ -7,17 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed — agent-base-v2 migration: base agents = copy of [v2] agents; opencode-era base + comm service archived to legacy/ (mission `agent-base-v2 migration`, branch `feature/agent-base-v2`)
+---
+
+## [0.20.2] — 2026-10-13
+
+### Changed — agent-base v2 migration: base agents = copy of [v2] agents; opencode stack (incl. session/API coding-worker lane + comm service) retired to legacy/ (`feature/agent-base-v2` @ `a9d8aa860`, merged to `latest` @ `abeb66023`)
+
+> **CHANGELOG (consolidation migration):** *The v2 agent prompts are promoted to base — `agents/developer`, `agents/reviewer`, `agents/planner`, `agents/tidier`, `agents/approver` become byte-identical copies of their `[v2]` counterparts (both kept; `[v2]` dirs untouched, so existing instances and ensembles notice nothing). The opencode-era base agents plus the full opencode stack — including the opencode session/API coding-worker lane and its comm service — are archived under `legacy/` (copy-then-verify sever) and severed from the daemon; the active tree is opencode-free. No DB migrations; rides the fast-upgrade pipeline (stage.sh manifest machinery self-adapts — `agents_tree_sha256` / `agents_manifest` recompute automatically).*
 
 - **Phase A — legacy archive.** opencode-era `agents/developer`, `agents/reviewer`, `agents/planner`, `agents/tidier`, `agents/approver` (the v1 base) plus the opencode comm service were copy-verified into `legacy/` (root-level legacy source dir). Pre-mission and post-mission per-dir sorted sha256 manifests re-verified at mission end — archive intact.
 - **Phase B — base := v2 copy.** `agents/developer`, `agents/reviewer`, `agents/planner`, `agents/tidier`, `agents/approver` (the base, NOT the `[v2]` dirs) were replaced byte-for-byte with the content of their matching `[v2]` dirs. `version` in each base meta.json now reads `"2.0.0"`. v2 dirs untouched and remain the live operational lane; existing instances + ensembles notice NOTHING (v2 checksum invariance: pre == post).
-- **Phase C — opencode excision.** daemon code paths that wired the opencode service were removed. `default_agent_versions` runtime value unchanged (verified via read-only `GET /api/settings/default-agent-versions`).
+- **Phase C — opencode excision.** daemon code paths that wired the opencode service were removed (tier-1 wiring severance → full-stack source-tree removal, `2e3bf2b2a` → `7b0a102c3`); opencode-specific tests and historical docs archived to `legacy/`. `default_agent_versions` runtime value unchanged (verified via read-only `GET /api/settings/default-agent-versions`).
 - **Phase D — references + docs refresh.** `docs/agents.md` §2/§3/§3.4/§3.5/§7, `docs/skill-evolution.md` example, `docs/agent-prompt-writing-guide.md` §9 refreshed to describe v2 reality. Active-tree guidance docs (`testing-guide.md`, `docs/mcp-integration.md`) updated to drop retired `OpenCode server` / `OpenCode configuration` phrasing. `docs/mcp-kb-usage.md` verified false positive (documents upstream `sst/opencode`, not our service) — UNTOUCHED. Drift implications (base is now a frozen mirror of v2) noted for maintainers; not solved in this mission. Full docs-consistency sweep and R10 allowlist committed at `evidence/docs-consistency-sweep.md` + `evidence/r10-allowlist.md`.
 - **Phase E — verification evidence.** Per-dir sha256 manifests prove v2 zero-touch (pre == post), base==v2 (per-agent diff empty), legacy/ archive intact, full test wall green, fenced dev-lane boot-scan clean, `default_agent_versions` runtime invariant. Evidence committed at `.agents/shared/planning/agent-base-v2/evidence/`.
+- **Security hygiene folded into the merge** (`84e9c54aa`): leaked-key redaction + env-family scrub + fail-closed secret-scan gate (S-1..S-3, EXP-1..EXP-5), with the scan script + output committed as Phase E evidence.
 
-_No version bump (D8: no live-system contact this mission). Migration rides the next promote ceremony via the fast pipeline; stage.sh manifest machinery self-adapts (`agents_tree_sha256` / `agents_manifest` recompute automatically)._
+_Mission gates: 18/18 DoD, R10 gate green. Migration rides the promote ceremony via the fast pipeline; stage.sh manifest machinery self-adapts (`agents_tree_sha256` / `agents_manifest` recompute automatically)._
 
----
+## [0.20.1] — 2026-10-13
+
+> **Backfill note:** no CHANGELOG section was cut at release time (cosmetic debt flagged at the v0.20.2 cut). Minimal pointer entry — full per-commit detail in `git log v0.20.0..v0.20.1`; tag annotation: *"v0.20.1: upgrade-speed-overhaul maiden-promote vehicle (merged @ `885a19d4f`)"*.
+
+### Changed — upgrade-speed overhaul: interactive VACUUM FULL escalation + maintenance-console tabs (`merged @ 885a19d4f`)
+
+- **Maintenance console:** tab shell (sticky tab bar, lazy-mounted tabs) + interactive VACUUM FULL escalation after the destructive prune, guarded by schema/engine/headroom/ENOSPC checks with a pgcode-presence-first discriminator.
+- **Protection layers:** version-control host armor (L3 snapshots, L4 tree-loss alert, L1 arm runbook) and Layer-1 ownership separation — HOME-shape-tolerant install-root resolution, executor uid pinning, wrapper allowlist enumeration, realpath traversal hardening, unconditional owner-invoker refusal.
+- **Upgrade lane:** council remediation round — 8 criticals + behavioral pins + scrubbed re-adjudication.
 
 ## [0.20.0] — 2026-10-12
 
