@@ -355,8 +355,15 @@ Returns:
                 "error": "Cannot modify system agents except _mother"
             }
         
-        # Only allow modifying specific files
-        modifiable_files = ["soul.md", "workflow.md", "rule.md", "user.md", "memory.md", "tools.md"]
+        # Only allow modifying specific files. Phase A T9(b) (S17): the
+        # versioned-immutable subset (soul/rule/workflow/tools_note + the
+        # legacy tools.md fallback) returns the same refusal shape used
+        # today — agent_mother is no longer a write path for these. The
+        # full DB-submission rewrite that replaces this allowlist lands
+        # in Phase B (T8); memory.md is the only carve-out (memory is
+        # prompt-loaded AND runtime-written with compaction — disposition
+        # fork R7/R11 deferred to decisions.md).
+        modifiable_files = ["memory.md"]
         if file not in modifiable_files:
             return {
                 "success": False,
