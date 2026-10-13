@@ -10,9 +10,9 @@
 #
 # Scanned surface (EXP-2/EXP-4 scope):
 #   (a) .agents/shared/planning/agent-base-v2/  (planning dir incl. evidence/)
-#   (c) .agents/tester/                          (verified commission-clean)
-#   (d) the 2 foreign runtime writes (inspected, NOT git-added)
-#   (b) /tmp commission scratch (c4-gate-*.log, agent-base-v2-*)
+#   (b) .agents/tester/                          (verified commission-clean)
+#   (c) the 2 foreign runtime writes (inspected, NOT git-added)
+#   (d) /tmp commission scratch (c4-gate-*.log, agent-base-v2-*)
 # /tmp targets are skipped (noted) when absent — scratch may be wiped.
 #
 # Self-exclusion: this script and secret-scan-output.txt contain the

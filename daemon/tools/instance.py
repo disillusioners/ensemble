@@ -151,7 +151,7 @@ def _format_task_context(context: dict[str, Any]) -> str:
 #
 # When an agent declares an innate skill, the matching tool categories are
 # automatically granted (merged into the agent's allow list) so the skill is
-# actually usable. This avoids requiring every agent to repeat
+# actually usable.
 # Add new entries here when introducing a new innate skill that requires
 # dedicated tool categories. The skill prompt is loaded separately by the
 # loader; this map only governs tool access.

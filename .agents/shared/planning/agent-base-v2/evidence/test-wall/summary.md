@@ -2,7 +2,7 @@
 
 **Invocation (proven at C.4, verbatim):** `./.venv/bin/python -m pytest tests/ --ignore=tests/packs --timeout=120 -q -n auto` — daemon UP in fenced dev lane (dev.sh, ensemble_dev @ 8079), outer `timeout 1700`, executed 2026-10-13 16:04:20Z → 16:13:57Z (562s).
 
-> **Denominator note (post-review D-2, 2026-10-13):** the headline **344** is pytest's FAILED-only count line (25 ERRORs are a separate summary line) — the true classification universe is **374 unique FAILED∪ERROR ids** = {353 pre-existing base-proven + 18 mission-drift root-caused + 3 flakes}; wall−base = **21** (= 18+3); raw count lines vs normalized unique ids differ by ~5 ids (xdist output normalization).
+> **Denominator note (post-review D-2, 2026-10-13):** the headline **344** is pytest's FAILED-only count line (25 ERRORs are a separate summary line) — the true classification universe is **374 unique FAILED∪ERROR ids** = {353 pre-existing base-proven + 18 mission-drift root-caused + 3 flakes}; wall−base = **21** (= 18+3); raw count lines vs normalized unique ids differ by ~5 ids — the gap is the 5 pytest logging-plugin `ERROR daemon.*` records (not "xdist output normalization"); the test-id-only universe is **369**, and 374 = FAILED∪ERROR universe (still correct).
 
 | Run | Tree | failed | passed | skipped | xfailed | errors |
 |---|---|---|---|---|---|---|
