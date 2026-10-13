@@ -112,13 +112,27 @@ def _pick_free_port() -> int:
 
 
 def _scrubbed_env() -> dict:
-    """Return a clean env dict with POSTGRES_* scrubbed.
+    """Return a clean env dict with secret-bearing families scrubbed.
 
     The interactive shell sets POSTGRES_* pointing at ensemble_prod on
     port 5432. NEVER let those leak into pg_ctl/psql/initdb. Only
     PATH (with the @14 bin prepended) and PGUSER survive.
+
+    Scrub families (2026-10-13 incident): BLUEPRINT_* and any
+    ``*_API_KEY`` (covers *EMBEDDING_API_KEY et al.). A failed
+    subprocess call dumps its full env into the pytest error repr —
+    an unscrubbed key lands verbatim in captured output (leaked via
+    the agent-base-v2 full test-wall log, redacted same day).
     """
-    env = {k: v for k, v in os.environ.items() if not k.startswith("POSTGRES_")}
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not (
+            k.startswith("POSTGRES_")
+            or k.startswith("BLUEPRINT_")
+            or k.endswith("_API_KEY")
+        )
+    }
     env["PATH"] = PG_BIN_DIR + os.pathsep + env.get("PATH", "")
     env["PGUSER"] = PG_USER
     return env
