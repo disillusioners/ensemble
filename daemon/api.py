@@ -742,6 +742,23 @@ async def lifespan(app: FastAPI):
     PromptVersion.metadata.create_all(manager.engine)
     PromptAuditEvent.metadata.create_all(manager.engine)
 
+    # Phase A T13 (S9 / D-BASH-ESCAPE accepted-risk control): prompt-artifact
+    # baseline drift check at boot. READ-ONLY compare of the live agents/
+    # tree against the committed agents/.prompt-artifacts.sha256; drift is
+    # operator-visible (WARN) and NEVER boot-blocking (allow-stale policy).
+    # Agents-root resolution + reset seam live in daemon/tools/
+    # prompt_artifacts.py (single source for the versioned set too).
+    try:
+        from daemon.tools.prompt_artifacts import log_baseline_drift_at_boot
+
+        log_baseline_drift_at_boot(logger_=logger)
+    except Exception as baseline_err:  # noqa: BLE001
+        logger.warning(
+            "[Startup] Prompt-artifact drift check failed (non-fatal): %s: %s",
+            type(baseline_err).__name__,
+            baseline_err,
+        )
+
     # Phase 2 (Batch 2) of feature/virtual-job-management-surface:
     # construct the WorkResolverService now that the JobRepository is
     # available. The resolver is the single point that looks up a
