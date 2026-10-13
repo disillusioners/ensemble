@@ -1,0 +1,1 @@
+{"status":"ready","components":{"database":true,"queue_freshness":true,"services":true,"checkpoint_saver":true},"detail":{"reasons":[],"queue_max_age_seconds":null,"checked_at":"2026-10-13T15:29:47.432282+00:00","inflight_turns":0},"draining":false}

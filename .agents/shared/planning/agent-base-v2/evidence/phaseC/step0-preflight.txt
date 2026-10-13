@@ -1,0 +1,48 @@
+PHASE C STEP 0 PRE-FLIGHT RECORD
+Generated: $(date -u +%FT%TZ)
+
+=== 1) Phase A archive integrity (BLOCKING) ===
+11 of 11 files byte-identical (sha256sum match):
+  - legacy/daemon/opencode/__init__.py
+  - legacy/daemon/opencode/client.py
+  - legacy/daemon/opencode/constants.py
+  - legacy/daemon/opencode/registry.py
+  - legacy/daemon/opencode/repository.py
+  - legacy/daemon/opencode/server.py
+  - legacy/daemon/opencode/session_manager.py
+  - legacy/daemon/opencode/state.py
+  - legacy/daemon/tools/external_opencode.py
+  - legacy/agents/_prompt_system/innate-skills/opencode/skill.md
+  - legacy/agents/_prompt_system/innate-skills/opencode/skill.md.bak
+
+=== 2) Phase B base copy diff-empty (BLOCKING; 5 pairs; leader NOT in set) ===
+  diff -r agents/developer agents/'developer[v2]' → empty
+  diff -r agents/reviewer  agents/'reviewer[v2]'  → empty
+  diff -r agents/tidier    agents/'tidier[v2]'    → empty
+  diff -r agents/approver  agents/'approver[v2]'  → empty
+  diff -r agents/planner   agents/'planner[v2]'   → empty
+  agents/leader[v2] does NOT exist on disk (R7 confirmed)
+
+=== 3) VERDICT 2 §13.2 — BRANCH 1 FULL-STACK REMOVAL SELECTED ===
+Evidence (a) coder agent (opencode-free by design; contamination guards stay green)
+Evidence (b) 5 retiring base agents meta.json — post-Phase-B: NO opencode in innate_skills
+Evidence (c) Runtime invocation outside tests — manager wiring PASSIVE (init creates registry
+           object only; startup recovery DISABLED; idle eviction touches in-memory only;
+           no HTTP listener). NO granted caller exists in post-Phase-B state. DEAD.
+Evidence (d) MCP config layer — zero opencode-named entries in daemon/mcp/
+           (builtins are context7, plane, webfetch only; verified)
+Evidence (e) Port 4095 (local OpenCode HTTP) — nothing listening; ~/.opencode_skill/ absent
+Evidence (f) keyword_extraction.py + context_injection.py — LIVE-SHARED infra with active
+           non-opencode callers (attestation_report_judge.py, graph.py:10794,
+           plugin_subsystem/opendesign/generate.py:650). Modules STAY per D5; comment rephrases only.
+
+BRANCH 1 selected = FULL-STACK REMOVAL = sever everything listed in §13.4/§13.5;
+archive already lives in legacy/ per Phase A; ensemble's own system unregressed.
+
+=== 4) S4 DB reachability pre-flight ===
+Source .env → ENSEMBLE_SELF_ENV=dev, POSTGRES_HOST=127.0.0.1, POSTGRES_DB=ensemble_dev, PORT=8079
+psql probe: ensemble_dev reachable, SELECT 1 returned ok.
+
+=== 5) daemon module path resolution (editable-install trap) ===
+python3 -c 'import daemon; print(daemon.__file__)'
+→ /home/nea/ensemble-src-wt-agent-base-v2/daemon/__init__.py (INSIDE WORKTREE, ✓)

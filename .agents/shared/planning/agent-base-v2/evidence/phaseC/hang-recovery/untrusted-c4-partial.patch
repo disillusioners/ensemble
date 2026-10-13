@@ -1,0 +1,997 @@
+diff --git a/.agents/shared/planning/designer-agent/install-audit.jsonl b/.agents/shared/planning/designer-agent/install-audit.jsonl
+index ede18919e..953e2a4f4 100644
+--- a/.agents/shared/planning/designer-agent/install-audit.jsonl
++++ b/.agents/shared/planning/designer-agent/install-audit.jsonl
+@@ -344,3 +344,26 @@
+ {"ts":"2026-10-10T10:37:52.676788+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_75399c5935714bf29d8ea310b8fe0ba1","idempotency_key":"","trace_id":"9974649407324839a3e3771199ddd861"}
+ {"ts":"2026-10-10T10:37:54.592736+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_6e499b5feada47fe831356159fde8e68","idempotency_key":"","trace_id":"0808d3147d874adabb3d5d44f990ba07"}
+ {"ts":"2026-10-10T10:38:13.798997+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_9470380f5d384a569d0a2c9188abcd55","idempotency_key":"","trace_id":"a335106de6ff42d095d88d30aaf4878c"}
++{"ts":"2026-10-13T11:37:05.490846+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_c462df86d5574091a01ddf0659128a85","idempotency_key":"","trace_id":"47dd068458fa49aa8b9d0ed23aa56664"}
++{"ts":"2026-10-13T11:37:05.496782+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_e5c58376bf1d4032a6aa3c2eb8aad136","idempotency_key":"","trace_id":"2f1b3530fa0d4811a8ee47004daffff2"}
++{"ts":"2026-10-13T11:37:05.499819+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_e50156b2cb0e492e848d0f4ae1a8b23a","idempotency_key":"","trace_id":"4ef901b0b1404ef7843204e6e667c89c"}
++{"ts":"2026-10-13T11:37:05.510547+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_ceed1dae53104ef6afbbb7ad088fd953","idempotency_key":"","trace_id":"4630c37dfb4248aa88d58488fd870f97"}
++{"ts":"2026-10-13T11:37:05.515761+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_4e8536cf89bc4737ad31dd02d8136436","idempotency_key":"","trace_id":"124b8011d9ae42ac872a26ca53d87604"}
++{"ts":"2026-10-13T11:37:05.518660+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_9d988266aa82415eaaeeb6bb2fd860e2","idempotency_key":"","trace_id":"91a9d67dc4ee47cf96345bc24f46a5a2"}
++{"ts":"2026-10-13T11:37:05.524178+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_9ea461db33274af8ad95709864248393","idempotency_key":"","trace_id":"e974a8fd5ad34929b6e0e254722be479"}
++{"ts":"2026-10-13T11:37:05.552687+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_4350ae9cfd504323a5cf743425b27c6c","idempotency_key":"","trace_id":"d4424d08a07f4e18bbea5cbabbdf13b3"}
++{"ts":"2026-10-13T11:37:05.561788+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_bcc88ee49ef041b1aa139e74d7e93a1c","idempotency_key":"","trace_id":"be53f29eb78c435f98925d3fde5b7411"}
++{"ts":"2026-10-13T11:46:46.906813+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_67718566464f4f0f9cbac7bdec1eb9ed","idempotency_key":"","trace_id":"e0db9e27d6fb44768f61eade2c434412"}
++{"ts":"2026-10-13T11:46:46.911231+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_394e728bd85045e491475058abe6f443","idempotency_key":"","trace_id":"72fd1b65ce9740b2911b996a82c8b702"}
++{"ts":"2026-10-13T11:46:46.915449+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_effa061bc0964d999a76312fd08e9c9c","idempotency_key":"","trace_id":"88aa37088abe45f5b9995f1e2f0463f3"}
++{"ts":"2026-10-13T11:46:46.919406+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_51618cd9fc8444f5836ed76963112889","idempotency_key":"","trace_id":"e76b3a4404e24c6185379f9159874647"}
++{"ts":"2026-10-13T11:46:46.923326+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_4d24262004d443b7bd901a66ca5487e7","idempotency_key":"","trace_id":"be571bbfcd194a9e958c91d4a914fcb0"}
++{"ts":"2026-10-13T11:46:46.927390+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_d52ee97a6dfc40d1a4fc021d24b62b21","idempotency_key":"","trace_id":"85787c29097a447fbfa57e1bc726b337"}
++{"ts":"2026-10-13T11:46:46.931500+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_d016bd56735f49be88348bcbc5b06c97","idempotency_key":"","trace_id":"58044042fe4e4397b5371a7cc7b56c53"}
++{"ts":"2026-10-13T11:46:46.935614+00:00","event":"kms_issue","name":"svc-a","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_274cc19c508a41418cc8b5d68dc1221a","idempotency_key":"","trace_id":"7f5c413e3d93481c9e3482ac5573a421"}
++{"ts":"2026-10-13T11:46:46.936020+00:00","event":"kms_issue","name":"svc-b","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_e97d158d8f00446aa92189c468b4b008","idempotency_key":"","trace_id":"0adb38f6429f4a48a14408006703463b"}
++{"ts":"2026-10-13T11:46:46.940050+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_a664082ab7584765ab87ebc167d841fe","idempotency_key":"","trace_id":"a6ee02884f864b01b43f6251739eb7c9"}
++{"ts":"2026-10-13T11:46:46.954174+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_4ff3ad99a5ff4fdaa1d2c285c51d4453","idempotency_key":"","trace_id":"91973a86965347a7bfc19729f07b0138"}
++{"ts":"2026-10-13T11:46:46.956306+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_e9695a3e86bb4e9fa8e60cb20123d17f","idempotency_key":"","trace_id":"bd3a704ffb09401b828730e85e0d0ff0"}
++{"ts":"2026-10-13T11:46:46.959878+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_a9b31d7f21fa4ae6860306ff095850e6","idempotency_key":"","trace_id":"63883db28fbb42a2a825997b0c4417a1"}
++{"ts":"2026-10-13T11:46:46.964196+00:00","event":"kms_issue","name":"opendesign","actor":"system","parent":null,"secret_ref":"KMS_HANDLE_6002e1fec2794a59bdafd30e74c45d2b","idempotency_key":"","trace_id":"4327cedb650542b1b9eb82321707b9ea"}
+diff --git a/.agents/tidier/notes.md b/.agents/tidier/notes.md
+index 8dcef959f..b70b94a65 100644
+--- a/.agents/tidier/notes.md
++++ b/.agents/tidier/notes.md
+@@ -614,3 +614,14 @@ Diff f2611f07..HEAD, 5 FE files (+487/−10). 0 High / 4 Medium / 8 Low.
+ - Clean zones (cross-confirmed by ≥2 workers or exhaustive sweep): env-gate remnant sweep = zero live refs outside the sentinel test; naming of new primitives consistent across layers ((rows, stop_reason) / partial_completion sub-keys / adapter attrs); no new except clauses anywhere in the diff; zero cast()/type-ignore introduced; 10-commit messages all match content; FE export hygiene clean after dead /status field drop.
+ - Deferred to Reviewer ×3: mid-loop raise loses partial-commit counts in audit row (adapter:1454-1500 + prune:303-331); always-True `blob_prune_destructive_default` surfaced as live config field (schemas.py:1888, api_service:197, models:749); side-channel instance attrs vs frozen tuple widening (adapter:939-952, council-approved).
+ - Worker count nits (both transparent, adjudicated): A summary said "2 Medium" for one finding spanning 2 sites → counted as 1; B summary "3 green" = 2 definite + 1 Consider → all kept as Low.
++
++
++## 2026-10-12 — upgrade-speed-overhaul tidy pass (worktree feature/upgrade-speed-overhaul @ 74ff8d152, ranges c8a3fbf6..63445dcad + 4574b8771..74ff8d152 = 72 mission files ~+10.7k/−203; foreign merge 4574b8771 content EXCLUDED), Iteration 001
++- Commission: maintainability-only pass post-council-APPROVE; 7 caller focus areas (splice dead-code, shell-substrate duplication, set -u/PIPESTATUS/mktemp-trap, python style, stale comments, F4-F8 absorption, test-tree consistency); offered single tiny-commit exception → DECLINED per Cardinal #5 (7th occurrence: 09-15/16, 09-26, 09-27, 10-04, 10-06, 10-08) + active giter worktree claim; provably-zero-behavior batch routed to giter instead.
++- Dispatch: 3 parallel read-only workers (readable cf3f1b96, hygiene 16c89718, robust 67106d51). developer spawn BLOCKED by team-membership gate (tidier may spawn explorer/image-reader/kb-writer/worker only) — worker lane used. All 3 reported fully, no gaps, no re-dispatch. Dispatcher spot-checks confirmed promotion evidence (lib.sh:24 "~3140" vs wc -l 5564; decisions.md:53 cites lib.sh:108, LOCK_HEARTBEAT_S=30 actually at :174; lib.sh:4258 self-cite sits at :5184).
++- Verdict: NEEDS WORK (non-blocking; zero behavior findings) — 1 High / 13 Medium / 12 Low after dedup (5 merges: B13+C7 set -u drift; B9+A-OO5 api.py typing; A5+A7 planning-doc anchors PROMOTED to High; B12+B13+B14+C8 test-prologue drift family; B2-B5+B7 size-rationale family folded to one finding ×6 sites).
++- High: systematic planning-doc line-anchor falseness — decisions.md ×9 (53,155,184,213,246,536,559,669,672) + phase3-plan.md ×2 (31,38) + p4-implementation-report:226; anchors off by 66–925 lines; these docs are the promote-critical decision record (same integrity class as the 2026-09-29 runbook §8 High).
++- Headline Mediums: trap-replacement r-f82e class in TEST packs (test_journal_splice.sh trap replaced :242, dropped :267 → sections 3-12 unprotected; 5 unguarded mktemp dirs; test_release_journal.sh no EXIT trap at all); journal_splice.py:241 bare except-Exception:pass in _is_under_live; :262-272 hard-coded JOURNAL_EMPTY twin vs canonical upgrade_journal.py:138-145; test-prologue drift in 4 dimensions (FAKE_HOME fence 1/7, set -u 4/7, assert_contains 3/7, unfenced sibling) → recommend tests/upgrade_test_lib.sh; lib.sh:24 stale size claim; 6 files missing required size-rationale comment (launcher.sh 1664, upgrade_journal.py 3046 NEWLY-CROSSED, sweep 1887, repository.py 1468, test_release_journal.sh 2524); F4-F8 reviewer register NOT committed in-repo (absorption unverifiable; F1+F2 verified landed clean); measurements 24-txt/5-SHA retention policy unpinned (no README); api.py:242/336 two untyped params in mission-touched helpers; gen_state_json.py shebang+100644 mode mismatch; docs name delete_doomed_ids_async ×6 vs impl delete_doomed_ids.
++- Clean zones (cross-confirmed ≥2 workers or exhaustive): P2 bash brace-walk FULLY REMOVED not bypassed (128 lib.sh fns all have callers; journal_update retained-by-design for FENCED whole-object writes); PIPESTATUS council bug FIXED at tip (lib.sh:2948-2949, curl_rc=$? immediately after invocation) + only 2 sibling PIPESTATUS sites, both clean; no pipefail anywhere in delta; F1 escape guard 4-layer fail-closed; F2 flock lock-by-filename correct, subshell fd-9 no collision; bash-3.2 portability clean (no declare -A/${var,,}/bash≥4 semantics); PEP 604 uniform (0 Optional[ across 6 mission files); zero NEW type:ignore/cast; 13 budget constants cross-verified against test_ceremony_wallclock.sh identity table (LIVEZ 180/READYZ 120/900s ceiling et al.); _dotenv_value/_resolve_wait_s duplication class NOT regressed (sync-guard comments lib.sh:3366-3396; launcher _js_* purity documented launcher.sh:1037-1043); sweep never-wedge pattern consistent; exit-code discipline 0/1/78/2 NoReturn-annotated.
++- Process nits: skill_feedback-first visibility NOT verified this pass (not checked in relays); worker B summary/table count mismatch (said 11 Medium, table carries 12 — table authoritative per 09-27 precedent); A and C leaked one narrating preamble line before their report headers.
++- Deferred to Reviewer ×5: journal_open_txn displaced_version capture-order TOCTOU + architecture-recommendation §2.4 C-4 "captured BEFORE txn opens" doc-order claim (correctness lane must rule which statement is true); gate-hot-path redundant curl per green probe (perf adjudication); C5+C7 same-release bisect coupling note; manager.py 5 pre-existing Any service slots; lib.sh:2939 mktemp || /tmp/probe.$$ fallback collision (correctness).
+diff --git a/.env.example b/.env.example
+index 2940496bc..88ae24a72 100644
+--- a/.env.example
++++ b/.env.example
+@@ -36,7 +36,7 @@ OPENAI_MODEL=gpt-4
+ # Use a smaller/cheaper model for cost efficiency on title generation
+ # OPENAI_MODEL_TITLE=gpt-3.5-turbo
+ 
+-# Model for keyword extraction from outgoing opencode prompts (optional, falls
++# Model for keyword extraction from outgoing prompts (optional, falls
+ # back to OPENAI_MODEL). Set to "quick" to mirror the explorer agent's
+ # llm_model for cost/speed on context preloading.
+ # OPENAI_MODEL_KEYWORDS=quick
+diff --git a/agents/_prompt_system/knowledge.md b/agents/_prompt_system/knowledge.md
+index ee6ffe7d6..3c9f5127a 100644
+--- a/agents/_prompt_system/knowledge.md
++++ b/agents/_prompt_system/knowledge.md
+@@ -93,7 +93,7 @@ The old file-based memory system (`.agents/{agent-id}/memories/`) has been migra
+ 
+ ## Exploration Priority Rules
+ 
+-Agents sometimes bypass the internal `explore()` tool and use external agent systems (opencode, etc.) directly for codebase exploration. This is **wrong** — `explore()` has a critical side-effect that benefits the entire system.
++Agents sometimes bypass the internal `explore()` tool and use external agent systems directly for codebase exploration. This is **wrong** — `explore()` has a critical side-effect that benefits the entire system.
+ 
+ ### Why This Matters
+ 
+@@ -103,7 +103,7 @@ To inspect the shared context directory from inside an internal agent, use the `
+ 
+ ### Rules
+ 
+-1. **`explore()` is MANDATORY before external exploration.** Before using any external agent system (opencode-skill, etc.) to explore or understand code/project state, you MUST first call `explore(query)` for the same topic. No exceptions.
++1. **`explore()` is MANDATORY before external exploration.** Before using any external agent system (e.g. legacy opencode-skill or any other delegated code-generation lane) to explore or understand code/project state, you MUST first call `explore(query)` for the same topic. No exceptions.
+ 
+ 2. **Do not re-explore what `explore()` already answered.** If `explore()` provides sufficient information, do not duplicate the same query via external tools. Only use external tools for follow-up details that `explore()` could not provide.
+ 
+diff --git a/agents/devops/soul.md b/agents/devops/soul.md
+index 610e5cf81..f0640edfa 100644
+--- a/agents/devops/soul.md
++++ b/agents/devops/soul.md
+@@ -31,7 +31,7 @@ I exist to manage infrastructure and deployment operations so you don't have to
+ 
+ ## How I Work
+ 
+-I execute operations **directly via the `bash` tool**. Unlike Developer (who delegates to OpenCode for code generation), I run `docker`, `kubectl`, `terraform`, `aws`, `gcloud`, and shell commands straight from my own bash session. This keeps me responsive, scoped, and explicit about every command.
++I execute operations **directly via the `bash` tool**. Unlike Developer (who delegates to coder/designer for code generation), I run `docker`, `kubectl`, `terraform`, `aws`, `gcloud`, and shell commands straight from my own bash session. This keeps me responsive, scoped, and explicit about every command.
+ 
+ If a task requires generating new application code, I hand it off to Developer. If a task requires test execution, I hand it off to Tester. If a task requires git operations, I hand it off to Giter.
+ 
+diff --git a/agents/explorer/soul.md b/agents/explorer/soul.md
+index 4975c7dc9..beec45db3 100644
+--- a/agents/explorer/soul.md
++++ b/agents/explorer/soul.md
+@@ -38,7 +38,7 @@ I find and synthesize project knowledge from the RAG knowledge base and project
+ - **Cannot execute code** — Read-only access
+ - **Cannot modify files** — No file writes
+ - **Cannot spawn agents** — No recursion via explore()
+-- **Cannot call innate_skills** — No opencode or other special skills
++- **Cannot call innate_skills** — No legacy opencode or other special skills
+ 
+ ## Speed Reminder
+ 
+diff --git a/agents/maintenancer/knowledge/01-architecture-overview.md b/agents/maintenancer/knowledge/01-architecture-overview.md
+index 7ae07e8cf..7759ae7c3 100644
+--- a/agents/maintenancer/knowledge/01-architecture-overview.md
++++ b/agents/maintenancer/knowledge/01-architecture-overview.md
+@@ -3,7 +3,7 @@
+ last-verified-against: v0.12.4
+ 
+ ## Facade + registry
+-`daemon/manager.py` coordinates lifecycle, repos, queues, sources, MCP/OpenCode, tools, LangGraph. New kwargs thread `enqueue_message` + ship a facade-forwarding test.
++`daemon/manager.py` coordinates lifecycle, repos, queues, sources, MCP, tools, LangGraph. New kwargs thread `enqueue_message` + ship a facade-forwarding test.
+ `daemon/registry.py:1170-1175`: `get_registry()` builds module-global `_registry` + runs `discover()`. Per-spawn reads the snapshot via `get_version(...) or get_resolved(...)` (`daemon/tools/instance.py:4542-4544`), never the file. New agent dir requires daemon restart.
+ 
+ ## Execution graph
+@@ -13,7 +13,7 @@ last-verified-against: v0.12.4
+ ~16 repos share one SQLAlchemy engine (selection: `daemon/manager.py:~446-460`). SQLite: PG paths no-op. PG: `create_all + _ensure_postgres_columns` (runner SQLite-only — §04 (ii)).
+ 
+ ## Checkpoint + CLE
+-`daemon/checkpoint_adapter.py` normalizes LangGraph checkpoints; OpenCode keeps its own SQLite. CLE handler in graph.py uses mid-flight `aupdate_state` superseded by the in-flight task — DML vanishes on normal return. See §04 (vi).
++`daemon/checkpoint_adapter.py` normalizes LangGraph checkpoints. CLE handler in graph.py uses mid-flight `aupdate_state` superseded by the in-flight task — DML vanishes on normal return. See §04 (vi).
+ 
+ ## Prompt loader
+ `daemon/loader.py:~373-385`: 11-section order — soul, rule, skill.md (legacy), per-skill, dynamic_tools, tools.md, workflow, memory, recent memories, shared_knowledge, project-experience.
+diff --git a/daemon/config.py b/daemon/config.py
+index 3ea15f5f5..60952f860 100644
+--- a/daemon/config.py
++++ b/daemon/config.py
+@@ -165,7 +165,7 @@ class LLMConfig(BaseSettings):
+     model_keywords: str | None = Field(
+         default=None,
+         description=(
+-            "Model for keyword extraction from outgoing opencode prompts "
++            "Model for keyword extraction from outgoing prompts "
+             "(falls back to model). Set to 'quick' to mirror the explorer agent's "
+             "llm_model for cost/speed."
+         ),
+diff --git a/daemon/loader.py b/daemon/loader.py
+index 37e094873..93d013a31 100644
+--- a/daemon/loader.py
++++ b/daemon/loader.py
+@@ -223,7 +223,7 @@ def load_tools_doc_for_agent(
+         logger.debug(f"Including {len(mcp_tool_names)} MCP tools in tool filter resolution for {agent_id}")
+ 
+     # Resolve filter to set of allowed tool names.
+-    # Innate skills (e.g. "opencode") implicitly grant their tool categories
++    # Innate skills (e.g. "chart") implicitly grant their tool categories
+     # so the system prompt lists them even when `tools.allow` omits them.
+     if tool_filter is None:
+         # No filter → all tools allowed — EXCEPT privileged categories
+diff --git a/daemon/repositories/task/repository.py b/daemon/repositories/task/repository.py
+index 6ec6c78ff..6ff7923a0 100644
+--- a/daemon/repositories/task/repository.py
++++ b/daemon/repositories/task/repository.py
+@@ -1774,7 +1774,7 @@ class TaskRepository:
+         heartbeat thread during a running turn. ``instances.last_activity_at``
+         is touched by a subset of lifecycle writers (terminal
+         transitions, instance.status flips) and is NOT updated by
+-        in-flight tool calls, LLM turns, or OpenCode subprocess
++        in-flight tool calls, LLM turns, or long-running child subprocess
+         activity. A genuinely-working-but-DB-silent child turn can
+         therefore have a very stale ``last_activity_at`` while its
+         task row carries a freshly-beating heartbeat. Using the
+diff --git a/daemon/services/context_injection.py b/daemon/services/context_injection.py
+index 98824c694..376c4346b 100644
+--- a/daemon/services/context_injection.py
++++ b/daemon/services/context_injection.py
+@@ -538,7 +538,7 @@ def _mcp_rag_hint(
+             # R21 entry gate (LOCKED-L 2026-09-15): drop superseded rows
+             # at THIS external pass-through surface (the renderer
+             # received the raw list from an upstream caller — typically
+-            # the ``external_opencode.py`` preload path, but defensively
++            # the upstream-call preload path, but defensively
+             # filter again here so any future caller shape can't leak
+             # a superseded row into the hint). The superseded check is
+             # routed through the shared predicate
+@@ -843,7 +843,7 @@ def get_shared_context(
+         audience: ``"internal"`` (default) shows the LangChain tool names in
+             the "Need more?" hint. Pass ``"external"`` to show the hosted MCP
+             tool names — used when the injection is being prepended to a
+-            message that an external agent system (e.g. opencode via MCP)
++            message that an external agent system (e.g. via MCP)
+             will see.
+         project_id: Optional project UUID forwarded to the external MCP RAG
+             hint so the agent can scope ``ensemble_kb_*`` tool calls. Ignored
+diff --git a/daemon/services/context_messages.py b/daemon/services/context_messages.py
+index 050fb2a1f..9e7d2f7c6 100644
+--- a/daemon/services/context_messages.py
++++ b/daemon/services/context_messages.py
+@@ -32,11 +32,11 @@ Design follows the plan:
+   prefix is applied, so the rebuilt message reads cleanly.
+ * **ADR-11** — KV metadata merges into the same ``[SYSTEM CONTEXT:
+   Related Project]`` message instead of a separate appender.
+-* **ADR-13** — opencode path is OUT OF SCOPE. These builders are
++* **ADR-13** — external-agent paths are OUT OF SCOPE. These builders are
+   consumed only by the ensemble ``agent_node`` path (Phase 3).
+ 
+-Opencode single-message merging lives behind
+-``external_opencode_send_message`` and is intentionally untouched.
++External single-message merging lives behind the external-agent tool and
++is intentionally untouched.
+ """
+ 
+ from __future__ import annotations
+diff --git a/daemon/services/critical_note_gate.py b/daemon/services/critical_note_gate.py
+index 37307113c..3bbc930c9 100644
+--- a/daemon/services/critical_note_gate.py
++++ b/daemon/services/critical_note_gate.py
+@@ -5,7 +5,7 @@ external pass-through surfaces (R21, LOCKED-L 2026-09-15):
+ 
+ * ``daemon/routers/projects.py::_get_critical_notes_safe``
+ * ``daemon/services/context_injection.py`` (``_mcp_rag_hint`` filter)
+-* ``daemon/tools/external_opencode.py`` (preload list-and-coerce path)
++* ``daemon/tools/external_opencode.py`` (preload list-and-coerce path; legacy)
+ 
+ An entry counts as ACTIVE iff its ``superseded_by_id`` is ``None``.
+ Defensive against the empty-string class: a stray empty ``""`` pointer
+diff --git a/daemon/services/keyword_extraction.py b/daemon/services/keyword_extraction.py
+index 0035d0419..82b9cbe14 100644
+--- a/daemon/services/keyword_extraction.py
++++ b/daemon/services/keyword_extraction.py
+@@ -6,7 +6,7 @@ Two paths produce a focused query string for ``get_shared_context``:
+    ``model_keywords`` LLM (defaults to ``model``; ops typically pin this to
+    ``"quick"`` to mirror the explorer agent's per-instance model). Bounded by
+    :data:`KEYWORD_EXTRACTION_TIMEOUT_S` (40s — this is a harness platform, not
+-   a chat UI, and the opencode call we are feeding dwarfs the extraction cost).
++   a chat UI, and the chat-side call we are feeding dwarfs the extraction cost).
+ 
+ 2. **Heuristic** (``_heuristic_keywords``) — pure-Python fallback that
+    extracts backtick-quoted terms, CamelCase tokens, the first non-empty line,
+@@ -423,9 +423,9 @@ async def extract_keywords(
+ 
+     except asyncio.TimeoutError:
+         logger.debug(
+-            "[OpenCode] Keyword extraction timed out after %.1fs", timeout_s,
++            "[Keyword] Keyword extraction timed out after %.1fs", timeout_s,
+         )
+         return []
+     except Exception as e:
+-        logger.debug("[OpenCode] Keyword extraction failed: %s", e)
++        logger.debug("[Keyword] Keyword extraction failed: %s", e)
+         return []
+diff --git a/daemon/services/waiting_children_watchdog.py b/daemon/services/waiting_children_watchdog.py
+index c3434f8fe..fc237b540 100644
+--- a/daemon/services/waiting_children_watchdog.py
++++ b/daemon/services/waiting_children_watchdog.py
+@@ -6,7 +6,7 @@ child completion reports, it sleeps on its dependency watcher until
+ works for children that reach a terminal status (completed / error /
+ terminated / failed). It does NOT work for children that *silently
+ hang* — the child is still RUNNING in name, but its LLM call, tool
+-invocation, or OpenCode subprocess is wedged. The watcher never
++invocation, or long-running child subprocess is wedged. The watcher never
+ fires; the parent sleeps forever; the user eventually gives up.
+ 
+ This service is the safety net. Every ``interval_seconds`` (default
+@@ -749,7 +749,7 @@ class WaitingChildrenWatchdog:
+         The pre-W-B B3 escalation / release decision was gated only on
+         the freshness proxy ``instances.last_activity_at`` — but that
+         column is NOT refreshed by in-flight tool calls, LLM turns, or
+-        OpenCode subprocess activity. Only ``task.last_heartbeat_at``
++        long-running child subprocess activity. Only ``task.last_heartbeat_at``
+         (which the worker pool's heartbeat thread updates on a bounded
+         interval) moves during a running turn. A genuinely-working-but-
+         DB-silent child turn can therefore have a very stale
+diff --git a/daemon/tools/instance.py b/daemon/tools/instance.py
+index fe1c964e1..5b92acbf8 100644
+--- a/daemon/tools/instance.py
++++ b/daemon/tools/instance.py
+@@ -5810,7 +5810,7 @@ Returns:
+ 
+     # ── Chart tools (delegates to Charter agent for Mermaid diagrams, always available) ──
+     # NOTE: NOT inside the is_rag_enabled() block — these are always available,
+-    # matching the OpenCode pattern above. The chart category is auto-granted
++    # matching the chart-factory pattern. The chart category is auto-granted
+     # to agents with innate_skills:["chart"] via INNATE_SKILL_TOOL_CATEGORIES.
+     chart_tool_list = create_chart_tools(manager, current_instance_id)
+     tools.extend(chart_tool_list)
+@@ -5847,7 +5847,7 @@ Returns:
+ 
+     # ── Todo tools (per-instance todo list with SSE emission, always available) ──
+     # NOTE: NOT inside the is_rag_enabled() block — these are always available,
+-    # matching the chart/opencode pattern. The todo category is auto-granted to
++    # matching the chart/todo pattern. The todo category is auto-granted to
+     # agents with innate_skills:["todo"] via INNATE_SKILL_TOOL_CATEGORIES.
+     # Pass manager._live_hub defensively via getattr so the factory still works
+     # in tests/environments where the hub is not wired up.
+@@ -6233,7 +6233,7 @@ def _apply_tool_filter(tools: list[Any], agent_id: str, mcp_tool_names: list[str
+             all_tool_names.add(tool_name)
+ 
+     # Resolve the filter with MCP-aware category expansion.
+-    # Innate skills (e.g. "opencode") implicitly grant the tool categories
++    # Innate skills (e.g. "chart") implicitly grant the tool categories
+     # they require, so the agent does not have to repeat them in `tools.allow`.
+     effective_allow = expand_allow_for_innate_skills(
+         agent_meta.tools.allow,
+diff --git a/pyproject.toml b/pyproject.toml
+index ce396dc12..584113e47 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -85,12 +85,13 @@ dev = [
+ 
+ [tool.pytest.ini_options]
+ markers = [
+-    "integration: integration tests that require a live OpenCode server (run with `pytest -m integration`)",
++    "integration: integration tests that require live external services (run with `pytest -m integration`)",
+     "postgres: PostgreSQL-only tests that require a live PostgreSQL server (run with `pytest -m postgres`)",
+     "no_xdist: tests that cannot run under pytest-xdist parallelism (skipped automatically when PYTEST_XDIST_WORKER is set; run them serially with `pytest -m no_xdist`)",
+     "slow: opt-in tests that download large artifacts (~200MB) or take minutes to run; not executed by default",
+ ]
+ addopts = "-m 'not integration and not postgres and not slow'"
+ asyncio_mode = "auto"
++testpaths = ["tests"]
+ timeout = 30
+ timeout_method = "thread"
+diff --git a/test/packs/regression_chat_source_integration_test.sh b/test/packs/regression_chat_source_integration_test.sh
+index d3a390a16..7ac6a53e8 100755
+--- a/test/packs/regression_chat_source_integration_test.sh
++++ b/test/packs/regression_chat_source_integration_test.sh
+@@ -5,7 +5,7 @@
+ # joins the pack automatically.
+ # Timeout: 1 minute (60s) — 22s solo per measurement 2026-09-19, ~60s with xdist under load
+ #
+-# Split from regression_integration_opencode_e2e_test.sh (P-12 in
++# Split from legacy opencode_e2e regression test (P-12 in
+ # PACKS.md) — chat-source-worker-lane integration family was
+ # SILENTLY-DESELECTED by the default ``pyproject.toml`` addopts
+ # (``addopts = "-m 'not integration and not postgres'"``); every
+diff --git a/test/packs/regression_integration_test.sh b/test/packs/regression_integration_test.sh
+index 69f097f0c..e066172bf 100755
+--- a/test/packs/regression_integration_test.sh
++++ b/test/packs/regression_integration_test.sh
+@@ -28,7 +28,7 @@
+ #   * Inner guard 350s (was 290s, +60s)
+ #   * Outer guard 360s (was 300s, +60s)
+ #
+-# Split from regression_integration_opencode_e2e_test.sh (P-12 in
++# Split from legacy opencode_e2e regression test (P-12 in
+ # PACKS.md) — that combined pack breached 300s solo at the merge
+ # gate. The split shape is:
+ #
+@@ -37,8 +37,7 @@
+ #     defect; 50 tests, ~22s).
+ #   * regression_integration_test.sh (this pack) — non-chat-source
+ #     integration slice (962 tests now actually executed, ≤350s).
+-#   * regression_opencode_e2e_test.sh — tests/opencode/ + tests/e2e/
+-#     (~520 tests, ~17s).
++#   * (legacy opencode regression pack archived in legacy/test/packs/)
+ #
+ # All three of the new packs fit under their respective dual-layer guards.
+ #
+diff --git a/tests/helpers/send_message_fixtures.py b/tests/helpers/send_message_fixtures.py
+index 1d2937eb5..f58548f03 100644
+--- a/tests/helpers/send_message_fixtures.py
++++ b/tests/helpers/send_message_fixtures.py
+@@ -65,8 +65,7 @@ def patch_heavy_helpers():
+         patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
+         patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
+         patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_db_tools", return_value=[]),
++                patch("daemon.tools.instance.create_db_tools", return_value=[]),
+         patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+         patch("daemon.tools.instance.create_context_tools", return_value=[]),
+         patch("daemon.tools.instance.create_chart_tools", return_value=[]),
+diff --git a/tests/integration/test_auth_boot_preflight.py b/tests/integration/test_auth_boot_preflight.py
+index cdd78f3f8..23ca6e642 100644
+--- a/tests/integration/test_auth_boot_preflight.py
++++ b/tests/integration/test_auth_boot_preflight.py
+@@ -17,7 +17,7 @@ a tmp ``ENSEMBLE_CONFIG`` + tmp data dir — mirroring the
+ before the DB probe, before uvicorn — so the scrub is belt-and-braces,
+ not the only line of defense.
+ 
+-No ``integration`` marker: this harness needs no live OpenCode server —
++No ``integration`` marker: this harness needs no live external services —
+ it must run (and gate) with the default ``pytest`` invocation.
+ """
+ 
+diff --git a/tests/integration/test_spawn_default_unchanged.py b/tests/integration/test_spawn_default_unchanged.py
+index a0f0439ca..6d9a413c4 100644
+--- a/tests/integration/test_spawn_default_unchanged.py
++++ b/tests/integration/test_spawn_default_unchanged.py
+@@ -160,8 +160,7 @@ class TestResolverNotCalledOnDefaultPath:
+                 "daemon.tools.instance.create_project_history_tools",
+                 return_value=[],
+             ),
+-            patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
+-            patch("daemon.tools.instance.create_db_tools", return_value=[]),
++                        patch("daemon.tools.instance.create_db_tools", return_value=[]),
+             patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+             patch("daemon.tools.instance.create_context_tools", return_value=[]),
+             patch("daemon.tools.instance.create_chart_tools", return_value=[]),
+diff --git a/tests/job_queue/conftest.py b/tests/job_queue/conftest.py
+index 1e3f1a4b4..5ecaf3895 100644
+--- a/tests/job_queue/conftest.py
++++ b/tests/job_queue/conftest.py
+@@ -62,7 +62,7 @@ def _truncate_tables(engine):
+         from sqlmodel import Session, text
+         from sqlalchemy import inspect
+         # Only truncate tables that actually exist in the engine. Some
+-        # models (e.g. ``opencode_sessions``) get registered into
++        # models get registered into
+         # ``SQLModel.metadata`` AFTER the session-scoped ``engine``
+         # fixture ran ``create_all`` — they are imported lazily inside
+         # test bodies. Iterating ``metadata.tables`` blindly would issue
+diff --git a/tests/migration/test_jsonb_migration.py b/tests/migration/test_jsonb_migration.py
+index 88a35a8b4..5ab759284 100644
+--- a/tests/migration/test_jsonb_migration.py
++++ b/tests/migration/test_jsonb_migration.py
+@@ -65,15 +65,6 @@ from daemon.repositories.event import models as _event_models  # noqa: F401
+ from daemon.migrations.models import SchemaMigration as _SchemaMigration  # noqa: F401
+ from daemon.repositories.infra import models as _infra_models  # noqa: F401
+ 
+-# NOTE: ``OpenCodeSessionRecord`` is intentionally NOT in
+-# ``SQLModel.metadata`` — its module uses ``OpenCodeSessionRecord
+-# .__table__.create()`` to avoid polluting the dedicated opencode
+-# engine with ensemble's other 22+ tables. See
+-# ``daemon/opencode/repository.py`` docstring for the rationale.
+-# This means the fresh-DB tests below must also call
+-# ``__table__.create()`` explicitly for the opencode table.
+-from daemon.opencode.repository import OpenCodeSessionRecord  # noqa: F401
+-
+ from daemon.repositories.infra.types import JSONBType
+ 
+ 
+@@ -103,12 +94,9 @@ JSONB_MIGRATION_PAIRS: list[tuple[str, str]] = [
+     ("message_queue", "images"),
+     ("mcp_servers", "config"),
+     ("mcp_servers", "config_schema"),
+-    ("opencode_sessions", "latest_response"),
+-    ("opencode_sessions", "questions"),
+ ]
+-
+-assert len(JSONB_MIGRATION_PAIRS) == 17, (
+-    f"Expected 17 JSONB migration pairs, got {len(JSONB_MIGRATION_PAIRS)}. "
++assert len(JSONB_MIGRATION_PAIRS) == 15, (
++    f"Expected 15 JSONB migration pairs, got {len(JSONB_MIGRATION_PAIRS)}. "
+     f"Update this list AND the DO block in daemon/manager.py to match."
+ )
+ 
+@@ -191,10 +179,6 @@ def fresh_pg_schema() -> Iterator[Engine]:
+             conn.execute(text("CREATE SCHEMA public"))
+ 
+         SQLModel.metadata.create_all(engine)
+-        # ``OpenCodeSessionRecord`` is created separately because
+-        # its module uses ``__table__.create()`` rather than
+-        # ``SQLModel.metadata.create_all()`` (see module docstring).
+-        OpenCodeSessionRecord.__table__.create(engine, checkfirst=True)
+         yield engine
+     finally:
+         # Best-effort cleanup: drop the schema so the next test
+@@ -220,10 +204,6 @@ def sqlite_engine() -> Iterator[Engine]:
+         poolclass=StaticPool,
+     )
+     SQLModel.metadata.create_all(engine)
+-    # ``OpenCodeSessionRecord`` is created separately because
+-    # its module uses ``__table__.create()`` rather than
+-    # ``SQLModel.metadata.create_all()`` (see module docstring).
+-    OpenCodeSessionRecord.__table__.create(engine, checkfirst=True)
+     try:
+         yield engine
+     finally:
+@@ -362,9 +342,7 @@ BEGIN
+               ('message_queue','metadata'),
+               ('message_queue','images'),
+               ('mcp_servers','config'),
+-              ('mcp_servers','config_schema'),
+-              ('opencode_sessions','latest_response'),
+-              ('opencode_sessions','questions')
++              ('mcp_servers','config_schema')
+           )
+     LOOP
+         BEGIN
+@@ -494,7 +472,6 @@ class TestSQLiteRegression:
+         from daemon.repositories.instance.models import Instance
+         from daemon.repositories.mcp_server.models import McpServer
+         from daemon.repositories.message_queue.models import MessageQueue
+-        from daemon.opencode.repository import OpenCodeSessionRecord
+         from daemon.repositories.project.models import (
+             Project,
+             ProjectHistoryEntry,
+@@ -515,7 +492,6 @@ class TestSQLiteRegression:
+             "instances": Instance,
+             "message_queue": MessageQueue,
+             "mcp_servers": McpServer,
+-            "opencode_sessions": OpenCodeSessionRecord,
+         }
+ 
+         for table_name, column_name in JSONB_MIGRATION_PAIRS:
+diff --git a/tests/test_council_tools.py b/tests/test_council_tools.py
+index 69cf11708..ad2df5056 100644
+--- a/tests/test_council_tools.py
++++ b/tests/test_council_tools.py
+@@ -52,8 +52,7 @@ def _patch_heavy_helpers() -> list:
+         patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
+         patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
+         patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_db_tools", return_value=[]),
++                patch("daemon.tools.instance.create_db_tools", return_value=[]),
+         patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+         patch("daemon.tools.instance.create_context_tools", return_value=[]),
+         patch("daemon.tools.instance.create_chart_tools", return_value=[]),
+diff --git a/tests/test_governor_integration.py b/tests/test_governor_integration.py
+index d657595af..8c3cbb6e5 100644
+--- a/tests/test_governor_integration.py
++++ b/tests/test_governor_integration.py
+@@ -58,8 +58,7 @@ def _patch_heavy_helpers() -> list:
+         patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
+         patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
+         patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_db_tools", return_value=[]),
++                patch("daemon.tools.instance.create_db_tools", return_value=[]),
+         patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+         patch("daemon.tools.instance.create_context_tools", return_value=[]),
+         patch("daemon.tools.instance.create_chart_tools", return_value=[]),
+@@ -952,8 +951,7 @@ class TestNonGovernorFiltering:
+             patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
+             patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
+             patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
+-            patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
+-            patch("daemon.tools.instance.create_db_tools", return_value=[]),
++                        patch("daemon.tools.instance.create_db_tools", return_value=[]),
+             patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+             patch("daemon.tools.instance.create_context_tools", return_value=[]),
+             patch("daemon.tools.instance.create_chart_tools", return_value=[]),
+diff --git a/tests/test_governor_recursion_acceptance_walk.py b/tests/test_governor_recursion_acceptance_walk.py
+index 8b8f61bbd..e0a422270 100644
+--- a/tests/test_governor_recursion_acceptance_walk.py
++++ b/tests/test_governor_recursion_acceptance_walk.py
+@@ -333,8 +333,7 @@ def _heavy_factory_patches() -> list:
+                 "daemon.tools.instance.create_project_history_tools",
+                 return_value=[],
+             ),
+-            patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
+-            patch("daemon.tools.instance.create_db_tools", return_value=[]),
++                        patch("daemon.tools.instance.create_db_tools", return_value=[]),
+             patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+             patch("daemon.tools.instance.create_context_tools", return_value=[]),
+             patch("daemon.tools.instance.create_chart_tools", return_value=[]),
+diff --git a/tests/test_innate_skills_refactoring.py b/tests/test_innate_skills_refactoring.py
+index a318a7cb5..955a31e15 100644
+--- a/tests/test_innate_skills_refactoring.py
++++ b/tests/test_innate_skills_refactoring.py
+@@ -8,10 +8,10 @@ These tests verify the complete end-to-end behavior of the refactored skill syst
+ - Registry behavior (including find_skill)
+ 
+ This specifically tests against the REAL agents/ directory to ensure:
+-- developer, reviewer, planner, tidier, approver all get opencode skill
++- developer, reviewer, planner, tidier, approver all get a chart-style skill
+ - leader gets coordination skill
+ - jober gets job-orchestration skill
+-- tester gets test-pack, todo, and dynamic-skill (NO opencode after worker-only dispatch migration)
++- tester gets test-pack, todo, and dynamic-skill (post worker-only dispatch migration)
+ - giter has NO skills section
+ """
+ import json
+@@ -53,13 +53,12 @@ class TestInnateSkillsSystemPromptIdentity:
+         cache = PromptCache()
+         
+         # Test each agent
+-        # Stale test: skill header uses hyphen (OpenCode-Skill) not underscore
+         # Updated for v2 base copy (Phase B): all 5 retiring base agents now declare
+-        # ["todo", "chart", "dynamic-skill"]; opencode has been removed.
++        # ["todo", "chart", "dynamic-skill"].
+         test_cases = [
+             ("developer", ["todo", "chart", "dynamic-skill"], "Dynamic Skill"),
+             ("reviewer", ["todo", "chart", "dynamic-skill"], "Dynamic Skill"),
+-            ("tester", ["test-pack", "todo", "dynamic-skill"], "Dynamic Skill"),  # opencode removed (worker-only dispatch migration)
++            ("tester", ["test-pack", "todo", "dynamic-skill"], "Dynamic Skill"),  # worker-only dispatch migration
+             ("tester", ["test-pack", "todo", "dynamic-skill"], "Test Pack Skill"),  # test-pack still innate
+             ("planner", ["todo", "chart", "dynamic-skill"], "Dynamic Skill"),
+             ("tidier", ["todo", "chart", "dynamic-skill"], "Dynamic Skill"),
+@@ -82,8 +81,6 @@ class TestInnateSkillsSystemPromptIdentity:
+                 assert expected_skill_content in prompt, f"{agent_id} prompt should contain {expected_skill_content}"
+             else:
+                 # giter should NOT have any skill sections (no innate_skills, no legacy skills/)
+-                # Stale test: skill header uses hyphen (OpenCode-Skill) not underscore
+-                assert "OpenCode-Skill" not in prompt, f"giter should NOT have opencode skill"
+                 assert "Coordination Skill" not in prompt, f"giter should NOT have coordination skill"
+                 assert "# Skill" not in prompt, f"giter should have no skill sections"
+             
+@@ -92,7 +89,7 @@ class TestInnateSkillsSystemPromptIdentity:
+             assert len(prompt) > 100, f"{agent_id} should have substantial prompt content"
+     
+     def test_tester_gets_three_innate_skills(self, real_agents_dir, real_registry):
+-        """Verify tester gets test-pack, todo, and dynamic-skill (opencode removed after worker-only dispatch migration)."""
++        """Verify tester gets test-pack, todo, and dynamic-skill (post worker-only dispatch migration)."""
+         cache = PromptCache()
+         tester_meta = real_registry.get("tester")
+         assert tester_meta is not None
+@@ -222,7 +219,7 @@ class TestEdgeCases:
+         agent_dir.mkdir()
+         
+         # Create meta with non-existent skill
+-        # Updated for v2 base copy (Phase B): use 'chart' instead of 'opencode' (retired).
++        # Updated for v2 base copy (Phase B): uses 'chart'.
+         meta_content = {
+             "id": "test_agent",
+             "name": "Test",
+@@ -270,7 +267,7 @@ class TestEdgeCases:
+         agent_dir.mkdir()
+         
+         # Create meta with innate_skills
+-        # Updated for v2 base copy (Phase B): 'opencode' replaced by 'chart'.
++        # v2 base copy (Phase B): uses 'chart'.
+         meta = {"id": "conflict_agent", "innate_skills": ["chart"]}
+         (agent_dir / "meta.json").write_text(json.dumps(meta))
+         
+@@ -298,7 +295,7 @@ class TestRegistryInnateSkills:
+     def test_find_skill_checks_innate_first(self, real_registry):
+         """find_skill() should check innate-skills first, then legacy."""
+         # Test chart skill - should find all agents that declare it via innate_skills.
+-        # Updated for v2 base copy (Phase B): 'opencode' replaced by 'chart'.
++        # v2 base copy (Phase B): uses 'chart'.
+         # Actual registry (post-B) returns 14 agents declaring chart in innate_skills
+         # (verified at exec-time via real_registry.find_skill('chart'); see
+         # evidence/phaseB/test-pin-sites.txt for the derivation).
+@@ -360,7 +357,7 @@ class TestInnateSkillsIntegration:
+         
+         # Verify specific skill content is present for key agents
+         tester_prompt, _ = load_and_cache_prompt("tester", real_registry.get("tester").path, cache)
+-        # tester no longer has opencode (worker-only dispatch migration) — verify dynamic-skill instead
++        # tester verification (worker-only dispatch migration) — uses dynamic-skill instead
+         assert "Dynamic Skill" in tester_prompt
+         assert "Test Pack Skill" in tester_prompt
+         
+diff --git a/tests/test_manager_shutdown.py b/tests/test_manager_shutdown.py
+index 32ea85edf..1aa3bb5c2 100644
+--- a/tests/test_manager_shutdown.py
++++ b/tests/test_manager_shutdown.py
+@@ -123,7 +123,6 @@ def _build_minimal_manager(mock_config, *, shutdown_steps_async=True):
+     manager._drain_warmup_pool = AsyncMock()
+     manager._mcp_service = MagicMock()
+     manager._mcp_service.close_all_connections = AsyncMock()
+-    manager._shutdown_opencode_registry = AsyncMock()
+     manager.cleanup = MagicMock()
+ 
+     # Mark the cancellation service as not-yet-shutting-down so the
+diff --git a/tests/test_spawn_instance_instructive_errors.py b/tests/test_spawn_instance_instructive_errors.py
+index 849315487..ad4c4225b 100644
+--- a/tests/test_spawn_instance_instructive_errors.py
++++ b/tests/test_spawn_instance_instructive_errors.py
+@@ -23,7 +23,7 @@ class TestSkillDetectionInErrorMessage:
+         """When input is a skill (not an agent), error message should list agents with that skill."""
+         # Create mock metadata
+         mock_meta = MagicMock(spec=AgentMetadata)
+-        mock_meta.id = "opencode"
++        mock_meta.id = "coder"
+         mock_meta.system = False
+ 
+         # Create mock registry
+@@ -39,7 +39,7 @@ class TestSkillDetectionInErrorMessage:
+ 
+         with patch("daemon.registry.get_registry", return_value=mock_registry):
+             with pytest.raises(HTTPException) as exc_info:
+-                validate_agent_id("opencode")
++                validate_agent_id("coder")
+ 
+             assert exc_info.value.status_code == 404
+             detail = exc_info.value.detail
+@@ -47,7 +47,7 @@ class TestSkillDetectionInErrorMessage:
+ 
+             # Should contain skill detection message
+             assert "is a skill, not an agent" in message
+-            assert "opencode" in message
++            assert "coder" in message
+ 
+             # Should list agents with this skill
+             assert "developer" in message
+@@ -359,13 +359,13 @@ class TestManagerSpawnInstanceErrors:
+                 manager._loop = None
+ 
+                 with pytest.raises(ValueError) as exc_info:
+-                    manager.spawn_instance("opencode")
++                    manager.spawn_instance("coder")
+ 
+                 message = str(exc_info.value)
+ 
+                 # Should mention skill
+                 assert "is a skill, not an agent" in message
+-                assert "opencode" in message
++                assert "coder" in message
+ 
+                 # Should list agents with skill
+                 assert "developer" in message
+diff --git a/tests/test_spawn_team_members.py b/tests/test_spawn_team_members.py
+index 5ee1ae2ab..0b18801c9 100644
+--- a/tests/test_spawn_team_members.py
++++ b/tests/test_spawn_team_members.py
+@@ -55,7 +55,6 @@ def _patch_heavy_helpers():
+         patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
+         patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
+         patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
+         patch("daemon.tools.instance.create_db_tools", return_value=[]),
+         patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+         patch("daemon.tools.instance.create_context_tools", return_value=[]),
+diff --git a/tests/test_tool_filter.py b/tests/test_tool_filter.py
+index 7265d359e..a777030ad 100644
+--- a/tests/test_tool_filter.py
++++ b/tests/test_tool_filter.py
+@@ -687,7 +687,7 @@ class TestMcpToolFiltering:
+ class TestExpandAllowForInnateSkills:
+     """Tests for expand_allow_for_innate_skills() helper.
+ 
+-    Innate skills (e.g. "opencode") should implicitly grant the tool
++    Innate skills (e.g. "chart") should implicitly grant the tool
+     categories they require, so the agent does not have to repeat them
+     in `tools.allow`.
+     """
+@@ -704,23 +704,23 @@ class TestExpandAllowForInnateSkills:
+ 
+     def test_none_allow_returns_none(self):
+         """If allow is None, agent already has everything — no expansion."""
+-        assert expand_allow_for_innate_skills(None, ["opencode"]) is None
++        assert expand_allow_for_innate_skills(None, ["chart"]) is None
+         assert expand_allow_for_innate_skills(None, []) is None
+ 
+-    def test_opencode_innate_skill_adds_external_opencode_category(self):
++    def test_chart_innate_skill_adds_chart_category(self):
+         result = expand_allow_for_innate_skills(
+-            ["bash", "filesystem"], ["opencode"]
++            ["bash", "filesystem"], ["chart"]
+         )
+-        assert "external_opencode" in result
++        assert "chart" in result
+         assert "bash" in result
+         assert "filesystem" in result
+ 
+     def test_does_not_duplicate_existing_category(self):
+-        """If external_opencode already in allow, leave it alone."""
++        """If chart already in allow, leave it alone."""
+         result = expand_allow_for_innate_skills(
+-            ["bash", "external_opencode"], ["opencode"]
++            ["bash", "chart"], ["chart"]
+         )
+-        assert result.count("external_opencode") == 1
++        assert result.count("chart") == 1
+ 
+     def test_unknown_innate_skill_is_ignored(self):
+         result = expand_allow_for_innate_skills(
+@@ -754,12 +754,12 @@ class TestExpandAllowForInnateSkills:
+         INNATE_SKILL_TOOL_CATEGORIES["test-skill"] = ["test-category"]
+         try:
+             result = expand_allow_for_innate_skills(
+-                ["bash"], ["opencode", "test-skill"]
++                ["bash"], ["chart", "test-skill"]
+             )
+         finally:
+             INNATE_SKILL_TOOL_CATEGORIES.clear()
+             INNATE_SKILL_TOOL_CATEGORIES.update(original)
+-        assert "external_opencode" in result
++        assert "chart" in result
+         assert "test-category" in result
+         assert "bash" in result
+ 
+@@ -824,18 +824,18 @@ class TestExpandAllowForInnateSkills:
+ 
+         assert result == ["bash"]
+ 
+-    def test_apply_tool_filter_grants_opencode_tools_for_innate_skill(self):
+-        """End-to-end: agent with innate_skills=['opencode'] gets opencode tools."""
++    def test_apply_tool_filter_grants_chart_tools_for_innate_skill(self):
++        """End-to-end: agent with innate_skills=['chart'] gets chart tools."""
+         tools = [
+             self._create_mock_tool("bash"),
+-            self._create_mock_tool("external_opencode_init_session"),
+-            self._create_mock_tool("external_opencode_send_message"),
++            self._create_mock_tool("chart_generate"),
++            self._create_mock_tool("chart_render"),
+         ]
+         categories = {
+             "bash": ["bash"],
+-            "external_opencode": [
+-                "external_opencode_init_session",
+-                "external_opencode_send_message",
++            "chart": [
++                "chart_generate",
++                "chart_render",
+             ],
+         }
+         with patch("daemon.registry.get_registry") as mock_registry:
+@@ -843,31 +843,31 @@ class TestExpandAllowForInnateSkills:
+                 mock_list.return_value = categories
+                 mock_agent_meta = MagicMock()
+                 mock_filter = MagicMock()
+-                # Allow list does NOT include external_opencode
++                # Allow list does NOT include chart
+                 mock_filter.allow = ["bash"]
+                 mock_filter.deny = None
+                 mock_agent_meta.tools = mock_filter
+-                mock_agent_meta.innate_skills = ["opencode"]
++                mock_agent_meta.innate_skills = ["chart"]
+                 mock_registry.return_value.get_version.return_value = None
+                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
+ 
+                 result = _apply_tool_filter(tools, "developer")
+                 tool_names = {t.name for t in result}
+ 
+-        # opencode tools should be auto-included
++        # chart tools should be auto-included
+         assert "bash" in tool_names
+-        assert "external_opencode_init_session" in tool_names
+-        assert "external_opencode_send_message" in tool_names
++        assert "chart_generate" in tool_names
++        assert "chart_render" in tool_names
+ 
+     def test_explicit_deny_still_wins_over_innate_skill_grant(self):
+         """If user explicitly denies a category, deny wins (per resolve_tool_filter)."""
+         tools = [
+             self._create_mock_tool("bash"),
+-            self._create_mock_tool("external_opencode_init_session"),
++            self._create_mock_tool("chart_generate"),
+         ]
+         categories = {
+             "bash": ["bash"],
+-            "external_opencode": ["external_opencode_init_session"],
++            "chart": ["chart_generate"],
+         }
+         with patch("daemon.registry.get_registry") as mock_registry:
+             with patch("daemon.tools.instance.list_tools_by_category") as mock_list:
+@@ -875,9 +875,9 @@ class TestExpandAllowForInnateSkills:
+                 mock_agent_meta = MagicMock()
+                 mock_filter = MagicMock()
+                 mock_filter.allow = ["bash"]
+-                mock_filter.deny = ["external_opencode"]
++                mock_filter.deny = ["chart"]
+                 mock_agent_meta.tools = mock_filter
+-                mock_agent_meta.innate_skills = ["opencode"]
++                mock_agent_meta.innate_skills = ["chart"]
+                 mock_registry.return_value.get_version.return_value = None
+                 mock_registry.return_value.get_resolved.return_value = mock_agent_meta
+ 
+@@ -885,7 +885,7 @@ class TestExpandAllowForInnateSkills:
+                 tool_names = {t.name for t in result}
+ 
+         assert "bash" in tool_names
+-        assert "external_opencode_init_session" not in tool_names
++        assert "chart_generate" not in tool_names
+ 
+ 
+ 
+diff --git a/tests/tools/test_auto_kill_integration.py b/tests/tools/test_auto_kill_integration.py
+index f2eae7637..eef2ebcaf 100644
+--- a/tests/tools/test_auto_kill_integration.py
++++ b/tests/tools/test_auto_kill_integration.py
+@@ -989,7 +989,6 @@ class TestDaemonShutdownKillsEverything:
+         manager._drain_warmup_pool = AsyncMock()
+         manager._mcp_service = MagicMock()
+         manager._mcp_service.close_all_connections = AsyncMock()
+-        manager._shutdown_opencode_registry = AsyncMock()
+         manager.cleanup = MagicMock()
+ 
+         class _StubCancellationService:
+diff --git a/tests/tools/test_send_message_context_param.py b/tests/tools/test_send_message_context_param.py
+index db507a06c..8159f4b54 100644
+--- a/tests/tools/test_send_message_context_param.py
++++ b/tests/tools/test_send_message_context_param.py
+@@ -103,8 +103,7 @@ def _patch_heavy_helpers():
+         patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
+         patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
+         patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_db_tools", return_value=[]),
++                patch("daemon.tools.instance.create_db_tools", return_value=[]),
+         patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+         patch("daemon.tools.instance.create_context_tools", return_value=[]),
+         patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
+diff --git a/tests/tools/test_send_message_load_skill.py b/tests/tools/test_send_message_load_skill.py
+index 6a21aa0e7..77abe0d2a 100644
+--- a/tests/tools/test_send_message_load_skill.py
++++ b/tests/tools/test_send_message_load_skill.py
+@@ -74,8 +74,7 @@ def _patch_heavy_helpers():
+         patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
+         patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
+         patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_db_tools", return_value=[]),
++                patch("daemon.tools.instance.create_db_tools", return_value=[]),
+         patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+         patch("daemon.tools.instance.create_context_tools", return_value=[]),
+         patch("daemon.tools.instance._load_mcp_tools", return_value=[]),
+diff --git a/tests/unit/services/test_critical_notes_phase2_filters.py b/tests/unit/services/test_critical_notes_phase2_filters.py
+index 4055b1bfd..240f7129a 100644
+--- a/tests/unit/services/test_critical_notes_phase2_filters.py
++++ b/tests/unit/services/test_critical_notes_phase2_filters.py
+@@ -8,8 +8,7 @@ critical-notes list unfiltered upstream:
+ * ``daemon/services/context_injection.py::_mcp_rag_hint`` — defensive
+   post-fetch filter applied inside the renderer so any upstream caller
+   shape can't leak a superseded row.
+-* ``daemon/tools/external_opencode.py`` — list-and-coerce path that
+-  builds the dict list passed into the preloader.
++* ``daemon/tools/external_opencode.py`` (legacy) — list-and-coerce path.
+ * ``daemon/routers/projects.py::_get_critical_notes_safe`` — fetch
+   site used by every ProjectResponse payload.
+ * ``daemon/services/context_messages.py::_format_critical_notes_section``
+diff --git a/tests/unit/test_coder_agent.py b/tests/unit/test_coder_agent.py
+index 4bea5ae1e..b341b039a 100644
+--- a/tests/unit/test_coder_agent.py
++++ b/tests/unit/test_coder_agent.py
+@@ -37,11 +37,6 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
+     "mother": ["agent_list", "agent_create", "agent_read", "agent_modify", "agent_delete"],
+     "todo": ["create_todo", "update_todo", "list_todos", "complete_todo"],
+     "chart": ["render_chart", "list_chart_types"],
+-    "external_opencode": [
+-        "external_opencode_init_session", "external_opencode_send_message",
+-        "external_opencode_get_status", "external_opencode_wait_for_result",
+-        "external_opencode_abort_session",
+-    ],
+     "db": ["db_query", "db_execute", "db_schema"],
+     "mcp": ["mcp_list_servers", "mcp_invoke"],
+     "knowledge": ["explore", "experience"],
+diff --git a/tests/unit/test_governor_recursion_guard.py b/tests/unit/test_governor_recursion_guard.py
+index 7d9bcb971..404b63cb8 100644
+--- a/tests/unit/test_governor_recursion_guard.py
++++ b/tests/unit/test_governor_recursion_guard.py
+@@ -167,8 +167,7 @@ def _patches():
+             "daemon.tools.instance.create_project_history_tools",
+             return_value=[],
+         ),
+-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_db_tools", return_value=[]),
++                patch("daemon.tools.instance.create_db_tools", return_value=[]),
+         patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+         patch("daemon.tools.instance.create_context_tools", return_value=[]),
+         patch("daemon.tools.instance.create_chart_tools", return_value=[]),
+diff --git a/tests/unit/test_wanderer_agent.py b/tests/unit/test_wanderer_agent.py
+index 8932f7c24..7ec80c8ee 100644
+--- a/tests/unit/test_wanderer_agent.py
++++ b/tests/unit/test_wanderer_agent.py
+@@ -38,11 +38,6 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
+     "mother": ["agent_list", "agent_create", "agent_read", "agent_modify", "agent_delete"],
+     "todo": ["create_todo", "update_todo", "list_todos", "complete_todo"],
+     "chart": ["render_chart", "list_chart_types"],
+-    "external_opencode": [
+-        "external_opencode_init_session", "external_opencode_send_message",
+-        "external_opencode_get_status", "external_opencode_wait_for_result",
+-        "external_opencode_abort_session",
+-    ],
+     "db": ["db_query", "db_execute", "db_schema"],
+     "mcp": ["mcp_list_servers", "mcp_invoke"],
+     "knowledge": ["explore", "experience"],
+diff --git a/tests/unit/tools/test_spawn_councilor_default_version.py b/tests/unit/tools/test_spawn_councilor_default_version.py
+index e00c66965..aa14f86b7 100644
+--- a/tests/unit/tools/test_spawn_councilor_default_version.py
++++ b/tests/unit/tools/test_spawn_councilor_default_version.py
+@@ -123,8 +123,7 @@ def _patch_heavy_helpers() -> list:
+         patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
+         patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
+         patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_opencode_tools", return_value=[]),
+-        patch("daemon.tools.instance.create_db_tools", return_value=[]),
++                patch("daemon.tools.instance.create_db_tools", return_value=[]),
+         patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+         patch("daemon.tools.instance.create_context_tools", return_value=[]),
+         patch("daemon.tools.instance.create_chart_tools", return_value=[]),
+diff --git a/tests/unit/tools/test_version_tag_tool_resolution.py b/tests/unit/tools/test_version_tag_tool_resolution.py
+index a7834ccc8..04e594bd4 100644
+--- a/tests/unit/tools/test_version_tag_tool_resolution.py
++++ b/tests/unit/tools/test_version_tag_tool_resolution.py
+@@ -429,8 +429,6 @@ class TestCreateInstanceToolsThreadsVersionTag:
+                   return_value=[]),
+             patch("daemon.tools.instance.create_project_history_tools",
+                   return_value=[]),
+-            patch("daemon.tools.instance.create_opencode_tools",
+-                  return_value=[]),
+             patch("daemon.tools.instance.create_db_tools", return_value=[]),
+             patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+             patch("daemon.tools.instance.create_context_tools", return_value=[]),
+@@ -1101,8 +1099,6 @@ class TestClosureLevelSpawnInstanceUsesVersionedMeta:
+                   return_value=[]),
+             patch("daemon.tools.instance.create_project_history_tools",
+                   return_value=[]),
+-            patch("daemon.tools.instance.create_opencode_tools",
+-                  return_value=[]),
+             patch("daemon.tools.instance.create_db_tools", return_value=[]),
+             patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+             patch("daemon.tools.instance.create_context_tools", return_value=[]),
+@@ -1289,8 +1285,6 @@ class TestClosureLevelConveneCouncilUsesVersionedMeta:
+                   return_value=[]),
+             patch("daemon.tools.instance.create_project_history_tools",
+                   return_value=[]),
+-            patch("daemon.tools.instance.create_opencode_tools",
+-                  return_value=[]),
+             patch("daemon.tools.instance.create_db_tools", return_value=[]),
+             patch("daemon.tools.instance.create_infra_tools", return_value=[]),
+             patch("daemon.tools.instance.create_context_tools", return_value=[]),
