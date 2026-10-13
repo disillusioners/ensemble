@@ -727,6 +727,21 @@ async def lifespan(app: FastAPI):
     stored_watch_repo = StoredWatchRepository(engine=manager.engine)
     manager._stored_watch_repo = stored_watch_repo
 
+    # Phase A of agent-prompt-immutability: prompt_versions +
+    # prompt_audit_events (R2 mitigation). Brand-new tables — the
+    # .sql migration runner applies them on SQLite, but we
+    # explicitly create_all here to cover engines whose
+    # manager-level create_all ran before the prompt_version model
+    # module was imported (same StoredWatch precedent above).
+    # The fresh-table contract (no _ensure_postgres_columns mirror
+    # needed) is documented in the migration header + models.
+    from daemon.repositories.prompt_version.models import (
+        PromptAuditEvent,
+        PromptVersion,
+    )
+    PromptVersion.metadata.create_all(manager.engine)
+    PromptAuditEvent.metadata.create_all(manager.engine)
+
     # Phase 2 (Batch 2) of feature/virtual-job-management-surface:
     # construct the WorkResolverService now that the JobRepository is
     # available. The resolver is the single point that looks up a

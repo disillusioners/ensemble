@@ -54,6 +54,8 @@ from .repositories import (
     create_skill_ab_test_repository,
     create_skill_bank_repository,
     create_message_metadata_repository,
+    create_prompt_version_repository,
+    PromptVersionRepository,
     MessageMetadataRepository,
     ReportInjectionRepository,
     InstanceUiPrefsRepository,
@@ -120,6 +122,7 @@ from .services.blueprint_matcher import BlueprintMatcher
 from .services.blueprint_rate_limiter import BlueprintRateLimiter
 from .services.blueprint_write_service import BlueprintWriteService
 from .services.skill_injection_service import SkillInjectionService
+from .services.prompt_version_service import PromptVersionService
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
 from .services.skill_job_dispatcher import SkillJobDispatcher
@@ -1170,6 +1173,29 @@ class InstanceManager:
         # Skill Bank — standalone user-facing CRUD (NOT gated by skill_evolution)
         self._skill_bank_repo = create_skill_bank_repository(
             engine=self._engine, create_tables=False
+        )
+
+        # Prompt-version repository + service — Phase A of the
+        # agent-prompt-immutability commission (T5). The repo is
+        # held next to the skill_bank_repo (manager.py:1171-1173)
+        # and the service is manager-owned (SkillStoreService
+        # pattern at manager.py:111-122) so inner_soul +
+        # agent_mother rewrite paths and future router endpoints
+        # can reach it without app.state wiring. The two
+        # brand-new tables (prompt_versions + prompt_audit_events)
+        # are created via SQLModel.metadata.create_all at manager
+        # boot (registered when the repositories package is
+        # imported above); the explicit per-model create_all calls
+        # in api.py lifespan (next to the StoredWatch precedent)
+        # cover engines whose manager-level create_all ran before
+        # the model module was imported. The .sql migration file
+        # (20261013_214000_create_prompt_versions.sql) covers
+        # fresh SQLite via the MigrationRunner.
+        self._prompt_version_repo = create_prompt_version_repository(
+            engine=self._engine, create_tables=False
+        )
+        self._prompt_version_service = PromptVersionService(
+            repo=self._prompt_version_repo
         )
 
         # NEW: Session repository for session management

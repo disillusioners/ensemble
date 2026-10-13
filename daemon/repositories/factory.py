@@ -41,6 +41,15 @@ from .blueprint.pending_repository import (
     create_blueprint_pending_repository as _create_blueprint_pending_repository,
 )
 
+# Prompt-version repository (Phase A of the agent-prompt-immutability
+# commission). Imported here so SQLModel.metadata.create_all() (called
+# from daemon/manager.py) registers the prompt_versions +
+# prompt_audit_events tables on fresh PostgreSQL databases. Fresh
+# SQLite databases pick the tables up from the MigrationRunner via
+# the 20261013_214000_create_prompt_versions.sql migration. Brand-
+# new tables — no _ensure_postgres_columns needed.
+from .prompt_version.repository import PromptVersionRepository
+
 if TYPE_CHECKING:
     from daemon.ensemble_config import EnsembleConfig
 
@@ -1143,6 +1152,57 @@ def create_message_metadata_repository(
     return MessageMetadataRepository(engine)
 
 
+def create_prompt_version_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> "PromptVersionRepository":
+    """Create a PromptVersionRepository from configuration or shared engine.
+
+    Persistence layer for the prompt-version + prompt-audit-event
+    tables that back the agent-prompt-immutability Phase A
+    feature. Two brand-new tables:
+
+    * ``prompt_versions`` — versioned override rows for agent
+      prompt artifacts (soul/rule/workflow/tools_note/tools/skill
+      per the F2 conservative-default set). PK ``version_id`` TEXT;
+      key ``(agent_id, version_tag, artifact, version)`` UNIQUE per
+      A7/C5/G-4e; ``is_selected`` flag for the per-key
+      one-selection-pointer invariant (F5); split identity columns
+      per decisions.md D-IDENTITY-STAMPING.
+
+    * ``prompt_audit_events`` — audit/event-row table
+      (drift_events precedent). One row per state transition /
+      selection change / template-copy event.
+
+    Both tables are created on first use via
+    ``SQLModel.metadata.create_all`` — brand-new tables need no
+    ``_ensure_postgres_columns`` mirror (snapshot / stored_watches
+    precedent; ``research-findings-db-api.md`` §1).
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+
+    Returns:
+        Configured :class:`PromptVersionRepository` instance.
+
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return PromptVersionRepository(engine)
+
+
 # Backward compatibility alias
 create_task_repository = create_job_repository
 
@@ -1168,5 +1228,6 @@ __all__ = [
     "create_skill_ab_test_repository",
     "create_skill_bank_repository",
     "create_message_metadata_repository",
+    "create_prompt_version_repository",
     "run_migrations",
 ]
