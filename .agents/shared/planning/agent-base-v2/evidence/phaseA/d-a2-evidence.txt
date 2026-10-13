@@ -1,0 +1,5 @@
+name: opencode-skill
+description: "Control and operate oh-my-opencode-slim via web API interface using the Go-based opencode_skill."
+metadata: {"version": "1.2.0", "author": "Kha Nguyen", "license": "MIT", "github_url": "https://github.com/disillusioners/opencode-skills"}
+
+D-A2 addendum-resolved: example/SKILL.md is the ported Go-binary contract spec (name: opencode-skill, metadata version 1.2.0) → INCLUDED in legacy/
