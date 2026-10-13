@@ -1,0 +1,6 @@
+agents/tidier/memory.md
+agents/tidier/meta.json
+agents/tidier/rule.md
+agents/tidier/soul.md
+agents/tidier/tools_note.md
+agents/tidier/workflow.md

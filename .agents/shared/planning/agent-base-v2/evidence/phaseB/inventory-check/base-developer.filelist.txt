@@ -1,0 +1,8 @@
+agents/developer/growth.md
+agents/developer/memory.md
+agents/developer/meta.json
+agents/developer/rule.md
+agents/developer/soul.md
+agents/developer/tools_note.md
+agents/developer/user.md
+agents/developer/workflow.md

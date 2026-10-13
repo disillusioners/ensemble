@@ -1,0 +1,32 @@
+Phase B Summary
+===============
+Branch: feature/agent-base-v2
+HEAD:   97f3ad43cf3d6869d3c40e02e6fd5aaf59382d1b
+Pairs executed: approver developer planner reviewer tidier
+
+v2 untouched (D4 proof):
+  approver v2-before==v2-after diff size: 0 bytes (must be 0)
+  developer v2-before==v2-after diff size: 0 bytes (must be 0)
+  planner v2-before==v2-after diff size: 0 bytes (must be 0)
+  reviewer v2-before==v2-after diff size: 0 bytes (must be 0)
+  tidier v2-before==v2-after diff size: 0 bytes (must be 0)
+
+base==v2 byte-identical (post-copy proof):
+  approver base-after==v2-before diff size: 0 bytes (must be 0)
+  developer base-after==v2-before diff size: 0 bytes (must be 0)
+  planner base-after==v2-before diff size: 0 bytes (must be 0)
+  reviewer base-after==v2-before diff size: 0 bytes (must be 0)
+  tidier base-after==v2-before diff size: 0 bytes (must be 0)
+
+Per-pair filelist match:
+  approver filelist diff size: 0 bytes (must be 0)
+  developer filelist diff size: 0 bytes (must be 0)
+  planner filelist diff size: 0 bytes (must be 0)
+  reviewer filelist diff size: 0 bytes (must be 0)
+  tidier filelist diff size: 0 bytes (must be 0)
+
+Test pin update pre-edit grep: 10 lines
+Test pin update post-edit grep: 1 lines
+
+agents-tree.5pairs.txt line count: 104 (52 base + 52 v2 = 104 by plan's script; plan-text asserts 52 — self-contradiction noted)
+agents-tree.5pairs.sha256: d5fffac3a623feb95d1759257b96dac34d77823ae22f947b4839bcbc0c3981d4 (64 hex chars)

@@ -1,13 +1,20 @@
 {
   "id": "developer",
   "name": "Developer",
-  "description": "Specializes in code generation and debugging",
+  "description": "Development orchestrator — plans coding work, delegates complex tasks to coder, skill-based tasks to workers, aggregates results",
   "icon": "💻",
   "color": "accent-cyan",
-  "version": "1.0.0",
-  "innate_skills": ["opencode", "chart", "todo"],
-  "tools": {
-    "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "db", "blueprint", "service", "midflight"]
+  "version": "2.0.0",
+  "innate_skills": ["todo", "chart", "dynamic-skill"],
+  "skill_injection": false,
+  "snapshot_enabled": true,
+  "no_force_explore": true,
+  "context_injection": {
+    "heuristic_match_shared_md_files": true
   },
-  "team_members": ["explorer"]
+  "tools": {
+    "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "service"],
+    "deny": ["edit_file", "write_file"]
+  },
+  "team_members": ["coder", "worker"]
 }

@@ -1,8 +1,12 @@
 # Memory
 
+> This is the `reviewer[v2]`-local memory. It owns the Deep-Review trigger checklist and the severity guidelines. Skill templates (`code-review`, `business-logic-review`) and my workflow point here — not to the v1 reviewer memory.
+
+---
+
 ## 🔴 Deep-Review Trigger Checklist
 
-Auto-detect these patterns in the review target. If **any** match, activate Deep-Review mode.
+Auto-detect these patterns in the review target. If **any** match, activate Deep-Review mode (governor council via `convene_council_with_skill`).
 
 ### 1. Data Integrity / Security
 Anything that could lose data, corrupt state, or break security.
@@ -64,44 +68,11 @@ Structural changes that reshape the system.
 
 ---
 
-## What I Check
+## Severity Guidelines
 
-### Architecture & Plans
-- Requirements completeness
-- Component boundaries respected
-- Dependencies flow correctly
-- No circular dependencies
-- Scalability considerations
-- Trade-offs justified
-
-### Code Quality
-- Naming conventions
-- Function/variable scope
-- Error handling
-- Resource cleanup
-- Type safety
-- DRY, SRP principles
-
-### Common Pitfalls
-- Race conditions
-- Memory leaks
-- SQL injection, XSS
-- Hardcoded secrets
-- Unhandled exceptions
-- N+1 queries
-- Missing null checks
-- Deadlocks
-
-### Language Traps
-- **Python**: mutable defaults, closure over loop, `==` vs `is`
-- **JS/TS**: `==` vs `===`, async errors, prototype pollution
-- **SQL**: string concat, missing transactions, dirty reads
-- **General**: premature optimization, over-engineering, YAGNI
-
-### Severity Guidelines
 | Issue Type | Typical Severity |
 |------------|------------------|
-| Security vulnerability | 🔴 Critical |
+| Security vulnerability | 🔴 Critical (if unsure between 🟡 and 🔴, default to 🔴) |
 | Breaks architecture | 🔴 Critical |
 | Data loss risk | 🔴 Critical |
 | Memory/thread leak | 🔴 Critical |
@@ -112,6 +83,18 @@ Structural changes that reshape the system.
 
 ---
 
+## Common Pitfalls (reminder set for worker/skill prompts)
+- Race conditions, memory leaks, deadlocks
+- SQL injection, XSS, hardcoded secrets
+- Unhandled exceptions, N+1 queries, missing null checks
+
+### Language Traps
+- **Python**: mutable defaults, closure over loop, `==` vs `is`
+- **JS/TS**: `==` vs `===`, async errors, prototype pollution
+- **SQL**: string concat, missing transactions, dirty reads
+
+---
+
 ## Project-Specific Standards
 
-Before each review, check `.agents/reviewer/memory.md` for project-specific standards and conventions.
+Before each review, check `.agents/reviewer/memories/` (runtime, plural — where this agent records review experience) for project-specific standards and conventions.

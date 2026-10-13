@@ -1,0 +1,43 @@
+Phase B Skill-Bank Idempotency Audit (Risk #4)
+================================================
+Date: 2026-10-13
+Executor: Coder (working-lead)
+Worktree: /home/nea/ensemble-src-wt-agent-base-v2
+
+A. EXECUTION-TIME CONSTRAINTS
+- Per D8 hard guardrail: NO live-system contact (no daemon boot/restart, no DB writes, no promote).
+- The skill bank is a live DB-backed component (skill_bank_templates, per skill_seed_service.py:285-292).
+- This audit is therefore CONCEPTUAL/DOCUMENTARY rather than runtime-verified. The actual verification
+  happens at user-promote time, when the user inspects live DB state and confirms idempotency.
+
+B. POST-PROMOTE STATE EXPECTATIONS
+After Phase B's base := v2 copy + a daemon restart, skill_seed_service.py:436's same-version
+idempotency check will:
+1. Walk agents/<base>/skill-set.yaml for the 5 affected base agents.
+2. Compare each (agent_id, skill_name, version) tuple against what's in skill_bank_templates.
+3. Skip the seed if version matches (no-op).
+
+Expected post-B bank state (per v2's skill-set.yaml + skills-template/):
+  approver/{approval-strategy:1.1.0, plan-approval:1.2.0, decision-approval:1.2.0}
+  developer/{dev-strategy:1.3.0}
+  planner/{planning-strategy:1.1.0, plan-creation:1.2.0, roadmap-strategy:1.2.0, requirements-analysis:1.2.0, technical-analysis:1.2.0}
+  reviewer/{review-strategy:1.1.0, code-review:1.2.0, plan-review:1.2.0, architecture-review:1.2.0, business-logic-review:1.2.0, pr-review:1.2.0, security-review:1.2.0}
+  tidier/{tidier-strategy:1.1.0, tidier-readable-code:1.2.0, tidier-robustness:1.2.0, tidier-static-hygiene:1.2.0}
+
+C. IDEMPOTENCY CHECK (same-version no-op is safe)
+skill_seed_service.py:436 — same-version is treated as a no-op (skip the seed). Base <-> v2 share
+the SAME version numbers (since base == v2 byte-identical), so:
+- IF the v2 agents were previously seeded: re-seed finds same version, skips — safe.
+- IF v2 was NOT previously seeded (cold bank): the post-B restart seeds base templates once
+  (now == v2 content), which is correct behavior — same target state either way.
+
+D. DEFERRED LIVE-CHECK
+The live verification of this audit happens at user-promote time per D8 + per the plan's documented
+"documented for executor" pattern. The actual query at promote:
+  SELECT agent_id, name, template_version FROM skill_bank_templates
+   WHERE agent_id IN ('approver','developer','planner','reviewer','tidier');
+
+E. WHAT PHASE B'S OWN WORK DIDN'T DO
+- Did NOT modify any skill-set.yaml content (copied byte-identical from v2).
+- Did NOT change skill template versions (no edits to skills-template/*.md files).
+- Did NOT touch daemon/ skill-seed code paths.

@@ -1,14 +1,18 @@
 {
   "id": "planner",
   "name": "Planner",
-  "description": "Analyzes requests, creates structured execution plans, and tracks progress",
+  "description": "Strategic planning dispatcher — researches codebase via explorer, delegates plan creation to skill-equipped workers, delivers structured plans",
   "icon": "📋",
   "color": "accent-indigo",
-  "version": "1.0.0",
-  "innate_skills": ["opencode", "chart", "todo"],
-  "tools": {
-    "allow": ["instance", "bash", "proc", "filesystem", "time", "subtree_messages",
-    "subtree_status", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "blueprint", "service"]
+  "version": "2.0.0",
+  "innate_skills": ["todo", "chart", "dynamic-skill"],
+  "skill_injection": true,
+  "no_force_explore": true,
+  "context_injection": {
+    "heuristic_match_shared_md_files": true
   },
-  "team_members": ["explorer"]
+  "tools": {
+    "allow": ["instance", "bash", "proc", "filesystem", "time", "self", "help", "image", "knowledge", "mcp", "context", "shared_meta_kv", "service"]
+  },
+  "team_members": ["worker", "explorer"]
 }

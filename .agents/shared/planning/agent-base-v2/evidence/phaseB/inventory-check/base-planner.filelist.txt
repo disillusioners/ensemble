@@ -1,0 +1,6 @@
+agents/planner/memory.md
+agents/planner/meta.json
+agents/planner/rule.md
+agents/planner/soul.md
+agents/planner/tools_note.md
+agents/planner/workflow.md
