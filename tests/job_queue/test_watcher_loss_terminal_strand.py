@@ -490,6 +490,38 @@ class TestWatcherLossStrandRed:
         assert ghost.status == InstanceStatus.IDLE.value
 
     @pytest.mark.asyncio
+    async def test_no_stamp_downgrade_churn_for_stranded_tree(
+        self, strand_harness,
+    ):
+        """Component 2 (asymmetry) pin: the stranded-tree drive must
+        NOT go through stamp COMPLETED → gate block → downgrade
+        WAITING_CHILDREN. The pre-stamp recursive eval skips the
+        stamp entirely — the churn signature (the downgrade SSE
+        ``stream_status_change(root, 'waiting_children')`` emitted by
+        the post-stamp downgrade path at base) must never fire."""
+        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        _insert_receipt(strand_harness.engine)
+        _seed_child_completed_event(
+            strand_harness.engine, T_CHILD_COMPLETED,
+        )
+
+        await _adrive_root_completion(strand_harness)
+
+        sse = [
+            c for c in strand_harness.manager._live_hub
+            .stream_status_change.await_args_list
+            if c.args and c.args[0] == ROOT
+            and c.args[1] == "waiting_children"
+        ]
+        assert not sse, (
+            "FIX CONTRACT: no stamp→downgrade churn for the stranded "
+            f"tree — the pre-stamp eval must skip the stamp (got {sse})"
+        )
+        assert _get_instance_row(
+            strand_harness.engine, ROOT
+        ).status == InstanceStatus.COMPLETED.value
+
+    @pytest.mark.asyncio
     async def test_guard_must_not_hold_on_stranded_orphan(
         self, strand_harness,
     ):
@@ -497,10 +529,27 @@ class TestWatcherLossStrandRed:
         report live for a tree whose only non-terminal member is a
         never-dispatched ghost stranded under a TERMINAL parent.
 
+        Seeded at the EMISSION-GATE-TIME posture: the root is already
+        stamped COMPLETED (the sync helper's direct-children check
+        passed) and the gate's recursive walk re-checks the tree. (A
+        non-terminal ROOT correctly holds — that is leg (c), the
+        self-referential hold the healer closes; it is not this
+        test's subject.)
+
         Base behavior (RED evidence): live=True, reason="non-terminal
         member present" — the idle grandchild counts live and holds
         every guard consumer (emission gate, f2, boot sweep)."""
         _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        # Stamp the root (the gate-time posture — at the emission gate
+        # the sync helper has already stamped COMPLETED).
+        with strand_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET status = 'completed' "
+                    "WHERE instance_id = :r"
+                ),
+                {"r": ROOT},
+            )
         verdict = await _mlg.evaluate_mission_live(
             instance_repository=strand_harness.instance_repo,
             instance_id=ROOT,
@@ -510,6 +559,7 @@ class TestWatcherLossStrandRed:
             f"not hold mission liveness (base behavior: {verdict.reason})"
         )
         assert verdict.error is False
+        assert "strand member(s) excluded" in verdict.reason
 
     @pytest.mark.asyncio
     async def test_genuinely_running_descendant_still_holds(
@@ -683,20 +733,29 @@ class TestControls:
     async def test_c2_terminalized_straggler_unblocks(
         self, strand_harness,
     ):
-        """C2: terminalize the straggler → the next gate pass
-        publishes. Proves the block is CAUSED by the non-terminal
-        straggler and nothing else."""
-        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        """C2 (causal control, fix-stable): a non-terminal straggler
+        the strand exclusion does NOT cover (PAUSED — execution
+        evidence, operator domain) blocks the mission; once
+        terminalized, the next gate pass publishes. Proves the block
+        is CAUSED by the non-terminal straggler and nothing else."""
+        _seed_poison_tree(strand_harness.engine, with_ghost=False)
+        _insert_instance(
+            strand_harness.engine, "straggler-paused",
+            status=InstanceStatus.PAUSED.value,
+            parent_id=TESTER,
+            agent_id="worker",
+        )
         _insert_receipt(strand_harness.engine)
         _seed_child_completed_event(
             strand_harness.engine, T_CHILD_COMPLETED,
         )
 
-        # Drive 1: wedges (RED shape).
+        # Drive 1: held (paused straggler blocks — no publish).
         await _adrive_root_completion(strand_harness)
         assert _get_instance_row(
             strand_harness.engine, ROOT
         ).status == InstanceStatus.WAITING_CHILDREN.value
+        assert strand_harness.watcher_repo.get_watchers_for_job(RECEIPT_JOB)
 
         # Terminalize the straggler (operator-style cleanup).
         with strand_harness.engine.begin() as conn:
@@ -705,7 +764,7 @@ class TestControls:
                     "UPDATE instances SET status = 'terminated' "
                     "WHERE instance_id = :g"
                 ),
-                {"g": GHOST},
+                {"g": "straggler-paused"},
             )
 
         # Drive 2: gate passes now → publish fires.

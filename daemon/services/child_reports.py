@@ -2529,6 +2529,67 @@ Provide a concise summary:"""
                     f"{instance_id[:8]}...: {marker_err}"
                 )
 
+        # ── Component 2 (watcher-loss terminal strand, 2026-10-14) ──
+        # Asymmetry fix, first half: evaluate the RECURSIVE tree
+        # liveness BEFORE the COMPLETED stamp. The sync helper's
+        # live-children cross-check counts DIRECT children only; the
+        # emission-time ``_root_completion_gate`` re-checks the
+        # RECURSIVE tree. With a live depth-2+ member, the historical
+        # sequence was stamp COMPLETED → gate blocks → downgrade to
+        # WAITING_CHILDREN + suppressed publish (stamp-then-downgrade
+        # churn; on a stranded-tree shape the suppressed publish then
+        # never re-arms — the watcher-loss wedge). Evaluating the same
+        # recursive predicate the gate uses BEFORE the sync helper
+        # runs means a live-tree root never reaches the stamp at all:
+        # no discharge, no stamp, no downgrade write. The stage-6
+        # gate below remains as the defense-in-depth emission check
+        # (unchanged) for regressions between this eval and publish.
+        #
+        # Fail-OPEN (C3 contract): any exception here logs a WARNING
+        # and proceeds to the sync helper — the at-least-once
+        # terminal-delivery guarantee outranks the churn optimization.
+        # ROOT lane only (``parent_id is None``): child lanes have no
+        # stamp-vs-gate asymmetry (their reports ride the parent's
+        # gates).
+        if instance_meta is not None and instance_meta.parent_id is None:
+            try:
+                from .mission_live_guard import (
+                    evaluate_mission_live as _pre_eval,
+                    MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS as _pre_timeout,
+                )
+                _pre_verdict = await _pre_eval(
+                    instance_repository=self._instance_repository,
+                    instance_id=instance_id,
+                    # Bus leg not consulted here (the sync helper's
+                    # bus gate owns it, same seam); only the
+                    # recursive tree legs gate this early-out.
+                    bus_pending_count=None,
+                    timeout_seconds=_pre_timeout,
+                    # skip_root: the root's own (non-terminal) status
+                    # is what the stamp is about to flip — only
+                    # DESCENDANT liveness gates the pre-stamp
+                    # decision.
+                    skip_root=True,
+                )
+                if _pre_verdict.live:
+                    logger.info(
+                        "root_completion: pre-stamp recursive liveness "
+                        "holds for %s... (%s) — skipping the COMPLETED "
+                        "stamp entirely (no stamp→downgrade churn; the "
+                        "next message-completed signal re-checks)",
+                        instance_id[:8], _pre_verdict.reason,
+                    )
+                    return
+                # Not live (all-terminal after strand exclusion, or
+                # timed-out zombie) → fall through to the sync stamp.
+            except Exception as _pre_exc:  # noqa: BLE001 — fail-OPEN
+                logger.warning(
+                    "root_completion: pre-stamp liveness eval raised "
+                    "for %s... (%s); proceeding to the sync stamp "
+                    "(fail-open per C3 contract)",
+                    instance_id[:8], _pre_exc,
+                )
+
         # MAJOR A fix (re-arm safety net, 2026-06-22; Phase 1 bus
         # migration 2026-06-23): wrap the ``asyncio.to_thread`` call in
         # the per-parent ``asyncio.Lock`` when the bus is wired. After

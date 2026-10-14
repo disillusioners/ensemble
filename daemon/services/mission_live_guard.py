@@ -173,6 +173,7 @@ async def evaluate_mission_live(
     instance_id: str | None,
     bus_pending_count: int | None = None,
     timeout_seconds: int = MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+    skip_root: bool = False,
 ) -> MissionLiveVerdict:
     """Evaluate the three-leg mission-live guard (+ zombie backstop).
 
@@ -200,6 +201,17 @@ async def evaluate_mission_live(
             decide).
         timeout_seconds: Zombie-backstop window; defaults to
             ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``.
+        skip_root: Pre-stamp mode (watcher-loss strand component 2,
+            2026-10-14) — do NOT count the ROOT itself as a live leg.
+            For callers that evaluate liveness immediately BEFORE
+            stamping the root COMPLETED: at that moment the root's
+            own non-terminal status is exactly what the stamp is
+            about to flip, so leg (c) is tautologically live and
+            would wrongly suppress every completion. Only the
+            DESCENDANTS' liveness (leg b, strand-aware) gates the
+            pre-stamp decision. Leg (c) stays active for all other
+            consumers (f2, sweeps, the emission gate — where the
+            root is already terminal when the gate runs).
 
     Returns:
         :class:`MissionLiveVerdict`. NEVER raises — internal errors
@@ -212,6 +224,7 @@ async def evaluate_mission_live(
             instance_id=instance_id,
             bus_pending_count=bus_pending_count,
             timeout_seconds=timeout_seconds,
+            skip_root=skip_root,
         )
     except Exception as exc:  # noqa: BLE001 — fail-open is the contract
         logger.warning(
@@ -238,6 +251,7 @@ async def _evaluate_legs(
     instance_id: str | None,
     bus_pending_count: int | None,
     timeout_seconds: int,
+    skip_root: bool = False,
 ) -> MissionLiveVerdict:
     """Leg evaluation (async — blocking repo reads go through
     ``asyncio.to_thread`` per the repo's standard pattern). Raises on
@@ -360,7 +374,14 @@ async def _evaluate_legs(
         member_parent[tree_id] = getattr(instance, "parent_id", None)
         # FIXBACK: do NOT early-return on a non-terminal observation.
         # Record it; the post-walk decision tree decides the verdict.
-        if status is not None and status not in TERMINAL_INSTANCE_STATUSES:
+        # skip_root (pre-stamp mode): the root's own non-terminal
+        # status is what the caller's stamp is about to flip — it is
+        # not a hold reason on this evaluation.
+        if (
+            status is not None
+            and status not in TERMINAL_INSTANCE_STATUSES
+            and not (skip_root and tree_id == instance_id)
+        ):
             any_non_terminal = True
         # Terminal-or-not, contribute ``last_activity_at`` to the
         # anchor (a live descendant's recent activity keeps the
@@ -413,6 +434,7 @@ async def _evaluate_legs(
                 st is not None
                 and st not in TERMINAL_INSTANCE_STATUSES
                 and tid not in stranded_set
+                and not (skip_root and tid == instance_id)
                 for tid, st in member_status.items()
             )
 
