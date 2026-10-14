@@ -75,7 +75,6 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from daemon.auth.decorators import require_scope
-from daemon.models import ErrorCodes, ErrorResponse
 from daemon.repositories.custom_agent_configs import CustomAgentIdError
 from daemon.repositories.custom_agent_configs.repository import (
     CustomAgentCollisionError,
@@ -111,6 +110,20 @@ _ERR_AUTH_NOT_CONFIGURED = "AUTH_NOT_CONFIGURED"
 #: Stable error code token for the 401 body (auth-ON but AuthContext
 #: missing — middleware gap; see _actor_from_request below).
 _ERR_AUTH_CONTEXT_MISSING = "AUTH_CONTEXT_MISSING"
+#: Stable error code token for the 404 body on GET-single / DELETE
+#: when no live custom-agent row matches the wire id. Mirrors the
+#: prompts family token ``VERSION_NOT_FOUND`` — the H3 envelope
+#: contract is shape-consistent across routers.
+_ERR_CUSTOM_AGENT_NOT_FOUND = "CUSTOM_AGENT_NOT_FOUND"
+#: Stable error code token for the 400 body on user-supplied
+#: validation errors (mirrors the prompts family token
+#: ``INVALID_REQUEST`` — reused deliberately per the F1 scope-
+#: reuse convention).
+_ERR_INVALID_REQUEST = "INVALID_REQUEST"
+#: Stable error code token for the 503 body when the manager or
+#: the lifecycle service is not wired (test-fixture gap; NOT a
+#: client-facing failure).
+_ERR_INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
 def _err(status_code: int, error: str, message: str) -> HTTPException:
@@ -227,27 +240,23 @@ def _lifecycle_service(request: Request) -> Any:
     """
     manager = getattr(request.app.state, "manager", None)
     if manager is None:
-        raise HTTPException(
-            status_code=503,
-            detail=ErrorResponse(
-                code=ErrorCodes.INTERNAL_ERROR,
-                message=(
-                    "Custom-agent lifecycle service unavailable "
-                    "(manager not configured)"
-                ),
-            ).model_dump(),
+        raise _err(
+            503,
+            _ERR_INTERNAL_ERROR,
+            (
+                "Custom-agent lifecycle service unavailable "
+                "(manager not configured)"
+            ),
         )
     svc = getattr(manager, "_custom_agent_lifecycle_service", None)
     if svc is None:
-        raise HTTPException(
-            status_code=503,
-            detail=ErrorResponse(
-                code=ErrorCodes.INTERNAL_ERROR,
-                message=(
-                    "Custom-agent lifecycle service unavailable "
-                    "(_custom_agent_lifecycle_service missing)"
-                ),
-            ).model_dump(),
+        raise _err(
+            503,
+            _ERR_INTERNAL_ERROR,
+            (
+                "Custom-agent lifecycle service unavailable "
+                "(_custom_agent_lifecycle_service missing)"
+            ),
         )
     return svc
 
@@ -303,40 +312,34 @@ async def create_custom_agent(
     # Body validation — required fields + types.
     user_name = body.get("user_name")
     if not user_name or not isinstance(user_name, str):
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=(
-                    "user_name is required (must be a non-empty "
-                    "string — alphanumeric + hyphen + underscore)"
-                ),
-            ).model_dump(),
+        raise _err(
+            400,
+            _ERR_INVALID_REQUEST,
+            (
+                "user_name is required (must be a non-empty "
+                "string — alphanumeric + hyphen + underscore)"
+            ),
         )
 
     name = body.get("name")
     if not name or not isinstance(name, str):
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message="name is required (must be a non-empty string)",
-            ).model_dump(),
+        raise _err(
+            400,
+            _ERR_INVALID_REQUEST,
+            "name is required (must be a non-empty string)",
         )
 
     soul_md = body.get("soul_md")
     if not isinstance(soul_md, str):
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=(
-                    "soul_md is required (User Directive #5A: "
-                    "customs have NO template fallback; an empty "
-                    "soul would trip NoPromptContentError on "
-                    "every spawn)"
-                ),
-            ).model_dump(),
+        raise _err(
+            400,
+            _ERR_INVALID_REQUEST,
+            (
+                "soul_md is required (User Directive #5A: "
+                "customs have NO template fallback; an empty "
+                "soul would trip NoPromptContentError on "
+                "every spawn)"
+            ),
         )
 
     # NOTE: we look up the lifecycle service AFTER the body
@@ -384,44 +387,21 @@ async def create_custom_agent(
             tools_deny_spawn=body.get("tools_deny_spawn"),
         )
     except CustomAgentIdError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=str(e),
-            ).model_dump(),
-        )
+        raise _err(400, _ERR_INVALID_REQUEST, str(e))
     except CustomAgentCollisionError as e:
-        raise HTTPException(
-            status_code=409,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=str(e),
-            ).model_dump(),
-        )
+        raise _err(409, _ERR_INVALID_REQUEST, str(e))
     except CustomAgentCreationError as e:
         # Could be a 'soul_md empty', an IntegrityError (collides
         # with existing wire id), or a wide-txn error. Map to a
         # 400 for the surface that the operator usually can
         # correct via a re-POST with tweaked body. The router's
         # 409 fallback (wire-id collision) is handled by the
-        # IntegrityError class message text.
+        # IntegrityError class message text — H5 retires this
+        # sniff once the service pre-checks via a SELECT.
         msg = str(e)
         if "already exists" in msg.lower():
-            raise HTTPException(
-                status_code=409,
-                detail=ErrorResponse(
-                    code=ErrorCodes.INVALID_REQUEST,
-                    message=msg,
-                ).model_dump(),
-            )
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=msg,
-            ).model_dump(),
-        )
+            raise _err(409, _ERR_INVALID_REQUEST, msg)
+        raise _err(400, _ERR_INVALID_REQUEST, msg)
 
     return result
 
@@ -453,20 +433,12 @@ async def get_custom_agent(request: Request, user_name: str):
     try:
         config = await svc.get_by_agent_id(user_name)
     except CustomAgentIdError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=str(e),
-            ).model_dump(),
-        )
+        raise _err(400, _ERR_INVALID_REQUEST, str(e))
     if config is None:
-        raise HTTPException(
-            status_code=404,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=f"Custom agent not found: {user_name}",
-            ).model_dump(),
+        raise _err(
+            404,
+            _ERR_CUSTOM_AGENT_NOT_FOUND,
+            f"Custom agent not found: {user_name}",
         )
     return config
 
@@ -486,20 +458,12 @@ async def delete_custom_agent(request: Request, user_name: str):
             user_name=user_name,
         )
     except CustomAgentIdError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=str(e),
-            ).model_dump(),
-        )
+        raise _err(400, _ERR_INVALID_REQUEST, str(e))
     if not deleted:
-        raise HTTPException(
-            status_code=404,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=f"Custom agent not found: {user_name}",
-            ).model_dump(),
+        raise _err(
+            404,
+            _ERR_CUSTOM_AGENT_NOT_FOUND,
+            f"Custom agent not found: {user_name}",
         )
     return {
         "deleted": True,
