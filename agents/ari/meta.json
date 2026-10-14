@@ -16,6 +16,7 @@
       "self",
       "help",
       "image",
+      "image-gen",
       "context",
       "shared_meta_kv",
       "project",

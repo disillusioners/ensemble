@@ -2132,3 +2132,762 @@ class TestOutgoingMessageImagesBackwardCompat:
         assert msg.images is not None
         assert len(msg.images) == 1
         assert msg.images[0].image_id == "9" * 32
+
+
+# ============================================================================
+# Phase 2 — image-gen marker-family extraction tests (ADDITIVE)
+# ============================================================================
+# Implements Phase 2 Tasks #4 + #5 from
+# ``.agents/shared/planning/image-gen-tool/phase2-plan.md``:
+#   * ``TestExtractImageGenMarkersUnit`` — truth-table clone of
+#     ``TestExtractChartImagesUnit`` (above) for the image-gen feature.
+#   * Byte-compat guard — golden chart-render fixtures assert identical
+#     ``extract_chart_images`` outputs pre/post Phase 2 (chart-render path
+#     is byte-stable; the family pass is purely ADDITIVE over non-chart
+#     lines).
+#   * SWEEPER-LAST-ON-RESIDUAL test — load-bearing AM13 correctness proof
+#     (architecture-recommendation.md §3 + §6, phase2-plan.md §Reviewer
+#     implementation-time notes). Generalized sweeper textually matches
+#     well-formed family markers; safety exists ONLY because the family
+#     pass runs BEFORE the sweeper. The test pins this invariant — if the
+#     pass order regresses, the test goes red.
+#
+# Imports are scoped to this section so the existing module-level imports
+# above remain untouched (ADDITIVE-only discipline per the byte-compat
+# hard gate).
+
+
+from daemon.sources.dispatcher import (  # noqa: E402
+    ALLOWED_FEATURES,
+    _FAMILY_MARKER_RE,
+    _MARKER_RE,
+    _NEAR_MISS_RE,
+    _resolve_family_images,
+    extract_chart_images,
+    extract_image_markers,
+)
+
+
+class TestExtractImageGenMarkersUnit:
+    """Pure-function unit tests for ``extract_image_markers`` (Phase 2 Task #4).
+
+    Truth-table clone of ``TestExtractChartImagesUnit`` — extraction,
+    dedupe, first-occurrence order, strip-from-chat-text, near-miss junk
+    sweep, multi-marker lines, mixed chart+image-gen text.
+    """
+
+    def test_valid_single_image_gen_marker_extracted(self):
+        content = (
+            "Hello world\n"
+            "<!-- ens-img:image-gen:abcdef0123456789abcdef0123456789 -->\n"
+            "More text"
+        )
+        stripped, by_feature = extract_image_markers(content)
+        assert by_feature == {
+            "image-gen": ["abcdef0123456789abcdef0123456789"]
+        }
+        assert "Hello world" in stripped
+        assert "More text" in stripped
+        assert "<!-- ens-img" not in stripped
+
+    def test_no_marker_returns_empty_dict(self):
+        content = "Just plain text, no marker."
+        stripped, by_feature = extract_image_markers(content)
+        assert by_feature == {}
+        assert stripped == content
+
+    def test_malformed_image_gen_marker_with_extra_whitespace_not_extracted(self):
+        # Extra whitespace inside the comment — FAMILY regex requires the
+        # exact full-line anchored form. The sweeper is whole-line so an
+        # in-prose marker is left untouched (cosmetic; only self-contained
+        # lines get stripped).
+        content = (
+            "Text <!--  ens-img:image-gen:abcdef0123456789abcdef0123456789  -->"
+            " after"
+        )
+        stripped, by_feature = extract_image_markers(content)
+        assert by_feature == {}
+        assert "ens-img" in stripped
+        assert stripped == content
+
+    def test_malformed_image_gen_marker_with_invented_id_not_extracted(self):
+        # 31-char id (one short) — FAMILY regex (32 hex) must NOT match.
+        content = (
+            "<!-- ens-img:image-gen:abcdef0123456789abcdef012345678 -->\n"
+        )
+        stripped, by_feature = extract_image_markers(content)
+        assert by_feature == {}
+        assert "ens-img" not in stripped
+
+    def test_duplicate_image_gen_marker_dedupes_first_occurrence(self):
+        content = (
+            "<!-- ens-img:image-gen:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->\n"
+            "Some text\n"
+            "<!-- ens-img:image-gen:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"
+        )
+        stripped, by_feature = extract_image_markers(content)
+        assert by_feature == {
+            "image-gen": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+        }
+        assert stripped.count("ens-img") == 0
+
+    def test_multiple_distinct_image_gen_markers_first_occurrence_order(self):
+        content = (
+            "<!-- ens-img:image-gen:11111111111111111111111111111111 -->\n"
+            "x\n"
+            "<!-- ens-img:image-gen:22222222222222222222222222222222 -->\n"
+            "y\n"
+            "<!-- ens-img:image-gen:33333333333333333333333333333333 -->"
+        )
+        stripped, by_feature = extract_image_markers(content)
+        assert by_feature == {
+            "image-gen": [
+                "11111111111111111111111111111111",
+                "22222222222222222222222222222222",
+                "33333333333333333333333333333333",
+            ]
+        }
+        assert "ens-img" not in stripped
+
+    def test_image_gen_near_miss_stripped_not_extracted(self):
+        # Sweeper strips junk; the locked + family passes don't claim it.
+        content = (
+            "Text line\n"
+            "  <!-- ens-img:image-gen:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz -->\n"
+            "More"
+        )
+        stripped, by_feature = extract_image_markers(content)
+        assert by_feature == {}
+        assert "ens-img" not in stripped
+
+    def test_image_gen_valid_marker_plus_near_miss_in_same_input(self):
+        content = (
+            "<!-- ens-img:image-gen:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->\n"
+            "middle\n"
+            "<!-- ens-img:image-gen:toolongidfortheregexpaddedchars000 -->\n"
+            "end"
+        )
+        stripped, by_feature = extract_image_markers(content)
+        assert by_feature == {
+            "image-gen": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+        }
+        assert "ens-img" not in stripped
+        assert "middle" in stripped
+        assert "end" in stripped
+
+    def test_empty_content(self):
+        stripped, by_feature = extract_image_markers("")
+        assert by_feature == {}
+        assert stripped == ""
+
+    def test_marker_on_own_line_preserves_other_lines(self):
+        content = (
+            "first line\n"
+            "<!-- ens-img:image-gen:cccccccccccccccccccccccccccccccc -->\n"
+            "last line"
+        )
+        stripped, by_feature = extract_image_markers(content)
+        assert by_feature == {
+            "image-gen": ["cccccccccccccccccccccccccccccccc"]
+        }
+        assert "first line" in stripped
+        assert "last line" in stripped
+        assert "ens-img" not in stripped
+
+
+class TestExtractMixedChartAndImageGen:
+    """Phase 2 — mixed chart + image-gen extraction in a single content."""
+
+    def test_chart_and_image_gen_extracted_independently(self):
+        chart_id = "d" * 32
+        image_gen_id = "e" * 32
+        content = (
+            f"Here is a chart and an image\n"
+            f"<!-- ens-img:chart-render:{chart_id} -->\n"
+            f"middle\n"
+            f"<!-- ens-img:image-gen:{image_gen_id} -->\n"
+            f"end"
+        )
+        stripped, by_feature = extract_image_markers(content)
+        assert by_feature == {
+            "chart-render": [chart_id],
+            "image-gen": [image_gen_id],
+        }
+        assert "ens-img" not in stripped
+        assert "Here is a chart and an image" in stripped
+        assert "middle" in stripped
+        assert "end" in stripped
+
+    def test_same_id_under_different_features_extracted_once_first_feature_wins(self):
+        # The id space is shared (32-hex); the same id under two features is
+        # a forgery / namespace-confusion pattern. Dedup is per-id across
+        # all features (one image per id; first-occurrence wins).
+        same_id = "f" * 32
+        content = (
+            f"<!-- ens-img:chart-render:{same_id} -->\n"
+            f"middle\n"
+            f"<!-- ens-img:image-gen:{same_id} -->"
+        )
+        stripped, by_feature = extract_image_markers(content)
+        # First-occurrence (chart-render) wins; image-gen is dropped.
+        assert by_feature == {"chart-render": [same_id]}
+        assert "ens-img" not in stripped
+
+    def test_chart_renders_byte_compat_with_existing_chart_tests(self):
+        # The chart-render extraction path inside ``extract_image_markers``
+        # delegates to ``extract_chart_images`` and must therefore produce
+        # results byte-identical to the chart-only function for chart-only
+        # inputs.
+        content = (
+            "<!-- ens-img:chart-render:11111111111111111111111111111111 -->\n"
+            "x\n"
+            "<!-- ens-img:chart-render:22222222222222222222222222222222 -->"
+        )
+        chart_stripped, chart_ids = extract_chart_images(content)
+        family_stripped, family_by_feature = extract_image_markers(content)
+        assert family_stripped == chart_stripped
+        assert family_by_feature == {"chart-render": chart_ids}
+
+
+class TestSweeperLastOnResidual:
+    """Phase 2 Task #4 — the AM13 load-bearing pass-order invariant proof.
+
+    The generalized near-miss sweeper (``_NEAR_MISS_RE``) TEXTUALLY MATCHES
+    well-formed family markers — ``32-hex ⊂ [^>\n]{0,64}``. Safety exists
+    ONLY because the sweeper runs LAST on lines the locked + family passes
+    did not claim. If a future contributor re-orders the passes or runs
+    the sweeper over the raw input, well-formed markers get stripped-and-
+    lost silently.
+
+    The invariant comment in ``dispatcher.py`` is the architectural
+    correctness proof; this test is the executable proof.
+    """
+
+    def test_sweeper_textually_matches_a_well_formed_image_gen_marker(self):
+        # Direct sanity: the sweeper, taken alone, DOES match a well-formed
+        # image-gen marker. This is the load-bearing observation.
+        line = "<!-- ens-img:image-gen:abcdef0123456789abcdef0123456789 -->"
+        assert _NEAR_MISS_RE.match(line) is not None
+
+    def test_sweeper_runs_last_so_well_formed_marker_is_extracted(self):
+        # End-to-end through ``extract_image_markers``: the well-formed
+        # image-gen marker survives (extracted into the family dict) BECAUSE
+        # the family pass consumed it before the sweeper ran. If the pass
+        # order regressed, the marker would be stripped-and-lost and the
+        # family dict would be empty.
+        marker = "abcdef0123456789abcdef0123456789"
+        content = f"text\n<!-- ens-img:image-gen:{marker} -->\nmore"
+        stripped, by_feature = extract_image_markers(content)
+        assert by_feature == {"image-gen": [marker]}
+        assert "ens-img" not in stripped
+        assert "text" in stripped
+        assert "more" in stripped
+
+    def test_family_pass_uses_unclaimed_lines_only(self):
+        # The family pass operates on the residual AFTER the locked pass
+        # consumed chart-render lines. A well-formed chart-render marker
+        # must NOT be re-extracted by the family pass (would double-count).
+        chart_id = "1" * 32
+        image_gen_id = "2" * 32
+        content = (
+            f"<!-- ens-img:chart-render:{chart_id} -->\n"
+            f"<!-- ens-img:image-gen:{image_gen_id} -->"
+        )
+        _, by_feature = extract_image_markers(content)
+        assert by_feature == {
+            "chart-render": [chart_id],
+            "image-gen": [image_gen_id],
+        }
+        # And critically: the chart id appears exactly once (no double-
+        # extraction from the family pass).
+        assert by_feature["chart-render"].count(chart_id) == 1
+
+
+class TestExtractChartImagesByteCompatGuard:
+    """Phase 2 Task #5 — byte-compat guard for chart-render extraction.
+
+    Golden chart-render fixtures assert ``extract_chart_images`` output
+    identity pre/post Phase 2. The chart pipeline is byte-stable; the
+    family pass is purely ADDITIVE over non-chart lines.
+
+    Frozen-tuple capture procedure (review-fix, council NEEDS-FIXES P1):
+    the eight ``FROZEN_TUPLES`` below were captured by importing the
+    BASE ``daemon/sources/dispatcher.py`` at sha ``8c525315e`` (the
+    pinned baseline the byte-compat contract was authored against) via::
+
+        git -C /home/nea/ensemble-src show 8c525315e:daemon/sources/dispatcher.py \\
+            > /tmp/img-gen-scratch/dispatcher_base.py
+        git -C /home/nea/ensemble-src show 8c525315e:daemon/sources/base.py \\
+            > /tmp/img-gen-scratch/base_base.py
+        # load via importlib in a /tmp scratch (fenced — mktemp scratch dir,
+        # FAKE_HOME guard; never resolve live-shaped paths)
+
+    and running ``extract_chart_images`` over each fixture verbatim. The
+    tuples assert ``(stripped_text, image_ids)`` byte-identity; any
+    future contributor who changes ``extract_chart_images`` output for a
+    chart-render fixture fails this test, per the byte-compat contract.
+    """
+
+    # Each entry: (expected_stripped_text, expected_image_ids_list).
+    # Captured at base 8c525315e — the commit the Phase 2 contract was authored against.
+    FROZEN_TUPLES = [
+        # 1. Single valid marker
+        ("Hello world\nMore text", ["abcdef0123456789abcdef0123456789"]),
+        # 2. No marker
+        ("Just plain text, no marker.", []),
+        # 3. Three distinct markers in first-occurrence order
+        (
+            "x\ny",
+            [
+                "11111111111111111111111111111111",
+                "22222222222222222222222222222222",
+                "33333333333333333333333333333333",
+            ],
+        ),
+        # 4. Duplicate marker dedupes to first occurrence
+        ("Some text", ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]),
+        # 5. Near-miss stripped (33-char id)
+        ("Text line\nMore", []),
+        # 6. Empty content
+        ("", []),
+        # 7. Marker on own line preserves other lines
+        ("first line\nlast line", ["cccccccccccccccccccccccccccccccc"]),
+        # 8. Mixed valid + near-miss
+        ("middle\nend", ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]),
+    ]
+
+    def test_chart_only_golden_fixtures_byte_identical(self):
+        # Golden fixtures chosen to exercise every ``extract_chart_images``
+        # code path (dedupe, multi-id, near-miss, empty, own-line, mixed).
+        golden_inputs = [
+            # 1. Single valid marker
+            "Hello world\n"
+            "<!-- ens-img:chart-render:abcdef0123456789abcdef0123456789 -->\n"
+            "More text",
+            # 2. No marker
+            "Just plain text, no marker.",
+            # 3. Three distinct markers in first-occurrence order
+            "<!-- ens-img:chart-render:11111111111111111111111111111111 -->\n"
+            "x\n"
+            "<!-- ens-img:chart-render:22222222222222222222222222222222 -->\n"
+            "y\n"
+            "<!-- ens-img:chart-render:33333333333333333333333333333333 -->",
+            # 4. Duplicate marker dedupes to first occurrence
+            "<!-- ens-img:chart-render:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->\n"
+            "Some text\n"
+            "<!-- ens-img:chart-render:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->",
+            # 5. Near-miss stripped (33-char id)
+            "Text line\n"
+            "<!-- ens-img:chart-render:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz -->\n"
+            "More",
+            # 6. Empty content
+            "",
+            # 7. Marker on own line preserves other lines
+            "first line\n"
+            "<!-- ens-img:chart-render:cccccccccccccccccccccccccccccccc -->\n"
+            "last line",
+            # 8. Mixed valid + near-miss
+            "<!-- ens-img:chart-render:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->\n"
+            "middle\n"
+            "<!-- ens-img:chart-render:toolongidfortheregexpaddedchars000 -->\n"
+            "end",
+        ]
+        # FROZEN_TUPLES was captured at base 8c525315e (see class docstring).
+        # Any change to ``extract_chart_images`` for chart-render inputs fails
+        # this assertion, enforcing the byte-compat contract.
+        assert len(self.FROZEN_TUPLES) == len(golden_inputs), (
+            "FROZEN_TUPLES length MUST match golden_inputs length"
+        )
+        for idx, (golden, expected) in enumerate(
+            zip(golden_inputs, self.FROZEN_TUPLES), start=1
+        ):
+            actual = extract_chart_images(golden)
+            assert actual == expected, (
+                f"chart-render byte-compat broken for fixture #{idx}; "
+                f"expected (stripped, ids)={expected!r}, got {actual!r}.\n"
+                f"Golden input:\n{golden!r}"
+            )
+
+    def test_image_gen_marker_does_not_affect_chart_only_pipeline(self):
+        # ``extract_chart_images`` (chart-only byte-compat function) must
+        # be unaffected by image-gen markers in the input — the chart
+        # pipeline ignores image-gen markers (they fall through the chart
+        # extraction + chart near-miss sweep and remain in the residual).
+        # The new family function is the one that extracts image-gen.
+        chart_id = "a" * 32
+        image_gen_id = "b" * 32
+        content = (
+            f"<!-- ens-img:chart-render:{chart_id} -->\n"
+            f"<!-- ens-img:image-gen:{image_gen_id} -->"
+        )
+        stripped, chart_ids = extract_chart_images(content)
+        # Chart-render extraction still finds the chart marker.
+        assert chart_ids == [chart_id]
+        # The image-gen marker survives the chart-only sweep (it is not a
+        # chart-render near-miss) — the family pass is what removes it.
+        assert "image-gen" in stripped
+        assert image_gen_id in stripped
+
+
+class TestAllowedFeaturesProvenanceGate:
+    """Phase 2 Task #2 — ``ALLOWED_FEATURES`` provenance gate unit coverage.
+
+    Unit-level coverage of the explicit frozenset gate at the delivery
+    boundary. Integration coverage (resolver drop + WARN) lives in the
+    seam tests below + the family-resolver unit tests.
+    """
+
+    def test_allowed_features_contains_both_chart_and_image_gen(self):
+        assert "chart-render" in ALLOWED_FEATURES
+        assert "image-gen" in ALLOWED_FEATURES
+
+    def test_allowed_features_is_a_frozenset(self):
+        # The frozenset type is the contract: future features extend by
+        # adding new entries to a literal; mutation is refused.
+        assert isinstance(ALLOWED_FEATURES, frozenset)
+
+    @pytest.mark.asyncio
+    async def test_resolve_family_images_refuses_unknown_feature(self):
+        # Default-deny for a feature not in ALLOWED_FEATURES — the resolver
+        # returns [] without touching the store.
+        from daemon.services.tmp_image_store import TmpImageRecord
+
+        record = TmpImageRecord(
+            image_id="c" * 32,
+            content_type="image/png",
+            size_bytes=3,
+            uploaded_at="2026-10-04T00:00:00+00:00",
+            sha256_hex="0" * 64,
+            provenance={"feature": "image-gen"},
+            retention_class="normal",
+        )
+
+        class _FakeStore:
+            def __init__(self):
+                self.open_full_calls: list[str] = []
+
+            def open_full(self, image_id):
+                # If called for an unknown feature, the resolver short-
+                # circuits BEFORE opening the store — assert no calls.
+                self.open_full_calls.append(image_id)
+                return record
+
+            def open_with_meta(self, image_id):
+                return b"PNG", "image/png", "0" * 64
+
+        fake_store = _FakeStore()
+        # Future feature "video-gen" is NOT in ALLOWED_FEATURES today.
+        atts = await _resolve_family_images("video-gen", ["c" * 32], fake_store)
+        assert atts == []
+        assert fake_store.open_full_calls == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_family_images_drop_provenance_mismatch(self):
+        # Record advertises "chart-render" but caller asks for "image-gen"
+        # → drop + WARN (text fallback).
+        from daemon.services.tmp_image_store import TmpImageRecord
+
+        record = TmpImageRecord(
+            image_id="d" * 32,
+            content_type="image/png",
+            size_bytes=3,
+            uploaded_at="2026-10-04T00:00:00+00:00",
+            sha256_hex="0" * 64,
+            provenance={"feature": "chart-render"},  # wrong feature
+            retention_class="normal",
+        )
+
+        class _FakeStore:
+            def open_full(self, image_id):
+                return record
+
+            def open_with_meta(self, image_id):
+                return b"PNG", "image/png", "0" * 64
+
+        atts = await _resolve_family_images("image-gen", ["d" * 32], _FakeStore())
+        assert atts == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_family_images_deliver_matching_feature(self):
+        # Happy path: provenance matches the requested feature.
+        from daemon.services.tmp_image_store import TmpImageRecord
+
+        record = TmpImageRecord(
+            image_id="e" * 32,
+            content_type="image/png",
+            size_bytes=3,
+            uploaded_at="2026-10-04T00:00:00+00:00",
+            sha256_hex="0" * 64,
+            provenance={"feature": "image-gen"},
+            retention_class="normal",
+        )
+
+        class _FakeStore:
+            def open_full(self, image_id):
+                return record
+
+            def open_with_meta(self, image_id):
+                return b"PNG", "image/png", "0" * 64
+
+        atts = await _resolve_family_images("image-gen", ["e" * 32], _FakeStore())
+        assert len(atts) == 1
+        assert atts[0].image_id == "e" * 32
+        assert atts[0].filename.startswith("image-")
+
+
+class TestFamilyRegexPinning:
+    """Pin the new ``_FAMILY_MARKER_RE`` regex shape (decisions.md §D2)."""
+
+    def test_family_re_exact_match_image_gen(self):
+        line = "<!-- ens-img:image-gen:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"
+        m = _FAMILY_MARKER_RE.match(line)
+        assert m is not None
+        assert m.group(1) == "image-gen"
+        assert m.group(2) == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    def test_family_re_exact_match_chart_render(self):
+        # The family regex also matches chart-render lines (the LOCKED
+        # regex claims them FIRST so they are not double-extracted, but
+        # the family regex shape is intentionally a superset).
+        line = "<!-- ens-img:chart-render:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"
+        m = _FAMILY_MARKER_RE.match(line)
+        assert m is not None
+        assert m.group(1) == "chart-render"
+
+    def test_family_re_rejects_extra_text(self):
+        line = "<!-- ens-img:image-gen:aaaaaaaaaaaaaaaa --> junk"
+        assert _FAMILY_MARKER_RE.match(line) is None
+
+    def test_family_re_rejects_unknown_feature_token(self):
+        # Uppercase or underscore in the feature token → not matched
+        # (lowercase-kebab per D2 grammar).
+        for bad in ("Image-Gen", "image_gen", "IMAGE-GEN", "image.gen"):
+            line = f"<!-- ens-img:{bad}:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"
+            assert _FAMILY_MARKER_RE.match(line) is None, (
+                f"family regex must reject feature token {bad!r}"
+            )
+
+
+class TestBothSeamImageGenEndToEnd:
+    """Phase 2 — end-to-end image-gen marker through BOTH dispatch_completed
+    AND dispatch_message seams, mirroring the existing chart-render seam
+    coverage (``TestProgressiveLaneExtractsAndStrips``,
+    ``TestCompletedLaneExtractsAndStrips``) for the image-gen feature.
+    """
+
+    @pytest.mark.asyncio
+    async def test_progressive_lane_image_gen_extracts_and_strips(self):
+        image_gen_marker = "a" * 32
+        from daemon.services.tmp_image_store import TmpImageRecord
+        record = TmpImageRecord(
+            image_id=image_gen_marker,
+            content_type="image/png",
+            size_bytes=3,
+            uploaded_at="2026-10-04T00:00:00+00:00",
+            sha256_hex="0" * 64,
+            provenance={"feature": "image-gen"},
+            retention_class="normal",
+        )
+
+        class _FakeStore:
+            def __init__(self):
+                self.delete_calls: list[str] = []
+
+            def open_full(self, image_id):
+                return record
+
+            def open_with_meta(self, image_id):
+                return b"PNG", "image/png", "0" * 64
+
+            def delete(self, image_id):
+                self.delete_calls.append(image_id)
+                return True
+
+        fake_store = _FakeStore()
+        adapter = AsyncMock()
+        adapter.send = AsyncMock(return_value=True)
+
+        manager = Mock()
+        manager.tmp_image_store = fake_store
+
+        registry = Mock()
+        registry.get = Mock(return_value=adapter)
+        registry.manager = manager
+
+        dispatcher = ResponseDispatcher(registry=registry, subscriber_id="test")
+        await dispatcher.start()
+
+        content = (
+            "Here is your generated image\n"
+            f"<!-- ens-img:image-gen:{image_gen_marker} -->\n"
+            "hope you like it"
+        )
+        await dispatcher.dispatch_message(
+            source="discord:user1", content=content,
+        )
+
+        assert adapter.send.await_count == 1
+        outgoing = adapter.send.await_args.args[0]
+        assert "ens-img" not in outgoing.content
+        assert "Here is your generated image" in outgoing.content
+        assert "hope you like it" in outgoing.content
+        assert outgoing.images is not None
+        assert len(outgoing.images) == 1
+        assert outgoing.images[0].image_id == image_gen_marker
+        # filename prefix is image-<id8> (NOT chart-<id8>).
+        assert outgoing.images[0].filename.startswith("image-")
+
+        # store.delete fired once after successful delivery.
+        assert fake_store.delete_calls == [image_gen_marker]
+
+        await dispatcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_completed_lane_image_gen_extracts_and_strips(self):
+        image_gen_marker = "b" * 32
+        from daemon.services.tmp_image_store import TmpImageRecord
+        record = TmpImageRecord(
+            image_id=image_gen_marker,
+            content_type="image/png",
+            size_bytes=3,
+            uploaded_at="2026-10-04T00:00:00+00:00",
+            sha256_hex="0" * 64,
+            provenance={"feature": "image-gen"},
+            retention_class="normal",
+        )
+
+        class _FakeStore:
+            def __init__(self):
+                self.delete_calls: list[str] = []
+
+            def open_full(self, image_id):
+                return record
+
+            def open_with_meta(self, image_id):
+                return b"PNG", "image/png", "0" * 64
+
+            def delete(self, image_id):
+                self.delete_calls.append(image_id)
+                return True
+
+        fake_store = _FakeStore()
+        adapter = AsyncMock()
+        # Progressive returns False (forces completed lane to fire).
+        adapter.send = AsyncMock(side_effect=[False, True])
+
+        manager = Mock()
+        manager.tmp_image_store = fake_store
+        registry = Mock()
+        registry.get = Mock(return_value=adapter)
+        registry.manager = manager
+
+        dispatcher = ResponseDispatcher(registry=registry, subscriber_id="test")
+        await dispatcher.start()
+
+        source = "discord:user1"
+        content = (
+            f"Here is your generated image\n"
+            f"<!-- ens-img:image-gen:{image_gen_marker} -->\n"
+        )
+
+        await dispatcher.dispatch_message(source=source, content=content)
+        await dispatcher.dispatch_completed(
+            instance_id="test-instance",
+            message_id="msg-1",
+            source=source,
+            content=content,
+        )
+
+        assert adapter.send.await_count == 2
+        completed_call = adapter.send.await_args_list[-1].args[0]
+        assert "ens-img" not in completed_call.content
+        assert completed_call.images is not None
+        assert len(completed_call.images) == 1
+        assert completed_call.images[0].image_id == image_gen_marker
+        # store.delete fired EXACTLY ONCE (only the completed lane delivered).
+        assert fake_store.delete_calls == [image_gen_marker]
+
+        await dispatcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_mixed_chart_and_image_gen_delivered_together(self):
+        # Chart + image-gen markers in the same content → both delivered
+        # through one OutgoingMessage.images list.
+        chart_marker = "c" * 32
+        image_gen_marker = "d" * 32
+        from daemon.services.tmp_image_store import TmpImageRecord
+        chart_record = TmpImageRecord(
+            image_id=chart_marker,
+            content_type="image/png",
+            size_bytes=3,
+            uploaded_at="2026-10-04T00:00:00+00:00",
+            sha256_hex="0" * 64,
+            provenance={"feature": "chart-render"},
+            retention_class="normal",
+        )
+        image_record = TmpImageRecord(
+            image_id=image_gen_marker,
+            content_type="image/png",
+            size_bytes=3,
+            uploaded_at="2026-10-04T00:00:00+00:00",
+            sha256_hex="0" * 64,
+            provenance={"feature": "image-gen"},
+            retention_class="normal",
+        )
+
+        class _FakeStore:
+            def __init__(self):
+                self.delete_calls: list[str] = []
+
+            def open_full(self, image_id):
+                if image_id == chart_marker:
+                    return chart_record
+                if image_id == image_gen_marker:
+                    return image_record
+                raise KeyError(image_id)
+
+            def open_with_meta(self, image_id):
+                if image_id == chart_marker:
+                    return b"PNG", "image/png", "0" * 64
+                if image_id == image_gen_marker:
+                    return b"PNG", "image/png", "0" * 64
+                raise KeyError(image_id)
+
+            def delete(self, image_id):
+                self.delete_calls.append(image_id)
+                return True
+
+        fake_store = _FakeStore()
+        adapter = AsyncMock()
+        adapter.send = AsyncMock(return_value=True)
+
+        manager = Mock()
+        manager.tmp_image_store = fake_store
+        registry = Mock()
+        registry.get = Mock(return_value=adapter)
+        registry.manager = manager
+
+        dispatcher = ResponseDispatcher(registry=registry, subscriber_id="test")
+        await dispatcher.start()
+
+        content = (
+            f"Chart and image below:\n"
+            f"<!-- ens-img:chart-render:{chart_marker} -->\n"
+            f"<!-- ens-img:image-gen:{image_gen_marker} -->\n"
+            f"end"
+        )
+        await dispatcher.dispatch_message(
+            source="discord:user1", content=content,
+        )
+
+        assert adapter.send.await_count == 1
+        outgoing = adapter.send.await_args.args[0]
+        assert "ens-img" not in outgoing.content
+        assert outgoing.images is not None
+        assert len(outgoing.images) == 2
+        delivered_ids = {img.image_id for img in outgoing.images}
+        assert delivered_ids == {chart_marker, image_gen_marker}
+        # Both blobs deleted after delivery.
+        assert sorted(fake_store.delete_calls) == sorted([chart_marker, image_gen_marker])
+
+        await dispatcher.stop()

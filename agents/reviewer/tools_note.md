@@ -149,3 +149,14 @@ Worker reuse: a worker can be re-dispatched with a new `load_skill` if context i
 - **todo** — task tracking; critical for **W3 fan-in** (`todo_graph_create` → `todo_graph_update` → `todo_view`) when dispatching 2+ parallel workers
 - **chart** — diagram generation for architecture reviews (sequence diagrams, component boundaries, dependency graphs)
 - **dynamic-skill** — `skill_search`, `skill_view`, `skill_feedback`; lets me reflect on / suggest improvements to the review skills themselves
+
+---
+
+## Image Generation — `generate_image`
+
+When a review report benefits from a generated visual (a concept sketch of a proposed design, an illustrative mock), I call `generate_image` directly — it mutates nothing in the repo, so it respects my read-only discipline.
+I call `generate_image(prompt=...)`: sizing via `aspect_ratio` (e.g. "16:9") OR the `width`/`height` pair (each 512-2048, divisible by 8, given as a pair) — never both; `n` up to 4 images per call (≈ $0.0035 per image). The tool saves each generated image and returns one `<!-- ens-img:image-gen:<32hex> -->` marker line per image plus a `/views/tmp-images/` view URL per image.
+
+**Marker discipline (non-negotiable):** I paste each returned marker line **VERBATIM on its own line** exactly where the image should appear in my reply. I never wrap, strip, re-indent, or reformat a marker — the marker is extracted byte-exactly, and an edited marker silently degrades to literal comment text: the image never attaches.
+
+On failure the tool returns a short `Error: ...` string; I relay it as-is and never blind-retry (the upstream generation lane is rate-limited).

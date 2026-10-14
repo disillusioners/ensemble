@@ -1250,6 +1250,78 @@ class TestInstallerSkillHygiene:
 #     2026-10-05-unify-spawn-tools-acceptance.md §2 (A/B: PASS@base
 #     ×3 / FAIL@feature ×3; sha256-corroborated against pinned
 #     baselines at ac399874).
+#   - 2026-10-14 image-gen-tool commission Phase 1 (worktree
+#     /home/ensemble-worktrees/image-gen-tool, branch
+#     feature/image-gen-tool): agents/developer[v2]/tools_note.md
+#     re-pinned f8df81327f6553e169b583ea58dc10dbe4a8340d3e1405d4d1
+#     afabc84089988e → 62882063ca109e7829c097201e110a0edb872ade00041
+#     5372ab7ca016bee5748. Delta is EXACTLY one appended section,
+#     "## Image Generation — `generate_image`" (11 added lines at
+#     end-of-file; zero modified/removed lines — git diff audited
+#     before re-pin): when-to-use guidance, sizing contract
+#     (aspect_ratio XOR width/height pair, n≤4, ≈$0.0035/image), and
+#     the byte-exact `<!-- ens-img:image-gen:<32hex> -->` marker
+#     paste-verbatim discipline mirroring the charter chart-render
+#     teaching. No charter/render-pipeline semantic changed.
+#     Evidence pointer: tests/unit/tools/test_image_gen_tool.py
+#     (commission Phase 4 pack; Phase 1 unit rows all green) —
+#     seal ceremony per .agents/shared/planning/image-gen-tool/
+#     phase1-plan.md Seal-Trip Subsection.
+#   - 2026-10-14 image-gen-tool commission Phase 2 (worktree
+#     /home/ensemble-worktrees/image-gen-tool, branch
+#     feature/image-gen-tool): daemon/sources/dispatcher.py re-pinned
+#     50dd3211c1b6c59358c5426e046a88054a9ee58cc8001b8d57d53b6b2813fc3b
+#     → f03c0b4852bdc3e3d02e5171e0feedcb02b04a91f73b888b8314d5c62e042a6f.
+#     Delta is EXACTLY the marker-family generalization sanctioned by
+#     phase2-plan.md: NEW _FAMILY_MARKER_RE + generalized _NEAR_MISS_RE
+#     (AM13 sweep-order invariant preserved) + NEW extract_image_markers
+#     function + NEW ALLOWED_FEATURES frozenset + NEW _resolve_family_images
+#     + private inline chart-only near-miss regex in extract_chart_images
+#     (byte-compat) + both dispatch seams updated to call BOTH
+#     extract_chart_images (pin #5 anchor) AND extract_image_markers on
+#     the chart-stripped residual. _MARKER_RE stays byte-stable
+#     (R5-gated). _resolve_chart_images body unchanged. ZERO edits to
+#     daemon/sources/base.py, the three adapters, or daemon/constants.py.
+#     git diff audit confirmed delta is EXACTLY this commission's edits
+#     (no unrelated changes; dispatcher.py landed as an isolated commit
+#     b1802fe07 per phase2-plan.md §Risks mitigation). Evidence pointer:
+#     tests/test_sources_dispatcher.py::TestSweeperLastOnResidual
+#     (AM13 load-bearing pass-order proof) + Pin #25/#26/#27 in
+#     tests/test_chart_image_delivery_audit.py (family call sites +
+#     ALLOWED_FEATURES gate + _FAMILY_MARKER_RE shape). Seal ceremony per
+#     .agents/shared/planning/image-gen-tool/phase2-plan.md Seal-Trip
+#     Subsection. No .prompt-artifacts.sha256 regen (dispatcher.py is
+#     not an agent prompt artifact).
+#   - 2026-10-14 image-gen-tool commission tidier-polish (worktree
+#     /home/ensemble-worktrees/image-gen-tool, branch
+#     feature/image-gen-tool): daemon/sources/dispatcher.py re-pinned
+#     f03c0b4852bdc3e3d02e5171e0feedcb02b04a91f73b888b8314d5c62e042a6f
+#     → 4282ddc0396f9103ff7e14af9077c721d29e5329fac702ad3dfbfafd7083e53a.
+#     Delta is EXACTLY the four tidier-polish edits M1/M2/M3/M8
+#     (M1 = reword the two seam comments at lines 577-579 + 729-732
+#     that falsely claimed ``extract_image_markers`` "delegates to
+#     ``extract_chart_images`` for the chart-only sweep" — replaced
+#     with "the seam delegates the chart-only sweep via the call
+#     below"; M2 = collapse the six-line pass-2 unreachability
+#     comment to the one-line true statement; M3 = clarify that
+#     ``feature_ids`` doesn't carry chart-render because the seam
+#     fed chart-stripped residual to ``extract_image_markers`` —
+#     the ``!= "chart-render"`` filter is kept as belt-and-braces;
+#     M8 = hoist the duplicated chart near-miss regex literal to
+#     a module-level ``_CHART_NEAR_MISS_RE`` referenced from both
+#     call sites — same pattern string + same flags, no behavior
+#     change). _MARKER_RE, _FAMILY_MARKER_RE, _NEAR_MISS_RE
+#     unchanged. _resolve_chart_images body unchanged. ZERO edits
+#     to daemon/sources/base.py, the three adapters,
+#     daemon/constants.py, or any out-of-scope file. git diff
+#     audit confirmed delta is EXACTLY these four edits and
+#     nothing else. Evidence pointer: tests/test_sources_dispatcher.py
+#     golden-tuple + byte-compat guard + 108 passing cases (per
+#     M8 hoist) + .agents/tidier/notes.md (round-tidier list).
+#     Seal ceremony per .agents/shared/planning/image-gen-tool/
+#     phase2-plan.md Seal-Trip Subsection. No
+#     .prompt-artifacts.sha256 regen (dispatcher.py is not an
+#     agent prompt artifact).
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "870ec32faf071cc1478c0540690381ef46c0bd1ae6667163215845ad39992581",
@@ -1263,7 +1335,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase B — 7 daemon files
     "daemon/sources/base.py": "ca2762ac8840bd8f7050955744af25f16325ed6806d09ba1fe3d020383581f3a",
     "daemon/sources/registry.py": "a46da82b930e2efc0b6f16a2f40a902c16343c08c49ee1236fda9ab928213a1b",
-    "daemon/sources/dispatcher.py": "50dd3211c1b6c59358c5426e046a88054a9ee58cc8001b8d57d53b6b2813fc3b",
+    "daemon/sources/dispatcher.py": "4282ddc0396f9103ff7e14af9077c721d29e5329fac702ad3dfbfafd7083e53a",
     "daemon/sources/adapters/discord/adapter.py": "87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43",
     # Phase B — 7 daemon files + slack-setup.md (8).
     # slack/adapter.py re-pinned 2026-10-04: authorized remediation commit
@@ -1279,7 +1351,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/ari/rule.md": "bb784e8c41afc913bccf1873bfd5cb8943e5b1e17daacc6936efa08a31d26b68",
     "agents/coder/soul.md": "0fa7fb9e875203ff9d2b8a14bdd3cdcabce24a44f8a89a0031a6a33123196201",
     "agents/developer/rule.md": "dba24812288634cd5c31e8e78ba8c95e664a37549f49b0feb56fabd099b4c260",
-    "agents/developer[v2]/tools_note.md": "f8df81327f6553e169b583ea58dc10dbe4a8340d3e1405d4d1afabc84089988e",
+    "agents/developer[v2]/tools_note.md": "62882063ca109e7829c097201e110a0edb872ade000415372ab7ca016bee5748",
     "agents/devops/rule.md": "889e52842c0d4c562ad18d27364f9a7ea0223453df4a6659c11995d631996b78",
     "agents/doc-writer/rule.md": "7897c461b8e9a2b748ec03500ac88be942845642bdd1fc3c0fef5444935152c7",
     "agents/governor/rule.md": "84a93586df376ad39dc553af36f86f684977ecfa8d717186f2fe8f16846c8cf5",

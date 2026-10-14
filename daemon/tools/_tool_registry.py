@@ -593,6 +593,19 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "knowledge": "daemon.tools.knowledge_tools",
     "chart": "daemon.tools.chart_tools",
     "image": "daemon.tools.image_tools",
+    # Image-Gen tool (image-gen commission Phase 1, 2026-10-14) —
+    # single-tool category exposing ``generate_image`` (direct POST to
+    # the ensemble LLM lane's /image_generation endpoint; no agent
+    # spawn behind it, so TOOL_REQUIRED_AGENTS does not apply).
+    # NON-privileged: per-agent visibility is the uniform tools.allow
+    # gate — the 6 consumer agents (ari, leader, developer[v2],
+    # reviewer, tester, worker) carry the explicit ``"image-gen"``
+    # allow token. Deliberately a SEPARATE category from "image" so
+    # critic (allow ['read_file','image','design'] + per-tool
+    # image_save deny) can never reach generation (decisions.md D3).
+    # Caps/limits live as module constants in daemon/tools/image_gen.py
+    # — NOT in daemon/constants.py (sealed).
+    "image-gen": "daemon.tools.image_gen",
     "todo": "daemon.tools.todo_tools",
     "question": "daemon.tools.question_tools",
     # Mid-flight QA channel (2026-09-21) — non-blocking progress
@@ -761,6 +774,10 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "explain_image",
     "explore",
     "generate_chart",
+    # generate_image — image-gen commission Phase 1 (2026-10-14);
+    # factory-created per-instance (create_image_gen_tools,
+    # daemon/tools/image_gen.py), category "image-gen".
+    "generate_image",
     # image_save / image_list / image_get — designer-agent substrate
     # (Phase 1 WP7/8/9) — factory-created per-instance alongside
     # explain_image; never registered at module import. The
