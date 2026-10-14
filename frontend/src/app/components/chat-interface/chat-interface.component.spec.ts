@@ -6,6 +6,7 @@ import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import type { Message } from '../../models';
 import { ChatInterfaceComponent } from './chat-interface.component';
 import { ImageViewerActionsService } from '../../services/image-viewer-actions.service';
+import { LiveViewActionsService } from '../../services/live-view-actions.service';
 
 /**
  * ngx-markdown ships raw ESM (fesm2022 + marked.esm.js) that the jest
@@ -738,6 +739,382 @@ describe('ChatInterfaceComponent — image-viewer click + onerror (phase 6)', ()
       expect(component.imageSrc(REF_URL_32HEX, 'srv-middle', 1)).toBe(
         ChatInterfaceComponent.FALLBACK_IMAGE_SRC_CACHE,
       );
+    });
+  });
+});
+
+// ─── Phase 3 / ens-img scanner + lightbox (image-gen tool) ───────────────
+//
+// Test strategy (per phase3-plan.md §"Tasks" + §"Reviewer
+// implementation-time notes"):
+//
+//   - The marker SURVIVES in the markdown render as a real
+//     `<!-- ens-img:image-gen:<32hex> -->` COMMENT node (AM11 —
+//     proved end-to-end in `constants/ens-img-marker.spec.ts`).
+//     The chat-interface scan walks each bubble's `childNodes`,
+//     filters `nodeType === Node.COMMENT_NODE` (8), matches
+//     `node.data` against the content-form regex, and swaps the
+//     comment for an `<img>` via `node.replaceWith(img)`.
+//
+//   - The spec seeds real COMMENT_NODE children into the bubble
+//     via `document.createComment(markerString)` (reviewer
+//     implementation-time note binding). The existing ngx-markdown
+//     stub (`chat-interface.component.spec.ts:22-29`) emits NO
+//     comments — fake-comment scans would not exercise the real
+//     DOM path.
+//
+//   - Fixtures:
+//       - canonical image-gen marker → swapped for <img>
+//       - chart-render marker → not within v1 (ENS_IMG_FEATURES gate)
+//       - text-node lookalike (the marker string typed as literal
+//         visible text) → not swapped (AM11 contract: textContent /
+//         text-node scan never sees the marker)
+//       - malformed marker (wrong-length hex) → not swapped
+//       - non-feature token (e.g. image-edit) → not swapped
+//       - inside a .message-bubble scope (stray comment in chat
+//         header is left alone — same bubble-scoping discipline as
+//         live-view chips)
+//       - click → dialog opens with the tmp-images URL
+//       - (error) → src swaps to the pinned SVG fallback
+//       - double-scan → no second <img> (WeakSet idempotency)
+//       - MutationObserver re-batch (after replaceWith) → no
+//         re-processing
+//
+// The spec mirrors the live-view-chip.spec.ts structure for
+// consistency with the established Phase 2 pattern. The image-viewer
+// dialog service is stubbed via the same pattern used in the
+// phase 6 spec above (jest.fn injected as the service provider).
+
+const ENS_IMG_HEX_1 = 'a'.repeat(32);
+const ENS_IMG_HEX_2 = 'b'.repeat(32);
+
+function makeAssistantMarkerMessage(
+  content: string,
+  overrides: Partial<Message> = {},
+): Message {
+  return {
+    message_id: 'inst-1-msg-marker',
+    role: 'assistant',
+    content,
+    created_at: '2026-10-14T19:00:00Z',
+    ...overrides,
+  };
+}
+
+describe('ChatInterfaceComponent — ens-img scanner + lightbox (Phase 3)', () => {
+  let fixture: ComponentFixture<ChatInterfaceComponent>;
+  let component: ChatInterfaceComponent;
+  let imageViewerOpen: jest.Mock;
+  let liveViewOpen: jest.Mock;
+
+  /**
+   * Wait for the rAF-coalesced scan to fire. The chat-interface
+   * schedules the chip / ens-img scan via `requestAnimationFrame`
+   * after a MutationObserver tick; the test waits two animation
+   * frames so both the observer-driven rAF and the rAF scheduled
+   * by scheduleScan have a chance to run.
+   */
+  async function waitForScan(): Promise<void> {
+    await new Promise<void>((resolve) =>
+      window.requestAnimationFrame(() => resolve()),
+    );
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+  }
+
+  function setupMount(messages: Message[]): void {
+    imageViewerOpen = jest.fn();
+    liveViewOpen = jest.fn();
+    TestBed.configureTestingModule({
+      imports: [ChatInterfaceComponent],
+      providers: [
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        provideNoopAnimations(),
+        provideMarkdown(),
+        {
+          provide: ImageViewerActionsService,
+          useValue: { openViewer: imageViewerOpen },
+        },
+        {
+          provide: LiveViewActionsService,
+          useValue: { openViewer: liveViewOpen },
+        },
+      ],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(ChatInterfaceComponent);
+    component = fixture.componentInstance;
+    fixture.componentRef.setInput('instanceId', 'inst-1');
+    fixture.componentRef.setInput('messages', messages);
+    fixture.detectChanges();
+  }
+
+  function getBubble(): HTMLElement {
+    const bubble = fixture.nativeElement.querySelector('.message-bubble');
+    if (!bubble) {
+      throw new Error('expected a .message-bubble in the rendered DOM');
+    }
+    return bubble as HTMLElement;
+  }
+
+  /**
+   * Seed a real `Node.COMMENT_NODE` (nodeType === 8) child into
+   * the bubble. This is the AM11 fixture — the existing
+   * ngx-markdown stub emits no comments, so a fake scan would not
+   * exercise the real DOM path. Using `document.createComment`
+   * guarantees the child has the exact node type the scanner
+   * looks for.
+   */
+  function seedComment(bubble: HTMLElement, data: string): Comment {
+    const comment = document.createComment(data);
+    bubble.appendChild(comment);
+    return comment;
+  }
+
+  /**
+   * Seed a literal text-node child — the AM11 negative-case
+   * fixture: the marker string typed as visible text must NOT be
+   * transformed (textContent / text-node scans never see the
+   * marker; the scanner only acts on `nodeType === 8`).
+   */
+  function seedText(bubble: HTMLElement, text: string): Text {
+    const textNode = document.createTextNode(text);
+    bubble.appendChild(textNode);
+    return textNode;
+  }
+
+  function queryEnsImg(): HTMLImageElement[] {
+    return Array.from(
+      fixture.nativeElement.querySelectorAll('[data-testid="ens-img-inline"]'),
+    ) as HTMLImageElement[];
+  }
+
+  function queryComments(bubble: HTMLElement): Comment[] {
+    return Array.from(bubble.childNodes).filter(
+      (n) => n.nodeType === Node.COMMENT_NODE,
+    ) as Comment[];
+  }
+
+  describe('canonical image-gen marker — swapped for <img>', () => {
+    it('replaces a single comment with an <img> bound to /views/tmp-images/<id>', async () => {
+      setupMount([makeAssistantMarkerMessage('hi')]);
+      const bubble = getBubble();
+      seedComment(bubble, `ens-img:image-gen:${ENS_IMG_HEX_1}`);
+      await waitForScan();
+      fixture.detectChanges();
+
+      const imgs = queryEnsImg();
+      expect(imgs.length).toBe(1);
+      const img = imgs[0];
+      expect(img.tagName.toLowerCase()).toBe('img');
+      expect(img.getAttribute('src')).toBe(`/views/tmp-images/${ENS_IMG_HEX_1}`);
+      expect(img.getAttribute('alt')).toBe('generated image');
+      expect(img.classList.contains('ens-img-inline')).toBe(true);
+      expect(img.getAttribute('data-ens-img-id')).toBe(ENS_IMG_HEX_1);
+      // The comment is gone — replaceWith detaches it.
+      expect(queryComments(bubble).length).toBe(0);
+    });
+
+    it('handles multiple image-gen markers in the same bubble (one <img> per comment)', async () => {
+      setupMount([makeAssistantMarkerMessage('multi')]);
+      const bubble = getBubble();
+      seedComment(bubble, `ens-img:image-gen:${ENS_IMG_HEX_1}`);
+      // Adjacent text-node lookalike must NOT be transformed.
+      seedText(bubble, `ens-img:image-gen:${ENS_IMG_HEX_2}`);
+      seedComment(bubble, `ens-img:image-gen:${ENS_IMG_HEX_2}`);
+      await waitForScan();
+      fixture.detectChanges();
+
+      const imgs = queryEnsImg();
+      expect(imgs.length).toBe(2);
+      const ids = imgs.map((i) => i.getAttribute('data-ens-img-id')).sort();
+      expect(ids).toEqual([ENS_IMG_HEX_1, ENS_IMG_HEX_2].sort());
+      // The text-node lookalike stays in the bubble as text.
+      expect(bubble.textContent).toContain(`ens-img:image-gen:${ENS_IMG_HEX_2}`);
+    });
+  });
+
+  describe('non-transform negative cases (scope discipline + AM11 contract)', () => {
+    it('chart-render markers are NOT transformed (Task 6 non-regression guard)', async () => {
+      setupMount([makeAssistantMarkerMessage('chart')]);
+      const bubble = getBubble();
+      const chartMarker = `ens-img:chart-render:${ENS_IMG_HEX_1}`;
+      seedComment(bubble, chartMarker);
+      await waitForScan();
+      fixture.detectChanges();
+
+      // No <img> is injected.
+      expect(queryEnsImg().length).toBe(0);
+      // The comment stays in the DOM — the chart-render marker is
+      // rendered as today's invisible comment text (ngx-markdown /
+      // marked do not transform it either, so the visible surface
+      // is unchanged).
+      expect(queryComments(bubble).length).toBe(1);
+      expect(queryComments(bubble)[0].data).toContain('chart-render');
+    });
+
+    it('unknown feature tokens are NOT transformed (ENS_IMG_FEATURES is the gate)', async () => {
+      setupMount([makeAssistantMarkerMessage('unknown')]);
+      const bubble = getBubble();
+      // 'image-edit' is NOT in ENS_IMG_FEATURES — would be a v2
+      // addition. Today it is silently passed through (matching
+      // the regex is family-generic; the gate is what scopes the
+      // transform).
+      seedComment(bubble, `ens-img:image-edit:${ENS_IMG_HEX_1}`);
+      await waitForScan();
+      fixture.detectChanges();
+
+      expect(queryEnsImg().length).toBe(0);
+      expect(queryComments(bubble).length).toBe(1);
+    });
+
+    it('malformed markers (wrong-length hex / non-hex chars) are NOT transformed', async () => {
+      setupMount([makeAssistantMarkerMessage('malformed')]);
+      const bubble = getBubble();
+      seedComment(bubble, `ens-img:image-gen:${'a'.repeat(31)}`); // 31 chars
+      seedComment(bubble, `ens-img:image-gen:${'Z'.repeat(32)}`); // uppercase
+      seedComment(bubble, `ens-img:image-gen:`); // missing id
+      await waitForScan();
+      fixture.detectChanges();
+
+      expect(queryEnsImg().length).toBe(0);
+      // All three malformed comments survive untouched.
+      expect(queryComments(bubble).length).toBe(3);
+    });
+
+    it('text-node lookalikes are NOT transformed (AM11 contract)', async () => {
+      // The marker string typed as LITERAL VISIBLE TEXT — not as
+      // a comment — must be left alone. textContent / text-node
+      // scans never see the marker; the scanner only acts on
+      // `nodeType === 8`. This is the AM11 binding pin.
+      setupMount([makeAssistantMarkerMessage('lookalike')]);
+      const bubble = getBubble();
+      const markerString = `ens-img:image-gen:${ENS_IMG_HEX_1}`;
+      seedText(bubble, `before ${markerString} after`);
+      await waitForScan();
+      fixture.detectChanges();
+
+      expect(queryEnsImg().length).toBe(0);
+      // The bubble's textContent carries the literal string — no
+      // <img> was injected, no text was rewritten.
+      expect(bubble.textContent).toContain(markerString);
+    });
+
+    it('does NOT touch comments outside a .message-bubble (scope discipline)', async () => {
+      setupMount([makeAssistantMarkerMessage('scope')]);
+      // The chat-interface today renders no stray comments in
+      // non-bubble areas (the header / chrome are Angular
+      // template-driven text), but the scan is scoped to
+      // .message-bubble so a future stray comment is left
+      // alone. Plant one in the chat header to assert the
+      // discipline — chat-header is the canonical non-bubble
+      // surface for these specs.
+      const headerArea = fixture.nativeElement.querySelector('.chat-header');
+      if (headerArea) {
+        const stray = document.createComment(
+          `ens-img:image-gen:${ENS_IMG_HEX_1}`,
+        );
+        headerArea.appendChild(stray);
+      }
+      const bubble = getBubble();
+      seedComment(bubble, `ens-img:image-gen:${ENS_IMG_HEX_1}`);
+      await waitForScan();
+      fixture.detectChanges();
+
+      // Exactly one <img> — the bubble-scoped one.
+      const imgs = queryEnsImg();
+      expect(imgs.length).toBe(1);
+      expect(imgs[0].getAttribute('data-ens-img-id')).toBe(ENS_IMG_HEX_1);
+    });
+  });
+
+  describe('idempotency — double-scan does not double-inject', () => {
+    it('a second scan finds no comment to process (replaceWith detached the original)', async () => {
+      setupMount([makeAssistantMarkerMessage('once')]);
+      const bubble = getBubble();
+      seedComment(bubble, `ens-img:image-gen:${ENS_IMG_HEX_1}`);
+      await waitForScan();
+      fixture.detectChanges();
+      expect(queryEnsImg().length).toBe(1);
+      // Second scan: the comment was detached by replaceWith, so
+      // the bubble has no comments to match. No second <img>.
+      await waitForScan();
+      fixture.detectChanges();
+      expect(queryEnsImg().length).toBe(1);
+    });
+  });
+
+  describe('click handler — opens the image-viewer dialog', () => {
+    it('calls ImageViewerActionsService.openViewer with the tmp-images URL', async () => {
+      setupMount([makeAssistantMarkerMessage('click')]);
+      const bubble = getBubble();
+      seedComment(bubble, `ens-img:image-gen:${ENS_IMG_HEX_1}`);
+      await waitForScan();
+      fixture.detectChanges();
+
+      const img = queryEnsImg()[0];
+      img.click();
+      expect(imageViewerOpen).toHaveBeenCalledTimes(1);
+      expect(imageViewerOpen).toHaveBeenCalledWith(
+        `/views/tmp-images/${ENS_IMG_HEX_1}`,
+        'inst-1-msg-marker',
+      );
+    });
+
+    it('does NOT bubble the click (defensive stopPropagation)', async () => {
+      // Same read-by-source pin as the live-view-chip spec: no
+      // bubble-level click handler exists today, so a bubble
+      // spy would be a no-op. The stopPropagation call is pinned
+      // by reading the production source; this spec asserts the
+      // click reached the handler with the correct args.
+      setupMount([makeAssistantMarkerMessage('click2')]);
+      const bubble = getBubble();
+      seedComment(bubble, `ens-img:image-gen:${ENS_IMG_HEX_1}`);
+      await waitForScan();
+      fixture.detectChanges();
+
+      const img = queryEnsImg()[0];
+      const evt = new MouseEvent('click', { bubbles: true, cancelable: true });
+      img.dispatchEvent(evt);
+      expect(imageViewerOpen).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('error fallback — broken tmp-images URL renders the pinned SVG', () => {
+    it('swaps the src to the pinned SVG fallback on the first error event', async () => {
+      setupMount([makeAssistantMarkerMessage('err')]);
+      const bubble = getBubble();
+      seedComment(bubble, `ens-img:image-gen:${ENS_IMG_HEX_1}`);
+      await waitForScan();
+      fixture.detectChanges();
+
+      const img = queryEnsImg()[0];
+      img.dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+
+      // src swaps to the byte-identical fallback (the same
+      // constant the dialog body uses — see
+      // image-viewer-dialog.component.ts).
+      expect(img.getAttribute('src')).toBe(
+        ChatInterfaceComponent.FALLBACK_IMAGE_SRC_CACHE,
+      );
+      expect(img.classList.contains('ens-img-inline-failed')).toBe(true);
+    });
+
+    it('is idempotent — a second error event does not refire the swap', async () => {
+      setupMount([makeAssistantMarkerMessage('err2')]);
+      const bubble = getBubble();
+      seedComment(bubble, `ens-img:image-gen:${ENS_IMG_HEX_1}`);
+      await waitForScan();
+      fixture.detectChanges();
+
+      const img = queryEnsImg()[0];
+      img.dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      const srcAfterFirst = img.getAttribute('src');
+      img.dispatchEvent(new Event('error'));
+      fixture.detectChanges();
+      expect(img.getAttribute('src')).toBe(srcAfterFirst);
     });
   });
 });

@@ -32,6 +32,11 @@ import {
   parseLiveViewUrl,
   deriveLiveViewTitle,
 } from '../../constants/live-view-url';
+import {
+  ENS_IMG_FEATURES,
+  ENS_IMG_MARKER_CONTENT_RE,
+  buildTmpImageUrl,
+} from '../../constants/ens-img-marker';
 
 interface MermaidChartContext {
   /** Bubble that owns this chart — used to look up the source message. */
@@ -130,6 +135,23 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
    * the swap).
    */
   private readonly injectedLiveViewChips = new WeakSet<HTMLAnchorElement>();
+  /**
+   * Track which `<!-- ens-img:<feature>:<32hex> -->` COMMENT nodes
+   * we've already replaced with an `<img>`. Keyed by the comment
+   * node identity so a MutationObserver re-fire is a no-op for
+   * the same marker (the comment is detached from the DOM after
+   * the swap; this WeakSet keeps the detached node keyed by
+   * identity so the lookup remains valid for the lifetime of the
+   * spec / runtime).
+   *
+   * Per reviewer implementation-time note (phase3-plan.md §"Reviewer
+   * implementation-time notes [review-notes]"), the node is added
+   * to the WeakSet AFTER `replaceWith(img)` — this keeps the
+   * detached comment node identity-keyed so the next MutationObserver
+   * re-batch (which can refire on the bubble after the swap)
+   * finds the comment and short-circuits.
+   */
+  private readonly injectedEnsImgMarkers = new WeakSet<Node>();
   /**
    * Active transient status pills, indexed by chart bubble, so we can
    * clear them when the bubble unmounts or a new status supersedes.
@@ -885,6 +907,14 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
       this.scanHandle = null;
       this.scanForMermaidCharts();
       this.scanForLiveViewChips();
+      // Order matters: live-view chips swap `<a>` tags for buttons;
+      // ens-img markers live in the same bubble childNodes tree but
+      // are a different node kind (COMMENT_NODE, AM11). Running
+      // the ens-img scan AFTER the chip scan keeps the work-order
+      // deterministic for any future contributor reading the
+      // pipeline — the scanHandle will still coalesce any
+      // observer-driven re-fires into one rAF callback.
+      this.scanForEnsImgMarkers();
     });
   }
 
@@ -1076,6 +1106,164 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
     // position (extremely unlikely but possible during a
     // streaming reconnect) does not double-inject.
     anchor.replaceWith(chip);
+  }
+
+  // ─── Inline `ens-img:<feature>:<32hex>` marker injection (Phase 3) ────
+  //
+  // The image-gen tool (and future family members) drops markers into
+  // the chat content the daemon emits. The marker grammar lives in
+  // ``constants/ens-img-marker``; the scanner below targets the
+  // COMMENT nodes ngx-markdown / marked produces (AM11 — see
+  // phase3-plan.md §"Marker scan, not markdown rewrite"). The
+  // chip pattern does NOT transfer as-is: chips scan `<a>` elements,
+  // ens-img scans `Node.COMMENT_NODE` (`nodeType === 8`) — the
+  // envelope is stripped by the DOM, so the match runs against
+  // `node.data` (no `<!--` / `-->` framing).
+
+  /**
+   * Walk the messages container and swap every matched
+   * ``<!-- ens-img:<feature>:<32hex> -->`` COMMENT node for an
+   * inline `<img>`. Mirrors the chip-scan shape — same
+   * MutationObserver-driven entry point, same short-circuit on
+   * ``isLoading``, same idempotency via a ``WeakSet`` of already-
+   * injected comment nodes. Scope discipline: only
+   * ``feature === "image-gen"`` is transformed in v1
+   * (``ENS_IMG_FEATURES`` gate); chart-render markers visible in
+   * web transcripts keep today's behavior.
+   */
+  private scanForEnsImgMarkers(): void {
+    if (this.isLoading) {
+      // Same rationale as the chip / Mermaid scans — DOM is
+      // mutating fast during a stream; the post-stream isLoading
+      // true→false hook in ``ngOnChanges`` reschedules the scan.
+      return;
+    }
+    const container = this.messagesContainerRef?.nativeElement;
+    if (!container) {
+      return;
+    }
+    // Scope the scan to message bubbles so we never touch
+    // comments outside the transcript (e.g. in the chat header /
+    // chrome — no comments exist there today, but scoping
+    // future-proofs the scan).
+    const bubbles = container.querySelectorAll<HTMLElement>('.message-bubble');
+    bubbles.forEach((bubble) => {
+      const messageId = bubble.dataset?.['messageId'] ?? '';
+      // Live NodeList — collect first to avoid mutating the
+      // underlying list mid-iteration (``replaceWith`` detaches
+      // the comment from its parent; jsdom keeps the live list
+      // stable here, but a static copy is the documented
+      // DOM-traversal pattern for replace-style transforms).
+      const comments = Array.from(bubble.childNodes).filter(
+        (n): n is Comment => n.nodeType === Node.COMMENT_NODE,
+      );
+      for (const comment of comments) {
+        if (this.injectedEnsImgMarkers.has(comment)) {
+          continue;
+        }
+        const match = ENS_IMG_MARKER_CONTENT_RE.exec(comment.data);
+        if (match === null) {
+          continue;
+        }
+        const feature = match[1];
+        const id = match[2];
+        // Feature gate — the regex is family-generic on
+        // purpose; the gate is what scopes the transform.
+        // Chart-render markers (and any future family member
+        // not in the v1 feature list) are left as comments
+        // and rendered as today's invisible comment text.
+        if (!ENS_IMG_FEATURES.includes(feature)) {
+          continue;
+        }
+        this.injectEnsImgElement(comment, feature, id, bubble, messageId);
+        // Per reviewer implementation-time note (binding):
+        // add to the WeakSet AFTER ``replaceWith`` so the
+        // detached comment stays keyed by identity. The next
+        // MutationObserver re-batch will find the comment in
+        // the WeakSet via referential equality and short-
+        // circuit without re-processing.
+        this.injectedEnsImgMarkers.add(comment);
+      }
+    });
+  }
+
+  /**
+   * Replace a matched ``<!-- ens-img:<feature>:<32hex> -->``
+   * COMMENT node with an inline `<img>`. The pattern is the
+   * pure-DOM equivalent of the chip template's `[src]` Angular
+   * binding — the `<img>` is built imperatively and ``src`` is
+   * set via ``setAttribute`` so the attribute (not the property)
+   * carries the canonical tmp-images URL. ``alt="generated image"``
+   * matches the spec's intent (the spec pins the alt text via the
+   * matcher so future a11y audits have a stable target).
+   *
+   * Click → open the image-viewer dialog (via the existing
+   * ImageViewerActionsService.openViewer — the dialog itself is
+   * NOT modified, the URL is just a canonical tmp-images one).
+   * (error) → swap the broken `<img>`'s src to the pinned
+   * inline SVG fallback. The fallback is structurally identical
+   * to the bubble-thumbnail fallback (same SVG markup, same
+   * data-URI encoding) so a single visual identity holds across
+   * both surfaces (the existing dialog-body fallback is byte-
+   * identical to this one — see IMAGE_VIEWER_FALLBACK_SRC export).
+   *
+   * The element is built via ``this.document.createElement``
+   * (the project's Angular DOCUMENT token; the chip pattern uses
+   * the same) so the test environment's stubbed document is
+   * honored and the spec can drive the swap without a real
+   * MarkdownModule render.
+   */
+  private injectEnsImgElement(
+    comment: Comment,
+    feature: string,
+    id: string,
+    bubble: HTMLElement,
+    messageId: string,
+  ): void {
+    void feature; // feature is reserved for the v2 multi-feature path; today only "image-gen" reaches here.
+    const src = buildTmpImageUrl(id);
+    const img = this.document.createElement('img');
+    img.setAttribute('src', src);
+    img.setAttribute('alt', 'generated image');
+    img.classList.add('ens-img-inline');
+    img.setAttribute('data-testid', 'ens-img-inline');
+    img.setAttribute('data-ens-img-id', id);
+    img.setAttribute('data-ens-img-message-id', messageId);
+    img.loading = 'lazy';
+
+    // Click handler — open the image-viewer dialog with the
+    // canonical tmp-images URL. Mirrors the chip's defensive
+    // stopPropagation + ngZone re-entry pattern.
+    img.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.ngZone.run(() => {
+        this.imageViewerActions.openViewer(src, messageId || 'unknown');
+      });
+    });
+
+    // (error) handler — swap the broken <img>'s src to the
+    // pinned SVG fallback. Idempotent: clear the native
+    // onerror on first hit so the browser does not refire for
+    // the same broken element. The dialog-body fallback is
+    // byte-identical (see IMAGE_VIEWER_FALLBACK_SRC in the
+    // dialog component); we reuse the local FALLBACK_IMAGE_SRC_CACHE
+    // so a single fallback constant holds across both surfaces.
+    img.addEventListener('error', () => {
+      img.onerror = null;
+      img.setAttribute('src', ChatInterfaceComponent.FALLBACK_IMAGE_SRC_CACHE);
+      img.classList.add('ens-img-inline-failed');
+    });
+
+    comment.replaceWith(img);
+    // ``bubble`` is intentionally unused in the body — the
+    // parameter is part of the contract so the scanner can
+    // pass the owning message id without re-deriving it from
+    // the comment's parent. Suppress the unused-vars lint
+    // explicitly so a future contributor who reads the bubble
+    // (e.g. for an aria-labelledby wiring) sees the parameter
+    // is intentional.
+    void bubble;
   }
 
   /**
