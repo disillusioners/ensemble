@@ -7506,12 +7506,15 @@ class InstanceManager:
             # ``daemon/repositories/prompt_version/models.py``;
             # existing databases need the ADD COLUMN here. The SQLite
             # counterpart lives at
-            # ``daemon/migrations/versions/20261013_214000_create_prompt_versions.sql``
-            # (the table-create migration that includes the column
-            # from day one). The ``TEXT`` type mirrors the model
-            # (``String``) — NOT NULL DEFAULT keeps the conservative
-            # bucket populated without an application-side backfill
-            # step.
+            # ``daemon/migrations/versions/20261014_013702_alter_prompt_versions_add_artifact_class.sql``
+            # — an ALTER + CASE-backfill migration (the column is NOT
+            # in the original 20261013_214000 table-create file). The
+            # ``TEXT`` type mirrors the model (``String``) — NOT NULL
+            # DEFAULT keeps the conservative bucket populated, and the
+            # companion UPDATE stamps MEMORY-class rows for pre-existing
+            # dev DBs (artifact IN ('memory','user','growth') or
+            # LIKE 'memories/%' → 'MEMORY'; everything else stays
+            # 'CORE').
             (
                 "ALTER TABLE prompt_versions ADD COLUMN IF NOT EXISTS "
                 "artifact_class TEXT NOT NULL DEFAULT 'CORE'"
