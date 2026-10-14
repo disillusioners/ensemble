@@ -118,13 +118,21 @@ def _insert_instance(
     agent_id: str = "leader",
     version: int = 1,
     last_activity_at: datetime | None = None,
+    updated_at: datetime | None = None,
 ) -> None:
     """Insert an ``instances`` row (raw SQL — mirrors the
     test_mission_live_guard seeder so the ghost row can carry
-    ``last_activity_at = NULL`` and ``version = 1`` exactly)."""
+    ``last_activity_at = NULL`` and ``version = 1`` exactly).
+
+    ``updated_at`` defaults to now; pass an explicit value to model
+    a row aged past the shared strand race guard
+    (``mission_live_guard.ORPHAN_MIN_AGE_SECONDS``)."""
     now = datetime.now(timezone.utc).isoformat()
     activity_iso = (
         last_activity_at.isoformat() if last_activity_at is not None else None
+    )
+    updated_iso = (
+        updated_at.isoformat() if updated_at is not None else now
     )
     with engine.begin() as conn:
         conn.execute(
@@ -147,7 +155,7 @@ def _insert_instance(
                 "status": status,
                 "project_id": "test-project",
                 "created_at": now,
-                "updated_at": now,
+                "updated_at": updated_iso,
                 "last_activity_at": activity_iso,
                 "version": version,
                 "parent_id": parent_id,
@@ -163,6 +171,17 @@ def _seed_poison_tree(engine, *, with_ghost: bool = True) -> None:
     ``SQLModelInstanceRepository.filter_never_dispatched_ids`` exactly:
     status=idle, version=1, ZERO message_queue rows, ZERO task rows,
     last_activity_at=NULL (the live poison row 4d41bd67 shape).
+
+    AGE CONTRACT (final hardening 2026-10-14): the ghost is seeded
+    AGED — ``updated_at`` 5 minutes in the past, well past the
+    shared strand race guard
+    (``mission_live_guard.ORPHAN_MIN_AGE_SECONDS``) that BOTH sides
+    now run (read-side liveness exclusion + write-side healer).
+    The aged strand is the steady-state poison shape the fix
+    targets; the too-fresh variant is the explicitly-tested
+    exception (``test_race_guard_young_orphan_skipped`` here, and
+    the gap suite's G9 read-side age-mirror tests) — re-stamp the
+    ghost young in those tests, never here.
     """
     _insert_instance(
         engine, ROOT,
@@ -184,6 +203,7 @@ def _seed_poison_tree(engine, *, with_ghost: bool = True) -> None:
             agent_id="worker",
             version=1,
             last_activity_at=None,
+            updated_at=now_utc_naive() - timedelta(minutes=5),
         )
 
 
@@ -1039,6 +1059,19 @@ class TestMissionStrandHealer:
         younger than ORPHAN_MIN_AGE_SECONDS is skipped (it may be a
         mid-flight spawn-then-message ritual); nothing mutates."""
         _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        # The seed models the AGED steady-state poison shape — re-stamp
+        # the ghost YOUNG for this test (the too-fresh exception).
+        with strand_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET updated_at = :u "
+                    "WHERE instance_id = :g"
+                ),
+                {
+                    "u": datetime.now(timezone.utc).isoformat(),
+                    "g": GHOST,
+                },
+            )
         healer = self._make_healer(strand_harness)
         outcome = await healer.heal_instance(ROOT)
         assert outcome["healed"] is False

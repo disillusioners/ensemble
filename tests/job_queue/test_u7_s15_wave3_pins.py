@@ -438,6 +438,23 @@ class TestW1LiveTreeHoldsBackstop:
             parent_id="root-w6b",
             last_activity_at=None,
         )
+        # AGE CONTRACT (final hardening 2026-10-14): the read-side
+        # strand exclusion runs the shared race-guard predicate — the
+        # ghost must be aged past ORPHAN_MIN_AGE_SECONDS to count as
+        # stranded. Seed rows stamp fresh; backdate to the aged
+        # steady-state shape.
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET updated_at = :u "
+                    "WHERE instance_id = 'strand-w6b'"
+                ),
+                {
+                    "u": (
+                        datetime.now(timezone.utc) - timedelta(minutes=5)
+                    ).isoformat(),
+                },
+            )
 
         verdict = await evaluate_mission_live(
             instance_repository=repo,

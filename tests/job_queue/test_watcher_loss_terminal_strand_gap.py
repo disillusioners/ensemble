@@ -1152,3 +1152,220 @@ class TestG7_PendingTaskAbortsHeal:
         assert ghost.status == InstanceStatus.IDLE.value, (
             f"orphan must be untouched (got {ghost.status!r})"
         )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# G9 — final hardening: read-side age mirror (shared race-guard predicate)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _stamp_ghost_age(harness, *, aged: bool) -> None:
+    """Re-stamp the ghost's ``updated_at`` young (just-spawned) or
+    aged (5 min — well past the shared ORPHAN_MIN_AGE_SECONDS guard).
+    The seed models the aged steady state; the young variant is the
+    explicitly-tested exception."""
+    with harness.engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE instances SET updated_at = :u "
+                "WHERE instance_id = :g"
+            ),
+            {
+                "u": (
+                    datetime.now(timezone.utc)
+                    - (timedelta(minutes=5) if aged else timedelta(0))
+                ).isoformat(),
+                "g": GHOST,
+            },
+        )
+
+
+class TestG9_ReadSideAgeMirror:
+    """Final hardening (2026-10-14): the read-side strand exclusion
+    runs the SAME ``strand_past_race_guard`` predicate as the
+    write-side healer (single source of truth in
+    ``mission_live_guard``). A too-fresh ghost keeps holding liveness
+    (the just-messaged-not-yet-rowed window); only an AGED ghost is
+    excluded. Pins both directions of the mirror."""
+
+    @pytest.mark.asyncio
+    async def test_fresh_ghost_under_terminal_parent_keeps_mission_held(
+        self, gap_harness,
+    ):
+        """A just-spawned never-dispatched ghost (<60s) under a
+        TERMINAL direct parent must NOT be excluded — the
+        spawn-then-message ritual may still deliver its first
+        message, so the row keeps holding mission liveness (same
+        race-guard philosophy as the healer's write side)."""
+        _seed_poison_tree(gap_harness.engine, with_ghost=True)
+        _stamp_ghost_age(gap_harness, aged=False)
+        # Stamp the root (the emission-gate-time posture — the sync
+        # helper has already stamped COMPLETED when the gate walks).
+        with gap_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET status = 'completed' "
+                    "WHERE instance_id = :r"
+                ),
+                {"r": ROOT},
+            )
+
+        verdict = await _mlg.evaluate_mission_live(
+            instance_repository=gap_harness.instance_repo,
+            instance_id=ROOT,
+        )
+
+        assert verdict.live is True, (
+            f"FAIL-CLOSED: a too-fresh ghost must keep holding "
+            f"liveness (got live={verdict.live!r}, "
+            f"reason={verdict.reason!r})"
+        )
+        assert verdict.error is False
+        assert "strand member(s) excluded" not in verdict.reason, (
+            "the fresh ghost must NOT have been strand-excluded"
+        )
+
+    @pytest.mark.asyncio
+    async def test_aged_ghost_under_terminal_parent_is_excluded(
+        self, gap_harness,
+    ):
+        """The aged steady-state shape (the seed): ghost ≥60s old
+        under a TERMINAL direct parent is excluded — the mission is
+        NOT live (the original strand fix contract, now age-gated)."""
+        _seed_poison_tree(gap_harness.engine, with_ghost=True)
+        _stamp_ghost_age(gap_harness, aged=True)
+        with gap_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET status = 'completed' "
+                    "WHERE instance_id = :r"
+                ),
+                {"r": ROOT},
+            )
+
+        verdict = await _mlg.evaluate_mission_live(
+            instance_repository=gap_harness.instance_repo,
+            instance_id=ROOT,
+        )
+
+        assert verdict.live is False, (
+            f"aged stranded ghost must not hold liveness "
+            f"(got: {verdict.reason!r})"
+        )
+        assert verdict.error is False
+        assert "strand member(s) excluded" in verdict.reason
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# G10 — final hardening: TRUE-CONCURRENT heal (per-root lock pin)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestG10_HealConcurrency:
+    """Final hardening (2026-10-14): the 300s sweep and the
+    event-driven downgrade hand-off can target the SAME root
+    concurrently. ``MissionStrandHealer.heal_instance`` serializes
+    per root behind an ``asyncio.Lock``: two concurrent invocations
+    produce EXACTLY ONE heal — the second caller waits, re-runs the
+    invariant checks against the post-heal state, and observes the
+    already-healed root cleanly (the ``not the wedge posture`` skip).
+    Pins the lock AND its refcounted map hygiene (entries popped when
+    the last caller leaves)."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_heals_terminal_events_exactly_once(
+        self, gap_harness,
+    ):
+        import asyncio as _asyncio
+
+        _seed_poison_tree(gap_harness.engine, with_ghost=True)
+        _insert_receipt(gap_harness.engine)
+        _seed_child_completed_event(
+            gap_harness.engine, T_CHILD_COMPLETED,
+        )
+        healer = _make_healer(gap_harness)
+
+        # Spy on the sanctioned terminate lane — exactly one ghost
+        # terminate may run across BOTH callers.
+        terminate_calls: list[str] = []
+        original_terminate = (
+            gap_harness.manager._lifecycle_service.terminate_instance
+        )
+
+        async def _spy_terminate(instance_id, **kwargs):
+            terminate_calls.append(instance_id)
+            return await original_terminate(instance_id, **kwargs)
+
+        gap_harness.manager._lifecycle_service.terminate_instance = (
+            _spy_terminate
+        )
+
+        # TRUE concurrency: both coroutines are scheduled by the same
+        # gather; the loser blocks on the per-root lock mid-flight
+        # (not a sequential second call).
+        with _DrivePatchStack(_fresh_history()):
+            results = await _asyncio.gather(
+                healer.heal_instance(ROOT),
+                healer.heal_instance(ROOT),
+            )
+
+        # Exactly ONE caller performed the heal; the other observed
+        # the already-healed state cleanly (no exception — gather
+        # would have raised; a named skip reason).
+        healed = [r for r in results if r.get("healed")]
+        skipped = [r for r in results if not r.get("healed")]
+        assert len(healed) == 1, f"exactly one heal (got {results!r})"
+        assert len(skipped) == 1, f"exactly one clean skip (got {results!r})"
+        assert "wedge posture" in (skipped[0].get("reason") or ""), (
+            f"the second caller must observe the healed state via the "
+            f"wedge-posture skip (got {skipped[0]!r})"
+        )
+
+        # Terminal surface fired EXACTLY ONCE:
+        # (a) one ghost terminate through the lifecycle lane;
+        assert terminate_calls == [GHOST], (
+            f"exactly one ghost terminate across both callers "
+            f"(got {terminate_calls!r})"
+        )
+        # (b) ONE root terminal lifecycle event across BOTH calls
+        #     (no duplicate SSE/lifecycle noise from interleaved
+        #     drives);
+        root_terminal_events = [
+            c for c in (
+                gap_harness.events_service
+                ._publish_instance_lifecycle_event.await_args_list
+            )
+            if c.kwargs.get("instance_id") == ROOT
+            and c.kwargs.get("status") == "completed"
+        ]
+        assert len(root_terminal_events) == 1, (
+            f"root terminal lifecycle event must fire EXACTLY ONCE "
+            f"across concurrent heals (got "
+            f"{len(root_terminal_events)}: {[dict(c.kwargs) for c in root_terminal_events]!r})"
+        )
+        # (c) the watcher delivery rode the transport boundary EXACTLY
+        #     ONCE across both callers (the CAS-claimed notify lane).
+        assert (
+            gap_harness.manager.enqueue_message.await_count == 1
+        ), (
+            f"watcher delivery must enqueue exactly once across "
+            f"concurrent heals (got "
+            f"{gap_harness.manager.enqueue_message.await_count})"
+        )
+
+        # End state identical to the sequential heal (G6 shape).
+        assert _get_instance_row(
+            gap_harness.engine, ROOT
+        ).status == InstanceStatus.COMPLETED.value
+        assert _get_instance_row(
+            gap_harness.engine, GHOST
+        ).status == "terminated"
+
+        # Lock-map hygiene: both callers left — the per-root entries
+        # are popped (bounded growth; no stale lock leak).
+        assert healer._heal_locks == {}, (
+            f"per-root lock map must drain (got {healer._heal_locks!r})"
+        )
+        assert healer._heal_lock_refs == {}, (
+            f"per-root refcount map must drain "
+            f"(got {healer._heal_lock_refs!r})"
+        )
