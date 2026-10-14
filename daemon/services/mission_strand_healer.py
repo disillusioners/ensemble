@@ -93,13 +93,18 @@ logger = logging.getLogger(__name__)
 # sweep latency).
 DEFAULT_MISSION_STRAND_HEAL_INTERVAL_SECONDS: int = 300
 
-# Race guard: an orphan candidate's ``updated_at`` must be at least
-# this old before the healer will terminalize it. A freshly-spawned
+# Race guard threshold — SINGLE SOURCE OF TRUTH lives in
+# ``mission_live_guard.ORPHAN_MIN_AGE_SECONDS`` together with the
+# shared predicate ``strand_past_race_guard`` (final hardening
+# 2026-10-14: the read-side liveness exclusion runs the SAME
+# predicate, so the two sides can never drift). Imported lazily at
+# the use site, matching this module's service-import convention.
+# An orphan candidate's ``updated_at`` must be at least that old
+# before the healer will terminalize it: a freshly-spawned
 # never-dispatched child may be about to receive its first message
 # (the spawn-then-message ritual); age proves the strand is not a
 # mid-flight ritual. Same threshold family as the F14/A4 60s
 # orphan-age convention.
-ORPHAN_MIN_AGE_SECONDS: int = 60
 
 
 class MissionStrandHealer:
@@ -132,6 +137,21 @@ class MissionStrandHealer:
         self._interval_seconds = int(interval_seconds)
         self._task: asyncio.Task | None = None
         self._stopping = False
+        # Per-root heal serialization (final hardening 2026-10-14):
+        # the 300s sweep and the event-driven downgrade hand-off
+        # (``child_reports._schedule_strand_heal`` — a fire-and-forget
+        # task) can target the SAME root concurrently. Exactly-once
+        # job closure already holds; the lock kills the duplicate
+        # lifecycle/SSE terminal-event noise from interleaved drives.
+        # Bounded growth: refcounted entries — ``_heal_lock_refs``
+        # counts interested callers per root; the LAST caller out pops
+        # both entries (same hygiene family as the WC watchdog's
+        # wedge cooldown map). Get-or-create + refcount bump contain
+        # NO await points, so the sequence is atomic per event-loop
+        # task — no caller can hold a stale lock reference across a
+        # pop.
+        self._heal_locks: dict[str, asyncio.Lock] = {}
+        self._heal_lock_refs: dict[str, int] = {}
 
     # ── lifecycle (WatchReconcileSweepService contract) ──────────
 
@@ -241,7 +261,48 @@ class MissionStrandHealer:
     # ── heal (single root — also the event-driven entry point) ───
 
     async def heal_instance(self, root_id: str) -> dict[str, Any]:
-        """Attempt a heal of ONE mission root. Returns an outcome dict:
+        """Serialize per-root, then attempt ONE heal.
+
+        The per-root ``asyncio.Lock`` makes concurrent invocations —
+        the 300s sweep tick racing the event-driven downgrade
+        hand-off — mutually exclusive per root: the second caller
+        waits, then re-runs every invariant check against the
+        post-heal state and observes it cleanly (typically the
+        ``not the wedge posture`` skip). Lifecycle/SSE terminal
+        events therefore fire EXACTLY ONCE per root heal. Lock-map
+        entries are refcounted and popped by the last caller out
+        (bounded growth).
+
+        Returns the outcome dict of the single serialized heal:
+        ``{"healed": bool, "reason": str, "terminalized": [ids],
+        "drove": bool}``. NEVER raises for expected skip conditions —
+        internal errors propagate (the sweep tick isolates them; the
+        event-driven caller wraps fail-soft).
+        """
+        lock = self._heal_locks.get(root_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._heal_locks[root_id] = lock
+        self._heal_lock_refs[root_id] = (
+            self._heal_lock_refs.get(root_id, 0) + 1
+        )
+        try:
+            async with lock:
+                return await self._heal_instance_locked(root_id)
+        finally:
+            remaining = self._heal_lock_refs.get(root_id, 0) - 1
+            if remaining > 0:
+                # A queued caller still holds interest in this entry.
+                self._heal_lock_refs[root_id] = remaining
+            else:
+                # Last interested caller out — drop the entry so the
+                # maps stay bounded (a later heal mints a fresh lock).
+                self._heal_lock_refs.pop(root_id, None)
+                self._heal_locks.pop(root_id, None)
+
+    async def _heal_instance_locked(self, root_id: str) -> dict[str, Any]:
+        """Attempt a heal of ONE mission root (caller holds the
+        per-root lock). Returns an outcome dict:
 
         ``{"healed": bool, "reason": str, "terminalized": [ids], "drove": bool}``
 
@@ -352,9 +413,11 @@ class MissionStrandHealer:
                               f"{type(exc).__name__}: {exc}",
                 }
             status_by_id = {m.instance_id: m.status for m in members}
-            age_cutoff = (
-                await asyncio.to_thread(self._now_naive)
-            ).timestamp() - ORPHAN_MIN_AGE_SECONDS
+            from daemon.services.mission_live_guard import (
+                ORPHAN_MIN_AGE_SECONDS,
+                strand_past_race_guard,
+            )
+            now_naive = await asyncio.to_thread(self._now_naive)
             orphans = []
             for m in non_terminal:
                 if m.instance_id not in ghost_ids:
@@ -386,16 +449,14 @@ class MissionStrandHealer:
                             f"safety bound"
                         ),
                     }
-                updated_at = self._parse_naive(
-                    getattr(m, "updated_at", None)
-                )
-                if (
-                    updated_at is None
-                    or updated_at.timestamp() > age_cutoff
+                if not strand_past_race_guard(
+                    getattr(m, "updated_at", None), now=now_naive,
                 ):
-                    # Race guard: the strand is too fresh to
-                    # distinguish from a mid-flight ritual. Re-check
-                    # next tick.
+                    # Race guard (shared predicate — the read-side
+                    # liveness exclusion in mission_live_guard runs
+                    # the exact same helper): the strand is too fresh
+                    # to distinguish from a mid-flight ritual.
+                    # Re-check next tick.
                     return {
                         "healed": False,
                         "reason": (
@@ -554,10 +615,3 @@ class MissionStrandHealer:
     def _now_naive():
         from daemon.services.timestamps import now_utc_naive
         return now_utc_naive()
-
-    @staticmethod
-    def _parse_naive(value: Any):
-        from daemon.services.mission_live_guard import (
-            parse_completed_at_naive,
-        )
-        return parse_completed_at_naive(value)

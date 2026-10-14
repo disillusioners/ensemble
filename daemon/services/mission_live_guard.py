@@ -29,10 +29,12 @@ still live?** The mission is LIVE when ANY of:
   live). STRAND EXCEPTION (2026-10-14, watcher-loss terminal strand):
   a never-dispatched member (idle, version 1, zero ``message_queue``
   and zero ``task`` rows) whose DIRECT parent is TERMINAL is
-  stranded-by-construction and does NOT count live — see the STRAND
-  INVARIANT comment in :func:`_evaluate_legs`; never-dispatched rows
-  under a LIVE direct parent (the spawn-then-message ritual) keep
-  holding liveness;
+  stranded-by-construction and does NOT count live once it has aged
+  past ``ORPHAN_MIN_AGE_SECONDS`` (final hardening: the shared
+  ``strand_past_race_guard`` predicate — read/write mirror) — see
+  the STRAND INVARIANT comment in :func:`_evaluate_legs`;
+  never-dispatched rows under a LIVE direct parent (the
+  spawn-then-message ritual) keep holding liveness;
 * (c) the root instance itself is non-terminal (same status set).
 
 Fail-open contract (binding): any exception inside the guard returns
@@ -165,6 +167,46 @@ def parse_completed_at_naive(value: datetime | str | None) -> datetime | None:
     if aware is None:
         return None
     return aware.replace(tzinfo=None)
+
+
+# ── Strand race-guard threshold (watcher-loss terminal strand, final
+#    hardening 2026-10-14) ─────────────────────────────────────────
+# A never-dispatched strand candidate's ``updated_at`` must be at
+# least this old before EITHER side acts on it. A freshly-spawned
+# child may be about to receive its first message (the spawn-then-
+# message ritual); age proves the strand is not mid-flight. BOTH
+# consumers run the SAME predicate below — one threshold, one
+# predicate, no read/write drift. Same threshold family as the
+# F14/A4 60s orphan-age convention. (Lives HERE — the read side —
+# because the write-side healer already imports this module's
+# ``parse_completed_at_naive``; the dependency direction healer →
+# guard keeps the graph acyclic.)
+ORPHAN_MIN_AGE_SECONDS: int = 60
+
+
+def strand_past_race_guard(
+    updated_at: "datetime | str | None",
+    now: datetime | None = None,
+) -> bool:
+    """Shared strand age predicate — single source of truth.
+
+    True ⇔ the strand's ``updated_at`` proves it is at least
+    ``ORPHAN_MIN_AGE_SECONDS`` old. Both sides run this exact
+    predicate: the READ-side liveness exclusion (:func:`_evaluate_legs`
+    — a too-fresh ghost keeps holding liveness; the ritual may still
+    deliver) and the WRITE-side healer (``mission_strand_healer`` — a
+    too-fresh strand is refused, re-checked next tick).
+
+    ``None``/unparseable → False (fail-closed: an unknown age never
+    clears the guard on either side). Age math runs naive-against-
+    naive per the ``now_utc_naive()`` binding convention.
+    """
+    parsed = parse_completed_at_naive(updated_at)
+    if parsed is None:
+        return False
+    if now is None:
+        now = now_utc_naive()
+    return (now - parsed).total_seconds() >= ORPHAN_MIN_AGE_SECONDS
 
 
 async def evaluate_mission_live(
@@ -350,6 +392,15 @@ async def _evaluate_legs(
     # is the legitimate spawn-then-message ritual — the parent is
     # about to (or still may) send the first message. Such rows
     # continue to hold liveness and are NEVER excluded here.
+    # AGE MIRROR (final hardening 2026-10-14): a ghost under a
+    # TERMINAL direct parent is excluded ONLY once it has aged past
+    # ``ORPHAN_MIN_AGE_SECONDS`` (the shared
+    # :func:`strand_past_race_guard` predicate — the SAME predicate
+    # the write-side healer runs before terminalizing). A too-fresh
+    # ghost keeps holding liveness: the just-messaged-not-yet-rowed
+    # window is real, and excluding on a mid-flight ritual would
+    # finalize the mission while the parent's first message is still
+    # in the delivery lane (the stamp→downgrade churn class).
     # Dispatchability is judged by the DIRECT parent only: any live
     # instance between the member and the root can still dispatch it
     # (send_message has no parent-ownership check), so a terminal
@@ -361,6 +412,7 @@ async def _evaluate_legs(
     anchor_missing = True           # a single non-NULL value flips this to False
     member_status: dict[str, str | None] = {}
     member_parent: dict[str, str | None] = {}
+    member_updated: dict[str, object] = {}
     for tree_id in tree_ids:
         instance = await asyncio.to_thread(
             instance_repository.get, tree_id
@@ -372,6 +424,7 @@ async def _evaluate_legs(
         status = getattr(instance, "status", None)
         member_status[tree_id] = status
         member_parent[tree_id] = getattr(instance, "parent_id", None)
+        member_updated[tree_id] = getattr(instance, "updated_at", None)
         # FIXBACK: do NOT early-return on a non-terminal observation.
         # Record it; the post-walk decision tree decides the verdict.
         # skip_root (pre-stamp mode): the root's own non-terminal
@@ -426,6 +479,16 @@ async def _evaluate_legs(
             if (
                 parent_status is not None
                 and parent_status in TERMINAL_INSTANCE_STATUSES
+                # Age mirror (final hardening 2026-10-14): the SAME
+                # race-guard predicate the write-side healer runs.
+                # A too-fresh ghost keeps holding liveness — the
+                # just-messaged-not-yet-rowed window is real on the
+                # read side too, and a stale exclusion here would
+                # finalize under a mid-flight ritual (the stamp→
+                # downgrade churn class). Aged-only exclusion also
+                # unifies read/write semantics: both sides act on
+                # exactly the same row set.
+                and strand_past_race_guard(member_updated.get(oid))
             ):
                 stranded_excluded.append(oid)
         if stranded_excluded:
