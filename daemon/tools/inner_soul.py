@@ -50,13 +50,16 @@ side on a target-by-target basis:
     directly, no approval. The user's preferences take effect
     on the next prompt reload.
   - **memories per-slug chaining**: ``memories/`` writes use
-    the key ``memories/<slug>`` (``<slug>`` = the legacy
-    timestamped filename without the ``.md``). Consecutive
-    writes on the same slug land as version 1, 2, 3, ... on
-    the same key — the loader's selection pointer + latest
-    row governs which version is "live". The legacy
-    collision-counter that derived ``<filename>-<n>.md`` is
-    retired; the version chain is the lineage.
+    the key ``memories/<slug>.md`` (the canonical form —
+    WITH the ``.md`` extension — matches the prompt-visible
+    filename index in the loader's recent-memory list and
+    the on-the-wire ``access_memory("X.Y.md")`` contract).
+    Consecutive writes on the same slug land as version
+    1, 2, 3, ... on the same key — the loader's selection
+    pointer + latest row governs which version is "live".
+    The legacy collision-counter that derived
+    ``<filename>-<n>.md`` is retired; the version chain is
+    the lineage.
   - **memory.md compaction as new version**: the 80%
     proactive compaction rule is preserved as a SEMANTIC
     guardrail — the mutator enforces the 2000-word cap on the
@@ -1385,10 +1388,12 @@ def _submit_memory_version(
         version_tag: Version tag of the owning instance
             (``None`` normalizes to ``""`` in the repo).
         artifact: The DB artifact key for the row. For
-            ``memories/<slug>`` writes this is the per-slug key
-            (e.g. ``"memories/20260401_1430-foo"`` — without the
-            ``.md`` extension); for ``memory`` / ``user`` /
-            ``growth`` it is the canonical artifact string.
+            ``memories/<slug>.md`` writes this is the per-slug
+            key (e.g. ``"memories/20260401_1430-foo.md"`` —
+            WITH the ``.md`` extension; matches the
+            prompt-visible filename index); for ``memory`` /
+            ``user`` / ``growth`` it is the canonical artifact
+            string.
         content: The composed row body (the pre-compaction /
             pre-dedup logic already ran in the caller).
         request: The original request text (for error messages).
@@ -1655,8 +1660,11 @@ def _update_memories(
     Pre-rewrite this wrote a timestamped ``.md`` file under
     ``<agent>/memories/``. Since the DUAL-PATH rewrite, the
     canonical state is a MEMORY-class row keyed
-    ``memories/<slug>`` where ``<slug>`` is the legacy timestamped
-    filename WITHOUT the ``.md`` extension.
+    ``memories/<slug>.md`` — the canonical form carries the
+    ``.md`` extension (User Directive F4, 2026-10-14: matches
+    the prompt-visible filename index in the loader's
+    recent-memory list and the on-the-wire
+    ``access_memory("X.Y.md")`` contract).
 
     Consecutive writes on the same slug land as version 1, 2, 3,
     ... on the same key — the legacy collision-counter that
@@ -1687,7 +1695,7 @@ def _update_memories(
     return _submit_memory_version(
         agent_id=agent_id,
         version_tag=version_tag,
-        artifact=f"memories/{slug}",
+        artifact=f"memories/{slug}.md",
         content=content,
         request=request,
         instance_id=instance_id,

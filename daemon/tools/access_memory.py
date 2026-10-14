@@ -86,6 +86,33 @@ def create_access_memory_tool(agent_id: str, version_tag: str | None = None):
         The repo is the canonical read path — mirrors
         ``inner_soul._update_memory_md`` / ``_update_memories``
         which write via ``create_memory_version`` on the same key.
+
+        F4 NORMALIZATION (User Directive, 2026-10-14) — the
+        canonical row key shape is ``memories/<slug>.md`` where
+        ``<slug>.md`` is the legacy timestamped filename WITH
+        the ``.md`` extension (``inner_soul._update_memories``
+        line 1690 sets ``artifact=f"memories/{slug}.md"``
+        matching the prompt-visible filename index in the
+        loader's recent-memory list — the same shape the agent
+        passes to ``access_memory("X.Y.md")``). The on-the-wire
+        ``access_memory("X.Y.md")`` arg carries the ``.md``
+        suffix verbatim; the canonical form is the same
+        shape — we only normalize a bare ``X.Y`` input by
+        appending the extension so the candidate set uses
+        the canonical key.
+
+        Backward tolerance (the F4 advisory): we ALSO try
+        the no-extension form on the row side, so any
+        pre-normalization rows that were written WITHOUT
+        the extension (the pre-F4 default — ``memories/
+        <slug>`` rows that exist in promotion runs prior to
+        this normalization change) still resolve. The cost
+        is one extra string comparison per candidate row,
+        scoped to the per-call iteration below. Archive
+        keys (``archive/2026/01/foo.md``) keep the ``.md``
+        suffix because the F4 fix applies only to the
+        per-slug leaf — the archive path shape is
+        preserved verbatim.
         """
         try:
             # The repo is the canonical injection site — see
@@ -109,10 +136,27 @@ def create_access_memory_tool(agent_id: str, version_tag: str | None = None):
                 )
             except Exception:
                 return None
+            # F4 canonical key — the row key carries the
+            # ``.md`` extension (matches the prompt-visible
+            # filename index). Normalize a bare ``X.Y`` to
+            # ``X.Y.md`` so the candidate set uses the
+            # canonical key. Archive keys (e.g.,
+            # ``archive/2026/01/foo.md``) already carry
+            # ``.md`` at the tail and round-trip unchanged.
+            canonical = key if key.endswith(".md") else f"{key}.md"
+            # Build the candidate key set ONCE — the
+            # canonical (.md-suffixed) form plus the legacy
+            # no-extension form for backward tolerance with
+            # pre-F4 rows (the pre-F4 default — see the
+            # advisory in the docstring).
+            candidates = {
+                f"memories/{canonical}",
+                f"memories/{canonical[:-3]}",
+            }
             for row in eff_rows:
                 if getattr(row, "artifact_class", None) != "MEMORY":
                     continue
-                if row.artifact != f"memories/{key}":
+                if row.artifact not in candidates:
                     continue
                 # The EffectiveRow.latest_content is the
                 # transition-free latest MEMORY row's content.

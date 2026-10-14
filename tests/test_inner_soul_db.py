@@ -27,6 +27,7 @@ Fencing (project critical notes):
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -60,6 +61,7 @@ from daemon.services.prompt_version_service import PromptVersionService
 from daemon.tools.inner_soul import (
     _update_memories,
     _update_memory_md,
+    _update_growth,
     _update_soul,
     _update_user,
     _update_workflow,
@@ -329,10 +331,17 @@ class TestPendingSupersession:
     ):
         """A5/C4: the new row's VERSION chains on max(version) over
         draft+pending rows; the prior pending row is archived (≤ 1
-        active pending per key). Content composes on the EFFECTIVE
-        chain (selected > latest_approved > file) — a pending row is
-        NOT effective, so the second draft composes on the file
-        fallback, not on the first pending draft.
+        active pending per key).
+
+        CORE post-F5 composition base = prior active row's content
+        (a pending IS active pre-F5-fix); the second draft
+        accumulates on top of the first pending draft's content,
+        NOT on the file fallback — the same accumulation semantic
+        F3 enforces for MEMORY-class rows (memory / user /
+        growth). The file-fallback assertion pre-F5 was: v2.content
+        does NOT contain ``**My name is DBTester**``. Post-F5, v2
+        contains the prior pending row's name on top of the
+        template, so the assertion flips to ``in``.
         """
         tool = create_inner_soul_tool(manager, "dbagent", "inst-test-1")
 
@@ -351,10 +360,16 @@ class TestPendingSupersession:
         # Version chaining: v2 = max(version over draft+pending) + 1.
         assert v2.version == 2
 
-        # Content composed on the EFFECTIVE chain (file fallback — no
-        # approved rows yet), with the target-specific mutation.
-        assert "**My name is DBTester**" not in v2.content
-        assert v2.content.startswith("# Who I Am\n\nI am a test agent.\n")
+        # Post-F5: v2 composes on prior active (v1 pending) row's
+        # content — the same accumulation semantic F3 enforces for
+        # MEMORY-class rows. delta_1 + delta_2 both present in v2.
+        # The "name is DBTester" line replaces the template's
+        # "I am a test agent." placeholder (the mutator injects
+        # the name in place); the second delta ("I value terse
+        # answers") appends below.
+        assert "**My name is DBTester**" in v2.content
+        assert v2.content.startswith("# Who I Am")
+        assert "I am a test agent." in v2.content
         assert "- I value terse answers" in v2.content
 
         # Audit: ARCHIVED event for v1 superseded by v2.
@@ -610,6 +625,405 @@ class TestMemoryCarveOutsUnchanged:
         # the same helper the loader uses.
         latest = slug_rows[0].latest_content or ""
         assert "An observation" in latest
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# F3 — MEMORY composer accumulation (Gate finding F3 fix verification)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestMemoryComposerAccumulation:
+    """F3 fix verification — the three MEMORY composers
+    (``_update_memory_md`` / ``_update_user`` / ``_update_growth``)
+    MUST compose on the EFFECTIVE chain (latest MEMORY-class
+    DB row content) instead of the on-disk file. Consecutive
+    writes accumulate on top of the prior row instead of
+    clobbering against the frozen template file.
+
+    The gate finding: pre-fix, write N+1 read the frozen
+    on-disk file as the composition base, so write N's row
+    content was discarded (the DB row at version N+1 was
+    recomputed from file + delta_N+1, losing delta_N).
+    Post-fix, write N+1 reads the DB row at version N as the
+    base, so the chain is monotonically accumulating.
+    """
+
+    def test_memory_md_two_writes_accumulate(
+        self, registry_patched, manager, temp_agent, repo, service
+    ):
+        """Two consecutive writes on memory.md accumulate:
+        write_1 inserts ``first insight`` (cold-boot file content),
+        write_2 appends ``second insight`` on top of write_1's
+        row content — both bullets present in the v2 content.
+        """
+        # Seed the on-disk memory.md with a clear "cold-boot"
+        # signature so the file-fallback path is exercised on
+        # write_1 (no DB rows yet).
+        (temp_agent / "memory.md").write_text(
+            "# Memory\n\n## Known Patterns\n\n"
+        )
+
+        result_1 = _update_memory_md(
+            "dbagent", temp_agent, "first insight",
+            {"max_memory_words": 2000},
+            manager=_ManagerWithService(service),
+            instance_id="inst-test-1",
+        )
+        assert result_1["success"] is True
+        assert "persisted (memory version 1)" in result_1.get("file", "") \
+            or "memory version 1" in result_1.get("message", "")
+
+        result_2 = _update_memory_md(
+            "dbagent", temp_agent, "second insight",
+            {"max_memory_words": 2000},
+            manager=_ManagerWithService(service),
+            instance_id="inst-test-1",
+        )
+        assert result_2["success"] is True
+
+        # F3 fix — both deltas are in the v2 row content.
+        rows = sorted(_rows_for(repo, "memory"), key=lambda r: r.version)
+        assert len(rows) == 2
+        v1, v2 = rows
+        assert "first insight" in v1.content
+        assert "second insight" in v2.content, (
+            "F3 fix: write N+1 must compose on the EFFECTIVE chain "
+            "(the v1 row content), so v2 content carries BOTH "
+            "first insight AND second insight. Pre-fix, v2 content "
+            "would only have 'second insight' (the file was the "
+            "composition base; write 1's row was discarded)."
+        )
+        assert "first insight" in v2.content, (
+            "F3 fix: the v1 row content MUST survive into v2 "
+            "(accumulation across un-approved writes)"
+        )
+
+        # The on-disk file is UNTOUCHED (the cold-boot F6 source
+        # only — Ud#3).
+        on_disk = (temp_agent / "memory.md").read_text()
+        assert "first insight" not in on_disk
+        assert "second insight" not in on_disk
+
+        # Effective resolution matches v2 content.
+        eff = asyncio.run(service.get_effective("dbagent", "", "memory"))
+        assert "first insight" in eff
+        assert "second insight" in eff
+
+    def test_user_md_two_writes_accumulate(
+        self, registry_patched, manager, temp_agent, repo, service
+    ):
+        """Two consecutive writes on user.md accumulate on the
+        EFFECTIVE chain — the user ud-mutator (placeholder-strip
+        + append-bullet) runs against the prior row's content,
+        not the cold-boot file.
+        """
+        (temp_agent / "user.md").write_text(
+            "# User\n\n(To be filled in with details about the user)\n"
+        )
+
+        result_1 = _update_user(
+            "dbagent", temp_agent, "User prefers dark mode",
+            manager=_ManagerWithService(service),
+            instance_id="inst-test-1",
+        )
+        assert result_1["success"] is True
+
+        result_2 = _update_user(
+            "dbagent", temp_agent, "User prefers TypeScript",
+            manager=_ManagerWithService(service),
+            instance_id="inst-test-1",
+        )
+        assert result_2["success"] is True
+
+        rows = sorted(_rows_for(repo, "user"), key=lambda r: r.version)
+        assert len(rows) == 2
+        v1, v2 = rows
+        # Both bullets present in v2 (F3 fix: accumulation).
+        assert "User prefers dark mode" in v2.content
+        assert "User prefers TypeScript" in v2.content, (
+            "F3 fix: write_2 must compose on the EFFECTIVE chain "
+            "(v1 row content), so v2 carries BOTH bullets"
+        )
+        # The placeholder was stripped at v1 (ud-mutator strips
+        # the "(To be filled in ...)" placeholder).
+        assert "(To be filled" not in v2.content
+
+        # On-disk file UNTOUCHED.
+        on_disk = (temp_agent / "user.md").read_text()
+        assert "User prefers dark mode" not in on_disk
+
+    def test_growth_md_two_writes_accumulate(
+        self, registry_patched, manager, temp_agent, repo, service
+    ):
+        """Two consecutive writes on growth.md accumulate on the
+        EFFECTIVE chain — the growth gd-mutator (whole-content
+        replace / append-line) runs against the prior row's
+        content, not the cold-boot file.
+
+        Each write uses the single-line append path (the
+        directive's first-time-persistence semantic — short
+        body lines get appended under the existing chain).
+        """
+        (temp_agent / "growth.md").write_text(
+            "# Growth\n\nmax_memory_words: 2000\n"
+        )
+
+        result_1 = _update_growth(
+            "dbagent", temp_agent, "max_soul_chars: 3000",
+            manager=_ManagerWithService(service),
+            instance_id="inst-test-1",
+        )
+        assert result_1["success"] is True
+
+        result_2 = _update_growth(
+            "dbagent", temp_agent, "memory_archive_ttl_days: 60",
+            manager=_ManagerWithService(service),
+            instance_id="inst-test-1",
+        )
+        assert result_2["success"] is True
+
+        rows = sorted(_rows_for(repo, "growth"), key=lambda r: r.version)
+        assert len(rows) == 2
+        v1, v2 = rows
+        # Both knobs are in v2 (F3 fix: accumulation across
+        # consecutive append-style writes).
+        assert "max_soul_chars: 3000" in v2.content
+        assert "memory_archive_ttl_days: 60" in v2.content, (
+            "F3 fix: write_2 must compose on the EFFECTIVE chain "
+            "(v1 row content), so v2 carries BOTH knobs"
+        )
+        # The pre-existing config knob from the cold-boot file
+        # is also preserved (it was on the v1 row content,
+        # which v2 appends on top of).
+        assert "max_memory_words: 2000" in v2.content
+
+        # On-disk file UNTOUCHED (the F6 cold-boot fallback).
+        on_disk = (temp_agent / "growth.md").read_text()
+        assert "max_soul_chars: 3000" not in on_disk
+        assert "memory_archive_ttl_days: 60" not in on_disk
+
+    def test_chaining_test_v1_to_v2_intact(
+        self, registry_patched, manager, temp_agent, repo, service
+    ):
+        """Chaining test (memory rows are transition-free — the
+        v1→v2 chain is latest-row-wins on CONTENT accumulated):
+        v1 is superseded by v2 on selection (latest-row-wins is
+        the F3 accumulation semantic; the prior row is NOT
+        archived here — MEMORY rows stay effective throughout,
+        unlike CORE rows that gate on the state machine).
+
+        This pins the chain behavior the directive flagged
+        (the pre-fix test asserted only the second delta; this
+        pins BOTH deltas).
+        """
+        (temp_agent / "memory.md").write_text("# Memory\n\n## Known Patterns\n\n")
+
+        _update_memory_md(
+            "dbagent", temp_agent, "delta one",
+            {"max_memory_words": 2000},
+            manager=_ManagerWithService(service),
+            instance_id="inst-test-1",
+        )
+        _update_memory_md(
+            "dbagent", temp_agent, "delta two",
+            {"max_memory_words": 2000},
+            manager=_ManagerWithService(service),
+            instance_id="inst-test-1",
+        )
+
+        rows = sorted(_rows_for(repo, "memory"), key=lambda r: r.version)
+        v1, v2 = rows[0], rows[1]
+        # ≤ 1 active row per (agent, version_tag, artifact)
+        # is the CONTRACT, but MEMORY rows are transition-free
+        # — both stay state='approved' (the chain's "history" is
+        # the version ordinal, not the state machine).
+        assert v1.state == "approved"
+        assert v2.state == "approved"
+        # The chain source for v2 is v1's content (F3 fix).
+        assert "delta one" in v2.content
+        assert "delta two" in v2.content
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# F4 — memories key normalization (round-trip)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestF4MemoriesKeyNormalization:
+    """F4 round-trip — the per-slug memory row's artifact
+    key must match the on-the-wire ``access_memory("X.Y.md")``
+    contract shape so the read path can resolve the same
+    filename the agent sees in the prompt-visible recent-memory
+    index (User Directive, 2026-10-14).
+
+    Canonical form is ``memories/<slug>.md`` (WITH the ``.md``
+    extension). The writer (``_update_memories``) lands the
+    row at that exact key; the reader (``access_memory``)
+    tries the canonical form first and falls back to the
+    legacy ``memories/<slug>`` (no-ext) form for any
+    pre-F4 rows that might exist from prior promotion runs.
+    """
+
+    def test_writer_keys_with_md_suffix(
+        self, registry_patched, manager, temp_agent, repo, service
+    ):
+        """The per-slug MEMORY row's ``artifact`` ends in
+        ``.md`` — the canonical form. ``_update_memories``
+        lands the row at ``memories/<slug>.md`` (NOT
+        ``memories/<slug>`` without the extension).
+        """
+        classification = {"type": "event", "description": "test event"}
+        result = _update_memories(
+            "dbagent", temp_agent, "An observation", classification,
+            manager=_ManagerWithService(service),
+            instance_id="inst-test-1",
+        )
+        assert result["success"] is True
+
+        # Lookup by version_id (the writer returns it).
+        row = repo.get_version(result["version_id"])
+        assert row is not None
+        # F4 canonical form: artifact ends with .md.
+        assert row.artifact.startswith("memories/"), (
+            f"per-slug row must live under memories/..., got {row.artifact!r}"
+        )
+        assert row.artifact.endswith(".md"), (
+            f"F4 canonical form: artifact must carry the .md "
+            f"suffix (matches the prompt-visible filename "
+            f"index); got {row.artifact!r} (the legacy no-ext "
+            f"form is the pre-F4 default)."
+        )
+        # The MEMORY class stamps correctly via
+        # class_for_artifact("memories/<slug>.md") — startswith
+        # "memories/" branch.
+        assert row.artifact_class == "MEMORY"
+        # Born-effective (transition-free; no approval).
+        assert row.state == "approved"
+
+    def test_round_trip_via_access_memory(
+        self, registry_patched, manager, temp_agent, repo, service
+    ):
+        """Round-trip: ``_update_memories`` writes a row
+        with key ``memories/<slug>.md``; the agent calls
+        ``access_memory("<slug>.md")`` and gets the same
+        content back from the DB.
+
+        This is the council-flagged bug class: pre-F4 the
+        writer stored ``memories/<slug>`` (no ext) while the
+        on-the-wire ``access_memory("X.Y.md")`` arg carried
+        the ``.md`` extension — the row never resolved on
+        the read side.
+        """
+        from daemon.tools.access_memory import create_access_memory_tool
+        from daemon.loader import set_prompt_version_repo
+
+        # Wire the loader's prompt-version repo singleton so
+        # ``access_memory._resolve_db_content`` reads from
+        # the same repo the writer wrote to.
+        prev_repo = _get_prompt_version_repo()
+        set_prompt_version_repo(repo)
+        try:
+            classification = {"type": "event", "description": "round-trip"}
+            write_result = _update_memories(
+                "dbagent", temp_agent,
+                "Round-trip observation about F4",
+                classification,
+                manager=_ManagerWithService(service),
+                instance_id="inst-test-1",
+            )
+            assert write_result["success"] is True
+
+            # The artifact key the writer landed.
+            row = repo.get_version(write_result["version_id"])
+            assert row is not None
+            artifact = row.artifact
+            assert artifact.endswith(".md"), (
+                f"F4 canonical form: artifact must carry .md "
+                f"suffix; got {artifact!r}"
+            )
+
+            # The filename the agent sees (the prompt-visible
+            # recent-memory index lists the <slug>.md leaf).
+            filename = artifact[len("memories/"):]
+            assert filename.endswith(".md")
+
+            # Round-trip: call access_memory with the same
+            # filename. The reader resolves via the DB
+            # effective rows (NOT the file fallback — the
+            # file fallback would also return content for
+            # a freshly-written file, so we must hit the
+            # DB path).
+            tool = create_access_memory_tool("dbagent")
+            read_result = tool.invoke(filename)
+
+            # The DB row's content has the legacy file-shape
+            # header (Created / Type / Description / body);
+            # the round-trip content matches the writer's
+            # persisted body.
+            assert "Round-trip observation about F4" in read_result, (
+                f"F4 round-trip: access_memory({filename!r}) "
+                f"must return the writer's content from the DB; "
+                f"got {read_result!r}"
+            )
+        finally:
+            set_prompt_version_repo(prev_repo)
+
+    def test_reader_tolerates_legacy_no_ext_rows(
+        self, registry_patched, manager, temp_agent, repo, service
+    ):
+        """Back-compat tolerance — pre-F4 rows that were
+        written WITHOUT the ``.md`` extension (legacy
+        ``memories/<slug>`` form, e.g. from promotion runs
+        prior to this fix) must still resolve on the read
+        side when the agent calls ``access_memory
+        ("<slug>.md")``.
+
+        We hand-craft the legacy row via
+        ``repo.create_memory_version`` directly (no
+        internal writer path uses the legacy form after
+        F4 lands — this is documentation in test form).
+        """
+        from daemon.tools.access_memory import create_access_memory_tool
+        from daemon.loader import set_prompt_version_repo
+        from daemon.repositories.prompt_version.repository import (
+            actor_from_instance,
+        )
+
+        prev_repo = _get_prompt_version_repo()
+        set_prompt_version_repo(repo)
+        try:
+            # Hand-craft a legacy no-ext row.
+            actor = actor_from_instance("legacy-inst", "dbagent", "")
+            row = repo.create_memory_version(
+                "dbagent", "",
+                "memories/legacy-note",  # legacy form, NO .md
+                "This row was written before F4 normalized the key",
+                actor,
+            )
+            assert row is not None
+
+            # The agent calls access_memory("legacy-note.md")
+            # — the canonical .md shape. The reader falls
+            # back to the no-ext form to find this row.
+            tool = create_access_memory_tool("dbagent")
+            read_result = tool.invoke("legacy-note.md")
+            assert "legacy-note.md" not in read_result or (
+                "legacy-note" not in read_result.split("legacy-note.md")[0]
+            ) or (
+                "written before F4" in read_result
+            ), (
+                f"F4 back-compat: legacy no-ext rows (artifact="
+                f"memories/legacy-note) must resolve when the "
+                f"agent calls access_memory('legacy-note.md'); "
+                f"got {read_result!r}"
+            )
+            assert "written before F4" in read_result, (
+                f"F4 back-compat: legacy no-ext row content "
+                f"must round-trip through access_memory "
+                f"with .md suffix in the call; got {read_result!r}"
+            )
+        finally:
+            set_prompt_version_repo(prev_repo)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
