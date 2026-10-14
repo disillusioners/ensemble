@@ -8,11 +8,13 @@ import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatMenuModule } from '@angular/material/menu';
+import { MatBadgeModule } from '@angular/material/badge';
 import { ApiService } from './services/api.service';
 import { SseService } from './services/sse.service';
 import { TabStateService } from './services/tab-state.service';
 import { WorkspaceOverlayService } from './services/workspace-overlay.service';
 import { InstancesViewStateService } from './services/instances-view-state.service';
+import { PersonaService } from './services/persona.service';
 import { NotificationBellComponent } from './components/notification-bell/notification-bell.component';
 import { JobQueueIndicatorComponent } from './components/job-queue-indicator/job-queue-indicator.component';
 import { PlaneViewerComponent } from './components/plane-viewer/plane-viewer.component';
@@ -52,6 +54,7 @@ interface PlaneConfig {
     MatIconModule,
     MatButtonModule,
     MatMenuModule,
+    MatBadgeModule,
     NotificationBellComponent,
     JobQueueIndicatorComponent,
     PlaneViewerComponent,
@@ -74,6 +77,14 @@ export class App implements OnInit {
    * that needs to show/hide the overlay.
    */
   protected readonly workspaceOverlayService = inject(WorkspaceOverlayService);
+  /**
+   * Persona (prompt-version) singleton — exposes ``pendingCount`` signal
+   * to the header nav anchor's matBadge. Public so the template can
+   * read it; mutations in the Persona page also push into this signal
+   * via the shared singleton, so the badge updates immediately on
+   * approve/reject without a navigation/reload.
+   */
+  protected readonly personaService = inject(PersonaService);
   private readonly tabStateService = inject(TabStateService);
   /**
    * Singleton state for the instance detail overlay (root-mounted
@@ -588,6 +599,13 @@ export class App implements OnInit {
     // find projA in the restored list and fall through to
     // ``setActiveTab('projA')``, which writes back the same state.
     this.tabStateService.restoreState();
+    // Boot: pull the CORE-only pending-approval count for the Persona
+    // nav anchor's matBadge. The signal updates silently on success;
+    // failures are caught inside refreshPendingCount and surface only
+    // on the ``error`` signal (no toast). Page-level mutations
+    // (approve/reject/submit/retract) re-call this method to drain the
+    // badge immediately.
+    this.personaService.refreshPendingCount();
     // Initialize synchronously so a deep-link to /plan shows the overlay
     // on the very first paint, before the first NavigationEnd fires.
     this.isPlanRoute.set(this.router.url === '/plan' || this.router.url.startsWith('/plan/'));
@@ -602,6 +620,11 @@ export class App implements OnInit {
       const navEnd = event as NavigationEnd;
       this.isPlanRoute.set(navEnd.urlAfterRedirects === '/plan' || navEnd.urlAfterRedirects.startsWith('/plan/'));
       this.syncDetailVisibility(navEnd.urlAfterRedirects);
+      // Re-pull the badge on every navigation — cheap, drains naturally,
+      // and catches rows approved/rejected from the Persona page in a
+      // separate tab (the page mutations already drain via
+      // refreshPendingCount; this is the cross-tab/late-arrival belt).
+      this.personaService.refreshPendingCount();
     });
   }
 

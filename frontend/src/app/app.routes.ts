@@ -54,6 +54,10 @@ export const routes: Routes = [
   // /skills/triggers MUST come before /skills/:id — Angular first-match wins
   { path: 'skills/triggers', loadComponent: () => import('./pages/skills/skill-triggers/skill-triggers.page.component').then(m => m.SkillTriggersPageComponent), title: 'Skill Triggers' },
   { path: 'skills/:id', loadComponent: () => import('./pages/skills/skill-detail/skill-detail.component').then(m => m.SkillDetailComponent) },
+  // Persona (prompt-version) — agent-prompt-immutability Phase C P1.
+  // Static path BEFORE any :id route so Angular's first-match-wins picks
+  // it up; mirrors the /skills/bank precedent.
+  { path: 'persona', loadComponent: () => import('./pages/persona/persona.component').then(m => m.PersonaComponent), title: 'Persona' },
   { path: 'schedules', loadComponent: () => import('./pages/schedules/schedules.component').then(m => m.SchedulesComponent) },
   { path: 'snapshots', loadComponent: () => import('./pages/snapshots/snapshots.component').then(m => m.SnapshotsComponent), title: 'Snapshots' },
   { path: 'mcp-servers', loadComponent: () => import('./components/mcp-server-list/mcp-server-list.component').then(m => m.McpServerListComponent) },
