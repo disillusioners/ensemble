@@ -111,6 +111,18 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     # confirms each named scope is in SCOPE_TAXONOMY at the
     # dedicated validation leg below.
     "/api/prompts": "prompts:read|prompts:submit|prompts:approve|prompts:audit|prompts:write",
+    # Phase C / agent-prompt-immutability F1 (overnight, 2026-10-14):
+    # custom-agents REST family (the 4 endpoints POST / GET / GET
+    # / DELETE — same as the canonical R-A1/A2 lifecycle surface).
+    # The leader F1 directive DELIBERATELY REUSES the prompts:*
+    # scope set rather than minting a new scope (the chosen
+    # scope-reuse convention is documented in
+    # ``daemon/routers/custom_agents.py`` module-level docstring
+    # — invokes the F1 reconciliation note). POST + DELETE
+    # = prompts:write (write-class); GET list + GET single
+    # = prompts:read (read-class). The cage's parsing leg
+    # validates the named scopes against SCOPE_TAXONOMY below.
+    "/api/custom-agents": "prompts:read|prompts:write",
 }
 
 #: The wildcard sentinel as stored in the manifest.
@@ -206,20 +218,25 @@ class TestSourceMatchTarget:
     """The F3-pinned cage match target: ``api_router.include_router(``."""
 
     def test_census_pinned(self):
-        """The textual census: 31 ``api_router.include_router(`` matches
-        at the current tree = 29 unconditional + 2 auth-ON-gated
+        """The textual census: 32 ``api_router.include_router(`` matches
+        at the current tree = 30 unconditional + 2 auth-ON-gated
         (mcp-kb keys, auth-self). A drift here fails the cage and
         forces a manifest review.
 
         Phase B / agent-prompt-immutability T6 added the prompts_router
         (29 unconditional; was 28 pre-T6) — the cage must reflect this
         with the new /api/prompts family pinned in the manifest above.
+
+        Phase C / agent-prompt-immutability F1 added the
+        custom_agents_router (30 unconditional; was 29 pre-F1) — the
+        cage must reflect this with the new /api/custom-agents
+        family pinned in the manifest above.
         """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
-        assert len(matches) == 31, (
+        assert len(matches) == 32, (
             f"api_router.include_router( census drifted: {len(matches)} "
-            "(pinned 31 = 29 unconditional + 2 auth-ON-gated). New mount? "
+            "(pinned 32 = 30 unconditional + 2 auth-ON-gated). New mount? "
             "Declare its family in PINNED_SCOPE_MANIFEST above."
         )
 
@@ -240,11 +257,11 @@ class TestScopeManifestCage:
         assert not violations, "\n".join(violations)
 
     def test_declared_route_count_pinned(self, app_routes):
-        """The decoration census: 71 P4 T4.4 decorations + the 7 P3
+        """The decoration census: 75 P4 T4.4 decorations + the 7 P3
         T3.12 mcpkb:admin keys routes + the 12 Phase B T5 prompts
         routes + the 3 USER-DIRECTIVE-#2 (2026-10-14) prompts deltas
         (PATCH /versions/{id}, DELETE /versions/{id}, GET
-        /pending-count — every one @require_scope-decorated) = 93
+        /pending-count — every one @require_scope-decorated) = 97
         declared routes. A drift is a decoration added/removed
         without a manifest row change.
 
@@ -254,6 +271,17 @@ class TestScopeManifestCage:
         S4 / T5 acceptance) — the cage count was 78 pre-T6. The UD#2
         deltas (2026-10-14) grew it 90 → 93; the /api/prompts family
         entry itself is unchanged (same five prompts:* scopes).
+
+        Phase C / agent-prompt-immutability F1 added 4
+        @require_scope-decorated routes under /api/custom-agents
+        (the canonical R-A1/R-A2 4-endpoint family: POST
+        /api/custom-agents + GET (list) + GET (single) + DELETE)
+        growing the cage count 93 → 97. The /api/custom-agents
+        family entry delegates to the prompts:* scope set (the
+        F1 deliberate scope-reuse convention; the family entry
+        declares ``prompts:read|prompts:write`` and the actual
+        scope per route maps to it — see
+        ``daemon/routers/custom_agents.py`` module docstring).
         """
         declared = [
             r
@@ -262,8 +290,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 93, (
-            f"declared-route census drifted: {len(declared)} (pinned 93)"
+        assert len(declared) == 97, (
+            f"declared-route census drifted: {len(declared)} (pinned 97)"
         )
 
     def test_manifest_entries_valid(self):

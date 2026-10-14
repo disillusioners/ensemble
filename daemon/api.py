@@ -3769,6 +3769,14 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # custom_agents_router mounted BEFORE any future
     # /api/agents/* additions so it cannot be silently
     # shadowed by a more-specific later route.
+    # F1 (overnight 2026-10-14): mounted UNCONDITIONALLY — every
+    # endpoint carries @require_scope (prompts:read|write reuse —
+    # no new scope minted) AND the inline _require_auth_on 503
+    # AUTH_NOT_CONFIGURED gate, so auth-OFF stays fail-closed
+    # (the prompts-family T5/D3 posture). Scope pin lives in the
+    # scope manifest cage (tests/unit/test_router_scope_manifest.py);
+    # registration census pin lives in
+    # tests/integration/test_router_class_manifest.py.
     api_router.include_router(agents_router)        # /api/agents
     api_router.include_router(custom_agents_router) # /api/custom-agents (Phase C: R-A1/A2 lifecycle)
     api_router.include_router(instances_router)      # /api/instances

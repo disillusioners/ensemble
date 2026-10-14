@@ -34,6 +34,37 @@ the predefined flow. Endpoints:
 
 Errors map to the existing daemon-typed envelope (``error`` +
 ``message`` per ``research-findings-db-api.md`` §1 API shape).
+
+**Authorization (overnight F1 gate — 2026-10-14, R-A1/A2 ruling,
+leader REJECT → APPROVED).** The family shipped with ZERO
+authorization; the F1 finding requires it to mirror the
+prompts-family pattern (``daemon/routers/prompts.py`` is the
+canonical exemplar). Each endpoint carries a
+``@require_scope`` decorator AND an inline ``_require_auth_on``
+503 gate that fires BEFORE the decorator — the decorator is
+inert when auth is OFF (decorators.py:74-84), so the explicit
+gate is the fail-closed posture.
+
+Scope mapping (no NEW scope minted; the leader's F1 directive
+REUSES ``prompts:read`` / ``prompts:write`` from the prompt-
+immutability Phase B T4 taxonomy — the directive explicitly
+forbids inventing new scopes and labels the choice as a
+deliberate scope-reuse convention until a custom-agents
+boundary is opened in the taxonomy):
+
+* ``prompts:read``  — GET (list + single)
+* ``prompts:write`` — POST (create) + DELETE (soft-delete)
+
+These are NOT a permissions slip: a request that carries the
+wider ``prompts:write`` already crosses the same privilege
+boundary by definition. Custom-agent lifecycle operates
+inside the same v1 scope family as the prompt-version REST
+surface because it issues prompt-version writes
+(``create_custom_agent`` writes v1 APPROVED rows under R-A1;
+``soft_delete_custom_agent`` keeps the rows but flips
+``deleted_at`` on the config row). The reuse will be revisited
+the first time the custom-agents surface requires a scope the
+prompts family does not (per the §8.4 register entry).
 """
 
 from __future__ import annotations
@@ -43,6 +74,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
+from daemon.auth.decorators import require_scope
 from daemon.models import ErrorCodes, ErrorResponse
 from daemon.repositories.custom_agent_configs import CustomAgentIdError
 from daemon.repositories.custom_agent_configs.repository import (
@@ -62,6 +94,60 @@ router = APIRouter(
 
 
 # =========================================================================
+# Authorization constants + 503 gate — leader F1 finding (overnight,
+# 2026-10-14). Mirrors the prompts-family pattern verbatim
+# (daemon/routers/prompts.py:160-199). The gate MUST run BEFORE the
+# @require_scope (which is inert when auth is OFF — decorators.py:74-84).
+# =========================================================================
+
+#: POST / DELETE — write-class surface (the F1 directive deliberately
+#: reuses the prompts:write scope rather than minting a new one).
+_SCOPE_WRITE = "prompts:write"
+#: GET (list + single) — read-class surface (F1 reuse: prompts:read).
+_SCOPE_READ = "prompts:read"
+#: Stable error code token for the 503 body (client-stable — do NOT
+#: change without a coordinated FE toast update).
+_ERR_AUTH_NOT_CONFIGURED = "AUTH_NOT_CONFIGURED"
+#: Stable error code token for the 401 body (auth-ON but AuthContext
+#: missing — middleware gap; see _actor_from_request below).
+_ERR_AUTH_CONTEXT_MISSING = "AUTH_CONTEXT_MISSING"
+
+
+def _err(status_code: int, error: str, message: str) -> HTTPException:
+    """Plain-dict error envelope for the auth posture (F1).
+
+    Body is ``{"error": CODE, "message": ...}`` — byte-stable across
+    OpenAPI rendering versions, mirrors ``daemon/routers/prompts.py``
+    line 180 verbatim so the auth-class contract is shape-consistent
+    across both routers (FE toasts on ``error``).
+    """
+    return HTTPException(
+        status_code=status_code,
+        detail={"error": error, "message": message},
+    )
+
+
+def _require_auth_on(request: Request) -> None:
+    """The F1 503 gate — auth-OFF fail-closed posture (D3 / F1).
+
+    Runs BEFORE the @require_scope decorator. Reads the same
+    ``request.app.state.auth_config`` attribute the decorator
+    consults; raises 503 ``AUTH_NOT_CONFIGURED`` when absent.
+    Mirrors the prompts-family contract exactly
+    (``daemon/routers/prompts.py:188-199``).
+
+    The §8.4 anonymous-dev ruling (the auth-OFF actor-fallback on
+    the POST path) SUPERSEDED for THIS router by the F1 directive:
+    the 503 fires first; the fallback is dead in practice here
+    but the code path is kept so future surfaces can opt back in
+    via NOT calling this gate.
+    """
+    cfg = getattr(getattr(request.app, "state", None), "auth_config", None)
+    if cfg is None:
+        raise _err(503, _ERR_AUTH_NOT_CONFIGURED, "Auth not configured (fail-closed)")
+
+
+# =========================================================================
 # Helpers
 # =========================================================================
 
@@ -76,26 +162,35 @@ def _actor_from_request(request: Request) -> Any:
     forgery): the body is IGNORED; identity comes ONLY from
     ``request.state.auth_context``.
 
-    When auth is OFF (``actor_from_request`` would refuse by
-    raising ``AuthContextMissingError``), the router falls back
-    to a deterministic test identity — same conservative posture
-    as the rest of the daemon: fail-closed by default, but the
-    auth-OFF posture is intentionally non-blocking for ad-hoc
-    operator flows (D-AUTH-OFF ruling carries).
+    **F1 reconciliation note.** The original implementation fell
+    back to a deterministic ``anonymous-dev`` ActorContext when
+    the auth-context was missing — the §8.4 register entry. The
+    F1 directive places the ``_require_auth_on(request)`` 503
+    gate BEFORE this helper on every endpoint of THIS router,
+    so auth-OFF never reaches this branch (the F1 503 fires
+    first). The §8.4 fallback code path is RETAINED so any
+    FUTURE router surface that opts in (by NOT calling the 503
+    gate explicitly) inherits the auth-OFF conservative
+    posture. Import-repair note: ``AuthContextMissingError``
+    lives in the service layer (PB-A,
+    ``daemon/services/prompt_version_service.py:226``); the
+    prior import from the REPO module was wrong — every POST
+    was 500-ing on the missing-class ImportError. The fixed
+    import is from the service layer.
     """
     from daemon.repositories.prompt_version.repository import (
-        AuthContextMissingError,
         actor_from_request,
+    )
+    from daemon.services.prompt_version_service import (
+        AuthContextMissingError,
     )
 
     try:
         return actor_from_request(request)
     except AuthContextMissingError:
-        # Auth-OFF posture — return a stable dev identity so the
-        # endpoint stays usable in dev / test runs (the R-A1
-        # stamp field is filled anyway; the operator-facing
-        # audit row carries "anonymous-dev" so the
-        # ``created_by`` audit column is never empty).
+        # Future-surface auth-OFF fallback (§8.4 anonymous-dev
+        # register entry — preserved verbatim; the F1 gate
+        # blocks this branch on the current router).
         from daemon.repositories.prompt_version.repository import (
             ActorContext,
         )
@@ -163,6 +258,7 @@ def _lifecycle_service(request: Request) -> Any:
 
 
 @router.post("", status_code=201)
+@require_scope(_SCOPE_WRITE)
 async def create_custom_agent(
     request: Request,
     body: dict[str, Any],
@@ -195,7 +291,13 @@ async def create_custom_agent(
     * Tools: ``tools_allow`` / ``tools_deny`` /
       ``tools_deny_spawn``.
     * Context: ``context_injection_heuristic_match_shared_md_files``.
+
+    **Authorization (F1).** ``@require_scope("prompts:write")`` +
+    the inline ``_require_auth_on(request)`` 503 gate (the F1
+    directive — the decorator is inert when auth is OFF, so
+    the gate fires first; the prompts-family pattern).
     """
+    _require_auth_on(request)
     actor = _actor_from_request(request)
 
     # Body validation — required fields + types.
@@ -325,16 +427,28 @@ async def create_custom_agent(
 
 
 @router.get("")
+@require_scope(_SCOPE_READ)
 async def list_custom_agents(request: Request):
-    """List all LIVE custom-agent configs."""
+    """List all LIVE custom-agent configs.
+
+    **Authorization (F1).** ``@require_scope("prompts:read")`` +
+    the inline ``_require_auth_on(request)`` 503 gate.
+    """
+    _require_auth_on(request)
     svc = _lifecycle_service(request)
     items = await svc.list_active()
     return {"items": items, "total": len(items)}
 
 
 @router.get("/{user_name}")
+@require_scope(_SCOPE_READ)
 async def get_custom_agent(request: Request, user_name: str):
-    """Get one custom agent's config + versions."""
+    """Get one custom agent's config + versions.
+
+    **Authorization (F1).** ``@require_scope("prompts:read")`` +
+    the inline ``_require_auth_on(request)`` 503 gate.
+    """
+    _require_auth_on(request)
     svc = _lifecycle_service(request)
     try:
         config = await svc.get_by_agent_id(user_name)
@@ -358,8 +472,14 @@ async def get_custom_agent(request: Request, user_name: str):
 
 
 @router.delete("/{user_name}")
+@require_scope(_SCOPE_WRITE)
 async def delete_custom_agent(request: Request, user_name: str):
-    """Soft-delete a custom agent (R-A2 conservative: rows kept)."""
+    """Soft-delete a custom agent (R-A2 conservative: rows kept).
+
+    **Authorization (F1).** ``@require_scope("prompts:write")`` +
+    the inline ``_require_auth_on(request)`` 503 gate.
+    """
+    _require_auth_on(request)
     svc = _lifecycle_service(request)
     try:
         deleted = await svc.soft_delete_custom_agent(
