@@ -1204,6 +1204,25 @@ class InstanceManager:
             repo=self._prompt_version_repo
         )
 
+        # Phase C — User Directive #5A custom-agent config repository.
+        # Sibling of ``_prompt_version_repo`` — same construction
+        # pattern (``engine=``, ``create_tables=False`` — the api
+        # lifespan covers create_all; the .sql migration covers
+        # SQLite). The router's POST /api/custom-agents / DELETE
+        # endpoints reach it via ``manager._custom_agent_config_repo``
+        # (the SkillStoreService-style manager-owned pattern at
+        # ``manager.py:1171-1213``).
+        #
+        # CONSTRUCTION ORDER (residual-fix cluster C, 2026-10-14):
+        # MUST be assigned BEFORE ``_custom_agent_lifecycle_service``
+        # below — the service constructor consumes the repo
+        # (``config_repo=self._custom_agent_config_repo``); assigning
+        # it after the service was a use-before-assign that raised
+        # AttributeError on every full ``InstanceManager`` boot.
+        self._custom_agent_config_repo = create_custom_agent_config_repository(
+            engine=self._engine, create_tables=False
+        )
+
         # Phase C — User Directive #5A custom-agent lifecycle
         # service. Owns the wide-transaction coordination between
         # ``_custom_agent_config_repo`` + ``_prompt_version_repo``
@@ -1228,18 +1247,6 @@ class InstanceManager:
         # tests).
         from . import loader as _loader_module
         _loader_module.set_prompt_version_repo(self._prompt_version_repo)
-
-        # Phase C — User Directive #5A custom-agent config repository.
-        # Sibling of ``_prompt_version_repo`` — same construction
-        # pattern (``engine=``, ``create_tables=False`` — the api
-        # lifespan covers create_all; the .sql migration covers
-        # SQLite). The router's POST /api/custom-agents / DELETE
-        # endpoints reach it via ``manager._custom_agent_config_repo``
-        # (the SkillStoreService-style manager-owned pattern at
-        # ``manager.py:1171-1213``).
-        self._custom_agent_config_repo = create_custom_agent_config_repository(
-            engine=self._engine, create_tables=False
-        )
 
         # NEW: Session repository for session management
         # Must be created before SourceRegistry for scheduler session mode
