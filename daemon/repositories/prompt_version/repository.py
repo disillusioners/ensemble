@@ -1677,10 +1677,16 @@ class PromptVersionRepository:
                     f"({agent_id}, {version_tag!r}, {artifact})"
                 )
             if target[1] != "approved":
-                raise ValueError(
-                    f"cannot select prompt_version {version_id}: state "
-                    f"is {target[1]!r}, only approved versions may be "
-                    f"selected (F6)"
+                # Non-approved target → 409 INVALID_TRANSITION at the
+                # router (prompts.py:857 catches ``_InvalidTransitionError``).
+                # The repo raises the typed error directly so the
+                # router does not need a fallback catch; previously
+                # this was a ``ValueError`` which fell through to a
+                # bare 500 (H4 finding).
+                raise InvalidTransitionError(
+                    version_id=version_id,
+                    from_state=target[1],
+                    to_state="approved",
                 )
 
             # Find currently-selected rows for this key (audit
