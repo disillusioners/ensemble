@@ -60,9 +60,14 @@ def mock_manager():
         state = "pending_approval"
 
     class _StubPromptVersionService:
+        def __init__(self):
+            self.memory_calls = []
         async def create_and_submit(self, agent_id, version_tag, artifact,
                                     content_or_mutator, actor, *,
                                     file_fallback=None):
+            return _StubRow()
+        async def create_memory_version(self, agent_id, version_tag, artifact, content, actor):
+            self.memory_calls.append((artifact, content))
             return _StubRow()
 
     mgr._prompt_version_service = _StubPromptVersionService()

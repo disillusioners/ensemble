@@ -76,9 +76,14 @@ def mock_manager():
         state = "pending_approval"
 
     class _StubPromptVersionService:
+        def __init__(self):
+            self.memory_calls = []
         async def create_and_submit(self, agent_id, version_tag, artifact,
                                     content_or_mutator, actor, *,
                                     file_fallback=None):
+            return _StubRow()
+        async def create_memory_version(self, agent_id, version_tag, artifact, content, actor):
+            self.memory_calls.append((artifact, content))
             return _StubRow()
 
     mgr._prompt_version_service = _StubPromptVersionService()
@@ -627,11 +632,11 @@ class TestFullCompoundWorkflow:
                 "request": "Today we discussed API design AND We talked about testing strategy"
             })
             
-            memories_after = list(memories_dir.glob("*.md"))
-            new_memories = [f for f in memories_after if f not in memories_before]
-            
-            # Should create at least one new memory (possibly two if both parts processed)
-            assert len(new_memories) >= 1
+            stub = mock_manager._prompt_version_service
+            assert len(stub.memory_calls) >= 1
+            artifact, content = stub.memory_calls[0]
+            assert artifact.startswith("memories/")
+            assert "API design" in content or "testing strategy" in content
 
     def test_compound_mixed_types(self, mock_registry, mock_manager, temp_agent, rag_disabled):
         """Compound request with mixed types should submit appropriate drafts.
@@ -679,8 +684,5 @@ class TestFullCompoundWorkflow:
                 "request": "A AND B AND C",
                 "target": "memories"
             })
-            
-            memories_after = list(memories_dir.glob("*.md"))
-            
-            # All parts should go to memories/
-            assert len(memories_after) > len(memories_before)
+            # All parts should go to memories/ (DB-backed path; check stub state)
+            assert len(mock_manager._prompt_version_service.memory_calls) >= 1

@@ -118,9 +118,14 @@ def mock_manager():
         state = "pending_approval"
 
     class _StubPromptVersionService:
+        def __init__(self):
+            self.memory_calls = []
         async def create_and_submit(self, agent_id, version_tag, artifact,
                                     content_or_mutator, actor, *,
                                     file_fallback=None):
+            return _StubRow()
+        async def create_memory_version(self, agent_id, version_tag, artifact, content, actor):
+            self.memory_calls.append((artifact, content))
             return _StubRow()
 
     mgr._prompt_version_service = _StubPromptVersionService()
@@ -639,9 +644,10 @@ class TestInnerSoulToolRedirect:
             # Should NOT redirect
             assert "experience()" not in result
             
-            # Phase B: DB submission — pending-approval grammar, file untouched
-            assert "📋 user:" in result
-            assert "pending approval" in result
+            # Phase B T7: user.md = MEMORY-class (born-effective `✓ user:` grammar,
+            # not pending). Memory versions are transition-free — create_memory_version
+            # rows land as `state='approved'` immediately.
+            assert "✓ user:" in result
             assert user_file.read_text() == user_before
 
     def test_content_parameter_works_for_redirect(self, mock_registry, mock_manager, temp_agent, rag_enabled):
@@ -749,35 +755,31 @@ class TestMemoriesTargetRouting:
     def test_explicit_target_memories_calls_update_memories(self, temp_agent, mock_manager):
         """Test that explicit target='memories' triggers _update_memories()."""
         classification = {"type": "event", "targets": ["memories"], "description": "Event or observation"}
-        
-        # Call _update_memories directly
-        result = _update_memories("test_agent", temp_agent, "Test memory content", classification, mock_manager)
-        
-        # Verify success
+
+        result = _update_memories(
+            "test_agent", temp_agent, "Test memory content", classification,
+            mock_manager, instance_id="test-instance",
+        )
+
         assert result["success"] is True
         assert result["target"] == "memories"
         assert "file" in result
-        assert result["file"].startswith("memories/")
-        
-        # Verify file was created
-        memories_dir = temp_agent / "memories"
-        memory_files = list(memories_dir.glob("*.md"))
-        assert len(memory_files) >= 1
-        
-        # Verify file content
-        created_file = memory_files[-1]  # Get the most recent one
-        content = created_file.read_text()
+        assert "memory-version" in result["file"]
+        # DB-backed: verify content landed via stub's create_memory_version
+        stub = mock_manager._prompt_version_service
+        assert stub.memory_calls
+        artifact, content = stub.memory_calls[-1]
+        assert artifact.startswith("memories/") and artifact.endswith(".md")
         assert "Test memory content" in content
         assert "event" in content.lower()
 
     def test_execute_update_with_memories_target(self, temp_agent, mock_manager):
         """Test that _execute_update routes to _update_memories for target='memories'."""
         from daemon.tools.inner_soul import _execute_update
-        
+
         classification = {"type": "skill", "targets": ["memories"], "description": "New skills"}
         growth_rules = {"max_memory_words": 500, "max_soul_chars": 2000}
-        
-        # Execute update with memories target
+
         result = _execute_update(
             agent_id="test_agent",
             agent_path=temp_agent,
@@ -786,17 +788,14 @@ class TestMemoriesTargetRouting:
             intent=None,
             rules=growth_rules,
             manager=mock_manager,
-            classification=classification
+            classification=classification,
+            instance_id="test-instance",
         )
-        
-        # Should succeed
+
         assert result["success"] is True
         assert result["target"] == "memories"
-        
-        # File should be created
-        memories_dir = temp_agent / "memories"
-        memory_files = list(memories_dir.glob("*.md"))
-        assert len(memory_files) >= 1
+        # DB-backed: stub tracks create_memory_version call
+        assert mock_manager._prompt_version_service.memory_calls
 
     def test_tool_with_explicit_target_memories(self, mock_registry, mock_manager, temp_agent):
         """Test full tool invocation with target='memories'."""
@@ -812,18 +811,14 @@ class TestMemoriesTargetRouting:
                 "target": "memories",
                 "request": "Remember this important observation"
             })
-            
+
             # Should succeed and not redirect
             assert "ERROR" not in result or "experience()" not in result
-            
-            # Should create a memory file
-            memories_after = list(memories_dir.glob("*.md"))
-            assert len(memories_after) > len(memories_before)
-            
-            # Verify the new memory contains the request content
-            new_files = [f for f in memories_after if f not in memories_before]
-            assert len(new_files) >= 1
-            content = new_files[0].read_text()
+            # DB-backed: stub tracks create_memory_version call + content
+            stub = mock_manager._prompt_version_service
+            assert stub.memory_calls
+            artifact, content = stub.memory_calls[-1]
+            assert artifact.startswith("memories/")
             assert "important observation" in content
 
 
@@ -907,15 +902,15 @@ class TestMemoryLimitErrorMessage:
             agent_path=temp_agent,
             request="New valid content",
             rules=growth_rules,
-            manager=mock_manager
+            manager=mock_manager,
+            instance_id="test-instance",
         )
-        
+
         assert result["success"] is True
         assert "error" not in result
-        
-        # Verify content was written
-        content = memory_file.read_text()
-        assert "New valid content" in content
+        # DB-backed: verify content landed via stub's create_memory_version
+        stub = mock_manager._prompt_version_service
+        assert any(c for _, c in stub.memory_calls if "New valid content" in c)
 
 
 # =============================================================================
@@ -1018,10 +1013,8 @@ class TestToolIntentRememberBehavior:
                 "intent": "remember",
                 "request": "some unclear text xyz"
             })
-            
-            # Should create memory file
-            memories_after = list(memories_dir.glob("*.md"))
-            assert len(memories_after) > len(memories_before)
+            # DB-backed: stub's create_memory_version call signals the write
+            assert mock_manager._prompt_version_service.memory_calls
 
     def test_tool_intent_remember_is_default_for_remember_intent(self, mock_registry, mock_manager, temp_agent):
         """Test that intent='remember' defaults target to memories/."""
