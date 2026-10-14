@@ -1,5 +1,22 @@
 # Test Packs
 
+## Commission PHASE-4 CERTIFICATION — IMAGE-GEN TOOL @ 6eeed8694 (2026-10-14) — 🟢 VERDICT: PASS (0 commission-caused failures; 1 classified seal red w/ exactly 8 known stale pins; 4 FE base-proven pre-existing) — full evidence: RESULTS/2026-10-14-image-gen-tool-phase4-certification.md
+
+Worktree `/home/ensemble-worktrees/image-gen-tool` (branch feature/image-gen-tool; base 8c525315e; **11 commits actual vs 12 stated — HEAD verified**). 10 workers, 0 re-dispatches, 0 timeouts. Lane A LIVE MiniMax generation proven end-to-end (image_id 5de377d4…, sha256 7a1124fb… three-way byte-exact, /views/tmp-images 200, marker emitted, provenance feature=image-gen); Lane B = SKIP-WITH-DISCLOSURE (404 unknown model, user-gate closed); budget 2/5 real images script-enforced (exit-33 hard-cap verified). NEW registered packs: `image_gen_delivery_integration` + `image_gen_lane_a`.
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `image_gen_tool_unit` (ad-hoc) | `pytest tests/unit/tools/test_image_gen_tool.py tests/unit/tools/test_frozen_tool_name_discovery.py` | tool contract + frozen names | <1 min | 2026-10-14 @ 6eeed8694 (4.79s) | ✅ PASS 101/101 |
+| `sources_dispatcher_unit` (ad-hoc) | `pytest tests/test_sources_dispatcher.py` | marker truth-tables incl. image-gen | <1 min | 2026-10-14 @ 6eeed8694 (0.81s) | ✅ PASS 108/108 |
+| `chart_trio` (ad-hoc, 2 invocations) | default-filter trio + full e2e file via `--override-ini="addopts="` | chart quartet (with dispatcher file = 183/184) + CHART_CAPABLE audit | ~1 min | 2026-10-14 @ 6eeed8694 (2.14s + 3.22s) | ✅ PASS-with-classified-red 75/76 + 27/28 (seal test, exactly 8 known stale pins, base-proven, re-pin ceremony owed) |
+| `slack_adapter_regression` (ad-hoc) | `pytest tests/test_slack_{adapter,blocks,rate_limiter,thread_manager}.py` | untouched regression family | <1 min | 2026-10-14 @ 6eeed8694 (3.66s) | ✅ PASS 187/187 |
+| `sources_unit_test` (registered) | `test/packs/sources_unit_test.sh` | sources subsystem | ~2 min | 2026-10-14 @ 6eeed8694 (9.82s) | ✅ PASS 213/213 (+61 branch-added dispatcher tests vs 152 baseline) |
+| `image_regression_test` (registered) | `test/packs/image_regression_test.sh` | image-family regression | ~2 min | 2026-10-14 @ 6eeed8694 (10.7s) | ✅ PASS 138/138 (+23 vs 115 baseline, pre-branch additions) |
+| `frontend_full_jest` (ad-hoc) | `cd frontend && ./node_modules/.bin/jest` (FULL suite, no shard) | FE unit gate | ~1 min | 2026-10-14 @ 6eeed8694 (21.7s) | ✅ PASS-with-preexisting 4007P/4F (jobs-grouping ×3 + jobs-filter-state ×1, identical at base 8c525315e; ledger :397/:447) |
+| `fe_tsc_app` (ad-hoc) | `cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.app.json` | TS gate (frontend-local binary) | <1 min | 2026-10-14 @ 6eeed8694 (7s) | ✅ PASS exit 0 |
+| `image_gen_delivery_integration` (NEW registered) | `pytest tests/test_image_gen_delivery_integration.py --override-ini="addopts=" -m integration` | both-seam full chain, delete-after-delivery, web leg, degraded paths | <1 min | 2026-10-14 @ 6eeed8694 + 53c94ab9f (1.03s) | ✅ PASS 16/16 (+ co-green w/ chart groups 20/20; default-suite deselected 16) |
+| `image_gen_lane_a` (NEW registered) | `bash test/packs/image_gen_lane_a.sh <lane-a|lane-b-probe|all>` | LIVE lanes: dev-proxy real MiniMax e2e + live probe + 5-image budget counter (exit 33 on cap) | ~2 min/leg | 2026-10-14 @ 6eeed8694 + 1a3f58d9e (41s lane-a) | ✅ PASS lane-a (real image, byte-exact) / ⏭️ lane-b SKIP-WITH-DISCLOSURE (404, 0 images) |
+
 ## Commission FINAL GATE — WATCHER-LOSS TERMINAL-STRAND (RCA b6e24d78) @ 27d2452a7→d195316a6 (+gap bfb242d9) (2026-10-14) — 🟢 VERDICT: PASS — full evidence: RESULTS/2026-10-14-watcher-loss-terminal-strand-final-gate.md
 
 Worktree `/home/ensemble-worktrees/watcher-loss-terminal-strand` (branch feature/watcher-loss-terminal-strand; base 27d2452a7; 4 production fixes: mission_live_guard, child_reports, NEW mission_strand_healer, watchdog re-arm + api/config wiring). INDEPENDENT verification — 13 workers, 0 re-dispatches, all developer claims re-derived from zero. 5,184 collected / 5,048 passed / 24 failed (ALL pre-existing documented families, 0 branch-caused) / 0 TIMEOUT. Tester-authored gap suite (G1–G8, scenario-3 conjunct + fail-closed probes + idempotency edges + fidelity pin) 10/10 @ commit bfb242d9. ensure.md Core: scoped packs PASS; concurrency exact-baseline 99P/0F/74S. Release-Gate E2E deferred to promote ceremony.
