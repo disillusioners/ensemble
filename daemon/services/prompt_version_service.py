@@ -32,6 +32,15 @@ Phase B additions (T1+T2+T3+T10, see
   authority check reads ``actor.instance_id`` against the row's
   ``submitter_instance_id`` for the internal path, and reuses
   the project's "session == trusted human" convention for HTTP).
+* USER DIRECTIVE #2 (2026-10-14, frontend specs) — the CRUD + badge
+  deltas: ``update_version_content`` / ``delete_version`` (thin
+  wrappers; the editable-state guard draft/pending-ONLY lives in the
+  repo and raises the typed ``VersionNotEditableError`` /
+  ``VersionNotDeletableError`` the router maps to ``409
+  VERSION_IMMUTABLE``) and ``count_pending`` (the Persona UI badge
+  feed). Approved rows stay append-only immutable history; rejected
+  is terminal; hard-delete of approved history is a MORNING FORK and
+  is deliberately NOT built.
 
 Why a service layer
 -------------------
@@ -154,6 +163,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any, Callable, Optional, Union
+
+# Re-export of the repo's typed not-editable / not-deletable errors —
+# part of this facade's contract surface (the routers / callers that
+# hold only the service can catch them without a second import path).
+# noqa: F401 — intentional re-export.
+from daemon.repositories.prompt_version.repository import (  # noqa: F401
+    VersionNotDeletableError,
+    VersionNotEditableError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -851,10 +869,89 @@ class PromptVersionService:
             offset=offset,
         )
 
+    # --------------------------------------------------------
+    # USER DIRECTIVE #2 (2026-10-14) — content edit / delete /
+    # pending-count (the CRUD + badge API deltas, deliverable 2).
+    # --------------------------------------------------------
+
+    async def update_version_content(
+        self,
+        version_id: str,
+        content: str,
+        actor: Any,
+    ) -> Any:
+        """Replace the content of a draft/pending row in place (UD#2).
+
+        Thin wrapper — the editable-state guard (draft/pending ONLY;
+        approved = append-only immutable history, rejected = terminal,
+        archived = superseded) lives in the repo
+        (:meth:`PromptVersionRepository.update_version_content`) and
+        raises the typed
+        :class:`daemon.repositories.prompt_version.repository.VersionNotEditableError`
+        carrying the row's current state; the router maps it to
+        ``409 VERSION_IMMUTABLE``. The UPDATED audit row (prior/new
+        content_hash + byte sizes) is stamped inside the same
+        ``engine.begin()`` as the content UPDATE.
+
+        Lane note: no human-lane guard here (unlike approve/reject) —
+        editing an UNAPPROVED draft/pending row is a ``prompts:write``
+        operation available to both HTTP lanes per the endpoint table
+        (USER DIRECTIVE #2); the immutable-history protection is the
+        state rule itself, not the lane.
+
+        Raises:
+            VersionNotEditableError: Non-editable current state.
+            LookupError: Unknown version_id.
+        """
+        return await asyncio.to_thread(
+            self._repo.update_version_content,
+            version_id,
+            content,
+            actor,
+        )
+
+    async def delete_version(
+        self,
+        version_id: str,
+        actor: Any,
+    ) -> Any:
+        """Hard-delete a draft/pending row (UD#2).
+
+        Thin wrapper — same editable-state rule as
+        :meth:`update_version_content`; the repo raises the typed
+        :class:`daemon.repositories.prompt_version.repository.VersionNotDeletableError`
+        carrying the row's current state (mapped to
+        ``409 VERSION_IMMUTABLE``). The DELETED audit row (identity +
+        content_hash + content byte length in the payload — forensics
+        survive the deleted row) is stamped inside the same
+        ``engine.begin()`` as the DELETE. Hard-delete of APPROVED
+        history is a morning fork and is deliberately NOT built.
+
+        Raises:
+            VersionNotDeletableError: Non-deletable current state.
+            LookupError: Unknown version_id.
+        """
+        return await asyncio.to_thread(
+            self._repo.delete_version,
+            version_id,
+            actor,
+        )
+
+    async def count_pending(self) -> int:
+        """Count rows in state ``pending_approval`` (UD#2 badge feed).
+
+        Plain count — the A8 effective fingerprint does not apply
+        (a badge answers "how many rows await approval"); drains as
+        approve/reject land.
+        """
+        return await asyncio.to_thread(self._repo.count_pending)
+
 
 __all__ = [
     "PromptVersionService",
     "HumanLaneRequiredError",
     "AuthContextMissingError",
     "RetractAuthorityError",
+    "VersionNotEditableError",
+    "VersionNotDeletableError",
 ]
