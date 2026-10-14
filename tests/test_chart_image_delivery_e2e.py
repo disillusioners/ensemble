@@ -1250,6 +1250,23 @@ class TestInstallerSkillHygiene:
 #     2026-10-05-unify-spawn-tools-acceptance.md §2 (A/B: PASS@base
 #     ×3 / FAIL@feature ×3; sha256-corroborated against pinned
 #     baselines at ac399874).
+#   - 2026-10-14 image-gen-tool commission Phase 1 (worktree
+#     /home/ensemble-worktrees/image-gen-tool, branch
+#     feature/image-gen-tool): agents/developer[v2]/tools_note.md
+#     re-pinned f8df81327f6553e169b583ea58dc10dbe4a8340d3e1405d4d1
+#     afabc84089988e → 62882063ca109e7829c097201e110a0edb872ade00041
+#     5372ab7ca016bee5748. Delta is EXACTLY one appended section,
+#     "## Image Generation — `generate_image`" (11 added lines at
+#     end-of-file; zero modified/removed lines — git diff audited
+#     before re-pin): when-to-use guidance, sizing contract
+#     (aspect_ratio XOR width/height pair, n≤4, ≈$0.0035/image), and
+#     the byte-exact `<!-- ens-img:image-gen:<32hex> -->` marker
+#     paste-verbatim discipline mirroring the charter chart-render
+#     teaching. No charter/render-pipeline semantic changed.
+#     Evidence pointer: tests/unit/tools/test_image_gen_tool.py
+#     (commission Phase 4 pack; Phase 1 unit rows all green) —
+#     seal ceremony per .agents/shared/planning/image-gen-tool/
+#     phase1-plan.md Seal-Trip Subsection.
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "870ec32faf071cc1478c0540690381ef46c0bd1ae6667163215845ad39992581",
@@ -1279,7 +1296,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/ari/rule.md": "bb784e8c41afc913bccf1873bfd5cb8943e5b1e17daacc6936efa08a31d26b68",
     "agents/coder/soul.md": "0fa7fb9e875203ff9d2b8a14bdd3cdcabce24a44f8a89a0031a6a33123196201",
     "agents/developer/rule.md": "dba24812288634cd5c31e8e78ba8c95e664a37549f49b0feb56fabd099b4c260",
-    "agents/developer[v2]/tools_note.md": "f8df81327f6553e169b583ea58dc10dbe4a8340d3e1405d4d1afabc84089988e",
+    "agents/developer[v2]/tools_note.md": "62882063ca109e7829c097201e110a0edb872ade000415372ab7ca016bee5748",
     "agents/devops/rule.md": "889e52842c0d4c562ad18d27364f9a7ea0223453df4a6659c11995d631996b78",
     "agents/doc-writer/rule.md": "7897c461b8e9a2b748ec03500ac88be942845642bdd1fc3c0fef5444935152c7",
     "agents/governor/rule.md": "84a93586df376ad39dc553af36f86f684977ecfa8d717186f2fe8f16846c8cf5",
