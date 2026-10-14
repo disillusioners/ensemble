@@ -1011,6 +1011,16 @@ dispatcher-approved-pending-morning-ratification):
   agent_mother.agent_modify) compose on the
   new base without code change (the repo
   abstracts the seam).
+  **Landed in commit ``5bfe1b308``**
+  ("fix(prompts): F5 create_and_submit
+  composition base — prior active row, not
+  get_effective", 2026-10-14 06:02Z) — journal
+  pointer added post-landing by the F2/F5
+  fix-cycle coder session per the dispatcher
+  directive (the fix-cycle dispatch of
+  2026-10-14 mandates the amendment entry
+  record the landing commit sha; the original
+  entry predates its own sha by construction).
 * **Pending-count is CORE-only by design** — the
   ``count_pending`` repo method predicate carries
   ``AND artifact_class = 'CORE'``; the
