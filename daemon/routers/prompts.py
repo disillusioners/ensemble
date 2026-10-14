@@ -82,7 +82,6 @@ The router does NOT touch ``daemon/services/*``, ``daemon/repositories/*`,
 
 from __future__ import annotations
 
-import asyncio
 import difflib
 import logging
 import re
@@ -508,8 +507,18 @@ async def list_versions(
     # Phase D / follow-up (out of scope per phaseB-plan.md §OOS).
     if agent_id is None or version_tag is None or artifact is None:
         return _VersionListResponse(items=[], total=0)
-    items = await asyncio.to_thread(
-        svc.list_versions, agent_id, version_tag, artifact, limit=limit, offset=offset
+    # Call-form contract (F2 call-form fix, 2026-10-14): every
+    # service method is ALREADY an async facade (phase-contract
+    # A4 — one ``await asyncio.to_thread`` hop around the sync
+    # repo, INSIDE the service). The router MUST ``await`` them
+    # directly. Wrapping an async method in another
+    # ``asyncio.to_thread(...)`` runs the coroutine FACTORY in a
+    # thread and returns an un-awaited coroutine object — the
+    # route then dies on attribute access (``'coroutine' object
+    # has no attribute ...``). The old sync-MagicMock fixtures
+    # hid exactly this; the real-service lane tests catch it.
+    items = await svc.list_versions(
+        agent_id, version_tag, artifact, limit=limit, offset=offset
     )
     # The repo's list_versions returns all-state rows; filter in
     # the router (the repo doesn't carry a state filter — Phase A's
@@ -542,7 +551,7 @@ async def get_version(
     _require_auth_on(request)
     _require_uuid_like(version_id)
     svc = _get_service(request)
-    row = await asyncio.to_thread(svc.get_version, version_id)
+    row = await svc.get_version(version_id)
     if row is None:
         raise _err(404, _ERR_VERSION_NOT_FOUND, f"No version {version_id}")
     return _version_to_response(row)
@@ -565,19 +574,19 @@ async def diff_version(
     _require_auth_on(request)
     _require_uuid_like(version_id)
     svc = _get_service(request)
-    row = await asyncio.to_thread(svc.get_version, version_id)
+    row = await svc.get_version(version_id)
     if row is None:
         raise _err(404, _ERR_VERSION_NOT_FOUND, f"No version {version_id}")
     # Resolve the comparison content (against).
     if against == "effective":
-        against_content = await asyncio.to_thread(
-            svc.get_effective, row.agent_id, row.version_tag, row.artifact
+        against_content = await svc.get_effective(
+            row.agent_id, row.version_tag, row.artifact
         )
         against_label = "effective"
         against_version_id = None
     elif against == "approved":
-        latest = await asyncio.to_thread(
-            svc.get_latest_approved, row.agent_id, row.version_tag, row.artifact
+        latest = await svc.get_latest_approved(
+            row.agent_id, row.version_tag, row.artifact
         )
         if latest is None:
             raise _err(404, _ERR_VERSION_NOT_FOUND, "No approved version for key")
@@ -587,7 +596,7 @@ async def diff_version(
     else:
         # explicit version_id — also acts as the path-param allowlist
         _require_uuid_like(against)
-        target = await asyncio.to_thread(svc.get_version, against)
+        target = await svc.get_version(against)
         if target is None:
             raise _err(404, _ERR_VERSION_NOT_FOUND, f"No version {against}")
         against_content = target.content
@@ -626,7 +635,7 @@ async def approve_version(
     actor = actor_from_request(request)
     svc = _get_service(request)
     try:
-        row = await asyncio.to_thread(svc.approve, version_id, actor)
+        row = await svc.approve(version_id, actor)
     except _HumanLaneRequiredError:
         raise _err(403, _ERR_HUMAN_LANE_REQUIRED, "Approve requires session lane (D2)")
     except MemoryClassError as exc:
@@ -667,7 +676,7 @@ async def reject_version(
     actor = actor_from_request(request)
     svc = _get_service(request)
     try:
-        row = await asyncio.to_thread(svc.reject, version_id, actor)
+        row = await svc.reject(version_id, actor)
     except _HumanLaneRequiredError:
         raise _err(403, _ERR_HUMAN_LANE_REQUIRED, "Reject requires session lane (D2)")
     except MemoryClassError as exc:
@@ -709,7 +718,7 @@ async def submit_version(
     actor = actor_from_request(request)
     svc = _get_service(request)
     try:
-        row = await asyncio.to_thread(svc.submit_for_approval, version_id, actor)
+        row = await svc.submit_for_approval(version_id, actor)
     except MemoryClassError as exc:
         raise _err(
             409,
@@ -762,7 +771,10 @@ async def retract_version(
     actor = actor_from_request(request)
     svc = _get_service(request)
     try:
-        row = await asyncio.to_thread(svc.retract, version_id, actor)
+        # Direct await (F2 call-form fix) — ``svc.retract`` is an
+        # async facade; to_thread-wrapping it returns an un-awaited
+        # coroutine (see the call-form contract note at endpoint 1).
+        row = await svc.retract(version_id, actor)
     except MemoryClassError as exc:
         raise _err(
             409,
@@ -803,8 +815,7 @@ async def create_version(
     _require_path_param(body.artifact, "artifact")
     actor = actor_from_request(request)
     svc = _get_service(request)
-    row = await asyncio.to_thread(
-        svc.create_draft,
+    row = await svc.create_draft(
         body.agent_id,
         body.version_tag,
         body.artifact,
@@ -834,8 +845,7 @@ async def set_selection(
     actor = actor_from_request(request)
     svc = _get_service(request)
     try:
-        await asyncio.to_thread(
-            svc.set_selection,
+        await svc.set_selection(
             body.agent_id,
             body.version_tag,
             body.artifact,
@@ -870,9 +880,7 @@ async def clear_selection(
     _require_path_param(artifact, "artifact")
     actor = actor_from_request(request)
     svc = _get_service(request)
-    await asyncio.to_thread(
-        svc.clear_selection, agent_id, version_tag, artifact, actor
-    )
+    await svc.clear_selection(agent_id, version_tag, artifact, actor)
     return _SelectionResponse(
         agent_id=agent_id, version_tag=version_tag, artifact=artifact, version_id=None
     )
@@ -898,9 +906,7 @@ async def get_effective(
     _require_path_param(version_tag, "version_tag")
     _require_path_param(artifact, "artifact")
     svc = _get_service(request)
-    content = await asyncio.to_thread(
-        svc.get_effective, agent_id, version_tag, artifact
-    )
+    content = await svc.get_effective(agent_id, version_tag, artifact)
     return _EffectiveResponse(
         agent_id=agent_id, version_tag=version_tag, artifact=artifact, content=content
     )
@@ -965,8 +971,7 @@ async def list_audit(
     if actor_subject is not None:
         _require_filter_param(actor_subject, "actor_subject")
     svc = _get_service(request)
-    items, total = await asyncio.to_thread(
-        svc.list_audit_events,
+    items, total = await svc.list_audit_events(
         agent_id=agent_id,
         version_tag=version_tag,
         artifact=artifact,
@@ -1006,9 +1011,7 @@ async def update_version_content(
     actor = actor_from_request(request)
     svc = _get_service(request)
     try:
-        row = await asyncio.to_thread(
-            svc.update_version_content, version_id, body.content, actor
-        )
+        row = await svc.update_version_content(version_id, body.content, actor)
     except MemoryClassError as exc:
         # Ud#3: PATCH on a MEMORY row is a class-mismatch 4xx
         # — MEMORY rows are transition-free, no edit path.
@@ -1051,7 +1054,7 @@ async def delete_version(
     actor = actor_from_request(request)
     svc = _get_service(request)
     try:
-        row = await asyncio.to_thread(svc.delete_version, version_id, actor)
+        row = await svc.delete_version(version_id, actor)
     except MemoryClassError as exc:
         # Ud#3: DELETE on a MEMORY row is a class-mismatch 4xx
         # — MEMORY rows are transition-free, no delete path.
@@ -1093,7 +1096,7 @@ async def pending_count(
     """
     _require_auth_on(request)
     svc = _get_service(request)
-    count = await asyncio.to_thread(svc.count_pending)
+    count = await svc.count_pending()
     return _PendingCountResponse(count=int(count or 0))
 
 

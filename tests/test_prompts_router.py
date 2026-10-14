@@ -35,7 +35,7 @@ sister test file (``test_prompts_router_auth_off.py``).
 from __future__ import annotations
 
 from typing import Any, Optional
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import APIRouter, FastAPI
@@ -257,28 +257,32 @@ def _make_service_mock(**overrides: Any) -> Any:
     """Build a MagicMock-based service with sane defaults.
 
     Override any method by passing ``method_name=callable``. ALL
-    methods are SYNC because the router bridges through
-    ``asyncio.to_thread`` (the service surface from
-    ``daemon/services/prompt_version_service.py`` is itself an
-    async wrapper around sync repo calls). MagicMock with a return
-    value is the correct shape.
+    service METHODS are ``AsyncMock`` — they model the REAL
+    :class:`daemon.services.prompt_version_service.
+    PromptVersionService`, whose every public method is an
+    ``async def`` facade (phase-contract A4: one
+    ``await asyncio.to_thread`` hop around the sync repo inside
+    the service). The router awaits them directly (F2 call-form
+    fix, 2026-10-14) — a sync ``MagicMock`` return would crash
+    the route with ``TypeError: object MagicMock can't be used in
+    'await' expression``; ``AsyncMock`` returns an awaitable.
     """
     svc = MagicMock()
-    # Async methods (router to_thread-wraps them → the underlying
-    # callable is sync).
-    svc.create_draft = MagicMock(
+    # Async methods — the real service surface is an async facade
+    # (A4); the router ``await``s these directly.
+    svc.create_draft = AsyncMock(
         return_value=_make_version(state="draft", approver_subject=None, approver_auth_method=None)
     )
-    svc.create_and_submit = MagicMock(
+    svc.create_and_submit = AsyncMock(
         return_value=_make_version(state="pending_approval", approver_subject=None, approver_auth_method=None)
     )
-    svc.submit_for_approval = MagicMock(
+    svc.submit_for_approval = AsyncMock(
         return_value=_make_version(state="pending_approval", approver_subject=None, approver_auth_method=None)
     )
-    svc.approve = MagicMock(
+    svc.approve = AsyncMock(
         return_value=_make_version(state="approved")
     )
-    svc.reject = MagicMock(
+    svc.reject = AsyncMock(
         return_value=_make_version(state="rejected")
     )
     # F2 fix (2026-10-14): the router now routes retract through
@@ -288,31 +292,32 @@ def _make_service_mock(**overrides: Any) -> Any:
     # router — keep that method mock-free here and let the real
     # service own it (see ``TestRetractRealService`` for the
     # real-service coverage of the four matrix cases).
-    svc.retract = MagicMock(
+    svc.retract = AsyncMock(
         return_value=_make_version(state="draft")
     )
-    svc.set_selection = MagicMock(return_value=None)
-    svc.clear_selection = MagicMock(return_value=None)
-    # Sync methods (the router to_thread-wraps them).
-    svc.list_versions = MagicMock(return_value=[_make_version()])
-    svc.get_version = MagicMock(return_value=_make_version())
-    svc.get_latest_approved = MagicMock(return_value=_make_version())
-    svc.get_effective = MagicMock(return_value="effective-content")
-    svc.get_effective_rows = MagicMock(return_value=[])
-    svc.get_selection = MagicMock(return_value=None)
-    svc.append_audit_event = MagicMock(return_value=None)
+    svc.set_selection = AsyncMock(return_value=None)
+    svc.clear_selection = AsyncMock(return_value=None)
+    # Reads are async facades too (A4 — one to_thread hop inside
+    # the service, NOT in the router).
+    svc.list_versions = AsyncMock(return_value=[_make_version()])
+    svc.get_version = AsyncMock(return_value=_make_version())
+    svc.get_latest_approved = AsyncMock(return_value=_make_version())
+    svc.get_effective = AsyncMock(return_value="effective-content")
+    svc.get_effective_rows = AsyncMock(return_value=[])
+    svc.get_selection = AsyncMock(return_value=None)
+    svc.append_audit_event = AsyncMock(return_value=None)
     # Phase B T5 endpoint 12 (audit list) — real path. Default empty
     # result keeps every existing test green; per-test overrides swap
     # in rows for the filter-matrix coverage.
-    svc.list_audit_events = MagicMock(return_value=([], 0))
+    svc.list_audit_events = AsyncMock(return_value=([], 0))
     # USER DIRECTIVE #2 (2026-10-14) — CRUD + badge deltas.
-    svc.update_version_content = MagicMock(
+    svc.update_version_content = AsyncMock(
         return_value=_make_version(state="draft", content="edited")
     )
-    svc.delete_version = MagicMock(
+    svc.delete_version = AsyncMock(
         return_value=_make_version(state="draft")
     )
-    svc.count_pending = MagicMock(return_value=0)
+    svc.count_pending = AsyncMock(return_value=0)
     for k, v in overrides.items():
         setattr(svc, k, v)
     return svc
@@ -419,7 +424,7 @@ class TestListVersions:
             _make_version(version_id="v-2", version=2),
             _make_version(version_id="v-1", version=1),
         ]
-        service_mock.list_versions = MagicMock(return_value=rows)
+        service_mock.list_versions = AsyncMock(return_value=rows)
         resp = client.get(
             "/api/prompts/versions",
             params={
@@ -444,7 +449,7 @@ class TestListVersions:
             _make_version(version_id="v-1", state="approved"),
             _make_version(version_id="v-2", state="draft"),
         ]
-        service_mock.list_versions = MagicMock(return_value=rows)
+        service_mock.list_versions = AsyncMock(return_value=rows)
         resp = client.get(
             "/api/prompts/versions",
             params={
@@ -472,7 +477,7 @@ class TestListVersions:
 
     def test_list_versions_pagination_shape(self, client, service_mock):
         rows = [_make_version(version_id=f"v-{i}", version=i) for i in range(1, 6)]
-        service_mock.list_versions = MagicMock(return_value=rows)
+        service_mock.list_versions = AsyncMock(return_value=rows)
         resp = client.get(
             "/api/prompts/versions",
             params={
@@ -507,7 +512,7 @@ class TestListVersions:
 
 class TestGetVersion:
     def test_get_version_returns_row(self, client, service_mock):
-        service_mock.get_version = MagicMock(
+        service_mock.get_version = AsyncMock(
             return_value=_make_version(version_id="v-42", content="hello")
         )
         resp = client.get("/api/prompts/versions/v-42")
@@ -517,7 +522,7 @@ class TestGetVersion:
         assert body["content"] == "hello"
 
     def test_get_version_not_found_returns_404(self, client, service_mock):
-        service_mock.get_version = MagicMock(return_value=None)
+        service_mock.get_version = AsyncMock(return_value=None)
         resp = client.get("/api/prompts/versions/missing")
         assert resp.status_code == 404
         body = resp.json()
@@ -535,8 +540,8 @@ class TestDiffVersion:
         """Default ``against=effective`` reads the service's
         ``get_effective`` and computes the unified diff."""
         version = _make_version(version_id="v-1", content="new\ncontent\n")
-        service_mock.get_version = MagicMock(return_value=version)
-        service_mock.get_effective = MagicMock(return_value="old\ncontent\n")
+        service_mock.get_version = AsyncMock(return_value=version)
+        service_mock.get_effective = AsyncMock(return_value="old\ncontent\n")
         resp = client.get("/api/prompts/versions/v-1/diff")
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -549,8 +554,8 @@ class TestDiffVersion:
 
     def test_diff_against_approved(self, client, service_mock):
         version = _make_version(version_id="v-1", content="new\n")
-        service_mock.get_version = MagicMock(return_value=version)
-        service_mock.get_latest_approved = MagicMock(
+        service_mock.get_version = AsyncMock(return_value=version)
+        service_mock.get_latest_approved = AsyncMock(
             return_value=_make_version(version_id="v-0", content="old\n")
         )
         resp = client.get(
@@ -566,8 +571,8 @@ class TestDiffVersion:
         self, client, service_mock
     ):
         version = _make_version(version_id="v-1")
-        service_mock.get_version = MagicMock(return_value=version)
-        service_mock.get_latest_approved = MagicMock(return_value=None)
+        service_mock.get_version = AsyncMock(return_value=version)
+        service_mock.get_latest_approved = AsyncMock(return_value=None)
         resp = client.get(
             "/api/prompts/versions/v-1/diff",
             params={"against": "approved"},
@@ -577,7 +582,7 @@ class TestDiffVersion:
     def test_diff_against_explicit_version(self, client, service_mock):
         v1 = _make_version(version_id="v-1", content="target\n")
         v2 = _make_version(version_id="v-2", content="source\n")
-        service_mock.get_version = MagicMock(side_effect=[v1, v2])
+        service_mock.get_version = AsyncMock(side_effect=[v1, v2])
         resp = client.get(
             "/api/prompts/versions/v-1/diff",
             params={"against": "v-2"},
@@ -588,7 +593,7 @@ class TestDiffVersion:
 
     def test_diff_invalid_against_returns_422(self, client, service_mock):
         version = _make_version(version_id="v-1")
-        service_mock.get_version = MagicMock(return_value=version)
+        service_mock.get_version = AsyncMock(return_value=version)
         # version_id with bad chars — fails the allowlist
         resp = client.get(
             "/api/prompts/versions/v-1/diff",
@@ -613,7 +618,7 @@ class TestApproveHumanLaneOnly:
     def test_bearer_approve_returns_403_human_lane_required(
         self, client, service_mock
     ):
-        service_mock.approve = MagicMock(side_effect=_ApproveForbiddenError())
+        service_mock.approve = AsyncMock(side_effect=_ApproveForbiddenError())
         resp = client.post(
             "/api/prompts/versions/v-1/approve",
             headers={"X-Test-Role": "bearer:prompts:approve"},
@@ -624,7 +629,7 @@ class TestApproveHumanLaneOnly:
         assert detail.get("error") == "HUMAN_LANE_REQUIRED"
 
     def test_session_approve_returns_200(self, client, service_mock):
-        service_mock.approve = MagicMock(
+        service_mock.approve = AsyncMock(
             return_value=_make_version(version_id="v-1", state="approved")
         )
         resp = client.post("/api/prompts/versions/v-1/approve")
@@ -639,7 +644,7 @@ class TestApproveHumanLaneOnly:
         raises ``InvalidTransitionError`` whose current_state =
         'approved'. Router maps to 409 ALREADY_APPROVED."""
         exc = _InvalidTransitionErrorMock(version_id="v-1", from_state="approved", to_state="approved")
-        service_mock.approve = MagicMock(side_effect=exc)
+        service_mock.approve = AsyncMock(side_effect=exc)
         resp = client.post("/api/prompts/versions/v-1/approve")
         assert resp.status_code == 409, resp.text
         body = resp.json()
@@ -648,7 +653,7 @@ class TestApproveHumanLaneOnly:
 
     def test_reject_already_rejected_returns_409(self, client, service_mock):
         exc = _InvalidTransitionErrorMock(from_state="rejected", to_state="rejected")
-        service_mock.reject = MagicMock(side_effect=exc)
+        service_mock.reject = AsyncMock(side_effect=exc)
         resp = client.post("/api/prompts/versions/v-1/reject")
         assert resp.status_code == 409
         body = resp.json()
@@ -656,7 +661,7 @@ class TestApproveHumanLaneOnly:
         assert detail.get("error") == "ALREADY_REJECTED"
 
     def test_bearer_reject_returns_403(self, client, service_mock):
-        service_mock.reject = MagicMock(side_effect=_ApproveForbiddenError())
+        service_mock.reject = AsyncMock(side_effect=_ApproveForbiddenError())
         resp = client.post(
             "/api/prompts/versions/v-1/reject",
             headers={"X-Test-Role": "bearer:prompts:approve"},
@@ -667,7 +672,7 @@ class TestApproveHumanLaneOnly:
         assert detail.get("error") == "HUMAN_LANE_REQUIRED"
 
     def test_session_reject_returns_200(self, client, service_mock):
-        service_mock.reject = MagicMock(
+        service_mock.reject = AsyncMock(
             return_value=_make_version(version_id="v-1", state="rejected")
         )
         resp = client.post("/api/prompts/versions/v-1/reject")
@@ -675,7 +680,7 @@ class TestApproveHumanLaneOnly:
         assert resp.json()["state"] == "rejected"
 
     def test_approve_not_found_returns_404(self, client, service_mock):
-        service_mock.approve = MagicMock(side_effect=LookupError("not found"))
+        service_mock.approve = AsyncMock(side_effect=LookupError("not found"))
         resp = client.post("/api/prompts/versions/missing/approve")
         assert resp.status_code == 404
 
@@ -684,7 +689,7 @@ class TestSubmitAndRetract:
     """Submit / retract — machine lane OK (D11 / phaseB-plan.md D10)."""
 
     def test_bearer_submit_with_scope_passes(self, client, service_mock):
-        service_mock.submit_for_approval = MagicMock(
+        service_mock.submit_for_approval = AsyncMock(
             return_value=_make_version(state="pending_approval")
         )
         resp = client.post(
@@ -745,89 +750,24 @@ class TestSubmitAndRetract:
 
 
 class TestRetractRealService:
-    """F2 leader-gate coverage — real repo + real service + real router."""
+    """F2 leader-gate coverage — real repo + real service + real router.
 
-    # NOTE: the router's pattern ``await asyncio.to_thread(svc.METHOD, ...)``
-    # works with the MagicMock test fixtures because MagicMock returns a
-    # sync ``return_value`` when called. With the REAL
-    # ``PromptVersionService`` every public method is ``async def`` — so
-    # ``asyncio.to_thread(svc.retract, ...)`` runs the call in a thread,
-    # receives the coroutine, and ``await`` only awaits the thread's
-    # future, NOT the coroutine itself. The result is a never-awaited
-    # coroutine (RuntimeWarning) and the route then tries to read
-    # attributes from a coroutine (AttributeError → 500).
-    #
-    # The F2 finding is about S16 authority bypass — the router bug
-    # above is a separate pre-existing issue that affects every
-    # endpoint uniformly. To keep the F2 fix scoped, the real-service
-    # test below overrides ``retract`` on the service instance with a
-    # SYNC facade that inlines the same S16 logic against the repo
-    # directly. The other endpoints are out of scope and stay mocked.
-
-    @staticmethod
-    def _sync_retract(repo, version_id, actor):
-        """Sync implementation of ``PromptVersionService.retract``.
-
-        Mirrors the S16 matrix (T2 / decisions.md S16) — see
-        ``daemon/services/prompt_version_service.py:506-652`` for
-        the canonical async source. Used as a monkey-patch override
-        on the real service so the router's
-        ``await asyncio.to_thread(svc.retract, ...)`` pattern returns
-        the right thing (it was the pattern itself that masked the
-        F2 bypass — the F2 fix routes through this method, which the
-        router does now correctly; the sync facade keeps the test
-        honest by ensuring the REAL ``RetractAuthorityError`` is
-        raised, not a fake one mocked into existence).
-        """
-        from daemon.services.prompt_version_service import (
-            RetractAuthorityError,
-        )
-
-        auth_method = getattr(actor, "auth_method", None)
-        if auth_method not in ("session", "internal", "bearer"):
-            raise ValueError(
-                f"retract on {version_id}: actor.auth_method "
-                f"{auth_method!r} is not a known value "
-                f"(session/internal/bearer)"
-            )
-
-        if auth_method == "bearer":
-            # Machine lane cannot retract a row submitted by an
-            # instance identity — refuse with the typed error the
-            # router maps to 403 RETRACT_FORBIDDEN (S5 body shape).
-            raise RetractAuthorityError(
-                version_id=version_id,
-                actor_auth_method=auth_method,
-                actor_instance_id=None,
-                row_submitter_instance_id=None,
-                reason="machine_lane_refused",
-            )
-
-        if auth_method == "internal":
-            # Own-row authority check (T2 / S16) — the actor's
-            # instance_id must match the row's submitter_instance_id.
-            row = repo.get_version(version_id)
-            if row is None:
-                raise LookupError(
-                    f"prompt_version {version_id} not found "
-                    f"(retract authority check)"
-                )
-            actor_instance_id = getattr(actor, "instance_id", None)
-            if actor_instance_id != row.submitter_instance_id:
-                raise RetractAuthorityError(
-                    version_id=version_id,
-                    actor_auth_method=auth_method,
-                    actor_instance_id=actor_instance_id,
-                    row_submitter_instance_id=row.submitter_instance_id,
-                    reason="wrong_instance",
-                )
-
-        # auth_method == "session" OR internal+own-row: pass the
-        # gate, run the A1 transition (F-A1 state machine guard
-        # lives in the repo's atomic_transition).
-        return repo.atomic_transition(
-            version_id, "pending_approval", "draft", actor,
-        )
+    The router awaits the service DIRECTLY (F2 call-form fix,
+    2026-10-14: ``row = await svc.retract(version_id, actor)``) —
+    the service's every public method is an ``async def`` facade
+    (phase-contract A4), so the old
+    ``await asyncio.to_thread(svc.retract, ...)`` shape ran the
+    coroutine FACTORY in a thread and handed the route an
+    un-awaited coroutine object (AttributeError → 500). The
+    real-service tests in this class execute the REAL
+    ``PromptVersionService.retract`` — the S16 matrix, the typed
+    :class:`RetractAuthorityError`, and the router's 403/409/404
+    mappings — against a fresh file-SQLite engine. No
+    monkey-patches, no sync facades: the earlier revision worked
+    around the to_thread bug by overriding ``retract`` with a sync
+    copy of the S16 logic; the call-form fix makes that scaffold
+    unnecessary and it is removed.
+    """
 
     @pytest.fixture
     def real_db_engine(self):
@@ -882,14 +822,12 @@ class TestRetractRealService:
     def real_service(self, real_db_engine):
         """A real :class:`PromptVersionService` bound to the fixture DB.
 
-        The ``retract`` method is MONKEY-PATCHED with a sync facade
-        (``self._sync_retract``) so the router's
-        ``await asyncio.to_thread(svc.retract, ...)`` pattern returns
-        a real result (not a coroutine — see the class docstring for
-        the full rationale). The S16 matrix and the typed error
-        :class:`RetractAuthorityError` are the REAL service classes,
-        so the 403 body-code mapping the router produces is verified
-        against the genuine exception path.
+        No method overrides: the real async ``retract`` (and every
+        other real method the routes call) runs as-is. The S16
+        matrix and the typed error
+        :class:`RetractAuthorityError` are the REAL service
+        classes, so the 403 body-code mapping the router produces
+        is verified against the genuine exception path.
         """
         from daemon.repositories.prompt_version.repository import (
             PromptVersionRepository,
@@ -898,12 +836,9 @@ class TestRetractRealService:
 
         engine, _ = real_db_engine
         repo = PromptVersionRepository(engine)
-        service = PromptVersionService(repo)
-        # Override retract with the sync facade (see class docstring).
-        service.retract = lambda version_id, actor: self._sync_retract(
-            repo, version_id, actor,
-        )
-        return service
+        # No overrides — the REAL async ``retract`` runs end-to-end
+        # through the router's direct ``await`` (call-form fix).
+        return PromptVersionService(repo)
 
     @pytest.fixture
     def real_client(self, real_db_engine, real_service):
@@ -1009,6 +944,48 @@ class TestRetractRealService:
         detail = body.get("detail", body)
         # Body code per S5 body-shape contract — one stable code.
         assert detail.get("error") == "RETRACT_FORBIDDEN"
+
+    # ─── (opt#1) bearer approve → 403 HUMAN_LANE_REQUIRED, real lane ───
+
+    def test_bearer_approve_real_lane_returns_403_human_lane_required(
+        self, real_client, real_service
+    ):
+        """OPTIONAL#1 (F2 ride-along, dispatcher-mandated 2026-10-14):
+        service-layer approve/reject refuses bearer actors — the
+        binding rule "agents NEVER approve"; the lane discriminator
+        beats scope (D2). A bearer holding ``prompts:approve`` PASSES
+        the scope decorator but the REAL service's
+        ``_require_human_lane`` gate raises the typed
+        :class:`HumanLaneRequiredError` (fields: ``version_id`` +
+        ``actor_auth_method``) and the router maps it to 403
+        ``HUMAN_LANE_REQUIRED``. End-to-end on the real lane: real
+        repo row, real service gate, real router mapping.
+        """
+        seeded = self._seed_pending_row(real_service, "inst-self")
+        resp = real_client.post(
+            f"/api/prompts/versions/{seeded.version_id}/approve",
+            headers={"X-Test-Role": "bearer:prompts:approve"},
+        )
+        assert resp.status_code == 403, resp.text
+        body = resp.json()
+        detail = body.get("detail", body)
+        assert detail.get("error") == "HUMAN_LANE_REQUIRED"
+
+    def test_bearer_reject_real_lane_returns_403_human_lane_required(
+        self, real_client, real_service
+    ):
+        """Mirror of the approve ride-along — ``reject`` refuses the
+        bearer lane on the real service path too (same typed error,
+        same 403 mapping)."""
+        seeded = self._seed_pending_row(real_service, "inst-self")
+        resp = real_client.post(
+            f"/api/prompts/versions/{seeded.version_id}/reject",
+            headers={"X-Test-Role": "bearer:prompts:approve"},
+        )
+        assert resp.status_code == 403, resp.text
+        body = resp.json()
+        detail = body.get("detail", body)
+        assert detail.get("error") == "HUMAN_LANE_REQUIRED"
 
     def test_bearer_without_prompts_submit_scope_returns_403_scope(
         self, real_client, real_service
@@ -1130,7 +1107,7 @@ class TestCreateDraft:
             approver_subject=None,
             approver_auth_method=None,
         )
-        service_mock.create_draft = MagicMock(return_value=new_row)
+        service_mock.create_draft = AsyncMock(return_value=new_row)
         resp = client.post(
             "/api/prompts/versions",
             json={
@@ -1165,7 +1142,7 @@ class TestCreateDraft:
 
 class TestSelections:
     def test_set_selection_returns_200(self, client, service_mock):
-        service_mock.set_selection = MagicMock(return_value=None)
+        service_mock.set_selection = AsyncMock(return_value=None)
         resp = client.post(
             "/api/prompts/selections",
             json={
@@ -1180,7 +1157,7 @@ class TestSelections:
         assert body["version_id"] == "v-1"
 
     def test_clear_selection_returns_200(self, client, service_mock):
-        service_mock.clear_selection = MagicMock(return_value=None)
+        service_mock.clear_selection = AsyncMock(return_value=None)
         resp = client.delete("/api/prompts/selections/developer/v2/soul")
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -1206,7 +1183,7 @@ class TestSelections:
 
 class TestEffective:
     def test_effective_returns_content(self, client, service_mock):
-        service_mock.get_effective = MagicMock(return_value="effective content")
+        service_mock.get_effective = AsyncMock(return_value="effective content")
         resp = client.get("/api/prompts/effective/developer/v2/soul")
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -1218,7 +1195,7 @@ class TestEffective:
     def test_effective_returns_null_when_no_override(
         self, client, service_mock
     ):
-        service_mock.get_effective = MagicMock(return_value=None)
+        service_mock.get_effective = AsyncMock(return_value=None)
         resp = client.get("/api/prompts/effective/developer/v2/soul")
         assert resp.status_code == 200
         body = resp.json()
@@ -1273,7 +1250,7 @@ class TestScopeEnforcement:
     ):
         """Session lane carries the full operator family (D9 / P4
         real grant model) — every prompts:* scope is granted."""
-        service_mock.list_versions = MagicMock(return_value=[])
+        service_mock.list_versions = AsyncMock(return_value=[])
         resp = client.get(
             "/api/prompts/versions",
             params={"agent_id": "developer", "version_tag": "",
@@ -1335,7 +1312,7 @@ class TestAuditEndpoint:
                                        "version": 1,
                                        "via": "create_and_submit"}),
         ]
-        service_mock.list_audit_events = MagicMock(return_value=(rows, 3))
+        service_mock.list_audit_events = AsyncMock(return_value=(rows, 3))
         resp = client.get(
             "/api/prompts/audit",
             params={
@@ -1372,7 +1349,7 @@ class TestAuditEndpoint:
     ):
         """Limit/offset pass through to the service (skill_bank
         pagination shape)."""
-        service_mock.list_audit_events = MagicMock(return_value=([], 0))
+        service_mock.list_audit_events = AsyncMock(return_value=([], 0))
         resp = client.get(
             "/api/prompts/audit",
             params={"limit": 10, "offset": 25},
@@ -1385,7 +1362,7 @@ class TestAuditEndpoint:
     def test_audit_version_id_filter(self, client, service_mock):
         """Per-version timeline lookup — ``version_id`` filter rides
         ``idx_prompt_audit_events_version`` (Phase A)."""
-        service_mock.list_audit_events = MagicMock(return_value=([], 0))
+        service_mock.list_audit_events = AsyncMock(return_value=([], 0))
         resp = client.get(
             "/api/prompts/audit",
             params={"version_id": "v-1"},
@@ -1398,7 +1375,7 @@ class TestAuditEndpoint:
         """D10 lane-discrimination filter — ``actor_subject`` lets a
         UI find all rows submitted by a given instance or signed
         by a given human operator."""
-        service_mock.list_audit_events = MagicMock(return_value=([], 0))
+        service_mock.list_audit_events = AsyncMock(return_value=([], 0))
         resp = client.get(
             "/api/prompts/audit",
             params={"actor_subject": "operator-cli"},
@@ -1416,7 +1393,7 @@ class TestAuditEndpoint:
         ``.``) and internal instance subjects (``instance:<uuid>``
         — ``:``). The strict PATH pattern 422'd both; filter values
         are not URL segments."""
-        service_mock.list_audit_events = MagicMock(return_value=([], 0))
+        service_mock.list_audit_events = AsyncMock(return_value=([], 0))
         for subject in (
             "user@example.com",
             "instance:3f2b1c9e-8a4d-4e2f-9b7a-1c2d3e4f5a6b",
@@ -1455,7 +1432,7 @@ class TestAuditEndpoint:
         """No filter → all query params are ``None`` and pass
         through to the service unchanged (the repo applies the
         optional filter clauses only for non-None values)."""
-        service_mock.list_audit_events = MagicMock(return_value=([], 0))
+        service_mock.list_audit_events = AsyncMock(return_value=([], 0))
         resp = client.get("/api/prompts/audit")
         assert resp.status_code == 200
         kwargs = service_mock.list_audit_events.call_args.kwargs
@@ -1484,7 +1461,7 @@ class TestUpdateVersionContent:
 
     def test_patch_draft_returns_200(self, client, service_mock):
         edited = _make_version(version_id="v-1", state="draft", content="edited")
-        service_mock.update_version_content = MagicMock(return_value=edited)
+        service_mock.update_version_content = AsyncMock(return_value=edited)
         resp = client.patch(
             "/api/prompts/versions/v-1",
             json={"content": "edited"},
@@ -1506,7 +1483,7 @@ class TestUpdateVersionContent:
         edited = _make_version(
             version_id="v-1", state="pending_approval", content="edited"
         )
-        service_mock.update_version_content = MagicMock(return_value=edited)
+        service_mock.update_version_content = AsyncMock(return_value=edited)
         resp = client.patch("/api/prompts/versions/v-1", json={"content": "edited"})
         assert resp.status_code == 200, resp.text
         assert resp.json()["state"] == "pending_approval"
@@ -1515,7 +1492,7 @@ class TestUpdateVersionContent:
     def test_patch_immutable_state_returns_409(
         self, client, service_mock, state
     ):
-        service_mock.update_version_content = MagicMock(
+        service_mock.update_version_content = AsyncMock(
             side_effect=VersionNotEditableError("v-1", state)
         )
         resp = client.patch("/api/prompts/versions/v-1", json={"content": "x"})
@@ -1526,7 +1503,7 @@ class TestUpdateVersionContent:
         assert state in detail.get("message", "")
 
     def test_patch_unknown_returns_404(self, client, service_mock):
-        service_mock.update_version_content = MagicMock(
+        service_mock.update_version_content = AsyncMock(
             side_effect=LookupError("prompt_version v-missing not found")
         )
         resp = client.patch("/api/prompts/versions/v-missing", json={"content": "x"})
@@ -1551,7 +1528,7 @@ class TestDeleteVersion:
 
     def test_delete_draft_returns_200(self, client, service_mock):
         deleted = _make_version(version_id="v-1", state="draft")
-        service_mock.delete_version = MagicMock(return_value=deleted)
+        service_mock.delete_version = AsyncMock(return_value=deleted)
         resp = client.delete("/api/prompts/versions/v-1")
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -1562,7 +1539,7 @@ class TestDeleteVersion:
 
     def test_delete_pending_returns_200(self, client, service_mock):
         deleted = _make_version(version_id="v-1", state="pending_approval")
-        service_mock.delete_version = MagicMock(return_value=deleted)
+        service_mock.delete_version = AsyncMock(return_value=deleted)
         resp = client.delete("/api/prompts/versions/v-1")
         assert resp.status_code == 200, resp.text
         assert resp.json()["deleted"] is True
@@ -1571,7 +1548,7 @@ class TestDeleteVersion:
     def test_delete_immutable_state_returns_409(
         self, client, service_mock, state
     ):
-        service_mock.delete_version = MagicMock(
+        service_mock.delete_version = AsyncMock(
             side_effect=VersionNotDeletableError("v-1", state)
         )
         resp = client.delete("/api/prompts/versions/v-1")
@@ -1582,7 +1559,7 @@ class TestDeleteVersion:
         assert state in detail.get("message", "")
 
     def test_delete_unknown_returns_404(self, client, service_mock):
-        service_mock.delete_version = MagicMock(
+        service_mock.delete_version = AsyncMock(
             side_effect=LookupError("prompt_version v-missing not found")
         )
         resp = client.delete("/api/prompts/versions/v-missing")
@@ -1600,13 +1577,13 @@ class TestPendingCount:
     """UD#2 endpoint 15 — GET /pending-count (the badge feed)."""
 
     def test_pending_count_returns_count(self, client, service_mock):
-        service_mock.count_pending = MagicMock(return_value=7)
+        service_mock.count_pending = AsyncMock(return_value=7)
         resp = client.get("/api/prompts/pending-count")
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"count": 7}
 
     def test_pending_count_zero(self, client, service_mock):
-        service_mock.count_pending = MagicMock(return_value=0)
+        service_mock.count_pending = AsyncMock(return_value=0)
         resp = client.get("/api/prompts/pending-count")
         assert resp.status_code == 200
         assert resp.json() == {"count": 0}
@@ -1652,7 +1629,7 @@ class TestWriteScopeOnUd2Mutations:
     def test_bearer_with_write_scope_passes_scope_gate(
         self, client, service_mock
     ):
-        service_mock.update_version_content = MagicMock(
+        service_mock.update_version_content = AsyncMock(
             return_value=_make_version(version_id="v-1", state="draft")
         )
         resp = client.patch(

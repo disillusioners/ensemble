@@ -648,11 +648,13 @@ class PromptVersionService:
                 "draft",
                 actor,
             )
-        # internal+own-row: figure out from_state from the row
-        # already read above (we re-read; the second read is
-        # intentional — the row's state may have moved between
-        # the authority-check read and now; the repo's atomic
-        # transition's CAS will refuse if so).
+        # internal+own-row: the SAME pending_approval → draft pair
+        # (a never-submitted draft row is NOT retractable here —
+        # use delete_version for abandoned drafts; see the
+        # docstring). The row was read once above for the
+        # authority check; the CAS below refuses atomically if the
+        # row's state moved between that read and this transition
+        # (the from_state guard IS the serialization).
         return await asyncio.to_thread(
             self._repo.atomic_transition,
             version_id,
