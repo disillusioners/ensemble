@@ -2406,11 +2406,55 @@ class TestSweeperLastOnResidual:
 class TestExtractChartImagesByteCompatGuard:
     """Phase 2 Task #5 — byte-compat guard for chart-render extraction.
 
-    Golden chart-render fixtures (captured at baseline) assert
-    ``extract_chart_images`` output identity pre/post Phase 2. The chart
-    pipeline is byte-stable; the family pass is purely ADDITIVE over
-    non-chart lines.
+    Golden chart-render fixtures assert ``extract_chart_images`` output
+    identity pre/post Phase 2. The chart pipeline is byte-stable; the
+    family pass is purely ADDITIVE over non-chart lines.
+
+    Frozen-tuple capture procedure (review-fix, council NEEDS-FIXES P1):
+    the eight ``FROZEN_TUPLES`` below were captured by importing the
+    BASE ``daemon/sources/dispatcher.py`` at sha ``8c525315e`` (the
+    pinned baseline the byte-compat contract was authored against) via::
+
+        git -C /home/nea/ensemble-src show 8c525315e:daemon/sources/dispatcher.py \\
+            > /tmp/img-gen-scratch/dispatcher_base.py
+        git -C /home/nea/ensemble-src show 8c525315e:daemon/sources/base.py \\
+            > /tmp/img-gen-scratch/base_base.py
+        # load via importlib in a /tmp scratch (fenced — mktemp scratch dir,
+        # FAKE_HOME guard; never resolve live-shaped paths)
+
+    and running ``extract_chart_images`` over each fixture verbatim. The
+    tuples assert ``(stripped_text, image_ids)`` byte-identity; any
+    future contributor who changes ``extract_chart_images`` output for a
+    chart-render fixture fails this test, per the byte-compat contract.
     """
+
+    # Each entry: (expected_stripped_text, expected_image_ids_list).
+    # Captured at base 8c525315e — the commit the Phase 2 contract was authored against.
+    FROZEN_TUPLES = [
+        # 1. Single valid marker
+        ("Hello world\nMore text", ["abcdef0123456789abcdef0123456789"]),
+        # 2. No marker
+        ("Just plain text, no marker.", []),
+        # 3. Three distinct markers in first-occurrence order
+        (
+            "x\ny",
+            [
+                "11111111111111111111111111111111",
+                "22222222222222222222222222222222",
+                "33333333333333333333333333333333",
+            ],
+        ),
+        # 4. Duplicate marker dedupes to first occurrence
+        ("Some text", ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]),
+        # 5. Near-miss stripped (33-char id)
+        ("Text line\nMore", []),
+        # 6. Empty content
+        ("", []),
+        # 7. Marker on own line preserves other lines
+        ("first line\nlast line", ["cccccccccccccccccccccccccccccccc"]),
+        # 8. Mixed valid + near-miss
+        ("middle\nend", ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]),
+    ]
 
     def test_chart_only_golden_fixtures_byte_identical(self):
         # Golden fixtures chosen to exercise every ``extract_chart_images``
@@ -2448,14 +2492,20 @@ class TestExtractChartImagesByteCompatGuard:
             "<!-- ens-img:chart-render:toolongidfortheregexpaddedchars000 -->\n"
             "end",
         ]
-        for golden in golden_inputs:
-            stripped, ids = extract_chart_images(golden)
-            # Capture as a frozen snapshot. If anyone touches
-            # extract_chart_images in a way that changes chart-render output,
-            # this assertion goes red and the byte-compat contract breaks.
-            snapshot = (stripped, ids)
-            assert snapshot == extract_chart_images(golden), (
-                f"chart-render byte-compat broken for fixture:\n{golden!r}"
+        # FROZEN_TUPLES was captured at base 8c525315e (see class docstring).
+        # Any change to ``extract_chart_images`` for chart-render inputs fails
+        # this assertion, enforcing the byte-compat contract.
+        assert len(self.FROZEN_TUPLES) == len(golden_inputs), (
+            "FROZEN_TUPLES length MUST match golden_inputs length"
+        )
+        for idx, (golden, expected) in enumerate(
+            zip(golden_inputs, self.FROZEN_TUPLES), start=1
+        ):
+            actual = extract_chart_images(golden)
+            assert actual == expected, (
+                f"chart-render byte-compat broken for fixture #{idx}; "
+                f"expected (stripped, ids)={expected!r}, got {actual!r}.\n"
+                f"Golden input:\n{golden!r}"
             )
 
     def test_image_gen_marker_does_not_affect_chart_only_pipeline(self):
