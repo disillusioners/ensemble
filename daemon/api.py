@@ -1378,6 +1378,42 @@ async def lifespan(app: FastAPI):
     )
 
     # ─────────────────────────────────────────────────────────────
+    # MissionStrandHealer (watcher-loss terminal strand, 2026-10-14)
+    # — periodic write-side heal for stranded mission trees.
+    # ALWAYS-ON infrastructure (NO kill-switch — the same HARD
+    # POLICY as the F3 / JobLockSweepService / WatchReconcileSweep
+    # sweeps); the only knob is the interval (default 300s, floor
+    # 1s, FAIL FAST at boot via pydantic Field(ge=1)). Wired
+    # immediately AFTER the watch-reconcile sweep (same
+    # infrastructure-sweeps neighborhood) and exposed on the
+    # manager (``manager._mission_strand_healer``, same pattern as
+    # ``manager._mission_resolver``) so the in-session
+    # downgrade-path hook in ``child_reports`` can fire the heal
+    # EVENT-DRIVEN. The first tick fires IMMEDIATELY at start
+    # (fast on-boot catch-up — a freshly-restarted daemon drains
+    # any wedge accumulated since the previous shutdown without
+    # waiting a full interval).
+    from daemon.services.mission_strand_healer import (
+        DEFAULT_MISSION_STRAND_HEAL_INTERVAL_SECONDS,
+        MissionStrandHealer,
+    )
+    mission_strand_heal_interval = (
+        config.services.mission_strand_heal_interval_seconds
+    )
+    mission_strand_healer = MissionStrandHealer(
+        manager=manager,
+        interval_seconds=mission_strand_heal_interval,
+    )
+    mission_strand_healer.start()
+    manager._mission_strand_healer = mission_strand_healer
+    app.state.mission_strand_healer = mission_strand_healer
+    logger.info(
+        f"MissionStrandHealer started: interval="
+        f"{mission_strand_heal_interval}s (default "
+        f"{DEFAULT_MISSION_STRAND_HEAL_INTERVAL_SECONDS}s)"
+    )
+
+    # ─────────────────────────────────────────────────────────────
     # clipboard-image-chat Phase 3 (Tasks 4-5) — tmp-image retention
     # sweep. ALWAYS-ON infrastructure (NO kill-switch env var — per
     # the project owner's HARD POLICY on Batch A, architect amendment
@@ -2722,6 +2758,22 @@ async def lifespan(app: FastAPI):
                 f"WatchReconcileSweepService shutdown error: {e}"
             )
         app.state.watch_reconcile_sweep = None
+
+    # --- MissionStrandHealer shutdown (watcher-loss terminal strand) ---
+    # Stop the stranded-tree heal sweep BEFORE the manager shuts down
+    # (same shutdown contract as the watch-reconcile sweep: graceful
+    # stop with WARNING on failure, getattr-guarded so a partial
+    # startup failure is a silent no-op). In-flight heals driven by
+    # the event-driven hook complete independently of this task.
+    mission_strand_healer = getattr(
+        app.state, "mission_strand_healer", None
+    )
+    if mission_strand_healer is not None:
+        try:
+            await mission_strand_healer.stop()
+        except Exception as e:
+            logger.warning(f"MissionStrandHealer shutdown error: {e}")
+        app.state.mission_strand_healer = None
 
     # --- JobLockSweepService shutdown (F3) ---
     # Stop the periodic reclaim sweep BEFORE the manager shuts down

@@ -366,14 +366,21 @@ class TestW1LiveTreeHoldsBackstop:
     async def test_w1_idle_descendant_still_counts_live(
         self, components,
     ):
-        """W6 — negative-control sibling: an IDLE descendant still
-        canonicalizes-to-live per the resolver's IDLE → ``processing``
-        mapping. IDLE is NOT in ``TERMINAL_INSTANCE_STATUSES`` so leg
-        (b) holds.
+        """W6 — negative-control sibling: an IDLE descendant with
+        EXECUTION EVIDENCE (``version > 1`` — a turn has run against
+        it) still canonicalizes-to-live per the resolver's IDLE →
+        ``processing`` mapping. IDLE is NOT in
+        ``TERMINAL_INSTANCE_STATUSES`` so leg (b) holds.
 
-        Per the mission-resolver contract (and the
-        ``TERMINAL_INSTANCE_STATUSES`` import in mission_live_guard),
-        IDLE counts LIVE for the defer-window decision."""
+        STRAND REFINEMENT (watcher-loss terminal strand, 2026-10-14):
+        the strand exclusion scopes to the NEVER-DISPATCHED ghost
+        signature (idle + version 1 + zero message_queue rows + zero
+        task rows) under a TERMINAL direct parent. An idle row with
+        execution evidence (version 2) is NOT never-dispatched — it
+        keeps holding liveness exactly as before. (The ghost-shaped
+        contrast — never-dispatched + terminal parent → excluded —
+        is pinned in
+        ``test_w6b_idle_ghost_under_terminal_parent_is_strand``.)"""
         engine = components["engine"]
         repo = components["instance_repo"]
 
@@ -388,6 +395,15 @@ class TestW1LiveTreeHoldsBackstop:
             parent_id="root-w6",
             last_activity_at=now_utc_naive() - timedelta(seconds=10),
         )
+        # Execution evidence: bump version past the never-dispatched
+        # ghost signature (a turn has run against this row).
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET version = 2 "
+                    "WHERE instance_id = 'idle-w6'"
+                ),
+            )
 
         verdict = await evaluate_mission_live(
             instance_repository=repo,
@@ -397,6 +413,60 @@ class TestW1LiveTreeHoldsBackstop:
 
         assert verdict.live
         assert not verdict.timed_out
+
+    @pytest.mark.asyncio
+    async def test_w6b_idle_ghost_under_terminal_parent_is_strand(
+        self, components,
+    ):
+        """Strand contrast (watcher-loss terminal strand, 2026-10-14):
+        a NEVER-DISPATCHED idle ghost (version 1, zero messages, zero
+        tasks) whose direct parent is TERMINAL is stranded-by-
+        construction and does NOT hold mission liveness — the root
+        completes. The W6 idle-counts-live contract is scoped to
+        rows with execution evidence or a live direct parent."""
+        engine = components["engine"]
+        repo = components["instance_repo"]
+
+        _insert_tree_member(
+            engine, instance_id="root-w6b",
+            status="completed",
+            last_activity_at=now_utc_naive() - timedelta(seconds=10),
+        )
+        _insert_tree_member(
+            engine, instance_id="strand-w6b",
+            status="idle",  # never-dispatched ghost shape
+            parent_id="root-w6b",
+            last_activity_at=None,
+        )
+        # AGE CONTRACT (final hardening 2026-10-14): the read-side
+        # strand exclusion runs the shared race-guard predicate — the
+        # ghost must be aged past ORPHAN_MIN_AGE_SECONDS to count as
+        # stranded. Seed rows stamp fresh; backdate to the aged
+        # steady-state shape.
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET updated_at = :u "
+                    "WHERE instance_id = 'strand-w6b'"
+                ),
+                {
+                    "u": (
+                        datetime.now(timezone.utc) - timedelta(minutes=5)
+                    ).isoformat(),
+                },
+            )
+
+        verdict = await evaluate_mission_live(
+            instance_repository=repo,
+            instance_id="root-w6b",
+            bus_pending_count=None,
+        )
+
+        assert not verdict.live, (
+            "the stranded never-dispatched ghost must not hold "
+            f"mission liveness (got: {verdict.reason})"
+        )
+        assert not verdict.error
 
 
 # ─────────────────────────────────────────────────────────────────────────────

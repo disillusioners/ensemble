@@ -49,6 +49,8 @@ Test surface:
 
 from __future__ import annotations
 
+import time
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -189,7 +191,7 @@ class TestWedgeEpisodeEndPurges:
             manager=manager, repo=repo, task_repo=task_repo,
         )
         # Pre-seed the wedge cooldown.
-        w._wedge_notified.add("parent-A")
+        w._wedge_notified["parent-A"] = time.monotonic()
         assert "parent-A" in w.wedge_episodes
 
         await w.run_once()
@@ -229,7 +231,7 @@ class TestWedgeEpisodeEndPurges:
         w = _build_watchdog(
             manager=manager, repo=repo, task_repo=task_repo,
         )
-        w._wedge_notified.add("parent-A")
+        w._wedge_notified["parent-A"] = time.monotonic()
         assert "parent-A" in w.wedge_episodes
 
         await w.run_once()
@@ -262,7 +264,7 @@ class TestWedgeEpisodeEndPurges:
         w = _build_watchdog(
             manager=manager, repo=repo, task_repo=task_repo,
         )
-        w._wedge_notified.add("parent-A")
+        w._wedge_notified["parent-A"] = time.monotonic()
         assert "parent-A" in w.wedge_episodes
 
         await w.run_once()

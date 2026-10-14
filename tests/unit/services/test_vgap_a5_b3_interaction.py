@@ -57,6 +57,8 @@ callsite).
 
 from __future__ import annotations
 
+import time
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -243,7 +245,7 @@ class TestA5B3NoDoubleNotify:
             release_after_nudge_count=3,
         )
         # Pre-seed: prior wedge episode for parent-A.
-        w._wedge_notified.add("parent-A")
+        w._wedge_notified["parent-A"] = time.monotonic()
 
         # Tick 1: base hang notice + nudge=1.
         # Tick 2: nudge=2 → escalation fires (threshold=2).
@@ -377,7 +379,7 @@ class TestA5B3ReleaseWedgeRace:
             release_after_nudge_count=2,
         )
         # Pre-seed: prior wedge episode for parent-A.
-        w._wedge_notified.add("parent-A")
+        w._wedge_notified["parent-A"] = time.monotonic()
         assert "parent-A" in w.wedge_episodes
 
         # ── Tick 1: base hang notice + escalation fires (nudge=1,

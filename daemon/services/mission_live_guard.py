@@ -26,7 +26,15 @@ still live?** The mission is LIVE when ANY of:
   ``TERMINAL_INSTANCE_STATUSES`` — non-terminal therefore includes
   ``running`` / ``waiting_children`` / ``queued`` / ``paused`` AND
   ``idle`` (the resolver canonicalizes IDLE → ``"processing"``, i.e.
-  live);
+  live). STRAND EXCEPTION (2026-10-14, watcher-loss terminal strand):
+  a never-dispatched member (idle, version 1, zero ``message_queue``
+  and zero ``task`` rows) whose DIRECT parent is TERMINAL is
+  stranded-by-construction and does NOT count live once it has aged
+  past ``ORPHAN_MIN_AGE_SECONDS`` (final hardening: the shared
+  ``strand_past_race_guard`` predicate — read/write mirror) — see
+  the STRAND INVARIANT comment in :func:`_evaluate_legs`;
+  never-dispatched rows under a LIVE direct parent (the
+  spawn-then-message ritual) keep holding liveness;
 * (c) the root instance itself is non-terminal (same status set).
 
 Fail-open contract (binding): any exception inside the guard returns
@@ -161,12 +169,53 @@ def parse_completed_at_naive(value: datetime | str | None) -> datetime | None:
     return aware.replace(tzinfo=None)
 
 
+# ── Strand race-guard threshold (watcher-loss terminal strand, final
+#    hardening 2026-10-14) ─────────────────────────────────────────
+# A never-dispatched strand candidate's ``updated_at`` must be at
+# least this old before EITHER side acts on it. A freshly-spawned
+# child may be about to receive its first message (the spawn-then-
+# message ritual); age proves the strand is not mid-flight. BOTH
+# consumers run the SAME predicate below — one threshold, one
+# predicate, no read/write drift. Same threshold family as the
+# F14/A4 60s orphan-age convention. (Lives HERE — the read side —
+# because the write-side healer already imports this module's
+# ``parse_completed_at_naive``; the dependency direction healer →
+# guard keeps the graph acyclic.)
+ORPHAN_MIN_AGE_SECONDS: int = 60
+
+
+def strand_past_race_guard(
+    updated_at: "datetime | str | None",
+    now: datetime | None = None,
+) -> bool:
+    """Shared strand age predicate — single source of truth.
+
+    True ⇔ the strand's ``updated_at`` proves it is at least
+    ``ORPHAN_MIN_AGE_SECONDS`` old. Both sides run this exact
+    predicate: the READ-side liveness exclusion (:func:`_evaluate_legs`
+    — a too-fresh ghost keeps holding liveness; the ritual may still
+    deliver) and the WRITE-side healer (``mission_strand_healer`` — a
+    too-fresh strand is refused, re-checked next tick).
+
+    ``None``/unparseable → False (fail-closed: an unknown age never
+    clears the guard on either side). Age math runs naive-against-
+    naive per the ``now_utc_naive()`` binding convention.
+    """
+    parsed = parse_completed_at_naive(updated_at)
+    if parsed is None:
+        return False
+    if now is None:
+        now = now_utc_naive()
+    return (now - parsed).total_seconds() >= ORPHAN_MIN_AGE_SECONDS
+
+
 async def evaluate_mission_live(
     *,
     instance_repository: "SQLModelInstanceRepository | None",
     instance_id: str | None,
     bus_pending_count: int | None = None,
     timeout_seconds: int = MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+    skip_root: bool = False,
 ) -> MissionLiveVerdict:
     """Evaluate the three-leg mission-live guard (+ zombie backstop).
 
@@ -194,6 +243,17 @@ async def evaluate_mission_live(
             decide).
         timeout_seconds: Zombie-backstop window; defaults to
             ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``.
+        skip_root: Pre-stamp mode (watcher-loss strand component 2,
+            2026-10-14) — do NOT count the ROOT itself as a live leg.
+            For callers that evaluate liveness immediately BEFORE
+            stamping the root COMPLETED: at that moment the root's
+            own non-terminal status is exactly what the stamp is
+            about to flip, so leg (c) is tautologically live and
+            would wrongly suppress every completion. Only the
+            DESCENDANTS' liveness (leg b, strand-aware) gates the
+            pre-stamp decision. Leg (c) stays active for all other
+            consumers (f2, sweeps, the emission gate — where the
+            root is already terminal when the gate runs).
 
     Returns:
         :class:`MissionLiveVerdict`. NEVER raises — internal errors
@@ -206,6 +266,7 @@ async def evaluate_mission_live(
             instance_id=instance_id,
             bus_pending_count=bus_pending_count,
             timeout_seconds=timeout_seconds,
+            skip_root=skip_root,
         )
     except Exception as exc:  # noqa: BLE001 — fail-open is the contract
         logger.warning(
@@ -232,6 +293,7 @@ async def _evaluate_legs(
     instance_id: str | None,
     bus_pending_count: int | None,
     timeout_seconds: int,
+    skip_root: bool = False,
 ) -> MissionLiveVerdict:
     """Leg evaluation (async — blocking repo reads go through
     ``asyncio.to_thread`` per the repo's standard pattern). Raises on
@@ -304,9 +366,53 @@ async def _evaluate_legs(
             ),
         )
 
+    # ── STRAND INVARIANT (watcher-loss terminal strand, 2026-10-14) ──
+    # A never-dispatched instance row (status=idle, version=1, zero
+    # ``message_queue`` rows, zero ``task`` rows — the canonical ghost
+    # signature shared with ``ChildReportsService._ghost_child_filter``
+    # via ``SQLModelInstanceRepository.filter_never_dispatched_ids``)
+    # whose DIRECT parent is TERMINAL is stranded-by-construction:
+    # dispatch requires a message, the automatic dispatcher of a
+    # spawned child is its parent, and its parent is terminal — the
+    # row can never self-progress. A spawned-but-never-dispatched
+    # grandchild of this shape (live RCA 2026-10-14, mission b6e24d78,
+    # poison row 4d41bd67) persisted non-terminal and held mission
+    # liveness forever: the sync stamp path counts DIRECT children
+    # only (all completed → root stamped COMPLETED) while THIS
+    # recursive walk counted the depth-2 strand (any_non_terminal →
+    # gate blocked → post-stamp downgrade → publish suppressed → no
+    # lifecycle terminal event → receipt JobItem never finalized →
+    # watcher never fired). Terminal-ancestry-stranded rows therefore
+    # MUST NOT hold mission liveness: they are excluded from the
+    # leg (b)/(c) non-terminal count below. Read-side exclusion only —
+    # this site NEVER mutates the rows (write-side cleanup is the
+    # strand healer's job, via the sanctioned lifecycle lane).
+    #
+    # SAFETY BOUND: a never-dispatched row under a LIVE direct parent
+    # is the legitimate spawn-then-message ritual — the parent is
+    # about to (or still may) send the first message. Such rows
+    # continue to hold liveness and are NEVER excluded here.
+    # AGE MIRROR (final hardening 2026-10-14): a ghost under a
+    # TERMINAL direct parent is excluded ONLY once it has aged past
+    # ``ORPHAN_MIN_AGE_SECONDS`` (the shared
+    # :func:`strand_past_race_guard` predicate — the SAME predicate
+    # the write-side healer runs before terminalizing). A too-fresh
+    # ghost keeps holding liveness: the just-messaged-not-yet-rowed
+    # window is real, and excluding on a mid-flight ritual would
+    # finalize the mission while the parent's first message is still
+    # in the delivery lane (the stamp→downgrade churn class).
+    # Dispatchability is judged by the DIRECT parent only: any live
+    # instance between the member and the root can still dispatch it
+    # (send_message has no parent-ownership check), so a terminal
+    # GRANDparent does not strand a member whose direct parent is
+    # live. Unknown parent status (row vanished mid-walk) counts as
+    # live — fail-closed.
     any_non_terminal = False        # FIXBACK: drives the all-terminal short-circuit
     freshest_activity = None        # max ``last_activity_at`` seen during the walk
     anchor_missing = True           # a single non-NULL value flips this to False
+    member_status: dict[str, str | None] = {}
+    member_parent: dict[str, str | None] = {}
+    member_updated: dict[str, object] = {}
     for tree_id in tree_ids:
         instance = await asyncio.to_thread(
             instance_repository.get, tree_id
@@ -316,9 +422,19 @@ async def _evaluate_legs(
             # row cannot hold the mission open; skip it.
             continue
         status = getattr(instance, "status", None)
+        member_status[tree_id] = status
+        member_parent[tree_id] = getattr(instance, "parent_id", None)
+        member_updated[tree_id] = getattr(instance, "updated_at", None)
         # FIXBACK: do NOT early-return on a non-terminal observation.
         # Record it; the post-walk decision tree decides the verdict.
-        if status is not None and status not in TERMINAL_INSTANCE_STATUSES:
+        # skip_root (pre-stamp mode): the root's own non-terminal
+        # status is what the caller's stamp is about to flip — it is
+        # not a hold reason on this evaluation.
+        if (
+            status is not None
+            and status not in TERMINAL_INSTANCE_STATUSES
+            and not (skip_root and tree_id == instance_id)
+        ):
             any_non_terminal = True
         # Terminal-or-not, contribute ``last_activity_at`` to the
         # anchor (a live descendant's recent activity keeps the
@@ -331,18 +447,79 @@ async def _evaluate_legs(
             if freshest_activity is None or parsed_activity > freshest_activity:
                 freshest_activity = parsed_activity
 
+    # ── Strand exclusion (see STRAND INVARIANT above) ─────────────
+    # One extra batched query (``filter_never_dispatched_ids`` — the
+    # ghost signature) ONLY when a non-terminal member exists; then a
+    # pure in-memory parent-status check over rows already in hand.
+    # Failure direction: if the never-dispatched probe fails, strand
+    # NOTHING (fail-closed — the rows keep holding liveness).
+    stranded_excluded: list[str] = []
+    if any_non_terminal:
+        non_terminal_ids = [
+            tid for tid, st in member_status.items()
+            if st is not None and st not in TERMINAL_INSTANCE_STATUSES
+        ]
+        try:
+            never_dispatched = await asyncio.to_thread(
+                instance_repository.filter_never_dispatched_ids,
+                non_terminal_ids,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-closed on probe error
+            logger.warning(
+                "mission_live_guard: never-dispatched probe failed for "
+                "%s... (%s: %s) — stranding NOTHING (fail-closed)",
+                instance_id[:8], type(exc).__name__, exc,
+            )
+            never_dispatched = set()
+        for oid in never_dispatched:
+            parent_id = member_parent.get(oid)
+            parent_status = (
+                member_status.get(parent_id) if parent_id else None
+            )
+            if (
+                parent_status is not None
+                and parent_status in TERMINAL_INSTANCE_STATUSES
+                # Age mirror (final hardening 2026-10-14): the SAME
+                # race-guard predicate the write-side healer runs.
+                # A too-fresh ghost keeps holding liveness — the
+                # just-messaged-not-yet-rowed window is real on the
+                # read side too, and a stale exclusion here would
+                # finalize under a mid-flight ritual (the stamp→
+                # downgrade churn class). Aged-only exclusion also
+                # unifies read/write semantics: both sides act on
+                # exactly the same row set.
+                and strand_past_race_guard(member_updated.get(oid))
+            ):
+                stranded_excluded.append(oid)
+        if stranded_excluded:
+            stranded_set = set(stranded_excluded)
+            any_non_terminal = any(
+                st is not None
+                and st not in TERMINAL_INSTANCE_STATUSES
+                and tid not in stranded_set
+                and not (skip_root and tid == instance_id)
+                for tid, st in member_status.items()
+            )
+
     # ── C1: ALL-TERMINAL tree → finalize immediately ──────────────
     # FIXBACK: the anchor plays NO role here. Every tree member is
     # terminal — the mission is closed, the held row may drain. This
     # restores the pre-U7 frozen terminal contract that the
     # predecessor's overshoot (fall-through ``live=True``) violated.
     if not any_non_terminal:
+        _strand_note = (
+            f"; {len(stranded_excluded)} terminal-ancestry strand "
+            f"member(s) excluded from liveness"
+            if stranded_excluded
+            else ""
+        )
         return MissionLiveVerdict(
             live=False,
             reason=(
                 "no live leg: root + descendants terminal, bus quiet "
                 "— all-terminal tree finalizes immediately "
                 "(anchor plays no role on all-terminal trees)"
+                f"{_strand_note}"
             ),
         )
 

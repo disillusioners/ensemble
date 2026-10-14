@@ -2301,6 +2301,65 @@ Provide a concise summary:"""
                     f"{instance_id[:8]}...: {_sse_exc}"
                 )
 
+    def _schedule_strand_heal(self, instance_id: str) -> None:
+        """Fire-and-forget hand-off of a tree_liveness-blocked root to
+        the MissionStrandHealer (watcher-loss terminal strand,
+        2026-10-14 — the event-driven arm of the asymmetry fix).
+
+        Called ONLY from the post-stamp downgrade path when the
+        emission gate blocked with ``reason=tree_liveness`` — the one
+        block class with NO future message-completed signal on a
+        stranded tree. The healer re-checks its full invariant set
+        (zero obligations + strand-only tree + race guards) and is a
+        no-op when any leg fails, so scheduling is always safe and
+        cannot loop (a re-block after a heal means a genuinely-live
+        member appeared — the healer refuses to touch it, and the
+        300s sweep + zombie backstop remain the remaining nets).
+
+        Fail-soft: an unwired healer (partial boot, tests) is a
+        silent no-op; task failures are logged by the done-callback.
+        """
+        healer = getattr(self._manager, "_mission_strand_healer", None)
+        if healer is None:
+            logger.debug(
+                "strand heal hand-off skipped for %s...: healer "
+                "unwired (the 300s sweep remains the net)",
+                instance_id[:8],
+            )
+            return
+
+        def _log_heal_done(task: "asyncio.Task") -> None:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                logger.warning(
+                    "strand heal hand-off failed for %s...: %s: %s "
+                    "(non-fatal — the 300s sweep remains the net)",
+                    instance_id[:8], type(exc).__name__, exc,
+                )
+            else:
+                outcome = task.result() or {}
+                logger.info(
+                    "strand heal hand-off for %s...: healed=%s "
+                    "(%s)", instance_id[:8], outcome.get("healed"),
+                    outcome.get("reason"),
+                )
+
+        try:
+            task = asyncio.get_running_loop().create_task(
+                healer.heal_instance(instance_id),
+                name=f"strand-heal-{instance_id[:8]}",
+            )
+            task.add_done_callback(_log_heal_done)
+        except RuntimeError as _loop_exc:
+            # No running loop (defensive — this site is async-context
+            # only). The periodic sweep covers the root.
+            logger.warning(
+                "strand heal hand-off for %s... could not schedule: %s",
+                instance_id[:8], _loop_exc,
+            )
+
     async def _root_completion_gate(
         self,
         session,
@@ -2527,6 +2586,67 @@ Provide a concise summary:"""
                     f"_process_child_completion_and_notify_parent: "
                     f"child_outcome lookup failed (non-fatal) for "
                     f"{instance_id[:8]}...: {marker_err}"
+                )
+
+        # ── Component 2 (watcher-loss terminal strand, 2026-10-14) ──
+        # Asymmetry fix, first half: evaluate the RECURSIVE tree
+        # liveness BEFORE the COMPLETED stamp. The sync helper's
+        # live-children cross-check counts DIRECT children only; the
+        # emission-time ``_root_completion_gate`` re-checks the
+        # RECURSIVE tree. With a live depth-2+ member, the historical
+        # sequence was stamp COMPLETED → gate blocks → downgrade to
+        # WAITING_CHILDREN + suppressed publish (stamp-then-downgrade
+        # churn; on a stranded-tree shape the suppressed publish then
+        # never re-arms — the watcher-loss wedge). Evaluating the same
+        # recursive predicate the gate uses BEFORE the sync helper
+        # runs means a live-tree root never reaches the stamp at all:
+        # no discharge, no stamp, no downgrade write. The stage-6
+        # gate below remains as the defense-in-depth emission check
+        # (unchanged) for regressions between this eval and publish.
+        #
+        # Fail-OPEN (C3 contract): any exception here logs a WARNING
+        # and proceeds to the sync helper — the at-least-once
+        # terminal-delivery guarantee outranks the churn optimization.
+        # ROOT lane only (``parent_id is None``): child lanes have no
+        # stamp-vs-gate asymmetry (their reports ride the parent's
+        # gates).
+        if instance_meta is not None and instance_meta.parent_id is None:
+            try:
+                from .mission_live_guard import (
+                    evaluate_mission_live as _pre_eval,
+                    MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS as _pre_timeout,
+                )
+                _pre_verdict = await _pre_eval(
+                    instance_repository=self._instance_repository,
+                    instance_id=instance_id,
+                    # Bus leg not consulted here (the sync helper's
+                    # bus gate owns it, same seam); only the
+                    # recursive tree legs gate this early-out.
+                    bus_pending_count=None,
+                    timeout_seconds=_pre_timeout,
+                    # skip_root: the root's own (non-terminal) status
+                    # is what the stamp is about to flip — only
+                    # DESCENDANT liveness gates the pre-stamp
+                    # decision.
+                    skip_root=True,
+                )
+                if _pre_verdict.live:
+                    logger.info(
+                        "root_completion: pre-stamp recursive liveness "
+                        "holds for %s... (%s) — skipping the COMPLETED "
+                        "stamp entirely (no stamp→downgrade churn; the "
+                        "next message-completed signal re-checks)",
+                        instance_id[:8], _pre_verdict.reason,
+                    )
+                    return
+                # Not live (all-terminal after strand exclusion, or
+                # timed-out zombie) → fall through to the sync stamp.
+            except Exception as _pre_exc:  # noqa: BLE001 — fail-OPEN
+                logger.warning(
+                    "root_completion: pre-stamp liveness eval raised "
+                    "for %s... (%s); proceeding to the sync stamp "
+                    "(fail-open per C3 contract)",
+                    instance_id[:8], _pre_exc,
                 )
 
         # MAJOR A fix (re-arm safety net, 2026-06-22; Phase 1 bus
@@ -4738,6 +4858,30 @@ Provide a concise summary:"""
                             f"root_completion: downgrade SSE failed for "
                             f"{instance_id[:8]}...: {_sse_exc}"
                         )
+                # ── Component 2 (watcher-loss terminal strand,
+                # 2026-10-14) — second half of the asymmetry fix:
+                # schedule an EVENT-DRIVEN re-check. The historical
+                # contract — "the next message-completed signal will
+                # re-invoke this handler and re-check" — provably
+                # never fires for the tree_liveness block on a
+                # stranded tree (0 children, 0 queued messages — no
+                # future signal exists; the strand can never produce
+                # one). When the block reason is tree_liveness, hand
+                # the root to the strand healer immediately (the
+                # same heal the 300s sweep would run, zero sweep
+                # latency). The healer's own invariant legs are
+                # fail-closed: if the tree does not match the
+                # strand-only signature it is a no-op, so the
+                # schedule cannot loop (a re-block after a heal
+                # means a genuinely-live member appeared, which the
+                # healer refuses to touch).
+                if (
+                    _gate_block_reason
+                    and str(_gate_block_reason).startswith(
+                        "tree_liveness"
+                    )
+                ):
+                    self._schedule_strand_heal(instance_id)
                 return
 
             # ── FP4 (2026-10-03) — L6: escalate-and-HOLD not annotate.

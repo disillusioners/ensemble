@@ -153,6 +153,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from daemon.repositories.instance.models import InstanceStatus
@@ -177,6 +178,23 @@ WATCHDOG_SOURCE: str = "system:watchdog"
 #: hang-notice metric stream. Same semantics: stamped onto the
 #: durable ``MessageQueue.source`` column.
 WEDGE_SOURCE: str = "system:watchdog:wedge"
+
+#: DELTA 2 (watcher-loss terminal strand, 2026-10-14) — wedge-pass
+#: re-arm cooldown. After a wedge notice fires, the parent becomes
+#: wedge-eligible again once this much wall-clock time has elapsed
+#: (``time.monotonic()`` based), EVEN IF it never left
+#: WAITING_CHILDREN: the wake re-running the completion path and
+#: re-parking (gate re-blocks, no carrier, no children) must NOT
+#: silence the backstop for the daemon lifetime — the one-shot
+#: ``set``-membership anti-spam did exactly that (live evidence
+#: 2026-10-14: fired 10:30:31, re-parked 10:33:40, silent
+#: thereafter). 30 minutes: below the default 1h scan cadence, so a
+#: re-parked parent is re-eligible by the NEXT tick (re-park →
+#: re-arm → next tick re-wake), while still bounding duplicate
+#: notices when the cadence is tightened. Episode-boundary clears
+#: (parent left WC / live carrier appeared) drop the entry outright
+#: and re-enable immediately, unchanged.
+WEDGE_REARM_COOLDOWN_SECONDS: float = 30 * 60
 
 
 def _format_age_human(age_seconds: float) -> str:
@@ -538,13 +556,29 @@ class WaitingChildrenWatchdog:
         # episode-end logic.
         self._notified: set[tuple[str, str]] = set()
 
-        # Wedge-fix backstop cooldown set: parents currently in a
-        # notified wedge episode. INDEPENDENT of ``_notified`` so a
+        # Wedge-fix backstop cooldown map: parents currently in a
+        # notified wedge episode → the ``time.monotonic()`` instant of
+        # the last wedge notice. INDEPENDENT of ``_notified`` so a
         # hang notice does not preempt a wedge notice (and vice
         # versa) — they target different signatures. An episode ends
         # when the parent leaves ``WAITING_CHILDREN`` or a live
         # carrier appears.
-        self._wedge_notified: set[str] = set()
+        #
+        # DELTA 2 (watcher-loss terminal strand, 2026-10-14) — the
+        # previous bare ``set[str]`` was ONE-SHOT-FOREVER for a
+        # wake that RE-PARKS: the wedge fired, the wake re-ran the
+        # completion path, the gate re-blocked, the root re-parked
+        # at WAITING_CHILDREN with no carrier and no children — and
+        # the entry (only cleared by leave-WC/live-carrier, neither
+        # of which happens on a re-park) silenced the wedge pass for
+        # the DAEMON LIFETIME (live evidence 2026-10-14: fired
+        # 10:30:31, re-hit the gate 10:33:40, re-parked, silent
+        # thereafter). Cooldown-based re-eligibility: a re-parked
+        # parent becomes wedge-eligible again after
+        # ``WEDGE_REARM_COOLDOWN_SECONDS``, so each re-park gets a
+        # fresh wake at the pass's cadence instead of eternal
+        # silence.
+        self._wedge_notified: dict[str, float] = {}
 
         # Wedge-pass counters (observability — separate from the
         # ``run_once`` stats dict so existing 4-key tests stay
@@ -1570,7 +1604,7 @@ class WaitingChildrenWatchdog:
                     # any stale wedge episode so a future genuine
                     # wedge (after the last child completes) can
                     # re-notify.
-                    self._wedge_notified.discard(parent_id)
+                    self._wedge_notified.pop(parent_id, None)
                     continue
                 # Wedge condition part 1: zero live carrier. If a
                 # carrier exists, the wedge is NOT active — the
@@ -1580,10 +1614,25 @@ class WaitingChildrenWatchdog:
                     # Composition property: the revival seam worked.
                     # Clear any prior wedge episode for this parent
                     # so a future genuine wedge can re-notify.
-                    self._wedge_notified.discard(parent_id)
+                    self._wedge_notified.pop(parent_id, None)
                     continue
-                # Anti-spam: only notify once per episode.
-                if parent_id in self._wedge_notified:
+                # Anti-spam: cooldown-based re-eligibility (DELTA 2,
+                # watcher-loss terminal strand 2026-10-14 — replaces
+                # the one-shot-forever ``in`` check). A wedge notice
+                # fires at most once per
+                # ``WEDGE_REARM_COOLDOWN_SECONDS`` per parent: a wake
+                # that RE-PARKS (gate re-blocks, root back to WC, no
+                # carrier, no children) re-arms automatically once
+                # the cooldown elapses, so the pass re-fires at its
+                # cadence instead of staying silent for the daemon
+                # lifetime. Within the cooldown the parent is
+                # skipped (the original anti-spam contract).
+                _last_wedge = self._wedge_notified.get(parent_id)
+                if (
+                    _last_wedge is not None
+                    and (time.monotonic() - _last_wedge)
+                    < WEDGE_REARM_COOLDOWN_SECONDS
+                ):
                     continue
                 # Compose + deliver the wedge notice. Same
                 # ``enqueue_message`` wake primitive as the hang
@@ -1652,7 +1701,10 @@ class WaitingChildrenWatchdog:
                 )
                 if inspect.iscoroutine(notify_result):
                     await notify_result
-                self._wedge_notified.add(parent_id)
+                # DELTA 2: stamp the notify instant (cooldown anchor).
+                # The cooldown re-arms the pass for the NEXT wake if
+                # this one re-parks.
+                self._wedge_notified[parent_id] = time.monotonic()
                 self._wedge_notices_enqueued_total += 1
                 logger.warning(
                     f"[Watchdog] Wedge notice enqueued for parent "
@@ -1690,7 +1742,8 @@ class WaitingChildrenWatchdog:
                 if p not in still_waiting_for_wedge
             }
             if departed_for_wedge:
-                self._wedge_notified -= departed_for_wedge
+                for _p in departed_for_wedge:
+                    self._wedge_notified.pop(_p, None)
                 logger.info(
                     f"[Watchdog] {len(departed_for_wedge)} wedge "
                     f"episode(s) dropped — parent left "
