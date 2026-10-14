@@ -88,3 +88,21 @@ Low-priority pin gaps (documented, non-blocking): gate-leg fail-open pin (partia
 - docs commit (this file + PACKS.md pathspec) — see close-out.
 
 **Overall: 🟢 VERDICT PASS — all four commission-mandated scenarios exist and pass (3 completed by tester-authored G1), fix-specific behaviors 5–7 verified, mock fidelity confirmed with one bounded pinned risk, edge cases closed, zero branch-caused regressions across 5,184 independently-collected tests.**
+
+---
+
+## DELTA RE-GATE (focused, pre-merge) @ 69337058d — 2026-10-14 — 🟢 VERDICT: PASS — CLEARED FOR MERGE
+
+Branch moved after the 5,184-run: `e4bc31387` (shared `strand_past_race_guard` + `ORPHAN_MIN_AGE_SECONDS=60` single-sourced at mission_live_guard.py:184; refcounted per-root asyncio.Lock around `heal_instance` :282-301), `b7678bd8e` (G9 read-side age mirror + G10 true-concurrent double-fire), `69337058d` (census classification row) — built ON `bfb242d9`+`e162aa55e`. Ancestry verified 4/4 read-only.
+
+| Check | Result |
+|---|---|
+| (1) Ancestry | ✅ HEAD 69337058dd4… contains bfb242d92, e162aa55e, e4bc31387, b7678bd8e; G9 (2 tests) + G10 (1) live in the gap file; census row at test_terminal_write_census.py:509-521 classifies mission_strand_healer.py:466 `hooked` |
+| (2a) Gap suite @ HEAD | ✅ PASS 13/13 (G9 fresh-ghost-held + aged-excluded; G10 `asyncio.gather` concurrency → exactly-one heal/terminate/event/enqueue + lock-map hygiene `_heal_locks=={}`) |
+| (2b) wedge_fix @ HEAD | ✅ PASS 78/78 (registered script; parity with baseline) |
+| (2c) concurrency @ HEAD | ✅ PASS 99P/0F/74S/173C — EXACT baseline, zero drift (refcounted-lock hardening clean) |
+| (3) job_queue dir @ HEAD | ✅ PASS-with-preexisting 2099C/2046P/15F/38S — failure set node-for-node IDENTICAL to the documented 15; +13 collected = gap file's 13 defs exactly (verified via def-name diff, no re-runs); census row absorbed the healer site (census nodes remain red on long-standing drift reasons, status unchanged); developer spot claim 2046P/15F reproduced exactly |
+| (4) Guard-sanity audit | ✅ NO weakening — probe-failure fail-CLOSED branches intact both lanes (read :462-473 short-circuits BEFORE the age predicate; healer :405-414 returns healed=False); read-side exclusion is conjunctive (parent-terminal AND age≥60s) → young ghost HOLDS liveness until aged (pinned by G9 fresh-ghost test); ORPHAN_MIN_AGE_SECONDS single-sourced (healer imports, `_parse_naive` removed); per-root lock leak-free (finally-pop on every exit path), no same-task re-entrancy (drive path uses create_task), G10 mutation-proven (lock bypass → both callers heal → assertion fails). Hardening TIGHTENS the read side (kills the stamp→downgrade churn class) with strict-equivalent fail-closed semantics. |
+
+**Delta verdict: all four commissioned items PASS; zero new failures; no pin gaps; no lock hazards. Branch `feature/watcher-loss-terminal-strand` @ `69337058d` CLEARED for merge.**
+

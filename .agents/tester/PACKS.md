@@ -4,6 +4,8 @@
 
 Worktree `/home/ensemble-worktrees/watcher-loss-terminal-strand` (branch feature/watcher-loss-terminal-strand; base 27d2452a7; 4 production fixes: mission_live_guard, child_reports, NEW mission_strand_healer, watchdog re-arm + api/config wiring). INDEPENDENT verification — 13 workers, 0 re-dispatches, all developer claims re-derived from zero. 5,184 collected / 5,048 passed / 24 failed (ALL pre-existing documented families, 0 branch-caused) / 0 TIMEOUT. Tester-authored gap suite (G1–G8, scenario-3 conjunct + fail-closed probes + idempotency edges + fidelity pin) 10/10 @ commit bfb242d9. ensure.md Core: scoped packs PASS; concurrency exact-baseline 99P/0F/74S. Release-Gate E2E deferred to promote ceremony.
 
+**DELTA RE-GATE @ 69337058d (2026-10-14, focused pre-merge): 🟢 PASS — CLEARED FOR MERGE** — ancestry 4/4; gap suite 13/13 (incl. G9 read-side age mirror, G10 gather-concurrency exactly-once + lock-map hygiene); wedge 78/78; concurrency exact-baseline 99P/0F/74S/173C zero drift; job_queue 2099C/2046P/15F/38S with failure set node-for-node identical to the documented 15 (+13 = gap file defs exactly); guard-sanity audit: fail-closed preserved/tightened (age predicate conjunctive, young ghost holds liveness — pinned), ORPHAN_MIN_AGE_SECONDS single-sourced, per-root lock leak-free/no re-entrancy. Full evidence: RESULTS addendum (same file).
+
 | Pack | Location | Scope | Est. | Last Run | Status |
 |---|---|---|---|---|---|
 | `wlts-new-suite` (ad-hoc) | `.venv/bin/pytest tests/job_queue/test_watcher_loss_terminal_strand.py` | NEW 26-test strand suite | <2 min | 2026-10-14 @ d195316a6 (6.7s) | ✅ PASS 26/26 |
