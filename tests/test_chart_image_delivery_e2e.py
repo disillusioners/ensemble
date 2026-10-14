@@ -1292,6 +1292,36 @@ class TestInstallerSkillHygiene:
 #     .agents/shared/planning/image-gen-tool/phase2-plan.md Seal-Trip
 #     Subsection. No .prompt-artifacts.sha256 regen (dispatcher.py is
 #     not an agent prompt artifact).
+#   - 2026-10-14 image-gen-tool commission tidier-polish (worktree
+#     /home/ensemble-worktrees/image-gen-tool, branch
+#     feature/image-gen-tool): daemon/sources/dispatcher.py re-pinned
+#     f03c0b4852bdc3e3d02e5171e0feedcb02b04a91f73b888b8314d5c62e042a6f
+#     → 4282ddc0396f9103ff7e14af9077c721d29e5329fac702ad3dfbfafd7083e53a.
+#     Delta is EXACTLY the four tidier-polish edits M1/M2/M3/M8
+#     (M1 = reword the two seam comments at lines 577-579 + 729-732
+#     that falsely claimed ``extract_image_markers`` "delegates to
+#     ``extract_chart_images`` for the chart-only sweep" — replaced
+#     with "the seam delegates the chart-only sweep via the call
+#     below"; M2 = collapse the six-line pass-2 unreachability
+#     comment to the one-line true statement; M3 = clarify that
+#     ``feature_ids`` doesn't carry chart-render because the seam
+#     fed chart-stripped residual to ``extract_image_markers`` —
+#     the ``!= "chart-render"`` filter is kept as belt-and-braces;
+#     M8 = hoist the duplicated chart near-miss regex literal to
+#     a module-level ``_CHART_NEAR_MISS_RE`` referenced from both
+#     call sites — same pattern string + same flags, no behavior
+#     change). _MARKER_RE, _FAMILY_MARKER_RE, _NEAR_MISS_RE
+#     unchanged. _resolve_chart_images body unchanged. ZERO edits
+#     to daemon/sources/base.py, the three adapters,
+#     daemon/constants.py, or any out-of-scope file. git diff
+#     audit confirmed delta is EXACTLY these four edits and
+#     nothing else. Evidence pointer: tests/test_sources_dispatcher.py
+#     golden-tuple + byte-compat guard + 108 passing cases (per
+#     M8 hoist) + .agents/tidier/notes.md (round-tidier list).
+#     Seal ceremony per .agents/shared/planning/image-gen-tool/
+#     phase2-plan.md Seal-Trip Subsection. No
+#     .prompt-artifacts.sha256 regen (dispatcher.py is not an
+#     agent prompt artifact).
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "870ec32faf071cc1478c0540690381ef46c0bd1ae6667163215845ad39992581",
@@ -1305,7 +1335,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase B — 7 daemon files
     "daemon/sources/base.py": "ca2762ac8840bd8f7050955744af25f16325ed6806d09ba1fe3d020383581f3a",
     "daemon/sources/registry.py": "a46da82b930e2efc0b6f16a2f40a902c16343c08c49ee1236fda9ab928213a1b",
-    "daemon/sources/dispatcher.py": "f03c0b4852bdc3e3d02e5171e0feedcb02b04a91f73b888b8314d5c62e042a6f",
+    "daemon/sources/dispatcher.py": "4282ddc0396f9103ff7e14af9077c721d29e5329fac702ad3dfbfafd7083e53a",
     "daemon/sources/adapters/discord/adapter.py": "87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43",
     # Phase B — 7 daemon files + slack-setup.md (8).
     # slack/adapter.py re-pinned 2026-10-04: authorized remediation commit

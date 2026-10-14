@@ -2318,7 +2318,7 @@ class TestExtractMixedChartAndImageGen:
         assert "middle" in stripped
         assert "end" in stripped
 
-    def test_same_id_under_different_features_extracted_once_per_feature(self):
+    def test_same_id_under_different_features_extracted_once_first_feature_wins(self):
         # The id space is shared (32-hex); the same id under two features is
         # a forgery / namespace-confusion pattern. Dedup is per-id across
         # all features (one image per id; first-occurrence wins).

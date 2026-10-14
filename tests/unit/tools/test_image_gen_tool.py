@@ -50,7 +50,6 @@ from daemon.tools.image_gen import (
     MAX_N,
     MAX_PROMPT_CHARS,
     _clamp_timeout,
-    _error_envelope,
     _resolve_env,
     create_image_gen_tools,
 )

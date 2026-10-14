@@ -740,7 +740,8 @@ def create_image_gen_tools(
         #    unconfigured (D4).
         cfg, env_err = _resolve_env()
         if cfg is None:
-            return env_err  # type: ignore[misc]
+            assert env_err is not None  # _resolve_env invariant: cfg None → err non-None
+            return env_err
 
         # 2. Validate args — before any network call.
         arg_err = _validate_args(
@@ -833,7 +834,8 @@ def create_image_gen_tools(
         #    gate (AM2), single-object data, string counts.
         parsed, parse_err = _parse_generation_response(status_code, body)
         if parsed is None:
-            return parse_err  # type: ignore[misc]
+            assert parse_err is not None  # _parse_generation_response invariant: parsed None → err non-None
+            return parse_err
 
         image_urls: list[str] = parsed["image_urls"]
         failed_count: int = parsed["failed_count"]

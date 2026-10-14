@@ -3,7 +3,7 @@
  * for the FE-side recognition of inline image markers that the
  * daemon emits into chat transcripts.
  *
- * ## Family grammar (mirror of `daemon/sources/dispatcher.py:30`)
+ * ## Family grammar (mirror of `_MARKER_RE in daemon/sources/dispatcher.py`)
  *
  * The daemon emits a COMMENT node carrying a marker that follows the
  * family grammar:
@@ -11,7 +11,7 @@
  *     <!-- ens-img:<feature>:<32hex-lowercase> -->
  *
  * The original chart-render family member lives at
- * `daemon/sources/dispatcher.py:30` as a regex
+ * `_MARKER_RE in daemon/sources/dispatcher.py` as a regex
  * (`^<!-- ens-img:chart-render:([a-f0-9]{32}) -->$`). The
  * image-gen feature is the second member of the family — same shape,
  * different feature token. This module exports BOTH:
@@ -28,12 +28,13 @@
  *     `node.data` with this form so the regex does not have to
  *     special-case the envelope in the hot path.
  *
- * Both forms are DERIVED from the same body regex — `ENS_IMG_CORE_RE`
- * — so any grammar change (a new segment, a tighter character class)
- * is a single-edit update with both forms staying in lock-step. The
- * coupling is structural, not coincidental: a divergence here would
- * silently break either the docs/parity path OR the scanner hot path
- * depending on which form drifted.
+ * All three regexes below — `ENS_IMG_CORE_RE`, `ENS_IMG_MARKER_FULL_RE`,
+ * and `ENS_IMG_MARKER_CONTENT_RE` — are three independent literals
+ * kept in lock-step by the parity spec. Any grammar change (a new
+ * segment, a tighter character class) must update ALL three by hand;
+ * the coupling is intentional and the parity spec pins the alignment
+ * so a future contributor who edits one without the other trips the
+ * spec.
  *
  * ## Feature gate (v1 scope discipline)
  *
@@ -72,7 +73,7 @@ export const ENS_IMG_CORE_RE = /^ens-img:([a-z0-9-]+):([a-f0-9]{32})$/;
 /**
  * Full-marker form — matches the verbatim daemon-side family
  * grammar (with the `<!-- -->` envelope) as a regex anchored at
- * both ends. Mirrors `daemon/sources/dispatcher.py:30`
+ * both ends. Mirrors `_MARKER_RE in daemon/sources/dispatcher.py`
  * `^<!-- ens-img:chart-render:([a-f0-9]{32}) -->$` but generalized
  * to the family feature class `[a-z0-9-]+` so the image-gen
  * feature passes through identically.

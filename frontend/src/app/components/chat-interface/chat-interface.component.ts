@@ -1175,7 +1175,7 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
         if (!ENS_IMG_FEATURES.includes(feature)) {
           continue;
         }
-        this.injectEnsImgElement(comment, feature, id, bubble, messageId);
+        this.injectEnsImgElement(comment, id, messageId);
         // Per reviewer implementation-time note (binding):
         // add to the WeakSet AFTER ``replaceWith`` so the
         // detached comment stays keyed by identity. The next
@@ -1215,12 +1215,9 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
    */
   private injectEnsImgElement(
     comment: Comment,
-    feature: string,
     id: string,
-    bubble: HTMLElement,
     messageId: string,
   ): void {
-    void feature; // feature is reserved for the v2 multi-feature path; today only "image-gen" reaches here.
     const src = buildTmpImageUrl(id);
     const img = this.document.createElement('img');
     img.setAttribute('src', src);
@@ -1243,12 +1240,16 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
     });
 
     // (error) handler — swap the broken <img>'s src to the
-    // pinned SVG fallback. Idempotent: clear the native
-    // onerror on first hit so the browser does not refire for
-    // the same broken element. The dialog-body fallback is
-    // byte-identical (see IMAGE_VIEWER_FALLBACK_SRC in the
-    // dialog component); we reuse the local FALLBACK_IMAGE_SRC_CACHE
-    // so a single fallback constant holds across both surfaces.
+    // pinned SVG fallback. Re-running the swap is a no-op
+    // (every (error) event re-sets `src` to the SAME
+    // FALLBACK_IMAGE_SRC_CACHE, so a second error event leaves
+    // `src` unchanged — the spec pins this idempotence at
+    // `chat-interface.component.spec.ts` "is idempotent — a second
+    // error event does not refire the swap"). The dialog-body
+    // fallback is byte-identical (see IMAGE_VIEWER_FALLBACK_SRC
+    // in the dialog component); we reuse the local
+    // FALLBACK_IMAGE_SRC_CACHE so a single fallback constant
+    // holds across both surfaces.
     img.addEventListener('error', () => {
       img.onerror = null;
       img.setAttribute('src', ChatInterfaceComponent.FALLBACK_IMAGE_SRC_CACHE);
@@ -1256,14 +1257,6 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges, OnDe
     });
 
     comment.replaceWith(img);
-    // ``bubble`` is intentionally unused in the body — the
-    // parameter is part of the contract so the scanner can
-    // pass the owning message id without re-deriving it from
-    // the comment's parent. Suppress the unused-vars lint
-    // explicitly so a future contributor who reads the bubble
-    // (e.g. for an aria-labelledby wiring) sees the parameter
-    // is intentional.
-    void bubble;
   }
 
   /**

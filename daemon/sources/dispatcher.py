@@ -67,13 +67,25 @@ _FAMILY_MARKER_RE = re.compile(
 #   correctness proof is the sweeper-last-on-residual unit test (NOT optional
 #   documentation; see phase2-plan.md §Reviewer implementation-time notes).
 #
-#   The chart-render byte-compat function ``extract_chart_images`` uses its
-#   OWN chart-only near-miss regex (private to that function) so the chart
-#   pipeline stays byte-identical for chart-render inputs.
+#   The chart-render byte-compat path uses its OWN chart-only near-miss
+#   regex (see ``_CHART_NEAR_MISS_RE`` below) so the chart pipeline
+#   stays byte-identical for chart-render inputs.
 #
 # The LOCKED marker regex above stays byte-stable — no relaxation in v1.
 _NEAR_MISS_RE = re.compile(
     r"^\s*<!--\s*ens-img:[a-z0-9-]+:[^>\n]{0,64}-->\s*$",
+    re.MULTILINE,
+)
+
+# Chart-only near-miss sweeper — hoisted to module level (tidier-polish M8)
+# so both call sites (``extract_chart_images`` pass 2 and
+# ``extract_image_markers`` pass 1.5) share a single source of truth.
+# Stays chart-only on purpose: the generalized ``_NEAR_MISS_RE`` would
+# textually match well-formed image-gen markers (AM13) and would silently
+# strip-and-lose them if used at either site. Same pattern string + flags
+# as the prior inline literals — no behavior change.
+_CHART_NEAR_MISS_RE = re.compile(
+    r"^\s*<!--\s*ens-img:chart-render:[^>\n]{0,64}-->\s*$",
     re.MULTILINE,
 )
 
@@ -124,20 +136,18 @@ def extract_chart_images(content: str) -> tuple[str, list[str]]:
     ``OutgoingMessage`` construction — see architecture-recommendation.md §1
     pin, verbatim.
 
-    Note (phase2-plan.md): the chart-only near-miss regex below is kept
-    PRIVATE to this function so chart-render byte-compat is preserved; the
-    GENERALIZED ``_NEAR_MISS_RE`` would textually match well-formed image-gen
-    markers (AM13) and would silently strip-and-lose them if used here.
+    Note (phase2-plan.md): the chart-only near-miss regex is the
+    module-level ``_CHART_NEAR_MISS_RE`` so chart-render byte-compat is
+    preserved; the GENERALIZED ``_NEAR_MISS_RE`` would textually match
+    well-formed image-gen markers (AM13) and would silently strip-and-
+    lose them if used here.
     """
-    # Phase 2: chart-only near-miss — kept inline for chart-render byte-compat.
-    # The module-level ``_NEAR_MISS_RE`` is the GENERALIZED family form used
-    # by ``extract_image_markers`` AFTER the family pass has consumed well-
-    # formed markers; using it here would consume image-gen lines before
-    # ``extract_image_markers`` can extract them.
-    _chart_near_miss = re.compile(
-        r"^\s*<!--\s*ens-img:chart-render:[^>\n]{0,64}-->\s*$",
-        re.MULTILINE,
-    )
+    # Phase 2: chart-only near-miss — references the module-level
+    # ``_CHART_NEAR_MISS_RE`` (tidier-polish M8 hoist). The generalized
+    # ``_NEAR_MISS_RE`` is the FAMILY form used by ``extract_image_markers``
+    # AFTER the family pass has consumed well-formed markers; using it
+    # here would consume image-gen lines before ``extract_image_markers``
+    # can extract them.
     image_ids: list[str] = []
     seen: set[str] = set()  # amendment #2: per-id dedupe
     # First pass: extract via LOCKED regex. Subsequent occurrences of the same
@@ -159,7 +169,7 @@ def extract_chart_images(content: str) -> tuple[str, list[str]]:
     # lines are exactly those the locked regex did not match.)
     swept: list[str] = []
     for line in pending_lines:
-        if _chart_near_miss.match(line):
+        if _CHART_NEAR_MISS_RE.match(line):
             continue
         swept.append(line)
 
@@ -218,25 +228,17 @@ def extract_image_markers(content: str) -> tuple[str, dict[str, list[str]]]:
 
     # Pass 1.5: chart-only near-miss sweep — strips chart-render near-miss
     # lines from the pending list (mirrors ``extract_chart_images`` pass 2;
-    # uses an INLINE chart-only regex so the GENERALIZED ``_NEAR_MISS_RE``
-    # does not textually match and strip well-formed family markers below).
-    _chart_near_miss_inline = re.compile(
-        r"^\s*<!--\s*ens-img:chart-render:[^>\n]{0,64}-->\s*$",
-        re.MULTILINE,
-    )
+    # references the module-level ``_CHART_NEAR_MISS_RE`` (tidier-polish M8
+    # hoist) so the GENERALIZED ``_NEAR_MISS_RE`` does not textually match
+    # and strip well-formed family markers below).
     _after_chart_sweep: list[str] = []
     for line in _chart_pending:
-        if _chart_near_miss_inline.match(line):
+        if _CHART_NEAR_MISS_RE.match(line):
             continue
         _after_chart_sweep.append(line)
     residual = "\n".join(_after_chart_sweep)
 
-    # Pass 2: family pass on residual — extracts non-chart-render markers
-    # (and any chart-render near-miss survivors that the chart-only sweep
-    # in pass 1.5 left behind, e.g. internal chart-render lines with
-    # embedded junk that the generalized regex can still legitimately match
-    # as a well-formed family marker — but the locked pass already ran, so
-    # double-extraction is impossible).
+    # Pass 2: family pass on residual — extracts non-chart-render markers.
     pending_after_family: list[str] = []
     for line in residual.splitlines():
         m = _FAMILY_MARKER_RE.match(line)
@@ -575,18 +577,22 @@ class ResponseDispatcher:
         # the same transformation — once-only is preserved structurally
         # by `_progressive_sent_sources`. Phase 2 generalization: the
         # extraction now handles the full feature family (chart-render +
-        # image-gen); chart-render stays byte-compat via the locked pass
-        # inside ``extract_image_markers`` (delegating to
-        # ``extract_chart_images`` for the chart-only sweep). The seam
-        # itself still invokes ``extract_chart_images`` first (pin #5
-        # byte-compat audit anchor — chart-render extraction is the
-        # documented LAST content transformation before OutgoingMessage,
-        # verbatim) and then ``extract_image_markers`` on the chart-
-        # stripped residual to extract non-chart features.
+        # image-gen); the seam delegates the chart-only sweep via
+        # the call below. The seam itself still invokes
+        # ``extract_chart_images`` first (pin #5 byte-compat audit
+        # anchor — chart-render extraction is the documented LAST
+        # content transformation before OutgoingMessage, verbatim) and
+        # then ``extract_image_markers`` on the chart-stripped
+        # residual to extract non-chart features.
         chart_stripped, chart_ids = extract_chart_images(content)
         stripped_content, feature_ids = extract_image_markers(chart_stripped)
-        # `feature_ids` does NOT carry chart-render (the chart pass already
-        # ran first); route non-chart features through the family resolver.
+        # `feature_ids` does NOT carry chart-render in this seam (the chart
+        # pass already ran first on `content` and consumed every chart-render
+        # marker, leaving the residual fed to `extract_image_markers` empty
+        # of chart lines); the `!= "chart-render"` filter is kept as
+        # belt-and-braces against a future caller that bypasses the
+        # chart-first seam order. Route non-chart features through the
+        # family resolver.
         non_chart_features = {
             f: ids for f, ids in feature_ids.items() if f != "chart-render"
         }
@@ -723,11 +729,10 @@ class ResponseDispatcher:
         # extraction here, the marker leaks as literal text (HTML comments
         # render literally on Discord / Telegram / Slack) and the image
         # never delivers — the feature is dead-on-arrival for the exact
-        # user story it exists to serve. Phase 2: extraction is now feature-
-        # family aware (chart-render + image-gen) via
-        # ``extract_image_markers``; chart-render stays byte-compat through
-        # the locked pass (delegating to ``extract_chart_images``). The
-        # seam itself still invokes ``extract_chart_images`` first (pin #5
+        # user story it exists to serve. Phase 2: extraction is now
+        # feature-family aware (chart-render + image-gen); the seam
+        # delegates the chart-only sweep via the call below. The seam
+        # itself still invokes ``extract_chart_images`` first (pin #5
         # byte-compat audit anchor) and then ``extract_image_markers`` on
         # the chart-stripped residual to extract non-chart features.
         chart_stripped, chart_ids = extract_chart_images(content)
