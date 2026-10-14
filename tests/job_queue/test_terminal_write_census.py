@@ -504,6 +504,21 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
         reason="dormant: boundary writer — zero in-tree callers at census time; "
                "notify contract attaches at callers when first wired",
     ),
+    # ── Watcher-loss terminal strand — healer drive (final hardening
+    #    census debt, 2026-10-14) ──
+    CensusEntry(
+        file="daemon/services/mission_strand_healer.py",
+        site="_process_child_completion_and_notify_parent",
+        anchor="heal_instance", classification="hooked",
+        hooked_at="daemon/services/child_reports.py:5173",
+        reason="strand healer's drive IS the sanctioned emission "
+               "machinery: the notify rides inside "
+               "_process_child_completion_db_sync (child_reports "
+               ":5173/:5189) on the drive path; the heal itself "
+               "serializes per root behind the per-root asyncio.Lock "
+               "(anchor matches the pre- and post-lock-wrapper "
+               "enclosing names heal_instance/_heal_instance_locked)",
+    ),
 ]
 
 
