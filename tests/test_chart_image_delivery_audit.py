@@ -512,3 +512,112 @@ def test_pin_24_ari_prewarm_reminder() -> None:
     assert "install-mermaid-cli" in ari, (
         "ari/workflow.md must reference the install-mermaid-cli skill"
     )
+
+
+# ============================================================================
+# Phase 2 — image-gen marker-family audit pins (ADDITIVE)
+# ============================================================================
+# Implements Phase 2 Task #6 from
+# ``.agents/shared/planning/image-gen-tool/phase2-plan.md``:
+#   * Pin #25 — ``extract_image_markers`` at BOTH seams (def + 2 seams = 3)
+#   * Pin #26 — provenance gate ALLOWED_FEATURES at the delivery boundary
+#   * Pin #27 — family regex byte-stable at the locked line position
+#
+# Audit-regex arithmetic: def + 2 seams = **3** pinned call sites (per
+# phase2-plan.md §Gate definition review-fold 3). The existing Pin #6
+# (chart-render) is preserved unmodified — it continues to assert that the
+# chart-only ``extract_chart_images`` is still wired into the dispatcher
+# (def + 1 internal delegation = 2 occurrences satisfies its ≥2 threshold).
+# These pins are STRICTLY ADDITIVE.
+#
+# The pins are appended below; they do not modify any prior pin test
+# function or assertion (byte-compat hard gate, phase2-plan.md §Gate
+# definition review-fold 3).
+
+
+def test_pin_25_family_call_sites() -> None:
+    """Pin #25 — ``extract_image_markers`` at BOTH seams (Phase 2 addition).
+
+    Audit-regex arithmetic: def + 2 seams = **3** pinned call sites
+    (phase2-plan.md §Gate definition review-fold 3). The audit test counts
+    the definition site plus both seam call sites — the dispatcher must
+    route marker-family extraction through both
+    ``dispatch_completed`` and ``dispatch_message``.
+    """
+    dispatcher = _read(DISPATCHER_PY)
+    call_sites = len(re.findall(r"extract_image_markers\s*\(", dispatcher))
+    assert call_sites >= 3, (
+        f"dispatcher.py must have ≥3 extract_image_markers call sites "
+        f"(def + 2 seams); found {call_sites}"
+    )
+    # AND the function definition exists at the module level.
+    assert "def extract_image_markers(" in dispatcher, (
+        "dispatcher.py must define ``extract_image_markers`` at module level"
+    )
+
+
+def test_pin_26_allowed_features_provenance_gate() -> None:
+    """Pin #26 — ``ALLOWED_FEATURES`` frozenset gate at the delivery boundary.
+
+    Per phase2-plan.md §Marker Family Design Provenance gate: the explicit
+    ALLOWED_FEATURES frozenset MUST contain both ``chart-render`` and
+    ``image-gen`` — and the gate MUST be consulted at the family resolver
+    (default-deny for unknown features). This pin asserts the module-level
+    declaration + the gate usage at the delivery boundary.
+    """
+    dispatcher = _read(DISPATCHER_PY)
+    # Module-level frozenset declaration.
+    assert "ALLOWED_FEATURES" in dispatcher, (
+        "dispatcher.py must declare ALLOWED_FEATURES"
+    )
+    assert "frozenset" in dispatcher, (
+        "ALLOWED_FEATURES must be a frozenset (immutable)"
+    )
+    # Both features are admitted.
+    assert '"chart-render"' in dispatcher or "'chart-render'" in dispatcher, (
+        "ALLOWED_FEATURES must include 'chart-render'"
+    )
+    assert '"image-gen"' in dispatcher or "'image-gen'" in dispatcher, (
+        "ALLOWED_FEATURES must include 'image-gen'"
+    )
+    # The gate is consulted at the family resolver (delivery boundary).
+    assert "_resolve_family_images" in dispatcher, (
+        "dispatcher.py must define _resolve_family_images for the family "
+        "delivery path"
+    )
+    # The new family resolver references ALLOWED_FEATURES (default-deny).
+    family_resolver_block = dispatcher.split("def _resolve_family_images", 1)[1]
+    assert "ALLOWED_FEATURES" in family_resolver_block, (
+        "_resolve_family_images must consult ALLOWED_FEATURES"
+    )
+
+
+def test_pin_27_family_regex_byte_stable() -> None:
+    """Pin #27 — ``_FAMILY_MARKER_RE`` regex shape pinned at the dispatcher."""
+    dispatcher = _read(DISPATCHER_PY)
+    # The family regex MUST be declared with the D2 grammar.
+    assert "_FAMILY_MARKER_RE" in dispatcher, (
+        "dispatcher.py must declare _FAMILY_MARKER_RE"
+    )
+    # And the regex pattern must be the D2 grammar: feature token
+    # ``[a-z0-9-]+`` + 32-hex image id + full-line anchored.
+    family_regex_pattern = re.search(
+        r'_FAMILY_MARKER_RE\s*=\s*re\.compile\(\s*r"([^"]+)"', dispatcher
+    )
+    assert family_regex_pattern is not None, (
+        "_FAMILY_MARKER_RE must be a compiled regex with a literal pattern"
+    )
+    pattern = family_regex_pattern.group(1)
+    # Feature token: a regex character class containing lowercase letters,
+    # digits, and hyphen (``[a-z0-9-]+``). Match the class presence, not the
+    # Python escape literal.
+    assert re.search(r"\[a-z0-9-\]\+", pattern), (
+        f"family regex feature token must be [a-z0-9-]+ (D2 grammar); got {pattern!r}"
+    )
+    # Image id: 32-hex (lower-case a-f + digits) repeated exactly 32 times.
+    assert re.search(r"\[a-f0-9\]\{32\}", pattern), (
+        f"family regex image_id must be [a-f0-9]{{32}} (D2 grammar); got {pattern!r}"
+    )
+    assert pattern.startswith("^") and pattern.endswith("$"), (
+        f"family regex must be full-line anchored (^...$); got {pattern!r}"
+    )
