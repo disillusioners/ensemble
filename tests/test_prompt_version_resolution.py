@@ -1637,7 +1637,10 @@ class TestPersistenceReconstructionPath:
         src = Path("daemon/persistence.py").read_text()
         # The reconstruction call site at line 1141 (current line
         # after this commit) must include version_tag=version_tag.
-        # Grep for the call pattern.
+        # Grep for the call pattern. Phase C (User Directive #5A,
+        # 2026-10-14) added the ``is_custom_agent`` kwarg; the test
+        # was last updated for the pre-Phase-C source shape and now
+        # allows the additional kwarg for forward compatibility.
         assert (
             "load_and_cache_prompt(\n"
             "        agent_id=agent_id,\n"
@@ -1645,6 +1648,7 @@ class TestPersistenceReconstructionPath:
             "        cache=prompt_cache,\n"
             "        mcp_tool_names=mcp_tool_names,\n"
             "        version_tag=version_tag,\n"
+            "        is_custom_agent=_is_custom_persist,\n"
             "    )"
         ) in src, (
             "persistence.py:1141 reconstruction MUST pass "

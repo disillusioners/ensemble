@@ -148,13 +148,13 @@ class CustomAgentConfigRepository:
     to ``engine.begin()``.
 
     Attributes:
-        _engine: SQLAlchemy engine bound to the project's
+        engine: SQLAlchemy engine bound to the project's
             database (SQLite or PostgreSQL). The repo holds NO
             engine-creating logic — engine-only by corpus
             convention (research-findings-db-api.md §1).
     """
 
-    _engine: Engine
+    engine: Engine
 
     # ----------------------------------------------------------------
     # Mappers — model ↔ AgentMetadata-shaped view
@@ -269,7 +269,7 @@ class CustomAgentConfigRepository:
             stmt = stmt.where(
                 col(CustomAgentConfig.deleted_at).is_(None)
             )
-        with Session(self._engine) as session:
+        with Session(self.engine) as session:
             return session.exec(stmt).first()
 
     def list_active(self) -> Sequence[CustomAgentConfig]:
@@ -283,7 +283,7 @@ class CustomAgentConfigRepository:
             list is stable; alphabetical sort belongs on the
             caller side).
         """
-        with Session(self._engine) as session:
+        with Session(self.engine) as session:
             stmt = (
                 select(CustomAgentConfig)
                 .where(col(CustomAgentConfig.deleted_at).is_(None))
@@ -302,7 +302,7 @@ class CustomAgentConfigRepository:
             (incl. soft-deleted) ordered by ``created_at``
             ascending.
         """
-        with Session(self._engine) as session:
+        with Session(self.engine) as session:
             stmt = select(CustomAgentConfig).order_by(
                 col(CustomAgentConfig.created_at).asc()
             )
@@ -495,7 +495,7 @@ class CustomAgentConfigRepository:
         if conn is not None:
             _do_insert(conn)
         else:
-            with self._engine.begin() as c:
+            with self.engine.begin() as c:
                 _do_insert(c)
 
         logger.info(
@@ -551,7 +551,7 @@ class CustomAgentConfigRepository:
         if conn is not None:
             deleted = _do_update(conn)
         else:
-            with self._engine.begin() as c:
+            with self.engine.begin() as c:
                 deleted = _do_update(c)
 
         if deleted:
@@ -598,7 +598,7 @@ class CustomAgentConfigRepository:
         if conn is not None:
             restored = _do_update(conn)
         else:
-            with self._engine.begin() as c:
+            with self.engine.begin() as c:
                 restored = _do_update(c)
 
         if restored:

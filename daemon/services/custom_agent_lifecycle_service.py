@@ -264,7 +264,7 @@ class CustomAgentLifecycleService:
         # rows all commit together. Run the sync transaction
         # inside asyncio.to_thread so the async lane is preserved.
         def _do_create() -> dict[str, Any]:
-            engine = self._config_repo._engine
+            engine = self._config_repo.engine
             v1_versions: list[dict[str, Any]] = []
             config_dict: Optional[dict[str, Any]] = None
 
