@@ -56,7 +56,9 @@ from pydantic import ValidationError
 from sqlalchemy import create_engine, select
 from sqlalchemy.dialects import postgresql, sqlite as sqlite_dialect
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel
+import time
+
+from sqlmodel import Session, SQLModel
 
 from daemon.config import ServicesConfig
 from daemon.repositories.instance.models import Instance, InstanceStatus
@@ -1586,4 +1588,106 @@ class TestWedgeSkipsBGuardedParents:
         await watchdog.run_once()
         manager.enqueue_message.assert_not_called(), (
             "a replaced (b) episode is still an OPEN episode — wedge stays silent"
+        )
+
+
+# ─── DELTA 2 — wedge re-arm after cooldown (not one-shot-forever) ────────────
+
+
+class TestWedgeRearmAfterCooldown:
+    """DELTA 2 (watcher-loss terminal strand, 2026-10-14): a wedge
+    wake that RE-PARKS (the wake re-ran the completion path, the
+    emission gate re-blocked, the root is back at WAITING_CHILDREN
+    with no carrier and no children) must RE-ARM the wedge pass —
+    cooldown-based re-eligibility — instead of silencing it for the
+    daemon lifetime (the live 2026-10-14 evidence: fired 10:30:31,
+    re-hit the gate 10:33:40, re-parked, silent thereafter)."""
+
+    def _watchdog(self, repo, manager):
+        task_repo = MagicMock()
+        task_repo.list_live_process_report_carriers_for_instance = (
+            lambda instance_id: []
+        )
+        return WaitingChildrenWatchdog(
+            repo,
+            manager,
+            interval_seconds=1,
+            hang_threshold_seconds=1,
+            task_repository=task_repo,
+        )
+
+    async def test_repark_rearms_and_refires_after_cooldown(
+        self, repo, manager, make_instance
+    ) -> None:
+        from daemon.services.waiting_children_watchdog import (
+            WEDGE_REARM_COOLDOWN_SECONDS,
+        )
+
+        # The wedged shape: WC parent + COMPLETED child + no carrier.
+        parent_id = make_instance(
+            status=InstanceStatus.WAITING_CHILDREN,
+            instance_id="wc-parent-rearm",
+        )
+        make_instance(status=InstanceStatus.COMPLETED, parent_id=parent_id)
+        w = self._watchdog(repo, manager)
+
+        # Tick 1: the wedge fires (the wake is enqueued).
+        await w.run_once()
+        assert manager.enqueue_message.await_count == 1
+        assert w.wedge_notices_enqueued == 1
+
+        # The wake RE-PARKS: the mocked enqueue wrote nothing, so the
+        # parent is still WC with no carrier and no children — the
+        # exact live re-park posture.
+        manager.enqueue_message.reset_mock()
+
+        # Tick 2 (within the cooldown): the original anti-spam
+        # contract holds — silent.
+        await w.run_once()
+        assert manager.enqueue_message.await_count == 0, (
+            "within the cooldown the wedge must stay silent"
+        )
+        assert w.wedge_notices_enqueued == 1
+
+        # The cooldown elapses (re-park age > WEDGE_REARM_COOLDOWN):
+        # the pass RE-ARMS and re-fires — the DELTA-2 contract. The
+        # monotonic anchor is aged directly (no wall-clock sleep).
+        w._wedge_notified[parent_id] = (
+            time.monotonic() - WEDGE_REARM_COOLDOWN_SECONDS - 1
+        )
+        await w.run_once()
+        assert manager.enqueue_message.await_count == 1, (
+            "DELTA 2: a re-parked parent must be wedge-eligible "
+            "again after the cooldown — not one-shot-forever"
+        )
+        assert w.wedge_notices_enqueued == 2
+
+    async def test_cooldown_entry_cleared_on_leave_wc(
+        self, repo, manager, make_instance
+    ) -> None:
+        """The episode-boundary purge (parent left WC) still drops
+        the cooldown entry outright — immediate re-eligibility on a
+        future genuine wedge, unchanged from the pre-DELTA-2
+        contract."""
+        parent_id = make_instance(
+            status=InstanceStatus.WAITING_CHILDREN,
+            instance_id="wc-parent-leave",
+        )
+        make_instance(status=InstanceStatus.COMPLETED, parent_id=parent_id)
+        w = self._watchdog(repo, manager)
+
+        await w.run_once()
+        assert w.wedge_notices_enqueued == 1
+        assert parent_id in w.wedge_episodes
+
+        # Parent leaves WC (terminal). The purge drops the entry.
+        from daemon.repositories.instance.models import Instance as I
+        with Session(w._repo.engine) as session:
+            row = session.get(I, parent_id)
+            row.status = InstanceStatus.COMPLETED.value
+            session.add(row)
+            session.commit()
+        await w.run_once()
+        assert parent_id not in w.wedge_episodes, (
+            "leave-WC must drop the cooldown entry (episode boundary)"
         )

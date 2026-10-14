@@ -55,6 +55,7 @@ carrier) is forced via mocks so the wedge pass actually fires.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -335,7 +336,9 @@ class TestA5WedgeNotifyWork:
             repo, manager, worker_pool=worker_pool,
         )
         # Pre-seed the cooldown so the wedge skip applies.
-        w._wedge_notified.add(parent_id)
+        # (DELTA 2: cooldown map — parent → monotonic instant; a
+        # fresh instant is inside the re-arm window.)
+        w._wedge_notified[parent_id] = time.monotonic()
 
         stats = await w.run_once()
 
