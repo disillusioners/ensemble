@@ -244,6 +244,65 @@ class InvalidTransitionError(ValueError):
         )
 
 
+# USER DIRECTIVE #2 (2026-10-14) — the editable-state rule. EDIT and
+# DELETE apply to ``draft`` / ``pending_approval`` rows ONLY. Leader
+# ruling (binding composition with frozen A1): approved rows are
+# append-only immutable history; rejected is terminal (resubmit = a
+# new row); archived is a superseded side state. Hard-delete of
+# approved history is deliberately NOT built (morning fork).
+_EDITABLE_STATES: frozenset[str] = frozenset({"draft", "pending_approval"})
+
+
+class VersionNotEditableError(ValueError):
+    """Raised when content-edit is attempted on a non-editable row.
+
+    The editable-state rule (USER DIRECTIVE #2, 2026-10-14): only
+    ``draft`` / ``pending_approval`` rows may have their content
+    replaced in place. ``approved`` rows are the append-only
+    immutable history; ``rejected`` is terminal (resubmit = new row);
+    ``archived`` is superseded. Carries the row's current state so
+    the HTTP layer can map to ``409 VERSION_IMMUTABLE`` with a
+    targeted message without a second read.
+
+    Inherits from ``ValueError`` (uniform error shape with
+    :class:`InvalidTransitionError`).
+    """
+
+    def __init__(self, version_id: str, current_state: str) -> None:
+        self.version_id = version_id
+        self.current_state = current_state
+        super().__init__(
+            f"prompt_version {version_id} is not editable: state is "
+            f"{current_state!r} (only draft/pending_approval rows may "
+            f"be edited; approved history is append-only immutable, "
+            f"rejected is terminal, archived is superseded)"
+        )
+
+
+class VersionNotDeletableError(ValueError):
+    """Raised when hard-delete is attempted on a non-deletable row.
+
+    Mirror of :class:`VersionNotEditableError` for the DELETE path
+    (USER DIRECTIVE #2, 2026-10-14): only ``draft`` /
+    ``pending_approval`` rows may be hard-deleted. Approved rows are
+    append-only immutable history — hard-delete of approved history
+    is a morning fork and is deliberately NOT built. Carries the
+    row's current state for the ``409 VERSION_IMMUTABLE`` mapping.
+
+    Inherits from ``ValueError`` (uniform error shape).
+    """
+
+    def __init__(self, version_id: str, current_state: str) -> None:
+        self.version_id = version_id
+        self.current_state = current_state
+        super().__init__(
+            f"prompt_version {version_id} is not deletable: state is "
+            f"{current_state!r} (only draft/pending_approval rows may "
+            f"be deleted; approved history is append-only immutable, "
+            f"rejected is terminal, archived is superseded)"
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Actor context (A3)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1717,6 +1776,240 @@ class PromptVersionRepository:
         raise last_error
 
     # ─────────────────────────────────────────────────────────────────
+    # USER DIRECTIVE #2 (2026-10-14, frontend specs) — content edit /
+    # delete / pending-count. The CRUD + badge API deltas the mandated
+    # Persona UI consumes.
+    #
+    # Leader ruling (binding composition with frozen A1): EDIT and
+    # DELETE apply to ``draft`` / ``pending_approval`` rows ONLY
+    # (:data:`_EDITABLE_STATES`). Approved rows stay append-only
+    # immutable history; rejected is terminal (resubmit = new row);
+    # pending-supersession (create_and_submit archive) still governs.
+    # Hard-delete of approved history is a MORNING FORK — deliberately
+    # NOT built here.
+    #
+    # Serialization posture (mirrors ``atomic_transition``, the
+    # documented no-advisory-lock case): these are CAS-guarded
+    # single-statement mutations — the
+    # ``… WHERE state IN (draft, pending_approval)`` rowcount check IS
+    # the serialization. A concurrent approve/reject/archive between
+    # the read and the write flips the row out of the editable set and
+    # the CAS matches zero rows → the typed not-editable /
+    # not-deletable error carries the row's CURRENT state. No
+    # per-key advisory lock is taken (the lock's documented callers
+    # are the key-level read-modify-write writers; these methods
+    # target one row by PK).
+    # ─────────────────────────────────────────────────────────────────
+
+    def update_version_content(
+        self,
+        version_id: str,
+        content: str,
+        actor: ActorContext,
+    ) -> PromptVersion:
+        """Replace the content of a ``draft`` / ``pending_approval`` row
+        in place (USER DIRECTIVE #2, deliverable 1).
+
+        Editable-state rule: only draft/pending rows may be edited.
+        Any other state raises :class:`VersionNotEditableError`
+        carrying the row's current state (approved = append-only
+        immutable history; rejected = terminal; archived =
+        superseded). The recompute of ``content_hash`` and the
+        ``UPDATED`` audit row commit INSIDE the same
+        ``engine.begin()`` as the content UPDATE (A3) — the audit
+        payload carries the prior + new content_hash and both byte
+        sizes.
+
+        Returns the updated row snapshot (rebuilt in-memory from the
+        pre-update read — same rationale as ``create_draft``'s
+        return: no cross-connection Session.get under contention).
+
+        Raises:
+            LookupError: If no row carries ``version_id``.
+            VersionNotEditableError: If the row's state is outside
+                ``draft`` / ``pending_approval`` (or raced out of the
+                editable set between the read and the CAS UPDATE —
+                the error carries the current state either way).
+
+        Forensic note: under two concurrent edits of the SAME row,
+        both CAS UPDATEs succeed (state is unchanged by edits) and
+        each stamps its own UPDATED row; the second committer's
+        ``prior_content_hash`` is read at its own transaction start,
+        so an intermediate edit that committed in between may be
+        skipped in the prior-hash provenance. Content + new hash are
+        always exact; only the prior-side provenance can skip an
+        intermediate under that race. Single-editor UI flows (the
+        Persona UI) never hit this.
+        """
+        new_hash = _sha256_hex(content)
+        now = _now_iso()
+        with self.engine.begin() as conn:
+            prior = self._read_full_row_in_conn(conn, version_id)
+            if prior is None:
+                raise LookupError(f"prompt_version {version_id} not found")
+            prior_hash = prior[5]
+            prior_content: str = prior[6]
+
+            upd = (
+                PromptVersion.__table__.update()
+                .where(
+                    col(PromptVersion.version_id) == version_id,
+                    col(PromptVersion.state).in_(sorted(_EDITABLE_STATES)),
+                )
+                .values(content=content, content_hash=new_hash, updated_at=now)
+            )
+            result = conn.execute(upd)
+            if result.rowcount == 0:
+                # The row exists (read above) but left the editable
+                # set — carry the CURRENT state (the read-to-write
+                # race case resolves here too).
+                cur = conn.execute(
+                    select(col(PromptVersion.state))
+                    .select_from(PromptVersion)
+                    .where(col(PromptVersion.version_id) == version_id)
+                ).one_or_none()
+                raise VersionNotEditableError(
+                    version_id, cur[0] if cur is not None else prior[4]
+                )
+
+            # Audit row stamped INSIDE the same txn (A3).
+            self._append_audit_in_conn(
+                conn,
+                agent_id=prior[0],
+                version_tag=prior[1],
+                artifact=prior[2],
+                version_id=version_id,
+                event_type="UPDATED",
+                actor=actor,
+                payload={
+                    "prior_content_hash": prior_hash,
+                    "new_content_hash": new_hash,
+                    "prior_content_bytes": len(prior_content.encode("utf-8")),
+                    "new_content_bytes": len(content.encode("utf-8")),
+                    "state": prior[4],
+                    "version": prior[3],
+                },
+            )
+
+        logger.info(
+            f"prompt_version.update_version_content ok: "
+            f"version_id={version_id} agent_id={prior[0]} "
+            f"version_tag={prior[1]!r} artifact={prior[2]} "
+            f"state={prior[4]} prior_bytes="
+            f"{len(prior_content.encode('utf-8'))} "
+            f"new_bytes={len(content.encode('utf-8'))}"
+        )
+        return self._row_snapshot(
+            prior, version_id, content=content, content_hash=new_hash, updated_at=now
+        )
+
+    def delete_version(
+        self,
+        version_id: str,
+        actor: ActorContext,
+    ) -> PromptVersion:
+        """Hard-delete a ``draft`` / ``pending_approval`` row (USER
+        DIRECTIVE #2, deliverable 1).
+
+        Editable-state rule mirrors :meth:`update_version_content`:
+        only draft/pending rows may be deleted; any other state
+        raises :class:`VersionNotDeletableError` carrying the row's
+        current state. Hard-delete of APPROVED history is a morning
+        fork and is deliberately NOT implemented.
+
+        The ``DELETED`` audit row commits INSIDE the same
+        ``engine.begin()`` as the row DELETE (A3) and carries the
+        full identity + ``content_hash`` + ``content_bytes`` in its
+        payload — the forensics survive the deleted row (the audit
+        row's own identity columns also carry agent_id / version_tag
+        / artifact / version_id per the drift_events template).
+
+        Returns the deleted row's snapshot (post-delete forensic
+        echo for the HTTP response body).
+
+        Raises:
+            LookupError: If no row carries ``version_id``.
+            VersionNotDeletableError: If the row's state is outside
+                ``draft`` / ``pending_approval`` (or raced out of the
+                editable set between the read and the CAS DELETE).
+        """
+        now = _now_iso()
+        with self.engine.begin() as conn:
+            prior = self._read_full_row_in_conn(conn, version_id)
+            if prior is None:
+                raise LookupError(f"prompt_version {version_id} not found")
+
+            result = conn.execute(
+                PromptVersion.__table__.delete()
+                .where(
+                    col(PromptVersion.version_id) == version_id,
+                    col(PromptVersion.state).in_(sorted(_EDITABLE_STATES)),
+                )
+            )
+            if result.rowcount == 0:
+                cur = conn.execute(
+                    select(col(PromptVersion.state))
+                    .select_from(PromptVersion)
+                    .where(col(PromptVersion.version_id) == version_id)
+                ).one_or_none()
+                raise VersionNotDeletableError(
+                    version_id, cur[0] if cur is not None else prior[4]
+                )
+
+            # Audit row stamped INSIDE the same txn (A3). Identity +
+            # content forensics ride the payload so the trail survives
+            # the deleted row.
+            self._append_audit_in_conn(
+                conn,
+                agent_id=prior[0],
+                version_tag=prior[1],
+                artifact=prior[2],
+                version_id=version_id,
+                event_type="DELETED",
+                actor=actor,
+                payload={
+                    "agent_id": prior[0],
+                    "version_tag": prior[1],
+                    "artifact": prior[2],
+                    "version": prior[3],
+                    "state": prior[4],
+                    "content_hash": prior[5],
+                    "content_bytes": len(prior[6].encode("utf-8")),
+                },
+            )
+
+        logger.info(
+            f"prompt_version.delete_version ok: "
+            f"version_id={version_id} agent_id={prior[0]} "
+            f"version_tag={prior[1]!r} artifact={prior[2]} "
+            f"state={prior[4]}"
+        )
+        return self._row_snapshot(
+            prior, version_id, content=prior[6], content_hash=prior[5],
+            updated_at=now,
+        )
+
+    def count_pending(self) -> int:
+        """Count rows in state ``pending_approval`` (USER DIRECTIVE #2,
+        deliverable 1 — the Persona UI badge feed).
+
+        Cheap single-scalar SELECT; drains as approve/reject land.
+        Served by ``idx_prompt_versions_state_updated`` (the
+        ``(state, updated_at)`` index — the state-LEADING index; the
+        mission's ``idx_prompt_versions_key_state`` has leading
+        agent_id columns and does not serve a state-only predicate).
+
+        The count is deliberately a PLAIN count — the A8 effective
+        fingerprint does not apply (a badge answers "how many rows
+        await approval", not "what is in effect").
+        """
+        with Session(self.engine) as session:
+            stmt = select(func.count(col(PromptVersion.version_id))).where(
+                col(PromptVersion.state) == "pending_approval"
+            )
+            return int(session.exec(stmt).one() or 0)
+
+    # ─────────────────────────────────────────────────────────────────
     # Internal helpers — execute against a live ``Connection`` so the
     # audit row commits inside the caller's ``engine.begin()`` block.
     # ─────────────────────────────────────────────────────────────────
@@ -1772,11 +2065,86 @@ class PromptVersionRepository:
             )
         return result[0]
 
+    # USER DIRECTIVE #2 helpers — full-row read + snapshot rebuild for
+    # ``update_version_content`` / ``delete_version``.
+
+    _FULL_ROW_COLUMNS = (
+        col(PromptVersion.agent_id),
+        col(PromptVersion.version_tag),
+        col(PromptVersion.artifact),
+        col(PromptVersion.version),
+        col(PromptVersion.state),
+        col(PromptVersion.content_hash),
+        col(PromptVersion.content),
+        col(PromptVersion.is_selected),
+        col(PromptVersion.submitter_instance_id),
+        col(PromptVersion.submitter_agent_id),
+        col(PromptVersion.submitter_version_tag),
+        col(PromptVersion.approver_subject),
+        col(PromptVersion.approver_auth_method),
+        col(PromptVersion.created_at),
+    )
+
+    def _read_full_row_in_conn(self, conn: Any, version_id: str) -> Optional[tuple]:
+        """Read one row's full column tuple inside the caller's txn.
+
+        Returns ``None`` when the row does not exist. Used by
+        :meth:`update_version_content` / :meth:`delete_version` so the
+        audit payload + the returned snapshot are built from a single
+        in-transaction read (no cross-connection round-trip).
+        """
+        return conn.execute(
+            select(*self._FULL_ROW_COLUMNS)
+            .select_from(PromptVersion)
+            .where(col(PromptVersion.version_id) == version_id)
+        ).one_or_none()
+
+    @staticmethod
+    def _row_snapshot(
+        row: tuple,
+        version_id: str,
+        *,
+        content: str,
+        content_hash: str,
+        updated_at: str,
+    ) -> PromptVersion:
+        """Rebuild a :class:`PromptVersion` from a full-row tuple.
+
+        ``content`` / ``content_hash`` / ``updated_at`` are passed
+        explicitly because they are the fields a mutation changes;
+        everything else comes from the pre-mutation read.
+        """
+        (
+            agent_id, version_tag, artifact, version, state, _hash,
+            _content, is_selected, sub_inst, sub_agent, sub_tag,
+            appr_subj, appr_meth, created_at,
+        ) = row
+        return PromptVersion(
+            version_id=version_id,
+            agent_id=agent_id,
+            version_tag=version_tag,
+            artifact=artifact,
+            version=version,
+            state=state,
+            content=content,
+            content_hash=content_hash,
+            is_selected=is_selected,
+            submitter_instance_id=sub_inst,
+            submitter_agent_id=sub_agent,
+            submitter_version_tag=sub_tag,
+            approver_subject=appr_subj,
+            approver_auth_method=appr_meth,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+
 
 __all__ = [
     "PromptVersionRepository",
     "VALID_TRANSITIONS",
     "InvalidTransitionError",
+    "VersionNotEditableError",
+    "VersionNotDeletableError",
     "ActorContext",
     "actor_from_instance",
     "actor_from_request",

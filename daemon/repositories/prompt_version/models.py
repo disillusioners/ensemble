@@ -111,6 +111,18 @@ PROMPT_STATES: frozenset[str] = frozenset({
 # Audit event-type vocabulary (phase-contract.md T2 + decisions.md
 # D-IDENTITY-STAMPING). UPPERCASE per the addendum S3/O-12
 # prescription — never ``created`` / ``submitted`` etc.
+#
+# USER DIRECTIVE #2 (2026-10-14, frontend specs) — ADDITIVE extension
+# of the S3/O-12 nine-type set with ``UPDATED`` + ``DELETED`` (the
+# CRUD + badge API deltas, deliverable 1). Code-level frozenset only:
+# the DB column is ``event_type TEXT NOT NULL`` (migration
+# ``20261013_214000_create_prompt_versions.sql:119``) and validation
+# happens here at every stamp site (:meth:`PromptVersionRepository.
+# _validate_event_type`), so the extension is additive code with NO
+# schema change. Morning-review surface: the two new types cover the
+# draft/pending content-edit and draft/pending hard-delete paths —
+# ``UPDATED`` = content replaced in place on an editable row;
+# ``DELETED`` = row removed, forensics carried by the audit payload.
 PROMPT_AUDIT_EVENT_TYPES: frozenset[str] = frozenset({
     "CREATED",
     "SUBMITTED",
@@ -121,6 +133,8 @@ PROMPT_AUDIT_EVENT_TYPES: frozenset[str] = frozenset({
     "SELECTED",
     "CLEARED",
     "AGENT_CREATE_TEMPLATE_COPIED",
+    "UPDATED",
+    "DELETED",
 })
 
 # Conservative-default versioned-immutable artifact set (decisions.md
