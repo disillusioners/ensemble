@@ -412,19 +412,27 @@ def resolve_prompts_from_db(
             continue
         # Class-aware resolution (User Directive #3).
         if getattr(row, "artifact_class", ARTIFACT_CLASS_CORE_FALLBACK) == "MEMORY":
-            resolved = (
-                row.selected_content
-                or getattr(row, "latest_content", None)
-            )
-            if resolved is None:
+            # M16 — explicit ``is not None`` chain so an empty
+            # ``selected_content`` / ``latest_content`` row is
+            # served as the empty string, NOT silently falling
+            # through to the template file. Truthy ``or`` would
+            # treat ``""`` as missing.
+            if row.selected_content is not None:
+                resolved = row.selected_content
+            elif getattr(row, "latest_content", None) is not None:
+                resolved = row.latest_content
+            else:
                 # No DB content yet — leave the file alone
                 # (empty fallback; proven boot-tolerant).
                 continue
             out[artifact] = resolved
             continue
-        # CORE class — F6 precedence.
-        resolved = row.selected_content or row.latest_approved_content
-        if resolved is None:
+        # CORE class — F6 precedence. Same M16 fix.
+        if row.selected_content is not None:
+            resolved = row.selected_content
+        elif row.latest_approved_content is not None:
+            resolved = row.latest_approved_content
+        else:
             # Drafts / pending rows that never got approved → no DB
             # content for this artifact; leave the file alone.
             continue
