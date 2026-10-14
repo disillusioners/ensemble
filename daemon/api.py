@@ -3763,7 +3763,12 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
             "description": "Multi-Agent AI Daemon with LangGraph",
         }
 
-    # Include routers - order matters for route matching
+    # Include routers - order matters for route matching.
+    # Prefix-distinction invariant: /api/agents and
+    # /api/custom-agents are DISTINCT prefixes; keep
+    # custom_agents_router mounted BEFORE any future
+    # /api/agents/* additions so it cannot be silently
+    # shadowed by a more-specific later route.
     api_router.include_router(agents_router)        # /api/agents
     api_router.include_router(custom_agents_router) # /api/custom-agents (Phase C: R-A1/A2 lifecycle)
     api_router.include_router(instances_router)      # /api/instances

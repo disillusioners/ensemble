@@ -1186,10 +1186,16 @@ class AgentRegistry:
 
         1. A custom agent's wire identity is
            ``"custom:<user-chosen-name>"`` (the
-           :data:`CUSTOM_AGENT_ID_PREFIX` prefix). The prefix
-           is provably disjoint from any real dir-derived id
-           (``_parse_agent_dir_name`` would have rejected any
-           dir containing ``:``).
+           :data:`CUSTOM_AGENT_ID_PREFIX` prefix). The
+           tag regex (``_TAG_PATTERN``) only restricts
+           the charset INSIDE the ``[version_tag]``
+           brackets, so a plain dir named e.g.
+           ``custom:foo/`` would actually pass the
+           parser as-is (base id ``custom:foo``, no
+           tag). The provably disjoint guarantee comes
+           from the defense-in-depth collision check
+           below at step 2 (file-defined wins) — not
+           from the tag regex.
         2. As defense-in-depth — and because the prefix could
            theoretically collide with a hypothetical reserved
            ``agents/custom:<name>/`` dir — the merger ALSO

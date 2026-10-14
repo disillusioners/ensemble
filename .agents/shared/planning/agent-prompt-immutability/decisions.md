@@ -1133,5 +1133,16 @@ ADD COLUMN.
 * **D-3**: user.md disposition. The directive
   SUPERSEDES D5 — the morning fork is sealed;
   user.md is MEMORY-class.
+* **D-IDENTITY-STAMPING** (DECIDED, worker review
+  2026-10-14, dispatcher-ratified): auth-OFF POST
+  ``/api/custom-agents`` stamps ``'anonymous-dev'``
+  actor on creation — ACCEPTED because R-A1 makes
+  creation the legitimate first-write (no
+  approval-gate bypass risk; v1 lands approved so
+  the badge never moves). Audit row carries
+  ``'anonymous-dev'`` per D-IDENTITY-STAMPING for
+  traceability. Documents the deliberate divergence
+  from the prompts family (D3 fail-closed) —
+  different surface, different posture.
 
 **End of §8.**
