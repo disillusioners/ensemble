@@ -1701,8 +1701,74 @@ def _format_rejection(target: str, max_words: int, word_count: int, rules: dict 
     return {
         "success": False,
         "target": target,
-        "error": f"Memory limit exceeded ({word_count} >= {max_words} words). Content was not saved."
+        "error": f"Memory limit ({word_count} >= {max_words} words) exceeded. Content was not saved."
     }
+
+
+def _read_memory_chain_source(
+    agent_id: str,
+    version_tag: str | None,
+    artifact: str,
+    fallback_file: Path,
+    default_text: str,
+    manager: "InstanceManager" | None,
+) -> str:
+    """Resolve the MEMORY-class chain source for a composer (F3 fix).
+
+    Per the directive that ships with this fix, the three
+    MEMORY composers (``_update_memory_md`` /
+    ``_update_user`` / ``_update_growth``) MUST compose on the
+    EFFECTIVE chain — the latest MEMORY-class DB row's content
+    — NOT on the on-disk file. Consecutive writes accumulate
+    on top of the prior row instead of clobbering against the
+    frozen template file (the file is a cold-boot F6 source
+    only, post-sweep).
+
+    Precedence:
+
+    1. ``repo.get_effective(agent_id, version_tag, artifact)``
+       — the class-aware resolution. For MEMORY-class
+       artifacts, this returns ``selected_version.content``
+       when a selection-pointer is pinned, otherwise the
+       latest row's content (any state — MEMORY rows are
+       transition-free and born-effective). Returns ``None``
+       when no DB rows exist for the key.
+    2. The on-disk file (cold-boot fallback; pre-rewrite state
+       for hosts that have not yet promoted any rows). No
+       flock — a torn read here only degrades the chain
+       source, never correctness (the DB transaction in
+       :meth:`create_memory_version` is the serialization
+       point).
+    3. ``default_text`` — the bootstrap string when neither DB
+       nor the file exists (fresh agent dir + zero rows).
+
+    Fail-open posture: any service / DB exception skips to the
+    next precedence level. The composer MUST always return
+    SOME chain source — to short-circuit on ``None`` would break
+    the append-bullet contract and silently lose user data.
+    """
+    service = _get_prompt_version_service(manager)
+    if service is not None:
+        try:
+            effective = _run_coro_sync(
+                service.get_effective(
+                    agent_id,
+                    version_tag or "",
+                    artifact,
+                )
+            )
+        except Exception:  # noqa: BLE001 — fail-open to file fallback
+            effective = None
+        if effective is not None:
+            return effective
+
+    try:
+        if fallback_file.exists():
+            return fallback_file.read_text(encoding="utf-8")
+    except OSError:
+        pass
+
+    return default_text
 
 
 def _update_memory_md(
@@ -1730,25 +1796,24 @@ def _update_memory_md(
     ``memory`` key, the loader's ``latest_content`` flips to
     the post-compaction row.
 
-    The chain source: ``file_fallback`` (the on-disk file
-    content read at submit time, for cold-boot with zero DB
-    rows) is folded into the new row when present. Dedup is
+    The chain source: ``repo.get_effective`` is the canonical
+    base — the latest MEMORY-class DB row's content (F3
+    fix — write N+1 = content_N + delta_N+1, accumulation on
+    the existing chain). The on-disk ``memory.md`` is the
+    cold-boot F6 fallback only (no DB rows). Dedup is
     preserved — a duplicate bullet short-circuits to a no-op
     success result WITHOUT persisting a new version (the
     chain stays at its current max).
     """
     memory_file = agent_path / "memory.md"
-    try:
-        # Read the on-disk file as the cold-boot F6 fallback.
-        # No flock — the DB transaction is the serialization
-        # point; a torn read here only degrades the chain
-        # source, never correctness.
-        current = (
-            memory_file.read_text(encoding="utf-8")
-            if memory_file.exists() else "# Memory\n\n"
-        )
-    except OSError:
-        current = "# Memory\n\n"
+    current = _read_memory_chain_source(
+        agent_id=agent_id,
+        version_tag=version_tag,
+        artifact="memory",
+        fallback_file=memory_file,
+        default_text="# Memory\n\n",
+        manager=manager,
+    )
 
     word_count = len(current.split())
     max_words = rules.get("max_memory_words", 2000)
@@ -1857,24 +1922,27 @@ def _update_user(agent_id: str, agent_path: Path, request: str, manager: "Instan
     prompt reload.
 
     The body still uses the placeholder-strip + append-bullet
-    composition, but it is computed in the caller (we read
-    the on-disk file as the F6 fallback for cold boots) and
-    persisted as a whole-content row via the MEMORY creator.
-    The ``agent_mother.agent_modify`` bypass closes for
-    user.md too — the same class-aware dispatch routes it
-    through ``create_memory_version``.
+    composition, but it is computed in the caller on the
+    EFFECTIVE chain — ``repo.get_effective`` (F3 fix —
+    accumulation across un-approved writes) — and persisted
+    as a whole-content row via the MEMORY creator. The
+    on-disk file is the cold-boot F6 fallback only (no DB
+    rows yet). The ``agent_mother.agent_modify`` bypass closes
+    for user.md too — the same class-aware dispatch routes
+    it through ``create_memory_version``.
     """
     user_file = agent_path / "user.md"
-    try:
-        current = (
-            user_file.read_text(encoding="utf-8")
-            if user_file.exists() else "# User\n\n"
-        )
-    except OSError:
-        current = "# User\n\n"
+    current = _read_memory_chain_source(
+        agent_id=agent_id,
+        version_tag=version_tag,
+        artifact="user",
+        fallback_file=user_file,
+        default_text="# User\n\n",
+        manager=manager,
+    )
 
     # Reuse the byte-preserving user mutator (placeholder-strip
-    # + append bullet) on the cold-boot F6 source.
+    # + append bullet) on the EFFECTIVE chain.
     new_content = _make_user_mutator(request)(current)
 
     return _submit_memory_version(
@@ -1925,9 +1993,10 @@ def _update_growth(
     Pre-rewrite growth.md was config-only — read by
     ``_load_growth_rules`` to derive ``max_memory_words`` /
     ``max_soul_chars`` / etc., and otherwise dormant. The
-    directive re-disposes it as MEMORY-class: the cold-boot
-    F6 file is the fallback when no DB row exists, and the DB
-    row is the live source otherwise.
+    directive re-disposes it as MEMORY-class: the chain source
+    is ``repo.get_effective`` (F3 fix — write N+1 = content_N
+    + delta_N+1, accumulation on the existing chain); the
+    cold-boot F6 file is the fallback when no DB row exists.
 
     Whole-content replace semantics: the caller passes the
     new growth.md body in ``request`` (a free-form config
@@ -1936,13 +2005,14 @@ def _update_growth(
     matches). The file fallback is read for cold boots.
     """
     growth_file = agent_path / "growth.md"
-    try:
-        current = (
-            growth_file.read_text(encoding="utf-8")
-            if growth_file.exists() else "# Growth\n\n"
-        )
-    except OSError:
-        current = "# Growth\n\n"
+    current = _read_memory_chain_source(
+        agent_id=agent_id,
+        version_tag=version_tag,
+        artifact="growth",
+        fallback_file=growth_file,
+        default_text="# Growth\n\n",
+        manager=manager,
+    )
 
     # Whole-content replace (the caller sends the new body).
     # For empty/append-style requests, fall back to
@@ -1952,7 +2022,7 @@ def _update_growth(
     if not new_body:
         new_content = current
     elif new_body.startswith("#") or "\n" in new_body or len(new_body) > 200:
-        # Full block — replace the file body.
+        # Full block — replace the chain body.
         new_content = new_body
     else:
         # Single line — append under the existing chain.
