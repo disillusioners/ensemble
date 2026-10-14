@@ -812,6 +812,10 @@ class TestLogicalSiteMemoriesInvalidateThreadsVersionTag:
             "dev", agent_dir,
             "an observation worth remembering",
             classification, manager=manager, version_tag="v2",
+            # Ud#3 fail-closed gate: MEMORY-class rows are stamped with
+            # the submitter instance id (production closure always has
+            # one). This test predates the gate — pass it explicitly.
+            instance_id="inst-t12-memories-1",
         )
         assert result["success"] is True
 
@@ -837,6 +841,7 @@ class TestLogicalSiteMemoriesInvalidateThreadsVersionTag:
         _ = _update_memories(
             "dev", agent_dir, "obs",
             classification, manager=manager, version_tag=None,
+            instance_id="inst-t12-memories-2",
         )
 
         assert cache.get("dev", None, None) is None
@@ -864,6 +869,7 @@ class TestLogicalSiteMemoryMdInvalidateThreadsVersionTag:
         result = _update_memory_md(
             "dev", agent_dir, "remember this",
             rules, manager=manager, version_tag="v2",
+            instance_id="inst-t12-memory-md-1",
         )
         assert result["success"] is True
 
