@@ -100,7 +100,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, NamedTuple, Optional, Union
 
 from sqlalchemy import func, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
@@ -1064,6 +1064,290 @@ class PromptVersionRepository:
                 )
                 continue
         # Retry budget exhausted — re-raise the last IntegrityError.
+        assert last_error is not None
+        raise last_error
+
+    # 2b. create_initial_approved_v1 ----------------------------------------
+    # User Directive #5A (Phase C, R-A1) — the custom-agent
+    # creation path writes the v1 prompt_versions rows DIRECTLY
+    # with state='approved' + is_selected=1 (no draft /
+    # pending-approval / approval flow). The creating user IS the
+    # human approver, stamped from the HTTP lane. This helper is
+    # the R-A1 commit-everything-in-one-txn atom alongside
+    # :meth:`insert_config` on the custom_agent_configs repo.
+
+    def create_initial_approved_v1(
+        self,
+        agent_id: str,
+        version_tag: str,
+        artifact: str,
+        content: str,
+        actor: ActorContext,
+        *,
+        artifact_class: Optional[str] = None,
+        conn: Optional[Any] = None,
+    ) -> PromptVersion:
+        """Insert a v1 prompt-version row directly as ``approved`` (R-A1).
+
+        User Directive #5A (2026-10-14, Phase C) — the
+        custom-agent creation ruling. R-A1: "user-authored
+        creation writes v1 CORE rows as APPROVED (the creating
+        user IS the human approver; audit-stamped via the
+        ``actor_from_request`` session lane). Badge does NOT
+        move (v1 lands approved, not pending)."
+
+        Bypasses the ``draft → pending_approval → approved``
+        state machine (the only caller surface that uses this
+        method is the custom-agent POST endpoint, which is a
+        one-shot atomic transaction). The created row carries:
+
+        * ``state = 'approved'``;
+        * ``is_selected = 1`` (the only row for the key — it is
+          both latest_approved AND selected, so the loader
+          serves it via F6 immediately);
+        * ``approver_subject = actor.subject`` (verified
+          non-empty HTTP lane);
+        * ``approver_auth_method = actor.auth_method`` (verified
+          in 'session'/'bearer').
+
+        Lifecycle rows:
+
+        * One :class:`PromptVersion` row (the version itself);
+        * One :class:`PromptAuditEvent` ``CREATED`` row
+          (audit provenance per A3 + the D-IDENTITY-STAMPING
+          ruling — submitter/approver identity carried on
+          both columns);
+        * One :class:`PromptAuditEvent` ``APPROVED`` row
+          (the auto-approved event so the timeline reflects
+          the R-A1 "v1 lands approved, not pending" rule).
+
+        All three rows commit in ONE ``engine.begin()`` (or in
+        the caller's transaction when ``conn=`` is provided).
+        Caller-side integration with
+        :meth:`CustomAgentConfigRepository.insert_config` uses
+        the same ``conn`` argument so config + versions +
+        audit all share one transaction — R-A1's atomicity
+        invariant.
+
+        Args:
+            agent_id: Resolved agent id (MUST be a custom agent
+                wire form when called from the custom-agent POST
+                endpoint; the loader's R-A2 empty-state posture
+                is gated by ``is_custom_agent=True`` upstream of
+                this method — the repo itself does not enforce
+                the prefix because it is also reachable from
+                baseline-seeding callers that may use non-custom
+                ids in test paths).
+            version_tag: Version tag (``""`` for base; F9).
+            artifact: Artifact key (one of PROMPT_ARTIFACTS +
+                memory family + memories/<slug>).
+            content: Override body (markdown).
+            actor: Caller identity — MUST be an HTTP actor
+                (``actor_from_request``); the method refuses
+                ``internal`` per S16 anti-forgery.
+            artifact_class: Optional explicit class
+                (default: canonical via :func:`class_for_artifact`).
+            conn: Optional ``Connection``. When supplied, the
+                insert runs inside the caller's transaction
+                (the router opens a wide ``engine.begin()`` and
+                passes ``conn`` here AND to
+                :meth:`CustomAgentConfigRepository.insert_config`).
+                When ``None``, the method opens its own
+                ``engine.begin()`` block.
+
+        Returns:
+            The freshly inserted :class:`PromptVersion` row.
+
+        Raises:
+            ValueError: On 'internal' actor, on missing
+                ``actor.subject`` / ``actor.auth_method``, or on
+                bad ``state`` (defensive — 'approved' is the
+                only legal value here; ``draft`` /
+                ``pending_approval`` etc. are REFUSED so the
+                direct-from-R-A1 surface can never be misused
+                to mint unreviewed rows in other states).
+            PromptClassMismatchError: On a caller-supplied
+                ``artifact_class`` that doesn't match the
+                canonical class for ``artifact``.
+            IntegrityError: After the retry budget is
+                exhausted (concurrent writer on the same key).
+        """
+        # S16: refuse internal lane — only HTTP actors (session /
+        # bearer) may satisfy the R-A1 "creating user IS the
+        # human approver" rule.
+        if actor.is_internal():
+            raise ValueError(
+                "create_initial_approved_v1() requires an HTTP "
+                "actor (session/bearer); internal actors cannot "
+                "satisfy the R-A1 'creating user IS the human "
+                "approver' rule"
+            )
+        if not actor.subject:
+            raise ValueError(
+                "create_initial_approved_v1() requires a non-empty "
+                "actor.subject (R-A1: the creating user IS the "
+                "human approver; an empty subject refuses the "
+                "stamp)"
+            )
+        if actor.auth_method not in {AUTH_METHOD_SESSION, AUTH_METHOD_BEARER}:
+            raise ValueError(
+                f"create_initial_approved_v1() requires "
+                f"auth_method in session/bearer; got "
+                f"{actor.auth_method!r}"
+            )
+
+        # The state column is hard-coded to 'approved' here; the
+        # helper allows NO override — it is the R-A1 direct
+        # approval surface, not a generic create-with-state path.
+        state = "approved"
+        self._validate_state(state)
+        version_tag = _normalize_version_tag(version_tag)
+        canonical_class = class_for_artifact(artifact)
+        if artifact_class is None:
+            artifact_class = canonical_class
+        else:
+            self._validate_artifact_class(artifact_class)
+            if artifact_class != canonical_class:
+                raise PromptClassMismatchError(
+                    artifact=artifact,
+                    artifact_class=artifact_class,
+                    canonical_class=canonical_class,
+                )
+        content_hash = _sha256_hex(content)
+        now = _now_iso()
+
+        last_error: Optional[Exception] = None
+        for attempt in range(_MAX_INSERT_RETRIES):
+            try:
+                def _do_insert(c: Connection) -> PromptVersion:
+                    self._acquire_key_lock(
+                        c, agent_id, version_tag, artifact
+                    )
+                    row = c.execute(
+                        select(func.max(col(PromptVersion.version)))
+                        .select_from(PromptVersion)
+                        .where(
+                            col(PromptVersion.agent_id) == agent_id,
+                            col(PromptVersion.version_tag) == version_tag,
+                            col(PromptVersion.artifact) == artifact,
+                        )
+                    ).one()
+                    next_version = (row[0] or 0) + 1
+
+                    version_id = str(uuid.uuid4())
+                    pv = PromptVersion(
+                        version_id=version_id,
+                        agent_id=agent_id,
+                        version_tag=version_tag,
+                        artifact=artifact,
+                        version=next_version,
+                        state=state,
+                        content=content,
+                        content_hash=content_hash,
+                        is_selected=1,  # R-A1: v1 lands selected
+                        submitter_instance_id=actor.instance_id,
+                        submitter_agent_id=(
+                            actor.agent_id if actor.is_internal() else None
+                        ),
+                        submitter_version_tag=(
+                            _normalize_version_tag(actor.version_tag)
+                            if actor.is_internal()
+                            else ""
+                        ),
+                        # The R-A1 stamp: the creating user IS the
+                        # human approver — stamps are filled from
+                        # the actor directly, NOT via the
+                        # ``draft → pending_approval → approved``
+                        # path.
+                        approver_subject=actor.subject,
+                        approver_auth_method=actor.auth_method,
+                        artifact_class=artifact_class,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    c.execute(
+                        PromptVersion.__table__.insert().values(
+                            version_id=pv.version_id,
+                            agent_id=pv.agent_id,
+                            version_tag=pv.version_tag,
+                            artifact=pv.artifact,
+                            version=pv.version,
+                            state=pv.state,
+                            content=pv.content,
+                            content_hash=pv.content_hash,
+                            is_selected=pv.is_selected,
+                            submitter_instance_id=pv.submitter_instance_id,
+                            submitter_agent_id=pv.submitter_agent_id,
+                            submitter_version_tag=pv.submitter_version_tag,
+                            approver_subject=pv.approver_subject,
+                            approver_auth_method=pv.approver_auth_method,
+                            artifact_class=pv.artifact_class,
+                            created_at=pv.created_at,
+                            updated_at=pv.updated_at,
+                        )
+                    )
+                    # Two audit rows in ONE txn (A3): CREATED + the
+                    # auto-APPROVED so the timeline reflects the
+                    # R-A1 "v1 lands approved, not pending" rule.
+                    self._append_audit_in_conn(
+                        c,
+                        agent_id=agent_id,
+                        version_tag=version_tag,
+                        artifact=artifact,
+                        version_id=version_id,
+                        event_type="CREATED",
+                        actor=actor,
+                        payload={
+                            "state": state,
+                            "version": next_version,
+                            "artifact_class": artifact_class,
+                            "via": "create_initial_approved_v1",
+                            "ruling": "R-A1",
+                        },
+                    )
+                    self._append_audit_in_conn(
+                        c,
+                        agent_id=agent_id,
+                        version_tag=version_tag,
+                        artifact=artifact,
+                        version_id=version_id,
+                        event_type="APPROVED",
+                        actor=actor,
+                        payload={
+                            "from_state": "draft",
+                            "to_state": "approved",
+                            "version": next_version,
+                            "via": "create_initial_approved_v1",
+                            "ruling": "R-A1",
+                            "auto_approved": True,
+                        },
+                    )
+                    return pv
+
+                if conn is not None:
+                    pv_result = _do_insert(conn)
+                else:
+                    with self.engine.begin() as c:
+                        pv_result = _do_insert(c)
+
+                logger.info(
+                    f"prompt_version.create_initial_approved_v1 ok: "
+                    f"agent_id={agent_id} version_tag={version_tag!r} "
+                    f"artifact={artifact} version={pv_result.version} "
+                    f"version_id={pv_result.version_id} "
+                    f"approver={actor.subject!r}/"
+                    f"{actor.auth_method} attempt={attempt + 1}"
+                )
+                return pv_result
+            except IntegrityError as e:
+                last_error = e
+                logger.warning(
+                    f"prompt_version.create_initial_approved_v1 retry: "
+                    f"agent_id={agent_id} artifact={artifact} "
+                    f"attempt={attempt + 1}/{_MAX_INSERT_RETRIES} "
+                    f"err={type(e).__name__}"
+                )
+                continue
         assert last_error is not None
         raise last_error
 

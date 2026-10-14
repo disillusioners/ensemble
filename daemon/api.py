@@ -117,6 +117,7 @@ logger = logging.getLogger(__name__)
 # Import routers
 from daemon.routers import (
     agents_router,
+    custom_agents_router,
     database_router,
     instances_router,
     jobs_router,
@@ -3736,6 +3737,7 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
 
     # Include routers - order matters for route matching
     api_router.include_router(agents_router)        # /api/agents
+    api_router.include_router(custom_agents_router) # /api/custom-agents (Phase C: R-A1/A2 lifecycle)
     api_router.include_router(instances_router)      # /api/instances
     api_router.include_router(messages_router)      # /api/instances/{id}/messages, /api/instances/{id}/events
     api_router.include_router(sources_router)       # /api/sources

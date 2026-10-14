@@ -1203,6 +1203,22 @@ class InstanceManager:
         self._prompt_version_service = PromptVersionService(
             repo=self._prompt_version_repo
         )
+
+        # Phase C — User Directive #5A custom-agent lifecycle
+        # service. Owns the wide-transaction coordination between
+        # ``_custom_agent_config_repo`` + ``_prompt_version_repo``
+        # (the R-A1 atomicity invariant: config row + v1 versions
+        # + audit rows all commit in one ``engine.begin()``).
+        # Constructed AFTER ``_prompt_version_repo`` — the
+        # service borrows the prompt-version repo's
+        # ``create_initial_approved_v1`` helper for the v1 rows.
+        from .services.custom_agent_lifecycle_service import (
+            CustomAgentLifecycleService,
+        )
+        self._custom_agent_lifecycle_service = CustomAgentLifecycleService(
+            config_repo=self._custom_agent_config_repo,
+            prompt_version_repo=self._prompt_version_repo,
+        )
         # Phase A T6 / T7: register the repo with the loader so the
         # ``load_and_cache_prompt`` hook can lazily look it up. The
         # loader MUST NOT import the repository class at module load

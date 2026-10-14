@@ -382,6 +382,41 @@ class PromptVersionService:
         )
 
     # --------------------------------------------------------
+    # Phase C — User Directive #5A (R-A1 helper wrapper)
+    # --------------------------------------------------------
+
+    async def create_initial_approved_v1(
+        self,
+        agent_id: str,
+        version_tag: str,
+        artifact: str,
+        content: str,
+        actor: Any,
+        *,
+        artifact_class: Optional[str] = None,
+    ) -> Any:
+        """Async wrapper over ``repo.create_initial_approved_v1``.
+
+        Used by the POST ``/api/custom-agents`` endpoint — R-A1
+        helper that bypasses the state machine to write v1 rows
+        directly as ``approved`` + ``is_selected=1``. The
+        ``conn=`` parameter is intentionally NOT exposed at the
+        service layer (the router handles the wide transaction
+        itself via ``manager._engine.begin()`` so the config row
+        + v1 versions + audit rows all commit atomically — the
+        R-A1 atomicity invariant).
+        """
+        return await asyncio.to_thread(
+            self._repo.create_initial_approved_v1,
+            agent_id,
+            version_tag,
+            artifact,
+            content,
+            actor,
+            artifact_class=artifact_class,
+        )
+
+    # --------------------------------------------------------
     # State transitions
     # --------------------------------------------------------
 

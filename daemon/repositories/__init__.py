@@ -148,6 +148,25 @@ from .service_tool.models import ServiceTracking, ServiceStatus
 # construct it from the shared engine.
 from .prompt_version.repository import PromptVersionRepository
 
+# Custom-agent config package (Phase C of the agent-prompt-
+# immutability commission, User Directive #5A — 2026-10-14).
+# Re-exported here so ``SQLModel.metadata.create_all()`` registers
+# the ``custom_agent_configs`` table on fresh PostgreSQL databases
+# and the factory function below can construct it from the shared
+# engine. Fresh SQLite databases pick the table up from the
+# MigrationRunner via the
+# ``20261014_040000_create_custom_agent_configs.sql`` migration.
+# Brand-new table — no _ensure_postgres_columns needed
+# (stored_watches / prompt_versions precedent).
+from .custom_agent_configs import (
+    CUSTOM_AGENT_ID_PREFIX,
+    CustomAgentConfig,
+    CustomAgentConfigRepository,
+    CustomAgentIdError,
+    is_custom_agent_id,
+    make_custom_agent_id,
+)
+
 # Factory functions
 from .factory import (
     DatabaseConfig,
@@ -174,6 +193,7 @@ from .factory import (
     create_skill_bank_repository,
     create_message_metadata_repository,
     create_prompt_version_repository,
+    create_custom_agent_config_repository,
     run_migrations,
 )
 
@@ -301,5 +321,6 @@ __all__ = [
     "create_skill_bank_repository",
     "create_message_metadata_repository",
     "create_prompt_version_repository",
+    "create_custom_agent_config_repository",
     "run_migrations",
 ]
