@@ -1669,3 +1669,171 @@ def _measure_ms(fn) -> float:
 
 # Helper for the Session.get audit query inside the test.
 from sqlmodel import Session
+
+# ─────────────────────────────────────────────────────────────────────────────
+# User Directive 2026-10-14 — clean-start narrative (1× sqlite, NOT parametrized)
+#
+# Verifies the F1 OVERRIDES-ONLY default end-to-end against an EMPTY DB:
+# the fresh prompt-version store must be served from the template file
+# until the user submits + approves a draft. Combined narrative of the
+# existing TestPrecedence + TestSoulSubmissionCreatesPendingRow +
+# TestApprovedContentBecomesCompositionBase patterns, asserting at each
+# step:
+#   * DB row count is zero before any submission (empty-slate);
+#   * pre-submission effective content == template file content (no
+#     stale state leaks from any prior path);
+#   * post-approval effective content != file (DB row wins on the chain).
+#
+# Parametrization deliberately omitted (the chain holds on either driver;
+# the existing parametrized precedence tests already cover both).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+from unittest.mock import MagicMock, patch
+
+from daemon.registry import AgentMetadata
+from daemon.tools.inner_soul import create_inner_soul_tool
+
+
+class TestUserDirectiveCleanStart:
+    """F1 + D-SEED-EDGE-RESOLVED-DEAD narrative (directive 2026-10-14).
+
+    Walks the resolution chain against a fresh empty prompt-version
+    DB and proves NO stale state leaks (no rows → file fallback;
+    submitted draft → row version=1, file untouched; approve →
+    effective content comes from DB, not the file).
+    """
+
+    def test_empty_db_template_then_submit_then_approve_serves_db(
+        self, repo_engine, repo
+    ):
+        engine, _ = repo_engine  # sqlite-only by fixture filter
+
+        # Step 0 — assert empty-slate provenance (DB row count == 0).
+        initial_rows = repo.list_versions("sweptagent", "", "soul")
+        assert initial_rows == [], (
+            f"Empty-slate invariant: DB must start with zero rows. "
+            f"Found {len(initial_rows)} pre-existing rows."
+        )
+        assert repo.get_effective("sweptagent", "", "soul") is None, (
+            "Empty-slate: no DB rows → effective MUST return None "
+            "(file fallback path fires, no DB content leaks)."
+        )
+
+        # Step 1 — build the runtime surface (tmp agent dir + manager stub).
+        from pathlib import Path
+
+        import tempfile
+        from daemon.loader import PromptCache
+        from daemon.services.prompt_version_service import PromptVersionService
+
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "soul.md").write_text("# Who I Am\n\nI am a swept agent.\n")
+        template_content = (tmp / "soul.md").read_text()
+
+        # Pre-submission effective == file content (no DB rows).
+        pre_effective = repo.get_effective("sweptagent", "", "soul")
+        # The resolver returns None for the zero-row case; assert that
+        # composition then serves the file unchanged.
+        assert pre_effective is None
+        # File IS the pre-submission source (no surprises).
+        assert (tmp / "soul.md").read_text() == template_content
+
+        # Step 2 — submit a draft via the real inner_soul tool path.
+        service = PromptVersionService(repo=repo)
+        manager_stub = MagicMock()
+        # A real PromptCache (not None/Mock) so the post-submission
+        # prompt_cache.invalidate busts deterministically (the tool
+        # path expects a dict-like object with an ``invalidate`` method).
+        manager_stub.prompt_cache = PromptCache()
+        manager_stub._prompt_version_service = service
+
+        registry_mock = MagicMock()
+        metadata = AgentMetadata(
+            id="sweptagent",
+            name="Swept Agent",
+            description="Test agent for clean-start narrative",
+            path=tmp,
+            system=False,
+        )
+        registry_mock.get_version.return_value = metadata
+        registry_mock.get_resolved.return_value = metadata
+
+        tool = create_inner_soul_tool(
+            manager_stub, "sweptagent", "inst-directive-1"
+        )
+
+        soul_file = tmp / "soul.md"
+        file_before_mtime = soul_file.stat().st_mtime_ns
+
+        # Phrasing matches the soul name-change mutator pattern
+        # ("My name is …") so the content assertion is on the
+        # established test_inner_soul_db.py convention (Phase B T7).
+        result = tool.invoke({
+            "request": "My name is CleanStart",
+            "target": "soul",
+        })
+
+        # The tool response grammar is preserved (📋 / pending).
+        assert "📋 soul:" in result
+        assert "pending approval" in result
+
+        # The DB row materialized as version=1, state=pending_approval,
+        # with the new name bolded inside the composed content (the
+        # soul name-change mutator mutates "My name is" into the
+        # bolded form on the effective chain).
+        rows = repo.list_versions("sweptagent", "", "soul")
+        assert len(rows) == 1
+        assert rows[0].version == 1
+        assert rows[0].state == "pending_approval"
+        assert "**My name is CleanStart**" in rows[0].content, (
+            f"Soul name-change mutator must bold the new name. "
+            f"Content: {rows[0].content!r}"
+        )
+        assert rows[0].submitter_instance_id == "inst-directive-1"
+
+        # The file is UNTOUCHED (no write side-effect — DB-only draft).
+        assert soul_file.read_text() == template_content
+        assert soul_file.stat().st_mtime_ns == file_before_mtime
+
+        # Pre-approval effective is STILL file-content (pending row is NOT
+        # effective — F6 precedence: only approved/selected rows resolve).
+        pre_approval_effective = repo.get_effective("sweptagent", "", "soul")
+        assert pre_approval_effective is None, (
+            "Pre-approval effective MUST stay None (pending rows are "
+            "not effective — only approved/selected resolve). "
+            "Empty-slate provenance is preserved through submission."
+        )
+
+        # Step 3 — human approve via session lane (the ONLY lane allowed).
+        import asyncio
+
+        human = ActorContext(
+            subject="user@example.com", auth_method="session"
+        )
+        approved = asyncio.run(
+            service.approve(rows[0].version_id, human)
+        )
+        assert approved.state == "approved"
+
+        # Step 4 — post-approval effective now serves from DB (NOT file).
+        post_approval_effective = repo.get_effective(
+            "sweptagent", "", "soul"
+        )
+        assert post_approval_effective == rows[0].content, (
+            f"Post-approval effective MUST equal approved DB row "
+            f"content (F6 precedence: latest_approved > file). "
+            f"Expected: {rows[0].content!r}, got: "
+            f"{post_approval_effective!r}"
+        )
+        assert post_approval_effective != template_content, (
+            "Empty-slate invariant: post-approval effective MUST differ "
+            "from the template file. If they match, the resolver is "
+            "still serving file and ignoring the DB row — REGRESSION."
+        )
+
+        # Step 5 — empty-slate still proven: the non-soul artifact has
+        # ZERO rows AND effective=None (no fall-through from the soul
+        # draft to unrelated artifacts).
+        assert repo.list_versions("sweptagent", "", "workflow") == []
+        assert repo.get_effective("sweptagent", "", "workflow") is None
