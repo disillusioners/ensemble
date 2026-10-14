@@ -335,6 +335,8 @@ def strand_harness(strand_engine):
     manager._task_repo = task_repo_fq
     manager._watcher_repo = watcher_repo
     manager._event_bus = event_bus
+    from daemon.write_pause_guard import WritePauseGuard
+    manager.write_guard = WritePauseGuard()
     manager._live_hub = MagicMock()
     manager._live_hub.stream_status_change = AsyncMock()
     manager._live_hub.stream_question_pack = AsyncMock()
@@ -376,6 +378,18 @@ def strand_harness(strand_engine):
     service = ChildReportsService(
         manager=manager, events_service=events_service,
     )
+    # The healer's two seams on the manager: the sanctioned lifecycle
+    # lane (REAL service — real H10 terminate transaction over the
+    # test engine) and the emission-machinery drive (the service
+    # above).
+    from daemon.services.instance_lifecycle import InstanceLifecycleService
+    manager._lifecycle_service = InstanceLifecycleService(
+        manager,
+        MagicMock(),  # cancellation_service — no live requests in tests
+        events_service=events_service,
+        job_queue_service=queue_service,
+    )
+    manager._child_reports_service = service
 
     return type(
         "StrandHarness",
@@ -394,24 +408,51 @@ def strand_harness(strand_engine):
     )()
 
 
-def _drive_root_completion(harness) -> None:
-    """Deprecated sync wrapper — tests use :func:`_adrive_root_completion`."""
-    raise NotImplementedError("use _adrive_root_completion")
+def _patch_drive_seams(history: list[dict] | None = None):
+    """Context manager with the drive-seam patch set (checkpoint
+    history extractor + timestamp + bridge). Shared by the direct
+    drive and the healer's internal drive — both enter the production
+    completion path, whose checkpoint seams need the same stubs."""
+    if history is None:
+        history = _fresh_history()
+    from contextlib import ExitStack
+    return _DrivePatchStack(history)
+
+
+class _DrivePatchStack:
+    """Reusable context-manager wrapper (contextlib.ExitStack based)
+    so healer tests can wrap ``heal_instance`` in the same patches the
+    direct drive uses."""
+
+    def __init__(self, history: list[dict]):
+        self._history = history
+
+    def __enter__(self):
+        from contextlib import ExitStack
+        self._stack = ExitStack()
+        self._stack.enter_context(patch(
+            "daemon.services.child_reports.get_instance_messages",
+            new_callable=AsyncMock,
+            return_value=self._history,
+        ))
+        self._stack.enter_context(patch(
+            "daemon.services.child_reports.get_last_assistant_timestamp",
+            new_callable=AsyncMock,
+            return_value=T_FRESH_ASSISTANT,
+        ))
+        self._stack.enter_context(patch(
+            "daemon.services.child_reports.MainLoopBridge"
+            ".run_async_no_wait"
+        ))
+        return self._stack
+
+    def __exit__(self, *exc):
+        return self._stack.__exit__(*exc)
 
 
 async def _adrive_root_completion(harness) -> None:
     """Async drive — awaited inside the tests."""
-    with patch(
-        "daemon.services.child_reports.get_instance_messages",
-        new_callable=AsyncMock,
-        return_value=_fresh_history(),
-    ), patch(
-        "daemon.services.child_reports.get_last_assistant_timestamp",
-        new_callable=AsyncMock,
-        return_value=T_FRESH_ASSISTANT,
-    ), patch(
-        "daemon.services.child_reports.MainLoopBridge.run_async_no_wait"
-    ):
+    with _patch_drive_seams():
         await harness.service._process_child_completion_and_notify_parent(
             ROOT, "root-final-msg-1",
         )
@@ -787,3 +828,474 @@ class TestControls:
 # Guard unit evidence — captured in the RED run, superseded above by the
 # flipped fix-contract assertions (test_guard_must_not_hold_on_stranded_orphan).
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Component 3 — the mission-strand healer (write-side durable fix)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestMissionStrandHealer:
+    """The healer closes BOTH legs of the perpetual hold in ONE
+    invocation: (i) terminal-ancestry orphan members via the
+    SANCTIONED lifecycle lane (terminate_instance — no raw UPDATE),
+    and (ii) the zero-obligation WAITING_CHILDREN root itself, driven
+    through the EXISTING emission machinery (stamp→gate→publish)."""
+
+    @staticmethod
+    def _make_healer(harness):
+        from daemon.services.mission_strand_healer import MissionStrandHealer
+        return MissionStrandHealer(
+            manager=harness.manager, interval_seconds=300,
+        )
+
+    @staticmethod
+    def _seed_stale_task_result(engine, stale_body: str) -> None:
+        """Stamp the work Task's ``result`` column with a STALE
+        summary (the 19:40Z-frozen receipt surface — DELTA 3: the
+        result surface is ``tasks.result`` read via WorkRecord, NOT a
+        JobItem column)."""
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE task SET result = :r WHERE work_id = :w"),
+                {"r": stale_body, "w": RECEIPT_JOB},
+            )
+
+    @pytest.mark.asyncio
+    async def test_heals_wedge_within_one_invocation(
+        self, strand_harness,
+    ):
+        """DELTA-1 + component-3 core: ONE heal_instance invocation
+        terminalizes the orphan (status flips via the REAL lifecycle
+        lane) AND drives the WC root to terminal with the publish
+        chain firing (lifecycle completed event + watcher
+        CAS-claimed)."""
+        from daemon.constants import TERMINAL_INSTANCE_STATUSES as T
+
+        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        _insert_receipt(strand_harness.engine)
+        _seed_child_completed_event(
+            strand_harness.engine, T_CHILD_COMPLETED,
+        )
+        # Backdate the ghost's updated_at past the race guard.
+        with strand_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET updated_at = :u "
+                    "WHERE instance_id = :g"
+                ),
+                {
+                    "u": (
+                        datetime.now(timezone.utc)
+                        - timedelta(hours=1)
+                    ).isoformat(),
+                    "g": GHOST,
+                },
+            )
+
+        healer = self._make_healer(strand_harness)
+        with _patch_drive_seams():
+            outcome = await healer.heal_instance(ROOT)
+
+        assert outcome["healed"] is True, outcome
+        assert outcome["terminalized"] == [GHOST]
+        # Orphan terminalized via the lifecycle lane (audited status
+        # flip — the row is TERMINATED, not COMPLETED-stamped).
+        ghost_row = _get_instance_row(strand_harness.engine, GHOST)
+        assert ghost_row.status == "terminated"
+        assert ghost_row.status in T
+        # Root driven to terminal by the drive.
+        root_row = _get_instance_row(strand_harness.engine, ROOT)
+        assert root_row.status == InstanceStatus.COMPLETED.value
+        # Publish chain fired.
+        completed = [
+            c for c in strand_harness.events_service
+            ._publish_instance_lifecycle_event.await_args_list
+            if c.kwargs.get("status") == "completed"
+            and c.kwargs.get("instance_id") == ROOT
+        ]
+        assert completed, "healer drive must publish the terminal event"
+        assert strand_harness.watcher_repo.get_watchers_for_job(
+            RECEIPT_JOB
+        ) == [], "the armed watcher must fire (CAS-claimed)"
+
+    @pytest.mark.asyncio
+    async def test_sweep_once_heals_in_single_invocation(
+        self, strand_harness,
+    ):
+        """DELTA 4 / user spec: the 300s-class sweep must close the
+        wedge within ONE sweep invocation (asserted as
+        sweep_once() → healed=1; NOT wall-clock)."""
+        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        _insert_receipt(strand_harness.engine)
+        _seed_child_completed_event(
+            strand_harness.engine, T_CHILD_COMPLETED,
+        )
+        with strand_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET updated_at = :u "
+                    "WHERE instance_id = :g"
+                ),
+                {
+                    "u": (
+                        datetime.now(timezone.utc)
+                        - timedelta(hours=1)
+                    ).isoformat(),
+                    "g": GHOST,
+                },
+            )
+        healer = self._make_healer(strand_harness)
+        with _patch_drive_seams():
+            stats = await healer.sweep_once()
+        assert stats["scanned"] == 1
+        assert stats["healed"] == 1
+        assert stats["terminalized_orphans"] == 1
+        assert _get_instance_row(
+            strand_harness.engine, ROOT
+        ).status == InstanceStatus.COMPLETED.value
+
+    @pytest.mark.asyncio
+    async def test_live_parent_ghost_never_terminalized(
+        self, strand_harness,
+    ):
+        """SAFETY BOUND (user-spec'd): a never-dispatched child under
+        a LIVE parent (the WC root itself) is the legitimate
+        spawn-then-message ritual — the healer must NOT terminalize
+        it and must NOT heal the root."""
+        _seed_poison_tree(strand_harness.engine, with_ghost=False)
+        _insert_instance(
+            strand_harness.engine, "ghost-under-live-root",
+            status=InstanceStatus.IDLE.value,
+            parent_id=ROOT,
+            agent_id="worker",
+            version=1,
+            last_activity_at=None,
+        )
+        with strand_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET updated_at = :u "
+                    "WHERE instance_id = :g"
+                ),
+                {
+                    "u": (
+                        datetime.now(timezone.utc)
+                        - timedelta(hours=1)
+                    ).isoformat(),
+                    "g": "ghost-under-live-root",
+                },
+            )
+        healer = self._make_healer(strand_harness)
+        outcome = await healer.heal_instance(ROOT)
+        assert outcome["healed"] is False
+        assert "safety bound" in (outcome["reason"] or "") or (
+            "not terminal" in (outcome["reason"] or "")
+        ), outcome
+        # Untouched.
+        ghost_row = _get_instance_row(
+            strand_harness.engine, "ghost-under-live-root"
+        )
+        assert ghost_row.status == InstanceStatus.IDLE.value
+        assert _get_instance_row(
+            strand_harness.engine, ROOT
+        ).status == InstanceStatus.WAITING_CHILDREN.value
+
+    @pytest.mark.asyncio
+    async def test_genuinely_live_member_blocks_heal(
+        self, strand_harness,
+    ):
+        """FAIL-CLOSED: a RUNNING member (execution evidence — not
+        never-dispatched-shaped) aborts the whole heal; nothing is
+        terminalized."""
+        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        with strand_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET status = 'running', "
+                    "updated_at = :u WHERE instance_id = :g"
+                ),
+                {
+                    "u": (
+                        datetime.now(timezone.utc)
+                        - timedelta(hours=1)
+                    ).isoformat(),
+                    "g": GHOST,
+                },
+            )
+        healer = self._make_healer(strand_harness)
+        outcome = await healer.heal_instance(ROOT)
+        assert outcome["healed"] is False
+        assert "not never-dispatched" in (outcome["reason"] or "")
+        assert _get_instance_row(
+            strand_harness.engine, GHOST
+        ).status == InstanceStatus.RUNNING.value
+
+    @pytest.mark.asyncio
+    async def test_race_guard_young_orphan_skipped(
+        self, strand_harness,
+    ):
+        """Race guard: a strand-shaped member whose updated_at is
+        younger than ORPHAN_MIN_AGE_SECONDS is skipped (it may be a
+        mid-flight spawn-then-message ritual); nothing mutates."""
+        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        healer = self._make_healer(strand_harness)
+        outcome = await healer.heal_instance(ROOT)
+        assert outcome["healed"] is False
+        assert "race guard" in (outcome["reason"] or "")
+        assert _get_instance_row(
+            strand_harness.engine, GHOST
+        ).status == InstanceStatus.IDLE.value
+
+    @pytest.mark.asyncio
+    async def test_paused_root_skipped(self, strand_harness):
+        """Operator domain: a PAUSED root is never healed."""
+        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        with strand_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET status = 'paused' "
+                    "WHERE instance_id = :r"
+                ),
+                {"r": ROOT},
+            )
+        healer = self._make_healer(strand_harness)
+        outcome = await healer.heal_instance(ROOT)
+        assert outcome["healed"] is False
+        assert "paused" in (outcome["reason"] or "")
+        assert _get_instance_row(
+            strand_harness.engine, GHOST
+        ).status == InstanceStatus.IDLE.value
+
+    @pytest.mark.asyncio
+    async def test_open_report_injection_skips_heal(
+        self, strand_harness,
+    ):
+        """A declared-wait (b) obligation owns the root (L6 machinery)
+        — the healer must not drive it."""
+        from daemon.repositories.report_injection.models import (
+            ReportInjection,
+            ReportInjectionState,
+        )
+        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        _insert_receipt(strand_harness.engine)
+        with strand_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET updated_at = :u "
+                    "WHERE instance_id = :g"
+                ),
+                {
+                    "u": (
+                        datetime.now(timezone.utc)
+                        - timedelta(hours=1)
+                    ).isoformat(),
+                    "g": GHOST,
+                },
+            )
+        with Session(strand_harness.engine) as session:
+            session.add(ReportInjection(
+                injection_id=str(uuid.uuid4()),
+                parent_instance_id=ROOT,
+                child_instance_id=TESTER,
+                child_message_id="cm-1",
+                report_message_id="rm-1",
+                state=ReportInjectionState.PENDING.value,
+            ))
+            session.commit()
+        healer = self._make_healer(strand_harness)
+        outcome = await healer.heal_instance(ROOT)
+        assert outcome["healed"] is False
+        assert "open_report_injections" in (outcome["reason"] or "")
+
+    @pytest.mark.asyncio
+    async def test_receipt_finalizes_with_fresh_summary(
+        self, strand_harness,
+    ):
+        """Full receipt chain (user spec: _finalize_job re-enters →
+        result_summary REFRESHED): after the heal drive, driving the
+        observer's lifecycle handler finalizes the receipt JobItem to
+        DONE and the delivered watcher envelope carries the
+        FRESH-at-heal body — NOT the stale 19:40Z ``task.result``
+        value (DELTA 3: the result surface is ``tasks.result`` via
+        WorkRecord, not a JobItem column)."""
+        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        _insert_receipt(strand_harness.engine)
+        _seed_child_completed_event(
+            strand_harness.engine, T_CHILD_COMPLETED,
+        )
+        self._seed_stale_task_result(
+            strand_harness.engine, "STALE 19:40Z frozen summary"
+        )
+        with strand_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET updated_at = :u "
+                    "WHERE instance_id = :g"
+                ),
+                {
+                    "u": (
+                        datetime.now(timezone.utc)
+                        - timedelta(hours=1)
+                    ).isoformat(),
+                    "g": GHOST,
+                },
+            )
+
+        healer = self._make_healer(strand_harness)
+        with _patch_drive_seams():
+            outcome = await healer.heal_instance(ROOT)
+        assert outcome["healed"] is True
+
+        # The delivered envelope (transport mock) must carry the
+        # FRESH body (the drive's in-scope last_content), not the
+        # stale task.result.
+        envelope_calls = (
+            strand_harness.manager.enqueue_message.await_args_list
+        )
+        assert envelope_calls, "watcher delivery must enqueue"
+        delivered = envelope_calls[-1].kwargs.get("message", "")
+        assert "FRESH" in delivered or "final report" in delivered, (
+            f"envelope must carry fresh content: {delivered!r}"
+        )
+        assert "STALE 19:40Z" not in delivered
+
+        # The observer's lifecycle handler finalizes the receipt:
+        # ACTIVE → DONE (fresh result fetched at finalize time).
+        from daemon.services.job_feedback_observer import (
+            JobFeedbackObserver,
+        )
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=strand_harness.queue_service,
+            job_repo=strand_harness.job_repo,
+            lock_repo=MagicMock(),
+            project_repo=MagicMock(),
+            instance_manager=strand_harness.manager,
+        )
+        strand_harness.manager._get_last_assistant_message_raw = AsyncMock(
+            return_value="FRESH post-heal report body"
+        )
+        await observer._process_event({
+            "event_type": "instance_lifecycle",
+            "data": {
+                "instance_id": ROOT,
+                "status": "completed",
+                "error": None,
+            },
+        })
+        assert _job_admission_state(
+            strand_harness.engine, RECEIPT_JOB
+        ) == AdmissionState.DONE.value
+        strand_harness.manager \
+            ._get_last_assistant_message_raw.assert_awaited_with(ROOT)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Component 2b — the event-driven downgrade→heal hand-off
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDowngradeHealHandoff:
+    @pytest.mark.asyncio
+    async def test_tree_liveness_downgrade_schedules_heal(
+        self, strand_harness,
+    ):
+        """A tree_liveness gate block at the downgrade path must hand
+        the root to the strand healer EVENT-DRIVEN (the block class
+        with no future message-completed signal)."""
+        import asyncio as _asyncio
+
+        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        _insert_receipt(strand_harness.engine)
+        _seed_child_completed_event(
+            strand_harness.engine, T_CHILD_COMPLETED,
+        )
+        healer = MagicMock()
+        healer.heal_instance = AsyncMock(
+            return_value={"healed": False, "reason": "unit-mock"}
+        )
+        strand_harness.manager._mission_strand_healer = healer
+
+        # Force the stage-6 gate to block with the strand reason
+        # (the wiring under test is block→schedule, not the gate's
+        # own decision — that is pinned elsewhere).
+        with patch(
+            "daemon.services.child_reports.get_instance_messages",
+            new_callable=AsyncMock,
+            return_value=_fresh_history(),
+        ), patch(
+            "daemon.services.child_reports.get_last_assistant_timestamp",
+            new_callable=AsyncMock,
+            return_value=T_FRESH_ASSISTANT,
+        ), patch(
+            "daemon.services.child_reports.MainLoopBridge"
+            ".run_async_no_wait"
+        ), patch.object(
+            strand_harness.service,
+            "_root_completion_gate",
+            new_callable=AsyncMock,
+            return_value=(False, "tree_liveness: unit-forced", False),
+        ):
+            await (
+                strand_harness.service
+                ._process_child_completion_and_notify_parent(
+                    ROOT, "root-final-msg-1",
+                )
+            )
+        # Let the fire-and-forget task run.
+        for _ in range(3):
+            await _asyncio.sleep(0)
+        healer.heal_instance.assert_awaited_once_with(ROOT)
+        # Downgrade happened (the block path ran).
+        assert _get_instance_row(
+            strand_harness.engine, ROOT
+        ).status == InstanceStatus.WAITING_CHILDREN.value
+
+    @pytest.mark.asyncio
+    async def test_non_liveness_block_does_not_schedule_heal(
+        self, strand_harness,
+    ):
+        """Other block classes (bus_pending, pending_count,
+        freshness) keep the EXISTING contract: the next
+        message-completed signal re-checks. No heal hand-off."""
+        import asyncio as _asyncio
+
+        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        _insert_receipt(strand_harness.engine)
+        healer = MagicMock()
+        healer.heal_instance = AsyncMock(return_value={})
+        strand_harness.manager._mission_strand_healer = healer
+        with patch(
+            "daemon.services.child_reports.get_instance_messages",
+            new_callable=AsyncMock,
+            return_value=_fresh_history(),
+        ), patch(
+            "daemon.services.child_reports.get_last_assistant_timestamp",
+            new_callable=AsyncMock,
+            return_value=T_FRESH_ASSISTANT,
+        ), patch(
+            "daemon.services.child_reports.MainLoopBridge"
+            ".run_async_no_wait"
+        ), patch.object(
+            strand_harness.service,
+            "_root_completion_gate",
+            new_callable=AsyncMock,
+            return_value=(False, "pending_count=2", False),
+        ):
+            await (
+                strand_harness.service
+                ._process_child_completion_and_notify_parent(
+                    ROOT, "root-final-msg-1",
+                )
+            )
+        for _ in range(3):
+            await _asyncio.sleep(0)
+        healer.heal_instance.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unwired_healer_is_silent_noop(self, strand_harness):
+        """Fail-soft: an unwired healer (partial boot) is a silent
+        no-op — no raise, no crash."""
+        strand_harness.manager._mission_strand_healer = None
+        strand_harness.service._schedule_strand_heal(ROOT)  # must not raise

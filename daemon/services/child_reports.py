@@ -2301,6 +2301,65 @@ Provide a concise summary:"""
                     f"{instance_id[:8]}...: {_sse_exc}"
                 )
 
+    def _schedule_strand_heal(self, instance_id: str) -> None:
+        """Fire-and-forget hand-off of a tree_liveness-blocked root to
+        the MissionStrandHealer (watcher-loss terminal strand,
+        2026-10-14 — the event-driven arm of the asymmetry fix).
+
+        Called ONLY from the post-stamp downgrade path when the
+        emission gate blocked with ``reason=tree_liveness`` — the one
+        block class with NO future message-completed signal on a
+        stranded tree. The healer re-checks its full invariant set
+        (zero obligations + strand-only tree + race guards) and is a
+        no-op when any leg fails, so scheduling is always safe and
+        cannot loop (a re-block after a heal means a genuinely-live
+        member appeared — the healer refuses to touch it, and the
+        300s sweep + zombie backstop remain the remaining nets).
+
+        Fail-soft: an unwired healer (partial boot, tests) is a
+        silent no-op; task failures are logged by the done-callback.
+        """
+        healer = getattr(self._manager, "_mission_strand_healer", None)
+        if healer is None:
+            logger.debug(
+                "strand heal hand-off skipped for %s...: healer "
+                "unwired (the 300s sweep remains the net)",
+                instance_id[:8],
+            )
+            return
+
+        def _log_heal_done(task: "asyncio.Task") -> None:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                logger.warning(
+                    "strand heal hand-off failed for %s...: %s: %s "
+                    "(non-fatal — the 300s sweep remains the net)",
+                    instance_id[:8], type(exc).__name__, exc,
+                )
+            else:
+                outcome = task.result() or {}
+                logger.info(
+                    "strand heal hand-off for %s...: healed=%s "
+                    "(%s)", instance_id[:8], outcome.get("healed"),
+                    outcome.get("reason"),
+                )
+
+        try:
+            task = asyncio.get_running_loop().create_task(
+                healer.heal_instance(instance_id),
+                name=f"strand-heal-{instance_id[:8]}",
+            )
+            task.add_done_callback(_log_heal_done)
+        except RuntimeError as _loop_exc:
+            # No running loop (defensive — this site is async-context
+            # only). The periodic sweep covers the root.
+            logger.warning(
+                "strand heal hand-off for %s... could not schedule: %s",
+                instance_id[:8], _loop_exc,
+            )
+
     async def _root_completion_gate(
         self,
         session,
@@ -4799,6 +4858,30 @@ Provide a concise summary:"""
                             f"root_completion: downgrade SSE failed for "
                             f"{instance_id[:8]}...: {_sse_exc}"
                         )
+                # ── Component 2 (watcher-loss terminal strand,
+                # 2026-10-14) — second half of the asymmetry fix:
+                # schedule an EVENT-DRIVEN re-check. The historical
+                # contract — "the next message-completed signal will
+                # re-invoke this handler and re-check" — provably
+                # never fires for the tree_liveness block on a
+                # stranded tree (0 children, 0 queued messages — no
+                # future signal exists; the strand can never produce
+                # one). When the block reason is tree_liveness, hand
+                # the root to the strand healer immediately (the
+                # same heal the 300s sweep would run, zero sweep
+                # latency). The healer's own invariant legs are
+                # fail-closed: if the tree does not match the
+                # strand-only signature it is a no-op, so the
+                # schedule cannot loop (a re-block after a heal
+                # means a genuinely-live member appeared, which the
+                # healer refuses to touch).
+                if (
+                    _gate_block_reason
+                    and str(_gate_block_reason).startswith(
+                        "tree_liveness"
+                    )
+                ):
+                    self._schedule_strand_heal(instance_id)
                 return
 
             # ── FP4 (2026-10-03) — L6: escalate-and-HOLD not annotate.

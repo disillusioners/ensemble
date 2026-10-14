@@ -2035,6 +2035,33 @@ class ServicesConfig(BaseSettings):
             "SERVICES_WATCH_RECONCILE_SWEEP_INTERVAL_SECONDS."
         ),
     )
+    # ── MissionStrandHealer (watcher-loss terminal strand,
+    # 2026-10-14) — periodic write-side heal for stranded mission
+    # trees (never-dispatched ghost members under terminal parents +
+    # the zero-obligation WAITING_CHILDREN root). Single-invocation
+    # heal via the sanctioned lifecycle lane + the existing emission
+    # machinery; ALWAYS-ON (same HARD POLICY — no kill-switch); the
+    # interval is the only knob. Default 300s = the same 300s-class
+    # cadence as the watch-reconcile sweep. The in-session
+    # downgrade-path hook in ``child_reports`` fires the same heal
+    # EVENT-DRIVEN (zero sweep latency) when the emission gate
+    # blocks with reason=tree_liveness. Floor 1s prevents spin;
+    # out-of-range values FAIL FAST AT BOOT. Override via
+    # SERVICES_MISSION_STRAND_HEAL_INTERVAL_SECONDS.
+    mission_strand_heal_interval_seconds: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "Watcher-loss terminal strand (2026-10-14): how often "
+            "the ``MissionStrandHealer`` runs its stranded-tree "
+            "heal tick (seconds). Default 300s. ALWAYS-ON "
+            "infrastructure (no kill-switch env var); the "
+            "interval knob tunes responsiveness vs DB load. "
+            "Floor 1s prevents spin; out-of-range values FAIL "
+            "FAST AT BOOT. Override via "
+            "SERVICES_MISSION_STRAND_HEAL_INTERVAL_SECONDS."
+        ),
+    )
     # clipboard-image-chat Phase 1 / Task 2b (architect amendment #3):
     # hard cap on the tmp-image store's total disk usage. The store
     # performs a walkdir sum BEFORE each write and raises
