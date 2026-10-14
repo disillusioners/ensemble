@@ -36,13 +36,16 @@ import logging
 from typing import Any, Optional, Sequence
 
 from sqlalchemy.exc import IntegrityError
+from sqlmodel import col, select
 
 from ..repositories.custom_agent_configs import (
     CUSTOM_AGENT_ID_PREFIX,
+    CustomAgentConfig,
     CustomAgentConfigRepository,
     make_custom_agent_id,
 )
 from ..repositories.custom_agent_configs.repository import (
+    CustomAgentCollisionError,
     CustomAgentIdError,
 )
 
@@ -270,6 +273,33 @@ class CustomAgentLifecycleService:
 
             try:
                 with engine.begin() as conn:
+                    # H5 — race-free typed discrimination. Pre-SELECT
+                    # the wire id BEFORE the INSERT so a duplicate
+                    # surfaces as CustomAgentCollisionError at this
+                    # site (rolled back via the surrounding
+                    # ``engine.begin()`` exit-on-exception), not as
+                    # a generic IntegrityError. The router maps the
+                    # two typed exceptions to 409 and 400 cleanly
+                    # — substring sniffing the message is gone.
+                    #
+                    # The SELECT runs on the same ``conn`` so the
+                    # read sees uncommitted INSERTs from a sibling
+                    # txn that has not yet finished — closing the
+                    # race window that the bare IntegrityError path
+                    # could not.
+                    existing = conn.execute(
+                        select(
+                            col(CustomAgentConfig.config_id),
+                        ).where(
+                            col(CustomAgentConfig.agent_id) == agent_id,
+                            col(CustomAgentConfig.deleted_at).is_(None),
+                        )
+                    ).first()
+                    if existing is not None:
+                        raise CustomAgentCollisionError(
+                            f"custom agent {agent_id!r} already exists"
+                        )
+
                     config_row = self._config_repo.insert_config(
                         agent_id=agent_id,
                         name=name,
@@ -328,13 +358,19 @@ class CustomAgentLifecycleService:
                             }
                         )
             except IntegrityError as e:
+                # H5 — any remaining IntegrityError after the
+                # pre-SELECT is genuinely a creation error (FK
+                # violation, NOT-NULL, CHECK constraint, race
+                # window where another writer slipped between the
+                # pre-SELECT and the INSERT). The router maps the
+                # 400 path; the ``from e`` chain is preserved for
+                # forensics.
                 logger.warning(
                     f"custom_agent.create integrity error: "
                     f"agent_id={agent_id} err={type(e).__name__}: {e}"
                 )
                 raise CustomAgentCreationError(
-                    f"custom agent {agent_id!r} already exists (or "
-                    f"another IntegrityError on the wide txn): {e}"
+                    f"custom agent {agent_id!r} creation failed: {e}"
                 ) from e
 
             assert config_dict is not None

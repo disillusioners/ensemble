@@ -389,19 +389,19 @@ async def create_custom_agent(
     except CustomAgentIdError as e:
         raise _err(400, _ERR_INVALID_REQUEST, str(e))
     except CustomAgentCollisionError as e:
+        # Pre-checked race-free in the service (H5): a duplicate
+        # ``agent_id`` is detected by a SELECT before the INSERT,
+        # so 409 maps directly from this typed exception with no
+        # substring sniffing.
         raise _err(409, _ERR_INVALID_REQUEST, str(e))
     except CustomAgentCreationError as e:
-        # Could be a 'soul_md empty', an IntegrityError (collides
-        # with existing wire id), or a wide-txn error. Map to a
-        # 400 for the surface that the operator usually can
-        # correct via a re-POST with tweaked body. The router's
-        # 409 fallback (wire-id collision) is handled by the
-        # IntegrityError class message text — H5 retires this
-        # sniff once the service pre-checks via a SELECT.
-        msg = str(e)
-        if "already exists" in msg.lower():
-            raise _err(409, _ERR_INVALID_REQUEST, msg)
-        raise _err(400, _ERR_INVALID_REQUEST, msg)
+        # Genuine creation failure: empty ``soul_md``, FK
+        # violation, NOT-NULL / CHECK constraint, or the
+        # IntegrityError race window where another writer
+        # slipped between the pre-SELECT and the INSERT. The
+        # service preserves the original ``from e`` chain for
+        # forensics.
+        raise _err(400, _ERR_INVALID_REQUEST, str(e))
 
     return result
 
