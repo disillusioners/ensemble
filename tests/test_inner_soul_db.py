@@ -287,7 +287,9 @@ class TestSoulSubmissionCreatesPendingRow:
     def test_user_submit_placeholder_strip(
         self, registry_patched, manager, temp_agent, repo
     ):
-        """D5 — user.md joins the DB model: placeholder-strip + append."""
+        """Ud#3 SUPERSEDES D5 — user.md is MEMORY-class now: born-effective,
+        no approval round-trip, file untouched.
+        """
         tool = create_inner_soul_tool(manager, "dbagent", "inst-test-1")
         user_file = temp_agent / "user.md"
         before = user_file.read_text()
@@ -297,13 +299,20 @@ class TestSoulSubmissionCreatesPendingRow:
             "target": "user",
         })
 
-        assert "📋 user:" in result
+        # MEMORY grammar: "✓ <target>: persisted (memory version N)"
+        # — the DUAL-PATH born-effective marker.
+        assert "✓ user:" in result
+        assert "persisted (memory version 1)" in result
         rows = _rows_for(repo, "user")
         assert len(rows) == 1
+        # MEMORY rows land in state='approved' (transition-free).
+        assert rows[0].state == "approved"
+        assert rows[0].artifact_class == "MEMORY"
         content = rows[0].content
         assert "(To be filled" not in content
         assert "- User prefers dark mode" in content
-        # File untouched
+        # File untouched — the F6 fallback stays as the cold-boot
+        # source; the DB row is the live state.
         assert user_file.read_text() == before
 
 
@@ -495,42 +504,112 @@ class TestResponseGrammarPinned:
         assert len(_rows_for(repo, "soul")) == 1
 
     def test_memories_still_write_files_during_db_regime(
-        self, registry_patched, manager, temp_agent, repo
+        self, registry_patched, manager, temp_agent, repo, service
     ):
-        """D7 — memories/ carve-out unchanged while soul goes to the DB."""
+        """Ud#3 SUPERSEDES D7 — memories target is MEMORY-class: per-slug
+        DB row, file fallback stays as cold-boot F6 source (NOT written
+        by the writer path). The soul line keeps the CORE grammar;
+        the memories line carries the MEMORY grammar.
+        """
+        # Wire the manager._prompt_version_service on the
+        # _ManagerWithService (the test fixture's minimal stand-in).
+        manager._prompt_version_service = service
         tool = create_inner_soul_tool(manager, "dbagent", "inst-test-1")
         with patch("daemon.tools.inner_soul.is_rag_enabled", return_value=False):
             result = tool.invoke({
                 "request": "My name is DBTester AND I noticed a pattern in my own pacing",
             })
+        # CORE path: soul line keeps the pending-approval grammar.
         assert "📋 soul:" in result
+        # MEMORY path: memories line carries the new grammar.
+        assert "✓ memories:" in result
+        assert "persisted (memory version 1)" in result
+        # No files written by the writer path (file fallback
+        # only — Ud#3).
         memories = list((temp_agent / "memories").glob("*.md"))
-        assert len(memories) == 1
-        # The memories line keeps the ✓ file grammar.
-        assert "✓ memories: memories/" in result
+        assert len(memories) == 0
+        # The DB row IS the live state.
+        rows = _rows_for(repo, "memory")  # memory.md key
+        assert len(rows) == 0  # memory target not invoked here
+        # But the per-slug memories key IS the row.
+        from daemon.repositories.prompt_version.repository import (
+            class_for_artifact,
+        )
+        # The memories/ row lives under key "memories/<slug>".
+        eff_rows = repo.get_effective_rows("dbagent", "")
+        slug_keys = [
+            r.artifact for r in eff_rows
+            if class_for_artifact(r.artifact) == "MEMORY"
+        ]
+        assert any(k.startswith("memories/") for k in slug_keys), (
+            f"Expected a memories/<slug> row, got: {slug_keys}"
+        )
 
 
 class TestMemoryCarveOutsUnchanged:
-    """D6/D7 — memory.md + memories/ keep their file-write semantics."""
+    """Ud#3 SUPERSEDES D6/D7 — memory.md + memories/ are now MEMORY-class.
 
-    def test_memory_md_still_atomic_writes(self, temp_agent, repo):
+    The file fallback stays as the cold-boot F6 source; the writer
+    substrate is ``create_memory_version`` (transition-free,
+    born-effective). These tests now prove the new regime:
+
+    * memory.md writes land as MEMORY-class DB rows; the file is
+      UNTOUCHED (a cold-boot fallback only).
+    * memories/ writes land as MEMORY-class per-slug DB rows; the
+      file under memories/ is UNTOUCHED.
+    """
+
+    def test_memory_md_persists_as_db_row(self, temp_agent, repo, service):
         result = _update_memory_md(
-            "dbagent", temp_agent, "A persona insight", {"max_memory_words": 2000}, None,
+            "dbagent", temp_agent, "A persona insight",
+            {"max_memory_words": 2000},
+            manager=_ManagerWithService(service),
+            instance_id="inst-test-1",
         )
         assert result["success"] is True
-        assert "A persona insight" in (temp_agent / "memory.md").read_text()
-        # No DB rows for the memory carve-out.
+        assert result["target"] == "memory"
+        # MEMORY row materialized.
+        rows = _rows_for(repo, "memory")
+        assert len(rows) == 1
+        assert rows[0].state == "approved"
+        assert rows[0].artifact_class == "MEMORY"
+        assert "A persona insight" in rows[0].content
+        # File UNTOUCHED — the file is the cold-boot F6 source,
+        # not the live state.
+        assert "A persona insight" not in (temp_agent / "memory.md").read_text()
+        # No CORE rows for memory (it's a different key).
         assert repo.list_versions("dbagent", "", "soul") == []
 
-    def test_memories_still_write_text(self, temp_agent):
+    def test_memories_persists_as_per_slug_db_row(
+        self, temp_agent, repo, service,
+    ):
         classification = {"type": "event", "description": "test event"}
         result = _update_memories(
-            "dbagent", temp_agent, "An observation", classification, None,
+            "dbagent", temp_agent, "An observation", classification,
+            manager=_ManagerWithService(service),
+            instance_id="inst-test-1",
         )
         assert result["success"] is True
+        assert result["target"] == "memories"
+        # No file written by the writer path.
         files = list((temp_agent / "memories").glob("*.md"))
-        assert len(files) == 1
-        assert "An observation" in files[0].read_text()
+        assert len(files) == 0
+        # Per-slug MEMORY row materialized.
+        from daemon.repositories.prompt_version.repository import (
+            class_for_artifact,
+        )
+        eff_rows = repo.get_effective_rows("dbagent", "")
+        slug_rows = [
+            r for r in eff_rows
+            if class_for_artifact(r.artifact) == "MEMORY"
+            and r.artifact.startswith("memories/")
+        ]
+        assert len(slug_rows) == 1
+        # EffectiveRow carries latest_content (the per-class
+        # resolution helper), not raw .content — read it via
+        # the same helper the loader uses.
+        latest = slug_rows[0].latest_content or ""
+        assert "An observation" in latest
 
 
 # ═══════════════════════════════════════════════════════════════════════════

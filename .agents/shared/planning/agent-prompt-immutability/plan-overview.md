@@ -106,6 +106,13 @@ Conservative defaults standing overnight: **F1** overrides-only seeding (no boot
 | 25k+ wall green or classified | Risk #2 mitigation (bounded blast radius, pack-first ordering) |
 | **phaseB-plan item 5 — Memory reconciliation table (revised by user directive 2026-10-14)** | `memory-reconciliation-table.md` + addendum (mechanism unchanged per R6; accumulated content archived per R2; RAG no-consume boundary per R4) |
 | **phaseB-plan item 6 — Seeding mechanics (F1 OVERRIDES-ONLY, RESOLVED-DEAD by directive)** | `decisions.md §7` binding block (no seeding code; no edges; empty DB at go-live); clean-start narrative `tests/test_prompt_version_resolution.py::TestUserDirectiveCleanStart` |
+| **SURFACES layer — DUAL-PATH write regime (Ud#3)** | `decisions.md §8.2` + `phase-contract.md` A1/A5/A9 amendments; `tests/test_directive_dual_path.py::TestDualPathCleanStart` (both paths against empty DB) + `TestDualPathGrammarPins` (CORE 📋 / MEMORY ✓ grammar pins) + `TestMemoryCompactionAsNewVersion` (80% compaction as a new memory version, pre-compaction content in history) |
+| **SURFACES layer — classification routing (Ud#4)** | `decisions.md §8.3` (routing map + RAG no-consume boundary); `tests/test_directive_dual_path.py::TestDirectiveFourRouting` (USER-related content → user.md MEMORY row; core target grammar still pending; project_knowledge rejected with hint) |
+| **SURFACES layer — guard flips (Ud#3 re-disposition)** | `daemon/tools/prompt_artifacts.py` (memory.md + growth.md JOIN the frozenset); `tests/test_directive_dual_path.py::TestGuardFlips` (write_file refusal shape; unrelated-path write allowed); `tests/test_prompt_artifact_guards.py::test_versioned_prompt_artifacts_exact_contents` (the canonical pin) |
+| **SURFACES layer — agent_mother lane closure (Ud#3 SUPERSEDES D6)** | `daemon/tools/agent_mother.py` (class-aware dispatch: CORE → create_and_submit; MEMORY → create_memory_version); `tests/test_agent_modify_rewire.py::TestAgentModifyMemoryCarveOut` (memory.md / user.md / growth.md all route to DB) |
+| **SURFACES layer — access_memory read-path (DB-first, file fallback)** | `daemon/tools/access_memory.py` (DB-first via get_effective_rows; per-slug key shape; symlink-safety fence preserved) |
+| **SURFACES layer — router class deltas (Ud#3)** | `daemon/routers/prompts.py` (list endpoint gains `artifact_class` filter; MemoryClassError → 409 `MEMORY_CLASS_MISMATCH` on approve / reject / submit / retract / PATCH / DELETE); `tests/test_prompts_router.py` (existing 70 tests still green + new artifact_class serialization); `tests/test_directive_dual_path.py::TestRouterClassDeltas` (predicate correctness + count_pending CORE-only + MemoryClassError surfaces) |
+| **SURFACES layer — 5B wiring (the two pc-core handoffs)** | `daemon/manager.py` (`_ensure_postgres_columns` mirror line for `artifact_class NOT NULL DEFAULT 'CORE'`); `daemon/api.py` (boot lifespan: `record_initial_baselines_for_all_predefined_agents` → `detect_drift_for_all_predefined_agents`, non-fatal wrapper) |
 
 ## 8a. User Directive 2026-10-14 — acceptance delta (binding migration policy reversal)
 
@@ -137,6 +144,36 @@ in `decisions.md §1–§6` are otherwise unchanged; only §6's
 `D-SEED-EDGE` row is flipped from "second-most likely flip" to
 "RESOLVED-DEAD" per the directive, with the full reasoning captured
 in `decisions.md §7`.
+
+## 8b. SURFACES layer (overnight, 2026-10-14, dispatcher-approved post-hoc — morning-ratification pending)
+
+The SURFACES layer (User Directive #2 + #3 + #4 + #5B, 2026-10-14)
+landed overnight as the single review-fold-in. Per-decision
+disposition is captured in `decisions.md §8` (blocks #2/#3/#4/#5);
+the frozen-contract amendments are in `phase-contract.md` A1/A5/A9
+journal entries; the acceptance map (rows 9–14 above) is the
+binding provenance.
+
+Pack run (`feature/agent-prompt-immutability` @ the post-§8 commit):
+- `tests/test_inner_soul_db.py` → **18 passed**
+- `tests/test_prompt_version_resolution.py` → **73 passed**
+- `tests/test_prompt_version_resolution_core.py` → **78 passed**
+- `tests/test_prompt_version_content_mutations.py` +
+  `tests/test_prompt_version_dualdriver.py` → **46 passed**
+- `tests/test_prompt_artifact_guards.py` → **36 passed**
+- `tests/test_agent_modify_rewire.py` → **23 passed**
+- `tests/test_prompts_router.py` + `tests/test_prompts_audit_read.py`
+  → **83 passed**
+- `tests/test_prompt_preserved_exceptions.py` → **11 passed**
+- `tests/test_directive_dual_path.py` (NEW) → **16 passed**
+- **Total: 384 passed** (SQLite-only leg; PG parametrized legs skip
+  on this sandbox per the existing SC8/SC9 convention).
+
+The morning ratification is expected to confirm the A1/A5/A9
+amendment journal entries as frozen (the same dispatcher-approved
+post-hoc pattern as the A7 precedent in §2.9). Any deviation
+flips the contract back to a Phase D follow-up; the directive
+authority is the only morning override.
 
 ## 9. Instances
 

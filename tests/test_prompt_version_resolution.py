@@ -1556,35 +1556,50 @@ class TestLoaderPromptCacheInvalidateRespectsTagsT7D3:
         import re
         from pathlib import Path
 
-        # (a) agent_mother — 1 site
+        # (a) agent_mother — RETIRED direct-write path (User Directive
+        # #3, 2026-10-14, RESOLUTION-CORE). The previously-direct
+        # writers (memory.md, growth.md) now route through the
+        # shared ``_submit_prompt_version`` /
+        # ``_submit_memory_version`` helpers in inner_soul.py, which
+        # own the prompt_cache.invalidate(agent_id, version_tag=)
+        # call. agent_mother's contract is now "submit a DB row +
+        # return the row identity"; the cache-bust is the helper's
+        # responsibility. The grep below now expects 0 agent_mother
+        # sites (the direct-write path is dead code; agent_mother.py
+        # returns a defensive refusal if ever reached there).
         am = Path("daemon/tools/agent_mother.py").read_text()
         am_calls = re.findall(
-            r"prompt_cache\.invalidate\(\s*agent_name[^)]*version_tag=",  # noqa: E501
+            r"prompt_cache\.invalidate\(",  # noqa: E501
             am,
         )
-        assert len(am_calls) >= 1, (
-            f"agent_mother.agent_modify must thread version_tag "
-            f"into invalidate(); saw {am_calls!r}"
+        assert len(am_calls) == 0, (
+            f"agent_mother must NOT call prompt_cache.invalidate "
+            f"directly anymore (User Directive #3, 2026-10-14 — all "
+            f"writers route through inner_soul's shared helpers); "
+            f"saw {am_calls!r}"
         )
 
         # (b) inner_soul — version_tag threading at every invalidate
         # site. Phase B T7 consolidated the soul/user/workflow
         # invalidation into the shared ``_submit_prompt_version``
-        # helper, so the PHYSICAL count is 3 (memories, memory_md,
-        # shared DB-submission helper) covering the 5 LOGICAL writer
-        # sites; each still threads ``version_tag=version_tag``. The
-        # functional per-tag bust is behaviorally pinned by
+        # helper. User Directive #3 added the MEMORY helper
+        # ``_submit_memory_version`` (also threads version_tag).
+        # The PHYSICAL count is 2 (shared CORE helper + shared
+        # MEMORY helper) covering the 5 LOGICAL writer sites; each
+        # still threads ``version_tag=version_tag``. The functional
+        # per-tag bust is behaviorally pinned by
         # ``tests/test_inner_soul_db.py::TestInvalidateThreadsVersionTag``.
         is_mod = Path("daemon/tools/inner_soul.py").read_text()
         is_calls = re.findall(
             r"prompt_cache\.invalidate\(\s*agent_id,\s*version_tag=version_tag\s*\)",  # noqa: E501
             is_mod,
         )
-        assert len(is_calls) == 3, (
+        assert len(is_calls) == 2, (
             f"inner_soul invalidate sites must ALL thread "
-            f"version_tag=version_tag (Phase B: 3 physical sites — "
-            f"memories, memory_md, shared _submit_prompt_version — "
-            f"covering the 5 logical writers); saw {len(is_calls)}"
+            f"version_tag=version_tag (Ud#3: 2 physical sites — "
+            f"shared _submit_prompt_version + shared "
+            f"_submit_memory_version — covering the 5 logical "
+            f"writers); saw {len(is_calls)}"
         )
         # No invalidate call may omit version_tag.
         bare_calls = re.findall(

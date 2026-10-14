@@ -186,6 +186,7 @@ def _make_version(
     agent_id: str = "developer",
     version_tag: str = "",
     artifact: str = "soul",
+    artifact_class: str = "CORE",
     version: int = 1,
     state: str = "approved",
     content: str = "default content",
@@ -209,6 +210,7 @@ def _make_version(
     v.agent_id = agent_id
     v.version_tag = version_tag
     v.artifact = artifact
+    v.artifact_class = artifact_class
     v.version = version
     v.state = state
     v.content = content

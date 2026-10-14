@@ -93,6 +93,7 @@ from pydantic import BaseModel, Field
 
 from daemon.auth.decorators import require_scope
 from daemon.repositories.prompt_version.repository import (
+    MemoryClassError,
     VersionNotDeletableError,
     VersionNotEditableError,
     actor_from_request,
@@ -143,6 +144,15 @@ _ERR_INVALID_TRANSITION = "INVALID_TRANSITION"
 #: Non-editable / non-deletable row state (UD#2 — approved /
 #: rejected / archived rows refuse PATCH + DELETE).
 _ERR_VERSION_IMMUTABLE = "VERSION_IMMUTABLE"
+#: MEMORY-class rows refuse state-machine operations
+#: (User Directive #3, 2026-10-14, RESOLUTION-CORE). The
+#: transition-free creator (``create_memory_version``) is
+#: the ONLY mutator; ``approve`` / ``reject`` / ``submit`` /
+#: ``retract`` / ``PATCH`` / ``DELETE`` against a MEMORY row
+#: surface as 409 ``MEMORY_CLASS_MISMATCH``. The class
+#: becomes the contract token; clients branch on the
+#: error string.
+_ERR_MEMORY_CLASS_MISMATCH = "MEMORY_CLASS_MISMATCH"
 #: Generic domain not-found.
 _ERR_VERSION_NOT_FOUND = "VERSION_NOT_FOUND"
 #: The 5 prompts:* scopes (D11 — single source of truth:
@@ -258,6 +268,7 @@ class _VersionResponse(BaseModel):
     agent_id: str
     version_tag: str
     artifact: str
+    artifact_class: str = "CORE"  # Ud#3: CORE | MEMORY
     version: int
     state: str
     content: str
@@ -359,14 +370,30 @@ def _version_to_response(row: Any) -> _VersionResponse:
     The model has no ``to_dict`` (skill/models.py:214 precedent is
     not present here); build the response from attributes. Read-only
     fields only — the row is never mutated through this path.
+
+    ``artifact_class`` (Ud#3, 2026-10-14) is read from the row
+    directly (the canonical column on the
+    :class:`PromptVersion` SQLModel). When the row predates
+    the column, fall back to the canonical
+    :func:`class_for_artifact` derivation (the conservative
+    bucket is ``CORE``).
     """
     if row is None:
         raise _err(404, _ERR_VERSION_NOT_FOUND, "Version not found")
+    # ``artifact_class`` may be missing on legacy rows that
+    # predate the column; derive via class_for_artifact.
+    artifact_class = getattr(row, "artifact_class", None)
+    if not artifact_class:
+        from daemon.repositories.prompt_version.repository import (
+            class_for_artifact,
+        )
+        artifact_class = class_for_artifact(row.artifact)
     return _VersionResponse(
         version_id=row.version_id,
         agent_id=row.agent_id,
         version_tag=row.version_tag,
         artifact=row.artifact,
+        artifact_class=artifact_class,
         version=row.version,
         state=row.state,
         content=row.content,
@@ -424,6 +451,13 @@ async def list_versions(
     version_tag: Optional[str] = Query(default=None),
     artifact: Optional[str] = Query(default=None),
     state: Optional[str] = Query(default=None),
+    artifact_class: Optional[str] = Query(
+        default=None,
+        description=(
+            "Ud#3 filter — restrict to CORE or MEMORY rows. "
+            "One of: CORE, MEMORY."
+        ),
+    ),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> _VersionListResponse:
@@ -431,6 +465,12 @@ async def list_versions(
 
     Filters + pagination follow the ``skill_bank.py:72-108`` shape;
     response envelope is ``{items, total}``.
+
+    ``artifact_class`` (Ud#3, 2026-10-14, RESOLUTION-CORE):
+    restricts the listing to CORE (state-machine) or MEMORY
+    (transition-free) rows. The Persona UI uses this to
+    separate the operator-pending CORE queue from the
+    agent-direct MEMORY rows.
     """
     _require_auth_on(request)
     if agent_id is not None:
@@ -439,6 +479,24 @@ async def list_versions(
         _require_path_param(version_tag, "version_tag")
     if artifact is not None:
         _require_path_param(artifact, "artifact")
+    # artifact_class filter is permissive — it is matched
+    # against a stored column value, not a URL segment, so
+    # the canonical CORE / MEMORY tokens must pass. The
+    # FILTER allowlist (Finding #1) accepts these and
+    # rejects slashes / whitespace / injection chars.
+    if artifact_class is not None:
+        if artifact_class not in ("CORE", "MEMORY"):
+            _require_filter_param(artifact_class, "artifact_class")
+        # Tighten: 422 on anything else (the allowlist
+        # above is permissive on characters; the value
+        # membership check is the contract).
+        if artifact_class not in ("CORE", "MEMORY"):
+            raise _err(
+                422,
+                "INVALID_FILTER_PARAM",
+                f"artifact_class must be one of ['CORE', 'MEMORY']; "
+                f"got {artifact_class!r}",
+            )
     svc = _get_service(request)
     # list_versions takes a 3-part key; for unfilled parts we list over
     # the model's broadest path. Phase A's repo surface only exposes
@@ -458,6 +516,19 @@ async def list_versions(
     # A2 surface).
     if state is not None:
         items = [r for r in items if getattr(r, "state", None) == state]
+    # artifact_class filter (Ud#3) — fall back to the canonical
+    # derivation when the column is missing on legacy rows.
+    if artifact_class is not None:
+        from daemon.repositories.prompt_version.repository import (
+            class_for_artifact,
+        )
+
+        def _row_class(r: Any) -> str:
+            return getattr(r, "artifact_class", None) or class_for_artifact(
+                getattr(r, "artifact", "")
+            )
+
+        items = [r for r in items if _row_class(r) == artifact_class]
     return _VersionListResponse(items=[_version_to_response(r) for r in items], total=len(items))
 
 
@@ -544,6 +615,11 @@ async def approve_version(
 
     Bearer + scope still 403 ``HUMAN_LANE_REQUIRED`` (D2 / R3).
     Session lane with ``prompts:approve`` scope passes the gate.
+
+    MemoryClassError → 409 ``MEMORY_CLASS_MISMATCH`` (Ud#3).
+    MEMORY rows are transition-free; the state machine does
+    not govern them. The error string is the contract token
+    clients branch on.
     """
     _require_auth_on(request)
     _require_uuid_like(version_id)
@@ -553,6 +629,12 @@ async def approve_version(
         row = await asyncio.to_thread(svc.approve, version_id, actor)
     except _HumanLaneRequiredError:
         raise _err(403, _ERR_HUMAN_LANE_REQUIRED, "Approve requires session lane (D2)")
+    except MemoryClassError as exc:
+        raise _err(
+            409,
+            _ERR_MEMORY_CLASS_MISMATCH,
+            f"approve refused: {exc}",
+        )
     except _InvalidTransitionError as exc:
         # The repo's atomic_transition surfaces "not in
         # VALID_TRANSITIONS" — map the common shapes (already
@@ -576,6 +658,10 @@ async def reject_version(
     version_id: str = Path(...),
     request: Request = ...,
 ) -> _VersionResponse:
+    """Reject a pending version. HUMAN lane only (D2).
+
+    MemoryClassError → 409 ``MEMORY_CLASS_MISMATCH`` (Ud#3).
+    """
     _require_auth_on(request)
     _require_uuid_like(version_id)
     actor = actor_from_request(request)
@@ -584,6 +670,12 @@ async def reject_version(
         row = await asyncio.to_thread(svc.reject, version_id, actor)
     except _HumanLaneRequiredError:
         raise _err(403, _ERR_HUMAN_LANE_REQUIRED, "Reject requires session lane (D2)")
+    except MemoryClassError as exc:
+        raise _err(
+            409,
+            _ERR_MEMORY_CLASS_MISMATCH,
+            f"reject refused: {exc}",
+        )
     except _InvalidTransitionError as exc:
         cur = getattr(exc, "current_state", None) or getattr(exc, "from_state", "")
         if cur == "approved":
@@ -609,6 +701,8 @@ async def submit_version(
     transitions ``draft → pending_approval``; the router does no
     extra guard (the lane rule is read+approve + reject; submit is
     the agent-write leg).
+
+    MemoryClassError → 409 ``MEMORY_CLASS_MISMATCH`` (Ud#3).
     """
     _require_auth_on(request)
     _require_uuid_like(version_id)
@@ -616,6 +710,12 @@ async def submit_version(
     svc = _get_service(request)
     try:
         row = await asyncio.to_thread(svc.submit_for_approval, version_id, actor)
+    except MemoryClassError as exc:
+        raise _err(
+            409,
+            _ERR_MEMORY_CLASS_MISMATCH,
+            f"submit refused: {exc}",
+        )
     except _InvalidTransitionError as exc:
         raise _err(409, _ERR_INVALID_TRANSITION, str(exc))
     except LookupError:
@@ -633,13 +733,22 @@ async def retract_version(
     """Retract a pending or draft version. Authority (S16) is
     enforced SERVICE-side: a submitter may retract its OWN row; a
     human session may retract any row. The router only maps the
-    service's authority errors to 403."""
+    service's authority errors to 403.
+
+    MemoryClassError → 409 ``MEMORY_CLASS_MISMATCH`` (Ud#3).
+    """
     _require_auth_on(request)
     _require_uuid_like(version_id)
     actor = actor_from_request(request)
     svc = _get_service(request)
     try:
         row = await asyncio.to_thread(svc.atomic_transition, version_id, "pending_approval", "draft", actor)
+    except MemoryClassError as exc:
+        raise _err(
+            409,
+            _ERR_MEMORY_CLASS_MISMATCH,
+            f"retract refused: {exc}",
+        )
     except _InvalidTransitionError as exc:
         # A retract on a draft must use a different path — service
         # chooses (S16): for simplicity here, treat a draft-row
@@ -875,6 +984,14 @@ async def update_version_content(
         row = await asyncio.to_thread(
             svc.update_version_content, version_id, body.content, actor
         )
+    except MemoryClassError as exc:
+        # Ud#3: PATCH on a MEMORY row is a class-mismatch 4xx
+        # — MEMORY rows are transition-free, no edit path.
+        raise _err(
+            409,
+            _ERR_MEMORY_CLASS_MISMATCH,
+            f"update refused: {exc}",
+        )
     except VersionNotEditableError as exc:
         raise _err(
             409,
@@ -910,6 +1027,14 @@ async def delete_version(
     svc = _get_service(request)
     try:
         row = await asyncio.to_thread(svc.delete_version, version_id, actor)
+    except MemoryClassError as exc:
+        # Ud#3: DELETE on a MEMORY row is a class-mismatch 4xx
+        # — MEMORY rows are transition-free, no delete path.
+        raise _err(
+            409,
+            _ERR_MEMORY_CLASS_MISMATCH,
+            f"delete refused: {exc}",
+        )
     except VersionNotDeletableError as exc:
         raise _err(
             409,
@@ -933,6 +1058,13 @@ async def pending_count(
     ``{"count": N}`` — drains as approve/reject land. A PLAIN count:
     the A8 effective fingerprint does not apply (a badge answers
     "how many rows await approval", not "what is in effect").
+
+    User Directive #3 (2026-10-14, RESOLUTION-CORE) — the
+    pending-count is **CORE-only by design**: the repo's
+    ``count_pending`` walks state-machine rows and excludes
+    MEMORY-class rows (they are born-effective in
+    ``state='approved'`` and never enter the
+    ``pending_approval`` state — the badge is unchanged).
     """
     _require_auth_on(request)
     svc = _get_service(request)
@@ -975,10 +1107,15 @@ def _resolve_exception(name: str) -> type | None:
     # boundary — sibling coders own daemon/services/*; we must not
     # import the service module directly to avoid boot-order cycles).
     try:
-        from daemon.repositories.prompt_version.repository import InvalidTransitionError as _ITRE  # noqa: E501
+        from daemon.repositories.prompt_version.repository import (
+            InvalidTransitionError as _ITRE,
+            MemoryClassError as _MCE,
+        )
 
         if name == "InvalidTransitionError":
             return _ITRE
+        if name == "MemoryClassError":
+            return _MCE
     except Exception:  # noqa: BLE001
         return None
     try:
@@ -1011,6 +1148,8 @@ def _resolve_exception(name: str) -> type | None:
 #   * ``InvalidTransitionError(ValueError)``      — repositories/prompt_version/repository.py:222
 #     (docstring: "Mirrors daemon/services/job_state_machine.py:65-81")
 #   * ``RetractAuthorityError(PermissionError)``  — services/prompt_version_service.py:232
+#   * ``MemoryClassError(ValueError)``            — repositories/prompt_version/repository.py:359
+#     (Ud#3, 2026-10-14: MEMORY rows refuse state-machine ops)
 #
 # so a resolution failure now widens the catch only to the narrowest
 # base that preserves the typed 4xx mapping — unrelated programming
@@ -1021,6 +1160,7 @@ def _resolve_exception(name: str) -> type | None:
 _HumanLaneRequiredError = _resolve_exception("HumanLaneRequiredError") or ValueError
 _InvalidTransitionError = _resolve_exception("InvalidTransitionError") or ValueError
 _RetractAuthorityError = _resolve_exception("RetractAuthorityError") or PermissionError
+_MemoryClassError = _resolve_exception("MemoryClassError") or ValueError
 
 
 __all__ = ["router"]

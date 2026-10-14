@@ -398,8 +398,12 @@ class TestAgentModifyAllowlistShrink:
     def test_non_versioned_residue_still_refused(
         self, monkeypatch, tmp_path
     ):
-        """growth.md / meta.json keep the Phase A refusal shape (T8)."""
-        for fname in ("growth.md", "meta.json"):
+        """Non-versioned residue (meta.json) keeps the Phase A refusal
+        shape; ``growth.md`` joined the versioned set per User
+        Directive #3 (2026-10-14, RESOLUTION-CORE) so it is no
+        longer in this list.
+        """
+        for fname in ("meta.json",):
             tool, _ = self._tool(monkeypatch, tmp_path)
             result = asyncio_run_tool(
                 tool, agent_name="developer", file=fname, content="x"
@@ -439,40 +443,59 @@ class TestAgentModifyAllowlistShrink:
         # The file was NOT touched (the old refusal's purpose, kept).
         assert (tmp_path / "agents" / "developer" / "soul.md").read_text() == "OLD"
 
-    def test_agent_modify_memory_md_still_direct_write(
+    def test_agent_modify_memory_md_now_routes_to_db(
         self, monkeypatch, tmp_path
     ):
-        """memory.md remains the direct-write carve-out (D6)."""
-        tool, mgr = self._tool(monkeypatch, tmp_path)
+        """memory.md joined the DB-versioned set (Ud#3 SUPERSEDES D6).
+
+        Replaces the legacy ``test_agent_modify_memory_md_still_direct_write``
+        which pinned the file-writer carve-out. The new regime:
+        memory.md writes route through ``create_memory_version``
+        (MEMORY-class, transition-free); the file on disk is
+        UNTOUCHED.
+        """
+
+        class _Row:
+            version_id = "v-mem"
+            version = 1
+            state = "approved"
+
+        class _Svc:
+            async def create_memory_version(self, *a, **k):
+                return _Row()
+
+        tool, _ = self._tool(monkeypatch, tmp_path, service=_Svc())
         result = asyncio_run_tool(
             tool, agent_name="developer", file="memory.md", content="M1"
         )
 
         assert result["success"] is True
-        assert result["file"] == "memory.md"
+        assert result["state"] == "approved"
+        # File UNTOUCHED — the writer substrate is the DB row.
         assert (
             tmp_path / "agents" / "developer" / "memory.md"
-        ).read_text() == "M1"
-        # D9: the bust carries the resolved (base, None) key.
-        assert mgr.prompt_cache.calls == [("developer", None)]
+        ).read_text() == "M0"
 
-    def test_agent_modify_user_md_routes_to_db_submission(
+    def test_agent_modify_user_md_routes_to_memory_db(
         self, monkeypatch, tmp_path
     ):
-        """user.md joins the DB-versioned set (D5) — submits, not refuses.
+        """user.md is MEMORY-class (Ud#3 SUPERSEDES D5).
 
-        Replaces the Phase A pin
-        (``test_agent_modify_user_md_no_longer_allowed``), which
-        asserted the interim refusal pending this Phase B landing.
+        Replaces the prior test
+        (``test_agent_modify_user_md_routes_to_db_submission``)
+        which pinned the CORE submission path. The new regime:
+        user.md writes route through ``create_memory_version``
+        (MEMORY-class, transition-free, born-effective in
+        ``state='approved'``). The file on disk is UNTOUCHED.
         """
 
         class _Row:
             version_id = "v-guard-u"
             version = 1
-            state = "pending_approval"
+            state = "approved"
 
         class _Svc:
-            async def create_and_submit(self, *a, **k):
+            async def create_memory_version(self, *a, **k):
                 return _Row()
 
         tool, _ = self._tool(monkeypatch, tmp_path, service=_Svc())
@@ -480,8 +503,7 @@ class TestAgentModifyAllowlistShrink:
             tool, agent_name="developer", file="user.md", content="U1"
         )
         assert result["success"] is True
-        assert result["submitted"] is True
-        assert result["state"] == "pending_approval"
+        assert result["state"] == "approved"
 
 
 def asyncio_run_tool(tool, **kwargs) -> dict:
@@ -566,28 +588,51 @@ class TestInnerSoulShim:
             content = user_file.read_text()
             assert "my name is bar" not in content
 
-    def test_memory_target_unaffected(self, override_agents_roots):
-        """_update_memory_md still works (memory.md carved out)."""
+    def test_memory_target_fails_closed_without_service(
+        self, override_agents_roots
+    ):
+        """_update_memory_md fails closed without a service (Ud#3).
+
+        Replaces the legacy ``test_memory_target_unaffected`` which
+        pinned the file-writer carve-out. The new regime: memory.md
+        is MEMORY-class; without the prompt-version service the
+        change is refused and the file stays untouched.
+        """
         from daemon.tools.inner_soul import _update_memory_md
 
         test_agent = override_agents_roots["test_agent"]
         result = _update_memory_md(
-            "test_agent", test_agent, "some new memory", {}, None
+            "test_agent", test_agent, "some new memory", {}, None,
+            instance_id=None,
         )
 
-        # The Phase A shim must not interfere with memory.md writes.
-        assert result.get("success") is True
+        # The MEMORY creator is fail-closed — no service means no
+        # persist; the file is the cold-boot F6 fallback (NOT the
+        # writer).
+        assert result.get("success") is False
         assert result.get("target") == "memory"
-        # Confirm the actual content was written.
-        assert "some new memory" in test_agent.joinpath("memory.md").read_text()
+        assert "NOT applied" in result.get("error", "")
+        # File UNTOUCHED.
+        assert "some new memory" not in test_agent.joinpath(
+            "memory.md"
+        ).read_text()
 
-    # NOTE (Phase B T7/D5): the former ``test_user_target_unaffected``
-    # (``user.md still writes``) is SUPERSEDED — user.md joins the DB
-    # version model; see
-    # ``test_user_submission_fails_closed_without_service`` above.
+    # NOTE (User Directive #3, 2026-10-14, RESOLUTION-CORE): the
+    # former ``test_user_target_unaffected`` (``user.md still
+    # writes``) is SUPERSEDED — user.md joins the MEMORY-class set;
+    # see ``test_user_submission_fails_closed_without_service``
+    # above for the closed-loop fail-closed pin.
 
-    def test_memories_target_unaffected(self, override_agents_roots):
-        """_update_memories still works (memories/ carved out)."""
+    def test_memories_target_fails_closed_without_service(
+        self, override_agents_roots
+    ):
+        """_update_memories fails closed without a service (Ud#3).
+
+        Replaces the legacy ``test_memories_target_unaffected`` which
+        pinned the file-writer carve-out. The new regime: per-slug
+        MEMORY-class row; no service means no persist; no file
+        under memories/ is written.
+        """
         from daemon.tools.inner_soul import _update_memories
 
         test_agent = override_agents_roots["test_agent"]
@@ -597,14 +642,17 @@ class TestInnerSoulShim:
             "observation",
             {"category": "event", "type": "event", "description": "test event"},
             None,
+            instance_id=None,
         )
 
-        assert result.get("success") is True
-        # A new memory file was created under memories/.
+        # MEMORY creator is fail-closed — no service means no
+        # persist; no file is written.
+        assert result.get("success") is False
+        # No file under memories/ written.
         memories_files = list(
             (test_agent / "memories").glob("*.md")
         )
-        assert any("observation" in p.name for p in memories_files)
+        assert memories_files == []
 
 
 # ===========================================================================
@@ -621,7 +669,12 @@ class TestGuardModuleAPI:
         assert isinstance(VERSIONED_PROMPT_ARTIFACTS, frozenset)
 
     def test_versioned_prompt_artifacts_exact_contents(self):
-        """Exact pin — any drift in the artifact list is a contract change."""
+        """Exact pin — any drift in the artifact list is a contract change.
+
+        User Directive #3 (2026-10-14, RESOLUTION-CORE) added
+        ``memory.md`` and ``growth.md`` to the versioned-immutable
+        set. The exact list is the contract.
+        """
         from daemon.tools.prompt_artifacts import VERSIONED_PROMPT_ARTIFACTS
 
         assert VERSIONED_PROMPT_ARTIFACTS == frozenset({
@@ -631,6 +684,9 @@ class TestGuardModuleAPI:
             "tools_note.md",
             "tools.md",  # legacy fallback
             "skill.md",  # legacy single-skill loader
+            # User Directive #3, 2026-10-14, RESOLUTION-CORE
+            "memory.md",
+            "growth.md",
         })
 
     def test_check_write_returns_none_for_unrelated_path(

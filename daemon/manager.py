@@ -7464,6 +7464,29 @@ class InstanceManager:
                 "    END IF;\n"
                 "END $$\n"
             ),
+            # prompt_versions.artifact_class (User Directive #3 + #5B,
+            # 2026-10-14, RESOLUTION-CORE — the CORE/MEMORY class
+            # model). NOT NULL DEFAULT 'CORE' — the conservative
+            # default is the safe bucket (every pre-directive row is
+            # implicitly CORE; the loader's class-aware resolution is
+            # already gated on ``artifact_class`` so the default keeps
+            # the wire correct on legacy data without an
+            # application-side backfill). Fresh Postgres databases get
+            # the column from ``SQLModel.metadata.create_all()`` via
+            # the ``PromptVersion`` SQLModel declaration at
+            # ``daemon/repositories/prompt_version/models.py``;
+            # existing databases need the ADD COLUMN here. The SQLite
+            # counterpart lives at
+            # ``daemon/migrations/versions/20261013_214000_create_prompt_versions.sql``
+            # (the table-create migration that includes the column
+            # from day one). The ``TEXT`` type mirrors the model
+            # (``String``) — NOT NULL DEFAULT keeps the conservative
+            # bucket populated without an application-side backfill
+            # step.
+            (
+                "ALTER TABLE prompt_versions ADD COLUMN IF NOT EXISTS "
+                "artifact_class TEXT NOT NULL DEFAULT 'CORE'"
+            ),
         ]
         with self._engine.begin() as conn:
             for stmt in statements:

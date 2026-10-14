@@ -22,12 +22,22 @@ artifacts. Two regimes:
   compose against the effective chain — the submitted string IS
   the draft body (unlike inner_soul's append/learned mutations,
   which compose via the mutator callable).
-* **File carve-out** (``memory.md`` only, per D6) — memory.md is
-  prompt-loaded AND runtime-written with 80% compaction; it keeps
-  the direct ``write_text`` path until decisions.md re-disposes it.
+* **File carve-out** — RETIRED for ``memory.md`` (User Directive
+  #3, 2026-10-14, RESOLUTION-CORE). memory.md now joins the
+  versioned-immutable set (the prompt-artifacts frozenset
+  landed in Phase B/Dir5B); the writer substrate is the
+  ``create_memory_version`` MEMORY-class creator (transition-
+  free, born-effective). The historical 80% compaction /
+  dedup semantics are preserved INSIDE the mutator the caller
+  composes (or — for whole-content replace via agent_modify —
+  in the caller's content). The file itself is NEVER written
+  by this module anymore; the file is the cold-boot F6
+  fallback (template file content when no DB rows exist) only.
+  ``growth.md`` is also MEMORY-class and is also no longer
+  written here.
 
-Everything else (``growth.md``, ``meta.json``, ...) keeps the
-refusal shape Phase A landed.
+Everything else (``meta.json``, ...) keeps the refusal shape
+Phase A landed.
 
 **Preserved exceptions (T9 inventory)** — creation and deletion are
 legitimate first-writes / whole-agent moves and still write files
@@ -90,6 +100,16 @@ Mother agent specific tools for managing baby agent lifecycle.
 # / the loader hook's ``_HOOK_ARTIFACT_KEYS``. ``user.md`` → ``user``
 # joins per decisions.md D5 (DB-versioned despite never being
 # prompt-loaded; the row simply never enters the loader's prompts dict).
+#
+# User Directive #3 (2026-10-14, RESOLUTION-CORE) — ``memory.md`` and
+# ``growth.md`` JOIN the DB-versioned set. The historical 80% compaction
+# / dedup semantics (memory.md) survive on the substrate because the
+# caller — the inner_soul tool — composes the mutator before invoking
+# ``create_and_submit`` (Phase B T7 A5/C4 composite); the agent_modify
+# whole-content replace semantics (T8) also fit — caller already sent
+# the full body, no compose step needed. ``growth.md`` is MEMORY-class
+# per the directive re-disposition; whole-content replace applies
+# (no append/learned-mutator model on the file).
 _DB_VERSIONED_FILES: dict[str, str] = {
     "soul.md": "soul",
     "rule.md": "rule",
@@ -98,14 +118,23 @@ _DB_VERSIONED_FILES: dict[str, str] = {
     "tools.md": "tools",
     "skill.md": "skill",
     "user.md": "user",
+    # Directive #3 (2026-10-14) — memory.md and growth.md join.
+    "memory.md": "memory",
+    "growth.md": "growth",
 }
 
-# Phase B T8 / D6: the only file agent_modify still writes DIRECTLY.
-# memory.md is prompt-loaded AND runtime-written with 80% proactive
-# compaction + dedup — the DB approval round-trip would break the
-# compaction semantics, so it stays file-based until decisions.md
-# re-disposes it (no schema change needed if it later joins).
-_DIRECT_WRITE_FILES: list[str] = ["memory.md"]
+# Phase B T8 / D6: the file agent_modify writes DIRECTLY is now EMPTY.
+# Both ``memory.md`` and ``growth.md`` are now MEMORY-class, written via
+# ``create_memory_version`` on the same DB path as the rest of the
+# versioned set. The carve-out's 80% compaction / dedup semantics now
+# live in the inner_soul memory-target mutator (the DUAL-PATH rewrite,
+# directive #3 point 4 + #4 routing) — agent_modify's whole-content
+# replace semantics apply (caller sends the new body; the DB row is
+# the new revision). An empty list here is the directive-ratified
+# end-state of the file-write lane; legacy code that still imports
+# this constant will see ``[]`` and treat the file as DB-versioned
+# (the default behavior in the dispatch above).
+_DIRECT_WRITE_FILES: list[str] = []
 
 # Base directory for agents (handle PyInstaller frozen state)
 if getattr(sys, 'frozen', False):
@@ -476,7 +505,7 @@ Returns:
         base_id, resolved_tag = _parse_agent_dir_name(agent_name)
 
         if artifact_key is not None:
-            # ── DB submission path (T8) ─────────────────────────────
+            # ── DB submission path (T8 + Directive #3) ────────────
             # file_fallback = the CURRENT on-disk content (or None) —
             # the bottom of the F6 precedence chain the service
             # composes against for mutator callers and records for
@@ -492,6 +521,8 @@ Returns:
 
                 from ..repositories.prompt_version.repository import (
                     actor_from_instance,
+                    class_for_artifact,
+                    ARTIFACT_CLASS_MEMORY,
                 )
 
                 actor = actor_from_instance(
@@ -510,35 +541,64 @@ Returns:
                         ),
                     }
 
-                # svc.create_and_submit is ALREADY an async facade
-                # (it does its own asyncio.to_thread hop around the
-                # sync repo composite per A4/A5) — await it directly;
-                # wrapping it in another to_thread would return an
-                # un-awaited coroutine.
-                row = await svc.create_and_submit(
-                    base_id,
-                    resolved_tag,
-                    artifact_key,
-                    content,
-                    actor,
-                    file_fallback=file_fallback,
-                )
+                # Class-aware dispatch (User Directive #3, 2026-10-14):
+                # CORE artifacts (soul/rule/workflow/tools/tools_note/skill)
+                # ride the state-machine path (create_and_submit → pending
+                # approval). MEMORY artifacts (memory/user/growth) ride the
+                # transition-free creator (create_memory_version → born
+                # effective). Same actor, same fallback chain, different
+                # creator method per class.
+                if class_for_artifact(artifact_key) == ARTIFACT_CLASS_MEMORY:
+                    row = await svc.create_memory_version(
+                        base_id,
+                        resolved_tag,
+                        artifact_key,
+                        content,
+                        actor,
+                    )
+                else:
+                    # svc.create_and_submit is ALREADY an async facade
+                    # (it does its own asyncio.to_thread hop around the
+                    # sync repo composite per A4/A5) — await it directly;
+                    # wrapping it in another to_thread would return an
+                    # un-awaited coroutine.
+                    row = await svc.create_and_submit(
+                        base_id,
+                        resolved_tag,
+                        artifact_key,
+                        content,
+                        actor,
+                        file_fallback=file_fallback,
+                    )
             except Exception as e:
                 return {
                     "success": False,
                     "error": f"Failed to submit prompt-version draft: {str(e)}"
                 }
 
-            return {
-                "success": True,
-                "agent": agent_name,
-                "file": file,
-                "message": (
+            # Tail the success body with class info so callers
+            # (mother / agent-self) can branch on which path the
+            # submission took.
+            if class_for_artifact(artifact_key) == ARTIFACT_CLASS_MEMORY:
+                success_message = (
+                    f"Persisted {file} for agent '{agent_name}' as "
+                    f"memory version {row.version} (state: {row.state}, "
+                    f"transition-free; effective immediately; file on "
+                    f"disk was not changed)."
+                )
+            else:
+                success_message = (
                     f"Submitted {file} for agent '{agent_name}' as "
                     f"version {row.version} (state: {row.state}). It takes "
                     f"effect for the agent's prompt only after a human "
                     f"approves it; the file on disk was not changed."
-                ),
+                )
+
+            return {
+                "success": True,
+                "agent": agent_name,
+                "file": file,
+                "message": success_message,
                 "version_id": row.version_id,
                 "version": row.version,
                 "state": row.state,
@@ -546,49 +606,57 @@ Returns:
                 "file_fallback_used": file_fallback is not None,
             }
 
-        # ── Direct-write path — memory.md only (D6) ──────────────────
-        try:
-            # Write new content
-            file_path.write_text(content, encoding="utf-8")
-
-            # Phase A T7 / D9: thread the resolved version_tag so the
-            # cache bust reaches the per-tag key (``developer[v2]``).
-            manager.prompt_cache.invalidate(agent_name, version_tag=resolved_tag)
-
-            return {
-                "success": True,
-                "agent": agent_name,
-                "file": file,
-                "message": f"Updated {file} for agent '{agent_name}'",
-                "cache_invalidated": True,
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Failed to modify file: {str(e)}"
-            }
+        # ── Direct-write path — RETIRED (User Directive #3, 2026-10-14) ──
+        # All formerly-direct-write files (memory.md, growth.md) have
+        # moved to the DB-versioned set; the dispatch above routes
+        # them through ``create_and_submit`` (CORE state-machine
+        # path) instead. The branch below is dead code in steady
+        # state, but kept as a defensive net for the legacy test
+        # fixture that imports ``_DIRECT_WRITE_FILES`` to assert the
+        # carve-out invariant. If we ever land here, fail loud — the
+        # dispatcher should have routed to the DB path.
+        return {
+            "success": False,
+            "error": (
+                f"Direct-write path for '{file}' is retired "
+                f"(User Directive #3, 2026-10-14, RESOLUTION-CORE). "
+                f"All files in the versioned set route through the "
+                f"prompt-version DB. The dispatch should never reach "
+                f"this branch."
+            ),
+        }
 
     agent_modify._full_doc_ = """Modify an agent's file contents.
 
-Phase B (T8): prompt artifacts (soul.md, rule.md, workflow.md,
-tools_note.md, tools.md, skill.md, user.md) are NOT written to disk —
-the content is submitted to the prompt-version approval pipeline as a
-pending_approval row and takes effect only after a human approves it
-(file fallback stays live until then). memory.md remains a direct
-write (runtime memory state with compaction, per the memory.md
-carve-out).
+Phase B (T8) + User Directive #3 (2026-10-14, RESOLUTION-CORE):
+prompt artifacts (soul.md, rule.md, workflow.md, tools_note.md,
+tools.md, skill.md, user.md, memory.md, growth.md) are NOT written
+to disk — the content is submitted to the prompt-version DB as a
+new revision. The artifact class drives the writer:
+
+* CORE (soul / rule / workflow / tools_note / tools / skill) — the
+  content is submitted via ``create_and_submit`` (A5 composite) and
+  lands in ``state='pending_approval'``; takes effect only after a
+  human approves it.
+* MEMORY (memory / user / growth) — the content is submitted via
+  ``create_memory_version`` (transition-free, born-effective). The
+  file fallback stays live until a DB row exists (cold-boot F6
+  precedence).
+
+The legacy direct-write carve-out (memory.md) is RETIRED — the
+prompt-artifacts frozenset now guards memory.md and growth.md as
+versioned-immutable templates.
 
 Args:
     agent_name: The agent identifier (e.g., "developer", "developer[v2]", "_mother")
     file: The file to modify (soul.md, workflow.md, rule.md, user.md,
-        memory.md, tools_note.md, tools.md, skill.md)
+        memory.md, tools_note.md, tools.md, skill.md, growth.md)
     content: The new content for the file (whole-content replace for
         submitted artifacts)
 
 Returns:
-    Dict with success status. For submitted artifacts: version_id /
-    version / state of the new pending_approval row. For memory.md:
-    the direct-write confirmation.
+    Dict with success status. For all supported files: version_id /
+    version / state of the new DB row.
 """
     
     @register_tool_category("mother")

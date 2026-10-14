@@ -811,3 +811,327 @@ at Phase B go-live.
 
 **End of §7.**
 
+
+---
+
+## 8. User Directive 2026-10-14 (overnight, landing): SURFACES layer
+
+The SURFACES layer (User Directive #2 frontend specs + Directive
+#3 + #4 + #5B wiring + directive-specified tests + ALL FOUR docs
+blocks) lands as a single review-fold-in. The followings blocks
+are frozen at fold-in (overnight, dispatcher-approved post-hoc;
+morning-ratification expected) and supersede any §1-§7 language
+that conflicts.
+
+### 8.1 Block #2 — Frontend specs (Ud#2 endpoint growth + designer-skip rationale)
+
+The frontend Persona UI (Phase C, gated) consumes the 15-endpoint
+canonical family. The Ud#2 deltas (12 → 15) — the
+PATCH/DELETE/pending-count endpoints — were the only Phase C
+contract work. Five points + the phasing:
+
+1. **PATCH /api/prompts/versions/{version_id}** — body
+   ``{content}``; scope ``prompts:write``; draft/pending rows
+   ONLY. Approved / rejected / archived rows surface as
+   ``409 VERSION_IMMUTABLE``; unknown id → 404. The leader
+   ruling: EDIT = draft/pending content ONLY — approved
+   rows are append-only immutable history; rejected is
+   terminal (resubmit = new row); archived is superseded.
+   Hard-delete of approved history is a MORNING FORK and
+   is deliberately NOT built.
+2. **DELETE /api/prompts/versions/{version_id}** — same
+   scope + state rule + 409/404 mapping. The repo
+   hard-deletes the row and stamps a ``DELETED`` audit
+   event whose payload carries identity + content_hash +
+   content byte length (forensics survive the row).
+3. **GET /api/prompts/pending-count** — scope
+   ``prompts:read``; returns ``{"count": N}`` — the
+   Persona UI badge feed; drains as approve/reject land.
+   A PLAIN count (the A8 effective fingerprint does not
+   apply to a badge). **CORE-only by design** (Ud#3
+   SUPERSEDES the original scope intent): MEMORY rows
+   are born-effective at ``state='approved'`` and never
+   enter the ``pending_approval`` state, so they do
+   not contribute to the badge. The repo's
+   ``count_pending`` predicate
+   ``state == 'pending_approval' AND artifact_class = 'CORE'``
+   is the fence.
+4. **List endpoint artifact_class filter** (Ud#3, 2026-10-14) —
+   ``GET /api/prompts/versions?artifact_class=CORE|MEMORY``
+   restricts the listing to the chosen class. The
+   serialization now carries the ``artifact_class`` field
+   on every row (default ``"CORE"`` when the column is
+   missing on legacy rows). 422 on anything outside
+   ``['CORE', 'MEMORY']``; the permissive filter allowlist
+   still rejects slashes / whitespace / injection chars.
+5. **MemoryClassError → 4xx mapping** (Ud#3) — the
+   state-machine endpoints (approve / reject / submit /
+   retract / PATCH / DELETE) surface
+   :class:`MemoryClassError` (the typed refusal when a
+   state-machine op targets a MEMORY-class row) as
+   ``409 MEMORY_CLASS_MISMATCH``. The class becomes the
+   contract token; clients branch on the error string.
+
+**Phasing**: P1 = the 12-endpoint family (T5 already landed).
+P1.5 = the 3 deltas + artifact_class filter (the SURFACES
+layer). The frontend C build (Phase C, gated) consumes
+the 15-endpoint family plus the ``artifact_class`` field
+on serialization; no further endpoint growth is in scope
+for the morning review.
+
+**CRUD-vs-A1 reconciliation**: the A1 frozen contract
+states that ``rejected`` and ``approved`` are TERMINAL
+states; the PATCH/DELETE endpoint family reuses the
+``rejected``/``approved``/``archived`` fence via
+``409 VERSION_IMMUTABLE`` (the leader ruling). The
+EDIT scope is ``draft`` / ``pending_approval`` ONLY;
+no rejected → draft re-open. Resubmit after reject =
+a NEW row at ``max(version)+1`` for the key; the
+rejected row stays in the lineage.
+
+**Designer-skip rationale**: the designer agent is the
+operator-UI consumer; it does NOT consume the
+``prompts:*`` scope or any of the 15 endpoints. The
+persona-class UI sits behind the designer's
+``_full_doc_`` tool surface (the inner_soul /
+access_memory pair); the prompt-version surface is
+operator-only. The desen's ``od.*`` tools (the
+opendesign plugin) are out of scope.
+
+### 8.2 Block #3 — Approval scope split (CORE vs MEMORY class boundary)
+
+Five points + the binding supersessions:
+
+1. **Two write paths, one substrate**: ``inner_soul`` runs
+   two write paths side by side on a target-by-target
+   basis. The dispatch is class-aware (CORE →
+   ``create_and_submit``; MEMORY →
+   ``create_memory_version``). The same D10 audit
+   identity is threaded through both paths.
+2. **Class-boundary ruling (binding)**: the
+   ``VALID_TRANSITIONS`` state machine governs CORE
+   rows ONLY. MEMORY rows are transition-free
+   (``state='approved'`` from the creator). Any
+   state-machine op (approve / reject / submit /
+   retract / PATCH / DELETE) on a MEMORY row surfaces
+   as :class:`MemoryClassError` and is mapped to
+   ``409 MEMORY_CLASS_MISMATCH`` at the router.
+3. **Supersession of D5** (the Phase B tentative CORE
+   binding for user.md): user.md is MEMORY-class now
+   (directive overturns D5). The file is NEVER
+   prompt-loaded (F2 boundary preserved); the WRITE
+   side joins the MEMORY class so the
+   ``agent_mother.agent_modify`` bypass closes.
+   User preferences take effect on the next prompt
+   reload.
+4. **Supersession of the memory.md carve-out** (D6):
+   memory.md and growth.md JOIN the versioned-immutable
+   set (Ud#3 SUPERSEDES D6 / R7). The writer substrate
+   is the MEMORY creator; the on-disk file is the
+   cold-boot F6 fallback (read by ``access_memory``
+   when no DB row exists). The 80% compaction /
+   dedup semantics live INSIDE the
+   ``_update_memory_md`` composer; the
+   post-compaction row materializes as a NEW memory
+   version, the pre-compaction content stays in
+   history.
+5. **Per-slug memory chaining** (Ud#3, memories/<slug>
+   keying): ``memories/`` writes use the key
+   ``memories/<slug>`` where ``<slug>`` is the legacy
+   timestamped filename WITHOUT the ``.md`` extension.
+   Consecutive writes on the same slug chain as
+   version 1, 2, 3, ... on the same key — the
+   collision-counter that derived
+   ``<filename>-<n>.md`` is retired; the version
+   chain IS the lineage. The loader's
+   selection pointer + latest row govern which
+   version is "live".
+
+**Phase-contract amendment journal** (binding,
+directive-authorized, like the A7 precedent — dated,
+dispatcher-approved-pending-morning-ratification):
+
+* **A1 amendment** — ``VALID_TRANSITIONS`` is
+  CORE-only. MEMORY rows bypass the state machine.
+  The contract table in ``phase-contract.md`` A1
+  needs a one-line annotation: the transitions
+  are the CORE-class valid set; MEMORY-class
+  rows are transition-free (no
+  VALID_TRANSITIONS entry; the state column on
+  a MEMORY row is just the landed / recallable
+  indicator). The ``InvalidTransitionError``
+  remains the CORE-only error.
+* **A5 amendment** — the ``create_and_submit``
+  composite is the CORE path; the
+  ``create_memory_version`` creator is the MEMORY
+  path. The contract table's A5 row needs a
+  one-line note: ``create_and_submit`` is for
+  CORE artifacts (state machine +
+  ``pending_approval``); ``create_memory_version``
+  is for MEMORY artifacts (transition-free,
+  born-effective). Both are members of the
+  service facade; consumers pick by class.
+* **Pending-count is CORE-only by design** — the
+  ``count_pending`` repo method predicate carries
+  ``AND artifact_class = 'CORE'``; the
+  ``pending-count`` endpoint docstring documents
+  the same. The MEMORY path is born-effective; the
+  badge source is unchanged.
+
+### 8.3 Block #4 — Preserved classification routing (Directive #4 + RAG retirement ruling CORRECTION)
+
+The classification routing is **preserved VERBATIM in
+behavior** — the SURFACES layer does NOT add new
+classification logic; it only BUILDS OUT the existing
+routing with a documented destination map. The
+correction of the §7 (D-SEED-EDGE RESOLVED-DEAD)
+language about the RAG retirement ruling: nothing was
+built to retire the RAG path, and the directive's
+classification routing is BUILD-TO-SPEC, not
+rework.
+
+**Principle**: the classification layers in
+``_classify_request`` / ``_should_redirect_to_rag``
+stay verbatim in behavior. The persona-prefix flag
+(Stage 1) sets ``persona_intent_matched``; the
+project pre-check (Stage 2) REJECTs project content
+unless the dual-match (persona + project) gets
+resolved by a persona category (Stage 3); the
+normal semantic classification (Stage 3) maps the
+request to a target.
+
+**Routing map** (the content-class × target ×
+destination matrix):
+
+| Content class | Target | RAG-ON destination | RAG-OFF destination |
+|---|---|---|---|
+| **Project content** (architecture / gotchas / deploy status) | n/a (REJECT) | RAG via ``experience()`` (queryable via ``explore()``) | existing project-content rejection/hint path (suggests ``project_history_add`` / ``experience``, NEVER silent agent-memory storage) |
+| **USER-related content** ("User prefers TypeScript") | ``user.md`` (or implicit) | MEMORY-class direct persist via ``create_memory_version`` (no approval) | same (MEMORY class is RAG-state-agnostic) |
+| **Dual-match (persona + project)** | category-matched persona target (identity / personality / user_preference / user_identity / workflow) | CORE submission (soul / workflow) for the resolved persona target | same |
+| **CORE targets** (soul / workflow) | explicit | CORE submission via ``create_and_submit`` (state machine + ``pending_approval``) | same |
+| **MEMORY targets** (memory / memories / user / growth) | explicit | MEMORY-class direct persist via ``create_memory_version`` (no approval) | same |
+
+**Target-vs-content-class precedence**: the explicit
+``target=`` argument routes first (the existing
+code's order is preserved); the classification is
+secondary. This keeps the existing test suite's
+expectations intact.
+
+**Correction of the D-SEED-EDGE RAG retirement ruling**
+(DIRECTIVE #4 of 2026-10-14): the SURFACES layer
+does NOT retire the RAG redirect; nothing was built
+to retire it. The Phase B rewrite's
+``_should_redirect_to_rag`` path is the canonical
+PROJECT-class-on-RAG-ON destination; the directive
+documents it as the binding destination. RAG-OFF
+uses the existing project-content rejection/hint
+path (this is the "preservation-spec" the directive
+calls out — suggesting the right tools, NEVER
+silent agent-memory storage).
+
+**RAG no-consume boundary** (R4, verified): the
+persona paths (``create_and_submit``,
+``create_memory_version``, ``get_effective``) never
+query or consume persona-class RAG entries. The
+classifier itself (``_should_redirect_to_rag``) is
+the only RAG-write surface, and it writes to the
+KB via ``experience()`` — a different (KB) lane
+from the persona-class rows.
+
+### 8.4 Block #5 — DB-born customs + auto-reset (R-A1/A2/B1-B4 + selection-survival + morning forks)
+
+**R-A1 (DB-born customizations)**: the directive's
+"first-time-persistence semantic" is the steady
+state. Pre-directive content was swept per R2; new
+writes land as DB rows; the file under the agent
+dir is the cold-boot F6 fallback only. The
+``prompt_versions`` table starts EMPTY at go-live
+and grows on agent / operator writes.
+
+**R-A2 (Custom agents have no template fallback)**:
+the A2 ruling stands — custom agents are not in the
+registry's ``list_all``; the boot auto-reset walker
+is registry-only. The lifecycle coder owns the
+custom-agent identity; the SURFACES layer does not
+land an explicit custom-agent ``is_custom_agent``
+flag (the resolution-side hook in ``loader.py`` is
+already in place — Ud#5A landing).
+
+**R-B1 (initial-baseline seeding)** — the
+``record_initial_baselines_for_all_predefined_agents``
+boot call seeds CORE-class baselines for every
+predefined agent in the registry. The seeded rows
+carry the shipped-template sha256 per
+``(agent_id, version_tag, artifact)``. Custom
+agents short-circuit to ``[]``. MEMORY-class
+artifacts are NEVER recorded (the
+``_validate_artifact_class_core_only`` path
+rejects them).
+
+**R-B2 (auto-reset on template drift)** — the
+``detect_drift_for_all_predefined_agents`` boot
+call walks every predefined agent's CORE
+artifacts, compares the live file sha256 against
+the recorded baseline, and on a hit:
+  * stamps a ``TEMPLATE_RESET`` audit row
+    (CORE-only, ``payload.via='detect_template_drift'``);
+  * re-points the baseline to the new content.
+  * preserves the selection pointer if the drifted
+    key has a ``is_selected=1`` row (the
+    R-B3 selection-preservation check).
+
+**Selection-survival** (R-B3): the auto-reset
+walk re-points the baseline but does NOT touch
+the ``is_selected`` pointer on the agent's
+approved rows. A drift hit on the template file
+with an existing selection surfaces
+``selection_preserved=True`` in the audit
+payload; the agent continues to resolve against
+the selected approved row until a human
+re-approves. The on-disk drift is operator-visible
+(WARN at boot) and NEVER boot-blocking (allow-
+stale parity).
+
+**R-B4 (boot orchestration order)**: the
+``api.py`` lifespan calls
+``record_initial_baselines_for_all_predefined_agents``
+FIRST (idempotent — lazy-seeds any missing
+baselines) and THEN
+``detect_drift_for_all_predefined_agents`` (the
+detect pass lands the audit events + baseline
+re-points for any drifts found). Both calls are
+wrapped in a non-fatal try/except — WARN + continue,
+NEVER block boot. Ordered AFTER the
+``PromptVersion.metadata.create_all(...)`` /
+``PromptAuditEvent.metadata.create_all(...)`` /
+``PromptTemplateBaseline.metadata.create_all(...)``
+calls (so the schema is in place when the
+baselines are seeded). The mirror line in
+``_ensure_postgres_columns`` for the
+``artifact_class`` column lands ADD-ONLY +
+idempotent (the same convention as the rest of
+the ``_ensure_postgres_columns`` body) — fresh
+PG databases get the column from
+``SQLModel.metadata.create_all()`` via the
+``PromptVersion`` SQLModel declaration; existing
+databases receive the column via the mirror
+ADD COLUMN.
+
+**Morning forks** (the deferred-debt register):
+
+* **D-1**: per-plugin staleness policy refinement
+  (auto-follow-tags / freeze-with-alarm /
+  prompt-on-stale). Out of scope here; per the
+  plugin_staleness_policy note, the
+  post-v0.18.0 design is the morning fork.
+* **D-2**: memory.md disposition flip
+  (carve-out re-disposition for memory.md vs
+  memory.md-as-MEMORY). The directive
+  SUPERSEDES the prior D6 carve-out — the
+  morning fork is sealed; the file is
+  versioned-immutable.
+* **D-3**: user.md disposition. The directive
+  SUPERSEDES D5 — the morning fork is sealed;
+  user.md is MEMORY-class.
+
+**End of §8.**

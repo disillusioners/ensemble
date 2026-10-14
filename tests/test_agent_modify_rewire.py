@@ -153,7 +153,16 @@ def _invoke(tool, **kwargs) -> dict:
 
 
 class TestAgentModifyDbSubmission:
-    """The versioned-immutable set routes through create_and_submit."""
+    """The CORE versioned-immutable set routes through create_and_submit.
+
+    User Directive #3 (2026-10-14, RESOLUTION-CORE) split the
+    versioned set into CORE (this test) and MEMORY
+    (``TestAgentModifyMemoryClass``). The CORE class:
+    soul / rule / workflow / tools_note / tools / skill — pending
+    approval round-trip. The MEMORY class: memory / user /
+    growth — born-effective via ``create_memory_version`` (no
+    approval, file untouched, state='approved').
+    """
 
     @pytest.mark.parametrize(
         "fname,artifact",
@@ -164,7 +173,6 @@ class TestAgentModifyDbSubmission:
             ("tools_note.md", "tools_note"),
             ("tools.md", "tools"),
             ("skill.md", "skill"),
-            ("user.md", "user"),  # D5 — joins DB-versioning
         ],
     )
     def test_versioned_artifact_submits_pending_row_and_never_touches_file(
@@ -264,45 +272,78 @@ class TestAgentModifyDbSubmission:
 
 
 class TestAgentModifyMemoryCarveOut:
-    """D6 — memory.md keeps the direct write + D9 invalidation."""
+    """Ud#3 SUPERSEDES D6 — memory.md is MEMORY-class now.
 
-    def test_memory_md_writes_file_directly_and_invalidates_with_tag(
-        self, agent_modify, manager, fenced_agents_root
-    ):
-        target = fenced_agents_root["root"] / "developer[v2]"
-        result = _invoke(
-            agent_modify,
-            agent_name="developer[v2]",
-            file="memory.md",
-            content="M1",
-        )
+    The previously-direct-writer carve-out for memory.md is
+    RETIRED (User Directive #3, 2026-10-14, RESOLUTION-CORE).
+    memory.md writes route through ``create_memory_version``
+    (transition-free, born-effective). The file on disk is
+    UNTOUCHED. The cache-bust is the helper's responsibility
+    (no agent_mother invalidate direct call).
 
-        assert result["success"] is True
-        assert result.get("cache_invalidated") is True
-        # The file REALLY changed on disk this time.
-        assert (target / "memory.md").read_text() == "M1"
-        # D9: the bust reaches the per-tag key, not the base key.
-        assert manager.prompt_cache.calls == [("developer[v2]", "v2")]
+    The pin below proves the new regime: the file is byte-
+    identical to the pre-call content; the MEMORY-class row
+    is born-effective in ``state='approved'``; the artifact
+    is class-stamped ``MEMORY``.
+    """
 
-    def test_memory_md_base_agent_invalidates_base_key(
-        self, agent_modify, manager, fenced_agents_root
+    def test_memory_md_persists_as_memory_row_file_untouched(
+        self, agent_modify, service, fenced_agents_root
     ):
         target = fenced_agents_root["root"] / "developer"
+        (target / "memory.md").write_text("ORIGINAL")
+
         result = _invoke(
             agent_modify, agent_name="developer", file="memory.md", content="M1"
         )
         assert result["success"] is True
-        assert (target / "memory.md").read_text() == "M1"
-        # Base agent: tag resolves to None (normalized to "" by the
-        # repo; the cache call carries the raw resolved None).
-        assert manager.prompt_cache.calls == [("developer", None)]
+        assert result["state"] == "approved"
+        # File UNTOUCHED — the writer substrate is the DB row;
+        # the on-disk file is the cold-boot F6 fallback only.
+        assert (target / "memory.md").read_text() == "ORIGINAL"
+        # MEMORY row materialized.
+        rows = service._repo.list_versions("developer", "", "memory")
+        assert len(rows) == 1
+        assert rows[0].state == "approved"
+        assert rows[0].artifact_class == "MEMORY"
+        assert rows[0].content == "M1"
 
-    def test_memory_md_never_creates_db_rows(
+    def test_user_md_persists_as_memory_row(
         self, agent_modify, service, fenced_agents_root
     ):
-        _invoke(agent_modify, agent_name="developer", file="memory.md", content="M1")
-        # No 'memory' artifact rows — the carve-out is total (D6).
-        assert service._repo.list_versions("developer", "", "memory") == []
+        """user.md is MEMORY-class (Ud#3 SUPERSEDES D5)."""
+        target = fenced_agents_root["root"] / "developer"
+        (target / "user.md").write_text("ORIGINAL")
+
+        result = _invoke(
+            agent_modify, agent_name="developer", file="user.md", content="U1"
+        )
+        assert result["success"] is True
+        assert result["state"] == "approved"
+        assert (target / "user.md").read_text() == "ORIGINAL"
+        rows = service._repo.list_versions("developer", "", "user")
+        assert len(rows) == 1
+        assert rows[0].state == "approved"
+        assert rows[0].artifact_class == "MEMORY"
+        assert rows[0].content == "U1"
+
+    def test_growth_md_persists_as_memory_row(
+        self, agent_modify, service, fenced_agents_root
+    ):
+        """growth.md is MEMORY-class (Ud#3 re-disposition)."""
+        target = fenced_agents_root["root"] / "developer"
+        (target / "growth.md").write_text("ORIGINAL")
+
+        result = _invoke(
+            agent_modify, agent_name="developer", file="growth.md", content="G1"
+        )
+        assert result["success"] is True
+        assert result["state"] == "approved"
+        assert (target / "growth.md").read_text() == "ORIGINAL"
+        rows = service._repo.list_versions("developer", "", "growth")
+        assert len(rows) == 1
+        assert rows[0].state == "approved"
+        assert rows[0].artifact_class == "MEMORY"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -311,9 +352,16 @@ class TestAgentModifyMemoryCarveOut:
 
 
 class TestAgentModifyRefusals:
-    """The refusal shape stays; only the allowed set changed (T8)."""
+    """The refusal shape stays; only the allowed set changed (Ud#3).
 
-    @pytest.mark.parametrize("fname", ["growth.md", "meta.json", "random.md"])
+    User Directive #3 (2026-10-14, RESOLUTION-CORE) brought
+    memory.md, user.md, and growth.md INTO the versioned set
+    (MEMORY-class). The remaining ``Cannot modify`` shape
+    applies to truly non-versioned residue (meta.json /
+    random.md).
+    """
+
+    @pytest.mark.parametrize("fname", ["meta.json", "random.md"])
     def test_non_modifiable_file_keeps_refusal_shape(
         self, agent_modify, fenced_agents_root, fname
     ):

@@ -57,11 +57,23 @@ over the versioned set, re-hashed at stage time and at boot. The bash tool
 is held by 26/43 agents; the practical alternative is a documented
 operator + skill-evolution policy lane (Phase B+).
 
-**memory.md / user.md / growth.md = CARVED OUT (R7 / R11).** The disposition
-fork (``decisions.md`` worker, Phase-A decision still pending at the time
-of this commit) conservatively excludes these from the versioned-immutable
-set. Schema + resolution hook + service + repo are artifact-agnostic, so a
-later ``decisions.md`` inversion is a config-only change.
+**memory.md / user.md / growth.md — IMMUTABLE TEMPLATE GUARDS (2026-10-14 directive).**
+The Phase A disposition carved these three out as file-writable
+carve-outs; User Directive #3 + #5B (2026-10-14, RESOLUTION-CORE)
+reverses that for ``memory.md`` and ``growth.md`` (they join the
+immutable-template regime). ``user.md`` is already in
+``_DB_VERSIONED_FILES`` for ``agent_mother`` (Phase B D5) and the
+``inner_soul`` DUAL-PATH now writes all three via
+``create_memory_version`` (MEMORY-class, transition-free). The
+guard surface here is therefore TEMPLATE-side only: the file is
+immutable at runtime (defense-in-depth — the actual writer
+substrate is the DB). ``memory.md`` joins the artifact set with
+the lone carve-out that the ``agent_mother.agent_modify`` D6 lane
+no longer writes it directly (the create_memory_version path is
+the ONLY writer). ``growth.md`` joins with the historical config-
+knob semantics preserved — the writer is the DB row, the file is
+read by ``_load_growth_rules`` as a fallback when no row exists
+(cold-boot tolerance per decisions.md §7 boot-tolerance proofs).
 
 **Allowed-time exceptions (preserved, NOT covered by guard):**
     * ``agent_mother.agent_create`` — template copy from ``_baby_template``.
@@ -111,6 +123,20 @@ VERSIONED_PROMPT_ARTIFACTS: frozenset[str] = frozenset({
     "tools_note.md",
     "tools.md",  # legacy fallback for tools_note.md
     "skill.md",  # legacy single-skill loader
+    # User Directive #3 + #5B (2026-10-14, RESOLUTION-CORE) —
+    # memory.md and growth.md JOIN the versioned-immutable set
+    # per the directive's re-disposition ruling. The substrate
+    # change in inner_soul (memory/user/growth → create_memory_version)
+    # makes these two files MEMORY-class templates: the file is
+    # NEVER modified at runtime; the DB row IS the live content;
+    # the on-disk copy stays the F6 fallback for cold boots with
+    # zero DB rows. user.md was already in ``_DB_VERSIONED_FILES``
+    # for agent_mother (Phase B D5) and is handled by the
+    # inner_soul DUAL-PATH rewrite — it does NOT need to join
+    # this frozenset because the writer is already DB-only
+    # (no file-write code path left to guard on user.md).
+    "memory.md",
+    "growth.md",
 })
 
 # ---------------------------------------------------------------------------

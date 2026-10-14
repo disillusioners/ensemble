@@ -772,6 +772,96 @@ async def lifespan(app: FastAPI):
         prompt_version_repo=getattr(manager, "_prompt_version_repo", None),
     )
 
+    # User Directive #5B (2026-10-14, RESOLUTION-CORE) — boot
+    # auto-reset wiring. Run the two pc-core handoffs
+    # (record_initial_baselines_for_all_predefined_agents then
+    # detect_drift_for_all_predefined_agents) at the next ordered
+    # site AFTER the BaselineService is wired. Non-fatal wrapper:
+    # WARN + continue — NEVER block boot. The detect pass is
+    # allow-stale parity (drift is reported, not gating). A
+    # missing registry (e.g. cold-booted dev hosts with no
+    # predefined-agent set) short-circuits to an empty call.
+    try:
+        from daemon.registry import get_registry, _parse_agent_dir_name
+        from daemon.repositories.prompt_version.repository import (
+            ActorContext, AUTH_METHOD_INTERNAL,
+        )
+        registry = get_registry()
+        # Walk list_all — base + tagged versions in one call. The
+        # list shape is ``[(base_id, None), ..., (base_id, "v2"),
+        # ...]``; the BaselineService consumes version_tag=None
+        # (normalized to "" inside the repo) AND tagged versions
+        # in the same call. Custom agents are NOT in the registry
+        # (they are user-created at runtime); the boot walker is
+        # registry-only so the is_custom_agent flag is moot here.
+        predefined: list[tuple[str, str | None]] = []
+        for meta in registry.list_all():
+            base_id, version_tag = _parse_agent_dir_name(meta.id)
+            predefined.append((base_id, version_tag))
+        predefined.sort(key=lambda kv: (kv[0], kv[1] or ""))
+
+        if predefined and manager._baseline_service is not None:
+            # Resolve agents_root deterministically — the path
+            # that hosts the versioned prompt templates.
+            from pathlib import Path as _P
+            try:
+                agents_root = (registry._agents_dir).resolve()
+            except Exception:
+                # Fallback: walk the registry's first agent's
+                # path's parent.parent.
+                if registry.list_all():
+                    agents_root = (
+                        registry.list_all()[0].path.parent.parent
+                    ).resolve()
+                else:
+                    agents_root = None
+
+            if agents_root is not None:
+                # Normalize None → "" for the service signature.
+                predefined_normalized = [
+                    (a, t or "") for a, t in predefined
+                ]
+                # Synthetic boot actor — the "internal" lane is
+                # reserved for in-process submitters; the boot
+                # walker is in-process (lifespan) so internal is
+                # correct. The instance_id/agent_id triple is
+                # required by the ActorContext constructor
+                # (anti-forgery, R3 source-forgery ticket
+                # 257488dc). The "boot" subject/agent_id is a
+                # stable sentinel for the audit lineage.
+                boot_actor = ActorContext(
+                    subject="boot:auto-reset",
+                    auth_method=AUTH_METHOD_INTERNAL,
+                    instance_id="boot:auto-reset",
+                    agent_id="boot",
+                    version_tag="",
+                )
+                seed_results = await manager._baseline_service \
+                    .record_initial_baselines_for_all_predefined_agents(
+                        predefined_normalized,
+                        agents_root,
+                        actor=boot_actor,
+                    )
+                drift_results = await manager._baseline_service \
+                    .detect_drift_for_all_predefined_agents(
+                        predefined_normalized,
+                        agents_root,
+                        actor=boot_actor,
+                    )
+                logger.info(
+                    f"[Startup] baseline auto-reset: seeded "
+                    f"{sum(len(v) for v in seed_results.values())} "
+                    f"row(s), drift hits="
+                    f"{sum(len(v) for v in drift_results.values())}"
+                )
+    except Exception as baseline_wire_err:  # noqa: BLE001
+        logger.warning(
+            "[Startup] baseline auto-reset wiring skipped (non-fatal): "
+            "%s: %s",
+            type(baseline_wire_err).__name__,
+            baseline_wire_err,
+        )
+
     # Phase A T13 (S9 / D-BASH-ESCAPE accepted-risk control): prompt-artifact
     # baseline drift check at boot. READ-ONLY compare of the live agents/
     # tree against the committed agents/.prompt-artifacts.sha256; drift is
