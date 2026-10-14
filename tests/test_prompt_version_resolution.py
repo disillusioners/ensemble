@@ -1235,16 +1235,34 @@ class TestLoaderPrecedenceF6:
         assert out == prompts
 
     def test_resolve_prompts_from_db_carves_out_memory(self, repo, internal_actor, http_actor):
-        # memory.md is CARVED OUT (decisions.md D-ARTIFACT-DISPOSITION —
-        # R7/R11). A DB row for "memory" must NOT replace the file.
-        v = repo.create_draft("dev", "", "memory", "DB-MEM", internal_actor)
-        repo.submit_for_approval(v.version_id, internal_actor)
-        repo.approve(v.version_id, http_actor)
+        # memory.md was CARVED OUT in pre-Ud#3 (D-ARTIFACT-DISPOSITION
+        # — R7/R11). User Directive #3 (2026-10-14) REMOVED the carve-out
+        # for memory.md + the memories/ family: MEMORY-class rows reach
+        # the loader with class-distinct precedence (selected > latest
+        # > template-file-fallback). The carve-out still applies to
+        # ``user`` / ``growth`` — they are NEITHER loader-prompt-visible
+        # NOR prompt-key in the loader's prompts dict, so the loader
+        # naturally no-ops them via the missing-dict-key lookup. This
+        # test now exercises the new MEMORY behavior end-to-end.
+        v = repo.create_draft("dev", "", "memory", "DB-MEM-DRAFT", internal_actor)
+        # MEMORY rows are created via create_memory_version (transition-free);
+        # create_draft lands the row in 'draft' but doesn't transition.
+        # Use create_memory_version to land the row in 'approved' (born-effective).
+        # The test: with a MEMORY row present, the loader resolves the
+        # artifact via the DB selection/latest chain; without, the file
+        # fallback fires.
+        v_mem = repo.create_memory_version(
+            "dev", "", "memory", "DB-MEM", internal_actor,
+        )
+        # NOTE: v (the draft created above) stays in 'draft' — for the
+        # MEMORY path the test only needs v_mem to be effective.
 
         prompts = {"soul": "FILE-SOUL", "memory": "FILE-MEM"}
         out = resolve_prompts_from_db(prompts, "dev", "", repo)
-        # memory stays file-only even with an approved DB row.
-        assert out["memory"] == "FILE-MEM"
+        # MEMORY: latest row content beats the file fallback (the
+        # memory.md file is "FILE-MEM" but DB MEMORY row carries
+        # "DB-MEM" — the loader takes DB content as effective).
+        assert out["memory"] == "DB-MEM"
         # Other artifacts unaffected.
         assert out["soul"] == "FILE-SOUL"
 

@@ -738,10 +738,39 @@ async def lifespan(app: FastAPI):
     # needed) is documented in the migration header + models.
     from daemon.repositories.prompt_version.models import (
         PromptAuditEvent,
+        PromptTemplateBaseline,
         PromptVersion,
     )
     PromptVersion.metadata.create_all(manager.engine)
     PromptAuditEvent.metadata.create_all(manager.engine)
+
+    # User Directive #5B (2026-10-14, RESOLUTION-CORE) —
+    # ``prompt_template_baselines`` is the third table in the
+    # prompt-version family: stores the shipped-template sha256
+    # per (agent_id, version_tag, artifact) so the R-B2 CORE-only
+    # auto-reset protocol can detect drift between shipped and
+    # recorded content. Brand-new table (same create_all
+    # precedent as PromptVersion / PromptAuditEvent above).
+    # No ``_ensure_postgres_columns`` mirror needed — the
+    # .sql migration handles SQLite, the model handles PG.
+    PromptTemplateBaseline.metadata.create_all(manager.engine)
+
+    # User Directive #5B (2026-10-14) — wire the
+    # ``BaselineRepository`` + ``BaselineService`` onto the manager.
+    # The repo + service sit next to the existing
+    # ``_prompt_version_repo`` / ``_prompt_version_service`` (the
+    # ``SkillStoreService``-style manager-owned pattern at
+    # ``manager.py:1171-1204``); sibling callers + the boot orchestrator
+    # below reach them through ``manager._baseline_service``.
+    from daemon.repositories.prompt_version.repository import (
+        BaselineRepository,
+    )
+    from daemon.services.baseline_service import BaselineService
+    manager._baseline_repo = BaselineRepository(engine=manager.engine)
+    manager._baseline_service = BaselineService(
+        repo=manager._baseline_repo,
+        prompt_version_repo=getattr(manager, "_prompt_version_repo", None),
+    )
 
     # Phase A T13 (S9 / D-BASH-ESCAPE accepted-risk control): prompt-artifact
     # baseline drift check at boot. READ-ONLY compare of the live agents/

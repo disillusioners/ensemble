@@ -34,15 +34,21 @@ from __future__ import annotations
 from .models import (
     PROMPT_ARTIFACTS,
     PROMPT_AUDIT_EVENT_TYPES,
+    PROMPT_ARTIFACT_CLASSES,
+    PROMPT_MEMORY_ARTIFACTS,
     PROMPT_STATES,
     PromptAuditEvent,
+    PromptTemplateBaseline,
     PromptVersion,
 )
 
 __all__ = [
     "PromptVersion",
     "PromptAuditEvent",
+    "PromptTemplateBaseline",
     "PROMPT_STATES",
     "PROMPT_AUDIT_EVENT_TYPES",
+    "PROMPT_ARTIFACT_CLASSES",
     "PROMPT_ARTIFACTS",
+    "PROMPT_MEMORY_ARTIFACTS",
 ]

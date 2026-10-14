@@ -177,7 +177,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# Typed errors (Phase B, T2 / T3)
+# Typed errors (Phase B, T2 / T3 + Ud#3)
 # ============================================================
 
 
@@ -943,8 +943,64 @@ class PromptVersionService:
         Plain count — the A8 effective fingerprint does not apply
         (a badge answers "how many rows await approval"); drains as
         approve/reject land.
+
+        User Directive #3 (2026-10-14): CORE-only — MEMORY-class
+        rows have no pending state; see repo's ``count_pending``
+        for the predicate.
         """
         return await asyncio.to_thread(self._repo.count_pending)
+
+    # --------------------------------------------------------
+    # User Directive #3 (2026-10-14, RESOLUTION-CORE) — MEMORY-class
+    # creator + class-aware create_draft forwarding
+    # --------------------------------------------------------
+
+    async def create_memory_version(
+        self,
+        agent_id: str,
+        version_tag: str,
+        artifact: str,
+        content: str,
+        actor: Any,
+    ) -> Any:
+        """Persist a MEMORY-class row directly (Ud#3 binding blocks 1+2).
+
+        MEMORY rows are TRANSITION-FREE and born-effective: this
+        method writes a row in ``state='approved'`` and stamps
+        one ``CREATED`` audit event with
+        ``payload.artifact_class='MEMORY'``. The row appears in
+        the loader resolution chain the same instant it commits —
+        no submit/approve cycle needed.
+
+        The :class:`daemon.repositories.prompt_version.repository.MemoryClassError`
+        surfaces only when the :class:`PromptVersionRepository`
+        refuses (a non-MEMORY-class artifact was supplied) — the
+        router maps that to ``409 MEMORY_NOT_GOVERNED``.
+
+        Args:
+            agent_id: Resolved agent identity.
+            version_tag: Version tag (``""`` for base; F9).
+            artifact: Artifact key (``memory`` / ``user`` /
+                ``growth`` / ``memories/<slug>``).
+            content: Override body.
+            actor: Submitter identity.
+
+        Returns:
+            The freshly inserted :class:`PromptVersion` row.
+
+        Raises:
+            ValueError: On bad artifact class (the repo's
+                :class:`PromptClassMismatchError` covers the
+                mismatch path).
+        """
+        return await asyncio.to_thread(
+            self._repo.create_memory_version,
+            agent_id,
+            version_tag,
+            artifact,
+            content,
+            actor,
+        )
 
 
 __all__ = [
@@ -954,4 +1010,16 @@ __all__ = [
     "RetractAuthorityError",
     "VersionNotEditableError",
     "VersionNotDeletableError",
+    "MemoryClassError",
 ]
+
+
+# User Directive #3 (2026-10-14) — surface the typed MEMORY-class
+# error through this facade. Routers / callers that hold only the
+# service can catch it without a second import path.
+# noqa: F401 — intentional re-export.
+from daemon.repositories.prompt_version.repository import (  # noqa: E402,F401
+    ARTIFACT_CLASS_CORE,
+    ARTIFACT_CLASS_MEMORY,
+    MemoryClassError,
+)

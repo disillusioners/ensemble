@@ -123,6 +123,14 @@ PROMPT_STATES: frozenset[str] = frozenset({
 # draft/pending content-edit and draft/pending hard-delete paths —
 # ``UPDATED`` = content replaced in place on an editable row;
 # ``DELETED`` = row removed, forensics carried by the audit payload.
+#
+# USER DIRECTIVE #5B (2026-10-14, RESOLUTION-CORE) — ADDITIVE
+# extension with ``TEMPLATE_RESET`` (the R-B2 CORE-only auto-reset
+# audit event when the baseline service detects a shipped-template
+# drift). Code-level frozenset only: no DB schema change (same
+# ``event_type TEXT NOT NULL`` column); validation reuses
+# :meth:`PromptVersionRepository._validate_event_type`. The payload
+# carries ``(old_hash, new_hash, selection_preserved: bool)``.
 PROMPT_AUDIT_EVENT_TYPES: frozenset[str] = frozenset({
     "CREATED",
     "SUBMITTED",
@@ -135,13 +143,54 @@ PROMPT_AUDIT_EVENT_TYPES: frozenset[str] = frozenset({
     "AGENT_CREATE_TEMPLATE_COPIED",
     "UPDATED",
     "DELETED",
+    "TEMPLATE_RESET",
+})
+
+# User Directive #3 (2026-10-14, RESOLUTION-CORE) — class vocabulary. Each
+# ``prompt_versions`` row carries a single ``artifact_class`` value that
+# drives both the resolution chain and the audit/CREATE-time guard rails:
+#
+#   * 'CORE' — soul / rule / workflow / tools_note / tools / skill
+#     (the conservative Phase A set, decisions.md F2). State-machine
+#     governed (draft → pending_approval → approved | rejected); the
+#     R-B2 CORE-only template auto-reset applies on shipped-file
+#     drift.
+#   * 'MEMORY' — memory / user / growth / memories/<slug> family.
+#     TRANSITION-FREE: no state machine, no pending / approval rows;
+#     rows are born-effective at creation time. The loader's
+#     resolution precedence for MEMORY rows is
+#     ``selected_version.content > LATEST row > template-file fallback``
+#     (the file fallback is empty post-sweep — the empty-file boot
+#     tolerance proven by ``decisions.md §7 boot-tolerance proofs``).
+#     The R-B2 auto-reset does NOT touch MEMORY rows (MEMORY owns
+#     the artifact; user updates are stored row-by-row).
+#
+# The class DISTINCT identity is critical: a MEMORY write must bust
+# ONLY the MEMORY fingerprint slot (a CORE write busts ONLY the CORE
+# slot). The loader's synthetic ``db_versions_fingerprint``
+# (loader.py ``_compute_db_versions_fingerprint``) splits the
+# ``EffectiveRow`` list by class and folds per-class — see Ud#3
+# binding block 3.
+PROMPT_ARTIFACT_CLASSES: frozenset[str] = frozenset({
+    "CORE",
+    "MEMORY",
 })
 
 # Conservative-default versioned-immutable artifact set (decisions.md
 # F2). The hook (T6 in phaseA-plan.md) iterates this set when
 # replacing file content with DB overrides; ``memory.md`` / ``user.md``
 # / ``growth.md`` are CARVED OUT (D-ARTIFACT-DISPOSITION) and the
-# loader does NOT consult the DB for them.
+# loader does NOT consult the DB for them in Phase A.
+#
+# User Directive #3 (2026-10-14, RESOLUTION-CORE) extends the loader's
+# resolution set to the memory family for MEMORY-class rows (the
+# carve-out covered FILE writes by inner_soul; it now also covers DB
+# rows by inner_soul's MEMORY-class create path). The set below is
+# unchanged for the loader hook — ``PROMPT_ARTIFACTS`` keeps the
+# CORE-CLASS scope (decision-stable); the loader's MEMORY resolution
+# is implemented via the artifact string (``memory`` / ``user`` /
+# ``growth`` / ``memories/<slug>``) carrying class=MEMORY. See
+# ``loader.py:_HOOK_ARTIFACT_KEYS`` for the resolution extension.
 PROMPT_ARTIFACTS: frozenset[str] = frozenset({
     "soul",
     "rule",
@@ -149,6 +198,17 @@ PROMPT_ARTIFACTS: frozenset[str] = frozenset({
     "tools_note",
     "tools",
     "skill",
+})
+
+# Memory-class artifact keys (Ud#3 binding block 1). The loader
+# resolves these with MEMORY precedence when DB rows are present;
+# file fallback fires (now empty post-sweep) when they are not.
+# ``memories/<slug>`` is per-file (each memory file is its own key,
+# with versions = its revisions; selection = per-file pin).
+PROMPT_MEMORY_ARTIFACTS: frozenset[str] = frozenset({
+    "memory",
+    "user",
+    "growth",
 })
 
 
@@ -354,6 +414,24 @@ class PromptVersion(SQLModel, table=True):
             "approved / rejected."
         ),
     )
+    artifact_class: str = Field(
+        default="CORE",
+        max_length=16,
+        description=(
+            "Resolution class (User Directive #3, 2026-10-14). One of "
+            "PROMPT_ARTIFACT_CLASSES (CORE | MEMORY). CORE = the "
+            "state-machine-governed conservative-default set (soul/rule/"
+            "workflow/tools_note/tools/skill); MEMORY = the carve-out "
+            "memory family (memory/user/growth/memories/<slug>) which "
+            "is TRANSITION-FREE and born-effective. Class-distinct "
+            "identity is critical for the loader fingerprint (a MEMORY "
+            "write busts ONLY the MEMORY slot; a CORE write busts "
+            "ONLY the CORE slot). Migration adds this column with "
+            "DEFAULT 'CORE'; backfill UPDATE classifies existing rows "
+            "into MEMORY when artifact IN (memory, user, growth) or "
+            "artifact LIKE 'memories/%'."
+        ),
+    )
     created_at: str = Field(default_factory=_now_iso)
     updated_at: str = Field(default_factory=_now_iso)
 
@@ -457,3 +535,110 @@ class PromptAuditEvent(SQLModel, table=True):
         description="JSONBType blob — transition-specific context.",
     )
     created_at: str = Field(default_factory=_now_iso)
+
+
+# ============================================================
+# User Directive #5B (2026-10-14, RESOLUTION-CORE) — Template
+# baselines for the predefined-agent R-B2 CORE-only auto-reset.
+# ============================================================
+
+
+class PromptTemplateBaseline(SQLModel, table=True):
+    """The shipped-template sha256 baseline per ``(agent_id, version_tag,
+    artifact)``.
+
+    Records the file-content identity at ``record_initial_baselines``
+    time so the R-B2 CORE-only auto-reset can detect shipped template
+    drift and clear the un-selected resolution path
+    (``latest_approved → template-file``) back to the new file base
+    (an EXPLICIT ``is_selected=1`` pointer SURVIVES the auto-reset per
+    R-B3 — user intent wins; the approved-history rows remain).
+
+    Index / unique-constraint names stay byte-identical to the
+    companion migration ``daemon/migrations/versions/
+    20261014_013815_create_prompt_template_baselines.sql`` (the
+    canonical source for the SQL DDL; the model is the canonical
+    source for the PG ``create_all`` path). The
+    ``tests/migration/test_prompt_versions_index_parity.py`` test
+    pattern extends to this table (parity checked by T_DR-B2).
+
+    This table does NOT carry a state column — baselines are
+    monotonically-replaced (the auto-reset re-points in place:
+    UPDATE on the matching key, never INSERT a second row). No
+    selection pointer (baselines are inherently one-slot-per-key).
+
+    MEMORY-class artifacts (``memory`` / ``user`` / ``growth`` /
+    ``memories/<slug>``) are NEVER inserted here — the auto-reset
+    is CORE-only (R-B2). The service guards against MEMORY-class
+    artifact strings before the insert.
+
+    Attributes:
+        baseline_id: UUID4 primary key (TEXT — dual-driver
+            portability; precedent: ``StoredWatch``).
+        agent_id: Resolved base agent id (``"developer"`` for
+            ``developer[v2]/`` per the F9 / D15/D16 identity model).
+        version_tag: Version tag from directory-suffix (``''`` for
+            base, ``'v2'`` for tagged copies). NULL-normalized to
+            ``''`` at write time (NULL-distinct UNIQUE pitfall).
+        artifact: Artifact key (one of ``PROMPT_ARTIFACTS`` — the
+            CORE set; MEMORY-class is rejected at the service
+            boundary).
+        template_sha256: Lowercase hex sha256 of the shipped file
+            body at record time (``None`` is NOT valid;
+            ``record_initial_baselines`` always hashes a real file).
+        recorded_at: ISO-8601 stamp of the seed / re-point event.
+    """
+
+    __tablename__ = "prompt_template_baselines"
+    __table_args__ = (
+        # One baseline per (agent_id, version_tag, artifact) key.
+        # The auto-reset re-points via UPDATE on this UNIQUE
+        # predicate; a fresh INSERT on a duplicate key is a service-
+        # side bug (the record_initial_baselines path explicitly
+        # inserts-or-updates via INSERT ... ON CONFLICT (PostgreSQL)
+        # or INSERT OR REPLACE (SQLite) — see :class:`BaselineService`).
+        UniqueConstraint(
+            "agent_id",
+            "version_tag",
+            "artifact",
+            name="uq_prompt_template_baselines_agent_tag_artifact",
+        ),
+        # Sweep queries by artifact (e.g. ``all soul.md baselines
+        # across agents``).
+        Index(
+            "idx_prompt_template_baselines_artifact",
+            "artifact",
+        ),
+        # Recency queries (e.g. ``baselines re-pointed in the last
+        # 7 days`` for the journal surface).
+        Index(
+            "idx_prompt_template_baselines_recorded_at",
+            "recorded_at",
+        ),
+    )
+
+    baseline_id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True,
+        max_length=64,
+    )
+    agent_id: str = Field(max_length=128)
+    version_tag: str = Field(
+        default="",
+        max_length=64,
+        description=(
+            "Version tag from directory-suffix ('' for base; "
+            "'v2' for tagged copies). NULL-normalized to '' at "
+            "write time — the UNIQUE constraint is unambiguous "
+            "across drivers (NULL-distinct pitfall)."
+        ),
+    )
+    artifact: str = Field(max_length=64)
+    template_sha256: str = Field(
+        max_length=64,
+        description=(
+            "Lowercase hex sha256 of the shipped file at "
+            "recorded_at time."
+        ),
+    )
+    recorded_at: str = Field(default_factory=_now_iso)
