@@ -753,3 +753,187 @@ class TestRouterClassDeltas:
             asyncio.run(pv_service.approve(row.version_id, actor))
         assert "memory" in str(excinfo.value).lower() or \
             "MEMORY" in str(excinfo.value)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# F4 — slug key normalization (Gate finding F4 fix verification)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestSlugKeyNormalization:
+    """F4 fix verification — ``inner_soul._update_memories``
+    writes row keys shaped ``memories/<slug>.md`` (WITH the
+    ``.md`` extension — the canonical form matching the
+    prompt-visible filename index in the loader's
+    ``_recent_memory_files`` and the on-the-wire
+    ``access_memory("X.Y.md")`` contract). The access_memory
+    DB-read side normalizes both forms (stripping ``.md`` to
+    derive the canonical slug, plus a candidate-set scan
+    against the ``.md``-suffixed form for backward
+    tolerance on the few pre-normalization rows that may
+    exist).
+
+    Round-trip semantic: write via ``inner_soul`` → read via
+    ``access_memory`` → DB content (NOT the file fallback) is
+    returned. Pre-fix, the ``.md``-suffix mismatch caused a
+    silent miss; post-fix, both forms resolve via the
+    candidate-set scan.
+
+    Sibling canon: the WITH-.md write-side (committed as
+    Ud#4 F4 fix) is the canonical form. The reader
+    normalizes both shapes so pre- and post-fix rows resolve.
+    """
+
+    def _set_repo_singleton(self, repo):
+        """Wire the loader's module-level repo singleton for the
+        ``access_memory`` DB read path."""
+        from daemon import loader as _loader
+        prev = _loader._PROMPT_VERSION_REPO
+        _loader.set_prompt_version_repo(repo)
+        return prev
+
+    def _restore_repo(self, prev):
+        from daemon import loader as _loader
+        _loader.set_prompt_version_repo(prev)
+
+    def test_access_memory_round_trip_via_inner_soul(
+        self, mock_registry, manager, temp_agent, repo, pv_service
+    ):
+        """Round-trip — write via ``_update_memories`` (the slug
+        carries the ``.md`` extension per the F4 canonical
+        form). Read via ``access_memory("X.Y.md")`` → returns
+        the DB content (NOT the file fallback).
+
+        Pre-fix, the ``access_memory`` DB lookup compared
+        against ``memories/X.Y.md`` which never matched the
+        pre-F4 row key shape ``memories/<slug>`` (no
+        extension) — the lookup always missed and the call
+        fell through to the file fallback (a not-found
+        message on a fresh agent dir). Post-fix, the
+        ``_resolve_db_content`` candidate set normalizes
+        the key shape (with AND without ``.md``), so the
+        row resolves regardless of the on-disk convention.
+        """
+        from daemon.tools.access_memory import create_access_memory_tool
+        from daemon.tools.inner_soul import _update_memories
+
+        # Wire the loader's repo singleton for the DB read
+        # path inside ``access_memory`` (the singleton is
+        # set by daemon/api.py lifespan in production; the
+        # test bypasses that and uses the test repo).
+        prev_repo = self._set_repo_singleton(repo)
+
+        try:
+            # Write via inner_soul — the canonical artifact
+            # key carries the ``.md`` extension per the F4
+            # fix.
+            classification = {"type": "event", "description": "test"}
+            write_result = _update_memories(
+                "dbagent", temp_agent,
+                "Foo bar observation delta-1", classification,
+                manager=_ManagerWithService(pv_service),
+                instance_id="inst-test-1",
+            )
+            assert write_result["success"] is True
+
+            # Locate the stored row's artifact key — pins the
+            # canonical key shape the F4 fix asserts.
+            eff_rows = repo.get_effective_rows("dbagent", "")
+            slug_artifacts = [
+                r.artifact for r in eff_rows
+                if r.artifact.startswith("memories/")
+            ]
+            assert len(slug_artifacts) == 1
+            canonical_key = slug_artifacts[0]
+            assert canonical_key.endswith(".md"), (
+                f"F4 canonical row key carries the .md "
+                f"extension; got {canonical_key!r}"
+            )
+
+            # Read via access_memory — the on-the-wire
+            # filename carries the ``.md`` suffix (matches
+            # the existing contract). Post-fix, the
+            # candidate set covers both shapes and the row
+            # resolves.
+            with patch("daemon.registry.get_registry", return_value=mock_registry):
+                tool = create_access_memory_tool("dbagent")
+
+            # The filename portion of the artifact key
+            # (``memories/X.Y.md`` → ``X.Y.md``).
+            filename = canonical_key.split("/", 1)[1]
+            assert filename.endswith(".md")
+            content = tool.invoke(filename)
+
+            # Round-trip: the DB content is returned, NOT
+            # the file fallback (no file exists).
+            assert "Foo bar observation delta-1" in content, (
+                f"F4 fix: access_memory MUST return the DB "
+                f"row content (the candidate-set scan covers "
+                f"the canonical .md-suffixed form); pre-fix "
+                f"the lookup missed and the file fallback "
+                f"returned a not-found message. Got: {content!r}"
+            )
+            # Sanity: NOT the file-fallback not-found shape.
+            assert "not found" not in content.lower() or \
+                "Foo bar observation" in content
+        finally:
+            self._restore_repo(prev_repo)
+
+    def test_access_memory_with_bare_slug_resolves_via_backward_tolerance(
+        self, mock_registry, manager, temp_agent, repo, pv_service
+    ):
+        """Direct canonical call — write the row WITHOUT the
+        ``.md`` extension (the pre-F4 / legacy form) and
+        read back via ``access_memory`` with NO ``.md``
+        extension. The bare-slug read MUST still resolve
+        via the backward-tolerance candidate scan.
+
+        This pins the backward-tolerance comparison the F4
+        advisory requires (any pre-normalization row
+        without the ``.md`` extension still resolves).
+        """
+        from daemon.tools.access_memory import create_access_memory_tool
+        from daemon.repositories.prompt_version.repository import (
+            ActorContext,
+        )
+
+        prev_repo = self._set_repo_singleton(repo)
+        try:
+            # Write directly via the service, keying the
+            # row WITHOUT the ``.md`` extension (the
+            # pre-F4 / legacy form — simulating a row
+            # written before the normalization change).
+            actor = ActorContext(
+                subject="user@example.com", auth_method="session"
+            )
+            import asyncio
+            asyncio.run(pv_service.create_memory_version(
+                "dbagent", "", "memories/legacy-slug",
+                "Legacy no-extension content", actor,
+            ))
+
+            # Read via access_memory with NO ``.md``
+            # extension — the candidate set MUST cover
+            # the bare-slug form via backward tolerance.
+            with patch("daemon.registry.get_registry", return_value=mock_registry):
+                tool = create_access_memory_tool("dbagent")
+
+            content_bare = tool.invoke("legacy-slug")
+            assert "Legacy no-extension content" in content_bare, (
+                f"F4 fix: bare-slug (no .md) read MUST find "
+                f"the legacy no-extension row via the "
+                f"backward-tolerance candidate. Got: "
+                f"{content_bare!r}"
+            )
+
+            # And the .md-suffixed read still works
+            # (backward tolerance is symmetric — bare
+            # finds legacy, .md finds canonical).
+            content_with_md = tool.invoke("legacy-slug.md")
+            assert "Legacy no-extension content" in content_with_md, (
+                f"F4 fix: .md-suffixed read MUST find the "
+                f"row via the canonical candidate set. Got: "
+                f"{content_with_md!r}"
+            )
+        finally:
+            self._restore_repo(prev_repo)
