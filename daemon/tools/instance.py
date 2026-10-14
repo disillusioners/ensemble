@@ -236,6 +236,7 @@ from .comment_edit import create_comment_edit_tools
 from .doc_commit import create_doc_commit_tools
 from .chart_tools import create_chart_tools
 from .compare_tools import create_compare_tools
+from .image_gen import create_image_gen_tools
 from .image_tools import create_image_tools
 from .live_views import create_live_view_tools
 from .todo_tools import create_todo_tools
@@ -5828,6 +5829,20 @@ Returns:
     # Image tools (always available, like chart tools)
     image_tools = create_image_tools(manager, current_instance_id)
     tools.extend(image_tools)
+
+    # ── Image-gen tool (image-gen commission Phase 1, 2026-10-14) —
+    #    direct POST to the ensemble LLM lane's /image_generation
+    #    endpoint (no agent spawn). Same critical list-append pattern
+    #    as the chart/image factories above: decorator-only
+    #    registration is SILENTLY INVISIBLE — this extend is the third
+    #    step of the three-step registration seam (decorator +
+    #    CATEGORY_MODULES entry + construction). NON-privileged
+    #    category — per-agent visibility is scoped by _apply_tool_filter
+    #    via the tools.allow ["image-gen"] token carried by exactly
+    #    agents/{ari,leader,developer[v2],reviewer,tester,worker}/
+    #    meta.json.
+    image_gen_tool_list = create_image_gen_tools(manager, current_instance_id)
+    tools.extend(image_gen_tool_list)
 
     # ── Live-view URL minter (Phase 1, 2026-10-07) — the
     # ``view_link`` tool mints URLs for the ``/views/<root>/<rel>``
