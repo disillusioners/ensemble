@@ -730,19 +730,39 @@ async def retract_version(
     version_id: str = Path(...),
     request: Request = ...,
 ) -> _VersionResponse:
-    """Retract a pending or draft version. Authority (S16) is
-    enforced SERVICE-side: a submitter may retract its OWN row; a
-    human session may retract any row. The router only maps the
-    service's authority errors to 403.
+    """Retract a pending or draft version (T2 / S16 / phase-contract.md A3).
 
-    MemoryClassError → 409 ``MEMORY_CLASS_MISMATCH`` (Ud#3).
+    Authority is enforced SERVICE-side via
+    :meth:`PromptVersionService.retract` (the service is the single
+    source of truth for S16 anti-forgery — ``session`` any row,
+    ``internal`` own-row only, ``bearer`` REFUSED with
+    ``reason="machine_lane_refused"``). The router MUST route
+    through ``svc.retract`` and MUST NOT call
+    ``svc.atomic_transition`` directly — that bypass was the
+    F2 leader-gate finding: any bearer with ``prompts:submit`` could
+    retract ANY actor's pending row because the S16 matrix lived
+    only in the never-invoked ``svc.retract`` method.
+
+    Error mapping (each branch now reachable through the real
+    service path):
+
+    * :class:`RetractAuthorityError` → 403 ``RETRACT_FORBIDDEN``
+      (bearer → ``machine_lane_refused``; internal other-instance →
+      ``wrong_instance``; the message body still uses one stable code
+      per the S5 body-shape contract).
+    * :class:`InvalidTransitionError` → 409 ``INVALID_TRANSITION``
+      (the row is no longer in a retract-able state — approved /
+      rejected / archived rows refuse retract; F-A1 state machine).
+    * :class:`MemoryClassError` → 409 ``MEMORY_CLASS_MISMATCH``
+      (Ud#3 — only the transition-free creator mutates MEMORY rows).
+    * :class:`LookupError` → 404 ``VERSION_NOT_FOUND``.
     """
     _require_auth_on(request)
     _require_uuid_like(version_id)
     actor = actor_from_request(request)
     svc = _get_service(request)
     try:
-        row = await asyncio.to_thread(svc.atomic_transition, version_id, "pending_approval", "draft", actor)
+        row = await asyncio.to_thread(svc.retract, version_id, actor)
     except MemoryClassError as exc:
         raise _err(
             409,
@@ -750,13 +770,18 @@ async def retract_version(
             f"retract refused: {exc}",
         )
     except _InvalidTransitionError as exc:
-        # A retract on a draft must use a different path — service
-        # chooses (S16): for simplicity here, treat a draft-row
-        # retract as archive via the same path; map both 409s.
+        # Repo refuses the state pair — the row is not in a
+        # retract-able state (terminal-only state machine, F-A1).
         raise _err(409, _ERR_INVALID_TRANSITION, str(exc))
     except LookupError:
         raise _err(404, _ERR_VERSION_NOT_FOUND, f"No version {version_id}")
     except _RetractAuthorityError:
+        # REACHABLE on the HTTP lane only since this fix landed;
+        # the router-side mapping is the typed
+        # ``RETRACT_FORBIDDEN`` body (S5 body-shape contract), the
+        # service-side ``reason`` distinguishes
+        # ``wrong_instance`` vs ``machine_lane_refused`` and is
+        # available for log forensics via the raised exception.
         raise _err(403, "RETRACT_FORBIDDEN", "Retract authority denied (S16)")
     return _version_to_response(row)
 

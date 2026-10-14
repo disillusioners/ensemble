@@ -538,6 +538,16 @@ class PromptVersionService:
           bearer lane is machine-only; no machine identity can
           retract a row that an instance submitted.
 
+        **HTTP wiring (F2 gate finding, 2026-10-14).** The HTTP
+        router ``daemon/routers/prompts.py:765`` MUST route through
+        this method. A prior bypass via ``svc.atomic_transition(
+        version_id, "pending_approval", "draft", actor)`` reached
+        the repo WITHOUT this authority gate — any caller with
+        ``prompts:submit`` could retract ANY actor's pending row.
+        Callers that need the underlying CAS without authority
+        must come through this method, not through
+        ``svc.atomic_transition``.
+
         All other :class:`ActorContext` fields are read for the
         authority check but never asserted from a request body —
         :meth:`actor_from_request` ignores body-asserted actor
@@ -671,6 +681,25 @@ class PromptVersionService:
         scope claim) is the source of authority. This is the
         service-side gate; the repo's atomic_transition then
         validates the A1 state pair (defense-in-depth, R3).
+
+        **Ride-along (F2 gate, 2026-10-14).** A bearer carrying
+        ``prompts:approve`` scope is still refused here — lane
+        discriminator beats scope (D2). The repo's defense-in-depth
+        check (``only HTTP actors may approve``) is the second line;
+        if a future router bug ever lets a bearer reach ``approve``
+        or ``reject``, this gate refuses with the typed
+        :class:`HumanLaneRequiredError` carrying:
+
+        * ``version_id`` — the PromptVersion PK the caller tried
+          to act on.
+        * ``actor_auth_method`` — the offending lane string
+          (``"bearer"`` / ``"internal"`` / ``"<missing>"`` when the
+          actor has no ``auth_method`` attribute); surfaces in the
+          HTTP 403 body for log forensics.
+
+        The HTTP router maps this to ``403 HUMAN_LANE_REQUIRED``
+        (D2 / phase-contract.md A3); the typed error is the
+        testable refusal the F2 ride-along requires.
         """
         auth_method = getattr(actor, "auth_method", None)
         if auth_method != "session":

@@ -559,6 +559,96 @@ class TestHumanOnlyLaneT3:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# F2 ride-along — bearer-with-prompts:approve scope is REFUSED at the service
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestF2RideAlongBearerRefused:
+    """F2 leader-gate ride-along (2026-10-14): defense-in-depth for
+    ``approve`` / ``reject`` against a bearer carrying the
+    ``prompts:approve`` scope.
+
+    Per decisions.md D2 / F4 / phase-contract.md A3, the lane
+    discriminator (``actor.auth_method``) is the source of
+    authority — NOT the scope claim. A bearer token with
+    ``prompts:approve`` is still the machine lane and CANNOT
+    satisfy the human-only approval rule. The router's
+    ``@require_scope`` decorator passes (the scope is present),
+    so the second line of defense is the service's
+    :meth:`_require_human_lane` guard — it raises the typed
+    :class:`HumanLaneRequiredError` that the router maps to
+    ``403 HUMAN_LANE_REQUIRED``.
+
+    If a future router bug ever lets a bearer past
+    ``@require_scope``, this guard STILL refuses the call. The
+    tests below lock in:
+
+    * the typed error name (:class:`HumanLaneRequiredError`),
+    * the ``actor_auth_method`` field is the offending lane
+      string (``"bearer"``) — surfaces in the HTTP 403 body for
+      log forensics,
+    * the ``version_id`` field carries the PromptVersion PK so
+      the failure traces back to the row.
+    """
+
+    def test_bearer_with_prompts_approve_scope_refused_for_approve(
+        self, service, own_internal_actor,
+    ):
+        """A bearer carrying ``prompts:approve`` is refused at the
+        service for ``approve`` — even though ``@require_scope``
+        would pass. Lane discriminator beats scope (D2)."""
+        v = self._submit_one(service, own_internal_actor)
+        # Build a bearer actor — scopes are intentionally irrelevant
+        # to the lane test (we're verifying the service gate, not
+        # the scope decorator). The service's _require_human_lane
+        # guard fires on auth_method != "session".
+        bearer = ActorContext(
+            subject="machine-1",
+            auth_method=AUTH_METHOD_BEARER,
+        )
+        with pytest.raises(HumanLaneRequiredError) as exc_info:
+            asyncio.run(service.approve(v.version_id, bearer))
+        err = exc_info.value
+        assert err.actor_auth_method == AUTH_METHOD_BEARER
+        assert err.version_id == v.version_id
+
+    def test_bearer_with_prompts_approve_scope_refused_for_reject(
+        self, service, own_internal_actor,
+    ):
+        """Mirror of the approve test — ``reject`` also refuses a
+        bearer with ``prompts:approve`` scope."""
+        v = self._submit_one(service, own_internal_actor)
+        bearer = ActorContext(
+            subject="machine-1",
+            auth_method=AUTH_METHOD_BEARER,
+        )
+        with pytest.raises(HumanLaneRequiredError) as exc_info:
+            asyncio.run(service.reject(v.version_id, bearer))
+        err = exc_info.value
+        assert err.actor_auth_method == AUTH_METHOD_BEARER
+        assert err.version_id == v.version_id
+
+    def test_internal_actor_with_prompts_approve_scope_refused(
+        self, service, own_internal_actor,
+    ):
+        """Belt-and-braces: an ``internal`` actor (the instance
+        submitter path) is ALSO refused for ``approve`` / ``reject``
+        — only the human session lane can approve or reject.
+        Defense-in-depth holds for any non-session lane."""
+        v = self._submit_one(service, own_internal_actor)
+        with pytest.raises(HumanLaneRequiredError) as exc_info:
+            asyncio.run(service.approve(v.version_id, own_internal_actor))
+        assert exc_info.value.actor_auth_method == AUTH_METHOD_INTERNAL
+        assert exc_info.value.version_id == v.version_id
+
+    @staticmethod
+    def _submit_one(service, actor):
+        return asyncio.run(service.create_and_submit(
+            "dev", "", "soul", "ride-along content", actor,
+        ))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Retract authority matrix (T2 / S16)
 # ─────────────────────────────────────────────────────────────────────────────
 
