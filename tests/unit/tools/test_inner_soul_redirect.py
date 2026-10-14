@@ -101,9 +101,29 @@ def mock_registry(temp_agent):
 
 @pytest.fixture
 def mock_manager():
-    """Create mock InstanceManager."""
+    """Create mock InstanceManager.
+
+    Phase B T7: carries a minimal async stub for the prompt-version
+    service so the soul/user/workflow DB-submission path SUCCEEDS in
+    grammar/redirect tests. Real DB composition (mutators, pending
+    supersession, file-untouched invariants) is pinned against a real
+    repo+service in ``tests/test_inner_soul_db.py``.
+    """
     mgr = MagicMock()
     mgr.prompt_cache = MagicMock()
+
+    class _StubRow:
+        version = 1
+        version_id = "stub-version-id"
+        state = "pending_approval"
+
+    class _StubPromptVersionService:
+        async def create_and_submit(self, agent_id, version_tag, artifact,
+                                    content_or_mutator, actor, *,
+                                    file_fallback=None):
+            return _StubRow()
+
+    mgr._prompt_version_service = _StubPromptVersionService()
     return mgr
 
 
@@ -473,7 +493,13 @@ class TestInnerSoulToolRedirect:
             assert len(memories_after) == len(memories_before)
 
     def test_identity_request_does_not_redirect(self, mock_registry, mock_manager, temp_agent, rag_enabled):
-        """Identity request should update soul.md, not redirect."""
+        """Identity request should submit a soul draft, not redirect.
+
+        Phase B T7 disposition: the soul target submits a DB draft
+        (📋 pending-approval grammar); ``soul.md`` itself is immutable —
+        the pre-B file-write assertion is replaced by a file-UNTOUCHED
+        assertion.
+        """
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
             
@@ -485,10 +511,10 @@ class TestInnerSoulToolRedirect:
             # Should NOT redirect
             assert "experience()" not in result
             
-            # Should update soul.md
-            soul_after = soul_file.read_text()
-            assert soul_after != soul_before
-            assert "Cody" in soul_after
+            # Phase B: DB submission — pending-approval grammar, file untouched
+            assert "📋 soul:" in result
+            assert "pending approval" in result
+            assert soul_file.read_text() == soul_before
 
     def test_project_knowledge_request_redirects(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Project knowledge request should redirect (special case)."""
@@ -513,7 +539,11 @@ class TestInnerSoulToolRedirect:
             assert "experience()" in result
 
     def test_personality_request_does_not_redirect(self, mock_registry, mock_manager, temp_agent, rag_enabled):
-        """Personality request should update files, not redirect."""
+        """Personality request should submit drafts, not redirect.
+
+        Phase B T7 disposition: file-write assertion replaced by
+        file-UNTOUCHED (soul.md is immutable; DB draft submitted).
+        """
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
             
@@ -525,13 +555,17 @@ class TestInnerSoulToolRedirect:
             # Should NOT redirect
             assert "experience()" not in result
             
-            # Should update soul.md or user.md
-            soul_after = soul_file.read_text()
-            # The change might go to soul.md or user.md depending on classification
-            assert soul_after != soul_before or "cozy" in soul_after.lower()
+            # Phase B: DB submission — pending-approval grammar, file untouched
+            assert "📋" in result
+            assert "pending approval" in result
+            assert soul_file.read_text() == soul_before
 
     def test_workflow_request_does_not_redirect(self, mock_registry, mock_manager, temp_agent, rag_enabled):
-        """Workflow request should update workflow.md, not redirect."""
+        """Workflow request should submit a workflow draft, not redirect.
+
+        Phase B T7 disposition: file-write assertion replaced by
+        file-UNTOUCHED (workflow.md is immutable; DB draft submitted).
+        """
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
             
@@ -543,9 +577,10 @@ class TestInnerSoulToolRedirect:
             # Should NOT redirect
             assert "experience()" not in result
             
-            # Should update workflow.md
-            workflow_after = workflow_file.read_text()
-            assert workflow_after != workflow_before
+            # Phase B: DB submission — pending-approval grammar, file untouched
+            assert "📋 workflow:" in result
+            assert "pending approval" in result
+            assert workflow_file.read_text() == workflow_before
 
     def test_pattern_request_redirects(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Pattern request should redirect to experience()."""
@@ -586,7 +621,11 @@ class TestInnerSoulToolRedirect:
             assert "mistake" in result.lower()
 
     def test_user_preference_does_not_redirect(self, mock_registry, mock_manager, temp_agent, rag_enabled):
-        """User preference should update user.md, not redirect."""
+        """User preference should submit a user draft, not redirect.
+
+        Phase B T7 / D5 disposition: user.md joins the DB version
+        model — file-write assertion replaced by file-UNTOUCHED.
+        """
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
             
@@ -600,9 +639,10 @@ class TestInnerSoulToolRedirect:
             # Should NOT redirect
             assert "experience()" not in result
             
-            # Should update user.md
-            user_after = user_file.read_text()
-            assert user_after != user_before
+            # Phase B: DB submission — pending-approval grammar, file untouched
+            assert "📋 user:" in result
+            assert "pending approval" in result
+            assert user_file.read_text() == user_before
 
     def test_content_parameter_works_for_redirect(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """content parameter (legacy) should also trigger redirect."""
@@ -661,7 +701,7 @@ class TestInnerSoulToolResponseStructure:
             assert any("explore()" in line for line in lines), "Should mention explore()"
 
     def test_soul_update_response_has_proper_format(self, mock_registry, mock_manager, temp_agent, rag_enabled):
-        """Verify soul update response has expected format."""
+        """Verify soul submission response has the Phase B pending grammar."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
             
@@ -669,10 +709,15 @@ class TestInnerSoulToolResponseStructure:
             
             # Check key elements are present
             assert "Processed" in result or "soul" in result.lower()
-            assert "soul.md" in result or "Soul" in result
+            # Phase B T7: D4 pending-approval grammar replaces the
+            # file-path payload; the "  <marker> <target>:" line shape is kept.
+            assert "📋 soul:" in result
+            assert "submitted as prompt-version v" in result
+            assert "pending approval" in result
+            assert "takes effect once approved" in result
 
     def test_workflow_update_response_has_proper_format(self, mock_registry, mock_manager, temp_agent, rag_enabled):
-        """Verify workflow update response has expected format."""
+        """Verify workflow submission response has the Phase B pending grammar."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
             
@@ -683,7 +728,9 @@ class TestInnerSoulToolResponseStructure:
             })
             
             assert "Processed" in result or "workflow" in result.lower()
-            assert "workflow.md" in result
+            assert "📋 workflow:" in result
+            assert "submitted as prompt-version v" in result
+            assert "pending approval" in result
 
 
 # =============================================================================

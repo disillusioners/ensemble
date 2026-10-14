@@ -1549,15 +1549,32 @@ class TestLoaderPromptCacheInvalidateRespectsTagsT7D3:
             f"into invalidate(); saw {am_calls!r}"
         )
 
-        # (b) inner_soul — 5 sites (memories, memory_md, soul, user, workflow)
+        # (b) inner_soul — version_tag threading at every invalidate
+        # site. Phase B T7 consolidated the soul/user/workflow
+        # invalidation into the shared ``_submit_prompt_version``
+        # helper, so the PHYSICAL count is 3 (memories, memory_md,
+        # shared DB-submission helper) covering the 5 LOGICAL writer
+        # sites; each still threads ``version_tag=version_tag``. The
+        # functional per-tag bust is behaviorally pinned by
+        # ``tests/test_inner_soul_db.py::TestInvalidateThreadsVersionTag``.
         is_mod = Path("daemon/tools/inner_soul.py").read_text()
         is_calls = re.findall(
             r"prompt_cache\.invalidate\(\s*agent_id,\s*version_tag=version_tag\s*\)",  # noqa: E501
             is_mod,
         )
-        assert len(is_calls) == 5, (
-            f"inner_soul MUST have 5 invalidate sites threading "
-            f"version_tag=version_tag; saw {len(is_calls)}"
+        assert len(is_calls) == 3, (
+            f"inner_soul invalidate sites must ALL thread "
+            f"version_tag=version_tag (Phase B: 3 physical sites — "
+            f"memories, memory_md, shared _submit_prompt_version — "
+            f"covering the 5 logical writers); saw {len(is_calls)}"
+        )
+        # No invalidate call may omit version_tag.
+        bare_calls = re.findall(
+            r"prompt_cache\.invalidate\(\s*agent_id\s*\)", is_mod,
+        )
+        assert not bare_calls, (
+            f"inner_soul must have NO base-key-only invalidate calls; "
+            f"saw {bare_calls!r}"
         )
 
         # (c) instance_messaging._get_system_prompt_tokens — drops

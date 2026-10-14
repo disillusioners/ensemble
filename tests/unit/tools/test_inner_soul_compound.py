@@ -60,9 +60,28 @@ def mock_registry(temp_agent):
 
 @pytest.fixture
 def mock_manager():
-    """Create mock InstanceManager."""
+    """Create mock InstanceManager.
+
+    Phase B T7: carries a minimal async stub for the prompt-version
+    service so the soul/user/workflow DB-submission path SUCCEEDS in
+    grammar/compound tests. Real DB composition is pinned in
+    ``tests/test_inner_soul_db.py``.
+    """
     mgr = MagicMock()
     mgr.prompt_cache = MagicMock()
+
+    class _StubRow:
+        version = 1
+        version_id = "stub-version-id"
+        state = "pending_approval"
+
+    class _StubPromptVersionService:
+        async def create_and_submit(self, agent_id, version_tag, artifact,
+                                    content_or_mutator, actor, *,
+                                    file_fallback=None):
+            return _StubRow()
+
+    mgr._prompt_version_service = _StubPromptVersionService()
     return mgr
 
 
@@ -615,7 +634,11 @@ class TestFullCompoundWorkflow:
             assert len(new_memories) >= 1
 
     def test_compound_mixed_types(self, mock_registry, mock_manager, temp_agent, rag_disabled):
-        """Compound request with mixed types should update appropriate files."""
+        """Compound request with mixed types should submit appropriate drafts.
+
+        Phase B T7 disposition: the identity part submits a soul DB
+        draft (📋 pending grammar); soul.md itself stays untouched.
+        """
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
             
@@ -626,9 +649,10 @@ class TestFullCompoundWorkflow:
                 "request": "My name is TestBot AND User prefers dark mode"
             })
             
-            # Should update soul.md for identity
-            soul_after = soul_file.read_text()
-            assert soul_after != soul_before or "TestBot" in soul_after
+            # Should submit a soul draft for the identity part
+            assert "📋 soul:" in result
+            assert "pending approval" in result
+            assert soul_file.read_text() == soul_before
 
     def test_compound_response_shows_all_parts(self, mock_registry, mock_manager, temp_agent, rag_disabled):
         """Compound response should show all processed parts."""
