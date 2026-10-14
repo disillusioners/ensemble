@@ -617,6 +617,53 @@ journal_init
 # longer describes it (the operator explicitly rebuilt + re-verified it)
 journal_quarantine_clear "$VERSION"
 
+# ── Prompt-artifact drift leg (S9/T13 — D-BASH-ESCAPE accepted-risk control) ─
+#
+# READ-ONLY re-hash of the staged agents/ tree against the committed baseline
+# (agents/.prompt-artifacts.sha256 — shipped INSIDE the release payload since
+# stage.sh copies the repo agents/ tree verbatim). NON-BLOCKING BY DESIGN
+# (allow-stale policy, agent-prompt-immutability decisions.md D-BASH-ESCAPE +
+# architecture-recommendation.md S9): drift is VISIBLE at stage — logged +
+# journaled — and NEVER gates staging (no exit-nonzero on drift, on checker
+# failure, or on a missing baseline/pre-generation tree). The versioned set +
+# depth-2 matcher + path conventions are single-sourced in
+# daemon/tools/prompt_artifacts.py; this leg only invokes the checker CLI.
+prompt_artifact_drift_leg() {
+    local rel_dir="$1" version="$2"
+    local baseline="$rel_dir/agents/.prompt-artifacts.sha256"
+    local checker="$SCRIPT_DIR/../protection/generate_prompt_artifact_baseline.py"
+    if [ ! -f "$checker" ]; then
+        _log "prompt-artifact drift leg: checker missing ($checker) — skipping (non-fatal)"
+        return 0
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        _log "prompt-artifact drift leg: python3 unavailable — skipping (non-fatal)"
+        return 0
+    fi
+    if [ ! -f "$baseline" ]; then
+        _log "prompt-artifact drift leg: baseline absent ($baseline) — skipping (fresh tree before first baseline generation; non-fatal)"
+        return 0
+    fi
+    local leg_out leg_rc summary details
+    leg_out="$(python3 "$checker" --check --tree "$rel_dir" 2>&1)"
+    leg_rc=$?
+    if [ "$leg_rc" -ne 0 ]; then
+        summary="$(printf '%s\n' "$leg_out" | head -1)"
+        details="$(printf '%s\n' "$leg_out" | grep '^PROMPT-DRIFT-FILE:' | head -5 | tr '\n' '; ')"
+        _warn "prompt-artifact DRIFT in staged release $version (informational — allow-stale, staging continues): $summary"
+        printf '%s\n' "$leg_out" | while IFS= read -r line; do _warn "  $line"; done
+        if command -v journal_history_append >/dev/null 2>&1; then
+            journal_history_append warn \
+                "prompt-artifact-drift at stage of $version: $summary files: $details" \
+                || _warn "prompt-artifact drift leg: journal append failed (non-fatal)"
+        fi
+    else
+        _log "prompt-artifact baseline clean for $version ($leg_out)"
+    fi
+    return 0
+}
+prompt_artifact_drift_leg "$REL" "$VERSION"
+
 # ── ENSEMBLE_SELF_ENV marker → INSTALL_DIR/.env (D-FA2.3; HIGHEST-PRIORITY) ─
 #
 # 2026-09-22 supersession: the marker is OPTIONAL (operator opt-out via

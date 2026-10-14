@@ -1,0 +1,368 @@
+<div class="persona-container">
+  <!-- Header -->
+  <div class="persona-header">
+    <div class="header-left">
+      <h1 class="page-title">Persona</h1>
+      <span class="header-count">{{ filteredItems().length }} of {{ items().length }}</span>
+    </div>
+    <div class="header-actions">
+      <button mat-stroked-button (click)="onRefresh()" [disabled]="loading()" class="refresh-btn">
+        <mat-icon [class.spinning]="loading()">refresh</mat-icon>
+        Refresh
+      </button>
+      <button mat-flat-button color="primary" (click)="onOpenCreateForm()" class="create-btn">
+        <mat-icon>add</mat-icon>
+        New Draft
+      </button>
+    </div>
+  </div>
+
+  <!-- Filter Bar -->
+  <div class="filter-bar">
+    <app-searchable-select
+      class="filter-field"
+      label="Agent"
+      [options]="distinctAgents()"
+      [ngModel]="agentFilter()"
+      (ngModelChange)="onAgentFilterChange($event)">
+    </app-searchable-select>
+
+    <app-searchable-select
+      class="filter-field"
+      label="Artifact"
+      [options]="distinctArtifacts()"
+      [ngModel]="artifactFilter()"
+      (ngModelChange)="onArtifactFilterChange($event)">
+    </app-searchable-select>
+
+    <app-searchable-select
+      class="filter-field"
+      label="Class"
+      [options]="[
+        { value: 'all', label: 'All Classes' },
+        { value: 'CORE', label: 'CORE' },
+        { value: 'MEMORY', label: 'MEMORY' }
+      ]"
+      [ngModel]="classFilter()"
+      (ngModelChange)="onClassFilterChange($event)">
+    </app-searchable-select>
+
+    <app-searchable-select
+      class="filter-field"
+      label="State"
+      [options]="[
+        { value: 'all', label: 'All States' },
+        { value: 'draft', label: 'draft' },
+        { value: 'pending_approval', label: 'pending_approval' },
+        { value: 'approved', label: 'approved' },
+        { value: 'rejected', label: 'rejected' },
+        { value: 'archived', label: 'archived' }
+      ]"
+      [ngModel]="stateFilter()"
+      (ngModelChange)="onStateFilterChange($event)">
+    </app-searchable-select>
+
+    @if (hasActiveFilters()) {
+      <button mat-button (click)="onClearFilters()" class="clear-filters-btn">
+        <mat-icon>clear</mat-icon>
+        Clear filters
+      </button>
+    }
+  </div>
+
+  <!-- Inline Create-Draft Form -->
+  @if (formOpen()) {
+    <mat-card class="persona-create-form">
+      <mat-card-header>
+        <mat-card-title>Create Draft Version</mat-card-title>
+        <mat-card-subtitle>
+          A draft is editable until submitted for approval.
+        </mat-card-subtitle>
+      </mat-card-header>
+      <mat-card-content>
+        <div class="form-row">
+          <mat-form-field appearance="outline" class="form-field">
+            <mat-label>Agent id</mat-label>
+            <input matInput required
+                   [value]="formAgent()"
+                   (input)="formAgent.set($any($event.target).value)"
+                   placeholder="e.g., developer">
+          </mat-form-field>
+
+          <mat-form-field appearance="outline" class="form-field">
+            <mat-label>Artifact</mat-label>
+            <input matInput required
+                   [value]="formArtifact()"
+                   (input)="formArtifact.set($any($event.target).value)"
+                   placeholder="e.g., soul">
+          </mat-form-field>
+        </div>
+
+        <mat-form-field appearance="outline" class="form-field">
+          <mat-label>Content</mat-label>
+          <textarea matInput required rows="10"
+                    [value]="formContent()"
+                    (input)="formContent.set($any($event.target).value)"
+                    placeholder="# Soul…"></textarea>
+        </mat-form-field>
+      </mat-card-content>
+      <mat-card-actions align="end">
+        <button mat-button (click)="onCancelCreateForm()" [disabled]="formSubmitting()">Cancel</button>
+        <button mat-flat-button color="primary"
+                (click)="onSubmitCreate()"
+                [disabled]="formSubmitting()"
+                class="submit-btn">
+          <mat-icon>save</mat-icon>
+          @if (formSubmitting()) { Creating… } @else { Create Draft }
+        </button>
+      </mat-card-actions>
+    </mat-card>
+  }
+
+  <!-- Main Content -->
+  <div class="persona-main">
+    <!-- Loading skeleton -->
+    @if (loading() && items().length === 0) {
+      <div class="loading-container">
+        @for (i of [1, 2, 3]; track i) {
+          <div class="skeleton-card">
+            <div class="skeleton-header">
+              <div class="skeleton-badge"></div>
+              <div class="skeleton-badge small"></div>
+              <div class="skeleton-time"></div>
+            </div>
+            <div class="skeleton-content">
+              <div class="skeleton-line"></div>
+              <div class="skeleton-line short"></div>
+            </div>
+          </div>
+        }
+      </div>
+    }
+
+    <!-- Custom-agent empty-state (an agent is picked but has zero rows). -->
+    @if (isCustomAgentEmpty()) {
+      <div class="empty-container">
+        <mat-icon class="empty-icon">person_add</mat-icon>
+        <h3>No versions yet for "{{ agentFilter() }}"</h3>
+        <p>This custom agent has no prompt-version history. Start with a v1 draft.</p>
+        <button mat-flat-button color="primary" (click)="onCreateV1(agentFilter())">
+          <mat-icon>add</mat-icon>
+          Create v1
+        </button>
+      </div>
+    }
+
+    <!-- Generic empty-state (nothing at all in the response). -->
+    @if (isEmptyState()) {
+      <div class="empty-container">
+        <mat-icon class="empty-icon">person_outline</mat-icon>
+        <h3>No prompt versions yet</h3>
+        @if (hasActiveFilters()) {
+          <p>Try adjusting your filters or
+            <button mat-button color="primary" (click)="onClearFilters()">clear all filters</button>
+          </p>
+        } @else {
+          <p>Create your first draft to get started.</p>
+        }
+        <button mat-flat-button color="primary" (click)="onOpenCreateForm()">
+          <mat-icon>add</mat-icon>
+          New Draft
+        </button>
+      </div>
+    }
+
+    <!-- Grouped card list -->
+    @if (grouped().length > 0) {
+      <div class="version-list">
+        @for (group of grouped(); track group.agent + '::' + group.artifact) {
+          <mat-card class="group-card">
+            <div class="group-header">
+              <div class="group-title">
+                <h3 class="group-name">
+                  <mat-icon>folder</mat-icon>
+                  {{ group.agent }} / {{ group.artifact }}
+                </h3>
+                <span class="group-count">{{ group.rows.length }} version{{ group.rows.length === 1 ? '' : 's' }}</span>
+              </div>
+              <button mat-stroked-button (click)="onOpenCreateForm()" class="add-version-btn">
+                <mat-icon>add</mat-icon>
+                Add v{{ (group.rows[0]?.version || 0) + 1 }}
+              </button>
+            </div>
+
+            <mat-divider></mat-divider>
+
+            <div class="version-rows">
+              @for (v of group.rows; track v.version_id) {
+                <div class="version-row" [class.memory-row]="isMemoryRow(v)">
+                  @if (editingId() === v.version_id) {
+                    <!-- Inline edit form -->
+                    <mat-card class="version-edit-form">
+                      <mat-card-content>
+                        <mat-form-field appearance="outline" class="form-field">
+                          <mat-label>Content</mat-label>
+                          <textarea matInput required rows="10"
+                                    [value]="editContent()"
+                                    (input)="editContent.set($any($event.target).value)"></textarea>
+                        </mat-form-field>
+                      </mat-card-content>
+                      <mat-card-actions align="end">
+                        <button mat-button (click)="onCancelEdit()" [disabled]="editSubmitting()">Cancel</button>
+                        <button mat-flat-button color="primary"
+                                (click)="onSaveEdit()"
+                                [disabled]="editSubmitting()"
+                                class="submit-btn">
+                          <mat-icon>save</mat-icon>
+                          @if (editSubmitting()) { Saving… } @else { Save Changes }
+                        </button>
+                      </mat-card-actions>
+                    </mat-card>
+                  } @else {
+                    <!-- Read row -->
+                    <div class="version-row-header">
+                      <div class="version-row-chips">
+                        <mat-chip-set>
+                          <mat-chip class="version-chip">
+                            v{{ v.version }}
+                          </mat-chip>
+                          <mat-chip class="class-chip"
+                                    [style.borderColor]="classColor(v.artifact_class)"
+                                    [style.color]="classColor(v.artifact_class)">
+                            <mat-icon matChipAvatar>{{ classIcon(v.artifact_class) }}</mat-icon>
+                            {{ v.artifact_class }}
+                          </mat-chip>
+                          <mat-chip class="state-chip"
+                                    [style.borderColor]="stateColor(v.state)"
+                                    [style.color]="stateColor(v.state)">
+                            <mat-icon matChipAvatar>{{ stateIcon(v.state) }}</mat-icon>
+                            {{ v.state }}
+                          </mat-chip>
+                          @if (v.is_selected) {
+                            <mat-chip class="selected-chip" matTooltip="Per-key selection pointer">
+                              <mat-icon matChipAvatar>verified</mat-icon>
+                              selected
+                            </mat-chip>
+                          }
+                        </mat-chip-set>
+                      </div>
+                      <span class="version-row-meta">
+                        <span class="meta-key">created {{ v.created_at }}</span>
+                        @if (v.updated_at && v.updated_at !== v.created_at) {
+                          <span class="meta-key">· updated {{ v.updated_at }}</span>
+                        }
+                        <span class="meta-key">· actor {{ actor(v) }}</span>
+                        <span class="meta-key">· #{{ v.version_id.slice(0, 8) }}…</span>
+                      </span>
+                    </div>
+
+                    @if (v.content) {
+                      <pre class="version-row-preview">{{ truncate(v.content, 480) }}</pre>
+                    }
+
+                    <div class="version-row-actions">
+                      <!-- CORE-only button matrix (enforcement evidence):
+                           Approve/Reject = CORE pending_approval ONLY.
+                           Edit/Delete    = CORE draft|pending_approval ONLY.
+                           Set Selection  = CORE approved ONLY.
+                           MEMORY rows    = view-only (View Diff). -->
+                      @if (canApprove(v)) {
+                        <button mat-flat-button color="primary"
+                                (click)="onApprove(v)"
+                                class="approve-btn"
+                                data-test="approve-btn">
+                          <mat-icon>check</mat-icon>
+                          Approve
+                        </button>
+                        <button mat-stroked-button color="warn"
+                                (click)="onReject(v)"
+                                class="reject-btn"
+                                data-test="reject-btn">
+                          <mat-icon>close</mat-icon>
+                          Reject
+                        </button>
+                      }
+                      @if (canSubmit(v)) {
+                        <button mat-stroked-button
+                                (click)="onSubmitForApproval(v)"
+                                class="submit-for-approval-btn"
+                                matTooltip="Submit for human approval">
+                          <mat-icon>send</mat-icon>
+                          Submit for approval
+                        </button>
+                      }
+                      @if (canEdit(v)) {
+                        <button mat-stroked-button (click)="onEdit(v)" [disabled]="editSubmitting()" class="edit-btn">
+                          <mat-icon>edit</mat-icon>
+                          Edit
+                        </button>
+                      }
+                      @if (canDelete(v)) {
+                        <button mat-stroked-button color="warn" (click)="onDelete(v)" class="delete-btn">
+                          <mat-icon>delete</mat-icon>
+                          Delete
+                        </button>
+                      }
+                      @if (canSetSelection(v)) {
+                        <button mat-stroked-button color="accent"
+                                (click)="onSetSelection(v)"
+                                [disabled]="selectingId() === v.version_id"
+                                class="select-btn"
+                                matTooltip="Move the per-key one-selection pointer to this version">
+                          <mat-icon>verified</mat-icon>
+                          @if (selectingId() === v.version_id) { Setting… } @else { Set as Selected }
+                        </button>
+                      }
+                      <button mat-stroked-button (click)="onViewDiff(v)" class="diff-btn">
+                        <mat-icon>compare</mat-icon>
+                        View Diff
+                      </button>
+                      @if (isMemoryRow(v)) {
+                        <span class="memory-badge" matTooltip="MEMORY-class rows are transition-free and not editable.">
+                          <mat-icon>memory</mat-icon>
+                          MEMORY · view only
+                        </span>
+                      }
+                    </div>
+                  }
+                </div>
+              }
+            </div>
+          </mat-card>
+        }
+      </div>
+    }
+  </div>
+
+  <!-- Diff overlay (persona mode — uses generalized DiffViewerComponent). -->
+  @if (diffVersionId(); as diffId) {
+    <div class="diff-overlay" (click)="onCloseDiff()">
+      <div class="diff-panel" (click)="$event.stopPropagation()">
+        <div class="diff-panel-header">
+          <span class="diff-panel-title">
+            <mat-icon>compare</mat-icon>
+            {{ diffALabel() }} → {{ diffBLabel() }}
+          </span>
+          <button mat-icon-button (click)="onCloseDiff()" aria-label="Close diff">
+            <mat-icon>close</mat-icon>
+          </button>
+        </div>
+        @if (diffLoading()) {
+          <div class="diff-loading">
+            <mat-progress-spinner mode="indeterminate" diameter="32"></mat-progress-spinner>
+            <span>Loading effective baseline…</span>
+          </div>
+        } @else {
+          <app-diff-viewer
+            mode="persona"
+            [aContent]="diffA()"
+            [bContent]="diffB()"
+            [aLabel]="diffALabel()"
+            [bLabel]="diffBLabel()"
+            [hasChanges]="diffHasChanges()">
+          </app-diff-viewer>
+        }
+      </div>
+    </div>
+  }
+</div>

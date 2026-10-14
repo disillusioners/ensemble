@@ -24,41 +24,49 @@ from .config import Config
 from .ensemble_config import EnsembleConfig
 from .graph import build_instance_graph
 from .loader import PromptCache, load_and_cache_prompt  # re-exported: instance_lifecycle does `from ..manager import load_and_cache_prompt` and tests patch `daemon.manager.load_and_cache_prompt`
+from .loader import (  # Phase A T6 / T7 — re-exported for tests + the A6/C7 failure-counter observability surface
+    resolve_prompts_from_db,
+    set_prompt_version_repo,
+    get_prompt_version_hook_failures,
+)  # noqa: F401
 from .utils import parse_think_tags, serialize_message, find_near_instance, DEFAULT_FUZZY_MATCH_DISTANCE  # noqa: F401  # re-exported for backward compat with tests/tools
 from .persistence import (
     get_instance_messages,
     get_checkpointer,
 )
 from .repositories import (
-    SQLModelInstanceRepository,
-    SQLModelProjectRepository,
-    SQLModelSourceRepository,
-    SQLModelMessageQueueRepository,
-    DatabaseConfig,
-    create_engine_from_config,
-    create_project_repository,
-    create_instance_repository,
-    create_source_repository,
-    create_message_queue_repository,
-    create_mcp_server_repository,
-    create_infra_repository,
-    create_shared_meta_kv_repository,
-    create_skill_repository,
-    create_blueprint_repository,
-    create_blueprint_embedding_repository,
-    create_blueprint_pending_repository,
-    create_skill_lineage_repository,
-    create_skill_embedding_repository,
-    create_skill_usage_repository,
-    create_skill_trigger_repository,
-    create_skill_ab_test_repository,
-    create_skill_bank_repository,
-    create_message_metadata_repository,
-    MessageMetadataRepository,
-    ReportInjectionRepository,
-    InstanceUiPrefsRepository,
-    ServiceRepo,
-)
+        SQLModelInstanceRepository,
+        SQLModelProjectRepository,
+        SQLModelSourceRepository,
+        SQLModelMessageQueueRepository,
+        DatabaseConfig,
+        create_engine_from_config,
+        create_project_repository,
+        create_instance_repository,
+        create_source_repository,
+        create_message_queue_repository,
+        create_mcp_server_repository,
+        create_infra_repository,
+        create_shared_meta_kv_repository,
+        create_skill_repository,
+        create_blueprint_repository,
+        create_message_metadata_repository,
+        create_prompt_version_repository,
+        create_custom_agent_config_repository,
+        create_blueprint_embedding_repository,
+        create_blueprint_pending_repository,
+        create_skill_lineage_repository,
+        create_skill_embedding_repository,
+        create_skill_usage_repository,
+        create_skill_trigger_repository,
+        create_skill_ab_test_repository,
+        create_skill_bank_repository,
+        PromptVersionRepository,
+        MessageMetadataRepository,
+        ReportInjectionRepository,
+        InstanceUiPrefsRepository,
+        ServiceRepo,
+    )
 from .repositories.task.repository import (
     TaskRepository,
     _capped_doomed_id_repr,
@@ -120,6 +128,7 @@ from .services.blueprint_matcher import BlueprintMatcher
 from .services.blueprint_rate_limiter import BlueprintRateLimiter
 from .services.blueprint_write_service import BlueprintWriteService
 from .services.skill_injection_service import SkillInjectionService
+from .services.prompt_version_service import PromptVersionService
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
 from .services.skill_job_dispatcher import SkillJobDispatcher
@@ -1171,6 +1180,73 @@ class InstanceManager:
         self._skill_bank_repo = create_skill_bank_repository(
             engine=self._engine, create_tables=False
         )
+
+        # Prompt-version repository + service — Phase A of the
+        # agent-prompt-immutability commission (T5). The repo is
+        # held next to the skill_bank_repo (manager.py:1171-1173)
+        # and the service is manager-owned (SkillStoreService
+        # pattern at manager.py:111-122) so inner_soul +
+        # agent_mother rewrite paths and future router endpoints
+        # can reach it without app.state wiring. The two
+        # brand-new tables (prompt_versions + prompt_audit_events)
+        # are created via SQLModel.metadata.create_all at manager
+        # boot (registered when the repositories package is
+        # imported above); the explicit per-model create_all calls
+        # in api.py lifespan (next to the StoredWatch precedent)
+        # cover engines whose manager-level create_all ran before
+        # the model module was imported. The .sql migration file
+        # (20261013_214000_create_prompt_versions.sql) covers
+        # fresh SQLite via the MigrationRunner.
+        self._prompt_version_repo = create_prompt_version_repository(
+            engine=self._engine, create_tables=False
+        )
+        self._prompt_version_service = PromptVersionService(
+            repo=self._prompt_version_repo
+        )
+
+        # Phase C — User Directive #5A custom-agent config repository.
+        # Sibling of ``_prompt_version_repo`` — same construction
+        # pattern (``engine=``, ``create_tables=False`` — the api
+        # lifespan covers create_all; the .sql migration covers
+        # SQLite). The router's POST /api/custom-agents / DELETE
+        # endpoints reach it via ``manager._custom_agent_config_repo``
+        # (the SkillStoreService-style manager-owned pattern at
+        # ``manager.py:1171-1213``).
+        #
+        # CONSTRUCTION ORDER (residual-fix cluster C, 2026-10-14):
+        # MUST be assigned BEFORE ``_custom_agent_lifecycle_service``
+        # below — the service constructor consumes the repo
+        # (``config_repo=self._custom_agent_config_repo``); assigning
+        # it after the service was a use-before-assign that raised
+        # AttributeError on every full ``InstanceManager`` boot.
+        self._custom_agent_config_repo = create_custom_agent_config_repository(
+            engine=self._engine, create_tables=False
+        )
+
+        # Phase C — User Directive #5A custom-agent lifecycle
+        # service. Owns the wide-transaction coordination between
+        # ``_custom_agent_config_repo`` + ``_prompt_version_repo``
+        # (the R-A1 atomicity invariant: config row + v1 versions
+        # + audit rows all commit in one ``engine.begin()``).
+        # Constructed AFTER ``_prompt_version_repo`` — the
+        # service borrows the prompt-version repo's
+        # ``create_initial_approved_v1`` helper for the v1 rows.
+        from .services.custom_agent_lifecycle_service import (
+            CustomAgentLifecycleService,
+        )
+        self._custom_agent_lifecycle_service = CustomAgentLifecycleService(
+            config_repo=self._custom_agent_config_repo,
+            prompt_version_repo=self._prompt_version_repo,
+        )
+        # Phase A T6 / T7: register the repo with the loader so the
+        # ``load_and_cache_prompt`` hook can lazily look it up. The
+        # loader MUST NOT import the repository class at module load
+        # (zero-DB-imports invariant — A6/C7); the manager is the
+        # sole writer to this module-level reference. Idempotent; the
+        # loader's setter overwrites on each manager re-init (e.g. in
+        # tests).
+        from . import loader as _loader_module
+        _loader_module.set_prompt_version_repo(self._prompt_version_repo)
 
         # NEW: Session repository for session management
         # Must be created before SourceRegistry for scheduler session mode
@@ -7423,6 +7499,32 @@ class InstanceManager:
                 "ALTER COLUMN expected_bytes TYPE bigint;\n"
                 "    END IF;\n"
                 "END $$\n"
+            ),
+            # prompt_versions.artifact_class (User Directive #3 + #5B,
+            # 2026-10-14, RESOLUTION-CORE — the CORE/MEMORY class
+            # model). NOT NULL DEFAULT 'CORE' — the conservative
+            # default is the safe bucket (every pre-directive row is
+            # implicitly CORE; the loader's class-aware resolution is
+            # already gated on ``artifact_class`` so the default keeps
+            # the wire correct on legacy data without an
+            # application-side backfill). Fresh Postgres databases get
+            # the column from ``SQLModel.metadata.create_all()`` via
+            # the ``PromptVersion`` SQLModel declaration at
+            # ``daemon/repositories/prompt_version/models.py``;
+            # existing databases need the ADD COLUMN here. The SQLite
+            # counterpart lives at
+            # ``daemon/migrations/versions/20261014_013702_alter_prompt_versions_add_artifact_class.sql``
+            # — an ALTER + CASE-backfill migration (the column is NOT
+            # in the original 20261013_214000 table-create file). The
+            # ``TEXT`` type mirrors the model (``String``) — NOT NULL
+            # DEFAULT keeps the conservative bucket populated, and the
+            # companion UPDATE stamps MEMORY-class rows for pre-existing
+            # dev DBs (artifact IN ('memory','user','growth') or
+            # LIKE 'memories/%' → 'MEMORY'; everything else stays
+            # 'CORE').
+            (
+                "ALTER TABLE prompt_versions ADD COLUMN IF NOT EXISTS "
+                "artifact_class TEXT NOT NULL DEFAULT 'CORE'"
             ),
         ]
         with self._engine.begin() as conn:

@@ -2090,17 +2090,26 @@ class InstanceLifecycleService:
         # Load MCP tool names for prompt generation (needed before creating tools)
         # This gets the tool names from the MCP service cache (pre-loaded by spawn_instance_with_mcp)
         mcp_tool_names = self._get_mcp_tool_names(instance_id)
-        
+
         # Load and cache prompt using resolved path (pass MCP tool names for category expansion)
         # Import from manager to pick up test patches
         from ..manager import load_and_cache_prompt
         agent_path = Path(resolved_agent_dir)
+        # Phase C — User Directive #5A. Custom agents are
+        # DB-born (R-A2 ruling: NO on-disk prompt files); the
+        # loader's ``is_custom_agent`` flag flips the
+        # resolution-side hook's empty-state posture to
+        # ``NoPromptContentError`` so a zero-versions custom
+        # surfaces the actionable spawn-time error instead of
+        # silently serving an empty prompt.
+        _is_custom = bool(getattr(metadata, "is_custom", False))
         system_prompt, token_count = load_and_cache_prompt(
             resolved_agent_id,
             agent_path,
             prompt_cache,
             mcp_tool_names,
             version_tag=effective_version_tag,
+            is_custom_agent=_is_custom,
         )
 
         # Apply the post-cache append chain for context, metadata, time,
@@ -4558,12 +4567,21 @@ class InstanceLifecycleService:
         # Import from manager to pick up test patches
         from ..manager import load_and_cache_prompt
         agent_path = Path(agent_meta.path)
+        # Phase C — User Directive #5A. Restore-path parity with
+        # the spawn path: thread ``is_custom_agent`` so a
+        # restored custom instance surfaces the R-A2 empty-state
+        # ``NoPromptContentError`` on a zero-versions DB just like
+        # a fresh spawn does.
+        _is_custom_restore = bool(
+            getattr(agent_meta, "is_custom", False)
+        )
         system_prompt, token_count = load_and_cache_prompt(
             resolved_agent_id,
             agent_path,
             prompt_cache,
             mcp_tool_names,
             version_tag=resolved_tag,
+            is_custom_agent=_is_custom_restore,
         )
 
         # Apply the post-cache append chain for context, metadata, time,

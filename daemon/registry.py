@@ -265,6 +265,40 @@ class AgentMetadata(BaseModel):
     color: str = Field(default="accent-blue", description="Color theme")
     version: str | None = Field(default=None, description="Agent version")
     path: Path = Field(..., description="Resolved absolute path to agent directory")
+    # Phase C — User Directive #5A (R-A2 lifecycle ruling).
+    # Custom agents are DB-born; the on-disk ``agents/<dir>/``
+    # form does NOT exist for them. The hybrid registry
+    # surfaces customs as ``AgentMetadata`` instances with
+    # ``is_custom=True``; ``path`` carries a sentinel that
+    # ``Path.exists()`` returns False for (``<custom-agent>/<id>``
+    # — POSIX-invalid characters guarantee no real dir is ever
+    # matched). Loaders / spawn paths thread ``is_custom`` to
+    # decide whether the resolution hook (``resolve_prompts_from_db``)
+    # runs with the empty-state flip (R-A2 hook at
+    # ``daemon/loader.py:resolve_prompts_from_db``).
+    is_custom: bool = Field(
+        default=False,
+        description=(
+            "True when this metadata was synthesized from a "
+            "custom_agent_configs row (User Directive #5A, "
+            "DB-born; no on-disk file)."
+        ),
+    )
+    # Phase C — tombstone marker for soft-deleted customs. The
+    # hybrid registry's discover() sweep sets this on the
+    # in-memory AgentMetadata so caller-side filters can hide
+    # deleted rows from operator-facing listings WITHOUT an
+    # extra DB roundtrip. NOT serialized into
+    # ``custom_agent_configs`` directly; rebuilt from the
+    # ``deleted_at`` column at discovery time.
+    is_custom_deleted: bool = Field(
+        default=False,
+        description=(
+            "True for soft-deleted customs (R-A2 lifecycle trash; "
+            "custom_agent_configs.deleted_at IS NOT NULL). Hidden "
+            "from active listings; visible to the audit surface."
+        ),
+    )
     system: bool = Field(default=False, description="Whether this is a system agent")
     capabilities: list[str] = Field(default_factory=list, description="Agent capabilities")
     tags: list[str] = Field(default_factory=list, description="Agent tags")
@@ -530,6 +564,16 @@ class AgentRegistry:
     """Centralized registry mapping agent_id to AgentMetadata."""
 
     _agents: dict[str, AgentMetadata]
+    # Phase C — User Directive #5A (R-A2 lifecycle ruling).
+    # Custom agents are DB-born and live in
+    # ``custom_agent_configs``; the registry discovers them at
+    # ``discover()`` time and merges them into ``_agents`` with
+    # ``is_custom=True``. ``_custom_agents`` is the source-of-
+    # truth subscript for customs only (lets us re-discover the
+    # DB rows without rebuilding the file-scan side). The two
+    # dicts share the ``agent_id`` keyspace; the collision rule
+    # is documented at :meth:`_register_custom_agent`.
+    _custom_agents: dict[str, AgentMetadata]
     _agents_dir: Path
 
     def __init__(self, agents_dir: Path) -> None:
@@ -548,6 +592,13 @@ class AgentRegistry:
         # ``None`` (for the base) and/or one or more tag strings, preserving
         # discovery order without duplicates.
         self._versions: dict[str, list[str | None]] = {}
+        # Phase C — custom-agent namespace (DB-born; User Directive
+        # #5A / R-A2 ruling). Populated by ``discover_custom_agents``
+        # which the daemon lifespan calls AFTER the file-scan
+        # ``discover()`` so file-defined rows always shadow a
+        # same-named custom row (the collision rule documented at
+        # ``_register_custom_agent``).
+        self._custom_agents: dict[str, AgentMetadata] = {}
 
     def discover(self) -> None:
         """Scan agents directory and populate registry."""
@@ -742,13 +793,24 @@ class AgentRegistry:
     def get(self, agent_id: str) -> AgentMetadata | None:
         """Get agent metadata by ID.
 
+        Hybrid resolution: returns file-defined rows first;
+        falls through to custom-agent rows (R-A2). File-defined
+        wins — a same-named custom agent is shadowed by the
+        file-defined one. The reverse (file-defined shadowed by
+        a same-named custom) is FORBIDDEN by
+        ``_register_custom_agent`` at insert time, so the
+        shadowing here is one-directional by construction.
+
         Args:
             agent_id: The agent identifier
 
         Returns:
             AgentMetadata if found, None otherwise
         """
-        return self._agents.get(agent_id)
+        meta = self._agents.get(agent_id)
+        if meta is not None:
+            return meta
+        return self._custom_agents.get(agent_id)
 
     def get_resolved(
         self,
@@ -818,6 +880,14 @@ class AgentRegistry:
     def resolve_pure_id(self, agent_id: str) -> str | None:
         """Check if a string is a valid agent ID (with alias support).
 
+        Hybrid resolution: file-defined first, then custom-agent
+        rows. The two namespaces are disjoint at the wire form
+        (``custom:<name>`` for customs vs. plain dir-derived ids
+        for file-defined; the helper ``is_custom_agent_id``
+        discriminates) so no real collision exists — but the
+        ordering is "file-defined wins" defensively so a
+        same-named custom row never shadows a real file agent.
+
         Args:
             agent_id: The string to check
 
@@ -830,6 +900,14 @@ class AgentRegistry:
             return canonical
         # Also check the original in case alias maps to something not yet loaded
         if agent_id in self._agents:
+            return agent_id
+        # Phase C — custom-agent namespace fallback. The wire form
+        # ``"custom:foo"`` cannot collide with a real dir-derived
+        # id; ``is_custom_agent_id`` is the namespace guard. The
+        # file-defined-wins precedence is preserved (above) so a
+        # future reserved ``custom:foo`` couldn't shadow a
+        # file-defined ``developer`` etc.
+        if agent_id in self._custom_agents:
             return agent_id
         return None
 
@@ -894,12 +972,55 @@ class AgentRegistry:
         return None
 
     def list_all(self) -> list[AgentMetadata]:
-        """List all registered agents.
+        """List all registered agents (file-defined ∪ custom).
+
+        Phase C — surfaces BOTH file-defined (``_agents``) and
+        custom-agent (``_custom_agents``) entries. The returned
+        list is sorted by ID (the agent's wire identity) so
+        callers get a stable ordering regardless of discovery
+        source. Soft-deleted customs (``is_custom_deleted=True``)
+        are EXCLUDED here — the operator-facing list hides them;
+        the audit / graveyard surface uses
+        :meth:`list_all_custom` directly.
 
         Returns:
-            List of all AgentMetadata objects, sorted by ID
+            List of all AgentMetadata objects (file-defined +
+            custom) sorted by ID.
         """
-        return sorted(self._agents.values(), key=lambda a: a.id)
+        combined = list(self._agents.values())
+        combined.extend(
+            m for m in self._custom_agents.values()
+            if not getattr(m, "is_custom_deleted", False)
+        )
+        return sorted(combined, key=lambda a: a.id)
+
+    def list_all_custom(
+        self,
+        *,
+        include_deleted: bool = False,
+    ) -> list[AgentMetadata]:
+        """List the custom-agent subset only.
+
+        Phase C — narrow surface for the audit / graveyard;
+        the operator-facing API uses :meth:`list_all` which
+        applies the soft-delete filter.
+
+        Args:
+            include_deleted: When ``True``, also return rows
+                whose ``is_custom_deleted=True`` (the
+                soft-deleted rows from the audit / trash
+                surface).
+
+        Returns:
+            List of custom-agent AgentMetadata sorted by ID.
+        """
+        rows = list(self._custom_agents.values())
+        if not include_deleted:
+            rows = [
+                m for m in rows
+                if not getattr(m, "is_custom_deleted", False)
+            ]
+        return sorted(rows, key=lambda a: a.id)
 
     def get_version(
         self,
@@ -1043,6 +1164,155 @@ class AgentRegistry:
                 if base_id not in agents_with_skill:
                     agents_with_skill.append(base_id)
         return agents_with_skill
+
+    # ========================================================================
+    # Phase C — User Directive #5A (R-A2 lifecycle): custom-agent discovery
+    # ========================================================================
+
+    def discover_custom_agents(
+        self,
+        config_rows,
+        config_repo_factory=None,
+    ) -> int:
+        """Discover custom-agent rows from the DB and merge them.
+
+        Phase C (User Directive #5A, 2026-10-14, R-A2 ruling) —
+        hybrid discovery sweep. The daemon's ``api.py`` lifespan
+        calls this AFTER ``discover()`` (the file-scan side)
+        completes, passing a ``CustomAgentConfigRepository``
+        instance OR a pre-fetched row iterable.
+
+        Hybrid collision rule (file-defined wins):
+
+        1. A custom agent's wire identity is
+           ``"custom:<user-chosen-name>"`` (the
+           :data:`CUSTOM_AGENT_ID_PREFIX` prefix). The
+           tag regex (``_TAG_PATTERN``) only restricts
+           the charset INSIDE the ``[version_tag]``
+           brackets, so a plain dir named e.g.
+           ``custom:foo/`` would actually pass the
+           parser as-is (base id ``custom:foo``, no
+           tag). The provably disjoint guarantee comes
+           from the defense-in-depth collision check
+           below at step 2 (file-defined wins) — not
+           from the tag regex.
+        2. As defense-in-depth — and because the prefix could
+           theoretically collide with a hypothetical reserved
+           ``agents/custom:<name>/`` dir — the merger ALSO
+           checks ``agent_id`` against the file-defined
+           ``_agents`` dict; a real file-defined id wins
+           (the custom row's metadata is dropped with a
+           WARN log).
+        3. Soft-deleted customs (``deleted_at IS NOT NULL``)
+           carry ``is_custom_deleted=True`` on the synthesized
+           AgentMetadata so the operator-facing
+           :meth:`list_all` can hide them; the audit /
+           graveyard surface uses :meth:`list_all_custom`
+           with ``include_deleted=True``.
+
+        Args:
+            config_rows: Iterable of
+                :class:`CustomAgentConfig` rows (typically
+                ``config_repo.list_active()``); the helper
+                accepts the rows themselves rather than a
+                repo so the manager-driven lifespan path can
+                pre-fetch once and reuse the result.
+            config_repo_factory: Optional factory function
+                ``() -> CustomAgentConfigRepository``. When
+                ``config_rows`` is ``None``, the helper uses
+                the factory to load the active rows itself.
+
+        Returns:
+            Number of custom-agent rows successfully
+            registered (post-collision-filter).
+        """
+        if config_rows is None:
+            if config_repo_factory is None:
+                raise ValueError(
+                    "discover_custom_agents requires either "
+                    "config_rows or config_repo_factory"
+                )
+            config_repo = config_repo_factory()
+            config_rows = config_repo.list_active()
+        else:
+            # Allow callers that lazy-pass ``None`` from
+            # ``config_repo.list_active()`` (no-op on a
+            # missing repo) — treat as a no-op discover.
+            try:
+                config_rows = list(config_rows)
+            except TypeError:
+                return 0
+
+        # Lazy import to keep registry importable when the
+        # custom-agent package isn't yet on the path (e.g.,
+        # a partial registry test fixture).
+        from .repositories.custom_agent_configs import (
+            CustomAgentConfigRepository,
+            is_custom_agent_id,
+        )
+
+        registered = 0
+        for row in config_rows:
+            agent_id = row.agent_id
+            if not is_custom_agent_id(agent_id):
+                logger.warning(
+                    f"custom_agent_configs row agent_id={agent_id!r} "
+                    f"is not in the custom namespace; skipping"
+                )
+                continue
+            if agent_id in self._agents:
+                # File-defined wins (collisions are FORBIDDEN
+                # at the router boundary, but the helper still
+                # defends in case a future prefix-shift slipped
+                # through).
+                logger.warning(
+                    f"custom_agent id {agent_id!r} collides with "
+                    f"a file-defined agent; file-defined wins; "
+                    f"skipping custom row"
+                )
+                continue
+            try:
+                meta_dict = (
+                    CustomAgentConfigRepository.to_metadata_shape(row)
+                )
+                # Convert to AgentMetadata — use the
+                # ``is_custom_deleted`` from the row's
+                # ``deleted_at`` column.
+                meta_dict["path"] = Path(
+                    f"<custom-agent>/{agent_id}"
+                )
+                meta_dict["is_custom_deleted"] = (
+                    row.deleted_at is not None
+                )
+                meta = AgentMetadata(**meta_dict)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"discover_custom_agents: failed to "
+                    f"synthesize AgentMetadata for "
+                    f"agent_id={agent_id!r} ({type(exc).__name__}): "
+                    f"{exc}; skipping"
+                )
+                continue
+
+            self._custom_agents[agent_id] = meta
+            registered += 1
+
+        logger.info(
+            f"AgentRegistry.discover_custom_agents: registered "
+            f"{registered} custom agent(s)"
+        )
+        return registered
+
+    def clear_custom_agents(self) -> None:
+        """Clear all registered custom-agent rows.
+
+        Companion to :meth:`discover_custom_agents` — useful
+        for test fixtures + admins that mutate the
+        ``custom_agent_configs`` table out-of-band and need
+        the registry to re-discover on the next sweep.
+        Idempotent; no-op when no customs are registered.
+        """
+        self._custom_agents.clear()
 
     def validate_tool_configs(self) -> list[str]:
         """Validate all agents' tool configs. Returns list of warning messages.

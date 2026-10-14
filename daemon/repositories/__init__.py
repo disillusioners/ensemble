@@ -113,6 +113,21 @@ from .blueprint.pending_models import BlueprintPendingUpdate
 from .blueprint.repository import BlueprintRepository
 from .blueprint.pending_repository import BlueprintPendingRepository
 
+# Prompt-version package (Phase A of the agent-prompt-immutability
+# commission). Re-export the models so SQLModel.metadata.create_all()
+# (called from daemon/manager.py) registers the prompt_versions +
+# prompt_audit_events tables on fresh PostgreSQL databases. Fresh
+# SQLite databases pick the tables up from the MigrationRunner via
+# the 20261013_214000_create_prompt_versions.sql migration. Brand-
+# new tables — no _ensure_postgres_columns needed.
+from .prompt_version import (
+    PROMPT_ARTIFACTS,
+    PROMPT_AUDIT_EVENT_TYPES,
+    PROMPT_STATES,
+    PromptAuditEvent,
+    PromptVersion,
+)
+
 # Service-tool repository (service-tool Phase 1.A store track).
 # Imported here so ``SQLModel.metadata.create_all()`` (called from
 # ``daemon/manager.py``) registers the ``service_tracking`` table on
@@ -127,6 +142,30 @@ from .blueprint.pending_repository import BlueprintPendingRepository
 # F3 interface) — async callers wrap calls in ``asyncio.to_thread``.
 from .service_tool.repository import ServiceRepo
 from .service_tool.models import ServiceTracking, ServiceStatus
+
+# Prompt-version repository (Phase A of the agent-prompt-immutability
+# commission). Re-exported here so the factory function below can
+# construct it from the shared engine.
+from .prompt_version.repository import PromptVersionRepository
+
+# Custom-agent config package (Phase C of the agent-prompt-
+# immutability commission, User Directive #5A — 2026-10-14).
+# Re-exported here so ``SQLModel.metadata.create_all()`` registers
+# the ``custom_agent_configs`` table on fresh PostgreSQL databases
+# and the factory function below can construct it from the shared
+# engine. Fresh SQLite databases pick the table up from the
+# MigrationRunner via the
+# ``20261014_040000_create_custom_agent_configs.sql`` migration.
+# Brand-new table — no _ensure_postgres_columns needed
+# (stored_watches / prompt_versions precedent).
+from .custom_agent_configs import (
+    CUSTOM_AGENT_ID_PREFIX,
+    CustomAgentConfig,
+    CustomAgentConfigRepository,
+    CustomAgentIdError,
+    is_custom_agent_id,
+    make_custom_agent_id,
+)
 
 # Factory functions
 from .factory import (
@@ -153,6 +192,8 @@ from .factory import (
     create_skill_ab_test_repository,
     create_skill_bank_repository,
     create_message_metadata_repository,
+    create_prompt_version_repository,
+    create_custom_agent_config_repository,
     run_migrations,
 )
 
@@ -248,6 +289,13 @@ __all__ = [
     "ServiceRepo",
     "ServiceTracking",
     "ServiceStatus",
+    # Prompt-version (Phase A of agent-prompt-immutability)
+    "PromptVersionRepository",
+    "PromptVersion",
+    "PromptAuditEvent",
+    "PROMPT_STATES",
+    "PROMPT_AUDIT_EVENT_TYPES",
+    "PROMPT_ARTIFACTS",
     # Factory
     "DatabaseConfig",
     "create_engine_from_config",
@@ -272,5 +320,7 @@ __all__ = [
     "create_skill_ab_test_repository",
     "create_skill_bank_repository",
     "create_message_metadata_repository",
+    "create_prompt_version_repository",
+    "create_custom_agent_config_repository",
     "run_migrations",
 ]

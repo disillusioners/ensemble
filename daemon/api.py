@@ -117,6 +117,7 @@ logger = logging.getLogger(__name__)
 # Import routers
 from daemon.routers import (
     agents_router,
+    custom_agents_router,
     database_router,
     instances_router,
     jobs_router,
@@ -142,6 +143,7 @@ from daemon.routers import (
     maintenance_router,        # /api/maintenance (Section 1: checkpoint cleanup — Phase 1)
     missions_router,          # /api/missions (M4-i pull-forward: mission read-model HTTP surface)
     tmp_images_router,        # /api/tmp_images (Phase 1: clipboard-image-chat upload+serve)
+    prompts_router,           # /api/prompts (Phase B T5: agent-prompt-immutability approval REST)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
@@ -726,6 +728,196 @@ async def lifespan(app: FastAPI):
     StoredWatch.metadata.create_all(manager.engine)
     stored_watch_repo = StoredWatchRepository(engine=manager.engine)
     manager._stored_watch_repo = stored_watch_repo
+
+    # Phase A of agent-prompt-immutability: prompt_versions +
+    # prompt_audit_events (R2 mitigation). Brand-new tables — the
+    # .sql migration runner applies them on SQLite, but we
+    # explicitly create_all here to cover engines whose
+    # manager-level create_all ran before the prompt_version model
+    # module was imported (same StoredWatch precedent above).
+    # The fresh-table contract (no _ensure_postgres_columns mirror
+    # needed) is documented in the migration header + models.
+    from daemon.repositories.prompt_version.models import (
+        PromptAuditEvent,
+        PromptTemplateBaseline,
+        PromptVersion,
+    )
+    PromptVersion.metadata.create_all(manager.engine)
+    PromptAuditEvent.metadata.create_all(manager.engine)
+
+    # Phase C — User Directive #5A custom-agent config table
+    # (``custom_agent_configs`` — the R-A1/R-A2 backing store).
+    # Brand-new table; same create_all precedent as
+    # PromptVersion / PromptAuditEvent / PromptTemplateBaseline
+    # above. The .sql migration handles SQLite; the model
+    # handles PG. No ``_ensure_postgres_columns`` mirror needed.
+    from daemon.repositories.custom_agent_configs.models import (
+        CustomAgentConfig,
+    )
+    CustomAgentConfig.metadata.create_all(manager.engine)
+
+    # User Directive #5B (2026-10-14, RESOLUTION-CORE) —
+    # ``prompt_template_baselines`` is the third table in the
+    # prompt-version family: stores the shipped-template sha256
+    # per (agent_id, version_tag, artifact) so the R-B2 CORE-only
+    # auto-reset protocol can detect drift between shipped and
+    # recorded content. Brand-new table (same create_all
+    # precedent as PromptVersion / PromptAuditEvent above).
+    # No ``_ensure_postgres_columns`` mirror needed — the
+    # .sql migration handles SQLite, the model handles PG.
+    PromptTemplateBaseline.metadata.create_all(manager.engine)
+
+    # User Directive #5B (2026-10-14) — wire the
+    # ``BaselineRepository`` + ``BaselineService`` onto the manager.
+    # The repo + service sit next to the existing
+    # ``_prompt_version_repo`` / ``_prompt_version_service`` (the
+    # ``SkillStoreService``-style manager-owned pattern at
+    # ``manager.py:1171-1204``); sibling callers + the boot orchestrator
+    # below reach them through ``manager._baseline_service``.
+    from daemon.repositories.prompt_version.repository import (
+        BaselineRepository,
+    )
+    from daemon.services.baseline_service import BaselineService
+    manager._baseline_repo = BaselineRepository(engine=manager.engine)
+    manager._baseline_service = BaselineService(
+        repo=manager._baseline_repo,
+        prompt_version_repo=getattr(manager, "_prompt_version_repo", None),
+    )
+
+    # User Directive #5B (2026-10-14, RESOLUTION-CORE) — boot
+    # auto-reset wiring. Run the two pc-core handoffs
+    # (record_initial_baselines_for_all_predefined_agents then
+    # detect_drift_for_all_predefined_agents) at the next ordered
+    # site AFTER the BaselineService is wired. Non-fatal wrapper:
+    # WARN + continue — NEVER block boot. The detect pass is
+    # allow-stale parity (drift is reported, not gating). A
+    # missing registry (e.g. cold-booted dev hosts with no
+    # predefined-agent set) short-circuits to an empty call.
+    try:
+        from daemon.registry import get_registry, _parse_agent_dir_name
+        from daemon.repositories.prompt_version.repository import (
+            ActorContext, AUTH_METHOD_INTERNAL,
+        )
+        registry = get_registry()
+        # Walk list_all — base + tagged versions in one call. The
+        # list shape is ``[(base_id, None), ..., (base_id, "v2"),
+        # ...]``; the BaselineService consumes version_tag=None
+        # (normalized to "" inside the repo) AND tagged versions
+        # in the same call. Custom agents are NOT in the registry
+        # (they are user-created at runtime); the boot walker is
+        # registry-only so the is_custom_agent flag is moot here.
+        predefined: list[tuple[str, str | None]] = []
+        for meta in registry.list_all():
+            base_id, version_tag = _parse_agent_dir_name(meta.id)
+            predefined.append((base_id, version_tag))
+        predefined.sort(key=lambda kv: (kv[0], kv[1] or ""))
+
+        if predefined and manager._baseline_service is not None:
+            # Resolve agents_root deterministically — the path
+            # that hosts the versioned prompt templates.
+            from pathlib import Path as _P
+            try:
+                agents_root = (registry._agents_dir).resolve()
+            except Exception:
+                # Fallback: walk the registry's first agent's
+                # path's parent.parent.
+                if registry.list_all():
+                    agents_root = (
+                        registry.list_all()[0].path.parent.parent
+                    ).resolve()
+                else:
+                    agents_root = None
+
+            if agents_root is not None:
+                # Normalize None → "" for the service signature.
+                predefined_normalized = [
+                    (a, t or "") for a, t in predefined
+                ]
+                # Synthetic boot actor — the "internal" lane is
+                # reserved for in-process submitters; the boot
+                # walker is in-process (lifespan) so internal is
+                # correct. The instance_id/agent_id triple is
+                # required by the ActorContext constructor
+                # (anti-forgery, R3 source-forgery ticket
+                # 257488dc). The "boot" subject/agent_id is a
+                # stable sentinel for the audit lineage.
+                boot_actor = ActorContext(
+                    subject="boot:auto-reset",
+                    auth_method=AUTH_METHOD_INTERNAL,
+                    instance_id="boot:auto-reset",
+                    agent_id="boot",
+                    version_tag="",
+                )
+                seed_results = await manager._baseline_service \
+                    .record_initial_baselines_for_all_predefined_agents(
+                        predefined_normalized,
+                        agents_root,
+                        actor=boot_actor,
+                    )
+                drift_results = await manager._baseline_service \
+                    .detect_drift_for_all_predefined_agents(
+                        predefined_normalized,
+                        agents_root,
+                        actor=boot_actor,
+                    )
+                logger.info(
+                    f"[Startup] baseline auto-reset: seeded "
+                    f"{sum(len(v) for v in seed_results.values())} "
+                    f"row(s), drift hits="
+                    f"{sum(len(v) for v in drift_results.values())}"
+                )
+    except Exception as baseline_wire_err:  # noqa: BLE001
+        logger.warning(
+            "[Startup] baseline auto-reset wiring skipped (non-fatal): "
+            "%s: %s",
+            type(baseline_wire_err).__name__,
+            baseline_wire_err,
+        )
+
+    # Phase C — User Directive #5A (R-A2 lifecycle ruling). Merge
+    # ``custom_agent_configs`` rows into the global registry so the
+    # ``/api/agents`` listing, ``resolve_to_id``, and the loader's
+    # ``resolve_prompts_from_db`` hook (the empty-state posture
+    # ``is_custom_agent=True`` flip) can see them. The custom
+    # sweep runs AFTER the file-scan ``discover()`` so file-defined
+    # rows always shadow a hypothetical same-name custom row
+    # (the collision rule documented at
+    # ``daemon/registry.py:AgentRegistry.discover_custom_agents``).
+    # Non-fatal wrap — a custom-agent DB read failure MUST NOT
+    # block boot; loud WARN + continue (the R-B4 non-fatal posture).
+    try:
+        from daemon.registry import get_registry as _get_registry_cc
+        registry_cc = _get_registry_cc()
+        registered = registry_cc.discover_custom_agents(
+            config_rows=manager._custom_agent_config_repo.list_active(),
+        )
+        logger.info(
+            f"[Startup] custom-agent discovery: registered {registered}"
+        )
+    except Exception as custom_discover_err:  # noqa: BLE001
+        logger.warning(
+            "[Startup] custom-agent discovery skipped (non-fatal): "
+            "%s: %s",
+            type(custom_discover_err).__name__,
+            custom_discover_err,
+        )
+
+    # Phase A T13 (S9 / D-BASH-ESCAPE accepted-risk control): prompt-artifact
+    # baseline drift check at boot. READ-ONLY compare of the live agents/
+    # tree against the committed agents/.prompt-artifacts.sha256; drift is
+    # operator-visible (WARN) and NEVER boot-blocking (allow-stale policy).
+    # Agents-root resolution + reset seam live in daemon/tools/
+    # prompt_artifacts.py (single source for the versioned set too).
+    try:
+        from daemon.tools.prompt_artifacts import log_baseline_drift_at_boot
+
+        log_baseline_drift_at_boot(logger_=logger)
+    except Exception as baseline_err:  # noqa: BLE001
+        logger.warning(
+            "[Startup] Prompt-artifact drift check failed (non-fatal): %s: %s",
+            type(baseline_err).__name__,
+            baseline_err,
+        )
 
     # Phase 2 (Batch 2) of feature/virtual-job-management-surface:
     # construct the WorkResolverService now that the JobRepository is
@@ -3571,8 +3763,22 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
             "description": "Multi-Agent AI Daemon with LangGraph",
         }
 
-    # Include routers - order matters for route matching
+    # Include routers - order matters for route matching.
+    # Prefix-distinction invariant: /api/agents and
+    # /api/custom-agents are DISTINCT prefixes; keep
+    # custom_agents_router mounted BEFORE any future
+    # /api/agents/* additions so it cannot be silently
+    # shadowed by a more-specific later route.
+    # F1 (overnight 2026-10-14): mounted UNCONDITIONALLY — every
+    # endpoint carries @require_scope (prompts:read|write reuse —
+    # no new scope minted) AND the inline _require_auth_on 503
+    # AUTH_NOT_CONFIGURED gate, so auth-OFF stays fail-closed
+    # (the prompts-family T5/D3 posture). Scope pin lives in the
+    # scope manifest cage (tests/unit/test_router_scope_manifest.py);
+    # registration census pin lives in
+    # tests/integration/test_router_class_manifest.py.
     api_router.include_router(agents_router)        # /api/agents
+    api_router.include_router(custom_agents_router) # /api/custom-agents (Phase C: R-A1/A2 lifecycle)
     api_router.include_router(instances_router)      # /api/instances
     api_router.include_router(messages_router)      # /api/instances/{id}/messages, /api/instances/{id}/events
     api_router.include_router(sources_router)       # /api/sources
@@ -3618,6 +3824,22 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # otherwise send ``GET /api/tmp_images/<id>`` to the
     # index.html fallback (architect phase1-plan.md risk #1).
     api_router.include_router(tmp_images_router)       # /api/tmp_images
+
+    # Phase B / agent-prompt-immutability T5 + T6: the 15-endpoint
+    # prompt-version REST family (per phaseB-plan.md addendum S4
+    # canonical 12-endpoint family + the 3 USER-DIRECTIVE-#2 deltas
+    # 2026-10-14 — PATCH/DELETE /versions/{id}, GET /pending-count).
+    # Mounted UNCONDITIONALLY — the per-endpoint
+    # guard (T5/D3) returns 503 AUTH_NOT_CONFIGURED when auth is OFF,
+    # so the router stays registered even when auth is disabled (the
+    # routes still exist for dev tooling / OpenAPI generation). Scope
+    # pin (prompts:{read,submit,approve,audit,write}) lives in the
+    # scope manifest cage (tests/unit/test_router_scope_manifest.py);
+    # registration census pin lives in
+    # tests/integration/test_router_class_manifest.py. Mounted here
+    # — BEFORE the SPA catch-all (api.py:3641) so Starlette
+    # first-match-wins resolves /api/prompts/* to this router.
+    api_router.include_router(prompts_router)         # /api/prompts (Phase B T5)
 
     # OAuth2 Phase 3 (T3.12 / FR-41): the MCP-KB key-management CRUD —
     # the ONE new OAuth2-human-lane family (§5.6: 30 legacy + 1 new).

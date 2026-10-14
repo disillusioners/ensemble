@@ -60,9 +60,33 @@ def mock_registry(temp_agent):
 
 @pytest.fixture
 def mock_manager():
-    """Create mock InstanceManager."""
+    """Create mock InstanceManager.
+
+    Phase B T7: carries a minimal async stub for the prompt-version
+    service so the soul/user/workflow DB-submission path SUCCEEDS in
+    grammar/compound tests. Real DB composition is pinned in
+    ``tests/test_inner_soul_db.py``.
+    """
     mgr = MagicMock()
     mgr.prompt_cache = MagicMock()
+
+    class _StubRow:
+        version = 1
+        version_id = "stub-version-id"
+        state = "pending_approval"
+
+    class _StubPromptVersionService:
+        def __init__(self):
+            self.memory_calls = []
+        async def create_and_submit(self, agent_id, version_tag, artifact,
+                                    content_or_mutator, actor, *,
+                                    file_fallback=None):
+            return _StubRow()
+        async def create_memory_version(self, agent_id, version_tag, artifact, content, actor):
+            self.memory_calls.append((artifact, content))
+            return _StubRow()
+
+    mgr._prompt_version_service = _StubPromptVersionService()
     return mgr
 
 
@@ -608,14 +632,18 @@ class TestFullCompoundWorkflow:
                 "request": "Today we discussed API design AND We talked about testing strategy"
             })
             
-            memories_after = list(memories_dir.glob("*.md"))
-            new_memories = [f for f in memories_after if f not in memories_before]
-            
-            # Should create at least one new memory (possibly two if both parts processed)
-            assert len(new_memories) >= 1
+            stub = mock_manager._prompt_version_service
+            assert len(stub.memory_calls) >= 1
+            artifact, content = stub.memory_calls[0]
+            assert artifact.startswith("memories/")
+            assert "API design" in content or "testing strategy" in content
 
     def test_compound_mixed_types(self, mock_registry, mock_manager, temp_agent, rag_disabled):
-        """Compound request with mixed types should update appropriate files."""
+        """Compound request with mixed types should submit appropriate drafts.
+
+        Phase B T7 disposition: the identity part submits a soul DB
+        draft (📋 pending grammar); soul.md itself stays untouched.
+        """
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
             
@@ -626,9 +654,10 @@ class TestFullCompoundWorkflow:
                 "request": "My name is TestBot AND User prefers dark mode"
             })
             
-            # Should update soul.md for identity
-            soul_after = soul_file.read_text()
-            assert soul_after != soul_before or "TestBot" in soul_after
+            # Should submit a soul draft for the identity part
+            assert "📋 soul:" in result
+            assert "pending approval" in result
+            assert soul_file.read_text() == soul_before
 
     def test_compound_response_shows_all_parts(self, mock_registry, mock_manager, temp_agent, rag_disabled):
         """Compound response should show all processed parts."""
@@ -655,8 +684,5 @@ class TestFullCompoundWorkflow:
                 "request": "A AND B AND C",
                 "target": "memories"
             })
-            
-            memories_after = list(memories_dir.glob("*.md"))
-            
-            # All parts should go to memories/
-            assert len(memories_after) > len(memories_before)
+            # All parts should go to memories/ (DB-backed path; check stub state)
+            assert len(mock_manager._prompt_version_service.memory_calls) >= 1

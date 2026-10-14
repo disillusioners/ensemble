@@ -81,6 +81,24 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     "/api/snapshots": frozenset({"pd"}),
     "/api/sources": frozenset({"pd"}),  # + mappings_router
     "/api/tmp_images": frozenset({"pd"}),
+    # Phase B / agent-prompt-immutability T6 — the prompts_router
+    # mounts at /api/prompts (the 15-endpoint family: the canonical
+    # 12 per phaseB-plan.md addendum S4 + the 3 USER-DIRECTIVE-#2
+    # deltas 2026-10-14 — PATCH/DELETE /versions/{id},
+    # GET /pending-count). Every route carries an explicit
+    # @require_scope so the family classifies as protected-default
+    # ("pd"); no public/module_lane carve-out (D3 fail-closed posture
+    # guards auth-OFF via per-endpoint 503).
+    "/api/prompts": frozenset({"pd"}),
+    # Phase C / agent-prompt-immutability F1 (overnight, 2026-10-14):
+    # the custom_agents_router mounts at /api/custom-agents (the
+    # canonical R-A1/R-A2 4-endpoint family: POST + GET (list) + GET
+    # (single) + DELETE). Every endpoint carries an explicit
+    # @require_scope prompt:read|write AND an inline 503 AUTH_NOT_
+    # CONFIGURED gate (mirrors the prompts-family S8/D3 posture),
+    # so the family classifies as protected-default ("pd") — the
+    # D3 fail-closed posture is honored at every endpoint.
+    "/api/custom-agents": frozenset({"pd"}),
     "/api/webhooks": frozenset({"module_lane"}),  # FR-40 module lane
     "/api/work": frozenset({"pd"}),
     "/api/workspace": frozenset({"pd"}),
@@ -230,9 +248,15 @@ class TestRouterClassManifest:
                 f"{family}: unknown class tokens {classes - vocabulary}"
             )
         api_families = [f for f in PINNED_MANIFEST_AUTH_ON if f.startswith("/api/")]
-        # The family COUNT is part of the pin: 30 include_router calls
-        # (28 legacy + the 2 auth-gated T3.6 families) collapse onto 25
-        # api_router-owned prefixes (5 routers share a prefix — see the
-        # docstring); /api/health and /api/info are app-level probes and
-        # /api/mcp also carries the two app-level KB Mounts → 27.
-        assert len(api_families) == 27, sorted(api_families)
+        # The family COUNT is part of the pin: 32 include_router calls
+        # (30 unconditional + the 2 auth-gated T3.6 families) collapse
+        # onto 27 api_router-owned prefixes (5 routers share a prefix —
+        # see the docstring); /api/health and /api/info are app-level
+        # probes and /api/mcp also carries the two app-level KB Mounts.
+        # Phase B / agent-prompt-immutability T6 added the
+        # /api/prompts family — the api_families count grew from 27
+        # to 28.
+        # Phase C / agent-prompt-immutability F1 added the
+        # /api/custom-agents family — the api_families count grew
+        # from 28 to 29.
+        assert len(api_families) == 29, sorted(api_families)

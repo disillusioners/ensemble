@@ -16,11 +16,15 @@ The v1 taxonomy (D4.2 — the fine-grained set shipped day 1):
     mcp:read  mcpkb:admin
     snapshot:write  workspace:read
     auth:admin
+    prompts:read  prompts:submit  prompts:approve  prompts:audit  prompts:write
 
 Naming sources ([REQ] §5.4 / §7.3 / T3.12): the seven D4.2 scopes plus
 the named additions — ``mcpkb:admin`` (the OAuth2-managed KB-key CRUD
 family, T3.12), ``snapshot:write`` (§5.4 settings snapshot-admin
-paths), ``workspace:read`` (§5.4 workspace row). Nothing invented
+paths), ``workspace:read`` (§5.4 workspace row), and the five
+``prompts:*`` scopes (Phase B agent-prompt-immutability commission —
+T4 mint per phaseB-plan.md D11; ``prompts:approve`` joins the operator
+family via SESSION_OPERATOR_SCOPES = SCOPE_TAXONOMY). Nothing invented
 beyond the plan text.
 
 Grant model (P4 — the M-3 close; supersedes the P3
@@ -43,7 +47,9 @@ Grant model (P4 — the M-3 close; supersedes the P3
 
 from __future__ import annotations
 
-#: The full v1 scope taxonomy (D4.2 + the named §5.4/§7.3 additions).
+#: The full v1 scope taxonomy (D4.2 + the named §5.4/§7.3 additions +
+#: Phase B agent-prompt-immutability T4 — ``prompts:{read,submit,approve,
+#: audit,write}`` per phaseB-plan.md D11).
 SCOPE_TAXONOMY: frozenset[str] = frozenset(
     {
         "system:read",
@@ -60,6 +66,19 @@ SCOPE_TAXONOMY: frozenset[str] = frozenset(
         "snapshot:write",
         "workspace:read",
         "auth:admin",
+        # Phase B / agent-prompt-immutability T4 — minted per
+        # phaseB-plan.md D11. ``prompts:approve`` is the operator-
+        # family scope (it joins SESSION_OPERATOR_SCOPES via the
+        # SCOPE_TAXONOMY reference below); ``prompts:submit`` is
+        # broader (machine + human can hold it; the agent's internal
+        # lane bypasses HTTP scope entirely — see D10); ``prompts:
+        # read`` / ``prompts:audit`` / ``prompts:write`` cover the
+        # remaining surface (create-draft + selection + audit read).
+        "prompts:read",
+        "prompts:submit",
+        "prompts:approve",
+        "prompts:audit",
+        "prompts:write",
     }
 )
 

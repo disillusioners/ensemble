@@ -44,9 +44,33 @@ def temp_agent(tmp_path):
 
 @pytest.fixture
 def mock_manager():
-    """Create mock InstanceManager."""
+    """Create mock InstanceManager.
+
+    Phase B T7: carries a minimal async stub for the prompt-version
+    service so the soul/user/workflow DB-submission path succeeds
+    (D4/D5 disposition). Real DB composition is pinned in
+    ``tests/test_inner_soul_db.py``.
+    """
     mgr = MagicMock()
     mgr.prompt_cache = MagicMock()
+
+    class _StubRow:
+        version = 1
+        version_id = "stub-version-id"
+        state = "pending_approval"
+
+    class _StubPromptVersionService:
+        def __init__(self):
+            self.memory_calls = []
+        async def create_and_submit(self, agent_id, version_tag, artifact,
+                                    content_or_mutator, actor, *,
+                                    file_fallback=None):
+            return _StubRow()
+        async def create_memory_version(self, agent_id, version_tag, artifact, content, actor):
+            self.memory_calls.append((artifact, content))
+            return _StubRow()
+
+    mgr._prompt_version_service = _StubPromptVersionService()
     return mgr
 
 
@@ -597,37 +621,53 @@ class TestRegressionChecks:
             assert "Content here" in result
 
     def test_soul_update_still_works(self, temp_agent, mock_manager):
-        """Soul updates still work with the new architecture."""
+        """Soul updates still work — Phase B: DB submission, file untouched."""
         from daemon.tools.inner_soul import _update_soul
 
         rules = {"max_soul_chars": 2000}
-        result = _update_soul("test_agent", temp_agent, "I am a helpful agent", rules, mock_manager)
+        result = _update_soul("test_agent", temp_agent, "I am a helpful agent", rules, mock_manager,
+                              instance_id="test-instance")
 
         assert result["success"] is True
         assert result["target"] == "soul"
+        assert result["db"] is True
+        assert result["state"] == "pending_approval"
 
-        # Verify file was updated
+        # Phase B T7: the file is immutable — content unchanged
         soul_content = (temp_agent / "soul.md").read_text()
-        assert "helpful agent" in soul_content
+        assert "helpful agent" not in soul_content
 
     def test_user_update_still_works(self, temp_agent, mock_manager):
-        """User updates still work with the new architecture."""
+        """User updates still work — Phase B: DB submission, file untouched."""
         from daemon.tools.inner_soul import _update_user
 
-        result = _update_user("test_agent", temp_agent, "User likes dark mode", mock_manager)
+        result = _update_user("test_agent", temp_agent, "User likes dark mode", mock_manager,
+                              instance_id="test-instance")
 
         assert result["success"] is True
         assert result["target"] == "user"
+        assert result["db"] is True
+
+        # Phase B T7 (D5): user.md joins the DB version model — the
+        # file is never created/modified by a submission.
+        assert not (temp_agent / "user.md").exists() or (
+            "dark mode" not in (temp_agent / "user.md").read_text()
+        )
 
     def test_workflow_update_still_works(self, temp_agent, mock_manager):
-        """Workflow updates still work with the new architecture."""
+        """Workflow updates still work — Phase B: DB submission, file untouched."""
         from daemon.tools.inner_soul import _update_workflow
 
         rules = {}
-        result = _update_workflow("test_agent", temp_agent, "Always verify before commit", rules, mock_manager)
+        result = _update_workflow("test_agent", temp_agent, "Always verify before commit", rules, mock_manager,
+                                  instance_id="test-instance")
 
         assert result["success"] is True
         assert result["target"] == "workflow"
+        assert result["db"] is True
+
+        # Phase B T7: the file is immutable — content unchanged
+        assert "verify before commit" not in (temp_agent / "workflow.md").read_text()
 
     def test_compound_request_backward_compatibility(self, temp_agent, mock_manager):
         """Compound requests work with the new architecture."""

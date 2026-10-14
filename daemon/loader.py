@@ -1,16 +1,443 @@
 """Markdown loader for agent prompts."""
 
+from __future__ import annotations
+
+import hashlib
 import json
 import logging
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from .rag.config import is_rag_enabled
 from .registry import ToolFilter
 
+if TYPE_CHECKING:  # pragma: no cover — runtime keeps zero DB imports (A6/C7)
+    from .repositories.prompt_version.repository import PromptVersionRepository
+
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Prompt-version DB hook (Phase A T6 / T7 / T8)
+# ---------------------------------------------------------------------------
+# Module-level singleton reference to the prompt-version repository. Set
+# by :class:`daemon.manager.InstanceManager` at init time (the manager
+# already owns the repo via ``create_prompt_version_repository`` at
+# manager.py:1171-1173). The loader MUST NOT import the repository class
+# at module load (it has zero DB imports today; A6/C7 keeps that invariant)
+# — the value is read lazily inside ``_get_prompt_version_repo`` on every
+# cache check. ``None`` means "DB layer unavailable" (test fixtures,
+# daemon pre-init, fresh-boot race) — the hook is a no-op in that case
+# (FAIL-OPEN).
+_PROMPT_VERSION_REPO: Any = None
+
+# Module-level failure counter (A6/C7) — incremented on every hook
+# exception so an operator can detect "DB layer keeps failing" without
+# scraping log lines. Reset on daemon restart.
+_PROMPT_VERSION_HOOK_FAILURES: int = 0
+
+
+def _get_prompt_version_repo() -> Any:
+    """Return the prompt-version repository (set at InstanceManager init).
+
+    Returns ``None`` when the manager has not yet initialized the repo
+    (early-boot race, test fixture without a manager, etc.). Callers
+    treat ``None`` as "DB layer unavailable" and fall back to file-only
+    content (FAIL-OPEN — A6/C7).
+    """
+    return _PROMPT_VERSION_REPO
+
+
+def set_prompt_version_repo(repo: Any) -> None:
+    """Register the prompt-version repo at InstanceManager init.
+
+    Idempotent; safe to call more than once (e.g. on manager re-init
+    in tests). The manager is the single writer; the loader only reads
+    via :func:`_get_prompt_version_repo`.
+    """
+    global _PROMPT_VERSION_REPO
+    _PROMPT_VERSION_REPO = repo
+
+
+def get_prompt_version_hook_failures() -> int:
+    """Return the cumulative hook failure counter (A6/C7)."""
+    return _PROMPT_VERSION_HOOK_FAILURES
+
+
+def _bump_prompt_version_hook_failures() -> None:
+    """Increment the hook failure counter (A6/C7)."""
+    global _PROMPT_VERSION_HOOK_FAILURES
+    _PROMPT_VERSION_HOOK_FAILURES += 1
+
+
+# The conservative artifact set the hook replaces. Mirrors the F2
+# set in ``daemon.repositories.prompt_version.models.PROMPT_ARTIFACTS``
+# (soul / rule / workflow / tools_note / tools / skill — the CORE
+# set per User Directive #3). User Directive #3 (2026-10-14,
+# RESOLUTION-CORE) EXTENDS the loader's hook to the memory family
+# for MEMORY-class rows: the loader resolves ``memory``,
+# ``memories/<slug>``, ``user``, ``growth`` content via the DB
+# override chain (selected > latest > template-file fallback).
+# ``user.md`` / ``growth.md`` are NEVER loaded into the system
+# prompt — the hook only fires on the artifact family for which
+# the loader already has content-merge semantics. The carve-out
+# was removed for ``memory.md`` and the per-file ``memories/<slug>``
+# family (decisions.md §7 binding block swept accumulated
+# pre-directive content; the empty-file boot-tolerance proven
+# for the loader).
+#
+# Keys in the returned prompts dict are filenames WITHOUT the
+# ``.md`` extension (matches the loader's :func:`load_agent_prompts`
+# convention): ``soul`` ↔ ``soul.md`` etc. The ``memory`` key ↔
+# ``memory.md`` (loader §8 boot-prompt). Per-file MEMORY keys
+# (``memories/<slug>``) live in a separate index — they surface
+# via the recent-memories filename list (loader.py:560)
+# rather than the prompt-section dict.
+_HOOK_ARTIFACT_KEYS: frozenset[str] = frozenset({
+    # CORE set (Phase A conservative default)
+    "soul",
+    "rule",
+    "workflow",
+    "tools_note",
+    "tools",
+    "skill",
+    # MEMORY family (User Directive #3, 2026-10-14). ``user.md``
+    # / ``growth.md`` are not in the loader's prompt-key map —
+    # they NEVER appear in the loader's ``prompts`` dict, so the
+    # hook skips them (the dict-key lookup is the natural
+    # no-op). Listed here as canonical references for the
+    # round-trip tests.
+    "memory",
+    "user",
+    "growth",
+})
+
+
+# Empty-file fallback sentinel — when a MEMORY-class artifact has
+# no DB rows, the file is empty (per decisions.md §7 binding
+# block swept accumulated content; the loader's
+# ``load_agent_prompts`` skips missing ``memory.md`` and reads an
+# empty body). The hook REPLACES this fallback the same way for
+# MEMORY as it does for CORE: ``resolve_prompts_from_db`` returns
+# the DB-effective content for the artifact when present;
+# otherwise the loader's existing empty-string handling fires.
+#
+# The MEMORY-class loader path is ALSO boot-tolerant for the
+# ``memory.md`` §8 section — see the proven empty-file path at
+# ``daemon/loader.py:663-668`` (silently skip when ``memory.md``
+# missing) and ``load_recent_memories:565-567`` (skip when
+# ``memories/`` dir absent).
+_MEMORY_BOOT_TOLERANCE_PROVEN = True
+
+
+class NoPromptContentError(LookupError):
+    """Raised when a custom agent with zero versions has no usable prompt.
+
+    User Directive #5A (2026-10-14, RESOLUTION-CORE — the
+    ``custom agents`` groundwork, sibling lifetime ownership).
+    Custom agents have NO template fallback (the A2/R-A2 ruling
+    lands with the lifecycle coder; this module extends the
+    resolution-side hook). A ``get_effective(agent_id,
+    version_tag, artifact)`` call for a custom agent with ZERO
+    rows returns ``None`` (no DB content); the loader's read path
+    raises the typed error so spawn-time can surface an
+    actionable message inviting the operator to create v1.
+
+    Inherits from :class:`LookupError` (Python stdlib's "this
+    thing you looked for is not present" — distinct from
+    :class:`ValueError` so callers can use ``except LookupError``
+    to discriminate custom-agent empty-state from validation
+    errors). The ``agent_id`` + ``version_tag`` fields are
+    surfaced on the typed instance so the HTTP / HTTP-shaped
+    boundary can map a clean 404 / 422 with the actionable
+    message.
+
+    Attributes:
+        agent_id: Resolved custom-agent identity.
+        version_tag: Version tag (``""`` for base; F9).
+        artifact: The artifact key the loader tried to resolve.
+        message: An actionable message inviting v1 creation.
+    """
+
+    def __init__(
+        self,
+        agent_id: str,
+        version_tag: str,
+        artifact: str,
+    ) -> None:
+        self.agent_id = agent_id
+        self.version_tag = version_tag
+        self.artifact = artifact
+        super().__init__(
+            f"prompt_versions has no rows for custom agent "
+            f"({agent_id!r}, {version_tag!r}, {artifact!r}) — "
+            f"custom agents have NO template fallback (User "
+            f"Directive #5A, 2026-10-14: A2/R-A2 lifecycle ruling); "
+            f"create v1 via prompt_version_service to populate "
+            f"the artifact before spawning this agent."
+        )
+
+
+def _compute_db_versions_fingerprint(rows: list[Any] | None) -> str:
+    """Compute the synthetic ``db_versions_fingerprint`` from one
+    ``get_effective_rows`` result.
+
+    The fingerprint is the sha256 of the sorted, joined
+    ``(artifact, artifact_class, selected_version_id,
+    latest_approved_version_id, latest_version_id)`` tuples — the
+    class dimension is folded into the fingerprint so a CORE-only
+    write doesn't bust the MEMORY slot and vice versa. Stable
+    across calls that return the same DB state; it changes ONLY
+    when the effective-content identity changes — i.e. when a
+    selected or latest-approved (CORE) / latest (MEMORY) row
+    identity changes (approve a new version, change a selection,
+    clear a selection, persist a new MEMORY row via
+    ``create_memory_version``, R-B2 auto-reset re-points).
+
+    Empty / None input yields the ``""`` sentinel — same as a
+    missing repo — so the cache-hit check stays symmetric (N4
+    sentinel unification).
+
+    Pure function over the rows; does NOT hit the DB.
+    """
+    if not rows:
+        # N4 sentinel unification: empty rows == no DB rows == no
+        # fingerprint available. Keep the "" convention so a missing
+        # repo and a zero-rows repo produce the SAME fingerprint
+        # (no benign boot-moment cache bust).
+        return ""
+    triples = []
+    for r in rows:
+        triples.append((
+            r.artifact,
+            getattr(r, "artifact_class", ARTIFACT_CLASS_CORE_FALLBACK),
+            r.selected_version_id or "",
+            getattr(r, "latest_approved_version_id", None) or "",
+            getattr(r, "latest_version_id", None) or "",
+        ))
+    triples.sort()
+    payload = "|".join(
+        f"{a}:{cls}:{s}:{l}:{m}" for a, cls, s, l, m in triples
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+# Local fallback when the row doesn't carry ``artifact_class``
+# (Phase A rows without the column added; tests that don't go
+# through the full getter — we keep the fingerprint shape
+# stable across the migration window). Mirrors
+# ``ARTIFACT_CLASS_CORE`` in the repository module; defined
+# locally so the loader doesn't widen its import surface for a
+# constant used only on the missing-column path.
+ARTIFACT_CLASS_CORE_FALLBACK = "CORE"
+
+
+def _fetch_effective_rows_safe(
+    repo: "PromptVersionRepository", agent_id: str, version_tag: str,
+) -> list[Any] | None:
+    """Fetch effective rows with A6/C7 FAIL-OPEN semantics (N3 helper).
+
+    Wraps ``repo.get_effective_rows(agent_id, version_tag)`` so the
+    loader can call it ONCE per cache-miss and feed both the
+    fingerprint computation and the content replacement — closes
+    the two-SELECT waste (single-SELECT powers both, A8).
+
+    Returns:
+        The rows list on success (possibly empty — see N4). Returns
+        ``None`` on any hook exception (A6/C7 FAIL-OPEN): WARN
+        logged, failure counter bumped, caller falls through to
+        file-only content. NEVER re-raises.
+    """
+    try:
+        return repo.get_effective_rows(agent_id, version_tag)
+    except Exception as exc:  # noqa: BLE001 — A6/C7 FAIL-OPEN
+        logger.warning(
+            "prompt-version resolution unavailable, serving template: %s",
+            exc,
+        )
+        _bump_prompt_version_hook_failures()
+        return None
+
+
+def resolve_prompts_from_db(
+    prompts: dict[str, str],
+    agent_id: str,
+    version_tag: str,
+    repo: "PromptVersionRepository",
+    rows: list[Any] | None = None,
+    *,
+    is_custom_agent: bool = False,
+) -> dict[str, str]:
+    """Replace prompts[artifact] with DB-effective content (A4 / T6).
+
+    Single source of truth for the Phase A loader hook. Takes the
+    **SYNC repository** (NOT the async service facade — A4/C6/G-4b
+    pins this). All 4 call sites of ``load_and_cache_prompt``
+    (``instance_lifecycle.py:2098`` spawn, ``:4561`` restore,
+    ``persistence.py:1064`` and ``:1141`` reconstruction) are sync;
+    routing through the ``asyncio.to_thread`` facade would deadlock
+    the event loop or force a mid-build refactor.
+
+    User Directive #3 (2026-10-14) — class-aware precedence per
+    ``EffectiveRow.artifact_class``:
+
+    * **CORE** (soul / rule / workflow / tools_note / tools /
+      skill) — ``selected_version.content`` >
+      ``latest_approved.content`` > ``None``.
+    * **MEMORY** (memory / user / growth / ``memories/<slug>``) —
+      ``selected_version.content`` > **LATEST row content**
+      (any state value, since MEMORY rows are state-agnostic;
+      the loader resolves ``created via create_memory_version``
+      directly as effective) > ``None`` (template-file fallback;
+      empty post-sweep; the loader's existing empty-string
+      handling for missing ``memory.md`` is unchanged).
+
+    User Directive #5A (custom-agent resolution-side hook) —
+    ``is_custom_agent=True`` flips the empty-state posture:
+    when ``get_effective_rows`` returns ``[]`` (custom agent
+    with zero versions), this function raises
+    :class:`NoPromptContentError` so spawn-time surfaces an
+    actionable message inviting the operator to create v1. The
+    typed error carries ``(agent_id, version_tag, artifact)``
+    for the HTTP / prompt-message boundary to map a clean
+    404 / 422.
+
+    User Directive #3 also extends the conservative artifact
+    set: ``memory`` / ``user`` / ``growth`` now reach the DB
+    layer (the carve-out for those artifacts was removed per
+    the §7 binding block). Per-file ``memories/<slug>``
+    rows surface via the recent-memories filename list, NOT
+    the prompts dict (they are pure memory state; the
+    filename index keeps the prompt-token cost low).
+
+    **A8 single-SELECT guarantee**: ONE call to
+    ``repo.get_effective_rows(agent_id, version_tag)`` powers the
+    content replacement for ALL artifacts at once — no per-artifact
+    queries. Closes the fingerprint×content TOCTOU window (C2).
+    The internal ``load_and_cache_prompt`` caller (N3) passes a
+    pre-fetched ``rows`` list so the fingerprint computation AND
+    this function share the SAME single SELECT.
+
+    **A6/C7 FAIL-OPEN posture**: this function is the ONLY new
+    hot-path DB dependency introduced by Phase A. Any exception
+    (DB unreachable, schema drift, repo misconfigured) → log a WARN
+    with the exact message ``prompt-version resolution unavailable,
+    serving template`` + increment the failure counter + return the
+    original prompts UNMODIFIED. NO retries (rely on pool checkout
+    timeout). The cache-hit check below also catches hook exceptions
+    via its own try/except — this function is the LAST line of
+    defense.
+
+    **T10 — F1 OVERRIDES-ONLY seeding (Phase B).** The template file
+    (``agents/<name>/<artifact>.md``) stays the LIVE FALLBACK — there
+    is NO boot-time full-seed and NO hash-guarded lazy-seed. The
+    first ``create_draft`` for a given ``(agent_id, version_tag,
+    artifact)`` key inserts ``version = 1`` (monotonic per the
+    ``Skill.generation`` precedent); the resolver above returns
+    ``selected_version.content`` → ``latest_approved.content`` →
+    ``None`` (and only then reads the file). Rejected alternatives
+    (full-seed-at-boot = boot blast radius on every template edit;
+    hash-guarded lazy-seed = more state, deferred) are documented
+    in ``phaseB-plan.md`` OQ2 for morning review.
+
+    Args:
+        prompts: The current prompts dict (output of
+            ``load_agent_prompts(agent_dir)``). NOT mutated in place;
+            a shallow copy is returned so the caller's reference is
+            preserved.
+        agent_id: Resolved agent identity (the registry base name,
+            e.g. ``"developer"`` — NOT ``"developer[v2]``).
+        version_tag: Version tag (``""`` for base). Tag normalization
+            (NULL/empty → ``""``) is handled by the repo.
+        repo: The sync :class:`PromptVersionRepository` (or a duck
+            typed equivalent exposing ``get_effective_rows`` /
+            ``get_effective``).
+        rows: Pre-fetched rows from a single ``get_effective_rows``
+            call (N3 — passed by the internal ``load_and_cache_prompt``
+            caller so the fingerprint and the resolution share ONE
+            SELECT). When ``None``, this function fetches its own
+            rows (backward-compat for external callers + tests).
+        is_custom_agent: User Directive #5A resolution-side hook —
+            when ``True``, an empty ``rows`` raise
+            :class:`NoPromptContentError` (carries ``(agent_id,
+            version_tag, artifact)`` fields). The lifecycle coder
+            owns the full A2/R-A2 ruling.
+
+    Returns:
+        A new dict with DB-resolved content replacing file content
+        for overridden artifacts. Falls through to the original
+        prompts on any hook error.
+
+    Raises:
+        NoPromptContentError: When ``is_custom_agent=True`` and the
+            effective-rows walk yields zero rows for this (agent_id,
+            version_tag, artifact) tuple (the actionable spawn-time
+            failure).
+    """
+    if rows is None:
+        rows = _fetch_effective_rows_safe(repo, agent_id, version_tag)
+        if rows is None:
+            # A6/C7 FAIL-OPEN — already warned + counter bumped.
+            return prompts
+
+    if not rows:
+        # No DB rows → no-op; preserve pre-Phase-A contract,
+        # unless this is a custom agent (User Directive #5A).
+        if is_custom_agent:
+            # Raise the actionable typed error — the spawn-time
+            # boundary maps this to a clean failure. We raise on
+            # the most-likely-failed artifact (any one in the
+            # canonical CORE set works; ``soul`` is the canonical
+            # fall-through — the agent typically has no ``soul``
+            # content at all yet).
+            raise NoPromptContentError(
+                agent_id=agent_id,
+                version_tag=version_tag,
+                artifact="soul",
+            )
+        return prompts
+
+    out = dict(prompts)
+    for row in rows:
+        artifact = row.artifact
+        if artifact not in _HOOK_ARTIFACT_KEYS:
+            # Carved-out artifact (legacy file-only carve-out or
+            # an unknown key — leave the file content alone).
+            # Per-file ``memories/<slug>`` keys live here too: the
+            # loader's prompts dict doesn't carry per-file
+            # entries; the recent-memories index surfaces them as
+            # filenames.
+            continue
+        # Class-aware resolution (User Directive #3).
+        if getattr(row, "artifact_class", ARTIFACT_CLASS_CORE_FALLBACK) == "MEMORY":
+            # M16 — explicit ``is not None`` chain so an empty
+            # ``selected_content`` / ``latest_content`` row is
+            # served as the empty string, NOT silently falling
+            # through to the template file. Truthy ``or`` would
+            # treat ``""`` as missing.
+            if row.selected_content is not None:
+                resolved = row.selected_content
+            elif getattr(row, "latest_content", None) is not None:
+                resolved = row.latest_content
+            else:
+                # No DB content yet — leave the file alone
+                # (empty fallback; proven boot-tolerant).
+                continue
+            out[artifact] = resolved
+            continue
+        # CORE class — F6 precedence. Same M16 fix.
+        if row.selected_content is not None:
+            resolved = row.selected_content
+        elif row.latest_approved_content is not None:
+            resolved = row.latest_approved_content
+        else:
+            # Drafts / pending rows that never got approved → no DB
+            # content for this artifact; leave the file alone.
+            continue
+        out[artifact] = resolved
+    return out
 
 
 # Path to shared files (injected into all agents)
@@ -311,52 +738,103 @@ def load_shared_knowledge(no_force_explore: bool = False) -> str:
     return ""
 
 
-def load_recent_memories(agent_dir: Path, limit: int = 5, include_archived: bool = False, archive_limit: int = 5) -> str:
+def load_recent_memories(
+    agent_dir: Path,
+    limit: int = 5,
+    include_archived: bool = False,
+    archive_limit: int = 5,
+    db_memory_keys: Optional[list[str]] = None,
+) -> str:
     """Load list of recent memory filenames from memories/ directory.
-    
+
     Returns filenames only (not content) to minimize token usage.
     When include_archived=True, also lists files from memories/archive/YYYY/MM/.
+
+    User Directive #3 (2026-10-14) — ``db_memory_keys`` extension:
+    the per-file MEMORY-class DB rows (artifact=``memories/<slug>``)
+    surface in this filename index alongside the on-disk files.
+    Each memory file is its own key (versions = its revisions;
+    latest = current content; selection = per-file pin per R-B3).
+    The merge rule: any ``memories/<slug>`` key present in
+    ``db_memory_keys`` that has no on-disk file is rendered as
+    ``memories/<slug>`` in the output; keys with on-disk files
+    are de-duplicated (the on-disk file wins, matches today's
+    behavior — the DB row is for resolution content, not for
+    filename tracking).
+
+    The merge is FILE-WINS — filenames list the existence of
+    memory surface; the DB content lives separately in
+    ``EffectiveRow.latest_content`` (loader.py:resolve_prompts_from_db
+    MEMORY branch). The de-dup keeps the filename list consistent
+    with the loader's existing single-pass behavior.
     """
     memories_dir = agent_dir / "memories"
-    if not memories_dir.exists() or not memories_dir.is_dir():
-        return ""
-    
-    # Active memory files
-    memory_files = sorted(
-        [f for f in memories_dir.iterdir() if f.suffix == ".md" and not f.is_symlink() and f.is_file()],
-        key=lambda p: p.name,
-        reverse=True
-    )[:limit]
-    
-    lines = [f"- {f.name}" for f in memory_files]
-    
-    # Archived memory files
-    if include_archived:
-        archive_dir = memories_dir / "archive"
-        if archive_dir.exists() and archive_dir.is_dir():
-            archive_files = []
-            for year_dir in sorted(archive_dir.iterdir(), reverse=True):
-                if not year_dir.is_dir() or not year_dir.name.isdigit():
-                    continue
-                for month_dir in sorted(year_dir.iterdir(), reverse=True):
-                    if not month_dir.is_dir() or not month_dir.name.isdigit():
+    on_disk_lines: list[str] = []
+    on_disk_keys: set[str] = set()
+
+    if memories_dir.exists() and memories_dir.is_dir():
+        # Active memory files
+        memory_files = sorted(
+            [f for f in memories_dir.iterdir() if f.suffix == ".md" and not f.is_symlink() and f.is_file()],
+            key=lambda p: p.name,
+            reverse=True
+        )[:limit]
+
+        for f in memory_files:
+            on_disk_lines.append(f"- {f.name}")
+            # Strip the .md suffix to derive the "<slug>" key —
+            # used for de-duping against db_memory_keys whose
+            # shape is "memories/<slug>" (NOT "memories/<slug>.md").
+            on_disk_keys.add(f"memories/{f.name[:-3]}")
+
+        # Archived memory files
+        if include_archived:
+            archive_dir = memories_dir / "archive"
+            if archive_dir.exists() and archive_dir.is_dir():
+                archive_files = []
+                for year_dir in sorted(archive_dir.iterdir(), reverse=True):
+                    if not year_dir.is_dir() or not year_dir.name.isdigit():
                         continue
-                    for f in month_dir.iterdir():
-                        if f.suffix == ".md" and not f.is_symlink() and f.is_file():
-                            archive_files.append(f)
-            
-            # Sort by full relative path (YYYY/MM/filename.md) for correct chronological order
-            archive_files.sort(key=lambda p: str(p.relative_to(archive_dir)), reverse=True)
-            archive_files = archive_files[:archive_limit]
-            
-            for f in archive_files:
-                # Format as archive/YYYY/MM/filename.md
-                relative = f.relative_to(archive_dir)
-                lines.append(f"- archive/{relative}")
-    
+                    for month_dir in sorted(year_dir.iterdir(), reverse=True):
+                        if not month_dir.is_dir() or not month_dir.name.isdigit():
+                            continue
+                        for f in month_dir.iterdir():
+                            if f.suffix == ".md" and not f.is_symlink() and f.is_file():
+                                archive_files.append(f)
+
+                # Sort by full relative path (YYYY/MM/filename.md) for correct chronological order
+                archive_files.sort(key=lambda p: str(p.relative_to(archive_dir)), reverse=True)
+                archive_files = archive_files[:archive_limit]
+
+                for f in archive_files:
+                    # Format as archive/YYYY/MM/filename.md
+                    relative = f.relative_to(archive_dir)
+                    on_disk_lines.append(f"- archive/{relative}")
+
+    # Merge DB-only MEMORY keys. Filter to keys whose MEMORY
+    # row exists in the DB but has no on-disk file
+    # (``memories/<slug>`` not in ``on_disk_keys``). Sorted for
+    # deterministic output; respects ``limit`` budget roughly
+    # (the budget is consulted LATER if the merge overflows —
+    # see the floor above).
+    db_only_lines: list[str] = []
+    if db_memory_keys:
+        for key in sorted(db_memory_keys):
+            # Strip "memories/" prefix; the line shape is the
+            # filename only ("<slug>.md"). If the on-disk set
+            # already covers this key (a file exists), skip it
+            # (file wins — content lives separately).
+            if not key.startswith("memories/"):
+                continue
+            slug = key[len("memories/"):]
+            if f"memories/{slug}" in on_disk_keys:
+                continue
+            db_only_lines.append(f"- {slug}.md")
+
+    lines = on_disk_lines + db_only_lines
     if not lines:
         return ""
-    
+
     return "\n".join(lines)
 
 
@@ -825,6 +1303,8 @@ def load_and_cache_prompt(
     cache: PromptCache,
     mcp_tool_names: list[str] | None = None,
     version_tag: str | None = None,
+    *,
+    is_custom_agent: bool = False,
 ) -> tuple[str, int]:
     """Load and cache agent prompts including multiple skills.
 
@@ -836,6 +1316,12 @@ def load_and_cache_prompt(
         version_tag: Optional version tag (e.g., "v2") to distinguish tagged
             versions from base in the cache key (D15). Defaults to None for
             backward compatibility — existing callers do not need to thread it.
+        is_custom_agent: User Directive #5A — ``True`` when the caller has
+            resolved this agent against a custom_agent_configs row. The
+            loader threads the flag into ``resolve_prompts_from_db`` so
+            the empty-state posture flips to ``NoPromptContentError`` for
+            R-A2 lifecycle customs. Defaults to ``False`` so the existing
+            file-defined path stays unchanged (pre-Phase-C call sites).
 
     Returns:
         Tuple of (system_prompt, token_count).
@@ -904,6 +1390,31 @@ def load_and_cache_prompt(
                 except (PermissionError, OSError):
                     pass  # Skip broken symlinks and permission issues
     
+    # Phase A T7 (C1) + N3: compute the synthetic
+    # ``db_versions_fingerprint`` from the prompt-version DB so the
+    # cache self-heals on any DB change (approve / select / clear).
+    # Folded into ``current_mtimes`` so the equality check at the
+    # cache-hit step busts the cache whenever the fingerprint changes
+    # — across every MCP-variant key that the single-key
+    # ``invalidate`` cannot reach. FAIL-OPEN: any hook exception →
+    # fingerprint = "" + WARN log + counter bump; the mtime equality
+    # check below still works. N3 folds the cache-miss path's two
+    # ``get_effective_rows`` calls into ONE — fetch once here, feed
+    # both the fingerprint and the content replacement. N4 unifies
+    # the sentinel so missing repo and zero-rows both produce ``""``
+    # (no benign boot-moment cache bust).
+    _repo = _get_prompt_version_repo()
+    _db_rows: list[Any] | None
+    if _repo is not None:
+        _db_rows = _fetch_effective_rows_safe(
+            _repo, agent_id, version_tag or "",
+        )
+    else:
+        # N4: missing repo → no rows → fingerprint = "".
+        _db_rows = None
+    _db_fp = _compute_db_versions_fingerprint(_db_rows)
+    current_mtimes["__prompt_versions_fingerprint__"] = _db_fp
+
     # Check cache (include mcp_tool_names and version_tag in cache key)
     cached = cache.get(agent_id, mcp_tool_names, version_tag)
     if cached is not None:
@@ -911,13 +1422,29 @@ def load_and_cache_prompt(
         cache_key = cache._make_key(agent_id, mcp_tool_names, version_tag)
         stored_mtimes = cache._cache.get(cache_key, (None, None, {}))[2]
 
-        # Compare mtimes
+        # Compare mtimes (incl. the synthetic db_versions_fingerprint —
+        # Phase A T7 / C1 mechanism: cache self-heals on any DB change)
         if stored_mtimes == current_mtimes:
             logger.debug(f"Prompt cache hit for {agent_id} (mcp_tools={len(mcp_tool_names) if mcp_tool_names else 0}, version_tag={version_tag})")
             return cached
 
     # Cache miss or files changed - reload
     prompts = load_agent_prompts(agent_dir)
+
+    # Phase A T6 / T7 / T8 — resolution hook. Inserted between the
+    # file-reload (:920 above) and ``compose_system_prompt`` (:926
+    # below) so spawn, restore, and reconstruction all see the same
+    # DB-resolved content. The hook is FAIL-OPEN (A6/C7): any DB
+    # exception returns the file-loaded prompts unchanged. The repo
+    # is obtained lazily here so the loader has zero DB imports at
+    # module load time. N3: pass the pre-fetched ``_db_rows`` so the
+    # fingerprint and the content share ONE SELECT (A8).
+    if _repo is not None:
+        prompts = resolve_prompts_from_db(
+            prompts, agent_id, version_tag or "", _repo, rows=_db_rows,
+            is_custom_agent=is_custom_agent,
+        )
+
     skills = load_agent_skills(agent_dir, meta)
     dynamic_tools = load_tools_doc_for_agent(agent_id, mcp_tool_names, version_tag)
     project_experience = load_project_experience()
@@ -926,7 +1453,10 @@ def load_and_cache_prompt(
     system_prompt = compose_system_prompt(prompts, skills, dynamic_tools, project_experience, recent_memories, shared_knowledge)
     tokens = estimate_tokens(system_prompt)
 
-    # Update cache (include mcp_tool_names and version_tag in cache key)
+    # Update cache (include mcp_tool_names and version_tag in cache key).
+    # The mtime snapshot already carries the synthetic
+    # db_versions_fingerprint (Phase A T7 / C1) — see the
+    # current_mtimes build above.
     cache.set(agent_id, system_prompt, tokens, current_mtimes, mcp_tool_names, version_tag)
 
     return (system_prompt, tokens)

@@ -4,6 +4,81 @@ This is the core intelligence for agent growth. It understands:
 - What each .md file is for (soul=identity, user=preferences, memory=knowledge, etc.)
 - How to classify requests semantically
 - When to update multiple files together
+
+Write regime — DUAL-PATH (User Directive #3, 2026-10-14, RESOLUTION-CORE)
+=========================================================================
+
+Since the directive, ``inner_soul`` runs TWO write paths side by
+side on a target-by-target basis:
+
+* **CORE path** (``soul``, ``workflow``) — DB submission via
+  :meth:`PromptVersionService.create_and_submit` (A5/C4 composite).
+  The draft lands in ``state='pending_approval'`` (D4 auto-submit,
+  no held draft) and a human approves it through the
+  prompt-versions REST surface. The on-disk template keeps
+  serving until approval (F6 precedence).
+
+  - Composition (C4): the mutator composes on the EFFECTIVE
+    chain (``selected > latest_approved > file_fallback``),
+    then applies the target-specific mutation (soul
+    replace/append, workflow ``**Learned:**`` append).
+  - Pending-supersession (A5/G-4f): consecutive un-approved
+    calls chain on
+    ``max(version) WHERE state IN ('draft','pending_approval')``
+    and archive the prior pending row (≤ 1 active pending per
+    key).
+  - Identity stamping (D10): audit rows stamped
+    ``actor_subject=<instance_id>``,
+    ``actor_auth_method="internal"`` via ``actor_from_instance``.
+  - Response grammar (R7): ``📋 <target>: submitted as
+    prompt-version v<N> (pending approval); takes effect once
+    approved``.
+
+* **MEMORY path** (``memory``, ``user``, ``growth``,
+  ``memories/<slug>``) — direct persist via
+  :meth:`PromptVersionService.create_memory_version`. The
+  row is born-effective (``state='approved'``, transition-free,
+  NO approval round-trip — the directive reverses the
+  D5 pending-adjudication for ``user.md``). One ``CREATED``
+  audit row stamped with
+  ``payload.artifact_class='MEMORY'`` and
+  ``via='create_memory_version'``.
+
+  - **user.md supersession of D5**: ``user.md`` was tentatively
+    bound for CORE submission per Phase B D5. The directive
+    overturns that — it is MEMORY-class now, persists
+    directly, no approval. The user's preferences take effect
+    on the next prompt reload.
+  - **memories per-slug chaining**: ``memories/`` writes use
+    the key ``memories/<slug>.md`` (the canonical form —
+    WITH the ``.md`` extension — matches the prompt-visible
+    filename index in the loader's recent-memory list and
+    the on-the-wire ``access_memory("X.Y.md")`` contract).
+    Consecutive writes on the same slug land as version
+    1, 2, 3, ... on the same key — the loader's selection
+    pointer + latest row governs which version is "live".
+    The legacy collision-counter that derived
+    ``<filename>-<n>.md`` is retired; the version chain is
+    the lineage.
+  - **memory.md compaction as new version**: the 80%
+    proactive compaction rule is preserved as a SEMANTIC
+    guardrail — the mutator enforces the 2000-word cap on the
+    composed draft and trims via the existing
+    ``_compact_memory`` helper BEFORE persisting. The
+    pre-compaction content stays in history (it's a prior
+    version on the same ``memory`` key, ``latest_content``
+    flips to the post-compaction row).
+  - **Response grammar (R7)**: ``✓ <target>: persisted
+    (memory version N)`` — keeps the two-space indent +
+    ``✓`` marker + ``<target>:`` shape so prefix-parsing
+    agents need only the new ``(memory version N)`` tail.
+
+Failure posture: the DB-submission path is FAIL-CLOSED. If the
+prompt-version service is unavailable the change is refused with a
+``⚠`` result — the file is NEVER written as a fallback (that is the
+point of the immutability commission). The Phase A write-guard shim
+remains active on the ``write_file``/``edit_file`` tool surfaces as
+defense-in-depth against any other file-write path.
 """
 
 from __future__ import annotations
@@ -12,16 +87,27 @@ from datetime import datetime
 from pathlib import Path
 from langchain_core.tools import tool
 from typing import TYPE_CHECKING, Literal
+import asyncio
 import re
 import logging
 import fcntl
 import time
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 from ._tool_registry import register_tool_category
 from ..rag.config import is_rag_enabled
+from ..repositories.prompt_version.models import (
+    PROMPT_ARTIFACT_CLASSES,
+    PROMPT_MEMORY_ARTIFACTS,
+)
+from ..repositories.prompt_version.repository import (
+    ARTIFACT_CLASS_CORE,
+    ARTIFACT_CLASS_MEMORY,
+    class_for_artifact,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -584,7 +670,7 @@ def create_inner_soul_tool(
         content: str | None = None,
         request: str | None = None,
         intent: Literal["remember", "learn", "change"] | None = None,
-        target: Literal["memory", "workflow", "soul", "user", "memories"] | None = None
+        target: Literal["memory", "workflow", "soul", "user", "memories", "growth"] | None = None
     ) -> str:
         """Reflect on your persona, change behavioral patterns, or remember user interaction preferences. NOT for project state, task progress, code, or working logs. Use tool_help("inner_soul") for details."""
         try:
@@ -649,7 +735,12 @@ def create_inner_soul_tool(
                 if "REJECT" in targets:
                     return _format_project_rejection(actual_request, classification)
 
-                # Execute updates
+                # Execute updates. Phase A T7: thread version_tag from
+                # the ``create_inner_soul_tool`` closure so the post-write
+                # ``manager.prompt_cache.invalidate`` busts the per-tag
+                # key (F9 / decisions.md R10). Phase B T7: thread the
+                # instance identity for D10 audit stamping on the
+                # soul/user/workflow DB-submission path.
                 results = []
                 for t in targets:
                     result = _execute_update(
@@ -660,7 +751,9 @@ def create_inner_soul_tool(
                         intent=intent,
                         rules=growth_rules,
                         manager=manager,
-                        classification=classification
+                        classification=classification,
+                        version_tag=version_tag,
+                        instance_id=instance_id,
                     )
                     results.append(result)
 
@@ -710,7 +803,9 @@ def create_inner_soul_tool(
                         all_results.append({"part": part, "rejected": True, "response": rejection_msg})
                         continue
 
-                    # Execute updates for this part
+                    # Execute updates for this part. Phase A T7: thread version_tag
+                    # from the closure (F9 / R10). Phase B T7: thread the
+                    # instance identity for D10 audit stamping.
                     results = []
                     for t in targets:
                         result = _execute_update(
@@ -721,7 +816,9 @@ def create_inner_soul_tool(
                             intent=intent,
                             rules=growth_rules,
                             manager=manager,
-                            classification=classification
+                            classification=classification,
+                            version_tag=version_tag,
+                            instance_id=instance_id,
                         )
                         results.append(result)
                     
@@ -731,8 +828,20 @@ def create_inner_soul_tool(
                     
                     for r in results:
                         if r.get("success"):
-                            file_name = r.get("file", "")
-                            compound_lines.append(f"    ✓ {r.get('target', 'unknown')}: {file_name}")
+                            if r.get("db") and r.get("memory"):
+                                # MEMORY path (Ud#3): born-effective.
+                                compound_lines.append(
+                                    f"    ✓ {r.get('target', 'unknown')}: {r.get('message', 'persisted')}"
+                                )
+                            elif r.get("db"):
+                                # Phase B T7: pending-approval grammar for
+                                # DB-submitted CORE targets.
+                                compound_lines.append(
+                                    f"    📋 {r.get('target', 'unknown')}: {r.get('message', 'submitted')}"
+                                )
+                            else:
+                                file_name = r.get("file", "")
+                                compound_lines.append(f"    ✓ {r.get('target', 'unknown')}: {file_name}")
                         else:
                             compound_lines.append(f"    ⚠ {r.get('target', 'unknown')}: {r.get('error', 'Unknown error')}")
                     
@@ -772,11 +881,40 @@ tool to use instead.
 - **memories/** - Personal observations (NOT task logs)
 - **workflow.md** - HOW you work (processes, rules, steps)
 
-> Note: The `memory` and `memories` target types are kept for backward compatibility
-> but are now deprecated for new content. Knowledge that previously went to
-> `memory.md`/`memories/` should now be routed through the RAG knowledge system
-> via `experience()`. Persona-relevant reflections may still target `memories/`
-> when used in personal-observation contexts.
+> Write regime (prompt-immutability Phase B): `soul`, `workflow` and
+> `user` changes are submitted as versioned DB drafts that go straight
+> to PENDING APPROVAL — they take effect once a human operator
+> approves them; your files are not modified directly. You get a
+> `📋 <target>: submitted as prompt-version v<N> (pending approval)`
+> confirmation immediately. A rejected or superseded draft stays in
+> the audit lineage; just call this tool again to submit a fresh
+> version.
+
+> Note: The DUAL-PATH regime (User Directive #3, 2026-10-14,
+> RESOLUTION-CORE) keeps the five target types. CORE targets
+> (`soul` / `workflow`) submit a DB draft that goes straight to
+> PENDING APPROVAL — they take effect once a human operator
+> approves them; your files are not modified directly. MEMORY
+> targets (`memory` / `user` / `growth` / `memories/<slug>`)
+> persist directly to the prompt-version DB as MEMORY-class
+> rows — no approval round-trip, no badge hit. The on-disk
+> file stays the cold-boot F6 fallback.
+>
+> MEMORY grammar (Ud#3): a successful write returns
+> `✓ <target>: persisted (memory version N)` — born-effective,
+> transition-free. CORE grammar: a successful write returns
+> `📋 <target>: submitted as prompt-version v<N> (pending
+> approval)` — the agent_self tool surface keeps the two
+> markers (`✓` for born-effective, `📋` for pending-approval)
+> so prefix-parsing agents can branch without touching the
+> rest of the line.
+>
+> Persona-relevant reflections on personal observations should
+> still target `memory` / `memories/` (MEMORY path is the
+> historical semantic). Project knowledge (architecture,
+> gotchas, deployment state) MUST go through the RAG knowledge
+> system via `experience()` — the classification layers
+> REJECT project content even behind persona prefixes.
 
 ## How It Works:
 If you don't specify intent/target, the tool will classify your
@@ -787,8 +925,10 @@ Args:
     request: What you want to remember/learn/change. Can be natural
              language like "My name is Cody" or "User prefers concise responses"
     intent: (Optional) Explicit intent: "remember", "learn", or "change"
-    target: (Optional) Explicit target: "memory", "memories", "workflow", "soul", "user"
-             (note: "memory" and "memories" are deprecated — see above)
+    target: (Optional) Explicit target: "memory", "memories",
+             "workflow", "soul", "user", "growth" — the dispatch
+             is class-aware (CORE: soul / workflow; MEMORY:
+             memory / user / growth / memories/<slug>)
 
 Returns:
     Confirmation of what was done, or error message
@@ -796,16 +936,16 @@ Returns:
 Examples:
     # Natural language (auto-classified):
     inner_soul(request="My name is Cody")
-    # → Updates soul.md (identity)
+    # → Submits a soul change (pending approval)
 
     inner_soul(request="User likes TypeScript")
-    # → Updates user.md (user preference)
+    # → Submits a user.md change (pending approval)
 
     inner_soul(request="Be cozy with the user")
-    # → Updates soul.md + user.md (personality + relationship)
+    # → Submits soul.md + user.md changes (pending approval)
 
     inner_soul(request="Always check for tests before committing")
-    # → Updates workflow.md (process)
+    # → Submits a workflow.md change (pending approval)
 
     inner_soul(request="I learned that early testing catches bugs")
     # → Redirected to RAG (project knowledge) — use experience() instead
@@ -1025,6 +1165,397 @@ def _classify_request(request: str, intent: str | None = None) -> dict:
             "description": "Event or observation", "all_matches": []}
 
 
+# ============================================================
+# Prompt-version DB submission (Phase B T7 — soul/workflow/user)
+# ============================================================
+
+
+class PromptMutationRejected(ValueError):
+    """Raised by a target mutator to refuse the composed draft.
+
+    The mutator runs INSIDE ``create_and_submit``'s pre-transaction
+    composition step; raising here aborts the submission before any
+    DB row is written. Converted to the standard ``⚠ <target>:``
+    result shape by :func:`_submit_prompt_version`.
+    """
+
+
+def _run_coro_sync(coro):
+    """Drive an async service coroutine from this sync tool context.
+
+    The inner_soul tool function is deliberately SYNC (LangChain
+    StructuredTool + the existing test suite invoke it via
+    ``.invoke()``), but the prompt-version service facade is async
+    (A4: the ``asyncio.to_thread`` facade serves router +
+    inner_soul/agent_mother callers). Two cases (mirrors the
+    battle-tested ``plane_sync._drive_async`` semantics):
+
+    1. No event loop running in this thread → ``asyncio.run``.
+    2. A loop IS running in this thread (sync tool reached from a
+       live loop) → block a worker thread on a fresh loop instead;
+       ``run_until_complete`` is illegal inside a running loop.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(asyncio.run, coro).result()
+
+
+def _get_prompt_version_service(manager: "InstanceManager | None"):
+    """Fetch the manager's prompt-version service (or ``None``).
+
+    The manager constructs the singleton at boot
+    (``manager._prompt_version_service``); the attribute is read
+    defensively so mocks/legacy callers without one degrade to the
+    fail-closed path instead of AttributeError.
+    """
+    if manager is None:
+        return None
+    return getattr(manager, "_prompt_version_service", None)
+
+
+def _submit_prompt_version(
+    agent_id: str,
+    version_tag: str | None,
+    artifact: str,
+    mutator,
+    request: str,
+    instance_id: str | None,
+    agent_path: Path,
+    manager: "InstanceManager | None",
+    target: str,
+) -> dict:
+    """Submit a composed prompt-version draft for one target (D4/A5/C4).
+
+    Shared core of the Phase B ``_update_soul`` / ``_update_user`` /
+    ``_update_workflow`` rewires. FAIL-CLOSED: when the service or the
+    instance identity is unavailable the change is refused — the file
+    is never written as a fallback.
+
+    Args:
+        agent_id: Resolved base agent id (closure).
+        version_tag: Version tag of the owning instance (closure;
+            ``None`` normalizes to ``""`` in the repo).
+        artifact: Prompt artifact key (``"soul"`` / ``"workflow"`` /
+            ``"user"``).
+        mutator: Callable ``(effective_content: str | None) -> str``
+            applied INSIDE ``create_and_submit`` to the effective
+            chain (selected > latest_approved > file_fallback).
+        request: The original request text (for error messages).
+        instance_id: Submitting instance id (D10 audit identity).
+        agent_path: Agent directory — read-only source of the
+            template ``file_fallback``.
+        manager: InstanceManager (service + prompt_cache source).
+        target: Response-grammar target name (``"soul"`` etc.).
+
+    Returns:
+        Result dict in the ``_execute_update`` shape; success rows
+        carry ``db=True``, ``version``, ``version_id``, ``state``.
+    """
+    service = _get_prompt_version_service(manager)
+    if service is None:
+        return {
+            "success": False,
+            "target": target,
+            "error": (
+                "prompt-version service unavailable — change NOT applied "
+                f"({target} is an immutable prompt artifact; file "
+                "fallback is disabled)"
+            ),
+        }
+    if not instance_id:
+        return {
+            "success": False,
+            "target": target,
+            "error": (
+                "instance identity unavailable — change NOT submitted "
+                "(prompt-version drafts are stamped with the submitter "
+                "instance id)"
+            ),
+        }
+
+    # Read-only template snapshot: the bottom of the F6 effective
+    # chain. No lock — the DB transaction is the serialization point;
+    # a torn read here only degrades the fallback, never correctness.
+    fallback_file = agent_path / f"{artifact}.md"
+    try:
+        file_fallback = (
+            fallback_file.read_text(encoding="utf-8")
+            if fallback_file.exists()
+            else None
+        )
+    except OSError:
+        file_fallback = None
+
+    from ..repositories.prompt_version.repository import actor_from_instance
+
+    actor = actor_from_instance(instance_id, agent_id, version_tag)
+    try:
+        row = _run_coro_sync(
+            service.create_and_submit(
+                agent_id,
+                version_tag or "",
+                artifact,
+                mutator,
+                actor,
+                file_fallback=file_fallback,
+            )
+        )
+    except PromptMutationRejected as exc:
+        return {"success": False, "target": target, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — surface per-target, keep compound alive
+        return {
+            "success": False,
+            "target": target,
+            "error": f"prompt-version submission failed: {exc}",
+        }
+
+    # Invalidate the prompt-cache key for THIS (agent_id, version_tag)
+    # (D9 threading — Phase A T7). The loader's db_versions_fingerprint
+    # (A8) self-heals regardless; the invalidate is belt-and-braces
+    # latency hygiene, same as the file-write sites.
+    if manager is not None and hasattr(manager, "prompt_cache"):
+        manager.prompt_cache.invalidate(agent_id, version_tag=version_tag)
+
+    return {
+        "success": True,
+        "target": target,
+        "file": f"prompt-version v{row.version}",
+        "db": True,
+        "version": row.version,
+        "version_id": row.version_id,
+        "state": row.state,
+        "message": (
+            f"submitted as prompt-version v{row.version} (pending "
+            "approval); takes effect once approved"
+        ),
+    }
+
+
+# ============================================================
+# Prompt-version DB submission — MEMORY path (User Directive #3,
+# 2026-10-14, RESOLUTION-CORE)
+# ============================================================
+
+
+def _submit_memory_version(
+    agent_id: str,
+    version_tag: str | None,
+    artifact: str,
+    content: str,
+    request: str,
+    instance_id: str | None,
+    manager: "InstanceManager | None",
+    target: str,
+) -> dict:
+    """Persist a MEMORY-class row directly (Ud#3 binding blocks 1+2).
+
+    Shared core of the DUAL-PATH rewrite for ``memory`` / ``user``
+    / ``growth`` / ``memories/<slug>`` targets. FAIL-CLOSED like
+    the CORE counterpart: when the service or the instance identity
+    is unavailable, the change is refused — the file is NEVER
+    written as a fallback.
+
+    The caller has already COMPOSED the content string
+    (file_fallback + delta / append-bullet / dedup-then-append).
+    The MEMORY creator takes the whole content; no
+    ``file_fallback`` argument (transition-free; the row IS the
+    live state).
+
+    Args:
+        agent_id: Resolved base agent id (closure).
+        version_tag: Version tag of the owning instance
+            (``None`` normalizes to ``""`` in the repo).
+        artifact: The DB artifact key for the row. For
+            ``memories/<slug>.md`` writes this is the per-slug
+            key (e.g. ``"memories/20260401_1430-foo.md"`` —
+            WITH the ``.md`` extension; matches the
+            prompt-visible filename index); for ``memory`` /
+            ``user`` / ``growth`` it is the canonical artifact
+            string.
+        content: The composed row body (the pre-compaction /
+            pre-dedup logic already ran in the caller).
+        request: The original request text (for error messages).
+        instance_id: Submitting instance id (D10 audit identity).
+        manager: InstanceManager (service + prompt_cache source).
+        target: Response-grammar target name (``"memory"`` /
+            ``"user"`` / ``"growth"`` / ``"memories"``).
+
+    Returns:
+        Result dict in the ``_execute_update`` shape; success rows
+        carry ``db=True``, ``memory=True``, ``version``,
+        ``version_id``, ``state``. The response-grammar field
+        uses the "persisted (memory version N)" shape so
+        prefix-parsing agents get a stable tail token.
+    """
+    service = _get_prompt_version_service(manager)
+    if service is None:
+        return {
+            "success": False,
+            "target": target,
+            "error": (
+                "prompt-version service unavailable — change NOT applied "
+                f"({target} is an immutable MEMORY-class prompt artifact; "
+                "file fallback is disabled)"
+            ),
+        }
+    if not instance_id:
+        return {
+            "success": False,
+            "target": target,
+            "error": (
+                "instance identity unavailable — change NOT persisted "
+                "(MEMORY-class rows are stamped with the submitter "
+                "instance id)"
+            ),
+        }
+
+    from ..repositories.prompt_version.repository import actor_from_instance
+
+    actor = actor_from_instance(instance_id, agent_id, version_tag)
+    try:
+        row = _run_coro_sync(
+            service.create_memory_version(
+                agent_id,
+                version_tag or "",
+                artifact,
+                content,
+                actor,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — surface per-target, keep compound alive
+        return {
+            "success": False,
+            "target": target,
+            "error": f"prompt-version memory persist failed: {exc}",
+        }
+
+    # Invalidate the prompt-cache key for THIS (agent_id, version_tag).
+    # The loader's db_versions_fingerprint (A8) self-heals regardless;
+    # the invalidate is belt-and-braces latency hygiene, same as the
+    # CORE path. MEMORY rows affect the loader's MEMORY-family
+    # resolution (memory / user / growth) — the fingerprint bust
+    # reaches them all in one cache.set() per load_and_cache_prompt.
+    if manager is not None and hasattr(manager, "prompt_cache"):
+        manager.prompt_cache.invalidate(agent_id, version_tag=version_tag)
+
+    return {
+        "success": True,
+        "target": target,
+        "file": f"memory-version v{row.version}",
+        "db": True,
+        "memory": True,
+        "version": row.version,
+        "version_id": row.version_id,
+        "state": row.state,
+        "message": (
+            f"persisted (memory version {row.version})"
+        ),
+    }
+
+
+def _make_soul_mutator(request: str, rules: dict):
+    """Build the soul mutator — byte-preserving port of the pre-B logic.
+
+    ``current`` is the effective-chain content (``None`` when no DB
+    row and no template file exist); name-change requests replace the
+    ``**My name is ...**`` line in place, everything else appends a
+    bullet. The ``max_soul_chars`` cap raises
+    :class:`PromptMutationRejected` (no row, no file write).
+    """
+
+    def mutator(current: str | None) -> str:
+        if current is None:
+            current = "# Who I Am\n\n"
+
+        max_chars = rules.get("max_soul_chars", 2000)
+        if len(current) >= max_chars:
+            raise PromptMutationRejected(
+                f"soul.md at {len(current)} chars (max {max_chars}). Cannot add more."
+            )
+
+        lines = current.rstrip().split("\n")
+
+        request_lower = request.lower()
+        is_name_change = any(
+            p in request_lower
+            for p in [
+                "my name is",
+                "i am called",
+                "call me",
+                "remember my name",
+                "remember your name",
+            ]
+        )
+
+        if is_name_change:
+            name = (
+                request.split("name is")[-1]
+                .split("called")[-1]
+                .strip()
+                .rstrip(".")
+            )
+            formatted = f"**My name is {name}**"
+            insert_idx = 1  # After first line (header)
+            while insert_idx < len(lines) and lines[insert_idx].strip() == "":
+                insert_idx += 1
+            for i, line in enumerate(lines):
+                if line.startswith("**My name is"):
+                    lines[i] = formatted
+                    formatted = None  # Updated in place, not inserted
+                    break
+        else:
+            formatted = f"- {request}"
+            insert_idx = len(lines)
+
+        if formatted:
+            lines.insert(insert_idx, formatted)
+        return "\n".join(lines)
+
+    return mutator
+
+
+def _make_user_mutator(request: str):
+    """Build the user mutator (D5) — placeholder-strip + append bullet.
+
+    Byte-preserving port of the pre-B ``_update_user`` body; the
+    ``None`` current (no DB row, no template) seeds the historical
+    ``# User\\n\\n`` default.
+    """
+
+    def mutator(current: str | None) -> str:
+        if current is None:
+            current = "# User\n\n"
+
+        # Remove placeholder
+        if "(To be filled" in current:
+            current = current.split("(To be filled")[0].rstrip()
+
+        return f"{current}\n- {request}"
+
+    return mutator
+
+
+def _make_workflow_mutator(request: str):
+    """Build the workflow mutator — ensure ``**Learned:**`` + append bullet.
+
+    Byte-preserving port of the pre-B ``_update_workflow`` body.
+    """
+
+    def mutator(current: str | None) -> str:
+        if current is None:
+            current = "# Workflow\n\n"
+
+        if "**Learned:**" not in current:
+            current += "\n\n---\n\n**Learned:**\n"
+
+        return f"{current}\n- {request}"
+
+    return mutator
+
+
 def _execute_update(
     agent_id: str,
     agent_path: Path,
@@ -1033,66 +1564,125 @@ def _execute_update(
     intent: str | None,
     rules: dict,
     manager: "InstanceManager",
-    classification: dict
+    classification: dict,
+    version_tag: str | None = None,
+    instance_id: str | None = None,
 ) -> dict:
-    """Execute an update to a specific target."""
-    
+    """Execute an update to a specific target.
+
+    DUAL-PATH dispatch (User Directive #3, 2026-10-14,
+    RESOLUTION-CORE):
+
+    * CORE (soul / workflow) — :func:`_submit_prompt_version` →
+      DB draft, ``pending_approval``, no file write.
+    * MEMORY (memory / user / growth / memories/<slug>) —
+      :func:`_submit_memory_version` → MEMORY-class row,
+      born-effective, NO approval. ``memory.md`` and
+      ``memories/<slug>`` writes use the cold-boot file as
+      the F6 chain source; ``user.md`` / ``growth.md`` follow
+      the same pattern (their files are also cold-boot
+      fallbacks).
+
+    ``instance_id`` threads the D10 audit identity; ``version_tag``
+    threads the F9 / R10 cache-bust key.
+    """
     if target == "memories":
-        return _update_memories(agent_id, agent_path, request, classification, manager)
+        return _update_memories(
+            agent_id, agent_path, request, classification,
+            manager, version_tag=version_tag, instance_id=instance_id,
+        )
     elif target == "memory":
-        return _update_memory_md(agent_id, agent_path, request, rules, manager)
+        return _update_memory_md(
+            agent_id, agent_path, request, rules,
+            manager, version_tag=version_tag, instance_id=instance_id,
+        )
     elif target == "soul":
-        return _update_soul(agent_id, agent_path, request, rules, manager)
+        return _update_soul(
+            agent_id, agent_path, request, rules, manager,
+            version_tag=version_tag, instance_id=instance_id,
+        )
     elif target == "user":
-        return _update_user(agent_id, agent_path, request, manager)
+        return _update_user(
+            agent_id, agent_path, request, manager,
+            version_tag=version_tag, instance_id=instance_id,
+        )
     elif target == "workflow":
-        return _update_workflow(agent_id, agent_path, request, rules, manager)
+        return _update_workflow(
+            agent_id, agent_path, request, rules, manager,
+            version_tag=version_tag, instance_id=instance_id,
+        )
+    elif target == "growth":
+        # Growth target (Ud#3 supersedes the implicit growth
+        # gate): MEMORY-class, whole-content replace via the
+        # user mutator equivalent. The caller composes the
+        # new growth.md body — typically a config knob
+        # update. The legacy `_load_growth_rules` parser
+        # runs against the cold-boot file fallback; the
+        # DB row is the live source when present.
+        return _update_growth(
+            agent_id, agent_path, request,
+            manager, version_tag=version_tag, instance_id=instance_id,
+        )
     else:
         return {"success": False, "target": target, "error": f"Unknown target: {target}"}
 
 
-def _update_memories(agent_id: str, agent_path: Path, request: str, classification: dict, manager: "InstanceManager" | None = None) -> dict:
-    """Create timestamped memory file."""
-    memories_dir = agent_path / "memories"
-    memories_dir.mkdir(exist_ok=True)
-    
+def _update_memories(
+    agent_id: str,
+    agent_path: Path,
+    request: str,
+    classification: dict,
+    manager: "InstanceManager" | None = None,
+    version_tag: str | None = None,
+    instance_id: str | None = None,
+) -> dict:
+    """Persist a per-slug memory row (User Directive #3, 2026-10-14).
+
+    Pre-rewrite this wrote a timestamped ``.md`` file under
+    ``<agent>/memories/``. Since the DUAL-PATH rewrite, the
+    canonical state is a MEMORY-class row keyed
+    ``memories/<slug>.md`` — the canonical form carries the
+    ``.md`` extension (User Directive F4, 2026-10-14: matches
+    the prompt-visible filename index in the loader's
+    recent-memory list and the on-the-wire
+    ``access_memory("X.Y.md")`` contract).
+
+    Consecutive writes on the same slug land as version 1, 2, 3,
+    ... on the same key — the legacy collision-counter that
+    derived ``<filename>-<n>.md`` is retired; the version chain
+    IS the lineage. The on-disk file under ``memories/`` is
+    NEVER touched by this path; it remains the cold-boot F6
+    fallback (read by ``access_memory`` when no DB row exists).
+
+    The row body preserves the legacy file-shape header
+    (Created / Type / Description / content) for parity with
+    the historical rendering that the file writer produced.
+    """
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d_%H%M")
-    
-    # Create safe filename
-    desc = _slugify(request[:80])  # More chars for better description
-    filename = f"{timestamp}-{desc}.md"
-    
-    filepath = memories_dir / filename
-    
-    # Don't overwrite
-    counter = 1
-    while filepath.exists():
-        filename = f"{timestamp}-{desc}-{counter}.md"
-        filepath = memories_dir / filename
-        counter += 1
-    
-    # Write memory file with classification metadata
-    file_content = f"""# Memory
+    desc = _slugify(request[:80])
+    slug = f"{timestamp}-{desc}"
 
-**Created:** {now.strftime("%Y-%m-%d %H:%M")}
-**Type:** {classification["type"]}
-**Description:** {classification["description"]}
+    # Same header shape as the legacy file-writer for content
+    # parity (Created / Type / Description / body).
+    content = (
+        f"# Memory\n\n"
+        f"**Created:** {now.strftime('%Y-%m-%d %H:%M')}\n"
+        f"**Type:** {classification['type']}\n"
+        f"**Description:** {classification['description']}\n\n"
+        f"{request}\n"
+    )
 
-{request}
-"""
-    filepath.write_text(file_content, encoding="utf-8")
-    
-    # Invalidate prompt cache so new memory appears in next prompt
-    if manager:
-        manager.prompt_cache.invalidate(agent_id)
-    
-    return {
-        "success": True,
-        "target": "memories",
-        "file": f"memories/{filename}",
-        "type": classification["type"]
-    }
+    return _submit_memory_version(
+        agent_id=agent_id,
+        version_tag=version_tag,
+        artifact=f"memories/{slug}.md",
+        content=content,
+        request=request,
+        instance_id=instance_id,
+        manager=manager,
+        target="memories",
+    )
 
 
 def _format_rejection(target: str, max_words: int, word_count: int, rules: dict | None = None) -> dict:
@@ -1100,260 +1690,386 @@ def _format_rejection(target: str, max_words: int, word_count: int, rules: dict 
     return {
         "success": False,
         "target": target,
-        "error": f"Memory limit exceeded ({word_count} >= {max_words} words). Content was not saved."
+        "error": f"Memory limit ({word_count} >= {max_words} words) exceeded. Content was not saved."
     }
 
 
-def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None) -> dict:
-    """Add to core memory.md with file locking and compaction support."""
-    memory_file = agent_path / "memory.md"
-    
+def _read_memory_chain_source(
+    agent_id: str,
+    version_tag: str | None,
+    artifact: str,
+    fallback_file: Path,
+    default_text: str,
+    manager: "InstanceManager" | None,
+) -> str:
+    """Resolve the MEMORY-class chain source for a composer (F3 fix).
+
+    Per the directive that ships with this fix, the three
+    MEMORY composers (``_update_memory_md`` /
+    ``_update_user`` / ``_update_growth``) MUST compose on the
+    EFFECTIVE chain — the latest MEMORY-class DB row's content
+    — NOT on the on-disk file. Consecutive writes accumulate
+    on top of the prior row instead of clobbering against the
+    frozen template file (the file is a cold-boot F6 source
+    only, post-sweep).
+
+    Precedence:
+
+    1. ``repo.get_effective(agent_id, version_tag, artifact)``
+       — the class-aware resolution. For MEMORY-class
+       artifacts, this returns ``selected_version.content``
+       when a selection-pointer is pinned, otherwise the
+       latest row's content (any state — MEMORY rows are
+       transition-free and born-effective). Returns ``None``
+       when no DB rows exist for the key.
+    2. The on-disk file (cold-boot fallback; pre-rewrite state
+       for hosts that have not yet promoted any rows). No
+       flock — a torn read here only degrades the chain
+       source, never correctness (the DB transaction in
+       :meth:`create_memory_version` is the serialization
+       point).
+    3. ``default_text`` — the bootstrap string when neither DB
+       nor the file exists (fresh agent dir + zero rows).
+
+    Fail-open posture: any service / DB exception skips to the
+    next precedence level. The composer MUST always return
+    SOME chain source — to short-circuit on ``None`` would break
+    the append-bullet contract and silently lose user data.
+    """
+    service = _get_prompt_version_service(manager)
+    if service is not None:
+        try:
+            effective = _run_coro_sync(
+                service.get_effective(
+                    agent_id,
+                    version_tag or "",
+                    artifact,
+                )
+            )
+        except Exception:  # noqa: BLE001 — fail-open to file fallback
+            effective = None
+        if effective is not None:
+            return effective
+
     try:
-        with _lock_memory_file(memory_file):
-            # Read current content inside lock
-            current = memory_file.read_text(encoding="utf-8") if memory_file.exists() else "# Memory\n\n"
-            word_count = len(current.split())
-            max_words = rules.get("max_memory_words", 2000)
-            
-            # Check proactive compaction threshold (80%)
-            should_compact = word_count > max_words * 0.8
-            
-            if word_count >= max_words:
-                # Always try compaction when at capacity
-                current = _compact_memory(current)
-                word_count = len(current.split())
-                # Re-check after compaction
-                if word_count >= max_words:
-                    return _format_rejection("memory", max_words, word_count, rules)
-            elif should_compact:
-                # Proactively compact when approaching capacity
-                current = _compact_memory(current)
-                word_count = len(current.split())
-            
-            # Find insertion point (before "*For events" marker or HTML comments)
-            lines = current.rstrip().split('\n')
-            insert_idx = len(lines)
-            for i, line in enumerate(lines):
-                if line.startswith("*For events") or line.startswith("<!--"):
-                    insert_idx = i
-                    break
-            
-            # Check if the new entry would duplicate
-            new_entry = f"\n- {request}"
-            normalized_new = request.strip().lower()
-            for line in lines:
-                if line.strip().lower() == f"- {normalized_new}":
-                    return {
-                        "success": True,
-                        "action": "skipped",
-                        "target": "memory",
-                        "message": "Entry already exists in memory.md",
-                        "compact": False,
-                    }
-            
-            lines.insert(insert_idx, new_entry)
-            new_content = '\n'.join(lines)
-            
-            # Use atomic write instead of direct write
-            _atomic_write_memory(memory_file, new_content)
-            
-            # Invalidate prompt cache so next prompt sees the updated memory
-            if manager and hasattr(manager, 'prompt_cache'):
-                manager.prompt_cache.invalidate(agent_id)
-            
+        if fallback_file.exists():
+            return fallback_file.read_text(encoding="utf-8")
+    except OSError:
+        pass
+
+    return default_text
+
+
+def _update_memory_md(
+    agent_id: str,
+    agent_path: Path,
+    request: str,
+    rules: dict,
+    manager: "InstanceManager" | None = None,
+    version_tag: str | None = None,
+    instance_id: str | None = None,
+) -> dict:
+    """Persist a memory.md change as a MEMORY-class row (Ud#3).
+
+    Pre-rewrite this flock-locked ``memory.md`` and applied the
+    80% proactive compaction + dedup. Since the DUAL-PATH
+    rewrite, the canonical state is a MEMORY-class row keyed
+    ``memory``; the on-disk ``memory.md`` is NEVER touched by
+    this path.
+
+    Compaction as a new version (Ud#3): the 80% proactive
+    compaction rule is preserved as a SEMANTIC guardrail — the
+    composer's job is to keep the ``current`` chain under the
+    ``max_memory_words`` cap. The pre-compaction content
+    survives in history: it's a prior version on the same
+    ``memory`` key, the loader's ``latest_content`` flips to
+    the post-compaction row.
+
+    The chain source: ``repo.get_effective`` is the canonical
+    base — the latest MEMORY-class DB row's content (F3
+    fix — write N+1 = content_N + delta_N+1, accumulation on
+    the existing chain). The on-disk ``memory.md`` is the
+    cold-boot F6 fallback only (no DB rows). Dedup is
+    preserved — a duplicate bullet short-circuits to a no-op
+    success result WITHOUT persisting a new version (the
+    chain stays at its current max).
+    """
+    memory_file = agent_path / "memory.md"
+    current = _read_memory_chain_source(
+        agent_id=agent_id,
+        version_tag=version_tag,
+        artifact="memory",
+        fallback_file=memory_file,
+        default_text="# Memory\n\n",
+        manager=manager,
+    )
+
+    word_count = len(current.split())
+    max_words = rules.get("max_memory_words", 2000)
+
+    # 80% proactive compaction guardrail (preserved verbatim
+    # from the pre-rewrite logic — Ud#3: compaction lives in
+    # the composer, not in a post-insert hook).
+    should_compact = word_count > max_words * 0.8
+    if word_count >= max_words:
+        current = _compact_memory(current)
+        word_count = len(current.split())
+        if word_count >= max_words:
+            return _format_rejection("memory", max_words, word_count, rules)
+    elif should_compact:
+        current = _compact_memory(current)
+        word_count = len(current.split())
+
+    lines = current.rstrip().split('\n')
+    # Find insertion point (before "*For events" marker or HTML comments)
+    insert_idx = len(lines)
+    for i, line in enumerate(lines):
+        if line.startswith("*For events") or line.startswith("<!--"):
+            insert_idx = i
+            break
+
+    # Dedup check (preserved) — short-circuit before persisting.
+    normalized_new = request.strip().lower()
+    for line in lines:
+        if line.strip().lower() == f"- {normalized_new}":
             return {
                 "success": True,
-                "action": "updated",
+                "action": "skipped",
                 "target": "memory",
-                "message": f"Added to memory.md",
-                "compact": should_compact,
+                "message": "Entry already exists in memory.md (dedup)",
+                "compact": False,
             }
-    except TimeoutError:
-        return {
-            "success": False,
-            "action": "error",
-            "target": "memory",
-            "message": "Could not acquire lock on memory.md - please retry",
-        }
+
+    lines.insert(insert_idx, f"\n- {request}")
+    new_content = '\n'.join(lines)
+
+    result = _submit_memory_version(
+        agent_id=agent_id,
+        version_tag=version_tag,
+        artifact="memory",
+        content=new_content,
+        request=request,
+        instance_id=instance_id,
+        manager=manager,
+        target="memory",
+    )
+    # Tail the success body with the compaction flag (parity
+    # with the pre-rewrite contract; the agent_self tool
+    # contract surface stays the same). The CORE
+    # response-grammar field stays as the canonical
+    # ``persisted (memory version N)``.
+    if result.get("success"):
+        result["action"] = "updated"
+        result["compact"] = should_compact
+    return result
 
 
-def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None) -> dict:
-    """Apply soul.md change directly - identity updates are applied immediately."""
-    soul_file = agent_path / "soul.md"
-    history_dir = agent_path / "history"
-    history_dir.mkdir(exist_ok=True)
-    
-    now = datetime.now()
-    
-    try:
-        with _lock_memory_file(soul_file):
-            # Read current soul inside lock
-            if soul_file.exists():
-                current = soul_file.read_text(encoding="utf-8")
-            else:
-                current = "# Who I Am\n\n"
-            
-            # Check size constraints
-            max_chars = rules.get("max_soul_chars", 2000)
-            if len(current) >= max_chars:
-                return {
-                    "success": False,
-                    "target": "soul",
-                    "error": f"soul.md at {len(current)} chars (max {max_chars}). Cannot add more."
-                }
-            
-            # Determine where to add the change
-            lines = current.rstrip().split('\n')
-            
-            # Format the change based on request type
-            request_lower = request.lower()
-            is_name_change = any(p in request_lower for p in ["my name is", "i am called", "call me", "remember my name", "remember your name"])
-            
-            if is_name_change:
-                # Extract name and format nicely
-                name = request.split('name is')[-1].split('called')[-1].strip().rstrip('.')
-                formatted = f"**My name is {name}**"
-                # Insert right after main header
-                insert_idx = 1  # After first line (header)
-                while insert_idx < len(lines) and lines[insert_idx].strip() == "":
-                    insert_idx += 1
-                # Check if name already exists and update it
-                for i, line in enumerate(lines):
-                    if line.startswith("**My name is"):
-                        lines[i] = formatted
-                        formatted = None  # Flag that we updated, not inserted
-                        break
-            else:
-                formatted = f"- {request}"
-                # Append at the end
-                insert_idx = len(lines)
-            
-            # Insert the change (if not already updated)
-            if formatted:
-                lines.insert(insert_idx, formatted)
-            new_content = '\n'.join(lines)
-            
-            # Use atomic write inside lock
-            _atomic_write_memory(soul_file, new_content)
-    except TimeoutError:
-        return {
-            "success": False,
-            "target": "soul",
-            "error": "Could not acquire lock on soul.md - please retry"
-        }
-    
-    # Invalidate cache if manager provided
-    if manager:
-        manager.prompt_cache.invalidate(agent_id)
-    
-    # Log to history for audit trail
-    timestamp = now.strftime("%Y%m%d_%H%M%S")
-    history_file = history_dir / f"{timestamp}_soul_change.md"
-    history_content = f"""# Soul Change Applied
+def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None, version_tag: str | None = None, instance_id: str | None = None) -> dict:
+    """Submit a soul.md change as a prompt-version draft (Phase B T7).
 
-**Applied:** {now.strftime("%Y-%m-%d %H:%M:%S")}
-**Status:** APPLIED
+    Pre-B this wrote ``soul.md`` atomically and appended a
+    ``history/*_soul_change.md`` audit file. Since Phase B the change
+    is submitted to the prompt-version DB (D4 auto-submit →
+    ``pending_approval``) and the file is NEVER touched:
 
-## Change
-
-{request}
-
-## Previous State
-
-```
-{current[:500]}{'...' if len(current) > 500 else ''}
-```
-"""
-    history_file.write_text(history_content, encoding="utf-8")
-    
-    return {
-        "success": True,
-        "target": "soul",
-        "file": "soul.md",
-        "status": "applied",
-        "chars": f"{len(new_content)}/{max_chars}",
-        "message": "Soul change applied directly"
-    }
+    * Composition (C4): the mutator (:func:`_make_soul_mutator`)
+      applies the name-change/append semantics to the EFFECTIVE chain
+      (selected > latest_approved > file_fallback).
+    * Audit (D10): the ``history/`` file is retired — the DB audit
+      events (CREATED/SUBMITTED + ARCHIVED on supersession) stamped
+      with the submitter instance identity replace it; ``history/``
+      is no longer created.
+    * Fail-closed: service/identity unavailable → ``⚠`` refusal, no
+      file fallback. The Phase A write-guard shim stays on the
+      ``write_file``/``edit_file`` surfaces as defense-in-depth.
+    """
+    return _submit_prompt_version(
+        agent_id=agent_id,
+        version_tag=version_tag,
+        artifact="soul",
+        mutator=_make_soul_mutator(request, rules),
+        request=request,
+        instance_id=instance_id,
+        agent_path=agent_path,
+        manager=manager,
+        target="soul",
+    )
 
 
-def _update_user(agent_id: str, agent_path: Path, request: str, manager: "InstanceManager" | None = None) -> dict:
-    """Add user information to user.md."""
+def _update_user(agent_id: str, agent_path: Path, request: str, manager: "InstanceManager" | None = None, version_tag: str | None = None, instance_id: str | None = None) -> dict:
+    """Persist a user.md change as a MEMORY-class row (Ud#3 SUPERSEDES D5).
+
+    Pre-B this appended to ``user.md`` in place. Phase B D5
+    tentatively bound user.md to the CORE path (state machine
+    + ``pending_approval``); User Directive #3 (2026-10-14)
+    SUPERSEDES that — user.md is MEMORY-class now, persists
+    directly via ``create_memory_version``, NO approval
+    round-trip. The user's preferences take effect on the next
+    prompt reload.
+
+    The body still uses the placeholder-strip + append-bullet
+    composition, but it is computed in the caller on the
+    EFFECTIVE chain — ``repo.get_effective`` (F3 fix —
+    accumulation across un-approved writes) — and persisted
+    as a whole-content row via the MEMORY creator. The
+    on-disk file is the cold-boot F6 fallback only (no DB
+    rows yet). The ``agent_mother.agent_modify`` bypass closes
+    for user.md too — the same class-aware dispatch routes
+    it through ``create_memory_version``.
+    """
     user_file = agent_path / "user.md"
-    
-    try:
-        with _lock_memory_file(user_file):
-            current = user_file.read_text(encoding="utf-8") if user_file.exists() else "# User\n\n"
-            
-            # Remove placeholder
-            if "(To be filled" in current:
-                current = current.split("(To be filled")[0].rstrip()
-            
-            # Append
-            new_content = f"{current}\n- {request}"
-            
-            # Use atomic write inside lock
-            _atomic_write_memory(user_file, new_content)
-    except TimeoutError:
-        return {
-            "success": False,
-            "target": "user",
-            "error": "Could not acquire lock on user.md - please retry"
-        }
-    
-    if manager:
-        manager.prompt_cache.invalidate(agent_id)
-    
-    return {
-        "success": True,
-        "target": "user",
-        "file": "user.md"
-    }
+    current = _read_memory_chain_source(
+        agent_id=agent_id,
+        version_tag=version_tag,
+        artifact="user",
+        fallback_file=user_file,
+        default_text="# User\n\n",
+        manager=manager,
+    )
+
+    # Reuse the byte-preserving user mutator (placeholder-strip
+    # + append bullet) on the EFFECTIVE chain.
+    new_content = _make_user_mutator(request)(current)
+
+    return _submit_memory_version(
+        agent_id=agent_id,
+        version_tag=version_tag,
+        artifact="user",
+        content=new_content,
+        request=request,
+        instance_id=instance_id,
+        manager=manager,
+        target="user",
+    )
 
 
-def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None) -> dict:
-    """Add workflow change."""
-    workflow_file = agent_path / "workflow.md"
-    
-    try:
-        with _lock_memory_file(workflow_file):
-            current = workflow_file.read_text(encoding="utf-8") if workflow_file.exists() else "# Workflow\n\n"
-            
-            if "**Learned:**" not in current:
-                current += "\n\n---\n\n**Learned:**\n"
-            
-            new_workflow = f"{current}\n- {request}"
-            
-            # Use atomic write inside lock
-            _atomic_write_memory(workflow_file, new_workflow)
-    except TimeoutError:
-        return {
-            "success": False,
-            "target": "workflow",
-            "error": "Could not acquire lock on workflow.md - please retry"
-        }
-    
-    if manager:
-        manager.prompt_cache.invalidate(agent_id)
-    
-    return {
-        "success": True,
-        "target": "workflow",
-        "file": "workflow.md"
-    }
+def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None, version_tag: str | None = None, instance_id: str | None = None) -> dict:
+    """Submit a workflow.md change as a prompt-version draft (Phase B T7).
+
+    Pre-B this appended to ``workflow.md``'s ``**Learned:**`` section
+    in place. Since Phase B the change is submitted to the
+    prompt-version DB (D4 auto-submit → ``pending_approval``); the
+    mutator (:func:`_make_workflow_mutator`) ensures the
+    ``**Learned:**`` section exists on the EFFECTIVE chain and
+    appends the bullet. Fail-closed on missing service/identity.
+    """
+    return _submit_prompt_version(
+        agent_id=agent_id,
+        version_tag=version_tag,
+        artifact="workflow",
+        mutator=_make_workflow_mutator(request),
+        request=request,
+        instance_id=instance_id,
+        agent_path=agent_path,
+        manager=manager,
+        target="workflow",
+    )
+
+
+def _update_growth(
+    agent_id: str,
+    agent_path: Path,
+    request: str,
+    manager: "InstanceManager" | None = None,
+    version_tag: str | None = None,
+    instance_id: str | None = None,
+) -> dict:
+    """Persist a growth.md change as a MEMORY-class row (Ud#3).
+
+    Pre-rewrite growth.md was config-only — read by
+    ``_load_growth_rules`` to derive ``max_memory_words`` /
+    ``max_soul_chars`` / etc., and otherwise dormant. The
+    directive re-disposes it as MEMORY-class: the chain source
+    is ``repo.get_effective`` (F3 fix — write N+1 = content_N
+    + delta_N+1, accumulation on the existing chain); the
+    cold-boot F6 file is the fallback when no DB row exists.
+
+    Whole-content replace semantics: the caller passes the
+    new growth.md body in ``request`` (a free-form config
+    block; the parser only consumes the ``max_memory_words``
+    / ``max_soul_chars`` / ``archive ... days`` regex
+    matches). The file fallback is read for cold boots.
+    """
+    growth_file = agent_path / "growth.md"
+    current = _read_memory_chain_source(
+        agent_id=agent_id,
+        version_tag=version_tag,
+        artifact="growth",
+        fallback_file=growth_file,
+        default_text="# Growth\n\n",
+        manager=manager,
+    )
+
+    # Whole-content replace (the caller sends the new body).
+    # For empty/append-style requests, fall back to
+    # append-on-the-chain semantics matching the file's
+    # historical "config knobs" shape.
+    new_body = (request or "").strip()
+    if not new_body:
+        new_content = current
+    elif new_body.startswith("#") or "\n" in new_body or len(new_body) > 200:
+        # Full block — replace the chain body.
+        new_content = new_body
+    else:
+        # Single line — append under the existing chain.
+        if current.rstrip() == "":
+            new_content = "# Growth\n\n" + new_body + "\n"
+        else:
+            new_content = current.rstrip() + "\n" + new_body + "\n"
+
+    return _submit_memory_version(
+        agent_id=agent_id,
+        version_tag=version_tag,
+        artifact="growth",
+        content=new_content,
+        request=request,
+        instance_id=instance_id,
+        manager=manager,
+        target="growth",
+    )
 
 
 def _format_response(request: str, results: list, classification: dict) -> str:
-    """Format the response to show what was done."""
+    """Format the response to show what was done.
+
+    Per-target line grammar (DUAL-PATH, Ud#3 / R7):
+
+    * CORE DB-submitted targets (soul/workflow): ``  📋 <target>:
+      submitted as prompt-version v<N> (pending approval); takes
+      effect once approved`` — the D4 pending-approval grammar.
+      The line keeps the two-space-indent + marker + ``<target>:``
+      shape so prefix-parsing agents only need the new marker
+      (R7; exact strings pinned in
+      ``tests/test_inner_soul_db.py``).
+    * MEMORY DB-submitted targets (memory/user/growth/
+      memories/<slug>): ``  ✓ <target>: persisted (memory
+      version N)`` — the born-effective grammar. ``✓`` marker
+      chosen for "no approval needed" (the file was the prior
+      state; the row is the new state, and the row is live
+      immediately). The two-space indent + ``<target>:`` shape
+      is preserved for prefix-parsing.
+    * Failures: ``  ⚠ <target>: <error>`` — unchanged.
+    """
     lines = [f"✓ Processed: \"{request[:80]}{'...' if len(request) > 80 else ''}\""]
     lines.append(f"  Classification: {classification['type']} ({classification['description']})")
     lines.append("")
-    
+
     for r in results:
         if r.get("success"):
             target = r.get("target", "unknown")
             file = r.get("file", "")
             status = r.get("status", "")
-            
+
+            if r.get("db") and r.get("memory"):
+                # MEMORY path (Ud#3): born-effective, no approval.
+                lines.append(f"  ✓ {target}: {r.get('message', 'persisted')}")
+                continue
+
+            if r.get("db"):
+                # CORE path: DB-submitted draft — pending-approval grammar.
+                lines.append(f"  📋 {target}: {r.get('message', 'submitted')}")
+                continue
+
             msg = f"  ✓ {target}: {file}"
             if "chars" in r:
                 msg += f" ({r['chars']} chars)"
@@ -1362,7 +2078,7 @@ def _format_response(request: str, results: list, classification: dict) -> str:
             lines.append(msg)
         else:
             lines.append(f"  ⚠ {r.get('target', 'unknown')}: {r.get('error', 'Unknown error')}")
-    
+
     return "\n".join(lines)
 
 

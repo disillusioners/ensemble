@@ -48,6 +48,13 @@ Two application forms, one semantic core:
 Both forms stamp ``required_scopes`` onto their callable so the D4.7
 router-scope manifest cage can introspect every decorated route's
 declaration.
+
+Phase B agent-prompt-immutability T4 minted scopes (per
+``phaseB-plan.md`` D11): ``prompts:read``, ``prompts:submit``,
+``prompts:approve``, ``prompts:audit``, ``prompts:write`` — the
+canonical 5-scope family for the prompt-version REST surface. All
+five are added to :data:`daemon.auth.scopes.SCOPE_TAXONOMY` so they
+reach the browser lane via :data:`daemon.auth.scopes.SESSION_OPERATOR_SCOPES`.
 """
 
 from __future__ import annotations
