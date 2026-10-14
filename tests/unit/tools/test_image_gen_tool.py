@@ -162,6 +162,13 @@ def _wire(monkeypatch, handler, store):
     """Wire the transport seam + fake store into a fresh tool; return (tool, spy)."""
     spy = _TransportSpy(handler)
     monkeypatch.setattr(image_gen, "_TRANSPORT_FACTORY", lambda: spy.as_transport())
+    # SSRF guard bypass for OSS test URLs (``.test`` is RFC 6761 reserved-for-testing
+    # and does NOT resolve in this environment). Tests that exercise the guard
+    # explicitly (Finding 2) mock ``_ensure_public_url`` directly and do not
+    # rely on this default. Production never installs this monkeypatch.
+    monkeypatch.setattr(
+        image_gen, "_ensure_public_url", lambda url: (url, None)
+    )
     tools = create_image_gen_tools(_fake_manager(store), "inst-1")
     assert len(tools) == 1
     return tools[0], spy
@@ -940,3 +947,263 @@ class TestRegistryAndAllowlist:
         )
         assert meta["tools"]["allow"] == ["read_file", "image", "design"]
         assert "image_save" in (meta["tools"].get("deny") or [])
+
+
+# ─── 10. review-hardening (council NEEDS-FIXES Findings 2 / 3 / 4) ────────────
+
+
+import socket as _socket_module  # noqa: E402  — used by Finding-2 SSRF guard tests
+
+
+def _wire_no_ssrf_bypass(monkeypatch, handler, store):
+    """Wire the transport seam + fake store WITHOUT the auto-SSRF bypass.
+
+    The default ``_wire`` installs a permissive ``_ensure_public_url``
+    shim so existing tests do not have to worry about the SSRF guard on
+    their fake ``*.test`` URLs. Tests that want to EXERCISE the guard
+    (``TestReviewHardeningSSRFGuard``) use this helper instead — the
+    real guard stays in place and ``socket.getaddrinfo`` controls the
+    validation outcome via the test-local monkeypatch.
+    """
+    spy = _TransportSpy(handler)
+    monkeypatch.setattr(image_gen, "_TRANSPORT_FACTORY", lambda: spy.as_transport())
+    tools = create_image_gen_tools(_fake_manager(store), "inst-1")
+    assert len(tools) == 1
+    return tools[0], spy
+
+
+class TestReviewHardeningSSRFGuard:
+    """Finding 2 — public-URL defense-in-depth on the OSS fetch.
+
+    ``_fetch_image_bytes`` MUST refuse a non-public / loopback / private
+    target BEFORE any network I/O. Mirrors the guard at
+    ``daemon/tools/image_tools.py:93-143`` that the fetch path did not
+    previously have. Each returned address is checked against the standard
+    non-public set; ``follow_redirects=False`` is set on the request so
+    redirects cannot bypass the guard.
+    """
+
+    async def test_loopback_target_refused_before_fetch(
+        self, env_ok, monkeypatch, store
+    ):
+        # The URL itself is benign (http://oss.example/...) but
+        # getaddrinfo returns 127.0.0.1 — the guard must refuse.
+        target_url = "http://oss-loopback.invalid/img/a.png"
+        body = {"data": {"image_urls": [target_url]},
+                "metadata": {}, "base_resp": {"status_code": 0}}
+
+        def _fake_getaddrinfo(host, port, *args, **kwargs):
+            # Return loopback IPv4 for ANY host the guard probes.
+            return [(2, 1, 6, "", ("127.0.0.1", 0))]
+
+        oss_calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "proxy.test":
+                return httpx.Response(200, json=body)
+            # Track any OSS-stage fetch attempt — must be ZERO.
+            oss_calls.append(str(request.url))
+            return httpx.Response(
+                200,
+                headers={"content-type": "image/png"},
+                content=b"\x89PNG\r\n\x1a\n" + b"0" * 64,
+            )
+
+        with monkeypatch.context() as m:
+            m.setattr(_socket_module, "getaddrinfo", _fake_getaddrinfo)
+            # Use the wiring helper that does NOT install the
+            # auto-SSRF-bypass — exercise the real guard.
+            tool, _ = _wire_no_ssrf_bypass(m, handler, store)
+
+            result = await tool.ainvoke({"prompt": "fox"})
+
+        # The fetch phase never touched the OSS test transport.
+        assert oss_calls == [], (
+            f"SSRF guard failed — loopback target reached the OSS fetch: "
+            f"{oss_calls}"
+        )
+        # The envelope is a single-image fetch failure with the guard's
+        # refusal message, surfaced as ``image_gen_fetch_failed``.
+        assert _err_code(result) == "image_gen_fetch_failed"
+        assert "refused" in result
+        # The SKIP-disclosure text mentions the per-image reason verbatim.
+        assert "non-public IP 127.0.0.1" in result
+
+    async def test_private_rfc1918_target_refused(self, env_ok, monkeypatch, store):
+        # 10.0.0.0/8 (RFC1918) is private.
+        target_url = "http://rfc1918.invalid/img/a.png"
+        body = {"data": {"image_urls": [target_url]},
+                "metadata": {}, "base_resp": {"status_code": 0}}
+
+        def _fake_getaddrinfo(host, port, *args, **kwargs):
+            return [(2, 1, 6, "", ("10.0.0.1", 0))]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=body)
+
+        with monkeypatch.context() as m:
+            m.setattr(_socket_module, "getaddrinfo", _fake_getaddrinfo)
+            tool, _ = _wire_no_ssrf_bypass(m, handler, store)
+
+            result = await tool.ainvoke({"prompt": "fox"})
+
+        assert _err_code(result) == "image_gen_fetch_failed"
+        assert "non-public IP 10.0.0.1" in result
+
+    async def test_unresolvable_hostname_refused(self, env_ok, monkeypatch, store):
+        # The guard fails closed even when getaddrinfo raises — a typo'd
+        # URL or a DNS outage must not slip through to a fetch attempt.
+        target_url = "http://nope.invalid/img/a.png"
+        body = {"data": {"image_urls": [target_url]},
+                "metadata": {}, "base_resp": {"status_code": 0}}
+
+        def _fake_getaddrinfo(host, port, *args, **kwargs):
+            raise _socket_module.gaierror(-2, "Name or service not known")
+
+        oss_calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host != "proxy.test":
+                oss_calls.append(str(request.url))
+            return httpx.Response(200, json=body)
+
+        with monkeypatch.context() as m:
+            m.setattr(_socket_module, "getaddrinfo", _fake_getaddrinfo)
+            tool, _ = _wire_no_ssrf_bypass(m, handler, store)
+
+            result = await tool.ainvoke({"prompt": "fox"})
+
+        assert oss_calls == []
+        assert _err_code(result) == "image_gen_fetch_failed"
+        assert "Cannot resolve hostname" in result
+
+
+class TestReviewHardeningPostBodyReadCap:
+    """Finding 3 — POST-phase body-read cap (``POST_BODY_READ_CAP_BYTES``).
+
+    Mirrors the dual-enforcement posture of the OSS fetch path
+    (``MAX_IMAGE_BYTES`` pre-check + streamed running count). A hostile /
+    misconfigured upstream must NOT be able to pin the tool at the
+    POST-cap floor while dumping unbounded bytes into memory. Oversize ⇒
+    fail-closed ``image_gen_upstream_error`` envelope.
+    """
+
+    async def test_oversize_post_body_fails_closed_no_hang(
+        self, env_ok, monkeypatch, store
+    ):
+        # Construct a body larger than ``POST_BODY_READ_CAP_BYTES`` (1 MiB)
+        # so the bounded stream-read trips. The chunk is JSON-shaped so a
+        # ``aread`` consumer that ignored the cap would still parse it.
+        oversize_payload = b'{"data":{"image_urls":[]},' + (
+            b'"' + b'x' * image_gen.POST_BODY_READ_CAP_BYTES + b'": "y"}'
+        )
+        assert len(oversize_payload) > image_gen.POST_BODY_READ_CAP_BYTES
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            # Return the oversize body WITHOUT a Content-Length lie — the
+            # guard's boundary is the actual streamed byte count, not the
+            # advertised length.
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                content=oversize_payload,
+            )
+
+        tool, _ = _wire(monkeypatch, handler, store)
+        started = time.monotonic()
+        result = await tool.ainvoke({"prompt": "fox"})
+        elapsed = time.monotonic() - started
+
+        assert _err_code(result) == "image_gen_upstream_error"
+        assert "exceeds the" in result and "read cap" in result
+        # The cap path returns promptly (no Python parsing of the body
+        # takes place — we bail mid-read).
+        assert elapsed < 4.0, (
+            f"oversize-POST path must bound; elapsed={elapsed:.1f}s"
+        )
+        assert store.saved == []
+
+    async def test_under_cap_post_body_still_parses(
+        self, env_ok, monkeypatch, store
+    ):
+        # Sanity: a body well under the cap still parses and saves.
+        url = "https://oss.test/under-cap.png"
+        body = {"data": {"image_urls": [url]},
+                "metadata": {"success_count": "1", "failed_count": "0"},
+                "base_resp": {"status_code": 0, "status_msg": "success"}}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "proxy.test":
+                return httpx.Response(200, json=body)
+            return httpx.Response(
+                200,
+                headers={"content-type": "image/png"},
+                content=b"\x89PNG\r\n\x1a\n" + b"0" * 64,
+            )
+
+        tool, _ = _wire(monkeypatch, handler, store)
+        result = await tool.ainvoke({"prompt": "fox"})
+        _ok_payload(result)
+        assert len(store.saved) == 1
+
+
+class TestReviewHardeningFiveOhTwoEnvelopeFilter:
+    """Finding 4 — the 502 envelope relays ONLY ``status_code``+``status_msg``.
+
+    The 502 path parses the upstream ``base_resp`` (which may carry
+    extras like ``request_id``, ``trace_id``, internal flags, etc.). Only
+    the documented two fields are surfaced in the user-facing envelope —
+    upstream-internal keys MUST NOT leak.
+    """
+
+    async def test_extra_upstream_base_resp_keys_absent_from_envelope(
+        self, env_ok, monkeypatch, store
+    ):
+        # Upstream body carries base_resp with EXTRA keys; relay envelope
+        # must contain ONLY ``status``, ``status_code``, ``status_msg``.
+        # (Mandated keys + ``message`` + ``code`` from the envelope shape.)
+        body = {
+            "base_resp": {
+                "status_code": 2013,
+                "status_msg": "prompt may contain sensitive content",
+                # Upstream-internal noise — must NOT appear in our envelope:
+                "request_id": "req-abcdef123456",
+                "trace_id": "trace-789xyz-very-internal",
+                "internal_flag": True,
+                "retry_after_s": 30,
+                "extra": {"nested": "must_not_appear"},
+            }
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(502, json=body)
+
+        tool, _ = _wire(monkeypatch, handler, store)
+        result = await tool.ainvoke({"prompt": "fox"})
+
+        # Surface assertions (unchanged): code, status_code, status_msg
+        assert _err_code(result) == "image_gen_upstream_error"
+        # The two informational substrings are still present.
+        assert "2013" in result
+        assert "prompt may contain sensitive content" in result
+
+        # Filter assertion (Finding 4): no upstream-internal key leaks.
+        for forbidden in (
+            "request_id", "trace_id", "internal_flag",
+            "retry_after_s", "extra",
+            "req-abcdef123456", "trace-789xyz-very-internal",
+            "very-internal",
+        ):
+            assert forbidden not in result, (
+                f"Finding-4 leak: upstream-internal key {forbidden!r} "
+                f"surfaced in envelope: {result}"
+            )
+
+        # The envelope details MUST be ONLY the two mandated fields. Decode
+        # the envelope and assert strict equality on ``details``.
+        envelope = json.loads(result[len("Error: "):])
+        assert envelope["details"] == {
+            "status": 502,
+            "status_code": 2013,
+            "status_msg": "prompt may contain sensitive content",
+        }

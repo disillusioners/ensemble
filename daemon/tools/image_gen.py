@@ -47,9 +47,11 @@ byte-frozen here.
 """
 
 import asyncio
+import ipaddress
 import json as _json
 import logging
 import os
+import socket
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
@@ -103,6 +105,22 @@ DEFAULT_TIMEOUT_S: int = 240
 MIN_TIMEOUT_S: int = 30
 MAX_TIMEOUT_S: int = 300
 
+# POST-phase body-read cap (review-hardening Finding 3) — the fetch path
+# already dual-enforces ``MAX_IMAGE_BYTES`` (Content-Length pre-check +
+# streamed running count); the POST response body read has no cap and a
+# hostile / misconfigured upstream could pin the tool at the POST-cap
+# floor while dumping unbounded bytes into memory. ~1 MiB is well above
+# the largest known-valid generation response (the OpenAI-shape envelope
+# plus a base64 alt-field; well under 200 KiB in live shapes) and well
+# below the worst-case wall time spent in ``aread``-equivalent I/O.
+POST_BODY_READ_CAP_BYTES: int = 1 * 1024 * 1024  # 1 MiB
+
+# Sentinel returned by ``_post_and_parse`` when the streamed POST body
+# crosses ``POST_BODY_READ_CAP_BYTES`` (Finding 3). The caller translates
+# this into a fail-closed envelope WITHOUT attempting to JSON-parse the
+# unbounded buffer.
+_POST_BODY_OVERSIZE: object = object()
+
 # Proxy identity headers — house parity with the OD raw-SDK lane
 # (daemon/plugin_subsystem/opendesign/generate.py:649-658). Forwarded
 # verbatim by the proxy; harmless on this route, kept for parity.
@@ -141,6 +159,60 @@ _USAGE_NOTE = (
 # sits INSIDE the code path under test (canonical pattern
 # tests/unit/test_llm_failover_v2.py:326-478). Default ``None`` = real network.
 _TRANSPORT_FACTORY: Any = lambda: None  # noqa: E731
+
+
+def _ensure_public_url(url: str) -> tuple[str | None, str | None]:
+    """Validate URL scheme + resolve hostname; reject non-public IPs (F2).
+
+    Mirrors the SSRF guard at ``daemon/tools/image_tools.py`` (Finding 2 of
+    review-hardening). Defense-in-depth against an OSS URL that — even
+    though it is supposed to be the proxy-issued https endpoint — carries
+    a non-public host (loopback typo, private network injection). Each
+    resolved address is checked against the standard non-public set
+    (private, loopback, link-local, reserved, unspecified, multicast).
+
+    This performs a pre-flight DNS resolution to block internal IPs. There
+    is a small TOCTOU window between validation and the actual httpx
+    connection (which re-resolves DNS); this matches the threat-model
+    tradeoff documented in ``image_tools.py``. The fetch path also passes
+    ``follow_redirects=False`` so a redirected-to-private-IP cannot
+    bypass the guard.
+
+    Returns:
+        ``(url, None)`` on success, or ``(None, error_msg)`` on failure
+        (bad scheme, unresolvable hostname, non-public IP).
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return None, f"Unsupported URL scheme: {parsed.scheme!r}. Only http/https are allowed."
+    hostname = parsed.hostname
+    if not hostname:
+        return None, "URL has no hostname."
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return None, f"Cannot resolve hostname: {hostname}"
+
+    for info in infos:
+        ip = str(info[4][0])
+        try:
+            ip_obj = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if (
+            ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_reserved
+            or ip_obj.is_unspecified
+            or ip_obj.is_multicast
+        ):
+            return None, (
+                f"Blocked: hostname {hostname} resolves to non-public IP {ip}"
+            )
+    if not infos:
+        return None, f"Cannot resolve hostname to a usable address: {hostname}"
+    return url, None
 
 
 def _build_client(timeout: float) -> httpx.AsyncClient:
@@ -376,6 +448,10 @@ def _parse_generation_response(
 
     if status_code == 502:
         # Upstream app error relayed verbatim — parse base_resp from THIS body.
+        # The dict shape echoes ONLY ``status_code`` + ``status_msg`` (Finding 4):
+        # the upstream ``base_resp`` may carry extra keys (request_id, trace_id,
+        # internal flags, etc.) that we MUST NOT relay — they are upstream
+        # internals and have no place in our user-facing error envelope.
         base_resp = body.get("base_resp")
         if isinstance(base_resp, dict):
             app_code = base_resp.get("status_code")
@@ -385,7 +461,11 @@ def _parse_generation_response(
                     "Upstream image generation app error (relayed verbatim by "
                     f"the proxy as HTTP 502): status_code={app_code!r} "
                     f"status_msg={base_resp.get('status_msg')!r}.",
-                    {"status": 502, "base_resp": base_resp},
+                    {
+                        "status": 502,
+                        "status_code": app_code,
+                        "status_msg": base_resp.get("status_msg"),
+                    },
                 )
             # 502 carrying base_resp.status_code == 0 is contradictory — the
             # proxy only relays non-zero app errors on 502. Fail closed.
@@ -488,12 +568,27 @@ async def _fetch_image_bytes(
     a hostile server cannot exhaust memory). Returns ``(bytes,
     content_type)`` or a short error string (caller skips with disclosure —
     one bad image never aborts the batch).
+
+    Defense-in-depth (review-hardening Finding 2):
+        ``_ensure_public_url`` rejects scheme-mismatch, unresolvable
+        hostname, and any resolved address inside private/loopback/
+        link-local/reserved/unspecified/multicast BEFORE any network I/O.
+        The httpx client is built with ``follow_redirects=False`` so a
+        redirect to a private host cannot bypass the guard (mirrors the
+        image_tools posture, where redirects are walked hop-by-hop and
+        each hop is re-validated). The single-hop ``follow_redirects``
+        refusal is appropriate here: OSS URLs are proxy-issued and not
+        expected to redirect in normal operation; any redirect is a sign
+        of an upstream anomaly and is surfaced as a non-200 failure.
     """
+    validated_url, err = _ensure_public_url(url)
+    if err:
+        return f"image URL refused: {err}"
     try:
         async def _do_fetch() -> tuple[bytes, str]:
             declared_size: int | None = None
             async with _build_client(PER_IMAGE_FETCH_TIMEOUT_S) as client:
-                async with client.stream("GET", url) as response:
+                async with client.stream("GET", validated_url, follow_redirects=False) as response:
                     if response.status_code != 200:
                         return (
                             f"fetch HTTP {response.status_code} for image URL"
@@ -666,10 +761,27 @@ def create_image_gen_tools(
         # 3. POST + body-read + parse under ONE wall-clock cap (D7 + AM6) —
         #    the tool owns its cap; nothing else kills a ~150s native call.
         #    SINGLE attempt — no retries (upstream 10 RPM).
+        #
+        # Body-read is CAPPED at ``POST_BODY_READ_CAP_BYTES`` (Finding 3): a
+        # hostile / misconfigured upstream could otherwise pin the tool at
+        # the POST-cap floor while dumping unbounded bytes into memory. We
+        # stream-read chunk by chunk via ``response.aiter_bytes()``; once
+        # we cross the cap we close the response and return the special
+        # ``_POST_BODY_OVERSIZE`` sentinel that the caller translates into
+        # the fail-closed envelope below. ``aiter_bytes`` (vs
+        # ``aiter_raw``) is selected so the same code path works through
+        # ``MockTransport`` in tests; production reads from the socket in
+        # the same loop, so memory peak is bounded by ``chunk_size``.
         async def _post_and_parse() -> tuple[int, Any]:
             async with _build_client(float(cfg["timeout_s"])) as client:
                 response = await client.post(url, json=payload, headers=headers)
-                raw_body = await response.aread()
+                buf = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(buf) + len(chunk) > POST_BODY_READ_CAP_BYTES:
+                        await response.aclose()
+                        return response.status_code, _POST_BODY_OVERSIZE
+                    buf.extend(chunk)
+                raw_body = bytes(buf)
             try:
                 body = _json.loads(raw_body)
             except (ValueError, UnicodeDecodeError):
@@ -691,6 +803,19 @@ def create_image_gen_tools(
             return _error_envelope(
                 "image_gen_upstream_error",
                 f"Image generation request failed: {type(exc).__name__}: {exc}",
+            )
+
+        # Sentinel → fail-closed envelope (Finding 3, oversize POST body).
+        if body is _POST_BODY_OVERSIZE:
+            return _error_envelope(
+                "image_gen_upstream_error",
+                "Image generation POST response body exceeds the "
+                f"{POST_BODY_READ_CAP_BYTES}-byte read cap — refusing to "
+                "parse unbounded upstream output.",
+                {
+                    "status": status_code,
+                    "post_body_read_cap_bytes": POST_BODY_READ_CAP_BYTES,
+                },
             )
 
         # 4. Parse — proxy-specific error-body shapes (AM1), status_code==0
