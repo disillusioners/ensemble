@@ -126,25 +126,6 @@ if TYPE_CHECKING:
     from ..manager import InstanceManager
 
 
-# Target → artifact-class dispatch table (User Directive #3,
-# 2026-10-14, RESOLUTION-CORE). Single source of truth for
-# the DUAL-PATH writer selection. Mirrors ``class_for_artifact``
-# in ``daemon/repositories/prompt_version/repository.py``;
-# duplicated here as a fast dict lookup (the legacy carve-out
-# for ``memory`` / ``user`` / ``growth`` is RETIRED; the
-# directive flipped them to MEMORY-class).
-_TARGET_CLASS_DISPATCH: dict[str, str] = {
-    # CORE path (state-machine; pending_approval)
-    "soul": ARTIFACT_CLASS_CORE,
-    "workflow": ARTIFACT_CLASS_CORE,
-    # MEMORY path (transition-free; born-effective)
-    "memory": ARTIFACT_CLASS_MEMORY,
-    "user": ARTIFACT_CLASS_MEMORY,
-    "growth": ARTIFACT_CLASS_MEMORY,
-    "memories": ARTIFACT_CLASS_MEMORY,  # per-slug keying
-}
-
-
 # Semantic classification patterns
 CLASSIFICATION_RULES = {
     "identity": {
