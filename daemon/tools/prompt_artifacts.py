@@ -18,10 +18,17 @@ sites (C3 binding):
 The resolver is shared with ``read_file`` (:665) and ``list_directory`` (:591);
 a resolver-INTERNAL guard would fire on reads and break agent self-inspection.
 Reads are NOT guarded (this is a write-side immutability regime; the loader
-remains free to read template content). Belt-and-braces Phase-A shim at
-``daemon.tools.inner_soul._update_soul`` / ``_update_workflow`` routes the
-pre-write path through this helper too — closes the Phase-A unguarded window
-even if merge order shifts (S11).
+remains free to read template content). Phase B (commit 4bf53cec8) removed
+the in-function ``_check_prompt_artifact_write`` shim from
+``inner_soul._update_soul/_update_workflow`` (no file-write path left to
+guard — soul/workflow/user route through ``_submit_prompt_version`` →
+prompt-version DB drafts); enforcement is (a) **no file-write code path** in
+the rewired ``inner_soul``/``agent_mother``, (b) the ``write_file`` /
+``edit_file`` surface guards at ``daemon/tools/filesystem.py`` (post-
+``_resolve_within_workdir``), and (c) the belt-and-braces legacy
+``manager.prompt_cache.invalidate(agent_id, version_tag=version_tag)`` call
+on the remaining file-writer carve-outs (``memory.md`` / ``memories/``) so
+the cache self-heals even if the prompt-version layer is bypassed.
 
 **Containment.** Both agents-root candidates (registry base + ``BASE_DIR /
 agents``) are ``resolve(strict=False)``-d and checked against the resolved
