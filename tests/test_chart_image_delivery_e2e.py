@@ -1267,6 +1267,31 @@ class TestInstallerSkillHygiene:
 #     (commission Phase 4 pack; Phase 1 unit rows all green) —
 #     seal ceremony per .agents/shared/planning/image-gen-tool/
 #     phase1-plan.md Seal-Trip Subsection.
+#   - 2026-10-14 image-gen-tool commission Phase 2 (worktree
+#     /home/ensemble-worktrees/image-gen-tool, branch
+#     feature/image-gen-tool): daemon/sources/dispatcher.py re-pinned
+#     50dd3211c1b6c59358c5426e046a88054a9ee58cc8001b8d57d53b6b2813fc3b
+#     → f03c0b4852bdc3e3d02e5171e0feedcb02b04a91f73b888b8314d5c62e042a6f.
+#     Delta is EXACTLY the marker-family generalization sanctioned by
+#     phase2-plan.md: NEW _FAMILY_MARKER_RE + generalized _NEAR_MISS_RE
+#     (AM13 sweep-order invariant preserved) + NEW extract_image_markers
+#     function + NEW ALLOWED_FEATURES frozenset + NEW _resolve_family_images
+#     + private inline chart-only near-miss regex in extract_chart_images
+#     (byte-compat) + both dispatch seams updated to call BOTH
+#     extract_chart_images (pin #5 anchor) AND extract_image_markers on
+#     the chart-stripped residual. _MARKER_RE stays byte-stable
+#     (R5-gated). _resolve_chart_images body unchanged. ZERO edits to
+#     daemon/sources/base.py, the three adapters, or daemon/constants.py.
+#     git diff audit confirmed delta is EXACTLY this commission's edits
+#     (no unrelated changes; dispatcher.py landed as an isolated commit
+#     b1802fe07 per phase2-plan.md §Risks mitigation). Evidence pointer:
+#     tests/test_sources_dispatcher.py::TestSweeperLastOnResidual
+#     (AM13 load-bearing pass-order proof) + Pin #25/#26/#27 in
+#     tests/test_chart_image_delivery_audit.py (family call sites +
+#     ALLOWED_FEATURES gate + _FAMILY_MARKER_RE shape). Seal ceremony per
+#     .agents/shared/planning/image-gen-tool/phase2-plan.md Seal-Trip
+#     Subsection. No .prompt-artifacts.sha256 regen (dispatcher.py is
+#     not an agent prompt artifact).
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "870ec32faf071cc1478c0540690381ef46c0bd1ae6667163215845ad39992581",
@@ -1280,7 +1305,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase B — 7 daemon files
     "daemon/sources/base.py": "ca2762ac8840bd8f7050955744af25f16325ed6806d09ba1fe3d020383581f3a",
     "daemon/sources/registry.py": "a46da82b930e2efc0b6f16a2f40a902c16343c08c49ee1236fda9ab928213a1b",
-    "daemon/sources/dispatcher.py": "50dd3211c1b6c59358c5426e046a88054a9ee58cc8001b8d57d53b6b2813fc3b",
+    "daemon/sources/dispatcher.py": "f03c0b4852bdc3e3d02e5171e0feedcb02b04a91f73b888b8314d5c62e042a6f",
     "daemon/sources/adapters/discord/adapter.py": "87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43",
     # Phase B — 7 daemon files + slack-setup.md (8).
     # slack/adapter.py re-pinned 2026-10-04: authorized remediation commit
