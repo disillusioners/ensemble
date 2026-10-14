@@ -1857,13 +1857,10 @@ def _update_memory_md(
     # with the pre-rewrite contract; the agent_self tool
     # contract surface stays the same). The CORE
     # response-grammar field stays as the canonical
-    # ``persisted (memory version N)`` — the parity tail lives
-    # on a SEPARATE field (``memory_file_hint``) so the
-    # prefix-parsing agents only need the standard tail.
+    # ``persisted (memory version N)``.
     if result.get("success"):
         result["action"] = "updated"
         result["compact"] = should_compact
-        result["memory_file_hint"] = "memory.md"
     return result
 
 
