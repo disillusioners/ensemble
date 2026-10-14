@@ -1,5 +1,22 @@
 # Test Packs
 
+## Commission FINAL GATE — WATCHER-LOSS TERMINAL-STRAND (RCA b6e24d78) @ 27d2452a7→d195316a6 (+gap bfb242d9) (2026-10-14) — 🟢 VERDICT: PASS — full evidence: RESULTS/2026-10-14-watcher-loss-terminal-strand-final-gate.md
+
+Worktree `/home/ensemble-worktrees/watcher-loss-terminal-strand` (branch feature/watcher-loss-terminal-strand; base 27d2452a7; 4 production fixes: mission_live_guard, child_reports, NEW mission_strand_healer, watchdog re-arm + api/config wiring). INDEPENDENT verification — 13 workers, 0 re-dispatches, all developer claims re-derived from zero. 5,184 collected / 5,048 passed / 24 failed (ALL pre-existing documented families, 0 branch-caused) / 0 TIMEOUT. Tester-authored gap suite (G1–G8, scenario-3 conjunct + fail-closed probes + idempotency edges + fidelity pin) 10/10 @ commit bfb242d9. ensure.md Core: scoped packs PASS; concurrency exact-baseline 99P/0F/74S. Release-Gate E2E deferred to promote ceremony.
+
+| Pack | Location | Scope | Est. | Last Run | Status |
+|---|---|---|---|---|---|
+| `wlts-new-suite` (ad-hoc) | `.venv/bin/pytest tests/job_queue/test_watcher_loss_terminal_strand.py` | NEW 26-test strand suite | <2 min | 2026-10-14 @ d195316a6 (6.7s) | ✅ PASS 26/26 |
+| `wlts-wedge` (registered) | `test/packs/wedge_fix_suites_unit_test.sh` | reconciler wedge suites 10+68 | ~2 min | 2026-10-14 @ d195316a6 (3.5s) | ✅ PASS 78/78 |
+| `wlts-resolver` (ad-hoc) | `pytest tests/unit/services/test_mission_resolver.py` | resolver seam (48 def / 63 collected) | <2 min | 2026-10-14 @ d195316a6 (3.7s) | ✅ PASS 63/63 |
+| `wlts-childrep` (ad-hoc) | `pytest tests/unit/services/test_child_reports.py` | direct-hit modified module | <2 min | 2026-10-14 @ d195316a6 (6.4s) | ✅ PASS 48/48 |
+| `wlts-watchdog` (ad-hoc) | `pytest tests/unit/services/test_waiting_children_watchdog.py` | direct-hit + branch-modified tests | <2 min | 2026-10-14 @ d195316a6 (3.0s) | ✅ PASS 51/51 |
+| `wlts-concurrency` (registered) | `timeout 300 bash test/packs/concurrency_atomic_unit_test.sh` | ensure.md Core #2/#3 | ~2 min | 2026-10-14 @ d195316a6 (89s) | ✅ PASS 99P/0F/74S exact-baseline |
+| `wlts-services` (ad-hoc) | `pytest tests/unit/services -n auto` | services neighborhood dir-wide | ~2 min | 2026-10-14 @ d195316a6 (61s) | ✅ PASS-with-preexisting 2640P/9F (0 new) |
+| `wlts-jobqueue` (ad-hoc) | `pytest tests/job_queue -n auto` | job_queue dir-wide (developer A/B surface) | ~2 min | 2026-10-14 @ d195316a6 (76s) | ✅ PASS-with-preexisting 2033P/15F/38S (0 new; 2031→2033 = +2 branch authoring) |
+| `wlts-gap` (NEW, tester-authored) | `pytest tests/job_queue/test_watcher_loss_terminal_strand_gap.py` @ bfb242d9 | commission gaps G1–G8 | <1 min | 2026-10-14 @ bfb242d9 (3.6s) | ✅ PASS 10/10 |
+
+
 ## Commission TEST PHASE — INSTALL-DIR PROTECTION (Layers 1+3+4) @ f0c394388→ffb4acd6a (2026-10-12) — 🟢 VERDICT: PASS (zero branch-caused failures; all 72F+21E base-proven at c8a3fbf6a or ledger-matched pre-existing) — full evidence: RESULTS/2026-10-12-install-dir-protection-test-phase.md
 
 Worktree `/home/nea/ensemble-src-wt-install-dir-protection` (branch feature/install-dir-protection, 6 commits from base c8a3fbf6a; review round 3 `ffb4acd6a` landed mid-phase — layer-1 packs + tools complement re-verified at tip). 9 workers, 0 re-dispatches. Host armor verified read-only: L3 restore drill 3.02s/.env byte-identical, L4 treecheck CRIT drills green, L1 wrapper inert with refusal gates 77/76 journaled (0 executable-line drift vs deployed).
