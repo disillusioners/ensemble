@@ -509,10 +509,13 @@ class TestSelectionPointer:
         self, repo, internal_actor, http_actor
     ):
         # F6: only approved content can be selected for the
-        # effective prompt.
+        # effective prompt. ``InvalidTransitionError`` (ValueError
+        # subclass per A1) is the typed contract — the router catches
+        # it explicitly (prompts.py:857) and returns 409 instead of
+        # falling through to a bare 500 (H4 finding).
         v = repo.create_draft("dev", "", "soul", "a", internal_actor)
         # v is in 'draft' state — cannot select it.
-        with pytest.raises(ValueError, match="only approved"):
+        with pytest.raises(InvalidTransitionError, match="draft.*approved"):
             repo.set_selection("dev", "", "soul", v.version_id, http_actor)
 
     def test_clear_selection_emits_cleared_audit(
