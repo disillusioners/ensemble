@@ -242,13 +242,18 @@ class TestScopeManifestCage:
     def test_declared_route_count_pinned(self, app_routes):
         """The decoration census: 71 P4 T4.4 decorations + the 7 P3
         T3.12 mcpkb:admin keys routes + the 12 Phase B T5 prompts
-        routes = 90 declared routes. A drift is a decoration added/
-        removed without a manifest row change.
+        routes + the 3 USER-DIRECTIVE-#2 (2026-10-14) prompts deltas
+        (PATCH /versions/{id}, DELETE /versions/{id}, GET
+        /pending-count — every one @require_scope-decorated) = 93
+        declared routes. A drift is a decoration added/removed
+        without a manifest row change.
 
         Phase B / agent-prompt-immutability T5 added 12
         @require_scope-decorated routes under /api/prompts (the
         canonical 12-endpoint family per phaseB-plan.md addendum
-        S4 / T5 acceptance) — the cage count was 78 pre-T6.
+        S4 / T5 acceptance) — the cage count was 78 pre-T6. The UD#2
+        deltas (2026-10-14) grew it 90 → 93; the /api/prompts family
+        entry itself is unchanged (same five prompts:* scopes).
         """
         declared = [
             r
@@ -257,8 +262,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 90, (
-            f"declared-route census drifted: {len(declared)} (pinned 90)"
+        assert len(declared) == 93, (
+            f"declared-route census drifted: {len(declared)} (pinned 93)"
         )
 
     def test_manifest_entries_valid(self):

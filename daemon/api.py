@@ -3652,9 +3652,11 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # index.html fallback (architect phase1-plan.md risk #1).
     api_router.include_router(tmp_images_router)       # /api/tmp_images
 
-    # Phase B / agent-prompt-immutability T5 + T6: the 12-endpoint
+    # Phase B / agent-prompt-immutability T5 + T6: the 15-endpoint
     # prompt-version REST family (per phaseB-plan.md addendum S4
-    # canonical family). Mounted UNCONDITIONALLY — the per-endpoint
+    # canonical 12-endpoint family + the 3 USER-DIRECTIVE-#2 deltas
+    # 2026-10-14 — PATCH/DELETE /versions/{id}, GET /pending-count).
+    # Mounted UNCONDITIONALLY — the per-endpoint
     # guard (T5/D3) returns 503 AUTH_NOT_CONFIGURED when auth is OFF,
     # so the router stays registered even when auth is disabled (the
     # routes still exist for dev tooling / OpenAPI generation). Scope

@@ -20,7 +20,7 @@ manager construction, which is not what T14 tests). The fresh app:
   via ``_require_auth_on``; the service stub exists only to prove
   the gate precedes the call).
 
-The 12 endpoints must each return 503. We use FastAPI's
+The 15 endpoints must each return 503. We use FastAPI's
 ``TestClient`` (no httpx / async machinery) so the test reads as
 straightforward request/response assertions.
 """
@@ -73,7 +73,8 @@ def client(fresh_app):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Endpoint table — the canonical 12-endpoint family.
+# Endpoint table — the 15-endpoint family (12 canonical + the 3
+# USER-DIRECTIVE-#2 deltas 2026-10-14).
 # Each entry: (method, path, optional body).
 # ─────────────────────────────────────────────────────────────────────
 
@@ -104,6 +105,12 @@ _ENDPOINTS = [
     ("GET", "/api/prompts/effective/developer/v2/soul", None),
     # 12. audit
     ("GET", "/api/prompts/audit", None),
+    # 13. update version content (UD#2)
+    ("PATCH", "/api/prompts/versions/abc-123", {"content": "x"}),
+    # 14. delete version (UD#2)
+    ("DELETE", "/api/prompts/versions/abc-123", None),
+    # 15. pending-count (UD#2 badge feed)
+    ("GET", "/api/prompts/pending-count", None),
 ]
 
 

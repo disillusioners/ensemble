@@ -82,11 +82,13 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     "/api/sources": frozenset({"pd"}),  # + mappings_router
     "/api/tmp_images": frozenset({"pd"}),
     # Phase B / agent-prompt-immutability T6 — the prompts_router
-    # mounts at /api/prompts (the 12-endpoint family per phaseB-plan.md
-    # addendum S4). Every route carries an explicit @require_scope so
-    # the family classifies as protected-default ("pd"); no
-    # public/module_lane carve-out (D3 fail-closed posture guards
-    # auth-OFF via per-endpoint 503).
+    # mounts at /api/prompts (the 15-endpoint family: the canonical
+    # 12 per phaseB-plan.md addendum S4 + the 3 USER-DIRECTIVE-#2
+    # deltas 2026-10-14 — PATCH/DELETE /versions/{id},
+    # GET /pending-count). Every route carries an explicit
+    # @require_scope so the family classifies as protected-default
+    # ("pd"); no public/module_lane carve-out (D3 fail-closed posture
+    # guards auth-OFF via per-endpoint 503).
     "/api/prompts": frozenset({"pd"}),
     "/api/webhooks": frozenset({"module_lane"}),  # FR-40 module lane
     "/api/work": frozenset({"pd"}),

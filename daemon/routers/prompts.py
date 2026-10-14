@@ -1,22 +1,54 @@
 """Prompt-version REST router — agent-prompt-immutability Phase B T5.
 
-The canonical 12-endpoint REST family that exposes the
+The canonical 15-endpoint REST family that exposes the
 :class:`daemon.services.prompt_version_service.PromptVersionService`
 async facade to HTTP callers (operators + agents). Mounted under
 ``/api/prompts``. Per phaseB-plan.md D11 / addendum S4 (folded at
 T5 scope), the family is split across five scopes:
 
-    prompts:read    — list / get / diff / effective-read
+    prompts:read    — list / get / diff / effective-read / pending-count
     prompts:submit  — POST /submit (machine lane OK) + /retract
     prompts:approve — POST /approve / reject (HUMAN lane only per D2)
-    prompts:write   — POST /versions (create-draft) + selection set/clear
+    prompts:write   — POST /versions (create-draft) + selection
+                      set/clear + PATCH/DELETE /versions/{id} (UD#2)
     prompts:audit   — GET /audit (read-only)
+
+USER DIRECTIVE #2 (2026-10-14, frontend specs) — API DELTAS over the
+canonical 12-endpoint family (12 → 15):
+
+* ``PATCH /api/prompts/versions/{version_id}`` (endpoint 13) — body
+  ``{content}``; scope ``prompts:write``; draft/pending rows ONLY.
+  A non-editable state (approved / rejected / archived) surfaces as
+  ``409 VERSION_IMMUTABLE``; unknown id → 404. Leader ruling:
+  EDIT = draft/pending content ONLY — approved rows are append-only
+  immutable history; rejected is terminal (resubmit = new row);
+  archived is superseded. Hard-delete of approved history is a
+  MORNING FORK and is deliberately NOT built.
+* ``DELETE /api/prompts/versions/{version_id}`` (endpoint 14) — same
+  scope + state rule + ``409 VERSION_IMMUTABLE`` / 404 mapping. The
+  repo hard-deletes the row and stamps a ``DELETED`` audit event
+  whose payload carries identity + content_hash + content byte
+  length (forensics survive the row).
+* ``GET /api/prompts/pending-count`` (endpoint 15) — scope
+  ``prompts:read``; returns ``{"count": N}`` — the Persona UI badge
+  feed; drains as approve/reject land. A PLAIN count (the A8
+  effective fingerprint does not apply to a badge).
+
+Endpoint 11 (``GET /effective/{agent_id}/{version_tag}/{artifact}``)
+CONFIRMED (report-only, no code change) as the Persona UI diff
+baseline: it serves the active version content per the F6
+resolution chain ``selected.content > latest_approved.content >
+null`` (``PromptVersionRepository.get_effective`` →
+``get_effective_rows`` single-SELECT, A8). A ``null`` content means
+"template file is the baseline" (the loader fallback owns the file
+read).
 
 Source-of-truth artifacts:
 
 * Endpoints — phaseB-plan.md D12 + addendum S4 (canonical 12-endpoint
   family, including ``create-draft`` POST /versions and the effective
-  GET at ``/api/prompts/effective/{agent_id}/{version_tag}/{artifact}``).
+  GET at ``/api/prompts/effective/{agent_id}/{version_tag}/{artifact}``)
+  + USER DIRECTIVE #2 (2026-10-14) for endpoints 13-15.
 * Lane enforcement — D2 / D10 + ``daemon/auth/context.py``. Human-only
   approve/reject is enforced INSIDE the service (Phase B T3), which
   raises :class:`HumanLaneRequiredError` for non-session lanes; the
@@ -43,7 +75,7 @@ Source-of-truth artifacts:
   ``artifact``) are constrained to ``^[A-Za-z0-9_-]+$`` so a bad
   path never reaches the service / DB layer.
 
-The router does NOT touch ``daemon/services/*``, ``daemon/repositories/*``,
+The router does NOT touch ``daemon/services/*``, ``daemon/repositories/*`,
 ``daemon/tools/*``, or ``daemon/loader.py`` (Phase B T5 scope boundary
 — sibling coders own those files).
 """
@@ -61,6 +93,8 @@ from pydantic import BaseModel, Field
 
 from daemon.auth.decorators import require_scope
 from daemon.repositories.prompt_version.repository import (
+    VersionNotDeletableError,
+    VersionNotEditableError,
     actor_from_request,
 )
 
@@ -106,6 +140,9 @@ _ERR_ALREADY_APPROVED = "ALREADY_APPROVED"
 _ERR_ALREADY_REJECTED = "ALREADY_REJECTED"
 #: State-machine guard (A1 / T1).
 _ERR_INVALID_TRANSITION = "INVALID_TRANSITION"
+#: Non-editable / non-deletable row state (UD#2 — approved /
+#: rejected / archived rows refuse PATCH + DELETE).
+_ERR_VERSION_IMMUTABLE = "VERSION_IMMUTABLE"
 #: Generic domain not-found.
 _ERR_VERSION_NOT_FOUND = "VERSION_NOT_FOUND"
 #: The 5 prompts:* scopes (D11 — single source of truth:
@@ -275,6 +312,30 @@ class _SubmitBody(BaseModel):
     pass
 
 
+class _UpdateVersionBody(BaseModel):
+    """PATCH /versions/{id} body (UD#2 endpoint 13) — the replacement
+    content. ``min_length=1`` mirrors ``_CreateDraftBody.content``
+    (an empty-string edit is a delete, not an edit — use DELETE)."""
+
+    content: str = Field(min_length=1)
+
+
+class _DeleteVersionResponse(BaseModel):
+    """DELETE /versions/{id} body (UD#2 endpoint 14) — the deleted
+    row's forensic echo (the full content survives in the DELETED
+    audit payload's content_hash / content_bytes, not on the wire)."""
+
+    version_id: str
+    deleted: bool
+
+
+class _PendingCountResponse(BaseModel):
+    """GET /pending-count body (UD#2 endpoint 15) — the Persona UI
+    badge feed. Plain count; drains as approve/reject land."""
+
+    count: int
+
+
 class _SelectionBody(BaseModel):
     agent_id: str = Field(min_length=1)
     version_tag: str = ""
@@ -350,7 +411,7 @@ def _unified_diff(content_a: str, content_b: str, label_a: str, label_b: str) ->
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Endpoints — 12 canonical
+# Endpoints — 15 canonical (12 from T5 + 3 USER-DIRECTIVE-#2 deltas)
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -785,6 +846,98 @@ async def list_audit(
         items=[_audit_event_to_dict(r) for r in items],
         total=total,
     )
+
+
+# 13) PATCH /api/prompts/versions/{version_id} — edit draft/pending
+#     content (UD#2)
+@router.patch("/versions/{version_id}", response_model=_VersionResponse)
+@require_scope(_SCOPE_WRITE)
+async def update_version_content(
+    version_id: str = Path(...),
+    body: _UpdateVersionBody = ...,
+    request: Request = ...,
+) -> _VersionResponse:
+    """Replace the content of a draft/pending version in place (UD#2).
+
+    Editable-state rule (leader ruling, binding with frozen A1):
+    ``draft`` / ``pending_approval`` rows ONLY. ``approved`` rows are
+    append-only immutable history; ``rejected`` is terminal
+    (resubmit = new row); ``archived`` is superseded — all three
+    surface as ``409 VERSION_IMMUTABLE``. The repo recomputes
+    ``content_hash`` and stamps the ``UPDATED`` audit event (prior +
+    new content_hash, byte sizes) inside the same transaction.
+    """
+    _require_auth_on(request)
+    _require_uuid_like(version_id)
+    actor = actor_from_request(request)
+    svc = _get_service(request)
+    try:
+        row = await asyncio.to_thread(
+            svc.update_version_content, version_id, body.content, actor
+        )
+    except VersionNotEditableError as exc:
+        raise _err(
+            409,
+            _ERR_VERSION_IMMUTABLE,
+            f"Version is immutable in state {exc.current_state!r} "
+            f"(only draft/pending_approval may be edited)",
+        )
+    except LookupError:
+        raise _err(404, _ERR_VERSION_NOT_FOUND, f"No version {version_id}")
+    return _version_to_response(row)
+
+
+# 14) DELETE /api/prompts/versions/{version_id} — delete draft/pending
+#     (UD#2)
+@router.delete("/versions/{version_id}", response_model=_DeleteVersionResponse)
+@require_scope(_SCOPE_WRITE)
+async def delete_version(
+    version_id: str = Path(...),
+    request: Request = ...,
+) -> _DeleteVersionResponse:
+    """Hard-delete a draft/pending version (UD#2).
+
+    Same editable-state rule as PATCH: draft/pending ONLY — approved
+    history is append-only immutable (hard-delete of approved history
+    is a morning fork, deliberately NOT built); rejected/archived
+    surface as ``409 VERSION_IMMUTABLE``. The DELETED audit event
+    carries identity + content_hash + content byte length in its
+    payload — the forensics survive the row.
+    """
+    _require_auth_on(request)
+    _require_uuid_like(version_id)
+    actor = actor_from_request(request)
+    svc = _get_service(request)
+    try:
+        row = await asyncio.to_thread(svc.delete_version, version_id, actor)
+    except VersionNotDeletableError as exc:
+        raise _err(
+            409,
+            _ERR_VERSION_IMMUTABLE,
+            f"Version is immutable in state {exc.current_state!r} "
+            f"(only draft/pending_approval may be deleted)",
+        )
+    except LookupError:
+        raise _err(404, _ERR_VERSION_NOT_FOUND, f"No version {version_id}")
+    return _DeleteVersionResponse(version_id=row.version_id, deleted=True)
+
+
+# 15) GET /api/prompts/pending-count — Persona UI badge feed (UD#2)
+@router.get("/pending-count", response_model=_PendingCountResponse)
+@require_scope(_SCOPE_READ)
+async def pending_count(
+    request: Request = ...,
+) -> _PendingCountResponse:
+    """Count rows in state ``pending_approval`` (UD#2).
+
+    ``{"count": N}`` — drains as approve/reject land. A PLAIN count:
+    the A8 effective fingerprint does not apply (a badge answers
+    "how many rows await approval", not "what is in effect").
+    """
+    _require_auth_on(request)
+    svc = _get_service(request)
+    count = await asyncio.to_thread(svc.count_pending)
+    return _PendingCountResponse(count=int(count or 0))
 
 
 # ────────────────────────────────────────────────────────────────────────────

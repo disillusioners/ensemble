@@ -1,6 +1,6 @@
 """Phase B T5 router unit tests — agent-prompt-immutability commission.
 
-End-to-end exercise of the 12-endpoint REST family at
+End-to-end exercise of the 15-endpoint REST family at
 ``daemon/routers/prompts.py`` against a mocked
 ``PromptVersionService``. The mock-based pattern (per the brief:
 "test against a mocked service so you do NOT block on the sibling")
@@ -19,6 +19,11 @@ Coverage:
 * Scope enforcement (missing scope → 403 per existing convention)
 * Effective read precedence (selected > latest_approved > null)
 * Selection set/clear
+* USER DIRECTIVE #2 (2026-10-14) deltas — PATCH /versions/{id} +
+  DELETE /versions/{id} happy paths and the 409 VERSION_IMMUTABLE
+  mapping (approved/rejected/archived), 404 unknown, and GET
+  /pending-count badge shape (real repo typed errors raised by the
+  mock — the router must catch the REAL classes)
 
 Auth context injection: a tiny ASGI middleware stamps
 ``request.state.auth_context`` from a session/bearer flag so the
@@ -43,6 +48,10 @@ from daemon.auth.context import (
     AuthContext,
 )
 from daemon.routers.prompts import router as prompts_router
+from daemon.repositories.prompt_version.repository import (
+    VersionNotDeletableError,
+    VersionNotEditableError,
+)
 from tests.helpers.auth_fixture import on_auth_config
 
 
@@ -287,6 +296,14 @@ def _make_service_mock(**overrides: Any) -> Any:
     # result keeps every existing test green; per-test overrides swap
     # in rows for the filter-matrix coverage.
     svc.list_audit_events = MagicMock(return_value=([], 0))
+    # USER DIRECTIVE #2 (2026-10-14) — CRUD + badge deltas.
+    svc.update_version_content = MagicMock(
+        return_value=_make_version(state="draft", content="edited")
+    )
+    svc.delete_version = MagicMock(
+        return_value=_make_version(state="draft")
+    )
+    svc.count_pending = MagicMock(return_value=0)
     for k, v in overrides.items():
         setattr(svc, k, v)
     return svc
@@ -1040,6 +1057,204 @@ class TestAuditEndpoint:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# USER DIRECTIVE #2 (2026-10-14) — PATCH / DELETE / pending-count
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestUpdateVersionContent:
+    """UD#2 endpoint 13 — PATCH /versions/{id} (draft/pending ONLY).
+
+    The mock raises the REAL ``VersionNotEditableError`` from the
+    repository (not a sentinel) — the router must catch the actual
+    class the repo raises in production.
+    """
+
+    def test_patch_draft_returns_200(self, client, service_mock):
+        edited = _make_version(version_id="v-1", state="draft", content="edited")
+        service_mock.update_version_content = MagicMock(return_value=edited)
+        resp = client.patch(
+            "/api/prompts/versions/v-1",
+            json={"content": "edited"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["version_id"] == "v-1"
+        assert body["state"] == "draft"
+        assert body["content"] == "edited"
+        # Actor provenance: the third positional arg is the ActorContext
+        # stamped from request.state.auth_context (A3) — session lane.
+        args, _ = service_mock.update_version_content.call_args
+        assert args[0] == "v-1"
+        assert args[1] == "edited"
+        assert args[2].auth_method == AUTH_METHOD_SESSION
+        assert args[2].subject == "operator-cli"
+
+    def test_patch_pending_returns_200(self, client, service_mock):
+        edited = _make_version(
+            version_id="v-1", state="pending_approval", content="edited"
+        )
+        service_mock.update_version_content = MagicMock(return_value=edited)
+        resp = client.patch("/api/prompts/versions/v-1", json={"content": "edited"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["state"] == "pending_approval"
+
+    @pytest.mark.parametrize("state", ["approved", "rejected", "archived"])
+    def test_patch_immutable_state_returns_409(
+        self, client, service_mock, state
+    ):
+        service_mock.update_version_content = MagicMock(
+            side_effect=VersionNotEditableError("v-1", state)
+        )
+        resp = client.patch("/api/prompts/versions/v-1", json={"content": "x"})
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        detail = body.get("detail", body)
+        assert detail.get("error") == "VERSION_IMMUTABLE"
+        assert state in detail.get("message", "")
+
+    def test_patch_unknown_returns_404(self, client, service_mock):
+        service_mock.update_version_content = MagicMock(
+            side_effect=LookupError("prompt_version v-missing not found")
+        )
+        resp = client.patch("/api/prompts/versions/v-missing", json={"content": "x"})
+        assert resp.status_code == 404
+        body = resp.json()
+        detail = body.get("detail", body)
+        assert detail.get("error") == "VERSION_NOT_FOUND"
+
+    def test_patch_empty_content_422(self, client):
+        """``min_length=1`` mirrors create-draft — an empty edit is a
+        DELETE, not an edit."""
+        resp = client.patch("/api/prompts/versions/v-1", json={"content": ""})
+        assert resp.status_code == 422
+
+    def test_patch_bad_version_id_422(self, client):
+        resp = client.patch("/api/prompts/versions/bad!chars", json={"content": "x"})
+        assert resp.status_code == 422
+
+
+class TestDeleteVersion:
+    """UD#2 endpoint 14 — DELETE /versions/{id} (draft/pending ONLY)."""
+
+    def test_delete_draft_returns_200(self, client, service_mock):
+        deleted = _make_version(version_id="v-1", state="draft")
+        service_mock.delete_version = MagicMock(return_value=deleted)
+        resp = client.delete("/api/prompts/versions/v-1")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body == {"version_id": "v-1", "deleted": True}
+        args, _ = service_mock.delete_version.call_args
+        assert args[0] == "v-1"
+        assert args[1].auth_method == AUTH_METHOD_SESSION
+
+    def test_delete_pending_returns_200(self, client, service_mock):
+        deleted = _make_version(version_id="v-1", state="pending_approval")
+        service_mock.delete_version = MagicMock(return_value=deleted)
+        resp = client.delete("/api/prompts/versions/v-1")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted"] is True
+
+    @pytest.mark.parametrize("state", ["approved", "rejected", "archived"])
+    def test_delete_immutable_state_returns_409(
+        self, client, service_mock, state
+    ):
+        service_mock.delete_version = MagicMock(
+            side_effect=VersionNotDeletableError("v-1", state)
+        )
+        resp = client.delete("/api/prompts/versions/v-1")
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        detail = body.get("detail", body)
+        assert detail.get("error") == "VERSION_IMMUTABLE"
+        assert state in detail.get("message", "")
+
+    def test_delete_unknown_returns_404(self, client, service_mock):
+        service_mock.delete_version = MagicMock(
+            side_effect=LookupError("prompt_version v-missing not found")
+        )
+        resp = client.delete("/api/prompts/versions/v-missing")
+        assert resp.status_code == 404
+        body = resp.json()
+        detail = body.get("detail", body)
+        assert detail.get("error") == "VERSION_NOT_FOUND"
+
+    def test_delete_bad_version_id_422(self, client):
+        resp = client.delete("/api/prompts/versions/bad!chars")
+        assert resp.status_code == 422
+
+
+class TestPendingCount:
+    """UD#2 endpoint 15 — GET /pending-count (the badge feed)."""
+
+    def test_pending_count_returns_count(self, client, service_mock):
+        service_mock.count_pending = MagicMock(return_value=7)
+        resp = client.get("/api/prompts/pending-count")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"count": 7}
+
+    def test_pending_count_zero(self, client, service_mock):
+        service_mock.count_pending = MagicMock(return_value=0)
+        resp = client.get("/api/prompts/pending-count")
+        assert resp.status_code == 200
+        assert resp.json() == {"count": 0}
+
+    def test_pending_count_missing_scope_returns_403(self, client):
+        resp = client.get(
+            "/api/prompts/pending-count",
+            headers={"X-Test-Role": "bearer:prompts:audit"},
+        )
+        assert resp.status_code == 403, resp.text
+        body = resp.json()
+        detail = body.get("detail", body)
+        assert detail.get("error") == "SCOPE_INSUFFICIENT"
+
+
+class TestWriteScopeOnUd2Mutations:
+    """UD#2 PATCH/DELETE ride ``prompts:write`` — a bearer WITHOUT
+    that scope is refused 403; a bearer WITH it passes the scope gate
+    (the lane rule for edits/deletes is scope, not session — unlike
+    approve/reject)."""
+
+    def test_patch_without_write_scope_returns_403(self, client):
+        resp = client.patch(
+            "/api/prompts/versions/v-1",
+            json={"content": "x"},
+            headers={"X-Test-Role": "bearer:prompts:read"},
+        )
+        assert resp.status_code == 403, resp.text
+        body = resp.json()
+        detail = body.get("detail", body)
+        assert detail.get("error") == "SCOPE_INSUFFICIENT"
+
+    def test_delete_without_write_scope_returns_403(self, client):
+        resp = client.delete(
+            "/api/prompts/versions/v-1",
+            headers={"X-Test-Role": "bearer:prompts:read"},
+        )
+        assert resp.status_code == 403, resp.text
+        body = resp.json()
+        detail = body.get("detail", body)
+        assert detail.get("error") == "SCOPE_INSUFFICIENT"
+
+    def test_bearer_with_write_scope_passes_scope_gate(
+        self, client, service_mock
+    ):
+        service_mock.update_version_content = MagicMock(
+            return_value=_make_version(version_id="v-1", state="draft")
+        )
+        resp = client.patch(
+            "/api/prompts/versions/v-1",
+            json={"content": "x"},
+            headers={"X-Test-Role": "bearer:prompts:write"},
+        )
+        assert resp.status_code == 200, resp.text
+        args, _ = service_mock.update_version_content.call_args
+        # Bearer lane reaches the service (machine may edit unapproved
+        # drafts) — the actor stamps the BEARER identity.
+        assert args[2].auth_method == AUTH_METHOD_BEARER
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # OpenAPI generation (T5 acceptance — no 500)
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -1051,10 +1266,10 @@ class TestOpenAPIGenerates:
         Pydantic model miss-shape will surface as 500 here)."""
         schema = app.openapi()
         paths = schema.get("paths", {})
-        # The 12-endpoint family collapses to 11 path templates
-        # (GET + POST share /api/prompts/versions; POST + DELETE
-        # are on different selections paths).
-        assert len(paths) >= 11
+        # The 15-endpoint family collapses to 12 path templates
+        # (GET/POST share /api/prompts/versions; PATCH + DELETE share
+        # /api/prompts/versions/{version_id} with GET).
+        assert len(paths) >= 12
         for required in (
             "/api/prompts/versions",
             "/api/prompts/versions/{version_id}",
@@ -1067,8 +1282,14 @@ class TestOpenAPIGenerates:
             "/api/prompts/selections/{agent_id}/{version_tag}/{artifact}",
             "/api/prompts/effective/{agent_id}/{version_tag}/{artifact}",
             "/api/prompts/audit",
+            "/api/prompts/pending-count",
         ):
             assert required in paths, f"missing path {required}"
+
+        # UD#2 — the shared {version_id} template carries all of
+        # GET + PATCH + DELETE.
+        methods = set(paths["/api/prompts/versions/{version_id}"].keys())
+        assert {"get", "patch", "delete"} <= methods
 
 # ────────────────────────────────────────────────────────────────────────────
 # Review Finding #2 gate — exception alias resolution
