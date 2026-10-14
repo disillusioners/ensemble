@@ -1089,8 +1089,9 @@ class TestMigrationParity:
 
         versions_dir = Path("daemon/migrations/versions")
         files = sorted(versions_dir.glob("*.sql"))
-        # 95 files (was 93; two new migrations landed for Ud#3+Ud#5B).
-        assert len(files) == 95
+        # 96 files (93 → 95: class column + template baselines, Ud#3+Ud#5B;
+        # → 96: custom_agent_configs, Ud#5A).
+        assert len(files) == 96
 
         # Both new migrations present.
         class_migration = next(
