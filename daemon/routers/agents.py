@@ -63,7 +63,16 @@ async def list_agents():
 
 @router.post("", response_model=AgentInfo, status_code=201)
 async def create_agent(agent_create: AgentCreate):
-    """Create a new agent from template."""
+    """Create a new agent from template.
+
+    agent-prompt-immutability Phase B T9 — PRESERVED EXCEPTION: this
+    template copy writes the new agent's ``.md`` files directly, by
+    design. Creation is the legitimate first-write (F1/D8
+    OVERRIDES-ONLY: the template file is the live fallback until the
+    agent's first post-creation DB submission); it bypasses the
+    prompt-artifacts write guard on purpose. Pinned by
+    ``tests/test_prompt_preserved_exceptions.py``.
+    """
     agents_dir = BASE_DIR / "agents"
     template_dir = BASE_DIR / "agents" / "_baby_template"
     new_agent_dir = agents_dir / agent_create.id
@@ -150,7 +159,14 @@ async def create_agent(agent_create: AgentCreate):
 
 @router.delete("/{agent_id}")
 async def delete_agent(agent_id: str):
-    """Move an agent to trash (soft delete)."""
+    """Move an agent to trash (soft delete).
+
+    agent-prompt-immutability Phase B T9 — PRESERVED EXCEPTION: the
+    whole agent dir (including its ``.md`` files) is ``shutil.move``d
+    to ``_trash/`` — a rename, not a content write, so the prompt
+    guard has no surface here. Pinned by
+    ``tests/test_prompt_preserved_exceptions.py``.
+    """
     agents_dir = BASE_DIR / "agents"
     agent_dir = agents_dir / agent_id
     trash_dir = agents_dir / "_trash"

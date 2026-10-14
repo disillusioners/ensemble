@@ -2,8 +2,68 @@
 
 These tools allow the Mother agent to create, modify, list, and delete other agents.
 They are only available to the Mother agent (agents/_mother/).
+
+agent-prompt-immutability Phase B (T8/T9) — write-path regime
+-------------------------------------------------------------
+
+``agent_modify`` is no longer a direct file writer for prompt
+artifacts. Two regimes:
+
+* **DB submission** (``soul.md``, ``rule.md``, ``workflow.md``,
+  ``tools_note.md``, ``tools.md``, ``skill.md``, and ``user.md``
+  per decisions.md D5) — the full content is submitted via
+  ``prompt_version_service.create_and_submit`` (A5 composite) and
+  lands as a ``pending_approval`` row keyed
+  ``(agent_id, version_tag, artifact)``. The file on disk is NOT
+  touched; the draft takes effect only after a human approves it
+  (F4 — user-only approver). **Whole-content replace** is the
+  composition choice here: ``agent_modify`` already receives the
+  complete new content from its caller, so there is nothing to
+  compose against the effective chain — the submitted string IS
+  the draft body (unlike inner_soul's append/learned mutations,
+  which compose via the mutator callable).
+* **File carve-out** (``memory.md`` only, per D6) — memory.md is
+  prompt-loaded AND runtime-written with 80% compaction; it keeps
+  the direct ``write_text`` path until decisions.md re-disposes it.
+
+Everything else (``growth.md``, ``meta.json``, ...) keeps the
+refusal shape Phase A landed.
+
+**Preserved exceptions (T9 inventory)** — creation and deletion are
+legitimate first-writes / whole-agent moves and still write files
+directly, BY DESIGN:
+
+1. ``agent_create`` (this module) — template copy from
+   ``agents/_baby_template`` into the new agent dir (creation is
+   the first write; the new agent's content auto-versions at its
+   first post-creation submission per F1/D8 OVERRIDES-ONLY).
+2. ``daemon/routers/agents.py`` ``POST /agents`` — the HTTP twin of
+   the same template copy.
+3. ``agent_delete`` (this module) — ``shutil.move`` of the whole
+   agent dir to ``agents/_trash/`` (delete is a rename, not a
+   content write).
+4. ``daemon/routers/agents.py`` ``DELETE /agents/{id}`` — the HTTP
+   twin of the same _trash move.
+
+None of the four passes through the prompt-artifacts write guard
+(``daemon.tools.prompt_artifacts.check_write``); tests pin this
+(``tests/test_prompt_preserved_exceptions.py``).
+
+Cache invalidation (D9): the memory.md file path still invalidates
+the prompt cache with the resolved ``version_tag`` (the file content
+changed under the cache). The DB path does NOT invalidate — a
+``pending_approval`` row does not change effective content, and the
+loader's fingerprint-bust hook (A8, ``get_effective_rows``) owns
+cache busting when an approval/selection actually changes it.
+
+Read side: ``agent_read`` remains a file reader in this phase.
+Approved DB content reaches agents through the loader hook
+(prompt lane). Surfacing approved overrides inside ``agent_read``
+for user.md (whose content never enters the loader) is a documented
+D5 follow-up, deliberately out of T8 scope.
 """
 
+import asyncio
 import json
 import shutil
 import sys
@@ -22,6 +82,30 @@ CATEGORY_NAME = "Agent Management"
 CATEGORY_DOC = """\
 Mother agent specific tools for managing baby agent lifecycle.
 """
+
+# Phase B T8: file names agent_modify routes to DB submission instead
+# of direct writes, mapped to their DB artifact keys (loader convention
+# — keys WITHOUT the ``.md`` extension). The first six mirror
+# ``PROMPT_ARTIFACTS`` in ``daemon/repositories/prompt_version/models.py``
+# / the loader hook's ``_HOOK_ARTIFACT_KEYS``. ``user.md`` → ``user``
+# joins per decisions.md D5 (DB-versioned despite never being
+# prompt-loaded; the row simply never enters the loader's prompts dict).
+_DB_VERSIONED_FILES: dict[str, str] = {
+    "soul.md": "soul",
+    "rule.md": "rule",
+    "workflow.md": "workflow",
+    "tools_note.md": "tools_note",
+    "tools.md": "tools",
+    "skill.md": "skill",
+    "user.md": "user",
+}
+
+# Phase B T8 / D6: the only file agent_modify still writes DIRECTLY.
+# memory.md is prompt-loaded AND runtime-written with 80% proactive
+# compaction + dedup — the DB approval round-trip would break the
+# compaction semantics, so it stays file-based until decisions.md
+# re-disposes it (no schema change needed if it later joins).
+_DIRECT_WRITE_FILES: list[str] = ["memory.md"]
 
 # Base directory for agents (handle PyInstaller frozen state)
 if getattr(sys, 'frozen', False):
@@ -346,7 +430,7 @@ Returns:
     
     @register_tool_category("mother")
     @tool
-    def agent_modify(agent_name: str, file: str, content: str) -> dict:
+    async def agent_modify(agent_name: str, file: str, content: str) -> dict:
         """Modify an agent's file contents. Use tool_help("agent_modify") for details."""
         # Protect system agents except _mother (self-mod)
         if agent_name.startswith("_") and agent_name != "_mother":
@@ -354,43 +438,123 @@ Returns:
                 "success": False,
                 "error": "Cannot modify system agents except _mother"
             }
-        
-        # Only allow modifying specific files. Phase A T9(b) (S17): the
-        # versioned-immutable subset (soul/rule/workflow/tools_note + the
-        # legacy tools.md fallback) returns the same refusal shape used
-        # today — agent_mother is no longer a write path for these. The
-        # full DB-submission rewrite that replaces this allowlist lands
-        # in Phase B (T8); memory.md is the only carve-out (memory is
-        # prompt-loaded AND runtime-written with compaction — disposition
-        # fork R7/R11 deferred to decisions.md).
-        modifiable_files = ["memory.md"]
-        if file not in modifiable_files:
+
+        # ── Phase B T8 write-path classification ─────────────────────
+        # Versioned-immutable artifacts → DB submission (create_and_submit,
+        # A5) — the file on disk is NEVER touched; a human must approve
+        # the draft before it becomes effective (F4). memory.md → direct
+        # write (D6 carve-out). Everything else → the refusal shape
+        # Phase A landed.
+        artifact_key = _DB_VERSIONED_FILES.get(file)
+        is_direct_write = file in _DIRECT_WRITE_FILES
+        if artifact_key is None and not is_direct_write:
+            allowed = _DIRECT_WRITE_FILES + sorted(_DB_VERSIONED_FILES)
             return {
                 "success": False,
-                "error": f"Cannot modify '{file}'. Allowed files: {', '.join(modifiable_files)}"
+                "error": (
+                    f"Cannot modify '{file}'. Directly writable files: "
+                    f"{', '.join(_DIRECT_WRITE_FILES)}. All other prompt "
+                    f"artifacts are versioned-immutable and must be submitted "
+                    f"for approval by passing one of: {', '.join(sorted(_DB_VERSIONED_FILES))}."
+                ),
             }
-        
+
         agent_dir = BASE_DIR / "agents" / agent_name
-        file_path = agent_dir / file
-        
+
         if not agent_dir.exists():
             return {
                 "success": False,
                 "error": f"Agent '{agent_name}' not found"
             }
-        
+
+        file_path = agent_dir / file
+
+        # Resolve the version tag ONCE — used by the DB key
+        # ``(agent_id, version_tag, artifact)`` and by the cache
+        # bust on the direct-write path (D9 threading).
+        from ..registry import _parse_agent_dir_name
+        base_id, resolved_tag = _parse_agent_dir_name(agent_name)
+
+        if artifact_key is not None:
+            # ── DB submission path (T8) ─────────────────────────────
+            # file_fallback = the CURRENT on-disk content (or None) —
+            # the bottom of the F6 precedence chain the service
+            # composes against for mutator callers and records for
+            # lineage. agent_modify passes whole content (see module
+            # docstring: replace, not compose — the caller already
+            # sent the full body).
+            try:
+                file_fallback = (
+                    file_path.read_text(encoding="utf-8")
+                    if file_path.exists()
+                    else None
+                )
+
+                from ..repositories.prompt_version.repository import (
+                    actor_from_instance,
+                )
+
+                actor = actor_from_instance(
+                    current_instance_id,
+                    "_mother",  # this factory only mounts for agents/_mother
+                )
+
+                svc = getattr(manager, "_prompt_version_service", None)
+                if svc is None:
+                    return {
+                        "success": False,
+                        "error": (
+                            "Prompt-version service unavailable — cannot "
+                            f"submit '{file}'. The write was NOT performed "
+                            "(fail-closed; the file is immutable)."
+                        ),
+                    }
+
+                # svc.create_and_submit is ALREADY an async facade
+                # (it does its own asyncio.to_thread hop around the
+                # sync repo composite per A4/A5) — await it directly;
+                # wrapping it in another to_thread would return an
+                # un-awaited coroutine.
+                row = await svc.create_and_submit(
+                    base_id,
+                    resolved_tag,
+                    artifact_key,
+                    content,
+                    actor,
+                    file_fallback=file_fallback,
+                )
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Failed to submit prompt-version draft: {str(e)}"
+                }
+
+            return {
+                "success": True,
+                "agent": agent_name,
+                "file": file,
+                "message": (
+                    f"Submitted {file} for agent '{agent_name}' as "
+                    f"version {row.version} (state: {row.state}). It takes "
+                    f"effect for the agent's prompt only after a human "
+                    f"approves it; the file on disk was not changed."
+                ),
+                "version_id": row.version_id,
+                "version": row.version,
+                "state": row.state,
+                "submitted": True,
+                "file_fallback_used": file_fallback is not None,
+            }
+
+        # ── Direct-write path — memory.md only (D6) ──────────────────
         try:
             # Write new content
             file_path.write_text(content, encoding="utf-8")
 
-            # Phase A T7: thread the resolved version_tag so the cache
-            # bust reaches the per-tag key (``developer[v2]``). Today
-            # the call drops the tag (base-key only) — known bug; the
-            # fix closes it (F9 / decisions.md R10).
-            from ..registry import _parse_agent_dir_name
-            _base_id, _resolved_tag = _parse_agent_dir_name(agent_name)
-            manager.prompt_cache.invalidate(agent_name, version_tag=_resolved_tag)
-            
+            # Phase A T7 / D9: thread the resolved version_tag so the
+            # cache bust reaches the per-tag key (``developer[v2]``).
+            manager.prompt_cache.invalidate(agent_name, version_tag=resolved_tag)
+
             return {
                 "success": True,
                 "agent": agent_name,
@@ -403,16 +567,28 @@ Returns:
                 "success": False,
                 "error": f"Failed to modify file: {str(e)}"
             }
-    
+
     agent_modify._full_doc_ = """Modify an agent's file contents.
 
+Phase B (T8): prompt artifacts (soul.md, rule.md, workflow.md,
+tools_note.md, tools.md, skill.md, user.md) are NOT written to disk —
+the content is submitted to the prompt-version approval pipeline as a
+pending_approval row and takes effect only after a human approves it
+(file fallback stays live until then). memory.md remains a direct
+write (runtime memory state with compaction, per the memory.md
+carve-out).
+
 Args:
-    agent_name: The agent identifier (e.g., "developer", "leader", "_mother")
-    file: The file to modify (soul.md, workflow.md, rule.md, user.md, memory.md, tools.md)
-    content: The new content for the file
+    agent_name: The agent identifier (e.g., "developer", "developer[v2]", "_mother")
+    file: The file to modify (soul.md, workflow.md, rule.md, user.md,
+        memory.md, tools_note.md, tools.md, skill.md)
+    content: The new content for the file (whole-content replace for
+        submitted artifacts)
 
 Returns:
-    Dict with success status, or error message
+    Dict with success status. For submitted artifacts: version_id /
+    version / state of the new pending_approval row. For memory.md:
+    the direct-write confirmation.
 """
     
     @register_tool_category("mother")

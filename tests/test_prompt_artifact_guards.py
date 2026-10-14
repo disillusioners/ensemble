@@ -338,123 +338,157 @@ class TestDepthDisambiguation:
 
 
 # ===========================================================================
-# T9(b) — agent_mother.agent_modify allowlist shrink
+# T9(b) — agent_mother.agent_modify write-path classification
+#
+# Phase B UPDATE (T8 rewire, 2026-10-14): the Phase A interim contract
+# ("versioned artifacts REFUSED, allowlist = memory.md only") was
+# superseded by the T8 DB-submission rewire — versioned artifacts now
+# submit prompt-version drafts (pending_approval) and never touch the
+# file; memory.md keeps the direct write; only truly non-modifiable
+# files (growth.md, meta.json, ...) keep the refusal. The REAL wiring
+# (pending rows, file-untouched, fail-closed, D9 invalidation) is
+# pinned by ``tests/test_agent_modify_rewire.py``; the tests below
+# pin the classification boundaries at the refusal edge.
 # ===========================================================================
 
 
 class TestAgentModifyAllowlistShrink:
-    """R10 — refusal shape preserved, allowlist smaller (memory.md only)."""
+    """T8 classification boundaries — refusal survives only for the
+    non-versioned, non-memory residue."""
 
-    def _make_mother(self, monkeypatch, tmp_path):
-        """Build a minimal ``agent_modify`` tool against a tmp agents dir.
+    def _tool(self, monkeypatch, tmp_path, service=None):
+        """The REAL ``agent_modify`` closure against a tmp agents tree.
 
-        ``create_mother_tools(manager, current_instance_id)`` requires a
-        full InstanceManager (heavy boot). For the allowlist check we only
-        need the function body — extract it by re-running the inner code
-        path. The simpler path is to test the refusal at the body level via
-        a monkeypatched ``write_text`` (no actual write occurs) and a
-        ``prompt_cache`` stub.
+        Phase B T8 made the replay-style body-copy approach obsolete
+        (the body now branches between DB submission and the memory
+        carve-out), so these tests drive the real closure with a
+        minimal manager stub — same pattern as
+        ``tests/test_agent_modify_rewire.py``, which owns the
+        exhaustive matrix.
         """
-        # Instead of creating a full mother, call the underlying body via a
-        # small wrapper that replicates the allowlist check (the same logic
-        # we edited). The allowlist is a single line; testing it directly
-        # is more durable than booting the whole mother.
-        from daemon.tools.agent_mother import BASE_DIR
+        import asyncio
+        from pathlib import Path as _Path
 
-        # Monkeypatch BASE_DIR to our tmp_path's parent so the agent path
-        # resolves inside the override agents root.
+        from daemon.tools.agent_mother import create_mother_tools
+
+        agents_root = tmp_path / "agents"
+        (agents_root / "developer").mkdir(parents=True, exist_ok=True)
+        (agents_root / "developer" / "soul.md").write_text("OLD")
+        (agents_root / "developer" / "memory.md").write_text("M0")
         monkeypatch.setattr(
-            "daemon.tools.agent_mother.BASE_DIR", tmp_path
-        )
-        return BASE_DIR
-
-    def _agent_modify_invocation(
-        self, monkeypatch, tmp_path, agent_name, file_name, content="x"
-    ):
-        """Run ``agent_modify`` body directly, bypassing manager wiring.
-
-        The simpler/more-durable shape: import the closure-free body of
-        agent_modify. Since the body lives inside ``create_mother_tools``,
-        we replicate it here to test the allowlist + refusal contract in
-        isolation. The DB coder's parallel cycle owns the
-        ``agent_modify`` body wrap-up (Phase A T9(b) acceptance is the
-        allowlist + refusal shape contract, not the full
-        ``create_mother_tools`` boot path).
-        """
-        # Re-run the SAME body lines we edited in agent_mother.py:349-393.
-        # If the body ever drifts, this test will fail on the allowlist
-        # assertion (and that's the right signal).
-        modifiable_files = ["memory.md"]
-        if file_name not in modifiable_files:
-            return {
-                "success": False,
-                "error": f"Cannot modify '{file_name}'. "
-                f"Allowed files: {', '.join(modifiable_files)}",
-            }
-        # Allowlist passed → success stub (the actual write is the
-        # caller's job; we test the refusal contract).
-        return {
-            "success": True,
-            "agent": agent_name,
-            "file": file_name,
-            "message": f"Updated {file_name} for agent '{agent_name}'",
-        }
-
-    @pytest.mark.parametrize(
-        "versioned_artifact",
-        ["soul.md", "rule.md", "workflow.md", "tools_note.md", "skill.md"],
-    )
-    def test_agent_modify_returns_refusal_for_versioned_artifacts(
-        self, monkeypatch, tmp_path, versioned_artifact
-    ):
-        """All versioned artifacts return the same refusal shape (R10).
-
-        The error string preserves the existing ``{"success": False, "error":
-        f"Cannot modify '{file}'. Allowed files: {', '.join(modifiable_files)}"}``
-        shape — only the allowlist shrunk. The part AFTER
-        ``"Allowed files: "`` must list ONLY ``memory.md`` (no other
-        versioned-immutable artifact).
-        """
-        result = self._agent_modify_invocation(
-            monkeypatch, tmp_path, "developer", versioned_artifact
+            "daemon.tools.agent_mother.BASE_DIR", _Path(tmp_path)
         )
 
-        assert result["success"] is False
-        assert "Cannot modify" in result["error"]
-        assert versioned_artifact in result["error"]
-        # The new (smaller) allowlist appears in the error.
-        assert "Allowed files:" in result["error"]
-        allowlist_part = result["error"].split("Allowed files: ", 1)[1]
-        # The only entry in the new allowlist is memory.md.
-        assert allowlist_part.strip() == "memory.md"
-        # The pre-Phase-A allowlist entries (soul/rule/workflow/user/tools)
-        # are NOT in the allowlist portion.
-        for old in ("soul.md", "rule.md", "workflow.md", "user.md", "tools.md"):
-            assert old not in allowlist_part, (
-                f"{old} leaked into the post-Phase-A allowlist: {allowlist_part!r}"
-            )
+        class _PC:
+            calls: list = []
 
-    def test_agent_modify_memory_md_still_allowed(
+            def invalidate(self, agent_id, version_tag=None):
+                self.calls.append((agent_id, version_tag))
+
+        class _Mgr:
+            def __init__(self, svc):
+                self._prompt_version_service = svc
+                self.prompt_cache = _PC()
+
+        mgr = _Mgr(service)
+        tools = create_mother_tools(mgr, "inst-guard-test")
+        tool = next(t for t in tools if t.name == "agent_modify")
+        return tool, mgr
+
+    def test_non_versioned_residue_still_refused(
         self, monkeypatch, tmp_path
     ):
-        """memory.md remains in the allowlist (carved out)."""
-        result = self._agent_modify_invocation(
-            monkeypatch, tmp_path, "developer", "memory.md"
+        """growth.md / meta.json keep the Phase A refusal shape (T8)."""
+        for fname in ("growth.md", "meta.json"):
+            tool, _ = self._tool(monkeypatch, tmp_path)
+            result = asyncio_run_tool(
+                tool, agent_name="developer", file=fname, content="x"
+            )
+            assert result["success"] is False
+            assert f"Cannot modify '{fname}'" in result["error"]
+
+    def test_versioned_artifact_submits_instead_of_refusing(
+        self, monkeypatch, tmp_path
+    ):
+        """T8 supersession: soul.md → DB submission, NOT a refusal.
+
+        Replaces the Phase A pin
+        (``test_agent_modify_returns_refusal_for_versioned_artifacts``),
+        which asserted the interim refusal that the T8 rewire was
+        explicitly scheduled to replace. The full pending-row /
+        file-untouched contract lives in
+        ``tests/test_agent_modify_rewire.py``.
+        """
+
+        class _Row:
+            version_id = "v-guard"
+            version = 1
+            state = "pending_approval"
+
+        class _Svc:
+            # async — mirrors the REAL service facade (A4/A5).
+            async def create_and_submit(self, *a, **k):
+                return _Row()
+
+        tool, _ = self._tool(monkeypatch, tmp_path, service=_Svc())
+        result = asyncio_run_tool(
+            tool, agent_name="developer", file="soul.md", content="NEW"
+        )
+        assert result["success"] is True
+        assert result["state"] == "pending_approval"
+        # The file was NOT touched (the old refusal's purpose, kept).
+        assert (tmp_path / "agents" / "developer" / "soul.md").read_text() == "OLD"
+
+    def test_agent_modify_memory_md_still_direct_write(
+        self, monkeypatch, tmp_path
+    ):
+        """memory.md remains the direct-write carve-out (D6)."""
+        tool, mgr = self._tool(monkeypatch, tmp_path)
+        result = asyncio_run_tool(
+            tool, agent_name="developer", file="memory.md", content="M1"
         )
 
         assert result["success"] is True
         assert result["file"] == "memory.md"
+        assert (
+            tmp_path / "agents" / "developer" / "memory.md"
+        ).read_text() == "M1"
+        # D9: the bust carries the resolved (base, None) key.
+        assert mgr.prompt_cache.calls == [("developer", None)]
 
-    def test_agent_modify_user_md_no_longer_allowed(
+    def test_agent_modify_user_md_routes_to_db_submission(
         self, monkeypatch, tmp_path
     ):
-        """user.md is NOT in the Phase A allowlist (DB-joins at Phase B)."""
-        result = self._agent_modify_invocation(
-            monkeypatch, tmp_path, "developer", "user.md"
-        )
+        """user.md joins the DB-versioned set (D5) — submits, not refuses.
 
-        assert result["success"] is False
-        assert "user.md" in result["error"]
+        Replaces the Phase A pin
+        (``test_agent_modify_user_md_no_longer_allowed``), which
+        asserted the interim refusal pending this Phase B landing.
+        """
+
+        class _Row:
+            version_id = "v-guard-u"
+            version = 1
+            state = "pending_approval"
+
+        class _Svc:
+            async def create_and_submit(self, *a, **k):
+                return _Row()
+
+        tool, _ = self._tool(monkeypatch, tmp_path, service=_Svc())
+        result = asyncio_run_tool(
+            tool, agent_name="developer", file="user.md", content="U1"
+        )
+        assert result["success"] is True
+        assert result["submitted"] is True
+        assert result["state"] == "pending_approval"
+
+
+def asyncio_run_tool(tool, **kwargs) -> dict:
+    """Run an async langchain tool coroutine to completion (sync tests)."""
+    import asyncio
+
+    return asyncio.run(tool.coroutine(**kwargs))
 
 
 # ===========================================================================
@@ -463,10 +497,22 @@ class TestAgentModifyAllowlistShrink:
 
 
 class TestInnerSoulShim:
-    """Phase A T11 — soul/workflow writes refuse; memory/memories/user pass."""
+    """inner_soul write-surface disposition (Phase A T11 → Phase B T7).
 
-    def test_soul_target_write_refused(self, override_agents_roots):
-        """_update_soul refuses BEFORE acquiring the file lock."""
+    Phase A pinned the interim in-tool REFUSAL (the belt-and-braces
+    shim refused soul/workflow touches while user.md still wrote).
+    Phase B T7 replaces that regime: soul/workflow/user submit
+    prompt-version DB drafts (D4/D5) and NEVER write files; the
+    in-function shim is gone because there is no file write left to
+    guard — the immutability fence lives on the ``write_file`` /
+    ``edit_file`` tool surfaces (tested by the guard classes above)
+    and on the fail-closed posture pinned here: with the prompt-version
+    service unavailable, the change is REFUSED and the file stays
+    byte-identical. No file fallback exists.
+    """
+
+    def test_soul_submission_fails_closed_without_service(self, override_agents_roots):
+        """_update_soul refuses when no prompt-version service exists."""
         from daemon.tools.inner_soul import _update_soul
 
         test_agent = override_agents_roots["test_agent"]
@@ -476,14 +522,14 @@ class TestInnerSoulShim:
 
         assert result["success"] is False
         assert result["target"] == "soul"
-        assert "ERROR: REFUSED" in result["error"]
-        assert "soul.md" in result["error"]
+        assert "NOT applied" in result["error"]
         assert "immutable prompt artifact" in result["error"]
-        # The file must NOT have been mutated.
+        # The file must NOT have been mutated (and no history/ dir).
         assert test_agent.joinpath("soul.md").read_text() == "# soul.md\n"
+        assert not test_agent.joinpath("history").exists()
 
-    def test_workflow_target_write_refused(self, override_agents_roots):
-        """_update_workflow refuses BEFORE acquiring the file lock."""
+    def test_workflow_submission_fails_closed_without_service(self, override_agents_roots):
+        """_update_workflow refuses when no prompt-version service exists."""
         from daemon.tools.inner_soul import _update_workflow
 
         test_agent = override_agents_roots["test_agent"]
@@ -493,9 +539,32 @@ class TestInnerSoulShim:
 
         assert result["success"] is False
         assert result["target"] == "workflow"
-        assert "ERROR: REFUSED" in result["error"]
-        assert "workflow.md" in result["error"]
+        assert "NOT applied" in result["error"]
         assert test_agent.joinpath("workflow.md").read_text() == "# workflow.md\n"
+
+    def test_user_submission_fails_closed_without_service(self, override_agents_roots):
+        """_update_user refuses without a service (D5 — no file fallback).
+
+        Phase A pinned ``user.md still writes``; Phase B D5 flips the
+        disposition: user.md joins the DB version model, so without the
+        service the change is refused and the file stays untouched.
+        """
+        from daemon.tools.inner_soul import _update_user
+
+        test_agent = override_agents_roots["test_agent"]
+        result = _update_user(
+            "test_agent", test_agent, "my name is bar", None
+        )
+
+        assert result["success"] is False
+        assert result["target"] == "user"
+        assert "NOT applied" in result["error"]
+        # If a user.md template exists, it is byte-identical to before
+        # (no file fallback, no partial write).
+        user_file = test_agent.joinpath("user.md")
+        if user_file.exists():
+            content = user_file.read_text()
+            assert "my name is bar" not in content
 
     def test_memory_target_unaffected(self, override_agents_roots):
         """_update_memory_md still works (memory.md carved out)."""
@@ -512,17 +581,10 @@ class TestInnerSoulShim:
         # Confirm the actual content was written.
         assert "some new memory" in test_agent.joinpath("memory.md").read_text()
 
-    def test_user_target_unaffected(self, override_agents_roots):
-        """_update_user still works (user.md carved out)."""
-        from daemon.tools.inner_soul import _update_user
-
-        test_agent = override_agents_roots["test_agent"]
-        result = _update_user(
-            "test_agent", test_agent, "my name is bar", None
-        )
-
-        assert result.get("success") is True
-        assert result.get("target") == "user"
+    # NOTE (Phase B T7/D5): the former ``test_user_target_unaffected``
+    # (``user.md still writes``) is SUPERSEDED — user.md joins the DB
+    # version model; see
+    # ``test_user_submission_fails_closed_without_service`` above.
 
     def test_memories_target_unaffected(self, override_agents_roots):
         """_update_memories still works (memories/ carved out)."""
