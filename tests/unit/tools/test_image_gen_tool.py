@@ -35,6 +35,7 @@ Coverage map (plan DoD item 1 + reviewer notes):
 
 import asyncio
 import json
+import socket
 import time
 from pathlib import Path
 
@@ -952,9 +953,6 @@ class TestRegistryAndAllowlist:
 # ─── 10. review-hardening (council NEEDS-FIXES Findings 2 / 3 / 4) ────────────
 
 
-import socket as _socket_module  # noqa: E402  — used by Finding-2 SSRF guard tests
-
-
 def _wire_no_ssrf_bypass(monkeypatch, handler, store):
     """Wire the transport seam + fake store WITHOUT the auto-SSRF bypass.
 
@@ -1010,7 +1008,7 @@ class TestReviewHardeningSSRFGuard:
             )
 
         with monkeypatch.context() as m:
-            m.setattr(_socket_module, "getaddrinfo", _fake_getaddrinfo)
+            m.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
             # Use the wiring helper that does NOT install the
             # auto-SSRF-bypass — exercise the real guard.
             tool, _ = _wire_no_ssrf_bypass(m, handler, store)
@@ -1042,7 +1040,7 @@ class TestReviewHardeningSSRFGuard:
             return httpx.Response(200, json=body)
 
         with monkeypatch.context() as m:
-            m.setattr(_socket_module, "getaddrinfo", _fake_getaddrinfo)
+            m.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
             tool, _ = _wire_no_ssrf_bypass(m, handler, store)
 
             result = await tool.ainvoke({"prompt": "fox"})
@@ -1058,7 +1056,7 @@ class TestReviewHardeningSSRFGuard:
                 "metadata": {}, "base_resp": {"status_code": 0}}
 
         def _fake_getaddrinfo(host, port, *args, **kwargs):
-            raise _socket_module.gaierror(-2, "Name or service not known")
+            raise socket.gaierror(-2, "Name or service not known")
 
         oss_calls: list[str] = []
 
@@ -1068,7 +1066,7 @@ class TestReviewHardeningSSRFGuard:
             return httpx.Response(200, json=body)
 
         with monkeypatch.context() as m:
-            m.setattr(_socket_module, "getaddrinfo", _fake_getaddrinfo)
+            m.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
             tool, _ = _wire_no_ssrf_bypass(m, handler, store)
 
             result = await tool.ainvoke({"prompt": "fox"})
@@ -1076,6 +1074,58 @@ class TestReviewHardeningSSRFGuard:
         assert oss_calls == []
         assert _err_code(result) == "image_gen_fetch_failed"
         assert "Cannot resolve hostname" in result
+
+    async def test_public_host_accepted_end_to_end(
+        self, env_ok, monkeypatch, store
+    ):
+        # ACCEPT-PATH coverage for the REAL SSRF guard (council minor #2):
+        # the three refusal tests above exercise the REJECT branches; this
+        # test proves the ACCEPT path through the real ``_ensure_public_url``
+        # (i.e. WITHOUT the ``_wire`` permissive shim) by feeding a public
+        # IP through ``getaddrinfo``. The image must deliver end-to-end:
+        # guard accepts → ``_fetch_image_bytes`` runs → save succeeds.
+        target_url = "http://oss-public.example/img/a.png"
+        body = {
+            "data": {"image_urls": [target_url]},
+            "metadata": {"success_count": "1", "failed_count": "0"},
+            "base_resp": {"status_code": 0, "status_msg": "success"},
+        }
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 64
+
+        # 8.8.8.8 is Google's public DNS resolver — a real-public address.
+        def _fake_getaddrinfo(host, port, *args, **kwargs):
+            return [(2, 1, 6, "", ("8.8.8.8", 0))]
+
+        oss_calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "proxy.test":
+                return httpx.Response(200, json=body)
+            # OSS stage was actually reached — proves the guard accepted.
+            oss_calls.append(str(request.url))
+            return httpx.Response(
+                200,
+                headers={"content-type": "image/png"},
+                content=png,
+            )
+
+        with monkeypatch.context() as m:
+            m.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+            # Use the bypass-FREE wiring — the real guard decides.
+            tool, _ = _wire_no_ssrf_bypass(m, handler, store)
+
+            result = await tool.ainvoke({"prompt": "fox"})
+
+        # The OSS fetch was reached exactly once (no guard refusal).
+        assert len(oss_calls) == 1
+        assert oss_calls[0].endswith("/img/a.png")
+        # End-to-end payload: ok=true, one image saved, one marker emitted.
+        payload = _ok_payload(result)
+        assert len(payload["images"]) == 1
+        assert len(payload["markers"]) == 1
+        assert payload["images"][0]["size_bytes"] == len(png)
+        # Provenance stamps the feature correctly.
+        assert store.saved and store.saved[0]["provenance"]["feature"] == "image-gen"
 
 
 class TestReviewHardeningPostBodyReadCap:
@@ -1206,4 +1256,62 @@ class TestReviewHardeningFiveOhTwoEnvelopeFilter:
             "status": 502,
             "status_code": 2013,
             "status_msg": "prompt may contain sensitive content",
+        }
+
+    async def test_http_200_nonzero_base_resp_filter_same_three_keys(
+        self, env_ok, monkeypatch, store
+    ):
+        """Council minor #1 — adjacent-path coverage.
+
+        The 200-OK + non-zero ``base_resp.status_code`` path (HTTP 200 with
+        ``base_resp.status_code != 0`` ⇒ upstream reports an app-level
+        failure under a successful envelope) ALSO relays the upstream
+        dict. Same 3-key filter as the 502 path: ``{status, status_code,
+        status_msg}`` ONLY; extras (``request_id`` / ``trace_id`` /
+        internal flags) MUST NOT leak.
+        """
+        body = {
+            "data": {"image_urls": ["https://oss.example/img/a.png"]},
+            "metadata": {"success_count": "0", "failed_count": "1"},
+            "base_resp": {
+                "status_code": 1026,  # any non-zero AM2 code
+                "status_msg": "internal upstream failure",
+                # Same upstream-internal noise as the 502 case — must NOT
+                # appear in the 200-OK + non-zero envelope either.
+                "request_id": "req-abcdef123456",
+                "trace_id": "trace-789xyz-very-internal",
+                "internal_flag": True,
+                "retry_after_s": 30,
+                "extra": {"nested": "must_not_appear"},
+            },
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=body)
+
+        tool, _ = _wire(monkeypatch, handler, store)
+        result = await tool.ainvoke({"prompt": "fox"})
+
+        # Same envelope code as the 502 path.
+        assert _err_code(result) == "image_gen_upstream_error"
+        # The two informational substrings are present.
+        assert "1026" in result
+        assert "internal upstream failure" in result
+        # Same filter assertion: no upstream-internal key leaks.
+        for forbidden in (
+            "request_id", "trace_id", "internal_flag",
+            "retry_after_s", "extra",
+            "req-abcdef123456", "trace-789xyz-very-internal",
+            "very-internal",
+        ):
+            assert forbidden not in result, (
+                f"Council-minor #1 leak: upstream-internal key {forbidden!r} "
+                f"surfaced in 200-OK envelope: {result}"
+            )
+        # Strict equality on details with the 3-key filter (status=200 here).
+        envelope = json.loads(result[len("Error: "):])
+        assert envelope["details"] == {
+            "status": 200,
+            "status_code": 1026,
+            "status_msg": "internal upstream failure",
         }

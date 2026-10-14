@@ -177,6 +177,9 @@ def _ensure_public_url(url: str) -> tuple[str | None, str | None]:
     tradeoff documented in ``image_tools.py``. The fetch path also passes
     ``follow_redirects=False`` so a redirected-to-private-IP cannot
     bypass the guard.
+    Divergence from ``image_tools.py`` is DELIBERATE: OSS v1-signed
+    URLs are direct, and any redirect on that path is treated as a
+    hostile upstream anomaly.
 
     Returns:
         ``(url, None)`` on success, or ``(None, error_msg)`` on failure
@@ -512,7 +515,15 @@ def _parse_generation_response(
             "image_gen_upstream_error",
             "Upstream image generation failed: base_resp.status_code="
             f"{app_code!r} status_msg={base_resp.get('status_msg')!r}.",
-            {"base_resp": base_resp},
+            {
+                # Same 3-key filter as the 502 path (council minor #1 —
+                # Finding 4 adjacent-path coverage): the upstream dict
+                # may carry extras (request_id / trace_id / internal
+                # flags) that MUST NOT relay through the envelope.
+                "status": 200,
+                "status_code": app_code,
+                "status_msg": base_resp.get("status_msg"),
+            },
         )
 
     data = body.get("data")
