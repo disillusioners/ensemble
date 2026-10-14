@@ -1380,8 +1380,6 @@ class TestLeaseWrappedCompletion:
         """Drive with lease metadata present vs absent: identical
         completion behavior (both publish + fire the watcher in the
         healed tree)."""
-        import asyncio as _asyncio
-
         lease_metadata = {
             "blueprint_lease": {
                 "job_id": "blueprinter-job-1",
