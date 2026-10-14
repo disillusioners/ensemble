@@ -744,6 +744,17 @@ async def lifespan(app: FastAPI):
     PromptVersion.metadata.create_all(manager.engine)
     PromptAuditEvent.metadata.create_all(manager.engine)
 
+    # Phase C — User Directive #5A custom-agent config table
+    # (``custom_agent_configs`` — the R-A1/R-A2 backing store).
+    # Brand-new table; same create_all precedent as
+    # PromptVersion / PromptAuditEvent / PromptTemplateBaseline
+    # above. The .sql migration handles SQLite; the model
+    # handles PG. No ``_ensure_postgres_columns`` mirror needed.
+    from daemon.repositories.custom_agent_configs.models import (
+        CustomAgentConfig,
+    )
+    CustomAgentConfig.metadata.create_all(manager.engine)
+
     # User Directive #5B (2026-10-14, RESOLUTION-CORE) —
     # ``prompt_template_baselines`` is the third table in the
     # prompt-version family: stores the shipped-template sha256

@@ -35,37 +35,38 @@ from .persistence import (
     get_checkpointer,
 )
 from .repositories import (
-    SQLModelInstanceRepository,
-    SQLModelProjectRepository,
-    SQLModelSourceRepository,
-    SQLModelMessageQueueRepository,
-    DatabaseConfig,
-    create_engine_from_config,
-    create_project_repository,
-    create_instance_repository,
-    create_source_repository,
-    create_message_queue_repository,
-    create_mcp_server_repository,
-    create_infra_repository,
-    create_shared_meta_kv_repository,
-    create_skill_repository,
-    create_blueprint_repository,
-    create_blueprint_embedding_repository,
-    create_blueprint_pending_repository,
-    create_skill_lineage_repository,
-    create_skill_embedding_repository,
-    create_skill_usage_repository,
-    create_skill_trigger_repository,
-    create_skill_ab_test_repository,
-    create_skill_bank_repository,
-    create_message_metadata_repository,
-    create_prompt_version_repository,
-    PromptVersionRepository,
-    MessageMetadataRepository,
-    ReportInjectionRepository,
-    InstanceUiPrefsRepository,
-    ServiceRepo,
-)
+        SQLModelInstanceRepository,
+        SQLModelProjectRepository,
+        SQLModelSourceRepository,
+        SQLModelMessageQueueRepository,
+        DatabaseConfig,
+        create_engine_from_config,
+        create_project_repository,
+        create_instance_repository,
+        create_source_repository,
+        create_message_queue_repository,
+        create_mcp_server_repository,
+        create_infra_repository,
+        create_shared_meta_kv_repository,
+        create_skill_repository,
+        create_blueprint_repository,
+        create_message_metadata_repository,
+        create_prompt_version_repository,
+        create_custom_agent_config_repository,
+        create_blueprint_embedding_repository,
+        create_blueprint_pending_repository,
+        create_skill_lineage_repository,
+        create_skill_embedding_repository,
+        create_skill_usage_repository,
+        create_skill_trigger_repository,
+        create_skill_ab_test_repository,
+        create_skill_bank_repository,
+        PromptVersionRepository,
+        MessageMetadataRepository,
+        ReportInjectionRepository,
+        InstanceUiPrefsRepository,
+        ServiceRepo,
+    )
 from .repositories.task.repository import (
     TaskRepository,
     _capped_doomed_id_repr,
@@ -1211,6 +1212,18 @@ class InstanceManager:
         # tests).
         from . import loader as _loader_module
         _loader_module.set_prompt_version_repo(self._prompt_version_repo)
+
+        # Phase C — User Directive #5A custom-agent config repository.
+        # Sibling of ``_prompt_version_repo`` — same construction
+        # pattern (``engine=``, ``create_tables=False`` — the api
+        # lifespan covers create_all; the .sql migration covers
+        # SQLite). The router's POST /api/custom-agents / DELETE
+        # endpoints reach it via ``manager._custom_agent_config_repo``
+        # (the SkillStoreService-style manager-owned pattern at
+        # ``manager.py:1171-1213``).
+        self._custom_agent_config_repo = create_custom_agent_config_repository(
+            engine=self._engine, create_tables=False
+        )
 
         # NEW: Session repository for session management
         # Must be created before SourceRegistry for scheduler session mode
