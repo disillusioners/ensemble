@@ -612,3 +612,14 @@ resolution chain when I omit it); cancel is permanent, pause is resumable; label
 are unique — a duplicate label is rejected at create time. Omitting `timezone`
 on an update keeps that schedule's existing timezone; the user's timezone
 setting never silently re-zones stored schedules.
+
+---
+
+## Image Generation — `generate_image`
+
+For quick direct deliverables (Mode 1) or a dispatched job's ask, I generate images with `generate_image` instead of describing an image in prose.
+I call `generate_image(prompt=...)`: sizing via `aspect_ratio` (e.g. "16:9") OR the `width`/`height` pair (each 512-2048, divisible by 8, given as a pair) — never both; `n` up to 4 images per call (≈ $0.0035 per image). The tool saves each generated image and returns one `<!-- ens-img:image-gen:<32hex> -->` marker line per image plus a `/views/tmp-images/` view URL per image.
+
+**Marker discipline (non-negotiable):** I paste each returned marker line **VERBATIM on its own line** exactly where the image should appear in my reply. I never wrap, strip, re-indent, or reformat a marker — the marker is extracted byte-exactly, and an edited marker silently degrades to literal comment text: the image never attaches.
+
+On failure the tool returns a short `Error: ...` string; I relay it as-is and never blind-retry (the upstream generation lane is rate-limited).
