@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.20.3] — 2026-10-14
+
+### Added — agent-prompt immutability: immutable agent .md templates + DB versioned prompt overrides + approval workflow (`feature/agent-prompt-immutability` @ `9003cd765`, merged to `latest` @ `27d2452a7`)
+
+> **CHANGELOG (feature release):** *Agent prompt artifacts (`soul.md` / `rule.md` / `workflow.md` / `tools_note.md` / `skill-set.yaml` / `skills-template/*`) become IMMUTABLE in-tree templates — in-flight edits redirect into a DB-backed version store (`prompt_versions` + `prompt_audit_events`) with an approval workflow and a CORE/MEMORY approval-scope split: CORE artifacts submit versioned drafts for approval, while MEMORY (`memory.md` + memory carve-outs) keeps direct writes. `inner_soul` soul/workflow/user rewrites now compose on the effective chain and submit prompt-version DB drafts; `agent_mother.agent_modify` is rewired to DB submission (`modifiable_files` shrinks to `[memory.md]`). A Persona UI exposes the version/approval estate, and predefined agents auto-reset to their template baseline on drift (Ud#5B). A generated 156-artifact prompt-artifact baseline + read-only stage.sh drift leg + boot-WARN alarm protect the tree; agent .md files in live installs are never written directly.*
+
+- **Resolution core + storage**: `PromptVersion` / `PromptAuditEvent` SQLModel + checksummed additive migration; `PromptVersionRepository` (13 sync methods + `create_and_submit`) and `PromptVersionService` thin async facade wired into manager + API; loader hook + cache invalidation + drift tests; per-key `pg_advisory_xact_lock` serialization for prompt-version writers (R3).
+- **Approval workflow + REST surface**: 12-endpoint `/api/prompts` family incl. PATCH/DELETE/pending-count; 5 minted `prompts:*` scopes with scope/class manifest cages; approval state machine with typed transitions (`pending_approval→draft` is the only retract lane); audit trail with UPDATED/DELETED enum + allowlist-split filters.
+- **inner_soul rewrite + auto-reset protocol**: soul/workflow/user → prompt-version DB drafts (memory carve-outs unchanged; storage-key normalization for `access_memory` round-trip); predefined-agent auto-reset to template baseline (Ud#5B); versioned-prompt-artifact immutability guard (T9a) + `agent_mother.modifiable_files` → `[memory.md]` (T9b).
+- **Persona UI** (Phase C P1+P1.5): version/approval console surface; 188 persona-memory files swept into `legacy/` per user directive 2026-10-14.
+- **Custom-agent lifecycle**: `custom_agent_configs` table + repo + factory; POST/GET/DELETE lifecycle API with Pydantic body validation; hybrid registry (file-scan ∪ `custom_agent_configs`); spawn-path threading `is_custom_agent=True` end-to-end.
+- **Drift protection** (T13/S9): prompt-artifact drift core + committed 156-artifact baseline; read-only stage.sh drift leg (non-blocking); boot WARN on baseline drift.
+
+### Fixed — watcher-loss NEW variant RCA: ghost-descendant liveness poisoning + self-referential WC strand (`feature/watcher-loss-terminal-strand` @ `90813a009`, merged to `latest` @ `4ebd7f2f1`; RCA incident `b6e24d78`, receipt `6fc156f3`)
+
+> **CHANGELOG (fix release):** *Closes the watcher-loss NEW-variant RCA — a ghost instance under a terminal parent held its emission gate open, wedging the strand as a self-referential WC (watch-child) loop with no re-arm and silently stranding missions. Four-part fix: strand-aware liveness walk (terminal-ancestry orphans — ghost descendants — are excluded from liveness and can no longer hold missions), MissionStrandHealer (single-invocation heal sweep + event-driven downgrade hand-off, per-root heal lock), pre-stamped recursive liveness eval (stamp→downgrade churn eliminated), and wedge-pass cooldown re-arm on the WC watchdog (a re-parking wake re-fires). Supersedes the F14 nothing-re-fires class. Live heal at merge: 1 wedged mission healed, straggler terminated, final wake delivered as one user paste.*
+
+- **Strand-aware liveness walk** (`a05ef5903`): ghost-descendant liveness-poisoning exclusion — terminal-ancestry orphans cannot hold missions.
+- **MissionStrandHealer** (`0ec93ea9f`): single-invocation heal sweep + event-driven downgrade hand-off; shared strand race-guard + read-side age mirror + per-root heal lock (`e4bc31387`).
+- **Pre-stamp liveness eval** (`654d6cc9d`): recursive evaluation stamped before downgrade — stamp→downgrade churn eliminated.
+- **Wedge-pass cooldown re-arm** (`02ec363f3`): a re-parking wake on the WC watchdog re-fires instead of dying silently (DELTA 2).
+- **Test wall**: RED harness terminal-strand wedge repro; regression pack (epoch pin, lease inertness, ACL residue-zero, backstop reachability, lane adjudication); age-mirror contract + true-concurrent heal pins; commission-mandated gap tests (scenario-3 conjunct, healer fail-closed probes, idempotency edges); tester final gate + delta re-gate PASS — 16 commits, +4462/−26.
+
 ## [0.20.2] — 2026-10-13
 
 ### Changed — agent-base v2 migration: base agents = copy of [v2] agents; opencode stack (incl. session/API coding-worker lane + comm service) retired to legacy/ (`feature/agent-base-v2` @ `a9d8aa860`, merged to `latest` @ `abeb66023`)
