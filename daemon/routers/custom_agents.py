@@ -73,6 +73,7 @@ import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from daemon.auth.decorators import require_scope
 from daemon.repositories.custom_agent_configs import CustomAgentIdError
@@ -90,6 +91,64 @@ router = APIRouter(
     prefix="/custom-agents",
     tags=["custom-agents"],
 )
+
+
+# =========================================================================
+# Pydantic body model — M2 / M17 fix-cycle.
+#
+# ``dict[str, Any]`` was the M17 source of 500s from un-coercible
+# numerics (``int("yes")`` / ``float("xyz")``). Pydantic Field
+# constraints catch the same shape issues at the framework boundary
+# (a 422 with a structured error envelope replaces a 500). Field
+# names match the service's ``create_custom_agent`` keyword signature
+# verbatim so the handler body stays a 1:1 field pass-through.
+# =========================================================================
+
+
+class _CustomAgentCreate(BaseModel):
+    """POST /api/custom-agents request body (M2 + M17).
+
+    Required:
+
+    * ``user_name`` — bare agent id (alphanumeric + hyphen +
+      underscore; the router adds the ``custom:`` prefix internally).
+    * ``name`` — display name (non-empty).
+    * ``soul_md`` — soul content (non-empty; R-A1 + R-A2 require it).
+
+    Optional — every other prompt artifact + per-tool shape. Defaults
+    mirror the prior handler: ``description=""``, ``color`` and
+    ``icon`` unset at the schema level so the service falls through
+    to its own defaults (``"🤖"`` / ``"accent-blue"``).
+    """
+
+    user_name: str = Field(
+        min_length=1,
+        pattern=r"^[A-Za-z0-9_\-]+$",
+    )
+    name: str = Field(min_length=1)
+    soul_md: str = Field(min_length=1)
+    rule_md: Optional[str] = None
+    workflow_md: Optional[str] = None
+    tools_note_md: Optional[str] = None
+    tools_md: Optional[str] = None
+    description: Optional[str] = None
+    icon: Optional[str] = None
+    color: Optional[str] = None
+    llm_model: Optional[str] = None
+    llm_models: Optional[list[Any]] = None
+    team_members: Optional[list[str]] = None
+    innate_skills: Optional[list[str]] = None
+    capabilities: Optional[list[str]] = None
+    skill_injection: Optional[int] = None
+    snapshot_enabled: Optional[int] = None
+    blueprint_inactive: Optional[int] = None
+    inject_allowed_models: Optional[int] = None
+    recursion_limit_multiplier: Optional[float] = None
+    recursion_limit: Optional[int] = None
+    context_injection_heuristic_match_shared_md_files: Optional[int] = None
+    tools_allow: Optional[list[str]] = None
+    tools_deny: Optional[list[str]] = None
+    tools_deny_spawn: Optional[list[str]] = None
 
 
 # =========================================================================
@@ -270,7 +329,7 @@ def _lifecycle_service(request: Request) -> Any:
 @require_scope(_SCOPE_WRITE)
 async def create_custom_agent(
     request: Request,
-    body: dict[str, Any],
+    body: _CustomAgentCreate,
 ):
     """Create a custom agent + v1 approved prompt rows (R-A1).
 
@@ -309,82 +368,46 @@ async def create_custom_agent(
     _require_auth_on(request)
     actor = _actor_from_request(request)
 
-    # Body validation — required fields + types.
-    user_name = body.get("user_name")
-    if not user_name or not isinstance(user_name, str):
-        raise _err(
-            400,
-            _ERR_INVALID_REQUEST,
-            (
-                "user_name is required (must be a non-empty "
-                "string — alphanumeric + hyphen + underscore)"
-            ),
-        )
-
-    name = body.get("name")
-    if not name or not isinstance(name, str):
-        raise _err(
-            400,
-            _ERR_INVALID_REQUEST,
-            "name is required (must be a non-empty string)",
-        )
-
-    soul_md = body.get("soul_md")
-    if not isinstance(soul_md, str):
-        raise _err(
-            400,
-            _ERR_INVALID_REQUEST,
-            (
-                "soul_md is required (User Directive #5A: "
-                "customs have NO template fallback; an empty "
-                "soul would trip NoPromptContentError on "
-                "every spawn)"
-            ),
-        )
-
     # NOTE: we look up the lifecycle service AFTER the body
-    # validation so a 400 (client fixable) surfaces before the
+    # validation (now Pydantic-driven → 422 at the framework
+    # boundary) so a 400 / 422 (client fixable) surfaces before the
     # 503 / manager wiring check (server misconfigured).
     svc = _lifecycle_service(request)
 
     try:
         result = await svc.create_custom_agent(
-            user_name=user_name,
-            name=name,
+            user_name=body.user_name,
+            name=body.name,
             actor=actor,
-            soul_md=soul_md,
-            rule_md=body.get("rule_md"),
-            workflow_md=body.get("workflow_md"),
-            tools_note_md=body.get("tools_note_md"),
-            tools_md=body.get("tools_md"),
-            description=body.get("description", ""),
-            icon=body.get("icon", "🤖"),
-            color=body.get("color", "accent-blue"),
-            llm_model=body.get("llm_model"),
-            llm_models=body.get("llm_models"),
-            team_members=body.get("team_members"),
-            innate_skills=body.get("innate_skills"),
-            capabilities=body.get("capabilities"),
-            skill_injection=int(body.get("skill_injection", 0) or 0),
-            snapshot_enabled=int(body.get("snapshot_enabled", 0) or 0),
-            blueprint_inactive=int(body.get("blueprint_inactive", 0) or 0),
-            inject_allowed_models=int(
-                body.get("inject_allowed_models", 0) or 0
+            soul_md=body.soul_md,
+            rule_md=body.rule_md,
+            workflow_md=body.workflow_md,
+            tools_note_md=body.tools_note_md,
+            tools_md=body.tools_md,
+            description=body.description or "",
+            icon=body.icon or "🤖",
+            color=body.color or "accent-blue",
+            llm_model=body.llm_model,
+            llm_models=body.llm_models,
+            team_members=body.team_members,
+            innate_skills=body.innate_skills,
+            capabilities=body.capabilities,
+            skill_injection=body.skill_injection or 0,
+            snapshot_enabled=body.snapshot_enabled or 0,
+            blueprint_inactive=body.blueprint_inactive or 0,
+            inject_allowed_models=body.inject_allowed_models or 0,
+            recursion_limit_multiplier=(
+                body.recursion_limit_multiplier
+                if body.recursion_limit_multiplier is not None
+                else 1.0
             ),
-            recursion_limit_multiplier=float(
-                body.get("recursion_limit_multiplier", 1.0) or 1.0
+            recursion_limit=body.recursion_limit,
+            context_injection_heuristic_match_shared_md_files=(
+                body.context_injection_heuristic_match_shared_md_files or 0
             ),
-            recursion_limit=body.get("recursion_limit"),
-            context_injection_heuristic_match_shared_md_files=int(
-                body.get(
-                    "context_injection_heuristic_match_shared_md_files",
-                    0,
-                )
-                or 0
-            ),
-            tools_allow=body.get("tools_allow"),
-            tools_deny=body.get("tools_deny"),
-            tools_deny_spawn=body.get("tools_deny_spawn"),
+            tools_allow=body.tools_allow,
+            tools_deny=body.tools_deny,
+            tools_deny_spawn=body.tools_deny_spawn,
         )
     except CustomAgentIdError as e:
         raise _err(400, _ERR_INVALID_REQUEST, str(e))
