@@ -52,14 +52,6 @@ from ..repositories.custom_agent_configs.repository import (
 logger = logging.getLogger(__name__)
 
 
-class CustomAgentNotFoundError(LookupError):
-    """Raised when the targeted custom agent has no live config row.
-
-    Distinct from a connection error (engine raises); used by the
-    router to surface a clean 404.
-    """
-
-
 class CustomAgentCreationError(ValueError):
     """Raised when the creation transaction cannot complete.
 
@@ -500,6 +492,5 @@ class CustomAgentLifecycleService:
 
 __all__ = [
     "CustomAgentLifecycleService",
-    "CustomAgentNotFoundError",
     "CustomAgentCreationError",
 ]
