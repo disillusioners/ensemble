@@ -2472,12 +2472,26 @@ class PromptVersionRepository:
         per-key via ``_acquire_key_lock`` inside the composite
         transaction (R3).
 
-        Composition rule: ``new_content = f(effective_now, ...)``
-        where ``effective_now = selected.content > latest_approved.
-        content > file_fallback``. ``content_or_mutator`` is either
-        a full content string (used as-is) or a callable applied to
-        ``effective_now`` (the agent mutates the effective chain
-        content — e.g. ``soul.append_learned(...)``).
+        Composition rule (F5 amendment, leader-gate 2026-10-14,
+        dispatcher-ratified): when ``content_or_mutator`` is a
+        callable, the composition base is the **prior active
+        (draft|pending) row's content** for the same key when one
+        exists — NOT :meth:`get_effective`, which excludes pending
+        rows. Only when no prior active row exists does the base
+        fall through to the F6 effective chain
+        (``selected > latest_approved > file_fallback``). The base
+        resolution happens INSIDE the ``engine.begin()`` block under
+        the per-key advisory lock so the prior-active read is
+        consistent with the INSERT (closes the F5 window in which
+        ``v2 = f(template) + delta₂`` silently lost ``delta₁`` on
+        approval — the exact regression the C4 "two calls = two
+        appends" intent exists to prevent).
+
+        Concretely: the F6 effective chain is the
+        **no-prior-active** base, not the universal base. The
+        supersession-ordered prior active row's content is the
+        C4-preserving base for the mutator path. The ``str`` content
+        path is unchanged (no composition).
 
         Consecutive un-approved calls chain on
         ``max(version) WHERE state IN ('draft', 'pending_approval')``
@@ -2493,8 +2507,10 @@ class PromptVersionRepository:
             version_tag: Version tag (``""`` for base).
             artifact: Artifact key.
             content_or_mutator: Full content (str) OR a callable
-                ``(effective_content: Optional[str]) -> new_content: str``
-                applied to the resolved effective chain content.
+                ``(base_content: Optional[str]) -> new_content: str``
+                applied to the resolved composition base (F5
+                amendment: prior active row's content when present,
+                else F6 effective chain).
             actor: Submitter identity.
             file_fallback: The on-disk template content for the
                 artifact — the bottom of the F6 precedence chain.
@@ -2510,17 +2526,27 @@ class PromptVersionRepository:
             ValueError: On bad inputs or after the retry budget is
                 exhausted (caller surfaces the contention).
         """
-        # Resolve effective content for the mutator path.
-        if callable(content_or_mutator):
-            effective_now = self.get_effective(agent_id, version_tag, artifact)
-            if effective_now is None:
-                effective_now = file_fallback
-            new_content = content_or_mutator(effective_now)
+        # Str content path: no composition, pre-compute as today.
+        # Callable path: defer the mutator application to inside the
+        # ``engine.begin()`` block (under the per-key advisory lock)
+        # so the prior-active read is consistent with the INSERT
+        # (F5 amendment, 2026-10-14). The str path is unchanged.
+        is_mutator = callable(content_or_mutator)
+        if is_mutator:
+            # Sentinel — populated inside the retry loop on each
+            # attempt (the per-key advisory lock makes retries
+            # vanishingly rare in normal operation, but the
+            # ``engine.begin()`` block re-runs the base resolution
+            # + mutator to keep the read consistent with the
+            # INSERT — same atomicity guarantee the pre-loop
+            # resolution lacked).
+            new_content: Optional[str] = None
+            content_hash: Optional[str] = None
         else:
             new_content = content_or_mutator
+            content_hash = _sha256_hex(new_content)
 
         version_tag = _normalize_version_tag(version_tag)
-        content_hash = _sha256_hex(new_content)
         now = _now_iso()
 
         last_error: Optional[Exception] = None
@@ -2535,12 +2561,19 @@ class PromptVersionRepository:
                     # budget remains the backstop).
                     self._acquire_key_lock(conn, agent_id, version_tag, artifact)
                     # Find the prior active (draft OR pending) row
-                    # for archival (A5/C4 "≤ 1 active pending per key").
+                    # for archival (A5/C4 "≤ 1 active pending per key")
+                    # AND fetch its content — the F5 amendment base
+                    # for the mutator path (2026-10-14,
+                    # dispatcher-ratified). When no prior active
+                    # row exists, the base falls through to the
+                    # F6 effective chain inside the conditional
+                    # below.
                     prior_active = conn.execute(
                         select(
                             col(PromptVersion.version_id),
                             col(PromptVersion.version),
                             col(PromptVersion.state),
+                            col(PromptVersion.content),
                         )
                         .select_from(PromptVersion)
                         .where(
@@ -2552,6 +2585,40 @@ class PromptVersionRepository:
                         .order_by(col(PromptVersion.version).desc())
                         .limit(1)
                     ).one_or_none()
+
+                    # Resolve the composition base + apply the
+                    # mutator (F5 amendment, 2026-10-14). The base
+                    # is the prior active row's content when one
+                    # exists; only the no-prior-active branch falls
+                    # through to the F6 effective chain
+                    # (get_effective) and the file_fallback. This
+                    # keeps the C4 "two calls = two appends" intent
+                    # through the pending window: v2 composes on
+                    # v1's content (NOT on the file template),
+                    # so approving v2 preserves delta₁ + delta₂.
+                    if is_mutator:
+                        if prior_active is not None and prior_active[3] is not None:
+                            base_content: Optional[str] = prior_active[3]
+                        else:
+                            # No prior active — the "first submission"
+                            # or "post-approval re-submission" path.
+                            # The F6 effective chain
+                            # (selected > latest_approved) is the
+                            # correct base here; file_fallback is
+                            # the bottom.
+                            base_content = self.get_effective(
+                                agent_id, version_tag, artifact,
+                            )
+                            if base_content is None:
+                                base_content = file_fallback
+                        new_content = content_or_mutator(base_content)
+                        content_hash = _sha256_hex(new_content)
+
+                    # Narrow the sentinels (str path pre-sets, mutator
+                    # path sets above) — both MUST be set before the
+                    # INSERT.
+                    assert new_content is not None
+                    assert content_hash is not None
 
                     # Recompute max(version) — UNIQUE constraint is
                     # the final fence; the retry absorbs the race.

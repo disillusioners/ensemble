@@ -743,6 +743,124 @@ class TestCreateAndSubmit:
         )
         assert v2_rel.state == "pending_approval"
 
+    # F5 amendment (leader-gate 2026-10-14, dispatcher-ratified) —
+    # composition base for the mutator path is the prior active
+    # (draft|pending) row's content, NOT get_effective (which
+    # excludes pending rows). Without the fix, two consecutive
+    # un-approved mutator submissions would land v2 = f(template) +
+    # delta₂ — silently losing delta₁ on approval (the exact
+    # regression the C4 "two calls = two appends" intent exists to
+    # prevent).
+
+    def test_create_and_submit_mutator_chains_on_prior_active_content(
+        self, repo, internal_actor, http_actor
+    ):
+        """F5: the second mutator submission composes on the prior
+        active row's content (not the file template). v2 carries
+        BOTH deltas; v1 is archived (≤ 1 active pending per key).
+        """
+        def append_delta1(old):
+            return (old or "") + " + DELTA1"
+        v1 = repo.create_and_submit(
+            "dev", "", "soul", append_delta1, internal_actor,
+            file_fallback="base content",
+        )
+        assert v1.state == "pending_approval"
+        assert v1.content == "base content + DELTA1"
+
+        def append_delta2(old):
+            return (old or "") + " + DELTA2"
+        v2 = repo.create_and_submit(
+            "dev", "", "soul", append_delta2, internal_actor,
+            file_fallback="base content",
+        )
+        assert v2.state == "pending_approval"
+        # The critical F5 assertion: v2 composes on v1's content
+        # (the prior active row's content), NOT on get_effective
+        # (which would return file_fallback "base content" — losing
+        # DELTA1).
+        assert v2.content == "base content + DELTA1 + DELTA2", (
+            f"F5 amendment: expected both deltas in v2.content, "
+            f"got {v2.content!r} (composition must chain on the "
+            f"prior active row's content, not the F6 effective chain)"
+        )
+
+        # Pending-supersession invariant preserved: v1 archived, v2
+        # pending (the ≤ 1 active pending per key fence).
+        v1_rel = repo.get_version(v1.version_id)
+        v2_rel = repo.get_version(v2.version_id)
+        assert v1_rel.state == "archived"
+        assert v2_rel.state == "pending_approval"
+
+    def test_create_and_submit_mutator_after_approval_composes_on_approved(
+        self, repo, internal_actor, http_actor
+    ):
+        """F5 regression guard: after approval (no prior active
+        rows), the next mutator submission composes on the
+        approved content via the F6 effective chain. This is the
+        pre-existing "first-submission-after-approve" behavior —
+        the F5 fix MUST NOT regress it.
+        """
+        v1 = repo.create_and_submit(
+            "dev", "", "soul", "approved content", internal_actor,
+        )
+        repo.approve(v1.version_id, http_actor)
+
+        def append_new(old):
+            return (old or "") + " + NEW"
+        v2 = repo.create_and_submit(
+            "dev", "", "soul", append_new, internal_actor,
+            file_fallback="template content",
+        )
+        # No prior active (v1 is approved, not draft/pending).
+        # Base = get_effective() = "approved content" (file_fallback
+        # "template content" is NOT used because get_effective
+        # returns the approved content first).
+        assert v2.content == "approved content + NEW", (
+            f"post-approval compose-on-approved: expected "
+            f"'approved content + NEW', got {v2.content!r}"
+        )
+
+    def test_create_and_submit_approval_retains_prior_active_delta(
+        self, repo, internal_actor, http_actor
+    ):
+        """F5 end-to-end: two un-approved mutator submissions chain
+        via the prior-active base, and the approved row serves
+        content with BOTH deltas (the C4 "two calls = two
+        appends" intent — the regression the defect would
+        introduce).
+        """
+        def append_delta1(old):
+            return (old or "") + " + DELTA1"
+        v1 = repo.create_and_submit(
+            "dev", "", "soul", append_delta1, internal_actor,
+            file_fallback="base content",
+        )
+
+        def append_delta2(old):
+            return (old or "") + " + DELTA2"
+        v2 = repo.create_and_submit(
+            "dev", "", "soul", append_delta2, internal_actor,
+            file_fallback="base content",
+        )
+
+        # Approve v2 — this is the critical step. The pre-F5-fix
+        # defect would have v2.content = "base content + DELTA2"
+        # (composed on get_effective = file_fallback, not on
+        # prior_active = v1.content) — losing DELTA1. After the
+        # fix, v2.content carries BOTH deltas.
+        repo.approve(v2.version_id, http_actor)
+
+        # get_effective serves the approved row's content, which
+        # now carries BOTH deltas (the F5 fix preserved the
+        # C4 append intent through approval).
+        effective = repo.get_effective("dev", "", "soul")
+        assert effective == "base content + DELTA1 + DELTA2", (
+            f"F5 end-to-end: expected both deltas after approval, "
+            f"got {effective!r} (approval must retain the prior "
+            f"active delta — the regression the F5 fix closes)"
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # A7/C5 INSERT-retry under concurrency

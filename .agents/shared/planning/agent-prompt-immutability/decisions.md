@@ -971,6 +971,46 @@ dispatcher-approved-pending-morning-ratification):
   is for MEMORY artifacts (transition-free,
   born-effective). Both are members of the
   service facade; consumers pick by class.
+* **A5 F5 amendment (2026-10-14,
+  dispatcher-ratified, leader-gate F5
+  approval-as-content-regression finding)** —
+  the **composition base for the mutator path**
+  inside ``create_and_submit`` is the **prior
+  active (draft|pending) row's content** when one
+  exists for the same key, NOT
+  ``get_effective()`` (which excludes pending
+  rows). Formula:
+  ``base = prior_active.content if present else
+  get_effective() else file_fallback``. Only the
+  **no-prior-active branch** falls through to
+  the F6 effective chain (selected >
+  latest_approved) and the file template; the
+  base resolution runs INSIDE the
+  ``engine.begin()`` block under the per-key
+  advisory lock so the read is consistent with
+  the INSERT. The ``str`` content path is
+  unchanged. MEMORY-class rows are unaffected
+  (``create_memory_version`` is transition-free
+  and not part of this path).
+  **Rationale** (closes the F5 regression):
+  composing on ``get_effective``-only made
+  approval a content-regression path — two
+  consecutive un-approved mutator submissions
+  on a CORE key landed ``v2.content = f(template)
+  + delta₂`` and approving ``v2`` silently lost
+  ``delta₁`` (the exact regression the C4 "two
+  calls = two appends" intent exists to
+  prevent). The prior-active base preserves
+  ``delta₁`` through the pending window;
+  ``get_effective`` stays correct for the
+  no-prior-active branch (first submission,
+  post-approval re-submission). The contract
+  table's A5 row now carries the dated F5
+  amendment cell in ``phase-contract.md``;
+  consumers (Phase B, inner_soul,
+  agent_mother.agent_modify) compose on the
+  new base without code change (the repo
+  abstracts the seam).
 * **Pending-count is CORE-only by design** — the
   ``count_pending`` repo method predicate carries
   ``AND artifact_class = 'CORE'``; the
