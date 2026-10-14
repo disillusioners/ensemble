@@ -1295,6 +1295,8 @@ def load_and_cache_prompt(
     cache: PromptCache,
     mcp_tool_names: list[str] | None = None,
     version_tag: str | None = None,
+    *,
+    is_custom_agent: bool = False,
 ) -> tuple[str, int]:
     """Load and cache agent prompts including multiple skills.
 
@@ -1306,6 +1308,12 @@ def load_and_cache_prompt(
         version_tag: Optional version tag (e.g., "v2") to distinguish tagged
             versions from base in the cache key (D15). Defaults to None for
             backward compatibility — existing callers do not need to thread it.
+        is_custom_agent: User Directive #5A — ``True`` when the caller has
+            resolved this agent against a custom_agent_configs row. The
+            loader threads the flag into ``resolve_prompts_from_db`` so
+            the empty-state posture flips to ``NoPromptContentError`` for
+            R-A2 lifecycle customs. Defaults to ``False`` so the existing
+            file-defined path stays unchanged (pre-Phase-C call sites).
 
     Returns:
         Tuple of (system_prompt, token_count).
@@ -1426,6 +1434,7 @@ def load_and_cache_prompt(
     if _repo is not None:
         prompts = resolve_prompts_from_db(
             prompts, agent_id, version_tag or "", _repo, rows=_db_rows,
+            is_custom_agent=is_custom_agent,
         )
 
     skills = load_agent_skills(agent_dir, meta)

@@ -1133,6 +1133,27 @@ def _reconstruct_full_system_prompt(
         mcp_tool_names = inst_meta.get("mcp_tool_names")
     version_tag = getattr(instance_meta, "agent_tag", None)
 
+    # Phase C — User Directive #5A. Thread the registry's
+    # ``is_custom`` flag so a reconstructed-from-checkpoint
+    # custom instance surfaces the R-A2 empty-state posture
+    # (the ``NoPromptContentError`` typed refusal) on a
+    # zero-versions DB instead of silently serving an
+    # empty prompt. Conservative default: ``False`` — any
+    # registry miss here propagates the existing
+    # template-fallback behavior (pre-Phase-C contract).
+    _is_custom_persist: bool = False
+    try:
+        from daemon.registry import get_registry as _gr_persist
+        if agent_meta is None:
+            _gr_persist_inst = _gr_persist()
+            agent_meta = _gr_persist_inst.get_resolved(agent_id)
+        if agent_meta is not None:
+            _is_custom_persist = bool(
+                getattr(agent_meta, "is_custom", False)
+            )
+    except Exception:
+        _is_custom_persist = False
+
     # Lazy import here — same pattern used by the spawn/restore call sites
     # in instance_lifecycle.py so test patches at ``daemon.manager.*``
     # take effect.
@@ -1144,6 +1165,7 @@ def _reconstruct_full_system_prompt(
         cache=prompt_cache,
         mcp_tool_names=mcp_tool_names,
         version_tag=version_tag,
+        is_custom_agent=_is_custom_persist,
     )
     if not system_prompt or not system_prompt.strip():
         return None
