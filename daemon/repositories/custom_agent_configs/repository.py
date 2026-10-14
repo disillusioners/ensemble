@@ -169,8 +169,16 @@ class CustomAgentConfigRepository:
         contract is a dict that the registry unpacks into its
         ``AgentMetadata(**kwargs)`` constructor.
 
-        The ``path`` field is None for customs (no dir on disk).
+        The ``path`` field is left unset — the registry's
+        ``discover_custom_agents`` stamps the
+        ``<custom-agent>/<id>`` sentinel directly so callers
+        have a single source of truth for the sentinel form.
         The ``system`` field is FORCED 0 — customs are non-system.
+        The ``tools`` field is set to a real :class:`ToolFilter`
+        so the registry's ``validate_tool_configs`` + the
+        runtime tool-resolution code can consume the same
+        shape used for ``meta.json``-derived agents (single
+        code path, different source).
 
         Args:
             row: A :class:`CustomAgentConfig` row.
@@ -179,19 +187,27 @@ class CustomAgentConfigRepository:
             A kwargs dict ready for ``AgentMetadata(**kwargs)``
             (with the registry's ``path`` substitution).
         """
+        from daemon.registry import ToolFilter
+
+        tools = ToolFilter(
+            allow=list(row.tools_allow or []),
+            deny=list(row.tools_deny or []),
+            deny_spawn=list(row.tools_deny_spawn or []),
+        ) if (
+            row.tools_allow or row.tools_deny or row.tools_deny_spawn
+        ) else None
+
         return {
             "id": row.agent_id,
             "name": row.name or row.agent_id,
             "description": row.description,
             "icon": row.icon,
             "color": row.color,
-            "path": None,
-            "system": 0,
+            "path": None,  # sentinel set by discover_custom_agents
+            "system": 0,  # FORCED non-system on this path
             "capabilities": list(row.capabilities or []),
             "tags": [],
-            "tools_allow": list(row.tools_allow or []),
-            "tools_deny": list(row.tools_deny or []),
-            "tools_deny_spawn": list(row.tools_deny_spawn or []),
+            "tools": tools,
             "innate_skills": list(row.innate_skills or []),
             "llm_model": row.llm_model,
             "llm_models": list(row.llm_models or []),

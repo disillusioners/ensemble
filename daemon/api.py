@@ -874,6 +874,34 @@ async def lifespan(app: FastAPI):
             baseline_wire_err,
         )
 
+    # Phase C — User Directive #5A (R-A2 lifecycle ruling). Merge
+    # ``custom_agent_configs`` rows into the global registry so the
+    # ``/api/agents`` listing, ``resolve_to_id``, and the loader's
+    # ``resolve_prompts_from_db`` hook (the empty-state posture
+    # ``is_custom_agent=True`` flip) can see them. The custom
+    # sweep runs AFTER the file-scan ``discover()`` so file-defined
+    # rows always shadow a hypothetical same-name custom row
+    # (the collision rule documented at
+    # ``daemon/registry.py:AgentRegistry.discover_custom_agents``).
+    # Non-fatal wrap — a custom-agent DB read failure MUST NOT
+    # block boot; loud WARN + continue (the R-B4 non-fatal posture).
+    try:
+        from daemon.registry import get_registry as _get_registry_cc
+        registry_cc = _get_registry_cc()
+        registered = registry_cc.discover_custom_agents(
+            config_rows=manager._custom_agent_config_repo.list_active(),
+        )
+        logger.info(
+            f"[Startup] custom-agent discovery: registered {registered}"
+        )
+    except Exception as custom_discover_err:  # noqa: BLE001
+        logger.warning(
+            "[Startup] custom-agent discovery skipped (non-fatal): "
+            "%s: %s",
+            type(custom_discover_err).__name__,
+            custom_discover_err,
+        )
+
     # Phase A T13 (S9 / D-BASH-ESCAPE accepted-risk control): prompt-artifact
     # baseline drift check at boot. READ-ONLY compare of the live agents/
     # tree against the committed agents/.prompt-artifacts.sha256; drift is
