@@ -665,7 +665,149 @@ Each risk carries severity (H/M/L), mitigation, owning phase.
 | D-BASH-ESCAPE | documented accepted-risk | No |
 | D-WATCHER-CACHES | accepted-risk; Phase D reworks | No |
 | D-RESTORE-DRIFT | hook covers restore; S19 three-case caveat | No |
-| D-SEED-EDGE | manual operator migration | **YES — second-most likely** |
+| D-SEED-EDGE | manual operator migration | **YES — second-most likely** → **RESOLVED-DEAD 2026-10-14** (see §7 binding block) |
 | D-IDENTITY-STAMPING | submitter tuple + AuthContext subject/method | No |
 
-**End of decisions.md.**
+---
+
+## 7. User Directive 2026-10-14: migration policy reversal (BINDING — supersedes preservation language)
+
+**Verbatim intent.** DISCARD existing persona/memory customizations — do
+NOT migrate them into the new DB version store; persistence starts EMPTY
+at go-live (intended first-time-persistence semantic, NOT data loss).
+
+**Origin / scope.** Binding user directive delivered 2026-10-14
+overnight. Lands on branch `feature/agent-prompt-immutability` ahead of
+Phase A/B merge; commits land sweep (`3c307e8d`) before docs amendment.
+The legacy repository state of pre-directive content is preserved (git
+history intact + archive tree under
+`legacy/agent-prompt-immutability-sweep/2026-10-14-user-directive/`);
+this directive governs the **new DB-versioning surface**, NOT the
+archive.
+
+### Rulings (R1–R6, verbatim-intent)
+
+| ID  | Ruling                                                                                                                                                                                                  |
+|-----|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| R1  | **F1 STANDS** — template file itself = baseline initial version (no DB row); `D-SEED-EDGE` RESOLVED-DEAD: no seeding, no edges, empty DB at go-live.                                                       |
+| R2  | Sweep **INCLUDES** live memories surface: tracked `agents/{name}/memory.md` files get ARCHIVED (never deleted) into `legacy/` per repo convention — committed repo-side sweep on this branch. The memories MECHANISM stays (`access_memory` + future file writes continue); only accumulated pre-directive content goes. |
+| R3  | `.agents/{id}/memories` (zero code refs) — archive whatever is tracked.                                                                                                                                |
+| R4  | RAG — **NO KB purge**. Document the no-consume boundary: the new persona paths must never query/consume persona-class RAG entries (the rewrite already doesn't — verify + document for morning review).   |
+| R5  | Repo-committed `agents/*.md` AS-SHIPPED = baseline by fiat. No "pristine reset" chase.                                                                                                                  |
+| R6  | `D-ARTIFACT-DISPOSITION` (memory.md file-vs-DB mechanics) morning fork UNCHANGED — do not expand into it.                                                                                                |
+
+### Migration policy reversal — fork disposition deltas
+
+The following changes to the §1 fork register and §6 decision summary
+are ratified by the directive (and supersede the prior preservation
+language):
+
+- **F1 OVERRIDES-ONLY** → STANDS. No code added.
+- **D-SEED-EDGE** *(§1 / §6)* → **RESOLVED-DEAD.** The "second-most
+  likely morning flip" in §6's decision table is REMOVED: the
+  per-agent operator-migration workflow is no longer on the table.
+  Empty DB at go-live is the desired steady state.
+- **D-ARTIFACT-DISPOSITION** *(§1 / §6)* → unchanged per R6; the
+  memory.md carve-out default (file) is preserved verbatim — the
+  directive does not move the morning fork in either direction.
+- **D-ARTIFACT-DISPOSITION **(`memory.md` carve-out) read by
+  R2: sweep archives accumulated `memory.md` content; the file
+  itself is then empty/regenerated-by-future-writes, which is the
+  desired "first-time-persistence" state.
+- **No new fork D-* surfaced.** The directive does not add an
+  eleventh / twelfth fork to the §1 register; it ratifies the
+  *outcome* of the existing F1 fork + seals D-SEED-EDGE.
+
+### Archive inventory (commit `3c307e8d`)
+
+| Source class                            | Pattern                                  | Count |
+|-----------------------------------------|------------------------------------------|-------|
+| A — `agents/<name>/memory.md`           | active-agent `memory.md`                 | 11    |
+| B — `.agents/{id>/memories/*.md`        | orphan R3 layout (zero code refs)         | 177   |
+| C — `agents/{name>/memories/*.md`       | runtime-only (per `D-ARTIFACT-DISPOSITION`) | 0 (verified, by-construction) |
+| **Total archived**                      |                                          | **188** |
+
+Per-agent counts (B): `reviewer` 82, `developer` 82, `tester` 5,
+`charter` 4, `leader` 2, `tidier` 1, `coder` 1.
+
+Per-agent counts (A): `_baby_template`, `_mother`, `architect`,
+`developer`, `developer[v2]`, `giter`, `leader`, `maintenancer`,
+`reviewer`, `reviewer[v2]`, `tester`.
+
+Destination: `legacy/agent-prompt-immutability-sweep/2026-10-14-user-directive/`
+(parallels `legacy/.agents/shared/planning/opencode-native-tools/`
+convention; avoids polluting `legacy/agents/` whose tree holds
+retired-agent bundles — an unrelated category).
+
+Reversibility: archive-not-delete per R2; full `git revert` restores
+all 188 files byte-exact at original paths.
+
+### RAG no-consume boundary (R4 — verified)
+
+Static-grep on `daemon/repositories/prompt_version/` and
+`daemon/services/prompt_version_service.py`:
+- `prompt_versions` + `prompt_audit_events` + `prompt_selections`
+  tables ONLY; no `rag_*` / `experience` / `kb_*` reads on the
+  persona path.
+- `inner_soul` (`daemon/tools/inner_soul.py`) classifies targets
+  via `_should_redirect_to_rag` (`:230-276`) which is scoped to
+  non-project, non-persona targets — `memory`/`memories` are CARVED
+  OUT and never redirected; this is `inner_soul`'s own historic
+  boundary, NOT rewrite-side leak surface.
+
+Conclusion: the persona paths (`create_and_submit`, `get_effective`)
+never query or consume persona-class RAG entries. **No KB purge
+required.**
+
+### Boot-tolerance proofs
+
+Verified empirically (fenced eval under dev env, this branch):
+
+- `daemon/loader.py:565` `load_recent_memories` returns `""` when
+  `memories/` is absent — boot §9 safely skipped.
+- `daemon/loader.py:663-668` `load_agent_prompts` silently skips
+  missing `memory.md` — boot §8 safely skipped for the 11 affected
+  agents.
+- `daemon/tools/access_memory.py:73-74` `access_memory` returns
+  `"No memories/ directory found."` when memories/ is absent — no
+  exception, no crash.
+
+### Clean-start behavioral test
+
+New: `tests/test_prompt_version_resolution.py::TestUserDirectiveCleanStart`
+(one narrative test, sqlite-only) — proves:
+
+- empty DB starts with **zero rows**;
+- `get_effective` returns `None` (file fallback path) at empty state;
+- `inner_soul(target="soul")` produces a single `pending_approval`
+  row at `version=1`, file untouched (byte-identical + mtime-equal);
+- pre-approval effective is still `None` (pending is NOT effective);
+- session-lane `approve` transitions the row to `approved`;
+- post-approval `get_effective` returns the approved row content;
+- **post-approval effective ≠ template file content** (the empty-slate
+  invariant at runtime).
+
+Pack run (this branch):
+- `tests/test_prompt_version_resolution.py + tests/test_inner_soul_db.py`
+  → **91 passed**, including the new clean-start test and all
+  pre-existing precedence / state-machine / inner_soul tests.
+  PostgreSQL parametrized legs skip (no scratch PG fixture wired on
+  this sandbox host); SQLite leg covers the assertion surface per the
+  existing SC8/SC9 convention.
+
+### Acceptance impact (companion to plan-overview §8 amendment)
+
+- **§1 F1** + **§6 D-SEED-EDGE** → ratified outcome delivered.
+- **phaseB-plan.md deliverables 5/6** (memory reconciliation table +
+  F1 OVERRIDES-ONLY seeding) → amended to reflect the resolved-dead
+  state. See companion amends in `memory-reconciliation-table.md` /
+  `plan-overview.md §8`.
+
+### Supersedence note
+
+This block supersedes any §1/§2/§6 language that suggests a
+preservation or operator-migration workflow for persona customizations
+at Phase B go-live.
+
+**End of §7.**
+

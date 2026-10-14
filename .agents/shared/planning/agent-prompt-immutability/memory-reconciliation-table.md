@@ -71,9 +71,43 @@ context). Columns:
 - **T13** — `inner_soul` semantics-parity tests pin memory.md + memories/ write paths to remain unchanged (covers D6 default).
 - **R7 / R11** — disposition fork records in `decisions.md` that pre-date Phase B and feed this table.
 
-## Acceptance
+## Addendum — User Directive 2026-10-14 (binding migration policy reversal)
 
-- File committed at `.agents/shared/planning/agent-prompt-immutability/memory-reconciliation-table.md`.
-- Matrix complete for all 9 + 4 = 13 rows (soul, rule, workflow, tools_note, skill.md legacy, memory.md, user.md, memories/, growth.md, _prompt_system, meta.json, skill-set.yaml, RAG KB).
-- D5 and D6 explicitly called out (with rationale + open question) so the morning session sees the deferred decision in context.
-- Reviewed in morning session per `phaseB-plan.md` C13.
+This addendum records three facts that supplement (do NOT replace) the
+matrix above. Full directive text + rulings R1–R6 live at
+`decisions.md §7`.
+
+1. **Mechanism unchanged per R6 (D-ARTIFACT-DISPOSITION preserved).**
+   The carve-out default for `memory.md` (row 6 above — file) and
+   the carve-out default for `memories/` (row 8 above — file) are
+   unchanged. The `inner_soul` write paths (`_update_memory_md`,
+   `_update_memories`) and the `access_memory` read path are unchanged.
+   The directive does NOT re-open the disposition fork; it confirms
+   the file default and clears pre-directive accumulated content.
+
+2. **Accumulated content archived per the directive (commit `3c307e8d`).**
+   - `agents/<name>/memory.md` — 11 files → archive (table row 6,
+     pre-directive content cleared).
+   - `.agents/{id}/memories/*.md` — 177 files → archive (orphan layout,
+     zero code refs per R3).
+   - `agents/<name>/memories/` — 0 tracked files by-construction; new
+     release trees start clean (table row 8 unchanged).
+   - Total archived: 188 files (preserved with git history; see
+     `legacy/agent-prompt-immutability-sweep/2026-10-14-user-directive/README.md`
+     for the manifest + reversibility note).
+
+3. **RAG no-consume boundary per R4 (verified).** The persona-path
+   `create_and_submit` / `get_effective` surface
+   (`daemon/repositories/prompt_version/` +
+   `daemon/services/prompt_version_service.py`) does NOT query or
+   consume persona-class RAG entries. The `inner_soul` RAG-redirect
+   path (`daemon/tools/inner_soul.py:230-276`) is non-project only
+   and explicitly carves out `memory` / `memories` — that boundary
+   predates this directive and is preserved. **No KB purge required.**
+
+The matrix above + the deferred decisions referenced (D5 / D6) are
+otherwise unchanged by this directive. F1 OVERRIDES-ONLY (`decisions.md
+§1`) now ships the sealed state (no seeding, no edges, empty DB at
+go-live) — `D-SEED-EDGE` is RESOLVED-DEAD per the directive.
+
+**End of addendum.**

@@ -104,6 +104,39 @@ Conservative defaults standing overnight: **F1** overrides-only seeding (no boot
 | inner_soul submitting DB versions | Phase B rewrite + semantics-parity test pack |
 | Existing agents unregressed | Phase B 28-agent no-regression gate + decisions §2 zero-regression proof + no-override snapshot test |
 | 25k+ wall green or classified | Risk #2 mitigation (bounded blast radius, pack-first ordering) |
+| **phaseB-plan item 5 — Memory reconciliation table (revised by user directive 2026-10-14)** | `memory-reconciliation-table.md` + addendum (mechanism unchanged per R6; accumulated content archived per R2; RAG no-consume boundary per R4) |
+| **phaseB-plan item 6 — Seeding mechanics (F1 OVERRIDES-ONLY, RESOLVED-DEAD by directive)** | `decisions.md §7` binding block (no seeding code; no edges; empty DB at go-live); clean-start narrative `tests/test_prompt_version_resolution.py::TestUserDirectiveCleanStart` |
+
+## 8a. User Directive 2026-10-14 — acceptance delta (binding migration policy reversal)
+
+The two rows above (items 5 + 6) are the **acceptance mapping for the
+revised phaseB-plan deliverables 5/6** updated by the user directive.
+Specifically:
+
+- **Item 5** — Memory reconciliation table: no row-count migration; the
+  R4 RAG no-consume boundary is documented; R2 archived 188 files via
+  commit `3c307e8d`; the mechanism itself (rows 6 + 8 of the matrix)
+  is unchanged per R6.
+- **Item 6** — Seeding mechanics: F1 OVERRIDES-ONLY is **ratified and
+  sealed** (no seeding code, no edges, empty DB at go-live). The
+  previously-deferred `D-SEED-EDGE` operator-migration workflow is
+  **RESOLVED-DEAD** — see `decisions.md §7`. The
+  `TestUserDirectiveCleanStart` test in
+  `tests/test_prompt_version_resolution.py` proves the F1 default
+  end-to-end: empty DB → file fallback → submission creates
+  `pending_approval` row at `version=1` (file untouched) → human
+  approve → `get_effective` returns the approved row content (≠ file).
+
+Pack run (`feature/agent-prompt-immutability` @ `953b1d114+`):
+- `tests/test_prompt_version_resolution.py` +
+  `tests/test_inner_soul_db.py` → **91 passed** (sqlite leg; PG
+  parametrized legs skip on this sandbox).
+
+The matrix in `memory-reconciliation-table.md` and the fork register
+in `decisions.md §1–§6` are otherwise unchanged; only §6's
+`D-SEED-EDGE` row is flipped from "second-most likely flip" to
+"RESOLVED-DEAD" per the directive, with the full reasoning captured
+in `decisions.md §7`.
 
 ## 9. Instances
 
