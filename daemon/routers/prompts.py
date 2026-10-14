@@ -83,6 +83,18 @@ router = APIRouter(prefix="/prompts", tags=["prompts"])
 #: allowlist (path injection / log forgery vectors).
 _PATH_PARAM_RE = re.compile(r"^[A-Za-z0-9_\-]*$")
 
+#: Audit FILTER allowlist — deliberately PERMISSIVE (review Finding #1,
+#: Phase B close-out). Query-string FILTER params on ``GET /audit``
+#: must accept the canonical subject shapes that actually appear in
+#: audit rows: OIDC human subjects (``user@example.com`` — ``@`` and
+#: ``.``) and internal instance subjects (``instance:<uuid>`` —
+#: ``:``). The strict pattern above is intentionally NOT reused for
+#: these three params: it 422-rejected every realistic operator
+#: filter. The fence still holds where it matters — no slashes
+#: (path traversal), no whitespace (log forgery), no ``!``/``?``/
+#: ``&``/``=``/quotes (query-injection + log-forgery vectors).
+_FILTER_PARAM_RE = re.compile(r"^[A-Za-z0-9_\-@.+:]*$")
+
 #: Auth-OFF posture error code (D3). Constant so every endpoint returns
 #: the same body shape (research db-api §3 PITFALLS — body-asserted
 #: ``error`` strings must be stable for client parsing).
@@ -147,6 +159,25 @@ def _require_path_param(value: str, name: str) -> None:
             422,
             "INVALID_PATH_PARAM",
             f"{name!r} must match {_PATH_PARAM_RE.pattern!r}; got {value!r}",
+        )
+
+
+def _require_filter_param(value: str, name: str) -> None:
+    """Audit FILTER-param allowlist (S4 + review Finding #1). 422 on a
+    bad value.
+
+    Distinct from :func:`_require_path_param` BY DESIGN: filter values
+    are matched against stored row values, not URL segments, so the
+    canonical subject shapes (``user@example.com``,
+    ``instance:<uuid>``) must pass. The permissive pattern still
+    rejects slashes / whitespace / injection chars, so the traversal
+    and log-forgery fences are unchanged.
+    """
+    if not _FILTER_PARAM_RE.match(value):
+        raise _err(
+            422,
+            "INVALID_FILTER_PARAM",
+            f"{name!r} must match {_FILTER_PARAM_RE.pattern!r}; got {value!r}",
         )
 
 
@@ -714,8 +745,12 @@ async def list_audit(
 
     The service is the authoritative caller of
     :meth:`PromptVersionRepository.list_audit_events`; the router
-    is a thin bridge that validates path-allowlist + scope and
-    serializes rows via :func:`_audit_event_to_dict` (D10's
+    is a thin bridge that validates the key filters (``agent_id`` /
+    ``version_tag`` / ``artifact``) with the strict path allowlist,
+    the value filters (``event_type`` / ``version_id`` /
+    ``actor_subject``) with the permissive filter allowlist (review
+    Finding #1 — canonical subject shapes must pass), plus scope,
+    and serializes rows via :func:`_audit_event_to_dict` (D10's
     two-lane identity stamp surfaces verbatim).
     """
     _require_auth_on(request)
@@ -726,13 +761,14 @@ async def list_audit(
     if artifact is not None:
         _require_path_param(artifact, "artifact")
     if event_type is not None:
-        # Audit event types are UPPERCASE per the addendum S3/O-12;
-        # the path allowlist is the conservative fence.
-        _require_path_param(event_type, "event_type")
+        # Audit event types are UPPERCASE per the addendum S3/O-12.
+        # FILTER allowlist (Finding #1) — NOT the path pattern, which
+        # 422'd every realistic operator filter.
+        _require_filter_param(event_type, "event_type")
     if version_id is not None:
-        _require_path_param(version_id, "version_id")
+        _require_filter_param(version_id, "version_id")
     if actor_subject is not None:
-        _require_path_param(actor_subject, "actor_subject")
+        _require_filter_param(actor_subject, "actor_subject")
     svc = _get_service(request)
     items, total = await asyncio.to_thread(
         svc.list_audit_events,
@@ -809,12 +845,29 @@ def _resolve_exception(name: str) -> type | None:
     return None
 
 
-# Lazily-resolved exception classes (refreshed at call time so a
-# sibling coder's mid-session edit becomes effective without a router
-# restart). Module-level aliases:
-_HumanLaneRequiredError = _resolve_exception("HumanLaneRequiredError") or Exception
-_InvalidTransitionError = _resolve_exception("InvalidTransitionError") or Exception
-_RetractAuthorityError = _resolve_exception("RetractAuthorityError") or Exception
+# Module-level exception aliases (resolved once at import; review
+# Finding #2, Phase B close-out — the fallback MUST never be
+# ``Exception``: that turned every ``except`` block below into a
+# catch-ALL whenever lazy resolution failed, mapping unrelated
+# programming errors (``KeyError``, ``TypeError``, ...) onto typed
+# 4xx bodies instead of letting them surface as 500s. The fallbacks
+# are the EXACT base classes of the mapped service-side errors
+# (verified in-tree):
+#
+#   * ``HumanLaneRequiredError(ValueError)``      — services/prompt_version_service.py:166
+#   * ``InvalidTransitionError(ValueError)``      — repositories/prompt_version/repository.py:222
+#     (docstring: "Mirrors daemon/services/job_state_machine.py:65-81")
+#   * ``RetractAuthorityError(PermissionError)``  — services/prompt_version_service.py:232
+#
+# so a resolution failure now widens the catch only to the narrowest
+# base that preserves the typed 4xx mapping — unrelated programming
+# errors always propagate. The test gate
+# (``TestExceptionAliasResolution`` in tests/test_prompts_router.py)
+# asserts the resolved classes are the REAL service classes, i.e.
+# the fallbacks are dormant.
+_HumanLaneRequiredError = _resolve_exception("HumanLaneRequiredError") or ValueError
+_InvalidTransitionError = _resolve_exception("InvalidTransitionError") or ValueError
+_RetractAuthorityError = _resolve_exception("RetractAuthorityError") or PermissionError
 
 
 __all__ = ["router"]

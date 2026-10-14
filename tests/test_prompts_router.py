@@ -977,6 +977,50 @@ class TestAuditEndpoint:
         kwargs = service_mock.list_audit_events.call_args.kwargs
         assert kwargs["actor_subject"] == "operator-cli"
 
+    def test_audit_actor_subject_canonical_shapes_accepted(
+        self, client, service_mock
+    ):
+        """Review Finding #1 — the audit FILTER allowlist must accept
+        the canonical subject shapes that actually appear in audit
+        rows: OIDC human subjects (``user@example.com`` — ``@`` and
+        ``.``) and internal instance subjects (``instance:<uuid>``
+        — ``:``). The strict PATH pattern 422'd both; filter values
+        are not URL segments."""
+        service_mock.list_audit_events = MagicMock(return_value=([], 0))
+        for subject in (
+            "user@example.com",
+            "instance:3f2b1c9e-8a4d-4e2f-9b7a-1c2d3e4f5a6b",
+        ):
+            resp = client.get(
+                "/api/prompts/audit",
+                params={"actor_subject": subject},
+            )
+            assert resp.status_code == 200, resp.text
+            kwargs = service_mock.list_audit_events.call_args.kwargs
+            assert kwargs["actor_subject"] == subject
+
+    def test_audit_filter_allowlist_still_rejects_bad_shapes(self, client):
+        """Review Finding #1 — the permissive FILTER pattern keeps the
+        fence: slashes (path traversal) and whitespace (log forgery)
+        still 422 with the dedicated ``INVALID_FILTER_PARAM`` code."""
+        for bad in ("../etc/passwd", "user example.com"):
+            resp = client.get(
+                "/api/prompts/audit",
+                params={"actor_subject": bad},
+            )
+            assert resp.status_code == 422, resp.text
+            body = resp.json()
+            assert body["detail"]["error"] == "INVALID_FILTER_PARAM"
+
+    def test_audit_event_type_filter_still_rejects_bad_chars(self, client):
+        """The pre-existing ``bad!chars`` rejection (S4 fence) holds
+        under the FILTER allowlist — ``!`` is not in either pattern."""
+        resp = client.get(
+            "/api/prompts/audit",
+            params={"event_type": "bad!chars"},
+        )
+        assert resp.status_code == 422
+
     def test_audit_default_filters_pass_none(self, client, service_mock):
         """No filter → all query params are ``None`` and pass
         through to the service unchanged (the repo applies the
@@ -1025,3 +1069,61 @@ class TestOpenAPIGenerates:
             "/api/prompts/audit",
         ):
             assert required in paths, f"missing path {required}"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Review Finding #2 gate — exception alias resolution
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class TestExceptionAliasResolution:
+    """The router resolves the service-side exception classes at
+    import. The fallback used to be catch-ALL ``Exception`` (review
+    Finding #2) — these tests pin that (a) resolution actually
+    SUCCEEDS against the real service/repo classes (the fallback is
+    dormant) and (b) the fallbacks, should they ever fire, are the
+    narrow base classes — never ``Exception``."""
+
+    def test_aliases_resolve_to_real_service_classes(self):
+        import daemon.routers.prompts as prompts_module
+        from daemon.repositories.prompt_version.repository import (
+            InvalidTransitionError as RepoInvalidTransitionError,
+        )
+        from daemon.services.prompt_version_service import (
+            HumanLaneRequiredError as ServiceHumanLaneRequiredError,
+            RetractAuthorityError as ServiceRetractAuthorityError,
+        )
+
+        assert (
+            prompts_module._HumanLaneRequiredError
+            is ServiceHumanLaneRequiredError
+        )
+        assert (
+            prompts_module._InvalidTransitionError
+            is RepoInvalidTransitionError
+        )
+        assert (
+            prompts_module._RetractAuthorityError
+            is ServiceRetractAuthorityError
+        )
+
+    def test_fallback_bases_are_narrow_never_catch_all(self):
+        """The narrowed fallbacks are the EXACT bases of the mapped
+        errors — a resolution failure can never widen an ``except``
+        block past ``ValueError`` / ``PermissionError``, so unrelated
+        programming errors (``KeyError``, ``TypeError``, ...) always
+        propagate to the framework handler instead of being remapped
+        onto typed 4xx bodies."""
+        import daemon.routers.prompts as prompts_module
+
+        assert prompts_module._HumanLaneRequiredError is not Exception
+        assert prompts_module._InvalidTransitionError is not Exception
+        assert prompts_module._RetractAuthorityError is not Exception
+        # Bases verified against the service/repo class definitions:
+        # HumanLaneRequiredError(ValueError),
+        # InvalidTransitionError(ValueError) (mirrors
+        # job_state_machine.py:65), RetractAuthorityError(PermissionError).
+        assert issubclass(prompts_module._HumanLaneRequiredError, ValueError)
+        assert issubclass(prompts_module._InvalidTransitionError, ValueError)
+        assert issubclass(
+            prompts_module._RetractAuthorityError, PermissionError
+        )
