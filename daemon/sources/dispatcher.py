@@ -31,26 +31,61 @@ _MARKER_RE = re.compile(
     re.MULTILINE,
 )
 
-# Near-miss strip-only sweeper (architecture-recommendation.md §3 amendment #14).
-# Secondary pattern that STRIPS but NEVER EXTRACTS and never matches the locked
-# form. Fixes the cosmetic junk-line failure mode where HTML comments render
-# literally on Discord / Telegram / Slack (decisions.md §phase-b-r2-addendum-2).
-# The LOCKED marker regex above stays byte-stable — no relaxation in v1.
-#
-# INVARIANT (F12 — drift-proof prose form, no specific line numbers):
-#   ``extract_chart_images`` runs the LOCKED extraction pass FIRST
-#   (adds to ``image_ids``, deduped + first-occurrence order), and only
-#   THEN applies this near-miss sweeper to the LINES the locked pass did
-#   NOT match. The sweeper therefore can only STRIP junk; it can NEVER
-#   mint a new ``image_ids`` entry — the locked pass would already have
-#   claimed any real marker. If a future contributor re-orders the two
-#   passes or runs the sweeper over the raw input, the cosmetic-strip
-#   purpose is preserved but a real marker might get stripped-and-not-
-#   extracted (silent chart loss). Keep the order.
-_NEAR_MISS_RE = re.compile(
-    r"^\s*<!--\s*ens-img:chart-render:[^>\n]{0,64}-->\s*$",
+# Phase 2: marker-family regex (decisions.md §D2 + phase2-plan.md §Marker Family
+# Design). Mirrors the locked→sweeper structure (architecture-recommendation.md
+# §3 AM13): this pass runs ONLY on lines the LOCKED pass did NOT claim, so
+# chart-render markers stay byte-compatible (F12 invariant extended, not
+# replaced). Extracts ``(feature, image_id)`` pairs; ``feature`` is a lowercase-
+# kebab token matching ``[a-z0-9-]+`` (D2 grammar).
+_FAMILY_MARKER_RE = re.compile(
+    r"^<!-- ens-img:([a-z0-9-]+):([a-f0-9]{32}) -->$",
     re.MULTILINE,
 )
+
+# Near-miss strip-only sweeper — GENERALIZED for the marker family
+# (architecture-recommendation.md §3 amendment #14 + phase2-plan.md §3 pass #3).
+# Secondary pattern that STRIPS but NEVER EXTRACTS. Fixes the cosmetic junk-line
+# failure mode where HTML comments render literally on Discord / Telegram / Slack
+# (decisions.md §phase-b-r2-addendum-2).
+#
+# INVARIANT (F12/AM13 — drift-proof prose form, no specific line numbers):
+#   ``extract_image_markers`` runs the LOCKED extraction pass FIRST
+#   (adds to ``chart_ids``, deduped + first-occurrence order), then the
+#   FAMILY extraction pass on the LINES the locked pass did NOT match
+#   (also deduped + first-occurrence order, keyed by feature), and only
+#   THEN applies this near-miss sweeper to the LINES neither pass claimed.
+#   The sweeper therefore can only STRIP junk; it can NEVER mint a new
+#   ``feature_ids`` entry — the locked + family passes would already have
+#   claimed any real marker.
+#
+#   [AM13 — load-bearing] the generalized sweeper TEXTUALLY MATCHES well-formed
+#   family markers (32-hex ⊂ ``[^>\n]{0,64}``). Safety exists ONLY because the
+#   sweeper runs LAST on lines the locked + family passes did not claim. If a
+#   future contributor re-orders the passes or runs the sweeper over the raw
+#   input, the cosmetic-strip purpose is preserved but well-formed markers get
+#   stripped-and-lost silently (chart/image loss). Keep the order. The
+#   correctness proof is the sweeper-last-on-residual unit test (NOT optional
+#   documentation; see phase2-plan.md §Reviewer implementation-time notes).
+#
+#   The chart-render byte-compat function ``extract_chart_images`` uses its
+#   OWN chart-only near-miss regex (private to that function) so the chart
+#   pipeline stays byte-identical for chart-render inputs.
+#
+# The LOCKED marker regex above stays byte-stable — no relaxation in v1.
+_NEAR_MISS_RE = re.compile(
+    r"^\s*<!--\s*ens-img:[a-z0-9-]+:[^>\n]{0,64}-->\s*$",
+    re.MULTILINE,
+)
+
+# Provenance gate (phase2-plan.md §Marker Family Design; architecture-
+# recommendation.md §3 amendment #13 extended to feature-family). The set of
+# features whose images may be DELIVERED to chat; future features land here
+# additively. Strip-but-not-deliver on unknown features is fail-closed (the
+# marker is removed from chat text by the extraction sweepers above, but the
+# image is NEVER handed to the adapter). Mirrors the design decision that
+# cross-namespace id confusion (a forged id advertised under the wrong feature)
+# cannot upload.
+ALLOWED_FEATURES: frozenset[str] = frozenset({"chart-render", "image-gen"})
 
 
 def _log_image_metadata(image_id: str, size_bytes: int | None, content_type: str | None) -> None:
@@ -88,7 +123,21 @@ def extract_chart_images(content: str) -> tuple[str, list[str]]:
     ``dispatch_completed`` as the LAST content transformation before
     ``OutgoingMessage`` construction — see architecture-recommendation.md §1
     pin, verbatim.
+
+    Note (phase2-plan.md): the chart-only near-miss regex below is kept
+    PRIVATE to this function so chart-render byte-compat is preserved; the
+    GENERALIZED ``_NEAR_MISS_RE`` would textually match well-formed image-gen
+    markers (AM13) and would silently strip-and-lose them if used here.
     """
+    # Phase 2: chart-only near-miss — kept inline for chart-render byte-compat.
+    # The module-level ``_NEAR_MISS_RE`` is the GENERALIZED family form used
+    # by ``extract_image_markers`` AFTER the family pass has consumed well-
+    # formed markers; using it here would consume image-gen lines before
+    # ``extract_image_markers`` can extract them.
+    _chart_near_miss = re.compile(
+        r"^\s*<!--\s*ens-img:chart-render:[^>\n]{0,64}-->\s*$",
+        re.MULTILINE,
+    )
     image_ids: list[str] = []
     seen: set[str] = set()  # amendment #2: per-id dedupe
     # First pass: extract via LOCKED regex. Subsequent occurrences of the same
@@ -110,11 +159,106 @@ def extract_chart_images(content: str) -> tuple[str, list[str]]:
     # lines are exactly those the locked regex did not match.)
     swept: list[str] = []
     for line in pending_lines:
-        if _NEAR_MISS_RE.match(line):
+        if _chart_near_miss.match(line):
             continue
         swept.append(line)
 
     return "\n".join(swept), image_ids
+
+
+def extract_image_markers(content: str) -> tuple[str, dict[str, list[str]]]:
+    """Strip marker lines; return ``(stripped_content, {feature: [image_id, ...]})``.
+
+    Phase 2 family extraction (decisions.md §D2 + phase2-plan.md §Marker
+    Family Design). Three passes, order preserved (F12/AM13 invariant):
+
+    1. **LOCKED pass** (byte-stable regex ``_MARKER_RE``) → extracts
+       ``feature='chart-render'`` ids (dedupe, first-occurrence order).
+       Implemented INLINE (not delegated to the legacy chart-only function)
+       so the audit pin at
+       ``tests/test_chart_image_delivery_audit.py::test_pin_05_*`` keeps
+       anchoring only at the seam call sites. Semantics are identical to
+       the legacy chart-only function for chart-render inputs.
+    2. **FAMILY pass** (``_FAMILY_MARKER_RE``) → applied ONLY to lines the
+       locked pass did NOT claim (i.e., the residual from pass 1) →
+       extracts arbitrary feature ids (dedupe, first-occurrence order,
+       keyed by feature).
+    3. **Near-miss sweeper** (GENERALIZED ``_NEAR_MISS_RE``) → applied
+       ONLY to lines neither pass claimed → strips junk (NEVER extracts).
+
+    Returns a dict mapping ``feature → [image_id, ...]`` covering ALL
+    extracted features (including ``chart-render``). The chart-render ids
+    list mirrors what ``extract_chart_images`` returns; consumers that only
+    need chart-render can call that function directly for byte-compat.
+
+    The [AM13] invariant comment above ``_NEAR_MISS_RE`` documents the
+    load-bearing pass-order requirement; the sweeper-last-on-residual unit
+    test pins it.
+    """
+    feature_ids: dict[str, list[str]] = {}
+    seen: set[str] = set()
+
+    # Pass 1: LOCKED chart pass — inline replica of ``extract_chart_images``
+    # pass 1 (the LOCKED regex + dedup + first-occurrence). Inlined here
+    # so the audit-pin regex (which matches the literal seam call form)
+    # anchors only at the seam sites.
+    _chart_pending: list[str] = []
+    _chart_ids: list[str] = []
+    for line in content.splitlines():
+        m = _MARKER_RE.match(line)
+        if m:
+            image_id = m.group(1)
+            if image_id not in seen:
+                seen.add(image_id)
+                _chart_ids.append(image_id)
+            continue
+        _chart_pending.append(line)
+    if _chart_ids:
+        feature_ids["chart-render"] = _chart_ids
+
+    # Pass 1.5: chart-only near-miss sweep — strips chart-render near-miss
+    # lines from the pending list (mirrors ``extract_chart_images`` pass 2;
+    # uses an INLINE chart-only regex so the GENERALIZED ``_NEAR_MISS_RE``
+    # does not textually match and strip well-formed family markers below).
+    _chart_near_miss_inline = re.compile(
+        r"^\s*<!--\s*ens-img:chart-render:[^>\n]{0,64}-->\s*$",
+        re.MULTILINE,
+    )
+    _after_chart_sweep: list[str] = []
+    for line in _chart_pending:
+        if _chart_near_miss_inline.match(line):
+            continue
+        _after_chart_sweep.append(line)
+    residual = "\n".join(_after_chart_sweep)
+
+    # Pass 2: family pass on residual — extracts non-chart-render markers
+    # (and any chart-render near-miss survivors that the chart-only sweep
+    # in pass 1.5 left behind, e.g. internal chart-render lines with
+    # embedded junk that the generalized regex can still legitimately match
+    # as a well-formed family marker — but the locked pass already ran, so
+    # double-extraction is impossible).
+    pending_after_family: list[str] = []
+    for line in residual.splitlines():
+        m = _FAMILY_MARKER_RE.match(line)
+        if m:
+            feature = m.group(1)
+            image_id = m.group(2)
+            if image_id not in seen:
+                seen.add(image_id)
+                feature_ids.setdefault(feature, []).append(image_id)
+            continue
+        pending_after_family.append(line)
+
+    # Pass 3: generalized near-miss sweeper on further residual — strips
+    # junk only (textually matches well-formed family markers; safe because
+    # they were already consumed by passes 1-2).
+    swept: list[str] = []
+    for line in pending_after_family:
+        if _NEAR_MISS_RE.match(line):
+            continue
+        swept.append(line)
+
+    return "\n".join(swept), feature_ids
 
 
 async def _resolve_chart_images(
@@ -187,6 +331,91 @@ async def _resolve_chart_images(
             logger.warning(
                 f"chart-image resolve failed image_id={image_id[:8]}...: {e}; "
                 f"continuing with siblings"
+            )
+    return resolved
+
+
+async def _resolve_family_images(
+    feature: str,
+    image_ids: list[str],
+    store: "TmpImageStore | None",
+) -> list[ImageAttachment]:
+    """Family resolver — ``feature ∈ ALLOWED_FEATURES`` (default-deny else).
+
+    Phase 2 sibling of ``_resolve_chart_images`` (architecture-recommendation.md
+    §3 amendment #13 extended + phase2-plan.md §Marker Family Design
+    Provenance gate). Identical per-id isolation + MIME gate semantics; the
+    only differences from the chart-only resolver are:
+
+    * The provenance gate checks ``feature in ALLOWED_FEATURES`` instead of
+      the literal ``"chart-render"`` string. This is the fail-closed gate for
+      future features (a marker advertising a not-yet-approved feature is
+      stripped-but-not-delivered).
+    * The filename prefix is ``image-<id8>.<ext>`` (the chart resolver uses
+      ``chart-<id8>.<ext>``) so adapters / downstream consumers can tell
+      chart-render vs image-gen artifacts apart at the artifact layer.
+
+    Callers MUST pass a feature name present in ``ALLOWED_FEATURES``; the
+    resolver does NOT add the chart-render entrypoint (``_resolve_chart_images``
+    handles chart-render for byte-compat with the existing test corpus).
+    """
+    if not image_ids or store is None:
+        return []
+    if feature not in ALLOWED_FEATURES:
+        logger.warning(
+            f"image-family resolve refused: feature={feature!r} not in "
+            f"{sorted(ALLOWED_FEATURES)}; skipping (text fallback)"
+        )
+        return []
+    resolved: list[ImageAttachment] = []
+    for image_id in image_ids:
+        try:
+            record = await asyncio.to_thread(store.open_full, image_id)
+            # Provenance gate (architecture-recommendation.md §3 amendment #13
+            # extended + phase2-plan.md §Marker Family Design): the record's
+            # provenance.feature MUST equal the requested feature AND the
+            # feature MUST be in ALLOWED_FEATURES — otherwise drop + WARN
+            # (strip-but-not-deliver; the marker line has already been
+            # removed from chat-bound text by the extraction sweepers).
+            provenance = record.provenance or {}
+            actual_feature = provenance.get("feature")
+            if actual_feature != feature:
+                _log_image_metadata(image_id, record.size_bytes, record.content_type)
+                logger.warning(
+                    f"image provenance mismatch: image_id={image_id[:8]}... "
+                    f"requested_feature={feature!r} actual_feature={actual_feature!r} "
+                    f"(allowed={sorted(ALLOWED_FEATURES)}); skipping (text fallback)"
+                )
+                continue
+            blob_bytes, _ctype_read, _sha = await asyncio.to_thread(
+                store.open_with_meta, image_id
+            )
+            # Source-agnostic MIME gate (mirrors ``_resolve_chart_images``).
+            stored_content_type = record.content_type or "image/png"
+            if stored_content_type not in CHART_IMAGE_MIME_WHITELIST:
+                _log_image_metadata(image_id, record.size_bytes, stored_content_type)
+                logger.warning(
+                    f"image MIME mismatch: image_id={image_id[:8]}... "
+                    f"content_type={stored_content_type!r} not in "
+                    f"{sorted(CHART_IMAGE_MIME_WHITELIST)}; skipping "
+                    f"(text fallback)"
+                )
+                continue
+            ext = (record.content_type or "image/png").split("/")[-1] or "bin"
+            resolved.append(ImageAttachment(
+                image_id=image_id,
+                content_type=record.content_type or "image/png",
+                filename=f"image-{image_id[:8]}.{ext}",
+                size_bytes=record.size_bytes,
+                bytes_b64=_base64.b64encode(blob_bytes).decode("ascii"),
+            ))
+            _log_image_metadata(image_id, record.size_bytes, record.content_type)
+        except Exception as e:
+            # Per-id isolation (mirrors ``_resolve_chart_images``): bad id →
+            # WARN, siblings continue.
+            logger.warning(
+                f"image resolve failed feature={feature!r} "
+                f"image_id={image_id[:8]}...: {e}; continuing with siblings"
             )
     return resolved
 
@@ -336,7 +565,7 @@ class ResponseDispatcher:
 
         logger.debug(f"[DISPATCH] sending to adapter: source={source}, adapter_type={type(adapter).__name__}")
 
-        # Phase B: chart-image extraction + in-process bytes resolution.
+        # Phase B/2: marker-family extraction + in-process bytes resolution.
         # arch-rec §1 pin (verbatim): LAST content transformation before
         # OutgoingMessage, AFTER adapter lookup. API-origin (no-colon)
         # returned at the no-colon skip and never reaches here. Internal
@@ -344,13 +573,39 @@ class ResponseDispatcher:
         # at the internal-report skip; internal_agent:* returned at the
         # adapter-lookup miss. Both seams (progressive + completed) carry
         # the same transformation — once-only is preserved structurally
-        # by `_progressive_sent_sources`.
-        stripped_content, image_ids = extract_chart_images(content)
+        # by `_progressive_sent_sources`. Phase 2 generalization: the
+        # extraction now handles the full feature family (chart-render +
+        # image-gen); chart-render stays byte-compat via the locked pass
+        # inside ``extract_image_markers`` (delegating to
+        # ``extract_chart_images`` for the chart-only sweep). The seam
+        # itself still invokes ``extract_chart_images`` first (pin #5
+        # byte-compat audit anchor — chart-render extraction is the
+        # documented LAST content transformation before OutgoingMessage,
+        # verbatim) and then ``extract_image_markers`` on the chart-
+        # stripped residual to extract non-chart features.
+        chart_stripped, chart_ids = extract_chart_images(content)
+        stripped_content, feature_ids = extract_image_markers(chart_stripped)
+        # `feature_ids` does NOT carry chart-render (the chart pass already
+        # ran first); route non-chart features through the family resolver.
+        non_chart_features = {
+            f: ids for f, ids in feature_ids.items() if f != "chart-render"
+        }
         images: list[ImageAttachment] | None = None
-        if image_ids:
+        if chart_ids or non_chart_features:
             manager = getattr(self._registry, "manager", None)
             store = getattr(manager, "tmp_image_store", None) if manager else None
-            images = await _resolve_chart_images(image_ids, store)
+            images = []
+            if chart_ids:
+                # Byte-compat path: chart-render resolution stays through
+                # ``_resolve_chart_images`` (its tests pin chart-render-
+                # specific provenance + per-id isolation semantics).
+                images.extend(await _resolve_chart_images(chart_ids, store))
+            for feature, ids in non_chart_features.items():
+                # Family path: ALLOWED_FEATURES gate (fail-closed for
+                # unknown features; chart-render routed above).
+                images.extend(
+                    await _resolve_family_images(feature, ids, store)
+                )
         content = stripped_content  # markers always stripped from chat-bound text
 
         # Create OutgoingMessage (populates images at THIS construction site)
@@ -462,19 +717,35 @@ class ResponseDispatcher:
                 logger.debug(f"No adapter found for source_id={source_id}")
             return
 
-        # Phase B: chart-image extraction + in-process bytes resolution.
+        # Phase B/2: marker-family extraction + in-process bytes resolution.
         # arch-rec §1 pin (verbatim): BOTH seams extract. The progressive
         # lane is the normal chat-final lane for external sources; without
         # extraction here, the marker leaks as literal text (HTML comments
         # render literally on Discord / Telegram / Slack) and the image
         # never delivers — the feature is dead-on-arrival for the exact
-        # user story it exists to serve.
-        stripped_content, image_ids = extract_chart_images(content)
+        # user story it exists to serve. Phase 2: extraction is now feature-
+        # family aware (chart-render + image-gen) via
+        # ``extract_image_markers``; chart-render stays byte-compat through
+        # the locked pass (delegating to ``extract_chart_images``). The
+        # seam itself still invokes ``extract_chart_images`` first (pin #5
+        # byte-compat audit anchor) and then ``extract_image_markers`` on
+        # the chart-stripped residual to extract non-chart features.
+        chart_stripped, chart_ids = extract_chart_images(content)
+        stripped_content, feature_ids = extract_image_markers(chart_stripped)
+        non_chart_features = {
+            f: ids for f, ids in feature_ids.items() if f != "chart-render"
+        }
         images: list[ImageAttachment] | None = None
-        if image_ids:
+        if chart_ids or non_chart_features:
             manager = getattr(self._registry, "manager", None)
             store = getattr(manager, "tmp_image_store", None) if manager else None
-            images = await _resolve_chart_images(image_ids, store)
+            images = []
+            if chart_ids:
+                images.extend(await _resolve_chart_images(chart_ids, store))
+            for feature, ids in non_chart_features.items():
+                images.extend(
+                    await _resolve_family_images(feature, ids, store)
+                )
         content = stripped_content
 
         # Create OutgoingMessage (populates images at THIS construction site)
