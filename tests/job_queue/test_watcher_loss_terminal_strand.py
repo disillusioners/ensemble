@@ -1299,3 +1299,343 @@ class TestDowngradeHealHandoff:
         no-op — no raise, no crash."""
         strand_harness.manager._mission_strand_healer = None
         strand_harness.service._schedule_strand_heal(ROOT)  # must not raise
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Component 4 — regression families (a)-(g) + lane adjudication
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestEpochReadModelPin:
+    """(a) mint-race shape — the epoch read-model is a PURE read
+    (exoneration pin): epoch is the constant 1, started_at tracks
+    ``last_activity_at`` (created_at fallback), and no ``ended_at``
+    truthmaker exists until the work row carries a terminal_reason —
+    the epoch mint cannot race the completion path because it never
+    writes."""
+
+    def test_epoch_is_constant_one_and_started_tracks_activity(
+        self, strand_harness,
+    ):
+        from daemon.services.mission_resolver import MissionResolver
+
+        activity = now_utc_naive() - timedelta(minutes=5)
+        _insert_instance(
+            strand_harness.engine, ROOT,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+            last_activity_at=activity,
+        )
+        _insert_receipt(strand_harness.engine)
+        resolver = MissionResolver(
+            strand_harness.instance_repo, strand_harness.job_repo,
+        )
+        record = resolver.resolve(ROOT)
+        assert record is not None
+        assert record.epoch == 1, (
+            "epoch is the honest constant-1 read — no mint race"
+        )
+        # started_at := last_activity_at (to_utc_iso of the row value).
+        assert record.started_at is not None
+        assert record.started_at.startswith(
+            activity.isoformat()[:19]
+        ), f"started_at must track last_activity_at: {record.started_at!r}"
+        assert record.terminal_reason is None
+        # No ended_at truthmaker exists on the read model at all
+        # (historical epoch timestamps are NOT derivable — M4(ii)).
+        assert not hasattr(record, "ended_at") or (
+            getattr(record, "ended_at", None) is None
+        )
+
+    def test_instances_table_has_no_terminal_reason_column(self):
+        """DELTA 3 schema pin: ``instances`` carries NO
+        ``terminal_reason`` column (the mirror stamp lives on
+        JobItem only)."""
+        cols = {
+            c.name for c in Instance.__table__.columns
+        }
+        assert "terminal_reason" not in cols
+
+    def test_job_queue_items_has_no_result_summary_column(self):
+        """DELTA 3 schema pin: ``job_queue_items`` carries NO
+        ``result_summary`` column (dropped in Phase 5) — the receipt
+        result surface is ``tasks.result`` via WorkRecord."""
+        from daemon.repositories.job_queue.models import JobItem
+        cols = {c.name for c in JobItem.__table__.columns}
+        assert "result_summary" not in cols
+        # The actual surface: Task.result.
+        assert "result" in {c.name for c in TaskModel.__table__.columns}
+
+
+class TestLeaseWrappedCompletion:
+    """(b) lease-wrapped completion — the blueprint trigger lease is
+    blueprinter-job dedup ONLY (project-row metadata via the C7
+    coordinator); it is inert to the instance-completion path. A root
+    carrying lease-shaped metadata must behave IDENTICALLY to a bare
+    one."""
+
+    @pytest.mark.asyncio
+    async def test_lease_metadata_is_inert_to_completion(
+        self, strand_harness,
+    ):
+        """Drive with lease metadata present vs absent: identical
+        completion behavior (both publish + fire the watcher in the
+        healed tree)."""
+        import asyncio as _asyncio
+
+        lease_metadata = {
+            "blueprint_lease": {
+                "job_id": "blueprinter-job-1",
+                "run_token": "run-token-abc",
+                "project_id": "test-project",
+            },
+        }
+        for metadata in (lease_metadata, {}):
+            # Fresh engine per leg.
+            strand_harness2 = strand_harness
+            _seed_poison_tree(strand_harness.engine, with_ghost=False)
+            _insert_receipt(strand_harness.engine)
+            _seed_child_completed_event(
+                strand_harness.engine, T_CHILD_COMPLETED,
+            )
+            if metadata:
+                with Session(strand_harness.engine) as session:
+                    row = session.get(Instance, ROOT)
+                    row.instance_metadata = metadata
+                    session.add(row)
+                    session.commit()
+            await _adrive_root_completion(strand_harness)
+            row = _get_instance_row(strand_harness.engine, ROOT)
+            assert row.status == InstanceStatus.COMPLETED.value, (
+                f"lease metadata must be inert (metadata={metadata!r}: "
+                f"got {row.status!r})"
+            )
+            assert strand_harness.watcher_repo.get_watchers_for_job(
+                RECEIPT_JOB
+            ) == []
+            # Reset the singleton engine state for the second leg by
+            # truncating (the conftest truncates between TESTS, not
+            # within — do it manually here).
+            from sqlmodel import text as _text
+            with strand_harness.engine.begin() as conn:
+                for table in (
+                    "job_watchers", "job_queue_items", "task",
+                    "message_queue", "events", "instances",
+                    "report_injections", "instance_hierarchy",
+                ):
+                    try:
+                        conn.execute(_text(f'DELETE FROM "{table}"'))
+                    except Exception:
+                        pass
+
+
+class TestSpawnAclBlockedFinalTurn:
+    """(c) spawn-ACL-blocked final turn — the deny path is PURE and
+    PRE-TRANSACTION (instance.py:2592-2612 — the membership gate
+    returns before any DB work): a denied spawn leaves ZERO residue —
+    the parent row, hierarchy, bus watchers, queue and task tables
+    are all untouched. Locks the exoneration."""
+
+    @pytest.mark.asyncio
+    async def test_denied_spawn_leaves_zero_residue(
+        self, strand_harness,
+    ):
+        import asyncio
+
+        _seed_poison_tree(strand_harness.engine, with_ghost=False)
+        _insert_receipt(strand_harness.engine)
+
+        def _counts():
+            with strand_harness.engine.begin() as conn:
+                out = {}
+                for table in (
+                    "instances", "instance_hierarchy",
+                    "dependency_watchers", "message_queue", "task",
+                    "job_queue_items",
+                ):
+                    out[table] = conn.execute(
+                        text(f"SELECT COUNT(*) FROM {table}")
+                    ).scalar()
+                return out
+
+        before = _counts()
+        root_before = _get_instance_row(strand_harness.engine, ROOT)
+
+        # Build the real spawn tool closure with the harness manager
+        # (real repo — any stray write would land in the DB and be
+        # counted). 'leader' spawning 'leader' is denied by the real
+        # registry (leader's team_members excludes itself).
+        from daemon.tools.instance import create_instance_tools
+
+        manager = strand_harness.manager
+        manager.spawn_instance = MagicMock(
+            return_value=("should-never-spawn", None)
+        )
+        with patch("daemon.tools.instance.is_rag_enabled", return_value=False), \
+             patch("daemon.tools.instance.create_rag_tools", return_value=[]), \
+             patch("daemon.tools.instance.create_knowledge_tools", return_value=[]), \
+             patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()), \
+             patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()), \
+             patch("daemon.tools.instance.create_project_tools", return_value=[]), \
+             patch("daemon.tools.instance.create_job_tools_if_available", return_value=[]), \
+             patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()), \
+             patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]), \
+             patch("daemon.tools.instance.create_project_history_tools", return_value=[]), \
+             patch("daemon.tools.instance.create_db_tools", return_value=[]), \
+             patch("daemon.tools.instance.create_infra_tools", return_value=[]), \
+             patch("daemon.tools.instance.create_context_tools", return_value=[]), \
+             patch("daemon.tools.instance.create_chart_tools", return_value=[]), \
+             patch("daemon.tools.instance.create_compare_tools", return_value=[]), \
+             patch("daemon.tools.instance._load_mcp_tools", return_value=[]), \
+             patch("daemon.tools.instance.scan_tools_for_full_docs"), \
+             patch("daemon.tools.instance._apply_tool_filter",
+                   side_effect=lambda tools, *a, **kw: tools):
+            tools = create_instance_tools(
+                manager, ROOT, "leader",
+            )
+        spawn_tool = next(
+            t for t in tools if getattr(t, "name", None) == "spawn_instance"
+        )
+        result = await spawn_tool.coroutine(
+            agent_id="leader",
+            project_id="test-project",
+        )
+        assert result.startswith("ERROR"), (
+            f"denial expected: {result!r}"
+        )
+        manager.spawn_instance.assert_not_called()
+
+        after = _counts()
+        assert before == after, (
+            f"ZERO residue: {before!r} != {after!r}"
+        )
+        root_after = _get_instance_row(strand_harness.engine, ROOT)
+        assert root_after.status == root_before.status
+        assert (
+            root_after.last_activity_at == root_before.last_activity_at
+        )
+
+
+class TestBackstopReachability:
+    """(g) backstop reachability resolution — the 6h zombie backstop
+    (MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS) is NOT a bounded exit for
+    the strand wedge: the anchor is the FRESHEST tree activity and
+    ANY activity touch (a watchdog wake, a human message, ANY
+    last_activity_at roll) re-rolls it. The healer must not depend on
+    it (it does not). The backstop remains the last-resort exit for a
+    GENUINELY quiet tree — existing behavior, preserved."""
+
+    @pytest.mark.asyncio
+    async def test_anchor_reroll_starves_backstop(
+        self, strand_harness,
+    ):
+        """The wedge posture with a RE-ROLLED anchor: even with a
+        1h window, a fresh root activity (10 min old) starves the
+        backstop — live=True, timed_out=False. The 6h backstop can
+        be pushed out indefinitely by activity touches."""
+        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        verdict = await _mlg.evaluate_mission_live(
+            instance_repository=strand_harness.instance_repo,
+            instance_id=ROOT,
+            timeout_seconds=3600,  # 1h — far tighter than prod's 6h
+        )
+        assert verdict.live is True
+        assert verdict.timed_out is False, (
+            "a re-rolled anchor must starve the backstop — the strand "
+            "wedge is NOT bounded by the 6h window while activity "
+            "touches keep rolling the anchor"
+        )
+
+    @pytest.mark.asyncio
+    async def test_backstop_fires_on_genuinely_quiet_tree(
+        self, strand_harness,
+    ):
+        """Last resort preserved: a genuinely quiet tree (freshest
+        activity older than the window) fires the backstop
+        (timed_out=True) — the at-least-once exit survives."""
+        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        with strand_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET last_activity_at = :a "
+                    "WHERE instance_id IN (:r, :t, :g)"
+                ),
+                {
+                    "a": (
+                        now_utc_naive() - timedelta(hours=7)
+                    ).isoformat(),
+                    "r": ROOT, "t": TESTER, "g": GHOST,
+                },
+            )
+        verdict = await _mlg.evaluate_mission_live(
+            instance_repository=strand_harness.instance_repo,
+            instance_id=ROOT,
+        )
+        assert verdict.live is False
+        assert verdict.timed_out is True
+
+
+class TestLaneAdjudication:
+    """Adjudication by test (user spec): which lanes provably see —
+    and which can CLOSE — held/wedged rows of this shape.
+
+    Resolution: the watch-reconcile lane (WatchReconcileSweepService
+    → reconcile_held_watches_for_instance) is WORK-STATUS-GATED for
+    this shape (the receipt JobItem is ACTIVE — non-terminal work
+    status short-circuits before mission liveness is consulted), so
+    it can NEVER close the wedge; the boot sweep has the same gate
+    family. The lanes that ACT are (1) the drift-reconciler f2 lane —
+    which provably EVALUATES the held row every tick (the
+    mission-live-hold skip observable, pinned in
+    TestF2LaneHoldsPoisonShape) — and (2) the MissionStrandHealer,
+    which is the only lane that closes it (pinned in
+    TestMissionStrandHealer)."""
+
+    @pytest.mark.asyncio
+    async def test_watch_reconcile_lane_cannot_close_wedge(
+        self, strand_harness,
+    ):
+        from daemon.services.watch_reconcile_sweep import (
+            WatchReconcileSweepService,
+        )
+
+        _seed_poison_tree(strand_harness.engine, with_ghost=True)
+        _insert_receipt(strand_harness.engine)
+        _seed_child_completed_event(
+            strand_harness.engine, T_CHILD_COMPLETED,
+        )
+        # Backdate the work Task so the work-status gate sees a
+        # long-settled turn (the lane's hold is the ACTIVE JobItem,
+        # not freshness).
+        with strand_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET completed_at = :c "
+                    "WHERE work_id = :w"
+                ),
+                {
+                    "c": (
+                        now_utc_naive() - timedelta(hours=1)
+                    ).isoformat(),
+                    "w": RECEIPT_JOB,
+                },
+            )
+
+        sweep = WatchReconcileSweepService(
+            job_queue_service=strand_harness.queue_service,
+            interval_seconds=1,
+        )
+        result = await sweep.sweep_once()
+        assert result.get("fired", result.get("notified", 0)) in (0,) or (
+            result.get("fired") == 0
+        ), f"the lane must not fire: {result!r}"
+        rows = strand_harness.watcher_repo.get_watchers_for_job(RECEIPT_JOB)
+        assert rows, (
+            "ADJUDICATION: the watch-reconcile lane cannot close the "
+            "wedged shape (ACTIVE work row gates the lane before "
+            "mission liveness) — the row survives; only f2 evaluates "
+            "it and only the healer closes it"
+        )
+        # And the root is still wedged.
+        assert _get_instance_row(
+            strand_harness.engine, ROOT
+        ).status == InstanceStatus.WAITING_CHILDREN.value
