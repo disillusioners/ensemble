@@ -510,7 +510,8 @@ class PromptVersionService:
     ) -> Any:
         """Recall a submitted draft (T2 / S16).
 
-        The state-machine retract transitions are:
+        The state-machine retract transition is (the ONLY one this
+        method performs):
 
         * ``pending_approval → draft`` — the user / agent wants to
           take the row back and edit. The :class:`PromptVersion`
@@ -518,9 +519,14 @@ class PromptVersionService:
           the user re-submits via a new call to
           ``create_and_submit`` which inserts ``version + 1`` and
           archives this row (per A5/C4).
-        * ``draft → archived`` — a draft the user / agent
-          abandoned before submitting. The row is gone from the
-          live state but stays in the lineage for forensic audit.
+
+        A row in ``draft`` state is NOT retractable via this
+        method — the repo CAS below always targets the
+        ``pending_approval → draft`` pair, so a draft row
+        (never submitted) surfaces as :class:`InvalidTransitionError`.
+        An abandoned DRAFT is removed via ``delete_version``
+        (UD#2 endpoint 14; the editable-state rule there covers
+        draft/pending rows).
 
         Per phaseB-plan.md T2 / decisions.md S16 (anti-forgery),
         retract authority is:
