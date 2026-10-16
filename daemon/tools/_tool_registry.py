@@ -688,11 +688,13 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # boot-time ``is neither a known category nor a known tool``
     # validator stops flagging ari + leader's explicit
     # ``tools.allow: ["cu"]`` entries. The AST-walked source scanner
-    # (``_scan_category_module_sources``) handles missing files via
-    # ``file_path.exists()`` skip, so a stub module is NOT required
-    # for the row to take effect. Runtime gating is unchanged (the
-    # privilege strip on cu tools fires via ``_tool_category`` set
-    # in ``create_lazy_mcp_tools``, see
+    # (``_scan_category_module_sources``) finds the literal stub
+    # anchor at ``daemon/tools/cu_tools.py`` (a docstring-only module
+    # mirroring ``daemon/tools/plane_tools.py``); no @tool-decorated
+    # function is expected to live there — the row's value is the
+    # category-key registration, not the AST scan. Runtime gating is
+    # unchanged (the privilege strip on cu tools fires via
+    # ``_tool_category`` set in ``create_lazy_mcp_tools``, see
     # ``daemon/mcp/tool_adapter.py``); this row is warning hygiene
     # only. The cu entry is in PRIVILEGED_TOOL_CATEGORIES, so empty-
     # allow universes (watcher, etc.) still do NOT auto-grant cu_*.
