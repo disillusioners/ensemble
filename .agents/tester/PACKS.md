@@ -2400,3 +2400,18 @@ Ad-hoc gate packs (report-only; disposable PG16 initdb clusters, `PG_TEST_*` wir
 | concurrency_atomic_unit_test (registered) | `timeout 300 env <scrub> bash test/packs/concurrency_atomic_unit_test.sh` | PASS 99P/0F/74S (baseline-exact) | 76s |
 
 Lane-keeper note: bump Last Run on the two registered rows above (`concurrency_atomic_unit_test`, `mc_be_smoke`/`maintenance_smoke_test`) at next PACKS.md maintenance pass.
+
+## Ad-hoc verification packs — cu-mcp gate (2026-10-16)
+
+Feature `computer-use-mcp` (impl `cdc9e8633`, docs tip `e4f0832d0`, base `772ca92b9`); worktree `agents-ensemble-wt-cu-mcp`. All runs `uv run python -m pytest` from worktree root, `/bin/sh` POSIX, per-call `timeout` wrappers. Full report: RESULTS/2026-10-16-cu-mcp-computer-use-verification.md.
+
+| Pack | Location / invocation | Scope | Last Run | Status |
+|------|----------------------|-------|----------|--------|
+| cu_new_suite_unit_test | `timeout 120 uv run python -m pytest tests/unit/test_computer_use_mcp.py --tb=short -q` | New computer-use MCP suite (prefix, kill-switch incl. D7 matrix, privilege-stamp, empty-allow gating) | 2026-10-16 | ✅ PASS 45/45 in 0.73s |
+| cu_pins_unit_test | `timeout 120 uv run python -m pytest tests/unit/tools/test_upgrade_registration.py tests/unit/tools/test_attestation_registration.py --tb=short -q` | PRIVILEGED_TOOL_CATEGORIES same-PR pins (now 6 entries incl. cu) | 2026-10-16 | ✅ PASS 45/45 in 6.16s |
+| cu_pins_integration_test | `timeout 180 uv run python -m pytest tests/integration/test_maintenancer_spawn_resolves_tools.py tests/integration/test_service_tool_flag_off_byte_identical.py --override-ini="addopts=" --tb=short -q` | Maintenancer tool resolution + service-tool byte-identical pins (NOTE: byte-identical file lives in tests/integration/) | 2026-10-16 | ✅ PASS 22/22 in 1.54s |
+| cu_plane_reference_unit_test | `timeout 120 uv run python -m pytest tests/unit/test_plane_mcp.py --tb=short -q` | plane.py mirror semantics reference (plane_ un-stamped zero-regression vs tool_adapter stamp change) | 2026-10-16 | ✅ PASS 68/68 in 1.03s |
+| cu_disputed_pair_branch_test | `timeout 120 uv run python -m pytest tests/unit/test_builtin_mcp_servers.py tests/unit/test_context7_builtin.py --tb=short -q` @ branch | Disputed-pair A/B leg A (observation, no fixes) | 2026-10-16 | ⚠️ 92P/21E/0F — all 21E pre-existing at base (see QUARANTINE) |
+| cu_disputed_pair_base_test | identical invocation @ detached base worktree 772ca92b9 (import-proved, .env parity, worktree removed after) | Disputed-pair A/B leg B (base evidence) | 2026-10-16 | ⚠️ 92P/21E/0F — node-set identical to branch ⇒ claim CONFIRMED, 0 branch regressions |
+| cu_smoke_live_mock_test | `/tmp/cu-mcp-smoke/driver_main.py` via `timeout 300 uv run python` from worktree root (280s internal watchdog); boot via worktree frontend/scripts/boot-e2e-maintenance-daemon.sh, PG 15433, daemon 18099, DB ensemble_cu_smoke_main | LIVE benign smoke ON-path: DB row pin/profile, session, 38 tools, allowlisted read-only calls (screenshot/doctor/OCR/cursor), TCC signature capture | 2026-10-16 | ✅ PASS (TCC caveat: Screen Recording + Accessibility NOT granted — wallpaper-only capture; doctor authoritative) |
+| cu_smoke_killswitch_mock_test | `/tmp/cu-mcp-smoke/driver_ks.py` same harness pattern, PG 15434, daemon 18198, DB ensemble_cu_smoke_ks, COMPUTER_USE_MCP_ENABLED=0 | LIVE kill-switch OFF-path: no mcp_servers row, other builtins bootstrap, one-shot log ×1, zero cu spawns | 2026-10-16 | ✅ PASS 4/4 checks |

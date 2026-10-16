@@ -99,10 +99,10 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_five(self) -> None:
-        """The default-deny set is exactly five entries —
+    def test_privileged_categories_is_exactly_six_entries(self) -> None:
+        """The default-deny set is exactly six entries —
         ``system_upgrade``, ``system-log``, ``ens-db``, ``ens-env``,
-        and ``view-views``.
+        ``view-views``, and ``cu``.
 
         ``service`` was REMOVED from this set by user override
         2026-09-16 (D4 reversed; see
@@ -113,9 +113,18 @@ class TestStaticRegistrationChecklist:
         2026-10-02. ``view-views`` joined per the REWORK 2026-10-07
         (M1, user refinement #1) — the read-only ``view_link`` URL
         minter is RESTRICTED first-release (ari + leader + designer
-        only). Adding a category here is a deliberate trust
-        decision, and this pin makes silent additions visible
-        (D18/A14 — same-PR pin updates; this is pin file 1 of 3)."""
+        only). ``cu`` joined per the cu-mcp task 2026-10-16 — the
+        Computer Use MCP built-in's prefix-overridden tools
+        (``cu_click``, ``cu_screenshot``, ...) gate the full
+        local-control surface and MUST NOT auto-grant to
+        empty-allow agents (e.g. ``watcher``); explicit
+        ``tools.allow: ["cu"]`` on ``agents/ari/meta.json`` and
+        ``agents/leader/meta.json`` is the only access path.
+        Adding a category here is a deliberate trust decision,
+        and this pin makes silent additions visible (D18/A14 —
+        same-PR pin updates; this is pin file 1 of 3+1; the
+        integration sanity pin lives at
+        ``tests/integration/test_service_tool_flag_off_byte_identical.py``."""
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
@@ -124,6 +133,9 @@ class TestStaticRegistrationChecklist:
             # REWORK 2026-10-07 (M1): view_link is restricted first-release;
             # only ari / leader / designer opt in via tools.allow.
             "view-views",
+            # cu-mcp (2026-10-16): Computer Use MCP prefix-overridden
+            # tools; explicit allow-list on ari/leader only.
+            "cu",
         })
 
     def test_checklist_comment_block_present_in_module(self) -> None:
