@@ -81,6 +81,7 @@ from daemon.mcp.builtin_servers import (  # noqa: E402
     get_registry,
     is_builtin_disabled,
 )
+from daemon.mcp.models import McpToolSchema  # noqa: E402
 from daemon.routers.mcp_servers import (  # noqa: E402
     _block_test_connection_when_builtin_unavailable,
 )
@@ -1159,6 +1160,532 @@ class TestD7TestConnectionKillSwitchBypass:
         for cfg in (None, {}, {"transport": "stdio"}, {"transport": "stdio", "command": 1}):
             msg = _block_test_connection_when_builtin_unavailable(cfg)
             assert msg is None
+
+
+# ---------------------------------------------------------------------------
+# Class 9.5 — S1 regression pin: kill-switch gate in preload_mcp_tools
+# (cu-mcp commission S1 fix, 2026-10-16)
+# ---------------------------------------------------------------------------
+
+
+class TestPreloadBuiltinAvailabilityGate:
+    """Pin the S1 load-bearing fix: ``preload_mcp_tools`` consults
+    ``BuiltinServerDefinition.is_available()`` per server BEFORE any
+    ``get_schemas_for_server`` call, so a post-boot kill-switch flip
+    (``COMPUTER_USE_MCP_ENABLED=0``) with the server's row still ACTIVE
+    from the prior ON boot cannot cold-spawn the npx child.
+
+    The S1 contract (per the task plan):
+
+      1. **Kill-switch OFF + active row** → preload must NOT call
+         ``get_schemas_for_server`` for that server, must NOT add
+         the server to the per-instance session cache, and must NOT
+         surface that server's tools. A ONE-per-process INFO log
+         line names the skip (diagnostics for the post-boot flip
+         state).
+      2. **Kill-switch ON** (control) → preload behavior unchanged.
+         The gate is silently bypassed when ``is_available()``
+         returns True. ``get_schemas_for_server`` is awaited, the
+         per-instance session cache holds an entry for the server,
+         and tools are surfaced as before.
+      3. **Always-on builtins (plane / context7 / webfetch)** → gate
+         is silently bypassed (their ``is_available()`` returns
+         True). Legacy behavior preserved.
+      4. **Non-builtin (user-added) servers** → gate is silently
+         bypassed (no definition in the registry). Legacy behavior
+         preserved.
+      5. **One-shot log + per-server error isolation** → the gate
+         log is process-once (mirrors computer_use.py:147-171 and
+         plane.py:88-89 patterns). A bad ``is_available()``
+         (transient exception) MUST NOT abort the loop — the loop
+         continues with the next server.
+
+    The existing 45 tests cover the cu-mcp kill-switch
+    (``TestComputerUseMcpKillSwitch``) and the unaffected loop path
+    (test_mcp_service.py preload tests); this class pins the SHARED
+    SEAM behavior at the gate itself, not the cu-mcp-specific gate.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_preload_gate_log_flag(self):
+        """Reset ``mcp_service._preload_gate_skip_log_emitted``
+        before AND after each test.
+
+        The flag is module-level (one per process) and persists
+        across test cases inside this class. Without resetting,
+        the second-and-later ``test_kill_switch_off_*`` cases
+        would silently skip the log assertion.
+        """
+        from daemon.services import mcp_service
+
+        prev = mcp_service._preload_gate_skip_log_emitted
+        mcp_service._preload_gate_skip_log_emitted = False
+        try:
+            yield
+        finally:
+            mcp_service._preload_gate_skip_log_emitted = prev
+
+    @staticmethod
+    def _make_mock_manager():
+        """Minimal ``InstanceManager`` double for preload tests.
+
+        Avoids the heavy ``instance_manager_with_repo`` fixture
+        (which mocks fields unrelated to the cu-mcp gate). The
+        preload loop only touches:
+          * ``_mcp_server_repository.list_mcp_servers(is_active=True)``
+          * ``config.mcp_pool.tool_call_timeout``
+        Plus the registry lookup (function-local import inside
+        ``_is_builtin_server_available``). The MagicMock satisfies
+        both without spinning up a real DB.
+        """
+        mgr = MagicMock()
+        mgr._mcp_server_repository = MagicMock()
+        mgr.config = MagicMock(mcp_pool=MagicMock(tool_call_timeout=120))
+        return mgr
+
+    @pytest.mark.asyncio
+    async def test_kill_switch_off_skips_cu_preload(
+        self, monkeypatch, caplog
+    ):
+        """S1 main pin: kill-switch OFF → no schema fetch, no tools, one log.
+
+        Sets ``COMPUTER_USE_MCP_ENABLED=0`` AFTER the ``mcp_servers``
+        row was made active (simulating the post-boot flip state).
+        Asserts the load-bearing behavior:
+
+          * ``get_schemas_for_server`` is NOT awaited for the
+            ``computer-use`` server (gate short-circuits before any
+            cold spawn).
+          * ``service._tools_cache['inst-1']`` is empty — the cu_*
+            tools are NEVER surfaced to the LLM (the strongest
+            enforcement of the kill-switch).
+          * ``service._session_caches['inst-1']`` does NOT contain
+            the ``computer-use`` key — no session cache, no future
+            cold-spawn escape hatch.
+          * One INFO log line in the ``daemon.services.mcp_service``
+            logger names the skip.
+        """
+        import logging
+        from daemon.services.mcp_service import McpService
+
+        # Post-boot kill-switch flip: env is OFF but the row remains
+        # ACTIVE. We monkeypatch AFTER setting up the
+        # mock_manager-with-active-row so the env setup mirrors the
+        # real-world ordering exactly.
+        monkeypatch.setenv("COMPUTER_USE_MCP_ENABLED", "0")
+        monkeypatch.delenv(
+            "MCP_DISABLE_BUILT_IN_COMPUTER_USE", raising=False
+        )
+        _reset_one_shot_log_flags_for_tests()
+
+        # Active row from a prior ON boot — the bootstrap layer
+        # is NOT in this test's scope; the preload loop walks the
+        # already-active set.
+        cu_server = MagicMock()
+        cu_server.name = "computer-use"
+        cu_server.config = {"transport": "stdio", "command": "npx"}
+        cu_server.is_active = True
+
+        manager = self._make_mock_manager()
+        manager._mcp_server_repository.list_mcp_servers.return_value = [
+            cu_server
+        ]
+
+        service = McpService(manager=manager)
+
+        # Gate is supposed to short-circuit BEFORE this is called.
+        # A raising side_effect turns a gate-leak into a loud
+        # assertion failure rather than a silent one.
+        async def _fail_if_called(server_arg):
+            raise AssertionError(
+                "get_schemas_for_server MUST NOT be awaited for "
+                "'computer-use' when the kill-switch is OFF; the "
+                "S1 gate is broken — preload loop short-circuit "
+                "is leaking past the gate"
+            )
+
+        service.get_schemas_for_server = AsyncMock(side_effect=_fail_if_called)
+
+        with caplog.at_level(
+            logging.INFO, logger="daemon.services.mcp_service"
+        ):
+            await service.preload_mcp_tools("inst-1")
+
+        # (a) schema fetch never reached
+        service.get_schemas_for_server.assert_not_called()
+
+        # (b) and (c): session cache empty, tool cache empty
+        session_state = service._session_caches.get("inst-1", {})
+        assert "computer-use" not in session_state, (
+            "session cache MUST NOT contain 'computer-use' after "
+            "the kill-switch gate skip — no session spawn path"
+        )
+        tools = service.get_mcp_tools("inst-1")
+        assert tools == [], (
+            f"NO cu_* tools may surface for an instance when the "
+            f"kill-switch is OFF; got {[type(t).__name__ for t in tools]}"
+        )
+
+        # (d) one-process-once diagnostics log
+        skip_msgs = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.INFO
+            and "computer-use" in r.getMessage()
+            and "skip" in r.getMessage().lower()
+        ]
+        assert len(skip_msgs) >= 1, (
+            "expected an INFO log line naming the 'computer-use' "
+            "skip from the preload gate; got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_kill_switch_on_control_cu_tools_loaded(
+        self, monkeypatch
+    ):
+        """S1 control: kill-switch ON → cu-mcp preloads unchanged.
+
+        Without the S1 fix this is the path that already passed
+        45/45 in the cu-mcp verification cycle; with the fix the
+        gate is a no-op pass-through (``is_available()`` returns
+        True, helper returns True, schema fetch + tool build
+        proceed as before). The control pins:
+
+          * ``get_schemas_for_server`` IS awaited (gate bypassed).
+          * ``service._session_caches['inst-1']`` has the
+            ``computer-use`` entry with ``cache`` + ``lock`` (lazy
+            session wiring reaches the cu server).
+          * The cu_* tools are surfaced (the LLM sees the
+            ``cu_screenshot`` lazy tool).
+        """
+        from daemon.services.mcp_service import McpService
+
+        # ON path: kill-switch ON + npx resolvable via
+        # ``CU_NPX_PATH`` (the ``is_available()`` npx gate).
+        monkeypatch.setenv("COMPUTER_USE_MCP_ENABLED", "true")
+        monkeypatch.setenv("CU_NPX_PATH", "/usr/bin/env")
+        monkeypatch.delenv(
+            "MCP_DISABLE_BUILT_IN_COMPUTER_USE", raising=False
+        )
+        _reset_one_shot_log_flags_for_tests()
+
+        cu_server = MagicMock()
+        cu_server.name = "computer-use"
+        cu_server.config = {"transport": "stdio", "command": "npx"}
+        cu_server.is_active = True
+
+        manager = self._make_mock_manager()
+        manager._mcp_server_repository.list_mcp_servers.return_value = [
+            cu_server
+        ]
+
+        cu_schemas = [
+            McpToolSchema(
+                name="screenshot",
+                description="Capture the screen",
+                input_schema={
+                    "type": "object", "properties": {}
+                },
+                server_name="computer-use",
+            ),
+        ]
+
+        service = McpService(manager=manager)
+        service.get_schemas_for_server = AsyncMock(return_value=cu_schemas)
+
+        # The ``tool_name_prefix`` override is what turns the
+        # exposed tool name into ``cu_screenshot`` — that is the
+        # cu category stamp mechanism the privilege-strip rides on.
+        # Set the ``.name`` attribute on the mock AFTER
+        # construction (passing ``name=`` to the MagicMock
+        # constructor sets the mock's repr name, not a ``.name``
+        # attribute — see test_mcp_service.py:67-87 same ritual).
+        cu_screenshot_mock = MagicMock()
+        cu_screenshot_mock.name = "cu_screenshot"
+        with patch(
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            return_value=[cu_screenshot_mock],
+        ) as mock_create:
+            await service.preload_mcp_tools("inst-1")
+
+        # Gate bypassed → schema fetch awaited.
+        service.get_schemas_for_server.assert_awaited_once_with(
+            cu_server
+        )
+        assert mock_create.called, (
+            "create_lazy_mcp_tools MUST be invoked when the gate "
+            "bypasses the cu server (control pin of the S1 fix)"
+        )
+
+        # Session cache holds the cu server.
+        session_state = service._session_caches["inst-1"]
+        assert "computer-use" in session_state, (
+            "session cache MUST contain 'computer-use' when the "
+            "kill-switch gate bypasses — load-bearing for the "
+            "lazy session resolution path"
+        )
+        assert "cache" in session_state["computer-use"]
+        assert "lock" in session_state["computer-use"]
+
+        # cu_* tools surfaced.
+        tools = service.get_mcp_tools("inst-1")
+        tool_names = [getattr(t, "name", "") for t in tools]
+        assert "cu_screenshot" in tool_names, (
+            f"the cu_screenshot lazy tool MUST surface in the ON "
+            f"control path; got tool_names={tool_names}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_gate_bypassed_for_non_builtin_server(self, monkeypatch):
+        """The gate MUST NOT touch non-builtin (user-added) servers.
+
+        A user with a fully custom MCP server row named ``weird``
+        that happens to land in ``list_mcp_servers(is_active=True)``
+        has no definition in the builtin registry → the gate is
+        silently bypassed → the legacy preload path runs as
+        before. Pin against the gate accidentally imposing a
+        kill-switch opinion on user-added servers.
+        """
+        from daemon.services.mcp_service import McpService
+
+        monkeypatch.setenv("COMPUTER_USE_MCP_ENABLED", "false")
+        _reset_one_shot_log_flags_for_tests()
+
+        user_server = MagicMock()
+        user_server.name = "weird-user-mcp"
+        user_server.config = {
+            "transport": "http", "url": "https://example.com/mcp"
+        }
+        user_server.is_active = True
+
+        manager = self._make_mock_manager()
+        manager._mcp_server_repository.list_mcp_servers.return_value = [
+            user_server
+        ]
+
+        schemas = [
+            McpToolSchema(
+                name="weird_tool",
+                description="x",
+                input_schema={"type": "object", "properties": {}},
+                server_name="weird-user-mcp",
+            ),
+        ]
+
+        service = McpService(manager=manager)
+        service.get_schemas_for_server = AsyncMock(return_value=schemas)
+
+        with patch(
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            return_value=[MagicMock(name="weird_tool")],
+        ) as mock_create:
+            await service.preload_mcp_tools("inst-1")
+
+        # Non-builtin → gate is a no-op → schemas fetched.
+        service.get_schemas_for_server.assert_awaited_once_with(
+            user_server
+        )
+        assert mock_create.called
+
+        # Session cache has the user server.
+        session_state = service._session_caches["inst-1"]
+        assert "weird-user-mcp" in session_state
+
+    @pytest.mark.asyncio
+    async def test_gate_bypassed_for_healthy_builtin(self, monkeypatch, caplog):
+        """The gate MUST silently bypass always-on builtins.
+
+        ``PlaneServerDefinition.is_available()`` returns True when
+        the plane kill-switch is on + the URL + API key are all
+        set. We pin that a healthy-availability definition does NOT
+        trigger the gate-skip log (the existing
+        ``test_plane_mcp.py`` covers the plane kill-switch
+        contract; this test pins the SHARED SEAM behavior).
+        """
+        import logging
+        from daemon.services.mcp_service import McpService
+
+        # No cu-mcp kill-switch flip. Plane reads its own env
+        # inside its own ``is_available()`` — feed it the URL +
+        # API key so the gate sees a healthy-availability
+        # builtin (mirrors a real prod workspace).
+        monkeypatch.delenv(
+            "COMPUTER_USE_MCP_ENABLED", raising=False
+        )
+        monkeypatch.delenv(
+            "MCP_DISABLE_BUILT_IN_COMPUTER_USE", raising=False
+        )
+        monkeypatch.setenv("PLANE_MCP_ENABLED", "true")
+        monkeypatch.setenv("PLANE_MCP_URL", "https://api.plane.so")
+        monkeypatch.setenv("PLANE_MCP_API_KEY", "test-fixture-api-key")
+        _reset_one_shot_log_flags_for_tests()
+
+        plane_server = MagicMock()
+        plane_server.name = "plane"
+        plane_server.config = {"transport": "stdio", "command": "uvx"}
+        plane_server.is_active = True
+
+        manager = self._make_mock_manager()
+        manager._mcp_server_repository.list_mcp_servers.return_value = [
+            plane_server
+        ]
+
+        plane_schemas = [
+            McpToolSchema(
+                name="list_projects",
+                description="x",
+                input_schema={
+                    "type": "object", "properties": {}
+                },
+                server_name="plane",
+            ),
+        ]
+
+        service = McpService(manager=manager)
+        service.get_schemas_for_server = AsyncMock(
+            return_value=plane_schemas
+        )
+
+        # Mirror the same MagicMock name-setting ritual used by
+        # the cu-screenshot control test above.
+        plane_tool_mock = MagicMock()
+        plane_tool_mock.name = "plane_list_projects"
+
+        with caplog.at_level(
+            logging.INFO, logger="daemon.services.mcp_service"
+        ):
+            with patch(
+                "daemon.services.mcp_service.create_lazy_mcp_tools",
+                return_value=[plane_tool_mock],
+            ):
+                await service.preload_mcp_tools("inst-1")
+
+        # Gate bypassed.
+        service.get_schemas_for_server.assert_awaited_once_with(
+            plane_server
+        )
+
+        # The gate's one-shot skip log MUST NOT appear for a
+        # healthy-availability builtin.
+        skip_msgs = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.INFO
+            and "skip" in r.getMessage().lower()
+            and "plane" in r.getMessage().lower()
+        ]
+        assert skip_msgs == [], (
+            "the gate-skip log is reserved for unavailable "
+            "builtins; a healthy plane (or any always-on "
+            "builtin) MUST NOT trigger it: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_gate_exception_isolates_to_one_server(self, monkeypatch, caplog):
+        """A bad ``is_available()`` MUST NOT abort the loop.
+
+        Per-server error isolation: the gate is wrapped in
+        ``try/except`` and any exception inside the helper logs
+        a WARNING and skips the server, mirroring the
+        schema-lookup failure path right below it in the loop.
+        The next server on the iteration MUST still be processed.
+        """
+        import logging
+        from daemon.services.mcp_service import McpService
+
+        _reset_one_shot_log_flags_for_tests()
+
+        # The failing server is cu-mcp (helper raises); the
+        # surviving server is a non-builtin user-added server
+        # (``weird-user-mcp`` has no definition in the registry →
+        # the helper returns True for it unconditionally → load
+        # succeeds). Using a user-added server keeps the test
+        # focused on the cu helper's exception path without
+        # coupling to plane-env mock state.
+        cu_server = MagicMock()
+        cu_server.name = "computer-use"
+        cu_server.config = {"transport": "stdio", "command": "npx"}
+        cu_server.is_active = True
+
+        user_server = MagicMock()
+        user_server.name = "weird-user-mcp"
+        user_server.config = {
+            "transport": "http", "url": "https://example.com/mcp"
+        }
+        user_server.is_active = True
+
+        manager = self._make_mock_manager()
+        manager._mcp_server_repository.list_mcp_servers.return_value = [
+            cu_server, user_server,
+        ]
+
+        user_schemas = [
+            McpToolSchema(
+                name="weird_tool",
+                description="x",
+                input_schema={
+                    "type": "object", "properties": {}
+                },
+                server_name="weird-user-mcp",
+            ),
+        ]
+
+        service = McpService(manager=manager)
+
+        # Patch the gate helper DIRECTLY: it raises for cu (the
+        # exception isolation path) and returns True for the
+        # user-added server (which has no definition in the
+        # registry anyway). We deliberately do NOT poison
+        # ``get_schemas_for_server`` — the test pins that a
+        # helper exception logs a WARNING and skips just the
+        # affected server, leaving the next iteration alive.
+        async def _schema_lookup(srv):
+            return user_schemas if srv.name == "weird-user-mcp" else []
+
+        service.get_schemas_for_server = AsyncMock(side_effect=_schema_lookup)
+
+        # Patch the helper to raise for cu-mcp specifically.
+        # The real helper is a method on McpService — we patch
+        # it on the instance so the patch is contained to this
+        # test.
+        def _fake_gate(self, server_name):
+            if server_name == "computer-use":
+                raise RuntimeError("simulated transient helper failure")
+            return True  # user-added servers always pass
+
+        with patch.object(
+            McpService, "_is_builtin_server_available", _fake_gate
+        ), caplog.at_level(
+            logging.WARNING, logger="daemon.services.mcp_service"
+        ), patch(
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            return_value=[MagicMock(name="weird_tool")],
+        ):
+            await service.preload_mcp_tools("inst-1")
+
+        # Per-server isolation: the user-added server STILL got
+        # through despite the cu helper raising.
+        session_state = service._session_caches["inst-1"]
+        assert "weird-user-mcp" in session_state, (
+            "the failing computer-use entry MUST NOT prevent the "
+            "user-added entry from being processed — per-server "
+            "error isolation is load-bearing"
+        )
+        assert "computer-use" not in session_state
+
+        # The helper's exception must surface as a WARNING at
+        # the gate site (mirrors the schema-lookup WARNING right
+        # below it in the loop).
+        warning_msgs = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "computer-use" in r.getMessage()
+        ]
+        assert warning_msgs, (
+            "expected a WARNING log line naming 'computer-use' "
+            "for the helper exception path; got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
 
 
 # ---------------------------------------------------------------------------

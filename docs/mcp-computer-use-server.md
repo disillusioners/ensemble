@@ -83,6 +83,22 @@ re-check the upstream `NATIVE-PACKAGES.md` semantics on any
 are usually wire-compatible but still warrant a smoke pass on
 the host. We are pinned to 7.6.1 today.
 
+The `/mcp-servers/test-connection` UI probe (D7 guard at
+`daemon/routers/mcp_servers.py`) detects the cu-mcp config by
+matching the EXACT pinned package arg (e.g. `@zavora-ai/computer-use-mcp@7.6.1`)
+in `args`, not by a prefix substring or by another structural
+marker. The guard re-derives its expected pin from the SAME
+`CU_NPX_ARGS` module-level constant in
+`daemon/mcp/builtin_servers/computer_use.py` (imported by
+the router at line 137), so a pin bump is a single-file edit
+to that module — the guard silently tracks it. The reason for
+the exact-match (rather than startswith / regex) is the failure
+mode: a future version with a NEWER pin (e.g. `@7.7.0`) MUST
+NOT match the current guard, otherwise a future pin would
+silently bypass the kill-switch without the guard being
+updated. With the shared constant, that class of drift is
+structurally impossible — a bump updates both seams atomically.
+
 ## Universal packaging (all OSes)
 
 The 7.6.1 universal npm tarball bundles **all six platform
@@ -117,6 +133,20 @@ The kill-switch is also enforced at the `/mcp-servers/test-
 connection` UI probe (D7-shaped hole fix in
 `daemon/routers/mcp_servers.py`) so an operator who turns the
 switch off still can't probe the binary via the admin UI.
+
+**Run-time semantics of the kill-switch (S1 fix, 2026-10-16):**
+a post-boot flip takes effect for instances spawned AFTER the
+flip — ``preload_mcp_tools`` consults ``is_available()`` per
+server and skips the server entirely (no session spawn, no
+tools surfaced) for any instance preloaded after the flip.
+Instances preloaded BEFORE the flip retain their live ``cu_*``
+lazy tools for the lifetime of the process: the gate runs once
+per instance preload and the per-instance tool cache is not
+invalidated by the flip. A running instance requires a daemon
+restart to fully stop — the flip is a forward-only gate. This
+matches the process-once ``preload_mcp_tools: skipping
+unavailable builtin ...`` INFO log which mentions ``a
+subsequent SAME-NAME instance will see the same skip``.
 
 ## Loopback console
 

@@ -52,6 +52,22 @@ SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S = 1.5
 # Seconds-scale only — never a daemon-lifetime negative cache.
 EMPTY_DISCOVERY_RETRY_THROTTLE_S = 30.0
 
+# One-shot diagnostics flag for the S1 preload-loop availability gate
+# (cu-mcp commission, 2026-10-16). The gate's per-builtin reason
+# (kill-switch opt-out, npx unresolvable, generic disable) is logged
+# inside each definition's own ``is_available()``; this flag gates an
+# ADDITIONAL process-once INFO line from ``preload_mcp_tools`` that
+# names the server SKIPPED FOR A LIVE PRELOAD — the diagnostics for
+# exactly the post-boot flip state (active row exists from an ON
+# boot + definition now unavailable). Without this line, an operator
+# who sees the per-builtin log has no immediate link to "this is
+# what kept the server out of NEW instance preloads" — they would
+# need to grep TWO logs to make that link. The flag keeps the line
+# to ONE entry per process; reset by tests that re-exercise the
+# path. Module-level (not class-level) so a test fixture can flip
+# it without instantiating the service.
+_preload_gate_skip_log_emitted: bool = False
+
 
 class _McpSessionProviderImpl:
     """Pool-aware lazy session resolver bound to a specific instance.
@@ -733,6 +749,43 @@ class McpService:
             all_tools: list[BaseTool] = []
 
             for server in servers:
+                # S1 (cu-mcp commission, 2026-10-16): builtin
+                # availability gate. A post-boot kill-switch flip
+                # (e.g. ``COMPUTER_USE_MCP_ENABLED=0``) leaves the
+                # server's ``mcp_servers`` row ACTIVE from the prior
+                # ON boot — without this gate the preload loop
+                # would call ``get_schemas_for_server`` on the stale
+                # row and the cold-discovery path would cold-spawn
+                # the npx subprocess despite the operator opt-out.
+                # The bootstrap path already consults
+                # ``is_available()`` (skip DB row creation), so
+                # adding the gate here closes the post-boot flip
+                # hole. GENERIC for every builtin: resolves the
+                # ``BuiltinServerDefinition`` from the global
+                # registry and calls its ``is_available()``
+                # classmethod; non-builtin (user-added) servers
+                # have no definition → gate is silently bypassed →
+                # legacy behavior preserved. Healthy builtins
+                # (``plane``, ``context7``, ``webfetch``) all
+                # return ``True`` and never trigger the gate log.
+                # Per-loop iteration exception isolation: a bad
+                # ``is_available()`` (e.g. transient import
+                # failure) does NOT abort the loop — we log and
+                # skip the server, mirroring the schema-lookup
+                # failure path right below.
+                try:
+                    if not self._is_builtin_server_available(server.name):
+                        # Diagnostics one-shot log is emitted
+                        # inside the helper; nothing extra here.
+                        continue
+                except Exception as gate_err:
+                    logger.warning(
+                        f"Built-in availability gate raised for "
+                        f"'{server.name}': {gate_err}; "
+                        f"skipping server for this instance"
+                    )
+                    continue
+
                 # get_schemas_for_server is connection-free for pooled
                 # / cached servers; the cold path opens a throwaway
                 # connection that is torn down in `_discover_schemas_cold`.
@@ -1018,6 +1071,100 @@ class McpService:
         # ``getattr`` is defensive against future subclasses that might
         # not override the property.
         return getattr(definition, "tool_name_prefix", None)
+
+    def _is_builtin_server_available(self, server_name: str) -> bool:
+        """Return True when ``server_name`` is safe to preload.
+
+        SHARED SEAM for the cu-mcp commission S1 gate (and every
+        future builtin subprocess-spawning MCP server). The semantics:
+
+          * Server is NOT in the builtin registry (user-added server)
+            → ``True``. The user explicitly opted into this server;
+            no kill-switch opinion is imposed.
+          * Server IS a builtin but ``is_available()`` returns
+            ``True`` (e.g. ``plane`` / ``context7`` / ``webfetch``
+            always-on, or ``computer-use`` with kill-switch ON
+            AND npx resolvable AND no generic disable) → ``True``.
+          * Server IS a builtin and ``is_available()`` returns
+            ``False`` (kill-switch flipped OFF post-boot, npx
+            unresolvable, or generic MCP disable on) → ``False``.
+            The server is skipped for THIS instance (no
+            ``get_schemas_for_server`` call → no cold spawn), and
+            the instance tool cache never sees its tools.
+
+        The per-builtin ``is_available()`` carries its own one-shot
+        log (e.g. plane.py:88-89, computer_use.py:147-171) so the
+        operator sees the precise reason. We add a SECOND
+        one-shot log here, at the gate site, that names the
+        server SKIPPED FOR A LIVE PRELOAD — this is the
+        diagnostics for exactly the post-boot flip state
+        (active row + definition unavailable). One line per
+        process; reset by tests that need to re-exercise the
+        path.
+
+        Args:
+            server_name: The MCP server's name (matches
+                ``McpServer.name`` and ``BuiltinServerDefinition.name``).
+
+        Returns:
+            ``True`` when preload should proceed (the schemas
+            / tools / session path runs unchanged), ``False`` when
+            preload must skip the server entirely.
+        """
+        # Function-local import: same coupling-narrow pattern as
+        # the other ``_get_*`` helpers.
+        from daemon.mcp.builtin_servers import get_registry
+
+        definition = get_registry().get_by_name(server_name)
+        if definition is None:
+            # Non-builtin (user-added server) — no opinion here.
+            return True
+        # Each builtin runs its own AND of availability gates
+        # (kill-switch + generic disable + npx/package check + …);
+        # see ``BuiltinServerDefinition.is_available``.
+        try:
+            available = bool(definition.is_available())
+        except Exception as gate_err:
+            # ``is_available()`` should not raise, but if a future
+            # subclass adds an environment probe that throws we
+            # prefer "skip + log + treat as unavailable" over
+            # crashing the entire preload loop. This is the
+            # IN-HELPER net (catches ``is_available()`` errors
+            # only); the loop-site ``try/except`` at mcp_service.py
+            # ~:776 is a SECOND, INDEPENDENT net that catches
+            # broader failures (helper import errors, registry
+            # lookup failures, etc.). Local catch here keeps the
+            # operator-friendly behavior — the loop continues to
+            # the next server — and the WARNING surfaces the
+            # exact failure for triage.
+            logger.warning(
+                f"_is_builtin_server_available: '{server_name}' gate "
+                f"raised {gate_err}; treating as unavailable"
+            )
+            available = False
+        if available:
+            return True
+        # The prebuiltin's ``is_available()`` already emits its own
+        # one-shot log for the precise reason (kill-switch opt-out,
+        # npx unresolvable, generic MCP disable). At THIS gate we
+        # also emit ONE line per process — diagnostics for the
+        # "active row but definition unavailable" state, which is
+        # the post-boot flip case this entire S1 fix targets.
+        # Without this line, an operator who sees the per-builtin
+        # log has no immediate link to "this is what kept the
+        # server out of NEW instance preloads" — they would need
+        # to grep TWO logs to make that link.
+        global _preload_gate_skip_log_emitted
+        if not _preload_gate_skip_log_emitted:
+            _preload_gate_skip_log_emitted = True
+            logger.info(
+                f"preload_mcp_tools: skipping unavailable builtin "
+                f"'{server_name}' (active row exists but "
+                f"is_available() returned False — no session spawn, "
+                f"no tools surfaced); a subsequent SAME-NAME "
+                f"instance will see the same skip"
+            )
+        return False
 
     def _get_read_only_tools(
         self,
