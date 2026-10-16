@@ -148,6 +148,12 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
 # these — the tool names are only known after the MCP server responds.
 DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
     "plane_",
+    # cu-mcp (computer-use, 2026-10-16): the ``@zavora-ai/computer-use-mcp``
+    # built-in registers its tools under the ``cu_`` prefix (see
+    # ``daemon/mcp/builtin_servers/computer_use.py``). The tools only exist
+    # after the bootstrap layer auto-provisions a DB row + the server starts,
+    # so they cannot be statically enumerated.
+    "cu_",
 })
 
 
@@ -217,6 +223,23 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # carries the tool name (inventory, not the gate); the gate
     # is the privileged-category strip + per-agent allow entry.
     "view-views",
+    # cu-mcp (computer-use, 2026-10-16): ``cu`` is the category for
+    # the ``@zavora-ai/computer-use-mcp`` built-in's prefix-overridden
+    # tools (``cu_click``, ``cu_screenshot``, ...). Computer-use is
+    # a FULL local-control surface when the host grants are present
+    # (Accessibility + Screen Recording on macOS); empty-allow
+    # agents (e.g. ``watcher``) MUST NOT auto-inherit it. Explicit
+    # ``tools.allow: ["cu"]`` is the only access path — currently
+    # granted to ``ari`` and ``leader`` only. Stamping the category
+    # on the MCP tools (see ``daemon/mcp/tool_adapter.py`` —
+    # ``create_lazy_mcp_tools``) is what makes
+    # ``_strip_privileged_category_tools`` actually catch them
+    # when a prefix is used; before the stamp landed, the same
+    # privilege strip was bypassed because ``_tool_category`` was
+    # unset on every MCP tool (``plane_`` tools escape by design
+    # because ``plane`` is NOT in this set; ``cu`` enters because
+    # it is in the privileged set).
+    "cu",
 })
 
 

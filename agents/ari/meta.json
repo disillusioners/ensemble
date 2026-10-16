@@ -30,7 +30,8 @@
       "mission",
       "service",
       "scheduling",
-      "view-views"
+      "view-views",
+      "cu"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },

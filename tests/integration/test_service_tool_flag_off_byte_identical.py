@@ -822,8 +822,18 @@ def test_privileged_category_set_is_pinned() -> None:
             # REWORK 2026-10-07 (M1): view_link is restricted first-release;
             # only ari / leader / designer opt in via tools.allow.
             "view-views",
+            # cu-mcp (2026-10-16): Computer Use MCP prefix-overridden
+            # tools (cu_click, cu_screenshot, ...). Computer-use is
+            # a full local-control surface when the host OS grants
+            # are present; empty-allow agents (watcher, etc.) MUST
+            # NOT auto-inherit. Explicit ``tools.allow: ["cu"]`` on
+            # ari + leader only. Stamped via
+            # ``create_lazy_mcp_tools._tool_category`` from
+            # ``DYNAMIC_TOOL_PREFIXES`` (cu_).
+            "cu",
         }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "
-        f"trio + W4 ens-env + REWORK view-views; got {PRIVILEGED_TOOL_CATEGORIES}"
+        f"trio + W4 ens-env + REWORK view-views + cu-mcp 'cu'; "
+        f"got {PRIVILEGED_TOOL_CATEGORIES}"
     )

@@ -22,6 +22,7 @@ from langchain_core.tools import BaseTool, StructuredTool, ToolException
 
 if TYPE_CHECKING:
     from daemon.mcp.resilience import ResilienceManager
+    from daemon.tools._tool_registry import DYNAMIC_TOOL_PREFIXES, PRIVILEGED_TOOL_CATEGORIES
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,70 @@ def _slugify(name: str) -> str:
     # Remove special characters (keep only alphanumeric and underscores)
     slug = re.sub(r"[^a-z0-9_]", "", slug)
     return slug
+
+
+def _privilege_stamp_category_for_prefix(
+    tool_name_prefix: str | None,
+) -> str | None:
+    """Map a tool-name-prefix override to the privilege stamp category.
+
+    cu-mcp (2026-10-16) pre-existing hole fix: prefix-overridden MCP
+    tools (``plane_``, ``cu_``, ...) bypassed the privilege strip
+    (``_strip_privileged_category_tools``) because no StructuredTool
+    ever carried ``_tool_category`` — only ``@register_tool_category``
+    first-party tools did. This function lets ``create_lazy_mcp_tools``
+    stamp the category on each tool BEFORE the privilege layer runs,
+    so the strip sees the SAME universe of privileged categories
+    regardless of whether the tool came from a first-party decorator
+    or an MCP server.
+
+    Conjunctive rule (the conservative bit):
+
+      * ``tool_name_prefix`` (after stripping the trailing ``_``)
+        must match an entry in ``DYNAMIC_TOOL_PREFIXES``. This keeps
+        the registry authoritative — random prefix overrides don't
+        auto-acquire privileged-category stamps.
+      * AND the resulting category must be in
+        ``PRIVILEGED_TOOL_CATEGORIES``. This makes the stamp only land
+        on tools that are ACTUALLY privileged today; non-privileged
+        overrides (e.g. ``plane_`` whose category ``"plane"`` is
+        intentionally NOT privileged — plane tools are stable +
+        agent-gated via ``mcp_full_access``-free allow-list path
+        rather than the privilege strip) get NO stamp. Zero-regression
+        for plane is the test case that PR'd this contract.
+
+    Standard ``mcp_{slug}_`` prefixes (no override) → ``None`` →
+    no stamp — consistent with the long-standing behavior for
+    context7 / webfetch tools.
+
+    Args:
+        tool_name_prefix: The override passed to
+            ``create_lazy_mcp_tools``. ``None`` means "no override,
+            use the standard ``mcp_{slug}_`` prefix".
+
+    Returns:
+        The category string to stamp on every tool of this prefix
+        override (``"cu"`` for the cu-mcp built-in), or ``None`` when
+        the stamp should not apply.
+    """
+    if tool_name_prefix is None:
+        return None
+    bare_prefix = tool_name_prefix.rstrip("_")
+    if not bare_prefix:
+        return None
+    # Lazy import — the tool registry pulls in langchain/registry
+    # machinery at module load; deferring keeps the import graph
+    # lean and avoids any circular-import edge case (these modules
+    # don't actually cycle today, but this preserves the option).
+    from daemon.tools._tool_registry import (
+        DYNAMIC_TOOL_PREFIXES,
+        PRIVILEGED_TOOL_CATEGORIES,
+    )
+
+    for tracked in sorted(DYNAMIC_TOOL_PREFIXES, key=len, reverse=True):
+        if tracked.rstrip("_") == bare_prefix and bare_prefix in PRIVILEGED_TOOL_CATEGORIES:
+            return bare_prefix
+    return None
 
 
 def mcp_tool_name(server_name: str, tool_name: str) -> str:
@@ -245,6 +310,18 @@ def adapt_mcp_tools(
         prefix = f"mcp_{slugified_server}_"
     description_suffix = f"[MCP:{server_name}]"
 
+    # cu-mcp (2026-10-16): same privilege-stamp rule as the lazy
+    # factory — prefix overrides naming a PRIVILEGED category stamp
+    # ``_tool_category`` on each tool so the privilege strip
+    # (``_strip_privileged_category_tools``) actually catches them.
+    # See ``_privilege_stamp_category_for_prefix`` for the
+    # conjunction (``DYNAMIC_TOOL_PREFIXES`` ∩
+    # ``PRIVILEGED_TOOL_CATEGORIES``) — plane is intentionally NOT
+    # stamped, keeping zero-regression for that surface.
+    privilege_category = _privilege_stamp_category_for_prefix(
+        tool_name_prefix
+    )
+
     adapted_tools: list[BaseTool] = []
 
     for tool in tools:
@@ -263,6 +340,8 @@ def adapt_mcp_tools(
                 update["coroutine"] = timed_coroutine
 
         adapted_tool = tool.model_copy(update=update)
+        if privilege_category is not None:
+            adapted_tool._tool_category = privilege_category  # type: ignore[attr-defined]
         adapted_tools.append(adapted_tool)
         logger.debug(f"Adapted MCP tool: {tool.name} -> {new_name}")
 
@@ -351,6 +430,23 @@ def create_lazy_mcp_tools(
     zero-regression for context7, webfetch, and any other MCP server
     that hasn't opted in.
 
+    Privilege-stamp (cu-mcp, 2026-10-16): when ``tool_name_prefix``
+    names a PRIVILEGED category (configured via
+    ``DYNAMIC_TOOL_PREFIXES`` ∩ ``PRIVILEGED_TOOL_CATEGORIES`` —
+    today: ``cu_`` → ``"cu"``), each created tool receives
+    ``_tool_category`` matching the prefix's bare name. This is what
+    enables ``_strip_privileged_category_tools``
+    (``daemon/tools/instance.py``) to actually strip these tools
+    from empty-allow agents (e.g. ``watcher``). Without the stamp,
+    the strip would silently bypass every prefix-overridden MCP
+    tool, because the strip consults
+    ``getattr(t, "_tool_category", None) in
+    PRIVILEGED_TOOL_CATEGORIES``. Standard ``mcp_{slug}_`` prefixes
+    AND non-privileged prefix overrides (e.g. ``plane_`` whose
+    category ``"plane"`` is intentionally NOT in
+    ``PRIVILEGED_TOOL_CATEGORIES``) get NO stamp — zero-regression
+    for the existing plane surface.
+
     Args:
         server_name: MCP server name (used to build the tool name
             prefix and the description suffix).
@@ -390,6 +486,14 @@ def create_lazy_mcp_tools(
         prefix = f"mcp_{slugified_server}_"
     description_suffix = f"[MCP:{server_name}]"
 
+    # cu-mcp: derive the privilege-stamp category once. None means
+    # "don't stamp" — keeps the legacy behavior for standard MCP
+    # prefixes and for non-privileged prefix overrides (e.g.
+    # ``plane_``: "plane" ∉ PRIVILEGED_TOOL_CATEGORIES).
+    privilege_category = _privilege_stamp_category_for_prefix(
+        tool_name_prefix
+    )
+
     lazy_tools: list[BaseTool] = []
 
     for schema in schemas:
@@ -415,6 +519,17 @@ def create_lazy_mcp_tools(
             coroutine=coroutine,
             response_format="content_and_artifact",
         )
+        # cu-mcp (2026-10-16): stamp `_tool_category` on the created
+        # tool when the prefix override names a PRIVILEGED category.
+        # ``_strip_privileged_category_tools`` consults
+        # ``getattr(t, '_tool_category', None)`` — without this stamp,
+        # prefix-overridden MCP tools bypass the privilege strip
+        # entirely. Standard MCP prefixes (``mcp_{slug}_``) and
+        # non-privileged overrides (e.g. ``plane_``: "plane" ∉
+        # PRIVILEGED_TOOL_CATEGORIES) leave privilege_category=None
+        # and skip the stamp — zero-regression for the plane surface.
+        if privilege_category is not None:
+            tool._tool_category = privilege_category  # type: ignore[attr-defined]
         lazy_tools.append(tool)
 
     return lazy_tools
