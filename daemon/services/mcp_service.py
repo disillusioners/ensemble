@@ -1127,10 +1127,16 @@ class McpService:
         except Exception as gate_err:
             # ``is_available()`` should not raise, but if a future
             # subclass adds an environment probe that throws we
-            # prefer "skip + log" over crashing the entire preload
-            # loop. Re-raise at the loop site ONLY when the call
-            # is genuinely broken (developer error) — local catch
-            # preserves the operator-friendly behavior.
+            # prefer "skip + log + treat as unavailable" over
+            # crashing the entire preload loop. This is the
+            # IN-HELPER net (catches ``is_available()`` errors
+            # only); the loop-site ``try/except`` at mcp_service.py
+            # ~:776 is a SECOND, INDEPENDENT net that catches
+            # broader failures (helper import errors, registry
+            # lookup failures, etc.). Local catch here keeps the
+            # operator-friendly behavior — the loop continues to
+            # the next server — and the WARNING surfaces the
+            # exact failure for triage.
             logger.warning(
                 f"_is_builtin_server_available: '{server_name}' gate "
                 f"raised {gate_err}; treating as unavailable"
