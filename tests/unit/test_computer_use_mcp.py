@@ -881,26 +881,56 @@ class TestEmptyAllowAgentLeak:
         the explicit entry. The strip still catches OTHER
         privileged categories (``system_upgrade``, ``ens-db``,
         ``view-views``) — but ``cu`` is whitelisted.
+
+        BEHAVIORAL PIN (reviewer should-fix 2026-10-16):
+        ``resolve_tool_filter(allow=["cu"], all_tool_names={cu_*,
+        plane_*, mcp_*})`` MUST grant the cu_* tools. If the
+        dynamic category population regresses — e.g. the
+        ``DYNAMIC_TOOL_PREFIXES`` expansion loop stops enumerating
+        ``cu_`` into the ``"cu"`` key, or the ``"cu"`` row is
+        removed from CATEGORY_MODULES so allow-list resolution
+        no longer maps the entry to a category key — this test
+        fails. Today nothing would: the loop is in place and
+        the row was added by the same review pass. The test
+        pins the integration, not just the strip helper.
         """
-        from daemon.tools._tool_registry import PRIVILEGED_TOOL_CATEGORIES
-        from daemon.tools.instance import (
-            _strip_privileged_category_tools,
+        from daemon.tools.instance import resolve_tool_filter
+
+        all_tool_names: set[str] = {
+            # cu tools (the cu-mcp built-in's prefix-overridden set)
+            "cu_click", "cu_screenshot", "cu_doctor", "cu_type", "cu_key",
+            # plane tools (prefix-overridden — also from DYNAMIC_TOOL_PREFIXES)
+            "plane_list_issues", "plane_create_issue",
+            # standard MCP tools (the incumbent mcp_<server>_<tool> lane)
+            "mcp_context7_get_docs", "mcp_webfetch_fetch",
+        }
+
+        allowed = resolve_tool_filter(
+            allow=["cu"],
+            deny=None,
+            tool_categories={"mcp": ["mcp_context7_get_docs", "mcp_webfetch_fetch"]},
+            all_tool_names=all_tool_names,
         )
 
-        cu_tool = self._make_cu_tool()
-        # Simulate the per-agent allow-list filter having selected ``cu_tool``.
-        # The strip checks category-in-privileged, independent of the allow list;
-        # but the ALLOW list is a separate gate earlier in the pipeline. We're
-        # only testing the strip here. The strip itself will remove cu_tool
-        # regardless of the allow list — that's correct: the strip removes
-        # default-granted privileged tools; explicit allow happens at the
-        # allow-list resolution stage, BEFORE the strip is consulted in
-        # the return-all paths.
-        # This test pins the strip behavior, not the integration.
-        assert "cu" in PRIVILEGED_TOOL_CATEGORIES
-        survivors = _strip_privileged_category_tools([cu_tool])
-        assert survivors == [], (
-            "strip removes cu_* tools from the default-grant universe"
+        assert allowed is not None, (
+            "resolve_tool_filter with allow=['cu'] must return a concrete "
+            "set, not None (None would mean 'all tools allowed' which "
+            "skips the cu-gating we are pinning here)"
+        )
+        # The cu_* tools MUST be granted.
+        assert {"cu_click", "cu_screenshot", "cu_doctor", "cu_type", "cu_key"} <= allowed, (
+            f"cu_* tools MUST be in the allowed set when allow=['cu']; "
+            f"got {sorted(allowed)}"
+        )
+        # The mcp_* and plane_* tools MUST NOT be granted (the cu
+        # allow-list entry is category-scoped, not 'all MCP').
+        assert "mcp_context7_get_docs" not in allowed, (
+            "mcp_* tools must NOT be granted via allow=['cu'] — "
+            "the cu lane is prefix-scoped, not generic"
+        )
+        assert "plane_list_issues" not in allowed, (
+            "plane_* tools must NOT be granted via allow=['cu'] — "
+            "the cu lane is prefix-scoped, not generic"
         )
 
     def test_mcp_only_allow_does_not_grant_cu_tools(self):
@@ -912,27 +942,60 @@ class TestEmptyAllowAgentLeak:
         allow-list therefore sees ZERO cu tools — the explicit
         ``["cu"]`` entry is the ONLY access path. (The cu allow
         entry on ari/leader is what makes their access work.)
+
+        BEHAVIORAL PIN (reviewer should-fix 2026-10-16):
+        ``resolve_tool_filter(allow=["mcp"], all_tool_names={cu_*,
+        plane_*, mcp_*})`` MUST grant the mcp_* tools AND must
+        NOT grant cu_* / plane_*. The mcp lane is the incumbent
+        ``mcp_<server>_<tool>`` namespace; a future refactor that
+        swept ``DYNAMIC_TOOL_PREFIXES`` into the mcp category
+        would silently grant computer control via a generic
+        category entry — this test catches that regression.
         """
-        from daemon.tools._tool_registry import (
-            PRIVILEGED_TOOL_CATEGORIES,
+        from daemon.tools.instance import resolve_tool_filter
+
+        all_tool_names: set[str] = {
+            # cu tools — MUST NOT appear in the result
+            "cu_click", "cu_screenshot", "cu_doctor", "cu_type", "cu_key",
+            # plane tools — MUST NOT appear in the result
+            "plane_list_issues", "plane_create_issue",
+            # standard MCP tools — MUST appear in the result
+            "mcp_context7_get_docs", "mcp_webfetch_fetch",
+        }
+
+        allowed = resolve_tool_filter(
+            allow=["mcp"],
+            deny=None,
+            tool_categories={"mcp": ["mcp_context7_get_docs", "mcp_webfetch_fetch"]},
+            all_tool_names=all_tool_names,
         )
 
-        # ``is_mcp_tool`` is the legacy category-detect helper for
-        # standard ``mcp_{slug}_`` names. For prefix-overridden cu
-        # tools, the helper returns False (zero-regression mirror of
-        # ``TestComputerUsePrefixOverride.test_is_mcp_tool_false_for_cu_tools``):
-        assert is_mcp_tool("cu_screenshot") is False
-
-        # The actual gate the per-agent resolver would consult is
-        # the same: cu tools live under the ``cu`` category in
-        # PRIVILEGED_TOOL_CATEGORIES. The "mcp" generic allow-list
-        # entry does not enumerate into that set.
-        assert "cu" in PRIVILEGED_TOOL_CATEGORIES
-        assert "mcp" not in PRIVILEGED_TOOL_CATEGORIES, (
-            "GUARD: if 'mcp' ever lands in PRIVILEGED_TOOL_CATEGORIES, "
-            "this test no longer reflects the gate contract — the "
-            "compute here must be re-derived."
+        assert allowed is not None, (
+            "resolve_tool_filter with allow=['mcp'] must return a concrete "
+            "set, not None (None would skip the mcp-only lane we're pinning)"
         )
+        # The mcp_* tools MUST be granted (the mcp category is what
+        # the agent asked for).
+        assert {"mcp_context7_get_docs", "mcp_webfetch_fetch"} <= allowed, (
+            f"mcp_* tools MUST be in the allowed set when allow=['mcp']; "
+            f"got {sorted(allowed)}"
+        )
+        # The cu_* tools MUST NOT be granted — the mcp category lane
+        # is for the standard mcp_<server>_<tool> namespace, not the
+        # cu_/plane_ prefix-overridden sets.
+        for cu_name in ("cu_click", "cu_screenshot", "cu_doctor", "cu_type", "cu_key"):
+            assert cu_name not in allowed, (
+                f"{cu_name!r} MUST NOT be granted via allow=['mcp']; "
+                "the mcp lane must never sweep DYNAMIC_TOOL_PREFIXES. "
+                "If this assertion fires, a refactor silently granted "
+                "computer control via a generic category — revert immediately."
+            )
+        # The plane_* tools MUST NOT be granted for the same reason.
+        for plane_name in ("plane_list_issues", "plane_create_issue"):
+            assert plane_name not in allowed, (
+                f"{plane_name!r} MUST NOT be granted via allow=['mcp']; "
+                "the mcp lane is for the mcp_<server>_<tool> shape only"
+            )
 
 
 # ---------------------------------------------------------------------------
