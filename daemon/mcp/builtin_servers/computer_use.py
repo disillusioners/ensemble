@@ -35,7 +35,7 @@ the bootstrap-time copy and any runtime override agree.
 
 Availability / kill-switches
 ----------------------------
-``is_available()`` is a 4-gate AND:
+``is_available()`` is a 3-gate AND:
 
   1. ``COMPUTER_USE_MCP_ENABLED`` — primary kill-switch, default ON.
      Falsy values ``0`` / ``false`` / ``no`` / ``off`` (case-insensitive,
@@ -47,7 +47,6 @@ Availability / kill-switches
      ``shutil.which("npx")`` on PATH. When neither resolves, no
      subprocess can ever spawn and registration would silently
      degrade — we refuse up-front instead.
-  4. Schema version 1 — the only version this binary has ever emitted.
 
 When any gate fails, ``is_available()`` returns ``False`` and the
 bootstrap / warmup layers skip the server entirely (no DB record, no
@@ -217,14 +216,19 @@ class ComputerUseServerDefinition(BuiltinServerDefinition):
 
     @classmethod
     def is_available(cls) -> bool:
-        """4-gate AND: kill-switch + generic disable + npx + schema version.
+        """3-gate AND: kill-switch + generic disable + npx.
 
         The bootstrap / warmup layers skip the server entirely on a
         ``False`` return (no DB record, no connection attempt). The
-        two lazy one-shot logs are emitted ONCE per process so a
-        operator scanning the boot anchor sees the precise reason
-        (kill-switch opt-out vs. missing binary vs. generic MCP
-        disable) instead of the generic "skipped" message.
+        ``preload_mcp_tools`` loop in ``daemon/services/mcp_service.py``
+        ALSO consults this method for each active builtin — a post-boot
+        kill-switch flip with an active row from a prior ON boot is
+        filtered at preload time before any cold-spawn attempt (cu-mcp
+        commission S1, 2026-10-16). The two lazy one-shot logs are
+        emitted ONCE per process so an operator scanning the boot
+        anchor sees the precise reason (kill-switch opt-out vs.
+        missing binary vs. generic MCP disable) instead of the
+        generic "skipped" message.
         """
         if not _mcp_kill_switch_enabled():
             _log_kill_switch_once()
