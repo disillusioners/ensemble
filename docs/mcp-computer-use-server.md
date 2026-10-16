@@ -83,6 +83,21 @@ re-check the upstream `NATIVE-PACKAGES.md` semantics on any
 are usually wire-compatible but still warrant a smoke pass on
 the host. We are pinned to 7.6.1 today.
 
+The `/mcp-servers/test-connection` UI probe (D7 guard at
+`daemon/routers/mcp_servers.py`) detects the cu-mcp config by
+matching the EXACT pinned package arg (e.g. `@zavora-ai/computer-use-mcp@7.6.1`)
+in `args`, not by a prefix substring or by another structural
+marker. The guard re-derives its expected pin from the SAME
+`CU_NPX_ARGS` constant in this module's `__init__` (imported by
+the router at line 137), so a pin bump is a single-file edit
+to this module — the guard silently tracks it. The reason for
+the exact-match (rather than startswith / regex) is the failure
+mode: a future version with a NEWER pin (e.g. `@7.7.0`) MUST
+NOT match the current guard, otherwise a future pin would
+silently bypass the kill-switch without the guard being
+updated. With the shared constant, that class of drift is
+structurally impossible — a bump updates both seams atomically.
+
 ## Universal packaging (all OSes)
 
 The 7.6.1 universal npm tarball bundles **all six platform
