@@ -119,6 +119,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -130,6 +131,214 @@ from daemon.constants import INSTANCE_STATUS_PAUSED, TERMINAL_INSTANCE_STATUSES
 from daemon.services.pool_orchestrator import safe_notify_all_pools
 
 logger = logging.getLogger(__name__)
+
+
+# ─── agent-secrets P2 (design §1d) — pre-invoke resolution seam ──────────────
+
+def _get_process_secret_service():
+    """Return the process-wide :class:`SecretService` or ``None``.
+
+    agent-secrets P2 — mirrors the bash / proc seam discovery
+    (``get_process_scrubber()`` pattern): the manager constructs ONE
+    SecretService per process and its ``__init__`` self-registers
+    with the scrub module; this seam reads it LAZILY at call time.
+    No import-time side effects (design §0) — ``None`` service +
+    marker-shaped value raises the typed
+    ``secret_resolver_store_unavailable`` envelope (fail-closed).
+    """
+    try:
+        from daemon.services.secret_persistence_scrub import (
+            get_process_scrubber,
+        )
+
+        scrubber = get_process_scrubber()
+    except Exception:  # pragma: no cover — defensive
+        logger.debug(
+            "long_tool_nudge: secret-scrub registry unreachable; "
+            "pre-invoke resolution falls back to fail-closed",
+            exc_info=True,
+        )
+        return None
+    if scrubber is None:
+        return None
+    return getattr(scrubber, "_service", None)
+
+
+def _resolve_secret_typed_args_for_batch(
+    state: Any,
+    messages: Any,
+    last_ai: Any,
+    tool_calls: list,
+    instance_id: str,
+):
+    """Resolve declared ``secret_typed_args`` fields PRE-invoke.
+
+    agent-secrets P2 (design §1d, p2-architecture-recommendation.md).
+    For each ``tool_call`` whose tool is declared in
+    :data:`daemon.tools._auth.SECRET_TYPED_ARGS`, the DECLARED fields
+    carrying marker-shaped values are resolved via
+    :func:`daemon.services.secret_resolver.resolve_marker` (surface
+    ``"tool_param"``) and written into the INVOKE-BOUND ARGS COPY —
+    the AIMessage's ORIGINAL ``tool_calls`` keep the MARKER (live
+    args intact per §2.3; S2 scrubs the persisted copy later, and
+    markers are safe by construction per §2.4).
+
+    CRITICAL COMPOSITION (commission hard constraint): the S1
+    results-side scrub lives in :func:`wrapped_tools_node`
+    POST-execution (landed in a7a61cfe9/475f983f4). This
+    pre-invoke pass runs BEFORE ``bare.ainvoke`` and does not touch
+    the S1 wiring, the cancel-immunity/finally-stamp ordering, or
+    the attest-hook guard pattern. Sequence: resolve declared args
+    → invoke → existing S1 scrub of results.
+
+    Failure semantics (design §1d): a failing resolution produces a
+    typed envelope ``ToolMessage`` (``status="error"``) for THAT
+    tool_call and SKIPS it from the invoke batch (per-call error
+    semantics — the existing ToolNode ``handle_tool_errors=True``
+    pattern, applied pre-invoke). Other tool_calls in the same batch
+    still run. NOT global — opt-in only (undeclared tools = zero
+    change, zero measurable latency; design §0).
+
+    Returns:
+        ``(state_for_invoke, error_tool_messages)`` — the state
+        (possibly modified) to pass to ``bare.ainvoke``, plus the
+        synthetic error ToolMessages for failing calls (empty when
+        every declared resolution succeeded or no tool was
+        declared).
+    """
+    # Lazy import — matches the function-level import discipline the
+    # wrapper already uses for ``langgraph.prebuilt.ToolNode`` (mock-
+    # eviction safety + zero import-time side effects; design §0).
+    from daemon.tools._auth import SECRET_TYPED_ARGS
+    from daemon.services.secret_resolver import resolve_marker
+    from daemon.services.secret_service import (
+        ENS_SECRET_MARKER_PREFIX,
+        SecretMarkerResolutionError,
+    )
+
+    if not isinstance(state, dict):
+        # Degenerate state (the wrapper treats non-dict as
+        # pass-through already) — nothing to rewrite.
+        return state, []
+
+    needs_resolution = False
+    for tc in tool_calls:
+        tc_name = (
+            tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+        )
+        if tc_name in SECRET_TYPED_ARGS:
+            needs_resolution = True
+            break
+    if not needs_resolution:
+        # Fast path — no declared tool in this batch: byte-identical
+        # state, no synthetic errors, zero measurable latency (§0).
+        return state, []
+
+    new_messages = list(messages or [])
+    new_ai = last_ai.model_copy(deep=True) if last_ai is not None else None
+    new_tool_calls: list = []
+    error_tool_messages: list = []
+
+    for tc in tool_calls:
+        is_dict = isinstance(tc, dict)
+        tc_name = tc.get("name") if is_dict else getattr(tc, "name", "")
+        tc_id = tc.get("id") if is_dict else getattr(tc, "id", None)
+        tc_args = tc.get("args") if is_dict else getattr(tc, "args", {})
+        declared = SECRET_TYPED_ARGS.get(tc_name, frozenset())
+
+        if not declared or not isinstance(tc_args, dict):
+            new_tool_calls.append(tc)
+            continue
+
+        resolved_args = dict(tc_args)
+        failure_exc: Optional[Exception] = None
+        for field in declared:
+            if field not in resolved_args:
+                continue
+            value = resolved_args[field]
+            if not isinstance(value, str):
+                continue
+            if not value.startswith(ENS_SECRET_MARKER_PREFIX):
+                # Plaintext passes through byte-identical (§0 fast
+                # path; the resolver would no-op anyway — this skips
+                # even the function call).
+                continue
+            try:
+                resolved_args[field] = resolve_marker(
+                    value,
+                    secret_service=_get_process_secret_service(),
+                    actor=instance_id or "<tool_param>",
+                    surface="tool_param",
+                )
+            except SecretMarkerResolutionError as exc:
+                failure_exc = exc
+                break
+
+        if failure_exc is not None:
+            # Typed envelope ToolMessage (design §1d) — per-call
+            # error semantics; the failing call is SKIPPED from the
+            # invoke (child NOT spawned / tool NOT invoked).
+            from langchain_core.messages import ToolMessage
+
+            error_tool_messages.append(
+                ToolMessage(
+                    content=json.dumps(
+                        {
+                            "ok": False,
+                            "code": getattr(
+                                failure_exc,
+                                "code",
+                                "secret_resolver_store_unavailable",
+                            ),
+                            "surface": getattr(
+                                failure_exc, "surface", "tool_param"
+                            ),
+                            "message": str(failure_exc),
+                        }
+                    ),
+                    name=tc_name or "",
+                    tool_call_id=tc_id or "",
+                    status="error",
+                )
+            )
+            continue
+
+        # Successful resolution — write the plaintext into the
+        # INVOKE-BOUND COPY (the AIMessage's original tool_calls in
+        # the caller's state stay untouched).
+        new_tc = dict(tc) if is_dict else tc
+        if is_dict:
+            new_tc["args"] = resolved_args
+        else:
+            try:
+                new_tc.args = resolved_args
+            except Exception:  # pragma: no cover — defensive
+                new_tool_calls.append(tc)
+                continue
+        new_tool_calls.append(new_tc)
+
+    if new_ai is not None:
+        # Replace the AIMessage's tool_calls with the resolved copy
+        # (the caller's original last_ai object is untouched —
+        # model_copy(deep=True) above).
+        try:
+            new_ai.tool_calls = new_tool_calls
+        except Exception:  # pragma: no cover — defensive
+            logger.exception(
+                "[LongToolNudge] P2 pre-invoke tool_calls rewrite "
+                "failed; falling back to unmodified state"
+            )
+            return state, []
+        for i, m in enumerate(new_messages):
+            if m is last_ai:
+                new_messages[i] = new_ai
+                break
+        state_for_invoke = dict(state)
+        state_for_invoke["messages"] = new_messages
+        return state_for_invoke, error_tool_messages
+
+    return state, error_tool_messages
+
 
 # ─── Canonical constants (single home — synthesis AD-30) ─────────────────────
 
@@ -693,8 +902,38 @@ def wrapped_tools_node(
         # pause-cancel (graph_task.cancel()) and the task-cap TimeoutError
         # both raise through this node (Python guarantees finally on
         # BaseException propagation).
+        # agent-secrets P2 (design §1d) — PRE-INVOKE resolution: for
+        # tool_calls whose tool declares ``secret_typed_args``
+        # (``daemon/tools/_auth.SECRET_TYPED_ARGS``), copy the declared
+        # fields, resolve markers via ``resolve_marker(..., surface=
+        # "tool_param")``, write back into the INVOKE-BOUND ARGS COPY
+        # (the AIMessage's original tool_calls keep the MARKER — live
+        # args intact per §2.3), then invoke. Synthetic error
+        # ToolMessages for failing calls are MERGED with the
+        # bare.ainvoke result below; the failing tool_call is SKIPPED
+        # (child NOT spawned / tool NOT invoked — fail-closed §1d).
+        # The S1 results-side scrub (post-execution, below) is
+        # UNTOUCHED — sequence: resolve declared args → invoke →
+        # existing S1 scrub of results.
         try:
-            result = await bare.ainvoke(state, config)
+            state_for_invoke, pre_invoke_errors = (
+                _resolve_secret_typed_args_for_batch(
+                    state, messages, last_ai, tool_calls, instance_id
+                )
+            )
+        except Exception:  # noqa: BLE001 — defense-in-depth; the seam MUST never break the tools node
+            # Mirror of the attest-hook guard above: a failed
+            # pre-invoke resolution means the tool runs with its
+            # ORIGINAL args (markers pass through to the tool body —
+            # bash handles them at spawn time), never a broken turn.
+            logger.exception(
+                "[LongToolNudge] P2 pre-invoke secret-args resolution "
+                "dispatch failed; invoking with original args"
+            )
+            state_for_invoke, pre_invoke_errors = state, []
+
+        try:
+            result = await bare.ainvoke(state_for_invoke, config)
         finally:
             # A5 (council fix-cycle 1) — clear every stamp in ONE
             # atomic lock acquisition (``registry.clear_many``),
@@ -794,6 +1033,36 @@ def wrapped_tools_node(
         # both guarded — defense-in-depth must not break the tools
         # node (mirror of the attest-hook guard above; a failed
         # import means an unscrubbed result, never a broken turn).
+
+        # (5.a) agent-secrets P2 (design §1d) — merge the synthetic
+        # pre-invoke error ToolMessages with the bare.ainvoke result.
+        # The failing tool_call was SKIPPED from the invoke, so the
+        # result does NOT carry a ToolMessage for its id — the merge
+        # restores the batch cardinality the router/loop-repair
+        # expects (one ToolMessage per tool_call id).
+        if pre_invoke_errors:
+            try:
+                if isinstance(result, dict) and isinstance(
+                    result.get("messages"), list
+                ):
+                    result["messages"] = [
+                        *result["messages"],
+                        *pre_invoke_errors,
+                    ]
+                elif isinstance(result, list):
+                    result = [*result, *pre_invoke_errors]
+                else:
+                    logger.warning(
+                        "[LongToolNudge] P2 pre-invoke error merge: "
+                        "unrecognized bare.ainvoke result shape "
+                        "(type=%s); error envelopes dropped",
+                        type(result).__name__,
+                    )
+            except Exception:  # noqa: BLE001 — defense-in-depth
+                logger.exception(
+                    "[LongToolNudge] P2 pre-invoke error merge failed"
+                )
+
         try:
             from daemon.services.secret_persistence_scrub import (
                 scrub_tool_results_inplace,

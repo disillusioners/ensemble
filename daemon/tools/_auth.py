@@ -50,6 +50,37 @@ TOOL_REQUIRED_AGENTS: dict[str, list[str]] = {
     "design": ["image-comparator"],
 }
 
+# agent-secrets P2 (design §1d, p2-architecture-recommendation):
+# Tool name → frozenset of LLM-visible argument FIELD NAMES that MAY
+# carry ``__ENS_SECRET__<uuid4>__`` markers. This is the opt-in
+# registration slot the ``wrapped_tools_node`` pre-invoke seam reads
+# (``daemon/services/long_tool_nudge.py``): a declared field is
+# resolved via ``resolve_marker(..., surface="tool_param")`` into the
+# INVOKE-BOUND args copy BEFORE ``bare.ainvoke`` — the AIMessage's
+# original tool_calls keep the MARKER (live args intact per §2.3;
+# S2 scrubs the persisted copy later, markers are safe by
+# construction per §2.4).
+#
+# Undeclared tools = ZERO change (the pre-invoke hook is a no-op when
+# the tool name is absent from this map — the design §1d NOT-global
+# ruling: no blanket wrapper over every tool). A new secret-typed
+# tool adds ONE row here; no new tool category is minted (design
+# §6: ``secret_typed_args`` is a registration slot, not a category —
+# no triple-pin updates).
+#
+# Key choice — ``"bash"`` carries ``{"env"}`` (design §1a): the bash
+# tool's ``env`` overlay is the canonical LLM-authored marker
+# carrier. The bash tool ALSO runs its own spawn-time resolution
+# (defense-in-depth §1a); the wrapped_tools_node pass means the
+# spawn-time call sees plaintext (already resolved) — the spawn-time
+# call short-circuits on non-marker values (resolver §0 fast path).
+# ``proc_run`` carries NO entry here: its overlay is
+# operator-injected (``process_env_overlay`` param on
+# ``_build_child_env``, design §1b) — NOT an LLM-visible argument.
+SECRET_TYPED_ARGS: dict[str, frozenset[str]] = {
+    "bash": frozenset({"env"}),
+}
+
 
 def _check_team_membership(
     caller_agent_id: str,

@@ -25,6 +25,45 @@ from daemon.mcp.tool_adapter import _slugify, adapt_mcp_tools
 # resolver so pooled connections see plaintext (never ``__KMS_REF__…__``)
 # in the subprocess env. resolve_env is idempotent for non-marker values.
 from daemon.services.kms_resolver import resolve_env
+# agent-secrets P2 (design §1c) — LITERAL composition:
+# ``resolve_secret_markers(resolve_env(config.env))``. KMS-Lite runs
+# FIRST (the pre-existing seam), agent-secrets markers resolve on the
+# KMS-resolved dict (marker shapes are disjoint — the composition is
+# order-stable). Spawn-point resolution ONLY: ``build_pooled_stdio_config``
+# is DO-NOT-TOUCH (R4 — resolving there would persist plaintext into
+# DB config; see p2-architecture-recommendation.md §1c). Surface
+# ``"mcp_spawn"`` (envelope + audit context — the two forms are
+# byte-identical for this seam).
+from daemon.services.secret_resolver import resolve_secret_markers
+
+
+def _get_process_secret_service():
+    """Return the process-wide :class:`SecretService` or ``None``.
+
+    agent-secrets P2 (design §1c) — mirrors the bash / proc seam
+    discovery (``get_process_scrubber()`` pattern): the manager
+    constructs ONE SecretService per process and its ``__init__``
+    self-registers with the scrub module; this seam reads it LAZILY
+    at call time. No import-time side effects (design §0) — ``None``
+    service + marker-shaped value raises the typed
+    ``secret_resolver_store_unavailable`` envelope (fail-closed).
+    """
+    try:
+        from daemon.services.secret_persistence_scrub import (
+            get_process_scrubber,
+        )
+
+        scrubber = get_process_scrubber()
+    except Exception:  # pragma: no cover — defensive
+        logger.debug(
+            "mcp.warmup_pool: secret-scrub registry unreachable; "
+            "spawn-time env marker resolution falls back to fail-closed",
+            exc_info=True,
+        )
+        return None
+    if scrubber is None:
+        return None
+    return getattr(scrubber, "_service", None)
 
 logger = logging.getLogger(__name__)
 
@@ -207,10 +246,21 @@ class McpWarmupPool:
             Exception: On connection failure (after cleanup)
         """
         config = self._configs[server_name]
+        # agent-secrets P2 (design §1c) — LITERAL composition:
+        # ``resolve_secret_markers(resolve_env(config.env))``. Stored
+        # config NEVER holds resolved values (R1); the resolution
+        # happens at the SPAWN POINT, mirroring KMS-Lite. A failing
+        # marker (missing id, malformed, DB down) raises the typed
+        # envelope BEFORE the subprocess spawns — the server does NOT
+        # start with literal markers or partial env (fail-closed).
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,
-            env=resolve_env(config.env),
+            env=resolve_secret_markers(
+                resolve_env(config.env),
+                secret_service=_get_process_secret_service(),
+                surface="mcp_spawn",
+            ),
         )
         streams_cm = TaskScopedStdioClient(server_params)
         read_stream = write_stream = None
