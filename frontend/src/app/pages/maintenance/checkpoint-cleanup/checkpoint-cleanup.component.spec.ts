@@ -675,12 +675,19 @@ class TestableCheckpointCleanupComponent {
     return this.canDryRun() && !this.isMaintenanceDisabled() && !this.isRunInFlight();
   }
 
-  /** Step 2 → Step 3 gate (spec §2.4). */
+  /**
+   * Step 2 → Step 3 gate (spec §2.4) — vacuum-ungate 2026-10-17:
+   * the zero-reclaimable condition no longer blocks progression;
+   * VACUUM FULL still rewrites/compacts even with no prune-eligible
+   * rows. Gating is now just "fresh dry-run exists AND not in
+   * flight". The destructive override surfaces at step 3 (vacuum_full
+   * checkbox + confirm dialog).
+   */
   canContinueFromStep2(): boolean {
     const dry = this.lastDryRun();
     if (!dry) return false;
     if (this.dryRunning() || this.executing() || this.isRunInFlight()) return false;
-    return (dry.would_delete_count ?? 0) > 0;
+    return true;
   }
 
   /** Step 3 action gate (spec §2.5). */
@@ -2628,7 +2635,7 @@ describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
   });
 
   describe('step gating — canContinueFromStep2 (spec §2.4)', () => {
-    it('is true when lastDryRun exists with would_delete_count > 0 AND not in flight', () => {
+    it('is true when lastDryRun exists AND not in flight', () => {
       service.lastDryRun.set(DRY_RUN);
       service.canDryRun.set(true);
       service.isRunInFlight.set(false);
@@ -2640,13 +2647,43 @@ describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
       expect(component.canContinueFromStep2()).toBe(false);
     });
 
-    it('is false when dry-run reports would_delete_count == 0', () => {
+    // vacuum-ungate 2026-10-17 — the zero-reclaimable condition no
+    // longer gates progression; VACUUM FULL still rewrites/compacts
+    // tables even with zero prune-eligible rows, so the operator
+    // must always be able to advance to confirmation.
+    it('is true when dry-run reports would_delete_count == 0 (vacuum-ungate, 2026-10-17)', () => {
       const zero: CheckpointCleanupDryRun = {
         ...DRY_RUN,
         would_delete_count: 0,
+        would_delete: { ...DRY_RUN.would_delete, blobs: 0, bytes: 0 },
+        would_free_bytes: 0,
       };
       service.lastDryRun.set(zero);
-      expect(component.canContinueFromStep2()).toBe(false);
+      service.canDryRun.set(true);
+      service.isRunInFlight.set(false);
+      component.dryRunning.set(false);
+      component.executing.set(false);
+      expect(component.canContinueFromStep2()).toBe(true);
+    });
+
+    it('is true on mixed projections: zero count with non-zero nested blobs/bytes, and non-zero count with zero nested (vacuum-ungate edge, 2026-10-17)', () => {
+      service.lastDryRun.set({
+        ...DRY_RUN,
+        would_delete_count: 0,
+        would_delete: { ...DRY_RUN.would_delete, blobs: 4, bytes: 268435456 },
+        would_free_bytes: 268435456,
+      });
+      service.isRunInFlight.set(false);
+      component.dryRunning.set(false);
+      component.executing.set(false);
+      expect(component.canContinueFromStep2()).toBe(true);
+      service.lastDryRun.set({
+        ...DRY_RUN,
+        would_delete_count: 4,
+        would_delete: { ...DRY_RUN.would_delete, blobs: 0, bytes: 0 },
+        would_free_bytes: 0,
+      });
+      expect(component.canContinueFromStep2()).toBe(true);
     });
 
     it('is false during dry-run / execute / isRunInFlight (AC-16)', () => {

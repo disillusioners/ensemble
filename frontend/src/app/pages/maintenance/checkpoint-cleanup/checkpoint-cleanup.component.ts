@@ -352,11 +352,14 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Step 2 → Step 3. Gated on a fresh dry-run that promises something
-   * to delete. The spec's "OR explicit operator override" arm is
-   * satisfied by `dry.would_delete_count > 0` OR a successful prior
-   * execute (the run-again banner path); for the wizard gating path
-   * we use the strict arm — the banner already offers the override.
+   * Step 2 → Step 3. Gated on a fresh dry-run that has completed
+   * (the freshness window itself is enforced by the BE echo gate at
+   * execute time). The "nothing to delete" condition is NOT a gate:
+   * VACUUM FULL still rewrites/compacts tables and returns space
+   * even with zero prune-eligible rows, so the operator must always
+   * be able to advance to the confirmation step. The "explicit
+   * operator override" arm is satisfied by the destructive fields
+   * themselves (vacuum_full checkbox + confirm dialog at step 3).
    */
   canContinueFromStep2(): boolean {
     const dry = this.lastDryRun();
@@ -366,7 +369,7 @@ export class CheckpointCleanupComponent implements OnInit, OnDestroy {
     if (this.dryRunning() || this.executing() || this.isRunInFlight()) {
       return false;
     }
-    return (dry.would_delete_count ?? 0) > 0;
+    return true;
   }
 
   /** Step 3 action — gated on dry-run AND not already executing / in-flight. */

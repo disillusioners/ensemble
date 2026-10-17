@@ -283,10 +283,15 @@ async function advanceToStep3(page: Page) {
   // the FOOTER Continue button (header clicks are inert under the
   // `pointer-events: none` fence on `.mat-step-header` — see
   // component.scss). The footer Continue is gated on
-  // `canContinueFromStep2` (would_delete_count > 0 AND !dryRunning
-  // AND !executing AND !in_flight) which the test exercises via
-  // DRY_RUN_FIXTURE. Footer is the only sanctioned nav path
-  // (round-3 spec).
+  // `canContinueFromStep2` (!dryRunning AND !executing AND !in_flight
+  // AND a dry-run on record). The former `would_delete_count > 0`
+  // condition was REMOVED by vacuum-ungate (31bedca78, 2026-10-17):
+  // zero-reclaimable dry runs no longer block Step 3, since VACUUM
+  // FULL still rewrites/compacts with nothing prune-eligible. This
+  // spec's legs exercise the non-zero DRY_RUN_FIXTURE path; the
+  // zero-count progression is pinned by
+  // maintenance-vacuum-ungate-zero.spec.ts (w8/w9). Footer is the
+  // only sanctioned nav path (round-3 spec).
   await page.locator('[data-testid="ck-continue-btn"]').first().click();
   await page.locator('[data-testid="ck-execute-btn"]').waitFor({ state: 'visible', timeout: 5000 });
 }
