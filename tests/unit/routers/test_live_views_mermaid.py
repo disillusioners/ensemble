@@ -31,7 +31,9 @@ Mirrors the TestClient + stub service pattern in
 from __future__ import annotations
 
 import hashlib
+import os
 import pathlib
+from urllib.parse import quote
 
 import pytest
 from fastapi import FastAPI
@@ -764,3 +766,473 @@ class TestExtensionAllowlistForMermaid:
         )
         assert resp.status_code == 404
         assert resp.json() == {"error": "view not found"}
+
+# ===========================================================================
+# Group 6 — Fix-pack W2+W3: ETag / If-None-Match 304 / memoisation
+# ===========================================================================
+
+_MMD_URL = "/views/designer-artifact/ens/feat/design/mockups/diagram.mmd"
+_ASSET_URL = "/views/assets/mermaid/mermaid.min.js"
+
+
+def _mockup_dir(workdir: pathlib.Path) -> pathlib.Path:
+    """Return the mockup directory inside the ``filesystem_root_dir`` fixture."""
+    return (
+        workdir
+        / ".agents"
+        / "shared"
+        / "planning"
+        / "feat"
+        / "design"
+        / "mockups"
+    )
+
+
+class TestAssetEtagAndConditionalGet:
+    """Strong ETag + ``If-None-Match → 304`` on BOTH GET and HEAD (W2+W3).
+
+    The ETag/304 revalidation is the caching mechanism — the URL
+    carries no version segment, so ``Cache-Control`` deliberately
+    stays ``private, max-age=60`` (a same-URL re-vendor must not
+    strand browsers past revalidation; no ``immutable``, no long
+    max-age).
+    """
+
+    def test_asset_get_carries_strong_etag(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(_ASSET_URL)
+        assert resp.status_code == 200
+        etag = resp.headers.get("etag")
+        assert etag is not None
+        # Strong form: quoted opaque value, no ``W/`` prefix.
+        assert etag.startswith('"') and etag.endswith('"')
+        # Derived from the served bytes' sha256 (single hash pass).
+        assert etag == '"%s"' % hashlib.sha256(resp.content).hexdigest()
+
+    def test_asset_if_none_match_304_on_get(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        c = _client_with_workdir(filesystem_root_dir)
+        first = c.get(_ASSET_URL)
+        etag = first.headers["etag"]
+        second = c.get(_ASSET_URL, headers={"if-none-match": etag})
+        assert second.status_code == 304
+        assert second.content == b""
+        # ETag echoes on the 304 so the client can keep revalidating.
+        assert second.headers.get("etag") == etag
+        # Revalidation contract headers ride on 304.
+        assert second.headers.get("cache-control") == "private, max-age=60"
+        assert second.headers.get("x-content-type-options") == "nosniff"
+
+    def test_asset_if_none_match_304_on_head(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        c = _client_with_workdir(filesystem_root_dir)
+        etag = c.get(_ASSET_URL).headers["etag"]
+        head = c.head(_ASSET_URL, headers={"if-none-match": etag})
+        assert head.status_code == 304
+        assert head.headers.get("etag") == etag
+
+    def test_asset_if_none_match_star_matches(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(_ASSET_URL, headers={"if-none-match": "*"})
+        assert resp.status_code == 304
+
+    def test_asset_if_none_match_candidate_list_with_weak_prefix(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """A candidate LIST (with a ``W/``-prefixed stale entry) matches."""
+        c = _client_with_workdir(filesystem_root_dir)
+        etag = c.get(_ASSET_URL).headers["etag"]
+        resp = c.get(
+            _ASSET_URL,
+            headers={"if-none-match": f'W/"stale", {etag}'},
+        )
+        assert resp.status_code == 304
+
+    def test_asset_if_none_match_mismatch_returns_full_200(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        c = _client_with_workdir(filesystem_root_dir)
+        first = c.get(_ASSET_URL)
+        resp = c.get(_ASSET_URL, headers={"if-none-match": '"deadbeef"'})
+        assert resp.status_code == 200
+        assert resp.content == first.content
+        assert resp.headers.get("etag") == first.headers["etag"]
+
+    def test_asset_head_parity_content_length(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """HEAD parity on the ASSET: same status + Content-Length as GET."""
+        c = _client_with_workdir(filesystem_root_dir)
+        get_resp = c.get(_ASSET_URL)
+        head_resp = c.head(_ASSET_URL)
+        assert head_resp.status_code == 200
+        assert (
+            head_resp.headers["content-length"]
+            == get_resp.headers["content-length"]
+        )
+
+    def test_asset_carries_lockdown_document_csp(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """Optional fix-pack hardening: ``default-src 'none'`` on the asset.
+
+        The bundle is consumed via ``<script src=...>`` (fetch, not
+        navigation); if a browser ever renders the URL as a document,
+        the CSP strips every capability. Rides on GET and HEAD alike.
+        """
+        c = _client_with_workdir(filesystem_root_dir)
+        for resp in (c.get(_ASSET_URL), c.head(_ASSET_URL)):
+            assert (
+                resp.headers.get("content-security-policy")
+                == "default-src 'none'"
+            )
+
+    def test_asset_cache_control_stays_moderate(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """No ``immutable`` / long max-age — ETag revalidation is the mechanism."""
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(_ASSET_URL)
+        cache_control = resp.headers["cache-control"]
+        assert cache_control == "private, max-age=60"
+        assert "immutable" not in cache_control
+
+
+class TestAssetMemoisation:
+    """W2+W3 memoisation: read + hash ONCE per ``(mtime_ns, size)`` version.
+
+    Fixtures are mktemp-fenced (``tmp_path``) — a byte-identical copy
+    of the vendored asset with a DISTINCTIVE stat identity (epoch-1
+    ns mtimes) wired in via ``monkeypatch``, so the copy's key can
+    never collide with the real asset's key. The cache slot is
+    reset per test and restored by monkeypatch afterwards.
+    """
+
+    @pytest.fixture
+    def asset_copy(
+        self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    ) -> pathlib.Path:
+        from daemon.services import live_views as lv
+
+        src = lv._vendored_mermaid_asset_path()
+        dst = tmp_path / "mermaid.min.js"
+        dst.write_bytes(src.read_bytes())
+        # Distinctive stat identity: cannot collide with the real
+        # asset's key even though the bytes (and thus the size) match.
+        os.utime(dst, ns=(1_000_000_000, 1_000_000_000))
+        monkeypatch.setattr(
+            lv, "_vendored_mermaid_asset_path", lambda: dst
+        )
+        monkeypatch.setattr(lv, "_MERMAID_ASSET_CACHE", None)
+        return dst
+
+    @staticmethod
+    def _count_reads(
+        monkeypatch: pytest.MonkeyPatch, target: pathlib.Path
+    ) -> dict[str, int]:
+        from pathlib import Path
+
+        counter = {"n": 0}
+        orig = Path.read_bytes
+
+        def counting(self: Path) -> bytes:
+            if self == target:
+                counter["n"] += 1
+            return orig(self)
+
+        monkeypatch.setattr(Path, "read_bytes", counting)
+        return counter
+
+    def test_cached_serve_after_first_verify(
+        self,
+        asset_copy: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Second resolve on an unchanged file version does NOT re-read."""
+        from daemon.services import live_views as lv
+
+        counter = self._count_reads(monkeypatch, asset_copy)
+        r1 = lv._vendored_mermaid_asset()
+        assert counter["n"] == 1
+        r2 = lv._vendored_mermaid_asset()
+        assert counter["n"] == 1  # memoisation hit — no re-read, no re-hash
+        assert r2.data == r1.data
+        assert r2.etag == r1.etag
+        assert r2.sri == lv._MERMAID_ASSET_SRI_SHA256
+
+    def test_reverify_when_mtime_key_changes(
+        self,
+        asset_copy: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A touch (mtime change, bytes identical) triggers re-verification."""
+        from daemon.services import live_views as lv
+
+        counter = self._count_reads(monkeypatch, asset_copy)
+        lv._vendored_mermaid_asset()
+        assert counter["n"] == 1
+        os.utime(asset_copy, ns=(2_000_000_000, 2_000_000_000))
+        r2 = lv._vendored_mermaid_asset()
+        assert counter["n"] == 2  # key changed → re-read + re-verify
+        assert r2.sha256_hex == hashlib.sha256(asset_copy.read_bytes()).hexdigest()
+
+    def test_size_key_change_reverified_fail_closed_and_not_cached(
+        self,
+        asset_copy: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Byte change (size key change) → re-verify → fail closed, no cache.
+
+        Any byte drift breaks the pin, so a size-key change on the
+        vendored asset exercises BOTH the re-verify trigger and the
+        fail-closed contract: RuntimeError, and the failing version
+        is never memoised.
+        """
+        from daemon.services import live_views as lv
+
+        counter = self._count_reads(monkeypatch, asset_copy)
+        lv._vendored_mermaid_asset()
+        assert counter["n"] == 1
+        with open(asset_copy, "ab") as fh:
+            fh.write(b"tampered")
+        os.utime(asset_copy, ns=(3_000_000_000, 3_000_000_000))
+        key_before = lv._MERMAID_ASSET_CACHE[0]
+        with pytest.raises(RuntimeError, match="hash mismatch"):
+            lv._vendored_mermaid_asset()
+        # The failing version is never cached: the slot still holds
+        # the record keyed by the OLD (clean) stat identity — which
+        # can never match the tampered file's new identity, so the
+        # tampered bytes are re-verified (and fail closed) on every
+        # subsequent request.
+        assert lv._MERMAID_ASSET_CACHE is not None
+        assert lv._MERMAID_ASSET_CACHE[0] == key_before
+        assert lv._MERMAID_ASSET_CACHE[0] != (
+            3_000_000_000,
+            asset_copy.stat().st_size,
+        )
+
+    def test_verify_shim_forces_verification(
+        self,
+        asset_copy: pathlib.Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The named ``_verify_vendored_mermaid_sha256`` seam still verifies."""
+        from daemon.services import live_views as lv
+
+        counter = self._count_reads(monkeypatch, asset_copy)
+        lv._verify_vendored_mermaid_sha256()  # cold cache → full pass
+        assert counter["n"] == 1
+        lv._verify_vendored_mermaid_sha256()  # memoised → still verified
+        assert counter["n"] == 1
+
+    def test_tampered_asset_serves_500_envelope(
+        self,
+        asset_copy: pathlib.Path,
+        filesystem_root_dir: pathlib.Path,
+    ):
+        """End-to-end fail-closed: tampered asset → 500, never 200 bytes."""
+        c = _client_with_workdir(filesystem_root_dir)
+        with open(asset_copy, "ab") as fh:
+            fh.write(b"tampered")
+        os.utime(asset_copy, ns=(3_000_000_000, 3_000_000_000))
+        resp = c.get(_ASSET_URL)
+        assert resp.status_code == 500
+        assert resp.json() == {"error": "asset unavailable"}
+        # The lock-down CSP rides on the fail-closed envelope too.
+        assert (
+            resp.headers.get("content-security-policy")
+            == "default-src 'none'"
+        )
+
+
+# ===========================================================================
+# Group 7 — Fix-pack pins: raw-param semantics, hostile filenames, edges
+# ===========================================================================
+
+
+class TestRawParamSemantics:
+    """Pin the ACTUAL ``raw`` semantics: presence-based, any non-empty value.
+
+    The router is the canonical ``raw`` handler (there is no
+    service-level ``wants_raw_query``): ``raw=1``, ``raw=0``,
+    ``raw=TRUE`` — any non-empty value — return raw bytes; the
+    parameter absent or EMPTY returns the wrapper page.
+    """
+
+    @pytest.mark.parametrize("query", ["raw=1", "raw=0", "raw=TRUE", "raw=yes"])
+    def test_any_non_empty_raw_value_returns_raw_bytes(
+        self, filesystem_root_dir: pathlib.Path, query: str
+    ):
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(f"{_MMD_URL}?{query}")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "text/plain; charset=utf-8"
+        assert b"graph TD" in resp.content
+        assert b"<html" not in resp.content
+
+    def test_empty_raw_value_returns_wrapper(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """``?raw=`` (empty value) is NOT raw — the wrapper ships."""
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(f"{_MMD_URL}?raw=")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "text/html; charset=utf-8"
+        assert "/views/assets/mermaid/mermaid.min.js" in resp.text
+
+
+class TestWrapperHeadParity:
+    """HEAD parity on the WRAPPER URL specifically (fix-pack test (a))."""
+
+    def test_wrapper_head_matches_get_content_length(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        c = _client_with_workdir(filesystem_root_dir)
+        get_resp = c.get(_MMD_URL)
+        head_resp = c.head(_MMD_URL)
+        assert head_resp.status_code == 200
+        assert head_resp.headers["content-type"] == "text/html; charset=utf-8"
+        # HEAD Content-Length must equal the GET body length — the
+        # wrapper renders the same page for the measurement.
+        assert head_resp.headers["content-length"] == str(
+            len(get_resp.content)
+        )
+        # Hardening headers ride on the HEAD response too.
+        assert head_resp.headers.get("x-content-type-options") == "nosniff"
+
+    def test_wrapper_head_parity_with_mermaid_extension(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """Same parity contract for the ``.mermaid`` spelling."""
+        c = _client_with_workdir(filesystem_root_dir)
+        url = "/views/designer-artifact/ens/feat/design/mockups/alt.mermaid"
+        get_resp = c.get(url)
+        head_resp = c.head(url)
+        assert head_resp.status_code == 200
+        assert head_resp.headers["content-length"] == str(
+            len(get_resp.content)
+        )
+
+
+class TestHostileFilenamePins:
+    """Hostile-filename regression pins on the mermaid surface."""
+
+    def test_traversal_with_mermaid_extension_uniform_404(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """``..%2f..`` + a mermaid extension gets the uniform 404 —
+        the interception must NEVER fire for a hostile path."""
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get("/views/designer-artifact/ens/..%2f..%2fetc%2fpasswd.mmd")
+        assert resp.status_code == 404
+        assert resp.json() == {"error": "view not found"}
+        # Uniform envelope: no path / root disclosure.
+        assert b"passwd" not in resp.content
+
+    def test_double_encoded_traversal_with_mermaid_extension_uniform_404(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/%2e%2e%2f%2e%2e%2fetc%2fpasswd.mmd"
+        )
+        assert resp.status_code == 404
+        assert resp.json() == {"error": "view not found"}
+
+    def test_hostile_angle_bracket_filename_escaped_in_wrapper(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """A ``<img onerror>`` XSS filename is served (it exists) but
+        HTML-escaped in the wrapper title — the raw tag form must
+        never appear in the page. (Slash-free payload: filenames
+        cannot carry ``/``.)"""
+        hostile = "<img src=x onerror=alert(1)>.mmd"
+        (_mockup_dir(filesystem_root_dir) / hostile).write_text(
+            "graph TD\n  A --> B\n"
+        )
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/"
+            + quote(hostile)
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "text/html; charset=utf-8"
+        body = resp.content.decode("utf-8")
+        # The raw tag form must not appear anywhere in the page.
+        assert "<img src=x" not in body
+        assert "onerror=alert(1)>" not in body
+        # The escaped form does (title + status line).
+        assert "&lt;img src=x onerror=alert(1)&gt;" in body
+
+
+class TestEdgeProbes:
+    """Double extensions + percent-encoded paths."""
+
+    def test_double_extension_html_mmd_gets_wrapper(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """``.html.mmd`` — LAST extension wins → mermaid wrapper."""
+        (_mockup_dir(filesystem_root_dir) / "page.html.mmd").write_text(
+            "graph TD\n  A --> B\n"
+        )
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/page.html.mmd"
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "text/html; charset=utf-8"
+        assert "/views/assets/mermaid/mermaid.min.js" in resp.text
+
+    def test_double_extension_mmd_html_served_raw(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """``.mmd.html`` — LAST extension wins → native HTML, NO wrapper."""
+        (_mockup_dir(filesystem_root_dir) / "page.mmd.html").write_text(
+            "<h1>not a diagram</h1>"
+        )
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/page.mmd.html"
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "text/html; charset=utf-8"
+        assert b"not a diagram" in resp.content
+        # No wrapper interception: no vendored asset reference.
+        assert "mermaid.min.js" not in resp.text
+
+    def test_percent_encoded_filename_resolves_to_wrapper(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """A percent-encoded (space) filename resolves to the wrapper."""
+        (_mockup_dir(filesystem_root_dir) / "diagram v2.mmd").write_text(
+            "graph TD\n  A --> B\n"
+        )
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/diagram%20v2.mmd"
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "text/html; charset=utf-8"
+        assert "/views/assets/mermaid/mermaid.min.js" in resp.text
+
+    def test_percent_encoded_filename_raw_query_returns_bytes(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """Percent-encoded + ``?raw=1`` → raw bytes for the SAME file."""
+        (_mockup_dir(filesystem_root_dir) / "diagram v2.mmd").write_text(
+            "graph TD\n  A --> B\n"
+        )
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/"
+            "diagram%20v2.mmd?raw=1"
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "text/plain; charset=utf-8"
+        assert b"graph TD" in resp.content
