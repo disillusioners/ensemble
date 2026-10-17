@@ -27,6 +27,16 @@ Semantics (design §2.4 — binding):
   multi-pass scrubbing, round-trippable via ``parse_marker``.
 * **Markers are NEVER scrubbed** — candidate strings that fullmatch
   the marker regex are skipped (safe by construction; pin (c)).
+* **Marker-template substring exclusion** — a stored plaintext that
+  is a substring of the marker template ``__ENS_SECRET__<uuid>__``
+  is skipped. Agent-controlled values can reach this case (e.g.
+  ``"SECRET"``, ``"ENS_"``, ``"S"`` — all substrings of the
+  template); substituting such a plaintext inside an already-minted
+  marker would break the marker's ``fullmatch`` and grow the string
+  on every scrub pass, violating the §2.4 idempotency-under-multi-
+  pass guarantee. Such pathological values are NEVER scrubbed
+  (documented exclusion — a partner that legitimately needs such a
+  value must rename it).
 * **Collision determinism**: multiple secrets sharing one plaintext →
   the FIRST id by ``created_at`` ordering wins. The value-set query
   orders by ``created_at`` explicitly (the design §2.5 anchor
@@ -133,6 +143,7 @@ from typing import Any, Callable, Optional
 
 from daemon.services.secret_service import (
     ENS_SECRET_MARKER_RE_COMPILED,
+    SCRUB_AUDIT_CONTEXT,
     SecretService,
     mint_marker,
 )
@@ -152,11 +163,6 @@ DEFAULT_ID_SET_TTL_SECONDS: float = 60.0
 #: degenerate callers). Operator-diagnostic sentinel — the audit
 #: row's ``secret_id`` is the forensic anchor regardless.
 SCRUB_ACTOR_FALLBACK: str = "<scrub>"
-
-#: Audit ``context`` value for scrub rows (design §3.4; part of
-#: :data:`SECRET_AUDIT_RESOLVE_CONTEXTS` since Phase 0 landed the
-#: column).
-SCRUB_AUDIT_CONTEXT: str = "scrub"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -274,6 +280,16 @@ class SecretPersistenceScrubber:
         # per call).
         self._rows: Optional[list[tuple[str, str, bytes]]] = None
         self._loaded_at: float = -float("inf")
+        # Wall-clock stamp of the LAST ATTEMPTED load — success
+        # OR failure. Distinct from ``_loaded_at`` (which only
+        # stamps successful loads): gates the retry on the FAILURE
+        # path so a never-loaded / broken-secrets-schema / DB-down
+        # case cannot spam one exception per scrub call (S1
+        # results + S2 writes + S3 enqueues each call
+        # ``_current_rows``). One re-query attempt per TTL window
+        # is the rule — holds for both the stale-refresh case
+        # AND the never-loaded case.
+        self._last_attempt_at: float = -float("inf")
         self._lock = threading.Lock()
 
     # ── R3 invalidation ─────────────────────────────────────────
@@ -301,10 +317,15 @@ class SecretPersistenceScrubber:
         The next scrub re-queries the row set, so a newly-minted
         secret is visible to the scrubber WITHIN THE SAME PROCESS
         immediately after its insert commits (no 60 s wait).
+        Resets ``_last_attempt_at`` too — the next call MUST re-
+        query (the invalidate event is the primary defense; the
+        TTL is the backstop; reset both so the first call after
+        invalidation is the one attempt, not the cached gate).
         """
         with self._lock:
             self._rows = None
             self._loaded_at = -float("inf")
+            self._last_attempt_at = -float("inf")
 
     #: Public alias — the wiring sites and tests may force a refresh
     #: explicitly (mirrors the "single subscriber swaps the id-set"
@@ -320,60 +341,83 @@ class SecretPersistenceScrubber:
         docstring for the §2.4-vs-§2.5 reconciliation). Ordered by
         ``created_at`` (collision determinism). Only id / created_at
         / wrapped_secret are read — the index NEVER holds plaintext.
-        """
-        from sqlalchemy import text as sql_text
 
-        with self._service._engine.connect() as conn:
-            result = conn.execute(
-                sql_text(
-                    "SELECT id, created_at, wrapped_secret FROM secrets "
-                    "ORDER BY created_at ASC"
-                )
-            )
-            rows = [
-                (str(row[0]), str(row[1] or ""), bytes(row[2]))
-                for row in result
-            ]
-        return rows
+        Routed through ``SecretService.iter_scrub_rows`` so the
+        scrub module does NOT reach into ``self._service._engine``
+        directly — the read seam lives on the service (reviewer
+        finding #6).
+        """
+        return self._service.iter_scrub_rows()
 
     def _current_rows(self) -> list[tuple[str, str, bytes]]:
         """Return the cached metadata rows, refreshing when stale.
 
         Refresh triggers: never-loaded, store-event invalidation,
         or TTL expiry (60 s backstop). One small SELECT per refresh.
+
+        Failure-path gating — design §2.5 backstop (fail-open +
+        TTL-throttle):
+
+        * A SUCCESSFUL load refreshes ``_loaded_at`` (stale-refresh
+          path).
+        * A FAILED load (DB down / flapping since process start, or
+          broken ``secrets`` schema) must NOT re-attempt on EVERY
+          scrub call — otherwise S1 + S2 + S3 each retry the connect
+          per call and the log file fills with one exception per
+          call. Instead the failed path refreshes ``_last_attempt_at``
+          so the next call within the TTL window returns the cached
+          ``[]`` WITHOUT touching the engine — one re-query attempt
+          per TTL window for the never-loaded case (mirrors the
+          stale-refresh case where a failed re-requery is also
+          throttled by the same TTL).
         """
         now = self._clock()
         with self._lock:
+            # Fast path: cached, fresh → return without DB IO.
             if (
                 self._rows is not None
                 and (now - self._loaded_at) < self._ttl_seconds
             ):
                 return self._rows
+            # Never-loaded OR stale → gate the ATTEMPT by TTL.
+            # When the last attempt was within the TTL window we
+            # skip the connect entirely (no log spam, no engine
+            # pressure) and return the cached empty set if we have
+            # one, else ``[]``. One re-query attempt per TTL window
+            # regardless of whether the previous attempt loaded a
+            # set, failed to load, or was the never-loaded case.
+            if (now - self._last_attempt_at) < self._ttl_seconds:
+                return self._rows if self._rows is not None else []
         # Load OUTSIDE the lock (a DB read while another thread
         # scrubs must not serialize scrubs; a duplicate concurrent
         # load is harmless — last writer wins, both read-valid).
         try:
             rows = self._load_rows()
         except Exception:
-            # DB unavailable mid-requery: fail OPEN for this
-            # call (the scrub cannot know the values → cannot
-            # substitute) and stamp the load time so the TTL gates
-            # the RETRY (one re-query attempt per TTL window — a
-            # persistently-unavailable store, e.g. a disposed test
-            # engine, logs ONE exception per window instead of one
-            # per scrub call; a genuine transient flap delays scrub
-            # freshness by ≤ one TTL — the same trust class as the
-            # TTL backstop itself). Fail-open here is the same trust
-            # class as the resolver's store-unavailable envelope:
-            # the scrub is defense-in-depth BEHIND S1, and S1's own
-            # source of truth is the same DB (if the DB is down, no
-            # mint / resolve happened either).
+            # DB unavailable: fail OPEN for THIS call (the scrub
+            # cannot know the values → cannot substitute) and stamp
+            # BOTH ``_last_attempt_at`` (gates the retry; the next
+            # call within the TTL returns ``[]`` without querying)
+            # AND ``_loaded_at`` (legacy stamp — kept so any future
+            # fast-path predicate that consults it stays consistent).
+            # The TTL gate holds for BOTH the stale-refresh case
+            # AND the never-loaded case: a persistently-unavailable
+            # store, e.g. a disposed test engine, logs ONE exception
+            # per TTL window instead of one per scrub call; a genuine
+            # transient flap delays scrub freshness by ≤ one TTL
+            # (the same trust class as the TTL backstop itself).
+            # Fail-open here is the same trust class as the
+            # resolver's store-unavailable envelope: the scrub is
+            # defense-in-depth BEHIND S1, and S1's own source of
+            # truth is the same DB (if the DB is down, no mint /
+            # resolve happened either).
             logger.exception(
                 "[SecretScrub] id-set re-query failed; scrubbing "
                 "skipped for this call and retry is TTL-gated "
                 "(fail-open)"
             )
             with self._lock:
+                self._last_attempt_at = now
                 self._loaded_at = now
                 if self._rows is not None:
                     return self._rows
@@ -381,6 +425,7 @@ class SecretPersistenceScrubber:
         with self._lock:
             self._rows = rows
             self._loaded_at = now
+            self._last_attempt_at = now
             return self._rows
 
     # ── Decrypt-on-scrub value pairs ────────────────────────────
@@ -403,7 +448,29 @@ class SecretPersistenceScrubber:
         SKIPPED with a WARN: the value cannot be compared, and —
         per the rotation coupling — a rotated key breaks resolution
         louder than it breaks scrubbing. Never raises.
+
+        Marker-template substring exclusion (§2.4 idempotency): a
+        stored plaintext that is a SUBSTRING of any well-formed
+        marker (``__ENS_SECRET__<uuid4-hex>__``) is skipped. Reason:
+        ``text.replace(plaintext, marker)`` would fire INSIDE every
+        already-minted marker in the payload, breaking their
+        ``fullmatch`` (resolution fails) and growing the string on
+        every scrub pass — the §2.4 idempotency-under-multi-pass
+        guarantee would be violated. Agent-controlled values make
+        this reachable (a worker CAN store a value like ``"ENS_"``
+        or ``"SECRET"``), so the guard sits here at the only
+        place plaintext is ever held in scope. Documented exclusion:
+        such pathological values are NEVER scrubbed (a partner that
+        legitimately holds such a value can rename it).
         """
+        # Build the marker template the scrubber MUST defend — one
+        # canonical UUID-shape payload. The exact payload is
+        # irrelevant: the marker regex's inner-group is the fixed
+        # UUID4 hex/dash pattern, and ANY 32-hex + 4-dash payload
+        # fullmatches it (the 14th char is fixed to ``4`` but the
+        # prefix test only needs the marker shape — 0..9a-f covers
+        # all valid character positions).
+        _marker_template = mint_marker("00000000-0000-0000-0000-000000000000")
         pairs: list[tuple[str, str]] = []
         for secret_id, created_at, wrapped in rows:
             try:
@@ -433,6 +500,24 @@ class SecretPersistenceScrubber:
             # a marker is at best confusing, and the fullmatch skip
             # is the pin-(c) guarantee.
             if ENS_SECRET_MARKER_RE_COMPILED.fullmatch(plaintext):
+                continue
+            # Marker-template SUBSTRING exclusion (§2.4
+            # idempotency-under-multi-pass — documented exclusion;
+            # pathological values like ``"SECRET"``, ``"ENS_"``,
+            # ``"S"`` are reachable via agent-controlled mint
+            # calls). Cheap membership check; the marker template
+            # is short (~40 chars) and the per-pair skip is one
+            # ``in`` test.
+            if plaintext in _marker_template:
+                logger.warning(
+                    "[SecretScrub] secret %s plaintext is a "
+                    "substring of the marker template (%d chars); "
+                    "excluded from the scrub set (documented §2.4 "
+                    "idempotency exclusion — multi-pass scrubbing "
+                    "would corrupt already-minted markers)",
+                    secret_id,
+                    len(plaintext),
+                )
                 continue
             pairs.append((secret_id, plaintext))
         # Stable sort: length-desc primary, query-order (created_at)

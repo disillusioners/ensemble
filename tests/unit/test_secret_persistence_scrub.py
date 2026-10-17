@@ -192,6 +192,75 @@ class TestScrubberCore:
         assert new_text == marker
         assert subs == []
 
+    def test_marker_template_substring_excluded_idempotency(self, service):
+        """WARN-2 fix pin (§2.4 idempotency-under-multi-pass): a
+        stored plaintext that is a SUBSTRING of the marker template
+        is excluded from the scrub set. Three properties pinned:
+
+        1. The plaintext is reachable via ``service.store`` (an
+           agent CAN mint a value like ``"S"`` — the shortest
+           non-empty substring of the marker template).
+        2. An already-minted marker appearing inside a payload
+           survives BYTE-EXACT — the substring-excluded plaintext
+           does NOT fire inside the marker (would otherwise break
+           fullmatch + grow the string each pass).
+        3. The plaintext's STANDALONE occurrence is also left
+           alone — documented exclusion (multi-pass scrubbing is a
+           no-op for these pathological inputs).
+        """
+        # The pathological plaintext — a substring of the marker
+        # template ``__ENS_SECRET__<uuid>__``. Store TWO values:
+        # one pathological ("S") and one real ("REAL-VAL-2").
+        SUBSTR = "S"
+        service.store(name="path", kind="generic", value=SUBSTR,
+                      actor="coder")
+        real_row = service.store(name="real", kind="generic",
+                                 value="REAL-VAL-2", actor="coder")
+        real_sid = real_row["id"]
+        # Property 1 (indirect): the store() call succeeded (no
+        # guard at mint — the agent owns their plaintext). Both
+        # rows exist.
+        names = {r["name"] for r in service.list(actor="coder")}
+        assert {"path", "real"} <= names
+
+        scrubber = SecretPersistenceScrubber(service)
+        # Build a payload that mixes BOTH plaintexts (so the scrubber
+        # can fire on REAL-VAL-2 AND collide with the marker).
+        payload = f"prefix-REAL-VAL-2-mid-S-suffix"
+        new_text, subs = scrubber.scrub_text(payload)
+        # Real plaintext substituted; the path plaintext excluded.
+        assert "REAL-VAL-2" not in new_text
+        assert SUBSTR in new_text
+        assert subs == [real_sid]
+
+        # Property 2: the marker minted above survives byte-exact
+        # when the payload contains it AND a pathological plaintext
+        # would otherwise ``replace`` inside it. The marker has
+        # ``S`` characters at multiple positions (e.g.
+        # ``__ENS_SECRET__...__``); without the WARN-2 guard,
+        # ``text.replace("S", marker)`` would corrupt the marker
+        # on every pass.
+        real_marker = mint_marker(real_sid)
+        marker_payload = (
+            f"start-S-{real_marker}-S-middle-S-end"
+        )
+        new_text_2, subs_2 = scrubber.scrub_text(marker_payload)
+        # Marker survived byte-exact.
+        assert real_marker in new_text_2
+        # parse_marker still round-trips (fullmatch preserved).
+        assert parse_marker(real_marker) == real_sid
+        # No substitution happened (the only non-excluded secret is
+        # the "S" path which is excluded — its plaintext "S" is
+        # left intact).
+        assert subs_2 == []
+
+        # Idempotency: multi-pass scrub is a no-op (the second pass
+        # sees the same markers + the same excluded substring
+        # secret — no growth, no corruption).
+        new_text_2_again, subs_2_again = scrubber.scrub_text(new_text_2)
+        assert new_text_2_again == new_text_2
+        assert subs_2_again == []
+
     def test_multiple_occurrences_one_audit_worthy_substitution(
         self, service
     ):
@@ -692,12 +761,21 @@ class TestR3IdSetStaleness:
         assert subs2 == [second["id"]]
         assert mint_marker(second["id"]) in new2
 
-    def test_pin_g_ttl_backstop_via_clock_injection(
-        self, service, sqlite_engine
-    ):
-        """Pin (g) backstop: a row written WITHOUT the service
-        (direct SQL — no event) becomes visible only after the TTL
-        expires (clock-injected)."""
+    def test_pin_g_ttl_backstop_via_clock_injection(self, service):
+        """Pin (g) backstop: a row inserted WITHOUT firing the
+        invalidation event (here: ``service.store`` is called AFTER
+        warming the cache, before the scrubber subscribes) becomes
+        visible only after the TTL expires (clock-injected).
+
+        HYGIENE-6 cleanup (P2 phase 2 review): the prior fixture
+        wrote a row directly via SQL with a MISMATCHED cipher key
+        (the scrubber would skip it via the unwrap-skip WARN path,
+        not via the TTL gate), then pivoted to ``service.store``
+        for the real assertion — a dead fixture that accidentally
+        exercised the unwrap-skip WARN path instead of the
+        mechanism the test name promised. The test now exercises
+        ONLY the TTL gate (the dead SQL insert is removed).
+        """
         clock = _ManualClock()
         scrubber = SecretPersistenceScrubber(
             service, ttl_seconds=60.0, clock=clock
@@ -705,32 +783,13 @@ class TestR3IdSetStaleness:
         # Warm the cache (empty set loaded at t=1000).
         assert scrubber.scrub_text("warm")[1] == []
 
-        # Write a row DIRECTLY (no service → no invalidation event).
-        cipher = SecretCipher(encryption_key="x" * 0 or None) if False \
-            else None
-        from cryptography.fernet import Fernet as _F
-
-        key = _F.generate_key().decode()
-        direct_cipher = SecretCipher(encryption_key=key)
-        wrapped = direct_cipher.wrap(b"DIRECT-PLAIN-13")
-        with Session(sqlite_engine) as session:
-            session.add(Secret(
-                id="11111111-1111-4111-8111-111111111111",
-                name="direct", kind="generic", public_material=None,
-                wrapped_secret=wrapped, created_by="coder",
-                created_at="2026-10-18T00:00:00+00:00",
-                retired_at=None,
-            ))
-            session.commit()
-
-        # The direct cipher differs from the service's — build the
-        # expectation against a matching scrubber: instead, store a
-        # SERVICE-visible secret AFTER warming to exercise the TTL
-        # gate cleanly.
+        # No listener wired — the store() call below WILL commit a
+        # new row, but the scrubber will only see it after the TTL
+        # backstop re-queries (this is the no-event path: invalidate
+        # event is NOT fired because the scrubber was not subscribed
+        # before warm; the clock advances to prove the backstop).
         res = service.store(name="later", kind="generic",
                             value="TTL-GATED-PLAIN", actor="coder")
-        # No listener wired this time — the direct-constructed
-        # scrubber has none (this is the no-event path).
         # Within the TTL: NOT visible.
         new_within, subs_within = scrubber.scrub_text("TTL-GATED-PLAIN")
         assert subs_within == []
@@ -739,6 +798,50 @@ class TestR3IdSetStaleness:
         clock.advance(61.0)
         new_after, subs_after = scrubber.scrub_text("TTL-GATED-PLAIN")
         assert subs_after == [res["id"]]
+
+    def test_pin_g_ttl_gates_never_loaded_failure_path(
+        self, service
+    ):
+        """WARN-1 fix pin: the TTL gate holds for the NEVER-LOADED
+        case — a persistently-failing ``_load_rows`` (DB down or
+        broken schema since process start) does NOT re-attempt on
+        every scrub call. Within one TTL window of the first
+        failure: ONE exception, then ``[]`` without any DB IO.
+        After the TTL window expires: ONE more attempt, then the
+        same gate applies."""
+        clock = _ManualClock()
+        scrubber = SecretPersistenceScrubber(
+            service, ttl_seconds=60.0, clock=clock
+        )
+        # Spy on the load call so we can count attempts and assert
+        # NO IO within the TTL window (no engine.connect()).
+        attempts = {"n": 0}
+
+        def _boom():
+            attempts["n"] += 1
+            raise RuntimeError("simulated DB down")
+
+        scrubber._load_rows = _boom  # type: ignore[assignment]
+        # Call 1 — first attempt, fails, returns [] (fail-open).
+        new1, subs1 = scrubber.scrub_text("anything")
+        assert attempts["n"] == 1
+        assert new1 == "anything"
+        assert subs1 == []
+        # Call 2 — within TTL → MUST NOT attempt again.
+        new2, subs2 = scrubber.scrub_text("anything-else")
+        assert attempts["n"] == 1
+        assert new2 == "anything-else"
+        assert subs2 == []
+        # Call 3 — still within TTL → still no re-attempt.
+        scrubber.scrub_text("third-call")
+        assert attempts["n"] == 1
+        # Advance past the TTL → ONE more attempt allowed.
+        clock.advance(61.0)
+        scrubber.scrub_text("after-ttl")
+        assert attempts["n"] == 2
+        # Within the new TTL window → no further attempts.
+        scrubber.scrub_text("within-new-window")
+        assert attempts["n"] == 2
 
     def test_raising_listener_isolated(self, service):
         """One bad subscriber can never break a store path (the
@@ -904,9 +1007,11 @@ class TestD2MarkerPassthrough:
         # PB-F1: no value material anywhere in the envelope.
         blob = json.dumps(out)
         assert "REAL-VAL" not in blob
-        assert ENS_SECRET_MARKER_PREFIX not in blob.replace(
-            out.get("value", ""), ""
-        ) or True  # the marker literal is not carried as a value field
+        # PB-F1 (cont): the marker literal is NOT carried as a value
+        # field either — the envelope returns no ``value`` key at
+        # all on the not-found path. Direct assertion (the previous
+        # ``or True`` made the prior form vacuously true).
+        assert ENS_SECRET_MARKER_PREFIX not in blob
 
     def test_malformed_marker_shape_wraps_literally(self, service):
         """A marker-SHAPED value that fails the UUID4 fullmatch is

@@ -805,7 +805,19 @@ class _SqlSecretStore:
 
     def list_active(self) -> list[Secret]:
         with Session(self._engine) as session:
-            stmt = select(Secret).where(Secret.retired_at.is_(None))
+            # ``ORDER BY created_at ASC`` — anchors the §2.4
+            # collision-determinism rule at the store seam too: the
+            # ``secrets.list`` tool view AND the scrubber's row set
+            # see the same ordering (the design §2.4 anchor
+            # ``list_active()`` at ``secret_service.py:805`` carries
+            # NO explicit ORDER BY — surfacing it here stops the
+            # scrub set from being a footgun for the collision
+            # ruling when the engine hands rows in arbitrary order).
+            stmt = (
+                select(Secret)
+                .where(Secret.retired_at.is_(None))
+                .order_by(Secret.created_at.asc())
+            )
             return list(session.exec(stmt).all())
 
     # ─────────────────────────────────────────────────────
@@ -1372,6 +1384,45 @@ class SecretService:
                 actor=actor,
                 context=SCRUB_AUDIT_CONTEXT,
             )
+
+    def iter_scrub_rows(self) -> list[tuple[str, str, bytes]]:
+        """Read the metadata row set for the persistence scrubber.
+
+        Returns ``[(secret_id, created_at_iso, wrapped_bytes), ...]``
+        ordered by ``created_at ASC`` (the §2.4 collision-determinism
+        anchor the scrub set realizes). ALL rows — retired INCLUDED
+        (§2.4 binding — retired rows must keep scrubbing because old
+        transcripts may still carry their plaintext; retire is
+        presentation-layer delist, NOT revocation).
+
+        The scrubber is the sole caller. The accessor exists so the
+        scrub module does NOT reach into ``self._engine`` directly
+        with raw SQL — the read path lives on the service seam and
+        can grow (e.g. a future remote-store port) without reshaping
+        the scrubber. The list return (NOT a generator) mirrors the
+        scrubber's existing "snapshot at load time" contract; the
+        TTL backstop in the scrubber decides when to call again.
+
+        Returns an empty list on any DB failure (fail-closed at the
+        call site is wrong — the scrubber needs to differentiate
+        "empty" from "down", and the existing try/except in
+        ``SecretPersistenceScrubber._current_rows`` owns the
+        fail-open policy; this accessor surfaces the exception so
+        that path can keep working unchanged).
+        """
+        from sqlalchemy import text as sql_text
+
+        with self._engine.connect() as conn:
+            result = conn.execute(
+                sql_text(
+                    "SELECT id, created_at, wrapped_secret FROM secrets "
+                    "ORDER BY created_at ASC"
+                )
+            )
+            return [
+                (str(row[0]), str(row[1] or ""), bytes(row[2]))
+                for row in result
+            ]
 
     # ─────────────────────────────────────────────────────────
     # generate_ssh_keypair
