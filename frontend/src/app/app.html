@@ -20,18 +20,17 @@
         <a routerLink="/jobs" routerLinkActive="active" class="nav-link">Jobs</a>
         <a routerLink="/skills" routerLinkActive="active" class="nav-link">Skills</a>
         <!-- Persona (prompt-version management) — agent-prompt-immutability Phase C P1.
-             matBadge idiom mirrors notification-bell: count comes from
+             Icon removed (2026-10-17): sibling nav links have no icons; the
+             matBadge moved onto the link itself. Count comes from
              PersonaService.pendingCount signal (CORE-only by repo design).
              Hidden when count is 0; the App constructor + page mutations
              (approve/reject/submit/retract) drive refreshPendingCount. -->
-        <a routerLink="/persona" routerLinkActive="active" class="nav-link persona-nav-link">
-          <mat-icon
-            [matBadge]="personaService.pendingCount()"
-            [matBadgeHidden]="personaService.pendingCount() === 0"
-            matBadgeColor="warn"
-            matBadgeSize="small">
-            person
-          </mat-icon>
+        <a routerLink="/persona" routerLinkActive="active"
+           class="nav-link persona-nav-link"
+           [matBadge]="personaService.pendingCount()"
+           [matBadgeHidden]="personaService.pendingCount() === 0"
+           matBadgeColor="warn"
+           matBadgeSize="small">
           Persona
         </a>
         @if (planeEnabled()) {
