@@ -2666,6 +2666,26 @@ describe('CheckpointCleanupComponent — wizard (ck-redesign-2026q4)', () => {
       expect(component.canContinueFromStep2()).toBe(true);
     });
 
+    it('is true on mixed projections: zero count with non-zero nested blobs/bytes, and non-zero count with zero nested (vacuum-ungate edge, 2026-10-17)', () => {
+      service.lastDryRun.set({
+        ...DRY_RUN,
+        would_delete_count: 0,
+        would_delete: { ...DRY_RUN.would_delete, blobs: 4, bytes: 268435456 },
+        would_free_bytes: 268435456,
+      });
+      service.isRunInFlight.set(false);
+      component.dryRunning.set(false);
+      component.executing.set(false);
+      expect(component.canContinueFromStep2()).toBe(true);
+      service.lastDryRun.set({
+        ...DRY_RUN,
+        would_delete_count: 4,
+        would_delete: { ...DRY_RUN.would_delete, blobs: 0, bytes: 0 },
+        would_free_bytes: 0,
+      });
+      expect(component.canContinueFromStep2()).toBe(true);
+    });
+
     it('is false during dry-run / execute / isRunInFlight (AC-16)', () => {
       service.lastDryRun.set(DRY_RUN);
       component.dryRunning.set(true);
