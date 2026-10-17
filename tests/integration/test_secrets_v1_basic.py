@@ -62,6 +62,7 @@ from daemon.repositories.secrets.models import (  # noqa: F401
 from daemon.services.secret_service import (
     ENS_SECRET_MARKER_RE_COMPILED,
     SecretCipher,
+    SecretNameConflictError,
     SecretService,
 )
 
@@ -496,6 +497,93 @@ class TestV1BasicFlowPG:
                 ENS_SECRET_MARKER_RE_COMPILED.fullmatch(marker)
                 is not None
             ), f"{label} marker {marker!r} did not fullmatch"
+
+    def test_idx_secrets_kind_active_exists_on_pg(
+        self, pg_engine: Engine
+    ) -> None:
+        """Reviewer pin (gap 4a — PG index parity): the
+        partial index ``idx_secrets_kind_active`` declared
+        via the SQLModel ``Index(postgresql_where=...)``
+        is materialized on the PG scratch engine after
+        ``create_all``. The SQLite leg covers the same
+        predicate via ``sqlite_where``; this test pins
+        the PG parity explicitly via pg_indexes.
+        """
+        with _session(pg_engine) as session:
+            rows = session.exec(
+                text(
+                    "SELECT indexname, indexdef "
+                    "FROM pg_indexes "
+                    "WHERE schemaname = current_schema() "
+                    "AND tablename = 'secrets'"
+                )
+            ).all()
+        index_defs = {name: defn for name, defn in rows}
+        assert "idx_secrets_kind_active" in index_defs, (
+            f"partial index missing on PG; found: "
+            f"{sorted(index_defs)!r}"
+        )
+        # The PG partial index carries the same
+        # ``retired_at IS NULL`` predicate the SQLite
+        # side emits via ``sqlite_where`` — parity-
+        # record contract.
+        assert (
+            "retired_at IS NULL"
+            in index_defs["idx_secrets_kind_active"]
+        ), (
+            f"PG partial index predicate missing; "
+            f"indexdef={index_defs['idx_secrets_kind_active']!r}"
+        )
+
+    def test_store_name_conflict_no_audit_row_on_pg(
+        self, service_pg: SecretService, pg_engine: Engine
+    ) -> None:
+        """Reviewer pin (gap 4b — PG atomicity): the M1
+        ``engine.begin()`` atomicity contract holds on PG.
+        A duplicate-name ``store()`` raises
+        ``SecretNameConflictError`` AND rolls back the
+        mutation+audit insert together — no orphan
+        ``secrets_audit`` row is left after the failed
+        attempt (the SQLite leg is pinned by the dev's
+        M1 atomicity tests; this pins the PG path
+        symmetrically).
+        """
+        created = service_pg.store(
+            name="dup-pg",
+            kind="generic",
+            value="first",
+            actor="worker",
+        )
+        with pytest.raises(SecretNameConflictError):
+            service_pg.store(
+                name="dup-pg",
+                kind="generic",
+                value="second",
+                actor="worker",
+            )
+        with _session(pg_engine) as session:
+            audit_rows = session.exec(
+                select(SecretAuditEvent).where(
+                    SecretAuditEvent.action == "create"
+                )
+            ).all()
+            secrets_rows = session.exec(
+                select(Secret).where(Secret.name == "dup-pg")
+            ).all()
+        # Exactly one (the first successful call's)
+        # audit row remains — the failed call rolled
+        # back its audit insert along with the mutation.
+        assert len(audit_rows) == 1, (
+            f"failed store() leaked audit row(s): "
+            f"{[(r.id, r.secret_id) for r in audit_rows]!r}"
+        )
+        assert {r.secret_id for r in audit_rows} == {
+            created["id"]
+        }
+        assert len(secrets_rows) == 1, (
+            f"duplicate-name insert leaked secrets row(s): "
+            f"{len(secrets_rows)}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────
