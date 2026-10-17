@@ -1,0 +1,23 @@
+=== GET 200 landing.html ===
+status: 200
+cache-control: private, max-age=60
+content-length: 16
+content-type: text/html; charset=utf-8
+x-content-type-options: nosniff
+body: b'<h1>Landing</h1>'
+
+=== GET 404 missing ===
+status: 404
+cache-control: private, max-age=60
+content-length: 26
+content-type: application/json
+x-content-type-options: nosniff
+body: b'{"error":"view not found"}'
+
+=== HEAD 200 landing.html ===
+status: 200
+cache-control: private, max-age=60
+content-length: 16
+content-type: text/html; charset=utf-8
+x-content-type-options: nosniff
+body: b''

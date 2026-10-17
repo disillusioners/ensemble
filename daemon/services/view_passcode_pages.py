@@ -99,7 +99,7 @@ html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-famil
 h1 { font-size: 20px; margin: 0 0 12px 0; }
 p { font-size: 15px; line-height: 1.5; margin: 0 0 16px 0; }
 label { display: block; font-size: 14px; margin: 0 0 6px 0; }
-input[type="code"] {
+input[type="text"] {
   display: block; width: 100%; padding: 12px;
   font-size: 22px; letter-spacing: 4px; text-align: center;
   border: 1px solid #ccc; border-radius: 4px; background: #fff;
@@ -165,8 +165,8 @@ def render_interstitial(
         'autocomplete="off">\n'
         '  <label for="code">Passcode</label>\n'
         '  <input type="text" id="code" name="code" '
-        'type="code" inputmode="latin" '
-        'pattern="[a-zA-Z0-9]{{6}}" '
+        'inputmode="latin" '
+        'pattern="[a-zA-Z0-9]{6}" '
         'maxlength="6" minlength="6" required '
         'autocomplete="off" autocapitalize="off" '
         'autocorrect="off" spellcheck="false">\n'
@@ -211,8 +211,8 @@ def render_failure(
         'autocomplete="off">\n'
         '  <label for="code">Passcode</label>\n'
         '  <input type="text" id="code" name="code" '
-        'type="code" inputmode="latin" '
-        'pattern="[a-zA-Z0-9]{{6}}" '
+        'inputmode="latin" '
+        'pattern="[a-zA-Z0-9]{6}" '
         'maxlength="6" minlength="6" required '
         'autocomplete="off" autocapitalize="off" '
         'autocorrect="off" spellcheck="false">\n'

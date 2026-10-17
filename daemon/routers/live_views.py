@@ -500,7 +500,7 @@ def _public_csp_nonce() -> str:
     return new_csp_nonce()
 
 
-def _clear_grant_cookie_header() -> str:
+def _clear_grant_cookie_header(path: str) -> str:
     """Build the ``Set-Cookie`` value that clears the grant cookie.
 
     T2.5 / D12 — the validation chain's failure contract is
@@ -508,9 +508,35 @@ def _clear_grant_cookie_header() -> str:
     D6:76: ``InvalidToken`` → interstitial + cookie clear). A
     stale / tampered / expired cookie must not linger in the
     browser: the clear rides ``Max-Age=0`` on the SAME
-    exact-path scope the cookie was set with (a Set-Cookie
-    delete only takes effect when name + Path match the stored
-    cookie).
+    exact-path scope the cookie was set with — RFC 6265 §5.3
+    (step 11) deletes a stored cookie only when name + domain
+    + PATH all match, so the clear's ``Path`` must be the
+    exact string the set used (:func:`_grant_cookie_path`,
+    queryless). A ``Path=/`` clear does NOT reach a cookie
+    stored at a deeper path.
+    """
+    from daemon.services.view_passcode_service import GRANT_COOKIE_NAME
+
+    return (
+        f"{GRANT_COOKIE_NAME}=; "
+        f"Path={path}; "
+        "HttpOnly; Secure; SameSite=Lax; "
+        "Max-Age=0"
+    )
+
+
+def _clear_grant_cookie_root_header() -> str:
+    """Belt-and-suspenders ``Path=/`` clear variant.
+
+    Covers only a cookie stored at the root scope (RFC 6265
+    §5.3 name+domain+PATH equality — a root-scoped delete
+    never reaches a deeper-path cookie). The exact-path
+    variant (:func:`_clear_grant_cookie_header`) is the
+    authoritative delete; this one is hygiene for any
+    ``Path=/``-shaped grant cookie that a legacy client
+    stored before the exact-scope mint existed. Emitted as a
+    SECOND ``Set-Cookie`` header alongside the exact-path
+    clear.
     """
     from daemon.services.view_passcode_service import GRANT_COOKIE_NAME
 
@@ -552,15 +578,28 @@ def _render_interstitial_page(
     headers = page_headers(csp_nonce=nonce)
     if request.cookies.get("view_grant"):
         # A cookie was presented but the gate rejected it —
-        # clear it (the failed-validation contract; the
-        # Set-Cookie delete uses Path=/ scope-matching, which
-        # deletes cookies stored under ANY path for this name
-        # in RFC 6265 semantics browsers implement for
-        # same-name deeper-path cookies: the deeper-path
-        # cookie shadows the shorter one, so we clear the
-        # exact-path variant AND the root variant to cover
-        # both storage shapes).
-        headers["Set-Cookie"] = _clear_grant_cookie_header()
+        # clear it (the failed-validation contract). RFC
+        # 6265 §5.3 deletes a stored cookie only on name +
+        # domain + PATH equality, so the authoritative
+        # clear rides the SAME exact queryless path the
+        # mint used (:func:`_grant_cookie_path`). A
+        # ``Path=/`` clear never reaches a deeper-path
+        # cookie — it is emitted as a SECOND header purely
+        # as hygiene for any root-scoped grant cookie a
+        # legacy client stored.
+        cookie_path = _grant_cookie_path(root_name, rel_path)
+        response = Response(
+            content=body,
+            status_code=200,
+            headers=headers,
+        )
+        response.headers.append(
+            "Set-Cookie", _clear_grant_cookie_header(cookie_path)
+        )
+        response.headers.append(
+            "Set-Cookie", _clear_grant_cookie_root_header()
+        )
+        return response
     return Response(
         content=body,
         status_code=200,
@@ -652,25 +691,25 @@ def _client_ip_for_bucket(request: Request) -> str:
 
     Architecture-recommendation.md D7:83-86 (rightmost-XFF
     dominates every topology; leftmost is spoofable behind a
-    reverse proxy). Falls back to ``client`` (the Starlette
-    attribute on the request scope carrying the socket peer
-    address). Returns ``"unknown"`` when neither is present
-    (the limiter's malformed-IP guard collapses to "do not
-    consume a token"; the public lane never bricks on a
-    missing socket peer).
+    reverse proxy). The XFF parse is SINGLE-HOMED in
+    :func:`daemon.services.view_passcode_service.
+    _rightmost_xff_ip` (comma-split, whitespace-trimmed,
+    empty/invalid entries skipped) — the limiter keys on its
+    output and the service-level pins hold it; this wrapper
+    contributes only the request-scope glue: the socket-peer
+    fallback (the Starlette ``client`` scope entry) when no
+    XFF header survives the parse, and ``"unknown"`` when
+    neither is present (the limiter's malformed-IP guard
+    collapses to "do not consume a token"; the public lane
+    never bricks on a missing socket peer).
     """
-    headers = request.headers
-    raw = headers.get("x-forwarded-for") or headers.get(
-        "X-Forwarded-For"
+    from daemon.services.view_passcode_service import (
+        _rightmost_xff_ip,
     )
-    if raw:
-        candidates = [
-            segment.strip()
-            for segment in raw.split(",")
-            if segment.strip()
-        ]
-        if candidates:
-            return candidates[-1]
+
+    rightmost = _rightmost_xff_ip(request.headers)
+    if rightmost:
+        return rightmost
     scope_client = request.scope.get("client")
     if scope_client and isinstance(scope_client, tuple):
         host = scope_client[0]
@@ -749,16 +788,39 @@ def _is_https_request(request: Request) -> bool:
         return False
 
 
-def _request_public_url_path(
-    request: Request, root_name: str, rel_path: str
-) -> str:
-    """Return the EXACT public URL path for cookie ``Path`` scoping.
+def _grant_cookie_path(root_name: str, rel_path: str) -> str:
+    """Return the EXACT queryless public URL path for cookie ``Path`` scoping.
 
     Architecture-recommendation.md D6:73 (Path = the exact
     public view URL — tightest scope, NOT the
-    ``/views/public`` prefix). The URL includes any
-    ``?raw=1`` query string verbatim so the cookie Path
-    matches whatever the customer navigates to subsequently.
+    ``/views/public`` prefix) + D6:76 ("cookie Path matching
+    is query-insensitive"). RFC 6265 §5.1.4 path-matching
+    compares the attribute against the request PATH only —
+    the query string is never part of the match. A ``Path``
+    attribute carrying ``?raw=1`` (or any query) therefore
+    matches NO request path ever: the minted cookie could
+    never be sent back, and every post-303 GET would
+    re-render the interstitial — an infinite loop for
+    query-bearing entry URLs. The query lives only in the
+    303 ``Location`` and the form action
+    (:func:`_request_public_url_path`), never here.
+    """
+    return f"/views/public/{root_name}/{rel_path}"
+
+
+def _request_public_url_path(
+    request: Request, root_name: str, rel_path: str
+) -> str:
+    """Return the full public view URL — 303 ``Location`` + form action.
+
+    Carries any ``?raw=1`` (or utm / tracking) query string
+    verbatim: the same-URL POST contract (architecture-
+    recommendation.md D6:78) round-trips whatever URL the
+    customer is on. NOT for cookie ``Path`` scoping — the
+    Set-Cookie Path uses :func:`_grant_cookie_path`
+    (queryless; RFC 6265 §5.1.4 path-matching excludes the
+    query, so a query-bearing Path attribute can never match
+    a subsequent request).
     """
     base = f"/views/public/{root_name}/{rel_path}"
     raw_query = request.url.query
@@ -774,9 +836,11 @@ def _build_grant_cookie_value(
 
     Flags (architecture-recommendation.md D6:75): ``HttpOnly``,
     ``Secure``, ``SameSite=Lax``, ``Max-Age=ttl_seconds``. Path
-    = the exact public view URL (tightest scope; ADR D6:73).
-    The cookie NAME is ``view_grant`` (the canonical identifier
-    from the grant-cookie codec module).
+    = the exact QUERYLESS public view path (tightest scope;
+    ADR D6:73; RFC 6265 §5.1.4 — path-matching excludes the
+    query, see :func:`_grant_cookie_path`). The cookie NAME is
+    ``view_grant`` (the canonical identifier from the
+    grant-cookie codec module).
     """
     from daemon.services.view_passcode_service import (
         GRANT_COOKIE_NAME,
@@ -868,12 +932,18 @@ def _resolve_verify_rate_limiter(request: Request):
     """Return the per-app ``VerifyRateLimiter`` or None.
 
     The limiter is installed alongside the passcode service at
-    lifespan time. Missing limiter → the verify handler returns
-    the uniform 404 (fail-closed; we don't fail-OPEN the
-    limiter-only path — the binding T5 pin tests assume the
-    limiter exists for the interplay assertions; lifespan
-    guarantees wiring so a missing limiter = misconfigured
-    deployment = uniform 404).
+    lifespan time. Missing limiter → the verify handler
+    SKIPS the bucket entirely (``if limiter is not None and
+    not limiter.check(ip)`` — the POST proceeds ungated by
+    the bucket; the durable strike lock remains the
+    authoritative control). This is a deliberate fail-open
+    on the limiter-only seam (architecture-recommendation.md
+    V6 — a limiter misconfiguration must not brick the
+    lane); the UNIFORM-404 fail-closed posture applies to
+    the PASSCODE SERVICE seam (``_resolve_passcode_service``
+    → None → uniform 404), not here. Lifespan guarantees
+    wiring, so a missing limiter in production = degraded
+    throttling, never a 404 and never a crash.
     """
     from daemon.services.view_passcode_service import VerifyRateLimiter
 
@@ -1212,17 +1282,22 @@ def build_router() -> APIRouter:
         on a never-minted path).
 
         Gate order (architecture-recommendation.md D2:36 +
-        §Attack surface :186):
+        §Attack surface :186; cookie FIRST per D5:68 —
+        "Valid grant cookies persist through lockout —
+        lockout gates the entry lane, not established
+        grants", the reviewer-upheld deviation from the
+        original 4/5 numbering):
 
         1. well-formed root / rel
         2. root configured + enabled
         3. passcode row exists (any miss → uniform 404; NO
            row is created for unminted paths — ADR T7
            write-amplification pin)
-        4. locked? (returns a locked Response, not None)
-        5. grant cookie valid? (None = fall through to the
-           renderable gate; a valid cookie returns the
-           resolved envelope for serving)
+        4. grant cookie valid? (valid → resolved envelope
+           for serving; invalid/absent → fall through)
+        5. locked? (returns a locked Response, not None —
+           only reached when no valid grant was presented,
+           because a valid grant short-circuits at #4)
         """
         from daemon.services.live_views import (
             PathNotFoundError,
@@ -1322,11 +1397,11 @@ def build_router() -> APIRouter:
         """GET handler for ``/views/public/{root}/{rel}``.
 
         Gate order (architecture-recommendation.md §Attack
-        surface :186 + D2:36): well-formed → root configured
-        → row exists → locked? → cookie valid? → interstitial.
-        The CONTENT SERVING path reuses the EXISTING
-        ``_resolve`` pipeline byte-for-byte, only entered
-        post-grant.
+        surface :186 + D2:36; cookie first per D5:68):
+        well-formed → root configured → row exists → cookie
+        valid? → locked? → interstitial. The CONTENT SERVING
+        path reuses the EXISTING ``_resolve`` pipeline
+        byte-for-byte, only entered post-grant.
         """
         resolved = await _public_resolve(
             request, root_name, rel_path
@@ -1557,18 +1632,21 @@ def build_router() -> APIRouter:
                     root_name,
                     rel_path,
                 )
-            # Path = the EXACT public view URL (tightest
-            # scope; architecture-recommendation.md D6:73
-            # — NOT the ``/views/public`` prefix). The
-            # full request URL is what the browser just
-            # hit (the same-URL POST → 303 → GET
-            # contract); the URL includes any
-            # ``?raw=1`` query string verbatim, so the
-            # cookie Path matches whatever the customer
-            # navigates to subsequently.
-            cookie_path = _request_public_url_path(
-                request, root_name, rel_path
-            )
+            # Cookie Path = the EXACT queryless public view
+            # path (tightest scope; architecture-
+            # recommendation.md D6:73 — NOT the
+            # ``/views/public`` prefix). RFC 6265 §5.1.4
+            # path-matching compares the Path attribute
+            # against the request PATH only — the query is
+            # never part of the match (ADR D6:76 "cookie
+            # Path matching is query-insensitive"). A query-
+            # bearing Path attribute would match NO request:
+            # correct passcode → 303 → cookie never sent →
+            # infinite interstitial loop for query-bearing
+            # entry URLs (?raw=1, utm). The query lives ONLY
+            # in the 303 ``Location`` below and the form
+            # action.
+            cookie_path = _grant_cookie_path(root_name, rel_path)
             # On plain HTTP the ``Secure`` flag blocks
             # cookie storage on the browser
             # (architecture-recommendation.md D6:79).
@@ -1583,7 +1661,13 @@ def build_router() -> APIRouter:
                 status_code=303,
                 headers={
                     **_HARDENING_HEADERS,
-                    "Location": cookie_path,
+                    # Location = the FULL view URL the
+                    # customer just POSTed from — query
+                    # included verbatim (same-URL POST →
+                    # PRG; D6:78). NOT the cookie path.
+                    "Location": _request_public_url_path(
+                        request, root_name, rel_path
+                    ),
                     "Set-Cookie": _build_grant_cookie_value(
                         token=token,
                         path=cookie_path,

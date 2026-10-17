@@ -92,6 +92,7 @@ from daemon.services.view_passcode_service import (
     ViewPasscodeRotationRequired,
     ViewPasscodeService,
     ViewPasscodeValidationError,
+    _rightmost_xff_ip,
     codes_match,
     compute_ip_hmac,
     generate_passcode,
@@ -1253,3 +1254,66 @@ class TestPublicInputHardening:
         row = service.get_row("docs", "a/b.md")
         assert row is not None
         assert service.verify(row, "é€¥€") == VerifyOutcome.WRONG
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Rightmost-XFF parse — the SINGLE HOME of the binding abuse-control
+# key selection (P2 review finding D; ADR D7:83-86)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestRightmostXffIp:
+    """``_rightmost_xff_ip`` — the pure-function pins for the
+    limiter's key selection.
+
+    Single-home note (P2 review finding D): this helper is the
+    ONE implementation. The verify handler's
+    ``_client_ip_for_bucket`` (router) contributes only the
+    request-scope glue (socket-peer fallback / "unknown") and
+    delegates the XFF parse HERE — the router-level pins
+    (``tests/unit/routers/test_live_views_public_lane.py``,
+    Group E3) prove the handler keys the bucket on this
+    output.
+
+    ADR D7:83-86: behind a single trusted hop the rightmost
+    entry is the address APPENDED by our proxy = the real
+    client; leftmost entries are client-supplied and
+    spoofable (rotation voids the limiter). Rightmost
+    dominates in every topology.
+    """
+
+    def test_multi_hop_list_returns_rightmost(self) -> None:
+        headers = {
+            "x-forwarded-for": "203.0.113.7, 10.0.0.1, 198.51.100.9"
+        }
+        assert _rightmost_xff_ip(headers) == "198.51.100.9"
+
+    def test_single_entry_returns_that_entry(self) -> None:
+        # Proxy-overwrite topology: single entry (leftmost ==
+        # rightmost).
+        headers = {"x-forwarded-for": "198.51.100.9"}
+        assert _rightmost_xff_ip(headers) == "198.51.100.9"
+
+    def test_whitespace_padded_entries_are_stripped(self) -> None:
+        headers = {
+            "x-forwarded-for": "  203.0.113.8 ,  198.51.100.11  "
+        }
+        assert _rightmost_xff_ip(headers) == "198.51.100.11"
+
+    def test_empty_entries_skipped_returns_last_valid(self) -> None:
+        headers = {"x-forwarded-for": ", , 198.51.100.12, , "}
+        assert _rightmost_xff_ip(headers) == "198.51.100.12"
+
+    def test_all_invalid_entries_returns_none(self) -> None:
+        headers = {"x-forwarded-for": " , , "}
+        assert _rightmost_xff_ip(headers) is None
+
+    def test_empty_header_value_returns_none(self) -> None:
+        headers = {"x-forwarded-for": ""}
+        assert _rightmost_xff_ip(headers) is None
+
+    def test_header_absent_returns_none(self) -> None:
+        assert _rightmost_xff_ip({}) is None
+
+    def test_none_headers_returns_none(self) -> None:
+        assert _rightmost_xff_ip(None) is None

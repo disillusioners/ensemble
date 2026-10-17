@@ -1142,6 +1142,408 @@ TestVerifyHandler._mint = lambda self, store, c, rel_path="ens/feat/design/mocku
 
 
 # ─────────────────────────────────────────────────────────────────
+# Group E2 — cookie Path query discipline + exact-Path clear
+#            (P2 review remediation: findings A + B)
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestGrantCookiePathQueryDiscipline:
+    """Finding A (P2 review) — the Set-Cookie ``Path`` attribute
+    must NEVER carry a query string.
+
+    RFC 6265 §5.1.4 path-matching compares the Path attribute
+    against the request PATH only; the query is never part of
+    the match (ADR D6:76 — "cookie Path matching is query-
+    insensitive"). A cookie minted with ``Path=...?raw=1``
+    matches NO subsequent request → correct passcode → 303 →
+    cookie never sent → infinite interstitial loop for that
+    URL shape. The query lives only in the 303 ``Location``
+    and the form action.
+    """
+
+    _PATH = "/views/public/planning/ens/feat/design/mockups/landing.html"
+
+    def _mint_and_post_query_url(
+        self,
+        client: TestClient,
+        in_memory_store: _InMemoryPasscodeStore,
+        cipher: ViewPasscodeCipher,
+        query: str,
+    ):
+        """Mint a row, POST the correct code to a query-bearing
+        verify URL, return the 303 response + the code."""
+        plaintext = _mint_for_path(
+            in_memory_store, cipher, "ens/feat/design/mockups/landing.html"
+        )
+        resp = client.post(
+            f"{self._PATH}?{query}",
+            data={"code": plaintext},
+            follow_redirects=False,
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        assert resp.status_code == 303
+        return resp
+
+    @pytest.mark.parametrize("query", ["raw=1", "utm_source=x", "a=1&b=2"])
+    def test_set_cookie_path_attribute_contains_no_query(
+        self, client: TestClient, in_memory_store, cipher, query
+    ):
+        """Mint via a query-bearing URL → the Set-Cookie Path
+        attribute contains NO ``?`` and equals the queryless
+        view path exactly."""
+        resp = self._mint_and_post_query_url(
+            client, in_memory_store, cipher, query
+        )
+        cookie_header = resp.headers["set-cookie"]
+        path_attrs = [
+            part.strip()
+            for part in cookie_header.split(";")
+            if part.strip().lower().startswith("path=")
+        ]
+        assert len(path_attrs) == 1, cookie_header
+        assert "?" not in path_attrs[0]
+        assert path_attrs[0] == f"Path={self._PATH}"
+
+    def test_query_bearing_entry_full_flow_serves_content(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """THE loop-regression pin — the full customer flow
+        through a query-bearing entry URL:
+
+        GET ``?raw=1`` → interstitial → POST correct code →
+        303 (Location carries the query) → follow with the
+        stored cookie → CONTENT SERVES (no interstitial
+        re-render = no infinite loop).
+        """
+        entry = f"{self._PATH}?raw=1"
+        # 0. Mint BEFORE the flow (an unminted path is uniform
+        #    404 — the gate never reveals row existence).
+        plaintext = _mint_for_path(
+            in_memory_store, cipher, "ens/feat/design/mockups/landing.html"
+        )
+        # 1. Interstitial on the query-bearing entry.
+        first = client.get(entry)
+        assert first.status_code == 200
+        assert "<form" in first.text.lower()
+        assert b"<h1>Landing</h1>" not in first.content
+        # 2. POST the correct code to the same query-bearing URL.
+        posted = client.post(
+            entry,
+            data={"code": plaintext},
+            follow_redirects=False,
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        assert posted.status_code == 303
+        # 3. The 303 Location carries the query (same-URL PRG).
+        assert posted.headers["location"] == entry
+        # 4. Store the minted cookie (browser-equivalent: the
+        #    Path attribute has NO query, so the browser WILL
+        #    attach it to both the query-bearing and the bare
+        #    URL). TestClient wrinkle: the auto-extracted
+        #    Set-Cookie is Secure-flagged and httpx never SENDS
+        #    Secure cookies over its http:// test origin — so we
+        #    clear the jar and re-seed the token exactly as the
+        #    existing Group-E tests do (domain-less set = the
+        #    sendable idiom; path = the exact queryless cookie
+        #    scope, which is the property under test).
+        token = (
+            posted.headers["set-cookie"].split(";")[0].split("=", 1)[1]
+        )
+        client.cookies.clear()
+        client.cookies.set(
+            GRANT_COOKIE_NAME, token, path=self._PATH
+        )
+        # 5. Follow the redirect — content, NOT the interstitial.
+        served = client.get(entry)
+        assert served.status_code == 200
+        assert b"<h1>Landing</h1>" in served.content
+        assert "<form" not in served.text.lower()
+        # 5b. The bare URL serves too (same cookie scope).
+        bare = client.get(self._PATH)
+        assert bare.status_code == 200
+        assert b"<h1>Landing</h1>" in bare.content
+
+
+class TestFailedCookieClearExactPath:
+    """Finding B (P2 review) — the cookie-clear header rides
+    the SAME exact Path the set used.
+
+    RFC 6265 §5.3 (step 11) deletes a stored cookie only when
+    name + domain + PATH all match: a ``Path=/`` clear never
+    reaches a cookie stored at the exact view path — the
+    stale/tampered token would ride until expiry (the T2.5
+    clear contract nominally delivered). The authoritative
+    clear carries ``Path=/views/public/<root>/<rel>``
+    (queryless, the mint scope); a ``Path=/`` variant rides
+    as a SECOND header purely as root-scope hygiene.
+    """
+
+    _PATH = "/views/public/planning/ens/feat/design/mockups/landing.html"
+
+    def test_failed_validation_clears_exact_set_path(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """Tampered cookie → interstitial + a clear header whose
+        Path EQUALS the set-path (exact string), plus the
+        root-scope variant — both Max-Age=0."""
+        in_memory_store.upsert(
+            "planning",
+            "ens/feat/design/mockups/landing.html",
+            wrapped_passcode=cipher.wrap(generate_passcode().encode("ascii")),
+        )
+        client.cookies.set(
+            GRANT_COOKIE_NAME,
+            "gAAAAA-tampered-not-a-real-fernet-token",
+        )
+        resp = client.get(self._PATH)
+        assert resp.status_code == 200
+        assert "<form" in resp.text.lower()
+        clears = resp.headers.get_list("set-cookie")
+        assert clears, "failed-validation interstitial must carry clears"
+        exact = [
+            h
+            for h in clears
+            if h.startswith(f"{GRANT_COOKIE_NAME}=;")
+            and f"Path={self._PATH}" in h
+        ]
+        root = [
+            h
+            for h in clears
+            if h.startswith(f"{GRANT_COOKIE_NAME}=;") and "Path=/" in h
+        ]
+        # The authoritative exact-Path clear is present and is
+        # emitted FIRST.
+        assert exact, f"no exact-Path clear in {clears}"
+        assert clears[0] == exact[0]
+        assert "Max-Age=0" in exact[0]
+        # Belt-and-suspenders root variant also present.
+        assert root, f"no Path=/ variant in {clears}"
+        assert "Max-Age=0" in root[0]
+        # No clear header carries a query in its Path.
+        assert all("?" not in h for h in clears)
+
+    def test_clear_delete_matches_the_jar_stored_cookie(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        """Delete-match pin (RFC 6265 §5.3 step 11) — the failed-
+        validation response carries a clear whose (name, Path)
+        EXACTLY equals the jar-STORED cookie's (name, path): the
+        property a conformant browser applies to drop the stale
+        token.
+
+        Implementation note: httpx's client-side cookie jar does
+        NOT itself apply §5.3 deletion for Secure-over-http
+        responses (verified empirically — the jar retains the
+        stale value), so the jar cannot witness the drop. The
+        header-exact delete-match against the actual storage
+        shape IS the observable contract; real browsers apply
+        it. This is the commission-sanctioned minimum pin.
+        """
+        in_memory_store.upsert(
+            "planning",
+            "ens/feat/design/mockups/landing.html",
+            wrapped_passcode=cipher.wrap(generate_passcode().encode("ascii")),
+        )
+        stale = "gAAAAA-stale-token-value"
+        client.cookies.set(GRANT_COOKIE_NAME, stale, path=self._PATH)
+        stored = [
+            (c.name, c.path)
+            for c in client.cookies.jar
+            if c.name == GRANT_COOKIE_NAME
+        ]
+        assert stored, "precondition: cookie is in the jar"
+        resp = client.get(self._PATH)
+        assert resp.status_code == 200
+        clears = resp.headers.get_list("set-cookie")
+        parsed = []
+        for h in clears:
+            parts = [p.strip() for p in h.split(";")]
+            name_value = parts[0]
+            attrs = {
+                p.split("=", 1)[0].lower(): p.split("=", 1)[1]
+                for p in parts[1:]
+                if "=" in p
+            }
+            parsed.append((name_value, attrs))
+        delete_matches = [
+            (name_value, attrs)
+            for name_value, attrs in parsed
+            if name_value == f"{GRANT_COOKIE_NAME}="
+            and attrs.get("path") == stored[0][1]
+            and attrs.get("max-age") == "0"
+        ]
+        assert delete_matches, (
+            f"no §5.3 delete-match for stored {stored} in {clears}"
+        )
+
+
+class TestStaleGenerationCookieOnLockedView:
+    """Reviewer Unverified #2 (adjudication gap) — a LOCKED view
+    hit with a STALE-GENERATION (post-refresh) cookie falls to
+    the LOCKED page, never content, never the entry form.
+
+    Scenario: mint gen1 → customer holds a gen1 grant cookie →
+    owner refreshes (gen2, lock cleared) → the view gets locked
+    AGAIN at gen2 (10 fresh wrong entries). The stale gen1
+    cookie fails the generation match (gate #4) → falls
+    through → the lock short-circuit (gate #5) → the dedicated
+    locked-notice page. A valid current-generation cookie
+    would still serve (ADR D5:68 — grants persist through
+    lockout); a STALE one must not.
+    """
+
+    _PATH = "/views/public/planning/ens/feat/design/mockups/landing.html"
+
+    def test_locked_view_with_stale_generation_cookie_renders_locked_page(
+        self, client: TestClient, in_memory_store, cipher
+    ):
+        plaintext = generate_passcode()
+        wrapped = cipher.wrap(plaintext.encode("ascii"))
+        in_memory_store.upsert(
+            "planning",
+            "ens/feat/design/mockups/landing.html",
+            wrapped_passcode=wrapped,
+            generation=1,
+        )
+        # Customer's grant cookie — generation 1.
+        token = issue_grant_cookie(
+            cipher=cipher,
+            root_name="planning",
+            rel_path="ens/feat/design/mockups/landing.html",
+            generation=1,
+            ttl_seconds=86400,
+        )
+        # Owner refreshes → gen2 (counters reset, lock cleared)…
+        row = in_memory_store.get_row(
+            "planning", "ens/feat/design/mockups/landing.html"
+        )
+        row.generation = 2
+        row.failed_attempts = 0
+        row.locked = False
+        # …then the view locks again at gen2 (10 fresh wrongs).
+        row.failed_attempts = 10
+        row.locked = True
+        # The stale-gen cookie hits the locked view.
+        client.cookies.set(GRANT_COOKIE_NAME, token.decode("ascii"))
+        resp = client.get(self._PATH)
+        assert resp.status_code == 200
+        # The LOCKED page — no content, no entry form.
+        assert "This view is locked" in resp.text
+        assert b"<h1>Landing</h1>" not in resp.content
+        assert "<form" not in resp.text.lower()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Group E3 — rightmost-XFF keying pins (finding D, ADR D7)
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestRightmostXffBucketKeying:
+    """Finding D (P2 review) — the binding abuse-control's key
+    selection, pinned at the HTTP surface.
+
+    ADR D7:83-86: rightmost XFF entry else socket peer. Behind
+    a single trusted hop the rightmost entry is the address
+    OUR proxy appended = the real client; leftmost entries
+    are client-supplied and spoofable. The parse is
+    single-homed in
+    ``daemon.services.view_passcode_service._rightmost_xff_ip``
+    (the service-level pins cover the pure function); these
+    pins prove the verify handler's bucket is keyed by it.
+    """
+
+    _PATH = "/views/public/planning/ens/feat/design/mockups/landing.html"
+
+    def _bucket_keys(self, limiter: VerifyRateLimiter) -> set:
+        return set(limiter._buckets.keys())
+
+    def _minted_client(self, in_memory_store, cipher):
+        plaintext = _mint_for_path(
+            in_memory_store, cipher, "ens/feat/design/mockups/landing.html"
+        )
+        return plaintext
+
+    def test_multi_hop_xff_keys_on_rightmost(
+        self, client: TestClient, in_memory_store, cipher, limiter
+    ):
+        plaintext = self._minted_client(in_memory_store, cipher)
+        resp = client.post(
+            self._PATH,
+            data={"code": plaintext},
+            follow_redirects=False,
+            headers={
+                "X-Forwarded-For": "203.0.113.7, 10.0.0.1, 198.51.100.9",
+                "X-Forwarded-Proto": "https",
+            },
+        )
+        assert resp.status_code == 303
+        assert self._bucket_keys(limiter) == {"198.51.100.9"}
+
+    def test_whitespace_padded_xff_keys_on_stripped_rightmost(
+        self, client: TestClient, in_memory_store, cipher, limiter
+    ):
+        plaintext = self._minted_client(in_memory_store, cipher)
+        resp = client.post(
+            self._PATH,
+            data={"code": plaintext},
+            follow_redirects=False,
+            headers={
+                "X-Forwarded-For": "  203.0.113.8 ,  198.51.100.11  ",
+                "X-Forwarded-Proto": "https",
+            },
+        )
+        assert resp.status_code == 303
+        assert self._bucket_keys(limiter) == {"198.51.100.11"}
+
+    def test_empty_xff_entries_skipped_falls_to_last_valid(
+        self, client: TestClient, in_memory_store, cipher, limiter
+    ):
+        plaintext = self._minted_client(in_memory_store, cipher)
+        resp = client.post(
+            self._PATH,
+            data={"code": plaintext},
+            follow_redirects=False,
+            headers={
+                "X-Forwarded-For": ", , 198.51.100.12, , ",
+                "X-Forwarded-Proto": "https",
+            },
+        )
+        assert resp.status_code == 303
+        assert self._bucket_keys(limiter) == {"198.51.100.12"}
+
+    def test_all_invalid_xff_falls_back_to_socket_peer(
+        self, client: TestClient, in_memory_store, cipher, limiter
+    ):
+        plaintext = self._minted_client(in_memory_store, cipher)
+        resp = client.post(
+            self._PATH,
+            data={"code": plaintext},
+            follow_redirects=False,
+            headers={
+                "X-Forwarded-For": " , , ",
+                "X-Forwarded-Proto": "https",
+            },
+        )
+        assert resp.status_code == 303
+        # No XFF entry survived the parse → socket peer
+        # (Starlette TestClient's client host = "testclient").
+        assert self._bucket_keys(limiter) == {"testclient"}
+
+    def test_absent_xff_falls_back_to_socket_peer(
+        self, client: TestClient, in_memory_store, cipher, limiter
+    ):
+        plaintext = self._minted_client(in_memory_store, cipher)
+        resp = client.post(
+            self._PATH,
+            data={"code": plaintext},
+            follow_redirects=False,
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        assert resp.status_code == 303
+        assert self._bucket_keys(limiter) == {"testclient"}
+
+
+# ─────────────────────────────────────────────────────────────────
 # Group F — Reserved-root guard (T2.2 / AC16)
 # ─────────────────────────────────────────────────────────────────
 
@@ -1445,69 +1847,152 @@ class TestServiceWiring:
 # ─────────────────────────────────────────────────────────────────
 
 
+def _serialize_direct_lane_envelope(label: str, resp) -> str:
+    """Serialize a full HTTP envelope deterministically.
+
+    Status line + every header as ``name: value`` (raw wire
+    pairs, sorted) + the body as a byte repr. Byte-exact and
+    printable-ASCII-safe — the same algorithm that produced
+    the committed golden fixture.
+    """
+    lines = [f"=== {label} ===", f"status: {resp.status_code}"]
+    lines += [
+        f"{k.decode('ascii')}: {v.decode('ascii')}"
+        for k, v in sorted(resp.headers.raw)
+    ]
+    lines.append(f"body: {resp.content!r}")
+    return "\n".join(lines)
+
+
+# Golden fixture captured from the PRE-P2 base tree — git
+# 859e41193, extracted via ``git archive`` into a mktemp dir
+# and driven with the SAME requests through the SAME fixture
+# shape (base-tree ``daemon`` package on sys.path, worktree
+# venv deps). This makes the pin a TRUE before/after capture,
+# not a same-run self-comparison.
+_DIRECT_LANE_GOLDEN_PATH = (
+    pathlib.Path(__file__).parent
+    / "golden"
+    / "live_views_direct_lane_envelope_BASE-859e41193.golden.txt"
+)
+
+
 class TestDirectLaneByteParity:
     """req5 / AC3 — direct-lane ``/views/{root}/{path}``
-    responses are byte-identical to pre-feature (status,
-    headers, body). P1's existing test suite already pins
-    this; P2 adds an explicit "public-lane did not touch
-    the direct lane" assertion by sampling one path."""
+    responses are byte-identical to pre-P2 (git 859e41193).
 
-    def test_direct_lane_response_shape_unchanged(
+    The full parity argument, recorded:
+
+    1. **Base capture (true before/after).** The golden
+       fixture at ``tests/unit/routers/golden/
+       live_views_direct_lane_envelope_BASE-859e41193.golden.txt``
+       was generated from the BASE tree itself: ``git archive
+       859e41193`` extracted into a mktemp dir, driven with a
+       standalone capture script that imported the base
+       tree's ``daemon`` package (asserted via
+       ``daemon.__file__``) while third-party deps came from
+       the worktree venv. The branch tree MUST reproduce it
+       byte-for-byte — this is a before/after comparison,
+       not a same-run self-comparison.
+    2. **Empty direct-lane handler diff.** ``git diff
+       859e41193..HEAD`` on ``daemon/routers/live_views.py``
+       touches ONLY additive public-lane code; on
+       ``daemon/services/live_views.py`` the changes are the
+       reserved-name constants/guard (fires only on
+       ``root_name == "public"``, a name that could never
+       resolve pre-feature either — no root registers under
+       it).
+    3. **33 pre-existing direct-lane tests untouched+green.**
+       ``tests/unit/routers/test_live_views_router.py`` is
+       byte-untouched by this commission and pins the
+       direct-lane shape at 33 tests (the P1 behavioral
+       net).
+    4. **Golden + exact-header-set pins (this class).** Any
+       future direct-lane drift — a new header sneaking in,
+       a status change, a body byte change — trips here
+       first.
+    """
+
+    def test_direct_lane_envelopes_match_base_golden(
         self, client: TestClient
     ):
-        """Direct-lane GET on a real file → 200 + the native
-        bytes + the pre-existing hardening headers.
+        """The three canonical direct-lane envelopes (GET 200
+        / GET 404 / HEAD) reproduce the PRE-P2 base capture
+        byte-for-byte — status + every wire header + body."""
+        envelopes = "\n\n".join(
+            [
+                _serialize_direct_lane_envelope(
+                    "GET 200 landing.html",
+                    client.get(
+                        "/views/planning/ens/feat/design/mockups/landing.html"
+                    ),
+                ),
+                _serialize_direct_lane_envelope(
+                    "GET 404 missing",
+                    client.get("/views/planning/ens/no-such-file.html"),
+                ),
+                _serialize_direct_lane_envelope(
+                    "HEAD 200 landing.html",
+                    client.head(
+                        "/views/planning/ens/feat/design/mockups/landing.html"
+                    ),
+                ),
+            ]
+        ) + "\n"
+        golden = _DIRECT_LANE_GOLDEN_PATH.read_text(encoding="utf-8")
+        assert envelopes == golden, (
+            "Direct-lane envelope drifted from the pre-P2 base "
+            f"capture ({_DIRECT_LANE_GOLDEN_PATH.name}). If the "
+            "drift is INTENTIONAL, regenerate the golden from the "
+            "new base and re-record provenance."
+        )
 
-        The P1 suite (``test_live_views_router.py``, UNTOUCHED)
-        pins the direct-lane shape at 33 tests green — that IS
-        the byte-parity proof (the P2 change added routes; the
-        direct-lane handlers' code paths are unchanged except
-        for the defensive reserved-name mirror, which only
-        fires on ``root_name == "public"`` — a name that could
-        never resolve pre-feature either, since no root is
-        registered under it).
-
-        This test samples the canonical direct-lane response
-        for the header set (status/Content-Type/nosniff/
-        Content-Length/body) so any future drift that breaks
-        byte-parity trips here first.
-        """
+    def test_direct_lane_get_200_exact_header_set(
+        self, client: TestClient
+    ):
+        """GET 200 — the header NAME SET is exactly the pre-P2
+        four; a new header sneaking in fails the pin."""
         resp = client.get(
             "/views/planning/ens/feat/design/mockups/landing.html"
         )
         assert resp.status_code == 200
-        # The pre-feature header set (P1 shape).
-        assert resp.headers.get("x-content-type-options") == "nosniff"
-        assert (
-            resp.headers.get("cache-control") == "private, max-age=60"
-        )
-        assert "text/html; charset=utf-8" in resp.headers.get(
-            "content-type", ""
-        )
-        # The body is the file bytes verbatim (native serving —
-        # .html is NOT wrapped).
-        assert resp.content == b"<h1>Landing</h1>"
+        assert set(resp.headers.keys()) == {
+            "x-content-type-options",
+            "cache-control",
+            "content-length",
+            "content-type",
+        }
 
-    def test_direct_lane_404_envelope_unchanged(
+    def test_direct_lane_get_404_exact_header_set(
         self, client: TestClient
     ):
-        """The direct-lane uniform-404 envelope is byte-identical
-        (same JSON body, same nosniff header) — the P2 router
-        change did not touch it."""
+        """GET 404 — exactly the pre-P2 four headers + the
+        uniform envelope body."""
         resp = client.get("/views/planning/ens/no-such-file.html")
         assert resp.status_code == 404
+        assert set(resp.headers.keys()) == {
+            "x-content-type-options",
+            "cache-control",
+            "content-length",
+            "content-type",
+        }
         assert resp.json() == {"error": "view not found"}
-        assert resp.headers.get("x-content-type-options") == "nosniff"
 
-    def test_direct_lane_head_envelope_unchanged(
+    def test_direct_lane_head_exact_header_set(
         self, client: TestClient
     ):
-        """Direct-lane HEAD → 200 + Content-Length only (no
-        body) — unchanged by P2."""
+        """HEAD 200 — exactly the pre-P2 four headers, empty
+        body, Content-Length matching the GET body size."""
         resp = client.head(
             "/views/planning/ens/feat/design/mockups/landing.html"
         )
         assert resp.status_code == 200
+        assert set(resp.headers.keys()) == {
+            "x-content-type-options",
+            "cache-control",
+            "content-length",
+            "content-type",
+        }
         assert resp.content == b""
         assert resp.headers.get("content-length") == str(
             len(b"<h1>Landing</h1>")
