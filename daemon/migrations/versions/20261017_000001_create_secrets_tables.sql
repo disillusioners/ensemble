@@ -10,11 +10,43 @@
 -- Design summary (per plan §4 + §10 + §13):
 --
 --   * ``secrets`` is the durable Fernet-encrypted secret store backing
---     the new ``secrets`` privileged tool category (#6 in
+--     the new ``secrets`` privileged tool category (#7 in
 --     ``PRIVILEGED_TOOL_CATEGORIES`` — sextet → septet per
 --     Q1/Q2/Q3 decisions 2026-10-17 (``cu`` joined
 --     2026-10-16 making the count 6 before this entry,
 --     ``secrets`` is the 7th). The row IS the secret:
+--
+--     PRIVILEGED-CATEGORY-COUNT LOCKSTEP NOTE
+--     ----------------------------------------
+--     Changing the privileged-category count from ``secrets``
+--     being the 7th entry requires a lockstep update at every
+--     sibling site that asserts the count. The grep anchor is:
+--     ``sextet → septet`` (or ``#7 in
+--     PRIVILEGED_TOOL_CATEGORIES``) across:
+--
+--       1. ``daemon/services/secret_service.py`` (this
+--          commission's PRIMARY docstring + the
+--          ``MIN_API_TOKEN_LENGTH_BYTES`` block-comment
+--          cross-reference);
+--       2. ``daemon/tools/secrets_tools.py`` (module
+--          docstring + the per-tool ``Visibility`` block);
+--       3. ``daemon/tools/_tool_registry.py`` (3 sites at
+--          :123, :267, :800 — the registry's privileged-
+--          category enumerators);
+--       4. ``.agents/shared/planning/agent-secrets/plan-overview.md``
+--          (the ``sextet → septet`` line in the §6
+--          decisions table);
+--       5. ``daemon/tools/instance.py:6107-6108`` (the
+--          ``invoke_agent_and_wait`` privileged-category
+--          fence);
+--       6. ``daemon/migrations/versions/20261017_000001_create_secrets_tables.sql``
+--          (THIS FILE — the privileged-categories line at
+--          :13-17 above).
+--
+--     A count change that updates one site without the
+--     others re-asserts the same F15-class dual-emission
+--     hazard in COMMENTS instead of in schema — the same
+--     root cause wearing a different coat.
 --     - ``id`` is the UUID4 immutable handle that the
 --       ``__ENS_SECRET__<id>__`` marker text embeds (Q3 — marker
 --       format FROZEN, see ``daemon/services/secret_service.py``).
