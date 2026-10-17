@@ -945,10 +945,12 @@
           Continue →
         </button>
       } @else if (activeStep() === 1) {
-        <!-- Step 2: <- Back + Continue -> (Continue gated on a fresh dry-run
-             with would_delete_count > 0 -- spec §2.4).
-             AC-15 -- same `ck-continue-btn` testid; the footer renders
-             exactly one Continue button across steps 1-2. -->
+        <!-- Step 2: <- Back + Continue -> (Continue gated on a fresh
+             dry-run; zero-reclaimable no longer blocks — vacuum-ungate
+             2026-10-17. VACUUM FULL still rewrites/compacts even with
+             no prune-eligible rows). AC-15 -- same `ck-continue-btn`
+             testid; the footer renders exactly one Continue button
+             across steps 1-2. -->
         <button
           mat-stroked-button
           (click)="stepperNav().back()"
