@@ -809,3 +809,351 @@ class TestReferrerPolicyWrapperOnly:
         # Raw HTML is operator-curated — wrapper-only header
         # MUST NOT leak into this response.
         assert "referrer-policy" not in resp.headers
+
+# ===========================================================================
+# Group 8 — Phase 3 extension: mermaid fences inside .md files
+# ===========================================================================
+
+
+class TestMarkdownMermaidFenceExtension:
+    """``.md`` files containing ``mermaid`` fences use the mermaid-aware wrapper.
+
+    The Phase 3 extension ADDS mermaid-fence rendering on top
+    of the existing markdown wrapper. ``.md`` files WITHOUT
+    mermaid fences must keep the pre-Phase-3 wrapper byte-
+    identical (no vendored asset fetch, no mermaid.run call,
+    no CSP change).
+    """
+
+    def test_md_with_mermaid_fence_loads_vendored_asset(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        from daemon.routers.live_views import _MERMAID_ASSET_URL_PATH
+        from daemon.services.live_views import _MERMAID_ASSET_SRI_SHA256
+
+        mockup = (
+            filesystem_root_dir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        (mockup / "doc-with-mermaid.md").write_text(
+            "# Heading\n\n"
+            "```mermaid\n"
+            "graph TD\n  A --> B\n"
+            "```\n"
+        )
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/doc-with-mermaid.md"
+        )
+        assert resp.status_code == 200
+        body = resp.content.decode("utf-8")
+        # Vendored asset URL is loaded.
+        assert (
+            f'<script src="/views{_MERMAID_ASSET_URL_PATH}"'
+            in body
+        )
+        assert _MERMAID_ASSET_SRI_SHA256 in body
+        # The bootstrap rewrites ``pre code.language-mermaid``
+        # → ``pre.mermaid`` before mermaid.run.
+        assert "code.language-mermaid" in body
+        assert "pre.mermaid" in body
+        # ``mermaid.run`` is the rendering entry point (v10+).
+        assert "mermaid.run" in body
+        # The CDN-marked + DOMPurify scripts are STILL loaded
+        # (the existing wrapper doesn't change).
+        from daemon.services.live_views import (
+            DOMPURIFY_CDN_URL,
+            MARKED_CDN_URL,
+        )
+        assert MARKED_CDN_URL in body
+        assert DOMPURIFY_CDN_URL in body
+
+    def test_md_without_mermaid_fence_byte_identical_to_pre_phase3(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """No mermaid fences → no vendored asset fetch, no mermaid.run.
+
+        The Phase 3 extension is OPT-IN per file (cheap scan
+        before rendering). The pre-Phase-3 wrapper is preserved
+        byte-identical for files without mermaid fences — the
+        operator-facing behavior is unchanged.
+        """
+        from daemon.services.live_views import (
+            DOMPURIFY_CDN_URL,
+            MARKED_CDN_URL,
+            _MERMAID_ASSET_SRI_SHA256,
+        )
+
+        mockup = (
+            filesystem_root_dir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        # The seeded fixture does NOT create a plain .md file;
+        # stage one for this test.
+        (mockup / "plain.md").write_text("# Plain\n\nNo mermaid here.\n")
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/plain.md"
+        )
+        assert resp.status_code == 200
+        body = resp.content.decode("utf-8")
+        # No vendored asset URL on a plain .md.
+        assert "/views/assets/mermaid/mermaid.min.js" not in body
+        assert _MERMAID_ASSET_SRI_SHA256 not in body
+        # The CDN-marked + DOMPurify scripts ARE loaded (the
+        # pre-Phase-3 wrapper).
+        assert MARKED_CDN_URL in body
+        assert DOMPURIFY_CDN_URL in body
+        # No mermaid.run call.
+        assert "mermaid.run" not in body
+
+    def test_md_with_tilde_mermaid_fence_also_renders(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """Tilde fence (``~~~mermaid``) triggers the mermaid-aware wrapper."""
+        mockup = (
+            filesystem_root_dir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        (mockup / "tilde-mermaid.md").write_text(
+            "~~~mermaid\ngraph TD\nA --> B\n~~~\n"
+        )
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/tilde-mermaid.md"
+        )
+        assert resp.status_code == 200
+        body = resp.content.decode("utf-8")
+        assert "mermaid.run" in body
+        assert "/views/assets/mermaid/mermaid.min.js" in body
+
+    def test_md_with_mermaid_fence_preserves_heading_text(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """Headings/lists/etc. outside the mermaid fence still parse.
+
+        The mermaid-aware wrapper uses the same marked.parse
+        + DOMPurify.sanitize pipeline as the pre-Phase-3
+        wrapper — standard markdown content is preserved
+        byte-identical (the only delta is the vendored
+        asset fetch + the DOM walk that rewrites
+        ``pre code.language-mermaid`` → ``pre.mermaid``).
+        """
+        mockup = (
+            filesystem_root_dir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        (mockup / "rich.md").write_text(
+            "# H1\n## H2\n\n- a\n- b\n- c\n\n"
+            "paragraph with `inline code` and [link](https://example.com).\n\n"
+            "```mermaid\ngraph TD\nA --> B\n```\n"
+        )
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/rich.md"
+        )
+        assert resp.status_code == 200
+        body = resp.content.decode("utf-8")
+        # The wrapper renders mermaid fences via the vendored asset.
+        assert "mermaid.run" in body
+        # Marked still parses the rest (the raw markdown is escaped
+        # into the fallback <pre>; the live render happens client-side).
+        assert "H1" in body
+        assert "H2" in body
+        # The bootstrap calls DOMPurify.sanitize after marked.parse.
+        assert "DOMPurify.sanitize" in body
+
+    def test_md_with_mermaid_fence_renders_gfm_tables(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """GFM tables render alongside mermaid fences (same marked config).
+
+        Marked 12's ``gfm: true`` default handles tables
+        out-of-the-box — no per-table config needed. The
+        mermaid-aware wrapper uses the same marked config
+        as the pre-Phase-3 wrapper, so tables in the same
+        .md render alongside mermaid fences.
+        """
+        mockup = (
+            filesystem_root_dir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        (mockup / "tables.md").write_text(
+            "# Tables + Mermaid\n\n"
+            "| col1 | col2 |\n|------|------|\n| a    | b    |\n| c    | d    |\n\n"
+            "```mermaid\ngraph TD\nA --> B\n```\n"
+        )
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/tables.md"
+        )
+        assert resp.status_code == 200
+        body = resp.content.decode("utf-8")
+        # Table syntax survived (raw markdown embedded in fallback).
+        assert "| col1 | col2 |" in body
+        # The mermaid-aware wrapper is active.
+        assert "mermaid.run" in body
+        # Marked (which renders GFM tables) is still loaded.
+        from daemon.services.live_views import MARKED_CDN_URL
+        assert MARKED_CDN_URL in body
+
+    def test_md_with_mermaid_fence_html_escapes_malicious_payload(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """A ``<script>`` inside a mermaid fence is escaped in the fallback.
+
+        Defense in depth: mermaid's ``strict`` security level
+        already blocks HTML in labels, AND the wrapper still
+        html-escapes the raw markdown before embedding it
+        in the ``<pre>`` fallback (graceful-degradation
+        contract preserved).
+        """
+        mockup = (
+            filesystem_root_dir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        (mockup / "malicious-mermaid.md").write_text(
+            "```mermaid\n"
+            "<script>alert(1)</script>\n"
+            "graph TD\nA --> B\n"
+            "```\n"
+        )
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/malicious-mermaid.md"
+        )
+        body = resp.content.decode("utf-8")
+        # The raw payload is escaped in the embedded fallback.
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body
+        # The raw form does NOT survive as live HTML.
+        assert "<script>alert(1)</script>" not in body
+
+    def test_md_with_mermaid_fence_keeps_nosniff_header(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """The mermaid-aware wrapper keeps the nosniff hardening header."""
+        mockup = (
+            filesystem_root_dir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        (mockup / "mmd.md").write_text(
+            "# Hi\n```mermaid\ngraph TD\nA --> B\n```\n"
+        )
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/mmd.md"
+        )
+        assert resp.headers.get("x-content-type-options") == "nosniff"
+
+    def test_md_with_mermaid_fence_csp_style_src_allows_unsafe_inline_and_no_nonce(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """Mermaid-aware MD wrapper: style-src mirrors the .mmd wrapper fix.
+
+        Per CSP3 (https://www.w3.org/TR/CSP3/#match-element-to-source-list),
+        when a directive contains BOTH ``'nonce-X'`` and
+        ``'unsafe-inline'`` browsers IGNORE ``'unsafe-inline'`` and
+        require nonce matches — mermaid's runtime applies inline
+        ``style="..."`` attrs to SVG nodes post-load (no
+        element-level nonce), so the prior nonce+unsafe-inline
+        posture silently black-filled every mermaid SVG on the
+        markdown-fence path.
+
+        Script policy is UNCHANGED: ``script-src`` keeps the
+        jsdelivr CDN allowlist (marked + DOMPurify) plus the
+        per-request nonce (the bootstrap script). No
+        ``'unsafe-inline'`` on scripts. ``unsafe-eval`` still
+        absent.
+        """
+        import re
+
+        mockup = (
+            filesystem_root_dir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        (mockup / "csp-md-mermaid.md").write_text(
+            "# Hi\n```mermaid\ngraph TD\nA --> B\n```\n"
+        )
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/csp-md-mermaid.md"
+        )
+        csp = resp.headers.get("content-security-policy")
+        assert csp is not None, "CSP header MUST be set on the mermaid-aware MD wrapper"
+        # Hardening posture preserved.
+        assert "unsafe-eval" not in csp
+        assert "script-src 'unsafe-inline'" not in csp
+        # jsdelivr CDN allowlist still present (marked + DOMPurify
+        # are still CDN-loaded on this path).
+        assert "cdn.jsdelivr.net" in csp
+        # The per-request nonce rides in the CSP.
+        body = resp.content.decode("utf-8")
+        nonces = re.findall(r"'nonce-([^']+)'", csp)
+        assert nonces, "CSP must include at least one 'nonce-XXX' directive"
+        for nonce in nonces:
+            assert f'nonce="{nonce}"' in body
+        # Script-src preserved verbatim (jsdelivr + nonce).
+        script_src_match = re.search(r"script-src[^;]*", csp)
+        assert script_src_match is not None, "CSP must include a script-src directive"
+        script_src = script_src_match.group(0)
+        assert "cdn.jsdelivr.net" in script_src
+        assert "'nonce-" in script_src
+        assert "'unsafe-inline'" not in script_src, (
+            f"script-src must NOT carry 'unsafe-inline' (bootstrap "
+            f"script is the only inline script, gated by nonce); "
+            f"got: {script_src!r}"
+        )
+        # Style-src: must allow 'unsafe-inline' AND must NOT carry
+        # a nonce (the same CSP3 downgrade would black-fill SVGs).
+        style_src_match = re.search(r"style-src[^;]*", csp)
+        assert style_src_match is not None, "CSP must include a style-src directive"
+        style_src = style_src_match.group(0)
+        assert "'unsafe-inline'" in style_src, (
+            f"style-src must allow 'unsafe-inline' (mermaid runtime "
+            f"applies inline style attrs); got: {style_src!r}"
+        )
+        assert "'nonce-" not in style_src, (
+            f"style-src must NOT carry a nonce (CSP3 makes nonce + "
+            f"unsafe-inline downgrade to nonce-only, blocking mermaid "
+            f"inline styles); got: {style_src!r}"
+        )
