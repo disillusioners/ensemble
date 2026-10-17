@@ -79,11 +79,11 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from sqlalchemy import text as sql_text
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, and_, select
 
 from daemon.repositories.secrets.models import (
     SECRET_AUDIT_ACTIONS,
-    SECRET_AUDIT_ACTIONS_P1,
     Secret,
     SecretAuditEvent,
 )
@@ -548,10 +548,12 @@ class _SecretStorePort(Protocol):
     KMS-backed cipher would replace the cipher without
     touching the store).
 
-    The four calls:
+    The calls:
 
     * ``insert(secret)`` — INSERT a new row, RETURNING the
-      stored row. Raises on UNIQUE(name) collision.
+      stored row. Raises on UNIQUE(name) collision. Single-
+      operation; the atomic create+audit variant lives at
+      :meth:`_SqlSecretStore.insert_with_audit`.
     * ``get_by_id(id)`` — SELECT by id, including retired
       rows. Returns ``None`` if missing.
     * ``list_active()`` — SELECT all non-retired rows (used
@@ -559,9 +561,30 @@ class _SecretStorePort(Protocol):
     * ``mark_retired(id, at_iso)`` — UPDATE retired_at;
       returns the updated row or ``None`` if not found.
     * ``append_audit(action, secret_id, actor)`` — INSERT
-      an audit row. The action MUST be in
-      :data:`SECRET_AUDIT_ACTIONS`; the actor is the
-      agent id.
+      an audit row in its OWN session. The service
+      boundary NEVER calls this for mutations — it uses
+      the ``*_with_audit`` atomic variants below so a
+      crash between the mutation and the audit row
+      cannot leave the registry without its audit trail
+      (M1 — governor pre-promote fix 2026-10-17).
+    * ``insert_with_audit(secret, action, actor)`` —
+      INSERT the secret row AND the audit row inside ONE
+      ``engine.begin()`` transaction (the M1 atomicity
+      contract; mirrors
+      ``daemon/repositories/prompt_version/repository.py``
+      ``create_initial_approved_v1`` / ``atomic_transition``
+      pattern). Raises ``IntegrityError`` on UNIQUE(name)
+      collision (caller translates to
+      :class:`SecretNameConflictError`).
+    * ``mark_retired_with_audit(id, at_iso, actor)`` —
+      UPDATE retired_at AND INSERT the audit row inside
+      ONE ``engine.begin()`` transaction. Returns the
+      updated row or ``None`` if not found.
+    * ``get_by_id_with_audit(id, actor)`` — SELECT the row
+      AND INSERT the ``read_public`` audit row inside ONE
+      ``engine.begin()`` transaction (M1 — audit row
+      shares the transaction with the read). Returns the
+      row or ``None``.
 
     The ``callable`` annotation on the constructor's
     ``engine_factory`` is a hint that the port takes a
@@ -581,6 +604,25 @@ class _SecretStorePort(Protocol):
         secret_id: Optional[str],
         actor: str,
     ) -> None: ...
+    def insert_with_audit(
+        self,
+        secret: Secret,
+        *,
+        actor: str,
+    ) -> Secret: ...
+    def mark_retired_with_audit(
+        self,
+        id: str,
+        at_iso: str,
+        *,
+        actor: str,
+    ) -> Optional[Secret]: ...
+    def get_by_id_with_audit(
+        self,
+        id: str,
+        *,
+        actor: str,
+    ) -> Optional[Secret]: ...
 
 
 class _SqlSecretStore:
@@ -592,6 +634,20 @@ class _SqlSecretStore:
     prompt_version/repository.py). Per-method short-lived
     ``Session`` — every public method opens its own
     session and commits; no instance state.
+
+    M1 (governor pre-promote fix, 2026-10-17): the three
+    P1 audit-emitting actions (create, retire, read_public)
+    flow through the ``*_with_audit`` variants which wrap
+    the mutation AND the audit row in ONE
+    ``engine.begin()`` transaction. The earlier
+    session-per-call layout left a crash window between
+    the mutation's commit and the audit row's commit —
+    a crash there committed the mutation without its
+    audit row, contradicting the plan's promise of
+    prompt_versions-style same-engine.begin() atomicity.
+    The atomic variants mirror the
+    ``daemon/repositories/prompt_version/repository.py``
+    pattern (``atomic_transition`` + ``_append_audit_in_conn``).
     """
 
     def __init__(self, engine: Any) -> None:
@@ -656,6 +712,209 @@ class _SqlSecretStore:
             )
             session.add(event)
             session.commit()
+
+    # ─────────────────────────────────────────────────────
+    # M1 atomic variants — mutation + audit row inside ONE
+    # ``engine.begin()`` transaction (mirrors the
+    # ``prompt_version/repository.py`` ``atomic_transition``
+    # + ``_append_audit_in_conn`` pattern).
+    # ─────────────────────────────────────────────────────
+
+    def insert_with_audit(
+        self,
+        secret: Secret,
+        *,
+        actor: str,
+    ) -> Secret:
+        """INSERT the secret row + the ``create`` audit row
+        in one ``engine.begin()`` transaction.
+
+        Raises ``sqlalchemy.exc.IntegrityError`` on
+        UNIQUE(name) collision — the service translates
+        this to :class:`SecretNameConflictError`. Any
+        other failure rolls back BOTH writes so a crash
+        between the mutation and the audit row cannot
+        leave the registry in an inconsistent state
+        (M1 — governor pre-promote fix 2026-10-17).
+
+        Returns the persisted row read back inside the
+        same ``engine.begin()`` transaction so the
+        returned ORM object reflects the stored state.
+        Using ``Session.get`` from a separate connection
+        would race against an outer transaction that has
+        not yet committed — the row read happens on the
+        SAME ``conn`` so it sees the just-inserted values.
+        """
+        if "create" not in SECRET_AUDIT_ACTIONS:
+            raise ValueError(
+                "internal: 'create' missing from SECRET_AUDIT_ACTIONS"
+            )
+        with self._engine.begin() as conn:
+            conn.execute(
+                Secret.__table__.insert().values(
+                    id=secret.id,
+                    name=secret.name,
+                    kind=secret.kind,
+                    public_material=secret.public_material,
+                    wrapped_secret=secret.wrapped_secret,
+                    created_by=secret.created_by,
+                    created_at=secret.created_at,
+                    retired_at=secret.retired_at,
+                )
+            )
+            conn.execute(
+                SecretAuditEvent.__table__.insert().values(
+                    action="create",
+                    secret_id=secret.id,
+                    actor=actor,
+                    at=self._now_iso(),
+                )
+            )
+            # Read back via the SAME connection so the
+            # just-inserted row is visible. Returns the
+            # values in the same shape the caller expects
+            # (the existing ``insert()`` ORM-refresh contract).
+            row = conn.execute(
+                select(Secret).where(Secret.id == secret.id)
+            ).first()
+            if row is None:
+                # Should be unreachable — we just inserted.
+                raise RuntimeError(
+                    "insert_with_audit: row not visible after "
+                    "INSERT — internal invariant violated"
+                )
+            # Map Core row → ORM dataclass. Field order matches
+            # the SQLModel table definition; ``wrapped_secret``
+            # carries LargeBinary bytes, the rest are scalars.
+            stored = Secret(
+                id=row[0],
+                name=row[1],
+                kind=row[2],
+                public_material=row[3],
+                wrapped_secret=row[4],
+                created_by=row[5],
+                created_at=row[6],
+                retired_at=row[7],
+            )
+            return stored
+
+    def mark_retired_with_audit(
+        self,
+        id: str,
+        at_iso: str,
+        *,
+        actor: str,
+    ) -> Optional[Secret]:
+        """UPDATE retired_at + INSERT the ``retire`` audit
+        row in one ``engine.begin()`` transaction.
+
+        Returns the updated row, or ``None`` if the id
+        is unknown. The mutation AND the audit row are
+        committed atomically — a crash between the two
+        cannot leave the registry retired without its
+        audit trail (M1 — governor pre-promote fix
+        2026-10-17).
+
+        Returns ``None`` for an unknown id WITHOUT
+        inserting an audit row (mirrors the
+        ``get_by_id_with_audit`` NOT-found contract —
+        the v1 contract audits successful writes only).
+        """
+        if "retire" not in SECRET_AUDIT_ACTIONS:
+            raise ValueError(
+                "internal: 'retire' missing from SECRET_AUDIT_ACTIONS"
+            )
+        with self._engine.begin() as conn:
+            existing = conn.execute(
+                select(Secret).where(Secret.id == id)
+            ).first()
+            if existing is None:
+                # NOT-found does NOT audit (the v1 contract —
+                # the service raises ``SecretNotFoundError``).
+                return None
+            conn.execute(
+                Secret.__table__.update()
+                .where(Secret.id == id)
+                .values(retired_at=at_iso)
+            )
+            conn.execute(
+                SecretAuditEvent.__table__.insert().values(
+                    action="retire",
+                    secret_id=id,
+                    actor=actor,
+                    at=self._now_iso(),
+                )
+            )
+            # Read back inside the same transaction so
+            # the returned ORM row reflects the just-set
+            # retired_at.
+            row = conn.execute(
+                select(Secret).where(Secret.id == id)
+            ).first()
+            assert row is not None
+            return Secret(
+                id=row[0],
+                name=row[1],
+                kind=row[2],
+                public_material=row[3],
+                wrapped_secret=row[4],
+                created_by=row[5],
+                created_at=row[6],
+                retired_at=row[7],
+            )
+
+    def get_by_id_with_audit(
+        self,
+        id: str,
+        *,
+        actor: str,
+    ) -> Optional[Secret]:
+        """SELECT the row + INSERT the ``read_public`` audit
+        row in one ``engine.begin()`` transaction.
+
+        Returns the row, or ``None`` if the id is unknown
+        (NOT-found reads do NOT audit — the v1 contract
+        audits successful reads only, the P2 marker-
+        resolver audit will follow the same pattern).
+        The read AND the audit row commit atomically;
+        a crash between the two leaves neither side
+        visible (M1 — governor pre-promote fix
+        2026-10-17).
+        """
+        if "read_public" not in SECRET_AUDIT_ACTIONS:
+            raise ValueError(
+                "internal: 'read_public' missing from SECRET_AUDIT_ACTIONS"
+            )
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                select(Secret).where(Secret.id == id)
+            ).first()
+            if row is None:
+                # NOT-found does NOT audit (mirrors the
+                # previous behavior — the v1 contract).
+                return None
+            conn.execute(
+                SecretAuditEvent.__table__.insert().values(
+                    action="read_public",
+                    secret_id=id,
+                    actor=actor,
+                    at=self._now_iso(),
+                )
+            )
+            return Secret(
+                id=row[0],
+                name=row[1],
+                kind=row[2],
+                public_material=row[3],
+                wrapped_secret=row[4],
+                created_by=row[5],
+                created_at=row[6],
+                retired_at=row[7],
+            )
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
 
 
 class SecretService:
@@ -806,29 +1065,48 @@ class SecretService:
             created_at=now_iso,
             retired_at=None,
         )
+        # M1 atomic path: secret row + create audit row
+        # commit in ONE ``engine.begin()`` (the governor
+        # pre-promote fix, 2026-10-17 — mirrors
+        # ``prompt_version/repository.py:atomic_transition``).
+        # On UNIQUE(name) collision, the IntegrityError
+        # surfaces and we translate to a structured service
+        # error.
         try:
-            self._store.insert(row)
-        except Exception as exc:
-            # UNIQUE(name) collision surfaces as a SQLAlchemy
-            # IntegrityError — translate to a structured
-            # service error.
+            stored = self._store.insert_with_audit(row, actor=actor)
+        except IntegrityError as exc:
+            # UNIQUE(name) collision surfaces as a
+            # SQLAlchemy IntegrityError — translate to a
+            # structured service error. Other DB errors
+            # propagate as their real type so the tool
+            # envelope surfaces them verbatim (M2).
             raise SecretNameConflictError(
                 f"secret name {name!r} already exists"
             ) from exc
 
-        # Audit — stamped after the row commits (the
-        # P1 path always links to an existing row).
-        self._store.append_audit(
-            action="create",
-            secret_id=secret_id,
-            actor=actor,
-        )
+        # Capture the public-side values before we drop
+        # the in-memory ``material`` reference — the
+        # return dict needs them.
+        public_key = material.public_openssh
+        fingerprint = material.fingerprint
+
+        # Discard in-memory private bytes now that the
+        # wrap is committed (defense-in-depth — the
+        # ``SecretSshKeypairMaterial`` dataclass is the
+        # sole in-memory carrier; once ``stored`` returns
+        # the only reference is the wrapped bytes in the
+        # row, the plain bytes are unreachable). The
+        # dataclass goes out of scope on return.
+        del material, wrapped
+
+        secret_id = stored.id
+        marker = mint_marker(secret_id)
 
         return {
             "id": secret_id,
             "name": name,
-            "public_key": material.public_openssh,
-            "fingerprint": material.fingerprint,
+            "public_key": public_key,
+            "fingerprint": fingerprint,
             "marker": marker,
         }
 
@@ -896,18 +1174,19 @@ class SecretService:
             created_at=now_iso,
             retired_at=None,
         )
+        # M1 atomic path — see ``generate_ssh_keypair``
+        # for the rationale.
         try:
-            self._store.insert(row)
-        except Exception as exc:
+            self._store.insert_with_audit(row, actor=actor)
+        except IntegrityError as exc:
             raise SecretNameConflictError(
                 f"secret name {name!r} already exists"
             ) from exc
 
-        self._store.append_audit(
-            action="create",
-            secret_id=secret_id,
-            actor=actor,
-        )
+        # Drop in-memory token bytes (defense-in-depth — the
+        # wrap is committed; the only remaining reference is
+        # the wrapped form in the row).
+        del token_bytes, wrapped
 
         return {
             "id": secret_id,
@@ -974,18 +1253,19 @@ class SecretService:
             created_at=now_iso,
             retired_at=None,
         )
+        # M1 atomic path — see ``generate_ssh_keypair``
+        # for the rationale.
         try:
-            self._store.insert(row)
-        except Exception as exc:
+            self._store.insert_with_audit(row, actor=actor)
+        except IntegrityError as exc:
             raise SecretNameConflictError(
                 f"secret name {name!r} already exists"
             ) from exc
 
-        self._store.append_audit(
-            action="create",
-            secret_id=secret_id,
-            actor=actor,
-        )
+        # Drop the in-memory plaintext/wrapped pair (the
+        # wrap is committed; the only remaining reference
+        # is the wrapped form in the row).
+        del wrapped
 
         return {
             "id": secret_id,
@@ -1054,22 +1334,18 @@ class SecretService:
             raise SecretValidationError(
                 f"actor must be a non-empty string; got {actor!r}"
             )
-        row = self._store.get_by_id(id)
+        row = self._store.get_by_id_with_audit(id, actor=actor)
         if row is None:
             raise SecretNotFoundError(
                 f"secret id {id!r} not found"
             )
-        # Audit — stamped AFTER the read so the row is
-        # present in the log even on a not-found. Not-found
-        # does NOT audit (the row lookup failed first; the
-        # v1 contract audits successful reads only — the
-        # P2 marker-resolver audit will follow the same
-        # pattern).
-        self._store.append_audit(
-            action="read_public",
-            secret_id=id,
-            actor=actor,
-        )
+        # Audit row stamped INSIDE the same
+        # ``engine.begin()`` as the SELECT (M1 — see
+        # ``_SqlSecretStore.get_by_id_with_audit`` for
+        # the rationale). NOT-found reads do NOT audit
+        # (the v1 contract — successful reads only;
+        # the P2 marker-resolver audit follows the
+        # same pattern).
         return SecretPublicView(
             id=row.id,
             name=row.name,
@@ -1108,16 +1384,16 @@ class SecretService:
                 f"actor must be a non-empty string; got {actor!r}"
             )
         now_iso = self._now_iso()
-        row = self._store.mark_retired(id, now_iso)
+        # M1 atomic path — see ``generate_ssh_keypair``
+        # for the rationale. The UPDATE + audit row commit
+        # in one ``engine.begin()``.
+        row = self._store.mark_retired_with_audit(
+            id, now_iso, actor=actor
+        )
         if row is None:
             raise SecretNotFoundError(
                 f"secret id {id!r} not found"
             )
-        self._store.append_audit(
-            action="retire",
-            secret_id=id,
-            actor=actor,
-        )
         return {
             "id": id,
             "retired_at": now_iso,

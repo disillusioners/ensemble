@@ -46,10 +46,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from cryptography.fernet import Fernet
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event as sa_event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, Session
 
 # Register the SQLModel tables before create_all runs.
 from daemon.repositories.secrets.models import (  # noqa: F401
@@ -807,6 +807,422 @@ class TestAuditRows:
         assert "use_marker" not in SECRET_AUDIT_ACTIONS_P1
         assert "read_value" in SECRET_AUDIT_ACTIONS
         assert "read_value" not in SECRET_AUDIT_ACTIONS_P1
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Atomicity pin — M1 governor pre-promote fix (2026-10-17)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestAtomicityPin:
+    """Pin the M1 atomicity contract (governor pre-promote
+    fix, 2026-10-17):
+
+    The mutation row AND its audit row commit in ONE
+    ``engine.begin()`` transaction. A failure after the
+    mutation's INSERT but before the audit's INSERT MUST
+    roll back BOTH writes — neither side is visible.
+
+    The injection scheme: a SQLAlchemy ``before_cursor_execute``
+    event listener that raises an
+    :class:`sqlalchemy.exc.OperationalError` on the audit
+    INSERT. The pin asserts:
+
+      1. ``insert_with_audit`` raises (the simulated crash).
+      2. ``secrets`` table has ZERO matching rows (mutation
+         rolled back).
+      3. ``secrets_audit`` table has ZERO matching rows
+         (audit rolled back — never even committed).
+      4. ``mark_retired_with_audit`` carries the same
+         property (UPDATE + audit, atomic).
+      5. ``get_by_id_with_audit`` carries the same property
+         (SELECT + audit, atomic — but on a missing row the
+         audit is intentionally NOT written; the pin
+         asserts that the read+audit path on an existing
+         row leaves neither side visible if the audit
+         insert fails).
+      6. ``mark_retired_with_audit`` on a NOT-found id
+         does NOT audit (mirrors the ``read_public``
+         NOT-found contract — the v1 contract audits
+         successful writes only).
+
+    The pin is mutation-verified per repo convention
+    (surgically apply the guarded regression — split the
+    transaction across two sessions — and confirm the pin
+    FAILS with the expected message). See
+    ``test_mutation_verification_split_session_breaks_atomicity``
+    in this class.
+    """
+
+    def test_insert_with_audit_rolls_back_on_audit_failure(
+        self, sqlite_engine: Engine, fernet_key: str
+    ) -> None:
+        """Inject a crash on the audit INSERT; the mutation
+        row MUST NOT be visible. Pin: ``secrets`` count = 0,
+        ``secrets_audit`` count = 0."""
+        from sqlalchemy.exc import OperationalError
+
+        fail_count = {"n": 0}
+
+        @sa_event.listens_for(sqlite_engine, "before_cursor_execute")
+        def _fail_audit_insert(
+            conn, cursor, statement, parameters, context, executemany
+        ):
+            # Detect the audit INSERT — its table name in the
+            # statement is ``secrets_audit``. The mutation
+            # INSERTs into ``secrets``. Fail the second one
+            # (the audit) so we observe the partial-state
+            # window the M1 fix closes.
+            normalized = " ".join(statement.lower().split())
+            if (
+                "insert into secrets_audit" in normalized
+                and fail_count["n"] == 0
+            ):
+                fail_count["n"] += 1
+                raise OperationalError(
+                    "injected failure", None, None
+                )
+
+        try:
+            svc = SecretService(
+                engine=sqlite_engine,
+                cipher=SecretCipher(encryption_key=fernet_key),
+            )
+            with pytest.raises(OperationalError):
+                svc.generate_ssh_keypair(
+                    name="atomic-pin", actor="worker"
+                )
+
+            # Assert NO partial state — both tables empty.
+            with _session(sqlite_engine) as session:
+                from sqlmodel import select as _select
+                secrets_count = len(
+                    session.exec(_select(Secret)).all()
+                )
+                audit_count = len(
+                    session.exec(_select(SecretAuditEvent)).all()
+                )
+            assert secrets_count == 0, (
+                f"atomicity violated: {secrets_count} secret row(s) "
+                f"visible after audit-INSERT crash"
+            )
+            assert audit_count == 0, (
+                f"atomicity violated: {audit_count} audit row(s) "
+                f"visible after audit-INSERT crash"
+            )
+        finally:
+            sa_event.remove(
+                sqlite_engine,
+                "before_cursor_execute",
+                _fail_audit_insert,
+            )
+
+    def test_mark_retired_with_audit_rolls_back_on_audit_failure(
+        self, sqlite_engine: Engine, fernet_key: str
+    ) -> None:
+        """Inject a crash on the audit INSERT for ``retire``;
+        the UPDATE on the row MUST NOT persist. Pin: row's
+        ``retired_at`` is still ``None`` after the
+        simulated crash."""
+        from sqlalchemy.exc import OperationalError
+
+        # Set up a row first WITHOUT the listener so the
+        # INSERT itself succeeds.
+        svc = SecretService(
+            engine=sqlite_engine,
+            cipher=SecretCipher(encryption_key=fernet_key),
+        )
+        created = svc.generate_ssh_keypair(
+            name="retire-atomic-pin", actor="worker"
+        )
+        target_id = created["id"]
+
+        # Now arm the listener and retry retire.
+        fail_count = {"n": 0}
+
+        @sa_event.listens_for(sqlite_engine, "before_cursor_execute")
+        def _fail_audit_insert(
+            conn, cursor, statement, parameters, context, executemany
+        ):
+            normalized = " ".join(statement.lower().split())
+            if (
+                "insert into secrets_audit" in normalized
+                and fail_count["n"] == 0
+            ):
+                fail_count["n"] += 1
+                raise OperationalError(
+                    "injected failure", None, None
+                )
+
+        try:
+            with pytest.raises(OperationalError):
+                svc.retire(id=target_id, actor="worker")
+
+            # The row MUST still be active (the UPDATE
+            # was rolled back together with the audit
+            # INSERT).
+            with _session(sqlite_engine) as session:
+                row = session.get(Secret, target_id)
+                assert row is not None, (
+                    "atomicity violated: the secret row was "
+                    "deleted (UPDATE should be a soft-retire, "
+                    "not a DELETE)"
+                )
+                assert row.retired_at is None, (
+                    f"atomicity violated: retired_at={row.retired_at!r} "
+                    f"after audit-INSERT crash"
+                )
+        finally:
+            sa_event.remove(
+                sqlite_engine,
+                "before_cursor_execute",
+                _fail_audit_insert,
+            )
+
+    def test_get_by_id_with_audit_rolls_back_on_audit_failure(
+        self, sqlite_engine: Engine, fernet_key: str
+    ) -> None:
+        """Inject a crash on the audit INSERT for
+        ``read_public``; the read happens BEFORE the audit
+        in the same transaction, so the audit's failure
+        rolls back the read-side state. Pin: no audit row
+        visible after the crash."""
+        from sqlalchemy.exc import OperationalError
+
+        svc = SecretService(
+            engine=sqlite_engine,
+            cipher=SecretCipher(encryption_key=fernet_key),
+        )
+        created = svc.generate_ssh_keypair(
+            name="read-atomic-pin", actor="worker"
+        )
+        target_id = created["id"]
+
+        fail_count = {"n": 0}
+
+        @sa_event.listens_for(sqlite_engine, "before_cursor_execute")
+        def _fail_audit_insert(
+            conn, cursor, statement, parameters, context, executemany
+        ):
+            normalized = " ".join(statement.lower().split())
+            if (
+                "insert into secrets_audit" in normalized
+                and fail_count["n"] == 0
+            ):
+                fail_count["n"] += 1
+                raise OperationalError(
+                    "injected failure", None, None
+                )
+
+        try:
+            with pytest.raises(OperationalError):
+                svc.read_public(id=target_id, actor="worker")
+
+            # Pin: no audit row visible (the read happened
+            # before the failure — but the audit INSERT
+            # rolled back, so no audit row is in the log).
+            # The secret row itself stays intact (SELECT
+            # alone never mutates state).
+            with _session(sqlite_engine) as session:
+                from sqlmodel import select as _select
+                rows = session.exec(
+                    _select(SecretAuditEvent).where(
+                        SecretAuditEvent.secret_id == target_id
+                    )
+                ).all()
+                read_audits = [
+                    r for r in rows if r.action == "read_public"
+                ]
+                assert len(read_audits) == 0, (
+                    f"atomicity violated: {len(read_audits)} "
+                    f"read_public audit row(s) visible after "
+                    f"audit-INSERT crash"
+                )
+        finally:
+            sa_event.remove(
+                sqlite_engine,
+                "before_cursor_execute",
+                _fail_audit_insert,
+            )
+
+    def test_mark_retired_with_audit_does_not_audit_on_not_found(
+        self, sqlite_engine: Engine, fernet_key: str
+    ) -> None:
+        """NOT-found retire does NOT write an audit row
+        (mirrors the ``read_public`` NOT-found contract —
+        the v1 contract audits successful writes only)."""
+        svc = SecretService(
+            engine=sqlite_engine,
+            cipher=SecretCipher(encryption_key=fernet_key),
+        )
+        with pytest.raises(SecretNotFoundError):
+            svc.retire(id=str(uuid.uuid4()), actor="worker")
+        with _session(sqlite_engine) as session:
+            from sqlmodel import select as _select
+            rows = session.exec(
+                _select(SecretAuditEvent).where(
+                    SecretAuditEvent.action == "retire"
+                )
+            ).all()
+            assert len(rows) == 0, (
+                f"NOT-found audit leak: {len(rows)} retire audit "
+                f"row(s) visible after retire of unknown id"
+            )
+
+    def test_insert_with_audit_atomic_on_unique_collision(
+        self, sqlite_engine: Engine, fernet_key: str
+    ) -> None:
+        """UNIQUE(name) collision rolls back the entire
+        transaction — neither the secret row nor the audit
+        row is visible after the IntegrityError."""
+        svc = SecretService(
+            engine=sqlite_engine,
+            cipher=SecretCipher(encryption_key=fernet_key),
+        )
+        # First write succeeds.
+        svc.generate_ssh_keypair(name="collision-pin", actor="worker")
+
+        # Count audit rows so far.
+        with _session(sqlite_engine) as session:
+            from sqlmodel import select as _select
+            before_audits = len(
+                session.exec(_select(SecretAuditEvent)).all()
+            )
+
+        # Second write on the same name → IntegrityError.
+        with pytest.raises(SecretNameConflictError):
+            svc.generate_ssh_keypair(
+                name="collision-pin", actor="worker"
+            )
+
+        # Pin: only ONE secret row (the first one), and
+        # audit count unchanged (no audit row from the
+        # failed second insert).
+        with _session(sqlite_engine) as session:
+            from sqlmodel import select as _select
+            secret_rows = session.exec(
+                _select(Secret).where(Secret.name == "collision-pin")
+            ).all()
+            after_audits = len(
+                session.exec(_select(SecretAuditEvent)).all()
+            )
+        assert len(secret_rows) == 1, (
+            f"collision atomicity violated: {len(secret_rows)} "
+            f"rows visible for the colliding name"
+        )
+        assert after_audits == before_audits, (
+            f"collision atomicity violated: audit count grew "
+            f"{before_audits}→{after_audits} on the failed insert"
+        )
+
+    def test_mutation_verification_split_session_breaks_atomicity(
+        self, sqlite_engine: Engine, fernet_key: str
+    ) -> None:
+        """Mutation verification — the M1 atomicity pin
+        actually fails when the guarded regression
+        (split-session) is in place.
+
+        Procedure (repo convention):
+          1. Apply the guarded regression: replace the
+             ``insert_with_audit`` engine.begin() block
+             with two separate ``Session`` writes (the
+             pre-M1 layout).
+          2. Run the atomicity-pin failure-injection.
+          3. Assert the pin FAILS with the expected
+             message (a secret row visible after the
+             audit INSERT crash — the partial state the
+             M1 fix closes).
+          4. Restore the engine.begin() block.
+
+        The pin's value is the regression it detects; this
+        test documents that value.
+        """
+        from sqlalchemy.exc import OperationalError
+        from daemon.services import secret_service as svc_mod
+
+        # Original (atomic) ``insert_with_audit`` reference.
+        original = svc_mod._SqlSecretStore.insert_with_audit
+
+        def split_session_insert_with_audit(
+            self, secret, *, actor
+        ):
+            """Guarded regression: pre-M1 split-session layout
+            (mutation in one session, audit in another)."""
+            with Session(self._engine) as session:
+                session.add(secret)
+                session.commit()
+                session.refresh(secret)
+            with Session(self._engine) as session:
+                event = SecretAuditEvent(
+                    action="create",
+                    secret_id=secret.id,
+                    actor=actor,
+                )
+                session.add(event)
+                session.commit()
+            return secret
+
+        try:
+            svc_mod._SqlSecretStore.insert_with_audit = (
+                split_session_insert_with_audit
+            )
+
+            fail_count = {"n": 0}
+
+            @sa_event.listens_for(
+                sqlite_engine, "before_cursor_execute"
+            )
+            def _fail_audit_insert(
+                conn, cursor, statement, parameters, context, executemany
+            ):
+                normalized = " ".join(statement.lower().split())
+                if (
+                    "insert into secrets_audit" in normalized
+                    and fail_count["n"] == 0
+                ):
+                    fail_count["n"] += 1
+                    raise OperationalError(
+                        "injected failure", None, None
+                    )
+
+            try:
+                svc = SecretService(
+                    engine=sqlite_engine,
+                    cipher=SecretCipher(
+                        encryption_key=fernet_key
+                    ),
+                )
+                with pytest.raises(OperationalError):
+                    svc.generate_ssh_keypair(
+                        name="regression-pin", actor="worker"
+                    )
+
+                # Atomicity pin assertion: with the
+                # split-session regression in place, the
+                # secret row IS visible (the mutation
+                # committed before the audit INSERT crash).
+                with _session(sqlite_engine) as session:
+                    from sqlmodel import select as _select
+                    rows = session.exec(
+                        _select(Secret).where(
+                            Secret.name == "regression-pin"
+                        )
+                    ).all()
+                    assert len(rows) == 1, (
+                        f"mutation-verification failed: split-session "
+                        f"regression should leave the mutation visible "
+                        f"({len(rows)} row(s)); this means the pin is "
+                        f"NOT detecting the regression"
+                    )
+            finally:
+                sa_event.remove(
+                    sqlite_engine,
+                    "before_cursor_execute",
+                    _fail_audit_insert,
+                )
+        finally:
+            # Restore the atomic implementation.
+            svc_mod._SqlSecretStore.insert_with_audit = original
 
 
 # ─────────────────────────────────────────────────────────────────────
