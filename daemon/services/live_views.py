@@ -1210,10 +1210,12 @@ _MERMAID_ASSET_PUBLIC_URL_PATH = "/views/assets/mermaid/mermaid.min.js"
 _MERMAID_ASSET_PUBLIC_MIME = "application/javascript; charset=utf-8"
 # SHA-256 of the vendored bytes, base64-prefixed per W3C SRI
 # (``sha256-...``). Verified at vendoring time; documented in
-# ``PROVENANCE.md``. Re-verified at module import via
-# :func:`_verify_vendored_mermaid_sha256` so a corrupted/tampered
-# on-disk asset fails closed at first request rather than
-# silently shipping a different script to the browser.
+# ``PROVENANCE.md``. Re-verified per file version via
+# :func:`_vendored_mermaid_asset` (memoised on the
+# ``(st_mtime_ns, st_size)`` identity — re-verified only when the
+# stat identity changes) so a corrupted/tampered on-disk asset
+# fails closed at first request rather than silently shipping a
+# different script to the browser.
 # Computed from the hex digest
 # ``6484afc32872a3aa16cac9a76ba1816a1ed4cc870a6593cc2e17757750f518b2``
 # (recorded in ``SHA256SUMS`` next to the file).
@@ -1242,25 +1244,58 @@ def _vendored_mermaid_asset_path() -> Path:
     )
 
 
-def _verify_vendored_mermaid_sha256() -> None:
-    """Fail-closed check that the vendored asset matches the pinned hash.
+@dataclass(frozen=True)
+class _MermaidAssetRecord:
+    """Verified vendored-asset serving record (W2+W3 single-pass form).
 
-    Called lazily on first request via :func:`_vendored_mermaid_bytes`
-    so a corrupted file is detected at the live-views serving
-    seam rather than at module import time. The intent: a
-    deployment whose vendored file was tampered with (or never
-    landed because ``ensemble.spec`` was edited to drop the
-    data entry) must NOT keep serving a different script to the
-    browser — the request must fail loudly.
-
-    The comparison uses BOTH the hex digest (recorded in
-    ``SHA256SUMS`` next to the file as the human-readable
-    pin) AND the W3C-SRI base64 form (used in the wrapper's
-    ``<script integrity=...>`` attribute). The two forms
-    describe the SAME hash; re-checking both catches a
-    vendoring-time mistake (one form updated, the other
-    forgotten).
+    Built ONCE per on-disk file version: the bytes are read once,
+    the SHA-256 is computed once, and the hex digest (``SHA256SUMS``
+    pin form), the W3C-SRI base64 form (wrapper ``integrity=``
+    attribute) and the strong ETag are ALL derived from that
+    single digest pass.
     """
+
+    data: bytes
+    sha256_hex: str
+    sri: str
+    etag: str
+
+
+# Memoisation slot for :func:`_vendored_mermaid_asset` —
+# ``((st_mtime_ns, st_size), record)``. A file version is
+# identified by its stat identity: as long as BOTH the mtime (ns)
+# and the size are unchanged, the already-verified record is
+# served without re-reading or re-hashing the ~5.2 MiB bundle.
+# Any change to either component (re-vendor, touch, corruption
+# that shifts size) forces a fresh read + hash + fail-closed
+# verification. A failing version is NEVER cached, so a tampered
+# asset keeps failing closed on every request until repaired.
+_MERMAID_ASSET_CACHE: (
+    "tuple[tuple[int, int], _MermaidAssetRecord] | None"
+) = None
+
+
+def _vendored_mermaid_asset() -> _MermaidAssetRecord:
+    """Return the verified vendored asset record (memoised per file version).
+
+    W2+W3 (fix pack 2026-10-17): the prior shape re-read the
+    ~5.2 MiB bundle and re-hashed it on EVERY request — and read
+    it TWICE (once inside :func:`_verify_vendored_mermaid_sha256`,
+    once again in :func:`_vendored_mermaid_bytes`). This shape
+    reads the bytes ONCE per ``(st_mtime_ns, st_size)`` version,
+    computes the SHA-256 ONCE from that single read, and derives
+    BOTH pin forms (hex for ``SHA256SUMS``, base64 for the W3C
+    SRI) plus the strong ETag from the same digest. Verification
+    re-runs only when the stat identity changes.
+
+    Fail-closed posture preserved exactly: a missing asset raises
+    :class:`FileNotFoundError`; a hash mismatch against the pinned
+    SRI (or drift between the two pin forms) raises
+    :class:`RuntimeError` — and the failing version is not cached,
+    so the next request re-attempts verification rather than
+    serving a bad record.
+    """
+    global _MERMAID_ASSET_CACHE
     import base64
     import hashlib
 
@@ -1269,11 +1304,18 @@ def _verify_vendored_mermaid_sha256() -> None:
         raise FileNotFoundError(
             f"vendored mermaid asset missing: {asset_path}"
         )
+    st = asset_path.stat()
+    identity = (st.st_mtime_ns, st.st_size)
+    cached = _MERMAID_ASSET_CACHE
+    if cached is not None and cached[0] == identity:
+        return cached[1]
+
+    # Single read + single hash pass per file version; every
+    # downstream form is derived from THIS digest object.
     raw = asset_path.read_bytes()
-    h_hex = hashlib.sha256(raw).hexdigest()
-    h_b64 = base64.b64encode(raw and hashlib.sha256(raw).digest()).decode(
-        "ascii"
-    )
+    digest = hashlib.sha256(raw)
+    h_hex = digest.hexdigest()
+    h_b64 = base64.b64encode(digest.digest()).decode("ascii")
     expected_sri = _MERMAID_ASSET_SRI_SHA256
     if not expected_sri.startswith("sha256-"):
         raise RuntimeError(
@@ -1302,12 +1344,41 @@ def _verify_vendored_mermaid_sha256() -> None:
             f"records {h_hex}, the in-code SRI form expects "
             f"{expected_hex}. Update both pins atomically — refuse to serve."
         )
+    record = _MermaidAssetRecord(
+        data=raw,
+        sha256_hex=h_hex,
+        sri=f"sha256-{h_b64}",
+        etag=f'"{h_hex}"',
+    )
+    _MERMAID_ASSET_CACHE = (identity, record)
+    return record
+
+
+def _verify_vendored_mermaid_sha256() -> None:
+    """Fail-closed check that the vendored asset matches the pinned hash.
+
+    W2+W3: the actual verification now runs inside the memoised
+    :func:`_vendored_mermaid_asset` loader (read once + hash once
+    per ``(st_mtime_ns, st_size)`` file version, fail-closed on
+    any mismatch). This shim forces the verification pass by
+    resolving the record: a memoisation hit means the current
+    file version was already verified; a miss triggers the full
+    read + hash + verify. A failing version is never cached, so
+    a corrupted/tampered asset keeps raising here on every call.
+
+    Kept as a named seam because the vendoring runbook, the
+    router docs, and existing tests reference it: a deployment
+    whose vendored file was tampered with (or never landed
+    because ``ensemble.spec`` was edited to drop the data entry)
+    must NOT keep serving a different script to the browser —
+    the request must fail loudly.
+    """
+    _vendored_mermaid_asset()
 
 
 def _vendored_mermaid_bytes() -> bytes:
-    """Return the verified vendored mermaid.js bytes."""
-    _verify_vendored_mermaid_sha256()
-    return _vendored_mermaid_asset_path().read_bytes()
+    """Return the verified vendored mermaid.js bytes (memoised)."""
+    return _vendored_mermaid_asset().data
 
 
 def mermaid_asset_url() -> str:
@@ -1575,13 +1646,16 @@ _MERMAID_CSP_TEMPLATE = (
 )
 
 # CSP for the markdown wrapper when it ALSO needs mermaid.js
-# (the .md file contains ```mermaid fences). Same self-only
-# script-src shape as ``_MERMAID_CSP_TEMPLATE`` — the existing
-# markdown wrapper's CDN allowlist (``cdn.jsdelivr.net``) is
-# REMOVED in the mermaid-aware variant so a tampered CDN cannot
-# reach the page. Marked + DOMPurify are still CDN-loaded in the
-# existing markdown wrapper (out of scope for this change); the
-# mermaid-aware variant only swaps in the vendored mermaid asset.
+# (the .md file contains ```mermaid fences). The CDN allowlist
+# (``cdn.jsdelivr.net``) is KEPT in this variant — marked +
+# DOMPurify are still CDN-loaded on the mermaid-aware page
+# (vendoring them is out of scope), so dropping the allowlist
+# would break the page's own renderer + sanitizer. What the
+# variant changes is the mermaid runtime: it loads from
+# ``self`` (the vendored asset at ``/views/assets/...``) instead
+# of a third CDN fetch — same-origin, SRI-pinned, riding the
+# same /views gate. Strictness otherwise mirrors the plain
+# mermaid wrapper (no ``unsafe-eval``; nonce-gated bootstrap).
 _MARKDOWN_MERMAID_CSP_TEMPLATE = (
     "default-src 'self'; "
     "script-src 'self' https://cdn.jsdelivr.net 'nonce-{nonce}'; "

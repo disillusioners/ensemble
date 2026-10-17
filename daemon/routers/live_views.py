@@ -103,6 +103,21 @@ _HARDENING_HEADERS: dict[str, str] = {
 }
 
 
+# Asset-endpoint response headers: the shared hardening set plus
+# a lock-down document CSP of ``default-src 'none'``. The bundle
+# is consumed via ``<script src=...>`` (fetch, not navigation) —
+# but if a browser ever renders the URL as a top-level document
+# (direct navigation, hotlink into an <iframe>), the CSP strips
+# it of every capability: no scripts, no frames, no forms, no
+# connections. Defense in depth only; it does not affect the
+# legitimate ``<script>`` consumption path and rides on the 200,
+# 304, and 500 asset responses alike.
+_ASSET_HEADERS: dict[str, str] = {
+    **_HARDENING_HEADERS,
+    "Content-Security-Policy": "default-src 'none'",
+}
+
+
 # Mermaid asset endpoint metadata. The single-file IIFE bundle
 # at ``daemon/services/live_views/assets/mermaid/mermaid.min.js``
 # is served at ``/views/assets/mermaid/mermaid.min.js``. The
@@ -244,38 +259,70 @@ def _render_mermaid_wrapper_body(
 
 
 def _wants_raw_query(request: Request) -> bool:
-    """Return True iff the inbound request carries ``?raw=1``.
+    """Return True iff the inbound request asks for raw bytes.
 
-    Thin shim over :func:`wants_raw_query` in the service
-    so the router code stays request-aware. The service
-    version accepts a generic request-like object; this
-    router version pins the FastAPI ``Request`` type so
-    the router's call sites stay typed.
+    The router IS the canonical ``raw`` param handler — there is
+    no service-level ``wants_raw_query``. Semantics are
+    presence-based and pinned by tests: ANY non-empty value
+    counts as raw (``?raw=1``, ``?raw=0``, ``?raw=TRUE`` all
+    return raw bytes — clients are not trusted to send a
+    canonical ``1``), while the parameter absent OR empty
+    (``?raw=``) returns the wrapper page.
     """
     raw = request.query_params.get("raw")
     return raw is not None and raw != ""
 
 
-def _serve_mermaid_asset() -> Response:
+def _etag_matches(if_none_match: str | None, etag: str) -> bool:
+    """Evaluate ``If-None-Match`` against our strong ETag (RFC 7232).
+
+    ``*`` matches any current representation. Otherwise the
+    header is a comma-separated candidate list; each candidate
+    may carry a ``W/`` weakness prefix (we serve a strong ETag —
+    a weak candidate still compares equal on its opaque value,
+    which is the comparison browsers actually perform) and is
+    quote-stripped before the exact match. No header → no match
+    (full 200 response).
+    """
+    if not if_none_match:
+        return False
+    if if_none_match.strip() == "*":
+        return True
+    ours = etag.strip('"')
+    for candidate in if_none_match.split(","):
+        candidate = candidate.strip()
+        if candidate[:2] in ("W/", "w/"):
+            candidate = candidate[2:]
+        if candidate.strip('"') == ours:
+            return True
+    return False
+
+
+def _serve_mermaid_asset(request: Request) -> Response:
     """Return the vendored ``mermaid.min.js`` bytes with JS content-type.
 
-    The asset is read from the source-relative path
-    ``daemon/services/live_views/assets/mermaid/mermaid.min.js``
-    and verified against the pinned SHA-256 at request time
-    (so a corrupted/tampered on-disk asset fails closed rather
-    than serving an unexpected script). The response carries
-    the standard hardening headers plus ``Content-Type:
-    application/javascript`` so the browser can execute the
-    bundle as ES5/IIFE without MIME sniffing (the
-    ``nosniff`` header reinforces this).
+    W2+W3 (fix pack 2026-10-17): the asset record is resolved via
+    the memoised :func:`_vendored_mermaid_asset` loader — bytes
+    are read ONCE and hashed ONCE per ``(st_mtime_ns, st_size)``
+    file version instead of on every request (the prior shape
+    re-read + re-hashed the ~5.2 MiB bundle twice per request).
+    The response carries a STRONG ``ETag`` derived from that
+    single hash pass; a request whose ``If-None-Match`` matches
+    gets ``304 Not Modified`` (both GET and HEAD) so repeat
+    browsers skip the 5.2 MiB body — that revalidation, not an
+    ``immutable``/long ``max-age`` (the URL carries no version
+    segment, so a re-vendor must not strand browsers), is the
+    caching mechanism. Fail-closed posture unchanged: a missing
+    or hash-mismatched asset returns the 500 envelope rather
+    than serving a different script.
     """
     from daemon.services.live_views import (
         _MERMAID_ASSET_PUBLIC_MIME,
-        _vendored_mermaid_bytes,
+        _vendored_mermaid_asset,
     )
 
     try:
-        body = _vendored_mermaid_bytes()
+        record = _vendored_mermaid_asset()
     except (FileNotFoundError, RuntimeError) as exc:
         # Asset missing or hash mismatch — fail closed with a
         # 500 envelope. The wrapper page's bootstrap script
@@ -290,15 +337,24 @@ def _serve_mermaid_asset() -> Response:
         return JSONResponse(
             status_code=500,
             content={"error": "asset unavailable"},
-            headers=_HARDENING_HEADERS,
+            headers=_ASSET_HEADERS,
+        )
+    if _etag_matches(request.headers.get("if-none-match"), record.etag):
+        return Response(
+            status_code=304,
+            headers={
+                **_ASSET_HEADERS,
+                "ETag": record.etag,
+            },
         )
     return Response(
-        content=body,
+        content=record.data,
         media_type=_MERMAID_ASSET_PUBLIC_MIME,
         status_code=200,
         headers={
-            **_HARDENING_HEADERS,
-            "Content-Length": str(len(body)),
+            **_ASSET_HEADERS,
+            "ETag": record.etag,
+            "Content-Length": str(len(record.data)),
         },
     )
 
@@ -443,7 +499,7 @@ def build_router() -> APIRouter:
     router = APIRouter(prefix="/views", tags=["live_views"])
 
     @router.get(_MERMAID_ASSET_URL_PATH)
-    async def get_mermaid_asset() -> Response:
+    async def get_mermaid_asset(request: Request) -> Response:
         """Serve the vendored mermaid.js bundle.
 
         Hard-coded path (``/views/assets/mermaid/mermaid.min.js``).
@@ -454,38 +510,55 @@ def build_router() -> APIRouter:
         BEFORE the catch-all root route below — Starlette
         first-match-wins ordering is load-bearing here.
 
-        The vendored bytes are SHA-256-pinned at vendoring
-        time and re-verified on every request via
-        :func:`_verify_vendored_mermaid_sha256`; a corrupted
-        or missing on-disk asset returns 500 instead of
-        silently shipping a different bundle to the browser.
+        The vendored bytes are SHA-256-pinned at vendoring time
+        and re-verified per file version via the memoised
+        loader (:func:`_vendored_mermaid_asset` — re-read +
+        re-hash only when ``(st_mtime_ns, st_size)`` changes);
+        a corrupted or missing on-disk asset returns 500
+        instead of silently shipping a different bundle to the
+        browser. Responses carry a strong ``ETag``; a matching
+        ``If-None-Match`` short-circuits to ``304 Not Modified``.
         """
-        return _serve_mermaid_asset()
+        return _serve_mermaid_asset(request)
 
     @router.head(_MERMAID_ASSET_URL_PATH)
-    async def head_mermaid_asset() -> Response:
+    async def head_mermaid_asset(request: Request) -> Response:
         """HEAD support for the vendored mermaid.js asset.
 
         Mirrors the GET handler — same hardening headers, same
-        body length (the bytes are loaded + hashed on every
-        HEAD request too so a corrupted asset is detected on
-        HEAD just as it would be on GET). Body bytes are
-        discarded after the Content-Length measurement.
+        ``ETag``, same ``304 Not Modified`` contract on a
+        matching ``If-None-Match``, and on 200 the same body
+        length (the memoised record is resolved on HEAD too so
+        a corrupted asset is detected on HEAD just as it would
+        be on GET). Body bytes are discarded after the
+        Content-Length measurement.
         """
-        from daemon.services.live_views import _vendored_mermaid_bytes
+        from daemon.services.live_views import (
+            _MERMAID_ASSET_PUBLIC_MIME,
+            _vendored_mermaid_asset,
+        )
         try:
-            body = _vendored_mermaid_bytes()
+            record = _vendored_mermaid_asset()
         except (FileNotFoundError, RuntimeError):
             return Response(
                 status_code=500,
-                headers=_HARDENING_HEADERS,
+                headers=_ASSET_HEADERS,
+            )
+        if _etag_matches(request.headers.get("if-none-match"), record.etag):
+            return Response(
+                status_code=304,
+                headers={
+                    **_ASSET_HEADERS,
+                    "ETag": record.etag,
+                },
             )
         return Response(
             status_code=200,
             headers={
-                **_HARDENING_HEADERS,
-                "Content-Type": "application/javascript; charset=utf-8",
-                "Content-Length": str(len(body)),
+                **_ASSET_HEADERS,
+                "ETag": record.etag,
+                "Content-Type": _MERMAID_ASSET_PUBLIC_MIME,
+                "Content-Length": str(len(record.data)),
             },
         )
 

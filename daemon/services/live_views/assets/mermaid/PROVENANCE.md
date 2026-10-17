@@ -27,3 +27,23 @@ charter-mmdc-toolchain config pins `mermaidCli: 12` and `mermaid-cli@12.0.0`
 internally pins `mermaid@12.x`). Diagrams produced by charter's PNG-render
 and the in-browser render from this bundle will agree on syntax + theming
 defaults — parity with the reference PNGs the user expects to compare against.
+
+Retrieved: 2026-10-17 (from the local npm install tree named above;
+upstream tarball pinned at the URL above — `mermaid@12.1.0`).
+
+## License: MIT
+
+The vendored `mermaid.min.js` bundle is distributed under the MIT
+license. The full license text is bundled next to this file as
+`LICENSE.txt`, copied verbatim from the source package tree above
+(`…/node_modules/mermaid/LICENSE`, "The MIT License (MIT)",
+Copyright (c) 2014 - 2022 Knut Sveidqvist). The bundle banner
+inside `mermaid.min.js` states the same MIT grant.
+
+SRI family note: the SRI pin uses the **sha256** family (not
+sha384) because it is the same single digest already recorded in
+`SHA256SUMS` — one hash pass yields both the on-disk pin and the
+browser `integrity=` attribute, so the two pins cannot drift; a
+second sha384 digest would add a parallel pin to keep in sync
+with no added assurance for a same-origin asset that is already
+fail-closed hash-verified at serve time.
