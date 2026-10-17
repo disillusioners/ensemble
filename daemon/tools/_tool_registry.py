@@ -117,6 +117,28 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "service_status",
     "service_list",
     "service_logs",
+    # agent-secrets P1 tools (2026-10-17, plan f11965039) — created
+    # by create_secret_tools() factory
+    # (daemon/tools/secrets_tools.py). Six factory-built tools behind
+    # the ``secrets`` privileged category (#6 in
+    # ``PRIVILEGED_TOOL_CATEGORIES`` — sextet → septet per the
+    # Q1/Q2/Q3 rulings). Day-one allow-list is ``worker`` /
+    # ``tester`` / ``leader`` / ``ari``; agents outside that list
+    # get ZERO of these tools through both the
+    # ``_strip_privileged_category_tools`` default-deny strip
+    # (``daemon/tools/instance.py:6169``) AND the
+    # ``resolve_tool_filter`` empty-allow branch
+    # (``daemon/tools/instance.py:373``). The trust ruling (plan
+    # §1.2) is unconditional — secret-given = trusted for
+    # autonomous use; per-agent ``tools.allow`` is the ONLY access
+    # boundary. Names are flat snake_case (the ``kms_attach`` /
+    # ``ens_env_read`` precedent).
+    "secret_generate_ssh_keypair",
+    "secret_generate_api_token",
+    "secret_store",
+    "secret_list",
+    "secret_read_public",
+    "secret_retire",
     # scheduling tools (scheduled-tasks phase 2+4) — created by
     # create_scheduling_tools() factory (daemon/tools/scheduling.py).
     # Non-privileged category — granted per-agent via tools.allow
@@ -240,6 +262,33 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # because ``plane`` is NOT in this set; ``cu`` enters because
     # it is in the privileged set).
     "cu",
+    # agent-secrets P1 (2026-10-17, plan f11965039): ``secrets`` is
+    # the encrypted-secret-store tool category (#6 in
+    # PRIVILEGED_TOOL_CATEGORIES — quintet → sextet per the
+    # Q1/Q2/Q3 user rulings 2026-10-17). The category owns six
+    # factory-built tools (``secret_generate_ssh_keypair`` /
+    # ``secret_generate_api_token`` / ``secret_store`` /
+    # ``secret_list`` / ``secret_read_public`` / ``secret_retire``)
+    # that operate on the Fernet-encrypted ``secrets`` +
+    # ``secrets_audit`` PG tables. The trust ruling (plan §1.2)
+    # is unconditional: secret-given = trusted for autonomous
+    # use by ANY agent holding the category; the only access
+    # boundary is the per-agent ``tools.allow`` gate. The day-one
+    # allow-list (Q2 ruling) is ``worker``, ``tester``,
+    # ``leader``, ``ari``; agents outside that allow-list get
+    # ZERO of these tools through both the
+    # ``_strip_privileged_category_tools`` default-deny strip
+    # (``daemon/tools/instance.py:6169``) AND the
+    # ``resolve_tool_filter`` empty-allow branch
+    # (``daemon/tools/instance.py:373``). NEVER default-granted
+    # — opt-in-only. SAME-PR triple-pin updates at
+    # ``tests/unit/tools/test_upgrade_registration.py``,
+    # ``tests/unit/tools/test_attestation_registration.py``,
+    # ``tests/integration/test_maintenancer_spawn_resolves_tools.py``,
+    # and the integration sanity pin at
+    # ``tests/integration/test_service_tool_flag_off_byte_identical.py``
+    # are mandatory (the A14/D18 silent-additions-visible rule).
+    "secrets",
 })
 
 
@@ -739,6 +788,26 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # contract (source-of-truth = env, no redaction in result,
     # audit-only log, PB-F1 checkpoint exposure scope).
     "ens-env": "daemon.tools.ens_env_tools",
+    # agent-secrets P1 (2026-10-17, plan f11965039): the
+    # ``secrets`` category owns six factory-built tools
+    # (``secret_generate_ssh_keypair`` /
+    # ``secret_generate_api_token`` / ``secret_store`` /
+    # ``secret_list`` / ``secret_read_public`` / ``secret_retire``)
+    # that operate on the Fernet-encrypted ``secrets`` +
+    # ``secrets_audit`` PG tables via the in-process
+    # ``SecretService`` (colocated ``SecretCipher`` reads
+    # ``SYSTEM_ENCRYPTION_KEY`` at construction time). The
+    # category is entry #6 in ``PRIVILEGED_TOOL_CATEGORIES``
+    # (quintet → sextet); opt-in only via
+    # ``tools.allow: ["secrets"]`` on the day-one allow-list
+    # (Q2 ruling: ``worker``, ``tester``, ``leader``,
+    # ``ari``). See ``daemon/tools/secrets_tools.py`` for the
+    # full P1 contract (pubkey-only rule, marker mint format
+    # FROZEN at ``__ENS_SECRET__<id>__``, etc.). The list-extend
+    # is the third step of the three-step registration seam —
+    # see ``daemon/tools/instance.py`` near the
+    # ``create_ens_env_tools`` block for the parallel pattern.
+    "secrets": "daemon.tools.secrets_tools",
 }
 
 
@@ -969,6 +1038,23 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "task_schedule_cancel",
     "task_schedule_list",
     "task_schedule_update",
+    # agent-secrets P1 (2026-10-17, plan f11965039): six
+    # factory-built tools behind the ``secrets`` privileged
+    # category. Same frozen-binary-fallback rationale as
+    # ``ens_env_read`` (the discover-source-only walker falls
+    # back to ``KNOWN_TOOL_NAMES`` in PyInstaller-frozen
+    # binaries; the static fallback universe is the safety
+    # net so the validator never false-fails on a frozen
+    # install). Names match the actual tool NAMES exposed
+    # by ``daemon/tools/secrets_tools.py:create_secret_tools``
+    # (flat snake_case convention, ``kms_attach`` /
+    # ``ens_env_read`` precedent).
+    "secret_generate_ssh_keypair",
+    "secret_generate_api_token",
+    "secret_store",
+    "secret_list",
+    "secret_read_public",
+    "secret_retire",
     "terminate_instance",
     "time",
     "todo_clear",

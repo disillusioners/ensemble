@@ -756,6 +756,39 @@ async def lifespan(app: FastAPI):
     )
     CustomAgentConfig.metadata.create_all(manager.engine)
 
+    # agent-secrets P1 (2026-10-17, plan f11965039) —
+    # ``secrets`` + ``secrets_audit`` are the two new tables
+    # that back the in-process ``SecretService``. The
+    # ``secrets`` table holds the Fernet-encrypted secret
+    # rows; ``secrets_audit`` is the append-only audit log
+    # for the three P1 actions (``create`` / ``read_public`` /
+    # ``retire``). Both are brand-new tables — same
+    # create_all precedent as PromptVersion /
+    # PromptAuditEvent / CustomAgentConfig / PromptTemplateBaseline
+    # above. The .sql migration handles SQLite; the model
+    # handles PG. No ``_ensure_postgres_columns`` mirror
+    # needed.
+    from daemon.repositories.secrets.models import Secret, SecretAuditEvent
+    Secret.metadata.create_all(manager.engine)
+    SecretAuditEvent.metadata.create_all(manager.engine)
+
+    # agent-secrets P1 — wire the SecretService onto the
+    # manager (the ``SkillStoreService`` /
+    # ``PromptVersionService``-style manager-owned pattern
+    # at ``manager.py:1171-1204``). The service composes
+    # the colocated ``SecretCipher`` (Fernet via
+    # ``SYSTEM_ENCRYPTION_KEY`` — the same env the existing
+    # ``daemon/sources/credentials.py`` +
+    # ``daemon/services/kms_lite.py`` paths consume) +
+    # the SQLAlchemy-backed port implementation
+    # (``_SqlSecretStore``). The tools dereference
+    # ``manager._secret_service`` at call time
+    # (``daemon/tools/secrets_tools.py``); the wiring here
+    # makes the ``secrets`` category operational for the
+    # day-one allow-list (worker / tester / leader / ari).
+    from daemon.services.secret_service import SecretService
+    manager._secret_service = SecretService(engine=manager.engine)
+
     # User Directive #5B (2026-10-14, RESOLUTION-CORE) —
     # ``prompt_template_baselines`` is the third table in the
     # prompt-version family: stores the shipped-template sha256

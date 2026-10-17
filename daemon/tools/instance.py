@@ -6096,6 +6096,39 @@ Returns:
     ens_env_tool_list = create_ens_env_tools(manager, current_instance_id)
     tools.extend(ens_env_tool_list)
 
+    # ── secrets tools (Phase 1 of agent-secrets, 2026-10-17,
+    # plan f11965039) — six-tool category exposing
+    # ``secret_generate_ssh_keypair`` /
+    # ``secret_generate_api_token`` / ``secret_store`` /
+    # ``secret_list`` / ``secret_read_public`` / ``secret_retire``
+    # that operate on the Fernet-encrypted ``secrets`` +
+    # ``secrets_audit`` PG tables via the in-process
+    # ``SecretService`` (the manager's ``_secret_service`` field).
+    # The category is entry #6 in ``PRIVILEGED_TOOL_CATEGORIES``
+    # (quintet → sextet) — NEVER default-granted; the day-one
+    # allow-list (Q2 ruling) is ``worker``, ``tester``,
+    # ``leader``, ``ari`` only. Agents outside that allow-list
+    # get ZERO secrets tools through both the
+    # ``_strip_privileged_category_tools`` default-deny strip
+    # (instance.py:6169) AND the ``resolve_tool_filter``
+    # empty-allow branch (instance.py:373). The factory tolerates
+    # a None-stub manager for the loader warm-list (the
+    # ``ens_env_tools`` pattern at :6080-6098) — the tool bodies
+    # dereference ``manager._secret_service`` at call time, so
+    # the service lifecycle stays in the manager's hands. Same
+    # three-step registration seam as the sibling categories:
+    # decorator (in ``secrets_tools.py``) + ``CATEGORY_MODULES``
+    # entry (``_tool_registry.py``) + KNOWN_TOOL_NAMES + this
+    # construction call — all required. The factory returns a
+    # list of 6 StructuredTool objects; each carries the
+    # ``_tool_category`` attr stamped by ``@register_tool_category``
+    # so the ``_apply_tool_filter`` resolution sees them as
+    # ``secrets``-category and the default-deny strip catches
+    # them on non-allow agents.
+    from .secrets_tools import create_secret_tools
+    secret_tool_list = create_secret_tools(manager, current_instance_id)
+    tools.extend(secret_tool_list)
+
     # ── Plugin subsystem Port tools (slice ⑤ tier-1 wiring; REC §4.3
     # row ⑤ PROVES line + ⑤b native-lane-LIVE precondition) ──
     # Native plugin tools (od.generate / od.compose_brief / od.save /
