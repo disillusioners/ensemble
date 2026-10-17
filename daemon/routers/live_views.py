@@ -34,6 +34,35 @@ in an HTML viewer page (pinned-CDN renderer + sanitizer + CSP
 nonce) via ``render_markdown_wrapper``. Non-markdown content stays
 a byte-for-byte passthrough.
 
+Phase 3 — live-view mermaid rendering (this file's changes):
+
+* ``.mmd`` / ``.mermaid`` requests WITHOUT ``?raw=1`` are wrapped
+  in an HTML viewer page that loads the vendored mermaid.js
+  asset (served from ``/views/assets/mermaid/mermaid.min.js``),
+  initializes ``mermaid`` with ``securityLevel: 'strict'``, and
+  renders the diagram client-side. The raw source is fetched via
+  ``?raw=1`` — file content NEVER touches the wrapper HTML/JS
+  string interpolation surface.
+
+* ``?raw=1`` on ``.mmd`` / ``.mermaid`` returns the raw bytes
+  with sane MIME (``text/plain; charset=utf-8``) — identical to
+  the pre-Pinkage raw-serving behavior.
+
+* ``.md`` files containing ``mermaid`` fenced code blocks now
+  render those fences as actual diagrams (via the same vendored
+  asset + ``mermaid.run``). The ``.md`` path WITHOUT mermaid
+  fences keeps the existing CDN-marked wrapper byte-identical.
+
+* The vendored asset lives at
+  ``daemon/services/live_views/assets/mermaid/mermaid.min.js``
+  (loaded via the canonical source-relative ``__file__``-based
+  path so PyInstaller's data-files extraction keeps the file in
+  place when the binary runs in ``_MEIPASS``). The asset endpoint
+  at ``/views/assets/mermaid/mermaid.min.js`` is mounted on the
+  same router and rides the same auth/OAuth-proxy gate (the path
+  is under the ``/views`` prefix which the middleware in front
+  of the daemon gates on — the gate is untouched by this change).
+
 TOCTOU CONTAINMENT (REWORK 2026-10-07, M4): the service does a
 ``realpath``-based containment check + a stat-based size cap on
 the resolved path. Between the service resolve and the router
@@ -74,6 +103,16 @@ _HARDENING_HEADERS: dict[str, str] = {
 }
 
 
+# Mermaid asset endpoint metadata. The single-file IIFE bundle
+# at ``daemon/services/live_views/assets/mermaid/mermaid.min.js``
+# is served at ``/views/assets/mermaid/mermaid.min.js``. The
+# path is hard-coded so the wrapper template can render a
+# stable ``<script src=…>`` URL across wrapper types
+# (``.mmd``/``.mermaid`` wrapper AND ``.md`` mermaid-fence
+# wrapper). The route shape lives in ``build_router`` below.
+_MERMAID_ASSET_URL_PATH = "/assets/mermaid/mermaid.min.js"
+
+
 def _render_markdown_response(
     file_bytes: bytes, rel_path: str, nonce: str | None = None
 ) -> Response:
@@ -103,7 +142,9 @@ def _render_markdown_response(
     ruling that legitimate HTML may include scripts.
     """
     from daemon.services.live_views import (
+        markdown_wrapper_uses_mermaid,
         render_markdown_wrapper,
+        render_markdown_wrapper_with_mermaid,
     )
 
     # The file bytes were already size-capped (32 MiB) by
@@ -120,8 +161,56 @@ def _render_markdown_response(
         # spot the issue from the daemon log).
         markdown_text = file_bytes.decode("utf-8", errors="replace")
 
-    body, headers = render_markdown_wrapper(
-        rel_path=rel_path, markdown_text=markdown_text, nonce=nonce
+    # Phase 3: when the markdown contains ``mermaid`` fenced
+    # code blocks, ship the mermaid-aware variant (loads the
+    # vendored mermaid asset + bootstraps ``mermaid.run``
+    # after DOMPurify). When the markdown has NO mermaid
+    # fences, ship the original CDN-marked variant BYTE-
+    # IDENTICAL to the pre-Pinkage render (no CSP change, no
+    # SRI change, no vendored asset fetch on the client).
+    if markdown_wrapper_uses_mermaid(markdown_text):
+        body, headers = render_markdown_wrapper_with_mermaid(
+            rel_path=rel_path,
+            markdown_text=markdown_text,
+            nonce=nonce,
+        )
+    else:
+        body, headers = render_markdown_wrapper(
+            rel_path=rel_path, markdown_text=markdown_text, nonce=nonce
+        )
+    return Response(
+        content=body,
+        media_type="text/html; charset=utf-8",
+        status_code=200,
+        headers={
+            **headers,
+            "Content-Length": str(len(body.encode("utf-8"))),
+        },
+    )
+
+
+def _render_mermaid_response(
+    rel_path: str, nonce: str | None = None
+) -> Response:
+    """Render the ``.mmd`` / ``.mermaid`` wrapper page.
+
+    The wrapper fetches the raw source from the SAME URL +
+    ``?raw=1`` (so the file's content never enters the
+    HTML/JS string interpolation surface). The vendored
+    mermaid.js asset is loaded via a stable
+    ``/views/assets/mermaid/mermaid.min.js`` URL with the
+    SRI hash pinned.
+
+    Returns the wrapper HTML response (text/html) with the
+    mermaid-strict CSP (NO CDN script-src, NO unsafe-inline
+    for scripts) and the standard hardening headers. The
+    raw source file is NOT opened here — the wrapper does
+    that itself via the ``?raw=1`` URL the wrapper carries.
+    """
+    from daemon.services.live_views import render_mermaid_wrapper
+
+    body, headers = render_mermaid_wrapper(
+        rel_path=rel_path, nonce=nonce
     )
     return Response(
         content=body,
@@ -130,6 +219,86 @@ def _render_markdown_response(
         headers={
             **headers,
             "Content-Length": str(len(body.encode("utf-8"))),
+        },
+    )
+
+
+def _render_mermaid_wrapper_body(
+    rel_path: str, nonce: str | None = None
+) -> bytes:
+    """Return the wrapper HTML bytes for HEAD Content-Length measurement.
+
+    The HEAD handler must report a Content-Length that
+    matches the GET body — the wrapper page size is a
+    function of the rel_path (not the file bytes), so the
+    HEAD path can render the wrapper independently of any
+    file read. This mirrors the existing MD path's HEAD
+    contract.
+    """
+    from daemon.services.live_views import render_mermaid_wrapper
+
+    body, _headers = render_mermaid_wrapper(
+        rel_path=rel_path, nonce=nonce
+    )
+    return body.encode("utf-8")
+
+
+def _wants_raw_query(request: Request) -> bool:
+    """Return True iff the inbound request carries ``?raw=1``.
+
+    Thin shim over :func:`wants_raw_query` in the service
+    so the router code stays request-aware. The service
+    version accepts a generic request-like object; this
+    router version pins the FastAPI ``Request`` type so
+    the router's call sites stay typed.
+    """
+    raw = request.query_params.get("raw")
+    return raw is not None and raw != ""
+
+
+def _serve_mermaid_asset() -> Response:
+    """Return the vendored ``mermaid.min.js`` bytes with JS content-type.
+
+    The asset is read from the source-relative path
+    ``daemon/services/live_views/assets/mermaid/mermaid.min.js``
+    and verified against the pinned SHA-256 at request time
+    (so a corrupted/tampered on-disk asset fails closed rather
+    than serving an unexpected script). The response carries
+    the standard hardening headers plus ``Content-Type:
+    application/javascript`` so the browser can execute the
+    bundle as ES5/IIFE without MIME sniffing (the
+    ``nosniff`` header reinforces this).
+    """
+    from daemon.services.live_views import (
+        _MERMAID_ASSET_PUBLIC_MIME,
+        _vendored_mermaid_bytes,
+    )
+
+    try:
+        body = _vendored_mermaid_bytes()
+    except (FileNotFoundError, RuntimeError) as exc:
+        # Asset missing or hash mismatch — fail closed with a
+        # 500 envelope. The wrapper page's bootstrap script
+        # treats a non-200 asset fetch as a render failure
+        # (graceful degradation shows the raw text); an
+        # operator-facing 500 here is preferable to a
+        # silently-empty asset response.
+        logger.error(
+            "[LiveViews] vendored mermaid asset unavailable: %s",
+            exc,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"error": "asset unavailable"},
+            headers=_HARDENING_HEADERS,
+        )
+    return Response(
+        content=body,
+        media_type=_MERMAID_ASSET_PUBLIC_MIME,
+        status_code=200,
+        headers={
+            **_HARDENING_HEADERS,
+            "Content-Length": str(len(body)),
         },
     )
 
@@ -273,6 +442,53 @@ def build_router() -> APIRouter:
 
     router = APIRouter(prefix="/views", tags=["live_views"])
 
+    @router.get(_MERMAID_ASSET_URL_PATH)
+    async def get_mermaid_asset() -> Response:
+        """Serve the vendored mermaid.js bundle.
+
+        Hard-coded path (``/views/assets/mermaid/mermaid.min.js``).
+        Lives on the same router as ``/{root_name}/{rel_path:path}``
+        so it rides the same auth/OAuth-proxy gate (the
+        ``/views`` prefix sits behind the operator-fronted
+        proxy per ``docs/runbooks/live-views.md``). Mounted
+        BEFORE the catch-all root route below — Starlette
+        first-match-wins ordering is load-bearing here.
+
+        The vendored bytes are SHA-256-pinned at vendoring
+        time and re-verified on every request via
+        :func:`_verify_vendored_mermaid_sha256`; a corrupted
+        or missing on-disk asset returns 500 instead of
+        silently shipping a different bundle to the browser.
+        """
+        return _serve_mermaid_asset()
+
+    @router.head(_MERMAID_ASSET_URL_PATH)
+    async def head_mermaid_asset() -> Response:
+        """HEAD support for the vendored mermaid.js asset.
+
+        Mirrors the GET handler — same hardening headers, same
+        body length (the bytes are loaded + hashed on every
+        HEAD request too so a corrupted asset is detected on
+        HEAD just as it would be on GET). Body bytes are
+        discarded after the Content-Length measurement.
+        """
+        from daemon.services.live_views import _vendored_mermaid_bytes
+        try:
+            body = _vendored_mermaid_bytes()
+        except (FileNotFoundError, RuntimeError):
+            return Response(
+                status_code=500,
+                headers=_HARDENING_HEADERS,
+            )
+        return Response(
+            status_code=200,
+            headers={
+                **_HARDENING_HEADERS,
+                "Content-Type": "application/javascript; charset=utf-8",
+                "Content-Length": str(len(body)),
+            },
+        )
+
     async def _resolve(
         request: Request, root_name: str, rel_path: str
     ) -> Response:
@@ -326,6 +542,36 @@ def build_router() -> APIRouter:
                     "Content-Length": str(resolved.size_bytes),
                 },
             )
+        # Phase 3: ``.mmd`` / ``.mermaid`` (case-insensitive on
+        # the URL — the extension is already lowercased by
+        # ``extension_for`` before reaching here) WITHOUT
+        # ``?raw=1`` returns the wrapper page. The wrapper
+        # content is independent of the file bytes (the
+        # wrapper fetches the source itself via ``?raw=1``),
+        # so the HEAD Content-Length matches the GET body.
+        from daemon.services.live_views import (
+            extension_for,
+            is_mermaid_extension,
+            new_csp_nonce,
+        )
+
+        if is_mermaid_extension(extension_for(rel_path)) and not _wants_raw_query(
+            request
+        ):
+            return Response(
+                status_code=200,
+                headers={
+                    **_HARDENING_HEADERS,
+                    "Content-Type": "text/html; charset=utf-8",
+                    "Content-Length": str(
+                        len(
+                            _render_mermaid_wrapper_body(
+                                rel_path, nonce=new_csp_nonce()
+                            )
+                        )
+                    ),
+                },
+            )
         # Phase 2: ``.md`` files wrap into a per-response HTML
         # page whose size depends on the wrapper template +
         # markdown content. The HEAD handler must return a
@@ -338,8 +584,9 @@ def build_router() -> APIRouter:
         from daemon.services.live_views import (
             MAX_SERVED_BYTES,
             is_markdown_content_type,
-            new_csp_nonce,
             render_markdown_wrapper,
+            render_markdown_wrapper_with_mermaid,
+            markdown_wrapper_uses_mermaid,
         )
 
         if is_markdown_content_type(resolved.content_type):
@@ -350,11 +597,18 @@ def build_router() -> APIRouter:
                 markdown_text = file_bytes.decode(
                     "utf-8", errors="replace"
                 )
-                body, headers = render_markdown_wrapper(
-                    rel_path=rel_path,
-                    markdown_text=markdown_text,
-                    nonce=new_csp_nonce(),
-                )
+                if markdown_wrapper_uses_mermaid(markdown_text):
+                    body, headers = render_markdown_wrapper_with_mermaid(
+                        rel_path=rel_path,
+                        markdown_text=markdown_text,
+                        nonce=new_csp_nonce(),
+                    )
+                else:
+                    body, headers = render_markdown_wrapper(
+                        rel_path=rel_path,
+                        markdown_text=markdown_text,
+                        nonce=new_csp_nonce(),
+                    )
                 return Response(
                     status_code=200,
                     headers={
@@ -422,6 +676,28 @@ def build_router() -> APIRouter:
                 },
             )
 
+        # Phase 3: ``.mmd`` / ``.mermaid`` interception. The
+        # interception runs BEFORE the file-read path so the
+        # wrapper page is returned without ever opening the
+        # file (the wrapper fetches the source itself via
+        # ``?raw=1``). ``?raw=1`` short-circuits to the
+        # raw-byte path below (extension-typed MIME, identical
+        # to the pre-Pinkage raw serving). Case-insensitive
+        # — the extension is already lowercased by
+        # ``extension_for`` before reaching here.
+        from daemon.services.live_views import (
+            extension_for,
+            is_mermaid_extension,
+            new_csp_nonce,
+        )
+
+        if is_mermaid_extension(extension_for(rel_path)) and not _wants_raw_query(
+            request
+        ):
+            return _render_mermaid_response(
+                rel_path, nonce=new_csp_nonce()
+            )
+
         # Filesystem / project_scoped: serve the bytes. REWORK
         # 2026-10-07 (M4): fd-based read with ``O_NOFOLLOW`` →
         # ``fstat`` → size-cap re-check → ``os.read`` (capped to
@@ -452,6 +728,10 @@ def build_router() -> APIRouter:
         # supposed to click in chat). Other text types stay
         # native — ``text/plain`` and ``text/html`` are already
         # useful in a browser; image types keep their MIME.
+        # Phase 3: ``.md`` files with ``mermaid`` fences get
+        # the mermaid-aware variant (loads the vendored
+        # asset + bootstraps ``mermaid.run``); files without
+        # fences keep the CDN-marked wrapper byte-identical.
         if is_markdown_content_type(resolved.content_type):
             return _render_markdown_response(
                 file_bytes, rel_path, nonce=new_csp_nonce()

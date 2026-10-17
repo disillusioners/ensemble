@@ -11,6 +11,21 @@ a = Analysis(
         ('pyproject.toml', '.'),
         # Include migrations (SQL files needed at runtime)
         ('daemon/migrations', 'daemon/migrations'),
+        # Phase 3 — live-view mermaid rendering. The vendored
+        # ``mermaid.min.js`` IIFE bundle lives at
+        # ``daemon/services/live_views/assets/mermaid/mermaid.min.js``
+        # and is loaded by the running Python interpreter via
+        # ``Path(__file__).parent / "assets" / "mermaid" / ...``
+        # (see ``daemon/services/live_views.py:_vendored_mermaid_asset_path``).
+        # The dest path mirrors the source-relative shape so the
+        # frozen-binary ``__file__`` lookup resolves the extracted
+        # data file at ``_MEIPASS`` time. SHA-256 of the vendored
+        # asset is pinned in
+        # ``daemon/services/live_views/assets/mermaid/SHA256SUMS``
+        # and re-verified on every request via
+        # ``_verify_vendored_mermaid_sha256`` — a missing/tampered
+        # asset fails closed (HTTP 500 + operator log line).
+        ('daemon/services/live_views/assets', 'daemon/services/live_views/assets'),
     ],
     hiddenimports=[
         # Tiktoken plugin system
