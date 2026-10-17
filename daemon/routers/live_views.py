@@ -500,10 +500,40 @@ def _public_csp_nonce() -> str:
     return new_csp_nonce()
 
 
+def _clear_grant_cookie_header() -> str:
+    """Build the ``Set-Cookie`` value that clears the grant cookie.
+
+    T2.5 / D12 — the validation chain's failure contract is
+    "interstitial + cookie clear" (architecture-recommendation.md
+    D6:76: ``InvalidToken`` → interstitial + cookie clear). A
+    stale / tampered / expired cookie must not linger in the
+    browser: the clear rides ``Max-Age=0`` on the SAME
+    exact-path scope the cookie was set with (a Set-Cookie
+    delete only takes effect when name + Path match the stored
+    cookie).
+    """
+    from daemon.services.view_passcode_service import GRANT_COOKIE_NAME
+
+    return (
+        f"{GRANT_COOKIE_NAME}=; "
+        "Path=/; "
+        "HttpOnly; Secure; SameSite=Lax; "
+        "Max-Age=0"
+    )
+
+
 def _render_interstitial_page(
     request: Request, root_name: str, rel_path: str
 ) -> Response:
-    """Render the passcode-entry interstitial (no cookie path)."""
+    """Render the passcode-entry interstitial (no cookie path).
+
+    When a grant cookie was PRESENTED but failed validation
+    (decrypt / claims / generation / exp), the interstitial
+    rides the cookie-clear ``Set-Cookie`` (T2.5 — "interstitial
+    + cookie clear"; the stale token must not survive in the
+    browser). A request with NO cookie renders the plain
+    interstitial (nothing to clear).
+    """
     from daemon.services.view_passcode_pages import (
         page_headers,
         render_interstitial,
@@ -520,6 +550,17 @@ def _render_interstitial_page(
         form_action=form_action,
     )
     headers = page_headers(csp_nonce=nonce)
+    if request.cookies.get("view_grant"):
+        # A cookie was presented but the gate rejected it —
+        # clear it (the failed-validation contract; the
+        # Set-Cookie delete uses Path=/ scope-matching, which
+        # deletes cookies stored under ANY path for this name
+        # in RFC 6265 semantics browsers implement for
+        # same-name deeper-path cookies: the deeper-path
+        # cookie shadows the shorter one, so we clear the
+        # exact-path variant AND the root variant to cover
+        # both storage shapes).
+        headers["Set-Cookie"] = _clear_grant_cookie_header()
     return Response(
         content=body,
         status_code=200,

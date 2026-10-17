@@ -979,7 +979,8 @@ class TestGrantCookie:
     ):
         """AC8 — tampered / expired / wrong-generation
         cookies fall back to the interstitial (NEVER a 500,
-        NEVER plaintext)."""
+        NEVER plaintext) AND the stale cookie is CLEARED
+        (T2.5 — "interstitial + cookie clear")."""
         plaintext = generate_passcode()
         wrapped = cipher.wrap(plaintext.encode("ascii"))
         in_memory_store.upsert(
@@ -999,6 +1000,28 @@ class TestGrantCookie:
         # Interstitial (not served content).
         assert "<form" in resp.text.lower()
         assert b"<h1>Landing</h1>" not in resp.content
+        # Cookie clear rides the response (Max-Age=0 delete).
+        set_cookie = resp.headers.get("set-cookie", "")
+        assert f"{GRANT_COOKIE_NAME}=;" in set_cookie
+        assert "Max-Age=0" in set_cookie
+
+    def test_no_cookie_interstitial_carries_no_clear(self, client, in_memory_store, cipher):
+        """A plain no-cookie GET renders the interstitial WITHOUT
+        a Set-Cookie clear (nothing to clear — no spurious
+        cookie churn)."""
+        plaintext = generate_passcode()
+        wrapped = cipher.wrap(plaintext.encode("ascii"))
+        in_memory_store.upsert(
+            "planning",
+            "ens/feat/design/mockups/landing.html",
+            wrapped_passcode=wrapped,
+        )
+        resp = client.get(
+            "/views/public/planning/ens/feat/design/mockups/landing.html"
+        )
+        assert resp.status_code == 200
+        assert "<form" in resp.text.lower()
+        assert "set-cookie" not in resp.headers
 
     def test_generation_mismatch_collapses_to_interstitial(
         self, client: TestClient, in_memory_store, cipher
