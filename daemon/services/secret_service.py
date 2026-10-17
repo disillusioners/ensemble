@@ -453,6 +453,17 @@ def generate_ssh_keypair_material() -> SecretSshKeypairMaterial:
     private-side output is the OpenSSH PEM (no password) —
     the same shape ``ssh-add`` accepts.
 
+    The fingerprint is SHA256 over the OpenSSH 51-byte wire
+    blob (the ``ssh-keygen -lf`` parity — M3 governor pre-
+    promote fix, 2026-10-17). The wire blob is the
+    length-prefixed ``"ssh-ed25519"`` (4-byte big-endian
+    length + 11 bytes ASCII) followed by the length-prefixed
+    32-byte raw key (4-byte big-endian length + 32 bytes
+    raw), total 51 bytes. This is the byte sequence
+    ``ssh-keygen`` hashes; hashing the raw 32-byte key
+    alone produced a non-matching fingerprint and broke
+    the ``ssh-keygen -lf`` parity claim.
+
     Returns:
         The :class:`SecretSshKeypairMaterial` with all four
         fields populated. The private-side bytes are held in
@@ -471,18 +482,41 @@ def generate_ssh_keypair_material() -> SecretSshKeypairMaterial:
     )
     public_openssh: str = public_openssh_bytes.decode("ascii").strip()
 
-    # Fingerprint — SHA256 of the public key bytes, base64-
-    # decoded from the OpenSSH wire form (matches
-    # ``ssh-keygen -lf`` output, ``SHA256:xxxx``).
+    # Fingerprint — SHA256 of the OpenSSH 51-byte wire blob
+    # (M3 parity with ``ssh-keygen -lf``). The wire blob is
+    # the binary form of the pubkey body — the ASCII art
+    # encodes two length-prefixed strings:
+    #     ``len("ssh-ed25519") || "ssh-ed25519" ||
+    #       len(raw_key)      || raw_key``
+    # which is 4+11+4+32 = 51 bytes for an ed25519 key.
+    # ``cryptography`` exposes the public bytes in the
+    # ``OpenSSH`` encoding as the whole
+    # ``"ssh-ed25519 <b64> [comment]\n"`` line; we strip the
+    # prefix / suffix and base64-decode the body to recover
+    # the 51-byte wire blob (the
+    # ``serialization.PublicFormat.OpenSSH`` form).
     import base64
     import hashlib
+    import struct
 
     raw_public_bytes: bytes = public_key.public_bytes(
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
     )
-    digest = hashlib.sha256(raw_public_bytes).digest()
+    algo_name: bytes = b"ssh-ed25519"
+    wire_blob: bytes = (
+        struct.pack(">I", len(algo_name))
+        + algo_name
+        + struct.pack(">I", len(raw_public_bytes))
+        + raw_public_bytes
+    )
+    assert len(wire_blob) == 51, (
+        f"unexpected wire-blob length for ed25519: "
+        f"{len(wire_blob)} (expected 51)"
+    )
+    digest = hashlib.sha256(wire_blob).digest()
     # SSH fingerprint format: ``SHA256:<base64-no-padding>``
+    # (matches ``ssh-keygen -lf`` output verbatim).
     b64 = base64.b64encode(digest).decode("ascii").rstrip("=")
     fingerprint: str = f"SHA256:{b64}"
 
