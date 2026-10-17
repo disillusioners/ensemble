@@ -161,6 +161,7 @@ _EXT_TO_MIME: dict[str, str] = {
     "pdf": "application/pdf",
     "asc": "text/plain; charset=utf-8",  # designer's text-native wireframe
     "mmd": "text/plain; charset=utf-8",  # designer's text-native mermaid
+    "mermaid": "text/plain; charset=utf-8",  # designer's text-native mermaid (alt ext)
     "xml": "application/xml; charset=utf-8",
     "yml": "application/yaml; charset=utf-8",
     "yaml": "application/yaml; charset=utf-8",
@@ -1179,6 +1180,161 @@ class LiveViewsService:
 
 
 # ─────────────────────────────────────────────────────────────────
+# Vendored Mermaid asset (Phase 3: live-view mermaid rendering)
+# ─────────────────────────────────────────────────────────────────
+
+# Vendored mermaid.js, copied verbatim from
+# ``@mermaid-js/mermaid-cli@12.0.0/node_modules/mermaid@12.1.0/dist/mermaid.min.js``
+# (the IIFE build — sets ``globalThis.mermaid`` when loaded as a
+# plain ``<script>`` tag). Provenance + SHA-256 in
+# ``daemon/services/live_views/assets/mermaid/PROVENANCE.md`` and
+# ``SHA256SUMS``. The script lives in-repo so the live-views
+# subsystem is render-capable offline (no CDN) and the OAuth-
+# proxy gate in front of /views applies to the asset fetch too.
+#
+# Version pinned to 12.1.0 to match the major that the charter
+# lane's ``mmdc-v12`` toolchain renders with
+# (``agents/charter/skills-template/install-mermaid-cli.md`` —
+# ``mermaidCli: 12`` pin, ``mermaid-cli@12.0.0`` internally ships
+# ``mermaid@12.x``). Charter-rendered PNGs and browser-rendered
+# SVGs agree on syntax + theme defaults by construction.
+#
+# Resolved at request time via :func:`mermaid_asset_url` (the
+# router hard-codes the public URL path; the function reads the
+# vendored bytes from disk + computes the SRI hash lazily). The
+# route family is mounted on the daemon ``app`` (not ``api_router``)
+# so the same auth-gate as the rest of /views protects the asset
+# fetch.
+_MERMAID_ASSET_REL_PATH = "daemon/services/live_views/assets/mermaid/mermaid.min.js"
+_MERMAID_ASSET_PUBLIC_URL_PATH = "/views/assets/mermaid/mermaid.min.js"
+_MERMAID_ASSET_PUBLIC_MIME = "application/javascript; charset=utf-8"
+# SHA-256 of the vendored bytes, base64-prefixed per W3C SRI
+# (``sha256-...``). Verified at vendoring time; documented in
+# ``PROVENANCE.md``. Re-verified at module import via
+# :func:`_verify_vendored_mermaid_sha256` so a corrupted/tampered
+# on-disk asset fails closed at first request rather than
+# silently shipping a different script to the browser.
+# Computed from the hex digest
+# ``6484afc32872a3aa16cac9a76ba1816a1ed4cc870a6593cc2e17757750f518b2``
+# (recorded in ``SHA256SUMS`` next to the file).
+_MERMAID_ASSET_SRI_SHA256 = (
+    "sha256-ZISvwyhyo6oWysmna6GBah7UzIcKZZPMLhd1d1D1GLI="
+)
+
+
+def _vendored_mermaid_asset_path() -> Path:
+    """Return the on-disk path of the vendored ``mermaid.min.js``.
+
+    The vendored asset sits beside this module so PyInstaller's
+    ``datas=[]`` entry can ship it via the same source-relative
+    shape (``daemon/services/live_views/assets/mermaid/mermaid.min.js``)
+    that the running Python interpreter imports ``live_views.py``
+    from. Frozen-binary runs resolve ``__file__`` into PyInstaller's
+    ``_MEIPASS`` archive, where the same relative path resolves to
+    the extracted data file. Source-binary runs resolve it on disk.
+    """
+    return (
+        Path(__file__).parent
+        / "live_views"
+        / "assets"
+        / "mermaid"
+        / "mermaid.min.js"
+    )
+
+
+def _verify_vendored_mermaid_sha256() -> None:
+    """Fail-closed check that the vendored asset matches the pinned hash.
+
+    Called lazily on first request via :func:`_vendored_mermaid_bytes`
+    so a corrupted file is detected at the live-views serving
+    seam rather than at module import time. The intent: a
+    deployment whose vendored file was tampered with (or never
+    landed because ``ensemble.spec`` was edited to drop the
+    data entry) must NOT keep serving a different script to the
+    browser — the request must fail loudly.
+
+    The comparison uses BOTH the hex digest (recorded in
+    ``SHA256SUMS`` next to the file as the human-readable
+    pin) AND the W3C-SRI base64 form (used in the wrapper's
+    ``<script integrity=...>`` attribute). The two forms
+    describe the SAME hash; re-checking both catches a
+    vendoring-time mistake (one form updated, the other
+    forgotten).
+    """
+    import base64
+    import hashlib
+
+    asset_path = _vendored_mermaid_asset_path()
+    if not asset_path.is_file():
+        raise FileNotFoundError(
+            f"vendored mermaid asset missing: {asset_path}"
+        )
+    raw = asset_path.read_bytes()
+    h_hex = hashlib.sha256(raw).hexdigest()
+    h_b64 = base64.b64encode(raw and hashlib.sha256(raw).digest()).decode(
+        "ascii"
+    )
+    expected_sri = _MERMAID_ASSET_SRI_SHA256
+    if not expected_sri.startswith("sha256-"):
+        raise RuntimeError(
+            "vendored mermaid SRI hash is malformed (must start with "
+            "'sha256-'); the constant in "
+            "daemon/services/live_views.py is wrong"
+        )
+    expected_b64 = expected_sri[len("sha256-"):]
+    if h_b64 != expected_b64:
+        raise RuntimeError(
+            f"vendored mermaid asset hash mismatch: expected "
+            f"sha256-{expected_b64}, got sha256-{h_b64} — refuse to serve. "
+            f"Re-vendor from daemon/services/live_views/assets/mermaid/PROVENANCE.md"
+        )
+    # Re-derive the expected hex from the SRI base64 form so a
+    # mismatch between the two pin forms is caught at request
+    # time (defense in depth — a vendoring-time mistake that
+    # updates one form but forgets the other surfaces here
+    # instead of at byte-level rendering).
+    expected_hex = (
+        base64.b64decode(expected_b64).hex()
+    )
+    if h_hex != expected_hex:
+        raise RuntimeError(
+            f"vendored mermaid asset hex digest drift: SHA256SUMS "
+            f"records {h_hex}, the in-code SRI form expects "
+            f"{expected_hex}. Update both pins atomically — refuse to serve."
+        )
+
+
+def _vendored_mermaid_bytes() -> bytes:
+    """Return the verified vendored mermaid.js bytes."""
+    _verify_vendored_mermaid_sha256()
+    return _vendored_mermaid_asset_path().read_bytes()
+
+
+def mermaid_asset_url() -> str:
+    """Return the URL the wrapper page should ``<script src=>``.
+
+    Always ``/views/assets/mermaid/mermaid.min.js`` — path-
+    relative (the daemon has no canonical public hostname;
+    path-relative URLs sit behind the OAuth-proxy gate the
+    operator fronts the daemon with, which is the documented
+    deployment posture in ``docs/runbooks/live-views.md``).
+    """
+    return _MERMAID_ASSET_PUBLIC_URL_PATH
+
+
+def is_mermaid_extension(extension: str) -> bool:
+    """Return True iff the lowercase file extension is ``mmd`` or ``mermaid``.
+
+    Used by the router to intercept ``.mmd``/``.mermaid`` requests
+    BEFORE the file-byte path so the wrapper page is rendered
+    instead of raw text. Case-insensitive (the extension is
+    already lowercased by :func:`extension_for` before reaching
+    here, but the explicit check is the load-bearing boundary).
+    """
+    return extension in ("mmd", "mermaid")
+
+
+# ─────────────────────────────────────────────────────────────────
 # Markdown rendering (Phase 2: content-aware smart rendering)
 # ─────────────────────────────────────────────────────────────────
 
@@ -1385,3 +1541,428 @@ def is_markdown_content_type(content_type: str) -> bool:
     """
     base = content_type.split(";", 1)[0].strip().lower()
     return base in ("text/markdown", "text/x-markdown")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Mermaid rendering (Phase 3: .mmd/.mermaid wrapper + MD mermaid
+# fences; extends the markdown wrapper above)
+# ─────────────────────────────────────────────────────────────────
+
+# CSP for the mermaid-wrapper page. Stricter than the markdown
+# wrapper: NO external CDN script origins (the vendored mermaid.js
+# is served from /views/assets/... which is ``self``). The only
+# script sources are:
+#
+#   * ``'self'`` — the vendored mermaid.js asset
+#   * ``'nonce-...'`` — the per-request nonced bootstrap script
+#
+# ``img-src 'self' data:`` mirrors the markdown wrapper; the
+# ``style-src 'self' 'unsafe-inline' 'nonce-...'`` shape mirrors
+# the markdown wrapper (inline style attributes may slip through
+# DOMPurify when an operator-authored .mmd embeds raw HTML in
+# labels — the trade-off is the same as the markdown wrapper,
+# and the bootstrap rerenders the page through mermaid which
+# drops the inline styles anyway).
+_MERMAID_CSP_TEMPLATE = (
+    "default-src 'self'; "
+    "script-src 'self' 'nonce-{nonce}'; "
+    "style-src 'self' 'unsafe-inline' 'nonce-{nonce}'; "
+    "img-src 'self' data:; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+# CSP for the markdown wrapper when it ALSO needs mermaid.js
+# (the .md file contains ```mermaid fences). Same self-only
+# script-src shape as ``_MERMAID_CSP_TEMPLATE`` — the existing
+# markdown wrapper's CDN allowlist (``cdn.jsdelivr.net``) is
+# REMOVED in the mermaid-aware variant so a tampered CDN cannot
+# reach the page. Marked + DOMPurify are still CDN-loaded in the
+# existing markdown wrapper (out of scope for this change); the
+# mermaid-aware variant only swaps in the vendored mermaid asset.
+_MARKDOWN_MERMAID_CSP_TEMPLATE = (
+    "default-src 'self'; "
+    "script-src 'self' https://cdn.jsdelivr.net 'nonce-{nonce}'; "
+    "style-src 'self' 'nonce-{nonce}' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+# Mermaid wrapper page template. Loads the vendored mermaid.js
+# (SRI hash pinned), initializes mermaid with
+# ``securityLevel: 'strict'`` (blocks HTML in labels — defense in
+# depth even though we already fetch untrusted text), and
+# renders the diagram into the ``<div id="diagram">`` element.
+#
+# The raw .mmd source is fetched from ``?raw=1`` (same URL with
+# the raw query) so the wrapper never embeds file content into
+# HTML/JS strings server-side — the only cross-trust surface is
+# the JSON response from a fetch we control.
+#
+# The diagram container is wrapped in a horizontally-scrollable
+# element (``<div class="diagram-scroll">``) so wide diagrams
+# never break page layout on narrow viewports (mobile is a
+# PRIMARY consumption device per the architect ruling). The
+# wrapper also exposes a visible ``view raw`` link so the user
+# can always reach the raw text.
+_MERMAID_WRAPPER_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style nonce="{nonce}">
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 100%; margin: 0; padding: 0; line-height: 1.5; color: #222; box-sizing: border-box; }}
+  body *, body *::before, body *::after {{ box-sizing: inherit; }}
+  .topbar {{ display: flex; flex-wrap: wrap; align-items: center; gap: 0.75em; padding: 0.75em 1em; background: #f6f8fa; border-bottom: 1px solid #dfe2e5; font-size: 0.95em; }}
+  .topbar .title {{ font-weight: 600; word-break: break-all; min-width: 0; flex: 1 1 auto; }}
+  .topbar a {{ color: #0366d6; text-decoration: none; padding: 0.4em 0.7em; min-height: 32px; min-width: 32px; display: inline-flex; align-items: center; border-radius: 4px; }}
+  .topbar a:hover, .topbar a:focus {{ background: #e8f0fa; outline: none; }}
+  main {{ padding: 1em; max-width: 100%; }}
+  .diagram-scroll {{ width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; border: 1px solid #dfe2e5; border-radius: 4px; background: #fff; padding: 0.5em; touch-action: pan-x pan-y; }}
+  .diagram-scroll .mermaid {{ display: block; min-width: 0; }}
+  .status {{ font-size: 0.85em; color: #586069; padding: 0.5em 0; }}
+  .error {{ color: #b00020; padding: 0.5em; background: #fff5f5; border: 1px solid #ffd0d0; border-radius: 4px; }}
+  .raw-fallback {{ white-space: pre-wrap; word-wrap: break-word; background: #f6f8fa; padding: 1em; border-radius: 4px; overflow-x: auto; }}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="title">{title}</span>
+  <a href="{raw_href}" id="raw-link">view raw / download</a>
+</div>
+<main>
+  <div class="status" id="status">loading diagram…</div>
+  <div class="diagram-scroll" id="diagram-scroll">
+    <div class="mermaid" id="diagram"></div>
+  </div>
+  <pre class="raw-fallback" id="raw-fallback" hidden></pre>
+</main>
+<script src="{mermaid_url}" integrity="{mermaid_integrity}" crossorigin="anonymous" nonce="{nonce}"></script>
+<script nonce="{nonce}">
+(function() {{
+  var statusEl = document.getElementById('status');
+  var diagramEl = document.getElementById('diagram');
+  var fallbackEl = document.getElementById('raw-fallback');
+  var rawHref = document.getElementById('raw-link').getAttribute('href');
+  function showError(msg, rawText) {{
+    statusEl.textContent = '';
+    var err = document.createElement('div');
+    err.className = 'error';
+    err.textContent = msg;
+    statusEl.appendChild(err);
+    if (rawText != null) {{
+      fallbackEl.textContent = rawText;
+      fallbackEl.hidden = false;
+    }}
+  }}
+  // Guard tightening (mirrors the markdown wrapper's pattern):
+  // the IIFE bundle sets ``globalThis.mermaid`` so a bare
+  // ``typeof mermaid === 'undefined'`` is the right availability
+  // check. The ``run`` function is the v10+ rendering entry
+  // point; v11+ deprecated the older ``init``+``render`` pair.
+  if (typeof mermaid === 'undefined') {{
+    showError('mermaid not loaded — asset fetch failed or script blocked.');
+    return;
+  }}
+  if (typeof mermaid.initialize !== 'function') {{
+    showError('mermaid.initialize is not a function — version mismatch.');
+    return;
+  }}
+  if (typeof mermaid.run !== 'function') {{
+    showError('mermaid.run is not a function — version mismatch.');
+    return;
+  }}
+  try {{
+    mermaid.initialize({{
+      startOnLoad: false,
+      securityLevel: 'strict',
+      // Theming — match the daemon's light-background page; the
+      // chart lane's render uses mmdc defaults which are
+      // light-theme. Charter-rendered PNGs and our browser-
+      // rendered SVGs agree on color defaults.
+      theme: 'default',
+    }});
+  }} catch (e) {{
+    showError('mermaid.initialize failed: ' + (e && e.message ? e.message : String(e)));
+    return;
+  }}
+  fetch(rawHref, {{ credentials: 'same-origin' }})
+    .then(function(r) {{
+      if (!r.ok) {{ throw new Error('raw fetch HTTP ' + r.status); }}
+      return r.text();
+    }})
+    .then(function(source) {{
+      diagramEl.textContent = source;
+      statusEl.textContent = 'rendering…';
+      return mermaid.run({{ nodes: [diagramEl] }});
+    }})
+    .then(function() {{
+      statusEl.textContent = '';
+    }})
+    .catch(function(e) {{
+      var src = fallbackEl.textContent || diagramEl.textContent || '';
+      showError('render failed: ' + (e && e.message ? e.message : String(e)), src);
+    }});
+}})();
+</script>
+</body>
+</html>
+"""
+
+
+def render_mermaid_wrapper(
+    *,
+    rel_path: str,
+    nonce: str | None = None,
+) -> tuple[str, dict[str, str]]:
+    """Return ``(html_body, headers)`` for the .mmd/.mermaid wrapper.
+
+    The wrapper fetches the raw source via ``?raw=1`` (the
+    SAME URL the browser just loaded, plus a query param), so
+    the rendering path never embeds the file's bytes into
+    HTML/JS strings server-side. The raw source URL is the
+    only untrusted-text surface, and it flows into ``<div
+    class="mermaid">.textContent`` (which mermaid's own
+    renderer then consumes — never our HTML, never an inline
+    script).
+
+    The CSP is stricter than the markdown wrapper's: the only
+    allowed script sources are ``self`` (the vendored
+    mermaid.js asset) and the per-request nonce. No external
+    CDN origins, no ``unsafe-inline`` for scripts. The
+    response carries the standard hardening headers (nosniff,
+    cache-control) and the per-request Referrer-Policy
+    suppression that the markdown wrapper uses.
+    """
+    nonce = nonce or new_csp_nonce()
+    title = f"{rel_path} - live view"
+    # The raw URL is the SAME path the browser just loaded,
+    # with the raw=1 query. The wrapper page itself uses
+    # path-relative resolution so the wrapper works behind
+    # any operator-fronted proxy.
+    raw_href = "?raw=1"
+    body = _MERMAID_WRAPPER_HTML.format(
+        title=html.escape(title),
+        raw_href=html.escape(raw_href, quote=True),
+        nonce=html.escape(nonce),
+        mermaid_url=html.escape(mermaid_asset_url(), quote=True),
+        mermaid_integrity=html.escape(_MERMAID_ASSET_SRI_SHA256),
+    )
+    headers: dict[str, str] = {
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, max-age=60",
+        "Content-Security-Policy": _MERMAID_CSP_TEMPLATE.format(nonce=nonce),
+        "Referrer-Policy": "no-referrer",
+    }
+    return body, headers
+
+
+def markdown_wrapper_uses_mermaid(markdown_text: str) -> bool:
+    """Return True iff the markdown contains a ``mermaid`` fenced code block.
+
+    Used by the router + wrapper to decide whether to ship
+    the mermaid-aware variant of the markdown wrapper
+    (loads the vendored mermaid asset + bootstraps
+    ``mermaid.run`` after DOMPurify) or the existing
+    CDN-marked variant. Cheap scan over the text — no
+    full parse needed (the result is a yes/no, not which
+    block).
+
+    Detection rule: a line that EXACTLY matches
+    `````mermaid`` (three-or-more backticks followed by the
+    word ``mermaid`` and optional whitespace, then a
+    newline) is a fence opener. Tildes (``~~~mermaid``) are
+    the alternative fence syntax; we honor them too.
+    """
+    import re
+
+    return bool(
+        re.search(
+            r"^(?:`{3,}|~{3,})\s*mermaid\s*$",
+            markdown_text,
+            flags=re.MULTILINE,
+        )
+    )
+
+
+def render_markdown_wrapper_with_mermaid(
+    *,
+    rel_path: str,
+    markdown_text: str,
+    nonce: str | None = None,
+) -> tuple[str, dict[str, str]]:
+    """Return ``(html_body, headers)`` for the markdown wrapper that
+    ALSO renders ``mermaid`` fenced code blocks.
+
+    This is an EXTENSION of :func:`render_markdown_wrapper`
+    (which it does NOT replace). The two wrappers share
+    their hardening posture: nosniff, CSP nonce, DOMPurify
+    sanitization of marked's output, and ``Referrer-Policy:
+    no-referrer`` on every response.
+
+    How mermaid fences are rendered:
+      1. marked (v12, CDN-loaded) parses the markdown; by
+         default, ``language-mermaid`` code blocks become
+         ``<pre><code class="language-mermaid">…</code></pre>``.
+      2. DOMPurify sanitizes the HTML (unchanged contract).
+      3. The bootstrap script walks the article DOM,
+         finds every ``pre code.language-mermaid`` block,
+         moves the source text into a fresh
+         ``<pre class="mermaid">…</pre>`` element in place
+         of the original code block, then calls
+         ``mermaid.run({nodes: [...]})`` to render them.
+      4. The vendored ``/views/assets/mermaid/mermaid.min.js``
+         asset is loaded via ``<script src=…>`` (SRI
+         pinned); it sets ``globalThis.mermaid`` and
+         exposes ``mermaid.run``.
+
+    The CSP for this variant KEEPS the CDN-marked +
+    DOMPurify allowlist (out of scope to vendor them) but
+    also adds ``/views/assets/mermaid/mermaid.min.js`` via
+    the same ``'self'`` directive that already permits
+    same-origin scripts — no CSP change is needed because
+    the vendored asset is served from ``self``.
+    """
+    nonce = nonce or new_csp_nonce()
+    title = f"{rel_path} - live view"
+    body = _MARKDOWN_MERMAID_WRAPPER_HTML.format(
+        title=html.escape(title),
+        escaped_markdown=html.escape(markdown_text),
+        nonce=html.escape(nonce),
+        marked_url=MARKED_CDN_URL,
+        marked_integrity=MARKED_CDN_INTEGRITY,
+        dompurify_url=DOMPURIFY_CDN_URL,
+        dompurify_integrity=DOMPURIFY_CDN_INTEGRITY,
+        mermaid_url=html.escape(mermaid_asset_url(), quote=True),
+        mermaid_integrity=html.escape(_MERMAID_ASSET_SRI_SHA256),
+    )
+    headers: dict[str, str] = {
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, max-age=60",
+        "Content-Security-Policy": _MARKDOWN_MERMAID_CSP_TEMPLATE.format(nonce=nonce),
+        "Referrer-Policy": "no-referrer",
+    }
+    return body, headers
+
+
+# Markdown wrapper template with mermaid-fence rendering support.
+# Mirrors ``_MARKDOWN_WRAPPER_HTML`` (above) with these extensions:
+#
+#   * Loads the vendored ``/views/assets/mermaid/mermaid.min.js``
+#     asset (SRI pinned) AFTER marked + DOMPurify — the bootstrap
+#     only calls ``mermaid.run`` when at least one
+#     ``language-mermaid`` code block survived sanitization.
+#   * Bootstrap: after marked.parse + DOMPurify.sanitize writes
+#     ``article.innerHTML``, walks the article DOM and rewrites
+#     every ``pre code.language-mermaid`` to
+#     ``pre.mermaid > text-node`` (mermaid's preferred shape).
+#   * Bootstrap THEN calls ``mermaid.initialize({securityLevel:
+#     'strict'})`` + ``mermaid.run({nodes: [...]})`` only if the
+#     rewrite produced ≥ 1 mermaid element.
+#   * Defensive guards: each external script + the bootstrap
+#     function-shape calls all have availability guards so a
+#     missing asset / broken CDN degrades to readable raw
+#     markdown (same graceful-degradation contract as the
+#     existing wrapper).
+_MARKDOWN_MERMAID_WRAPPER_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style nonce="{nonce}">
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 920px; margin: 2em auto; padding: 0 1em; line-height: 1.5; color: #222; }}
+  pre {{ white-space: pre-wrap; word-wrap: break-word; background: #f6f8fa; padding: 1em; border-radius: 4px; overflow-x: auto; }}
+  article {{ line-height: 1.6; }}
+  article h1, article h2, article h3 {{ line-height: 1.25; margin-top: 1.5em; }}
+  article code {{ background: #f6f8fa; padding: 0.15em 0.3em; border-radius: 3px; }}
+  article pre code {{ background: transparent; padding: 0; }}
+  article a {{ color: #0366d6; }}
+  article blockquote {{ border-left: 4px solid #dfe2e5; margin: 0; padding: 0 1em; }}
+  article table {{ border-collapse: collapse; width: 100%; }}
+  article table th, article table td {{ border: 1px solid #dfe2e5; padding: 0.4em 0.8em; }}
+  article pre.mermaid {{ background: #fff; overflow-x: auto; -webkit-overflow-scrolling: touch; padding: 0.5em; border: 1px solid #dfe2e5; border-radius: 4px; }}
+  @media (max-width: 600px) {{
+    body {{ margin: 1em 0; padding: 0 0.5em; }}
+    article pre {{ white-space: pre; }}
+    article pre.mermaid {{ white-space: normal; }}
+  }}
+</style>
+</head>
+<body>
+<article id="rendered"><pre>{escaped_markdown}</pre></article>
+<script src="{marked_url}" integrity="{marked_integrity}" crossorigin="anonymous" nonce="{nonce}"></script>
+<script src="{dompurify_url}" integrity="{dompurify_integrity}" crossorigin="anonymous" nonce="{nonce}"></script>
+<script src="{mermaid_url}" integrity="{mermaid_integrity}" crossorigin="anonymous" nonce="{nonce}"></script>
+<script nonce="{nonce}">
+(function() {{
+  var article = document.getElementById('rendered');
+  if (!article) {{ return; }}
+  var raw = article.textContent || '';
+  try {{
+    if (typeof marked === 'undefined') {{ throw new Error('marked not loaded'); }}
+    if (typeof marked.parse !== 'function') {{ throw new Error('marked.parse is not a function'); }}
+    if (typeof DOMPurify === 'undefined') {{ throw new Error('DOMPurify not loaded'); }}
+    if (typeof DOMPurify.sanitize !== 'function') {{ throw new Error('DOMPurify.sanitize is not a function'); }}
+    var html = marked.parse(raw);
+    var safe = DOMPurify.sanitize(html, {{ USE_PROFILES: {{ html: true }} }});
+    article.innerHTML = safe;
+    // Rewrite every ``pre code.language-mermaid`` block to a
+    // ``pre.mermaid`` element that mermaid's ``run`` can
+    // discover. Mermaid's preferred shape is
+    // ``<pre class="mermaid">source</pre>``; marked emits
+    // ``<pre><code class="language-mermaid">source</code></pre>``.
+    // The DOM walk below copies the text content (so the source
+    // is preserved byte-for-byte) and replaces the matched
+    // subtree with a fresh element.
+    var mermaidNodes = [];
+    var codeBlocks = article.querySelectorAll('pre code.language-mermaid');
+    for (var i = 0; i < codeBlocks.length; i++) {{
+      var cb = codeBlocks[i];
+      var src = cb.textContent;
+      var newPre = document.createElement('pre');
+      newPre.className = 'mermaid';
+      newPre.textContent = src;
+      var parent = cb.parentNode;
+      if (parent && parent.parentNode) {{
+        parent.parentNode.replaceChild(newPre, parent);
+        mermaidNodes.push(newPre);
+      }}
+    }}
+    if (mermaidNodes.length > 0) {{
+      if (typeof mermaid === 'undefined') {{ throw new Error('mermaid not loaded'); }}
+      if (typeof mermaid.initialize !== 'function') {{ throw new Error('mermaid.initialize is not a function'); }}
+      if (typeof mermaid.run !== 'function') {{ throw new Error('mermaid.run is not a function'); }}
+      mermaid.initialize({{
+        startOnLoad: false,
+        securityLevel: 'strict',
+        theme: 'default',
+      }});
+      // ``mermaid.run`` returns a Promise (v10+); we do not
+      // await it here so the rest of the page (other
+      // markdown elements) renders immediately. A failed
+      // diagram surfaces an inline error SVG via mermaid's
+      // own rendering path — no extra catch needed.
+      mermaid.run({{ nodes: mermaidNodes }});
+    }}
+  }} catch (e) {{
+    // Bootstrap failed (JS off, CDN unreachable, marked/DOMPurify/
+    // mermaid missing, or a guard tripped). Restore the raw
+    // markdown in the article so the user sees the source
+    // rather than a blank page — graceful degradation contract.
+    article.innerHTML = '';
+    var pre = document.createElement('pre');
+    pre.textContent = raw;
+    article.appendChild(pre);
+  }}
+}})();
+</script>
+</body>
+</html>
+"""
