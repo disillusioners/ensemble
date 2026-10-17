@@ -1485,7 +1485,7 @@ _MARKDOWN_WRAPPER_HTML = """<!DOCTYPE html>
 <style nonce="{nonce}">
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 920px; margin: 2em auto; padding: 0 1em; line-height: 1.5; color: #222; }}
   pre {{ white-space: pre-wrap; word-wrap: break-word; background: #f6f8fa; padding: 1em; border-radius: 4px; overflow-x: auto; }}
-  article {{ line-height: 1.6; }}
+  article {{ line-height: 1.6; overflow-x: auto; }}
   article h1, article h2, article h3 {{ line-height: 1.25; margin-top: 1.5em; }}
   article code {{ background: #f6f8fa; padding: 0.15em 0.3em; border-radius: 3px; }}
   article pre code {{ background: transparent; padding: 0; }}
@@ -1627,17 +1627,25 @@ def is_markdown_content_type(content_type: str) -> bool:
 #   * ``'self'`` — the vendored mermaid.js asset
 #   * ``'nonce-...'`` — the per-request nonced bootstrap script
 #
-# ``img-src 'self' data:`` mirrors the markdown wrapper; the
-# ``style-src 'self' 'unsafe-inline' 'nonce-...'`` shape mirrors
-# the markdown wrapper (inline style attributes may slip through
-# DOMPurify when an operator-authored .mmd embeds raw HTML in
-# labels — the trade-off is the same as the markdown wrapper,
-# and the bootstrap rerenders the page through mermaid which
-# drops the inline styles anyway).
+# ``img-src 'self' data:`` mirrors the markdown wrapper.
+#
+# ``style-src 'self' 'unsafe-inline'`` (NO nonce) is REQUIRED: the
+# mermaid runtime applies inline ``style="..."`` attributes to
+# SVG nodes at render time (no element-level nonce), and per
+# CSP3 (https://www.w3.org/TR/CSP3/#match-element-to-source-list)
+# when a directive contains BOTH ``'nonce-X'`` and ``'unsafe-inline'``
+# browsers IGNORE ``'unsafe-inline'`` and require nonce matches.
+# Keeping the style nonce would therefore BLACK-FILL every SVG
+# shape (the SVG fills/strokes are inline style attributes the
+# runtime applies after page load). Without the style nonce,
+# ``'unsafe-inline'`` is honored and the SVG renders correctly.
+# The inline ``<style>`` element in the wrapper HTML no longer
+# carries the nonce attribute (it is unused and would only
+# confuse later readers).
 _MERMAID_CSP_TEMPLATE = (
     "default-src 'self'; "
     "script-src 'self' 'nonce-{nonce}'; "
-    "style-src 'self' 'unsafe-inline' 'nonce-{nonce}'; "
+    "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; "
     "object-src 'none'; "
     "base-uri 'self'; "
@@ -1690,7 +1698,7 @@ _MERMAID_WRAPPER_HTML = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
-<style nonce="{nonce}">
+<style>
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 100%; margin: 0; padding: 0; line-height: 1.5; color: #222; box-sizing: border-box; }}
   body *, body *::before, body *::after {{ box-sizing: inherit; }}
   .topbar {{ display: flex; flex-wrap: wrap; align-items: center; gap: 0.75em; padding: 0.75em 1em; background: #f6f8fa; border-bottom: 1px solid #dfe2e5; font-size: 0.95em; }}
@@ -1953,7 +1961,7 @@ _MARKDOWN_MERMAID_WRAPPER_HTML = """<!DOCTYPE html>
 <style nonce="{nonce}">
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 920px; margin: 2em auto; padding: 0 1em; line-height: 1.5; color: #222; }}
   pre {{ white-space: pre-wrap; word-wrap: break-word; background: #f6f8fa; padding: 1em; border-radius: 4px; overflow-x: auto; }}
-  article {{ line-height: 1.6; }}
+  article {{ line-height: 1.6; overflow-x: auto; }}
   article h1, article h2, article h3 {{ line-height: 1.25; margin-top: 1.5em; }}
   article code {{ background: #f6f8fa; padding: 0.15em 0.3em; border-radius: 3px; }}
   article pre code {{ background: transparent; padding: 0; }}

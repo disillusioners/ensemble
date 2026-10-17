@@ -277,6 +277,15 @@ class TestMermaidWrapperSurface:
         wrapper's: NO external CDN origins for scripts (the
         vendored asset is served from ``self``). The only script
         sources are ``self`` + the per-request nonce.
+
+        Style posture is pinned here too: ``style-src`` MUST
+        carry ``'unsafe-inline'`` and MUST NOT carry a nonce.
+        Per CSP3, when a directive contains both ``'nonce-X'``
+        and ``'unsafe-inline'`` browsers IGNORE ``'unsafe-inline'``
+        and require nonce matches — that posture would silently
+        black-fill every mermaid-rendered SVG (the runtime
+        applies inline ``style="..."`` attrs to SVG nodes
+        post-load with no element-level nonce).
         """
         c = _client_with_workdir(filesystem_root_dir)
         resp = c.get(
@@ -296,6 +305,22 @@ class TestMermaidWrapperSurface:
         assert nonces, "CSP must include at least one 'nonce-XXX' directive"
         for nonce in nonces:
             assert f'nonce="{nonce}"' in body
+        # Style-src allows inline styles (mermaid runtime applies
+        # them post-load) and EXPLICITLY does not carry a nonce —
+        # the nonce + unsafe-inline combination would, per CSP3,
+        # be downgraded to "nonce-only" and black-fill SVGs.
+        style_src_match = re.search(r"style-src[^;]*", csp)
+        assert style_src_match is not None, "CSP must include a style-src directive"
+        style_src = style_src_match.group(0)
+        assert "'unsafe-inline'" in style_src, (
+            f"style-src must allow 'unsafe-inline' (mermaid runtime "
+            f"applies inline style attrs); got: {style_src!r}"
+        )
+        assert "'nonce-" not in style_src, (
+            f"style-src must NOT carry a nonce (CSP3 makes nonce + "
+            f"unsafe-inline downgrade to nonce-only, blocking mermaid "
+            f"inline styles); got: {style_src!r}"
+        )
 
     def test_wrapper_topbar_has_view_raw_link(
         self, filesystem_root_dir: pathlib.Path
