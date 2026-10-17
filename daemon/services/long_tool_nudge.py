@@ -694,7 +694,7 @@ def wrapped_tools_node(
         # both raise through this node (Python guarantees finally on
         # BaseException propagation).
         try:
-            return await bare.ainvoke(state, config)
+            result = await bare.ainvoke(state, config)
         finally:
             # A5 (council fix-cycle 1) — clear every stamp in ONE
             # atomic lock acquisition (``registry.clear_many``),
@@ -775,6 +775,37 @@ def wrapped_tools_node(
                     "[LongToolNudge] finally-clear-loop error for %s",
                     short_instance,
                 )
+
+        # (5) S1 — agent-secrets P2 results-side scrub (design §2.2,
+        # p2-architecture-recommendation). Runs AFTER the finally
+        # stamp-clears (a cancel during ``bare.ainvoke`` propagates
+        # through the finally and never reaches this line — the
+        # cancel-immunity contract is untouched). Scrubs REAL
+        # ``ToolMessage.content`` IN PLACE before the result joins
+        # live graph state (pre-state-commit — the R1 designed-out:
+        # the LLM's next turn reads scrubbed context, and every
+        # downstream surface — checkpoints via S2, snapshots,
+        # dispatch — inherits the scrub transitively). The message
+        # objects keep their ``id()`` (pin (a)); ``AIMessage``
+        # content/args are NEVER touched here (§2.4 R8 + §2.2 S2:
+        # live args must stay intact for execution and same-turn
+        # loop repair). Zero behavior change before any SecretService
+        # exists (identity function). The import AND the call are
+        # both guarded — defense-in-depth must not break the tools
+        # node (mirror of the attest-hook guard above; a failed
+        # import means an unscrubbed result, never a broken turn).
+        try:
+            from daemon.services.secret_persistence_scrub import (
+                scrub_tool_results_inplace,
+            )
+
+            return scrub_tool_results_inplace(result, actor=instance_id)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception(
+                "[LongToolNudge] S1 secret-results scrub dispatch "
+                "failed; returning unscrubbed tool result"
+            )
+            return result
 
     return node
 

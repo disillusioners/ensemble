@@ -23,6 +23,7 @@ seam (``call_summarization_llm_for_snapshot``).
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -334,6 +335,86 @@ class TestCapturePipeline:
         assert out.status == SNAPSHOT_STATUS_ACTIVE
         assert out.digest["provenance"]["input_clamped"] is True
         assert len(calls[0]["prompt"]) < TRUNCATION_GLOBAL_INPUT_CAP_CHARS + 500
+
+
+# ============================================================================
+# Agent-secrets P2 pin — snapshot transcript elides tool args by
+# construction (commission test hook (e); snapshot_executor renders
+# role + text only, so AIMessage tool-call args / ToolMessage
+# additional_kwargs NEVER reach the summarizer prompt).
+# ============================================================================
+
+
+class TestSnapshotArgsElisionPin:
+    def test_args_plaintext_absent_from_transcript_prompt(
+        self, repo, monkeypatch
+    ):
+        """Pin (e): a checkpoint whose messages carry plaintext tool
+        args (AIMessage.tool_calls args + OpenAI-flavor
+        additional_kwargs + ToolMessage additional_kwargs) produces a
+        snapshot transcript WITHOUT the args plaintext — the
+        transcript renders role + text content only, so args are
+        elided by construction (no re-engineering needed; the S1/S2
+        scrub upstream makes the persisted forms markers anyway —
+        this pin guarantees the snapshot lane was never an args
+        carrier even pre-scrub)."""
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        calls: list[dict] = []
+        _install_llm_patch(monkeypatch, _digest_llm_response(), calls=calls)
+
+        marker_text = "__ENS_SECRET__33333333-3333-4333-8333-333333333333__"
+        args_plaintext = "ARGS-PLAIN-77"
+        messages = [
+            AIMessage(
+                content="storing the token",
+                tool_calls=[{
+                    "name": "secret_store",
+                    "args": {"name": "tok", "value": args_plaintext},
+                    "id": "call-1",
+                    "type": "tool_call",
+                }],
+                additional_kwargs={
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "secret_store",
+                            "arguments": json.dumps(
+                                {"value": args_plaintext}
+                            ),
+                        },
+                    }],
+                },
+            ),
+            # The post-S1 ToolMessage: content is the MARKER; the
+            # args-carrying additional_kwargs ride along (elided).
+            ToolMessage(
+                content=f"stored {marker_text} ok",
+                tool_call_id="call-1",
+                additional_kwargs={"tool_args_echo": args_plaintext},
+            ),
+        ]
+        rows = {
+            "inst-1": _instance("inst-1"),
+            "root-9": _instance("root-9", status="terminated"),
+        }
+        mgr = FakeManager(
+            FakeInstanceRepo(rows),
+            FakeGraph(messages=messages),
+            compactor=_compactor(),
+        )
+        executor = SnapshotExecutor(mgr, repo)
+        row = repo.create_with_embeddings(_running_row())
+
+        out = asyncio.run(executor.capture(row))
+
+        assert out.status == SNAPSHOT_STATUS_ACTIVE
+        prompt = calls[0]["prompt"]
+        # The marker content IS visible (role+text rendering).
+        assert marker_text in prompt
+        # The args plaintext is NOT (elided by construction).
+        assert args_plaintext not in prompt
 
 
 # ============================================================================

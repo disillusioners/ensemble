@@ -104,6 +104,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1198,6 +1199,37 @@ class SecretService:
         self._engine = engine
         self._cipher = cipher or SecretCipher()
         self._store: _SecretStorePort = _SqlSecretStore(engine)
+        # P2 R3 invalidation event (p2-architecture-recommendation
+        # §2.5): a plain in-process callback list guarded by a lock
+        # (the v1 pub/sub shape the commission sanctions). The
+        # persistence scrubber (``daemon/services/
+        # secret_persistence_scrub.py``) is the single production
+        # subscriber: the callback drops its cached id set so the
+        # next scrub re-queries. Retire does NOT fire this event —
+        # retired rows REMAIN in the scrub set (design §2.4 binding;
+        # the set is unchanged by retire).
+        self._store_listeners: list[Callable[[], None]] = []
+        self._store_listeners_lock = threading.Lock()
+        # Process-wide registration (lazy in-method import — the
+        # repo's cycle-break convention; the scrub module imports
+        # THIS module at its own module top). Never fails
+        # construction: a registration error would only mean the
+        # scrubber runs TTL-backstop-only or not at all, never a
+        # broken service. Zero effect on secret-free agents (no
+        # DB, no IO — a dict write + one callback-list append).
+        try:
+            from daemon.services.secret_persistence_scrub import (
+                register_secret_service,
+            )
+
+            register_secret_service(self)
+        except Exception:  # pragma: no cover — defensive
+            logger.debug(
+                "[SecretService] persistence-scrub registration "
+                "skipped (import failed); scrub falls back to "
+                "unwired/identity",
+                exc_info=True,
+            )
 
     @property
     def is_available(self) -> bool:
@@ -1255,6 +1287,91 @@ class SecretService:
                 f"is not set or is invalid"
             )
         return self._cipher
+
+    # ─────────────────────────────────────────────────────────
+    # P2 store-event pub/sub + scrub-audit sink
+    # (p2-architecture-recommendation §2.5 R3 + §3.4)
+    # ─────────────────────────────────────────────────────────
+
+    def add_store_listener(self, callback: Callable[[], None]) -> None:
+        """Subscribe ``callback`` to the row-created event.
+
+        The event design (P2 phase 2, commission item E): a small
+        in-process pub/sub — this plain callback list, lock-guarded,
+        stdlib only (the sanctioned v1 shape). Fired whenever a NEW
+        secret row is created (``store`` / ``generate_ssh_keypair`` /
+        ``generate_api_token`` — all three mint rows the scrub set
+        must see). NOT fired by ``retire`` (retired rows REMAIN in
+        the scrub set — design §2.4 binding; the set is unchanged by
+        retire).
+
+        The single production subscriber is the persistence
+        scrubber's id-set invalidation callback (R3 primary
+        defense); the list shape keeps future subscribers additive.
+        Listener exceptions are ISOLATED (fire loops each callback
+        and swallows) — one bad subscriber can never break a store
+        path.
+        """
+        with self._store_listeners_lock:
+            self._store_listeners.append(callback)
+
+    def _fire_store_listeners(self) -> None:
+        """Fire the row-created event (called AFTER the insert
+        transaction commits — a listener that re-queries must see
+        the new row). Best-effort: listener exceptions are logged
+        and swallowed so the store response path is never broken by
+        observability."""
+        with self._store_listeners_lock:
+            listeners = list(self._store_listeners)
+        for callback in listeners:
+            try:
+                callback()
+            except Exception:
+                logger.exception(
+                    "[SecretService] store listener raised; "
+                    "continuing (event is best-effort)"
+                )
+
+    def record_scrub_substitution(
+        self, *, secret_id: str, actor: str
+    ) -> None:
+        """Stamp ONE scrub audit row (P2 phase 2, design §3.4).
+
+        ``action='use_marker'`` (the enum entry meaning "a marker
+        reference was (re)created in place of the value"; no
+        ``scrub`` action exists in :data:`SECRET_AUDIT_ACTIONS` and
+        adding one would touch the P1 model file) with
+        ``context='scrub'``. Emitted PER-SUBSTITUTION (per distinct
+        secret whose value was actually replaced in a scrub call)
+        — NEVER per-write (§3.4 flood rule).
+
+        The audit write is the ONLY persistence the scrub path does
+        beyond reads; it rides its own short ``engine.begin()``
+        transaction (the scrub path has no caller transaction to
+        join — S1/S2/S3 call it outside any store transaction).
+
+        Args:
+            secret_id: The id whose plaintext was replaced. Required.
+            actor: The calling instance/agent id (Cardinal #2); the
+                scrub wiring sites pass the instance id, falling
+                back to the ``<scrub>`` sentinel when unresolvable.
+
+        Raises:
+            SecretValidationError: empty ``secret_id`` / ``actor``.
+            sqlalchemy exceptions: propagate (the scrubber's audit
+                emission is best-effort and catches them — a failed
+                audit row never fails the scrub).
+        """
+        _assert_nonempty_str(secret_id, label="secret_id")
+        _assert_nonempty_str(actor, label="actor")
+        with self._engine.begin() as conn:
+            _append_audit_in_conn(
+                conn,
+                action="use_marker",
+                secret_id=secret_id,
+                actor=actor,
+                context=SCRUB_AUDIT_CONTEXT,
+            )
 
     # ─────────────────────────────────────────────────────────
     # generate_ssh_keypair
@@ -1344,6 +1461,14 @@ class SecretService:
         # SecretNameConflictError before the ``del``). The
         # sibling creators (``generate_api_token``,
         # ``store``) follow the same pattern.
+
+        # P2 R3: fire the row-created event AFTER the insert
+        # commits (a re-querying listener must see the new row).
+        # Design §2.5 names ``store`` as the firing site; the
+        # generate_* paths mint rows too, so they fire the SAME
+        # event (a generated keypair/token is equally invisible to
+        # a stale scrub set).
+        self._fire_store_listeners()
 
         return {
             "id": secret_id,
@@ -1466,6 +1591,10 @@ class SecretService:
         # the wrapped form in the row).
         del token_bytes, wrapped
 
+        # P2 R3: fire the row-created event AFTER the insert
+        # commits (a re-querying listener must see the new row).
+        self._fire_store_listeners()
+
         return {
             "id": secret_id,
             "name": name,
@@ -1541,6 +1670,14 @@ class SecretService:
         # wrap is committed; the only remaining reference
         # is the wrapped form in the row).
         del wrapped
+
+        # P2 R3: fire the row-created event AFTER the insert
+        # commits (a re-querying listener must see the new row).
+        # Design §2.5 names ``store`` as the firing site; the
+        # generate_* paths mint rows too, so they fire the SAME
+        # event (a generated keypair/token is equally invisible to
+        # a stale scrub set).
+        self._fire_store_listeners()
 
         return {
             "id": secret_id,
@@ -2008,6 +2145,12 @@ SECRET_CODE_FERNET_KEY_MISMATCH: str = "secret_fernet_key_mismatch"
 #: ``KMSUnavailableError`` at ``kms_lite.py:130-141``). The
 #: service refused to operate — fail-closed (design §3.2).
 SECRET_CODE_CIPHER_UNAVAILABLE: str = "secret_cipher_unavailable"
+
+#: Audit ``context`` value emitted by the P2 persistence-scrub paths
+#: (``SecretService.record_scrub_substitution``; design §3.4 — the
+#: ``scrub`` context rides ``use_marker`` rows). Member of
+#: :data:`SECRET_AUDIT_RESOLVE_CONTEXTS`.
+SCRUB_AUDIT_CONTEXT: str = "scrub"
 
 #: Frozen set of all envelope codes. ``SecretMarkerResolutionError``
 #: validates against this set at construction so a future caller

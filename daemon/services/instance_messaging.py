@@ -2157,6 +2157,24 @@ class InstanceMessagingService:
 
         with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
             # 1. Insert the message
+            # S3 — agent-secrets P2 defense-in-depth body scrub
+            # (design §2.1 site 2 / §2.2, p2-architecture-
+            # recommendation): the PERSISTED queue-row body is
+            # scrubbed before the INSERT (exact-match against stored
+            # plaintext values; replacement token = the marker).
+            # Covers the body string only (human-prompt text +
+            # tool-args-adjacent paste echoes; tool args do NOT pass
+            # here per §2.1; ``metadata`` is structured caller data,
+            # out of scope). Sync by contract — this prelude already
+            # runs inside ``asyncio.to_thread`` (the caller's
+            # sync-write lane). Identity before any SecretService
+            # exists; the helper swallows + logs internally (the
+            # enqueue must never fail because of the scrub).
+            from daemon.services.secret_persistence_scrub import (
+                scrub_enqueued_body,
+            )
+
+            message = scrub_enqueued_body(message, actor=instance_id)
             db_message = MessageQueue(
                 message_id=message_id,
                 instance_id=instance_id,
