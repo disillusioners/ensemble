@@ -75,6 +75,102 @@ def _invalidate_mcp_schema_cache(manager: Any, server_name: str) -> None:
         mcp_service.invalidate_schema_cache(server_name)
 
 
+def _block_test_connection_when_builtin_unavailable(
+    config: dict | None,
+) -> str | None:
+    """Honor a builtin's kill-switch from the ``/test-connection`` probe.
+
+    D7-shaped hole fix (cu-mcp, 2026-10-16): operators disable a
+    builtin via its kill-switch (``COMPUTER_USE_MCP_ENABLED``,
+    ``PLANE_MCP_ENABLED``, etc.); the bootstrap path
+    (``InstanceManager._bootstrap_builtin_servers``) consults
+    ``is_available()`` and refuses to register. The test-connection
+    route, however, was accepting ANY submitted config — an
+    operator who turned the switch off could still probe it via the
+    UI, surfacing the binary in stderr. The fix: when the submitted
+    config matches a registered builtin's command + args shape, run
+    that builtin's ``is_available()`` first; if the gate is closed,
+    return a clear "refused" message that names the switch.
+
+    Implementation note: detection is BEST-EFFORT. We match by:
+
+      * ``transport == "stdio"`` (only stdio built-ins today),
+      * the resolved ``command`` equals any known builtin's
+        ``command`` field (``npx`` vs uvx vs …) — we compare the
+        final path component to avoid mismatches between absolute
+        ``CU_NPX_PATH`` and ``shutil.which("npx")`` resolutions,
+      * the pin entry matches (e.g. ``-y`` + the same pin string
+        carried by the builtin's ``CU_NPX_ARGS`` tuple — see
+        ``daemon/mcp/builtin_servers/computer_use.py``). The
+        runtime logic does NOT hardcode the pin; the tuple is the
+        source of truth and a package swap is a single-file edit
+        to that module's ``CU_NPX_ARGS`` constant.
+
+    Non-stdio configs and configs not matching any registered
+    builtin return ``None`` (no blocking — the legacy open path is
+    preserved for ad-hoc servers).
+
+    Args:
+        config: The submitted MCP config (raw, unvalidated).
+
+    Returns:
+        A user-facing refusal message string when the test should
+        be blocked, or ``None`` to proceed with the legacy
+        connection attempt.
+    """
+    if not isinstance(config, dict):
+        return None
+    if config.get("transport") != "stdio":
+        return None
+
+    cmd = config.get("command")
+    args = config.get("args") or []
+    if not isinstance(cmd, str) or not isinstance(args, list):
+        return None
+
+    # Match by command basename — avoids false negatives when
+    # ``CU_NPX_PATH`` is absolute but ``shutil.which("npx")`` would
+    # have produced a different absolute path. Same module the
+    # builtin uses to resolve the binary.
+    from daemon.mcp.builtin_servers.computer_use import (
+        ComputerUseServerDefinition,
+        CU_NPX_ARGS,
+    )
+
+    cmd_basename = cmd.rsplit("/", 1)[-1]
+    pin_arg = CU_NPX_ARGS[1] if len(CU_NPX_ARGS) >= 2 else ""
+    # Strip the trailing version pin (split on the LAST ``@``)
+    # to derive the package basename used for match.
+    pin_basename = pin_arg.rsplit("@", 1)[0]
+
+    # Match requires both:
+    #   * ``cmd`` resolves to ``npx`` (basename normalization
+    #     tolerates different absolute paths),
+    #   * the config carries the EXACT pinned package arg somewhere
+    #     in ``args`` (no startswith — a future bump like
+    #     ``@zavora-ai/computer-use-mcp@7.7.0`` MUST NOT match the
+    #     current guard, otherwise a future pin would silently
+    #     bypass the kill-switch without the guard being updated).
+    #     The future-proof update path: bump the pin in BOTH the
+    #     builtin module's ``CU_NPX_ARGS`` AND the local CU_NPX_ARGS
+    #     call site via a SAME-PR commit (the guard re-derives from
+    #     the module constant so a single source of truth wins).
+    if cmd_basename != "npx" or pin_arg not in args:
+        return None
+
+    # Matched cu-mcp signature — honor the kill-switch.
+    if not ComputerUseServerDefinition.is_available():
+        return (
+            "Test connection refused: Computer Use MCP built-in is "
+            "disabled by kill-switch (COMPUTER_USE_MCP_ENABLED is "
+            "falsy, npx is unresolvable, or the generic "
+            "MCP_DISABLE_BUILT_IN_COMPUTER_USE is set). Clear the "
+            "switch or remove the COMPUTER_USE_MCP_ENABLED env var "
+            "to probe the server."
+        )
+    return None
+
+
 def _compute_install_idempotency_key(
     definition: "BuiltinServerDefinition", generated_config: dict
 ) -> str:
@@ -320,9 +416,41 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
     Creates a temporary connection to the specified MCP server,
     verifies it responds correctly, and immediately cleans up.
     This does NOT save anything to the database.
+
+    D7-shaped hole fix (cu-mcp, 2026-10-16): the previous version
+    of this endpoint spawned whatever the caller asked for, even
+    when a known-bUILTIN server's kill-switch was OFF. With the
+    ``COMPUTER_USE_MCP_ENABLED`` kill-switch honoring that contract,
+    an operator who intentionally opts out must also be protected
+    from a bypass via this UI probe — otherwise the kill-switch is
+    advisory only. The fix is a registry-aware guard: when the
+    submitted config matches a known builtin's signature, consult
+    ``is_available()`` FIRST and refuse with a clear message when
+    the gate is closed.
     """
     conn_mgr = get_mcp_connection_manager()
     timeout = 15.0
+
+    # cu-mcp (2026-10-16) — D7 test-connection kill-switch bypass fix.
+    # Best-effort detection: a config matches the ``computer-use``
+    # builtin if its transport is stdio and its resolved ``command``
+    # equals the cu-mcp npx entry-point AND its first ``args`` entry
+    # is the cu-mcp npm package pin. The npx resolution mirrors the
+    # server's own (``CU_NPX_PATH`` first, then ``shutil.which``).
+    try:
+        blocked_msg = _block_test_connection_when_builtin_unavailable(
+            test_request.config
+        )
+        if blocked_msg is not None:
+            return McpServerTestConnectionResponse(
+                success=False,
+                message=blocked_msg,
+            )
+    except Exception:  # defensive — never let the guard loop break tests
+        logger.exception(
+            "Builtin-availability guard failed (cu-mcp D7 fix); "
+            "proceeding with test-connection as a fail-open fallback"
+        )
 
     try:
         # Create a temporary session (validation + timeout handled inside create_test_session)

@@ -140,11 +140,12 @@ class TestStaticRegistrationChecklist:
         )
 
     def test_attestation_not_in_privileged_categories(self) -> None:
-        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly five entries
+        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly six entries
         (the daemon-internal authority trio ``system_upgrade``,
         ``system-log``, ``ens-db`` plus ``ens-env`` per the W4
-        leader decision 2026-10-02 and ``view-views`` per the
-        REWORK 2026-10-07 M1 user refinement). The attestation
+        leader decision 2026-10-02, ``view-views`` per the
+        REWORK 2026-10-07 M1 user refinement, and ``cu`` per
+        the cu-mcp task 2026-10-16). The attestation
         category is opt-in-only by convention (fail-closed authz),
         NOT because it is privileged — D7 sub-question RESOLVED-
         by-leader: NOT privileged. Adding ``attestation`` to
@@ -162,20 +163,26 @@ class TestStaticRegistrationChecklist:
         override drops back to the trio. REWORK 2026-10-07 (M1) adds
         ``view-views`` (the read-only ``view_link`` URL minter;
         user decision: restricted first-release visibility to
-        ari + leader + designer)."""
+        ari + leader + designer). cu-mcp (2026-10-16) adds
+        ``cu`` (Computer Use MCP prefix-overridden tools; full
+        local-control surface, ari + leader allow-list only)."""
         assert ATTESTATION_CATEGORY not in PRIVILEGED_TOOL_CATEGORIES
         # W1-P2 (D18 same-PR pin update): the exact-equality pin is
         # updated in the same PR as the privilege promotion. The
         # mechanism is "silent additions visible" — promoting a new
         # category without bumping this pin would trip a regression
         # here. W4 (leader decision 2026-10-02) adds ``ens-env``;
-        # REWORK 2026-10-07 (M1) adds ``view-views``.
+        # REWORK 2026-10-07 (M1) adds ``view-views``; cu-mcp
+        # (2026-10-16) adds ``cu``.
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
             "ens-db",
             "ens-env",
             "view-views",
+            # cu-mcp (2026-10-16): Computer Use MCP prefix tools;
+            # explicit allow-list on ari/leader only.
+            "cu",
         })
 
 

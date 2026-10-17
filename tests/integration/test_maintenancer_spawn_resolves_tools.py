@@ -295,21 +295,26 @@ class TestPrivilegedCategoryRegistryShape:
     override note) — R-SR16 silent additions are visible by pin;
     this is pin file 3 of 3 per the A14 triple-pin discovery."""
 
-    def test_privileged_categories_contains_five_entries(self) -> None:
+    def test_privileged_categories_contains_six_entries(self) -> None:
         # W4 (leader decision 2026-10-02): the set was a quartet —
         # ``ens-env`` joined (key-returning tool, explicit opt-in
         # only). REWORK 2026-10-07 (M1) added ``view-views`` (the
         # read-only ``view_link`` URL minter; user decision:
         # RESTRICTED first-release visibility to ari + leader +
-        # designer only). Method name kept for grep-stability; the
-        # count moved 3 → 4 → 5 with the same-PR pin updates
-        # (D18/A14).
+        # designer only). cu-mcp (2026-10-16) added ``cu`` (Computer
+        # Use MCP built-in's prefix-overridden tools; full
+        # local-control surface, explicit ``tools.allow: ["cu"]``
+        # on ari + leader meta.json — empty-allow universe must
+        # NOT auto-grant it). Method name kept for grep-stability;
+        # the count moved 3 → 4 → 5 → 6 with the same-PR pin
+        # updates (D18/A14).
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
             "ens-db",
             "ens-env",
             "view-views",
+            "cu",
         })
 
     def test_ens_db_registered_in_category_modules(self) -> None:
