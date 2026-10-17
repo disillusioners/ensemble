@@ -1,5 +1,39 @@
 """``SecretService`` — Phase 1 of agent-secrets (plan f11965039).
 
+Module size rationale (M7 tidier convention, 2026-10-17):
+this module is ``concentrated by design``. It owns the
+in-process SecretService + the thin port seam
+(:class:`_SecretStorePort` Protocol + :class:`_SqlSecretStore`
+backend) + the Fernet :class:`SecretCipher` helper + the
+FROZEN ``mint_marker`` / ``parse_marker`` shape. Splitting
+the cipher out (e.g. into ``_cipher.py``) would re-fragment
+the ``SYSTEM_ENCRYPTION_KEY`` rotation-coupling seam (plan
+§7.1 — the cipher is the explicit anchor for the rotation
+coupling note). Splitting the port out would re-fragment the
+M1 ``engine.begin()`` atomicity guarantee (``plan §1.3 +
+governor pre-promote approval 2026-10-17`` keeps the four
+``*_with_audit`` methods together with their caller side so
+a future remote-store port (Vault / OpenBao / KMS) MUST
+replicate the atomic audit emission — the contract is
+documented at each method, but the surface is small enough
+that the methods next to each other make the contract
+memorable).
+
+~1600 lines today is well past the soft 1-2k band the rest
+of the daemon observes. The rationale is the audit-trail
+benefit (the thin-port Promise is the plan's deliberate
+choice), not a missing abstraction.
+
+Candidate splits NOT taken:
+
+  * :class:`SecretCipher` → ``daemon/services/_secret_cipher.py``
+    (would split the rotation-coupling note from the
+    cipher — defeats the purpose of the inline note);
+  * the ``*_with_audit`` store methods →
+    ``daemon/services/_sql_secret_store.py`` (would split
+    the port surface from the M1 atomicity contract —
+    the contract is the design point).
+
 Phase 1 ships the durable Fernet-encrypted secret store + the
 ``secrets`` tool category (#7 in ``PRIVILEGED_TOOL_CATEGORIES``,
 sextet → septet per the Q1/Q2/Q3 decisions 2026-10-17; ``cu``
@@ -822,13 +856,11 @@ class _SqlSecretStore:
                     retired_at=secret.retired_at,
                 )
             )
-            conn.execute(
-                SecretAuditEvent.__table__.insert().values(
-                    action="create",
-                    secret_id=secret.id,
-                    actor=actor,
-                    at=self._now_iso(),
-                )
+            _append_audit_in_conn(
+                conn,
+                action="create",
+                secret_id=secret.id,
+                actor=actor,
             )
             # Read back via the SAME connection so the
             # just-inserted row is visible. Returns the
@@ -843,20 +875,10 @@ class _SqlSecretStore:
                     "insert_with_audit: row not visible after "
                     "INSERT — internal invariant violated"
                 )
-            # Map Core row → ORM dataclass. Field order matches
-            # the SQLModel table definition; ``wrapped_secret``
+            # Map Core row → ORM dataclass via the shared
+            # ``_row_to_secret`` helper. ``wrapped_secret``
             # carries LargeBinary bytes, the rest are scalars.
-            stored = Secret(
-                id=row[0],
-                name=row[1],
-                kind=row[2],
-                public_material=row[3],
-                wrapped_secret=row[4],
-                created_by=row[5],
-                created_at=row[6],
-                retired_at=row[7],
-            )
-            return stored
+            return _row_to_secret(row)
 
     def mark_retired_with_audit(
         self,
@@ -897,13 +919,11 @@ class _SqlSecretStore:
                 .where(Secret.id == id)
                 .values(retired_at=at_iso)
             )
-            conn.execute(
-                SecretAuditEvent.__table__.insert().values(
-                    action="retire",
-                    secret_id=id,
-                    actor=actor,
-                    at=self._now_iso(),
-                )
+            _append_audit_in_conn(
+                conn,
+                action="retire",
+                secret_id=id,
+                actor=actor,
             )
             # Read back inside the same transaction so
             # the returned ORM row reflects the just-set
@@ -912,16 +932,7 @@ class _SqlSecretStore:
                 select(Secret).where(Secret.id == id)
             ).first()
             assert row is not None
-            return Secret(
-                id=row[0],
-                name=row[1],
-                kind=row[2],
-                public_material=row[3],
-                wrapped_secret=row[4],
-                created_by=row[5],
-                created_at=row[6],
-                retired_at=row[7],
-            )
+            return _row_to_secret(row)
 
     def get_by_id_with_audit(
         self,
@@ -953,28 +964,131 @@ class _SqlSecretStore:
                 # NOT-found does NOT audit (mirrors the
                 # previous behavior — the v1 contract).
                 return None
-            conn.execute(
-                SecretAuditEvent.__table__.insert().values(
-                    action="read_public",
-                    secret_id=id,
-                    actor=actor,
-                    at=self._now_iso(),
-                )
+            _append_audit_in_conn(
+                conn,
+                action="read_public",
+                secret_id=id,
+                actor=actor,
             )
-            return Secret(
-                id=row[0],
-                name=row[1],
-                kind=row[2],
-                public_material=row[3],
-                wrapped_secret=row[4],
-                created_by=row[5],
-                created_at=row[6],
-                retired_at=row[7],
-            )
+            return _row_to_secret(row)
 
     @staticmethod
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+
+def _row_to_secret(row: Any) -> Secret:
+    """Map a Core ``select(Secret)`` row to a :class:`Secret`
+    ORM dataclass.
+
+    Uses ``row._mapping`` (the SQLAlchemy ``RowMapping``
+    view) to bind by column name — kills the column-order
+    fragility that positional ``row[0]..row[7]`` carries
+    when the SQLModel column order changes (the
+    ``SecretAuditEvent`` precedent at
+    ``daemon/repositories/prompt_version/repository.py``
+    uses the same ``_mapping`` view for the same
+    robustness reason). The ``at`` field is NOT on
+    :class:`Secret` (it lives on ``SecretAuditEvent``) so
+    the eight-column bound is the exact match for the
+    current schema; a column-add later than ``created_at``
+    would update this helper alongside the SQLModel.
+
+    Module-level (NOT a method) because the three call
+    sites live inside ``engine.begin()`` blocks where the
+    ``self`` of ``_SqlSecretStore`` is irrelevant — the
+    helper takes the row directly.
+    """
+    m = row._mapping
+    return Secret(
+        id=m["id"],
+        name=m["name"],
+        kind=m["kind"],
+        public_material=m["public_material"],
+        wrapped_secret=m["wrapped_secret"],
+        created_by=m["created_by"],
+        created_at=m["created_at"],
+        retired_at=m["retired_at"],
+    )
+
+
+def _append_audit_in_conn(
+    conn: Any,
+    *,
+    action: str,
+    secret_id: Optional[str],
+    actor: str,
+) -> None:
+    """Insert one :class:`SecretAuditEvent` row inside the
+    caller's ``engine.begin()`` transaction.
+
+    The M1 atomicity contract (governor pre-promote fix,
+    2026-10-17) requires the audit row to share the
+    transaction with the mutation it audits — a crash
+    between the two commits is the regression the fix
+    closes. The helper takes the open ``conn`` from the
+    caller (NEVER opens its own) so the transaction
+    boundary stays where the caller defined it.
+
+    Action validation: ``SECRET_AUDIT_ACTIONS`` (the
+    canonical full-set; P1 emitters only use the P1
+    subset ``SECRET_AUDIT_ACTIONS_P1`` per tests). The
+    caller MUST have checked the action lives in the set
+    before invoking the helper — the M1 callers do (the
+    ``"create"/"retire"/"read_public" not in
+    SECRET_AUDIT_ACTIONS`` pre-guards stay at the public
+    method entry, NOT here, so a future caller that
+    bypasses the guard gets an immediate ``ValueError``
+    at the audit-insert site rather than a later
+    IntegrityError).
+
+    Mirrors the
+    ``daemon/repositories/prompt_version/repository.py``
+    ``_append_audit_in_conn`` helper (the named
+    precedent — same shape, same purpose, same M1
+    atomicity guarantee).
+    """
+    if action not in SECRET_AUDIT_ACTIONS:
+        raise ValueError(
+            f"_append_audit_in_conn: action {action!r} not "
+            f"in SECRET_AUDIT_ACTIONS"
+        )
+    conn.execute(
+        SecretAuditEvent.__table__.insert().values(
+            action=action,
+            secret_id=secret_id,
+            actor=actor,
+            at=datetime.now(timezone.utc).isoformat(),
+        )
+    )
+
+
+def _assert_nonempty_str(
+    value: object, *, label: str
+) -> None:
+    """Isinstance-first guard for non-empty ``str`` values.
+
+    Order matters: a wrong TYPE reports as ``TypeError``
+    (the caller passed something other than a string),
+    while an empty STRING reports as
+    :class:`SecretValidationError` (the caller passed a
+    string that was empty). The split matches the
+    tmp_image_bridge.py:278 fold-isinstance-first
+    precedent. Per the tidy pass convention, prefer
+    ``TypeError`` for shape violations and
+    ``SecretValidationError`` for content violations so
+    the two failure modes stay diagnostic-distinct.
+    """
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{label} must be a string; got "
+            f"{type(value).__name__}"
+        )
+    if not value:
+        raise SecretValidationError(
+            f"{label} must be a non-empty string; got "
+            f"{value!r}"
+        )
 
 
 class SecretService:
@@ -1085,6 +1199,31 @@ class SecretService:
                 f"{sorted(self.SUPPORTED_KINDS)}"
             )
 
+    @staticmethod
+    def _assert_name(name: object) -> None:
+        """Validate the ``name`` parameter.
+
+        Isinstance-first ordering (per tidier pass #2, M7
+        convention): a wrong TYPE reports as ``TypeError``;
+        an empty string reports as
+        :class:`SecretValidationError`. The split lets
+        callers distinguish "you passed the wrong shape"
+        (TypeError) from "you passed a string that was
+        empty" (SecretValidationError) — a single-class
+        union would obscure the difference.
+        """
+        _assert_nonempty_str(name, label="name")
+
+    @staticmethod
+    def _assert_actor(actor: object) -> None:
+        """Validate the ``actor`` parameter (Cardinal #2).
+
+        Isinstance-first ordering (mirror of
+        :meth:`_assert_name`): wrong-type → ``TypeError``;
+        empty string → :class:`SecretValidationError`.
+        """
+        _assert_nonempty_str(actor, label="actor")
+
     def _wrap_required(self) -> SecretCipher:
         """Return the cipher or raise (the service refuses to
         operate when the key is missing)."""
@@ -1114,14 +1253,8 @@ class SecretService:
             ``{id, name, public_key, fingerprint, marker}`` —
             the P1 tool response shape.
         """
-        if not name or not isinstance(name, str):
-            raise SecretValidationError(
-                f"name must be a non-empty string; got {name!r}"
-            )
-        if not actor or not isinstance(actor, str):
-            raise SecretValidationError(
-                f"actor must be a non-empty string; got {actor!r}"
-            )
+        self._assert_name(name)
+        self._assert_actor(actor)
 
         cipher = self._wrap_required()
         material = generate_ssh_keypair_material()
@@ -1181,8 +1314,14 @@ class SecretService:
         # dataclass goes out of scope on return.
         del material, wrapped
 
-        secret_id = stored.id
-        marker = mint_marker(secret_id)
+        # Use the pre-insert ``secret_id`` + ``marker`` (the
+        # row was inserted with this id; ``stored.id`` is
+        # always equal unless a UNIQUE collision diverted
+        # the control flow, in which case we never reach
+        # here — the IntegrityError raised
+        # SecretNameConflictError before the ``del``). The
+        # sibling creators (``generate_api_token``,
+        # ``store``) follow the same pattern.
 
         return {
             "id": secret_id,
@@ -1223,14 +1362,8 @@ class SecretService:
             does NOT exist — agents re-derive the token
             from the marker once P2 ships).
         """
-        if not name or not isinstance(name, str):
-            raise SecretValidationError(
-                f"name must be a non-empty string; got {name!r}"
-            )
-        if not actor or not isinstance(actor, str):
-            raise SecretValidationError(
-                f"actor must be a non-empty string; got {actor!r}"
-            )
+        self._assert_name(name)
+        self._assert_actor(actor)
         if (
             not isinstance(length, int)
             or isinstance(length, bool)
@@ -1345,14 +1478,11 @@ class SecretService:
             in memory until the cipher.encrypt call
             returns, then dropped on the floor).
         """
-        if not name or not isinstance(name, str):
-            raise SecretValidationError(
-                f"name must be a non-empty string; got {name!r}"
-            )
-        if not actor or not isinstance(actor, str):
-            raise SecretValidationError(
-                f"actor must be a non-empty string; got {actor!r}"
-            )
+        self._assert_name(name)
+        self._assert_actor(actor)
+        # value allows empty strings (the original check was
+        # type-only — wrapping an empty payload is a no-op
+        # but not an error).
         if not isinstance(value, str):
             raise SecretValidationError(
                 f"value must be a string; got {type(value).__name__}"
@@ -1412,10 +1542,7 @@ class SecretService:
         Args:
             actor: Agent id (audit attribution).
         """
-        if not actor or not isinstance(actor, str):
-            raise SecretValidationError(
-                f"actor must be a non-empty string; got {actor!r}"
-            )
+        self._assert_actor(actor)
         rows = self._store.list_active()
         return [
             SecretListView(
@@ -1449,14 +1576,8 @@ class SecretService:
         Raises:
             SecretNotFoundError: When the id is unknown.
         """
-        if not id or not isinstance(id, str):
-            raise SecretValidationError(
-                f"id must be a non-empty string; got {id!r}"
-            )
-        if not actor or not isinstance(actor, str):
-            raise SecretValidationError(
-                f"actor must be a non-empty string; got {actor!r}"
-            )
+        _assert_nonempty_str(id, label="id")
+        self._assert_actor(actor)
         row = self._store.get_by_id_with_audit(id, actor=actor)
         if row is None:
             raise SecretNotFoundError(
@@ -1498,14 +1619,8 @@ class SecretService:
         Raises:
             SecretNotFoundError: When the id is unknown.
         """
-        if not id or not isinstance(id, str):
-            raise SecretValidationError(
-                f"id must be a non-empty string; got {id!r}"
-            )
-        if not actor or not isinstance(actor, str):
-            raise SecretValidationError(
-                f"actor must be a non-empty string; got {actor!r}"
-            )
+        _assert_nonempty_str(id, label="id")
+        self._assert_actor(actor)
         now_iso = self._now_iso()
         # M1 atomic path — see ``generate_ssh_keypair``
         # for the rationale. The UPDATE + audit row commit

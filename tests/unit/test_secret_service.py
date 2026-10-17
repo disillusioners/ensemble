@@ -1,5 +1,15 @@
 """Unit tests for :mod:`daemon.services.secret_service`.
 
+Suite layout: 13 behavior-named classes covering the P1
+service surface (cipher, marker, ssh_keypair, api_token,
+store, list, read_public, retire, audit action set,
+atomicity pins — the M1 mutation-verification pin +
+the NF-1 token-boundary pin + the secret-list
+sanity). Kept single-file for diff-review locality (a
+future split into ``test_secret_service_cipher.py`` +
+``test_secret_service_audit.py`` + ``test_secret_service_
+tool_surface.py`` is a ticketed follow-up; not done here).
+
 Phase 1 of the agent-secrets commission (plan f11965039) — the
 durable Fernet-encrypted secret store + the in-process
 ``SecretService``. The tests cover:
