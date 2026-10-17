@@ -97,7 +97,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import logging
 import os
 import secrets
 import uuid
@@ -107,7 +106,8 @@ from enum import Enum
 from typing import Any, Optional, Protocol
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import text as sql_text
+from sqlalchemy import case
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, select
 
 from daemon.repositories.view_passcodes.models import (
@@ -119,8 +119,6 @@ from daemon.repositories.view_passcodes.models import (
     LiveViewPasscode,
     LiveViewPasscodeAudit,
 )
-
-logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -368,7 +366,15 @@ def codes_match(presented: str, actual: str) -> bool:
     The :func:`hmac.compare_digest` primitive guarantees the
     compare time depends on the inputs' LENGTH, not on the
     number of leading-matching characters. Both inputs are
-    casefolded first (the customer can type upper or lower).
+    UTF-8-encoded bytes BEFORE the compare (casefolding is
+    applied first so the customer can type upper or lower) —
+    the byte-level compare accepts arbitrary bytes, so
+    non-ASCII customer input (e.g. accented characters
+    accidentally typed via a phone IME) cannot raise a
+    :class:`UnicodeEncodeError` mid-compare (the ASCII-only
+    ``str`` form of ``compare_digest`` would surface ``TypeError``
+    on non-ASCII bytes — the public verify POST will receive
+    arbitrary UTF-8 in P2).
 
     Args:
         presented: The customer-entered passcode string.
@@ -380,8 +386,8 @@ def codes_match(presented: str, actual: str) -> bool:
         normalization.
     """
     return hmac.compare_digest(
-        normalize_entry(presented),
-        normalize_entry(actual),
+        normalize_entry(presented).encode("utf-8"),
+        normalize_entry(actual).encode("utf-8"),
     )
 
 
@@ -645,10 +651,6 @@ class _SqlViewPasscodeStore:
         leave the registry in an inconsistent state (M1
         atomicity contract).
         """
-        if "mint" not in LIVE_VIEW_AUDIT_ACTIONS:
-            raise ValueError(
-                "internal: 'mint' missing from LIVE_VIEW_AUDIT_ACTIONS"
-            )
         with self._engine.begin() as conn:
             conn.execute(
                 LiveViewPasscode.__table__.insert().values(
@@ -706,12 +708,6 @@ class _SqlViewPasscodeStore:
         caller decides whether to insert a fresh row first or
         raise a structured error).
         """
-        if "regenerate" not in LIVE_VIEW_AUDIT_ACTIONS:
-            raise ValueError(
-                "internal: 'regenerate' missing from "
-                "LIVE_VIEW_AUDIT_ACTIONS"
-            )
-        now_iso = datetime.now(timezone.utc).isoformat()
         with self._engine.begin() as conn:
             existing = conn.execute(
                 select(LiveViewPasscode).where(
@@ -770,12 +766,27 @@ class _SqlViewPasscodeStore:
         ``locked=true`` + emits the ``lockout`` audit row in
         the same transaction").
 
+        The increment + lock flip happens in ONE atomic SQL
+        statement (``UPDATE ... SET failed_attempts =
+        failed_attempts + 1, locked = (failed_attempts + 1 >=
+        :ceiling) WHERE root_name = :r AND rel_path = :p AND
+        locked = 0``). The ``WHERE locked = 0`` guard ensures
+        the lock flip + ``lockout`` audit row are emitted ONLY
+        on the FIRST crossing — concurrent 9th/10th failures
+        cannot both cross the ceiling. The read-then-write
+        Python shape would race: two concurrent increments
+        could both observe ``current_attempts == 9`` and both
+        decide to emit a ``lockout`` audit row, plus one of
+        the two increments would be lost.
+
         Returns ``(attempts, locked_now)``. ``attempts`` is the
-        post-increment value. ``locked_now`` is the row's
-        ``locked`` flag AFTER the increment. Both are needed
-        for the P2 verify response surface (the locked
-        short-circuit consults ``locked_now``; the rate-limiter
-        meter consults ``attempts``).
+        post-increment value (or the row's current value if
+        already locked — the ``WHERE locked = 0`` guard skips
+        the increment). ``locked_now`` is the row's ``locked``
+        flag AFTER the call. Both are needed for the P2 verify
+        response surface (the locked short-circuit consults
+        ``locked_now``; the rate-limiter meter consults
+        ``attempts``).
 
         Returns ``(-1, False)`` for an unknown
         ``(root_name, rel_path)`` pair — the verify POST on
@@ -784,12 +795,12 @@ class _SqlViewPasscodeStore:
         service caller MUST check the row exists BEFORE
         invoking this method, or accept the sentinel.
         """
-        if "lockout" not in LIVE_VIEW_AUDIT_ACTIONS:
-            raise ValueError(
-                "internal: 'lockout' missing from "
-                "LIVE_VIEW_AUDIT_ACTIONS"
-            )
+        ceiling = LIVE_VIEW_PASSCODE_STRIKE_CEILING
+        now_iso = datetime.now(timezone.utc).isoformat()
         with self._engine.begin() as conn:
+            # Existence probe — the atomic UPDATE below cannot
+            # distinguish "row missing" from "row exists but
+            # already locked" (both yield 0 rows-affected).
             existing = conn.execute(
                 select(LiveViewPasscode).where(
                     LiveViewPasscode.root_name == root_name,
@@ -799,42 +810,96 @@ class _SqlViewPasscodeStore:
             if existing is None:
                 # Sentinel — caller maps to uniform 404.
                 return (-1, False)
-            mapping = existing._mapping
-            current_attempts = mapping["failed_attempts"]
-            current_locked = bool(mapping["locked"])
-            if current_locked:
-                # Already locked — short-circuit, no increment,
-                # no audit (the locked verify short-circuits
-                # before this method is invoked; this guard is
-                # defense-in-depth against a future caller that
-                # bypasses the service-layer short-circuit).
-                return (current_attempts, True)
-            new_attempts = current_attempts + 1
-            new_locked = (
-                new_attempts >= LIVE_VIEW_PASSCODE_STRIKE_CEILING
-            )
-            now_iso = datetime.now(timezone.utc).isoformat()
-            conn.execute(
+            existing_mapping = existing._mapping
+            already_locked = bool(existing_mapping["locked"])
+            existing_generation = existing_mapping["generation"]
+
+            # Atomic increment + conditional lock flip in ONE
+            # SQL statement. The ``WHERE locked = 0`` guard
+            # short-circuits on an already-locked row (the
+            # post-commit locked check — defense-in-depth
+            # against a caller that bypasses the service-layer
+            # locked short-circuit). The ``CASE`` expression
+            # evaluates ``(failed_attempts + 1) >= ceiling`` in
+            # SQL so the lock flip happens in the same
+            # statement as the increment — no Python read-
+            # then-write race window. SQLAlchemy compiles the
+            # CASE booleans to PG ``true``/``false`` and
+            # SQLite ``1``/``0`` (driver-appropriate), so the
+            # ``locked`` column stays BOOLEAN on PG and INTEGER
+            # on SQLite.
+            result = conn.execute(
                 LiveViewPasscode.__table__.update()
                 .where(
                     LiveViewPasscode.root_name == root_name,
                     LiveViewPasscode.rel_path == rel_path,
+                    LiveViewPasscode.locked == False,  # noqa: E712
                 )
                 .values(
-                    failed_attempts=new_attempts,
-                    locked=int(new_locked),
+                    failed_attempts=(
+                        LiveViewPasscode.failed_attempts + 1
+                    ),
+                    locked=case(
+                        (
+                            (
+                                LiveViewPasscode.failed_attempts + 1
+                            ) >= ceiling,
+                            True,
+                        ),
+                        else_=False,
+                    ),
                     last_attempt_at=now_iso,
                 )
+                .execution_options(
+                    synchronize_session=False
+                ),
             )
-            if new_locked and not current_locked:
+            rowcount = result.rowcount
+            if rowcount == 0:
+                # Either the row vanished mid-call (rare — the
+                # caller mapped to 404 from the probe), or the
+                # row was already locked. The probe above
+                # confirmed existence, so this branch is the
+                # ``already locked`` defense-in-depth case:
+                # return the existing count + True.
+                if already_locked:
+                    return (
+                        existing_mapping["failed_attempts"],
+                        True,
+                    )
+                # Defensive: row vanished. Return the sentinel
+                # so the caller maps to 404.
+                return (-1, False)
+
+            # Read the post-increment values back inside the
+            # SAME transaction so we have the canonical
+            # ``attempts`` + ``locked_now`` return values and
+            # the ``generation`` to stamp on the audit row.
+            updated = conn.execute(
+                select(LiveViewPasscode).where(
+                    LiveViewPasscode.root_name == root_name,
+                    LiveViewPasscode.rel_path == rel_path,
+                )
+            ).first()
+            assert updated is not None
+            updated_mapping = updated._mapping
+            new_attempts = updated_mapping["failed_attempts"]
+            new_locked = bool(updated_mapping["locked"])
+
+            if new_locked and not already_locked:
                 # The strike-ceiling flip — emit the lockout
                 # audit row IN THE SAME transaction (ADR D5:65).
+                # The ``WHERE locked = 0`` guard above guarantees
+                # this branch fires on AT MOST one concurrent
+                # caller — the loser sees ``rowcount == 0`` and
+                # returns ``(existing_count, True)`` without
+                # emitting a duplicate audit row.
                 _append_audit_in_conn(
                     conn,
                     action="lockout",
                     root_name=root_name,
                     rel_path=rel_path,
-                    generation=mapping["generation"],
+                    generation=existing_generation,
                     actor=actor,
                     ip_hmac=ip_hmac,
                 )
@@ -1040,7 +1105,7 @@ class ViewPasscodeService:
             row's ``locked`` status.
 
         Raises:
-            ViewPasscodeCipherRotationRequired: When the
+            ViewPasscodeRotationRequired: When the
             stored ciphertext cannot be decrypted (the rotation-
             fail primitive, architecture-recommendation.md
             D4:59). The P2 tool maps this to a structured
@@ -1066,7 +1131,18 @@ class ViewPasscodeService:
             )
 
         # First-mint path: generate a fresh passcode, wrap,
-        # insert row + ``mint`` audit row atomically.
+        # insert row + ``mint`` audit row atomically. A
+        # concurrent caller can race this path and INSERT the
+        # same ``(root_name, rel_path)`` row first — the UNIQUE
+        # constraint surfaces as ``IntegrityError`` (the
+        # ``secrets_service.insert_with_audit`` precedent). We
+        # translate that collision to the SAME idempotent
+        # re-display result the existing-row branch above
+        # returns: re-read the winner's row + return the
+        # winning plaintext + ``created=False``. The audit-row
+        # that the winner emitted is preserved (the Integrity
+        # Error rolls back our own INSERT + audit pair, not the
+        # winner's).
         plaintext = generate_passcode()
         wrapped = self._cipher.wrap(plaintext.encode("ascii"))
         now_iso = self._now_iso()
@@ -1081,7 +1157,34 @@ class ViewPasscodeService:
             created_at=now_iso,
             last_attempt_at=None,
         )
-        stored = self._store.insert_with_audit(row, actor=actor)
+        try:
+            stored = self._store.insert_with_audit(row, actor=actor)
+        except IntegrityError as exc:
+            # UNIQUE(root_name, rel_path) collision — re-read
+            # the winner's row + return the idempotent
+            # re-display shape. The winner's mint audit row
+            # stays intact (rolled back = our pair only).
+            del wrapped  # winner is the durable carrier; drop ours
+            winner = self._store.get_row(root, rel)
+            if winner is None:
+                # Defensive: the row vanished between the
+                # INSERT-collision and the re-read. The UNIQUE
+                # contract guarantees a row exists; this branch
+                # is unreachable in practice but a typed raise
+                # beats silent corruption.
+                raise RuntimeError(
+                    f"mint: UNIQUE collision on (root={root!r}, "
+                    f"rel={rel!r}) but re-read returned no row"
+                ) from exc
+            winner_plaintext = self._cipher.unwrap(
+                winner.wrapped_passcode
+            ).decode("ascii")
+            return MintResult(
+                passcode=winner_plaintext,
+                generation=winner.generation,
+                created=False,
+                locked_status=winner.locked,
+            )
         del wrapped  # defense-in-depth; the only ref is in the row
         return MintResult(
             passcode=plaintext,
@@ -1109,6 +1212,16 @@ class ViewPasscodeService:
             view_row: The durable passcode row (the caller
                 fetched via :meth:`get_row`).
             presented: The customer-entered passcode string.
+                MUST be a ``str``; non-str input (None, int,
+                bytes, ...) raises :class:`TypeError` — the P2
+                router translates to a structured 400 envelope.
+                The compare itself never raises on arbitrary
+                UTF-8 because the bytes form of
+                ``hmac.compare_digest`` accepts non-ASCII bytes
+                (the public verify POST will receive arbitrary
+                customer input; the typed guard here closes
+                the None-AttributeError hole the bytes form
+                alone does not).
 
         Returns:
             :class:`VerifyOutcome.OK` if the codes match,
@@ -1117,6 +1230,8 @@ class ViewPasscodeService:
             currently locked.
 
         Raises:
+            TypeError: When ``presented`` is not a ``str``
+                (None / int / bytes / ...).
             ViewPasscodeRotationRequired: When the stored
             ciphertext cannot be decrypted (the rotation-fail
             primitive). The P2 router maps this to the
@@ -1124,6 +1239,19 @@ class ViewPasscodeService:
         """
         if view_row.locked:
             return VerifyOutcome.LOCKED
+        if not isinstance(presented, str):
+            # Public-input hardening: the verify POST feeds
+            # arbitrary customer input. A non-str ``presented``
+            # (None, int, bytes, ...) MUST raise a typed error
+            # rather than crash with ``AttributeError`` deep
+            # inside the compare (P2 router maps TypeError to
+            # 400). The TypeError-vs-WRONG choice: WRONG would
+            # mask type confusion as a wrong-code attempt;
+            # TypeError is the honest typed signal.
+            raise TypeError(
+                f"verify: presented must be a str; got "
+                f"{type(presented).__name__}"
+            )
         plaintext = self._cipher.unwrap(
             view_row.wrapped_passcode
         ).decode("ascii")
@@ -1149,13 +1277,19 @@ class ViewPasscodeService:
         ``engine.begin()`` transaction.
 
         Concurrent wrong-verify race at the lock boundary
-        (architecture-recommendation.md R9): the UPDATE is
-        serialized by SQLite's single-writer model / PG's row
-        lock — the SQLAlchemy ``engine.begin()`` block holds
-        a transaction-scoped lock on the row. Test pin at
-        ``test_record_failure_concurrent_10th_race`` (P1 unit
-        suite; mirrors the secrets M1 atomicity pin at
-        ``tests/unit/test_secret_service.py:1424-1479``).
+        (architecture-recommendation.md R9): the increment
+        and lock flip happen in ONE atomic ``UPDATE``
+        statement (``SET failed_attempts = failed_attempts + 1,
+        locked = CASE WHEN (failed_attempts + 1) >=
+        :ceiling ...``) with a ``WHERE locked = 0`` guard — so
+        concurrent 9th/10th failures cannot both cross the
+        ceiling (the loser sees ``rowcount == 0`` and returns
+        the existing count without emitting a duplicate
+        ``lockout`` audit row). Test pin at
+        ``test_record_failure_concurrent_10th_race_emits_exactly_one_lockout_audit``
+        in the P1 unit suite (the M1 atomicity contract; the
+        PG row-lock / SQLite single-writer-model are belt-and-
+        suspenders on top of the SQL-level guard).
 
         Args:
             root: The view root name (validated).

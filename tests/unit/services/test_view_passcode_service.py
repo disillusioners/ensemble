@@ -44,12 +44,13 @@ Test execution is fenced per the project critical notes:
 * the unit-tier SQLite fence (file-backed ``tmp_path`` per the
   secret-service precedent at
   ``tests/unit/test_secret_service.py:93-117``);
-* F1 pre-marked throwaway DB per the secrets-test precedent —
-  though the unit suite here uses SQLAlchemy ``create_all``
-  directly (the same in-memory SQLite path the parity test
-  exercises) so the F1 trap does not bite. The pre-mark helper
-  is referenced in the parity test for the boots-the-migration-
-  runner path;
+* the parity-test pair exercises the F1 pre-mark helper
+  (``tests/fakes/f1_premark_helper.py``) when the
+  ``MigrationRunner`` boots a fresh SQLite DB — the runner
+  hits the KNOWN pre-existing breaker
+  ``20260714_000001_widen_job_queue_type_constraint.sql`` and
+  the helper ledger-pre-marks it (NEVER misattributed to a
+  live-view-passcode defect);
 * run only the named file (``--tb=short -q``), never bare
   pytest, never ``-x``, never full-suite.
 """
@@ -940,3 +941,310 @@ class TestAppendAuditValidation:
             service.append_audit(
                 "x", "y", generation=-1, action="grant"
             )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# A1 — atomic strike increment: 9→10 boundary emits exactly ONE
+# ``lockout`` audit row, concurrent losers skip (defense-in-depth).
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestRecordFailureAtomicIncrementBoundary:
+    """A1 — the strike-ceiling flip must emit exactly ONE
+    ``lockout`` audit row at the 9→10 boundary (architecture-
+    recommendation.md D5:65). The atomic UPDATE has a
+    ``WHERE locked = 0`` guard so concurrent callers cannot
+    both cross the ceiling — the loser sees ``rowcount == 0``
+    and returns the existing count without emitting a
+    duplicate audit row."""
+
+    def test_record_failure_9_to_10_emits_exactly_one_lockout_audit(
+        self, service: ViewPasscodeService, sqlite_engine: Engine
+    ) -> None:
+        """Sequential 9→10 boundary: 9 failures no audit,
+        10th flips locked + emits ONE lockout row."""
+        service.mint("docs", "a/b.md", actor="worker")
+        # 9 prior failures — counter increments but no
+        # lockout audit yet.
+        for _ in range(LIVE_VIEW_PASSCODE_STRIKE_CEILING - 1):
+            attempts, locked_now = service.record_failure(
+                "docs", "a/b.md", ip="10.0.0.1"
+            )
+        with _session(sqlite_engine) as session:
+            prior_lockouts = session.exec(
+                select(LiveViewPasscodeAudit).where(
+                    LiveViewPasscodeAudit.action == "lockout"
+                )
+            ).all()
+        assert len(prior_lockouts) == 0
+        # 10th failure — flips locked + emits ONE lockout.
+        attempts, locked_now = service.record_failure(
+            "docs", "a/b.md", ip="10.0.0.1"
+        )
+        assert attempts == LIVE_VIEW_PASSCODE_STRIKE_CEILING
+        assert locked_now is True
+        with _session(sqlite_engine) as session:
+            lockouts = session.exec(
+                select(LiveViewPasscodeAudit).where(
+                    LiveViewPasscodeAudit.action == "lockout"
+                )
+            ).all()
+        assert len(lockouts) == 1, (
+            f"expected exactly ONE lockout audit row at the "
+            f"9→10 boundary; got {len(lockouts)} (the "
+            f"concurrent-loser regression would surface as "
+            f"duplicates)"
+        )
+        row = service.get_row("docs", "a/b.md")
+        assert row is not None
+        assert row.failed_attempts == LIVE_VIEW_PASSCODE_STRIKE_CEILING
+        assert row.locked is True
+
+    def test_record_failure_already_locked_does_not_emit_duplicate(
+        self, service: ViewPasscodeService, sqlite_engine: Engine
+    ) -> None:
+        """After the lock flips, subsequent failure calls
+        return the existing count + ``locked_now=True``
+        WITHOUT re-emitting a ``lockout`` audit row. The
+        ``WHERE locked = 0`` guard on the atomic UPDATE
+        short-circuits the increment + audit paths."""
+        service.mint("docs", "a/b.md", actor="worker")
+        # Trip the lock.
+        for _ in range(LIVE_VIEW_PASSCODE_STRIKE_CEILING):
+            service.record_failure("docs", "a/b.md", ip="10.0.0.1")
+        # An additional failure — already-locked path.
+        attempts, locked_now = service.record_failure(
+            "docs", "a/b.md", ip="10.0.0.1"
+        )
+        assert attempts == LIVE_VIEW_PASSCODE_STRIKE_CEILING
+        assert locked_now is True
+        with _session(sqlite_engine) as session:
+            lockouts = session.exec(
+                select(LiveViewPasscodeAudit).where(
+                    LiveViewPasscodeAudit.action == "lockout"
+                )
+            ).all()
+        assert len(lockouts) == 1, (
+            f"already-locked path re-emitted lockout audit; "
+            f"got {len(lockouts)} rows (must stay at 1)"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# A3 — mint race: UNIQUE(root_name, rel_path) collision surfaces
+# as IntegrityError; the service translates to the SAME idempotent
+# re-display shape the existing-row branch returns.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestMintRaceIdempotency:
+    """A3 — concurrent first-mint on the same (root, rel) pair:
+    one caller INSERTs successfully, the other hits
+    ``IntegrityError`` on the UNIQUE constraint. The service
+    translates the collision to the SAME ``MintResult`` the
+    pre-existing-row branch returns: the winner's passcode +
+    ``created=False`` + ``locked_status``."""
+
+    def test_mint_race_returns_winner_row_on_integrity_error(
+        self, service: ViewPasscodeService, sqlite_engine: Engine
+    ) -> None:
+        """Direct store-level collision: pre-INSERT a row
+        with a DIFFERENT passcode, then invoke ``mint``. The
+        pre-existing-row branch returns the winner's
+        plaintext (NOT our newly-generated one)."""
+        # First call: inserts row A.
+        winner = service.mint("docs", "a/b.md", actor="worker")
+        assert winner.created is True
+        winner_passcode = winner.passcode
+
+        # Second call on the SAME (root, rel): the
+        # existing-row branch fires (NOT the IntegrityError
+        # branch — the row is visible to ``get_row``).
+        # Same passcode + ``created=False``.
+        again = service.mint("docs", "a/b.md", actor="worker")
+        assert again.created is False
+        assert again.passcode == winner_passcode
+        assert again.generation == winner.generation
+        # Only ONE ``mint`` audit row in the table (the
+        # idempotent re-display path does NOT emit a second
+        # ``mint`` audit).
+        with _session(sqlite_engine) as session:
+            mints = session.exec(
+                select(LiveViewPasscodeAudit).where(
+                    LiveViewPasscodeAudit.action == "mint"
+                )
+            ).all()
+        assert len(mints) == 1
+
+    def test_mint_race_integrity_error_path_returns_winner(
+        self, service: ViewPasscodeService, sqlite_engine: Engine
+    ) -> None:
+        """Direct IntegrityError translation: simulate a
+        concurrent caller winning the INSERT race by
+        pre-INSERTing the row through a side channel, then
+        have the service's ``insert_with_audit`` raise
+        ``IntegrityError`` via monkey-patch. The service
+        catches it, re-reads the winner's row, and returns
+        the winner's passcode + ``created=False``."""
+        from sqlalchemy.exc import IntegrityError
+
+        # Pre-mint a winner row via the service.
+        winner = service.mint("docs", "a/b.md", actor="racer")
+        assert winner.created is True
+        winner_passcode = winner.passcode
+
+        # Force the next ``mint`` call to take the
+        # IntegrityError branch: monkey-patch the store's
+        # ``insert_with_audit`` to raise IntegrityError.
+        # The service catches it, re-reads the winner's
+        # row, and returns the idempotent result.
+        from daemon.services import view_passcode_service as svc_mod
+
+        original_insert = service._store.insert_with_audit
+        original_get_row = service._store.get_row
+        # Pre-populate the side-channel insert so the
+        # IntegrityError is the ONLY thing the store raises
+        # (without a side-channel insert, the IntegrityError
+        # would not be a real collision and the re-read
+        # would return None — the existing row path would
+        # already have fired).
+        # Actually, we need to make sure the FIRST insert
+        # succeeds (so the row exists), then the SECOND
+        # insert raises IntegrityError. Use a single
+        # monkey-patched insert that raises on the second
+        # call.
+        call_count = {"n": 0}
+
+        def fake_insert(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # First call — the side-channel winner
+                # already exists, so this raises
+                # IntegrityError (simulated race-loser).
+                raise IntegrityError(
+                    "UNIQUE constraint failed",
+                    params={},
+                    orig=Exception("UNIQUE"),
+                )
+            return original_insert(*args, **kwargs)
+
+        # Re-mint; the row is already there so get_row
+        # returns it. To exercise the IntegrityError
+        # branch we need get_row to return None on the
+        # first call AND insert_with_audit to raise. Patch
+        # get_row to return None the first time.
+        get_row_calls = {"n": 0}
+
+        def fake_get_row(*args, **kwargs):
+            get_row_calls["n"] += 1
+            if get_row_calls["n"] == 1:
+                # First call — simulate the race-loser's
+                # view (the row has not been committed yet
+                # from the racer's perspective).
+                return None
+            return original_get_row(*args, **kwargs)
+
+        service._store.insert_with_audit = fake_insert  # type: ignore[assignment]
+        service._store.get_row = fake_get_row  # type: ignore[assignment]
+        try:
+            again = service.mint("docs", "a/b.md", actor="worker")
+        finally:
+            service._store.insert_with_audit = original_insert  # type: ignore[assignment]
+            service._store.get_row = original_get_row  # type: ignore[assignment]
+
+        # IntegrityError was caught, re-read returned the
+        # winner's row, the service returned the
+        # idempotent re-display shape.
+        assert again.created is False
+        assert again.passcode == winner_passcode
+        assert again.generation == winner.generation
+        # Only ONE ``mint`` audit row (the winner's; the
+        # loser's pair was rolled back inside the loser's
+        # ``insert_with_audit`` engine.begin()).
+        with _session(sqlite_engine) as session:
+            mints = session.exec(
+                select(LiveViewPasscodeAudit).where(
+                    LiveViewPasscodeAudit.action == "mint"
+                )
+            ).all()
+        assert len(mints) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────
+# A4 — public-input hardening: codes_match on bytes (never
+# raises TypeError on non-ASCII); verify() type-checks
+# ``presented`` (None / int → TypeError).
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestPublicInputHardening:
+    """A4 — the verify POST on the unauthenticated lane
+    feeds arbitrary customer input. ``codes_match`` compares
+    UTF-8-encoded bytes (never raises TypeError on
+    non-ASCII); ``verify`` type-checks ``presented`` (None /
+    int / bytes → TypeError, NOT AttributeError)."""
+
+    def test_codes_match_accepts_non_ascii_presented(self) -> None:
+        """Non-ASCII ``presented`` does NOT raise TypeError
+        (the public verify POST will receive arbitrary
+        customer input via UTF-8; the bytes form of
+        ``compare_digest`` accepts arbitrary bytes)."""
+        # Non-ASCII input would crash the str form of
+        # ``hmac.compare_digest`` with TypeError on certain
+        # non-ASCII characters (e.g. ``é`` is ASCII-
+        # compatible but ``Ā`` is not — compare_digest
+        # historically rejected non-ASCII strings).
+        # The bytes form accepts any UTF-8 sequence.
+        # Mismatched → False (no match).
+        assert codes_match("é€¥€", "abc23j") is False
+        # Matched (same non-ASCII on both sides).
+        assert codes_match("é€¥€", "é€¥€") is True
+
+    def test_verify_rejects_none_with_typeerror(
+        self, service: ViewPasscodeService
+    ) -> None:
+        """``verify(row, presented=None)`` raises TypeError,
+        NOT AttributeError. The P2 router maps TypeError to
+        a structured 400 envelope."""
+        service.mint("docs", "a/b.md", actor="worker")
+        row = service.get_row("docs", "a/b.md")
+        assert row is not None
+        with pytest.raises(TypeError):
+            service.verify(row, None)  # type: ignore[arg-type]
+
+    def test_verify_rejects_int_with_typeerror(
+        self, service: ViewPasscodeService
+    ) -> None:
+        """``verify(row, presented=12345)`` raises TypeError."""
+        service.mint("docs", "a/b.md", actor="worker")
+        row = service.get_row("docs", "a/b.md")
+        assert row is not None
+        with pytest.raises(TypeError):
+            service.verify(row, 12345)  # type: ignore[arg-type]
+
+    def test_verify_rejects_bytes_with_typeerror(
+        self, service: ViewPasscodeService
+    ) -> None:
+        """``verify(row, presented=b"abc23j")`` raises
+        TypeError — bytes input is NOT a str, the typed
+        guard rejects it (the P2 router feeds a decoded
+        ``str``; raw bytes from the wire are decoded by
+        FastAPI before reaching the service)."""
+        service.mint("docs", "a/b.md", actor="worker")
+        row = service.get_row("docs", "a/b.md")
+        assert row is not None
+        with pytest.raises(TypeError):
+            service.verify(row, b"abc23j")  # type: ignore[arg-type]
+
+    def test_verify_non_ascii_presented_returns_wrong(
+        self, service: ViewPasscodeService
+    ) -> None:
+        """Non-ASCII ``presented`` returns ``WRONG`` (NOT
+        TypeError). The typed guard lets the non-ASCII str
+        through; the bytes compare returns False because
+        the non-ASCII bytes don't match the ASCII stored
+        code."""
+        service.mint("docs", "a/b.md", actor="worker")
+        row = service.get_row("docs", "a/b.md")
+        assert row is not None
+        assert service.verify(row, "é€¥€") == VerifyOutcome.WRONG

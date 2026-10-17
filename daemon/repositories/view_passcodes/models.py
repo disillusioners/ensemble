@@ -60,9 +60,14 @@ Notes
   ``prompt_versions.is_selected`` precedent at
   ``daemon/migrations/versions/20261013_214000_create_prompt_versions.sql:94``
   — cross-driver, native-enum-free). The SQLModel column is
-  declared ``bool``; SQLAlchemy emits INTEGER 0/1 on both
-  dialects (the ``is_selected`` precedent at
-  ``daemon/repositories/prompt_version/models.py``).
+  declared ``bool``; SQLAlchemy emits BOOLEAN on PG (where
+  ``locked <> 0`` would fail with "operator does not exist:
+  boolean <> integer" at ``create_all`` time) and INTEGER 0/1
+  on SQLite. The partial-index ``WHERE`` predicate is therefore
+  the portable ``locked IS TRUE`` (PG-native boolean test + SQLite
+  3.24+ boolean test on INTEGER 0/1) — the secrets precedent
+  uses the ``IS NULL`` portable shape; the bool column gets
+  ``IS TRUE`` for the same reason.
 * ``generation`` is an int bumped ONLY by ``refresh()``. The
   generation bump silently revokes ALL outstanding grant cookies
   (no session table — ADR D6 stateless cookie + D3 revocation-via-
@@ -71,10 +76,14 @@ Notes
   lockout state. Lock persists until ``refresh``; no auto-unlock
   (the spec default — architecture-recommendation.md D5:66).
 * Partial index ``idx_live_view_passcodes_locked`` keyed on
-  ``WHERE locked <> 0`` — the durable lookup path the P2 verify
-  short-circuit (locked → 200 notice) consults. Dual-dialect via
-  SQLAlchemy ``sqlite_where`` / ``postgresql_where`` (the
-  ``secrets`` / ``service_tool`` / ``job_queue`` precedent).
+  ``WHERE locked IS TRUE`` (PG: native BOOLEAN test) / ``WHERE
+  locked <> 0`` (SQLite migration: INTEGER 0/1) — the durable
+  lookup path the P2 verify short-circuit (locked → 200 notice)
+  consults. Dual-dialect via SQLAlchemy ``sqlite_where`` /
+  ``postgresql_where`` (the ``secrets`` / ``service_tool`` /
+  ``job_queue`` precedent). The model declares ``IS TRUE`` for
+  both — valid on PG BOOLEAN AND on SQLite INTEGER 0/1 (the IS
+  operator landed in SQLite 3.24).
 * ``action`` is a forward-compatible enum tag (frozenset-validated
   at the service boundary, NOT at the model — the model just stores
   the string). The closed set is
@@ -199,13 +208,19 @@ class LiveViewPasscode(SQLModel, table=True):
         # dialect via SQLAlchemy ``sqlite_where`` /
         # ``postgresql_where`` (the secrets / service_tool /
         # job_queue precedent — ``daemon/repositories/
-        # secrets/models.py:172-177``).
+        # secrets/models.py:172-177``). The predicate MUST be
+        # portable: ``locked IS TRUE`` works on PG BOOLEAN
+        # (the canonical boolean test) AND on SQLite INTEGER
+        # 0/1 (the IS operator was added in SQLite 3.24).
+        # ``locked <> 0`` is PG-ILLEGAL because PG has no
+        # boolean<>integer operator — ``create_all`` on the
+        # PG path raises immediately at table-create time.
         Index(
             "idx_live_view_passcodes_locked",
             "root_name",
             "rel_path",
-            sqlite_where=text("locked <> 0"),
-            postgresql_where=text("locked <> 0"),
+            sqlite_where=text("locked IS TRUE"),
+            postgresql_where=text("locked IS TRUE"),
         ),
     )
 
