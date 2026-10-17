@@ -278,7 +278,7 @@ Environment variables are loaded from `.env` file and override config.yaml value
 | `OPENAI_MODEL` | string | No | `gpt-4` | Default model for agent conversations |
 | `OPENAI_MODEL_TITLE` | string | No | — | Cheaper model for generating conversation titles |
 | `OPENAI_MODEL_VISION` | string | No | — | Vision-capable model for image analysis |
-| `OPENAI_SELECTABLE_MODELS` | string (CSV or JSON array) | No | `agentic,coding,coding2,vision` | Models allowed as instance model overrides at spawn time (exact names, not prefix match). See [Selectable models](#selectable-models-openai_selectable_models) below |
+| `OPENAI_SELECTABLE_MODELS` | string (CSV or JSON array) | No | `agentic,coding,coding2,vision,img-gen,decision` | Models allowed as instance model overrides at spawn time (exact names, not prefix match). See [Selectable models](#selectable-models-openai_selectable_models) below |
 | `OPENAI_ALLOWED_MODELS` | string | No | — | Legacy alias for `OPENAI_SELECTABLE_MODELS`; honored only when the new name is unset, with a one-shot deprecation warning |
 | `HOST` | string | No | `0.0.0.0` | Server bind address |
 | `PORT` | integer | No | `8079` (dev) / `8088` (prod) | Server port |
@@ -322,7 +322,7 @@ llm:
   model: ${OPENAI_MODEL:-gpt-4}
   model_title: ${OPENAI_MODEL_TITLE:-}
   model_vision: ${OPENAI_MODEL_VISION:-}
-  allowed_models: ${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision}
+  allowed_models: ${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision,img-gen,decision}
   temperature: 0.7
   request_timeout: 610
 ```
@@ -334,7 +334,7 @@ llm:
 | `llm.model` | string | `gpt-4` | Default model for agent conversations |
 | `llm.model_title` | string | — | Model used for generating conversation titles (optional, can use cheaper model) |
 | `llm.model_vision` | string | — | Vision-capable model for image analysis tasks |
-| `llm.allowed_models` | list of string | `agentic, coding, coding2, vision` | Models allowed as spawn-time instance model overrides. Resolved from `OPENAI_SELECTABLE_MODELS` (legacy alias `OPENAI_ALLOWED_MODELS`); see [Selectable models](#selectable-models-openai_selectable_models) below |
+| `llm.allowed_models` | list of string | `agentic, coding, coding2, vision, img-gen, decision` | Models allowed as spawn-time instance model overrides. Resolved from `OPENAI_SELECTABLE_MODELS` (legacy alias `OPENAI_ALLOWED_MODELS`); see [Selectable models](#selectable-models-openai_selectable_models) below |
 | `llm.temperature` | float | `0.7` | Default temperature for LLM requests (0.0-2.0) |
 | `llm.request_timeout` | integer | `610` | Timeout for LLM API requests in seconds |
 
@@ -352,11 +352,14 @@ selection flows only:
 Purpose-bound models (`model_title`, `model_keywords`, `model_vision`, compaction,
 skill evolution) are **unaffected** and keep resolving via their own env vars / YAML keys.
 
-**Default:** `agentic,coding,coding2,vision`. When the variable is unset, the daemon
+**Default:** `agentic,coding,coding2,vision,img-gen,decision`. When the variable is unset, the daemon
 substitutes this shipped default (`config.yaml` inlines it at the interpolation site;
 `daemon/config.py::_ALLOWED_MODELS_DEFAULT` is the single source of truth, and a
 consistency pin test fails if the two drift apart). `vision` is in the default so the
-designer agent's `llm_model: "vision"` resolves daemon-wide.
+designer agent's `llm_model: "vision"` resolves daemon-wide; `img-gen` and `decision`
+are in the default for purpose-id parity with the image-generation and decision-purpose
+consumer families (operators pinning an explicit list must include those ids to keep
+those spawn overrides alive — see the strict-when-set block above).
 
 **Accepted formats:** comma-separated (`gpt-4,gpt-4o`) or a JSON array
 (`'["gpt-4","gpt-4o"]'`). Matching is exact model name only — not a prefix or
@@ -383,7 +386,7 @@ unset, and logs a one-shot deprecation warning at startup. Rename the variable t
 **Default-applied startup WARNING:** when neither `OPENAI_SELECTABLE_MODELS` nor
 `OPENAI_ALLOWED_MODELS` is set, the daemon logs a one-shot WARNING at startup naming
 the default list
-(`[Config] allowed_models default applied: ['agentic', 'coding', 'coding2', 'vision'] ...`).
+(`[Config] allowed_models default applied: ['agentic', 'coding', 'coding2', 'vision', 'img-gen', 'decision'] ...`).
 Set `OPENAI_SELECTABLE_MODELS` explicitly — even to the current default value — and
 restart to silence it.
 
@@ -399,7 +402,7 @@ restart to silence it.
   outside the configured list) until operators added `vision` to
   `OPENAI_SELECTABLE_MODELS` in their `.env` / `.env.prod` (and demo `.env`) and
   restarted.
-- **What changed:** the shipped default is now `agentic,coding,coding2,vision`. If the
+- **At the time (v0.16.0):** **What changed:** the shipped default is now `agentic,coding,coding2,vision`. If the
   variable is unset, upgrades can no longer break on a missing env var — the default
   includes `vision`, and a one-shot WARNING at startup tells you the default fired.
 - **If you pin an explicit list:** strict-when-set behavior is intentional — the
@@ -1471,5 +1474,8 @@ Revert = **redeploy the earlier build** (frozen-PyInstaller, rebuild+restart dis
 | Knob | Effect (final architecture) |
 |---|---|
 | `ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=0` (+restart) | Fused judge never fires: deny band → deny+nudge WITHOUT judge (Q1); marker/A bands → plain allow. Cheapest incident brake — prefer this over reverting. |
+| `ENSEMBLE_LEADER_ATTESTATION_MODE=dry` (+restart) | Resolver computed + logged, node skipped, 0 LLM, allow-everything (passive observation). |
+| `ENSEMBLE_LEADER_ATTESTATION_MODE=off` (+restart) | The whole gate is off (pre-feature baseline). |
+is over reverting. |
 | `ENSEMBLE_LEADER_ATTESTATION_MODE=dry` (+restart) | Resolver computed + logged, node skipped, 0 LLM, allow-everything (passive observation). |
 | `ENSEMBLE_LEADER_ATTESTATION_MODE=off` (+restart) | The whole gate is off (pre-feature baseline). |

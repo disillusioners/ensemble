@@ -292,6 +292,21 @@ class TestEnvResolution:
         assert err is None
         assert cfg["model"] == "minimax-image-01"
 
+    def test_whitespace_around_set_model_value_is_stripped(self, monkeypatch):
+        """``IMAGE_GEN_MODEL="  minimax-image-01  "`` is stripped on
+        resolve — env-set value still wins, ``err is None``. The
+        inverse direction (whitespace-only) falls back to default
+        (pinned by ``test_whitespace_only_model_falls_back_to_default``
+        above); this test pins the strip-on-set direction so operator
+        typos with stray paste whitespace do not silently flip the
+        tool back to the default purpose-id."""
+        monkeypatch.setenv("IMAGE_GEN_MODEL", "  minimax-image-01  ")
+        monkeypatch.setenv("OPENAI_BASE_URL", BASE)
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        cfg, err = _resolve_env()
+        assert err is None
+        assert cfg["model"] == "minimax-image-01"
+
     async def test_openai_fallbacks_used_when_knobs_unset(self, monkeypatch, store):
         """``IMAGE_GEN_BASE_URL`` / ``IMAGE_GEN_API_KEY`` fall back to
         their ``OPENAI_*`` siblings. Combined with the unset
@@ -305,6 +320,7 @@ class TestEnvResolution:
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["auth"] = request.headers.get("authorization")
+            seen["body"] = json.loads(request.content.decode("utf-8"))
             return httpx.Response(200, json=SUCCESS_BODY)
 
         tool, _ = _wire(monkeypatch, handler, store)
@@ -314,6 +330,9 @@ class TestEnvResolution:
         result = await tool.ainvoke({"prompt": "a red fox"})
         assert seen["auth"] == "Bearer openai-key"
         assert "image_gen_not_configured" not in result
+        # Ambient OPENAI_MODEL must NOT be able to mask the purpose-id
+        # (re-pins the occ-3 wrong-model class prevention).
+        assert seen["body"]["model"] == IMAGE_GEN_DEFAULT_MODEL == "img-gen"
 
     def test_never_reads_openai_model(self, monkeypatch):
         """Purpose-bound resolver (D4): OPENAI_MODEL must be irrelevant
@@ -328,11 +347,28 @@ class TestEnvResolution:
         assert cfg["model"] == IMAGE_GEN_DEFAULT_MODEL == "img-gen"
         assert cfg["model"] != "agentic-should-be-ignored"
 
-    async def test_unresolvable_base_fails_closed(self, monkeypatch):
+    @pytest.mark.parametrize("base_state", ["unset", "empty", "whitespace"])
+    async def test_unresolvable_base_fails_closed(self, monkeypatch, base_state):
         """Base/key are the ONLY fail-closed path now. Model fallback
-        is LIVE-by-default; base/key unresolvable ⇒ envelope."""
-        monkeypatch.delenv("IMAGE_GEN_BASE_URL", raising=False)
-        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        is LIVE-by-default; base/key unresolvable ⇒ envelope.
+
+        Three states of the failing knob are pinned here — UNSET, EMPTY
+        string, WHITESPACE-ONLY — so removing the ``.strip()`` logic
+        (or treating whitespace-only as set) turns these red. The
+        passing knob (api_key) is kept valid in every param case;
+        ``image_gen_not_configured`` is asserted each time.
+        """
+        if base_state == "unset":
+            monkeypatch.delenv("IMAGE_GEN_BASE_URL", raising=False)
+            monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        elif base_state == "empty":
+            monkeypatch.setenv("IMAGE_GEN_BASE_URL", "")
+            monkeypatch.setenv("OPENAI_BASE_URL", "")
+        else:  # whitespace
+            monkeypatch.setenv("IMAGE_GEN_BASE_URL", "   ")
+            monkeypatch.setenv("OPENAI_BASE_URL", "   ")
+        # Keep the api_key knob valid in every case so only the base
+        # arm can possibly fail-closed.
         monkeypatch.setenv("IMAGE_GEN_API_KEY", "k")
         # IMAGE_GEN_MODEL unset ⇒ default purpose-id "img-gen" applies,
         # but the missing base still trips image_gen_not_configured.
@@ -340,16 +376,30 @@ class TestEnvResolution:
         result = await tool.ainvoke({"prompt": "x"})
         assert _err_code(result) == "image_gen_not_configured"
 
-    async def test_unresolvable_api_key_fails_closed(self, monkeypatch):
+    @pytest.mark.parametrize("api_key_state", ["unset", "empty", "whitespace"])
+    async def test_unresolvable_api_key_fails_closed(self, monkeypatch, api_key_state):
         """Mirror of ``test_unresolvable_base_fails_closed`` for the
         api_key arm. Default ``IMAGE_GEN_DEFAULT_MODEL = "img-gen"``
-        (purpose-id family default) must NOT loosen the api_key gate."""
-        # Provide a base URL so the base-arm of the check passes — only
-        # the key arm should fail-closed.
+        (purpose-id family default) must NOT loosen the api_key gate.
+
+        Three states of the failing knob are pinned here — UNSET, EMPTY
+        string, WHITESPACE-ONLY — so removing the ``.strip()`` logic
+        (or treating whitespace-only as set) turns these red. The
+        passing knob (base URL) is kept valid in every param case;
+        ``image_gen_not_configured`` is asserted each time.
+        """
+        # Keep the base knob valid in every case so only the api_key
+        # arm can possibly fail-closed.
         monkeypatch.setenv("IMAGE_GEN_BASE_URL", "http://dummy.local:1234")
-        # Both api keys explicitly absent.
-        monkeypatch.delenv("IMAGE_GEN_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        if api_key_state == "unset":
+            monkeypatch.delenv("IMAGE_GEN_API_KEY", raising=False)
+            monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        elif api_key_state == "empty":
+            monkeypatch.setenv("IMAGE_GEN_API_KEY", "")
+            monkeypatch.setenv("OPENAI_API_KEY", "")
+        else:  # whitespace
+            monkeypatch.setenv("IMAGE_GEN_API_KEY", "   ")
+            monkeypatch.setenv("OPENAI_API_KEY", "   ")
         # IMAGE_GEN_MODEL unset ⇒ default purpose-id "img-gen" applies,
         # but the missing api key still trips image_gen_not_configured.
         (tool,) = create_image_gen_tools(manager=None, current_instance_id="x")

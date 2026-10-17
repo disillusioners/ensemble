@@ -340,7 +340,8 @@ class TestLoadConfigAllowedModelsIntegration:
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """(c) Neither env var set → documented default
-        ``[agentic, coding, coding2, vision]`` (sel-default-20260927).
+        ``[agentic, coding, coding2, vision, img-gen, decision]``
+        (sel-default-20260927 + purpose-model-defaults @ c3fabc1d3).
         The shipped ``config.yaml`` inlines the same list at the
         interpolation site; the default-applied WARNING fires exactly
         once via the ``load_config`` wiring (caplog proof).

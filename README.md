@@ -218,14 +218,15 @@ overrides at spawn time (spawn `model=` override, weighted `llm_models` pool,
 such as `model_title` / `model_vision` are unaffected). It accepts a comma-separated
 list or a JSON array, e.g. `gpt-4,gpt-4o,gpt-4o-mini,gpt-4-turbo,gpt-3.5-turbo,o1-mini,o1-preview,vision`.
 
-- **Default (when unset):** `agentic,coding,coding2,vision` — matching the shipped
-  `config.yaml` interpolation. When the default applies, the daemon logs a one-shot
-  WARNING at startup; set the variable explicitly (even to the default value) to
-  silence it.
+- **Default (when unset):** `agentic,coding,coding2,vision,img-gen,decision` — matching
+  the shipped `config.yaml` interpolation. When the default applies, the daemon logs a one-shot
+  WARNING at startup; set the variable explicitly (even to the default value) to silence it.
 - **Strict-when-set:** an explicit list is respected exactly. A model outside the
   list falls back with a WARNING on spawn `model=` override, raises on
   `model_tier=`, and blocks instance creation for agents whose `llm_model` is not
-  listed — include `vision` in any explicit list.
+  listed — include `vision`, `img-gen`, and `decision` in any explicit list to
+  preserve the defaults' spawn-override coverage (a list missing any of those drops
+  the corresponding spawn override for the lifetime of the deployment).
 - **Empty/whitespace value = unset** (default applies). Unrestricted mode is
   config.yaml-only: hardcode `allowed_models: []` — there is no env path.
 - **Legacy alias** `OPENAI_ALLOWED_MODELS` is still honored when the new name is
