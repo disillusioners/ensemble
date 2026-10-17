@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.21.0] — 2026-10-17
+
+### Added — agent-secrets P1: in-core secret store + `secrets` privileged tool category (`agent-secrets-p1` @ `06b2886e2`, merged to `latest` @ `e4e4f304`)
+
+> **CHANGELOG (feature release):** *First slice of the agent-secrets subsystem (plan `f11965039`, `.agents/shared/planning/agent-secrets/`). v1 is feature-first per user ruling 2026-10-17: durable agent-usable secrets with autonomy-first semantics (secret-given = trusted for autonomous use — zero runtime questions), exact-match scrub containment, and private material that NEVER crosses the tool-result boundary. Option 3 architecture: in-process `SecretService` inside the core (not a tier-2/3 plugin adapter), PG-backed with Fernet encryption reusing `SYSTEM_ENCRYPTION_KEY` (rotation-coupling documented at the cipher seam — a future key rotation MUST re-encrypt `secrets.wrapped_secret` alongside `db_connections` credentials).*
+
+- **SecretService + SecretCipher** (`daemon/services/secret_service.py`) — in-process store facade; Fernet-wrapped values (`wrapped_secret` BYTEA/BLOB), UUID4 immutable handles, soft-retire tombstones (`retired_at` + partial index on active rows), `name` UNIQUE per row.
+- **Schema** — `daemon/migrations/versions/20261017_000001_create_secrets_tables.sql` (SQLite runner) + `daemon/repositories/secrets/models.py` (SQLModel canonical for PG `create_all`): `secrets` + append-only `secrets_audit`. UP section purely additive (CREATE ×4, idempotent IF NOT EXISTS); audit rows stamped inside the same `engine.begin()` transaction as the mutation (prompt_versions Phase-A precedent). Index-parity test extends the `test_prompt_versions_index_parity` pattern (`tests/migration/test_secrets_index_parity.py`).
+- **`secrets` privileged tool category (#7 — sextet → septet)** with 6 FLAT snake_case tools (`daemon/tools/secrets_tools.py`, registered `_tool_registry.py`): `secret_generate_ssh_keypair` (OpenSSH-parity fingerprint: hashes the 51-byte wire blob), `secret_generate_api_token` (length-cap + token-boundary guard), `secret_store`, `secret_list`, `secret_read_public` (pubkey-only rule: private material never returned), `secret_retire`.
+- **Marker scheme `__ENS_SECRET__<secret_id>__`** — lexically/regex-distinct from both KMS-Lite lanes (`__KMS_REF__…`, `__KMS_ENV__…`, untouched); v1 containment = registry-driven exact-match scrub of stored values from tool results (shape-pattern redaction spine deferred to improve-phase per feature-first ruling).
+- **Day-one allow-list** (Q2 ruling): `worker` / `tester` / `leader` / `ari` gain the `secrets` category via per-agent `tools.allow` entries; access vehicle is per-agent opt-in, `TOOLS_REQUIRED` gating unchanged.
+- **Test evidence** — tester verdict PASS-with-preexisting 187/187 @ `06b2886e2` (16 workers; 4/4 invariant probes: confinement/gating/marker/real-seam boot; mutation-verified pins incl. PB-F1 error-envelope family and concurrent-mint; PG lanes on throwaway `ens_t_*` roles/DBs with ambient live-DB fence); test-review 4 items landed with poison-proof fence evidence; tidier 4 pre-merge items landed; governor CONFIRMED-APPROVED-FOR-MERGE (production, 2 rounds).
+
+---
+
 ## [0.20.4] — 2026-10-17
 
 ### Added — live-view mermaid rendering + MD rich-content + responsive design (`feature/liveview-mermaid` @ `c37fbec7d`, merged to `latest` @ `dd1dd88dd`)
