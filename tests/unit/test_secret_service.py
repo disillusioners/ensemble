@@ -446,6 +446,70 @@ class TestApiTokenPreview:
                 name="bad-len", length=-1, actor="worker"
             )
 
+    def test_api_token_length_below_preview_floor_rejected(
+        self, service: SecretService
+    ) -> None:
+        """NF-1 governor pre-promote fix (2026-10-17,
+        re-verification round).
+
+        ``secrets.token_urlsafe(3)`` produces a 4-char
+        URL-safe string. The v1 contract emits
+        ``token_preview = token_str[-4:]`` — the LAST 4
+        CHARS of the URL-safe string. On a 4-char token,
+        ``token_preview`` IS the entire token, which would
+        leak the full secret through the response field.
+
+        The service MUST reject every ``length`` whose
+        resulting string is ``<= 4`` chars (i.e. nbytes < 4
+        per ``secrets.token_urlsafe`` semantics). The
+        helper ``generate_api_token_material`` is also
+        guarded (defense-in-depth — direct helper callers
+        cannot bypass the floor).
+
+        Pin (mutation-verified): revert the guard to
+        ``< 4`` (the buggy previous-round overclaim) and
+        confirm this pin FAILS for ``length=3`` (the helper
+        returns a 4-char string which passes ``< 4`` and
+        would emit the entire token via
+        ``token_preview``).
+        """
+        # Service boundary: lengths 1, 2, 3 all produce
+        # URL-safe strings <= 4 chars and MUST be
+        # rejected.
+        for bad_length in (1, 2, 3):
+            with pytest.raises(SecretValidationError):
+                service.generate_api_token(
+                    name=f"nf1-bad-{bad_length}",
+                    length=bad_length,
+                    actor="worker",
+                )
+        # And: length=4 is the floor that produces a
+        # 6-char URL-safe string (safe: preview is the
+        # last 4 of 6 chars, NOT the entire token).
+        result = service.generate_api_token(
+            name="nf1-floor", length=4, actor="worker"
+        )
+        assert len(result["token_preview"]) == 4
+
+    def test_generate_api_token_material_rejects_unsafe_length(
+        self, fernet_key: str
+    ) -> None:
+        """Defense-in-depth: the public helper
+        ``generate_api_token_material`` ALSO refuses
+        lengths below the 4-byte floor (NF-1). The helper
+        raises ``ValueError`` (NOT
+        ``SecretValidationError``) since the caller may
+        bypass the service boundary."""
+        # The flat import mirrors the existing pattern at
+        # the top of this test file — the helper is
+        # module-public.
+        from daemon.services.secret_service import (
+            generate_api_token_material,
+        )
+        for bad_length in (1, 2, 3):
+            with pytest.raises(ValueError):
+                generate_api_token_material(length=bad_length)
+
 
 # ─────────────────────────────────────────────────────────────────────
 # store — wrap-on-store

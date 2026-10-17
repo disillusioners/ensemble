@@ -591,6 +591,20 @@ def generate_ssh_keypair_material() -> SecretSshKeypairMaterial:
     # point, but the helper is module-public for tests).
 MAX_API_TOKEN_LENGTH_BYTES: int = 256
 
+# Minimum token length in bytes (NF-1 governor pre-promote
+    # fix, 2026-10-17, re-verification round). 4 bytes →
+    # 6-char URL-safe string → safe last-4-char preview
+    # (any smaller and ``secrets.token_urlsafe(n)`` returns
+    # a string whose length is ≤ 4 chars, so the v1
+    # last-4-char preview REVEALS the entire token). The
+    # floor is enforced at the service boundary (request-
+    # level + post-generation length-of-string guards) AND
+    # inside ``generate_api_token_material`` so a direct
+    # helper call cannot produce an unsafe-length token
+    # even when the service-level request validation is
+    # bypassed.
+MIN_API_TOKEN_LENGTH_BYTES: int = 4
+
 
 def generate_api_token_material(length: int = 32) -> bytes:
     """Generate a URL-safe token via ``secrets.token_urlsafe``.
@@ -606,9 +620,31 @@ def generate_api_token_material(length: int = 32) -> bytes:
     (256 bytes = 2048 bits). Lengths above the cap raise
     ``ValueError`` — minor ② governor pre-promote fix
     (2026-10-17, CWE-770 resource-exhaustion guard).
+
+    The length is BOTTOM-clamped at
+    :data:`MIN_API_TOKEN_LENGTH_BYTES` (4 bytes) — NF-1
+    governor pre-promote fix (2026-10-17, M3-round-2
+    re-verification): ``secrets.token_urlsafe(3)`` produces
+    a 4-char URL-safe string, and the service-level
+    ``token_preview`` is the last 4 chars. A length below 4
+    would let the caller reconstruct the entire token from
+    the preview, defeating the v1 pubkey-only contract. The
+    helper guard mirrors the service-level ``<= 4``-char
+    rejection so a direct helper call cannot produce an
+    unsafe-length token even when the service-level request
+    validation is bypassed (defense-in-depth — NF-1 ruling
+    2026-10-17).
+
+    Raising ``ValueError`` from the helper means the
+    service-level ``SecretValidationError`` is bypassed when
+    callers go through the helper directly — the test packs
+    that do so MUST catch ``ValueError``.
     """
-    if length <= 0:
-        raise ValueError(f"length must be positive; got {length}")
+    if length < MIN_API_TOKEN_LENGTH_BYTES:
+        raise ValueError(
+            f"length must be at least {MIN_API_TOKEN_LENGTH_BYTES} "
+            f"bytes (the v1 last-4-char preview floor); got {length}"
+        )
     if length > MAX_API_TOKEN_LENGTH_BYTES:
         raise ValueError(
             f"length {length} exceeds the {MAX_API_TOKEN_LENGTH_BYTES}-byte cap; "
@@ -1095,6 +1131,18 @@ class SecretService:
     #: ``generate_api_token_material``).
     MAX_API_TOKEN_LENGTH_BYTES: int = MAX_API_TOKEN_LENGTH_BYTES
 
+    #: Minimum token length in bytes (NF-1 governor
+    #: pre-promote fix, 2026-10-17, re-verification round).
+    #: 4 bytes → 6-char URL-safe string → the
+    #: ``token_preview = token_str[-4:]`` field is strictly
+    #: shorter than the full token. A smaller length would
+    #: let the caller reconstruct the entire token from the
+    #: preview. Class-level alias mirrors
+    #: :data:`MAX_API_TOKEN_LENGTH_BYTES`; the module-level
+    #: constant is the canonical source of truth (also
+    #: enforced inside ``generate_api_token_material``).
+    MIN_API_TOKEN_LENGTH_BYTES: int = MIN_API_TOKEN_LENGTH_BYTES
+
     def __init__(
         self,
         engine: Any,
@@ -1247,7 +1295,9 @@ class SecretService:
             length: Token length in bytes (the
                 ``secrets.token_urlsafe`` argument; the
                 resulting string is longer in chars). Must
-                be positive. Default 32.
+                be ``>= MIN_API_TOKEN_LENGTH_BYTES`` (4)
+                and ``<= MAX_API_TOKEN_LENGTH_BYTES``
+                (256). Default 32.
             actor: Agent id (Cardinal #2).
 
         Returns:
@@ -1270,9 +1320,21 @@ class SecretService:
             raise SecretValidationError(
                 f"actor must be a non-empty string; got {actor!r}"
             )
-        if not isinstance(length, int) or length <= 0:
+        if (
+            not isinstance(length, int)
+            or isinstance(length, bool)
+            or length < MIN_API_TOKEN_LENGTH_BYTES
+        ):
+            # Bool subclass-int guard: ``bool`` is a subclass
+            # of ``int`` in Python — a True/False passes
+            # ``isinstance(True, int)``. Reject booleans
+            # explicitly so the caller cannot smuggle a
+            # 0/1 as a length arg. Floor at MIN_* so the
+            # URL-safe string is at least 6 chars (NF-1
+            # governor pre-promote fix, 2026-10-17).
             raise SecretValidationError(
-                f"length must be a positive int; got {length!r}"
+                f"length must be an int >= "
+                f"{MIN_API_TOKEN_LENGTH_BYTES}; got {length!r}"
             )
         # Cap (CWE-770 resource-exhaustion guard — minor ②).
         # The cap is also enforced inside
@@ -1290,17 +1352,22 @@ class SecretService:
         wrapped = cipher.wrap(token_bytes)
         token_str = token_bytes.decode("ascii")
         # Preview = last 4 chars. The full token NEVER
-        # crosses the tool boundary in v1. Refuse lengths
-        # that would make the preview less-than-4 — minor ①
-        # governor pre-promote fix (2026-10-17). A
-        # length ≤ 3 would leak the entire token via the
-        # ``token_preview`` field, defeating the
-        # v1 last-4-char-only contract.
-        if len(token_str) < 4:
+        # crosses the tool boundary in v1. Refuse any
+        # token whose URL-safe string is <= 4 chars — NF-1
+        # governor pre-promote fix (2026-10-17). ``secrets
+        # .token_urlsafe(3)`` yields EXACTLY 4 chars, and
+        # ``token_str[-4:]`` on a 4-char string returns the
+        # entire token, defeating the v1 last-4-char-only
+        # contract. The helper now also enforces a 4-byte
+        # floor (``MIN_API_TOKEN_LENGTH_BYTES``), but this
+        # post-generation guard remains as defense-in-depth
+        # so any future regression in the helper cannot
+        # weaken the v1 contract.
+        if len(token_str) <= 4:
             raise SecretValidationError(
                 f"token length {length} produces a "
                 f"{len(token_str)}-char URL-safe string; "
-                f"the minimum is 4 chars (the v1 "
+                f"the minimum is > 4 chars (the v1 "
                 f"last-4-char preview contract)"
             )
         token_preview = token_str[-4:]
