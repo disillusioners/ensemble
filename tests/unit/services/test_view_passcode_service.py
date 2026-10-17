@@ -44,13 +44,18 @@ Test execution is fenced per the project critical notes:
 * the unit-tier SQLite fence (file-backed ``tmp_path`` per the
   secret-service precedent at
   ``tests/unit/test_secret_service.py:93-117``);
-* the parity-test pair exercises the F1 pre-mark helper
-  (``tests/fakes/f1_premark_helper.py``) when the
-  ``MigrationRunner`` boots a fresh SQLite DB — the runner
-  hits the KNOWN pre-existing breaker
-  ``20260714_000001_widen_job_queue_type_constraint.sql`` and
-  the helper ledger-pre-marks it (NEVER misattributed to a
-  live-view-passcode defect);
+* the migration-parity companion
+  (``tests/migration/test_view_passcode_index_parity.py``)
+  isolates its own throwaway ``versions/`` directory (holding
+  ONLY the live-view-passcode migration + a synthetic baseline)
+  rather than exercising the F1 pre-mark helper
+  (``tests/fakes/f1_premark_helper.py``) — the known pre-existing
+  breaker ``20260714_000001_widen_job_queue_type_constraint.sql``
+  is never loaded in that companion's boot, so the helper's
+  ledger pre-mark is not needed there (never misattribute the
+  isolation to a live-view-passcode defect; the F1 helper is the
+  right tool for suites that boot the FULL runner on fresh
+  SQLite);
 * run only the named file (``--tb=short -q``), never bare
   pytest, never ``-x``, never full-suite.
 """
