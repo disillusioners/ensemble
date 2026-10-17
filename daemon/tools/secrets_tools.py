@@ -45,6 +45,19 @@ ONLY; the runtime tool names are the flat form. The agent sees
 the tools listed as e.g. ``secret_generate_ssh_keypair`` in its
 tool surface.
 
+PB-F1 error envelope (M2 governor pre-promote fix, 2026-10-17)
+-------------------------------------------------------------
+
+Every wrapper at this boundary returns a class-name-only JSON
+envelope on failure — ``str(exc)``, ``traceback``, and
+``repr(exc)`` are NEVER carried into the response payload
+(CWE-209; the PB-F1 leak class is proven real in this project —
+2026-10-03 occ-2 incident). Expected typed errors from the
+:data:`SecretServiceError` hierarchy MAY carry their safe
+message (they are authored strings; SQLAlchemy / OS / IO errors
+are not). The pattern mirrors the adjacent
+``daemon/tools/ens_env_tools.py:375-395`` envelope.
+
 Category registration
 ---------------------
 
@@ -109,6 +122,79 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# PB-F1 error envelope (M2 governor pre-promote fix, 2026-10-17)
+# ─────────────────────────────────────────────────────────────────────
+#
+# Tool results land in checkpoints; exception ``str(exc)`` /
+# tracebacks have proven to leak ambient context (CWE-209 — the
+# PB-F1 leak class is proven real in this project, 2026-10-03
+# occ-2 incident). The pattern: surface the exception CLASS NAME
+# in the JSON envelope, and ONLY for the ``SecretServiceError``
+# hierarchy carry the authored ``str(exc)`` (these are
+# hand-written messages — name conflict / not-found / cipher
+# unavailable / validation error). Anything else
+# (SQLAlchemy errors, OS errors, library errors that carry DB
+# URLs / credentials in their message) is class-name-only.
+#
+# Mirrors the envelope at
+# ``daemon/tools/ens_env_tools.py:375-395``.
+
+
+def _format_error_envelope(exc: BaseException) -> str:
+    """Build the PB-F1 tool-result envelope.
+
+    Class-name-only for unexpected exceptions (the
+    ``SecretServiceError`` hierarchy MAY carry the
+    safe message; everything else is class-name-only).
+    Returns a JSON-serialized dict (the tool-boundary
+    shape — every failure mode is a JSON string so the
+    LangChain ``tool`` decorator wraps consistently).
+
+    Args:
+        exc: The caught exception.
+
+    Returns:
+        JSON string. Schema:
+
+          * ``{"error": "<ClassName>"}`` for unexpected
+            exceptions.
+          * ``{"error": "<ClassName>", "message": "<safe>"}``
+            for the :class:`SecretServiceError` hierarchy.
+
+    The leak class is closed by NEVER reading ``str(exc)``
+    outside the typed-error branch.
+    """
+    try:
+        from daemon.services.secret_service import SecretServiceError
+
+        if isinstance(exc, SecretServiceError):
+            # Authored message — safe to carry.
+            return json.dumps(
+                {
+                    "error": type(exc).__name__,
+                    "message": str(exc),
+                }
+            )
+    except Exception:
+        # Defensive: an import-time failure or isinstance
+        # call that itself raises MUST NOT propagate
+        # through the envelope helper (the tool boundary
+        # is a stable contract — fall through to the
+        # class-name-only branch).
+        pass
+    # Unexpected exception — class-name-only. NEVER
+    # ``str(exc)``, NEVER ``repr(exc)``, NEVER traceback.
+    try:
+        logger.warning(
+            "[secrets] tool boundary caught unexpected exception: %s",
+            type(exc).__name__,
+        )
+    except Exception:
+        pass
+    return json.dumps({"error": type(exc).__name__})
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -302,12 +388,7 @@ Use tool_help("secret_generate_ssh_keypair") for details."""
             result = svc.generate_ssh_keypair(name=name, actor=actor)
             return json.dumps(result)
         except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
-            return json.dumps(
-                {
-                    "error": type(exc).__name__,
-                    "message": str(exc),
-                }
-            )
+            return _format_error_envelope(exc)
 
     @register_tool_category("secrets")
     @tool
@@ -344,12 +425,7 @@ Use tool_help("secret_generate_api_token") for details."""
             )
             return json.dumps(result)
         except Exception as exc:  # noqa: BLE001
-            return json.dumps(
-                {
-                    "error": type(exc).__name__,
-                    "message": str(exc),
-                }
-            )
+            return _format_error_envelope(exc)
 
     @register_tool_category("secrets")
     @tool
@@ -396,12 +472,7 @@ Use tool_help("secret_store") for details."""
             )
             return json.dumps(result)
         except Exception as exc:  # noqa: BLE001
-            return json.dumps(
-                {
-                    "error": type(exc).__name__,
-                    "message": str(exc),
-                }
-            )
+            return _format_error_envelope(exc)
 
     @register_tool_category("secrets")
     @tool
@@ -415,12 +486,7 @@ Use tool_help("secret_list") for details."""
             result = svc.list(actor=actor)
             return json.dumps(result)
         except Exception as exc:  # noqa: BLE001
-            return json.dumps(
-                {
-                    "error": type(exc).__name__,
-                    "message": str(exc),
-                }
-            )
+            return _format_error_envelope(exc)
 
     @register_tool_category("secrets")
     @tool
@@ -444,12 +510,7 @@ Use tool_help("secret_read_public") for details."""
             result = svc.read_public(id=id, actor=actor)
             return json.dumps(result)
         except Exception as exc:  # noqa: BLE001
-            return json.dumps(
-                {
-                    "error": type(exc).__name__,
-                    "message": str(exc),
-                }
-            )
+            return _format_error_envelope(exc)
 
     @register_tool_category("secrets")
     @tool
@@ -472,12 +533,7 @@ Use tool_help("secret_retire") for details."""
             result = svc.retire(id=id, actor=actor)
             return json.dumps(result)
         except Exception as exc:  # noqa: BLE001
-            return json.dumps(
-                {
-                    "error": type(exc).__name__,
-                    "message": str(exc),
-                }
-            )
+            return _format_error_envelope(exc)
 
     tools_list = [
         secret_generate_ssh_keypair,

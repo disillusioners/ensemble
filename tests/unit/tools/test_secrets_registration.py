@@ -523,3 +523,266 @@ class TestRealAgentResolution:
             f"tools (not in Q2 day-one allow-list); "
             f"leaked {_secret_names(by_name)}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# PB-F1 envelope pin — M2 governor pre-promote fix (2026-10-17)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestPB1Envelope:
+    """Pin the M2 PB-F1 error envelope contract.
+
+    Every wrapper at the ``secrets`` tool boundary MUST
+    return a class-name-only JSON envelope on failure —
+    ``str(exc)``, ``traceback``, and ``repr(exc)`` are
+    NEVER carried into the response payload (CWE-209; the
+    PB-F1 leak class is proven real in this project —
+    2026-10-03 occ-2 incident).
+
+    Expected typed errors from the ``SecretServiceError``
+    hierarchy MAY carry their safe message (they are
+    authored strings). Anything else — SQLAlchemy errors,
+    OS errors, library errors that carry DB URLs /
+    credentials in their message — is class-name-only.
+
+    The pin's leak scenario: a canary string
+    (``"CANARY_PASSWORD"``) embedded in an unexpected
+    exception's ``str(exc)``. The wrapper MUST NOT carry
+    the canary into the response payload. The
+    mutation-verification test confirms the pin actually
+    fails when the guarded regression (``str(exc)`` in
+    the wrapper) is in place.
+    """
+
+    CANARY: str = "CANARY_PASSWORD"
+    CANARY_URL: str = (
+        "postgresql://user:CANARY_PASSWORD@host:5432/db"
+    )
+
+    def _build_tool(self, tool_name: str, manager: Any):
+        """Build a single secret_* tool by name."""
+        from daemon.tools.secrets_tools import create_secret_tools
+
+        tools = create_secret_tools(manager, "test-inst-id")
+        for tool_obj in tools:
+            if tool_obj.name == tool_name:
+                return tool_obj
+        raise AssertionError(f"tool {tool_name!r} not found")
+
+    def _invoke(self, tool_obj, **kwargs):
+        """Invoke a langchain ``StructuredTool`` with kwargs."""
+        # LangChain ``StructuredTool`` exposes ``invoke`` for
+        # ad-hoc runs. Pass kwargs as a dict.
+        return tool_obj.invoke(kwargs)
+
+    def _build_service_with_iter(self, exc_to_raise: Exception):
+        """Build a manager whose ``_secret_service`` raises ``exc_to_raise``
+        on every call."""
+        from daemon.services.secret_service import SecretService
+
+        manager = MagicMock(name="InstanceManager")
+        svc = MagicMock(spec=SecretService)
+
+        def _raise(*args, **kwargs):
+            raise exc_to_raise
+
+        # Wire every public method to raise the same exception.
+        svc.generate_ssh_keypair.side_effect = _raise
+        svc.generate_api_token.side_effect = _raise
+        svc.store.side_effect = _raise
+        svc.list.side_effect = _raise
+        svc.read_public.side_effect = _raise
+        svc.retire.side_effect = _raise
+        manager._secret_service = svc
+        manager._instance_repository = None
+        return manager
+
+    def test_unexpected_exception_str_not_in_envelope(self) -> None:
+        """Pin #1: an unexpected exception with the canary
+        string in ``str(exc)`` MUST NOT carry the canary
+        into the tool envelope."""
+        from daemon.services.secret_service import (
+            SecretService,
+        )
+
+        class FakeSQLError(Exception):
+            """Mimic a SQLAlchemy-style exception that leaks
+            the DB URL in its message (the real PB-F1 leak
+            class from the 2026-10-03 occ-2 incident)."""
+
+            def __init__(self, msg: str) -> None:
+                super().__init__(msg)
+
+        exc = FakeSQLError(
+            f"(psycopg2.OperationalError) could not connect "
+            f"to {self.CANARY_URL}"
+        )
+        manager = self._build_service_with_iter(exc)
+        tool_obj = self._build_tool(
+            "secret_generate_ssh_keypair", manager
+        )
+        response_json = self._invoke(tool_obj, name="pin-1")
+        response = json.loads(response_json)
+        # The canary MUST NOT be anywhere in the response.
+        assert self.CANARY not in response_json, (
+            f"PB-F1 leak: canary string {self.CANARY!r} "
+            f"found in tool envelope: {response_json!r}"
+        )
+        # Class name IS present.
+        assert response.get("error") == "FakeSQLError"
+        # No ``message`` field for unexpected exceptions.
+        assert "message" not in response, (
+            f"PB-F1 leak: unexpected exception's str(exc) "
+            f"leaked via 'message' field: {response!r}"
+        )
+
+    def test_all_six_wrappers_block_canary_leak(self) -> None:
+        """Pin #2: every wrapper — not just one — must
+        block the canary. Tests all 6 tool names."""
+        from daemon.services.secret_service import SecretService
+
+        class FakeSQLError(Exception):
+            def __init__(self, msg: str) -> None:
+                super().__init__(msg)
+
+        exc = FakeSQLError(
+            f"connection refused: {self.CANARY_URL}"
+        )
+        manager = self._build_service_with_iter(exc)
+
+        # Six wrappers — one per tool name. Each takes
+        # the canary differently (e.g. ``generate_api_token``
+        # needs ``length``, ``read_public`` needs ``id``,
+        # ``store`` needs ``kind`` / ``value``).
+        tool_call_signatures = {
+            "secret_generate_ssh_keypair": {"name": "x"},
+            "secret_generate_api_token": {
+                "name": "x",
+                "length": 32,
+            },
+            "secret_store": {
+                "name": "x",
+                "kind": "generic",
+                "value": "v",
+            },
+            "secret_list": {},
+            "secret_read_public": {"id": "abc"},
+            "secret_retire": {"id": "abc"},
+        }
+        for tool_name, kwargs in tool_call_signatures.items():
+            tool_obj = self._build_tool(tool_name, manager)
+            response_json = self._invoke(tool_obj, **kwargs)
+            assert self.CANARY not in response_json, (
+                f"PB-F1 leak in {tool_name!r}: canary in "
+                f"tool envelope: {response_json!r}"
+            )
+            response = json.loads(response_json)
+            assert response.get("error") == "FakeSQLError"
+            assert "message" not in response, (
+                f"PB-F1 leak in {tool_name!r}: 'message' "
+                f"field present for unexpected exception: "
+                f"{response!r}"
+            )
+
+    def test_typed_error_message_preserved(self) -> None:
+        """Pin #3 (positive case): expected typed errors
+        from the ``SecretServiceError`` hierarchy MAY
+        carry their safe message (the messages are
+        authored strings)."""
+        from daemon.services.secret_service import (
+            SecretNotFoundError,
+            SecretNameConflictError,
+        )
+        manager = self._build_service_with_iter(
+            SecretNotFoundError(
+                f"secret id 'abc123' not found"
+            )
+        )
+        tool_obj = self._build_tool(
+            "secret_read_public", manager
+        )
+        response_json = self._invoke(tool_obj, id="abc123")
+        response = json.loads(response_json)
+        # Class name IS present.
+        assert response.get("error") == "SecretNotFoundError"
+        # Message IS present (the authored string is safe).
+        assert response.get("message") == (
+            "secret id 'abc123' not found"
+        )
+
+        # Conflict case — same positive contract.
+        manager2 = self._build_service_with_iter(
+            SecretNameConflictError(
+                "secret name 'x' already exists"
+            )
+        )
+        tool_obj2 = self._build_tool(
+            "secret_generate_ssh_keypair", manager2
+        )
+        response_json2 = self._invoke(tool_obj2, name="x")
+        response2 = json.loads(response_json2)
+        assert response2.get("error") == "SecretNameConflictError"
+        assert response2.get("message") == (
+            "secret name 'x' already exists"
+        )
+
+    def test_mutation_verification_str_exc_breaks_pin(self) -> None:
+        """Mutation verification — the PB-F1 pin actually
+        fails when the guarded regression (``str(exc)`` in
+        the wrapper) is in place.
+
+        Procedure (repo convention):
+          1. Apply the guarded regression: replace
+             ``_format_error_envelope`` with a
+             ``str(exc)``-leaking variant.
+          2. Run the canary-leak pin.
+          3. Assert the pin FAILS (canary present).
+          4. Restore the class-name-only implementation.
+
+        The pin's value is the regression it detects; this
+        test documents that value.
+        """
+        import json as _json
+        from daemon.tools import secrets_tools as tools_mod
+
+        original = tools_mod._format_error_envelope
+
+        def leaking_envelope(exc):
+            """Guarded regression: pre-M2 ``str(exc)``
+            shape (the leak class the M2 fix closes)."""
+            return _json.dumps(
+                {
+                    "error": type(exc).__name__,
+                    "message": str(exc),
+                }
+            )
+
+        class FakeSQLError(Exception):
+            def __init__(self, msg: str) -> None:
+                super().__init__(msg)
+
+        try:
+            tools_mod._format_error_envelope = leaking_envelope
+
+            exc = FakeSQLError(
+                f"could not connect to {self.CANARY_URL}"
+            )
+            manager = self._build_service_with_iter(exc)
+            tool_obj = self._build_tool(
+                "secret_generate_ssh_keypair", manager
+            )
+            response_json = self._invoke(tool_obj, name="pin")
+
+            # The PB-F1 pin asserts the canary is NOT in
+            # the response. With the ``str(exc)``-leaking
+            # regression in place, the canary IS present.
+            assert self.CANARY in response_json, (
+                f"mutation-verification failed: the canary "
+                f"should be present under the ``str(exc)`` "
+                f"regression but is missing — the pin is "
+                f"NOT detecting the regression"
+            )
+        finally:
+            # Restore the class-name-only implementation.
+            tools_mod._format_error_envelope = original
