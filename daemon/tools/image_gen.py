@@ -17,10 +17,12 @@ LLM lane (llmproxy ``POST <base>/image_generation`` — the same
 
 Purpose-bound config (D4, OD resolver pattern — NEVER ``OPENAI_MODEL``):
 
-- ``IMAGE_GEN_MODEL``     — REQUIRED. Unset ⇒ fail-closed
-  ``image_gen_not_configured`` envelope. Value = the proxy-registered
-  CLIENT-FACING model id (e.g. ``minimax-image-01``); the proxy rewrites it
-  to its ``InternalModel`` upstream.
+- ``IMAGE_GEN_MODEL``     — purpose-bound. Unset/empty ⇒ falls back to the
+  purpose-id ``"img-gen"`` (the proxy resolves purpose → real
+  provider/model+credentials; see daemon.config.RT #purpose-model-defaults).
+  Env value wins when set. Value = the proxy-registered CLIENT-FACING
+  model id (e.g. ``minimax-image-01``); the proxy rewrites it to its
+  ``InternalModel`` upstream.
 - ``IMAGE_GEN_BASE_URL``  — optional; defaults to ``OPENAI_BASE_URL``.
 - ``IMAGE_GEN_API_KEY``   — optional; defaults to ``OPENAI_API_KEY``
   (existing key reused — never minted).
@@ -104,6 +106,17 @@ MAX_IMAGE_BYTES: int = 15 * 1024 * 1024
 DEFAULT_TIMEOUT_S: int = 240
 MIN_TIMEOUT_S: int = 30
 MAX_TIMEOUT_S: int = 300
+
+# Default purpose-id for the image-generation model (purpose-model-defaults
+# commission). Mirrors the ``OPENAI_MODEL_VISION`` → ``"vision"`` literal-
+# fallback pattern at
+# ``daemon/plugin_subsystem/opendesign/generate.py:709-727``: when the
+# ``IMAGE_GEN_MODEL`` env var is unset/empty, this purpose-id is sent to
+# the LLM proxy verbatim and the proxy resolves purpose → real
+# provider/model+credentials. The env value still wins outright when set.
+# Single source of truth — referenced by the test_image_gen_tool unit
+# suite (default-behavior pin).
+IMAGE_GEN_DEFAULT_MODEL: str = "img-gen"
 
 # POST-phase body-read cap (review-hardening Finding 3) — the fetch path
 # already dual-enforces ``MAX_IMAGE_BYTES`` (Content-Length pre-check +
@@ -256,24 +269,24 @@ def _resolve_env(
     ``IMAGE_GEN_MODEL`` only (the 2026-10-07 occ-3 wrong-model class of bug,
     prevented by construction).
 
+    When ``IMAGE_GEN_MODEL`` is unset/empty, falls back to the
+    ``IMAGE_GEN_DEFAULT_MODEL`` purpose-id (``"img-gen"``) — same
+    override-precedence as the ``model_vision`` → ``"vision"`` family
+    pattern at ``daemon/plugin_subsystem/opendesign/generate.py:709-727``.
+    Env-set values still win outright.
+
     Args:
         env: Optional mapping override (tests). Default ``os.environ``.
 
     Returns:
         ``(config, None)`` on success with keys ``model`` / ``base_url`` /
         ``api_key`` / ``timeout_s``, or ``(None, error_envelope_string)``
-        fail-closed.
+        fail-closed (only when base_url/api_key are also unresolvable —
+        the model fallback is now LIVE-by-default, never fail-closed).
     """
     src = env if env is not None else os.environ
 
-    model = (src.get("IMAGE_GEN_MODEL") or "").strip()
-    if not model:
-        return None, _error_envelope(
-            "image_gen_not_configured",
-            "IMAGE_GEN_MODEL is not set. Ask the operator to set it in the "
-            "daemon environment (the proxy-registered client-facing model id, "
-            "e.g. minimax-image-01). The tool stays fail-closed without it.",
-        )
+    model = (src.get("IMAGE_GEN_MODEL") or "").strip() or IMAGE_GEN_DEFAULT_MODEL
 
     base_url = (src.get("IMAGE_GEN_BASE_URL") or src.get("OPENAI_BASE_URL") or "").strip()
     api_key = (src.get("IMAGE_GEN_API_KEY") or src.get("OPENAI_API_KEY") or "").strip()
@@ -966,8 +979,10 @@ image). ``seed`` is an optional int64 pass-through.
 ``subject_reference`` are deliberately not exposed.
 
 Failure surface: ``"Error: ..."`` strings carrying a single-line JSON
-envelope (``image_gen_not_configured`` when IMAGE_GEN_MODEL is unset —
-the tool is fail-closed without configuration;
+envelope (``image_gen_not_configured`` when ``IMAGE_GEN_BASE_URL`` /
+``IMAGE_GEN_API_KEY`` (or their ``OPENAI_*`` fallbacks) are unresolvable —
+the model fallback (``IMAGE_GEN_DEFAULT_MODEL = "img-gen"``) is
+LIVE-by-default so the model env var alone never trips this code;
 ``image_gen_invalid_args``; ``image_gen_upstream_error``;
 ``image_gen_timeout``; ``image_gen_fetch_failed``). Never raises.
 Partial success (some upstream generations failed) is delivered with a

@@ -271,8 +271,17 @@ def make_spawn_manager(
         # "vision" rides the default allow-list because the factory's
         # compare_tools builder HARD-REQUIRES a 'vision' model
         # (VisionModelNotAllowedError, arch §8 — no silent default).
-        # Callers overriding allowed_models must include it too.
-        allowed_models = ["agentic", "coding", "coding2", "vision"]
+        # ``img-gen`` + ``decision`` ride the default too (purpose-id
+        # family; purpose-model-defaults 2026-10-17). Callers
+        # overriding allowed_models must include them too.
+        allowed_models = [
+            "agentic",
+            "coding",
+            "coding2",
+            "vision",
+            "img-gen",
+            "decision",
+        ]
 
     manager = MagicMock()
     manager.config = MagicMock()

@@ -74,15 +74,17 @@ llm:
   # honored when OPENAI_SELECTABLE_MODELS is unset; in that case the
   # process logs a one-shot deprecation warning at startup.
   # Default (when neither is set): ["agentic", "coding", "coding2",
-  # "vision"] — inlined as the interpolation default below so the
-  # shipped default is visible at the value line. ``vision`` is in
-  # the default so the designer agent's ``llm_model: "vision"``
+  # "vision", "img-gen", "decision"] — inlined as the interpolation
+  # default below so the shipped default is visible at the value line.
+  # ``vision`` is in the default so the designer agent's ``llm_model: "vision"``
   # resolves daemon-wide (P1-WP1 designer-agent mission) without
   # requiring every deployment to add it to OPENAI_SELECTABLE_MODELS
-  # explicitly. When neither env var is set, the daemon logs a
-  # one-shot WARNING at startup naming the default list (see
-  # ``daemon/config.py::warn_default_allowed_models_applied``); set
-  # OPENAI_SELECTABLE_MODELS explicitly to silence it.
+  # explicitly. ``img-gen`` joins as the default purpose-id for the
+  # image-generation tool (purpose-model-defaults commission); ``decision``
+  # is reserved for the decision-purpose consumer family. When neither
+  # env var is set, the daemon logs a one-shot WARNING at startup naming
+  # the default list (see ``daemon/config.py::warn_default_allowed_models_applied``);
+  # set OPENAI_SELECTABLE_MODELS explicitly to silence it.
   # An empty or whitespace-only env value is treated as unset
   # (default applies) — to lift restrictions entirely, hardcode
   # `allowed_models: []` here.
@@ -91,7 +93,7 @@ llm:
   # ``_ALLOWED_MODELS_DEFAULT`` in daemon/config.py — the
   # ``TestDefaultConsistencyPin.test_yaml_literal_matches_constant``
   # drift test fails if either side changes without the other.
-  allowed_models: ${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision}
+  allowed_models: ${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision,img-gen,decision}
 
   # Outbound LLM request-body gzip compression. When True, every
   # outbound LLM HTTP request body is gzip-compressed and a
