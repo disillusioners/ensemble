@@ -2,17 +2,60 @@
   "id": "leader",
   "name": "Leader",
   "description": "Coordinates tasks and manages workflow delegation",
-  "icon": "👑",
+  "icon": "\ud83d\udc51",
   "color": "accent-amber",
   "version": "1.2.0",
-  "innate_skills": ["coordination", "chart", "todo", "question"],
+  "innate_skills": [
+    "coordination",
+    "chart",
+    "todo",
+    "question"
+  ],
   "no_force_explore": true,
   "context_injection": {
     "heuristic_match_shared_md_files": true
   },
   "tools": {
-    "allow": ["instance", "subtree_messages",
-    "subtree_status", "self", "attestation", "project", "help", "image", "image-gen", "knowledge", "mcp", "critical_notes", "project_history", "shared_meta_kv", "question", "midflight", "job_pause", "job_resume", "scheduling", "view-views", "cu"]
+    "allow": [
+      "instance",
+      "subtree_messages",
+      "subtree_status",
+      "self",
+      "attestation",
+      "project",
+      "help",
+      "image",
+      "image-gen",
+      "knowledge",
+      "mcp",
+      "critical_notes",
+      "project_history",
+      "shared_meta_kv",
+      "question",
+      "midflight",
+      "job_pause",
+      "job_resume",
+      "scheduling",
+      "view-views",
+      "cu",
+      "secrets"
+    ]
   },
-  "team_members": ["planner", "developer", "reviewer", "tidier", "approver", "architect", "tester", "giter", "devops", "explorer", "wanderer", "kb-writer", "doc-writer", "maintenancer", "designer"]
+  "team_members": [
+    "planner",
+    "developer",
+    "reviewer",
+    "tidier",
+    "approver",
+    "architect",
+    "tester",
+    "giter",
+    "devops",
+    "explorer",
+    "wanderer",
+    "kb-writer",
+    "doc-writer",
+    "maintenancer",
+    "designer"
+  ]
 }

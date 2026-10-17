@@ -1,16 +1,25 @@
 {
   "id": "worker",
   "name": "Worker",
-  "description": "Autonomous worker with dynamic skill injection — executes tasks with AI-selected skills",
-  "icon": "🔧",
+  "description": "Autonomous worker with dynamic skill injection \u2014 executes tasks with AI-selected skills",
+  "icon": "\ud83d\udd27",
   "color": "accent-orange",
   "version": "1.0.0",
-  "innate_skills": ["dynamic-skill", "todo"],
+  "innate_skills": [
+    "dynamic-skill",
+    "todo"
+  ],
   "skill_injection": true,
   "no_force_explore": true,
   "llm_models": [
-    {"model": "coding2", "weight": 30},
-    {"model": "coding", "weight": 70}
+    {
+      "model": "coding2",
+      "weight": 30
+    },
+    {
+      "model": "coding",
+      "weight": 70
+    }
   ],
   "recursion_limit_multiplier": 7,
   "tools": {
@@ -34,7 +43,8 @@
       "service",
       "ens-env",
       "snapshot_create",
-      "snapshot_search"
+      "snapshot_search",
+      "secrets"
     ]
   },
   "context_injection": {

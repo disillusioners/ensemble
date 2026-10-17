@@ -1,12 +1,16 @@
 {
   "id": "ari",
   "name": "Ari",
-  "description": "Your smart general-purpose virtual assistant — the front door to ensemble. Does quick tasks directly and delegates complex work to specialist agents via the job system.",
-  "icon": "🌟",
+  "description": "Your smart general-purpose virtual assistant \u2014 the front door to ensemble. Does quick tasks directly and delegates complex work to specialist agents via the job system.",
+  "icon": "\ud83c\udf1f",
   "color": "accent-amber",
   "version": "1.2.0",
   "system": false,
-  "innate_skills": ["job-orchestration", "chart", "todo"],
+  "innate_skills": [
+    "job-orchestration",
+    "chart",
+    "todo"
+  ],
   "tools": {
     "allow": [
       "job",
@@ -31,9 +35,15 @@
       "service",
       "scheduling",
       "view-views",
-      "cu"
+      "cu",
+      "secrets"
     ],
-    "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
+    "deny": [
+      "edit_file",
+      "write_file",
+      "watch_job",
+      "watch_jobs"
+    ]
   },
   "default_queue": "system_parallel_queue"
 }

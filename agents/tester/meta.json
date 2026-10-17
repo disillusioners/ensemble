@@ -2,14 +2,43 @@
   "id": "tester",
   "name": "Tester",
   "description": "Writes and runs tests, reports results",
-  "icon": "🧪",
+  "icon": "\ud83e\uddea",
   "color": "accent-green",
-  "innate_skills": ["test-pack", "todo", "dynamic-skill"],
+  "innate_skills": [
+    "test-pack",
+    "todo",
+    "dynamic-skill"
+  ],
   "skill_injection": true,
   "snapshot_enabled": true,
   "tools": {
-    "allow": ["instance", "subtree_messages",
-    "subtree_status", "bash", "proc", "filesystem", "time", "self", "help", "image", "image-gen", "knowledge", "mcp", "context", "shared_meta_kv", "db", "blueprint", "service", "midflight", "snapshot_create", "snapshot_search"]
+    "allow": [
+      "instance",
+      "subtree_messages",
+      "subtree_status",
+      "bash",
+      "proc",
+      "filesystem",
+      "time",
+      "self",
+      "help",
+      "image",
+      "image-gen",
+      "knowledge",
+      "mcp",
+      "context",
+      "shared_meta_kv",
+      "db",
+      "blueprint",
+      "service",
+      "midflight",
+      "snapshot_create",
+      "snapshot_search",
+      "secrets"
+    ]
   },
-  "team_members": ["explorer", "worker"]
+  "team_members": [
+    "explorer",
+    "worker"
+  ]
 }
