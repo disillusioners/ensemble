@@ -125,6 +125,35 @@ logger = logging.getLogger(__name__)
 # filesystem call.
 _ROOT_NAME_REGEX = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 
+# Reserved root names — names that MUST NEVER be registered as a
+# view root because they would collide with the live-views
+# router's prefix structure. The single entry today is
+# ``"public"``, the second URL segment of the public passcode
+# lane (see :data:`PUBLIC_NAMESPACE`); a root literally named
+# ``"public"`` would make ``/views/public/<root>/<rel>``
+# paths unparseable (the parser would see a 4-segment URL and
+# try to resolve ``root=public, rel=<root>/<rel>``). The
+# case-folded check at config validation (:class:`LiveViewsConfig`
+# in ``daemon/config.py``) plus the route-side mirror in
+# ``daemon/routers/live_views.py`` enforce the reservation at
+# both layers — three-layer guard per
+# ``architecture-recommendation.md`` D1:27.
+RESERVED_ROOT_NAMES: frozenset[str] = frozenset({"public"})
+
+# Public passcode lane namespace — FROZEN module constant per
+# architecture-recommendation.md D11:128 and phase2-plan.md D11.
+# The prefix is a deployment contract: it MUST be identical
+# across the daemon code, the State-A proxy HTTPRoute YAML, the
+# State-B code-seeded prefix tag (``tag_routes_by_path`` call in
+# ``daemon/api.py``), and the runbook. Config-izing it invites
+# drift across the two-state migration; the constant is the
+# canonical source of truth. Live at this prefix:
+# ``/views/public/<root>/<rel>`` — the ``<root>`` is the
+# registered view root name (NOT ``public`` itself, which is
+# reserved per ``RESERVED_ROOT_NAMES``); the URL shape mirrors
+# the direct lane exactly with the public prefix substituted.
+PUBLIC_NAMESPACE: str = "/views/public"
+
 # Maximum file size we'll ever serve. Soft cap — anything above
 # this is 404'd to avoid serving large binaries through the daemon
 # (the architect note: the route is for artifacts and short-lived
@@ -185,6 +214,14 @@ def is_well_formed_root_name(name: str) -> bool:
     Used by both the router (rejects bad names with a uniform 404
     before any resolver call) and the tool (rejects bad names with
     a typed error so the agent gets feedback).
+
+    Reserved names (:data:`RESERVED_ROOT_NAMES`, today
+    ``"public"``) DO match the kebab-case regex but are still
+    rejected at the registry layer (:class:`LiveViewsConfig`
+    validator, ``daemon/config.py``). The regex here intentionally
+    stays regex-pure — the reservation is enforced where the
+    semantic conflict is (the registry + the public-lane
+    router), not on the character-class test.
     """
     if not name:
         return False
@@ -194,6 +231,21 @@ def is_well_formed_root_name(name: str) -> bool:
         # difference is a hard reject.
         return False
     return _ROOT_NAME_REGEX.match(name) is not None
+
+
+def is_reserved_root_name(name: str) -> bool:
+    """Return True iff ``name`` is in :data:`RESERVED_ROOT_NAMES`.
+
+    Case-folded comparison (the lowercase-only regex already
+    forbids any uppercase entry, but the case-fold is the cheap
+    belt-and-suspenders for an admin that hand-edits the
+    registry). The public-lane router mirrors this guard at the
+    route-resolution layer — three-layer guard per
+    ``architecture-recommendation.md`` D1:27.
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    return name.casefold() in {n.casefold() for n in RESERVED_ROOT_NAMES}
 
 
 def is_well_formed_rel_path(rel: str) -> bool:
@@ -849,6 +901,16 @@ class LiveViewsService:
         if not is_well_formed_root_name(root_name):
             raise RootNotFoundError(root_name)
 
+        # Reserved-name mirror (architecture-recommendation.md
+        # D1:27 — three-layer guard: registry validator at
+        # config load + this service-side mirror + public-lane
+        # route-side mirror). A request that names ``public``
+        # as a root hits the same ``RootNotFoundError`` as a
+        # request that names a nonexistent root — uniform 404,
+        # never a partial path parse.
+        if is_reserved_root_name(root_name):
+            raise RootNotFoundError(root_name)
+
         entry = self._config.roots.get(root_name)
         if entry is None or not entry.enabled:
             raise RootNotFoundError(root_name)
@@ -1178,6 +1240,54 @@ class LiveViewsService:
             return f"{base}{path_part}"
         return path_part
 
+    def build_public_url(
+        self, root_name: str, rel_path: str
+    ) -> str | None:
+        """Return the public passcode-lane URL for ``(root, rel)`` or None.
+
+        P2 of live-view-passcode (architecture-recommendation.md
+        D11:128; phase2-plan.md T2.1). Mirrors :meth:`build_url`
+        verbatim with the only delta being the path prefix —
+        ``/views/public/<root>/<rel>`` instead of
+        ``/views/<root>/<rel>``. The same :class:`BaseURLResolver`
+        chain resolves the base; the same well-formed-root /
+        well-formed-rel gates apply; the same ``None`` semantics
+        hold for unknown / disabled / malformed inputs.
+
+        Returns ``None`` for ``root_name == "public"`` —
+        :data:`RESERVED_ROOT_NAMES` forbids a root literally
+        named ``public`` (the URL would be unparseable for the
+        router; the public-lane router would receive
+        ``root="public", rel="<root>/<rel>"`` and refuse).
+
+        Path-relative vs. fully-qualified follows the same
+        resolver precedence as :meth:`build_url` (operator
+        override > Host-capture auto-detect > bind evidence >
+        path-relative last resort).
+        """
+        if not self._config.enabled:
+            return None
+        if not rel_path:
+            return None
+        if not is_well_formed_root_name(root_name):
+            return None
+        # Reserved-name guard at the URL-builder layer mirrors
+        # the config validator + the router mirror — the public
+        # lane only serves registered roots; ``public`` itself is
+        # reserved so the URL shape stays parseable (architecture-
+        # recommendation.md D1:27).
+        if is_reserved_root_name(root_name):
+            return None
+        if not self.has_root(root_name):
+            return None
+        if not is_well_formed_rel_path(rel_path):
+            return None
+        path_part = f"{PUBLIC_NAMESPACE}/{root_name}/{rel_path}"
+        base = self._base_url_resolver.resolve()
+        if base:
+            return f"{base}{path_part}"
+        return path_part
+
 
 # ─────────────────────────────────────────────────────────────────
 # Vendored Mermaid asset (Phase 3: live-view mermaid rendering)
@@ -1207,6 +1317,17 @@ class LiveViewsService:
 # fetch.
 _MERMAID_ASSET_REL_PATH = "daemon/services/live_views/assets/mermaid/mermaid.min.js"
 _MERMAID_ASSET_PUBLIC_URL_PATH = "/views/assets/mermaid/mermaid.min.js"
+# P2 of live-view-passcode (T2.10): the public-lane mirrored
+# path. The vendored bundle is served at BOTH paths via the
+# gate-free asset alias route (architecture-recommendation.md
+# D11:130); wrapper pages emitted on the public lane reference
+# THIS path so the asset fetch rides the public-lane exemption.
+# Do NOT widen the direct-lane exemption to ``/views/assets``
+# (the same lockdown headers apply, but the gating exemption
+# is exact-prefix on ``/views/public``).
+_MERMAID_ASSET_PUBLIC_URL_PATH_PUBLIC = (
+    "/views/public/assets/mermaid/mermaid.min.js"
+)
 _MERMAID_ASSET_PUBLIC_MIME = "application/javascript; charset=utf-8"
 # SHA-256 of the vendored bytes, base64-prefixed per W3C SRI
 # (``sha256-...``). Verified at vendoring time; documented in
@@ -1381,15 +1502,25 @@ def _vendored_mermaid_bytes() -> bytes:
     return _vendored_mermaid_asset().data
 
 
-def mermaid_asset_url() -> str:
+def mermaid_asset_url(*, public: bool = False) -> str:
     """Return the URL the wrapper page should ``<script src=>``.
 
-    Always ``/views/assets/mermaid/mermaid.min.js`` — path-
-    relative (the daemon has no canonical public hostname;
-    path-relative URLs sit behind the OAuth-proxy gate the
-    operator fronts the daemon with, which is the documented
-    deployment posture in ``docs/runbooks/live-views.md``).
+    Always ``/views/assets/mermaid/mermaid.min.js`` for the
+    direct lane (path-relative, behind the OAuth-proxy gate the
+    operator fronts the daemon with — the documented deployment
+    posture in ``docs/runbooks/live-views.md``).
+
+    For the public lane (``public=True``) the URL is the
+    mirrored ``/views/public/assets/mermaid/mermaid.min.js``
+    path — the public-lane asset alias (T2.10;
+    architecture-recommendation.md D11:130). The same vendored
+    bundle, the same ``_ASSET_HEADERS`` lockdown, but the
+    public path so it rides the public-lane exemption in BOTH
+    deployment states (State-A oauth2-proxy ``PathPrefix
+    /views/public`` rule, State-B code-seeded prefix tag).
     """
+    if public:
+        return _MERMAID_ASSET_PUBLIC_URL_PATH_PUBLIC
     return _MERMAID_ASSET_PUBLIC_URL_PATH
 
 
@@ -1814,6 +1945,7 @@ def render_mermaid_wrapper(
     *,
     rel_path: str,
     nonce: str | None = None,
+    public: bool = False,
 ) -> tuple[str, dict[str, str]]:
     """Return ``(html_body, headers)`` for the .mmd/.mermaid wrapper.
 
@@ -1833,6 +1965,16 @@ def render_mermaid_wrapper(
     response carries the standard hardening headers (nosniff,
     cache-control) and the per-request Referrer-Policy
     suppression that the markdown wrapper uses.
+
+    Args:
+        rel_path: The view relative path (used in the page
+            title and the ``?raw=1`` URL the wrapper fetches).
+        nonce: Optional CSP nonce; defaults to a fresh one.
+        public: When ``True``, emits the public-lane asset
+            URL (T2.10 — architecture-recommendation.md
+            D11:130). The raw URL is the same ``?raw=1``
+            shape the browser just loaded (the URL of the
+            view page is the same shape on both lanes).
     """
     nonce = nonce or new_csp_nonce()
     title = f"{rel_path} - live view"
@@ -1845,7 +1987,9 @@ def render_mermaid_wrapper(
         title=html.escape(title),
         raw_href=html.escape(raw_href, quote=True),
         nonce=html.escape(nonce),
-        mermaid_url=html.escape(mermaid_asset_url(), quote=True),
+        mermaid_url=html.escape(
+            mermaid_asset_url(public=public), quote=True
+        ),
         mermaid_integrity=html.escape(_MERMAID_ASSET_SRI_SHA256),
     )
     headers: dict[str, str] = {
@@ -1890,6 +2034,7 @@ def render_markdown_wrapper_with_mermaid(
     rel_path: str,
     markdown_text: str,
     nonce: str | None = None,
+    public: bool = False,
 ) -> tuple[str, dict[str, str]]:
     """Return ``(html_body, headers)`` for the markdown wrapper that
     ALSO renders ``mermaid`` fenced code blocks.
@@ -1899,6 +2044,19 @@ def render_markdown_wrapper_with_mermaid(
     their hardening posture: nosniff, CSP nonce, DOMPurify
     sanitization of marked's output, and ``Referrer-Policy:
     no-referrer`` on every response.
+
+    Args:
+        rel_path: The view relative path (used in the page
+            title).
+        markdown_text: The raw markdown bytes (UTF-8 text;
+            the wrapper HTML-escapes before injecting).
+        nonce: Optional CSP nonce; defaults to a fresh one.
+        public: When ``True``, emits the public-lane asset
+            URL (T2.10 — architecture-recommendation.md
+            D11:130). The marked + DOMPurify CDN URLs are
+            unchanged (CSP allows external CDN scripts on
+            both lanes; the mermaid asset URL is the
+            in-house mirror).
 
     How mermaid fences are rendered:
       1. marked (v12, CDN-loaded) parses the markdown; by
@@ -1933,7 +2091,7 @@ def render_markdown_wrapper_with_mermaid(
         marked_integrity=MARKED_CDN_INTEGRITY,
         dompurify_url=DOMPURIFY_CDN_URL,
         dompurify_integrity=DOMPURIFY_CDN_INTEGRITY,
-        mermaid_url=html.escape(mermaid_asset_url(), quote=True),
+        mermaid_url=html.escape(mermaid_asset_url(public=public), quote=True),
         mermaid_integrity=html.escape(_MERMAID_ASSET_SRI_SHA256),
     )
     headers: dict[str, str] = {

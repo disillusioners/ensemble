@@ -97,13 +97,16 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
+import logging
 import os
 import secrets
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional, Protocol
+from typing import Any, Callable, Mapping, Optional, Protocol
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import case
@@ -1285,8 +1288,9 @@ class ViewPasscodeService:
         concurrent 9th/10th failures cannot both cross the
         ceiling (the loser sees ``rowcount == 0`` and returns
         the existing count without emitting a duplicate
-        ``lockout`` audit row). Test pin at
-        ``test_record_failure_concurrent_10th_race_emits_exactly_one_lockout_audit``
+        ``lockout`` audit row). Test pins at
+        ``test_record_failure_9_to_10_emits_exactly_one_lockout_audit``
+        and ``test_record_failure_already_locked_does_not_emit_duplicate``
         in the P1 unit suite (the M1 atomicity contract; the
         PG row-lock / SQLite single-writer-model are belt-and-
         suspenders on top of the SQL-level guard).
@@ -1493,3 +1497,466 @@ class ViewPasscodeValidationError(RuntimeError):
 class ViewPasscodeNotFoundError(RuntimeError):
     """Raised when an operation requires an existing passcode
     row but ``(root, rel)`` has no row."""
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Grant cookie codec (P2 of live-view-passcode; architecture-
+# recommendation.md D6:71-79; phase2-plan.md T2.5 + D12).
+# Single home, colocated with the cipher so the
+# ``SYSTEM_ENCRYPTION_KEY`` rotation-coupling seam is intact (the
+# same posture the cipher takes — the cookie is the explicit
+# anchor for the rotation-coupling note).
+# ─────────────────────────────────────────────────────────────────────
+
+
+#: Cookie name — the canonical, schema-stable identifier the
+#: P2 router sets + reads on the public lane. Stable across the
+#: binding-spec v1 lifetime (any change is a breaking migration;
+#: the value is the explicit anchor in the cookie contract).
+GRANT_COOKIE_NAME: str = "view_grant"
+
+
+@dataclass(frozen=True)
+class GrantCookieClaims:
+    """The plaintext claims encoded in a grant cookie token.
+
+    Architecture-recommendation.md D6:75 — view identity is
+    carried as ``(root_name, rel_path)`` claims (NOT a row id);
+    the cookie is path-scoped to the EXACT public view URL
+    (``Path`` = the request URL), so the cookie's content needs
+    to match the request's view identity on validation — not
+    carry a database-side id.
+
+    Attributes:
+        root_name: The view root (validated against the request
+            URL's root segment).
+        rel_path: The view relative path (validated against the
+            request URL's path segment).
+        generation: The passcode row's generation AT ISSUANCE.
+            Validation requires ``cookie.generation ==
+            row.generation`` so a refresh silently revokes ALL
+            outstanding grants (architecture-recommendation.md
+            D6:76; the ADR D3 revocation-via-generation ruling).
+        exp: UNIX seconds. ``exp > now`` on validation
+            (``time.time()``).
+    """
+
+    root_name: str
+    rel_path: str
+    generation: int
+    exp: float
+
+    def to_json_bytes(self) -> bytes:
+        return json.dumps(
+            {
+                "root_name": self.root_name,
+                "rel_path": self.rel_path,
+                "generation": self.generation,
+                "exp": self.exp,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+
+    @classmethod
+    def from_json_bytes(cls, raw: bytes) -> "GrantCookieClaims":
+        obj = json.loads(raw.decode("utf-8"))
+        return cls(
+            root_name=str(obj["root_name"]),
+            rel_path=str(obj["rel_path"]),
+            generation=int(obj["generation"]),
+            exp=float(obj["exp"]),
+        )
+
+
+def issue_grant_cookie(
+    *,
+    cipher: "ViewPasscodeCipher",
+    root_name: str,
+    rel_path: str,
+    generation: int,
+    ttl_seconds: int,
+    now: float | None = None,
+) -> bytes:
+    """Issue a Fernet-encrypted grant cookie token.
+
+    Args:
+        cipher: The cipher (carries the Fernet instance + the
+            same ``SYSTEM_ENCRYPTION_KEY``-derived key material
+            used at rest for the passcode column).
+        root_name: The view root (must be non-empty + the same
+            ``is_well_formed_root_name`` gates the router
+            enforces).
+        rel_path: The view relative path (must be non-empty +
+            pass ``is_well_formed_rel_path``).
+        generation: The passcode row's generation AT ISSUANCE.
+        ttl_seconds: Cookie lifetime in seconds (the
+            ``passcode_grant_ttl_seconds`` config knob, default
+            ``86400``).
+        now: ``time.time()`` injection for tests; defaults to
+            wall-clock.
+
+    Returns:
+        The Fernet ciphertext bytes (URL-safe base64 — set
+        directly as the cookie value).
+
+    Raises:
+        ViewPasscodeValidationError: On invalid inputs.
+    """
+    if not isinstance(root_name, str) or not root_name:
+        raise ViewPasscodeValidationError(
+            "issue_grant_cookie: root_name must be a non-empty string"
+        )
+    if not isinstance(rel_path, str) or not rel_path:
+        raise ViewPasscodeValidationError(
+            "issue_grant_cookie: rel_path must be a non-empty string"
+        )
+    if (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+    ):
+        raise ViewPasscodeValidationError(
+            f"issue_grant_cookie: generation must be a positive int; "
+            f"got {generation!r}"
+        )
+    if (
+        not isinstance(ttl_seconds, int)
+        or isinstance(ttl_seconds, bool)
+        or ttl_seconds < 1
+    ):
+        raise ViewPasscodeValidationError(
+            f"issue_grant_cookie: ttl_seconds must be a positive int; "
+            f"got {ttl_seconds!r}"
+        )
+    current = time.time() if now is None else float(now)
+    claims = GrantCookieClaims(
+        root_name=root_name,
+        rel_path=rel_path,
+        generation=generation,
+        exp=current + ttl_seconds,
+    )
+    return cipher.wrap(claims.to_json_bytes())
+
+
+def parse_grant_cookie(
+    *,
+    cipher: "ViewPasscodeCipher",
+    token: bytes | str,
+    expected_root: str,
+    expected_rel: str,
+    expected_generation: int,
+    now: float | None = None,
+) -> GrantCookieClaims:
+    """Validate a Fernet-encrypted grant cookie token.
+
+    Validation chain (architecture-recommendation.md D6:76):
+
+      1. decrypt (``InvalidToken`` → raises
+         :class:`ViewPasscodeRotationRequired` — caller treats
+         as no-grant, never 500)
+      2. claims match THIS request's ``(root, rel)``
+      3. ``cookie.generation == row.generation``
+      4. ``exp > now``
+
+    Any failure raises :class:`ViewPasscodeValidationError`
+    with a message that DOES NOT include the offending
+    ciphertext or any cookie internals — the caller renders
+    the interstitial on the failure path.
+
+    The P2 router DOES NOT distinguish between failure modes
+    to the client — every failure collapses to the same
+    interstitial envelope (architecture-recommendation.md D6:76
+    "any failure → interstitial"). The typed-error distinction
+    is for the caller + the test matrix only.
+
+    Args:
+        cipher: The cipher (same one that issued the cookie).
+        token: The cookie bytes (or the URL-safe string the
+            browser sent — both work for ``Fernet.decrypt``).
+        expected_root: The view root from the request URL.
+        expected_rel: The view relative path from the request
+            URL.
+        expected_generation: The passcode row's generation
+            (post-refresh this is what kills old grants).
+        now: ``time.time()`` injection for tests; defaults to
+            wall-clock.
+
+    Returns:
+        The decoded :class:`GrantCookieClaims` on success.
+
+    Raises:
+        ViewPasscodeRotationRequired: On decryption failure
+            (rotation-fail primitive — caller treats as
+            no-grant, never 500).
+        ViewPasscodeValidationError: On any other validation
+            failure (root mismatch, rel mismatch, generation
+            mismatch, expiry). The P2 router maps all of these
+            to the interstitial.
+    """
+    if isinstance(token, str):
+        token_bytes = token.encode("ascii")
+    elif isinstance(token, (bytes, bytearray)):
+        token_bytes = bytes(token)
+    else:
+        raise ViewPasscodeValidationError(
+            "parse_grant_cookie: token must be bytes or str"
+        )
+    # Decrypt step — raises ViewPasscodeRotationRequired on
+    # ciphertext failure (the canonical primitive per
+    # architecture-recommendation.md D4:59 + D9:117).
+    plaintext = cipher.unwrap(token_bytes)
+    try:
+        claims = GrantCookieClaims.from_json_bytes(plaintext)
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise ViewPasscodeValidationError(
+            "parse_grant_cookie: malformed claims payload"
+        ) from exc
+    current = time.time() if now is None else float(now)
+    if claims.exp <= current:
+        raise ViewPasscodeValidationError(
+            "parse_grant_cookie: cookie expired"
+        )
+    if claims.root_name != expected_root:
+        raise ViewPasscodeValidationError(
+            "parse_grant_cookie: root mismatch"
+        )
+    if claims.rel_path != expected_rel:
+        raise ViewPasscodeValidationError(
+            "parse_grant_cookie: rel mismatch"
+        )
+    if claims.generation != expected_generation:
+        raise ViewPasscodeValidationError(
+            "parse_grant_cookie: generation mismatch"
+        )
+    return claims
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Per-IP token-bucket rate limiter (P2 of live-view-passcode;
+# architecture-recommendation.md D7 + V6; phase2-plan.md T2.6 +
+# D14). Adapts the TokenBucketLimiter pattern
+# (daemon/sources/rate_limiter.py:25) into a per-IP map with
+# LRU eviction; keying = rightmost X-Forwarded-For entry else
+# socket peer (ADR D7:83-86). Fails OPEN on limiter-internal
+# error (ADR V6) with a loud log — the durable strike lock is
+# the backstop.
+# ─────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class VerifyRateLimit:
+    """Rate limit knobs (P2 of live-view-passcode)."""
+    capacity: int
+    refill_per_minute: int
+
+
+#: LRU cap — bound memory at a fixed map size; the oldest
+#: entry is evicted on overflow (the prior "delete random
+#: entry" shape was the regression vector the LRU replaces).
+#: ~50k entries × ~100 bytes/IP ≈ 5 MiB worst-case — well
+#: below any reasonable memory ceiling.
+_PER_IP_LRU_CAP: int = 50_000
+
+
+def _rightmost_xff_ip(headers: "Mapping[str, str] | None") -> str | None:
+    """Return the rightmost X-Forwarded-For entry (architecture-
+    recommendation.md D7:83-86).
+
+    Behind a single trusted Envoy hop the rightmost entry is
+    the address APPENDED by our proxy = the real client;
+    leftmost entries are client-supplied and spoofable
+    (rotation voids the limiter). Rightmost dominates in every
+    topology: proxy appends → rightmost trustworthy; proxy
+    overwrites → single entry (leftmost == rightmost);
+    unknown topology → degrades to a shared bucket =
+    over-throttle, never bypass.
+
+    Header is comma-separated per RFC 7239; we trim whitespace
+    before returning. Empty / whitespace-only entries are
+    skipped (a header that is all commas / spaces returns
+    None).
+    """
+    if headers is None:
+        return None
+    raw = headers.get("x-forwarded-for") or headers.get(
+        "X-Forwarded-For"
+    )
+    if not raw:
+        return None
+    candidates = [
+        segment.strip() for segment in raw.split(",") if segment.strip()
+    ]
+    if not candidates:
+        return None
+    return candidates[-1]
+
+
+class _TokenBucket:
+    """One IP's token-bucket state (the per-IP slot).
+
+    Inline (not the public :class:`daemon.sources.rate_limiter.
+    TokenBucketLimiter`) because the source-layer class uses an
+    ``asyncio.Lock`` for cross-task safety — this lane is
+    request-time only and the GIL covers the simple int/float
+    mutations here. The shape (capacity, refill_per_minute →
+    messages_per_second = refill_per_minute / 60) is the
+    adapted parameter pair.
+    """
+
+    __slots__ = ("tokens", "last_refill")
+
+    def __init__(self, capacity: int) -> None:
+        self.tokens: float = float(capacity)
+        self.last_refill: float = time.monotonic()
+
+    def try_acquire(
+        self,
+        *,
+        capacity: int,
+        refill_per_minute: int,
+        now: float,
+    ) -> bool:
+        """Return True iff a token was acquired.
+
+        Side effect: updates ``tokens`` + ``last_refill``.
+        """
+        elapsed = now - self.last_refill
+        if elapsed > 0:
+            self.tokens = min(
+                float(capacity),
+                self.tokens
+                + elapsed * (refill_per_minute / 60.0),
+            )
+            self.last_refill = now
+        if self.tokens >= 1.0:
+            self.tokens -= 1.0
+            return True
+        return False
+
+
+class VerifyRateLimiter:
+    """Per-IP token-bucket limiter for the public verify endpoint.
+
+    Keying = rightmost XFF else socket peer (architecture-
+    recommendation.md D7). LRU eviction caps the map at
+    :data:`_PER_IP_LRU_CAP`. **Fails OPEN** on limiter-internal
+    error (architecture-recommendation.md V6 — the durable
+    strike lock is the authoritative control; a limiter bug
+    must not brick the lane).
+
+    Construction posture (BINDING):
+
+    * ``capacity`` / ``refill_per_minute`` are operator-tunable
+      via the ``ENSEMBLE_LIVE_VIEWS_VERIFY_RATE_LIMIT_*`` env
+      knobs (LiveViewsConfig); defaults are 5 / 5
+      (``phase2-plan.md`` D14).
+    * No I/O at construction. State is in-memory; restart
+      resets the map (one fresh burst per attacker — the
+      durable strike lock backstops).
+    """
+
+    def __init__(
+        self,
+        *,
+        capacity: int,
+        refill_per_minute: int,
+        clock: "Callable[[], float] | None" = None,
+    ) -> None:
+        if (
+            not isinstance(capacity, int)
+            or isinstance(capacity, bool)
+            or capacity < 1
+        ):
+            raise ViewPasscodeValidationError(
+                f"VerifyRateLimiter: capacity must be a "
+                f"positive int; got {capacity!r}"
+            )
+        if (
+            not isinstance(refill_per_minute, int)
+            or isinstance(refill_per_minute, bool)
+            or refill_per_minute < 1
+        ):
+            raise ViewPasscodeValidationError(
+                f"VerifyRateLimiter: refill_per_minute must "
+                f"be a positive int; got {refill_per_minute!r}"
+            )
+        self._capacity = capacity
+        self._refill_per_minute = refill_per_minute
+        self._clock = clock or time.monotonic
+        # Insertion-ordered dict (Python 3.7+) = LRU eviction
+        # by re-insertion on hit (move-to-end semantics).
+        self._buckets: dict[str, _TokenBucket] = {}
+
+    @property
+    def capacity(self) -> int:
+        return self._capacity
+
+    @property
+    def refill_per_minute(self) -> int:
+        return self._refill_per_minute
+
+    def check(
+        self,
+        ip: str,
+    ) -> bool:
+        """Return True iff a token was acquired for ``ip``.
+
+        Adapter pattern: callers pass the resolved IP (rightmost
+        XFF or socket peer; the resolver is the P2 router's
+        job — the limiter only consults the key). On an empty
+        bucket the call returns False; on an internal exception
+        the call returns True (fail-open, ADR V6) and emits a
+        loud WARNING log.
+        """
+        try:
+            return self._check_unlocked(ip)
+        except Exception as exc:
+            logger.warning(
+                "[LiveViews] verify-rate-limiter internal "
+                "error; failing OPEN (durable strike lock is "
+                "the backstop): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            return True
+
+    def _check_unlocked(self, ip: str) -> bool:
+        if not isinstance(ip, str) or not ip:
+            # A bad key must not brick the lane — fall back
+            # to the shared bucket (over-throttle, never
+            # bypass) — pass this single malformed hit but
+            # with a noisy log so the operator notices.
+            logger.warning(
+                "[LiveViews] verify-rate-limiter got a "
+                "non-string / empty IP; counting as a miss "
+                "without consuming a token"
+            )
+            return True
+        bucket = self._buckets.get(ip)
+        now = self._clock()
+        if bucket is None:
+            # New IP — establish the bucket and consume one
+            # token from a full capacity. LRU eviction at
+            # overflow.
+            if len(self._buckets) >= _PER_IP_LRU_CAP:
+                # Pop the oldest (insertion-ordered dict,
+                # first key = oldest).
+                oldest = next(iter(self._buckets))
+                self._buckets.pop(oldest, None)
+            bucket = _TokenBucket(self._capacity)
+            self._buckets[ip] = bucket
+            return bucket.try_acquire(
+                capacity=self._capacity,
+                refill_per_minute=self._refill_per_minute,
+                now=now,
+            )
+        # Existing IP — refresh the LRU position by
+        # re-inserting (Python 3.7+ dicts preserve
+        # insertion order; re-insert moves to the end).
+        self._buckets[ip] = bucket
+        return bucket.try_acquire(
+            capacity=self._capacity,
+            refill_per_minute=self._refill_per_minute,
+            now=now,
+        )

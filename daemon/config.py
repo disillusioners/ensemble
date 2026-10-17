@@ -2678,6 +2678,57 @@ class LiveViewsConfig(BaseSettings):
             "URLs (recommended for behind-OAuth-proxy deployments)."
         ),
     )
+    # P2 of live-view-passcode (phase2-plan.md D14): per-IP
+    # token-bucket knobs for the public-lane verify endpoint.
+    # Env vars: ``ENSEMBLE_LIVE_VIEWS_VERIFY_RATE_LIMIT_CAPACITY`` /
+    # ``ENSEMBLE_LIVE_VIEWS_VERIFY_RATE_LIMIT_REFILL_PER_MINUTE``.
+    # Defaults: 5 burst / 5 per minute — the binding part is the
+    # interplay pin (429 → no strike; success → neither bucket nor
+    # strike; wrong → both), not the exact numbers (architecture-
+    # recommendation.md D7:85, ``planner-tunables``).
+    verify_rate_limit_capacity: int = Field(
+        default=5,
+        description=(
+            "Per-IP token-bucket capacity (burst) for the public-lane "
+            "verify endpoint. Exceeding this from a single IP returns "
+            "429 WITHOUT consuming a strike counter attempt (the "
+            "binding interplay pin — architecture-recommendation.md D7 + "
+            "phase2-plan.md D14)."
+        ),
+    )
+    verify_rate_limit_refill_per_minute: int = Field(
+        default=5,
+        description=(
+            "Per-IP token-bucket refill rate (tokens per minute) for the "
+            "public-lane verify endpoint. Combined with "
+            "verify_rate_limit_capacity: 5 / 5 ≈ 1 token / 12s sustained, "
+            "burst 5."
+        ),
+    )
+    # Lockout threshold + grant TTL — knobs the P2 service
+    # reads at request time. Defaults: 10 strikes (requirement
+    # 4), 24h grant TTL (matches the oauth2-proxy house
+    # precedent ``oauth2-proxy.yaml:29 --cookie-expire=24h``).
+    # Env vars: ``ENSEMBLE_LIVE_VIEWS_PASSCODE_LOCKOUT_THRESHOLD`` /
+    # ``ENSEMBLE_LIVE_VIEWS_PASSCODE_GRANT_TTL_SECONDS``.
+    passcode_lockout_threshold: int = Field(
+        default=10,
+        description=(
+            "Number of consecutive wrong verify attempts that flips the "
+            "view's passcode row to ``locked=true``. ``view_link(refresh="
+            "True)`` is the only recovery path (no time-boxed auto-"
+            "unlock; spec default ratified in architecture-recommendation."
+            "md D5)."
+        ),
+    )
+    passcode_grant_ttl_seconds: int = Field(
+        default=86400,
+        description=(
+            "Lifetime of the public-lane grant cookie (~24h matches the "
+            "oauth2-proxy house precedent). Refresh silently revokes all "
+            "outstanding grants via the generation bump."
+        ),
+    )
     roots: dict[str, LiveViewsRootConfig] = Field(
         default_factory=_seed_phase1_roots,
         description=(
@@ -2714,6 +2765,62 @@ class LiveViewsConfig(BaseSettings):
             else:
                 out[k] = inner
         return out
+
+    @field_validator("roots", mode="after")
+    @classmethod
+    def _reject_reserved_root_names(
+        cls, v: object
+    ) -> object:
+        """Reserved-root guard (P2 of live-view-passcode,
+        ``architecture-recommendation.md`` D1:27, phase2-plan.md
+        T2.2). A configured root whose name is in
+        :data:`daemon.services.live_views.RESERVED_ROOT_NAMES`
+        (today: ``"public"``) refuses to boot with a clear
+        actionable error.
+
+        Three-layer guard posture (D1:27):
+
+        * registry layer — this validator (config load fails
+          closed with the offending root name in the error)
+        * route layer — public sub-routes are declared on the
+          ``/views`` router BEFORE the parametrized handlers,
+          and the public-lane gate collapses reserved-name
+          misses to uniform 404 (``daemon/routers/live_views.py``)
+        * handler layer — the generic (non-public) handler
+          additionally 404s ``root_name == "public"``
+          defensively
+
+        Boot-time refusal is the only safe posture: a root
+        literally named ``"public"`` would make
+        ``/views/public/<root>/<rel>`` URLs unparseable (the
+        router would see a 4-segment path and try
+        ``root="public", rel="<root>/<rel>"``). The kebab-case
+        regex permits the name today; this guard is what
+        rejects it.
+        """
+        # Lazy import — config is a leaf module; the
+        # reserved-names set is a single source of truth in the
+        # service layer (architecture-recommendation.md D11:128
+        # + phase2-plan.md D11).
+        from daemon.services.live_views import (
+            RESERVED_ROOT_NAMES,
+            is_reserved_root_name,
+        )
+
+        if not isinstance(v, dict):
+            return v
+        for name in v.keys():
+            if is_reserved_root_name(name):
+                raise ValueError(
+                    f"LiveViewsConfig.roots: {name!r} is a "
+                    f"reserved root name "
+                    f"({sorted(RESERVED_ROOT_NAMES)}); the "
+                    f"public passcode lane occupies this "
+                    f"prefix and the registry MUST NOT name a "
+                    f"root with it. Rename the entry in your "
+                    f"config and restart."
+                )
+        return v
 
 
 class AuthConfig(BaseSettings):
