@@ -259,7 +259,14 @@ class SecretCipher:
             key = key.encode("utf-8")
         try:
             self._fernet = Fernet(key)
-        except Exception as exc:  # noqa: BLE001 — Fernet raises ValueError on bad key
+        except (ValueError, TypeError) as exc:
+            # Fernet raises ValueError on a malformed key
+            # (e.g. wrong length / invalid base64) and
+            # TypeError on a non-bytes input. The bare
+            # ``except Exception`` was overly broad — minor
+            # ⑧ governor pre-promote fix (2026-10-17).
+            # Other exception types should propagate so the
+            # caller can surface the real diagnostic.
             logger.error(
                 "[SecretCipher] invalid %s: %s — SecretService will "
                 "refuse all wrap/unwrap calls.",
@@ -470,7 +477,39 @@ def generate_ssh_keypair_material() -> SecretSshKeypairMaterial:
         memory only; the service must wrap them via
         :class:`SecretCipher` and drop the in-memory copy
         ASAP (the dataclass is short-lived; the service
-        does NOT keep a reference past the wrap call).
+        does NOT keep a reference past the wrap call —
+        see :func:`SecretService.generate_ssh_keypair`
+        where ``del material, wrapped`` drops the
+        references after the atomic insert commits).
+
+    Memory hygiene (minor ⑨ — governor pre-promote fix,
+    2026-10-17):
+
+      * ``private_openssh_pem`` and ``raw_private_bytes``
+        are plaintext bytes — no in-process cache, no
+        persisted cache. They live only as fields on the
+        :class:`SecretSshKeypairMaterial` dataclass, which
+        is short-lived (single method scope).
+      * The dataclass's only consumer is
+        :meth:`SecretService.generate_ssh_keypair`, which
+        calls ``cipher.wrap(material.private_openssh_pem)``
+        inside the ``engine.begin()`` block. The wrap
+        produces the Fernet ciphertext that is stored in
+        ``secrets.wrapped_secret``.
+      * The service explicitly ``del``s the references
+        (``del material, wrapped``) after the atomic
+        insert commits, dropping both the dataclass and
+        the wrapped-form local variable. The plaintext
+        bytes become unreachable from the service's
+        scope; the cipher's Fernet-key wrapper is the
+        sole remaining on-disk form (the row's
+        ``wrapped_secret`` column).
+      * The docstring does NOT promise any persistence
+        layer's secure-zero — ``bytes`` objects in CPython
+        are immutable and not reliably wiped from memory.
+        The security claim is "in-memory bytes are dropped
+        after wrap within the call", not "memory is
+        securely erased".
     """
     private_key = ed25519.Ed25519PrivateKey.generate()
     public_key = private_key.public_key()
@@ -541,6 +580,18 @@ def generate_ssh_keypair_material() -> SecretSshKeypairMaterial:
     )
 
 
+# Maximum token length in bytes (the upper bound on
+    # ``secrets.token_urlsafe(nbytes)`` — minor ② governor
+    # pre-promote fix, 2026-10-17). 256 bytes = 2048 bits
+    # of entropy, well beyond any reasonable API token use
+    # case; a higher cap risks resource exhaustion
+    # (CWE-770). The cap is enforced at the service
+    # boundary AND inside ``generate_api_token_material``
+    # (defense-in-depth — the service is the only entry
+    # point, but the helper is module-public for tests).
+MAX_API_TOKEN_LENGTH_BYTES: int = 256
+
+
 def generate_api_token_material(length: int = 32) -> bytes:
     """Generate a URL-safe token via ``secrets.token_urlsafe``.
 
@@ -549,9 +600,20 @@ def generate_api_token_material(length: int = 32) -> bytes:
     returned bytes are the raw token material (Fernet-wrapped
     by the service before storage; the tool response carries
     only the last-4-char preview).
+
+    The length is capped at
+    :data:`SecretService.MAX_API_TOKEN_LENGTH_BYTES`
+    (256 bytes = 2048 bits). Lengths above the cap raise
+    ``ValueError`` — minor ② governor pre-promote fix
+    (2026-10-17, CWE-770 resource-exhaustion guard).
     """
     if length <= 0:
         raise ValueError(f"length must be positive; got {length}")
+    if length > MAX_API_TOKEN_LENGTH_BYTES:
+        raise ValueError(
+            f"length {length} exceeds the {MAX_API_TOKEN_LENGTH_BYTES}-byte cap; "
+            f"see SecretService.MAX_API_TOKEN_LENGTH_BYTES"
+        )
     return secrets.token_urlsafe(length).encode("ascii")
 
 
@@ -728,12 +790,29 @@ class _SqlSecretStore:
         secret_id: Optional[str],
         actor: str,
     ) -> None:
-        # Action validation is the service boundary's job; the
-        # store is a dumb writer. Mirrors the ``_assert_kind``
-        # guard on ``SecretService`` — the
-        # ``_SecretStorePort`` Protocol docstring at :559-562
-        # names ``SECRET_AUDIT_ACTIONS`` as the canonical
-        # validator set; the constants are imported at :83-84.
+        """Insert a single audit row in its OWN session.
+
+        Action validation is the service boundary's job;
+        the store is a dumb writer. Mirrors the
+        ``_assert_kind`` guard on ``SecretService`` — the
+        ``_SecretStorePort`` Protocol docstring at :559-562
+        names ``SECRET_AUDIT_ACTIONS`` as the canonical
+        validator set; the constants are imported at :83-84.
+
+        M1 contract (governor pre-promote fix, 2026-10-17):
+        this method is NOT called by the P1 mutation paths
+        — they use ``insert_with_audit`` /
+        ``mark_retired_with_audit`` /
+        ``get_by_id_with_audit`` (single ``engine.begin()``
+        per action). It is retained for the standalone
+        audit append path (the future P2 marker-resolver
+        audit row, which audits a ``use_marker`` action
+        without an accompanying ``secrets`` mutation). For
+        ANY audit row that pairs with a mutation, use the
+        ``*_with_audit`` variant — a crash between a
+        mutation's commit and this method's commit is the
+        regression M1 closes.
+        """
         if action not in SECRET_AUDIT_ACTIONS:
             raise ValueError(
                 f"action {action!r} not in SECRET_AUDIT_ACTIONS"
@@ -1006,6 +1085,16 @@ class SecretService:
         KIND_GENERIC,
     })
 
+    #: Maximum token length in bytes (the upper bound on
+    #: ``secrets.token_urlsafe(nbytes)`` — minor ② governor
+    #: pre-promote fix, 2026-10-17). The class-level alias
+    #: makes ``self.MAX_API_TOKEN_LENGTH_BYTES`` resolvable
+    #: from the service boundary; the module-level
+    #: :data:`MAX_API_TOKEN_LENGTH_BYTES` is the canonical
+    #: source of truth (also enforced inside
+    #: ``generate_api_token_material``).
+    MAX_API_TOKEN_LENGTH_BYTES: int = MAX_API_TOKEN_LENGTH_BYTES
+
     def __init__(
         self,
         engine: Any,
@@ -1185,14 +1274,36 @@ class SecretService:
             raise SecretValidationError(
                 f"length must be a positive int; got {length!r}"
             )
+        # Cap (CWE-770 resource-exhaustion guard — minor ②).
+        # The cap is also enforced inside
+        # ``generate_api_token_material`` (defense-in-depth),
+        # but the service is the canonical boundary check.
+        if length > self.MAX_API_TOKEN_LENGTH_BYTES:
+            raise SecretValidationError(
+                f"length {length} exceeds the "
+                f"{self.MAX_API_TOKEN_LENGTH_BYTES}-byte cap; "
+                f"see SecretService.MAX_API_TOKEN_LENGTH_BYTES"
+            )
 
         cipher = self._wrap_required()
         token_bytes = generate_api_token_material(length=length)
         wrapped = cipher.wrap(token_bytes)
         token_str = token_bytes.decode("ascii")
         # Preview = last 4 chars. The full token NEVER
-        # crosses the tool boundary in v1.
-        token_preview = token_str[-4:] if len(token_str) >= 4 else token_str
+        # crosses the tool boundary in v1. Refuse lengths
+        # that would make the preview less-than-4 — minor ①
+        # governor pre-promote fix (2026-10-17). A
+        # length ≤ 3 would leak the entire token via the
+        # ``token_preview`` field, defeating the
+        # v1 last-4-char-only contract.
+        if len(token_str) < 4:
+            raise SecretValidationError(
+                f"token length {length} produces a "
+                f"{len(token_str)}-char URL-safe string; "
+                f"the minimum is 4 chars (the v1 "
+                f"last-4-char preview contract)"
+            )
+        token_preview = token_str[-4:]
 
         secret_id = str(uuid.uuid4())
         marker = mint_marker(secret_id)

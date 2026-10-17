@@ -11,8 +11,10 @@
 --
 --   * ``secrets`` is the durable Fernet-encrypted secret store backing
 --     the new ``secrets`` privileged tool category (#6 in
---     ``PRIVILEGED_TOOL_CATEGORIES`` — quintet → sextet per Q1/Q2/Q3
---     decisions 2026-10-17). The row IS the secret:
+--     ``PRIVILEGED_TOOL_CATEGORIES`` — sextet → septet per
+--     Q1/Q2/Q3 decisions 2026-10-17 (``cu`` joined
+--     2026-10-16 making the count 6 before this entry,
+--     ``secrets`` is the 7th). The row IS the secret:
 --     - ``id`` is the UUID4 immutable handle that the
 --       ``__ENS_SECRET__<id>__`` marker text embeds (Q3 — marker
 --       format FROZEN, see ``daemon/services/secret_service.py``).

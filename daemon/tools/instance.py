@@ -6104,8 +6104,8 @@ Returns:
     # that operate on the Fernet-encrypted ``secrets`` +
     # ``secrets_audit`` PG tables via the in-process
     # ``SecretService`` (the manager's ``_secret_service`` field).
-    # The category is entry #6 in ``PRIVILEGED_TOOL_CATEGORIES``
-    # (quintet → sextet) — NEVER default-granted; the day-one
+    # The category is entry #7 in ``PRIVILEGED_TOOL_CATEGORIES``
+    # (sextet → septet) — NEVER default-granted; the day-one
     # allow-list (Q2 ruling) is ``worker``, ``tester``,
     # ``leader``, ``ari`` only. Agents outside that allow-list
     # get ZERO secrets tools through both the
