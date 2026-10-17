@@ -246,7 +246,7 @@ The trade-off is documented: the wrapper depends on a single CDN (`cdn.jsdelivr.
 
 ## 9. Public passcode lane (P2 of live-view-passcode, 2026-10-17)
 
-> **Pointer runbook only.** The full deployment note (State-A HTTPRoute diff + State-B code-seeded prefix-tag mechanism + the canonical-gate contract across the two-state migration) lands in P3 (`docs/runbooks/live-view-passcode.md` — to come) and the architecture-recommendation at `.agents/shared/planning/live-view-passcode/architecture-recommendation.md`. This section is the summary a daemon operator needs to recognize the lane + verify the gate + recover from a misconfig.
+> **Pointer runbook only.** The full deployment note (State-A HTTPRoute diff + ceremony + State-B code-seeded prefix-tag mechanism + the canonical-gate contract across the two-state migration) is `docs/runbooks/live-view-passcode-deployment.md` (P3 deliverable); the architecture-recommendation is at `.agents/shared/planning/live-view-passcode/architecture-recommendation.md`. This section is the summary a daemon operator needs to recognize the lane + verify the gate + recover from a misconfig.
 
 ### 9.1 What it is
 
@@ -306,9 +306,9 @@ P2 of `view_link` (architecture-recommendation.md D10):
 
 ### 9.7 What's NOT in this runbook (out of scope for P2)
 
-- **State-A HTTPRoute exact YAML diff** — `.agents/shared/planning/live-view-passcode/state-a-proxy-apply.md` (canonical spec; the implementation lands in the data-center-scripts repo as a separate lane).
-- **Drills** (rotation ceremony, two-state migration, smoke matrix) — `docs/runbooks/live-views-drills.md` (P3 deliverable).
+- **State-A HTTPRoute exact YAML diff, ceremony (merge → apply → drill), rollback, XFF + Host-preservation pins** — `docs/runbooks/live-view-passcode-deployment.md` §1 (canonical operator runbook; the manifest implementation lives in the data-center-scripts repo as a separate lane, commit `e1980058`).
+- **Drills** (two-state migration, State-B dry-run, ceremony checklist) — `docs/runbooks/live-view-passcode-deployment.md` §3 (transcripts archived under `.agents/shared/planning/live-view-passcode/evidence/`).
 - **Security-review pack** (threat model + governor sign-off) — `.agents/shared/planning/live-view-passcode/phase4-plan.md` deliverable (P4).
-- **Deployment-note doc** (operator-facing — the migration script + decision points) — P3 deliverable.
+- **Deployment-note doc** (operator-facing — the migration script + decision points) — **DELIVERED (P3): `docs/runbooks/live-view-passcode-deployment.md`.**
 
 See `.agents/shared/planning/live-view-passcode/architecture-recommendation.md` §📌 DEPLOYMENT NOTE for the exact contract that must hold across the two-state migration.
