@@ -1079,3 +1079,81 @@ class TestMarkdownMermaidFenceExtension:
             "/views/designer-artifact/ens/feat/design/mockups/mmd.md"
         )
         assert resp.headers.get("x-content-type-options") == "nosniff"
+
+    def test_md_with_mermaid_fence_csp_style_src_allows_unsafe_inline_and_no_nonce(
+        self, filesystem_root_dir: pathlib.Path
+    ):
+        """Mermaid-aware MD wrapper: style-src mirrors the .mmd wrapper fix.
+
+        Per CSP3 (https://www.w3.org/TR/CSP3/#match-element-to-source-list),
+        when a directive contains BOTH ``'nonce-X'`` and
+        ``'unsafe-inline'`` browsers IGNORE ``'unsafe-inline'`` and
+        require nonce matches — mermaid's runtime applies inline
+        ``style="..."`` attrs to SVG nodes post-load (no
+        element-level nonce), so the prior nonce+unsafe-inline
+        posture silently black-filled every mermaid SVG on the
+        markdown-fence path.
+
+        Script policy is UNCHANGED: ``script-src`` keeps the
+        jsdelivr CDN allowlist (marked + DOMPurify) plus the
+        per-request nonce (the bootstrap script). No
+        ``'unsafe-inline'`` on scripts. ``unsafe-eval`` still
+        absent.
+        """
+        import re
+
+        mockup = (
+            filesystem_root_dir
+            / ".agents"
+            / "shared"
+            / "planning"
+            / "feat"
+            / "design"
+            / "mockups"
+        )
+        (mockup / "csp-md-mermaid.md").write_text(
+            "# Hi\n```mermaid\ngraph TD\nA --> B\n```\n"
+        )
+        c = _client_with_workdir(filesystem_root_dir)
+        resp = c.get(
+            "/views/designer-artifact/ens/feat/design/mockups/csp-md-mermaid.md"
+        )
+        csp = resp.headers.get("content-security-policy")
+        assert csp is not None, "CSP header MUST be set on the mermaid-aware MD wrapper"
+        # Hardening posture preserved.
+        assert "unsafe-eval" not in csp
+        assert "script-src 'unsafe-inline'" not in csp
+        # jsdelivr CDN allowlist still present (marked + DOMPurify
+        # are still CDN-loaded on this path).
+        assert "cdn.jsdelivr.net" in csp
+        # The per-request nonce rides in the CSP.
+        body = resp.content.decode("utf-8")
+        nonces = re.findall(r"'nonce-([^']+)'", csp)
+        assert nonces, "CSP must include at least one 'nonce-XXX' directive"
+        for nonce in nonces:
+            assert f'nonce="{nonce}"' in body
+        # Script-src preserved verbatim (jsdelivr + nonce).
+        script_src_match = re.search(r"script-src[^;]*", csp)
+        assert script_src_match is not None, "CSP must include a script-src directive"
+        script_src = script_src_match.group(0)
+        assert "cdn.jsdelivr.net" in script_src
+        assert "'nonce-" in script_src
+        assert "'unsafe-inline'" not in script_src, (
+            f"script-src must NOT carry 'unsafe-inline' (bootstrap "
+            f"script is the only inline script, gated by nonce); "
+            f"got: {script_src!r}"
+        )
+        # Style-src: must allow 'unsafe-inline' AND must NOT carry
+        # a nonce (the same CSP3 downgrade would black-fill SVGs).
+        style_src_match = re.search(r"style-src[^;]*", csp)
+        assert style_src_match is not None, "CSP must include a style-src directive"
+        style_src = style_src_match.group(0)
+        assert "'unsafe-inline'" in style_src, (
+            f"style-src must allow 'unsafe-inline' (mermaid runtime "
+            f"applies inline style attrs); got: {style_src!r}"
+        )
+        assert "'nonce-" not in style_src, (
+            f"style-src must NOT carry a nonce (CSP3 makes nonce + "
+            f"unsafe-inline downgrade to nonce-only, blocking mermaid "
+            f"inline styles); got: {style_src!r}"
+        )

@@ -1664,10 +1664,22 @@ _MERMAID_CSP_TEMPLATE = (
 # of a third CDN fetch — same-origin, SRI-pinned, riding the
 # same /views gate. Strictness otherwise mirrors the plain
 # mermaid wrapper (no ``unsafe-eval``; nonce-gated bootstrap).
+#
+# ``style-src 'self' 'unsafe-inline'`` (NO nonce) is REQUIRED
+# for the same CSP3 reason as ``_MERMAID_CSP_TEMPLATE`` above:
+# the mermaid runtime applies inline ``style="..."`` attrs to
+# SVG nodes post-load (no element-level nonce); when a
+# directive contains BOTH ``'nonce-X'`` and ``'unsafe-inline'``
+# browsers IGNORE ``'unsafe-inline'`` and require nonce matches,
+# which would silently black-fill every mermaid SVG on the
+# markdown-fence path. The inline ``<style>`` element in
+# ``_MARKDOWN_MERMAID_WRAPPER_HTML`` loses its ``nonce`` attr
+# (unused; ``<script>`` nonces unchanged). The script policy
+# (jsdelivr CDN allowlist + per-request nonce) is unchanged.
 _MARKDOWN_MERMAID_CSP_TEMPLATE = (
     "default-src 'self'; "
     "script-src 'self' https://cdn.jsdelivr.net 'nonce-{nonce}'; "
-    "style-src 'self' 'nonce-{nonce}' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; "
     "object-src 'none'; "
     "base-uri 'self'; "
@@ -1958,7 +1970,7 @@ _MARKDOWN_MERMAID_WRAPPER_HTML = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
-<style nonce="{nonce}">
+<style>
   body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 920px; margin: 2em auto; padding: 0 1em; line-height: 1.5; color: #222; }}
   pre {{ white-space: pre-wrap; word-wrap: break-word; background: #f6f8fa; padding: 1em; border-radius: 4px; overflow-x: auto; }}
   article {{ line-height: 1.6; overflow-x: auto; }}
