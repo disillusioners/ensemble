@@ -2,7 +2,7 @@
 
 - **Version:** 2.0 @ feature/live-views-url-and-rendering (Phase 1 + Phase 2 of the live-view subsystem commission, ships with the post-v0.18.1 release vehicle).
 - **Canonical path:** `docs/runbooks/live-views.md` (matches the `docs/runbooks/` house convention; the other live-views planning lives in `.agents/shared/planning/live-views/`).
-- **Scope:** the `GET/HEAD /views/<root>/<rel>` HTTP route family + the `view_link` agent tool + the per-app `LiveViewsService` registry. **No write / delete / list endpoints** — read-only by design. **No auth at the daemon** — the edge guard is the deployment's responsibility.
+- **Scope:** the `GET/HEAD /views/<root>/<rel>` HTTP route family + the `GET/HEAD/POST /views/public/<root>/<rel>` public passcode lane + the `view_link` agent tool + the per-app `LiveViewsService` registry + the per-app `ViewPasscodeService` (Fernet-encrypted passcode substrate; P2 of live-view-passcode, 2026-10-17). **No write / delete / list endpoints** on the direct lane — read-only by design. **No auth at the daemon** for the direct lane — the edge guard is the deployment's responsibility. The public lane is gated daemon-side by the passcode + grant-cookie check (the canonical gate; the fronting proxy passes the prefix through — see the **§9 Public passcode lane** section below for the two-state exemption mechanism).
 
 ## 0. The single edge rule
 
@@ -243,3 +243,72 @@ The router dispatches per-type on the resolved MIME:
 3. **Graceful degradation is a feature.** When the CDN is unreachable (proxy blocking, dev box being offline), the page shows the raw markdown in a readable `<pre>` rather than a 500. Server-side rendering would either succeed (the markdown lib is local) but lose the defense-in-depth cleanup, or fail (if the sanitizer rejects the input) and serve nothing.
 
 The trade-off is documented: the wrapper depends on a single CDN (`cdn.jsdelivr.net`). The browser caches the scripts (HTTP semantics; both have a default immutable-style cache); the second visit loads the CDN scripts from the cache. For air-gapped deployments, an operator can run a local CDN mirror and override the URLs via a future config knob (deferred — the URL constants live in `daemon/services/live_views.py` and are greppable).
+
+## 9. Public passcode lane (P2 of live-view-passcode, 2026-10-17)
+
+> **Pointer runbook only.** The full deployment note (State-A HTTPRoute diff + State-B code-seeded prefix-tag mechanism + the canonical-gate contract across the two-state migration) lands in P3 (`docs/runbooks/live-view-passcode.md` — to come) and the architecture-recommendation at `.agents/shared/planning/live-view-passcode/architecture-recommendation.md`. This section is the summary a daemon operator needs to recognize the lane + verify the gate + recover from a misconfig.
+
+### 9.1 What it is
+
+A second URL family `GET/HEAD/POST /views/public/<root>/<rel>` that serves the SAME artifact bytes as the direct lane, gated daemon-side by a per-view **6-character passcode** (Fernet-encrypted at rest, case-insensitive on entry, alphabet `23456789abcdefghjkmnpqrstuvwxyz` — 31 symbols, 31⁶ ≈ 29.7 bits of entropy) + a **durable 10-strike lock** (counter on the row, persist-until-regenerate, `view_link(refresh=True)` is the only recovery) + a **per-IP token-bucket rate limit** ahead of the strike counter (default 5 / 5-per-minute, operator-tunable via `ENSEMBLE_LIVE_VIEWS_VERIFY_RATE_LIMIT_*` env knobs) + a **stateless Fernet grant cookie** (`view_grant`, `Path` = the EXACT public view URL, `HttpOnly; Secure; SameSite=Lax; Max-Age=86400`) issued on successful verify and consumed by the gate on subsequent GETs. The form action is the same URL (same-URL POST — `ADR D6:78`); the customer enters the code on a zero-JS interstitial (CSP `default-src 'none'; script-src 'none'` + nosniff + no-store + no-referrer).
+
+The lane is the canonical gate in BOTH deployment states (architecture-recommendation.md §📌 DEPLOYMENT NOTE):
+
+* **State A (oauth2-proxy front door):** the operator adds ONE `PathPrefix /views/public` HTTPRoute rule ordered BEFORE the catch-all in `infrastructure/k8s/ensemble/httproute.yaml`, pointing at the existing `ensemble-live:9797` Service. The proxy is a pure passthrough for that prefix; oauth2-proxy never sees the passcode flow.
+* **State B (in-house OAuth2 module, oauth2-proxy retired):** the daemon-side `AuthMiddleware` keeps `/views/public/*` exempt via the **code-seeded PUBLIC prefix tag** — `tag_routes_by_path(app, path_prefix="/views/public")` is called at the `daemon/api.py` create_app registration site AFTER `include_router`. `auth.anonymous_view_paths` ships EMPTY and stays empty (the operator-knob path was REJECTED — `ADR D3:43-50`). No operator action required; no proxy coupling to unwind.
+
+The canonical gate is daemon-side in BOTH states. Proxies are pure passthrough.
+
+### 9.2 Operator smoke
+
+```bash
+# (a) the public lane is reachable without auth on the canonical host
+curl -i -o /dev/null -w '%{http_code}\n' https://ensemble.example.com/views/public/planning/ens/feat/plan.md
+# 200 = interstitial (no row minted yet — uniform 404 if the operator wants to refuse the probe)
+# 404 = not configured / no row minted / wrong host (the canonical-gate posture is fail-closed)
+
+# (b) the public asset alias works without a grant cookie
+curl -i -o /dev/null -w '%{http_code}\n' https://ensemble.example.com/views/public/assets/mermaid/mermaid.min.js
+# 200 = vendored bundle served gate-free (asset-header lockdown; ADR D11:130)
+
+# (c) the prefix tag exempts the lane from the in-house OAuth2 module (State-B only)
+#     verified by the auth middleware unit test (T2 — `tests/integration/test_auth_middleware_dispatch.py`
+#     extensions are P4's lane; for P2 the manager-side regression cage at `daemon/auth/route_meta.py:118-125`
+#     pins the over-broad exclusion — `T3` pin).
+```
+
+### 9.3 The five fields `view_link` returns
+
+P2 of `view_link` (architecture-recommendation.md D10):
+
+* **Public URL** — `/views/public/<root>/<rel>` (fully qualified when `live_views.external_base_url` is set). The URL the customer opens.
+* **Passcode** — the 6-character code (FROZEN alphabet; ALWAYS returned on every mint, including locked — the owner must see why `refresh=True` is needed).
+* **Authenticated URL** — the legacy `/views/<root>/<rel>` shape. Unchanged by this feature; preserved for behind-OAuth consumers.
+* **Generation** — the passcode row's generation counter; `refresh=True` bumps this and silently revokes ALL outstanding grant cookies.
+* **Locked** — `yes` iff the row is currently locked (10+ wrong verify attempts). The only recovery is `view_link(refresh=True)`.
+
+### 9.4 Reserved-root guard
+
+`public` is a **reserved root name** (architecture-recommendation.md D1:27 — three-layer guard: registry validator + service-side mirror + route-side mirror). A configured root literally named `public` refuses to boot with a clear actionable error pointing at the operator config. The router further collapses any `/views/<...>/{...}` request whose first segment is `public` to uniform 404, so a future config drift cannot route a public-lane URL through the direct lane.
+
+### 9.5 Migration / rotation coupling
+
+`SYSTEM_ENCRYPTION_KEY` rotation MUST re-encrypt `live_view_passcodes.wrapped_passcode` (the canonical rotation-coupling note — `.agents/shared/planning/agent-secrets/` + `daemon/services/view_passcode_service.py:52-78` docstring). A rotation that omits the live-view walk surfaces as `ViewPasscodeRotationRequired` on the next verify attempt; the customer sees the interstitial's generic error (NEVER a 500), and the owner must call `view_link(refresh=True)` to regenerate the passcode (which also silently revokes all outstanding grant cookies — the cookie invalidation is automatic on the next mint via the generation bump).
+
+### 9.6 Knobs (operator `config.yaml` / env)
+
+| Knob | Env var | Default | Meaning |
+|------|---------|---------|---------|
+| `verify_rate_limit_capacity` | `ENSEMBLE_LIVE_VIEWS_VERIFY_RATE_LIMIT_CAPACITY` | `5` | Per-IP token-bucket burst |
+| `verify_rate_limit_refill_per_minute` | `ENSEMBLE_LIVE_VIEWS_VERIFY_RATE_LIMIT_REFILL_PER_MINUTE` | `5` | Per-IP token-bucket refill |
+| `passcode_lockout_threshold` | `ENSEMBLE_LIVE_VIEWS_PASSCODE_LOCKOUT_THRESHOLD` | `10` | Consecutive wrong verifies → locked (today's P1 value is hard-coded; this knob wires the env path; P3 may consult) |
+| `passcode_grant_ttl_seconds` | `ENSEMBLE_LIVE_VIEWS_PASSCODE_GRANT_TTL_SECONDS` | `86400` | Grant cookie lifetime (~24h, matches oauth2-proxy's `--cookie-expire=24h` house precedent) |
+
+### 9.7 What's NOT in this runbook (out of scope for P2)
+
+- **State-A HTTPRoute exact YAML diff** — `.agents/shared/planning/live-view-passcode/state-a-proxy-apply.md` (canonical spec; the implementation lands in the data-center-scripts repo as a separate lane).
+- **Drills** (rotation ceremony, two-state migration, smoke matrix) — `docs/runbooks/live-views-drills.md` (P3 deliverable).
+- **Security-review pack** (threat model + governor sign-off) — `.agents/shared/planning/live-view-passcode/phase4-plan.md` deliverable (P4).
+- **Deployment-note doc** (operator-facing — the migration script + decision points) — P3 deliverable.
+
+See `.agents/shared/planning/live-view-passcode/architecture-recommendation.md` §📌 DEPLOYMENT NOTE for the exact contract that must hold across the two-state migration.
