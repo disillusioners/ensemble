@@ -32,15 +32,19 @@
 --     declared on the SecretAuditEvent SQLModel at
 --     ``daemon/repositories/secrets/models.py``; api.py lifespan
 --     create_all — the P1 secrets-table precedent).
---   * Existing PG databases: the runner-docstring contract states
---     every .sql adding schema elements for existing PG databases
---     MUST also extend ``_ensure_postgres_columns`` with an
---     idempotent (IF NOT EXISTS) statement. The P2 phase-0 gate
---     verified no such statement exists yet for ``secrets_audit``
---     — the column-ensure entry is the runner-contract obligation
---     recorded by that gate; until it lands, existing PG databases
---     keep the P1 column set (the column is additive; P1-era code
---     neither writes nor reads it).
+--   * Existing PG databases receive the column via the idempotent
+--     ``ALTER TABLE secrets_audit ADD COLUMN IF NOT EXISTS context
+--     TEXT`` entry in ``EnsembleManager._ensure_postgres_columns``
+--     (daemon/manager.py — added in this commission per the
+--     runner-docstring contract: every .sql adding schema elements
+--     for existing PG databases MUST extend that method). The P2
+--     phase-0 gate proved WHY the IF NOT EXISTS form is required
+--     there: the plain ADD COLUMN in THIS file is not
+--     self-idempotent on PG (42710 DuplicateColumn on re-run) —
+--     but boot never executes this file on PG (runner NO-OP), so
+--     PG-lane idempotency rides the manager entry, and SQLite-lane
+--     re-run safety rides the schema_migrations ledger plus the
+--     runner's duplicate-column catch.
 --
 --   * STATEMENT FORM — deliberately the PG+SQLite-portable plain
 --     ``ALTER TABLE ... ADD COLUMN``, NOT the ``ADD COLUMN IF NOT

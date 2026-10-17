@@ -58,6 +58,28 @@ from daemon.repositories.secrets.models import (  # noqa: F401
     SecretAuditEvent,
 )
 from daemon.migrations.models import SchemaMigration  # noqa: F401
+# The manager-__init__-body model set (manager.py:560-625): the
+# existing-PG leg executes the REAL ``_ensure_postgres_columns``
+# statements, several of which target these tables (drift_events
+# indexes, maintenance_runs probe, auth / mcp_kb_keys / snapshot
+# lanes) — production registers them in ``InstanceManager.__init__``
+# before ``create_all``; mirror that set here so create_all emits
+# the same tables a real boot sees.
+from daemon.repositories.snapshot.models import (  # noqa: F401
+    Snapshot,
+    SnapshotEmbedding,
+    SnapshotUsageCounter,
+)
+from daemon.repositories.maintenance_runs.models import MaintenanceRun  # noqa: F401
+from daemon.plugin_subsystem.drift_event_publisher import DriftEvent  # noqa: F401
+from daemon.repositories.auth_session.models import (  # noqa: F401
+    AuthBootstrapConsumption,
+    AuthSession,
+    AuthState,
+    BearerToken,
+)
+from daemon.repositories.mcp_kb_keys.models import McpKbKey  # noqa: F401
+from daemon.manager import InstanceManager  # existing-PG leg seam
 from daemon.migrations.runner import MigrationFile, MigrationRunner
 
 # The migration under test — repo-relative resolution (NEVER a
@@ -167,6 +189,65 @@ def _postgres_scratch_engine() -> Iterator[Engine]:
         )
         engine = create_engine(scratch_url, pool_pre_ping=True)
         SQLModel.metadata.create_all(engine)
+        yield engine
+    finally:
+        if engine is not None:
+            engine.dispose()
+        try:
+            with admin.connect() as conn:
+                conn.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM "
+                        "pg_stat_activity WHERE datname = :d "
+                        "AND pid <> pg_backend_pid()"
+                    ),
+                    {"d": scratch_db},
+                )
+                conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
+        finally:
+            admin.dispose()
+
+
+@pytest.fixture
+def _postgres_p1shape_scratch_engine() -> Iterator[Engine]:
+    """Fresh scratch PG simulating an EXISTING (P1-era) database.
+
+    Lifecycle mirrors ``_postgres_scratch_engine`` (create database →
+    create_all in boot order → yield → terminate backends → drop),
+    but AFTER create_all the P2 ``context`` column is REMOVED from
+    ``secrets_audit`` — the resulting shape is exactly what an
+    existing PG database holds after the P1 commission (table
+    present, no context column). Other tables keep their
+    current-model shapes: every ``_ensure_postgres_columns``
+    statement is ``IF NOT EXISTS`` / probe-gated, so it tolerates
+    both shapes and this simulation isolates the one column this
+    commission owns.
+    """
+    admin, skip_reason = _pg_admin_engine()
+    if admin is None:
+        pytest.skip(skip_reason)
+
+    scratch_db = f"{_PG_SCRATCH_PREFIX}{uuid.uuid4().hex[:8]}"
+    if scratch_db in _PG_FORBIDDEN_DBS or _PG_MAINT_DB in _PG_FORBIDDEN_DBS:
+        pytest.exit(
+            f"HARD ABORT: PG scratch fixture resolved a live-shaped "
+            f"database (scratch={scratch_db!r}, maint={_PG_MAINT_DB!r}) "
+            f"— refuse to point secrets tests at a live database.",
+            returncode=1,
+        )
+
+    engine: Engine | None = None
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
+        scratch_url = (
+            f"postgresql+psycopg://{_PG_USER}:{_PG_PASSWORD}"
+            f"@{_PG_HOST}:{_PG_PORT}/{scratch_db}"
+        )
+        engine = create_engine(scratch_url, pool_pre_ping=True)
+        SQLModel.metadata.create_all(engine)  # boot order: model parity first
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE secrets_audit DROP COLUMN context"))
         yield engine
     finally:
         if engine is not None:
@@ -383,3 +464,69 @@ def test_migration_file_idempotent_after_create_all(tmp_path):
         assert led == [("20261018_000001",)]
     finally:
         engine.dispose()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Existing-PG leg — R10 adjudication (2026-10-18): the
+# ``EnsembleManager._ensure_postgres_columns`` entry is the PG lane
+# that lands ``context`` on databases created BEFORE this commission.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _run_column_ensure(engine: Engine) -> None:
+    """Exercise the REAL ``EnsembleManager._ensure_postgres_columns`` body.
+
+    Bare-instance seam: ``__init__`` is skipped and only the two
+    attributes the method (and its callee
+    ``_migrate_overloaded_image_refs_rows``) read are supplied —
+    ``_engine`` and ``_ensemble_config``. ``_ensemble_config = None``
+    makes the config-gated image-refs migration and autovacuum tail
+    self-guard-skip; the statements list carrying the secrets_audit
+    entry runs UNCONDITIONALLY (manager.py: ``with self._engine.begin()
+    as conn: for stmt in statements``), exactly as on a real PG boot.
+    """
+    manager = object.__new__(InstanceManager)
+    manager._engine = engine  # noqa: SLF001 — deliberate test seam
+    manager._ensemble_config = None  # noqa: SLF001
+    manager._ensure_postgres_columns()
+
+
+@pytest.mark.integration
+def test_existing_pg_lands_context_via_column_ensure(
+    _postgres_p1shape_scratch_engine,
+):
+    """Existing-PG leg: column-ensure lands ``context``; re-run idempotent.
+
+    P1-era shape (table present, no context) → the REAL
+    ``_ensure_postgres_columns`` pass → column lands (TEXT, nullable)
+    → SECOND pass raises no 42710 ``DuplicateColumn`` (the IF NOT
+    EXISTS form — the phase-0 gate proved the plain form in the .sql
+    file is NOT self-idempotent on PG) and the column is unchanged.
+    """
+    engine = _postgres_p1shape_scratch_engine
+
+    # P1-era state: the fixture removed the column.
+    before = _audit_columns_pg(engine)
+    assert "context" not in before, (
+        f"fixture must present the P1-era shape (no context): {sorted(before)}"
+    )
+
+    # Mechanism: the REAL column-ensure pass (PG boot evolution path).
+    _run_column_ensure(engine)
+
+    landed = _audit_columns_pg(engine)
+    assert "context" in landed, (
+        f"column-ensure did not land context: {sorted(landed)}"
+    )
+    data_type, is_nullable = landed["context"]
+    assert data_type == "text", (
+        f"the IF NOT EXISTS entry must add TEXT, got {data_type!r}"
+    )
+    assert is_nullable == "YES", "context must stay nullable"
+
+    # Idempotent re-run: no 42710 DuplicateColumn; column unchanged.
+    _run_column_ensure(engine)
+    again = _audit_columns_pg(engine)
+    assert again["context"] == ("text", "YES"), (
+        f"re-run must leave the column intact: {again.get('context')!r}"
+    )
