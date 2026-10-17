@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added — live-view mermaid rendering + MD rich-content + responsive design (`feature/liveview-mermaid`, in-progress)
+---
 
-> **CHANGELOG (feature, in-progress):** *Live-view subsystem gains client-side mermaid rendering for ``.mmd`` / ``.mermaid`` files (case-insensitive) + ``mermaid`` fenced code blocks inside ``.md`` files; vendored ``mermaid.min.js`` 12.1.0 (the major that the charter lane's ``mmdc-v12`` renders with, so in-browser SVGs and charter-rendered PNGs agree on syntax + theme); responsive mobile-first CSS for both wrappers (fluid layout, scrollable diagram container, touch-friendly tap targets). Vendored asset serves from ``/views/assets/mermaid/mermaid.min.js`` (same /views auth/OAuth-proxy gate as the rest of the subsystem — no CDN). Standard MD set (headings, lists, code, links, images) unchanged; GFM tables work via the existing marked 12 ``gfm: true`` default. Per-file wrapper selection: ``.md`` files WITHOUT mermaid fences keep the pre-feature wrapper byte-identical; files WITH fences get the mermaid-aware variant.*
+## [0.20.4] — 2026-10-17
+
+### Added — live-view mermaid rendering + MD rich-content + responsive design (`feature/liveview-mermaid` @ `c37fbec7d`, merged to `latest` @ `dd1dd88dd`)
+
+> **CHANGELOG (feature release):** *Live-view subsystem gains client-side mermaid rendering for ``.mmd`` / ``.mermaid`` files (case-insensitive) + ``mermaid`` fenced code blocks inside ``.md`` files; vendored ``mermaid.min.js`` 12.1.0 (the major that the charter lane's ``mmdc-v12`` renders with, so in-browser SVGs and charter-rendered PNGs agree on syntax + theme); responsive mobile-first CSS for both wrappers (fluid layout, scrollable diagram container, touch-friendly tap targets). Vendored asset serves from ``/views/assets/mermaid/mermaid.min.js`` (same /views auth/OAuth-proxy gate as the rest of the subsystem — no CDN). Standard MD set (headings, lists, code, links, images) unchanged; GFM tables work via the existing marked 12 ``gfm: true`` default. Per-file wrapper selection: ``.md`` files WITHOUT mermaid fences keep the pre-feature wrapper byte-identical; files WITH fences get the mermaid-aware variant.*
 
 - **Vendored mermaid.js asset** (`mermaid.min.js` 12.1.0, IIFE bundle, ~5.24 MiB) at `daemon/services/live_views/assets/mermaid/mermaid.min.js` (sha256 `6484afc32872a3aa16cac9a76ba1816a1ed4cc870a6593cc2e17757750f518b2`, W3C SRI `sha256-ZISvwyhyo6oWysmna6GBah7UzIcKZZPMLhd1d1D1GLI=`). Provenance + per-byte verification documented in `daemon/services/live_views/assets/mermaid/PROVENANCE.md` and `SHA256SUMS`. Asset is re-verified on every request via `_verify_vendored_mermaid_sha256` — a corrupted/missing on-disk asset fails closed (HTTP 500 + operator log line).
 - **Vendored asset endpoint** at `/views/assets/mermaid/mermaid.min.js` (GET + HEAD). Mounted on the same `live_views` router as the rest of `/views/*` so it rides the same auth/OAuth-proxy gate. `Content-Type: application/javascript; charset=utf-8` + standard hardening headers (nosniff, cache-control).
@@ -22,6 +26,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ensemble.spec` datas entry** for the vendored asset — `('daemon/services/live_views/assets', 'daemon/services/live_views/assets')`. PyInstaller frozen-binary build verified the asset is present at `_MEIPASS/daemon/services/live_views/assets/mermaid/mermaid.min.js` with byte-identical SHA-256 to the source.
 - **Audit item: relative image refs in `.md`**: marked v12 does NOT resolve relative image refs to the `/views/<root>/<rel>` URL by default (the rendered `<img src="...">` carries the raw relative path). This is pre-feature behavior; the wrapper does not rewrite relative refs because that would require server-side parsing of the markdown to find image sources, and the file's container directory isn't a canonical URL anyway (the URL the wrapper was loaded from IS the canonical path). Report: relative-image-ref behavior unchanged from pre-feature; the same constraint applies to the markdown renderer generally and is out of scope here.
 - **Tests** (`tests/unit/routers/test_live_views_mermaid.py` 32 cases + 7 new mermaid-fence cases appended to `tests/unit/routers/test_live_views_markdown.py`): wrapper content-type/headers, vendored asset URL/SRI/HEAD/byte-identical, root-agnosticism across two registered roots, MD mermaid-fence (backtick + tilde) → vendored asset fetch + `mermaid.run`, MD without mermaid fences → byte-identical pre-feature wrapper, GFM tables alongside mermaid fences, malicious-payload escaping, viewport meta, extension-not-allowed uniform 404, asset endpoint `Content-Type: application/javascript`, all 343 pre-existing live_views tests pass byte-identical.
+
+### Added — image generation: `generate_image` native tool + `ens-img:image-gen` marker family + FE lightbox (merge @ `772ca92b9`)
+
+> **CHANGELOG (feature release):** *Native image generation ships as a first-class tool lane: `generate_image` (category `image-gen`) calls the llmproxy `/v1/image_generation` endpoint with purpose-bound `IMAGE_GEN_*` env knobs and fail-closed error envelopes; results persist into the `tmp_images` substrate and reach chat sources as native attachments via a generalized `ens-img` marker family (`<!-- ens-img:image-gen:<id> -->`), with a frontend scanner that inlines generated images in the chat transcript (comment-node AM11 pattern) behind a lightbox with text-fallback.*
+
+- **`generate_image` native tool** (`daemon/tools/image_gen.py`, `ad196b152`): category `image-gen`, purpose-bound env (`IMAGE_GEN_*` knobs documented in `.env.example`), fail-closed envelopes; tool-registry category wiring (`_tool_registry.py`).
+- **Marker-family generalization** (`daemon/sources/dispatcher.py`, `b1802fe07`): the chart-render marker mechanism generalized to a family — `ens-img:image-gen:<id>` extraction on both seams (chat dispatch + web/API), delete-after-delivery, web-leg resolution; dispatcher SHA baseline re-sealed (`9c7048401`).
+- **FE lightbox** (`ens-img-marker.ts` + `chat-interface.component.ts`, `1a1555b3c`): comment-node inline image scanner (AM11), lightbox viewer, graceful fallback.
+- **Agent surface** (`daa50ff76`): image-gen allowlist token + prompt-note sections across agent `meta.json`/`tools_note.md` + prompt-artifact baseline regen.
+- **Tests + review hardening**: 86-case unit pack (`c054946eb`); marker-family extraction tests; dispatcher integration harness (both seams, delete-after-delivery, web leg); lane A/B runner with 5-image budget; council review NEEDS-FIXES + frozen-tuple byte-compat pins; tester phase-4 certification (`8c54dae43`).
+
+### Added — Computer Use MCP built-in server + kill-switch gate + version-pin policy (merge @ `eb8a0db1b`, follow-up `b6d1d7a82`)
+
+> **CHANGELOG (feature release):** *Computer Use becomes a built-in MCP server (`daemon/mcp/builtin_servers/computer_use.py`) launched via pinned npx args, gated by a kill-switch check in `preload_mcp_tools` (closes the post-boot flip cold-spawn hole), with cross-platform operator docs. A `mcps-client remote-hands` design proposal lands as docs.*
+
+- **Built-in CU server** (`cdc9e8633`): builtin server + `tool_adapter`/`mcp_service`/`routers/mcp_servers` wiring + privilege-stamp fix + D7 test-connection guard.
+- **S1 kill-switch gate** (`5ab043122`): `preload_mcp_tools` gate — no cold-spawn after post-boot flips.
+- **S5 version-pin policy** (`3f3b1acf0`): D7 test-connection guard pin-matched via shared `CU_NPX_ARGS`; S2 docstring truth-fix (`is_available()` is a 3-gate AND).
+- **Docs + tests**: per-OS operator sections (`docs/mcp-computer-use-server.md`); `docs/mcps-client-remote-hands.md` proposal; tester verification cycle + TCC lessons (`8d293bd86`).
+
+### Fixed — maintenance UI vacuum-ungate: checkpoint-cleanup wizard Continue no longer blocked on zero-reclaimable dry run (fix @ `31bedca78`, certification @ `f2dd8965b`, merged @ `0972b4a31`)
+
+> **CHANGELOG (fix release):** *The maintenance console's checkpoint-cleanup wizard no longer blocks Continue at step 2 (dry-run review) when the dry run projects ZERO reclaimable bytes — zero-reclaimable is a legitimate projection and Continue proceeds. Certified by zero-reclaimable e2e legs (w8/w9) + a mixed-projection edge pin.*
+
+- **Ungate** (`31bedca78`): checkpoint-cleanup component — step-2 Continue enabled on a zero-reclaimable dry-run projection (component + spec).
+- **Certification** (`f2dd8965b`): zero-reclaimable e2e legs (w8/w9), mixed-projection edge pin, stale comment fix, results+packs ledger.
 
 ---
 
