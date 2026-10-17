@@ -245,8 +245,13 @@ def make_spawn_manager(
 
     Args:
         allowed_models: Whitelist applied to ``config.llm.allowed_models``.
-            Defaults to ``["agentic", "coding", "coding2"]`` — mirrors
-            the legacy default-unchanged test surface.
+            Defaults to the current ``_ALLOWED_MODELS_DEFAULT`` tuple from
+            ``daemon.config`` — kept by prose reference here rather than
+            spelled out as a literal so the helper stays in lockstep with
+            the production default. Pass an explicit list to exercise a
+            strict-when-set path (remember: explicit lists are respected
+            exactly, so callers overriding the default must include every
+            purpose-id they want to survive the spawn-override gate).
         spawn_result: The ``(instance_id, validated_model_override)``
             tuple the SYNC facade returns. Pin G / X use the
             default; Pin AA uses ``("new-spawn-instance-id", "agentic")``.
@@ -271,8 +276,17 @@ def make_spawn_manager(
         # "vision" rides the default allow-list because the factory's
         # compare_tools builder HARD-REQUIRES a 'vision' model
         # (VisionModelNotAllowedError, arch §8 — no silent default).
-        # Callers overriding allowed_models must include it too.
-        allowed_models = ["agentic", "coding", "coding2", "vision"]
+        # ``img-gen`` + ``decision`` ride the default too (purpose-id
+        # family; purpose-model-defaults 2026-10-17). Callers
+        # overriding allowed_models must include them too.
+        allowed_models = [
+            "agentic",
+            "coding",
+            "coding2",
+            "vision",
+            "img-gen",
+            "decision",
+        ]
 
     manager = MagicMock()
     manager.config = MagicMock()

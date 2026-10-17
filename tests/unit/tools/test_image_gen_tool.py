@@ -10,9 +10,11 @@ the MockTransport mock sits INSIDE the wrapper under test via the module's
 Coverage map (plan DoD item 1 + reviewer notes):
 
 1. Factory shape — single tool, category ``image-gen``, full doc attached.
-2. Env fail-closed — unset ``IMAGE_GEN_MODEL`` ⇒ ``Error:`` string with a
-   SINGLE-LINE ``image_gen_not_configured`` envelope and ZERO network
-   attempts (transport spy). Base/key fallbacks + timeout clamp.
+2. Env resolution + LIVE-by-default — unset ``IMAGE_GEN_MODEL`` falls
+   back to the ``IMAGE_GEN_DEFAULT_MODEL`` purpose-id (``"img-gen"``);
+   env-set value wins. Base/key unresolvable ⇒
+   ``image_gen_not_configured`` envelope (model never trips it).
+   Timeout clamp.
 3. Arg validation truth-tables — 1500-char cap, aspect/width-height mutex +
    pair-only + 512-2048÷8, n≤4, seed int64.
 4. Wire shape — POST ``<base>/image_generation``, request JSON, identity
@@ -46,6 +48,7 @@ import daemon.tools.image_gen as image_gen
 from daemon.tools.image_gen import (
     CATEGORY_NAME,
     DEFAULT_TIMEOUT_S,
+    IMAGE_GEN_DEFAULT_MODEL,
     MAX_IMAGE_BYTES,
     MAX_N,
     MAX_PROMPT_CHARS,
@@ -213,38 +216,111 @@ class TestFactoryShape:
         assert "generate_image" in image_gen.CATEGORY_DOC
 
 
-# ─── 2. Env resolution + fail-closed ───────────────────────────────────────────
+# ─── 2. Env resolution + LIVE-by-default model fallback ─────────────────────────
 
 
 class TestEnvResolution:
-    async def test_unset_model_fails_closed_zero_network(self, monkeypatch):
-        for key in ("IMAGE_GEN_MODEL", "IMAGE_GEN_BASE_URL", "IMAGE_GEN_API_KEY",
-                    "OPENAI_BASE_URL", "OPENAI_API_KEY"):
-            monkeypatch.delenv(key, raising=False)
-        calls: list[httpx.Request] = []
-        monkeypatch.setattr(
-            image_gen,
-            "_TRANSPORT_FACTORY",
-            lambda: httpx.MockTransport(lambda req: calls.append(req) or httpx.Response(200)),
-        )
-        (tool,) = create_image_gen_tools(manager=None, current_instance_id="x")
-        result = await tool.ainvoke({"prompt": "a red fox"})
-        assert result.startswith("Error:")
-        assert _err_code(result) == "image_gen_not_configured"
-        # Single-line envelope (AM9): no newline between "Error: " and the end.
-        assert "\n" not in result
-        assert calls == [], "fail-closed path must attempt ZERO network calls"
-
-    async def test_openai_fallbacks_used_when_knobs_unset(self, monkeypatch, store):
+    async def test_unset_model_falls_back_to_img_gen_purpose_id(self, monkeypatch, store):
+        """Unset ``IMAGE_GEN_MODEL`` ⇒ falls back to the
+        ``IMAGE_GEN_DEFAULT_MODEL`` purpose-id (``"img-gen"``) instead
+        of fail-closed. The tool is LIVE-by-default; the proxy resolves
+        purpose → real provider/model+credentials. Env value still wins
+        when set (other tests pin that). Base/key fallbacks used when
+        their dedicated env vars are unset.
+        """
         for key in ("IMAGE_GEN_MODEL", "IMAGE_GEN_BASE_URL", "IMAGE_GEN_API_KEY"):
             monkeypatch.delenv(key, raising=False)
-        monkeypatch.setenv("IMAGE_GEN_MODEL", "minimax-image-01")
         monkeypatch.setenv("OPENAI_BASE_URL", BASE)
         monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
         seen: dict = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["auth"] = request.headers.get("authorization")
+            seen["body"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(200, json=SUCCESS_BODY)
+
+        tool, _ = _wire(monkeypatch, handler, store)
+        monkeypatch.setattr(
+            image_gen, "_fetch_image_bytes", lambda url: _fake_fetch_ok(url)
+        )
+        result = await tool.ainvoke({"prompt": "a red fox"})
+        assert "image_gen_not_configured" not in result
+        # The model on the wire is the purpose-id "img-gen", not the
+        # main OPENAI_MODEL.
+        assert seen["body"]["model"] == IMAGE_GEN_DEFAULT_MODEL == "img-gen"
+        assert seen["auth"] == "Bearer openai-key"
+
+    def test_unset_model_pure_resolver_returns_default_model(self, monkeypatch):
+        """Pure resolver: unset ``IMAGE_GEN_MODEL`` ⇒ model ==
+        ``IMAGE_GEN_DEFAULT_MODEL`` (``"img-gen"``). The base/key path
+        is the only fail-closed lane now."""
+        monkeypatch.delenv("IMAGE_GEN_MODEL", raising=False)
+        monkeypatch.setenv("OPENAI_BASE_URL", BASE)
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        cfg, err = _resolve_env()
+        assert err is None
+        assert cfg["model"] == IMAGE_GEN_DEFAULT_MODEL == "img-gen"
+
+    def test_empty_string_model_falls_back_to_default(self, monkeypatch):
+        """Bare ``IMAGE_GEN_MODEL=""`` is treated as unset (matches
+        ``_clean_env_value`` semantics used by allowed_models)."""
+        monkeypatch.setenv("IMAGE_GEN_MODEL", "")
+        monkeypatch.setenv("OPENAI_BASE_URL", BASE)
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        cfg, err = _resolve_env()
+        assert err is None
+        assert cfg["model"] == IMAGE_GEN_DEFAULT_MODEL == "img-gen"
+
+    def test_whitespace_only_model_falls_back_to_default(self, monkeypatch):
+        """``IMAGE_GEN_MODEL="   "`` ⇒ unset ⇒ default purpose-id.
+        Defense against operator typos / stray paste whitespace."""
+        monkeypatch.setenv("IMAGE_GEN_MODEL", "   ")
+        monkeypatch.setenv("OPENAI_BASE_URL", BASE)
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        cfg, err = _resolve_env()
+        assert err is None
+        assert cfg["model"] == IMAGE_GEN_DEFAULT_MODEL == "img-gen"
+
+    def test_env_value_wins_over_default(self, monkeypatch):
+        """Env-set ``IMAGE_GEN_MODEL`` overrides the purpose-id
+        default — the same override-precedence contract as the
+        ``model_vision`` → ``"vision"`` family."""
+        monkeypatch.setenv("IMAGE_GEN_MODEL", "minimax-image-01")
+        monkeypatch.setenv("OPENAI_BASE_URL", BASE)
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        cfg, err = _resolve_env()
+        assert err is None
+        assert cfg["model"] == "minimax-image-01"
+
+    def test_whitespace_around_set_model_value_is_stripped(self, monkeypatch):
+        """``IMAGE_GEN_MODEL="  minimax-image-01  "`` is stripped on
+        resolve — env-set value still wins, ``err is None``. The
+        inverse direction (whitespace-only) falls back to default
+        (pinned by ``test_whitespace_only_model_falls_back_to_default``
+        above); this test pins the strip-on-set direction so operator
+        typos with stray paste whitespace do not silently flip the
+        tool back to the default purpose-id."""
+        monkeypatch.setenv("IMAGE_GEN_MODEL", "  minimax-image-01  ")
+        monkeypatch.setenv("OPENAI_BASE_URL", BASE)
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        cfg, err = _resolve_env()
+        assert err is None
+        assert cfg["model"] == "minimax-image-01"
+
+    async def test_openai_fallbacks_used_when_knobs_unset(self, monkeypatch, store):
+        """``IMAGE_GEN_BASE_URL`` / ``IMAGE_GEN_API_KEY`` fall back to
+        their ``OPENAI_*`` siblings. Combined with the unset
+        ``IMAGE_GEN_MODEL`` fallback, a fully-empty daemon
+        environment is LIVE-by-default."""
+        for key in ("IMAGE_GEN_MODEL", "IMAGE_GEN_BASE_URL", "IMAGE_GEN_API_KEY"):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("OPENAI_BASE_URL", BASE)
+        monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["auth"] = request.headers.get("authorization")
+            seen["body"] = json.loads(request.content.decode("utf-8"))
             return httpx.Response(200, json=SUCCESS_BODY)
 
         tool, _ = _wire(monkeypatch, handler, store)
@@ -254,20 +330,78 @@ class TestEnvResolution:
         result = await tool.ainvoke({"prompt": "a red fox"})
         assert seen["auth"] == "Bearer openai-key"
         assert "image_gen_not_configured" not in result
+        # Ambient OPENAI_MODEL must NOT be able to mask the purpose-id
+        # (re-pins the occ-3 wrong-model class prevention).
+        assert seen["body"]["model"] == IMAGE_GEN_DEFAULT_MODEL == "img-gen"
 
     def test_never_reads_openai_model(self, monkeypatch):
-        """Purpose-bound resolver (D4): OPENAI_MODEL must be irrelevant."""
-        monkeypatch.setenv("IMAGE_GEN_MODEL", "minimax-image-01")
+        """Purpose-bound resolver (D4): OPENAI_MODEL must be irrelevant
+        even when ``IMAGE_GEN_MODEL`` is unset (the default is the
+        ``"img-gen"`` purpose-id, never ``OPENAI_MODEL``)."""
+        monkeypatch.delenv("IMAGE_GEN_MODEL", raising=False)
         monkeypatch.setenv("OPENAI_MODEL", "agentic-should-be-ignored")
+        monkeypatch.setenv("OPENAI_BASE_URL", BASE)
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
         cfg, err = _resolve_env()
         assert err is None
-        assert cfg["model"] == "minimax-image-01"
+        assert cfg["model"] == IMAGE_GEN_DEFAULT_MODEL == "img-gen"
+        assert cfg["model"] != "agentic-should-be-ignored"
 
-    async def test_unresolvable_base_fails_closed(self, monkeypatch):
-        monkeypatch.delenv("IMAGE_GEN_BASE_URL", raising=False)
-        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-        monkeypatch.setenv("IMAGE_GEN_MODEL", "m")
+    @pytest.mark.parametrize("base_state", ["unset", "empty", "whitespace"])
+    async def test_unresolvable_base_fails_closed(self, monkeypatch, base_state):
+        """Base/key are the ONLY fail-closed path now. Model fallback
+        is LIVE-by-default; base/key unresolvable ⇒ envelope.
+
+        Three states of the failing knob are pinned here — UNSET, EMPTY
+        string, WHITESPACE-ONLY — so removing the ``.strip()`` logic
+        (or treating whitespace-only as set) turns these red. The
+        passing knob (api_key) is kept valid in every param case;
+        ``image_gen_not_configured`` is asserted each time.
+        """
+        if base_state == "unset":
+            monkeypatch.delenv("IMAGE_GEN_BASE_URL", raising=False)
+            monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        elif base_state == "empty":
+            monkeypatch.setenv("IMAGE_GEN_BASE_URL", "")
+            monkeypatch.setenv("OPENAI_BASE_URL", "")
+        else:  # whitespace
+            monkeypatch.setenv("IMAGE_GEN_BASE_URL", "   ")
+            monkeypatch.setenv("OPENAI_BASE_URL", "   ")
+        # Keep the api_key knob valid in every case so only the base
+        # arm can possibly fail-closed.
         monkeypatch.setenv("IMAGE_GEN_API_KEY", "k")
+        # IMAGE_GEN_MODEL unset ⇒ default purpose-id "img-gen" applies,
+        # but the missing base still trips image_gen_not_configured.
+        (tool,) = create_image_gen_tools(manager=None, current_instance_id="x")
+        result = await tool.ainvoke({"prompt": "x"})
+        assert _err_code(result) == "image_gen_not_configured"
+
+    @pytest.mark.parametrize("api_key_state", ["unset", "empty", "whitespace"])
+    async def test_unresolvable_api_key_fails_closed(self, monkeypatch, api_key_state):
+        """Mirror of ``test_unresolvable_base_fails_closed`` for the
+        api_key arm. Default ``IMAGE_GEN_DEFAULT_MODEL = "img-gen"``
+        (purpose-id family default) must NOT loosen the api_key gate.
+
+        Three states of the failing knob are pinned here — UNSET, EMPTY
+        string, WHITESPACE-ONLY — so removing the ``.strip()`` logic
+        (or treating whitespace-only as set) turns these red. The
+        passing knob (base URL) is kept valid in every param case;
+        ``image_gen_not_configured`` is asserted each time.
+        """
+        # Keep the base knob valid in every case so only the api_key
+        # arm can possibly fail-closed.
+        monkeypatch.setenv("IMAGE_GEN_BASE_URL", "http://dummy.local:1234")
+        if api_key_state == "unset":
+            monkeypatch.delenv("IMAGE_GEN_API_KEY", raising=False)
+            monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        elif api_key_state == "empty":
+            monkeypatch.setenv("IMAGE_GEN_API_KEY", "")
+            monkeypatch.setenv("OPENAI_API_KEY", "")
+        else:  # whitespace
+            monkeypatch.setenv("IMAGE_GEN_API_KEY", "   ")
+            monkeypatch.setenv("OPENAI_API_KEY", "   ")
+        # IMAGE_GEN_MODEL unset ⇒ default purpose-id "img-gen" applies,
+        # but the missing api key still trips image_gen_not_configured.
         (tool,) = create_image_gen_tools(manager=None, current_instance_id="x")
         result = await tool.ainvoke({"prompt": "x"})
         assert _err_code(result) == "image_gen_not_configured"

@@ -439,8 +439,15 @@ class LLMConfig(BaseSettings):
     # session-restore re-validation on a resumed checkpoint. Purpose-bound
     # models — ``model_title``, ``model_keywords`` (when set to a fixed
     # value like ``"quick"``), ``model_vision``, the compaction model,
-    # and the skill evolution model — NEVER consult this list; configure
-    # them independently via their own env vars / YAML keys.
+    # the skill evolution model, and the purpose-bound consumer default
+    # ``IMAGE_GEN_MODEL`` (default ``"img-gen"``,
+    # ``daemon/tools/image_gen.py``) — NEVER consult this list; configure
+    # them independently via their own env vars / YAML keys. The
+    # purpose-id literals (``img-gen``, ``decision``) DO appear in the
+    # shipped default below for spawn-time ``llm_model="img-gen"`` /
+    # ``llm_model="decision"`` override consistency (mirrors how
+    # ``vision`` is in the default for designer-agent vision-guard
+    # compatibility).
     #
     # Override via the env-var pair ``OPENAI_SELECTABLE_MODELS`` (primary)
     # / ``OPENAI_ALLOWED_MODELS`` (legacy alias). Precedence and the
@@ -453,14 +460,19 @@ class LLMConfig(BaseSettings):
     # The NoDecode annotation prevents pydantic-settings from auto-JSON-decoding
     # the value, so our field_validator can handle comma-separated input.
     #
-    # Shipped default (sel-default-20260927): ``("agentic", "coding",
-    # "coding2", "vision")`` — see ``_ALLOWED_MODELS_DEFAULT`` and the
+    # Shipped default (sel-default-20260927 + purpose-model-defaults
+    # 2026-10-17): ``("agentic", "coding", "coding2", "vision",
+    # "img-gen", "decision")`` — see ``_ALLOWED_MODELS_DEFAULT`` and the
     # YAML interpolation literal at ``config.yaml:87``. ``vision`` is in
     # the default so the designer-agent vision-guard resolves
     # daemon-wide without forcing every deployment to add it to
-    # ``OPENAI_SELECTABLE_MODELS`` explicitly. When neither env var is
-    # set, ``load_config`` emits a one-shot WARNING naming the default
-    # (see ``warn_default_allowed_models_applied``). The
+    # ``OPENAI_SELECTABLE_MODELS`` explicitly. ``img-gen`` joins as the
+    # default purpose-id for the image-generation tool
+    # (``daemon/tools/image_gen.py::IMAGE_GEN_DEFAULT_MODEL``);
+    # ``decision`` is reserved for the decision-purpose consumer
+    # family. When neither env var is set, ``load_config`` emits a
+    # one-shot WARNING naming the default (see
+    # ``warn_default_allowed_models_applied``). The
     # drift-detector pin test
     # (``TestDefaultConsistencyPin.test_yaml_literal_matches_constant``)
     # keeps the two homes of the default aligned.
@@ -477,9 +489,10 @@ class LLMConfig(BaseSettings):
             "unaffected. Resolved from OPENAI_SELECTABLE_MODELS with "
             "OPENAI_ALLOWED_MODELS as a legacy alias (warn-once when the "
             "legacy name is the effective source). Default: ``(\"agentic\", "
-            "\"coding\", \"coding2\", \"vision\")`` — single source of "
-            "truth is ``_ALLOWED_MODELS_DEFAULT``; YAML inlines the same "
-            "list at the interpolation site; tests pin the equality."
+            "\"coding\", \"coding2\", \"vision\", \"img-gen\", \"decision\")`` "
+            "— single source of truth is ``_ALLOWED_MODELS_DEFAULT``; "
+            "YAML inlines the same list at the interpolation site; tests "
+            "pin the equality."
         ),
     )
 
@@ -4186,7 +4199,8 @@ def warn_deprecated_allowed_models_env() -> None:
 # Documented default for ``allowed_models`` when neither env var is set.
 # SINGLE SOURCE OF TRUTH (sel-default-20260927): this tuple MUST match the
 # ``config.yaml`` interpolation literal
-# ``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision}`` EXACTLY.
+# ``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision,img-gen,decision}``
+# EXACTLY.
 # The drift-detector pin test in
 # ``tests/unit/test_llm_allowed_models_precedence.py``
 # (``TestDefaultConsistencyPin.test_yaml_literal_matches_constant``)
@@ -4211,6 +4225,16 @@ _ALLOWED_MODELS_DEFAULT: tuple[str, ...] = (
     "coding",
     "coding2",
     "vision",
+    # purpose-model-defaults commission (2026-10-17): join the
+    # established purpose-id family alongside agentic/coding/coding2/vision.
+    # ``img-gen`` is the default purpose-id for the image-generation tool
+    # (see ``daemon/tools/image_gen.py::IMAGE_GEN_DEFAULT_MODEL``);
+    # ``decision`` is reserved for the decision-purpose consumer family
+    # (no current consumer — added for spawn-time ``llm_model="decision"``
+    # override consistency, mirrors how ``vision`` is in the default for
+    # designer-agent vision-guard compatibility).
+    "img-gen",
+    "decision",
 )
 
 
@@ -4240,7 +4264,7 @@ def warn_default_allowed_models_applied() -> None:
 
     Decided by inspecting ``os.environ`` directly — NOT by inspecting
     the ``yaml_value`` the resolver receives, because the YAML
-    interpolation ``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision}``
+    interpolation ``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision,img-gen,decision}``
     inlines the default and is therefore indistinguishable from an
     operator hard-coded value at the resolver layer.
 
@@ -4271,10 +4295,12 @@ def warn_default_allowed_models_applied() -> None:
         "default is used because neither OPENAI_SELECTABLE_MODELS nor "
         "the legacy OPENAI_ALLOWED_MODELS env var is set. ``vision`` "
         "is included so the designer-agent vision-guard resolves "
-        "daemon-wide. Set OPENAI_SELECTABLE_MODELS to override this "
-        "list (comma-separated or JSON array). To silence this "
-        "WARNING, set the env var explicitly — even to your current "
-        "default value — and restart.",
+        "daemon-wide; ``img-gen`` is the default purpose-id for the "
+        "image-generation tool; ``decision`` is reserved for the "
+        "decision-purpose consumer family. Set OPENAI_SELECTABLE_MODELS "
+        "to override this list (comma-separated or JSON array). To "
+        "silence this WARNING, set the env var explicitly — even to "
+        "your current default value — and restart.",
         list(_ALLOWED_MODELS_DEFAULT),
     )
 
@@ -4345,12 +4371,12 @@ def _resolve_allowed_models(
          exactly once per process.
       3. ``yaml_value`` — the YAML-interpolated value. The shipped
          ``config.yaml`` now inlines the default in its interpolation
-         (``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision}``),
+         (``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision,img-gen,decision}``),
          so the YAML layer hands us either the new-var value or that
          default — not an empty string. The empty-string branch is
          retained as defense-in-depth for custom/programmatic yaml and
          direct resolver calls: we substitute the documented default
-         ``("agentic", "coding", "coding2", "vision")`` (single source of
+         ``("agentic", "coding", "coding2", "vision", "img-gen", "decision")`` (single source of
          truth: ``_ALLOWED_MODELS_DEFAULT``) so a no-env-var deployment
          matches the shipped YAML default. Non-empty values (e.g. an
          operator hard-coded the value in YAML bypassing the env vars)
@@ -5439,14 +5465,14 @@ def load_config(config_path: str | None = None) -> Config:
     # Resolve the OPENAI_SELECTABLE_MODELS / OPENAI_ALLOWED_MODELS
     # precedence chain for ``llm.allowed_models``. The shipped
     # config.yaml inlines the default in its interpolation
-    # (``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision}``),
+    # (``${OPENAI_SELECTABLE_MODELS:-agentic,coding,coding2,vision,img-gen,decision}``),
     # so the YAML layer hands us either the new-var value or that
     # default — not an empty string. We still need explicit precedence
     # here (and an os.environ check for the legacy name) so:
     #   * both vars set → new wins, no warning
     #   * only legacy set → legacy wins + one-shot warning
     #   * neither set → documented default
-    #     ("agentic","coding","coding2","vision") + one-shot
+    #     ("agentic","coding","coding2","vision","img-gen","decision") + one-shot
     #     default-applied WARNING naming the list
     # The "neither set" branch is defense-in-depth: it only fires when
     # a custom/programmatic yaml (or direct resolver call) presents

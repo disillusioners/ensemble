@@ -9,8 +9,8 @@ and ``daemon/config.py``):
      unset, used as the effective source AND the warn-once
      ``warn_deprecated_allowed_models_env`` is invoked.
   3. Neither env var set → documented default
-     ``("agentic", "coding", "coding2", "vision")`` AND the
-     warn-once ``warn_default_allowed_models_applied`` is invoked.
+     ``("agentic", "coding", "coding2", "vision", "img-gen", "decision")``
+     AND the warn-once ``warn_default_allowed_models_applied`` is invoked.
 
 Internal API (the pydantic field ``config.llm.allowed_models``) is
 unchanged — only the env-var-level aliasing changed. These tests verify
@@ -19,8 +19,10 @@ deterministic) and the warning-fires-exactly-once guard on
 ``warn_deprecated_allowed_models_env`` /
 ``warn_default_allowed_models_applied``.
 
-The fail-safe default (``agentic, coding, coding2, vision``) was set
-under the ``sel-default-20260927`` commission to align the constant in
+The fail-safe default
+(``agentic, coding, coding2, vision, img-gen, decision`` — extended
+by the purpose-model-defaults commission, 2026-10-17) was set under
+the ``sel-default-20260927`` commission to align the constant in
 ``daemon/config.py`` with the YAML interpolation literal in
 ``config.yaml`` (which had already inlined ``vision`` per the
 designer-agent P1-WP1 mission, but the constant drifted). The
@@ -133,9 +135,10 @@ class TestResolveAllowedModelsPure:
         """When neither env var is exported and an empty yaml value
         arrives (custom yaml or programmatic callers), the resolver
         substitutes the documented default
-        ``agentic,coding,coding2,vision`` so a no-env-var deployment
-        matches the shipped YAML default (``sel-default-20260927``).
-        The drift-detector pin test
+        ``agentic,coding,coding2,vision,img-gen,decision`` so a
+        no-env-var deployment matches the shipped YAML default
+        (``sel-default-20260927`` + ``purpose-model-defaults``
+        2026-10-17). The drift-detector pin test
         (``TestDefaultConsistencyPin``) guarantees the constant stays
         aligned with the YAML interpolation literal.
         """
@@ -147,7 +150,7 @@ class TestResolveAllowedModelsPure:
             old_var=None,
             on_legacy=lambda: None,
         )
-        assert result == "agentic,coding,coding2,vision"
+        assert result == "agentic,coding,coding2,vision,img-gen,decision"
 
     def test_yaml_passthrough_when_neither_set(self) -> None:
         """If the YAML layer somehow handed us a non-empty value
@@ -337,7 +340,8 @@ class TestLoadConfigAllowedModelsIntegration:
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """(c) Neither env var set → documented default
-        ``[agentic, coding, coding2, vision]`` (sel-default-20260927).
+        ``[agentic, coding, coding2, vision, img-gen, decision]``
+        (sel-default-20260927 + purpose-model-defaults @ c3fabc1d3).
         The shipped ``config.yaml`` inlines the same list at the
         interpolation site; the default-applied WARNING fires exactly
         once via the ``load_config`` wiring (caplog proof).
@@ -353,6 +357,8 @@ class TestLoadConfigAllowedModelsIntegration:
             "coding",
             "coding2",
             "vision",
+            "img-gen",
+            "decision",
         ]
         records = [r for r in caplog.records if r.levelno >= logging.WARNING]
         # The legacy deprecation warning says "OPENAI_ALLOWED_MODELS is
@@ -430,8 +436,10 @@ class TestEmptyStringResolverSemantics:
 
     def test_new_var_empty_string_treated_as_unset(self) -> None:
         """F2 core: ``OPENAI_SELECTABLE_MODELS=""`` must fall through
-        to the documented default (``agentic,coding,coding2,vision``,
-        sel-default-20260927) — NOT unrestricted (empty list).
+        to the documented default
+        (``agentic,coding,coding2,vision,img-gen,decision``,
+        sel-default-20260927 + purpose-model-defaults 2026-10-17) — NOT
+        unrestricted (empty list).
         Operator-facing: a bare ``KEY=`` line in ``.env`` must never
         silently produce unrestricted mode.
         """
@@ -443,7 +451,7 @@ class TestEmptyStringResolverSemantics:
             old_var=None,
             on_legacy=lambda: None,
         )
-        assert result == "agentic,coding,coding2,vision"
+        assert result == "agentic,coding,coding2,vision,img-gen,decision"
 
     def test_old_var_empty_string_treated_as_unset(self) -> None:
         """F3 core: ``OPENAI_ALLOWED_MODELS=""`` must NOT trigger the
@@ -463,7 +471,7 @@ class TestEmptyStringResolverSemantics:
             old_var="",
             on_legacy=on_legacy,
         )
-        assert result == "agentic,coding,coding2,vision"
+        assert result == "agentic,coding,coding2,vision,img-gen,decision"
         assert calls == []
 
     def test_new_var_empty_old_var_set_old_honored_with_callback(
@@ -509,7 +517,7 @@ class TestEmptyStringResolverSemantics:
             old_var="",
             on_legacy=on_legacy,
         )
-        assert result == "agentic,coding,coding2,vision"
+        assert result == "agentic,coding,coding2,vision,img-gen,decision"
         assert calls == []
 
     def test_whitespace_only_treated_as_unset(self) -> None:
@@ -526,7 +534,7 @@ class TestEmptyStringResolverSemantics:
             old_var="\t  ",
             on_legacy=lambda: None,
         )
-        assert result == "agentic,coding,coding2,vision"
+        assert result == "agentic,coding,coding2,vision,img-gen,decision"
 
 
 class TestEmptyStringWarnSemantics:
@@ -650,8 +658,10 @@ class TestEmptyStringEndToEnd:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """E2e (F2): ``OPENAI_SELECTABLE_MODELS=""`` falls through to
-        the documented default (``agentic,coding,coding2,vision``,
-        sel-default-20260927) — NOT unrestricted. The CSV/JSON
+        the documented default
+        (``agentic,coding,coding2,vision,img-gen,decision``,
+        sel-default-20260927 + purpose-model-defaults 2026-10-17) — NOT
+        unrestricted. The CSV/JSON
         validator downstream would otherwise turn ``""`` into ``[]``
         = unrestricted.
         """
@@ -665,6 +675,8 @@ class TestEmptyStringEndToEnd:
             "coding",
             "coding2",
             "vision",
+            "img-gen",
+            "decision",
         ]
 
     def test_old_var_empty_string_yields_default_no_warning_e2e(
@@ -687,6 +699,8 @@ class TestEmptyStringEndToEnd:
             "coding",
             "coding2",
             "vision",
+            "img-gen",
+            "decision",
         ]
         legacy_records = [
             r
@@ -784,6 +798,9 @@ class TestDefaultAppliedWarning:
         assert "coding2" in msg
         # Notes vision inclusion (operator-facing: vision-guard compat).
         assert "vision" in msg
+        # Notes img-gen + decision inclusion (purpose-model-defaults).
+        assert "img-gen" in msg
+        assert "decision" in msg
         # Points to the override escape hatch.
         assert "OPENAI_SELECTABLE_MODELS" in msg
 
@@ -940,6 +957,8 @@ class TestDefaultAppliedWarningLoadConfig:
             "coding",
             "coding2",
             "vision",
+            "img-gen",
+            "decision",
         ]
         default_records = [
             r
@@ -994,7 +1013,7 @@ class TestDefaultAppliedWarningLoadConfig:
         the spawn-time validation chain.
         """
         monkeypatch.setenv(
-            "OPENAI_SELECTABLE_MODELS", "agentic,coding,coding2,vision"
+            "OPENAI_SELECTABLE_MODELS", "agentic,coding,coding2,vision,img-gen,decision"
         )
         monkeypatch.delenv("OPENAI_ALLOWED_MODELS", raising=False)
 
@@ -1007,6 +1026,8 @@ class TestDefaultAppliedWarningLoadConfig:
             "coding",
             "coding2",
             "vision",
+            "img-gen",
+            "decision",
         ]
         # The default-applied WARNING must NOT fire when the env var
         # is set (regardless of whether vision is in the list).
