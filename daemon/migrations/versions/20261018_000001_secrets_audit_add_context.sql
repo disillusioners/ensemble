@@ -1,0 +1,70 @@
+-- Migration: secrets_audit.add_context (P2 — resolution/scrub context tag)
+-- Additive only; no DROP, no destructive ALTER. Rollback-safe.
+-- Created: 2026-10-18
+-- Phase: agent-secrets P2, phase 0+1 schema
+--   (design: .agents/shared/planning/agent-secrets/
+--    p2-architecture-recommendation.md §4 + §5).
+--
+-- Adds ONE nullable column to ``secrets_audit``:
+--
+--   * ``context TEXT NULL`` — P2 resolution/scrub context tag.
+--     Values ``'bash_env' | 'mcp_spawn' | 'tool_param' | 'scrub'``,
+--     NULL for P1-era rows. The value set is validated at the
+--     SERVICE boundary in a later P2 phase, NOT by a CHECK
+--     constraint — keeps future values additive without another
+--     migration (design §4).
+--
+-- P1 audit rows keep ``context IS NULL``; no backfill is needed
+-- (P1 emitters never wrote the tag). No new index: the composite
+-- ``idx_secrets_audit_secret_id_at`` on ``(secret_id, at)`` already
+-- covers the audit query path (design §5).
+--
+-- DUAL-DRIVER NOTES (mirrors
+-- ``20260905_000001_attestation_ledger_columns.sql``):
+--
+--   * This .sql is applied by MigrationRunner ONLY when the engine
+--     dialect is SQLite (``daemon/migrations/runner.py`` skips
+--     non-SQLite engines; PG schema evolution is handled by
+--     ``daemon/manager.py::_ensure_postgres_columns`` per the
+--     runner docstring contract at runner.py:708-726).
+--   * Fresh PG databases receive the column via
+--     ``SQLModel.metadata.create_all`` (the ``context`` field is
+--     declared on the SecretAuditEvent SQLModel at
+--     ``daemon/repositories/secrets/models.py``; api.py lifespan
+--     create_all — the P1 secrets-table precedent).
+--   * Existing PG databases: the runner-docstring contract states
+--     every .sql adding schema elements for existing PG databases
+--     MUST also extend ``_ensure_postgres_columns`` with an
+--     idempotent (IF NOT EXISTS) statement. The P2 phase-0 gate
+--     verified no such statement exists yet for ``secrets_audit``
+--     — the column-ensure entry is the runner-contract obligation
+--     recorded by that gate; until it lands, existing PG databases
+--     keep the P1 column set (the column is additive; P1-era code
+--     neither writes nor reads it).
+--
+--   * STATEMENT FORM — deliberately the PG+SQLite-portable plain
+--     ``ALTER TABLE ... ADD COLUMN``, NOT the ``ADD COLUMN IF NOT
+--     EXISTS`` variant sketched in design §5: the ``IF NOT EXISTS``
+--     form is PostgreSQL-only syntax — SQLite rejects it with a
+--     parse error ("near \"EXISTS\": syntax error", probed on
+--     SQLite 3.45.1) and the runner's idempotent-error catches do
+--     NOT match syntax errors, so the literal form would kill both
+--     fresh- and existing-SQLite boots (the breaker class of the
+--     known pre-existing ``20260714_000001`` defect — NOT reintroduced
+--     here). Re-run safety on SQLite comes from the schema_migrations
+--     ledger plus the runner's documented ``duplicate column name``
+--     idempotent catch (runner.py:568) for databases where
+--     ``create_all`` already emitted the column (fresh-SQLite boot
+--     order: create_all first, migration runner second).
+
+-- UP
+
+ALTER TABLE secrets_audit ADD COLUMN context TEXT;
+
+-- DOWN
+-- Additive-only migration (attestation-ledger precedent,
+-- 20260905_000001): the ``context`` column is retained on rollback
+-- — this file contains no destructive statements by design, so the
+-- stage.sh full-history destructive-DDL scan is unaffected. Older
+-- SQLite engines cannot remove columns anyway, and the column is
+-- inert for P1-era code paths.

@@ -296,6 +296,15 @@ class SecretAuditEvent(SQLModel, table=True):
             stores the string).
         actor: Agent id (Cardinal #2).
         at: ISO-8601 stamp.
+        context: P2 resolution/scrub context tag —
+            ``'bash_env' | 'mcp_spawn' | 'tool_param' | 'scrub'``,
+            NULL for P1-era rows. Nullable, no CHECK constraint:
+            the value set is validated at the service boundary
+            (a later P2 phase) so future values stay additive
+            (p2-architecture-recommendation §4). Declared LAST so
+            create_all column order matches the trailing
+            ``ADD COLUMN`` position on pre-existing databases
+            (migration 20261018_000001).
     """
 
     __tablename__ = "secrets_audit"
@@ -353,6 +362,24 @@ class SecretAuditEvent(SQLModel, table=True):
     at: str = Field(
         default_factory=_now_iso,
         description="ISO-8601 stamp of the audit event.",
+    )
+    context: Optional[str] = Field(
+        default=None,
+        description=(
+            "P2 resolution/scrub context tag — ``'bash_env' | "
+            "'mcp_spawn' | 'tool_param' | 'scrub'``, NULL for "
+            "P1-era rows. Nullable TEXT, NO CHECK constraint "
+            "and NO max_length (mirrors the ``public_material`` "
+            "TEXT-column precedent — unbounded on create_all so "
+            "fresh-PG matches the migration's ``ADD COLUMN ... "
+            "TEXT`` on existing databases): the value set is "
+            "validated at the service boundary in a later P2 "
+            "phase so future values stay additive "
+            "(p2-architecture-recommendation §4). Column landed "
+            "additively via migration 20261018_000001 on "
+            "existing databases; fresh databases get it from "
+            "create_all right here."
+        ),
     )
 
 
