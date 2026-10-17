@@ -667,75 +667,46 @@ class _SecretStorePort(Protocol):
     :class:`SecretService`; the interface is the future door
     for an alternative store.
 
-    The interface is intentionally narrow: four calls, all
-    sync, all returning frozen dataclasses. The P1
-    implementation backs onto ``secrets`` +
-    ``secrets_audit`` (the SQLModel tables). The store
-    functions NEVER touch the cipher or the marker scheme
-    — those are the service's job. Splitting store from
-    cipher is what makes the contract process-boundary-
-    clean: a future port-wrapping layer would replace
-    the store with a remote / Vault / OpenBao backend
-    without touching the cipher (or vice versa — a future
-    KMS-backed cipher would replace the cipher without
-    touching the store).
+    **Atomic-audit-in-port decision (plan §1.3; governor
+    pre-promote approval, 2026-10-17):** the store is
+    responsible for stamping the audit row alongside the
+    mutation in ONE ``engine.begin()`` transaction. The
+    earlier "thin-data-only" port was clean in principle
+    but left a crash window between the mutation's commit
+    and the audit row's commit (the M1 pre-promote
+    regression). Re-adding the audit-stamping
+    responsibility to the port — i.e. shipping the four
+    LIVE ``*_with_audit`` methods as the entire port
+    surface — closes the window by construction. A future
+    remote-store port (Vault / OpenBao / KMS-backed) MUST
+    replicate the atomic-audit emission; the contract is
+    documented at each method below.
 
-    The calls:
+    The four LIVE calls (all sync; all returning
+    ``Secret`` or ``None``):
 
-    * ``insert(secret)`` — INSERT a new row, RETURNING the
-      stored row. Raises on UNIQUE(name) collision. Single-
-      operation; the atomic create+audit variant lives at
-      :meth:`_SqlSecretStore.insert_with_audit`.
-    * ``get_by_id(id)`` — SELECT by id, including retired
-      rows. Returns ``None`` if missing.
-    * ``list_active()`` — SELECT all non-retired rows (used
-      by ``secrets.list``). Returns the public views only.
-    * ``mark_retired(id, at_iso)`` — UPDATE retired_at;
-      returns the updated row or ``None`` if not found.
-    * ``append_audit(action, secret_id, actor)`` — INSERT
-      an audit row in its OWN session. The service
-      boundary NEVER calls this for mutations — it uses
-      the ``*_with_audit`` atomic variants below so a
-      crash between the mutation and the audit row
-      cannot leave the registry without its audit trail
-      (M1 — governor pre-promote fix 2026-10-17).
-    * ``insert_with_audit(secret, action, actor)`` —
-      INSERT the secret row AND the audit row inside ONE
-      ``engine.begin()`` transaction (the M1 atomicity
-      contract; mirrors
-      ``daemon/repositories/prompt_version/repository.py``
-      ``create_initial_approved_v1`` / ``atomic_transition``
-      pattern). Raises ``IntegrityError`` on UNIQUE(name)
-      collision (caller translates to
+    * :meth:`insert_with_audit` — INSERT the secret row
+      AND the ``create`` audit row inside ONE
+      ``engine.begin()`` transaction. Raises
+      ``IntegrityError`` on UNIQUE(name) collision (caller
+      translates to
       :class:`SecretNameConflictError`).
-    * ``mark_retired_with_audit(id, at_iso, actor)`` —
-      UPDATE retired_at AND INSERT the audit row inside
-      ONE ``engine.begin()`` transaction. Returns the
-      updated row or ``None`` if not found.
-    * ``get_by_id_with_audit(id, actor)`` — SELECT the row
-      AND INSERT the ``read_public`` audit row inside ONE
-      ``engine.begin()`` transaction (M1 — audit row
-      shares the transaction with the read). Returns the
-      row or ``None``.
-
-    The ``callable`` annotation on the constructor's
-    ``engine_factory`` is a hint that the port takes a
-    callable returning an engine, NOT a connection
-    directly — the SQLAlchemy backend opens its own
-    short-lived sessions per call (the prompt_version
-    repository pattern).
+    * :meth:`mark_retired_with_audit` — UPDATE
+      ``retired_at`` AND INSERT the ``retire`` audit row
+      inside ONE ``engine.begin()`` transaction. Returns
+      ``None`` for an unknown id (the v1 contract does NOT
+      audit NOT-found reads; mirrors the read path).
+    * :meth:`get_by_id_with_audit` — SELECT the row AND
+      INSERT the ``read_public`` audit row inside ONE
+      ``engine.begin()`` transaction (audit row only
+      written for hits; the v1 contract audits successful
+      reads only).
+    * :meth:`list_active` — SELECT all non-retired rows
+      (used by ``secrets.list``). Returns the public views
+      only; does NOT audit (the list path is metadata-only
+      and P1 does not emit a ``list`` audit row).
     """
 
-    def insert(self, secret: Secret) -> Secret: ...
-    def get_by_id(self, id: str) -> Optional[Secret]: ...
-    def list_active(self) -> list[Secret]: ...
-    def mark_retired(self, id: str, at_iso: str) -> Optional[Secret]: ...
-    def append_audit(
-        self,
-        action: str,
-        secret_id: Optional[str],
-        actor: str,
-    ) -> None: ...
     def insert_with_audit(
         self,
         secret: Secret,
@@ -755,6 +726,7 @@ class _SecretStorePort(Protocol):
         *,
         actor: str,
     ) -> Optional[Secret]: ...
+    def list_active(self) -> list[Secret]: ...
 
 
 class _SqlSecretStore:
@@ -764,13 +736,14 @@ class _SqlSecretStore:
     besides the engine. All methods are sync; callers
     bridge via ``asyncio.to_thread`` (the pattern from
     prompt_version/repository.py). Per-method short-lived
-    ``Session`` — every public method opens its own
-    session and commits; no instance state.
+    connection — every public method opens its own
+    ``engine.begin()`` block and commits; no instance
+    state.
 
     M1 (governor pre-promote fix, 2026-10-17): the three
-    P1 audit-emitting actions (create, retire, read_public)
-    flow through the ``*_with_audit`` variants which wrap
-    the mutation AND the audit row in ONE
+    mutation-path methods (``insert_with_audit``,
+    ``mark_retired_with_audit``, ``get_by_id_with_audit``)
+    pair the SQL mutation AND the audit row in ONE
     ``engine.begin()`` transaction. The earlier
     session-per-call layout left a crash window between
     the mutation's commit and the audit row's commit —
@@ -780,87 +753,25 @@ class _SqlSecretStore:
     The atomic variants mirror the
     ``daemon/repositories/prompt_version/repository.py``
     pattern (``atomic_transition`` + ``_append_audit_in_conn``).
+
+    The store surface mirrors the
+    :class:`_SecretStorePort` Protocol — see that
+    docstring for the contract.
+
+    Earlier non-atomic helpers (``insert``, ``get_by_id``,
+    ``mark_retired``, ``append_audit``) were removed in
+    the tidier pass — re-add at P2 need if a separate
+    audit emission path becomes real. P1 only has the
+    atomic ``*_with_audit`` family.
     """
 
     def __init__(self, engine: Any) -> None:
         self._engine = engine
 
-    def insert(self, secret: Secret) -> Secret:
-        with Session(self._engine) as session:
-            session.add(secret)
-            session.commit()
-            session.refresh(secret)
-            return secret
-
-    def get_by_id(self, id: str) -> Optional[Secret]:
-        with Session(self._engine) as session:
-            stmt = select(Secret).where(Secret.id == id)
-            row = session.exec(stmt).first()
-            return row
-
     def list_active(self) -> list[Secret]:
         with Session(self._engine) as session:
             stmt = select(Secret).where(Secret.retired_at.is_(None))
             return list(session.exec(stmt).all())
-
-    def mark_retired(
-        self, id: str, at_iso: str
-    ) -> Optional[Secret]:
-        with Session(self._engine) as session:
-            stmt = select(Secret).where(Secret.id == id)
-            row = session.exec(stmt).first()
-            if row is None:
-                return None
-            # The model carries a frozen ``retired_at`` column;
-            # SQLAlchemy tracks the assignment, no need for a
-            # separate UPDATE.
-            row.retired_at = at_iso
-            session.add(row)
-            session.commit()
-            session.refresh(row)
-            return row
-
-    def append_audit(
-        self,
-        action: str,
-        secret_id: Optional[str],
-        actor: str,
-    ) -> None:
-        """Insert a single audit row in its OWN session.
-
-        Action validation is the service boundary's job;
-        the store is a dumb writer. Mirrors the
-        ``_assert_kind`` guard on ``SecretService`` — the
-        ``_SecretStorePort`` Protocol docstring at :559-562
-        names ``SECRET_AUDIT_ACTIONS`` as the canonical
-        validator set; the constants are imported at :83-84.
-
-        M1 contract (governor pre-promote fix, 2026-10-17):
-        this method is NOT called by the P1 mutation paths
-        — they use ``insert_with_audit`` /
-        ``mark_retired_with_audit`` /
-        ``get_by_id_with_audit`` (single ``engine.begin()``
-        per action). It is retained for the standalone
-        audit append path (the future P2 marker-resolver
-        audit row, which audits a ``use_marker`` action
-        without an accompanying ``secrets`` mutation). For
-        ANY audit row that pairs with a mutation, use the
-        ``*_with_audit`` variant — a crash between a
-        mutation's commit and this method's commit is the
-        regression M1 closes.
-        """
-        if action not in SECRET_AUDIT_ACTIONS:
-            raise ValueError(
-                f"action {action!r} not in SECRET_AUDIT_ACTIONS"
-            )
-        with Session(self._engine) as session:
-            event = SecretAuditEvent(
-                action=action,
-                secret_id=secret_id,
-                actor=actor,
-            )
-            session.add(event)
-            session.commit()
 
     # ─────────────────────────────────────────────────────
     # M1 atomic variants — mutation + audit row inside ONE
