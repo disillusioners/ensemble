@@ -45,7 +45,9 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Iterator
 
 import pytest
@@ -587,6 +589,101 @@ class TestV1BasicFlowPG:
             f"{len(secrets_rows)}"
         )
 
+    def test_concurrent_mint_same_name_atomic_unique(
+        self, service_pg: SecretService, pg_engine: Engine
+    ) -> None:
+        """B-2 governor pre-promote fix (2026-10-17,
+        final-pre-merge round). N=8 threads race to
+        create a secret with the SAME
+        ``name="concurrent-mint-race"`` via
+        ``generate_api_token``. The M1 atomicity
+        contract + the ``uq_secrets_name`` UNIQUE
+        constraint must together produce exactly one
+        success and seven typed
+        ``SecretNameConflictError`` outcomes — ZERO
+        raw ``sqlalchemy.exc.IntegrityError`` leaks
+        past the service boundary (the PB-F1 typed
+        envelope must hold under race).
+        A ``threading.Barrier(N)`` synchronizes the
+        start so all N threads enter the service call
+        as close to simultaneously as the OS scheduler
+        allows, maximizing the race window.
+        """
+        N = 8
+        race_name = "concurrent-mint-race"
+        barrier = threading.Barrier(N)
+        outcomes: list[tuple[str, str]] = []
+        outcomes_lock = threading.Lock()
+
+        def race_one() -> None:
+            barrier.wait()
+            try:
+                result = service_pg.generate_api_token(
+                    name=race_name,
+                    length=32,
+                    actor="worker",
+                )
+                outcome: tuple[str, str] = ("ok", result["id"])
+            except SecretNameConflictError as exc:
+                outcome = ("conflict", str(exc))
+            # Any untyped leak is captured explicitly so
+            # the post-condition can pin the envelope.
+            except Exception as exc:  # noqa: BLE001
+                outcome = (
+                    "leak",
+                    f"{type(exc).__name__}: {exc}",
+                )
+            with outcomes_lock:
+                outcomes.append(outcome)
+
+        with ThreadPoolExecutor(max_workers=N) as pool:
+            futures = [
+                pool.submit(race_one) for _ in range(N)
+            ]
+            for f in futures:
+                f.result()
+
+        ok_count = sum(1 for o in outcomes if o[0] == "ok")
+        conflict_count = sum(
+            1 for o in outcomes if o[0] == "conflict"
+        )
+        leak_count = sum(
+            1 for o in outcomes if o[0] == "leak"
+        )
+        assert ok_count == 1, (
+            f"expected exactly 1 success; got {ok_count}; "
+            f"outcomes={outcomes!r}"
+        )
+        assert conflict_count == N - 1, (
+            f"expected exactly {N - 1} typed conflicts; "
+            f"got {conflict_count}; outcomes={outcomes!r}"
+        )
+        assert leak_count == 0, (
+            f"untyped exception(s) leaked past service "
+            f"boundary: "
+            f"{[o for o in outcomes if o[0] == 'leak']!r}"
+        )
+        # Final state: 1 secret row, 1 audit row.
+        winner_id = next(o[1] for o in outcomes if o[0] == "ok")
+        with _session(pg_engine) as session:
+            secrets_rows = session.exec(
+                select(Secret).where(Secret.name == race_name)
+            ).all()
+            audit_rows = session.exec(
+                select(SecretAuditEvent).where(
+                    SecretAuditEvent.action == "create",
+                    SecretAuditEvent.secret_id == winner_id,
+                )
+            ).all()
+        assert len(secrets_rows) == 1, (
+            f"final secrets row count for {race_name!r}: "
+            f"got {len(secrets_rows)}"
+        )
+        assert len(audit_rows) == 1, (
+            f"final audit row count for winner "
+            f"{winner_id!r}: got {len(audit_rows)}"
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Phase 1 v1 basic flow — SQLite leg (portability sanity check)
@@ -680,6 +777,29 @@ class TestRealManagerNoKeyBootTolerance:
         from daemon.manager import InstanceManager
 
         monkeypatch.delenv(SecretCipher.KEY_ENV, raising=False)
+        # F-1: ``create_postgres_engine`` at
+        # ``daemon/repositories/factory.py:256-260``
+        # reads POSTGRES_* ambient env OVER the passed
+        # ``EnsembleConfig`` — a bare pytest run with
+        # ambient LIVE POSTGRES_* would point the REAL
+        # manager engine at live ensemble_prod and run
+        # ``create_all`` + ``_ensure_postgres_columns()``
+        # DDL against it. The fence MUST live in the test
+        # itself (not the invoker's env -u) — it scrubs
+        # ambient POSTGRES_* BEFORE ``EnsembleConfig``
+        # construction so any ambient env leak is
+        # impossible to leak past. ``DATABASE_URL`` /
+        # ``DATABASE_URL_POSTGRES`` are NOT read by the
+        # builder (the inline URL overrides), so no
+        # scrub needed there.
+        for _var in (
+            "POSTGRES_HOST",
+            "POSTGRES_PORT",
+            "POSTGRES_DB",
+            "POSTGRES_USER",
+            "POSTGRES_PASSWORD",
+        ):
+            monkeypatch.delenv(_var, raising=False)
         # Fence every fence-shaped path before construction
         # (data dir, MCP, etc.).
         cfg = Config()
@@ -703,6 +823,27 @@ class TestRealManagerNoKeyBootTolerance:
         )
         manager = InstanceManager(
             config=cfg, ensemble_config=ec
+        )
+        # F-1 part 2: hard assert the manager's resolved
+        # PG database equals the scratch fixture name. If
+        # the F-1 fence ever breaks, the manager engine
+        # will silently point at ambient env (live prod
+        # on a bare pytest run) — this assert is the
+        # load-bearing tripwire.
+        manager_engine = getattr(manager, "_engine", None)
+        assert manager_engine is not None, (
+            "InstanceManager._engine not set post-construction; "
+            "expected at daemon/manager.py:567"
+        )
+        assert (
+            manager_engine.url.database
+            == pg_engine.url.database
+        ), (
+            f"F-1 fence broken: manager PG DB "
+            f"{manager_engine.url.database!r} != scratch "
+            f"fixture DB {pg_engine.url.database!r}; "
+            f"ambient POSTGRES_* leaked past the test-internal "
+            f"monkeypatch.delenv cluster"
         )
         try:
             svc = manager._secret_service

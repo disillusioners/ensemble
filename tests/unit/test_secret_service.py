@@ -456,6 +456,49 @@ class TestApiTokenPreview:
                 name="bad-len", length=-1, actor="worker"
             )
 
+    def test_api_token_length_above_cap_rejected(
+        self, service: SecretService
+    ) -> None:
+        """B-1 governor pre-promote fix (2026-10-17,
+        final-pre-merge round). The CWE-770
+        resource-exhaustion cap
+        (``SecretService.MAX_API_TOKEN_LENGTH_BYTES = 256``)
+        is enforced at the service boundary — every
+        length > 256 raises ``SecretValidationError``,
+        the typed envelope. The boundary value 256
+        itself SUCCEEDS (length-equal-to-cap is in
+        range, only length-greater-than-cap is out of
+        range). The 256-success result keeps the
+        ``token_preview`` at 4 chars and the FROZEN
+        ``__ENS_SECRET__<id>__`` marker shape.
+        """
+        # Above the cap: every one of these MUST be
+        # rejected with the typed envelope (NOT a raw
+        # ValueError, NOT a silent pass-through).
+        for over_length in (257, 512, 1024):
+            with pytest.raises(SecretValidationError):
+                service.generate_api_token(
+                    name=f"cap-over-{over_length}",
+                    length=over_length,
+                    actor="worker",
+                )
+        # At the cap: succeeds; token_preview is the
+        # last 4 chars; marker fullmatches the FROZEN
+        # regex.
+        at_cap = service.generate_api_token(
+            name="cap-at-256", length=256, actor="worker"
+        )
+        assert len(at_cap["token_preview"]) == 4, (
+            f"256-cap token preview drift: "
+            f"len={len(at_cap['token_preview'])}"
+        )
+        assert (
+            ENS_SECRET_MARKER_RE_COMPILED.fullmatch(
+                at_cap["marker"]
+            )
+            is not None
+        ), f"marker {at_cap['marker']!r} did not fullmatch"
+
     def test_api_token_length_below_preview_floor_rejected(
         self, service: SecretService
     ) -> None:
@@ -519,6 +562,33 @@ class TestApiTokenPreview:
         for bad_length in (1, 2, 3):
             with pytest.raises(ValueError):
                 generate_api_token_material(length=bad_length)
+
+    def test_generate_api_token_material_rejects_length_above_cap(
+        self, fernet_key: str
+    ) -> None:
+        """B-1 governor pre-promote fix (2026-10-17,
+        final-pre-merge round) — helper-layer mirror.
+        Defense-in-depth: the public helper
+        ``generate_api_token_material`` ALSO refuses
+        lengths above the 256-byte cap. The helper
+        raises ``ValueError`` (NOT
+        ``SecretValidationError``) since the caller
+        may bypass the service boundary — same error
+        type the :504-521 NF-1 pattern uses, so a
+        single ``except (ValueError,)`` clause
+        covers both bounds.
+        """
+        # The flat import mirrors the existing pattern
+        # at the top of this test file — the helper is
+        # module-public.
+        from daemon.services.secret_service import (
+            generate_api_token_material,
+        )
+        for over_length in (257, 512, 1024):
+            with pytest.raises(ValueError):
+                generate_api_token_material(
+                    length=over_length
+                )
 
 
 # ─────────────────────────────────────────────────────────────────────
