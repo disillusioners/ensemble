@@ -144,13 +144,20 @@ class Secret(SQLModel, table=True):
 
     __tablename__ = "secrets"
     __table_args__ = (
-        # UNIQUE(name) is declared at the column level (Field
-        # constraint) — the constraint name is auto-derived to
-        # ``name`` on SQLite, which is the name the migration
-        # carries inline. We re-declare it here with an explicit
-        # name for parity with the model's __table_args__ pattern
-        # (and to ensure PG ``create_all`` produces the same
-        # constraint name across the two drivers).
+        # UNIQUE(name) is the AUTHORITATIVE constraint — the
+        # named UniqueConstraint below carries the same name
+        # the SQLite migration declares, so the model's
+        # ``create_all`` (PG path) and the migration's
+        # inline ``UNIQUE`` (SQLite path) agree on
+        # ``uq_secrets_name`` (parity-record contract).
+        # Defining BOTH this named UniqueConstraint AND
+        # ``Field(unique=True)`` on the column would create
+        # TWO UNIQUE constraints on PG ``create_all`` (an
+        # auto-named inline UNIQUE + this named one) — the
+        # F15 precedent at
+        # ``daemon/repositories/project/models.py:334-340``
+        # removed the same dual emission. Keep this comment
+        # in lockstep with the model's name field.
         UniqueConstraint("name", name="uq_secrets_name"),
         # Active-registry partial index — covers the
         # ``list_active(kind=X)`` query path the P1
@@ -182,11 +189,23 @@ class Secret(SQLModel, table=True):
     )
     name: str = Field(
         max_length=256,
-        unique=True,
+        # UNIQUE(name) is declared via the named
+        # ``UniqueConstraint`` in ``__table_args__``
+        # (the authoritative source) — NOT via
+        # ``Field(unique=True)``. Adding ``unique=True``
+        # here would mint a SECOND, auto-named UNIQUE
+        # constraint on PG ``create_all`` (F15 dual-
+        # emission regression — see the F15 precedent
+        # at ``daemon/repositories/project/models.py:
+        # 334-340``; same fix applied in the tidier pass
+        # #2 here). The named constraint alone is the
+        # parity-record contract with the migration.
         description=(
-            "Human-readable label; UNIQUE within the system. "
-            "Re-storing on the same name is an error at the "
-            "service boundary (the trust ruling has no "
+            "Human-readable label; UNIQUE within the system "
+            "(the canonical UNIQUE constraint lives in the "
+            "named UniqueConstraint above). Re-storing on "
+            "the same name is an error at the service "
+            "boundary (the trust ruling has no "
             "human-in-loop, so silent rename is the wrong "
             "default)."
         ),
