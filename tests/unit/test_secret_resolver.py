@@ -296,6 +296,60 @@ class TestResolveMarkerSingleValue:
         assert excinfo.value.surface == "tool_param"
         assert excinfo.value.secret_id == malformed
 
+    def test_resolve_marker_malformed_raw_payload_never_in_envelope(
+        self, service: SecretService
+    ) -> None:
+        """P2 review advisory pin: even when the malformed
+        marker SHAPE happens to embed an obvious plaintext
+        payload (the kind a future operator might mistake
+        for a stored secret ID), that payload MUST appear
+        NOWHERE in ``str(exc)`` or ``repr(exc)`` — the
+        resolver wrapper leaks at most the code prefix
+        ``"secret resolution failed: secret_marker_malformed"``.
+        The raw payload IS stored on ``self.secret_id`` for
+        operator diagnostics; it is NOT crossed onto the
+        envelope surface.
+
+        Today this contract is enforced structurally (the
+        ``SecretMarkerResolutionError.__init__`` passes a
+        hardcoded message to ``super().__init__`` and never
+        includes ``secret_id`` in any serialized form). The
+        pin locks that invariant — a future refactor that
+        interpolates ``secret_id`` into the message string
+        trips it."""
+        plaintext_payload = "my-real-secret-key"
+        malformed_with_payload = (
+            f"{ENS_SECRET_MARKER_PREFIX}{plaintext_payload}__"
+        )
+        with pytest.raises(SecretMarkerResolutionError) as excinfo:
+            resolve_marker(
+                malformed_with_payload,
+                secret_service=service, actor="worker",
+            )
+        # The hardcoded envelope phrasing is the ONLY
+        # serialized shape — secret_id is operator-diagnostics
+        # only (see SecretMarkerResolutionError docstring).
+        assert str(excinfo.value) == (
+            "secret resolution failed: secret_marker_malformed"
+        ), (
+            "str(exc) drifted from the hardcoded envelope "
+            "template — secret_id may have leaked into the "
+            f"message: {str(excinfo.value)!r}"
+        )
+        # The plaintext payload is held on the attribute for
+        # postmortem use; it MUST NOT cross the envelope
+        # boundary via ``str`` or ``repr``.
+        for rendered in (str(excinfo.value), repr(excinfo.value)):
+            assert plaintext_payload not in rendered, (
+                f"plaintext payload leaked into envelope "
+                f"rendering ({rendered!r}) — secret_id may "
+                "have been serialized"
+            )
+        # Defense-in-depth: the attribute-level payload is
+        # preserved (operator diagnostics work), even though
+        # the envelope rendering hides it.
+        assert excinfo.value.secret_id == malformed_with_payload
+
     def test_resolve_marker_no_secret_service_raises_unconfigured(
         self, service: SecretService
     ) -> None:
@@ -568,12 +622,27 @@ class TestResolveSecretMarkersDict:
             # never resolves — short-circuit on first error.
             "ALSO_GOOD": minted["marker"],
         }
+        # R1 failure-path pin (P2 review advisory): snapshot
+        # the caller's env BEFORE invoking the resolver; the
+        # seam is contracted to never mutate the input dict,
+        # even on the failure path (mirror of the success-path
+        # pin at :478-480).
+        env_snapshot = dict(env)
         with pytest.raises(SecretMarkerResolutionError) as excinfo:
             resolve_secret_markers(
                 env, secret_service=service, actor="worker",
             )
         assert excinfo.value.code == SECRET_CODE_MARKER_MALFORMED
         assert excinfo.value.surface == "bash.env"
+        # R1 failure-path pin (P2 review advisory): the seam
+        # does NOT mutate-or-partial-decode the caller's env
+        # on the way to raising — mirror of the success-path
+        # pin at :478-480. Snapshot is taken BEFORE the
+        # resolver is invoked.
+        assert env == env_snapshot, (
+            f"resolver mutated caller's env on the failure "
+            f"path: was {env_snapshot!r}, now {env!r}"
+        )
 
     def test_resolve_secret_markers_default_surface_is_bash_env(
         self,

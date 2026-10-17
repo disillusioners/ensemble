@@ -113,7 +113,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from sqlalchemy import text as sql_text
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlmodel import Session, SQLModel, and_, select
 
 from daemon.repositories.secrets.models import (
@@ -1869,17 +1869,30 @@ class SecretService:
                         _plaintext_str = (
                             plaintext_bytes.decode("utf-8")
                         )
-        except OperationalError as exc:
-            # DB unavailable / flapping (design §3.2). One-
-            # shot fail-closed: NO retry at this layer —
-            # retry belongs to the agent loop. The audit
-            # row never committed (the transaction was
-            # rolled back by the OperationalError); that's
-            # acceptable — the design's "use_marker on
-            # success AND rejection" rule applies to
-            # resolution-time failures, not to
-            # DB-completely-down conditions where we
+        except DBAPIError as exc:
+            # DB unavailable / flapping (design §3.2) is
+            # broader than ``OperationalError`` alone — sibling
+            # DBAPIError subclasses (``InterfaceError`` for
+            # connection-level dropouts, ``DatabaseError`` for
+            # driver-side faults) land here too. One-shot
+            # fail-closed: NO retry at this layer — retry
+            # belongs to the agent loop. The audit row never
+            # committed (the transaction was rolled back by
+            # the DBAPIError); that's acceptable — the
+            # design's "use_marker on success AND rejection"
+            # rule applies to resolution-time failures, not
+            # to DB-completely-down conditions where we
             # cannot write anything.
+            #
+            # ``IntegrityError`` is a ``DBAPIError`` subclass
+            # but a PROGRAMMER-error class (UNIQUE collision /
+            # FK violation / NOT NULL etc.) — NOT a "DB
+            # unavailable" condition. Re-raise so the envelope
+            # contract does NOT paper over real bugs; the
+            # typed envelope is reserved for genuine flapping
+            # / down conditions.
+            if isinstance(exc, IntegrityError):
+                raise
             raise SecretMarkerResolutionError(
                 secret_id=secret_id,
                 code=SECRET_CODE_STORE_UNAVAILABLE,
@@ -2055,6 +2068,19 @@ class SecretMarkerResolutionError(RuntimeError):
       stamped by the resolver wrapper from the seam caller
       so the seam can format the JSON envelope without
       re-deriving the surface.
+
+    ``secret_id`` is **operator-diagnostics only**. It is held
+    on the instance attribute (``self.secret_id``) so a
+    postmortem operator can correlate the failure with the
+    stored row, but it MUST NEVER be serialized into any
+    envelope, log line, or ``str(exc)`` / ``repr(exc)`` form
+    that crosses an agent / tool / consumer boundary. The
+    ``secret_id`` field that does cross the boundary lives on
+    the JSON envelope and is structurally shaped by the seam
+    as a separate column / key, not derived from this
+    attribute — the convention is enforced by the
+    ``test_resolve_marker_malformed_raw_payload_never_in_envelope``
+    pin in :mod:`tests.unit.test_secret_resolver`.
 
     Anti-differential message phrasing (design §3.3):
     ``str(exc)`` is the literal ``"secret resolution failed:

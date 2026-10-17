@@ -2140,6 +2140,67 @@ class TestResolveMarker:
                 sqlite_engine, "before_cursor_execute", _fail_select
             )
 
+    def test_resolve_marker_interface_error_raises_store_unavailable(
+        self,
+        sqlite_engine: Engine,
+        fernet_key: str,
+    ) -> None:
+        """P2 review advisory pin: SQLAlchemy ``InterfaceError``
+        (a ``DBAPIError`` subclass — NOT ``OperationalError``)
+        on the SELECT still maps to the typed
+        ``secret_resolver_store_unavailable`` envelope at the
+        service boundary. The Phase 0+1 envelope covered
+        ``OperationalError`` only; the broadened
+        ``DBAPIError`` catch in :mod:`daemon.services.secret_service`
+        picks up driver-side / connection-level dropouts
+        siblings the original catch missed. ``IntegrityError``
+        (programmer-error class) MUST still propagate
+        untranslated — verified at the docstring / code level."""
+        from sqlalchemy.exc import InterfaceError
+
+        minted = SecretService(
+            engine=sqlite_engine,
+            cipher=SecretCipher(encryption_key=fernet_key),
+        ).store(
+            name="iface-down", kind="generic",
+            value="x", actor="worker",
+        )
+        fail_count = {"n": 0}
+
+        @sa_event.listens_for(sqlite_engine, "before_cursor_execute")
+        def _fail_select(
+            conn, cursor, statement, parameters, context, executemany
+        ):
+            normalized = " ".join(statement.lower().split())
+            if (
+                "select" in normalized
+                and "from secrets" in normalized
+                and fail_count["n"] == 0
+            ):
+                fail_count["n"] += 1
+                raise InterfaceError(
+                    "injected interface error", None, None
+                )
+
+        try:
+            svc = SecretService(
+                engine=sqlite_engine,
+                cipher=SecretCipher(encryption_key=fernet_key),
+            )
+            with pytest.raises(SecretMarkerResolutionError) as excinfo:
+                svc.resolve_marker(
+                    actor="worker", secret_id=minted["id"],
+                    context="tool_param",
+                )
+            assert excinfo.value.code == SECRET_CODE_STORE_UNAVAILABLE
+            assert excinfo.value.surface == "tool_param"
+            # Typed envelope — NOT a raw InterfaceError escape.
+            assert not isinstance(excinfo.value, InterfaceError)
+        finally:
+            sa_event.remove(
+                sqlite_engine, "before_cursor_execute", _fail_select
+            )
+
     def test_resolve_marker_rejects_invalid_context(
         self, service: SecretService
     ) -> None:
@@ -2331,6 +2392,51 @@ class TestResolveMarker:
             value = getattr(excinfo.value, attr)
             if isinstance(value, str):
                 assert "DO-NOT-LEAK-MARKER" not in value
+
+    def test_resolve_marker_kms_shaped_value_passes_through_untouched(
+        self, service: SecretService
+    ) -> None:
+        """P2 review advisory pin (service-layer KMS-lane
+        negative): a stored PLAINTEXT whose VALUE happens to
+        LOOK like a KMS-Lite marker (``__KMS_REF__KMS_HANDLE_...__``
+        or ``__KMS_ENV__...__``) MUST come back byte-exact from
+        ``resolve_marker``. The secret-service resolve path
+        does NOT re-enter the secret marker resolver NOR
+        any KMS interpolation logic. Defense-in-depth against
+        a future refactor that inlines one resolver into the
+        other — today the do-not-touch lanes (kms_lite,
+        kms_resolver, ens_env_tools, warmup_pool) are kept
+        byte-clean, but a round-trip pin locks the contract
+        at the service surface where the inlining risk lives.
+
+        Uses the existing ``service`` fixture only — no new
+        fixtures (Finding 5 review note: skip if fixtures
+        beyond the existing file's style are required)."""
+        # Realistic KMS-Lite marker SHAPES. The handle form
+        # carries a UUID4 placeholder; the env-ref form
+        # carries a variable name. Neither is anything the
+        # secret-resolver should ever substitute against.
+        kms_ref_value = "__KMS_REF__KMS_HANDLE_0123456789abcdef01234567__"
+        kms_env_value = "__KMS_ENV__OPENAI_API_KEY__"
+        stored_ref = service.store(
+            name="kms-ref-shape", kind="generic",
+            value=kms_ref_value, actor="worker",
+        )
+        stored_env = service.store(
+            name="kms-env-shape", kind="generic",
+            value=kms_env_value, actor="worker",
+        )
+        # Resolved plaintext is byte-exact with the stored
+        # value: no marker substitution, no env-var lookup,
+        # no KMS resolution (those run elsewhere, never here).
+        assert service.resolve_marker(
+            actor="worker", secret_id=stored_ref["id"],
+            context="tool_param",
+        ) == kms_ref_value
+        assert service.resolve_marker(
+            actor="worker", secret_id=stored_env["id"],
+            context="tool_param",
+        ) == kms_env_value
 
     def test_secret_retired_constant_present_but_resolver_never_emits(
         self, service: SecretService
