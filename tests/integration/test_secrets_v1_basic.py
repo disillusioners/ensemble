@@ -41,6 +41,7 @@ boots. The PG path is the integration target.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -62,6 +63,7 @@ from daemon.repositories.secrets.models import (  # noqa: F401
 from daemon.services.secret_service import (
     ENS_SECRET_MARKER_RE_COMPILED,
     SecretCipher,
+    SecretCipherUnavailable,
     SecretNameConflictError,
     SecretService,
 )
@@ -624,6 +626,114 @@ class TestV1BasicFlowSQLitePortability:
             assert b"BEGIN OPENSSH PRIVATE KEY" not in blob
             assert b"PRIVATE KEY" not in blob
             assert b"wrapped_secret" not in blob
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Real-manager-seam boot-tolerance pin
+# (closes the seam-mirror flag the unit-side pins carry —
+# tests/unit/test_secret_service.py:892-1039 mirrors the
+# manager's wiring without running the manager)
+# ─────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.integration
+class TestRealManagerNoKeyBootTolerance:
+    """Real ``InstanceManager.__init__`` construction with
+    ``SYSTEM_ENCRYPTION_KEY`` unset on the scratch PG.
+
+    Closes the seam-mirror gap the unit-class
+    ``TestManagerNoKeyBootTolerance`` owns: its 4 pins
+    mirror the manager's wiring line at
+    ``daemon/manager.py:1268`` without running it (the
+    original docstring explicitly defers a heavy boot
+    smoke). This integration pin runs the real
+    ``InstanceManager`` against the scratch PG fixture
+    and asserts the ``_secret_service`` wiring survives
+    the no-key path end-to-end.
+
+    Why the real manager (not a stitched SecretService):
+    the wiring happens AT construction time inside the
+    manager (the unconditional
+    ``self._secret_service = SecretService(engine=...)``
+    line). A direct ``SecretService(...)`` test cannot
+    regress the manager's wiring — only the real
+    construction can.
+    """
+
+    def test_real_manager_construction_with_no_key_succeeds(
+        self,
+        pg_engine: Engine,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        """Real ``InstanceManager`` boots without
+        ``SYSTEM_ENCRYPTION_KEY``; ``_secret_service``
+        is wired (not None), ``is_available`` is False,
+        and ``generate_api_token`` raises
+        ``SecretCipherUnavailable`` (M2 fix — class-name-
+        only, fail-CLOSED)."""
+        from daemon.config import Config
+        from daemon.ensemble_config import (
+            EnsembleConfig,
+            PostgresConfig,
+        )
+        from daemon.manager import InstanceManager
+
+        monkeypatch.delenv(SecretCipher.KEY_ENV, raising=False)
+        # Fence every fence-shaped path before construction
+        # (data dir, MCP, etc.).
+        cfg = Config()
+        cfg.compaction.enabled = False  # skip LLM-aware compactor
+        cfg.persistence.db_path = str(
+            tmp_path / "instances.db"
+        )
+        # Point at the scratch PG the fixture already
+        # created (same creds; ``EnsembleConfig`` triggers
+        # ``create_postgres_engine`` which builds its OWN
+        # independent engine pointing at the same DB).
+        ec = EnsembleConfig(
+            database="postgres",
+            postgres=PostgresConfig(
+                host=_PG_HOST,
+                port=_PG_PORT,
+                db=pg_engine.url.database,
+                user=_PG_USER,
+                password=_PG_PASSWORD,
+            ),
+        )
+        manager = InstanceManager(
+            config=cfg, ensemble_config=ec
+        )
+        try:
+            svc = manager._secret_service
+            assert svc is not None, (
+                "_secret_service must be wired "
+                "unconditionally at "
+                "daemon/manager.py:1268; a None here "
+                "breaks every manager caller."
+            )
+            assert type(svc).__name__ == "SecretService"
+            assert svc.is_available is False
+            with pytest.raises(SecretCipherUnavailable):
+                svc.generate_api_token(
+                    name="probe-real-no-key",
+                    length=32,
+                    actor="probe",
+                )
+            # The cipher seam itself must also raise the
+            # same typed error (defense-in-depth — the
+            # service's ``_wrap_required`` delegates to
+            # the cipher's ``wrap``).
+            with pytest.raises(SecretCipherUnavailable):
+                svc._cipher.wrap(b"any-bytes")
+        finally:
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(
+                    manager.shutdown(grace_period=2.0)
+                )
+            finally:
+                loop.close()
 
 
 # ─────────────────────────────────────────────────────────────────────
