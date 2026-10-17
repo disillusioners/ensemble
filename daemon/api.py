@@ -772,22 +772,30 @@ async def lifespan(app: FastAPI):
     Secret.metadata.create_all(manager.engine)
     SecretAuditEvent.metadata.create_all(manager.engine)
 
-    # agent-secrets P1 — wire the SecretService onto the
-    # manager (the ``SkillStoreService`` /
-    # ``PromptVersionService``-style manager-owned pattern
-    # at ``manager.py:1171-1204``). The service composes
-    # the colocated ``SecretCipher`` (Fernet via
-    # ``SYSTEM_ENCRYPTION_KEY`` — the same env the existing
-    # ``daemon/sources/credentials.py`` +
+    # agent-secrets P1 — ``SecretService`` is constructed in
+    # ``InstanceManager.__init__`` alongside
+    # ``_prompt_version_service`` /
+    # ``_custom_agent_lifecycle_service`` (the
+    # ``SkillStoreService``-style manager-owned pattern at
+    # ``manager.py:1185-1195, 1241-1255``) so direct
+    # constructors (CLI tools, ad-hoc tests) get a working
+    # service without this lifespan having to run. The
+    # ``secrets`` + ``secrets_audit`` ``create_all`` calls
+    # above stay here because the Secret / SecretAuditEvent
+    # model modules are imported only at lifespan time
+    # (mirrors the PromptVersion / CustomAgentConfig
+    # precedent — models reach ``SQLModel.metadata`` here).
+    # The service composes the colocated ``SecretCipher``
+    # (Fernet via ``SYSTEM_ENCRYPTION_KEY`` — the same env
+    # the existing ``daemon/sources/credentials.py`` +
     # ``daemon/services/kms_lite.py`` paths consume) +
     # the SQLAlchemy-backed port implementation
     # (``_SqlSecretStore``). The tools dereference
     # ``manager._secret_service`` at call time
-    # (``daemon/tools/secrets_tools.py``); the wiring here
-    # makes the ``secrets`` category operational for the
-    # day-one allow-list (worker / tester / leader / ari).
-    from daemon.services.secret_service import SecretService
-    manager._secret_service = SecretService(engine=manager.engine)
+    # (``daemon/tools/secrets_tools.py``); the manager
+    # ``__init__`` wiring makes the ``secrets`` category
+    # operational for the day-one allow-list (worker /
+    # tester / leader / ari).
 
     # User Directive #5B (2026-10-14, RESOLUTION-CORE) —
     # ``prompt_template_baselines`` is the third table in the

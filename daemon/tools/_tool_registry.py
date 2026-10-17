@@ -120,9 +120,10 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # agent-secrets P1 tools (2026-10-17, plan f11965039) — created
     # by create_secret_tools() factory
     # (daemon/tools/secrets_tools.py). Six factory-built tools behind
-    # the ``secrets`` privileged category (#6 in
+    # the ``secrets`` privileged category (#7 in
     # ``PRIVILEGED_TOOL_CATEGORIES`` — sextet → septet per the
-    # Q1/Q2/Q3 rulings). Day-one allow-list is ``worker`` /
+    # Q1/Q2/Q3 rulings; ``cu`` joined 2026-10-16 before this
+    # entry). Day-one allow-list is ``worker`` /
     # ``tester`` / ``leader`` / ``ari``; agents outside that list
     # get ZERO of these tools through both the
     # ``_strip_privileged_category_tools`` default-deny strip
@@ -263,10 +264,11 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # it is in the privileged set).
     "cu",
     # agent-secrets P1 (2026-10-17, plan f11965039): ``secrets`` is
-    # the encrypted-secret-store tool category (#6 in
-    # PRIVILEGED_TOOL_CATEGORIES — quintet → sextet per the
-    # Q1/Q2/Q3 user rulings 2026-10-17). The category owns six
-    # factory-built tools (``secret_generate_ssh_keypair`` /
+    # the encrypted-secret-store tool category (#7 in
+    # PRIVILEGED_TOOL_CATEGORIES — sextet → septet per the
+    # Q1/Q2/Q3 user rulings 2026-10-17; ``cu`` joined 2026-10-16
+    # making the count 6 before this entry). The category owns
+    # six factory-built tools (``secret_generate_ssh_keypair`` /
     # ``secret_generate_api_token`` / ``secret_store`` /
     # ``secret_list`` / ``secret_read_public`` / ``secret_retire``)
     # that operate on the Fernet-encrypted ``secrets`` +
@@ -797,8 +799,9 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # ``secrets_audit`` PG tables via the in-process
     # ``SecretService`` (colocated ``SecretCipher`` reads
     # ``SYSTEM_ENCRYPTION_KEY`` at construction time). The
-    # category is entry #6 in ``PRIVILEGED_TOOL_CATEGORIES``
-    # (quintet → sextet); opt-in only via
+    # category is entry #7 in ``PRIVILEGED_TOOL_CATEGORIES``
+    # (sextet → septet; ``cu`` joined 2026-10-16 before this
+    # entry); opt-in only via
     # ``tools.allow: ["secrets"]`` on the day-one allow-list
     # (Q2 ruling: ``worker``, ``tester``, ``leader``,
     # ``ari``). See ``daemon/tools/secrets_tools.py`` for the

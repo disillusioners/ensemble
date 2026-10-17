@@ -1,8 +1,9 @@
 """``secrets`` tool category — Phase 1 of agent-secrets (plan f11965039).
 
 Phase 1 ships six tools behind the new ``secrets`` privileged
-category (#6 in ``PRIVILEGED_TOOL_CATEGORIES`` — quintet →
-sextet per the Q1/Q2/Q3 decisions 2026-10-17). The category
+category (#7 in ``PRIVILEGED_TOOL_CATEGORIES`` — sextet →
+septet per the Q1/Q2/Q3 decisions 2026-10-17; ``cu`` joined
+2026-10-16 making the count 6 before this entry). The category
 is opt-in-only via the per-agent ``tools.allow`` gate; the
 service itself is unconditional (the trust ruling — plan
 §1.2 — has no human-in-loop, so a holding-pause path is the
@@ -59,7 +60,8 @@ ens_env_tools pattern):
    ``daemon/tools/instance.py`` — see the ens-env comment
    block at :6080-6098.
 4. ``PRIVILEGED_TOOL_CATEGORIES`` includes ``"secrets"`` as
-   entry #6 (quintet → sextet; same-PR triple-pin updates
+   entry #7 (sextet → septet; ``cu`` joined 2026-10-16
+   before this entry; same-PR triple-pin updates
    per the A14 / D18 SAME-PR rule).
 
 Plus the ``KNOWN_TOOL_NAMES`` entry for the frozen-binary
@@ -132,8 +134,9 @@ SSH keypairs, API tokens, and arbitrary wrap-on-store values.
   public key for keypair rows; null for token / generic).
 - `secret_retire` — soft-retire a row.
 
-Visibility: the ``secrets`` category is privileged (entry #6 in
-``PRIVILEGED_TOOL_CATEGORIES``). The day-one allow-list is
+Visibility: the ``secrets`` category is privileged (entry #7 in
+``PRIVILEGED_TOOL_CATEGORIES``; ``cu`` joined 2026-10-16
+before this entry). The day-one allow-list is
 ``worker``, ``tester``, ``leader``, ``ari`` — all other agents
 get ZERO of these tools through the standard
 ``_strip_privileged_category_tools`` default-deny seam.
@@ -533,8 +536,9 @@ SHA256 fingerprint (the same shape ``ssh-keygen -lf`` prints);
 ``marker`` is the P1 mint-form reference (FROZEN 2026-10-17,
 Q3 ruling).
 
-Visibility: the ``secrets`` category is privileged (#6 in
-``PRIVILEGED_TOOL_CATEGORIES``). The day-one allow-list is
+Visibility: the ``secrets`` category is privileged (#7 in
+``PRIVILEGED_TOOL_CATEGORIES``; ``cu`` joined 2026-10-16
+before this entry). The day-one allow-list is
 ``worker``, ``tester``, ``leader``, ``ari`` — agents without
 ``secrets`` in their ``tools.allow`` get ZERO of these tools.
 

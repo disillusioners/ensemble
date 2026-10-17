@@ -1,10 +1,12 @@
 """``SecretService`` — Phase 1 of agent-secrets (plan f11965039).
 
 Phase 1 ships the durable Fernet-encrypted secret store + the
-``secrets`` tool category (#6 in ``PRIVILEGED_TOOL_CATEGORIES``,
-quintet → sextet per the Q1/Q2/Q3 decisions 2026-10-17). Phase 2 will
-add the marker resolver and the consumption seams (bash ``env``
-overlay, MCP spawn, tool params, exact-match transcript scrub).
+``secrets`` tool category (#7 in ``PRIVILEGED_TOOL_CATEGORIES``,
+sextet → septet per the Q1/Q2/Q3 decisions 2026-10-17; ``cu``
+joined 2026-10-16 making the count 6 before this entry). Phase 2
+will add the marker resolver and the consumption seams (bash
+``env`` overlay, MCP spawn, tool params, exact-match transcript
+scrub).
 
 This module exposes:
 
@@ -637,7 +639,15 @@ class _SqlSecretStore:
         actor: str,
     ) -> None:
         # Action validation is the service boundary's job; the
-        # store is a dumb writer.
+        # store is a dumb writer. Mirrors the ``_assert_kind``
+        # guard on ``SecretService`` — the
+        # ``_SecretStorePort`` Protocol docstring at :559-562
+        # names ``SECRET_AUDIT_ACTIONS`` as the canonical
+        # validator set; the constants are imported at :83-84.
+        if action not in SECRET_AUDIT_ACTIONS:
+            raise ValueError(
+                f"action {action!r} not in SECRET_AUDIT_ACTIONS"
+            )
         with Session(self._engine) as session:
             event = SecretAuditEvent(
                 action=action,
