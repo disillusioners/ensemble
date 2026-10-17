@@ -340,6 +340,22 @@ class TestEnvResolution:
         result = await tool.ainvoke({"prompt": "x"})
         assert _err_code(result) == "image_gen_not_configured"
 
+    async def test_unresolvable_api_key_fails_closed(self, monkeypatch):
+        """Mirror of ``test_unresolvable_base_fails_closed`` for the
+        api_key arm. Default ``IMAGE_GEN_DEFAULT_MODEL = "img-gen"``
+        (purpose-id family default) must NOT loosen the api_key gate."""
+        # Provide a base URL so the base-arm of the check passes — only
+        # the key arm should fail-closed.
+        monkeypatch.setenv("IMAGE_GEN_BASE_URL", "http://dummy.local:1234")
+        # Both api keys explicitly absent.
+        monkeypatch.delenv("IMAGE_GEN_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        # IMAGE_GEN_MODEL unset ⇒ default purpose-id "img-gen" applies,
+        # but the missing api key still trips image_gen_not_configured.
+        (tool,) = create_image_gen_tools(manager=None, current_instance_id="x")
+        result = await tool.ainvoke({"prompt": "x"})
+        assert _err_code(result) == "image_gen_not_configured"
+
     def test_timeout_clamp_truth_table(self, monkeypatch):
         monkeypatch.delenv("IMAGE_GEN_TIMEOUT_S", raising=False)
         assert _clamp_timeout(None) == DEFAULT_TIMEOUT_S == 240
