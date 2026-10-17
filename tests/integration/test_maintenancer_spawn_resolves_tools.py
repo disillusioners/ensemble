@@ -295,7 +295,7 @@ class TestPrivilegedCategoryRegistryShape:
     override note) — R-SR16 silent additions are visible by pin;
     this is pin file 3 of 3 per the A14 triple-pin discovery."""
 
-    def test_privileged_categories_contains_six_entries(self) -> None:
+    def test_privileged_categories_contains_seven_entries(self) -> None:
         # W4 (leader decision 2026-10-02): the set was a quartet —
         # ``ens-env`` joined (key-returning tool, explicit opt-in
         # only). REWORK 2026-10-07 (M1) added ``view-views`` (the
@@ -305,9 +305,16 @@ class TestPrivilegedCategoryRegistryShape:
         # Use MCP built-in's prefix-overridden tools; full
         # local-control surface, explicit ``tools.allow: ["cu"]``
         # on ari + leader meta.json — empty-allow universe must
-        # NOT auto-grant it). Method name kept for grep-stability;
-        # the count moved 3 → 4 → 5 → 6 with the same-PR pin
-        # updates (D18/A14).
+        # NOT auto-grant it). agent-secrets P1 (2026-10-17, plan
+        # f11965039) added ``secrets`` (the encrypted-secret-store
+        # category; opt-in-only via
+        # ``tools.allow: ["secrets"]`` on the day-one allow-list
+        # ``worker`` / ``tester`` / ``leader`` / ``ari``; the
+        # trust ruling has no per-secret grants — per-agent
+        # ``tools.allow`` is the ONLY access boundary). Method
+        # name kept for grep-stability; the count moved
+        # 3 → 4 → 5 → 6 → 7 with the same-PR pin updates
+        # (D18/A14).
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
@@ -315,6 +322,10 @@ class TestPrivilegedCategoryRegistryShape:
             "ens-env",
             "view-views",
             "cu",
+            # agent-secrets P1 (2026-10-17, plan f11965039):
+            # the encrypted-secret-store category. opt-in-only;
+            # worker / tester / leader / ari day-one allow-list.
+            "secrets",
         })
 
     def test_ens_db_registered_in_category_modules(self) -> None:

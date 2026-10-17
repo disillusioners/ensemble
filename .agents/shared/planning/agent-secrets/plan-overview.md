@@ -71,7 +71,7 @@ Per KB `secret-management-architecture-option-3.md`: **in-core SecretService**, 
 
 ## 4. Data Model
 
-Additive-only migration under `daemon/migrations/versions/` — 96-file precedent, scheme `YYYYMMDD_NNNNNN_<desc>.sql`, latest `20261014_040000_create_custom_agent_configs.sql`. **Every new SQLModel table needs its own `*.sql`** (zero exceptions).
+Additive-only migration under `daemon/migrations/versions/` — 96-file precedent, scheme `YYYYMMDD_NNNNNN_<desc>.sql`, latest `20261014_040000_create_custom_agent_configs.sql`. **One `*.sql` per migration event** — multi-table files are precedented (e.g. `20261013_214000_create_prompt_versions.sql` ships 3 tables in one file; `20261014_040000_create_custom_agent_configs.sql` ships 2 tables in one file; ~6-7 multi-table files in the 96-file history). The "one file per table, zero exceptions" framing was the plan prose's mistake — the convention is per-event, not per-table.
 
 ### 4.1 `secrets` table
 
@@ -110,7 +110,7 @@ Rationale for keeping this minimal: trust ruling has no human-in-loop; the `read
 
 Adding a privileged category requires:
 
-1. **`@register_tool_category`** decorator at `_tool_registry.py:223-248` — `secrets` becomes the **6th** entry in `PRIVILEGED_TOOL_CATEGORIES` at `:194-220` (quintet today: `system_upgrade`, `system-log`, `ens-db`, `ens-env`, `view-views`).
+1. **`@register_tool_category`** decorator at `_tool_registry.py:223-248` — `secrets` becomes the **7th** entry in `PRIVILEGED_TOOL_CATEGORIES` at `:194-220` (sextet before this entry: `system_upgrade`, `system-log`, `ens-db`, `ens-env`, `view-views`, `cu` — `cu` joined 2026-10-16 making the count 6 before `secrets`).
 2. **`CATEGORY_MODULES` entry** at `_tool_registry.py:571`.
 3. **list-extend inside `create_instance_tools()`** at `daemon/tools/instance.py:2450` — pattern documented at `instance.py:5758-5766` and `:5833-5845`. **Decorator-only registration is SILENTLY INVISIBLE.**
 
@@ -244,12 +244,12 @@ Proposal: `__ENS_SECRET__<secret_id>__` — namespace prefix `__ENS_SECRET__`, U
 
 ## 10. Migration & Compat
 
-- **Additive only**: new tables; no DDL on existing tables. Per 96-file precedent, each new SQLModel table gets its own `*.sql` (zero exceptions). Migration committed alongside Phase 1.
+- **Additive only**: new tables; no DDL on existing tables. Per 96-file precedent, one `*.sql` per migration event — multi-table files have a place in the history (see §4 preamble). Migration committed alongside Phase 1.
 - **db_connections**: untouched (separate Fernet wrapper per `daemon/sources/credentials.py:19-39` conventions).
 - **Rotation coupling (per §9 Q1 Option A)**: reusing SYSTEM_ENCRYPTION_KEY linearly extends the existing rotation coupling — any future rotation must re-encrypt db_connections Fernet credentials (and now `secrets.wrapped_secret`) too, or both registries break.
 - **KMS-Lite LANE-1 / LANE-2**: untouched (`kms_lite.py:75-122`, `kms_resolver.py:149-203`); new marker format visually/semantically distinct.
 - **`kms_attach` / `mcp_set_env` / `ens_env_read` BYOK**: untouched (per §5.4).
-- **`PRIVILEGED_TOOL_CATEGORIES` quintet → sextet**: `secrets` becomes #6, never default-open; same-PR triple-pin test updates mandatory.
+- **`PRIVILEGED_TOOL_CATEGORIES` sextet → septet**: `secrets` becomes #7, never default-open; same-PR triple-pin test updates mandatory.
 
 ---
 

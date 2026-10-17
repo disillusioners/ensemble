@@ -756,6 +756,47 @@ async def lifespan(app: FastAPI):
     )
     CustomAgentConfig.metadata.create_all(manager.engine)
 
+    # agent-secrets P1 (2026-10-17, plan f11965039) —
+    # ``secrets`` + ``secrets_audit`` are the two new tables
+    # that back the in-process ``SecretService``. The
+    # ``secrets`` table holds the Fernet-encrypted secret
+    # rows; ``secrets_audit`` is the append-only audit log
+    # for the three P1 actions (``create`` / ``read_public`` /
+    # ``retire``). Both are brand-new tables — same
+    # create_all precedent as PromptVersion /
+    # PromptAuditEvent / CustomAgentConfig / PromptTemplateBaseline
+    # above. The .sql migration handles SQLite; the model
+    # handles PG. No ``_ensure_postgres_columns`` mirror
+    # needed.
+    from daemon.repositories.secrets.models import Secret, SecretAuditEvent
+    Secret.metadata.create_all(manager.engine)
+    SecretAuditEvent.metadata.create_all(manager.engine)
+
+    # agent-secrets P1 — ``SecretService`` is constructed in
+    # ``InstanceManager.__init__`` alongside
+    # ``_prompt_version_service`` /
+    # ``_custom_agent_lifecycle_service`` (the
+    # ``SkillStoreService``-style manager-owned pattern at
+    # ``manager.py:1185-1195, 1241-1255``) so direct
+    # constructors (CLI tools, ad-hoc tests) get a working
+    # service without this lifespan having to run. The
+    # ``secrets`` + ``secrets_audit`` ``create_all`` calls
+    # above stay here because the Secret / SecretAuditEvent
+    # model modules are imported only at lifespan time
+    # (mirrors the PromptVersion / CustomAgentConfig
+    # precedent — models reach ``SQLModel.metadata`` here).
+    # The service composes the colocated ``SecretCipher``
+    # (Fernet via ``SYSTEM_ENCRYPTION_KEY`` — the same env
+    # the existing ``daemon/sources/credentials.py`` +
+    # ``daemon/services/kms_lite.py`` paths consume) +
+    # the SQLAlchemy-backed port implementation
+    # (``_SqlSecretStore``). The tools dereference
+    # ``manager._secret_service`` at call time
+    # (``daemon/tools/secrets_tools.py``); the manager
+    # ``__init__`` wiring makes the ``secrets`` category
+    # operational for the day-one allow-list (worker /
+    # tester / leader / ari).
+
     # User Directive #5B (2026-10-14, RESOLUTION-CORE) —
     # ``prompt_template_baselines`` is the third table in the
     # prompt-version family: stores the shipped-template sha256

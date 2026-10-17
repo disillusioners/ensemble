@@ -34,7 +34,8 @@
       "service",
       "ens-env",
       "snapshot_create",
-      "snapshot_search"
+      "snapshot_search",
+      "secrets"
     ]
   },
   "context_injection": {

@@ -129,6 +129,7 @@ from .services.blueprint_rate_limiter import BlueprintRateLimiter
 from .services.blueprint_write_service import BlueprintWriteService
 from .services.skill_injection_service import SkillInjectionService
 from .services.prompt_version_service import PromptVersionService
+from .services.secret_service import SecretService
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
 from .services.skill_job_dispatcher import SkillJobDispatcher
@@ -1173,6 +1174,19 @@ class InstanceManager:
         # semantics: phase-3 REST and the agent tools reach the same module.
         self._scheduling_service = None
 
+        # agent-secrets P1 (plan f11965039, 2026-10-17): the
+        # ``SecretService`` slot is a default ``None`` here; the
+        # real service is constructed later in this ``__init__``
+        # alongside the other manager-owned siblings
+        # (``_prompt_version_service`` / ``_custom_agent_lifecycle_service``).
+        # The default ``None`` mirrors the
+        # ``getattr(manager, "_secret_service", None)`` access
+        # shape in ``daemon/tools/secrets_tools.py`` so any
+        # pre-construction access returns ``None`` and the
+        # tool-boundary ``RuntimeError`` envelope fires
+        # consistently.
+        self._secret_service = None
+
         # NEW: MCP Server repository for MCP server configuration storage
         self._mcp_server_repository = create_mcp_server_repository(engine=self._engine, create_tables=False)
 
@@ -1238,6 +1252,20 @@ class InstanceManager:
             config_repo=self._custom_agent_config_repo,
             prompt_version_repo=self._prompt_version_repo,
         )
+        # agent-secrets P1 (plan f11965039, 2026-10-17):
+        # ``SecretService`` is the in-process agent-secrets service
+        # (the ``SkillStoreService`` / ``PromptVersionService``
+        # sibling pattern). Constructed here so direct constructors
+        # (CLI tools, ad-hoc tests) get a working service without
+        # the api.py lifespan having run. ``SecretCipher`` is
+        # unconditional (``is_available`` returns False when
+        # ``SYSTEM_ENCRYPTION_KEY`` is unset, but construction does
+        # NOT raise — boot-tolerance invariant). The corresponding
+        # ``secrets`` + ``secrets_audit`` SQLModel ``create_all``
+        # calls remain in the api.py lifespan (the
+        # PromptVersion / CustomAgentConfig precedent — model
+        # modules are imported only at lifespan time).
+        self._secret_service = SecretService(engine=self._engine)
         # Phase A T6 / T7: register the repo with the loader so the
         # ``load_and_cache_prompt`` hook can lazily look it up. The
         # loader MUST NOT import the repository class at module load
