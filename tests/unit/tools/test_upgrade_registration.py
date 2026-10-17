@@ -99,10 +99,10 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_six_entries(self) -> None:
-        """The default-deny set is exactly six entries —
-        ``system_upgrade``, ``system-log``, ``ens-db``, ``ens-env``,
-        ``view-views``, and ``cu``.
+    def test_privileged_categories_is_exactly_seven_entries(self) -> None:
+        """The default-deny set is exactly seven entries —
+        ``system_upgrade``, ``system-log``, ``ens-db``,
+        ``ens-env``, ``view-views``, ``cu``, and ``secrets``.
 
         ``service`` was REMOVED from this set by user override
         2026-09-16 (D4 reversed; see
@@ -120,8 +120,16 @@ class TestStaticRegistrationChecklist:
         empty-allow agents (e.g. ``watcher``); explicit
         ``tools.allow: ["cu"]`` on ``agents/ari/meta.json`` and
         ``agents/leader/meta.json`` is the only access path.
-        Adding a category here is a deliberate trust decision,
-        and this pin makes silent additions visible (D18/A14 —
+        ``secrets`` joined per the agent-secrets P1 commission
+        (2026-10-17, plan f11965039) — the encrypted-secret-store
+        category (sextet → septet) is opt-in-only via
+        ``tools.allow: ["secrets"]`` on the day-one allow-list
+        (``worker``, ``tester``, ``leader``, ``ari``); the trust
+        ruling (plan §1.2) is unconditional — secret-given =
+        trusted for autonomous use — and the per-agent allow gate
+        is the ONLY access boundary. Adding a category here is a
+        deliberate trust decision, and this pin makes silent
+        additions visible (D18/A14 —
         same-PR pin updates; this is pin file 1 of 3+1; the
         integration sanity pin lives at
         ``tests/integration/test_service_tool_flag_off_byte_identical.py``."""
@@ -136,6 +144,13 @@ class TestStaticRegistrationChecklist:
             # cu-mcp (2026-10-16): Computer Use MCP prefix-overridden
             # tools; explicit allow-list on ari/leader only.
             "cu",
+            # agent-secrets P1 (2026-10-17, plan f11965039):
+            # the encrypted-secret-store category. opt-in-only;
+            # worker / tester / leader / ari day-one allow-list.
+            # The trust ruling has no per-secret grants — the
+            # per-agent ``tools.allow`` category gate is the
+            # ONLY access boundary.
+            "secrets",
         })
 
     def test_checklist_comment_block_present_in_module(self) -> None:

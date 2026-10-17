@@ -140,12 +140,13 @@ class TestStaticRegistrationChecklist:
         )
 
     def test_attestation_not_in_privileged_categories(self) -> None:
-        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly six entries
+        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly seven entries
         (the daemon-internal authority trio ``system_upgrade``,
         ``system-log``, ``ens-db`` plus ``ens-env`` per the W4
         leader decision 2026-10-02, ``view-views`` per the
-        REWORK 2026-10-07 M1 user refinement, and ``cu`` per
-        the cu-mcp task 2026-10-16). The attestation
+        REWORK 2026-10-07 M1 user refinement, ``cu`` per
+        the cu-mcp task 2026-10-16, and ``secrets`` per the
+        agent-secrets P1 commission 2026-10-17). The attestation
         category is opt-in-only by convention (fail-closed authz),
         NOT because it is privileged — D7 sub-question RESOLVED-
         by-leader: NOT privileged. Adding ``attestation`` to
@@ -165,7 +166,12 @@ class TestStaticRegistrationChecklist:
         user decision: restricted first-release visibility to
         ari + leader + designer). cu-mcp (2026-10-16) adds
         ``cu`` (Computer Use MCP prefix-overridden tools; full
-        local-control surface, ari + leader allow-list only)."""
+        local-control surface, ari + leader allow-list only).
+        agent-secrets P1 (2026-10-17, plan f11965039) adds
+        ``secrets`` (the encrypted-secret-store category;
+        worker / tester / leader / ari day-one allow-list;
+        trust ruling = no per-secret grants, per-agent
+        ``tools.allow`` is the only access boundary)."""
         assert ATTESTATION_CATEGORY not in PRIVILEGED_TOOL_CATEGORIES
         # W1-P2 (D18 same-PR pin update): the exact-equality pin is
         # updated in the same PR as the privilege promotion. The
@@ -173,7 +179,8 @@ class TestStaticRegistrationChecklist:
         # category without bumping this pin would trip a regression
         # here. W4 (leader decision 2026-10-02) adds ``ens-env``;
         # REWORK 2026-10-07 (M1) adds ``view-views``; cu-mcp
-        # (2026-10-16) adds ``cu``.
+        # (2026-10-16) adds ``cu``; agent-secrets P1 (2026-10-17)
+        # adds ``secrets``.
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
@@ -183,6 +190,13 @@ class TestStaticRegistrationChecklist:
             # cu-mcp (2026-10-16): Computer Use MCP prefix tools;
             # explicit allow-list on ari/leader only.
             "cu",
+            # agent-secrets P1 (2026-10-17, plan f11965039):
+            # the encrypted-secret-store category. opt-in-only;
+            # worker / tester / leader / ari day-one allow-list.
+            # The trust ruling has no per-secret grants — the
+            # per-agent ``tools.allow`` category gate is the
+            # ONLY access boundary.
+            "secrets",
         })
 
 

@@ -831,9 +831,16 @@ def test_privileged_category_set_is_pinned() -> None:
             # ``create_lazy_mcp_tools._tool_category`` from
             # ``DYNAMIC_TOOL_PREFIXES`` (cu_).
             "cu",
+            # agent-secrets P1 (2026-10-17, plan f11965039):
+            # the encrypted-secret-store category. opt-in-only;
+            # worker / tester / leader / ari day-one allow-list.
+            # The trust ruling has no per-secret grants — the
+            # per-agent ``tools.allow`` category gate is the
+            # ONLY access boundary.
+            "secrets",
         }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "
-        f"trio + W4 ens-env + REWORK view-views + cu-mcp 'cu'; "
-        f"got {PRIVILEGED_TOOL_CATEGORIES}"
+        f"trio + W4 ens-env + REWORK view-views + cu-mcp 'cu' + "
+        f"agent-secrets-P1 'secrets'; got {PRIVILEGED_TOOL_CATEGORIES}"
     )
