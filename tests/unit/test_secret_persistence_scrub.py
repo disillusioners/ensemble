@@ -69,6 +69,7 @@ from daemon.services.secret_persistence_scrub import (
 )
 from daemon.services.secret_service import (
     ENS_SECRET_MARKER_PREFIX,
+    SCRUB_AUDIT_CONTEXT,
     SecretCipher,
     SecretService,
     mint_marker,
@@ -1119,3 +1120,61 @@ class TestBothSeamsScrubbed:
         for adapter in (adapter_prog, adapter_done):
             for sent in adapter.sent:
                 assert "SEAM-PLAIN-21" not in sent
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Gap (d) — commission hook: enqueue S3 with a MARKER-BEARING body
+# round-trips the marker byte-identically (markers are NEVER scrubbed
+# — safe by construction, §2.4 fullmatch skip guard).
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestS3MarkerBodyRoundtrip:
+    def test_marker_bearing_body_roundtrips_as_marker(self, service):
+        """A queue-row body already carrying a VALID marker (the
+        S2-scrubbed retry case) passes through ``scrub_enqueued_body``
+        byte-identical — no substitution, no audit row."""
+        stored = service.store(name="s3m", kind="generic",
+                               value="S3-MARKER-PLAIN-1", actor="coder")
+        marker = mint_marker(stored["id"])
+        register_secret_service(service)
+        body = f"please re-run with {marker} thanks"
+        assert scrub_enqueued_body(body, actor="inst-s3m") == body
+
+    def test_marker_and_plaintext_in_one_body_partial_substitution(
+        self, service
+    ):
+        """Mixed body: the plaintext value IS substituted; the
+        VALID marker in the same body survives untouched (the
+        fullmatch skip guard is per-value)."""
+        s1 = service.store(name="s3m-a", kind="generic",
+                           value="S3-MIX-PLAIN-A", actor="coder")
+        s2 = service.store(name="s3m-b", kind="generic",
+                           value="S3-MIX-PLAIN-B", actor="coder")
+        marker_b = mint_marker(s2["id"])
+        register_secret_service(service)
+        body = (f"retry with {marker_b} after storing "
+                f"S3-MIX-PLAIN-A please")
+        out = scrub_enqueued_body(body, actor="inst-s3m")
+        assert out == (f"retry with {marker_b} after storing "
+                       f"{mint_marker(s1['id'])} please")
+
+    def test_marker_body_emits_no_audit_rows(self, service):
+        """Zero ``scrub``/``use_marker`` rows for a marker-only
+        body (per-substitution-only emission, design §3.4)."""
+        stored = service.store(name="s3m-c", kind="generic",
+                               value="S3-MARKER-PLAIN-3", actor="coder")
+        marker = mint_marker(stored["id"])
+        register_secret_service(service)
+        scrub_enqueued_body(f"body {marker} end", actor="inst-s3m")
+        with service._engine.connect() as conn:
+            rows = conn.execute(
+                select(SecretAuditEvent).where(  # type: ignore[arg-type]
+                    SecretAuditEvent.secret_id == stored["id"]
+                ).where(
+                    SecretAuditEvent.action == "use_marker"
+                ).where(
+                    SecretAuditEvent.context == SCRUB_AUDIT_CONTEXT
+                )
+            ).fetchall()
+        assert rows == []

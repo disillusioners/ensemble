@@ -441,3 +441,178 @@ async def _bash_tool_call(
         env=env,
         instance_id=instance_id,
     )
+
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Gap (c) — cross-phase interaction: RETIRED secret through the bash
+# env DOUBLE-PASS (SECRET_TYPED_ARGS pre-invoke + spawn-time) + the
+# retired value REMAINS in the scrub set. D1 ruling (design §3.2):
+# retired markers KEEP resolving — pinned here at the SEAM level
+# (the service-level pin lives in tests/unit/test_secret_service.py;
+# the wrapper entries were never exercised with a retired id before
+# this class).
+#
+# DOUBLE-PASS SHAPE (as implemented — pinned here deliberately): the
+# pre-invoke helper resolves STRING-typed declared fields only; the
+# bash ``env`` overlay is a DICT, so pass 1 is a documented no-op
+# for it (dict values are skipped, §0 fast path) and the spawn-time
+# seam (§1a, inside the bash tool) is the resolving pass. The scalar
+# pre-invoke pass is pinned separately (the probe-tool class in
+# tests/unit/services/test_long_tool_nudge_secret_typed_args.py;
+# here with a retired id via the D1 pin below).
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestBashRetiredSecretDoublePass:
+    @pytest.mark.asyncio
+    async def test_retired_marker_spawn_time_and_scrub_set(
+        self, service: SecretService
+    ) -> None:
+        """The full bash env flow with a RETIRED secret:
+
+        1. PRE-INVOKE pass — the ``wrapped_tools_node`` helper
+           (``_resolve_secret_typed_args_for_batch``, the
+           ``SECRET_TYPED_ARGS`` seam) leaves the dict-valued
+           ``env`` UNTOUCHED (dict fields are skipped — resolution
+           is the spawn-time seam's job); the args copy is
+           byte-identical and NO error envelope is produced (D1:
+           the marker shape never fails closed pre-invoke).
+        2. SPAWN-TIME pass — the real ``bash`` tool receives the
+           raw retired marker and STILL spawns with the plaintext
+           (surface ``bash.env``, design §3.2 D1 semantics).
+        3. SCRUB — a tool result echoing the retired plaintext is
+           markerized (the retired value stays in the scrub set,
+           design §2.4).
+        """
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        from daemon.services.long_tool_nudge import (
+            _resolve_secret_typed_args_for_batch,
+        )
+        from daemon.services.secret_persistence_scrub import (
+            scrub_tool_results_inplace,
+        )
+
+        plain_value = "retired-double-pass-plain-31d"
+        minted = service.store(
+            name="bash-retired-dp",
+            kind="generic",
+            value=plain_value,
+            actor="worker",
+        )
+        marker = minted["marker"]
+        service.retire(minted["id"], actor="worker")
+
+        probe = "P2_SECRET_TEST"
+
+        # ── Pass 1: SECRET_TYPED_ARGS pre-invoke — dict-valued env
+        # passes through untouched (no resolution HERE; no error) ──
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "bash",
+                    "args": {
+                        "command": ["bash", "-c", "true"],
+                        "env": {probe: marker},
+                    },
+                    "id": "call-ret-1",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        state = {"messages": [ai]}
+        state_for_invoke, errors = _resolve_secret_typed_args_for_batch(
+            state,
+            state["messages"],
+            ai,
+            ai.tool_calls,
+            "inst-ret-dp",
+        )
+        assert errors == []
+        resolved_ai = state_for_invoke["messages"][0]
+        assert (
+            resolved_ai.tool_calls[0]["args"]["env"][probe] == marker
+        )
+
+        # ── Pass 2: spawn-time (bash.env) — the resolving pass ──
+        result = await _run_bash_with_env({probe: marker}, "inst-ret-dp")
+        assert result.returncode == 0, result.stderr
+        assert result.env_value == plain_value
+        assert "__ENS_SECRET__" not in (result.env_value or "")
+
+        # ── Pass 3: scrub set still contains the retired value ──
+        scrubbed = scrub_tool_results_inplace(
+            {
+                "messages": [
+                    ToolMessage(
+                        content=(
+                            f"STDOUT:\n{plain_value}\n\nEXIT CODE: 0"
+                        ),
+                        tool_call_id="call-ret-1",
+                    )
+                ]
+            },
+            actor="inst-ret-dp",
+        )
+        tm_out = scrubbed["messages"][0]
+        assert marker in tm_out.content
+        assert plain_value not in tm_out.content
+
+    @pytest.mark.asyncio
+    async def test_retired_scalar_pre_invoke_pass_still_resolves(
+        self, service: SecretService, monkeypatch
+    ) -> None:
+        """D1 at the OTHER side of the double-pass: a SCALAR
+        declared field (the pre-invoke seam's actual input shape)
+        carrying a RETIRED marker resolves at pre-invoke — the
+        invoke-bound copy gets the plaintext, the original
+        AIMessage keeps the marker, no error envelope (the
+        probe-tool declaration pattern from the typed-args pack)."""
+        from langchain_core.messages import AIMessage
+
+        from daemon.services.long_tool_nudge import (
+            _resolve_secret_typed_args_for_batch,
+        )
+        from daemon.tools._auth import SECRET_TYPED_ARGS
+
+        plain_value = "retired-scalar-plain-52e"
+        minted = service.store(
+            name="retired-scalar",
+            kind="generic",
+            value=plain_value,
+            actor="worker",
+        )
+        marker = minted["marker"]
+        service.retire(minted["id"], actor="worker")
+
+        monkeypatch.setitem(
+            SECRET_TYPED_ARGS, "bash", frozenset({"api_token"})
+        )
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "bash",
+                    "args": {"api_token": marker, "plain": "x"},
+                    "id": "call-ret-2",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        state = {"messages": [ai]}
+        state_for_invoke, errors = _resolve_secret_typed_args_for_batch(
+            state,
+            state["messages"],
+            ai,
+            ai.tool_calls,
+            "inst-ret-dp2",
+        )
+        assert errors == []  # D1: retired does NOT fail closed
+        resolved_ai = state_for_invoke["messages"][0]
+        assert (
+            resolved_ai.tool_calls[0]["args"]["api_token"] == plain_value
+        )
+        # original AIMessage untouched (live args keep the MARKER)
+        assert ai.tool_calls[0]["args"]["api_token"] == marker
