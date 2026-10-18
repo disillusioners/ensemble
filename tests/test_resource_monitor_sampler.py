@@ -805,8 +805,8 @@ class TestAttributionIntegration:
             kind="mcp_child", instance_id=None,
             command="node server.js",
         )
-        charge_env_entries = None  # silence lint
-        # give the entry a server-scoped detail
+        # Server-scoped identity rides the entry's detail (the seam
+        # caller stamps the MCP server name there).
         charge_env._live[7171].detail = "context7"
         charge_mod.set_enabled(True)
         charge_mod.note_message_append("inst-a", {"m": "z"})
