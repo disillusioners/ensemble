@@ -191,8 +191,11 @@ class TestStaticRegistrationChecklist:
 
     def test_secrets_in_privileged_categories(self) -> None:
         """The ``secrets`` category is entry #7 in
-        ``PRIVILEGED_TOOL_CATEGORIES`` (sextet → septet
-        per the Q2 ruling 2026-10-17). It is NEVER
+        ``PRIVILEGED_TOOL_CATEGORIES`` (sextet → septet → octet;
+        the sextet→septet step per the Q2 ruling 2026-10-17
+        promoted ``secrets`` to #7, then the septet→octet step
+        per the settings-worker-slots P2 commission 2026-10-18
+        promoted ``settings`` to #8). It is NEVER
         default-granted (R-SR16: opt-in-only via
         per-agent ``tools.allow``).
 

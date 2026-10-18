@@ -300,13 +300,16 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # (``daemon/tools/instance.py:6169``) AND the
     # ``resolve_tool_filter`` empty-allow branch
     # (``daemon/tools/instance.py:373``). NEVER default-granted
-    # — opt-in-only. SAME-PR triple-pin updates at
+    # — opt-in-only. SAME-PR FIVE-pin updates at
     # ``tests/unit/tools/test_upgrade_registration.py``,
     # ``tests/unit/tools/test_attestation_registration.py``,
     # ``tests/integration/test_maintenancer_spawn_resolves_tools.py``,
-    # and the integration sanity pin at
-    # ``tests/integration/test_service_tool_flag_off_byte_identical.py``
-    # are mandatory (the A14/D18 silent-additions-visible rule).
+    # the integration sanity pin at
+    # ``tests/integration/test_service_tool_flag_off_byte_identical.py``,
+    # and ``tests/unit/tools/test_secrets_registration.py:212``
+    # (the fifth exact-set pin — the originally-omitted one,
+    # added by the iteration-002 council B2 correction) are
+    # mandatory (the A14/D18 silent-additions-visible rule).
     "secrets",
     # settings-worker-slots P2 (2026-10-18): ``settings`` is the
     # daemon-runtime-settings tool category (#8 in

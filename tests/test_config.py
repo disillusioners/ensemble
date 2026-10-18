@@ -186,11 +186,146 @@ class TestLoadConfig:
         """Test error when config file has invalid YAML."""
         config_file = tmp_path / "invalid.yaml"
         config_file.write_text("invalid: yaml: content: [}")
-        
+
         with pytest.raises(ValueError) as exc_info:
             load_config(str(config_file))
-        
+
         assert "Failed to parse" in str(exc_info.value)
+
+
+class TestWorkerPoolYamlShadow:
+    """settings-worker-slots F1 (council iter001) — the two
+    worker-pool-size keys (``limits.worker_pool_size``,
+    ``limits.chat_worker_pool_size``) are YAML-shadowed by literals
+    in ``config.yaml`` that MIRROR the constants
+    (``WORKER_POOL_SIZE=5`` / ``CHAT_WORKER_POOL_SIZE=2``). The
+    mechanism keeps the 4-tier ladder (DB > env > yaml > default)
+    authoritative while making malformed env values
+    NON-FATAL at ``load_config``:
+
+    * pydantic binds the init_kwarg (yaml literal) instead of the
+      env value — pydantic-settings priority is args/init_kwargs >
+      env > defaults — so a malformed env value never reaches the
+      LimitsConfig(int) validation.
+    * The settings resolver reads ``os.environ[spec.env_var]``
+      DIRECTLY (daemon/services/settings_service.py:377, the
+      shadowing-bug fix), parses+validates with parse_and_validate,
+      and on an invalid env value logs one WARNING + skips the env
+      tier — the yaml tier (or default below) wins.
+
+    Mirrors the existing ``llm_concurrency: 10`` yaml literal at
+    config.yaml:208 — same mechanism, same resolver path."""
+
+    def test_valid_env_value_wins_over_yaml(
+        self, tmp_path, monkeypatch
+    ):
+        """Valid env value (LIMITS_WORKER_POOL_SIZE=8) bypasses the
+        yaml shadow at pydantic-init time but the resolver promotes
+        env over yaml — the post-apply config field is 8.
+
+        Two-step verification (mirrors the real boot path:
+        ``load_config`` → ``apply_db_settings_overrides``):
+
+        1. After ``load_config`` alone, the field is the yaml literal
+           value (5) — pydantic init_kwarg shadowed the env. This is
+           the F1 mechanism's whole point: malformed env cannot reach
+           the int validator.
+        2. After ``apply_db_settings_overrides`` (the boot resolver),
+           the field is the env value (8) — the resolver reads
+           ``os.environ[spec.env_var]`` DIRECTLY and promotes env over
+           yaml. The 4-tier ladder (DB > env > yaml > default) is the
+           SSOT, not the pydantic field."""
+        config_file = tmp_path / "pool_cfg.yaml"
+        config_file.write_text(
+            "limits:\n"
+            "  worker_pool_size: 5\n"
+            "  chat_worker_pool_size: 2\n"
+        )
+        monkeypatch.setenv("LIMITS_WORKER_POOL_SIZE", "8")
+        monkeypatch.setenv("LIMITS_CHAT_WORKER_POOL_SIZE", "3")
+        monkeypatch.setenv("ENSEMBLE_CONFIG", str(config_file))
+        # Clear any pre-existing env values that might shadow.
+        for k in ("OPENAI_SELECTABLE_MODELS", "OPENAI_ALLOWED_MODELS"):
+            monkeypatch.delenv(k, raising=False)
+
+        config = load_config()
+
+        # Step 1 — pydantic init_kwarg (yaml literal) is what the
+        # config field holds; the env value never reached the int
+        # validator (this is the F1 shield for malformed env).
+        assert config.limits.worker_pool_size == 5
+        assert config.limits.chat_worker_pool_size == 2
+
+        # Step 2 — the boot resolver promotes env over yaml.
+        from daemon.config import raw_yaml_limits
+        from daemon.services.settings_service import (
+            apply_db_settings_overrides,
+        )
+
+        # ``db_overrides=None`` skips the DB tier; the resolver
+        # promotes env (8) over yaml (5) on the same ladder.
+        config, _snapshot = apply_db_settings_overrides(
+            config=config,
+            ensemble_config=None,
+            raw_yaml_limits=raw_yaml_limits(),
+        )
+        assert config.limits.worker_pool_size == 8
+        assert config.limits.chat_worker_pool_size == 3
+
+    def test_malformed_env_value_is_non_fatal_at_load_config(
+        self, tmp_path, monkeypatch
+    ):
+        """Pin F1 (the boot-robustness WARNING): with the yaml shadow
+        present, ``LIMITS_WORKER_POOL_SIZE=abc`` must NOT raise at
+        ``load_config`` — the resolver's documented skip/fail-open
+        contract is preserved. The config field falls through to the
+        yaml literal (5/2); the env tier is skipped with a WARNING."""
+        config_file = tmp_path / "pool_cfg.yaml"
+        config_file.write_text(
+            "limits:\n"
+            "  worker_pool_size: 5\n"
+            "  chat_worker_pool_size: 2\n"
+        )
+        monkeypatch.setenv("LIMITS_WORKER_POOL_SIZE", "abc")
+        monkeypatch.setenv("LIMITS_CHAT_WORKER_POOL_SIZE", "xyz")
+        monkeypatch.setenv("ENSEMBLE_CONFIG", str(config_file))
+        for k in ("OPENAI_SELECTABLE_MODELS", "OPENAI_ALLOWED_MODELS"):
+            monkeypatch.delenv(k, raising=False)
+
+        # The fix's whole point: this MUST NOT raise. Before the fix
+        # this raised ValidationError (pydantic bound env directly
+        # because no yaml shadow existed).
+        config = load_config()
+
+        # The yaml tier wins (5/2); pydantic init_kwarg shadowed the
+        # malformed env, so the field holds the yaml literal.
+        assert config.limits.worker_pool_size == 5
+        assert config.limits.chat_worker_pool_size == 2
+
+    def test_yaml_literal_present_in_raw_yaml_limits(
+        self, tmp_path, monkeypatch
+    ):
+        """The yaml literal MUST be visible via ``raw_yaml_limits()``
+        so the resolver's yaml tier can see it. Absence would defeat
+        the F1 mechanism (the resolver reads the raw section, NOT the
+        pydantic-merged field)."""
+        config_file = tmp_path / "pool_cfg.yaml"
+        config_file.write_text(
+            "limits:\n"
+            "  worker_pool_size: 5\n"
+            "  chat_worker_pool_size: 2\n"
+        )
+        monkeypatch.setenv("ENSEMBLE_CONFIG", str(config_file))
+        for k in ("OPENAI_SELECTABLE_MODELS", "OPENAI_ALLOWED_MODELS"):
+            monkeypatch.delenv(k, raising=False)
+
+        from daemon.config import raw_yaml_limits
+
+        load_config()
+        raw = raw_yaml_limits()
+        assert raw is not None
+        assert raw.get("worker_pool_size") == 5
+        assert raw.get("chat_worker_pool_size") == 2
 
 
 class TestConfigValidation:

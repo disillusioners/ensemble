@@ -206,6 +206,25 @@ limits:
   # also capped by the fixed worker thread pools (5 worker + 2 chat
   # = 7 concurrent graphs — constants, not settable here).
   llm_concurrency: 10
+  # settings-worker-slots (F1 council-iter001, malformed-env non-fatal).
+  # The two worker-pool-size keys are yaml-shadowed by literals that
+  # MIRROR the constants (5 worker + 2 chat). With the yaml literal
+  # present, pydantic binds the init_kwarg instead of the env value —
+  # pydantic-settings priority is args/init_kwargs > env > defaults —
+  # so a malformed env value (LIMITS_WORKER_POOL_SIZE=abc) never reaches
+  # the LimitsConfig(int) validation and cannot hard-fail boot. The
+  # settings resolver reads ``os.environ[spec.env_var]`` DIRECTLY
+  # (daemon/services/settings_service.py:377, the shadowing-bug fix),
+  # parses+validates with parse_and_validate, and on invalid env value
+  # logs one WARNING + skips the env tier — the yaml tier (or default
+  # below) wins. For VALID env values the resolver promotes env over
+  # yaml, so the env tier remains effective (the ladder is the SSOT,
+  # not the pydantic field). The 4-tier ladder — DB > env > yaml >
+  # default — is unchanged; the literals are a pydantic-input shadow,
+  # not a precedence change. Default tier picks
+  # WORKER_POOL_SIZE / CHAT_WORKER_POOL_SIZE from daemon.constants.
+  worker_pool_size: 5
+  chat_worker_pool_size: 2
   # S5 degenerate re-invoke cap (empty-response-guard Phase 1): max
   # consecutive reasoning-only / <think>-tag-only AI responses the
   # router re-invokes over before falling through to nudge/END

@@ -140,14 +140,15 @@ class TestStaticRegistrationChecklist:
         )
 
     def test_attestation_not_in_privileged_categories(self) -> None:
-        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly seven entries
+        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly eight entries
         (the daemon-internal authority trio ``system_upgrade``,
         ``system-log``, ``ens-db`` plus ``ens-env`` per the W4
         leader decision 2026-10-02, ``view-views`` per the
         REWORK 2026-10-07 M1 user refinement, ``cu`` per
-        the cu-mcp task 2026-10-16, and ``secrets`` per the
-        agent-secrets P1 commission 2026-10-17). The attestation
-        category is opt-in-only by convention (fail-closed authz),
+        the cu-mcp task 2026-10-16, ``secrets`` per the
+        agent-secrets P1 commission 2026-10-17, and ``settings``
+        per the settings-worker-slots P2 commission 2026-10-18).
+        The attestation category is opt-in-only by convention (fail-closed authz),
         NOT because it is privileged — D7 sub-question RESOLVED-
         by-leader: NOT privileged. Adding ``attestation`` to
         ``PRIVILEGED_TOOL_CATEGORIES`` would be a regression (it
