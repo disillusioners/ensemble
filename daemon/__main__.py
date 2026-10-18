@@ -330,14 +330,24 @@ def main(run_preflight: bool = True):
     # membership + starttime older than this process + never self /
     # ancestors / descendants / kernel threads / zombies) and every
     # signal passes the PID-recycle guard (starttime field-22 + pgid +
-    # cgroup re-check) immediately beforehand. Default-ON with the
-    # ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES kill-switch (leader ruling:
-    # guarded boot code — bounded, logged, revertible); TERM → bounded
-    # grace → SIGKILL, every action logged. Runs here — before config
-    # load, uvicorn, and any child-spawning subsystem — so the daemon's
-    # own tree is empty and the ancestry exclusion carries the launcher
-    # + PyInstaller bootloader. Fail-open: a sweep bug must never block
-    # boot. Full mechanism + census evidence: module docstring and
+    # cgroup re-check) immediately beforehand. Default is lane-
+    # conditional (remediation r2, 2026-10-18): prod = ON (the promoted
+    # frozen PyInstaller binary running under systemd — ``sys.frozen``
+    # truthy), dev/test/manual = OFF (source-mode ``python -m daemon``
+    # / launcher.sh source runs / every ``pytest`` — ``sys.frozen``
+    # falsy). Override is bidirectional in BOTH lanes via
+    # ``ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES`` (any non-disable value
+    # forces ON; ``0``/``false``/``no``/``off`` forces OFF). Default
+    # honors the leader ruling of "ships default-ON at promote"; the
+    # source-mode default-OFF avoids collateral-kill breadth in the
+    # login-session-scope cgroup and ``main()``-driving tests that
+    # never patch the kill-switch env (see W1/W2 review). TERM →
+    # bounded grace → SIGKILL, every action logged. Runs here — before
+    # config load, uvicorn, and any child-spawning subsystem — so the
+    # daemon's own tree is empty and the ancestry exclusion carries
+    # the launcher + PyInstaller bootloader. Fail-open: a sweep bug
+    # must never block boot. Full mechanism + census evidence: module
+    # docstring and
     # docs/investigations/2026-10-18-o8-stale-subprocess-sweep-and-killmode-audit.md
     try:
         from .services.boot_subprocess_sweep import sweep_stale_subprocesses

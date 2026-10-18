@@ -35,6 +35,7 @@ from daemon.services.boot_subprocess_sweep import (
     DEFAULT_ENABLED,
     ENV_KILL_SWITCH,
     ENV_TERM_GRACE_SECONDS,
+    is_prod_lane,
     kill_switch_from_env,
     sweep_stale_subprocesses,
     term_grace_seconds_from_env,
@@ -321,6 +322,58 @@ class TestExclusions:
         )
         assert {p for p, _ in rec.calls} == {500}
 
+    def test_younger_or_equal_starttime_never_signaled(self, env):
+        """N1 (review r2, 2026-10-18): the starttime clause
+        (``sweep_stale_subprocesses.py`` ~:371) is the prior-incarnation
+        oracle — a same-cgroup, NON-lineage process whose starttime is
+        younger-or-equal to the daemon's own starttime is NEVER a
+        candidate and NEVER signaled. Two mutations the test pins
+        against:
+
+          M1: ``>=`` → ``>`` boundary flip — pid 800 (starttime equal
+              to the daemon's own) joins the candidate set and gets
+              TERMed.
+          M2: deletion of the clause entirely — pid 800 (boundary) AND
+              pid 850 (strictly younger) BOTH join the candidate set
+              and get TERMed.
+
+        The strictly-older pid 500 (the standard-tree orphan) stays a
+        legitimate target, proving the sweep is otherwise running.
+        """
+        ids = standard_tree(env)
+        # Boundary-equal starttime — the M1 mutation would erroneously
+        # admit this process when ``>=`` is flipped to ``>``. Placed in
+        # the unit cgroup, not in the daemon's lineage, with a
+        # legitimate user-space cmdline.
+        env.add(800, comm="context7-mcp", ppid=1, starttime=T_DAEMON,
+                cmdline="node /home/nea/.npm/_npx/x/node_modules/.bin/context7-mcp")
+        # Strictly younger — the M2 (clause deletion) would admit this
+        # process regardless of the boundary; pinned so M2 also fails
+        # the test even on hosts where M1's regression never trips a
+        # sibling with starttime == my_start in practice.
+        env.add(850, comm="plane-mcp", ppid=1, starttime=T_DAEMON + 500,
+                cmdline="node /home/nea/.npm/_npx/x/node_modules/.bin/plane-mcp")
+        rec = SignalRecorder(env)
+
+        rep = sweep_stale_subprocesses(
+            proc_root=str(env.root),
+            daemon_pid=ids["daemon"],
+            kill_switch=True,
+            signal_fn=rec,
+            sleep_fn=lambda s: None,
+        )
+
+        # The legitimate target stays reaped (500 — strictly-older
+        # orphan); proves the sweep is running.
+        assert {p for p, _ in rec.calls} == {500}
+        # The younger-or-equal processes never appeared, in either
+        # the signal trace or the candidate list.
+        assert 800 not in [p for p, _ in rec.calls]
+        assert 850 not in [p for p, _ in rec.calls]
+        candidate_pids = {c.pid for c in rep.candidates}
+        assert 800 not in candidate_pids
+        assert 850 not in candidate_pids
+
 
 class TestPidRecycleGuard:
     def test_recycle_during_grace_skips_kill(self, env):
@@ -409,10 +462,67 @@ class TestPidRecycleGuard:
 
 class TestKillSwitchAndDefaults:
     def test_default_is_on_pinned(self):
-        """Leader ruling: ships default-ON at promote."""
+        """Leader ruling: ships default-ON at promote.
+
+        W1/W2 (review r2, 2026-10-18): the default is lane-conditional
+        — pinned on BOTH sides AND across BOTH resolution paths:
+
+        * prod lane (``is_prod=True``) → absent env → ON
+          (the leader ruling: ``DEFAULT_ENABLED = True`` and the lane
+          matches, so it applies);
+        * dev/test/manual lane (``is_prod=False``) → absent env →
+          OFF (the W1/W2 fix: dev-box launcher-scoped cgroup must not
+          get collateral-kill breadth; the daemon's own tree is empty
+          in the source-mode ``python -m daemon``/``launcher.sh``
+          runs, so the sweep has no defensible target there);
+        * the auto-detect path (``kill_switch_from_env({})`` with NO
+          kwarg) must follow :func:`is_prod_lane` and, in pytest
+          (``python -m pytest`` — a source-mode run), resolve to
+          **False**. This is the assertion that catches the W1/W2
+          "flip the discriminator" mutation: a regression that makes
+          :func:`is_prod_lane` always return True would flip the
+          auto-detect result to ON and FAIL this test.
+
+        The literal ``DEFAULT_ENABLED = True`` (the leader ruling
+        itself) is unchanged — the lane detector is what gates
+        whether the default applies.
+        """
         assert DEFAULT_ENABLED is True
-        assert kill_switch_from_env({}) is True
-        assert kill_switch_from_env({"x": "1"}) is True
+        assert is_prod_lane() is False  # pytest is source-mode (sanity)
+        # Auto-detect path (no kwarg): pytest source-mode → OFF
+        assert kill_switch_from_env({}) is False
+        assert kill_switch_from_env({"x": "1"}) is False
+        # prod lane — leader ruling honored
+        assert kill_switch_from_env({}, is_prod=True) is True
+        assert kill_switch_from_env({"x": "1"}, is_prod=True) is True
+        # dev/test/manual lane — W1/W2 fix honored
+        assert kill_switch_from_env({}, is_prod=False) is False
+        assert kill_switch_from_env({"x": "1"}, is_prod=False) is False
+
+    def test_env_override_wins_in_dev_test(self, monkeypatch):
+        """Explicit ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES wins in BOTH
+        directions in BOTH lanes — the source-mode default-OFF is
+        operator-overridable so a dev operator can run the sweep on a
+        specific boot to verify it (no other surface exposes the
+        boolean). Pinned because the sweep default-OFF is a recent
+        behavior change (W1/W2) and a regression that re-anchors the
+        default to ON for any env value (incl. absent) would silently
+        re-enable the dev-box collateral-kill breadth that the W1/W2
+        fix was written to remove.
+
+        The ``_fence_clean_env`` autouse fixture is what guarantees
+        the env is empty when this test starts — without it, an
+        ambient ``ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES`` on a dev box
+        could pass even after such a regression. The fixture delenvs
+        the var with ``raising=False`` so the test fails LOUD if the
+        fixture stops firing.
+        """
+        # Force-ON override in dev/test lane → ON (env wins)
+        monkeypatch.setenv(ENV_KILL_SWITCH, "1")
+        assert kill_switch_from_env(is_prod=False) is True
+        # Force-OFF override in prod lane → OFF (env wins)
+        monkeypatch.setenv(ENV_KILL_SWITCH, "0")
+        assert kill_switch_from_env(is_prod=True) is False
 
     def test_kill_switch_disable_values(self):
         for value in ("0", "false", "no", "off", "OFF", "False"):
@@ -423,7 +533,18 @@ class TestKillSwitchAndDefaults:
 
     def test_kill_switch_off_is_a_complete_noop(self, tmp_path):
         """OFF: no reads (nonexistent proc root proves it), no signals,
-        no errors — a clean disabled report."""
+        no errors — a clean disabled report.
+
+        W3 (review r2, 2026-10-18): the ``errors`` pin guards against
+        the regression that moves the /proc enumeration BEFORE the
+        kill-switch check — that mutation leaves the existing
+        ``enabled/scanned/candidates/actions/calls`` assertions passing
+        (the early returns still report an enabled=False empty report
+        in the success case) BUT fails this test, because the
+        enumeration runs against the nonexistent proc_root and
+        raises FileNotFoundError, which the fail-open bucket at the
+        bottom appends to ``report.errors``.
+        """
         rec = SignalRecorder(FakeProc(tmp_path / "unused"))
         rep = sweep_stale_subprocesses(
             proc_root=str(tmp_path / "does-not-exist"),
@@ -436,6 +557,7 @@ class TestKillSwitchAndDefaults:
         assert rep.scanned == 0
         assert rep.candidates == []
         assert rep.actions == []
+        assert rep.errors == []
         assert rec.calls == []
 
     def test_env_kill_switch_off_via_environment(self, env, monkeypatch):

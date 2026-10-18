@@ -71,8 +71,15 @@ stop phase, and its reactive cgroup sweep can still leave survivors
 stop/start pairs — the launcher's in-life relaunch after a child crash, dev
 and manual launcher starts — run no cgroup kill at all, which is how the
 4.2-day orphan accumulated. The sweep runs on every start path, bounded
-(TERM → ≤30 s grace → SIGKILL, then stops), logged, and default-ON with
-`ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES` as the kill-switch.
+(TERM → ≤30 s grace → SIGKILL, then stops), logged, and default-ON in the
+**prod lane only** — the promoted frozen PyInstaller binary under systemd
+(`sys.frozen` truthy). Source-mode runs (``python -m daemon``, ``launcher.sh``
+source starts, ``pytest``) default OFF (remediation r2, 2026-10-18, W1/W2
+review): the launcher-scope cgroup over-broadens the candidate set to
+same-session older non-lineage siblings, and test lanes that never patch the
+kill-switch env would otherwise scan real ``/proc`` on every ``main()`` call.
+``ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES`` overrides both directions in both
+lanes (the kill-switch).
 
 **Residual (documented, out of scope):** children that live in
 `systemd-run` transient scopes outside the unit cgroup survive unit stops and
@@ -116,16 +123,25 @@ automatic for every future (re)adoption. No patch, no commit.**
 
 Evidence (adopt-unit.sh read end-to-end, not just the two cited spots):
 
-- `_resolve_template` (:364–375) resolves **exactly one** unit source —
+- `_resolve_template` (:364–376) resolves **exactly one** unit source —
   `scripts/systemd/ensemble-daemon.service` (three same-file path fallbacks);
-  it REFUSES (exit 78) when the template is absent. There is **no second
-  template, no embedded env block, no heredoc unit body** (the only heredoc
-  in the script is the usage text, :96), and no alternate generation lane —
-  `UNIT_CONTENT` is set only by `_generate_unit`'s line loop.
+  on a missing template it `return 1`s (after a loud `_warn`), which is
+  converted to `exit 78` by the caller chain (`_generate_unit` at :413 does
+  `_resolve_template || return 1`, then `_generate_unit || exit 78` at :541
+  — the same helper-returns-1 / central-caller-exits-78 asymmetry the script
+  documents for `_unit_name` at :347–352). There is **no second template, no
+  embedded env block, no heredoc unit body** (the two heredocs in the script
+  are the usage text at :96 and the partial-state ledger printer inside
+  `_report_partial_and_fail` at :140 — neither carries unit content), and no
+  alternate generation lane — `UNIT_CONTENT` is set only by `_generate_unit`'s
+  line loop.
 - `_generate_unit` (:417–445) splices exactly five literal tokens
   (`__GENERATED_NOTE__`, `__UNIT_LABEL__`, `__USER__`,
   `__WORKING_DIRECTORY__`, `__LAUNCHER__`) plus the `__ENV_LINES__` line,
-  which `_read_config` (:302–311) fills with **PORT + POSTGRES_* only**;
+  which `_read_config` (:290–316 — the PORT+POSTGRES_* env-derivation block
+  spanning the surface comment at :302, the `for` loop at :305–310, and the
+  `[ -n "$ENV_LINES" ]` guard at :311–315) fills with **PORT + POSTGRES_*
+  only**;
   every other template line passes through byte-for-byte; a torn-token guard
   (:433–436) refuses surviving `__TOKEN__`s. The static
   `Environment=MALLOC_ARENA_MAX=2` line is a non-token line → **flows into
@@ -160,3 +176,25 @@ this override path).
   candidates=0, actions=0; kill-switch-off path: scanned=0 (zero reads).
 - Nearest-neighbor `tests/test_adopt_unit.sh` re-run green post-landing
   (template surface untouched; insurance run).
+
+**r2 remediation addendum (2026-10-18, W1/W2/W3/N1).** The lane-conditional
+default fix (W1/W2) and the new pins changed this file's surface: the suite
+is now **24/24** (was 22/22) — `+test_younger_or_equal_starttime_never_signaled`
+(N1) and `+test_env_override_wins_in_dev_test` (W1/W2 override pin) — and
+`test_default_is_on_pinned` now pins BOTH lanes (prod-kwarg ON / dev-kwarg OFF
+/ auto-detect follows `is_prod_lane()`). `test_kill_switch_off_is_a_complete_noop`
+gained `assert rep.errors == []` (W3). The original 22/22 + its three mutations
+above remain a record of the O8a landing (`a94000ae5`); the r2 mutation
+evidence is: (1) `is_prod_lane` → always `True` → `test_default_is_on_pinned`
+FAILS; (2) `>=`→`>` on the starttime clause → `test_younger_or_equal_starttime_never_signaled`
+FAILS; (3) starttime clause deleted → same test FAILS; (4) enumeration hoisted
+above the kill-switch check → `test_kill_switch_off_is_a_complete_noop` FAILS
+(the nonexistent-`proc_root` `FileNotFoundError` lands in `report.errors`).
+Scoped suite green post-restore: 68 passed
+(`tests/test_opt_o8_stale_subprocess_sweep.py tests/test_main_entry.py
+tests/unit/test_llm_streaming_wire_verify.py`). The two unfenced `main()`-drivers
+(`test_main_entry.py::test_boot_preflight_pg_reachable_proceeds`,
+`::test_boot_preflight_unexpected_error_fails_open`) and
+`test_llm_streaming_wire_verify.py::TestV4StartupOptOutPaths::test_v4_path1_daemon_main_wiring`
+pass WITHOUT patches (the W1/W2 acceptance proof — the sweep is a no-op in the
+source-mode test lane by default).

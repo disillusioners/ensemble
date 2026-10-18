@@ -64,11 +64,20 @@ KNOBS (boot-time env, O1 convention; deliberately NOT app_settings —
 this runs before config load and is boot-lane hygiene, not a managed
 runtime key):
 
-* ``ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES`` — kill-switch, default ON
-  (leader ruling 2026-10-18: guarded daemon boot code — bounded,
-  logged, revertible). ``0/false/no/off`` (case-insensitive) disables;
-  anything else (including absent) enables. OFF is a COMPLETE no-op:
-  no /proc reads, no signals, no log noise beyond one INFO line.
+* ``ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES`` — kill-switch with lane-
+  conditional default. The var **set** to ``0/false/no/off``
+  (case-insensitive) disables in BOTH lanes (explicit operator
+  override); the var **set** to anything else (including empty/
+  whitespace — the operator exported it) enables in BOTH lanes; the
+  var **absent** falls back to the lane default — prod lane
+  (``is_prod_lane() == True``, the promoted frozen binary) is ON,
+  dev/test/manual lane (``is_prod_lane() == False``, source-mode
+  ``python -m daemon`` / ``uvicorn daemon.api:app`` / ``pytest`` /
+  ``launcher.sh`` source runs) is OFF. The leader ruling of
+  "ships default-ON at promote" is honored by leaving
+  ``DEFAULT_ENABLED = True`` unchanged; the lane detector is what
+  gates whether the default applies. OFF is a COMPLETE no-op: no
+  /proc reads, no signals, no log noise beyond one INFO line.
 * ``ENSEMBLE_BOOT_SWEEP_TERM_GRACE_SECONDS`` — TERM→KILL grace window;
   default 5.0, clamped to [0.5, 30.0]; parse failure falls back to the
   default.
@@ -76,10 +85,24 @@ runtime key):
 FAIL-OPEN everywhere: any internal error is logged and a partial report
 returned — boot hygiene must never block boot. Beyond the qualified
 candidates, the module only ever READS /proc; it never writes anywhere
-and never signals anything the predicate did not qualify. In dev/test
-contexts the sweep is inert unless pointed at an injected /proc-style
-root (``proc_root=``) — the default ``/proc`` target is the live daemon
-boot path.
+and never signals anything the predicate did not qualify.
+
+LANE-CONDITIONAL DEFAULT (remediation r2, 2026-10-18). The default-ON
+rule (leader ruling, see KNOBS) is honored only in the PROD lane — the
+promoted frozen PyInstaller binary running under systemd. In dev/test/
+manual lanes (source-mode ``python -m daemon``, ``launcher.sh`` source
+runs, every ``pytest`` invocation), the sweep defaults to OFF. The
+discriminator and the rationale are in :func:`is_prod_lane`; the
+override rule (explicit ``ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES``
+wins in BOTH directions in ALL lanes) is in :func:`kill_switch_from_env`.
+The dev/test/manual default-OFF matters because (a) the dev/manual
+``launcher.sh`` cgroup is the login-session scope, so the candidate
+set over-broadens to same-session older non-lineage siblings (tmux
+daemons, tunnels, htop) — collateral-kill breadth; (b) test lanes
+unrelated to this module never patch the kill-switch env and would
+otherwise scan real /proc on every ``main()`` call. The pin test
+``test_default_is_on_pinned`` proves both sides; ``test_env_override_
+wins_in_dev_test`` pins the override.
 """
 
 from __future__ import annotations
@@ -87,6 +110,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import sys
 import time
 from dataclasses import dataclass, field
 
@@ -97,7 +121,9 @@ ENV_KILL_SWITCH = "ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES"
 ENV_TERM_GRACE_SECONDS = "ENSEMBLE_BOOT_SWEEP_TERM_GRACE_SECONDS"
 
 # Default-ON is the leader ruling (2026-10-18): guarded daemon boot code,
-# bounded + logged + revertible. Pinned by tests (default-ON pin).
+# bounded + logged + revertible. The DEFAULT itself stays True; the
+# lane-conditional application is in :func:`kill_switch_from_env` via
+# :func:`is_prod_lane` — Pinned by tests (default-ON pin).
 DEFAULT_ENABLED = True
 DEFAULT_TERM_GRACE_SECONDS = 5.0
 MIN_TERM_GRACE_SECONDS = 0.5
@@ -111,17 +137,92 @@ _DISABLE_VALUES = frozenset({"0", "false", "no", "off"})
 _MAX_LINEAGE_DEPTH = 64
 
 
-def kill_switch_from_env(environ: dict | None = None) -> bool:
-    """Resolve the kill-switch from ``ENV_KILL_SWITCH``.
+def is_prod_lane() -> bool:
+    """True when running in the promoted frozen-binary PROD lane.
 
-    Default ON (leader ruling): only an explicit disable value turns the
-    sweep off; absent / empty / any other value enables it.
+    Discriminator: ``getattr(sys, "frozen", False)`` — the canonical
+    PyInstaller freeze attribute, set by the bootloader before any
+    user code runs and available at module-import time (this function
+    must be callable BEFORE config load — it gates the default for the
+    sweep, which runs in ``daemon/__main__.main()`` BEFORE
+    ``load_config()``).
+
+    Why this discriminator, not ``ENSEMBLE_SELF_ENV``:
+
+    * ``ENSEMBLE_SELF_ENV`` can land on ``"live"`` for a dev checkout
+      when ``POSTGRES_DB=ensemble_prod`` is ambient on the box — the
+      auto-derive branch (D-FA2.3) does that on purpose so the live
+      gate sees ``live`` regardless of how the daemon was reached;
+      that is the OPPOSITE of what the sweep needs. Auto-derive is an
+      authoritative-detect for the lifecycle invariant; for THIS sweep
+      it would be false-positive-ON.
+    * systemd ``INVOCATION_ID`` (env) is only set when the daemon runs
+      under ``systemd-run`` / ``systemd.service``; the dev-box and
+      launcher.sh source runs do not have it, so it correctly
+      classifies them as non-prod — but it is also absent in unrelated
+      contexts (cron, manual ``python -m daemon`` from a non-systemd
+      shell), making it brittle on the negative side and unbinding
+      sys.frozen as the source of truth.
+    * ``getattr(sys, "frozen", False)`` is the canonical idiom this
+      codebase already uses at five sites to gate prod-only behavior:
+      ``daemon/loader.py:445``, ``daemon/manager.py:3542``,
+      ``daemon/registry.py:1486``, ``run_app.py:9``, and
+      ``daemon/tools/upgrade_tools.py:475,668``. Source-mode runs
+      (``python -m daemon``, ``uvicorn daemon.api:app``, ``pytest``,
+      ``launcher.sh`` source runs) resolve False; the promoted
+      PyInstaller binary resolves True. Reusing the established idiom
+      is the cheapest and most review-stable choice.
+
+    Tests pin both sides of the discriminator through the explicit
+    ``is_prod=`` kwarg on :func:`kill_switch_from_env` (the function
+    defers to this helper when ``is_prod`` is not supplied).
+    """
+    return bool(getattr(sys, "frozen", False))
+
+
+def kill_switch_from_env(
+    environ: dict | None = None,
+    *,
+    is_prod: bool | None = None,
+) -> bool:
+    """Resolve the kill-switch from ``ENV_KILL_SWITCH`` + lane detector.
+
+    Semantics (remediation r2, 2026-10-18; see KNOBS section in the
+    module docstring for the operator-facing summary):
+
+    * ``ENV_KILL_SWITCH`` **set** (any value, including empty or
+      whitespace-only — the operator went to the trouble of exporting
+      the var) → **explicit operator override**: a stripped-lower
+      value in ``_DISABLE_VALUES`` (``"0"``/``"false"``/``"no"``/
+      ``"off"``) returns OFF; **every other value (incl. empty after
+      strip) returns ON**. The override applies in BOTH lanes in
+      BOTH directions (B-side / override pin: ``test_env_override_
+      wins_in_dev_test``).
+    * ``ENV_KILL_SWITCH`` **absent** (no key in the env, or ``None``
+      from ``os.environ.get``) → lane-conditional default: **ON** in
+      the prod lane (``is_prod_lane()`` truthy — the promoted frozen
+      PyInstaller binary under systemd), **OFF** in dev/test/manual
+      (``is_prod_lane()`` falsy — source-mode ``python -m daemon``,
+      launcher.sh source runs, every ``pytest`` invocation).
+      ``is_prod`` defaults to :func:`is_prod_lane` when None; tests
+      can pin either lane via the explicit kwarg without depending
+      on how pytest was launched.
+
+    OFF is a complete no-op (the caller returns immediately, no /proc
+    reads, no signals).
     """
     env = os.environ if environ is None else environ
-    raw = (env.get(ENV_KILL_SWITCH) or "").strip().lower()
-    if raw in _DISABLE_VALUES:
-        return False
-    return DEFAULT_ENABLED
+    val = env.get(ENV_KILL_SWITCH)
+    if val is not None:
+        # Explicit env override — independent of lane.
+        raw = val.strip().lower()
+        if not raw:
+            return True  # operator set the var to empty/whitespace: ON
+        return raw not in _DISABLE_VALUES
+    # Env key absent — lane-conditional default.
+    if is_prod is None:
+        is_prod = is_prod_lane()
+    return DEFAULT_ENABLED if is_prod else False
 
 
 def term_grace_seconds_from_env(environ: dict | None = None) -> float:
