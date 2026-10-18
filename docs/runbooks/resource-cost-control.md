@@ -195,7 +195,7 @@ pressure-valve insurance, and some operators legitimately prefer strict
 no-swap + hard cgroup bounds. The call belongs to the user; if opted in, the
 example commands are checklist item (b).
 
-**Reading the tripwire.** `/system.slice` `memory.peak` ≈ **9.6 GB ≈ 97 % of
+**Reading the tripwire.** `/system.slice` `memory.peak` ≈ **9.6 GB ≈ 97% of
 the 9.9 GB box** since the Sep-26 boot. Before Oct 17 this read as a
 hypothetical near-full event; after the demonstrated OOM (3 deaths, daemon
 killed **23:19:14Z**, unit peak **8.4 GB**, box at **6.7 GB** at recovery) it
