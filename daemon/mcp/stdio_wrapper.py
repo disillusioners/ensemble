@@ -369,11 +369,14 @@ class TaskScopedContextManager:
                 self._error = e
                 self._ready.set()
                 return
-            self._ready.set()
             # D5 — best-effort on_ready hook (MCP child stamp). Runs
             # in the background task, right after the child is
-            # guaranteed alive. Exceptions are swallowed: a hook
-            # failure must never break the transport.
+            # guaranteed alive AND BEFORE ``_ready.set()`` so the
+            # stamp is guaranteed complete by the time the
+            # ``__aenter__`` waiter resumes (deterministic ordering
+            # — no dependence on the event-loop's wake schedule).
+            # Exceptions are swallowed: a hook failure must never
+            # break the transport.
             if self._on_ready is not None:
                 try:
                     self._on_ready()
@@ -382,6 +385,7 @@ class TaskScopedContextManager:
                         "TaskScopedContextManager on_ready hook failed: "
                         "%s: %s", type(exc).__name__, exc,
                     )
+            self._ready.set()
             try:
                 await self._close.wait()
             finally:
