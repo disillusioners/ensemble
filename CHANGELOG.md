@@ -5,7 +5,16 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.22.0] — 2026-10-18
+
+### Added — public passcode lane for live views (`liveview-passcode-1`, branch `feature/live-view-passcode` @ `6cf3dbcb6`, merged to `latest` @ `09d4c9490`)
+
+> **CHANGELOG (feature disclosure):** *Live views gain a narrow unauthenticated public lane — passcode-protected sharing via ``/views/public/{root}/{rel}`` with daemon-side passcode enforcement as the CANONICAL gate; proxies are pure passthrough (no coupling to external proxy mechanics). Two-state proxy compatibility (user ruling 2026-10-17): State A (external door.ensem.dev OAuth2 middle server) and State B (in-house OAuth2/OIDC module) both keep the public namespace exempt — operator migration runbook at ``docs/runbooks/live-view-passcode-deployment.md``. The existing OAuth-authenticated ``/views/*`` lane is unchanged.*
+
+- **6-char alnum passcodes; `view_link` ALWAYS returns the passcode** (`daemon/tools/live_views.py`) — minting is idempotent per `(root_name, rel_path)` (first-store-wins: re-mint returns the existing row, never clears an active lock); the link is self-contained for sharing.
+- **`view_passcode` tables** (`daemon/migrations/versions/20261017_193816_create_live_view_passcode_tables.sql`, one-file-two-tables per the secrets-P1 precedent): `live_view_passcodes` — Fernet `wrapped_passcode` BLOB via `SYSTEM_ENCRYPTION_KEY` (NO plaintext at rest), UUID4 immutable handles, `UNIQUE(root_name, rel_path)`; + append-only `live_view_passcode_audit`.
+- **10-strike durable lockout** (`daemon/services/view_passcode_service.py`, `daemon/repositories/view_passcodes/`) — ROW-level (locking one file never takes out a root), survives daemon restart; wrong-code attempts are counted durably.
+- **Public-lane router + interstitial pages + tests** (`daemon/routers/live_views.py`, `daemon/services/view_passcode_pages.py`; suites: public-lane router tests, service/tool tests, migration index-parity, golden direct-lane envelope pin).
 
 ### Changed — purpose-id family defaults extended (`purpose-model-defaults`, branch `feature/purpose-model-defaults` @ `c3fabc1d3`)
 
