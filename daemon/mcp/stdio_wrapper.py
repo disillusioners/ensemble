@@ -80,8 +80,15 @@ _PROC_ROOT: Path = Path("/proc")
 
 
 def _basename_command(command: str) -> str:
-    """Return the basename of an executable path (portable)."""
-    return os.path.basename(command or "")
+    """Return the basename of an executable path (portable).
+
+    Defensive: non-string input (e.g. a mock in a test harness)
+    yields ``""`` rather than raising — the caller treats an empty
+    basename as "no match".
+    """
+    if not isinstance(command, str) or not command:
+        return ""
+    return os.path.basename(command)
 
 
 def _read_cmdline(proc_root: Path, pid: int) -> list[str]:
