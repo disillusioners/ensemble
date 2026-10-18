@@ -46,7 +46,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import Column, Index, Integer, Text, text
+from sqlalchemy import BigInteger, Column, Index, Integer, Text, text
 from sqlmodel import Field, SQLModel
 
 
@@ -93,8 +93,16 @@ class ResourceDaemonBucket(SQLModel, table=True):
     hw_peak_kb: Optional[int] = Field(default=None)
     threads: Optional[int] = Field(default=None)
     fds: Optional[int] = Field(default=None)
-    cpu_user_usec: Optional[int] = Field(default=None)
-    cpu_sys_usec: Optional[int] = Field(default=None)
+    # BIGINT — cumulative since-boot counters can exceed PG INTEGER
+    # (2^31-1 usec ≈ 36 min of CPU) fast on a busy daemon.
+    cpu_user_usec: Optional[int] = Field(
+        default=None,
+        sa_column=Column("cpu_user_usec", BigInteger, nullable=True),
+    )
+    cpu_sys_usec: Optional[int] = Field(
+        default=None,
+        sa_column=Column("cpu_sys_usec", BigInteger, nullable=True),
+    )
     cg_current_kb: Optional[int] = Field(default=None)
     cg_anon_kb: Optional[int] = Field(default=None)
     cg_file_kb: Optional[int] = Field(default=None)
@@ -102,7 +110,12 @@ class ResourceDaemonBucket(SQLModel, table=True):
     cg_peak_kb: Optional[int] = Field(default=None)
     child_rss_total_kb: Optional[int] = Field(default=None)
     # D13 — attribution columns exist but stay NULL/0 in P1.
-    attributed_bytes: Optional[int] = Field(default=None)
+    # BIGINT — byte counters (PG INTEGER overflows at 2GiB; the
+    # maintenance_runs BigInteger precedent, incident 2026-09-28).
+    attributed_bytes: Optional[int] = Field(
+        default=None,
+        sa_column=Column("attributed_bytes", BigInteger, nullable=True),
+    )
     unattributed_kb: Optional[int] = Field(default=None)
     coverage_pct: Optional[float] = Field(default=None)
     # Sampler self-cost counters (D12 — alarmable).
@@ -152,14 +165,26 @@ class ResourceInstanceSample(SQLModel, table=True):
         description="``counter`` (cheap charge seam) or ``deep`` (reconcile walk).",
     )
     # P1 boundary: attribution counters written NULL/0 (D13). P2 fills.
-    charged_bytes: Optional[int] = Field(default=None)
-    deep_bytes: Optional[int] = Field(default=None)
+    charged_bytes: Optional[int] = Field(
+        default=None,
+        sa_column=Column("charged_bytes", BigInteger, nullable=True),
+    )
+    deep_bytes: Optional[int] = Field(
+        default=None,
+        sa_column=Column("deep_bytes", BigInteger, nullable=True),
+    )
     graph_cache_present: Optional[bool] = Field(default=None)
     in_flight_tasks: Optional[int] = Field(default=None)
     all_state_messages_len: Optional[int] = Field(default=None)
     child_rss_kb: Optional[int] = Field(default=None)
-    child_cpu_user_usec: Optional[int] = Field(default=None)
-    cpu_share_usec_est: Optional[int] = Field(default=None)
+    child_cpu_user_usec: Optional[int] = Field(
+        default=None,
+        sa_column=Column("child_cpu_user_usec", BigInteger, nullable=True),
+    )
+    cpu_share_usec_est: Optional[int] = Field(
+        default=None,
+        sa_column=Column("cpu_share_usec_est", BigInteger, nullable=True),
+    )
     # Labelled — NOT NULL to surface the residual honestly.
     estimated: bool = Field(
         default=True,
@@ -237,7 +262,10 @@ class ResourcePidMap(SQLModel, table=True):
     exit_code: Optional[int] = Field(default=None)
     exit_kind: Optional[str] = Field(default=None)
     peak_rss_kb: Optional[int] = Field(default=None)
-    cpu_user_usec: Optional[int] = Field(default=None)
+    cpu_user_usec: Optional[int] = Field(
+        default=None,
+        sa_column=Column("cpu_user_usec", BigInteger, nullable=True),
+    )
     # Dormant v2 columns (P6 will populate; schema lives here so
     # P6 doesn't re-create).
     action: Optional[str] = Field(default=None)
