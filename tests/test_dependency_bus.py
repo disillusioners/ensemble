@@ -15,9 +15,11 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import text
@@ -2700,3 +2702,239 @@ class TestWCSweepGraceWindow:
         }
         assert young.watch_id in pending_ids
         assert old_active.watch_id in pending_ids
+
+
+# -------------------------------------------------------------------------
+# TestLockReap — lock-map reap (resource-cost-control commission)
+# -------------------------------------------------------------------------
+
+
+class TestLockReap:
+    """``DependencyBus.reap_stale_locks`` (resource-cost-control).
+
+    Reap fires ONLY for terminal-or-gone, UNHELD, idle owners; held
+    locks and active owners are NEVER reaped; a DB probe failure fails
+    open (nothing reaped); no behavior change when nothing to reap.
+    """
+
+    @pytest.fixture
+    async def reap_bus(self, bus_repo_with_task):
+        """Started bus over an engine that ALSO has the ``task`` table.
+
+        The reap's terminality probe queries ``task`` — without that
+        table the probe fails open (by design) and nothing is reaped;
+        the fail-open behavior gets its own test below against the
+        table-less ``bus`` fixture.
+        """
+        b = DependencyBus(bus_repo_with_task)
+        await b.start()
+        try:
+            yield b
+        finally:
+            await b.stop()
+
+    @staticmethod
+    def _age(bus, key: str, seconds: float = 7200.0, parent: bool = False):
+        """Backdate a lock's fetch-touch clock (simulate full idle)."""
+        clock = bus._parent_lock_touch if parent else bus._lock_touch
+        clock[key] = time.monotonic() - seconds
+
+    @pytest.mark.asyncio
+    async def test_reap_removes_idle_unheld_lock_with_gone_owner(
+        self, reap_bus
+    ):
+        """Terminal-or-gone (no task row) + unheld + idle → reaped."""
+        await reap_bus._get_lock("999")  # creates lock + touch; no task row
+        self._age(reap_bus, "999")
+        reaped_tasks, reaped_parents = await reap_bus.reap_stale_locks()
+        assert (reaped_tasks, reaped_parents) == (1, 0)
+        assert "999" not in reap_bus._locks
+        assert "999" not in reap_bus._lock_touch
+
+    @pytest.mark.asyncio
+    async def test_reap_fires_for_terminal_status_owner(self, reap_bus):
+        """Owner task COMPLETED (terminal status) → lock reaped."""
+        task_id = str(
+            _insert_task(reap_bus._repo.engine, "inst-1", "completed")
+        )
+        await reap_bus._get_lock(task_id)
+        self._age(reap_bus, task_id)
+        reaped_tasks, _ = await reap_bus.reap_stale_locks()
+        assert reaped_tasks == 1
+        assert task_id not in reap_bus._locks
+
+    @pytest.mark.asyncio
+    async def test_held_lock_never_reaped(self, reap_bus):
+        """A HELD lock is never reaped, even with a gone + aged owner."""
+        lock = await reap_bus._get_lock("999")
+        await lock.acquire()
+        self._age(reap_bus, "999")
+        reaped_tasks, _ = await reap_bus.reap_stale_locks()
+        assert reaped_tasks == 0
+        assert "999" in reap_bus._locks
+        assert reap_bus._locks["999"] is lock
+        lock.release()
+
+    @pytest.mark.asyncio
+    async def test_active_owner_lock_never_reaped(self, reap_bus):
+        """Owner task RUNNING (active status) → lock kept."""
+        task_id = str(
+            _insert_task(reap_bus._repo.engine, "inst-1", "running")
+        )
+        await reap_bus._get_lock(task_id)
+        self._age(reap_bus, task_id)
+        reaped_tasks, _ = await reap_bus.reap_stale_locks()
+        assert reaped_tasks == 0
+        assert task_id in reap_bus._locks
+
+    @pytest.mark.asyncio
+    async def test_paused_owner_lock_never_reaped(self, reap_bus):
+        """Owner task PAUSED (active per the orphan-sweep predicate) → kept."""
+        task_id = str(
+            _insert_task(reap_bus._repo.engine, "inst-1", "paused")
+        )
+        await reap_bus._get_lock(task_id)
+        self._age(reap_bus, task_id)
+        reaped_tasks, _ = await reap_bus.reap_stale_locks()
+        assert reaped_tasks == 0
+        assert task_id in reap_bus._locks
+
+    @pytest.mark.asyncio
+    async def test_recent_touch_lock_never_reaped(self, reap_bus):
+        """Fresh (recently fetched) lock → kept even with a gone owner."""
+        await reap_bus._get_lock("999")
+        # NO backdating — the touch clock is current.
+        reaped_tasks, _ = await reap_bus.reap_stale_locks()
+        assert reaped_tasks == 0
+        assert "999" in reap_bus._locks
+
+    @pytest.mark.asyncio
+    async def test_pending_chain_owner_lock_never_reaped(self, reap_bus):
+        """Key with a live follow-up chain (``_pending``) → kept.
+
+        Belt-and-braces: even a terminal-status owner mid-rearm keeps
+        its lock while a chain is live.
+        """
+        task_id = str(
+            _insert_task(reap_bus._repo.engine, "inst-1", "completed")
+        )
+        await reap_bus._get_lock(task_id)
+        await reap_bus.watch(task_id, make_fu(target_id="parent-A"))
+        self._age(reap_bus, task_id)
+        reaped_tasks, _ = await reap_bus.reap_stale_locks()
+        assert reaped_tasks == 0
+        assert task_id in reap_bus._locks
+
+    @pytest.mark.asyncio
+    async def test_parent_locks_reaped_on_idle(self, reap_bus):
+        """Idle unheld parent locks are reaped (touch clock is their signal)."""
+        await reap_bus._get_parent_lock("parent-X")
+        self._age(reap_bus, "parent-X", parent=True)
+        reaped_tasks, reaped_parents = await reap_bus.reap_stale_locks()
+        assert (reaped_tasks, reaped_parents) == (0, 1)
+        assert "parent-X" not in reap_bus._parent_locks
+        assert "parent-X" not in reap_bus._parent_lock_touch
+
+    @pytest.mark.asyncio
+    async def test_held_parent_lock_never_reaped(self, reap_bus):
+        """A HELD parent lock is never reaped."""
+        lock = await reap_bus._get_parent_lock("parent-X")
+        await lock.acquire()
+        self._age(reap_bus, "parent-X", parent=True)
+        _, reaped_parents = await reap_bus.reap_stale_locks()
+        assert reaped_parents == 0
+        assert "parent-X" in reap_bus._parent_locks
+        lock.release()
+
+    @pytest.mark.asyncio
+    async def test_noop_when_nothing_to_reap(self, reap_bus):
+        """No stale entries → (0, 0), dicts unchanged."""
+        await reap_bus._get_lock("t1")
+        await reap_bus._get_parent_lock("p1")
+        before_locks = dict(reap_bus._locks)
+        before_parents = dict(reap_bus._parent_locks)
+        result = await reap_bus.reap_stale_locks()
+        assert result == (0, 0)
+        assert reap_bus._locks == before_locks
+        assert reap_bus._parent_locks == before_parents
+
+    @pytest.mark.asyncio
+    async def test_noop_when_task_table_missing_fails_open(self, bus):
+        """Probe failure (no ``task`` table) → fail-open, nothing reaped.
+
+        The default ``bus`` fixture's engine has NO ``task`` table; the
+        probe raises, the reap logs a warning and reaps nothing.
+        """
+        await bus._get_lock("999")
+        self._age(bus, "999")
+        reaped_tasks, reaped_parents = await bus.reap_stale_locks()
+        assert (reaped_tasks, reaped_parents) == (0, 0)
+        assert "999" in bus._locks
+
+    @pytest.mark.asyncio
+    async def test_bus_still_functions_after_reap(self, reap_bus):
+        """No behavior change: watch → reap → emit_terminal still fires."""
+        task_id = str(
+            _insert_task(reap_bus._repo.engine, "inst-1", "completed")
+        )
+        await reap_bus._get_lock("dead-lock")  # will be reaped
+        self._age(reap_bus, "dead-lock")
+        reaped_tasks, _ = await reap_bus.reap_stale_locks()
+        assert reaped_tasks == 1
+        # The live cycle is untouched by the reap.
+        await reap_bus.watch(task_id, make_fu(target_id="parent-A"))
+        fired = await reap_bus.emit_terminal(task_id, make_outcome())
+        assert len(fired) == 1
+        assert await reap_bus.pending_watchers(task_id) == []
+
+    @pytest.mark.asyncio
+    async def test_acquire_between_snapshot_and_pop_is_respected(
+        self, reap_bus
+    ):
+        """A lock acquired DURING the reap's probe window is never reaped.
+
+        Deterministic interleaving of the atomicity contract: the reap's
+        phase-1 snapshot sees the lock unheld, the reap then yields at
+        the DB probe (``asyncio.to_thread``), the test acquires the lock
+        inside that window, and the reap's verify-and-pop re-checks held
+        state and skips. This is the race the pop-time guard exists for.
+        """
+        lock = await reap_bus._get_lock("999")
+        self._age(reap_bus, "999")
+
+        # Gate the terminality probe so the reap deterministically PARKS
+        # inside it (between the phase-1 snapshot and the phase-3 pop)
+        # until the test has acquired the lock.
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+
+        def gated_probe(task_ids):
+            probe_started.set()
+            release_probe.wait(timeout=5)
+            return set()  # owner "gone" → phase 3 is the only remaining gate
+
+        with patch.object(
+            reap_bus, "_fetch_active_task_ids_sync", gated_probe
+        ):
+            reap_task = asyncio.create_task(reap_bus.reap_stale_locks())
+            while not probe_started.is_set():
+                await asyncio.sleep(0.005)
+            # Snapshot done; reap parked in the probe. Acquire now.
+            await lock.acquire()
+            release_probe.set()
+            reaped_tasks, _ = await asyncio.wait_for(reap_task, timeout=5)
+        # ...and the reap must have respected the mid-flight acquire.
+        assert reaped_tasks == 0
+        assert "999" in reap_bus._locks
+        lock.release()
+
+    @pytest.mark.asyncio
+    async def test_min_idle_override_contract(self, reap_bus):
+        """``min_idle_s`` parameter drives the threshold (cadence knob)."""
+        await reap_bus._get_lock("999")
+        self._age(reap_bus, "999", seconds=10.0)
+        # Default threshold (3600s): 10s-old lock is kept.
+        assert await reap_bus.reap_stale_locks() == (0, 0)
+        # Lowered threshold: same lock is now eligible and reaped.
+        reaped_tasks, _ = await reap_bus.reap_stale_locks(min_idle_s=5.0)
+        assert reaped_tasks == 1

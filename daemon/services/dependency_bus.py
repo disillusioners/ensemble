@@ -79,6 +79,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -145,6 +146,18 @@ def _has_truthy_error(outcome: Outcome) -> bool:
 #: use the same value without leaking the knob into the periodic
 #: service.
 DEFAULT_ORPHAN_SWEEP_GRACE_SECONDS: int = 30
+
+
+#: Minimum IDLE time (seconds) before a bus lock-map entry is eligible for
+#: reaping by :meth:`DependencyBus.reap_stale_locks` (resource-cost-control
+#: commission). "Idle" = last lock FETCH (``_get_lock`` /
+#: ``_get_parent_lock``) — the bus is the SOLE producer of activity for
+#: these keys, so a key untouched for a full reap cadence is, for every
+#: practical purpose, owned by a terminal (or gone) task/parent. Sized to
+#: match the hourly MaintenanceService cadence the reap is driven from
+#: (see ``InstanceManager._run_dependency_bus_lock_reap``): the first reap
+#: tick can therefore never reap anything younger than one full cadence.
+DEFAULT_LOCK_REAP_MIN_IDLE_S: float = 3600.0
 
 
 # -------------------------------------------------------------------------
@@ -410,9 +423,15 @@ class DependencyBus:
 
         # Per-source-task asyncio.Lock. Serializes concurrent
         # :meth:`watch` / :meth:`emit_terminal` on the same task.
-        # The lock is lazily created and reused — the bus never
-        # deletes individual locks (only :meth:`stop` clears the
-        # whole dict, on daemon shutdown).
+        # The lock is lazily created and reused. Entries whose owner
+        # has gone quiet are REAPED by :meth:`reap_stale_locks`
+        # (resource-cost-control): unheld + idle ≥
+        # ``DEFAULT_LOCK_REAP_MIN_IDLE_S`` + owner task terminal-or-gone
+        # (the orphan sweep's active-status predicate). Held or
+        # recently-touched locks are never reaped. (Historically the
+        # bus never deleted individual locks — only :meth:`stop`
+        # cleared the whole dict on daemon shutdown; the per-daemon-
+        # lifetime monotonic growth is what the reap bounds.)
         self._locks: dict[str, asyncio.Lock] = {}
         # Guards lock creation so concurrent first-access on the
         # same task can't race on dict mutation. Held only for the
@@ -422,14 +441,24 @@ class DependencyBus:
         # Per-parent asyncio.Lock (Phase 1, 2026-06-23). Serializes
         # the DB INSERT against a concurrent ``_finalize_job``
         # holding the parent lock. Created lazily via
-        # :meth:`_get_parent_lock`; never deleted by individual
-        # methods (the whole dict is cleared on :meth:`stop`).
-        # Per-task locks above remain the cache serializer.
+        # :meth:`_get_parent_lock`; entries whose owner has gone
+        # quiet are REAPED by :meth:`reap_stale_locks`
+        # (resource-cost-control) — held or recently-touched entries
+        # are never touched. Per-task locks above share the same
+        # reap path. The whole dict is still cleared on :meth:`stop`.
         self._parent_locks: dict[str, asyncio.Lock] = {}
         # Guards parent lock creation. Same pattern as ``_locks_guard``
         # above: held only for the dict lookup + ``asyncio.Lock()``
         # construction, then released.
         self._parent_locks_guard: asyncio.Lock = asyncio.Lock()
+        # Last-activity clocks for lock reap (resource-cost-control).
+        # Refreshed inside ``_get_lock`` / ``_get_parent_lock`` under
+        # the respective creation guard on EVERY fetch — the bus is the
+        # sole producer of these keys, so "fetch-touch age" is the
+        # bus-local liveness signal. Keyed identically to the lock
+        # dicts; entries are popped together with their locks.
+        self._lock_touch: dict[str, float] = {}
+        self._parent_lock_touch: dict[str, float] = {}
 
         # Per-parent generation counter (Phase 1, 2026-06-23,
         # extracted from :class:`CorrelationManager`). Monotonic
@@ -1613,6 +1642,10 @@ class DependencyBus:
         cache_size = sum(len(v) for v in self._pending.values())
         self._pending.clear()
         self._locks.clear()
+        # resource-cost-control: reap-liveness clocks clear alongside
+        # their lock dicts (same lifetime, same call site).
+        self._lock_touch.clear()
+        self._parent_lock_touch.clear()
         # Phase 1 (2026-06-23): clear per-parent locks + generation
         # counter alongside the per-task locks so the daemon shutdown
         # path doesn't leak dict entries. Per-parent entries are
@@ -1632,6 +1665,190 @@ class DependencyBus:
             f"bus stop: cleared {cache_size} cached watchers",
             extra={"completion_delivery_path": "bus"},
         )
+
+    # -------------------------------------------------------------------------
+    # Lock-map reap (resource-cost-control)
+    # -------------------------------------------------------------------------
+
+    async def reap_stale_locks(
+        self, min_idle_s: float = DEFAULT_LOCK_REAP_MIN_IDLE_S
+    ) -> tuple[int, int]:
+        """Reap lock-map entries whose owners have gone quiet.
+
+        resource-cost-control commission: ``_locks`` / ``_parent_locks``
+        are tiny but MONOTONIC over daemon lifetime (historically only
+        :meth:`stop` cleared them). This reap bounds that growth. It is
+        driven from the EXISTING hourly MaintenanceService loop (see
+        ``InstanceManager._run_dependency_bus_lock_reap``) — no new
+        thread, no new asyncio task.
+
+        **Reap criterion** — ALL of, per entry:
+
+        1. **UNHELD** — ``not lock.locked()`` at reap-verify time, under
+           the same creation guard that protects dict mutation (no new
+           lock discipline introduced; the guard IS the atomicity
+           boundary). A held lock is NEVER reaped.
+        2. **IDLE ≥ min_idle_s** — last ``_get_lock`` /
+           ``_get_parent_lock`` fetch at least this long ago (the touch
+           clock refreshes on every fetch under the same guard, so an
+           entry mid-use can never look idle). The bus is the SOLE
+           producer of activity for these keys.
+        3. **TERMINAL-or-gone owner** (task locks only) — the owning
+           task id is NOT in the active set
+           (``SELECT id FROM task WHERE status IN ('running','pending',
+           'paused')``) — the SAME active-task predicate the orphan
+           sweep (:meth:`_sweep_orphan_watchers`) uses. Probed as ONE
+           batched query per reap cycle and FAIL-OPEN: a DB error marks
+           every candidate active (nothing reaped this cycle). Parent
+           locks have no bus-visible liveness signal beyond the touch
+           clock (``_parent_errored`` is sticky-by-design), so criterion
+           2 alone — a full cadence of zero fetches — carries their
+           terminality inference.
+        4. **No live follow-up chain** (task locks) — the key is absent
+           from ``_pending`` (an extra belt: even a terminal task with
+           an in-flight re-arm keeps its lock).
+
+        **Atomicity / residual window (documented honestly).** Snapshot
+        and verify-then-pop both run under the respective guard, and the
+        held-state check re-runs at pop time — a waiter that ACQUIRED
+        between snapshot and pop is seen held and skipped. One window
+        remains and is accepted: a caller that fetched the lock
+        reference BEFORE the reap and is suspended BEFORE its acquire
+        can end up serializing on an orphaned object while a later
+        caller builds a fresh one. That requires the owner to have been
+        fully quiet for a full reap cadence and then to race the
+        microsecond verify-pop window; the orphaned critical section is
+        exactly the register-during-terminalization class the
+        generation counters (:meth:`get_generation` consumers) already
+        absorb. A replayed task self-heals on its next reap cycle (the
+        fresh lock is the live one; the orphan drops out of the dict
+        forever).
+
+        Args:
+            min_idle_s: Minimum fetch-touch idle before eligibility.
+                Defaults to ``DEFAULT_LOCK_REAP_MIN_IDLE_S`` (3600s —
+                one full reap cadence).
+
+        Returns:
+            ``(task_locks_reaped, parent_locks_reaped)``.
+        """
+        now = time.monotonic()
+
+        # Phase 1 — snapshot candidates under each guard (cheap dict
+        # reads; no DB, no awaits between check and snapshot).
+        async with self._locks_guard:
+            task_candidates = [
+                (task_id, lock)
+                for task_id, lock in self._locks.items()
+                if not lock.locked()
+                and (now - self._lock_touch.get(task_id, now)) >= min_idle_s
+                and task_id not in self._pending
+            ]
+        async with self._parent_locks_guard:
+            parent_candidates = [
+                (parent_id, lock)
+                for parent_id, lock in self._parent_locks.items()
+                if not lock.locked()
+                and (now - self._parent_lock_touch.get(parent_id, now))
+                >= min_idle_s
+            ]
+        if not task_candidates and not parent_candidates:
+            return (0, 0)
+
+        # Phase 2 — authoritative terminality for task locks: the
+        # orphan sweep's active-task predicate, one batched probe,
+        # fail-open (error ⇒ everything counts active ⇒ nothing reaped).
+        active_ids = await asyncio.to_thread(
+            self._fetch_active_task_ids_sync,
+            [task_id for task_id, _ in task_candidates],
+        )
+        reapable = [
+            (task_id, lock)
+            for task_id, lock in task_candidates
+            if task_id not in active_ids
+        ]
+
+        # Phase 3 — verify + pop ATOMICALLY under each guard. The
+        # held-state check RE-RUNS here: a waiter that acquired after
+        # the phase-1 snapshot is seen held and skipped (the acquire
+        # fast-path sets ``locked()`` synchronously when uncontended).
+        reaped_tasks = 0
+        async with self._locks_guard:
+            for task_id, lock in reapable:
+                if lock.locked():
+                    continue
+                idle_s = now - self._lock_touch.get(task_id, now)
+                self._locks.pop(task_id, None)
+                self._lock_touch.pop(task_id, None)
+                reaped_tasks += 1
+                logger.debug(
+                    "dependency_bus reap: task lock owner=%s idle_s=%.0f",
+                    task_id,
+                    idle_s,
+                )
+        reaped_parents = 0
+        async with self._parent_locks_guard:
+            for parent_id, lock in parent_candidates:
+                if lock.locked():
+                    continue
+                idle_s = now - self._parent_lock_touch.get(parent_id, now)
+                self._parent_locks.pop(parent_id, None)
+                self._parent_lock_touch.pop(parent_id, None)
+                reaped_parents += 1
+                logger.debug(
+                    "dependency_bus reap: parent lock owner=%s idle_s=%.0f",
+                    parent_id,
+                    idle_s,
+                )
+        if reaped_tasks or reaped_parents:
+            logger.info(
+                "dependency_bus reap: removed %d task lock(s), %d parent "
+                "lock(s) (idle >= %.0fs)",
+                reaped_tasks,
+                reaped_parents,
+                min_idle_s,
+            )
+        return (reaped_tasks, reaped_parents)
+
+    def _fetch_active_task_ids_sync(self, task_ids: list[str]) -> set[str]:
+        """Return the subset of ``task_ids`` whose task row is ACTIVE.
+
+        Active = ``status IN ('running', 'pending', 'paused')`` — the
+        SAME active-task predicate :meth:`_sweep_orphan_watchers` uses
+        (same casing rules: ``task.status`` is lowercase on disk). A
+        missing row (hard-deleted task) is NOT active → reapable.
+        Runs in a worker thread (``asyncio.to_thread`` at the call
+        site) per the bus's DB-call convention.
+
+        Dialect-portable ``text()`` SQL with an embedded literal IN-list
+        of candidate ids — the ids are UUID-shaped identifiers this bus
+        itself wrote into ``dependency_watchers.source_task_id`` (never
+        free-form user text), and each is single-quote-doubled
+        defensively anyway. Any DB error FAILS OPEN: every candidate is
+        reported active so the reap cycle becomes a no-op.
+        """
+        if not task_ids:
+            return set()
+        quoted = ",".join(
+            "'" + str(t).replace("'", "''") + "'" for t in task_ids
+        )
+        stmt = text(
+            "SELECT CAST(id AS TEXT) FROM task "
+            f"WHERE CAST(id AS TEXT) IN ({quoted}) "
+            "AND status IN ('running', 'pending', 'paused')"
+        )
+        try:
+            with self._repo.engine.connect() as conn:
+                rows = conn.execute(stmt).fetchall()
+            return {str(row[0]) for row in rows}
+        except Exception as exc:
+            logger.warning(
+                "dependency_bus reap: task-status probe failed (%s: %s) — "
+                "failing open, no task locks reaped this cycle",
+                type(exc).__name__,
+                exc,
+            )
+            return set(task_ids)
 
     # -------------------------------------------------------------------------
     # Private helpers
@@ -1660,6 +1877,11 @@ class DependencyBus:
         async with self._locks_guard:
             if source_task_id not in self._locks:
                 self._locks[source_task_id] = asyncio.Lock()
+            # Lock-reap liveness clock (resource-cost-control): every
+            # fetch refreshes the idle timer under the same guard, so a
+            # reap can never observe a lock as idle while a caller is
+            # between fetch and acquire.
+            self._lock_touch[source_task_id] = time.monotonic()
             return self._locks[source_task_id]
 
     async def _get_parent_lock(self, parent_id: str) -> asyncio.Lock:
@@ -1700,6 +1922,9 @@ class DependencyBus:
         async with self._parent_locks_guard:
             if parent_id not in self._parent_locks:
                 self._parent_locks[parent_id] = asyncio.Lock()
+            # Lock-reap liveness clock (resource-cost-control) — same
+            # discipline as ``_get_lock``.
+            self._parent_lock_touch[parent_id] = time.monotonic()
             return self._parent_locks[parent_id]
 
     def get_generation(self, parent_id: str) -> int:

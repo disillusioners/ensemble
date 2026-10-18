@@ -3510,6 +3510,23 @@ class InstanceManager:
             execute_fn=self._run_malloc_trim,
         )
 
+        # ── DependencyBus lock-map reap (resource-cost-control) ──────
+        # Hourly piggyback on the EXISTING MaintenanceService loop —
+        # no new thread, no new asyncio task (same pattern as the O1
+        # malloc_trim registration above; the ``_is_idle`` gate keeps
+        # it off in-flight work). Reaps the bus's terminal-owner UNHELD
+        # lock-map entries (``_locks`` / ``_parent_locks`` are tiny but
+        # monotonic over daemon lifetime); held or recently-touched
+        # locks are never reaped — see
+        # ``DependencyBus.reap_stale_locks`` for the full safety
+        # contract. The knob falls out for free: the cadence IS this
+        # registration's interval (no settings plumbing).
+        self._maintenance_service.register(
+            "dependency_bus_lock_reap",
+            min_interval_hours=1.0,
+            execute_fn=self._run_dependency_bus_lock_reap,
+        )
+
         # Section 1 / T8 + W1 + W2 (v3 fix pass) — boot sweep of
         # orphaned ``running`` rows (AM-7): unconditional
         # rowcount-guarded CAS ``running → interrupted``, WITH bounded
@@ -5964,6 +5981,40 @@ class InstanceManager:
                 )
         except Exception as exc:  # noqa: BLE001 — host loop must never die
             logger.debug(f"_run_malloc_trim skipped: {type(exc).__name__}: {exc}")
+
+    async def _run_dependency_bus_lock_reap(self) -> None:
+        """Idle-time DependencyBus lock-map reap (resource-cost-control).
+
+        Registered hourly with :class:`MaintenanceService` (same
+        cadence pattern as the O1 ``malloc_trim`` registration); the
+        ``_is_idle`` gate keeps it away from in-flight work. The bus
+        singleton may legitimately be absent (``set_dependency_bus``
+        never called in a stripped-down test manager) — that is a
+        DEBUG-logged no-op. The belt-and-braces ``except`` keeps the
+        host maintenance loop unkillable; the reap itself fails open
+        per-cycle (a DB probe error reaps nothing — see
+        ``DependencyBus.reap_stale_locks``).
+        """
+        try:
+            bus = get_dependency_bus()
+            if bus is None:
+                logger.debug(
+                    "dependency_bus_lock_reap: bus singleton absent — skipped"
+                )
+                return
+            reaped_tasks, reaped_parents = await bus.reap_stale_locks()
+            if reaped_tasks or reaped_parents:
+                logger.info(
+                    "dependency_bus_lock_reap: reaped %d task lock(s), "
+                    "%d parent lock(s)",
+                    reaped_tasks,
+                    reaped_parents,
+                )
+        except Exception as exc:  # noqa: BLE001 — host loop must never die
+            logger.debug(
+                f"_run_dependency_bus_lock_reap skipped: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     async def _run_skill_orphan_sweep(self) -> None:
         """Periodic sweep of stale ``selected=True`` usage records.
