@@ -1178,3 +1178,190 @@ class TestS3MarkerBodyRoundtrip:
                 )
             ).fetchall()
         assert rows == []
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Review-r1 remediation batch (2026-10-18) — W1 / W2 / W3 pins
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestReviewR1Remediation:
+    """Review-round-1 remediation pins (convergent-warning W1, latent
+    residuals W2/W3). One class, one batch — each test names the item
+    it pins."""
+
+    def test_structural_uuid_interior_exclusion_multi_pass(
+        self, service
+    ):
+        """W1 (structural marker exclusion): a stored plaintext that
+        IS a foreign uuid (marker-id shaped) must NOT fire inside an
+        already-minted marker carrying that same interior — the old
+        single all-zeros-template membership test passed it and
+        ``str.replace`` corrupted the marker (that id's resolution
+        died in the transcript). Pinned across MULTIPLE passes:
+
+        1. The marker for the colliding uuid survives BYTE-EXACT
+           through pass 1 AND pass 2; ``parse_marker`` round-trips.
+        2. The uuid-shaped plaintext is excluded (standalone
+           occurrence left intact — documented exclusion).
+        3. A plaintext merely EMBEDDING a valid-uuid interior (extra
+           non-hex chars around it) is NOT over-excluded — it is
+           scrubbed to its own marker.
+        4. Multi-pass is idempotent: pass 2 is a byte-identical
+           no-op.
+        """
+        holder = service.store(name="holder", kind="generic",
+                               value="HOLDER-PLAIN-1", actor="coder")
+        holder_id = holder["id"]
+        # The uuid-shaped plaintext — the id of the OTHER secret. A
+        # marker minted from that id CONTAINS this exact string, so
+        # the needle collides with the marker's interior.
+        uuidish = service.store(name="uuidish", kind="generic",
+                                value=holder_id, actor="coder")
+        real = service.store(name="real", kind="generic",
+                             value="REAL-R1-VAL", actor="coder")
+        # A valid-uuid4 interior embedded in a larger value (extra
+        # non-hex chars around it → NOT marker-id shaped).
+        embedded = service.store(
+            name="embedded", kind="generic",
+            value="tkn-de305d54-75b4-431b-adb2-eb6b9e546014-end",
+            actor="coder",
+        )
+        uuidish_id = uuidish["id"]
+        real_id = real["id"]
+        embedded_id = embedded["id"]
+
+        scrubber = SecretPersistenceScrubber(service)
+        colliding_marker = mint_marker(holder_id)
+        payload = (
+            f"head {colliding_marker} mid {holder_id} "
+            f"REAL-R1-VAL tkn-de305d54-75b4-431b-adb2-eb6b9e546014-end "
+            f"tail"
+        )
+
+        pass_1, subs_1 = scrubber.scrub_text(payload)
+
+        # (1) The colliding marker survived byte-exact — pre-fix this
+        # failed: the uuidish needle fired INSIDE the marker.
+        assert colliding_marker in pass_1
+        assert parse_marker(colliding_marker) == holder_id
+        # (2) The uuid-shaped plaintext is excluded — standalone
+        # occurrence left intact (documented §2.4 exclusion).
+        assert holder_id in pass_1
+        assert uuidish_id not in subs_1
+        # (3) The embedded-uuid plaintext IS scrubbed (no
+        # over-exclusion) and the real value too.
+        assert "REAL-R1-VAL" not in pass_1
+        assert mint_marker(real_id) in pass_1
+        assert (
+            "tkn-de305d54-75b4-431b-adb2-eb6b9e546014-end"
+            not in pass_1
+        )
+        assert mint_marker(embedded_id) in pass_1
+        # Longest-first ordering: the 43-char embedded value sorts
+        # before the 11-char real value.
+        assert subs_1 == [embedded_id, real_id]
+
+        # (4) Multi-pass idempotency: pass 2 sees the same markers +
+        # the same excluded uuidish plaintext — byte-identical, no
+        # growth, no corruption, zero substitutions.
+        pass_2, subs_2 = scrubber.scrub_text(pass_1)
+        assert pass_2 == pass_1
+        assert subs_2 == []
+        assert colliding_marker in pass_2
+        assert parse_marker(colliding_marker) == holder_id
+
+    def test_escaped_json_form_scrubbed_in_openai_tool_calls(
+        self, service
+    ):
+        """W2 (dual-form escaped-JSON needle): the OpenAI-flavor
+        ``additional_kwargs["tool_calls"][*]["function"]["arguments"]``
+        string carries the JSON-ESCAPED encoding of any plaintext
+        containing ``"`` / ``\\`` / newline / tab — the raw
+        exact-match cannot fire there. The escaped
+        ``json.dumps(plaintext)[1:-1]`` variant is scrubbed too; the
+        arguments string stays loadable JSON and the marker
+        round-trips. The raw form keeps firing for escape-free
+        plaintext (companion secret in the same call)."""
+        escaped_val = service.store(
+            name="escaped", kind="generic",
+            value='dq"quote\\back\nnewline\ttab', actor="coder",
+        )
+        escaped_sid = escaped_val["id"]
+        raw_val = service.store(name="raw", kind="generic",
+                                value="PLAIN-R1-VAL", actor="coder")
+        raw_sid = raw_val["id"]
+
+        scrubber = SecretPersistenceScrubber(service)
+        args_dict = {
+            "cmd": 'dq"quote\\back\nnewline\ttab',
+            "note": "PLAIN-R1-VAL",
+        }
+        ai = AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "bash",
+                "args": dict(args_dict),
+                "id": "c-r1-w2", "type": "tool_call",
+            }],
+            additional_kwargs={
+                "tool_calls": [{
+                    "id": "c-r1-w2",
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": json.dumps(args_dict),
+                    },
+                }],
+            },
+        )
+
+        copied = scrubber.scrub_message_copy(ai)
+        args_str = copied.additional_kwargs["tool_calls"][0][
+            "function"
+        ]["arguments"]
+
+        raw_plain = 'dq"quote\\back\nnewline\ttab'
+        escaped_plain = json.dumps(raw_plain)[1:-1]
+        # NEITHER encoding of the plaintext survives.
+        assert raw_plain not in args_str
+        assert escaped_plain not in args_str
+        # Both markers are present and the string is still JSON.
+        loaded = json.loads(args_str)
+        assert loaded["cmd"] == mint_marker(escaped_sid)
+        assert loaded["note"] == mint_marker(raw_sid)
+        assert parse_marker(loaded["cmd"]) == escaped_sid
+        assert parse_marker(loaded["note"]) == raw_sid
+        # The LIVE object is untouched (S2 copy contract): the
+        # arguments string still carries the ESCAPED plaintext (a
+        # JSON string never contains the raw control chars — they are
+        # escaped by construction) and NO marker.
+        live_args = ai.additional_kwargs["tool_calls"][0][
+            "function"
+        ]["arguments"]
+        assert escaped_plain in live_args
+        assert mint_marker(escaped_sid) not in live_args
+
+    def test_graph_source_stays_send_free(self):
+        """W3 (Send tripwire — latent residual): the S2 snapshot
+        scrub does NOT walk langgraph ``Send(...)`` /
+        ``__pregel_tasks__`` parallel-branch messages. That gap is
+        LATENT only because ``daemon/graph.py`` contains zero
+        ``Send(`` call sites. This static tripwire fails the moment
+        a Send is introduced — at which point the S2 walk MUST be
+        extended to the parallel-task channels BEFORE merging
+        (see the residual comment at the S2 section of
+        ``daemon/services/secret_persistence_scrub.py``)."""
+        import daemon
+        from pathlib import Path
+
+        graph_src = (
+            Path(daemon.__file__).parent / "graph.py"
+        ).read_text(encoding="utf-8")
+        assert "Send(" not in graph_src, (
+            "daemon/graph.py now uses langgraph Send(...) — the S2 "
+            "persistence scrub does NOT cover __pregel_tasks__ "
+            "parallel-branch messages. Extend the S2 walk to those "
+            "channels BEFORE merging (secret_persistence_scrub "
+            "S2 residual comment, review-r1 B2)."
+        )

@@ -27,16 +27,18 @@ Semantics (design §2.4 — binding):
   multi-pass scrubbing, round-trippable via ``parse_marker``.
 * **Markers are NEVER scrubbed** — candidate strings that fullmatch
   the marker regex are skipped (safe by construction; pin (c)).
-* **Marker-template substring exclusion** — a stored plaintext that
-  is a substring of the marker template ``__ENS_SECRET__<uuid>__``
-  is skipped. Agent-controlled values can reach this case (e.g.
-  ``"SECRET"``, ``"ENS_"``, ``"S"`` — all substrings of the
-  template); substituting such a plaintext inside an already-minted
-  marker would break the marker's ``fullmatch`` and grow the string
-  on every scrub pass, violating the §2.4 idempotency-under-multi-
-  pass guarantee. Such pathological values are NEVER scrubbed
-  (documented exclusion — a partner that legitimately needs such a
-  value must rename it).
+* **Marker-shape exclusion** — a stored plaintext that could fire
+  INSIDE an already-minted marker is skipped, via two guards: (1)
+  substring of the marker template's literal parts (e.g.
+  ``"SECRET"``, ``"ENS_"``, ``"S"``) and (2) structural uuid-shape
+  (dash-grouped hex, ≤36 chars — review-r1 W1; covers foreign-uuid
+  interiors the single-template check used to miss). Agent-controlled
+  values can reach both cases; substituting such a plaintext inside
+  an already-minted marker would break the marker's ``fullmatch``
+  and grow the string on every scrub pass, violating the §2.4
+  idempotency-under-multi-pass guarantee. Such pathological values
+  are NEVER scrubbed (documented exclusion — a partner that
+  legitimately needs such a value must rename it).
 * **Collision determinism**: multiple secrets sharing one plaintext →
   the FIRST id by ``created_at`` ordering wins. The value-set query
   orders by ``created_at`` explicitly (the design §2.5 anchor
@@ -136,7 +138,9 @@ Do-not-touch lanes untouched: ``kms_lite.py`` / ``kms_resolver.py``
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import threading
 import time
 from typing import Any, Callable, Optional
@@ -163,6 +167,23 @@ DEFAULT_ID_SET_TTL_SECONDS: float = 60.0
 #: degenerate callers). Operator-diagnostic sentinel — the audit
 #: row's ``secret_id`` is the forensic anchor regardless.
 SCRUB_ACTOR_FALLBACK: str = "<scrub>"
+
+#: STRUCTURAL marker-id shape (review-r1 W1): a stored plaintext
+#: matching this shape can fire INSIDE the variable uuid region of an
+#: already-minted marker, so it is excluded from the scrub set. The
+#: shape over-approximates "substring of some uuid4 string": hex runs
+#: of 1-8, up to three runs of 1-4 (dash-separated), optional 1-12
+#: tail — bounded at 36 chars, single dashes between runs only. The
+#: caller additionally requires at least one dash (``dash-grouped``):
+#: dash-free short hex values (``"deadbeef"``) stay SCRUBBED — the
+#: residual (a ≤12-hex dash-free needle can still hit a uuid group
+#: inside an existing marker) is accepted, since excluding all short
+#: hex values would break scrubbing for the common hex-token secret
+#: class. Over-exclusion is safe by design (documented §2.4 exclusion
+#: — such values are never scrubbed).
+_MARKER_UUID_SHAPE_RE = re.compile(
+    r"^[0-9a-f]{1,8}(?:-[0-9a-f]{1,4}){0,3}(?:-[0-9a-f]{1,12})?$"
+)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -473,27 +494,40 @@ class SecretPersistenceScrubber:
         per the rotation coupling — a rotated key breaks resolution
         louder than it breaks scrubbing. Never raises.
 
-        Marker-template substring exclusion (§2.4 idempotency): a
-        stored plaintext that is a SUBSTRING of any well-formed
-        marker (``__ENS_SECRET__<uuid4-hex>__``) is skipped. Reason:
-        ``text.replace(plaintext, marker)`` would fire INSIDE every
-        already-minted marker in the payload, breaking their
-        ``fullmatch`` (resolution fails) and growing the string on
-        every scrub pass — the §2.4 idempotency-under-multi-pass
-        guarantee would be violated. Agent-controlled values make
-        this reachable (a worker CAN store a value like ``"ENS_"``
-        or ``"SECRET"``), so the guard sits here at the only
-        place plaintext is ever held in scope. Documented exclusion:
-        such pathological values are NEVER scrubbed (a partner that
-        legitimately holds such a value can rename it).
+        Marker-shape exclusion (§2.4 idempotency): a stored plaintext
+        that could fire INSIDE an already-minted marker
+        (``__ENS_SECRET__<uuid4-hex>__``) is skipped. Two guards
+        cover the marker's two regions:
+
+        1. **Literal-template substring** — needles cut from the
+           FIXED literal parts (``"SECRET"``, ``"ENS_"``, ``"S"``).
+           Agent-controlled values make this reachable (a worker CAN
+           store such a value); substituting one inside a minted
+           marker would break its ``fullmatch`` and grow the string
+           on every scrub pass. Such values are NEVER scrubbed
+           (documented exclusion — a partner that legitimately needs
+           such a value must rename it).
+        2. **Structural uuid-shape** (review-r1 W1) — needles cut
+           from the VARIABLE uuid region: dash-grouped hex, ≤36
+           chars (see :data:`_MARKER_UUID_SHAPE_RE`). The
+           single-template membership test this guard replaces
+           derived from ONE all-zeros template, so a plaintext
+           embedding a DIFFERENT valid uuid interior passed
+           exclusion and ``str.replace`` then fired inside existing
+           markers carrying that interior — killing that id's
+           resolution in the transcript (no leak; broken
+           resolution). The structural guard excludes the whole
+           id-shaped class regardless of which uuid the template
+           was cut from.
         """
-        # Build the marker template the scrubber MUST defend — one
-        # canonical UUID-shape payload. The exact payload is
-        # irrelevant: the marker regex's inner-group is the fixed
-        # UUID4 hex/dash pattern, and ANY 32-hex + 4-dash payload
-        # fullmatches it (the 14th char is fixed to ``4`` but the
-        # prefix test only needs the marker shape — 0..9a-f covers
-        # all valid character positions).
+        # Marker-literal guard — needles cut from the marker's FIXED
+        # literal parts. The all-zeros template is only the probe for
+        # the literal regions (``__ENS_SECRET__`` prefix + ``__``
+        # suffix): any substring of it that is NOT uuid-interior
+        # shaped shares its characters with EVERY marker (the literal
+        # parts are template-invariant). It does NOT cover uuid
+        # interiors — the structural guard below owns those (the old
+        # single-template derivation was the review-r1 W1 defect).
         _marker_template = mint_marker("00000000-0000-0000-0000-000000000000")
         pairs: list[tuple[str, str]] = []
         for secret_id, created_at, wrapped in rows:
@@ -525,7 +559,7 @@ class SecretPersistenceScrubber:
             # is the pin-(c) guarantee.
             if ENS_SECRET_MARKER_RE_COMPILED.fullmatch(plaintext):
                 continue
-            # Marker-template SUBSTRING exclusion (§2.4
+            # Marker-literal SUBSTRING exclusion (§2.4
             # idempotency-under-multi-pass — documented exclusion;
             # pathological values like ``"SECRET"``, ``"ENS_"``,
             # ``"S"`` are reachable via agent-controlled mint
@@ -539,6 +573,33 @@ class SecretPersistenceScrubber:
                     "excluded from the scrub set (documented §2.4 "
                     "idempotency exclusion — multi-pass scrubbing "
                     "would corrupt already-minted markers)",
+                    secret_id,
+                    len(plaintext),
+                )
+                continue
+            # STRUCTURAL uuid-shape exclusion (review-r1 W1): a
+            # dash-grouped hex needle ≤36 chars could fire INSIDE the
+            # variable uuid region of an already-minted marker (the
+            # old single-template check passed foreign-uuid
+            # interiors, letting ``str.replace`` corrupt markers
+            # carrying that interior — resolution died for that id).
+            # Documented exclusion: id-shaped values are NEVER
+            # scrubbed. Residual: a dash-FREE ≤12-hex needle can
+            # still hit a uuid group — left scrubbed on purpose
+            # (excluding all short hex would break the common
+            # hex-token secret class; see _MARKER_UUID_SHAPE_RE).
+            if (
+                "-" in plaintext
+                and len(plaintext) <= 36
+                and _MARKER_UUID_SHAPE_RE.fullmatch(plaintext)
+            ):
+                logger.warning(
+                    "[SecretScrub] secret %s plaintext is "
+                    "marker-id shaped (dash-grouped hex, %d "
+                    "chars); excluded from the scrub set "
+                    "(structural §2.4 idempotency exclusion — "
+                    "multi-pass scrubbing would corrupt "
+                    "already-minted markers)",
                     secret_id,
                     len(plaintext),
                 )
@@ -675,6 +736,19 @@ class SecretPersistenceScrubber:
         self._audit_substitutions(substituted_ids, actor=actor)
 
     # ── S2 — persisted-snapshot copy scrub (live objects intact) ──
+    #
+    # KNOWN RESIDUAL (review-r1 B2, LATENT): langgraph ``Send(...)`` /
+    # ``__pregel_tasks__`` parallel-branch messages are NOT walked by
+    # the S2 snapshot scrub below — the field walk covers the
+    # top-level message values only (ToolMessage content + AIMessage
+    # tool-call args), not Send-created task channels. LATENT today:
+    # ``daemon/graph.py`` contains ZERO ``Send(`` call sites (pinned
+    # by ``test_graph_source_stays_send_free`` in
+    # ``tests/unit/test_secret_persistence_scrub.py`` — the tripwire
+    # fails the moment a Send is introduced). If that tripwire ever
+    # fires, extend the S2 walk to the ``__pregel_tasks__`` channel
+    # BEFORE merging — otherwise Send-branch args/content persist
+    # unscrubbed into checkpoints.
 
     def scrub_message_copy(self, message: Any) -> Any:
         """Return a SCRUBBED COPY of one message (S2 contract).
@@ -801,12 +875,18 @@ class SecretPersistenceScrubber:
         * ``additional_kwargs["tool_calls"][*]["function"]
           ["arguments"]`` — the OpenAI-flavor fallback where
           arguments ride as a JSON STRING. Exact-match replacement
-          inside the JSON string is JSON-safe: when the raw
-          plaintext matches literally, the marker replacement is
-          also literal (marker chars are JSON-inert); when the
-          plaintext contains JSON-escape characters it appears
-          escaped in the string and the raw exact-match simply
-          doesn't fire (no corruption either way).
+          inside the JSON string is JSON-safe: markers are
+          JSON-inert, so replacing either the RAW plaintext or its
+          JSON-escaped encoding keeps the string loadable. DUAL-FORM
+          needles (review-r1 W2): when the plaintext contains
+          ``"`` / backslash / control chars it appears JSON-ESCAPED
+          in the string and the raw needle cannot fire — the
+          ``json.dumps(plaintext)[1:-1]`` variant is therefore tried
+          as a second needle (no-op when absent / identical to raw).
+          Residual: exotic non-default encodings (custom escapers;
+          ``ensure_ascii=False`` raw-UTF-8 is already covered by the
+          raw pass) stay unscrubbed — encoding-proof matching is the
+          deferred redaction spine, not this seam.
 
         ``AIMessage.content`` NOT scrubbed (§2.4 R8).
         """
@@ -833,6 +913,20 @@ class SecretPersistenceScrubber:
         if isinstance(additional, dict):
             openai_calls = additional.get("tool_calls")
             if isinstance(openai_calls, list):
+                # Dual-form needles (review-r1 W2 — inert insurance):
+                # the arguments STRING carries the JSON-ESCAPED
+                # encoding of any plaintext containing ``"`` / ``\`` /
+                # control chars — the raw exact-match cannot fire
+                # there. The standard ``json.dumps`` variant (quotes
+                # stripped) is tried as a second needle; no-op when
+                # absent or identical to raw. An escaped needle can
+                # never fire inside a minted marker (marker chars are
+                # JSON-inert), so the second pass is marker-safe.
+                escaped_pairs: list[tuple[str, str]] = []
+                for sid, raw in pairs:
+                    escaped = json.dumps(raw)[1:-1]
+                    if escaped != raw:
+                        escaped_pairs.append((sid, escaped))
                 new_openai: list[Any] = []
                 changed = False
                 for call in openai_calls:
@@ -845,6 +939,25 @@ class SecretPersistenceScrubber:
                             new_args_str, subs = self.scrub_text(
                                 fn["arguments"], _pairs=pairs
                             )
+                            if escaped_pairs:
+                                (
+                                    esc_text,
+                                    esc_subs,
+                                ) = self.scrub_text(
+                                    new_args_str,
+                                    _pairs=escaped_pairs,
+                                )
+                                if esc_subs:
+                                    new_args_str = esc_text
+                                    # Audit-once: an id that fired in
+                                    # BOTH forms is one substitution
+                                    # for the audit contract (test (h)
+                                    # — one row per distinct secret).
+                                    subs = subs + [
+                                        sid
+                                        for sid in esc_subs
+                                        if sid not in subs
+                                    ]
                             if subs:
                                 call = {
                                     **call,

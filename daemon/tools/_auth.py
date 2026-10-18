@@ -61,6 +61,13 @@ TOOL_REQUIRED_AGENTS: dict[str, list[str]] = {
 # S2 scrubs the persisted copy later, markers are safe by
 # construction per §2.4).
 #
+# REGISTRATION CONSTRAINT (review-r1 advisory A): the pre-invoke
+# walker resolves STRING-typed field values only — a declared field
+# whose value is a dict/list (e.g. bash's ``env`` overlay,
+# ``dict[str, str]``) is SKIPPED, so declaring it here is a
+# structural no-op. Only register fields whose marker rides as a
+# scalar string (``str``) in the tool-call args.
+#
 # Undeclared tools = ZERO change (the pre-invoke hook is a no-op when
 # the tool name is absent from this map — the design §1d NOT-global
 # ruling: no blanket wrapper over every tool). A new secret-typed
@@ -68,18 +75,16 @@ TOOL_REQUIRED_AGENTS: dict[str, list[str]] = {
 # §6: ``secret_typed_args`` is a registration slot, not a category —
 # no triple-pin updates).
 #
-# Key choice — ``"bash"`` carries ``{"env"}`` (design §1a): the bash
-# tool's ``env`` overlay is the canonical LLM-authored marker
-# carrier. The bash tool ALSO runs its own spawn-time resolution
-# (defense-in-depth §1a); the wrapped_tools_node pass means the
-# spawn-time call sees plaintext (already resolved) — the spawn-time
-# call short-circuits on non-marker values (resolver §0 fast path).
-# ``proc_run`` carries NO entry here: its overlay is
+# EMPTY today (review-r1 advisory A): the former ``"bash":
+# frozenset({"env"})`` entry was DEAD — the walker skips the
+# dict-valued ``env`` field, so the pre-invoke pass never resolved
+# it. The REAL (and sole) bash.env resolution is the tool's own
+# spawn-time chain in ``daemon/tools/bash.py``
+# (``resolve_secret_markers`` → KMS-Lite → spawn, design §1a).
+# ``proc_run`` carries NO entry here either: its overlay is
 # operator-injected (``process_env_overlay`` param on
 # ``_build_child_env``, design §1b) — NOT an LLM-visible argument.
-SECRET_TYPED_ARGS: dict[str, frozenset[str]] = {
-    "bash": frozenset({"env"}),
-}
+SECRET_TYPED_ARGS: dict[str, frozenset[str]] = {}
 
 
 def _check_team_membership(

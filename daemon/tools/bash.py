@@ -137,15 +137,17 @@ def get_bash_process_registry() -> BashProcessRegistry:
 # The bash ``env`` overlay (``BashInputSchema.env``) is resolved at
 # the SPAWN SITE (design §1a literal chain: assembled →
 # ``resolve_secret_markers`` → ``resolve_env`` (KMS-Lite) → spawn).
-# The wrapped_tools_node pre-invoke pass (``secret_typed_args``,
-# ``daemon/tools/_auth.SECRET_TYPED_ARGS``) already resolves the
-# field BEFORE the tool body runs, so the spawn-time call below sees
-# plaintext (resolver short-circuit fast path — zero measurable
-# latency on marker-free values, design §0). It is retained here as
-# the FAIL-CLOSED backstop: any caller that bypasses the wrapper
-# (direct coroutine invocation, ad-hoc harness) still gets the
-# child-NOT-spawned guarantee instead of a literal
-# ``__ENS_SECRET__…__`` leaking into a subprocess env.
+# This chain is the SOLE bash.env resolution lane (review-r1
+# advisory A): the wrapped_tools_node pre-invoke pass does NOT cover
+# it — the ``env`` field is dict-valued and the pre-invoke walker
+# resolves STRING-typed declared fields only, so the former
+# ``SECRET_TYPED_ARGS["bash"]`` registration was a structural no-op
+# (now removed from ``daemon/tools/_auth.py``). The chain
+# short-circuits on marker-free values (resolver §0 fast path —
+# zero measurable latency) and FAILS CLOSED on a marker it cannot
+# resolve: the child is NOT spawned rather than a literal
+# ``__ENS_SECRET__…__`` leaking into a subprocess env (any caller —
+# wrapper or direct coroutine invocation — gets the same guarantee).
 #
 
 

@@ -53,7 +53,7 @@ Markers are resolved ONLY in the assembled env dict; parsing markers out of the 
 |---|---|
 | Integration | `daemon/tools/proc_tools.py:493-504` `_build_child_env(process_id)` — NEW optional `process_env_overlay: dict[str,str] \| None` param; overlay merges atop `os.environ.copy() ⊕ tracking_id` |
 | Decision | **Separate edits for bash and proc; share ONLY `resolve_secret_markers`.** A shared env-assembly helper risks publishing an LLM-visible `env` param onto the operator-internal proc path (different caller postures). |
-| Timing / locus / failure | Identical to (a) |
+| Timing / locus / failure | Spawn-time, child-env only, fail-closed — **as implemented (deviation (e), corrected 2026-10-18): secrets-ONLY** — `proc_tools.py:504-548` routes the assembled dict through `resolve_secret_markers` and STOPS there; the KMS-Lite chained step of (a) is deliberately NOT applied (the operator overlay is the agent-secrets lane; KMS-Lite resolution of operator env is out of this seam's scope). The `process_env_overlay` param has ZERO callers today — the lane is DORMANT operator surface, not the (a)-style LLM-authored carrier this row originally implied. |
 
 ### (c) MCP server spawn env — ⚠️ corrects plan §6.2
 
