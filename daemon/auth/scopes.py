@@ -17,6 +17,7 @@ The v1 taxonomy (D4.2 — the fine-grained set shipped day 1):
     snapshot:write  workspace:read
     auth:admin
     prompts:read  prompts:submit  prompts:approve  prompts:audit  prompts:write
+    settings:read  settings:write
 
 Naming sources ([REQ] §5.4 / §7.3 / T3.12): the seven D4.2 scopes plus
 the named additions — ``mcpkb:admin`` (the OAuth2-managed KB-key CRUD
@@ -24,7 +25,12 @@ family, T3.12), ``snapshot:write`` (§5.4 settings snapshot-admin
 paths), ``workspace:read`` (§5.4 workspace row), and the five
 ``prompts:*`` scopes (Phase B agent-prompt-immutability commission —
 T4 mint per phaseB-plan.md D11; ``prompts:approve`` joins the operator
-family via SESSION_OPERATOR_SCOPES = SCOPE_TAXONOMY). Nothing invented
+family via SESSION_OPERATOR_SCOPES = SCOPE_TAXONOMY), and
+``settings:{read,write}`` (db-backed-settings commission, architect
+Ruling 4 — the daemon-settings surface is the infrastructure
+precedent class: GET reports effective daemon config incl. env/yaml
+tier values, so its reads gate like instances/maintenance rather than
+the ungated language/timezone preference family). Nothing invented
 beyond the plan text.
 
 Grant model (P4 — the M-3 close; supersedes the P3
@@ -49,7 +55,8 @@ from __future__ import annotations
 
 #: The full v1 scope taxonomy (D4.2 + the named §5.4/§7.3 additions +
 #: Phase B agent-prompt-immutability T4 — ``prompts:{read,submit,approve,
-#: audit,write}`` per phaseB-plan.md D11).
+#: audit,write}`` per phaseB-plan.md D11 + db-backed-settings —
+#: ``settings:{read,write}`` per architect Ruling 4).
 SCOPE_TAXONOMY: frozenset[str] = frozenset(
     {
         "system:read",
@@ -79,6 +86,17 @@ SCOPE_TAXONOMY: frozenset[str] = frozenset(
         "prompts:approve",
         "prompts:audit",
         "prompts:write",
+        # db-backed-settings (architect Ruling 4) — the daemon
+        # runtime-settings API: GET /api/settings/daemon gates
+        # ``settings:read`` (reports effective daemon config incl.
+        # env/yaml tier values — infrastructure class); PUT/DELETE
+        # gate ``settings:write``. Mass-noun resource naming mirrors
+        # ``workspace`` / ``maintenance``; the read/write split
+        # mirrors the dominant instances family. Auto-joins
+        # SESSION_OPERATOR_SCOPES via the SCOPE_TAXONOMY reference
+        # below (SPA session lane needs no change).
+        "settings:read",
+        "settings:write",
     }
 )
 

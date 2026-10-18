@@ -1820,6 +1820,146 @@ class SnapshotUsageMetricsResponse(BaseModel):
     )
 
 
+# ==================== Daemon Runtime Settings Schemas (db-backed-settings P2 t1 — FROZEN) ====================
+# This JSON shape is the Phase 3 FE contract (coupling map: the only
+# tight cross-track seam). Changes after Phase 3 starts require
+# updating BOTH phases. Field-name/type mirror of the ONE shared
+# resolver's output (daemon/services/settings_service.resolve),
+# EXCEPT ``value`` — see DaemonSettingEntry.value.
+
+
+class DaemonSettingEntry(BaseModel):
+    """One managed daemon setting — GET ``/api/settings/daemon`` items
+    AND the bare PUT/DELETE response body.
+
+    FROZEN write shape (adopted note 4): PUT/DELETE return this model
+    BARE — never wrapped in :class:`DaemonSettingsResponse`, never a
+    top-level ``restart_required`` on writes; the entry's own
+    ``requires_restart`` + ``db_override`` fields carry the restart
+    semantics (ruling O3's per-key rule).
+
+    Tier detail fields (``env_value`` / ``yaml_value`` /
+    ``db_override``) are OMITTED when absent (``None``) — routes
+    serialize with ``response_model_exclude_none=True``. For
+    ``sensitive: true`` keys they are omitted ENTIRELY (masking
+    applied at the router, architect security addendum 1 — omitted,
+    not nulled). Each detail field carries its tier's PARSED,
+    VALIDATED value; a present-but-invalid tier value never wins the
+    ladder and never renders.
+
+    Value typing is per the managed key's ``value_type`` — ``int``
+    for v1's single key (``limits.llm_concurrency``); future typed
+    keys widen these annotations per-key at the registry.
+    """
+
+    key: str = Field(
+        ...,
+        description="Managed-key identifier (registry-gated), e.g. 'limits.llm_concurrency'.",
+    )
+    value: int = Field(
+        ...,
+        description=(
+            "The BOOT-APPLIED running truth (snapshot.applied_value — "
+            "what the daemon actually constructed, e.g. the LLM "
+            "semaphore bound at startup). NOT a fresh resolve: when a "
+            "DB override was written AFTER boot, value deliberately "
+            "lags the winning tier — the divergence between value and "
+            "source IS the honest restart-required reporting."
+        ),
+    )
+    source: Literal["db", "env", "yaml", "default"] = Field(
+        ...,
+        description=(
+            "LIVE re-resolve of the winning tier via the ONE shared "
+            "resolver: live DB row > live os.environ > boot-time yaml "
+            "literal snapshot > registry default."
+        ),
+    )
+    default: int = Field(
+        ...,
+        description="Registry default (the ladder's tier 4).",
+    )
+    env_value: int | None = Field(
+        default=None,
+        description=(
+            "The env tier's parsed, validated value (os.environ "
+            "LIMITS_LLM_CONCURRENCY) — omitted when the var is unset "
+            "or holds an invalid value."
+        ),
+    )
+    yaml_value: int | None = Field(
+        default=None,
+        description=(
+            "The yaml tier's parsed, validated literal — omitted when "
+            "the key is not literally present in config.yaml."
+        ),
+    )
+    db_override: int | None = Field(
+        default=None,
+        description=(
+            "The live DB override row's validated value — omitted "
+            "when no (valid) override row exists."
+        ),
+    )
+    requires_restart: bool = Field(
+        ...,
+        description=(
+            "Per-key flag: changes take effect on the next daemon "
+            "restart (v1 has no live-apply). The FE keys off THIS "
+            "field, not any top-level flag."
+        ),
+    )
+    sensitive: bool = Field(
+        ...,
+        description=(
+            "When true, tier detail fields are omitted from every "
+            "response (secret-bearing keys; v1 has none — "
+            "limits.llm_concurrency is sensitive=False)."
+        ),
+    )
+    description: str = Field(
+        ...,
+        description="Operator-facing description from the managed-key registry.",
+    )
+
+
+class DaemonSettingsResponse(BaseModel):
+    """Response for ``GET /api/settings/daemon``.
+
+    ``restart_required`` is DERIVED (true when any key carries a live
+    valid ``db_override``). It exists for API consumers/tooling and
+    is documented as such; the FE keys off the PER-KEY
+    ``requires_restart`` field (adopted ruling O3).
+    """
+
+    settings: list[DaemonSettingEntry] = Field(
+        ...,
+        description="One entry per registered managed key (registry order).",
+    )
+    restart_required: bool = Field(
+        ...,
+        description="Derived: any entry carries a live db_override.",
+    )
+
+
+class DaemonSettingUpdate(BaseModel):
+    """Request body for ``PUT /api/settings/daemon/{key}``.
+
+    ``value`` is typed per the managed key at v1 (int — the single
+    registry entry's value_type). Non-integral bodies are rejected by
+    pydantic (422); out-of-range ints by the registry validator
+    (422, e.g. ge=1).
+    """
+
+    value: int = Field(
+        ...,
+        description=(
+            "The override value to persist (validated against the "
+            "registry constraint, e.g. ge=1)."
+        ),
+    )
+
+
 # ==================== Maintenance Console — Section 1 (Checkpoint Cleanup) ====================
 # AM-15 — FROZEN wire shapes (Contract v3, plan-overview §1–§5).
 # Frozen surfaces: endpoint paths, payload shapes, error-code literals
