@@ -1,0 +1,18 @@
+<div class="resources-container">
+  <header class="resources-header">
+    <h1>Resources</h1>
+    <p class="resources-subtitle">
+      Daemon memory, CPU and per-instance attribution — live snapshot and history
+    </p>
+  </header>
+
+  <div class="resources-tabs-host">
+    <mat-tab-group>
+      @for (section of sections; track section.id) {
+        <mat-tab [label]="section.label">
+          <ng-container *ngComponentOutlet="section.component"></ng-container>
+        </mat-tab>
+      }
+    </mat-tab-group>
+  </div>
+</div>

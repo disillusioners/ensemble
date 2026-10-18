@@ -1,0 +1,90 @@
+// Raw slate hex per D5 — cloned from the Maintenance shell palette
+// (`maintenance.component.scss`). The component-scoped `:root`
+// custom-property pattern is provably inert in this codebase; do not
+// reintroduce it.
+$bg-primary: #0f172a;
+$bg-card: #1e293b;
+$bg-elevated: #243044;
+$border-color: #334155;
+$text-primary: #f1f5f9;
+$text-secondary: #94a3b8;
+$accent-cyan: #10a7f7;
+
+:host {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  background: $bg-primary;
+  color: $text-primary;
+}
+
+.resources-container {
+  flex: 1;
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1rem 1.5rem 2rem;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  overflow-y: auto;
+  // Local stacking context so the sticky tab bar's z-index is scoped to
+  // the page (mirrors the Maintenance shell).
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
+}
+
+.resources-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+
+  h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    font-weight: 600;
+    color: $text-primary;
+  }
+}
+
+.resources-subtitle {
+  margin: 0;
+  color: $text-secondary;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+}
+
+// Sticky tab bar — the page header scrolls out first, then the tab bar
+// pins to the top of the container's scroll region.
+.resources-tabs-host {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: $bg-card;
+}
+
+// Material `mat-tab` token overrides — reuse the existing palette.
+.mat-mdc-tab .mdc-tab-indicator__content--underline {
+  border-color: $accent-cyan;
+}
+
+.mat-mdc-tab .mdc-tab__text-label {
+  color: $text-secondary;
+}
+
+.mat-mdc-tab.mdc-tab--active .mdc-tab__text-label {
+  color: $text-primary;
+  font-weight: 600;
+}
+
+.mat-mdc-tab:hover .mdc-tab__text-label {
+  color: $text-primary;
+}
+
+.mat-mdc-tab:hover:not(.mdc-tab--disabled) {
+  background: $bg-elevated;
+}
