@@ -1,0 +1,99 @@
+# Phase 4 suite transcript — live-view-passcode (C1 regen)
+# ============================================================
+#
+# Generated 2026-10-18 by the C1 pre-promote regen sweep on
+# branch ``feature/live-view-passcode`` @ HEAD ``1483a3984`` +
+# the 4 commits added in this sweep (docs/C2+C3, feat/C4 +
+# pins, test/C5 malformed-POST, chore/C1 transcript regen).
+#
+# Test invocation (fenced, worktree .venv, per-test --timeout
+# cap, -q for compact output):
+#
+#     .venv/bin/python -m pytest \
+#       tests/unit/services/test_view_passcode_service.py \
+#       tests/migration/test_view_passcode_index_parity.py \
+#       tests/unit/routers/test_live_views_public_lane.py \
+#       tests/integration/test_auth_public_lane_tag.py \
+#       tests/integration/test_auth_middleware_dispatch.py \
+#       -q --timeout=60 --no-header
+#
+# Five test files named EXPLICITLY (the prior
+# ``evidence/phase4-suite-transcript.txt`` ran the FULL
+# suite and silently surfaced 93 unrelated failure rows
+# + 21 unrelated errors from tests/unit/test_* that have
+# nothing to do with live-view-passcode; C1 regen names
+# ONLY the five files that bind this feature).
+#
+# Run environment
+# ---------------
+#
+# - Worktree: /home/nea/ensemble-src-wt-liveview-passcode
+# - Branch:  feature/live-view-passcode
+# - Base:    latest @ a3e9f1bda213681eec3b89a6d7e79703b9c4b328
+# - Python:  CPython 3.14.7 (uv-managed, worktree .venv; NOT
+#            the main checkout's .venv)
+# - pytest:  pytest-9.0.2 / pytest-asyncio-1.3.0 / pytest-xdist-3.8.0
+# - pytest-timeout per-test cap: 60s (the worktree
+#   ``pytest-timeout`` install; suite-level ``--timeout`` is
+#   per-test NOT wall-clock)
+# - Fence discipline: no live-shaped HOME / INSTALL_DIR; tmp_path
+#   only (mktemp-FAKE_HOME convention from critical-note
+#   2026-10-12 test_journal_splice.sh §2 ; no rm -rf on any
+#   ``$HOME``-derived path).
+#
+# Per-file counts (raw pytest output, line-by-line):
+# --------------------------------------------------
+#
+tests/unit/services/test_view_passcode_service.py: 74 passed, 1 warning in 18.18s
+tests/migration/test_view_passcode_index_parity.py: 25 passed, 1 warning in 0.73s
+tests/unit/routers/test_live_views_public_lane.py: 61 passed, 1 warning in 4.27s
+tests/integration/test_auth_public_lane_tag.py: 10 passed, 1 warning in 14.01s
+tests/integration/test_auth_middleware_dispatch.py: 26 passed, 1 warning in 18.25s
+
+# Per-file roll-up
+# ----------------
+#
+# - 5 test files, 196 tests collected (pytest --collect-only), 196 passed,
+#   0 failed, 0 errored, 0 skipped.
+# - Delta vs council's pre-C1 182/182 reference = +14 tests
+#   (= 10 C4 pins + 4 C5 malformed-POST pins; the council ran the
+#   same 5 files BEFORE this commission's C4/C5 additions).
+# - Wall-clock for the named-paths invocation: ~59s end-to-end
+#   (the largest single-file contributor is
+#   test_view_passcode_service.py at 18s — its atomic-UPDATE
+#   concurrency pin sets up a fresh engine per test).
+
+# Named-paths full run (raw pytest output)
+# ----------------------------------------
+#
+/home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/pytest_asyncio/plugin.py:15: DeprecationWarning: 'asyncio.AbstractEventLoopPolicy' is deprecated and slated for removal in Python 3.16
+  from asyncio import AbstractEventLoop, AbstractEventLoopPolicy
+/home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/pytest_asyncio/plugin.py:247: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+........................................................................ [ 36%]
+........................................................................ [ 73%]
+....................................................                     [100%]/home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/_pytest/unraisableexception.py:33: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x71cc46afa360>
+  gc.collect()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/routers/test_live_views_public_lane.py::TestVerifyHandler::test_malformed_post_no_code_field_does_not_strike
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/anyio/_backends/_asyncio.py:2551: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x71cc46af86b0>
+    @classmethod
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/routers/test_live_views_public_lane.py::TestVerifyHandler::test_malformed_post_non_string_code_does_not_strike
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/starlette/routing.py:290: ResourceWarning: Unclosed file <tempfile.SpooledTemporaryFile object at 0x71cc4533acb0>
+    await self.app(scope, receive, send)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+196 passed, 3 warnings in 59.06s

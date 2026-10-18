@@ -1,0 +1,3 @@
+B2 correct-code status=200
+B2: PASS both render locked page (no compare on locked row)
+B2 disclosure scan FLAGS: attempt-wording digit-present

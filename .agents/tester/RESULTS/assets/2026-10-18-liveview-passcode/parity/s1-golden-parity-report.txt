@@ -1,0 +1,21 @@
+S1 GOLDEN PARITY REPORT (auth-OFF real-wire vs BASE-859e41193 golden)
+golden: live_views_direct_lane_envelope_BASE-859e41193.golden.txt
+
+| envelope (wire probe) | vs golden envelope | byte-identical | first divergence | classification |
+|---|---|---|---|---|
+| get404-absent | GET 404 missing | YES* | — | PASS-WITH-NOTE |
+| page200 | GET 200 landing.html (golden-clone body) | YES* | — | PASS-WITH-NOTE |
+| get200-hello | GET 200 landing.html (hello.md fixture) | YES* | unexpected wire header(s) beyond transport: ['content-security-policy', 'referrer-policy'] | PASS-WITH-NOTE (fixture-dependent) |
+| head200-hello | HEAD 200 landing.html (hello.md fixture) | YES* | unexpected wire header(s) beyond transport: ['content-security-policy', 'referrer-policy'] | PASS-WITH-NOTE (fixture-dependent) |
+| s1d-public-hello-unminted | — (public-lane posture) | YES* | — | PASS-WITH-NOTE |
+| s1d-public-absent-unminted | — (public-lane posture) | YES* | — | PASS-WITH-NOTE |
+
+Legend: YES = serialized wire envelope == golden byte-for-byte; YES* = byte-equal on all golden-relevant fields (status + every golden header name+value + body where content-independent), modulo transport-added (date/server) and/or proven-base-identical wrapper-class (content-security-policy/referrer-policy, s1-wrapper-provenance.txt) headers noted per row.
+
+Details:
+- get404-absent: PASS-WITH-NOTE — all golden headers + body byte-equal (transport-added: date, server)
+- page200: PASS-WITH-NOTE — all golden headers + body byte-equal (transport-added: date, server)
+- get200-hello: PASS-WITH-NOTE (fixture-dependent) — golden-relevant headers byte-equal; body/content-length differ only by fixture (hello.md wrapper vs landing.html golden); wrapper-class headers present (content-security-policy, referrer-policy) — proven base-tree behavior (AST source-segment diff 859e41193->HEAD byte-identical, s1-wrapper-provenance.txt); CSP carries per-request nonce: True; content-length == len(body); wrapper-html body (3303 bytes, csp-nonce present: True — per-request nondeterministic by design)
+- head200-hello: PASS-WITH-NOTE (fixture-dependent) — status/headers golden-equal; content-length 3303 == GET-200 wrapper body length (HEAD handler renders the wrapper so HEAD length matches GET — line 1782 comment); body b''
+- s1d-public-hello-unminted: PASS-WITH-NOTE — uniform 404 envelope byte-equal to golden 404 (modulo transport headers); no location header (not a login redirect)
+- s1d-public-absent-unminted: PASS-WITH-NOTE — uniform 404 envelope byte-equal to golden 404 (modulo transport headers); no location header (not a login redirect)

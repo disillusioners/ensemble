@@ -1,0 +1,2 @@
+B4c new-passcode status=303 grant_captured=yes
+B4c: PASS new grant renders

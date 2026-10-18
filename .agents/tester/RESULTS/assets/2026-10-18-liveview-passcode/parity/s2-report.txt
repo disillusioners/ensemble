@@ -1,0 +1,20 @@
+S2 STATE-B AUTH-ON REPORT (feature/live-view-passcode @ worktree, port 8085)
+env: ENSEMBLE_AUTH_ENABLED=true, placeholder OIDC (drill.invalid), anonymous_view_paths UNSET
+mint seam: ViewPasscodeService.mint/refresh direct (same service call view_link makes —
+           view_link is instance-bound; see daemon/tools/live_views.py:113 factory → passcode_service.mint)
+
+| probe | verdict | detail |
+|---|---|---|
+| S2a direct lane unauthenticated | PASS | status=302 location='/api/auth/login?return_to=/views/parityroot1/hello.md' (byte-shape unchanged from base behavior: 302 + in-house login redirect) |
+| S2b-pre public lane UNMINTED (row absent, run-1 archive) | PASS | status=404 body=b'{"error":"view not found"}' — uniform 404 FROM DAEMON, not a login redirect (AuthMiddleware passed the request through; row-gating posture) |
+| S2b-post public lane MINTED, NO session | PASS | status=200 content-type=text/html; charset=utf-8 interstitial-markers(passcode form present)=True — 200 interstitial passcode gate, NOT 302 login = State-B shape proof |
+| S2c-wrong wrong code + same-host Origin | PASS | status=200 (must NOT be 403 — proceeds to compare/deny; error re-render) |
+| S2c-plain correct code over plain HTTP | PASS | status=200 secure-context copy present=True (D6: no cookie, no redirect loop) |
+| S2c-https correct code + X-Forwarded-Proto: https | PASS | status=303 location='/views/public/parityroot1/hello.md' cookie-attrs={'Path-scoped': True, 'HttpOnly': True, 'Secure': True, 'SameSite=Lax': True, 'Max-Age=86400': True} (303 PRG + grant cookie) |
+| S2c-get GET with grant cookie renders view bytes | PASS | status=200 content-type=text/html; charset=utf-8 file-content-present=True body-bytes=3303 |
+| S2d unminted public path (pre-mint) | PASS | status=404 uniform-body=True location-header-absent=True (no existence leak) |
+| S2d unminted public path (post-mint) | PASS | status=404 uniform-body=True location-header-absent=True (no existence leak) |
+| S2e control /api/instances unauthenticated | PASS | status=302 location='/api/auth/login?return_to=/api/instances' (still guarded) |
+| sanity /views/livez (public exact tag) | PASS | status=200 |
+
+RESULT: PASS

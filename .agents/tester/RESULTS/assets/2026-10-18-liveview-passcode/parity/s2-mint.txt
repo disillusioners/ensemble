@@ -1,0 +1,2 @@
+mint -> ViewPasscodeRotationRequired; regenerating via refresh (documented recovery)
+MINT passcode=btt3th generation=2 created=False locked=False

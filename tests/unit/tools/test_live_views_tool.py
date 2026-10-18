@@ -75,16 +75,32 @@ def view_link_with_base(service_with_base: LiveViewsService):
 class TestUrlShape:
     def test_path_relative_default(self, view_link):
         # Path-relative when external_base_url is unset.
+        # P2 (live-view-passcode): the tool returns the
+        # 5-field labeled shape — the ``Authenticated URL``
+        # field carries the legacy direct-lane shape
+        # (``/views/<root>/<rel>``), the ``Public URL`` field
+        # carries the public lane (``/views/public/<root>/<rel>``).
         result = view_link.invoke(
             {"root_name": "designer-artifact", "path": "foo/bar.html"}
         )
-        assert result == "/views/designer-artifact/foo/bar.html"
+        assert "Authenticated URL: /views/designer-artifact/foo/bar.html" in result
+        assert (
+            "Public URL: /views/public/designer-artifact/foo/bar.html"
+            in result
+        )
 
     def test_fully_qualified_when_base_set(self, view_link_with_base):
         result = view_link_with_base.invoke(
             {"root_name": "docs", "path": "foo/bar.html"}
         )
-        assert result == "https://ensemble.example.com/views/docs/foo/bar.html"
+        assert (
+            "Authenticated URL: "
+            "https://ensemble.example.com/views/docs/foo/bar.html"
+        ) in result
+        assert (
+            "Public URL: "
+            "https://ensemble.example.com/views/public/docs/foo/bar.html"
+        ) in result
 
 
 # ===========================================================================
@@ -202,13 +218,15 @@ class TestToolName:
 
 class TestReturnType:
     def test_returns_string(self, view_link):
-        # LangChain tools are typed to return a string. The
-        # factory wraps the URL in a string envelope.
+        # LangChain tools are typed to return a string. P2
+        # (live-view-passcode): the string is the 5-field
+        # labeled shape; the ``Authenticated URL`` line
+        # carries the legacy ``/views/`` prefix.
         result = view_link.invoke(
             {"root_name": "designer-artifact", "path": "foo.html"}
         )
         assert isinstance(result, str)
-        assert result.startswith("/views/")
+        assert "Authenticated URL: /views/" in result
 
     def test_error_envelope_is_string(self, view_link):
         result = view_link.invoke({"root_name": "nope", "path": "x"})

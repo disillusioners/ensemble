@@ -1,0 +1,27 @@
+/home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+  from pydantic.v1.fields import FieldInfo as FieldInfoV1
+[LiveViews] view_link landed on the path-relative fallback (/views/...). No bind host was configured and Host-capture has no record. Set live_views.external_base_url with an https:// value to mint fully-qualified links; the path-relative shape is only safe on a localhost dev loop where the chat client can resolve it.
+SEEDED tmp-image id=8f820b5fa8934ae19b9da54f9c040cab bytes=74 sha256=228215e2dae3b473...
+== J1 mint via TOOL: view_link('journeyroot1', 'hello.md')
+Public URL: /views/public/journeyroot1/hello.md
+Passcode: p9qbhf
+Authenticated URL: /views/journeyroot1/hello.md
+Generation: 1
+Locked: no
+  J1 shape OK: 5/5 fields, public=/views/public/journeyroot1/hello.md, gen=1, locked=no
+== J1 mint via TOOL: view_link('journeyroot1', 'diagram.mmd')
+Public URL: /views/public/journeyroot1/diagram.mmd
+Passcode: p88pb6
+Authenticated URL: /views/journeyroot1/diagram.mmd
+Generation: 1
+Locked: no
+  J1 shape OK: 5/5 fields, public=/views/public/journeyroot1/diagram.mmd, gen=1, locked=no
+== J1 mint via TOOL: view_link('tmp-images', '8f820b5fa8934ae19b9da54f9c040cab')
+Public URL: /views/public/tmp-images/8f820b5fa8934ae19b9da54f9c040cab
+Passcode: drthc8
+Authenticated URL: /views/tmp-images/8f820b5fa8934ae19b9da54f9c040cab
+Generation: 1
+Locked: no
+  J1 shape OK: 5/5 fields, public=/views/public/tmp-images/8f820b5fa8934ae19b9da54f9c040cab, gen=1, locked=no
+  J1 idempotency OK: repeat call returned SAME passcode
+J1 RESULT: PASS

@@ -1,0 +1,12 @@
+HTTP/1.1 303 See Other
+date: Sun, 18 Oct 2026 05:01:32 GMT
+server: uvicorn
+x-content-type-options: nosniff
+cache-control: private, max-age=60
+location: /views/public/parityroot1/hello.md
+set-cookie: view_grant=gAAAAABq1FKsnmWmBdloBXQFcATL82AwPuRXuiinHAaGijuRGu07JALE-krvvHeUEawXw6yg6Gm5yza6tAfx1TzCCVABlcbtOCWeo1iB9vZVNYwIyE8YxmA-vz8FWgORkU80mMTYi2v_Xd8rWHbVcvKZnAQ7ONKQBm1_p96917-Ak0nXovmpeyjXkunw3lJHfwm3VaJUuvNI; Path=/views/public/parityroot1/hello.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+content-length: 0
+access-control-allow-credentials: true
+access-control-allow-origin: http://127.0.0.1:8085
+vary: Origin
+

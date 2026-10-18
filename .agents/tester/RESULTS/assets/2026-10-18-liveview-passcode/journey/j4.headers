@@ -1,0 +1,11 @@
+HTTP/1.1 200 OK
+date: Sun, 18 Oct 2026 05:01:29 GMT
+server: uvicorn
+content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-e2678dc81fefe678e7a402fb3d238b9f'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+x-content-type-options: nosniff
+cache-control: no-store
+referrer-policy: no-referrer
+content-type: text/html; charset=utf-8
+content-length: 1828
+access-control-allow-credentials: true
+

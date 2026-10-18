@@ -1,0 +1,1 @@
+MINT passcode=vatw9b generation=1 created=True locked=False

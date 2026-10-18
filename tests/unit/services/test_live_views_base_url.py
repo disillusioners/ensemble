@@ -643,6 +643,16 @@ class TestViewLinkOutputFormat:
     shape) still return typed "Error: ..." envelopes — the
     service-side chain is only consulted after the tool's
     pre-flight checks pass.
+
+    P2 of live-view-passcode (2026-10-17): the tool returns the
+    ADR D10 five-field labeled shape (``Public URL`` /
+    ``Passcode`` / ``Authenticated URL`` / ``Generation`` /
+    ``Locked``). These tests assert the ``Authenticated URL`` and
+    ``Public URL`` fields carry the correct base per the chain;
+    the passcode/generation/locked fields come from the
+    passcode service (a MagicMock — the tool stringifies
+    whatever the mock returns; the format is what these tests
+    pin).
     """
 
     def _service(
@@ -680,7 +690,12 @@ class TestViewLinkOutputFormat:
         svc = self._service(tmp_path)
         link = self._view_link(svc)
         result = link.invoke({"root_name": "docs", "path": "foo/bar.html"})
-        assert result == "/views/docs/foo/bar.html"
+        # P2 shape — the ``Authenticated URL`` field carries the
+        # legacy direct-lane URL (path-relative when nothing
+        # resolves); the ``Public URL`` field carries the
+        # ``/views/public/...`` shape with the same base.
+        assert "Authenticated URL: /views/docs/foo/bar.html" in result
+        assert "Public URL: /views/public/docs/foo/bar.html" in result
 
     def test_view_link_full_when_override(
         self, tmp_path: pathlib.Path
@@ -690,7 +705,14 @@ class TestViewLinkOutputFormat:
         )
         link = self._view_link(svc)
         result = link.invoke({"root_name": "docs", "path": "foo/bar.html"})
-        assert result == "https://ensemble.example.com/views/docs/foo/bar.html"
+        assert (
+            "Authenticated URL: "
+            "https://ensemble.example.com/views/docs/foo/bar.html"
+        ) in result
+        assert (
+            "Public URL: "
+            "https://ensemble.example.com/views/public/docs/foo/bar.html"
+        ) in result
 
     def test_view_link_full_when_host_captured(
         self, tmp_path: pathlib.Path
@@ -702,7 +724,14 @@ class TestViewLinkOutputFormat:
         )
         link = self._view_link(svc)
         result = link.invoke({"root_name": "docs", "path": "foo/bar.html"})
-        assert result == "https://captured.example.com/views/docs/foo/bar.html"
+        assert (
+            "Authenticated URL: "
+            "https://captured.example.com/views/docs/foo/bar.html"
+        ) in result
+        assert (
+            "Public URL: "
+            "https://captured.example.com/views/public/docs/foo/bar.html"
+        ) in result
 
     def test_view_link_full_when_bind_only(
         self, tmp_path: pathlib.Path
@@ -714,7 +743,14 @@ class TestViewLinkOutputFormat:
         link = self._view_link(svc)
         result = link.invoke({"root_name": "docs", "path": "foo/bar.html"})
         # 0.0.0.0 wildcard → 127.0.0.1.
-        assert result == "http://127.0.0.1:8079/views/docs/foo/bar.html"
+        assert (
+            "Authenticated URL: "
+            "http://127.0.0.1:8079/views/docs/foo/bar.html"
+        ) in result
+        assert (
+            "Public URL: "
+            "http://127.0.0.1:8079/views/public/docs/foo/bar.html"
+        ) in result
 
 
 # ===========================================================================

@@ -448,6 +448,7 @@ class InstanceManager:
         credential_manager: "CredentialManager | None" = None,
         tmp_image_store: "TmpImageStore | None" = None,
         live_views_service: "LiveViewsService | None" = None,
+        view_passcode_service: "ViewPasscodeService | None" = None,
     ):
         """Initialize the instance manager.
 
@@ -481,6 +482,12 @@ class InstanceManager:
                 public property ``manager.live_views_service``. Tests that
                 construct ``InstanceManager`` directly may pass ``None``
                 and the tool returns a typed error envelope.
+            view_passcode_service: Optional shared :class:`ViewPasscodeService`
+                used by the ``view_link`` tool (P2 of live-view-passcode,
+                2026-10-17) for the public-lane passcode mint / refresh
+                path. Same injection shape as ``live_views_service``;
+                tests that build ``InstanceManager`` directly may leave
+                ``None`` and the tool returns a typed error envelope.
         """
         self.config = config
         self._ensemble_config = ensemble_config
@@ -728,6 +735,17 @@ class InstanceManager:
         # ``None`` and the tool returns a typed error envelope.
         from .services.live_views import LiveViewsService
         self._live_views_service: "LiveViewsService | None" = live_views_service
+        # P2 of live-view-passcode: the passcode substrate
+        # mirrors the live_views_service injection shape. The
+        # tool reads it via ``manager.view_passcode_service``;
+        # the router reads it off ``app.state.view_passcode_service``
+        # (same instance). ``None`` default keeps tests that
+        # build ``InstanceManager`` directly working without
+        # a cipher.
+        from .services.view_passcode_service import ViewPasscodeService
+        self._view_passcode_service: "ViewPasscodeService | None" = (
+            view_passcode_service
+        )
 
         from .sources.credentials import CredentialManager
         if credential_manager is None:
@@ -2945,6 +2963,45 @@ class InstanceManager:
         seam only — production boot calls it once).
         """
         self._live_views_service = service
+
+    # ─────────────────────────────────────────────────────────────
+    # P2 of live-view-passcode: the ViewPasscodeService is the
+    # other half of the live-views subsystem that tools
+    # reach through the manager facade (the same canonical
+    # seam pattern as ``live_views_service`` above). The
+    # router pulls it off ``app.state``; the ``view_link``
+    # tool reads it off the manager so the agent-callable
+    # surface and the request-handling surface share one
+    # service instance.
+    # ─────────────────────────────────────────────────────────────
+
+    @property
+    def view_passcode_service(self) -> "ViewPasscodeService | None":
+        """Public read-only access to the shared :class:`ViewPasscodeService`.
+
+        The ``view_link`` tool reaches the passcode substrate
+        through this seam (mirrors the
+        ``app.state.view_passcode_service`` the routers also
+        use). The lifespan constructs the service once at boot
+        and injects it via :meth:`set_view_passcode_service`.
+        Tests that construct :class:`InstanceManager` directly
+        may pass ``None`` and the tool returns ``"Error:
+        view-passcode service not initialized"`` — never a
+        crash, never a stack trace.
+        """
+        return self._view_passcode_service
+
+    def set_view_passcode_service(
+        self, service: "ViewPasscodeService | None"
+    ) -> None:
+        """Inject the shared :class:`ViewPasscodeService` post-construction.
+
+        Mirror of :meth:`set_live_views_service` for the
+        passcode substrate. Idempotent; the lifespan calls it
+        exactly once at boot, but a second call replaces the
+        service reference (testing seam only).
+        """
+        self._view_passcode_service = service
 
     @property
     def credential_manager(self):

@@ -1,0 +1,12 @@
+HTTP/1.1 429 Too Many Requests
+date: Sun, 18 Oct 2026 04:47:34 GMT
+server: uvicorn
+content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-91c69bf3b0eb8ebdaec3424e591f3bf0'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+x-content-type-options: nosniff
+cache-control: no-store
+referrer-policy: no-referrer
+content-type: text/html; charset=utf-8
+content-length: 1351
+access-control-allow-origin: *
+access-control-allow-credentials: true
+

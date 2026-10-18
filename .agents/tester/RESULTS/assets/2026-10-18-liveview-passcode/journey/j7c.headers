@@ -1,0 +1,10 @@
+HTTP/1.1 303 See Other
+date: Sun, 18 Oct 2026 05:01:30 GMT
+server: uvicorn
+x-content-type-options: nosniff
+cache-control: private, max-age=60
+location: /views/public/journeyroot1/diagram.mmd
+set-cookie: view_grant=gAAAAABq1FKqkumkuRRx1IT0MSfKAaUUFQ8T1_FlEutuFWRZqb6-g5KeL6ZvHxWjWHSsxw7i3KKhk3zOrf6D7BHCf4QXB29ujvYcond5HHEzkl1z_cbmNyRdY6HNoYKg1Q74DIItXXucGopQjIwOk2q-5LsnAmpMzQkKr-B6o1ZxZuIHUZV0QIPIbr72V7fR9bwWRheUanBT; Path=/views/public/journeyroot1/diagram.mmd; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+content-length: 0
+access-control-allow-credentials: true
+

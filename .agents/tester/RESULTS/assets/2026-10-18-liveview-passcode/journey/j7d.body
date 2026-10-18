@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>diagram.mmd - live view</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 100%; margin: 0; padding: 0; line-height: 1.5; color: #222; box-sizing: border-box; }
+  body *, body *::before, body *::after { box-sizing: inherit; }
+  .topbar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75em; padding: 0.75em 1em; background: #f6f8fa; border-bottom: 1px solid #dfe2e5; font-size: 0.95em; }
+  .topbar .title { font-weight: 600; word-break: break-all; min-width: 0; flex: 1 1 auto; }
+  .topbar a { color: #0366d6; text-decoration: none; padding: 0.4em 0.7em; min-height: 32px; min-width: 32px; display: inline-flex; align-items: center; border-radius: 4px; }
+  .topbar a:hover, .topbar a:focus { background: #e8f0fa; outline: none; }
+  main { padding: 1em; max-width: 100%; }
+  .diagram-scroll { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; border: 1px solid #dfe2e5; border-radius: 4px; background: #fff; padding: 0.5em; touch-action: pan-x pan-y; }
+  .diagram-scroll .mermaid { display: block; min-width: 0; }
+  .status { font-size: 0.85em; color: #586069; padding: 0.5em 0; }
+  .error { color: #b00020; padding: 0.5em; background: #fff5f5; border: 1px solid #ffd0d0; border-radius: 4px; }
+  .raw-fallback { white-space: pre-wrap; word-wrap: break-word; background: #f6f8fa; padding: 1em; border-radius: 4px; overflow-x: auto; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="title">diagram.mmd - live view</span>
+  <a href="?raw=1" id="raw-link">view raw / download</a>
+</div>
+<main>
+  <div class="status" id="status">loading diagram…</div>
+  <div class="diagram-scroll" id="diagram-scroll">
+    <div class="mermaid" id="diagram"></div>
+  </div>
+  <pre class="raw-fallback" id="raw-fallback" hidden></pre>
+</main>
+<script src="/views/public/assets/mermaid/mermaid.min.js" integrity="sha256-ZISvwyhyo6oWysmna6GBah7UzIcKZZPMLhd1d1D1GLI=" crossorigin="anonymous" nonce="hYemgVBALLNJOjb29mZazQ"></script>
+<script nonce="hYemgVBALLNJOjb29mZazQ">
+(function() {
+  var statusEl = document.getElementById('status');
+  var diagramEl = document.getElementById('diagram');
+  var fallbackEl = document.getElementById('raw-fallback');
+  var rawHref = document.getElementById('raw-link').getAttribute('href');
+  function showError(msg, rawText) {
+    statusEl.textContent = '';
+    var err = document.createElement('div');
+    err.className = 'error';
+    err.textContent = msg;
+    statusEl.appendChild(err);
+    if (rawText != null) {
+      fallbackEl.textContent = rawText;
+      fallbackEl.hidden = false;
+    }
+  }
+  // Guard tightening (mirrors the markdown wrapper's pattern):
+  // the IIFE bundle sets ``globalThis.mermaid`` so a bare
+  // ``typeof mermaid === 'undefined'`` is the right availability
+  // check. The ``run`` function is the v10+ rendering entry
+  // point; v11+ deprecated the older ``init``+``render`` pair.
+  if (typeof mermaid === 'undefined') {
+    showError('mermaid not loaded — asset fetch failed or script blocked.');
+    return;
+  }
+  if (typeof mermaid.initialize !== 'function') {
+    showError('mermaid.initialize is not a function — version mismatch.');
+    return;
+  }
+  if (typeof mermaid.run !== 'function') {
+    showError('mermaid.run is not a function — version mismatch.');
+    return;
+  }
+  try {
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      // Theming — match the daemon's light-background page; the
+      // chart lane's render uses mmdc defaults which are
+      // light-theme. Charter-rendered PNGs and our browser-
+      // rendered SVGs agree on color defaults.
+      theme: 'default',
+    });
+  } catch (e) {
+    showError('mermaid.initialize failed: ' + (e && e.message ? e.message : String(e)));
+    return;
+  }
+  fetch(rawHref, { credentials: 'same-origin' })
+    .then(function(r) {
+      if (!r.ok) { throw new Error('raw fetch HTTP ' + r.status); }
+      return r.text();
+    })
+    .then(function(source) {
+      diagramEl.textContent = source;
+      statusEl.textContent = 'rendering…';
+      return mermaid.run({ nodes: [diagramEl] });
+    })
+    .then(function() {
+      statusEl.textContent = '';
+    })
+    .catch(function(e) {
+      var src = fallbackEl.textContent || diagramEl.textContent || '';
+      showError('render failed: ' + (e && e.message ? e.message : String(e)), src);
+    });
+})();
+</script>
+</body>
+</html>

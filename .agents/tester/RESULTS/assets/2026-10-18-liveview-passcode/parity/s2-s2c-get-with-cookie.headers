@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+date: Sun, 18 Oct 2026 05:01:32 GMT
+server: uvicorn
+x-content-type-options: nosniff
+cache-control: private, max-age=60
+content-security-policy: default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'nonce-_0_79LYtUAhIvEvTGdhhZQ'; style-src 'self' 'nonce-_0_79LYtUAhIvEvTGdhhZQ' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+referrer-policy: no-referrer
+content-length: 3303
+content-type: text/html; charset=utf-8
+

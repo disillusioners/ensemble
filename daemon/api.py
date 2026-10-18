@@ -1565,6 +1565,106 @@ async def lifespan(app: FastAPI):
         host_recorder=host_recorder,
     )
     app.state.live_views_service = live_views_service
+
+    # ─────────────────────────────────────────────────────────────
+    # P2 of live-view-passcode: ``ViewPasscodeService`` + the
+    # colocated per-IP ``VerifyRateLimiter`` + the cipher (for
+    # grant cookie issuance/validation). Wired at the same
+    # lifespan site as ``LiveViewsService`` so the router can
+    # pull all three off ``app.state`` at request time (the
+    # ``_resolve_passcode_service`` / ``_resolve_verify_rate_limiter``
+    # helpers in ``daemon/routers/live_views.py``).
+    #
+    # Failure posture (architecture-recommendation.md D4:59 +
+    # D7 fail-open + V6 fail-open on limiter): the cipher
+    # raises ``ViewPasscodeCipherUnavailable`` on missing
+    # ``SYSTEM_ENCRYPTION_KEY`` — fail-fast at construction
+    # (binding P1 posture). The router collapses the missing
+    # service to uniform 404; a misconfigured lifespan does
+    # NOT brick the lane.
+    # ─────────────────────────────────────────────────────────────
+    if config.live_views.enabled:
+        try:
+            from daemon.services.view_passcode_service import (
+                ViewPasscodeCipher,
+                ViewPasscodeService,
+                VerifyRateLimiter,
+            )
+
+            cipher = ViewPasscodeCipher()
+            # REUSE the manager's shared engine (the same
+            # SQLAlchemy engine every repository consumes —
+            # ``InstanceManager.__init__`` creates ONE engine
+            # for the process; a second engine to the same DB
+            # would double the connection pool for zero gain).
+            passcode_service = ViewPasscodeService(
+                engine=manager.engine,
+                cipher=cipher,
+                # C4 wiring (D14): forward the operator-
+                # configured strike ceiling — the value the
+                # atomic UPDATE compares against in
+                # ``record_failure_with_audit``. Default 10
+                # (the spec ceiling from architecture-
+                # recommendation.md D5) is honored when the
+                # env var is unset; range gate 1..100 is
+                # enforced at the config field (``daemon/
+                # config.py:2714``).
+                strike_ceiling=(
+                    config.live_views.passcode_lockout_threshold
+                ),
+            )
+            limiter = VerifyRateLimiter(
+                capacity=config.live_views.verify_rate_limit_capacity,
+                refill_per_minute=(
+                    config.live_views.verify_rate_limit_refill_per_minute
+                ),
+            )
+            app.state.view_passcode_service = passcode_service
+            app.state.view_passcode_cipher = cipher
+            app.state.view_passcode_grant_ttl_seconds = (
+                config.live_views.passcode_grant_ttl_seconds
+            )
+            app.state.verify_rate_limiter = limiter
+            daemon_logger.info(
+                "[LiveViews] passcode substrate ready: "
+                "strike_ceiling=%d grant_ttl=%ds "
+                "rate_limit=%d/%d-per-min",
+                # C4 wiring — read from the service's
+                # configured ceiling (operator-controllable
+                # via ENSEMBLE_LIVE_VIEWS_PASSCODE_LOCKOUT_
+                # THRESHOLD, range 1..100, default 10),
+                # not from the legacy STRIKE_CEILING class
+                # alias (which would report the spec default
+                # even after the operator overrode it).
+                passcode_service._strike_ceiling,
+                config.live_views.passcode_grant_ttl_seconds,
+                config.live_views.verify_rate_limit_capacity,
+                config.live_views.verify_rate_limit_refill_per_minute,
+            )
+        except Exception as exc:
+            # The cipher raises ``ViewPasscodeCipherUnavailable``
+            # on missing SYSTEM_ENCRYPTION_KEY; any DB failure
+            # propagates. Both collapse to
+            # "subsystem not wired" — the public-lane router
+            # falls back to uniform 404 (fail-closed posture;
+            # the direct lane is unaffected — requirement 5
+            # byte-identical is the public lane's sister
+            # guarantee).
+            daemon_logger.warning(
+                "[LiveViews] passcode substrate init failed "
+                "(uniform 404 on the public lane, direct lane "
+                "unaffected): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+        else:
+            # Passcode service is wired — thread it onto the
+            # manager so the ``view_link`` tool factory can
+            # read it via ``manager.view_passcode_service``
+            # (mirrors the live_views_service injection shape;
+            # both the agent-callable tool surface and the
+            # request-handling router share one instance).
+            manager.set_view_passcode_service(passcode_service)
     # Thread the service onto the manager so the ``view_link``
     # tool factory can read it via ``manager.live_views_service``
     # (mirrors the tmp_image_store injection shape; the manager
@@ -4097,6 +4197,31 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     from daemon.routers.live_views import build_router as _build_live_views_router
 
     app.include_router(_build_live_views_router())
+
+    # P2 of live-view-passcode: code-seeded PUBLIC prefix tag
+    # (architecture-recommendation.md D3:43-50 — the canonical
+    # State-B exemption mechanism; the ``auth.anonymous_view_paths``
+    # knob ships EMPTY and stays empty). The earlier PUBLIC
+    # exact-tag loop at ``_tag_route_classes`` (:3526-3560)
+    # runs BEFORE ``include_router`` (:4174) — the public
+    # sub-routes do not exist yet at that point, so we add a
+    # SECOND ``tag_routes_by_path`` call HERE, AFTER
+    # ``include_router`` (the SECOND call's load-bearing
+    # purpose is the prefix tag — see ADR D3:43-50 +
+    # D-A1 fold). The shared machinery at
+    # ``daemon/auth/route_meta.py:66-100`` supports prefix
+    # tagging (correcting the plan's earlier
+    # "exact-template-only" mischaracterization). Over-broad
+    # exclusion is pinned by test (the
+    # ``_template_prefix_matches`` truncates the legacy
+    # template at its first ``{`` — the
+    # ``/views/{root_name}/{rel_path:path}`` template
+    # collapses to ``/views/`` which can never be swept
+    # into a ``/views/public`` prefix tag).
+    from daemon.auth.route_meta import (
+        tag_routes_by_path as _tag_routes_by_path_public,
+    )
+    _tag_routes_by_path_public(app, path_prefix="/views/public")
 
     @app.get("/views/livez", include_in_schema=False)
     async def live_views_livez(request: Request):

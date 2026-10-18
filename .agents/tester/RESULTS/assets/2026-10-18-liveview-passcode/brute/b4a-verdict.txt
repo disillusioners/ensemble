@@ -1,0 +1,1 @@
+B4a: PASS old grant dead -> interstitial gate (not content)
