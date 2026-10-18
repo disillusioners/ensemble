@@ -149,8 +149,11 @@ async function installStubs(page: Page): Promise<void> {
   await page.route(/\/api\/resources\/history/, (route) => jsonRoute(route, HISTORY_PAYLOAD));
   await page.route('**/api/resources/self-cost', (route) => jsonRoute(route, SELF_COST_PAYLOAD));
   await page.route(/\/api\/resources\/traceback/, (route) => jsonRoute(route, TRACEBACK_PAYLOAD));
-  // Evidence BEFORE the list route so it takes precedence for the
-  // `/anomalies/{id}/evidence` shape.
+  // NOTE: the evidence and list-route patterns are DISJOINT (`(\?|$)`
+  // anchor vs `/evidence` suffix) — their relative order carries no
+  // precedence. The load-bearing ordering fact is the catch-all
+  // `**/api/**` registered FIRST = LOWEST precedence: Playwright routes
+  // are LIFO, so these specific stubs registered after it shadow it.
   await page.route(/\/api\/resources\/anomalies\/[^/]+\/evidence/, (route) =>
     jsonRoute(route, EVIDENCE_PAYLOAD),
   );
