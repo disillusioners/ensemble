@@ -239,4 +239,110 @@
     </div>
   </section>
 
+  <section class="setting-section daemon-section">
+    <h2>Daemon</h2>
+    <p class="setting-description">
+      Runtime daemon settings stored as database overrides. A saved
+      override takes effect on the <strong>next daemon restart</strong> —
+      until then the boot-applied value keeps running, so the running
+      value and the winning tier can legitimately differ.
+    </p>
+
+    @if (daemonLoading()) {
+      <span class="saving-indicator">Loading daemon settings...</span>
+    } @else {
+      @for (entry of daemonSettings(); track entry.key) {
+        <div class="daemon-key-row" [attr.data-key]="entry.key">
+          <div class="daemon-key-header">
+            <span class="daemon-key">{{ entry.key }}</span>
+            <span class="tier-chip" [ngClass]="'tier-' + entry.source">{{
+              daemonTierLabel(entry.source)
+            }}</span>
+            @if (entry.requires_restart) {
+              <span class="restart-badge">Requires restart</span>
+            }
+          </div>
+
+          <p class="setting-description daemon-description">
+            {{ entry.description }}
+          </p>
+
+          <div class="daemon-value-block">
+            <span class="daemon-value-label">Running value (boot-applied)</span>
+            <span class="daemon-effective-value">{{ entry.value }}</span>
+          </div>
+
+          @if (daemonIsDivergent(entry)) {
+            <p class="daemon-divergence">
+              The {{ daemonTierLabel(entry.source) }} tier now resolves to
+              {{ daemonSourceValue(entry) }} — applies after daemon restart.
+            </p>
+          }
+
+          @if (
+            entry.db_override !== undefined ||
+            entry.env_value !== undefined ||
+            entry.yaml_value !== undefined
+          ) {
+            <div class="daemon-tier-details">
+              @if (entry.db_override !== undefined) {
+                <span class="daemon-tier-detail">DB override: {{ entry.db_override }}</span>
+              }
+              @if (entry.env_value !== undefined) {
+                <span class="daemon-tier-detail">ENV: {{ entry.env_value }}</span>
+              }
+              @if (entry.yaml_value !== undefined) {
+                <span class="daemon-tier-detail">YAML: {{ entry.yaml_value }}</span>
+              }
+            </div>
+          }
+
+          <div class="daemon-edit-row">
+            <mat-form-field appearance="outline" class="daemon-input">
+              <mat-label>New value (min 1)</mat-label>
+              <input
+                matInput
+                type="number"
+                min="1"
+                step="1"
+                [value]="daemonDraftFor(entry)"
+                (input)="onDaemonDraftInput(entry, $event)"
+                [disabled]="isDaemonSaving(entry.key)"
+              />
+            </mat-form-field>
+            <button
+              mat-raised-button
+              color="primary"
+              class="daemon-save-btn"
+              (click)="saveDaemonSetting(entry)"
+              [disabled]="!canSaveDaemon(entry)"
+            >
+              Save override
+            </button>
+            <button
+              mat-stroked-button
+              class="daemon-reset-btn"
+              (click)="resetDaemonSetting(entry)"
+              [disabled]="isDaemonSaving(entry.key) || daemonLoading()"
+            >
+              Reset to file/env
+            </button>
+          </div>
+
+          @if (daemonDraftError(entry); as daemonError) {
+            <p class="daemon-validation-hint">{{ daemonError }}</p>
+          }
+
+          @if (daemonNote(entry.key); as daemonActionNote) {
+            <p class="daemon-action-note">{{ daemonActionNote }}</p>
+          }
+        </div>
+      }
+    }
+
+    <p class="setting-hint daemon-cobound-hint">
+      Real parallelism is also capped by the fixed worker thread pools (5 worker + 2 chat = 7 concurrent graphs — constants, not settable here).
+    </p>
+  </section>
+
 </div>

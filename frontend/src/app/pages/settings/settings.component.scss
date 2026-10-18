@@ -276,6 +276,168 @@ $accent-cyan: #10a7f7;
   gap: 0.75rem;
 }
 
+// Daemon runtime settings section (db-backed-settings P3) — one
+// card per managed key, data-driven over the frozen GET payload.
+// The running value (boot-applied) and the source tier chip are
+// deliberately separate elements: after a save/reset they diverge
+// until the next restart and must never collapse into one number.
+.daemon-key-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  padding: 1rem;
+  background: $bg-primary;
+  border: 1px solid $border-color;
+  border-radius: 6px;
+}
+
+.daemon-key-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.daemon-key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: $accent-cyan;
+  word-break: break-all;
+}
+
+.tier-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  border: 1px solid transparent;
+
+  &.tier-db {
+    background: rgba(16, 167, 247, 0.12);
+    color: $accent-cyan;
+    border-color: rgba(16, 167, 247, 0.3);
+  }
+
+  &.tier-env {
+    background: rgba(245, 158, 11, 0.12);
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.3);
+  }
+
+  &.tier-yaml {
+    background: rgba(167, 139, 250, 0.12);
+    color: #a78bfa;
+    border-color: rgba(167, 139, 250, 0.3);
+  }
+
+  &.tier-default {
+    background: rgba(148, 163, 184, 0.12);
+    color: $text-secondary;
+    border-color: rgba(148, 163, 184, 0.3);
+  }
+}
+
+// Always-visible restart hint — before AND after a save, since no
+// daemon setting applies live in v1.
+.restart-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.daemon-description {
+  font-size: 0.875rem;
+}
+
+.daemon-value-block {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+
+  .daemon-value-label {
+    font-size: 0.8125rem;
+    color: $text-secondary;
+  }
+
+  .daemon-effective-value {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 1.125rem;
+    font-weight: 700;
+    color: $text-primary;
+  }
+}
+
+.daemon-divergence {
+  margin: 0;
+  color: #f59e0b;
+  font-size: 0.8125rem;
+}
+
+.daemon-tier-details {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.daemon-tier-detail {
+  font-size: 0.75rem;
+  color: $text-secondary;
+  background: $bg-card;
+  border: 1px solid $border-color;
+  border-radius: 4px;
+  padding: 0.125rem 0.5rem;
+}
+
+.daemon-edit-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+
+  .daemon-input {
+    flex: 1 1 160px;
+    max-width: 220px;
+    min-width: 0;
+  }
+}
+
+// Material form-field tweak — match the dark theme palette (same
+// treatment as the language/timezone inputs above).
+::ng-deep .daemon-input .mat-mdc-text-field-wrapper {
+  background-color: $bg-primary;
+}
+
+.daemon-validation-hint {
+  margin: 0;
+  color: #f87171;
+  font-size: 0.8125rem;
+}
+
+.daemon-action-note {
+  margin: 0;
+  color: #22c55e;
+  font-size: 0.8125rem;
+}
+
+// Muted co-bound info line (architect Ruling 5) — documentation
+// only; inherits .setting-hint's muted italic treatment.
+.daemon-cobound-hint {
+  margin: 0;
+}
+
 // R16 — usage metrics list (Wave 3). Reuses the editor-section
 // styles for the wrapping section; the inner list is its own scope.
 .metrics-list {
