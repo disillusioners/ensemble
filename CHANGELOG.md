@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — agent-secrets P2: marker resolution seams + both-sides transcript scrub (`agent-secrets-p2` @ `79c658fda`)
+
+> **CHANGELOG (feature):** *Second slice of the agent-secrets subsystem (design `.agents/shared/planning/agent-secrets/p2-architecture-recommendation.md`). The P1 mint-only marker `__ENS_SECRET__<id>__` becomes a RESOLVABLE reference and the both-sides transcript leak closes: stored secret values are replaced by their marker at every persistence write path, and plaintext exists ONLY in the consumer's env/args at the moment of use. Zero behavior change for agents that never touch secrets.*
+
+- **Resolution seams (spawn/invoke-time, fail-closed)** — markers resolve to plaintext at the last moment, fresh from PG inside one transaction (SELECT → decrypt → `use_marker` audit row; no RAM plaintext anywhere, restart-durable by construction): the `bash` tool gains an optional `env` overlay (markers resolve for the child process only — a failing marker aborts the spawn with a typed envelope, never partial env), a proc subprocess env overlay (operator-injected, not LLM-visible), MCP stdio spawn points (warm pool + both cold spawns — stored config keeps its markers; resolution never persists plaintext into DB config), and opt-in `secret_typed_args` tool-param resolution (per-tool declared fields; undeclared tools unchanged — a registration slot, not a new category).
+- **Both-sides persistence scrub** — stored values are replaced by their marker at three write sites: tool results (before they join live agent context), the checkpoint saver proxy (serialized tool-call args + results — live args stay intact for execution and retry), and enqueued message bodies (defense-in-depth). Idempotent under multi-pass scrubbing; markers themselves are never rewritten; retired secrets stay in the scrub set. Staleness-safe: new secrets become scrub-visible immediately (store event + 60s TTL backstop).
+- **`use_marker` audit + `context` column** — one additive migration (`20261018_000001_secrets_audit_add_context.sql`, `secrets_audit.context`: `bash_env` / `mcp_spawn` / `tool_param` / `scrub`); P2 is the first emitter of the previously-reserved `use_marker` action (success AND rejection rows, stamped in the same transaction as the resolution they describe). Zero audit rows for secret-free agents.
+- **`secret_store` marker-passthrough (D2 ruling)** — storing a value that already IS a valid marker returns the existing secret's `{id, name}` without re-wrapping: a pause/resume retry that re-invokes `secret_store` with the scrubbed (markerized) arg is an idempotent success instead of minting a secret-of-a-marker.
+- **Typed error vocabulary (fail-closed everywhere)** — `secret_not_found` / `secret_marker_malformed` / `secret_resolver_store_unavailable` / `secret_fernet_key_mismatch` / `secret_cipher_unavailable` envelopes with an anti-differential message family (the `code` field is the only distinction — which id is live stays in the audit log); no seam ever spawns a child/server with literal markers or partial env. Retired secrets KEEP resolving (soft-retire = delist + audit, not revocation — D1 ruling).
+- **Do-not-touch lanes byte-unwired (static-audit pinned)** — `db_connections` Fernet, KMS-Lite LANE-1/2, and the `ens_env_read` BYOK lane contain zero references to the new resolver; `build_pooled_stdio_config` keeps returning stored config (spawn-point resolution only).
+
 ---
 
 ## [0.21.0] — 2026-10-17
