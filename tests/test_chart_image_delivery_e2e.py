@@ -1334,7 +1334,12 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/ari/workflow.md": "d39ce087888869611884a1ff71d4851f2b203a376d71c44d2b38b2f991ab3a38",
     # Phase B — 7 daemon files
     "daemon/sources/base.py": "ca2762ac8840bd8f7050955744af25f16325ed6806d09ba1fe3d020383581f3a",
-    "daemon/sources/registry.py": "a46da82b930e2efc0b6f16a2f40a902c16343c08c49ee1236fda9ab928213a1b",
+    # registry.py re-pinned 2026-10-18 (resource-cost-control O4): the
+    # backoff-reset gate (778a49cb2) + crashed-run lifetime metric
+    # (8fb77a7b5) edited this file's supervisor harness; pre-O4
+    # baseline was a46da82b930e...  Delta is EXACTLY the O4 edits and
+    # nothing in charter/render-pipeline semantics changed.
+    "daemon/sources/registry.py": "f90c57f73bffd28e4a1992049d617d7bb791b8d792807308b40d2720d9edf624",
     "daemon/sources/dispatcher.py": "4282ddc0396f9103ff7e14af9077c721d29e5329fac702ad3dfbfafd7083e53a",
     "daemon/sources/adapters/discord/adapter.py": "87351d95d35410f8ac507c305ad74efe02bcea566de609a4d423d4979f41ab43",
     # Phase B — 7 daemon files + slack-setup.md (8).
