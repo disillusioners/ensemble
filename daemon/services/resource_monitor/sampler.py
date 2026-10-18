@@ -227,11 +227,19 @@ class Sampler:
         # inside its single engine.begin() window. When no ring is
         # passed (bare-sampler tests), an internal bounded ring keeps
         # the /live latest-tick view working with zero DB coupling.
-        self.instance_ring = instance_ring or TierRing(
-            tier="instance",
-            maxlen=max(
-                2, DEFAULT_INSTANCE_RING_TICKS * (min(instance_cap, 64) + 1)
-            ),
+        # NOTE: explicit None check — TierRing defines __len__, so an
+        # empty ring is falsy and ``or`` would silently swap it out.
+        self.instance_ring = (
+            instance_ring
+            if instance_ring is not None
+            else TierRing(
+                tier="instance",
+                maxlen=max(
+                    2,
+                    DEFAULT_INSTANCE_RING_TICKS
+                    * (min(instance_cap, 64) + 1),
+                ),
+            )
         )
         # D12 — ≤64 instance rows/tick (config ``instance_cap``, env
         # ``RESOURCE_MONITOR_INSTANCE_CAP``; the config layer clamps
@@ -645,6 +653,15 @@ class Sampler:
                 share = int(
                     round(daemon_cpu_delta * (charged / charged_total))
                 )
+            # T5 all_state_messages_len: the messaging-service map is
+            # the primary source; when it lacks the instance, fall
+            # back to the charge record's cheap append counter (both
+            # are scalar reads — never a deep walk).
+            asml: Optional[int] = None
+            if self._state_message_counts_provider is not None:
+                asml = state_counts.get(iid)
+            if asml is None:
+                asml = rec.get("all_state_messages_len")
             return {
                 "instance_id": iid,
                 "agent_id": _agent_of(iid),
@@ -662,11 +679,7 @@ class Sampler:
                     if self._graph_tasks_provider is not None
                     else None
                 ),
-                "all_state_messages_len": (
-                    state_counts.get(iid)
-                    if self._state_message_counts_provider is not None
-                    else None
-                ),
+                "all_state_messages_len": asml,
                 "child_rss_kb": int(cc[0]) if cc else 0,
                 "child_cpu_user_usec": int(cc[1]) if cc else 0,
                 "cpu_share_usec_est": share,
