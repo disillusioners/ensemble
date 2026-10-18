@@ -316,6 +316,14 @@ H_OUT="$(ADOPT_SC_LOG="$WORK/sc.log" UNIT_DIR="$UNITDIR" POLKIT_RULES_DIR="$POLK
 H_RC=$?
 assert_eq "DRY_RUN happy: exit 0" "0" "$H_RC"
 
+# static allocator cap (resource-cost-control O1): the TEMPLATE carries it
+# (a content pin on the repo file itself — survives even if adoption of a
+# given install predates this directive), and adoption rides it through to
+# every generated unit via the directive loop above.
+assert_contains "template carries static MALLOC_ARENA_MAX cap" \
+    "Environment=MALLOC_ARENA_MAX=2" \
+    "$(cat "$REPO_ROOT/scripts/systemd/ensemble-daemon.service")"
+
 # substituted values
 assert_contains "ExecStart is the ABSOLUTE fixture launcher" "ExecStart=$FIX/launcher.sh" "$H_OUT"
 assert_contains "User substituted" "User=ens-adm" "$H_OUT"
@@ -328,7 +336,8 @@ assert_contains "Environment=POSTGRES_DB substituted" "Environment=POSTGRES_DB=e
 for directive in "Type=simple" "Restart=on-failure" "RestartSec=10" \
                  "RestartPreventExitStatus=78" "SuccessExitStatus=143" \
                  "KillMode=mixed" "StandardOutput=journal" "StandardError=journal" \
-                 "TimeoutStopSec=90" "WantedBy=multi-user.target"; do
+                 "TimeoutStopSec=90" "WantedBy=multi-user.target" \
+                 "Environment=MALLOC_ARENA_MAX=2"; do
     assert_contains "directive $directive present" "$directive" "$H_OUT"
 done
 assert_not_contains "NO WatchdogSec (deferred by design)" "WatchdogSec=" "$H_OUT"

@@ -1648,6 +1648,16 @@ main() {
     _log "ensemble launcher starting (INSTALL_DIR=$INSTALL_DIR)"
     load_env_file "$INSTALL_DIR/.env"
 
+    # Allocator cap (resource-cost-control O1, 2026-10-18): default glibc
+    # to 2 malloc arenas BEFORE the daemon child starts. MALLOC_ARENA_MAX
+    # is a libc tunable parsed at libc init — before the child's main() —
+    # so it must arrive via the environment, not an in-process setdefault.
+    # Default-only (setdefault semantics): a MALLOC_ARENA_MAX staged in
+    # .env (already exported above) wins over this default. Exported here
+    # in main(), so every `run_loop` cycle's child inherits it.
+    : "${MALLOC_ARENA_MAX:=2}"
+    export MALLOC_ARENA_MAX
+
     # Journal sweep BEFORE resolving the binary (ADR-012).
     _journal_sweep
 

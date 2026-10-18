@@ -1073,6 +1073,41 @@ else
         "identical bodies" "launcher=[${TWIN_LAUNCHER}] lib=[${TWIN_LIB}]"
 fi
 
+# ─── 12. allocator cap: MALLOC_ARENA_MAX default-export before exec ────────
+# (resource-cost-control O1) The launcher must default glibc to 2 malloc
+# arenas so libc init — which parses the env BEFORE the child's main() —
+# caps the daemon's arena count. Default-only semantics (a MALLOC_ARENA_MAX
+# staged in .env wins: load_env_file exports it before this default fires),
+# and the export must sit BEFORE main() hands off to run_loop (the child
+# inherits the launcher's exported env on every cycle).
+section "12. allocator cap (O1): export before exec"
+# Presence pins.
+assert_contains "launcher defaults MALLOC_ARENA_MAX to 2" \
+    ': "${MALLOC_ARENA_MAX:=2}"' "$(cat "$LAUNCHER")"
+assert_contains "launcher exports MALLOC_ARENA_MAX" \
+    "export MALLOC_ARENA_MAX" "$(cat "$LAUNCHER")"
+# Ordering pin: export line number < run_loop invocation line number.
+export_line="$(grep -n '^[[:space:]]*export MALLOC_ARENA_MAX[[:space:]]*$' "$LAUNCHER" | head -1 | cut -d: -f1)"
+exec_line="$(grep -n '^[[:space:]]*run_loop "\$bin"[[:space:]]*$' "$LAUNCHER" | head -1 | cut -d: -f1)"
+if [ -n "$export_line" ] && [ -n "$exec_line" ] && [ "$export_line" -lt "$exec_line" ]; then
+    _pass
+else
+    _fail "12. export MALLOC_ARENA_MAX precedes run_loop exec" \
+        "export line < run_loop line" \
+        "export=${export_line:-absent} run_loop=${exec_line:-absent}"
+fi
+# Default-only semantics: the := default must not clobber a staged value —
+# load_env_file exports staged keys BEFORE the default fires, so assert the
+# default line also sits AFTER the load_env_file call in main().
+loadenv_line="$(grep -n 'load_env_file "\$INSTALL_DIR/.env"' "$LAUNCHER" | head -1 | cut -d: -f1)"
+if [ -n "$loadenv_line" ] && [ -n "$export_line" ] && [ "$loadenv_line" -lt "$export_line" ]; then
+    _pass
+else
+    _fail "12. staged .env value wins (load_env_file before default export)" \
+        "load_env_file line < export line" \
+        "load_env_file=${loadenv_line:-absent} export=${export_line:-absent}"
+fi
+
 # ─── cleanup ────────────────────────────────────────────────────────────────
 rm -rf "$ENV_TEST_DIR" "$STATE_TEST_DIR" "$JS_TEST_DIR" \
        "$RB_TEST_DIR" "$RB_TEST_DIR2" "$RB_TEST_DIR3" "$RB_TEST_DIR4" \

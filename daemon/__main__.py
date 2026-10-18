@@ -19,6 +19,34 @@ from pathlib import Path
 
 from .config import load_config, warn_default_allowed_models_applied, warn_deprecated_allowed_models_env, warn_deprecated_reasoning_echo_env
 
+# ── Allocator cap (resource-cost-control O1, 2026-10-18) ──────────────────
+# Belt-and-braces env default. Scope, verified against the glibc tunables
+# model and this repo's actual boot paths:
+#
+#   CANNOT cap THIS process's own glibc arenas. MALLOC_ARENA_MAX is a libc
+#     tunable parsed at libc init — before main()/the interpreter starts —
+#     so an in-process setdefault is always too late for the parent. The
+#     parent-side cap comes from the pre-exec surfaces instead: the systemd
+#     unit template (scripts/systemd/ensemble-daemon.service) and
+#     launcher.sh main(), which both set the env BEFORE process start.
+#
+#   CAN reach child processes that inherit os.environ — the meaningful lane
+#     is bash/proc tool children (daemon/tools/bash.py spawns with
+#     env=None → inherited environ, or os.environ.copy() + overlay), i.e.
+#     agent-driven node/npm/test-farm processes pick the cap up.
+#
+#   CAN cover boot paths that bypass launcher.sh: the frozen PyInstaller
+#     entry (run_app.py imports this module before anything spawns) and
+#     `python -m daemon`. NOT the dev.sh `python -m uvicorn daemon.api:app`
+#     path (never imports this module), and NOT MCP stdio children
+#     (daemon/mcp/connection_manager.py builds their env fresh from the
+#     stored server config via resolve_env — os.environ is deliberately
+#     never merged there). Both gaps are known O1 residuals, out of scope.
+#
+# Module level = runs at import, before uvicorn/threads/any child spawn on
+# every path that reaches it. setdefault: a staged MALLOC_ARENA_MAX wins.
+os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+
 # ── Process exit-code contract (Auto-Restart ADR-010/011) ─────────────────
 # The launcher (Phase 1) maps exit codes to restart policy:
 #

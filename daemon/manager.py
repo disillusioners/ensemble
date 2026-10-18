@@ -111,6 +111,7 @@ from .services.dependency_bus import get_dependency_bus
 from .services.instance_lifecycle import InstanceLifecycleService
 from .services.instance_messaging import InstanceMessagingService
 from .services.context_messages import emit_ambient_kv_fresh_boot_log
+from .services.malloc_tuner import trim_malloc_heap
 from .services.report_integrity_guard import (
     emit_report_integrity_b_guard_boot_log,
 )
@@ -3398,6 +3399,21 @@ class InstanceManager:
                 last_run=last_run_dt,
             )
 
+        # ── Idle-time glibc heap trim (resource-cost-control O1) ─────
+        # Hourly piggyback on the EXISTING MaintenanceService loop —
+        # no new thread, no new asyncio task (O1 brief). The ``_is_idle``
+        # gate keeps it off in-flight work; the callback is the
+        # never-raises ctypes wrapper in daemon/services/malloc_tuner.py,
+        # so a non-glibc platform collapses to a debug-logged no-op.
+        # Returns whole free heap pages to the OS after per-turn
+        # transients have been freed to the allocator (the RSS-return
+        # step obmalloc/glibc do not perform on their own).
+        self._maintenance_service.register(
+            "malloc_trim",
+            min_interval_hours=1.0,
+            execute_fn=self._run_malloc_trim,
+        )
+
         # Section 1 / T8 + W1 + W2 (v3 fix pass) — boot sweep of
         # orphaned ``running`` rows (AM-7): unconditional
         # rowcount-guarded CAS ``running → interrupted``, WITH bounded
@@ -5740,6 +5756,30 @@ class InstanceManager:
         ``_graph_tasks``.
         """
         self._last_context_usage.pop(instance_id, None)
+
+    async def _run_malloc_trim(self) -> None:
+        """Idle-time glibc heap trim (resource-cost-control O1).
+
+        Registered hourly with :class:`MaintenanceService`; the
+        ``_is_idle`` gate keeps it away from in-flight work.
+        ``trim_malloc_heap`` (daemon/services/malloc_tuner.py) carries a
+        never-raises contract of its own; the belt-and-braces ``except``
+        below keeps the host maintenance loop unkillable even if that
+        contract is ever violated. Non-glibc platforms collapse to the
+        DEBUG-logged no-op inside the helper.
+        """
+        try:
+            if trim_malloc_heap():
+                logger.info(
+                    "malloc_trim: glibc heap trimmed — free pages "
+                    "returned to OS"
+                )
+            else:
+                logger.debug(
+                    "malloc_trim: nothing returned / unsupported platform"
+                )
+        except Exception as exc:  # noqa: BLE001 — host loop must never die
+            logger.debug(f"_run_malloc_trim skipped: {type(exc).__name__}: {exc}")
 
     async def _run_skill_orphan_sweep(self) -> None:
         """Periodic sweep of stale ``selected=True`` usage records.
