@@ -132,7 +132,16 @@ _EVENT_LOOKBACK = timedelta(days=14)
 #: ``event.created_at`` is widened by this pad on BOTH sides so
 #: mixed-offset rows are always fetched; the exact instant decision is
 #: then made in Python on ``coerce_to_aware_utc`` values (rule 3).
-_TZ_PAD = timedelta(hours=14)
+#: The pad STRICTLY EXCEEDS the max offset on purpose: an event at
+#: exactly the bind instant carried at the extreme ``+14:00`` offset
+#: has wall-clock digits EQUAL to a 14 h-padded bind but a
+#: lexicographically greater suffix — with a 14 h pad the strict-``<``
+#: hi comparison would drop it from the prefilter. 15 h + strict-``<``
+#: makes that impossible (any representation of an instant ≤ T has
+#: digits ≤ T+14h < T+15h). Unreachable from today's production writer
+#: (``datetime.now(timezone.utc)`` is always ``+00:00``); kept as a
+#: documented invariant for any future writer.
+_TZ_PAD = timedelta(hours=15)
 #: Terminal instance statuses — a latest-lifecycle-event or CURRENT
 #: snapshot carrying one of these means the instance was NOT alive at T.
 _INSTANCE_TERMINAL_STATUSES = frozenset(
@@ -234,7 +243,7 @@ _REGISTRY_SQL = text(
 _LIFECYCLE_SQL = text(
     "SELECT instance_id, data, created_at FROM event "
     "WHERE instance_id IN :ids AND kind = :kind "
-    "AND created_at <= :hi AND created_at >= :lo "
+    "AND created_at < :hi AND created_at >= :lo "
     "ORDER BY instance_id, created_at"
 ).bindparams(bindparam("ids", expanding=True))
 
@@ -346,7 +355,7 @@ def instances_alive_at(
                 ts = _read_dt(created_at)
                 if ts is None or ts > at:
                     # Unparseable, or AFTER the instant of interest —
-                    # the padded prefilter (±14h for mixed-offset TEXT
+                    # the padded prefilter (±15h for mixed-offset TEXT
                     # safety) deliberately over-fetches; the exact
                     # at-T decision happens here (rule 3).
                     continue

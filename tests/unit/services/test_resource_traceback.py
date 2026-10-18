@@ -249,6 +249,24 @@ class TestTzSeam:
         assert isinstance(raw, str) and raw.endswith("+07:00")
         assert rt._read_dt(raw) == T(hour=2)
 
+    def test_extreme_offset_event_at_exact_T_not_prefiltered_out(self, engine):
+        """Review #2 regression: an event at EXACTLY instant T stored
+        with the extreme ``+14:00`` offset has the SAME wall-clock
+        digits as the old ``T+14h`` hi bind but a lex-greater suffix —
+        the widened pad (15 h) plus the strict ``<`` hi comparison keep
+        it inside the prefilter so the exact Python rule-3 decision (in
+        at-T ⇒ keep) gets to see it. (Unreachable from today's
+        production writer — ``datetime.now(timezone.utc)`` is always
+        ``+00:00`` — pinned so the invariant holds for any future
+        writer.)"""
+        seed_instance(engine, "i-pad")
+        seed_event(engine, "i-pad", "running",
+                   "2026-10-18 16:00:00.000000+14:00")  # instant == T
+        alive = rt.instances_alive_at(engine, T())
+        assert [(r["instance_id"], r["source"]) for r in alive] == [
+            ("i-pad", "event")
+        ]
+
     def test_naive_digits_derived_from_coerce(self):
         # The companion must funnel through coerce_to_aware_utc — a
         # +07:00 input normalizes before digit-stripping.
