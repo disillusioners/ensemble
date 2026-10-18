@@ -2711,14 +2711,31 @@ class LiveViewsConfig(BaseSettings):
     # precedent ``oauth2-proxy.yaml:29 --cookie-expire=24h``).
     # Env vars: ``ENSEMBLE_LIVE_VIEWS_PASSCODE_LOCKOUT_THRESHOLD`` /
     # ``ENSEMBLE_LIVE_VIEWS_PASSCODE_GRANT_TTL_SECONDS``.
+    #
+    # C4 pre-promote: range ``1 ≤ threshold ≤ 100`` chosen to
+    # cover every plausible operator posture — a threshold of 1
+    # is the most aggressive single-strike lockout (paranoid);
+    # 100 is a polite-wait cap (high-friction UX for legitimate
+    # typos but never unreachable). Out-of-range values are
+    # refused at config validation so the daemon refuses to
+    # boot with an unintentionally weak/strong ceiling. Field
+    # ``description`` carries the operator-facing rationale;
+    # the range gate is the machine-facing guard. ``default=10``
+    # keeps the spec default (architecture-recommendation.md
+    # D5) byte-identical for every operator who does NOT set
+    # the knob.
     passcode_lockout_threshold: int = Field(
         default=10,
+        ge=1,
+        le=100,
         description=(
             "Number of consecutive wrong verify attempts that flips the "
             "view's passcode row to ``locked=true``. ``view_link(refresh="
             "True)`` is the only recovery path (no time-boxed auto-"
             "unlock; spec default ratified in architecture-recommendation."
-            "md D5)."
+            "md D5). C4 pre-promote wiring (D14): range gate 1..100, "
+            "default 10 preserves the spec ceiling byte-identical for "
+            "unconfigured operators."
         ),
     )
     passcode_grant_ttl_seconds: int = Field(

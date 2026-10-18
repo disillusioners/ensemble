@@ -1039,6 +1039,252 @@ class TestRecordFailureAtomicIncrementBoundary:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# C4 — passcode_lockout_threshold knob is wired through to the
+# atomic UPDATE. The field exists at the config layer
+# (daemon/config.py LiveViewsConfig.passcode_lockout_threshold);
+# the defect was zero consumers — the surface was declared but
+# never read. These pins prove the wiring: configured value is
+# honored at the strike ceiling, default (unset) still yields
+# 10, and out-of-range values are rejected at construction
+# (defense-in-depth — the config field validator is the
+# primary gate; the service-level guard catches the post-
+# config Python callers).
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestC4LockoutThresholdKnobWired:
+    """C4 pre-promote pins — the operator-configured strike
+    ceiling is honored through ``ViewPasscodeService`` into the
+    atomic UPDATE in
+    ``_SqlViewPasscodeStore.record_failure_with_audit``."""
+
+    def test_default_ceiling_yields_ten(
+        self, sqlite_engine: Engine, cipher: ViewPasscodeCipher
+    ) -> None:
+        """Unconfigured ``ViewPasscodeService(engine, cipher)``
+        falls back to ``LIVE_VIEW_PASSCODE_STRIKE_CEILING`` = 10
+        (spec default — architecture-recommendation.md D5).
+        Regression guard against the legacy ``STRIKE_CEILING``
+        class-constant shape silently overpowering an operator
+        override."""
+        service = ViewPasscodeService(engine=sqlite_engine, cipher=cipher)
+        service.mint("docs", "a/b.md", actor="worker")
+        for attempt_no in range(1, LIVE_VIEW_PASSCODE_STRIKE_CEILING + 1):
+            attempts, locked_now = service.record_failure(
+                "docs", "a/b.md", ip="10.0.0.1"
+            )
+            assert attempts == attempt_no, (
+                f"strike counter at attempt {attempt_no} should "
+                f"equal attempt_no; got {attempts}"
+            )
+            if attempt_no < LIVE_VIEW_PASSCODE_STRIKE_CEILING:
+                assert locked_now is False
+        # The 10th attempt flipped the lock.
+        row = service.get_row("docs", "a/b.md")
+        assert row is not None
+        assert row.locked is True
+        # ``STRIKE_CEILING`` instance attribute mirrors the
+        # configured value (the spec default — 10).
+        assert service.STRIKE_CEILING == LIVE_VIEW_PASSCODE_STRIKE_CEILING
+        assert service._strike_ceiling == LIVE_VIEW_PASSCODE_STRIKE_CEILING
+
+    def test_configured_ceiling_three_locks_at_third(
+        self, sqlite_engine: Engine, cipher: ViewPasscodeCipher
+    ) -> None:
+        """Operator sets ``strike_ceiling=3`` (aggressive
+        single-shot lockout posture) — the 3rd wrong flips
+        ``locked`` AND emits the lockout audit row. Proves the
+        CONFIGURED value is authoritative and the class-level
+        default is NOT consulted at request time."""
+        service = ViewPasscodeService(
+            engine=sqlite_engine, cipher=cipher, strike_ceiling=3,
+        )
+        service.mint("docs", "a/b.md", actor="worker")
+        # The configured value is reflected on the instance.
+        assert service.STRIKE_CEILING == 3
+        assert service._strike_ceiling == 3
+        # First two attempts — NOT locked.
+        for attempt_no, expected in [(1, False), (2, False)]:
+            attempts, locked_now = service.record_failure(
+                "docs", "a/b.md", ip="10.0.0.1"
+            )
+            assert attempts == attempt_no
+            assert locked_now is expected
+        # The 3rd attempt flips the lock (configured ceiling
+        # = 3, NOT the spec default of 10).
+        attempts, locked_now = service.record_failure(
+            "docs", "a/b.md", ip="10.0.0.1"
+        )
+        assert attempts == 3
+        assert locked_now is True
+        row = service.get_row("docs", "a/b.md")
+        assert row is not None
+        assert row.locked is True
+        # Lockout audit row is present (the M1 atomic contract
+        # — the atomic UPDATE + the audit insert share one
+        # ``engine.begin()`` transaction).
+        with _session(sqlite_engine) as session:
+            lockouts = session.exec(
+                select(LiveViewPasscodeAudit).where(
+                    LiveViewPasscodeAudit.action == "lockout",
+                    LiveViewPasscodeAudit.root_name == "docs",
+                    LiveViewPasscodeAudit.rel_path == "a/b.md",
+                )
+            ).all()
+        assert len(lockouts) == 1, (
+            f"configured ceiling=3 should emit exactly ONE "
+            f"lockout audit row; got {len(lockouts)}"
+        )
+
+    def test_configured_ceiling_one_locks_on_first(
+        self, sqlite_engine: Engine, cipher: ViewPasscodeCipher
+    ) -> None:
+        """Edge of the documented range — ``strike_ceiling=1``
+        flips the lock on the FIRST failure. Proves the lower
+        bound of the config gate (``ge=1``) propagates through
+        the service boundary into the SQL comparator."""
+        service = ViewPasscodeService(
+            engine=sqlite_engine, cipher=cipher, strike_ceiling=1,
+        )
+        service.mint("docs", "a/b.md", actor="worker")
+        attempts, locked_now = service.record_failure(
+            "docs", "a/b.md", ip="10.0.0.1"
+        )
+        assert attempts == 1
+        assert locked_now is True
+        row = service.get_row("docs", "a/b.md")
+        assert row is not None
+        assert row.locked is True
+
+    def test_construction_rejects_non_positive_ceiling(
+        self, sqlite_engine: Engine, cipher: ViewPasscodeCipher
+    ) -> None:
+        """Defense-in-depth: the service refuses to construct
+        when ``strike_ceiling`` is non-positive. The config
+        field validator (``ge=1``) is the primary gate; this
+        guard catches Python callers that bypass the config
+        layer (tests, ad-hoc scripts)."""
+        with pytest.raises(ValueError):
+            ViewPasscodeService(
+                engine=sqlite_engine, cipher=cipher, strike_ceiling=0,
+            )
+        with pytest.raises(ValueError):
+            ViewPasscodeService(
+                engine=sqlite_engine, cipher=cipher, strike_ceiling=-1,
+            )
+
+    def test_construction_rejects_non_int_ceiling(
+        self, sqlite_engine: Engine, cipher: ViewPasscodeCipher
+    ) -> None:
+        """``strike_ceiling`` must be an int (the SQL comparator
+        + the row column are int). Anything else is rejected
+        at construction — typed failure > silent coercion
+        > runtime DB type error."""
+        with pytest.raises(ValueError):
+            ViewPasscodeService(
+                engine=sqlite_engine,
+                cipher=cipher,
+                strike_ceiling=10.5,  # type: ignore[arg-type]
+            )
+        with pytest.raises(ValueError):
+            ViewPasscodeService(
+                engine=sqlite_engine,
+                cipher=cipher,
+                strike_ceiling="10",  # type: ignore[arg-type]
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# C4 — config layer range validation (ge=1, le=100). The service
+# guard above is the post-config Python defense; the field
+# validator is the PRIMARY gate (rejected at Settings load =
+# daemon refuses to boot with a bad ceiling).
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestC4ConfigFieldRangeGate:
+    """The C4 contract — ``passcode_lockout_threshold`` is
+    bounded 1..100 at the config layer. Out-of-range values
+    raise at construction (the daemon refuses to boot with an
+    unintentionally weak/strong ceiling)."""
+
+    def test_field_accepts_lower_bound(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            "ENSEMBLE_LIVE_VIEWS_PASSCODE_LOCKOUT_THRESHOLD", "1"
+        )
+        from daemon.config import LiveViewsConfig
+
+        cfg = LiveViewsConfig()
+        assert cfg.passcode_lockout_threshold == 1
+
+    def test_field_accepts_upper_bound(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            "ENSEMBLE_LIVE_VIEWS_PASSCODE_LOCKOUT_THRESHOLD", "100"
+        )
+        from daemon.config import LiveViewsConfig
+
+        cfg = LiveViewsConfig()
+        assert cfg.passcode_lockout_threshold == 100
+
+    def test_field_rejects_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``0`` would let a single failure flip the lock only
+        WHEN accumulated — but the M1 atomic UPDATE uses
+        ``>= ceiling``; ceiling=0 means an empty try-count
+        flips the lock before any wrong attempt, which is a
+        footgun. Rejected."""
+        monkeypatch.setenv(
+            "ENSEMBLE_LIVE_VIEWS_PASSCODE_LOCKOUT_THRESHOLD", "0"
+        )
+        from daemon.config import LiveViewsConfig
+
+        with pytest.raises(Exception):
+            # Pydantic raises ``ValidationError`` on ge=1
+            # failure — we import lazily so the import side
+            # effects (env-pollination) run first.
+            LiveViewsConfig()
+
+    def test_field_rejects_above_range(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Above the upper bound — a value like 10000 lets an
+        attacker grind indefinitely. Rejected at the config
+        gate."""
+        monkeypatch.setenv(
+            "ENSEMBLE_LIVE_VIEWS_PASSCODE_LOCKOUT_THRESHOLD", "10000"
+        )
+        from daemon.config import LiveViewsConfig
+
+        with pytest.raises(Exception):
+            LiveViewsConfig()
+
+    def test_field_default_is_ten(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unset → spec default 10. The contract: the spec
+        ceiling is byte-identical for every operator who does
+        NOT set the knob — wired but never override-by-default
+        semantically."""
+        monkeypatch.delenv(
+            "ENSEMBLE_LIVE_VIEWS_PASSCODE_LOCKOUT_THRESHOLD",
+            raising=False,
+        )
+        from daemon.config import LiveViewsConfig
+
+        cfg = LiveViewsConfig()
+        assert cfg.passcode_lockout_threshold == 10
+        assert (
+            cfg.passcode_lockout_threshold
+            == LIVE_VIEW_PASSCODE_STRIKE_CEILING
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────
 # A3 — mint race: UNIQUE(root_name, rel_path) collision surfaces
 # as IntegrityError; the service translates to the SAME idempotent
 # re-display shape the existing-row branch returns.

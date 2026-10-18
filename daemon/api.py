@@ -1600,6 +1600,18 @@ async def lifespan(app: FastAPI):
             passcode_service = ViewPasscodeService(
                 engine=manager.engine,
                 cipher=cipher,
+                # C4 wiring (D14): forward the operator-
+                # configured strike ceiling — the value the
+                # atomic UPDATE compares against in
+                # ``record_failure_with_audit``. Default 10
+                # (the spec ceiling from architecture-
+                # recommendation.md D5) is honored when the
+                # env var is unset; range gate 1..100 is
+                # enforced at the config field (``daemon/
+                # config.py:2714``).
+                strike_ceiling=(
+                    config.live_views.passcode_lockout_threshold
+                ),
             )
             limiter = VerifyRateLimiter(
                 capacity=config.live_views.verify_rate_limit_capacity,
@@ -1617,7 +1629,14 @@ async def lifespan(app: FastAPI):
                 "[LiveViews] passcode substrate ready: "
                 "strike_ceiling=%d grant_ttl=%ds "
                 "rate_limit=%d/%d-per-min",
-                passcode_service.STRIKE_CEILING,
+                # C4 wiring — read from the service's
+                # configured ceiling (operator-controllable
+                # via ENSEMBLE_LIVE_VIEWS_PASSCODE_LOCKOUT_
+                # THRESHOLD, range 1..100, default 10),
+                # not from the legacy STRIKE_CEILING class
+                # alias (which would report the spec default
+                # even after the operator overrode it).
+                passcode_service._strike_ceiling,
                 config.live_views.passcode_grant_ttl_seconds,
                 config.live_views.verify_rate_limit_capacity,
                 config.live_views.verify_rate_limit_refill_per_minute,
