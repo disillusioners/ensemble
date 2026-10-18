@@ -100,9 +100,10 @@ class TestStaticRegistrationChecklist:
         assert "create_upgrade_tools(" in source
 
     def test_privileged_categories_is_exactly_eight_entries(self) -> None:
-        """The default-deny set is exactly seven entries —
+        """The default-deny set is exactly eight entries —
         ``system_upgrade``, ``system-log``, ``ens-db``,
-        ``ens-env``, ``view-views``, ``cu``, and ``secrets``.
+        ``ens-env``, ``view-views``, ``cu``, ``secrets``, and
+        ``settings``.
 
         ``service`` was REMOVED from this set by user override
         2026-09-16 (D4 reversed; see
