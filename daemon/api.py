@@ -144,6 +144,7 @@ from daemon.routers import (
     missions_router,          # /api/missions (M4-i pull-forward: mission read-model HTTP surface)
     tmp_images_router,        # /api/tmp_images (Phase 1: clipboard-image-chat upload+serve)
     prompts_router,           # /api/prompts (Phase B T5: agent-prompt-immutability approval REST)
+    resources_router,         # /api/resources (resource-cost-control P1: live + history + self-cost)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
@@ -4091,6 +4092,7 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     api_router.include_router(database_router)        # /api/database
     api_router.include_router(settings_router)       # /api/settings (Phase 1: user language preference)
     api_router.include_router(snapshots_router)        # /api/snapshots (snapshot-uiux v1: read-only list/detail/metrics)
+    api_router.include_router(resources_router)         # /api/resources (resource-cost-control P1: live + history + self-cost)
     api_router.include_router(skill_bank_router)        # /api/skill-bank (Skill Bank CRUD)
     api_router.include_router(blueprints_router)        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     api_router.include_router(workspace_router)         # /api/workspace (Phase 1: workspace viewer)

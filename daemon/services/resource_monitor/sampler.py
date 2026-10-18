@@ -100,6 +100,13 @@ class SamplerCounters:
     ladder_level: str = LADDER_DEFAULT
     # Whether EMA self-throttle has fired.
     self_throttled: bool = False
+    # Monotonic clock timestamp of the LAST overrun (or None).
+    last_overrun_monotonic: Optional[float] = None
+    # Monotonic clock timestamp of sampler construction (uptime anchor).
+    started_at_monotonic: float = 0.0
+    # Previous tick's cumulative CPU usec (for cpu_pct delta). None on
+    # the very first tick — the delta is meaningless then.
+    prev_cpu_usec_total: Optional[int] = None
 
 
 # ── Sampler thread ─────────────────────────────────────────────────────────
@@ -159,6 +166,14 @@ class Sampler:
         # budget, double the interval and disable deep scans.
         self._effective_interval_s = float(sample_seconds)
         self._deep_scan_enabled = True
+
+        # Uptime anchor (set at construction; the sampler is built in
+        # the lifespan immediately after the manager — so this is a
+        # close proxy for daemon uptime).
+        self.counters.started_at_monotonic = self._wall_clock()
+
+        # Hysteresis counter for re-promotion.
+        self._clean_ticks = 0
 
     # ── Public lifecycle ───────────────────────────────────────────────
 
@@ -241,6 +256,7 @@ class Sampler:
             with self._lock:
                 self.counters.missed_samples += 1
                 self.counters.ticks_skipped += 1
+                self.counters.last_overrun_monotonic = tick_end
                 # Demote one ladder level.
                 idx = LADDER_LEVELS.index(self.counters.ladder_level)
                 if idx < len(LADDER_LEVELS) - 1:
@@ -314,6 +330,11 @@ class Sampler:
             # Write the row into the ring (the only writer).
             if snap is not None:
                 self.ring.append(self._snapshot_to_row(snap, tick_cost_ms))
+                # Track the cumulative CPU usec for the next tick's
+                # cpu_pct delta.
+                self.counters.prev_cpu_usec_total = (
+                    snap.daemon.cpu_user_usec + snap.daemon.cpu_sys_usec
+                )
 
         return snap
 
