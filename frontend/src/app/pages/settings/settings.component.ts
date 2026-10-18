@@ -1,3 +1,14 @@
+/**
+ * Settings page — the operator's single settings surface.
+ *
+ * Sub-systems covered: language preference, editor preference, VS Code
+ * server control, blueprint peak hours, timezone preference, and the
+ * DB-backed daemon runtime settings section (db-backed-settings P3 —
+ * registry-driven, renders generically as managed keys are added).
+ * Grows by one `// ── <Section> ──` divider block per new surface;
+ * the daemon-settings state/methods are the template for any future
+ * API-backed section (load + save + reset + re-fetch).
+ */
 import { Component, OnDestroy, OnInit, computed, signal, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';

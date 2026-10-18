@@ -54,10 +54,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
 from sqlalchemy import Engine
 from sqlmodel import Session, select
@@ -106,13 +107,13 @@ class ManagedKeySpec:
     env_var: str
     value_type: str  # "int" | "float" | "bool" | "str"
     default: Any
-    ge: Optional[int] = None
+    ge: int | None = None
     requires_restart: bool = True
     sensitive: bool = False
     # Documentation-grade only (Ruling 5) — NEVER enforced in code.
     # Computed from daemon.constants AT IMPORT TIME so it cannot
     # drift from the thread-pool constants.
-    effective_max: Optional[int] = None
+    effective_max: int | None = None
     description: str = ""
 
     def constraint_desc(self) -> str:
@@ -167,7 +168,9 @@ def _coerce_value(value_type: str, raw: Any) -> Any:
     """Parse a raw tier value into the registry-declared type.
 
     Strict by design: bool never parses as int (JSON ``true`` must not
-    smuggle past as 1), non-integral floats never parse as int, and
+    smuggle past as 1), non-integral floats never parse as int,
+    underscore digit separators are rejected (``"1_0"`` is not the
+    canonical spelling of 10), non-finite floats are rejected, and
     strings must be cleanly int-parsable (``int("7.5")`` raises).
     """
     if value_type == "int":
@@ -176,16 +179,23 @@ def _coerce_value(value_type: str, raw: Any) -> Any:
         if isinstance(raw, int):
             return raw
         if isinstance(raw, str):
-            return int(raw.strip())
+            text = raw.strip()
+            if "_" in text:
+                raise _ParseError(f"underscore separator not allowed in int: {raw!r}")
+            return int(text)
         raise _ParseError(f"cannot parse {type(raw).__name__} as int: {raw!r}")
     if value_type == "float":
         if isinstance(raw, bool):
             raise _ParseError(f"bool is not float: {raw!r}")
         if isinstance(raw, (int, float)):
-            return float(raw)
-        if isinstance(raw, str):
-            return float(raw.strip())
-        raise _ParseError(f"cannot parse {type(raw).__name__} as float: {raw!r}")
+            parsed = float(raw)
+        elif isinstance(raw, str):
+            parsed = float(raw.strip())
+        else:
+            raise _ParseError(f"cannot parse {type(raw).__name__} as float: {raw!r}")
+        if not math.isfinite(parsed):
+            raise _ParseError(f"non-finite float not allowed: {raw!r}")
+        return parsed
     if value_type == "bool":
         if isinstance(raw, bool):
             return raw
@@ -201,7 +211,7 @@ def _coerce_value(value_type: str, raw: Any) -> Any:
     raise _ParseError(f"unknown value_type {value_type!r}")
 
 
-def parse_and_validate(spec: ManagedKeySpec, raw: Any) -> tuple[bool, Any, Optional[str], Optional[str]]:
+def parse_and_validate(spec: ManagedKeySpec, raw: Any) -> tuple[bool, Any, str | None, str | None]:
     """Parse + range-validate one raw tier value.
 
     Returns ``(ok, value, failure_class, detail)`` where
@@ -230,7 +240,7 @@ def parse_and_validate(spec: ManagedKeySpec, raw: Any) -> tuple[bool, Any, Optio
 # =============================================================================
 
 
-_resolution_snapshot: Optional[dict[str, dict[str, Any]]] = None
+_resolution_snapshot: dict[str, dict[str, Any]] | None = None
 
 
 def set_settings_resolution_snapshot(snapshot: Mapping[str, Mapping[str, Any]]) -> None:
@@ -247,7 +257,7 @@ def set_settings_resolution_snapshot(snapshot: Mapping[str, Mapping[str, Any]]) 
     _resolution_snapshot = {k: dict(v) for k, v in snapshot.items()} if snapshot else {}
 
 
-def get_settings_resolution_snapshot() -> Optional[dict[str, dict[str, Any]]]:
+def get_settings_resolution_snapshot() -> dict[str, dict[str, Any]] | None:
     """Return the stored snapshot, or ``None`` when never set
     (the router-layer getter turns ``None`` into a 503)."""
     return _resolution_snapshot
@@ -307,20 +317,37 @@ def resolve(
     # Tier 3 — yaml literal (RAW literal from the pristine snapshot).
     raw_yaml = snap.get("yaml_value")
     if raw_yaml is not None:
-        ok, value, _cls, _detail = parse_and_validate(spec, raw_yaml)
+        ok, value, failure_class, detail = parse_and_validate(spec, raw_yaml)
         if ok:
             result["yaml_value"] = value
             result["value"] = value
             result["source"] = "yaml"
+        else:
+            logger.warning(
+                "[Settings] %s: invalid yaml tier value skipped — "
+                "failed %s: %s (lower tier active)",
+                key,
+                failure_class,
+                detail,
+            )
 
     # Tier 2 — os.environ, read DIRECTLY (never pydantic's env tier).
     raw_env = os.environ.get(spec.env_var)
     if raw_env is not None:
-        ok, value, _cls, _detail = parse_and_validate(spec, raw_env)
+        ok, value, failure_class, detail = parse_and_validate(spec, raw_env)
         if ok:
             result["env_value"] = value
             result["value"] = value
             result["source"] = "env"
+        else:
+            logger.warning(
+                "[Settings] %s: invalid env tier value skipped (env_var=%s) — "
+                "failed %s: %s (lower tier active)",
+                key,
+                spec.env_var,
+                failure_class,
+                detail,
+            )
 
     # Tier 1 — live DB row (caller-supplied context).
     if db_overrides is not None:
@@ -347,10 +374,22 @@ def _is_missing_table_error(exc: BaseException) -> bool:
     BEFORE ``create_all`` (PG) / the SQLite migration runner, so a
     missing ``app_settings`` table is the NORMAL first-boot state and
     must read as "no overrides", not as an error.
+
+    Detection order: driver-native FIRST (SQLSTATE ``42P01`` —
+    undefined_table — via the DBAPI exception wrapped in ``exc.orig``;
+    PostgreSQL-only), then an ANCHORED string-marker fallback for
+    drivers without ``pgcode`` (SQLite). The markers name the relation
+    explicitly — a bare "does not exist" (e.g. a missing COLUMN or
+    enum-type error text) must NOT read as a missing table.
     """
-    message = str(getattr(exc, "orig", exc)).lower()
-    markers = ("no such table", "does not exist", "undefined table", "unknown table")
-    return any(marker in message for marker in markers)
+    orig = getattr(exc, "orig", exc)
+    if getattr(orig, "pgcode", None) == "42P01":
+        return True
+    message = str(orig).lower()
+    return (
+        'relation "app_settings" does not exist' in message
+        or "no such table: app_settings" in message
+    )
 
 
 def _read_managed_rows(session: Session) -> dict[str, Any]:
@@ -464,7 +503,7 @@ class SettingsService:
         with Session(self._engine) as session:
             return _read_managed_rows(session)
 
-    def set_override(self, key: str, value: Any, updated_by: Optional[str] = None) -> None:
+    def set_override(self, key: str, value: Any, updated_by: str | None = None) -> None:
         """Upsert the DB override row for a registered key.
 
         Validates (parse + range) BEFORE writing — write-time
@@ -631,7 +670,7 @@ def apply_db_settings_overrides(
     # Step 2 — boot read via the throwaway engine, disposed on BOTH
     # success and failure (adopted note 8b).
     db_overrides: dict[str, Any] = {}
-    engine: Optional[Engine] = None
+    engine: Engine | None = None
     try:
         engine = _build_bootstrap_engine(ensemble_config, config)
         with Session(engine) as session:
@@ -661,13 +700,18 @@ def apply_db_settings_overrides(
             applied_count += 1
         current = _get_config_value(config, spec.config_path)
         if resolution["value"] != current:
+            # Sensitive-key tripwire: BOTH %r args redacted (same
+            # posture as the router PUT audit line) — a future
+            # secret-bearing key must never leak through this line.
+            logged_current = "<redacted>" if spec.sensitive else current
+            logged_value = "<redacted>" if spec.sensitive else resolution["value"]
             logger.info(
                 "[Settings] %s: %s tier wins — config field %r -> %r "
                 "(applies on this boot; restart-required semantics)",
                 key,
                 resolution["source"],
-                current,
-                resolution["value"],
+                logged_current,
+                logged_value,
             )
             _set_config_value(config, spec.config_path, resolution["value"])
         snapshot[key]["applied_value"] = _get_config_value(config, spec.config_path)

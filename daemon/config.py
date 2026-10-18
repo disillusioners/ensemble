@@ -5589,9 +5589,9 @@ def load_config(config_path: str | None = None) -> Config:
     # yaml tier. Copy taken so later mutation of processed_config
     # cannot rewrite history.
     global _RAW_YAML_LIMITS
-    _raw_limits_section = processed_config.get("limits")
+    raw_limits_section = processed_config.get("limits")
     _RAW_YAML_LIMITS = (
-        dict(_raw_limits_section) if isinstance(_raw_limits_section, dict) else None
+        dict(raw_limits_section) if isinstance(raw_limits_section, dict) else None
     )
     if "limits" in processed_config:
         config_dict["limits"] = processed_config["limits"]

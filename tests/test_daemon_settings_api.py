@@ -150,6 +150,31 @@ def _read_row(engine) -> AppSetting | None:
         return session.get(AppSetting, KEY)
 
 
+def _install_fake_sensitive_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> settings_service.ManagedKeySpec:
+    """Register the ``sensitive=True`` fake key for a test.
+
+    Builds the spec AND applies BOTH registry patches — the service
+    module's ``MANAGED_KEYS`` and the router's BY-VALUE import of it
+    (the endpoint iterates the router's binding) — then returns the
+    spec so the test can assert against ``fake.key``.
+    """
+    fake = settings_service.ManagedKeySpec(
+        key="limits.fake_secret",
+        config_path="limits.fake_secret",
+        env_var="LIMITS_FAKE_SECRET",
+        value_type="int",
+        default=4,
+        ge=1,
+        sensitive=True,
+        description="fake secret-bearing key (test-only)",
+    )
+    monkeypatch.setattr(settings_service, "MANAGED_KEYS", {**MANAGED_KEYS, fake.key: fake})
+    monkeypatch.setattr(routers_settings, "MANAGED_KEYS", {**MANAGED_KEYS, fake.key: fake})
+    return fake
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Fixtures (scheduler-idiom app/client pairs, auth-off + auth-on variants)
 # ────────────────────────────────────────────────────────────────────────────
@@ -358,20 +383,7 @@ class TestSensitiveMasking:
         OMITTING env_value/yaml_value/db_override (omitted-not-nulled)
         even when those tiers are POPULATED (env set + db row written)."""
         _no_env(monkeypatch)
-        fake = settings_service.ManagedKeySpec(
-            key="limits.fake_secret",
-            config_path="limits.fake_secret",
-            env_var="LIMITS_FAKE_SECRET",
-            value_type="int",
-            default=4,
-            ge=1,
-            sensitive=True,
-            description="fake secret-bearing key (test-only)",
-        )
-        monkeypatch.setattr(settings_service, "MANAGED_KEYS", {**MANAGED_KEYS, fake.key: fake})
-        # NOTE: the router holds a BY-VALUE import of MANAGED_KEYS — patch
-        # the router's binding too so the endpoint iterates the fake entry.
-        monkeypatch.setattr(routers_settings, "MANAGED_KEYS", {**MANAGED_KEYS, fake.key: fake})
+        fake = _install_fake_sensitive_key(monkeypatch)
         monkeypatch.setenv("LIMITS_FAKE_SECRET", "9")
 
         get = await client_off.get(URL)
@@ -407,20 +419,7 @@ class TestSensitiveMasking:
         while STILL carrying the subject — the audit-log surface of
         the ``sensitive=True`` tripwire (registry docstring)."""
         _no_env(monkeypatch)
-        fake = settings_service.ManagedKeySpec(
-            key="limits.fake_secret",
-            config_path="limits.fake_secret",
-            env_var="LIMITS_FAKE_SECRET",
-            value_type="int",
-            default=4,
-            ge=1,
-            sensitive=True,
-            description="fake secret-bearing key (test-only)",
-        )
-        # Double-binding precedent (test above) — the router holds a
-        # BY-VALUE import of MANAGED_KEYS, so patch BOTH bindings.
-        monkeypatch.setattr(settings_service, "MANAGED_KEYS", {**MANAGED_KEYS, fake.key: fake})
-        monkeypatch.setattr(routers_settings, "MANAGED_KEYS", {**MANAGED_KEYS, fake.key: fake})
+        fake = _install_fake_sensitive_key(monkeypatch)
 
         with caplog.at_level(logging.INFO, logger=_AUDIT_LOGGER):
             put = await client_off.put(

@@ -1,4 +1,14 @@
-"""Settings API endpoints."""
+"""Settings API endpoints.
+
+Sub-systems covered: language/timezone/editor preferences, VS Code
+server control, default agent versions, blueprint peak hours, Plane
+config, agent-snapshot toggle/metrics, and the DB-backed daemon
+runtime settings section (``/settings/daemon``, db-backed-settings).
+Grows by one ``# ==================== <Surface> ====================``
+divider block per new surface; sync DB/repository work in handlers
+stays behind ``asyncio.to_thread`` (file-wide idiom — see the
+daemon-settings endpoints for the pattern).
+"""
 import asyncio
 import json
 import logging
@@ -27,11 +37,14 @@ from daemon.services.vscode_server_manager import (
     VSCodeServerError,
 )
 from daemon import constants
+from daemon.auth.context import AUTH_METHOD_BEARER, AUTH_METHOD_SESSION
 from daemon.util.tz import _validate_iana
 from daemon.services.settings_service import (
     MANAGED_KEYS,
+    get_settings_resolution_snapshot as _svc_get_snapshot,
     parse_and_validate,
     resolve,
+    set_settings_resolution_snapshot as _svc_set_snapshot,
 )
 from daemon.routers.snapshots import _proxy_to_snapshots_metrics
 from .schemas import (
@@ -141,20 +154,16 @@ def set_settings_service(service: "SettingsService") -> None:
     _settings_service = service
 
 
-def set_settings_resolution_snapshot(snapshot: dict) -> None:
+def set_settings_resolution_snapshot(snapshot: dict[str, dict[str, Any]]) -> None:
     """Store the boot resolution snapshot (delegates to the service
     module's module-global — the SSOT storage; ONE copy, not two)."""
-    from daemon.services.settings_service import set_settings_resolution_snapshot as _set_snapshot
-
-    _set_snapshot(snapshot)
+    _svc_set_snapshot(snapshot)
 
 
-def get_settings_resolution_snapshot() -> dict:
+def get_settings_resolution_snapshot() -> dict[str, dict[str, Any]]:
     """Return the boot resolution snapshot — 503 when the lifespan
     hasn't wired it (same unwired idiom as ``get_settings_service``)."""
-    from daemon.services.settings_service import get_settings_resolution_snapshot as _get_snapshot
-
-    snapshot = _get_snapshot()
+    snapshot = _svc_get_snapshot()
     if snapshot is None:
         raise HTTPException(
             status_code=503,
@@ -862,7 +871,7 @@ def _actor_subject_from_request(request: Request) -> str | None:
     if auth_ctx is None:
         return None
     auth_method = getattr(auth_ctx, "auth_method", "")
-    if auth_method not in ("session", "bearer"):
+    if auth_method not in (AUTH_METHOD_SESSION, AUTH_METHOD_BEARER):
         return None
     subject = getattr(auth_ctx, "subject", None)
     if not subject or not isinstance(subject, str):
@@ -871,7 +880,7 @@ def _actor_subject_from_request(request: Request) -> str | None:
 
 
 def _build_daemon_entries(
-    overrides: dict,
+    overrides: dict[str, Any],
 ) -> tuple[list[DaemonSettingEntry], bool]:
     """Build one entry per registered key + the derived
     ``restart_required`` flag.
@@ -919,7 +928,7 @@ def _build_daemon_entries(
     return entries, restart_required
 
 
-def _daemon_entry_for(key: str, overrides: dict) -> DaemonSettingEntry:
+def _daemon_entry_for(key: str, overrides: dict[str, Any]) -> DaemonSettingEntry:
     """Return the refreshed bare entry for one key (PUT/DELETE
     response body — the t1-frozen write shape)."""
     entries, _ = _build_daemon_entries(overrides)
@@ -945,7 +954,10 @@ async def get_daemon_settings():
     the resolution snapshot (test-harness backstop).
     """
     service = get_settings_service()  # raises 503 if not initialized
-    overrides = service.get_overrides()
+    # Sync DB call — kept off the event loop (same to_thread idiom as
+    # every other repository read in this file, e.g. the peak-hours
+    # metadata reads above).
+    overrides = await asyncio.to_thread(service.get_overrides)
     entries, restart_required = _build_daemon_entries(overrides)
     return DaemonSettingsResponse(settings=entries, restart_required=restart_required)
 
@@ -989,7 +1001,7 @@ async def put_daemon_setting(
             },
         )
     subject = _actor_subject_from_request(request)
-    service.set_override(key, parsed, updated_by=subject)
+    await asyncio.to_thread(service.set_override, key, parsed, updated_by=subject)
     # Audit (ruling O2): ONE INFO line per PUT carrying subject + key
     # ("auth-off" for NULL updated_by rows). Sensitive keys log the
     # literal "<redacted>" in place of the value (sensitive=True
@@ -1001,7 +1013,7 @@ async def put_daemon_setting(
         logged_value,
         subject or "auth-off",
     )
-    return _daemon_entry_for(key, service.get_overrides())
+    return _daemon_entry_for(key, await asyncio.to_thread(service.get_overrides))
 
 
 @router.delete(
@@ -1024,7 +1036,7 @@ async def delete_daemon_setting(key: str, request: Request):
         )
     service = get_settings_service()  # raises 503 if not initialized
     subject = _actor_subject_from_request(request)
-    service.clear_override(key)
+    await asyncio.to_thread(service.clear_override, key)
     # Audit (ruling O2): ONE INFO line per DELETE carrying subject +
     # key ("auth-off" for NULL updated_by rows).
     logger.info(
@@ -1032,4 +1044,4 @@ async def delete_daemon_setting(key: str, request: Request):
         key,
         subject or "auth-off",
     )
-    return _daemon_entry_for(key, service.get_overrides())
+    return _daemon_entry_for(key, await asyncio.to_thread(service.get_overrides))

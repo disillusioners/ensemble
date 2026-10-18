@@ -1,3 +1,14 @@
+/**
+ * Settings page spec — mirrors the component's section layout.
+ *
+ * Sub-systems covered: language/editor/timezone preference flows, VS
+ * Code server control, blueprint peak hours, and the db-backed-settings
+ * P3 daemon-settings section (render + validation + tier chips +
+ * value-vs-source divergence + service contract). New sections append
+ * one `// ═══ <Section> ═══` divider block (see the Timezone and
+ * Daemon settings blocks for the house style); shared payload factories
+ * (e.g. `daemonEntry()`) live beside the section that owns them.
+ */
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
@@ -1393,22 +1404,9 @@ class TimezoneTestBedService {
   // Daemon runtime settings (db-backed-settings P3) — safe defaults so
   // specs that don't care about the section still satisfy the
   // component's ngOnInit load.
-  getDaemonSettings = jest.fn().mockReturnValue(
-    of({
-      settings: [
-        {
-          key: 'limits.llm_concurrency',
-          value: 4,
-          source: 'default',
-          default: 4,
-          requires_restart: true,
-          sensitive: false,
-          description: 'Maximum concurrent LLM-bound agent graphs.',
-        },
-      ],
-      restart_required: false,
-    }),
-  );
+  getDaemonSettings = jest
+    .fn()
+    .mockReturnValue(of({ settings: [daemonEntry()], restart_required: false }));
   putDaemonSetting = jest.fn();
   deleteDaemonSetting = jest.fn();
 }
@@ -1867,22 +1865,9 @@ describe('Settings page does not render relocated snapshot blocks', () => {
         .mockReturnValue(of({ start: 12, end: 20, tz_offset: 7 })),
       // Daemon runtime settings (db-backed-settings P3) — safe default
       // so the section loads without interfering with these assertions.
-      getDaemonSettings: jest.fn().mockReturnValue(
-        of({
-          settings: [
-            {
-              key: 'limits.llm_concurrency',
-              value: 4,
-              source: 'default',
-              default: 4,
-              requires_restart: true,
-              sensitive: false,
-              description: 'Maximum concurrent LLM-bound agent graphs.',
-            },
-          ],
-          restart_required: false,
-        }),
-      ),
+      getDaemonSettings: jest
+        .fn()
+        .mockReturnValue(of({ settings: [daemonEntry()], restart_required: false })),
       putDaemonSetting: jest.fn(),
       deleteDaemonSetting: jest.fn(),
     };

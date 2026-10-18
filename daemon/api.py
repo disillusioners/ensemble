@@ -2475,9 +2475,10 @@ async def lifespan(app: FastAPI):
     # settings router's module DI. The service rides the manager's
     # SINGLE shared engine (Ruling 2 — no second pool; the throwaway
     # bootstrap engine existed only inside apply_db_settings_overrides
-    # above and was already disposed). The snapshot (captured at the
-    # boot-apply call near api.py:401) is the resolver's yaml-tier
-    # SSOT for the /settings/daemon endpoints.
+    # above and was already disposed). The snapshot (captured by the
+    # lifespan's apply_db_settings_overrides boot-apply — the
+    # load_config() → InstanceManager window) is the resolver's
+    # yaml-tier SSOT for the /settings/daemon endpoints.
     from daemon.routers.settings import (
         set_settings_resolution_snapshot,
         set_settings_service,

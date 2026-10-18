@@ -153,6 +153,19 @@ def _spy_bootstrap_engine_dispose(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     return disposed
 
 
+@pytest.fixture
+def svc_engine(tmp_path):
+    """Temp-SQLite engine with the app_settings table created
+    (CRUD-lane fixture — mirrors the ``settings_engine`` fixture of
+    ``tests/test_daemon_settings_api.py:158-166``)."""
+    engine = create_engine(f"sqlite:///{tmp_path}/svc.db")
+    SQLModel.metadata.create_all(engine, tables=[AppSetting.__table__])
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # (a)-(f) — the resolver ladder
 # ────────────────────────────────────────────────────────────────────────────
@@ -266,19 +279,33 @@ class TestResolverLadder:
             # An invalid tier never renders its detail field either.
             assert result["db_override"] is None
 
-    def test_e_invalid_env_value_skipped_yaml_wins(self, monkeypatch):
+    def test_e_invalid_env_value_skipped_yaml_wins(self, monkeypatch, caplog):
         _env(monkeypatch, "junk")
-        result = resolve(KEY, _snapshot(yaml_value=10))
+        with caplog.at_level(logging.WARNING, logger="daemon.services.settings_service"):
+            result = resolve(KEY, _snapshot(yaml_value=10))
         assert result["source"] == "yaml"
         assert result["value"] == 10
         assert result["env_value"] is None
+        # Tier-skip observability: one WARNING carrying key + env-var
+        # name + failure class (parse).
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        msg = warnings[0].getMessage()
+        assert KEY in msg and SPEC.env_var in msg and "failed parse" in msg
 
-    def test_e_invalid_yaml_value_skipped_default_wins(self, monkeypatch):
+    def test_e_invalid_yaml_value_skipped_default_wins(self, monkeypatch, caplog):
         _env(monkeypatch, None)
-        result = resolve(KEY, _snapshot(yaml_value=0))
+        with caplog.at_level(logging.WARNING, logger="daemon.services.settings_service"):
+            result = resolve(KEY, _snapshot(yaml_value=0))
         assert result["source"] == "default"
         assert result["value"] == 10
         assert result["yaml_value"] is None
+        # Tier-skip observability: one WARNING carrying key + tier name
+        # + failure class (validation — ge=1).
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        msg = warnings[0].getMessage()
+        assert KEY in msg and "yaml tier" in msg and "failed validation" in msg
 
     def test_e_bool_never_smuggles_through_int_tiers(self, monkeypatch):
         """Strictness pin: JSON ``true`` must not parse as int 1."""
@@ -291,17 +318,13 @@ class TestResolverLadder:
         with pytest.raises(UnknownManagedKeyError):
             resolve("nope.not_managed", _snapshot())
 
-    def test_f_unknown_key_refused_by_service(self, tmp_path):
+    def test_f_unknown_key_refused_by_service(self, svc_engine):
         """(f) the registry gate spans the service CRUD too."""
-        engine = create_engine(f"sqlite:///{tmp_path}/svc.db")
-        try:
-            service = SettingsService(engine)
-            with pytest.raises(UnknownManagedKeyError):
-                service.set_override("nope.not_managed", 5)
-            with pytest.raises(UnknownManagedKeyError):
-                service.clear_override("nope.not_managed")
-        finally:
-            engine.dispose()
+        service = SettingsService(svc_engine)
+        with pytest.raises(UnknownManagedKeyError):
+            service.set_override("nope.not_managed", 5)
+        with pytest.raises(UnknownManagedKeyError):
+            service.clear_override("nope.not_managed")
 
 
 class TestParseAndValidate:
@@ -331,58 +354,39 @@ class TestParseAndValidate:
 
 
 class TestSettingsServiceCrud:
-    def test_round_trip_set_get_clear(self, tmp_path):
-        engine = create_engine(f"sqlite:///{tmp_path}/svc.db")
-        try:
-            SQLModel.metadata.create_all(engine, tables=[AppSetting.__table__])
-            service = SettingsService(engine)
-            assert service.get_overrides() == {}
-            service.set_override(KEY, 6, updated_by="operator-cli")
-            assert service.get_overrides() == {KEY: 6}
-            assert service.clear_override(KEY) is True
-            assert service.get_overrides() == {}
-            assert service.clear_override(KEY) is False  # idempotent
-        finally:
-            engine.dispose()
+    def test_round_trip_set_get_clear(self, svc_engine):
+        service = SettingsService(svc_engine)
+        assert service.get_overrides() == {}
+        service.set_override(KEY, 6, updated_by="operator-cli")
+        assert service.get_overrides() == {KEY: 6}
+        assert service.clear_override(KEY) is True
+        assert service.get_overrides() == {}
+        assert service.clear_override(KEY) is False  # idempotent
 
-    def test_set_override_rejects_invalid_values(self, tmp_path):
-        engine = create_engine(f"sqlite:///{tmp_path}/svc.db")
-        try:
-            SQLModel.metadata.create_all(engine, tables=[AppSetting.__table__])
-            service = SettingsService(engine)
-            for bad in (0, "junk", True):
-                with pytest.raises(SettingsValidationError):
-                    service.set_override(KEY, bad)
-            assert service.get_overrides() == {}  # nothing written
-        finally:
-            engine.dispose()
+    def test_set_override_rejects_invalid_values(self, svc_engine):
+        service = SettingsService(svc_engine)
+        for bad in (0, "junk", True):
+            with pytest.raises(SettingsValidationError):
+                service.set_override(KEY, bad)
+        assert service.get_overrides() == {}  # nothing written
 
-    def test_empty_actor_string_normalized_to_null(self, tmp_path):
+    def test_empty_actor_string_normalized_to_null(self, svc_engine):
         """``updated_by=""`` → NULL row (never the empty string)."""
-        engine = create_engine(f"sqlite:///{tmp_path}/svc.db")
-        try:
-            SQLModel.metadata.create_all(engine, tables=[AppSetting.__table__])
-            SettingsService(engine).set_override(KEY, 6, updated_by="")
-            with Session(engine) as session:
-                row = session.get(AppSetting, KEY)
-                assert row is not None
-                assert row.updated_by is None
-        finally:
-            engine.dispose()
+        SettingsService(svc_engine).set_override(KEY, 6, updated_by="")
+        with Session(svc_engine) as session:
+            row = session.get(AppSetting, KEY)
+            assert row is not None
+            assert row.updated_by is None
 
-    def test_unregistered_row_skipped_with_warning(self, tmp_path, caplog):
+    def test_unregistered_row_skipped_with_warning(self, svc_engine, tmp_path, caplog):
         """Direct-DB tampering guard: unregistered row never surfaces."""
-        engine = create_engine(f"sqlite:///{tmp_path}/svc.db")
-        try:
-            _seed_rows(str(tmp_path / "svc.db"), [_row(key="evil.freeform")])
-            with caplog.at_level(logging.WARNING, logger="daemon.services.settings_service"):
-                overrides = SettingsService(engine).get_overrides()
-            assert overrides == {}
-            assert any(
-                "unregistered app_settings row" in r.getMessage() for r in caplog.records
-            )
-        finally:
-            engine.dispose()
+        _seed_rows(str(tmp_path / "svc.db"), [_row(key="evil.freeform")])
+        with caplog.at_level(logging.WARNING, logger="daemon.services.settings_service"):
+            overrides = SettingsService(svc_engine).get_overrides()
+        assert overrides == {}
+        assert any(
+            "unregistered app_settings row" in r.getMessage() for r in caplog.records
+        )
 
     @pytest.mark.parametrize(
         ("value_json", "expected_marker"),
@@ -392,21 +396,17 @@ class TestSettingsServiceCrud:
         ],
     )
     def test_invalid_row_skipped_with_class_specific_error_log(
-        self, tmp_path, caplog, value_json, expected_marker
+        self, svc_engine, tmp_path, caplog, value_json, expected_marker
     ):
         """(e, row-level) an invalid row is skipped with its CLASS-specific
         ERROR log and lets lower tiers win (one row per key — PK)."""
-        engine = create_engine(f"sqlite:///{tmp_path}/svc.db")
-        try:
-            _seed_rows(str(tmp_path / "svc.db"), [_row(value_json=value_json)])
-            with caplog.at_level(logging.ERROR, logger="daemon.services.settings_service"):
-                overrides = SettingsService(engine).get_overrides()
-            assert overrides == {}
-            joined = " ".join(r.getMessage() for r in caplog.records)
-            assert expected_marker in joined
-            assert "lower tier wins" in joined
-        finally:
-            engine.dispose()
+        _seed_rows(str(tmp_path / "svc.db"), [_row(value_json=value_json)])
+        with caplog.at_level(logging.ERROR, logger="daemon.services.settings_service"):
+            overrides = SettingsService(svc_engine).get_overrides()
+        assert overrides == {}
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert expected_marker in joined
+        assert "lower tier wins" in joined
 
 
 # ────────────────────────────────────────────────────────────────────────────
