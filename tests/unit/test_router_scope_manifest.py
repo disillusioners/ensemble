@@ -75,7 +75,7 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     "/api/mcp": "mcpkb:admin",              # T3.12 keys family (Mounts module-lane)
     "/api/mcp-servers": "mcp:read",         # §5.4/§7.3 row 7
     "/api/recovery": "auth:admin",          # §5.4: recovery admin
-    "/api/settings": "snapshot:write|*",
+    "/api/settings": "snapshot:write|settings:read|settings:write|*",
     #   §5.4: snapshot-admin paths snapshot:write; all other settings
     #   routes stay undeclared (the family's * member).
     "/api/sources": "sources:write",        # + mappings router; the
@@ -290,8 +290,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 97, (
-            f"declared-route census drifted: {len(declared)} (pinned 97)"
+        assert len(declared) == 100, (
+            f"declared-route census drifted: {len(declared)} (pinned 100)"
         )
 
     def test_manifest_entries_valid(self):
