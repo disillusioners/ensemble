@@ -39,6 +39,12 @@ class ResourceMonitor:
     (T7). The three P1 endpoints (T8) read the facade's attributes
     for live data; the DB-backed reads (durably flushed rows) hit
     the engine via the router-side repos.
+
+    P4: ``anomaly`` carries the anomaly engine (:mod:`daemon.services
+    .resource_anomaly`) or ``None`` when the anomaly layer is
+    disabled (kill-switch) — the router's ``/anomalies`` family and
+    the traceback ``findings[]`` fill read it; ``None`` ⇒ empty
+    lists (D11 degrade shape).
     """
 
     def __init__(
@@ -50,6 +56,7 @@ class ResourceMonitor:
         retention: RetentionPolicy,
         enabled: bool = True,
         boot_error: Optional[str] = None,
+        anomaly: Optional[Any] = None,
     ) -> None:
         self.sampler = sampler
         self.flusher = flusher
@@ -57,6 +64,7 @@ class ResourceMonitor:
         self.retention = retention
         self.enabled = enabled
         self.boot_error = boot_error
+        self.anomaly = anomaly
         self.stop_event = threading.Event()
 
     # Convenience accessors (the router reads these).
@@ -170,6 +178,27 @@ class ResourceMonitor:
         return self.sampler.is_alive() or self.flusher.is_alive()
 
 
+def default_workers_provider() -> Optional[int]:
+    """The OBSERVED live worker count — started ``Worker`` threads.
+
+    Counts alive ``worker_pool.Worker`` instances across BOTH pools
+    (default + chat lane) via a thread walk — no manager reference is
+    needed, so the monitor stays decoupled from the lifespan scope.
+    Best-effort: any failure ⇒ ``None`` (the anomaly stratum degrades
+    to its configured-limit dimension alone; the pass never raises).
+    """
+    try:
+        from daemon.services.worker_pool import Worker
+
+        return sum(
+            1
+            for t in threading.enumerate()
+            if isinstance(t, Worker) and t.is_alive()
+        )
+    except Exception:
+        return None
+
+
 def build_resource_monitor(
     *,
     config_resource_monitor,  # daemon.config.ResourceMonitorConfig
@@ -180,6 +209,7 @@ def build_resource_monitor(
     graph_cache_provider: Optional[Callable[[], object]] = None,
     graph_tasks_provider: Optional[Callable[[], object]] = None,
     state_message_counts_provider: Optional[Callable[[], object]] = None,
+    workers_provider: Optional[Callable[[], Optional[int]]] = None,
 ) -> ResourceMonitor:
     """Construct the facade from the typed config + engine.
 
@@ -287,12 +317,64 @@ def build_resource_monitor(
             graph_tasks_provider=graph_tasks_provider,
             state_message_counts_provider=state_message_counts_provider,
         )
+        # P4 — the anomaly engine + scheduler gate. Built INSIDE the
+        # same try (a build failure degrades to anomaly=None with a
+        # log — sampling/flushing are untouched). The configured-limit
+        # provider reads the managed setting ``limits.llm_concurrency``
+        # read-only via the resolver ladder (phase4-plan decision 5).
+        anomaly_engine = None
+        anomaly_gate = None
+        if bool(getattr(cfg, "anomaly_enabled", True)):
+            try:
+                from daemon.services.resource_anomaly import (
+                    AnomalyEngine,
+                    AnomalyScheduler,
+                    make_configured_limit_provider,
+                )
+
+                anomaly_engine = AnomalyEngine(
+                    mad_threshold=float(
+                        getattr(cfg, "anomaly_mad_threshold", 6.0)
+                    ),
+                    min_baseline_points=int(
+                        getattr(cfg, "anomaly_min_baseline_points", 12)
+                    ),
+                    workers_provider=(
+                        workers_provider or default_workers_provider
+                    ),
+                    configured_limit_provider=(
+                        make_configured_limit_provider(engine)
+                    ),
+                    db_engine=engine,
+                )
+                anomaly_gate = AnomalyScheduler(
+                    anomaly_engine,
+                    interval_s=int(
+                        getattr(cfg, "anomaly_interval_s", 600)
+                    ),
+                )
+                flusher_anomaly_gate: Optional[
+                    Callable[[list[dict], list[dict]], None]
+                ] = anomaly_gate
+            except Exception as exc:
+                logger.error(
+                    "resource-monitor anomaly layer DISABLED (build "
+                    "failed): %s",
+                    exc,
+                    exc_info=True,
+                )
+                anomaly_engine = None
+                flusher_anomaly_gate = None
+        else:
+            flusher_anomaly_gate = None
+
         flusher = Flusher(
             engine=engine,
             raw_ring=ring,
             flush_batch_seconds=cfg.flush_batch_seconds,
             retention=retention,
             instance_ring=instance_ring,
+            anomaly_gate=flusher_anomaly_gate,
         )
     except Exception as exc:
         logger.error(
@@ -306,6 +388,7 @@ def build_resource_monitor(
         ring=ring,
         retention=retention,
         enabled=True,
+        anomaly=anomaly_engine,
     )
 
 
@@ -342,4 +425,5 @@ def _disabled_stub(
 __all__ = [
     "ResourceMonitor",
     "build_resource_monitor",
+    "default_workers_provider",
 ]

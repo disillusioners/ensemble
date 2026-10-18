@@ -19,6 +19,13 @@ Architecture §2.1 (binding):
     DELETE carries its ``interval_s`` predicate (30/60/3600), so a
     lower tier's cutoff can never erase a higher tier's rows.
 
+P4 addition: an optional ``anomaly_gate`` callable runs AFTER the
+transaction — the anomaly pass piggybacks THIS thread behind its own
+monotonic-interval gate (:mod:`daemon.services.resource_anomaly`),
+with its own skip-on-overrun budget. The gate never delays sampling
+or flushing and never raises into the flusher; ``None`` (default) =
+P1/P2/P3 behavior unchanged.
+
 P1 boundary (D13): T1 attribution columns are written NULL/0; the
 flusher does NOT compute attribution.
 """
@@ -153,6 +160,9 @@ class Flusher:
         wall_clock: Callable[[], float] = time.monotonic,
         now_utc_naive: Optional[Callable[[], datetime]] = None,
         instance_ring: Optional[TierRing] = None,
+        anomaly_gate: Optional[
+            Callable[[list[dict], list[dict]], None]
+        ] = None,
     ) -> None:
         self.engine = engine
         self.raw_ring = raw_ring
@@ -171,6 +181,18 @@ class Flusher:
         self._instance_ring = instance_ring
         self._wall_clock = wall_clock  # injectable for tests
         self._now_utc_naive = now_utc_naive or _default_now_utc_naive
+
+        # P4 — the anomaly pass piggybacks THIS thread (§2.1: ONE
+        # sampler + ONE flusher; no new thread). The gate is a
+        # callable ``(minute_rows, instance_rows) -> None`` built by
+        # the facade (``AnomalyScheduler``): it ingests every window
+        # and fires the detection pass behind its monotonic-interval
+        # gate with its own skip-on-overrun budget. The flusher only
+        # hands it the rows it already computed and guards against
+        # gate failure — sampling and flushing are never delayed by
+        # the pass. ``None`` (the default) = anomaly layer absent
+        # (P1/P2/P3 behavior, byte-identical run_once semantics).
+        self._anomaly_gate = anomaly_gate
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -255,6 +277,11 @@ class Flusher:
 
         rows_written = 0
         instance_rows_written = 0
+        # P4 — the drained instance rows are kept (boundedly — replaced
+        # every window, ≤ instance_cap+1 small dicts) so the anomaly
+        # gate AFTER the transaction can fold them into its bucketed
+        # store. Same for the minute roll-up rows already computed.
+        instance_rows: list[dict] = []
         swept = {"raw": 0, "minute": 0, "hour": 0, "instance": 0,
                  "pid_map": 0}
         minute_rows: list[dict] = []
@@ -352,6 +379,17 @@ class Flusher:
             raise
         finally:
             self._buffer.clear()
+
+        # P4 — anomaly gate (AFTER the transaction; the pass never
+        # holds the DB window open). Never raises into the flusher: a
+        # gate failure is logged and the window result is unaffected.
+        if self._anomaly_gate is not None:
+            try:
+                self._anomaly_gate(minute_rows, instance_rows)
+            except Exception as exc:
+                logger.warning(
+                    "resource-monitor anomaly gate failed: %s", exc
+                )
 
         return {
             "rows_written": rows_written,
