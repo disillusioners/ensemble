@@ -71,16 +71,18 @@ def test_app_settings_sql_alone_creates_exact_model_columns():
                 if col.primary_key:
                     # PK flag on `key` (the accepted PK-on-the-Column posture).
                     assert row[5] == 1, f"{col.name}: migration pk={row[5]}"
-                    # PARITY GAP (reported, NOT fixed here — P4 scope is
-                    # tests-only): both create_all dialects emit
-                    # `key TEXT NOT NULL, PRIMARY KEY (key)`, but the .sql
-                    # declares bare `key TEXT PRIMARY KEY` — SQLite's
-                    # non-INTEGER-PK quirk reports notnull=0 for it. This
-                    # pin records the CURRENT .sql shape; flipping it to 1
-                    # is the one-line .sql fix the fix-commission carries.
-                    assert row[3] == 0, (
-                        f"{col.name}: .sql gained NOT NULL — update this pin "
-                        f"and the report finding"
+                    # STRICT PARITY (fix 2026-10-18): the .sql previously
+                    # declared bare `key TEXT PRIMARY KEY` — SQLite's
+                    # non-INTEGER-PK quirk reported notnull=0 for it, weaker
+                    # than the model (a NULL-key direct-DB INSERT was
+                    # accepted on SQLite only). The .sql now declares the
+                    # key column NOT NULL, matching create_all's emission
+                    # on both dialects; the artifact pin is replaced by
+                    # model parity (nullable=False ⇔ notnull=1).
+                    assert col.nullable is False, f"{col.name}: model key must stay NOT NULL"
+                    assert row[3] == 1, (
+                        f"{col.name}: migration notnull={row[3]}, expected 1 "
+                        f"(parity with model nullable={col.nullable})"
                     )
                     continue
                 # NULLABILITY: notnull=0 ⇔ nullable.

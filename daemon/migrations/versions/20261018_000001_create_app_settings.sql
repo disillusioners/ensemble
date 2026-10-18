@@ -53,7 +53,7 @@
 -- UP
 
 CREATE TABLE IF NOT EXISTS app_settings (
-    key        TEXT PRIMARY KEY,
+    key        TEXT NOT NULL PRIMARY KEY,
     value_json TEXT NOT NULL,
     value_type TEXT NOT NULL,
     updated_by TEXT,
