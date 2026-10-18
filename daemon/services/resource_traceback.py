@@ -196,9 +196,15 @@ def _naive_digits(dt: datetime) -> str:
 
 
 def _aware_bind(dt: datetime) -> str:
-    """Aware bind view — for ``event.created_at`` (timestamptz on PG).
+    """Aware bind view — for ``event.created_at`` compares.
 
-    Space-separated digits + explicit ``+00:00`` so the literal is
+    The PG column is ``timestamp without time zone`` (the SQLModel
+    DATETIME default — NOT timestamptz): a bound offset is parsed and
+    DISCARDED, and correctness holds because the digits are
+    UTC-normalized by construction (``coerce_to_aware_utc`` before
+    digit-stripping), so the compared wall-clock IS UTC. On SQLite the
+    column is TEXT and the explicit ``+00:00`` suffix rides along in
+    storage and raw reads. Space-separated digits keep the literal
     unambiguous on both dialects.
     """
     aware = coerce_to_aware_utc(dt)
@@ -520,6 +526,14 @@ def nearest_sample_at(
     is an HONEST GAP: returns ``None``, never interpolates. Pass
     ``tolerance_s=None`` to disable the freshness check (the J3 agent
     hop uses that form — it wants the nearest KNOWN agent, however old).
+
+    Vocabulary contract for P4 consumers: the returned ``status`` is
+    the SAMPLER's sample-time vocabulary — NOT the registry status
+    enum. ``"idle"`` means "graph cached without an active task at
+    sample time" (cached paused/completed instances included) and is
+    NOT evidence of aliveness; ``None`` means unknown (never guessed).
+    The writer-side contract lives at the sampler status seam
+    (``resource_monitor/sampler.py`` ``_status_of``).
     """
     at = coerce_to_aware_utc(at)
     with engine.connect() as conn:
