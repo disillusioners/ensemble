@@ -196,18 +196,6 @@ def _to_http_400(msg: str, **extra: Any) -> HTTPException:
     return HTTPException(status_code=400, detail={"error": msg, **extra})
 
 
-def _to_http_500(exc: Exception, endpoint: str) -> HTTPException:
-    """Surface an unexpected failure as a structured 500.
-
-    Mirrors ``daemon/routers/snapshots.py:_to_http_500``.
-    """
-    logger.exception("[ResourcesRouter] %s failed: %s", endpoint, exc)
-    return HTTPException(
-        status_code=500,
-        detail={"error": str(exc), "endpoint": endpoint},
-    )
-
-
 # ── /live ───────────────────────────────────────────────────────────────────
 
 
@@ -233,7 +221,10 @@ async def get_live(request: Request) -> dict:
         cpu_pct = _cpu_pct_from_rows(rows)
 
         daemon_block = {
-            "pid": None,
+            # pid rides the ring row (the sampler stamps
+            # snap.daemon.pid on every tick — review F2); None only
+            # when the ring is empty (no clean tick yet).
+            "pid": (last.get("pid") if last else None),
             "cpu_pct": cpu_pct,
             "rss_mb": (
                 round((last.get("rss_kb") or 0) / 1024.0, 2) if last else None
@@ -246,9 +237,6 @@ async def get_live(request: Request) -> dict:
                 2,
             ),
         }
-        # pid — read from the sampler's last row if present; the ring
-        # doesn't carry pid today (T1 stores it in the daemon row on
-        # flush), so it's None in the live view. P2 may plumb it.
         cgroup_block = None
         if last is not None and last.get("cg_current_mb") is not None:
             cgroup_block = {

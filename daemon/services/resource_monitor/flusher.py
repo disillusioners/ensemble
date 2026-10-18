@@ -14,8 +14,10 @@ Architecture §2.1 (binding):
     BEGIN / COMMIT pair per window. AC8 asserts this via session
     instrumentation.
   * Roll-down raw → minute → hour rides the same flush window.
-  * Retention sweep (D8) runs post-window: deletes rows whose
-    ``bucket_ts`` is strictly less than the configured cutoff.
+  * Retention sweep (D8) runs post-window: PER-TIER DELETEs — the
+    three tiers are stacked in ONE table (deviation #1) and each
+    DELETE carries its ``interval_s`` predicate (30/60/3600), so a
+    lower tier's cutoff can never erase a higher tier's rows.
 
 P1 boundary (D13): T1 attribution columns are written NULL/0; the
 flusher does NOT compute attribution.
@@ -113,6 +115,10 @@ class Flusher:
         # Bounded drop-oldest buffer: rows popped off the raw ring
         # that haven't been written yet. Holds at most FLUSH_BUFFER_CAP.
         self._buffer: list[dict] = []
+        # F3: set after the FIRST missing-table write degradation has
+        # been logged — later windows stay silent (one clear line ties
+        # the degrade to its cause; file_change_monitor precedent).
+        self._missing_table_warned = False
 
     # ── Public lifecycle ───────────────────────────────────────────────
 
@@ -186,7 +192,7 @@ class Flusher:
         )
 
         rows_written = 0
-        swept = {"raw": 0, "minute": 0, "hour": 0}
+        swept = {"raw": 0, "minute": 0, "hour": 0, "instance": 0}
         minute_rows: list[dict] = []
         hour_rows: list[dict] = []
         try:
@@ -205,13 +211,27 @@ class Flusher:
                     # 3. Hour tier — INSERT the roll-up rows.
                     if hour_rows:
                         rows_written += self._write_hour(conn, hour_rows)
-                # 4. Retention sweep — DELETE rows older than cutoffs.
-                # Three independent DELETEs; each is its own rowcount.
-                swept["raw"] = self._sweep(conn, "resource_daemon_bucket", raw_cut)
-                swept["minute"] = self._sweep(
-                    conn, "resource_instance_sample", min_cut
+                # 4. Retention sweep — DELETE rows older than the tier
+                # cutoffs. The three tiers are STACKED in ONE table
+                # (deviation #1: resource_daemon_bucket discriminated
+                # by interval_s — 30 raw / 60 minute / 3600 hour), so
+                # each DELETE carries its interval_s predicate: a
+                # tier-blind raw sweep would erase minute (14 d) and
+                # hour (180 d) rows (review F1). T2 instance rows are
+                # raw-only (no roll-down) — swept at the raw cutoff
+                # with no interval discrimination (§2.5 raw tier).
+                swept["raw"] = self._sweep(
+                    conn, "resource_daemon_bucket", raw_cut, interval_s=30
                 )
-                swept["hour"] = self._sweep(conn, "resource_daemon_bucket", hr_cut)
+                swept["minute"] = self._sweep(
+                    conn, "resource_daemon_bucket", min_cut, interval_s=60
+                )
+                swept["hour"] = self._sweep(
+                    conn, "resource_daemon_bucket", hr_cut, interval_s=3600
+                )
+                swept["instance"] = self._sweep(
+                    conn, "resource_instance_sample", raw_cut
+                )
 
             self.counters.batches += 1
             self.counters.bytes_written += sum(
@@ -292,8 +312,7 @@ class Flusher:
             ],
             idempotent=True,
         )
-        conn.execute(text(sql), params)
-        return len(params)
+        return self._tier_write(conn, sql, params)
 
     def _write_minute(self, conn: Any, rows: list[dict]) -> int:
         """Roll-up rows go to a separate roll-up table OR the same T1
@@ -329,8 +348,7 @@ class Flusher:
             ],
             idempotent=True,
         )
-        conn.execute(text(sql), params)
-        return len(params)
+        return self._tier_write(conn, sql, params)
 
     def _write_hour(self, conn: Any, rows: list[dict]) -> int:
         params = [
@@ -361,22 +379,37 @@ class Flusher:
             ],
             idempotent=True,
         )
-        conn.execute(text(sql), params)
-        return len(params)
+        return self._tier_write(conn, sql, params)
 
-    def _sweep(self, conn: Any, table: str, cutoff_epoch_s: int) -> int:
+    def _sweep(
+        self,
+        conn: Any,
+        table: str,
+        cutoff_epoch_s: int,
+        interval_s: Optional[int] = None,
+    ) -> int:
         """DELETE rows strictly older than the cutoff. Returns rowcount.
+
+        ``interval_s`` restricts the DELETE to ONE stacked tier
+        (deviation #1: raw=30 / minute=60 / hour=3600 share the
+        ``resource_daemon_bucket`` table) — without it a lower tier's
+        cutoff would erase higher-tier rows (review F1). ``None``
+        sweeps the whole table (raw-only tables such as T2
+        ``resource_instance_sample``).
 
         Missing table → 0 (a fresh boot has no rows to sweep; a
         ``no such table`` / ``relation does not exist`` error is a
         benign first-boot state, never a flusher failure).
         """
+        where = "bucket_ts < :cutoff_iso"
+        params: dict = {"cutoff_iso": cutoff_iso(cutoff_epoch_s)}
+        if interval_s is not None:
+            where += " AND interval_s = :interval_s"
+            params["interval_s"] = interval_s
         try:
             result = conn.execute(
-                text(
-                    f"DELETE FROM {table} WHERE bucket_ts < :cutoff_iso"
-                ),
-                {"cutoff_iso": cutoff_iso(cutoff_epoch_s)},
+                text(f"DELETE FROM {table} WHERE {where}"),
+                params,
             )
         except Exception as exc:
             err = str(exc).lower()
@@ -389,6 +422,33 @@ class Flusher:
                 return 0
             raise
         return int(result.rowcount or 0)
+
+    def _tier_write(self, conn: Any, sql: str, params: list[dict]) -> int:
+        """Execute one tier INSERT with first-flush missing-table
+        tolerance (review F3 — the tolerance ``_sweep`` already had,
+        extended to the write paths).
+
+        Missing table → 0 + ONE warning (the first degradation logs
+        the cause — the schema does not exist yet; create_all /
+        migrations run later in the boot — file_change_monitor
+        precedent). Any other error propagates.
+        """
+        try:
+            conn.execute(text(sql), params)
+        except Exception as exc:
+            err = str(exc).lower()
+            if "no such table" in err or "does not exist" in err:
+                if not self._missing_table_warned:
+                    self._missing_table_warned = True
+                    logger.warning(
+                        "resource-monitor flusher degraded: tier tables "
+                        "absent on first flush (schema not created yet) — "
+                        "writes are skipped until create_all runs "
+                        "(resource_daemon_bucket missing)"
+                    )
+                return 0
+            raise
+        return len(params)
 
     def _dialect_insert(
         self, table: str, columns: list[str], *, idempotent: bool

@@ -232,6 +232,11 @@ class TestEndpointShapes:
         assert set(j["daemon"].keys()) == {
             "pid", "cpu_pct", "rss_mb", "threads", "fds", "uptime_s",
         }
+        # pid is POPULATED from the ring row (review F2) — the fake
+        # proc tree is read with the test process's own pid, which
+        # the sampler stamps into the row, which the /live handler
+        # surfaces here.
+        assert j["daemon"]["pid"] == os.getpid()
         # attribution zero-value in P1 (D13).
         assert j["attribution"] == {
             "attributed_mb": 0,

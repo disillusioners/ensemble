@@ -555,3 +555,155 @@ class TestRollDown:
             }
         assert fresh in remaining
         assert overnight not in remaining
+
+    def test_sweep_per_tier_predicates(self, sqlite_engine):
+        """Review F1 regression: per-tier sweep predicates under the
+        stacked ``resource_daemon_bucket`` table (interval_s
+        30 raw / 60 minute / 3600 hour).
+
+        Retention floors 24 h raw / 7 d minute / 90 d hour (D8).
+        The raw sweep must NOT delete minute (7 d) or hour (90 d)
+        rows — only the rows whose interval_s matches the tier's
+        cutoff. Tier-blind DELETEs (the pre-fix bug) erase
+        higher-tier rows inside the raw cutoff window.
+        """
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        ts = {
+            "raw_25h": (now - timedelta(hours=25)),   # > 24h floor → raw-delete
+            "raw_fresh": (now - timedelta(minutes=5)),  # < 24h → raw-keep
+            "min_25h": (now - timedelta(hours=25)),    # < 7d floor → minute-keep
+            "min_4d": (now - timedelta(days=4)),       # < 7d → minute-keep
+            "hr_4d": (now - timedelta(days=4)),        # < 90d floor → hour-keep
+            "hr_200d": (now - timedelta(days=200)),    # > 90d → hour-delete
+        }
+        iso = {k: v.strftime("%Y-%m-%d %H:%M:%S") for k, v in ts.items()}
+
+        # Seeded (tier, age): raw@25h, raw@5m, min@25h, min@4d, hr@4d, hr@200d.
+        seed = [
+            (30, "raw_25h"),
+            (30, "raw_fresh"),
+            (60, "min_25h"),
+            (60, "min_4d"),
+            (3600, "hr_4d"),
+            (3600, "hr_200d"),
+        ]
+        with sqlite_engine.begin() as conn:
+            for interval_s, age_key in seed:
+                conn.execute(
+                    text(
+                        "INSERT INTO resource_daemon_bucket "
+                        "(bucket_ts, interval_s, rss_kb) "
+                        "VALUES (:t, :i, 1)"
+                    ),
+                    {"t": iso[age_key], "i": interval_s},
+                )
+
+        ring = TierRing(tier="raw", maxlen=16)
+        flusher = Flusher(
+            engine=sqlite_engine,
+            raw_ring=ring,
+            flush_batch_seconds=60,
+            retention=RetentionPolicy(1440, 168, 90),  # floors
+        )
+        result = flusher.run_once()
+
+        # Counter expectations under the fixed per-tier sweep:
+        #   raw: 1 deletion (raw@25h — raw@5m kept; min@25h, min@4d,
+        #   hr@4d are NOT deleted because their interval_s != 30)
+        #   minute: 0 deletions (min@25h and min@4d both ≤ 7 d)
+        #   hour: 1 deletion (hr@200d — hr@4d kept)
+        #   instance: 0 (no instance rows seeded)
+        assert result["swept"]["raw"] == 1
+        assert result["swept"]["minute"] == 0
+        assert result["swept"]["hour"] == 1
+        assert result["swept"]["instance"] == 0
+
+        with sqlite_engine.connect() as conn:
+            remaining = {
+                (r[0], r[1])
+                for r in conn.execute(
+                    text(
+                        "SELECT bucket_ts, interval_s FROM "
+                        "resource_daemon_bucket"
+                    )
+                ).fetchall()
+            }
+        # Deletions.
+        assert (iso["raw_25h"], 30) not in remaining
+        assert (iso["hr_200d"], 3600) not in remaining
+        # Survivals (the bug would have wiped these under the
+        # tier-blind raw sweep because they sit inside the 24 h
+        # raw-cutoff window: min@25h, min@4d, hr@4d are all older
+        # than 24 h but belong to tiers with longer retention).
+        assert (iso["raw_fresh"], 30) in remaining
+        assert (iso["min_25h"], 60) in remaining
+        assert (iso["min_4d"], 60) in remaining
+        assert (iso["hr_4d"], 3600) in remaining
+
+    def test_first_flush_missing_table_degrades_with_one_warning(
+        self, tmp_path, caplog
+    ):
+        """Review F3: when the resource_* tables are absent on the
+        first flush, the writes degrade (no exception, zero rows
+        written) and ONE warning is logged. Subsequent windows stay
+        silent (warn-once, file_change_monitor precedent).
+        """
+        # Empty SQLite — no resource_* tables.
+        from sqlalchemy.pool import StaticPool
+
+        engine = create_engine(
+            f"sqlite:///{tmp_path / 'no_tables.db'}",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        ring = TierRing(tier="raw", maxlen=16)
+        ring.append(
+            {
+                "bucket_ts": "2026-10-18 10:00:00",
+                "interval_s": 30,
+                "rss_kb": 100000,
+                "cpu_user_usec": 1000,
+                "cpu_sys_usec": 100,
+                "threads": 4,
+                "fds": 5,
+                "sample_cost_ms": 0.5,
+                "attributed_bytes": 0,
+                "unattributed_kb": 0,
+                "coverage_pct": 0.0,
+                "missed_samples": 0,
+            }
+        )
+        flusher = Flusher(
+            engine=engine,
+            raw_ring=ring,
+            flush_batch_seconds=60,
+            retention=RetentionPolicy(2880, 336, 180),
+        )
+
+        with caplog.at_level("WARNING", logger="daemon.services.resource_monitor.flusher"):
+            r1 = flusher.run_once()
+        # First flush: degraded, no error raised, zero rows written.
+        assert r1["rows_written"] == 0
+        assert flusher._missing_table_warned is True
+        warnings_first = [
+            rec for rec in caplog.records
+            if "resource-monitor flusher degraded" in rec.message
+        ]
+        assert len(warnings_first) == 1, (
+            f"expected exactly one degrade warning, saw {len(warnings_first)}"
+        )
+        assert "schema not created yet" in warnings_first[0].message
+
+        # Second flush with the same flusher — still degraded but
+        # warn-once must not re-fire.
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="daemon.services.resource_monitor.flusher"):
+            r2 = flusher.run_once()
+        assert r2["rows_written"] == 0
+        warnings_second = [
+            rec for rec in caplog.records
+            if "resource-monitor flusher degraded" in rec.message
+        ]
+        assert warnings_second == [], (
+            "warn-once violated: second flush produced a degrade warning"
+        )

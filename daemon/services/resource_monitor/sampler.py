@@ -374,6 +374,9 @@ class Sampler:
             # time by the flusher (T6); the sampler writes the
             # cost-counter payload, not the timestamp.
             "interval_s": int(self._effective_interval_s),
+            # Daemon pid rides the ring row so the /live handler can
+            # populate the §2.8 daemon.pid field (review F2).
+            "pid": d.pid,
             "rss_kb": d.rss_kb,
             "pss_kb": d.pss_kb,
             "anon_kb": d.anon_kb,
