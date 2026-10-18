@@ -341,7 +341,7 @@
     }
 
     <p class="setting-hint daemon-cobound-hint">
-      Real parallelism is also capped by the fixed worker thread pools (5 worker + 2 chat = 7 concurrent graphs — constants, not settable here).
+      Real parallelism is also capped by the worker thread pools — limits.worker_pool_size + limits.chat_worker_pool_size, both DB-backed managed settings, now settable on this page. True concurrent-graph capacity is the emergent bound min(llm_concurrency, worker_pool_size + chat_worker_pool_size). Changes are restart-required — they apply at the next daemon restart, not live on write.
     </p>
   </section>
 
