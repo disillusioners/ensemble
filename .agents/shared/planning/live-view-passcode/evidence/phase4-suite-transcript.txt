@@ -1,0 +1,1012 @@
+bringing up nodes...
+bringing up nodes...
+
+s...........................................s..s..........s............. [  0%]
+.....s...........s...................s........s...s...........s......... [  0%]
+..............................s.s.s..s.s.s...s.s.s.s.................... [  1%]
+........................................................................ [  1%]
+........................................................................ [  2%]
+........................................................................ [  2%]
+........................................................................ [  2%]
+........................................................................ [  3%]
+........................................................................ [  3%]
+........................................................................ [  4%]
+........................................................................ [  4%]
+........................................................................ [  5%]
+........................................................................ [  5%]
+........................................................................ [  5%]
+........................................................................ [  6%]
+........................................................................ [  6%]
+........................................................................ [  7%]
+........................................................................ [  7%]
+........................................................................ [  8%]
+........................................................................ [  8%]
+........................................................................ [  8%]
+...................F....FFF..........FFF................................ [  9%]
+........................................................................ [  9%]
+........................................................................ [ 10%]
+........................................................................ [ 10%]
+........................................................................ [ 10%]
+........................................................................ [ 11%]
+........................................................................ [ 11%]
+........................................................................ [ 12%]
+........................................................................ [ 12%]
+........................................................................ [ 13%]
+........................................................................ [ 13%]
+........................................................................ [ 13%]
+........................................................................ [ 14%]
+............................................................[gw1] node down: Not properly terminated
+F..[gw0] node down: Not properly terminated
+F....................................................................... [ 15%]
+........................................................................ [ 15%]
+........................................................................ [ 16%]
+...........s...............[gw3] node down: Not properly terminated
+F...................[gw2] node down: Not properly terminated
+F....................................................................... [ 16%]
+........................................................................ [ 17%]
+........................................sss.s..sssssss.sssss.....ss...ss [ 17%]
+........................................................................ [ 17%]
+.........F....F..........................................F.............. [ 18%]
+......F...................................................F............. [ 18%]
+........................................................................ [ 19%]
+........................................................................ [ 19%]
+..............................F......................................... [ 20%]
+........................................................................ [ 20%]
+........................................................................ [ 20%]
+........................................................................ [ 21%]
+........................................................................ [ 21%]
+........................................................................ [ 22%]
+........................................................................ [ 22%]
+.........................F.............................................. [ 23%]
+.............................................sssss...................... [ 23%]
+........................................................................ [ 23%]
+.....................F..F............................................... [ 24%]
+........................................................................ [ 24%]
+........F............................................................... [ 25%]
+........................................................................ [ 25%]
+.............................................................F.......... [ 26%]
+............................................s..s........................ [ 26%]
+........................................................................ [ 26%]
+........................................................................ [ 27%]
+........................................................................ [ 27%]
+................................................F....................... [ 28%]
+.F.................................F......................F............. [ 28%]
+........F...........................................F................... [ 28%]
+............................................................F........... [ 29%]
+................................................................F....... [ 29%]
+..............................................................F......... [ 30%]
+........................................................................ [ 30%]
+...F....................................F............................... [ 31%]
+................F...........................F........................... [ 31%]
+....................................F................................... [ 31%]
+........................................................................ [ 32%]
+.....................F.................................................. [ 32%]
+................EE...............E..........E........................... [ 33%]
+........................................................................ [ 33%]
+........................................................................ [ 34%]
+........................................................................ [ 34%]
+........................................................................ [ 34%]
+........................................................................ [ 35%]
+........................................................................ [ 35%]
+.................................F..............................sssssss. [ 36%]
+ssss.................................................................... [ 36%]
+........................................................................ [ 37%]
+........................................................................ [ 37%]
+........................................................................ [ 37%]
+........................................................................ [ 38%]
+........................................................................ [ 38%]
+........................................................................ [ 39%]
+........................................................................ [ 39%]
+........................................................................ [ 39%]
+........................................................................ [ 40%]
+........................................................................ [ 40%]
+........................................................................ [ 41%]
+........................................................................ [ 41%]
+........................................................................ [ 42%]
+........................................................................ [ 42%]
+........................................................................ [ 42%]
+........................................................................ [ 43%]
+........................................................................ [ 43%]
+......F........................F........................................ [ 44%]
+........................................................................ [ 44%]
+....................................................F................... [ 45%]
+...FF................................................................... [ 45%]
+........................................................................ [ 45%]
+........................................................................ [ 46%]
+............................................................FF.......... [ 46%]
+....F................................................................... [ 47%]
+..................................s..................................... [ 47%]
+........................................................................ [ 48%]
+........................................................................ [ 48%]
+........................................................................ [ 48%]
+........................................................................ [ 49%]
+........................................................................ [ 49%]
+........................................................................ [ 50%]
+........................................................................ [ 50%]
+.....................................................s.................. [ 50%]
+........................................................................ [ 51%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 52%]
+........................................................................ [ 53%]
+........................................................................ [ 53%]
+........................................................................ [ 53%]
+........................................................................ [ 54%]
+........................................................................ [ 54%]
+........................................................................ [ 55%]
+..............................................................F......... [ 55%]
+...F.......F........F.F.............F.F.F.F...........F.......F.......F. [ 56%]
+...................F.................................................... [ 56%]
+........................................................................ [ 56%]
+........................................................................ [ 57%]
+........................................................................ [ 57%]
+........................................................................ [ 58%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 59%]
+......F............................................F.................... [ 59%]
+........................................F............................... [ 60%]
+........................................................................ [ 60%]
+........................................................................ [ 61%]
+........................................................................ [ 61%]
+........................................................................ [ 61%]
+........................................................................ [ 62%]
+........................................................................ [ 62%]
+........................................................................ [ 63%]
+............s........................................................... [ 63%]
+........................................................................ [ 64%]
+........................................................................ [ 64%]
+...........s....s....................................................... [ 64%]
+........................................................................ [ 65%]
+........................................................................ [ 65%]
+.........................................................F.............. [ 66%]
+......................F................................................. [ 66%]
+........................................................................ [ 67%]
+........................................................................ [ 67%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 68%]
+........................................................................ [ 69%]
+......................................................................s. [ 69%]
+...........s.........FF.F............................................... [ 70%]
+.............................F.......................................... [ 70%]
+........................................................................ [ 70%]
+........................................................................ [ 71%]
+........................................F.....F.F........s.............. [ 71%]
+........................................................................ [ 72%]
+........................................................................ [ 72%]
+...................................F................................s... [ 72%]
+................................................ss.ss.s................. [ 73%]
+........................................................................ [ 73%]
+........................................................................ [ 74%]
+........................................................................ [ 74%]
+........................................................................ [ 75%]
+........................................................................ [ 75%]
+........................................................................ [ 75%]
+............................FF.......................................... [ 76%]
+........................................................................ [ 76%]
+........................................................................ [ 77%]
+........................................................................ [ 77%]
+........................................................................ [ 78%]
+........................................................................ [ 78%]
+........................................................................ [ 78%]
+....F................................................................... [ 79%]
+........................................................................ [ 79%]
+........................................................................ [ 80%]
+...........................ss.sssssssssssss..s.s..............EEE......E [ 80%]
+E..................EEE.EE.E...EE..E.EE.E.......................F........ [ 81%]
+........................................................................ [ 81%]
+........................................................................ [ 81%]
+........................................................................ [ 82%]
+....................................................s.......s........s.. [ 82%]
+......s......s.......................................................... [ 83%]
+..................................s..............F...................... [ 83%]
+...........................FFFFF........................................ [ 83%]
+........................................................................ [ 84%]
+........................................................................ [ 84%]
+.......F................................................................ [ 85%]
+.......................................................F................ [ 85%]
+........................................................................ [ 86%]
+........................................................................ [ 86%]
+........................................................................ [ 86%]
+........................................................................ [ 87%]
+........................................................................ [ 87%]
+........................................................................ [ 88%]
+........................................................................ [ 88%]
+........................................................................ [ 89%]
+........................................................................ [ 89%]
+........................................................................ [ 89%]
+........................................................................ [ 90%]
+........................................................................ [ 90%]
+........................................................................ [ 91%]
+....................................................F................... [ 91%]
+........................................................................ [ 92%]
+........................................................................ [ 92%]
+........................................................................ [ 92%]
+........................................................................ [ 93%]
+................................F....F...............F.................. [ 93%]
+...................................F..s................................. [ 94%]
+........................................................................ [ 94%]
+...........................s............................................ [ 94%]
+........................................................................ [ 95%]
+....................................................F................... [ 95%]
+........................................................................ [ 96%]
+........................................................................ [ 96%]
+........................................................................ [ 97%]
+........................................................................ [ 97%]
+........................................................................ [ 97%]
+........................................................................ [ 98%]
+........................................................................ [ 98%]
+.........F....................................FF........................ [ 99%]
+........................................................................ [ 99%]
+...............................................................          [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/unit/services/test_child_reports.py: 2 warnings
+tests/unit/services/test_b_fail_open.py: 1 warning
+tests/unit/tools/test_spawn_councilor_default_version.py: 1 warning
+tests/unit/services/test_vgap_b4_backstop_behavior.py: 1 warning
+tests/unit/test_migration_worker.py: 12 warnings
+tests/unit/test_pause_never_dispatched_ghosts.py: 1 warning
+tests/unit/test_lifecycle_hook_completion.py: 1 warning
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/sqlmodel/orm/session.py:75: SAWarning: The engine provided as bind produced a connection that is already in a transaction. This is usually caused by a core event, such as 'engine_connect', that has left a transaction open. The effective join transaction mode used by this session is 'create_savepoint'. To silence this warning, do not leave transactions open
+    results = super().execute(
+
+tests/unit/checkpoint_adapter/test_direct_anti_join.py::TestSqliteAdapterBlobs::test_count_and_delete_blob_arms_noop_with_warning
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/_pytest/threadexception.py:58: PytestUnhandledThreadExceptionWarning: Exception in thread Thread-54 (_connection_worker_thread)
+  
+  Traceback (most recent call last):
+    File "/home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/aiosqlite/core.py", line 66, in _connection_worker_thread
+      future.get_loop().call_soon_threadsafe(set_result, future, result)
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 873, in call_soon_threadsafe
+      self._check_closed()
+      ~~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 551, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082, in _bootstrap_inner
+      self._context.run(self.run)
+      ~~~~~~~~~~~~~~~~~^^^^^^^^^^
+    File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024, in run
+      self._target(*self._args, **self._kwargs)
+      ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/aiosqlite/core.py", line 75, in _connection_worker_thread
+      future.get_loop().call_soon_threadsafe(set_exception, future, e)
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 873, in call_soon_threadsafe
+      self._check_closed()
+      ~~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 551, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+tests/unit/checkpoint_adapter/test_direct_anti_join.py::TestPostgresDirectAntiJoin::test_referenced_blobs_survive_unreferenced_die
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/_pytest/threadexception.py:58: PytestUnhandledThreadExceptionWarning: Exception in thread Thread-56 (_connection_worker_thread)
+  
+  Traceback (most recent call last):
+    File "/home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/aiosqlite/core.py", line 66, in _connection_worker_thread
+      future.get_loop().call_soon_threadsafe(set_result, future, result)
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 873, in call_soon_threadsafe
+      self._check_closed()
+      ~~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 551, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  During handling of the above exception, another exception occurred:
+  
+  Traceback (most recent call last):
+    File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082, in _bootstrap_inner
+      self._context.run(self.run)
+      ~~~~~~~~~~~~~~~~~^^^^^^^^^^
+    File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024, in run
+      self._target(*self._args, **self._kwargs)
+      ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/aiosqlite/core.py", line 75, in _connection_worker_thread
+      future.get_loop().call_soon_threadsafe(set_exception, future, e)
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 873, in call_soon_threadsafe
+      self._check_closed()
+      ~~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 551, in _check_closed
+      raise RuntimeError('Event loop is closed')
+  RuntimeError: Event loop is closed
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+tests/unit/job_queue/test_fix_b_legacy_zombie_reap.py: 11 warnings
+tests/unit/services/test_execution_gate.py: 26 warnings
+tests/unit/test_report_delivery_recovery_service.py: 5 warnings
+tests/unit/test_repository_claim_lane.py: 85 warnings
+tests/unit/test_root_instance_completion.py: 2 warnings
+tests/unit/tools/test_mission_tools.py: 1 warning
+tests/unit/services/test_auto_continue_interleaving.py: 19 warnings
+tests/unit/test_task_reconciliation.py: 18 warnings
+tests/unit/test_task_repo_batch_reconcile_logging_pin.py: 6 warnings
+tests/unit/services/test_cancel_task_by_work_id.py: 4 warnings
+tests/unit/test_turn_handle_transitions.py: 5 warnings
+tests/unit/test_tz_acceptance.py: 11 warnings
+tests/unit/test_explicit_handle_resume_report_guard.py: 4 warnings
+tests/unit/test_has_instance_busy.py: 14 warnings
+tests/unit/services/test_resume_cascade_drift_guard.py: 3 warnings
+tests/unit/services/test_w5_claim_order_wc_wake.py: 57 warnings
+tests/unit/services/test_w_b_watchdog_liveness_gate.py: 11 warnings
+tests/unit/services/test_work_resolver.py: 14 warnings
+tests/unit/test_answer_gate_resume_chain.py: 6 warnings
+tests/unit/test_pause_resume_terminate_tree_fix_p1.py: 58 warnings
+tests/unit/test_queued_orphan_reconciler.py: 4 warnings
+tests/unit/test_reconciler_wedge_fix.py: 4 warnings
+tests/unit/test_pause_resume_root.py: 5 warnings
+tests/unit/test_cascade_pause_resume.py: 20 warnings
+tests/unit/tools/test_job_list_job_types_filter.py: 15 warnings
+tests/unit/test_long_tool_nudge.py: 6 warnings
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+tests/unit/services/test_compact_executor.py: 1 warning
+tests/unit/services/test_keyword_extraction.py: 8 warnings
+tests/unit/test_report_repair.py: 18 warnings
+tests/unit/test_compaction_never_blocked.py: 11 warnings
+tests/unit/test_symptom_repair_engine_failover_e2e.py: 6 warnings
+tests/unit/test_empty_response_guard.py: 3 warnings
+tests/unit/test_vision.py: 2 warnings
+tests/unit/test_watchover_graph.py: 6 warnings
+tests/unit/test_graph_retry_integration.py: 6 warnings
+tests/unit/tool_pairing_history/test_w2_wiring.py: 3 warnings
+tests/unit/services/test_title_generation_trigger.py: 5 warnings
+tests/unit/services/test_title_think_stripping.py: 6 warnings
+tests/unit/test_nudge_behavior.py: 6 warnings
+tests/unit/test_question_graph.py: 2 warnings
+tests/unit/test_compaction.py: 90 warnings
+tests/unit/test_compaction_model_config.py: 2 warnings
+tests/unit/test_compaction_multimodal.py: 13 warnings
+tests/unit/test_compaction_escape_hatches_round2.py: 35 warnings
+tests/unit/test_llm_error_classifier.py: 59 warnings
+tests/unit/test_llm_buffer_response_header.py: 6 warnings
+tests/unit/test_llm_failover.py: 36 warnings
+tests/unit/test_llm_failover_v2.py: 12 warnings
+tests/unit/test_llm_failover_adversarial.py: 4 warnings
+tests/unit/test_llm_failover_v2_adversarial.py: 13 warnings
+tests/unit/test_llm_stream_stall_hardening_items_ab.py: 7 warnings
+tests/unit/test_llm_streaming_activation.py: 2 warnings
+tests/unit/test_malformed_llm_response_guard.py: 3 warnings
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/langchain_core/runnables/utils.py:756: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    return asyncio.iscoroutinefunction(func) or (
+
+tests/unit/services/test_compact_executor.py: 1 warning
+tests/unit/services/test_keyword_extraction.py: 8 warnings
+tests/unit/test_report_repair.py: 18 warnings
+tests/unit/test_compaction_never_blocked.py: 11 warnings
+tests/unit/test_symptom_repair_engine_failover_e2e.py: 6 warnings
+tests/unit/test_empty_response_guard.py: 3 warnings
+tests/unit/test_vision.py: 2 warnings
+tests/unit/test_watchover_graph.py: 6 warnings
+tests/unit/test_graph_retry_integration.py: 6 warnings
+tests/unit/tool_pairing_history/test_w2_wiring.py: 3 warnings
+tests/unit/services/test_title_generation_trigger.py: 5 warnings
+tests/unit/services/test_title_think_stripping.py: 6 warnings
+tests/unit/test_nudge_behavior.py: 6 warnings
+tests/unit/test_question_graph.py: 2 warnings
+tests/unit/test_compaction.py: 90 warnings
+tests/unit/test_compaction_model_config.py: 2 warnings
+tests/unit/test_compaction_multimodal.py: 13 warnings
+tests/unit/test_compaction_escape_hatches_round2.py: 35 warnings
+tests/unit/test_llm_error_classifier.py: 59 warnings
+tests/unit/test_llm_buffer_response_header.py: 6 warnings
+tests/unit/test_llm_failover.py: 36 warnings
+tests/unit/test_llm_failover_v2.py: 12 warnings
+tests/unit/test_llm_failover_adversarial.py: 4 warnings
+tests/unit/test_llm_failover_v2_adversarial.py: 13 warnings
+tests/unit/test_llm_stream_stall_hardening_items_ab.py: 7 warnings
+tests/unit/test_llm_streaming_activation.py: 2 warnings
+tests/unit/test_malformed_llm_response_guard.py: 3 warnings
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/langchain_core/runnables/utils.py:758: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    and asyncio.iscoroutinefunction(func.__call__)
+
+tests/unit/services/test_kms_raw_row_migration.py::TestFreshMigrate::test_multiple_secrets_in_one_row
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/sqlalchemy/engine/cursor.py:812: RuntimeWarning: coroutine 'to_thread' was never awaited
+    def _merge_cols_by_none(
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/tools/test_live_views_tool.py: 49 warnings
+tests/unit/plugin_subsystem/test_tier1_wiring.py: 42 warnings
+tests/unit/test_spawn_instance_input.py: 21 warnings
+tests/unit/test_spawn_lane_mcp_preload.py: 28 warnings
+tests/unit/tools/test_pause_resume_instance_tools.py: 217 warnings
+tests/unit/services/test_b1_wc_durable_send.py: 7 warnings
+tests/unit/tools/test_secrets_registration.py: 98 warnings
+tests/unit/tools/test_service_registration.py: 42 warnings
+tests/unit/tools/test_set_instance_tunable.py: 154 warnings
+tests/unit/test_governor_recursion_guard.py: 70 warnings
+tests/unit/tools/test_snapshot_tools.py: 273 warnings
+tests/unit/tools/test_attestation_registration.py: 105 warnings
+tests/unit/tools/test_snapshot_v3.py: 112 warnings
+tests/unit/tools/test_spawn_councilor_default_version.py: 28 warnings
+tests/unit/tools/test_spawn_instance_default_version.py: 14 warnings
+tests/unit/tools/test_upgrade_registration.py: 77 warnings
+tests/unit/tools/test_dynamic_toolset_expansion.py: 14 warnings
+tests/unit/tools/test_version_tag_tool_resolution.py: 21 warnings
+tests/unit/tools/test_instance_tools.py: 1106 warnings
+tests/unit/test_caller_model_overrides_seam.py: 7 warnings
+tests/unit/tools/test_knowledge_tools.py: 28 warnings
+  /home/nea/ensemble-src-wt-liveview-passcode/daemon/tools/instance.py:2051: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    is_async = asyncio.iscoroutinefunction(original_func)
+
+tests/unit/tools/test_live_views_tool.py: 56 warnings
+tests/unit/plugin_subsystem/test_tier1_wiring.py: 48 warnings
+tests/unit/test_spawn_instance_input.py: 24 warnings
+tests/unit/test_spawn_lane_mcp_preload.py: 32 warnings
+tests/unit/tools/test_pause_resume_instance_tools.py: 248 warnings
+tests/unit/services/test_b1_wc_durable_send.py: 8 warnings
+tests/unit/tools/test_secrets_registration.py: 112 warnings
+tests/unit/tools/test_service_registration.py: 48 warnings
+tests/unit/tools/test_set_instance_tunable.py: 176 warnings
+tests/unit/test_governor_recursion_guard.py: 80 warnings
+tests/unit/tools/test_snapshot_tools.py: 312 warnings
+tests/unit/tools/test_attestation_registration.py: 120 warnings
+tests/unit/tools/test_snapshot_v3.py: 128 warnings
+tests/unit/tools/test_spawn_councilor_default_version.py: 32 warnings
+tests/unit/tools/test_spawn_instance_default_version.py: 16 warnings
+tests/unit/tools/test_upgrade_registration.py: 88 warnings
+tests/unit/tools/test_dynamic_toolset_expansion.py: 16 warnings
+tests/unit/tools/test_version_tag_tool_resolution.py: 24 warnings
+tests/unit/tools/test_instance_tools.py: 1264 warnings
+tests/unit/test_caller_model_overrides_seam.py: 8 warnings
+tests/unit/tools/test_knowledge_tools.py: 32 warnings
+  /home/nea/ensemble-src-wt-liveview-passcode/daemon/tools/instance.py:1990: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(wrapped_func):
+
+tests/unit/tools/test_live_views_tool.py: 7 warnings
+tests/unit/plugin_subsystem/test_tier1_wiring.py: 6 warnings
+tests/unit/test_spawn_instance_input.py: 3 warnings
+tests/unit/test_spawn_lane_mcp_preload.py: 4 warnings
+tests/unit/tools/test_pause_resume_instance_tools.py: 31 warnings
+tests/unit/services/test_b1_wc_durable_send.py: 1 warning
+tests/unit/tools/test_secrets_registration.py: 14 warnings
+tests/unit/tools/test_service_registration.py: 6 warnings
+tests/unit/tools/test_set_instance_tunable.py: 22 warnings
+tests/unit/test_governor_recursion_guard.py: 10 warnings
+tests/unit/tools/test_snapshot_tools.py: 39 warnings
+tests/unit/tools/test_attestation_registration.py: 15 warnings
+tests/unit/tools/test_snapshot_v3.py: 16 warnings
+tests/unit/tools/test_spawn_councilor_default_version.py: 4 warnings
+tests/unit/tools/test_spawn_instance_default_version.py: 2 warnings
+tests/unit/tools/test_upgrade_registration.py: 11 warnings
+tests/unit/tools/test_dynamic_toolset_expansion.py: 2 warnings
+tests/unit/tools/test_version_tag_tool_resolution.py: 3 warnings
+tests/unit/tools/test_instance_tools.py: 158 warnings
+tests/unit/test_caller_model_overrides_seam.py: 1 warning
+tests/unit/tools/test_knowledge_tools.py: 4 warnings
+  /home/nea/ensemble-src-wt-liveview-passcode/daemon/tools/instance.py:2124: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    is_async = asyncio.iscoroutinefunction(original_func)
+
+tests/unit/services/test_b1_wc_durable_send.py: 1 warning
+tests/unit/tools/test_version_tag_tool_resolution.py: 1 warning
+tests/unit/tools/test_instance_tools.py: 35 warnings
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/sqlmodel/orm/session.py:136: SAWarning: The engine provided as bind produced a connection that is already in a transaction. This is usually caused by a core event, such as 'engine_connect', that has left a transaction open. The effective join transaction mode used by this session is 'create_savepoint'. To silence this warning, do not leave transactions open
+    return super().execute(
+
+tests/unit/test_timezone_aware_timestamps.py::test_naive_isoformat_no_timezone_suffix
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_timezone_aware_timestamps.py:16: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    naive_dt = datetime.utcnow()
+
+tests/unit/test_timezone_aware_timestamps.py::test_naive_datetime_is_not_timezone_aware
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_timezone_aware_timestamps.py:29: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    naive_dt = datetime.utcnow()
+
+tests/unit/test_timezone_aware_timestamps.py::test_aware_and_naive_not_directly_comparable
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_timezone_aware_timestamps.py:55: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    naive_dt = datetime.utcnow()
+
+tests/unit/test_timezone_aware_timestamps.py::test_aware_utc_equals_naive_utc_in_value
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_timezone_aware_timestamps.py:63: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    naive_dt = datetime.utcnow()
+
+tests/unit/services/test_waiting_children_watchdog.py::TestListHungChildrenBoundary::test_waiting_children_child_excluded_in_watchdog_run
+tests/unit/services/test_waiting_children_watchdog.py::TestRunOnceCooldown::test_renotifies_after_child_terminates_then_resumes
+tests/unit/services/test_waiting_children_watchdog.py::TestRunOnceCooldown::test_child_terminal_purges_pair_even_when_parent_scan_errors
+tests/unit/services/test_waiting_children_watchdog.py::TestLoopScheduler::test_loop_calls_run_once_periodically
+  /home/nea/ensemble-src-wt-liveview-passcode/daemon/services/waiting_children_watchdog.py:1613: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    if self._has_live_carrier_task(parent_id):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_terminate_downside_row_drain.py::test_terminate_drains_up_and_down_side_rows
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_terminate_downside_row_drain.py:207: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    await _cancel_bus_watchers_for(manager, terminated, "terminate_instance")
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_terminate_downside_row_drain.py::test_revive_after_terminate_mid_session_gate_clear
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_terminate_downside_row_drain.py:310: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    await _cancel_bus_watchers_for(manager, terminated, "terminate_instance")
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_terminate_downside_row_drain.py::test_composition_is_exactly_once_safe
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_terminate_downside_row_drain.py:405: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    await _cancel_bus_watchers_for(manager, terminated, "terminate_instance")
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_terminate_path_coverage_fire_with_outcome.py::test_terminate_flow_lands_fired_with_outcome
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/sqlalchemy/sql/selectable.py:4866: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    itertools.chain(
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_title_generation_trigger.py::TestTriggerTitleGenerationMethod::test_message_not_found_returns_early
+tests/unit/services/test_title_generation_trigger.py::TestCompletionPath1RootInstance::test_root_instance_completion_triggers_title_generation
+tests/unit/services/test_title_generation_trigger.py::TestInstanceMessagingTriggerTitleGeneration::test_enqueue_triggers_title_on_idle_to_running_with_human_message
+tests/unit/services/test_title_generation_trigger.py::TestInstanceMessagingTriggerTitleGeneration::test_send_message_triggers_title_on_cancelled_error
+  /home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py:2259: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    def __init__(self, name, parent):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_title_generation_trigger.py::TestFireAndForgetBehavior::test_trigger_title_generation_does_not_await_llm_call
+tests/unit/services/test_title_generation_trigger.py::TestMaybeTriggerTitleGenerationMethod::test_maybe_trigger_logs_debug_message
+  /home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py:496: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    __dict__['_mock_mock_calls'] = _CallList()
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_title_generation_trigger.py::TestInstanceMessagingTriggerTitleGeneration::test_send_message_triggers_title_on_cancelled_error
+  /home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py:2259: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+    def __init__(self, name, parent):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_title_generation_trigger.py::TestMaybeTriggerTitleGenerationMethod::test_maybe_trigger_logs_debug_message
+  /home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py:496: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+    __dict__['_mock_mock_calls'] = _CallList()
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_title_think_stripping.py::test_title_with_think_block_strips_reasoning
+tests/unit/test_migration_worker.py::TestRunMigrationPhases::test_complete_event_payload
+  /home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py:806: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    def __setattr__(self, name, value):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_title_think_stripping.py::test_title_with_think_block_strips_reasoning
+tests/unit/test_migration_worker.py::TestRunMigrationPhases::test_complete_event_payload
+  /home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py:806: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+    def __setattr__(self, name, value):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestTargetShapeForceEmits::test_target_shape_force_emits_idempotency_skip
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:448: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    row = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestTargetShapeForceEmits::test_target_shape_force_emits_completed_but_not_emitted
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:502: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    row = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestConcurrentDoubleFireSingleEmit::test_concurrent_double_fire_single_emit
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:566: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    row = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestConcurrentDoubleFireSingleEmit::test_concurrent_double_fire_single_emit
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:578: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    fired_count = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[dead_parent_skip]
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[deferred_pause]
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[deferred_waiting_children]
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[root_completed]
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[root_waiting_children]
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[tool_invocation_completed]
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:695: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    row = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[instance_not_found]
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:659: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    count = session.query(DependencyWatcher).count()
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestLegitimateIdempotencySkipDefer::test_skip_when_no_parent
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:752: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    count = session.query(DependencyWatcher).count()
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestLegitimateIdempotencySkipDefer::test_skip_when_instance_not_completed
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:793: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    row = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestLegitimateIdempotencySkipDefer::test_skip_when_no_pending_watcher
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:835: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    count = session.query(DependencyWatcher).count()
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestBackstopSkipConditions::test_backstop_skipped_when_no_parent
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:879: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    count = session.query(DependencyWatcher).count()
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestBackstopSkipConditions::test_backstop_skipped_when_instance_not_completed
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:913: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    row = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestReMintConcurrentDoubleFireSingleEmit::test_idempotency_skip_concurrent_double_fire_single_emit
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:994: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    pre_count = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestReMintConcurrentDoubleFireSingleEmit::test_idempotency_skip_concurrent_double_fire_single_emit
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:1038: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    row = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestReMintConcurrentDoubleFireSingleEmit::test_idempotency_skip_concurrent_double_fire_single_emit
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:1062: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    fired_count = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestReMintConcurrentDoubleFireSingleEmit::test_idempotency_skip_concurrent_double_fire_single_emit
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:1084: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    total_count = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestReMintConditionalHealWarning::test_heal_warning_fires_on_non_empty_return
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/services/test_vgap_b4_backstop_behavior.py:1206: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    row = session.query(DependencyWatcher).filter(
+
+tests/unit/test_oauth_client_jwks.py::TestClaimRejections::test_non_rs256_alg_rejected
+  /home/nea/ensemble-src-wt-liveview-passcode/.venv/lib/python3.14/site-packages/jwt/api_jwt.py:147: InsecureKeyLengthWarning: The HMAC key is 16 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_calculates_expired_instances_correctly
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:191: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    almost_expired_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds - 1)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_calculates_expired_instances_correctly
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:194: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    diff_under_ttl = (datetime.utcnow() - cached_at).total_seconds()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_calculates_expired_instances_correctly
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:198: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    just_expired_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 1)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_calculates_expired_instances_correctly
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:201: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    diff_over_ttl = (datetime.utcnow() - cached_at).total_seconds()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_calculates_expired_instances_correctly
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:205: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    long_expired_time = (datetime.utcnow() - timedelta(hours=48)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_calculates_expired_instances_correctly
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:208: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    diff_long_expired = (datetime.utcnow() - cached_at).total_seconds()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_releases_expired_paused_instances
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:230: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expired_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 60)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_skips_recent_paused_instances
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:267: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds - 600)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_skips_recent_paused_instances
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:273: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    diff = (datetime.utcnow() - cached_at).total_seconds()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_skips_recent_paused_instances_with_explicit_time
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:301: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_skips_instances_not_in_memory
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:327: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expired_time = (datetime.utcnow() - timedelta(hours=5)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_handles_invalid_updated_at
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:350: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    (datetime.utcnow() - timedelta(hours=2)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_handles_multiple_instances
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:391: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expired_time1 = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 300)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_handles_multiple_instances
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:392: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expired_time2 = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 600)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_handles_multiple_instances
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:393: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = (datetime.utcnow() - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_releases_expired_by_status[completed]
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_releases_expired_by_status[error]
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_releases_expired_by_status[terminated]
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_releases_expired_by_status[failed]
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_releases_expired_by_status[paused]
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:449: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expired_time = (datetime.utcnow() - timedelta(hours=25)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+tests/unit/test_paused_instance_ttl.py::TestPausedAtField::test_paused_at_cleared_on_resume
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_paused_instance_ttl.py:805: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    mock_meta.paused_at = datetime.utcnow().isoformat()
+
+tests/unit/test_chat_source_live_injection.py::TestFacadeSignaturePin::test_set_injection_real_signature_matches_mock_assumption
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_chat_source_live_injection.py:196: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    assert not asyncio.iscoroutinefunction(InstanceManager.set_injection), (
+
+tests/unit/test_chat_source_live_injection.py::TestFacadeSignaturePin::test_has_live_graph_task_real_signature_matches_mock_assumption
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_chat_source_live_injection.py:208: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    assert not asyncio.iscoroutinefunction(
+
+tests/unit/test_chat_source_live_injection.py::TestFacadeSignaturePin::test_get_instance_info_real_signature_matches_mock_assumption
+  /home/nea/ensemble-src-wt-liveview-passcode/tests/unit/test_chat_source_live_injection.py:222: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    assert not asyncio.iscoroutinefunction(
+
+tests/unit/test_coder_developer_migration.py::TestRestoreInstanceWithCoderAgentId::test_restore_instance_with_developer_agent_id_still_works
+tests/unit/test_compaction.py::TestMergeSummaries::test_four_plus_summaries_use_hierarchical_merge
+  /home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py:2259: RuntimeWarning: coroutine 'InstanceLifecycleService._restore_instance' was never awaited
+    def __init__(self, name, parent):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestInstanceDerivedStatus::test_running_instance_overrides_pending_job_status
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestTimingColumnsFromInstance::test_completed_at_sourced_from_instance_updated_at_for_terminal
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestTimingColumnsFromInstance::test_completed_at_falls_back_to_jobitem_mirror_for_non_terminal
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestTimingColumnsFromInstance::test_completed_at_none_when_both_instance_and_mirror_missing
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestJobWithCompletedInstance::test_completed_instance_surfaces_completed_status
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestJobWithErrorInstance::test_error_instance_surfaces_failed_status
+FAILED tests/unit/services/test_job_queue_proxy_phase1.py::TestJobWithWaitingChildrenInstance::test_waiting_children_instance_surfaces_processing
+FAILED tests/unit/routers/test_jobs_mission_id_filter.py::TestJobsRouterMissionIdFilter::test_instance_id_alias_accepted
+FAILED tests/unit/job_queue/test_joblock_release_scope_w1_observer.py::TestObserverPathJobScopedRelease::test_none_job_id_releases_nothing
+FAILED tests/unit/services/test_mission_resolver.py::TestDegradation::test_resolve_many_with_all_unknown_returns_empty
+FAILED tests/unit/test_auth_service_flow_p5.py::TestLoginUrlAgainstFakeOidc::test_login_302_to_fake_authorize_with_s256
+FAILED tests/unit/test_repository_claim_lane.py::TestStrictTwoWay::test_chat_prefix_row_claimable_by_chat_lane
+FAILED tests/unit/test_repository_claim_lane.py::TestStrictTwoWay::test_chat_prefix_row_not_claimable_by_default_lane
+FAILED tests/unit/test_repository_claim_lane.py::TestStrictTwoWay::test_default_lane_skips_chat_row_and_claims_next_default
+FAILED tests/unit/test_repository_claim_lane.py::TestStrictTwoWay::test_all_three_chat_prefixes_route_to_chat_lane
+FAILED tests/unit/test_repository_claim_lane.py::TestB1ConditionalFailOpen::test_flag_true_restored_default_lane_excludes_again
+FAILED tests/unit/test_repository_claim_lane.py::TestLaneSignatureContract::test_flag_transport_is_shared_module_state_not_per_instance
+FAILED tests/unit/plugin_subsystem/test_snapshot_class_byte_fidelity.py::TestSnapshotClassByteFidelity::test_hashes_file_count_matches_directory_entries
+FAILED tests/unit/plugin_subsystem/test_sync_runner.py::TestRealPluginSync::test_real_snapshot_dry_run_against_v0_24_1
+FAILED tests/unit/plugin_subsystem/test_sync_runner.py::TestRealPluginSync::test_real_full_3_class_manifest_validates
+FAILED tests/unit/plugin_subsystem/test_sync_runner.py::TestPinningTestReferentialIntegrity::test_no_duplicate_pinning_test_pointers
+FAILED tests/unit/rag/test_config.py::TestAutoTestRagNotConfigured::test_auto_test_rag_skips_when_host_not_set
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestFreshInstall::test_create_stamps_idempotency_key_and_defaults
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestFreshInstall::test_fresh_create_has_no_prev_snapshot
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestIdempotentReplay::test_same_values_same_row_no_duplicate
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestIdempotentReplay::test_replay_key_matches_formula
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestInstallUpdate::test_changed_values_update_and_capture_snapshot
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestInstallUpdate::test_snapshot_ttl_is_seven_days
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestInstallUpdate::test_update_preserves_bound_handles_from_kms_attach
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestSchemaVersionMismatch::test_mismatch_refused_409_and_row_untouched
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestSchemaVersionMismatch::test_mismatch_beats_idempotent_replay
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestUserCreatedConflict::test_user_created_name_conflict_409
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestAuditLine::test_mutation_writes_section74_line
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestAuditLine::test_replay_writes_no_extra_line
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestAuditLine::test_update_writes_second_line_with_secret_ref
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestAuditLine::test_audit_failure_never_fails_request
+FAILED tests/unit/test_configure_builtin_idempotency.py::TestDeleteFlow::test_delete_builtin_refused_403
+FAILED tests/unit/test_terminal_reason_mirror_set_regression.py::test_no_new_terminal_reason_literals_without_mirror_set
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[workflow.md11]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[workflow.md17]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[install-mermaid-cli.md]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_odd_fence_count_fails[rule.md3]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_odd_fence_count_fails[workflow.md3]
+FAILED tests/unit/test_devops_agent.py::TestDevopsMetaJsonValidation::test_innate_skills_is_dynamic_skill_and_todo
+FAILED tests/unit/test_devops_agent.py::TestDevopsMetaJsonValidation::test_skill_injection_enabled
+FAILED tests/unit/test_devops_agent.py::TestDevopsPromptComposition::test_no_opencode_skill_content_in_system_prompt
+FAILED tests/unit/test_gaia_agent.py::TestGaiaRegistryDiscovery::test_gaia_tools_config_in_registry
+FAILED tests/unit/test_gaia_agent.py::TestGaiaToolFiltering::test_gaia_tool_filter_from_registry
+FAILED tests/unit/test_gaia_agent.py::TestGaiaToolFiltering::test_gaia_tool_filter_config_parsed_correctly
+FAILED tests/unit/test_governor_recursion_guard.py::TestLifecycleGovernorChainGuard::test_legit_leader_governor_councilors_passes
+FAILED tests/unit/test_governor_recursion_guard.py::TestLifecycleGovernorChainGuard::test_root_position_governor_spawn_allowed
+FAILED tests/unit/test_governor_recursion_guard.py::TestLifecycleGovernorChainGuard::test_k_zero_disables_guard
+FAILED tests/unit/test_governor_recursion_guard.py::TestLifecycleGovernorChainGuard::test_kill_switch_env_zero_disables
+FAILED tests/unit/test_governor_recursion_guard.py::TestToolLayerConveneRefusal::test_convene_council_governor_caller_refused
+FAILED tests/unit/test_governor_recursion_guard.py::TestToolLayerConveneRefusal::test_convene_council_with_skill_governor_caller_refused
+FAILED tests/unit/test_governor_recursion_guard.py::TestToolLayerConveneRefusal::test_convene_council_leader_caller_still_allowed
+FAILED tests/unit/test_governor_recursion_guard.py::TestChildRequestTemplateFix::test_convene_council_message_names_spawn_councilor
+FAILED tests/unit/test_governor_recursion_guard.py::TestChildRequestTemplateFix::test_convene_council_with_skill_message_names_spawn_councilor
+FAILED tests/unit/test_governor_recursion_guard.py::TestSpawnCouncilorGovernorBlocked::test_spawn_councilor_targeting_governor_hits_lifecycle_guard
+FAILED tests/unit/services/test_scheduling_service.py::TestUserTimezoneRung::test_user_setting_rung_covers_once_anchor_site
+FAILED tests/unit/services/test_service_tool_manager.py::test_stop_pid_already_dead_returns_pid_dead
+FAILED tests/unit/tools/test_snapshot_tools.py::TestRegistrationChain::test_gate_flag_enabled_on_targets
+FAILED tests/unit/test_api_router_extraction.py::TestRouteRegistration::test_http_methods_are_correct
+FAILED tests/unit/test_api_router_extraction.py::TestApiModuleSize::test_api_module_is_small
+FAILED tests/unit/test_nudge_behavior.py::TestBuildInstanceGraph::test_graph_compiles_with_nudge_node
+FAILED tests/unit/test_nudge_behavior.py::TestBuildInstanceGraph::test_nudge_node_exists_in_graph
+FAILED tests/unit/test_nudge_behavior.py::TestBuildInstanceGraph::test_nudge_in_conditional_edges_mapping
+FAILED tests/unit/tools/test_frozen_tool_name_discovery.py::test_registry_validation_zero_warnings_for_project_manager_frozen_mode
+FAILED tests/unit/tools/test_inner_soul_compaction.py::TestUpdateMemoryMdIntegration::test_update_memory_md_basic
+FAILED tests/unit/tools/test_inner_soul_compaction.py::TestUpdateMemoryMdIntegration::test_update_memory_md_lock_timeout_handling
+FAILED tests/unit/tools/test_inner_soul_compaction.py::TestUpdateMemoryMdIntegration::test_update_memory_md_creates_file_if_missing
+FAILED tests/migration/test_attestation_migration.py::TestNoBooleanIntegerDefaultInShippedMigrations::test_no_boolean_int_literal_default
+FAILED tests/unit/test_project_manager_agent.py::TestPromptComposition::test_soul_cites_rule_for_severity_framing
+FAILED tests/unit/test_project_manager_agent.py::TestPromptComposition::test_workflow_cites_soul_and_rule
+FAILED tests/unit/test_post_restart_arm_notify_no_parallel.py::TestNoNewHttpEndpoint::test_no_new_http_endpoint_in_api_router
+FAILED tests/unit/test_caller_model_overrides_seam.py::TestModelTierPrecedence::test_model_tier_wins_over_model_with_visible_note
+FAILED tests/unit/tools/test_instance_tools.py::TestRegistration::test_planner_and_tester_resolve_subtree_messages_via_registry
+FAILED tests/unit/test_coder_developer_migration.py::TestRestoreInstanceWithCoderAgentId::test_restore_instance_with_coder_agent_id_does_not_raise
+FAILED tests/unit/test_coder_developer_migration.py::TestRestoreInstanceWithCoderAgentId::test_restore_instance_with_developer_agent_id_still_works
+FAILED tests/unit/test_coder_developer_migration.py::TestJobQueueEnqueueWithCoderAgentId::test_enqueue_with_coder_agent_id_succeeds
+FAILED tests/unit/test_coder_developer_migration.py::TestJobQueueEnqueueWithCoderAgentId::test_enqueue_with_coder_and_idempotency_key_succeeds
+FAILED tests/unit/test_coder_developer_migration.py::TestJobQueueEnqueueWithCoderAgentId::test_enqueue_with_developer_agent_id_still_works
+FAILED tests/unit/test_plane_sync.py::TestEdgeCaseConcurrentSync::test_service_concurrent_calls_dont_crash
+FAILED tests/unit/tools/test_instance_tools.py::TestSubtreeStatusRegistration::test_leader_planner_tester_opt_in_via_production_seam
+FAILED tests/unit/test_ladder_p2_routed_gap3_caller_seam_gate.py::TestCallerSeamGateWiringInvertedGateCatcher::test_resolver_forced_off_intercept_inert
+FAILED tests/unit/test_maintenancer_agent.py::TestConventionCompliance::test_all_prompt_files_exist
+FAILED tests/unit/test_maintenancer_agent.py::TestConventionCompliance::test_prompt_file_non_empty[memory.md]
+FAILED tests/unit/test_maintenancer_agent.py::TestConventionCompliance::test_no_forbidden_system_tokens[memory.md]
+FAILED tests/unit/test_maintenancer_kb_coverage.py::test_release_tag_pin_matches_pyproject
+FAILED tests/unit/test_loop_repairer.py::TestRepairFailureReturnsOriginal::test_repair_summary_failure_returns_original_messages
+FAILED tests/unit/test_mcp_tool_timeout.py::TestToolNodeIntegration::test_tool_node_handles_timeout
+FAILED tests/unit/tools/test_knowledge_tools.py::TestExploreCallerModelOverrides::test_coder_with_null_override_forwards_system_default_model
+FAILED tests/unit/tools/test_knowledge_tools.py::TestExploreCallerModelOverrides::test_coder_with_string_override_forwards_override_model
+ERROR tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_bootstrap_creates_context7_server
+ERROR tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_bootstrap_context7_schema_empty
+ERROR tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_bootstrap_context7_config_matches_base
+ERROR tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_schema_drift_refreshes_config
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_creates_servers
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_idempotent
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_schema_drift
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_fault_tolerant
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrap::test_bootstrap_skips_user_created_servers
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_disabled_skips_creation
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_disabled_deactivates_existing
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_reenable_reactivates
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_enabled_creates_new
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_disabled_with_user_server
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapDisableEnable::test_bootstrap_reenable_with_schema_drift
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapSkipsUnavailable::test_bootstrap_skips_unavailable_builtin
+ERROR tests/unit/test_builtin_mcp_servers.py::TestBootstrapSkipsUnavailable::test_bootstrap_no_exception_when_unavailable
+ERROR tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_orphaned_active_builtin_is_deactivated
+ERROR tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_registered_builtin_left_active
+ERROR tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_user_created_server_never_deactivated
+ERROR tests/unit/test_builtin_mcp_servers.py::TestOrphanedBuiltinCleanup::test_sweep_idempotent
+93 failed, 16809 passed, 98 skipped, 7028 warnings, 21 errors in 921.34s (0:15:21)
