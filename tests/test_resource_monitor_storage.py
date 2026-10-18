@@ -916,3 +916,294 @@ class TestInstanceSampleWrites:
         result = flusher.run_once()
         assert result["rows_written"] >= 2  # T1 + T2 (+ rollups)
         assert events.count("begin") == 1
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# P2 review C-1 — PG-grammar pins + narrowed relation-missing tolerance
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestPGGrammarPins:
+    """C-1: the flusher's generated INSERT grammar must be valid on
+    BOTH dialects. SQLite-only green (INSERT OR IGNORE takes no
+    target) masked the ``ON CONFLICT (_NONEXISTENT)`` shape — which
+    PostgreSQL rejected with 42703 on every exited-pid flush, and
+    the then-bare ``"does not exist"`` tolerance swallowed as a
+    benign first-boot state (silent data loss). These pins make the
+    class fail in unit tests regardless of the test dialect.
+    """
+
+    # The exact (table, columns, idempotent) set the flusher emits.
+    _FLUSHER_INSERTS = [
+        (
+            "resource_daemon_bucket",
+            [
+                "bucket_ts", "interval_s", "rss_kb", "cpu_user_usec",
+                "cpu_sys_usec", "missed_samples", "anon_kb", "threads",
+                "fds", "sample_cost_ms", "attributed_bytes",
+                "unattributed_kb", "coverage_pct",
+            ],
+            True,
+        ),
+        (
+            "resource_pid_map",
+            [
+                "pid", "pgid", "start_time", "instance_id", "agent_id",
+                "kind", "command", "detail", "parent_pid", "spawned_at",
+                "exited_at", "exit_code", "exit_kind", "peak_rss_kb",
+                "cpu_user_usec",
+            ],
+            False,
+        ),
+        (
+            "resource_instance_sample",
+            [
+                "bucket_ts", "instance_id", "agent_id", "status",
+                "scan_kind", "charged_bytes", "deep_bytes",
+                "graph_cache_present", "in_flight_tasks",
+                "all_state_messages_len", "child_rss_kb",
+                "child_cpu_user_usec", "cpu_share_usec_est", "estimated",
+            ],
+            False,
+        ),
+    ]
+
+    def _flusher_with_url(self, url: str) -> Flusher:
+        """A Flusher shell whose ONLY consumed attribute is the URL
+        string (``_dialect_insert`` reads ``str(self.engine.url)``
+        for dialect detection)."""
+        import types
+
+        f = Flusher.__new__(Flusher)
+        f.engine = types.SimpleNamespace(url=url)
+        return f
+
+    def _real_columns(self, sqlite_engine, table: str) -> set[str]:
+        with sqlite_engine.connect() as conn:
+            rows = conn.execute(
+                text(f"PRAGMA table_info({table})")
+            ).fetchall()
+        return {r[1] for r in rows}
+
+    def test_pid_map_insert_is_plain_on_both_dialects(self, sqlite_engine):
+        """C-1 core pin: the pid_map insert carries NO conflict
+        clause on either dialect (drain-once semantics — the
+        partial UNIQUE cannot serve as a column-list target)."""
+        real_cols = self._real_columns(sqlite_engine, "resource_pid_map")
+        for url in (
+            "sqlite:///:memory:",
+            "postgresql+psycopg://u:p@localhost:5432/ens",
+        ):
+            f = self._flusher_with_url(url)
+            sql = f._dialect_insert(
+                "resource_pid_map", sorted(real_cols), idempotent=False
+            )
+            assert "ON CONFLICT" not in sql.upper(), (url, sql)
+            assert "INSERT OR IGNORE" not in sql.upper(), (url, sql)
+            assert sql.upper().startswith("INSERT INTO"), (url, sql)
+
+    def test_every_conflict_target_names_real_columns(self, sqlite_engine):
+        """PG-grammar pin: for EVERY insert the flusher can emit,
+        the ON CONFLICT target column list names REAL columns of
+        the target table (applied schema = ground truth)."""
+        for table, columns, idempotent in self._FLUSHER_INSERTS:
+            real_cols = self._real_columns(sqlite_engine, table)
+            assert set(columns) <= real_cols, (table, columns, real_cols)
+            for url in (
+                "sqlite:///:memory:",
+                "postgresql+psycopg://u:p@localhost:5432/ens",
+            ):
+                f = self._flusher_with_url(url)
+                sql = f._dialect_insert(
+                    table, columns, idempotent=idempotent
+                )
+                assert "_NONEXISTENT" not in sql, (table, url, sql)
+                m = re.search(
+                    r"ON\s+CONFLICT\s*\(([^)]*)\)", sql, flags=re.IGNORECASE
+                )
+                if m is None:
+                    # Plain insert — nothing to pin on this shape.
+                    continue
+                targets = [
+                    c.strip().strip('"') for c in m.group(1).split(",")
+                ]
+                assert targets, (table, url, sql)
+                unknown = [c for c in targets if c not in real_cols]
+                assert not unknown, (
+                    f"ON CONFLICT target {unknown} is not a real column "
+                    f"of {table} (42703 class — C-1); sql={sql!r}"
+                )
+
+    def test_idempotent_on_non_bucket_table_fails_loud(self):
+        """The silent ``_NONEXISTENT`` fallback is replaced by a
+        generation-time ValueError — a future idempotent=True call
+        against a table without the compound unique key fails HERE,
+        not silently at flush time."""
+        f = self._flusher_with_url(
+            "postgresql+psycopg://u:p@localhost:5432/ens"
+        )
+        with pytest.raises(ValueError, match="C-1"):
+            f._dialect_insert(
+                "resource_pid_map", ["pid", "kind"], idempotent=True
+            )
+
+    def test_raw_write_sql_via_real_flusher_pg_shape(self, sqlite_engine):
+        """End-to-end shape check through a real Flusher: the raw
+        tier write SQL targets (bucket_ts, interval_s) on a PG URL
+        and both columns exist in the applied schema."""
+        real_cols = self._real_columns(sqlite_engine, "resource_daemon_bucket")
+        assert {"bucket_ts", "interval_s"} <= real_cols
+        ring = TierRing(tier="raw", maxlen=4)
+        ring.append(
+            {
+                "bucket_ts": "2026-10-18 10:00:00",
+                "interval_s": 30,
+                "rss_kb": 1,
+                "cpu_user_usec": 1,
+                "cpu_sys_usec": 1,
+                "threads": 1,
+                "fds": 1,
+                "sample_cost_ms": 0.1,
+                "attributed_bytes": 0,
+                "unattributed_kb": 0,
+                "coverage_pct": 0.0,
+                "missed_samples": 0,
+            }
+        )
+        f = Flusher(
+            engine=self._pg_url_engine(),
+            raw_ring=ring,
+            flush_batch_seconds=60,
+            retention=RetentionPolicy(2880, 336, 180),
+        )
+        sql = f._dialect_insert(
+            "resource_daemon_bucket",
+            [
+                "bucket_ts", "interval_s", "rss_kb", "cpu_user_usec",
+                "cpu_sys_usec", "missed_samples", "anon_kb", "threads",
+                "fds", "sample_cost_ms", "attributed_bytes",
+                "unattributed_kb", "coverage_pct",
+            ],
+            idempotent=True,
+        )
+        assert "ON CONFLICT (bucket_ts, interval_s) DO NOTHING" in sql
+
+    def _pg_url_engine(self):
+        import types
+
+        return types.SimpleNamespace(
+            url="postgresql+psycopg://u:p@localhost:5432/ens"
+        )
+
+
+class TestRelationMissingTolerance:
+    """C-1 hardening: the first-boot tolerance matches the
+    RELATION-missing class ONLY. A PG column error (42703,
+    ``column ... does not exist``) must PROPAGATE — the old bare
+    substring swallowed it (the C-1 silent-loss amplifier)."""
+
+    class _RaisingConn:
+        def __init__(self, exc: BaseException):
+            self._exc = exc
+
+        def execute(self, *a, **k):
+            raise self._exc
+
+    def _flusher(self) -> Flusher:
+        import types
+
+        f = Flusher.__new__(Flusher)
+        f.engine = types.SimpleNamespace(url="sqlite:///:memory:")
+        f._missing_table_warned = False
+        return f
+
+    def test_pg_column_error_propagates(self):
+        f = self._flusher()
+        conn = self._RaisingConn(
+            Exception(
+                'column "_nonexistent" of relation '
+                '"resource_pid_map" does not exist'
+            )
+        )
+        with pytest.raises(Exception, match="_nonexistent"):
+            f._tier_write(conn, "INSERT INTO x VALUES (1)", [{}])
+
+    def test_pg_relation_missing_still_tolerated(self):
+        f = self._flusher()
+        conn = self._RaisingConn(
+            Exception('relation "resource_pid_map" does not exist')
+        )
+        assert f._tier_write(conn, "INSERT INTO x VALUES (1)", [{}]) == 0
+        assert f._missing_table_warned is True
+
+    def test_sqlite_no_such_table_still_tolerated(self):
+        f = self._flusher()
+        conn = self._RaisingConn(
+            Exception("no such table: resource_daemon_bucket")
+        )
+        assert f._tier_write(conn, "INSERT INTO x VALUES (1)", [{}]) == 0
+
+    def test_undefinedtable_class_name_tolerated(self):
+        f = self._flusher()
+
+        class UndefinedTable(Exception):
+            pass
+
+        conn = self._RaisingConn(UndefinedTable("syntax-level miss"))
+        assert f._tier_write(conn, "INSERT INTO x VALUES (1)", [{}]) == 0
+
+    def test_sweep_column_error_propagates(self, sqlite_engine):
+        """The sweep shares the narrowed matcher — a column-shaped
+        DELETE error surfaces instead of returning 0."""
+        f = self._flusher()
+        conn = self._RaisingConn(
+            Exception('column "nope" does not exist')
+        )
+        with pytest.raises(Exception, match="nope"):
+            f._sweep(conn, "resource_pid_map", 12345)
+
+    def test_sweep_relation_missing_returns_zero(self):
+        f = self._flusher()
+        conn = self._RaisingConn(
+            Exception('relation "resource_pid_map" does not exist')
+        )
+        assert f._sweep(conn, "resource_pid_map", 12345) == 0
+
+    def test_write_pid_map_emits_plain_insert_pg(self):
+        """Call-site pin: driving the REAL flusher's pid_map write
+        with a PG-URL engine must emit a plain INSERT (no conflict
+        clause). Catches a regression of the call-site flag (the
+        original bug lived in the ``idempotent=True`` argument,
+        which the direct-_dialect_insert pins above do not
+        exercise)."""
+        import types
+
+        from daemon.services.resource_monitor.pid_registry import (
+            PidRegistryEntry,
+        )
+
+        captured: list[str] = []
+
+        class _CaptureConn:
+            def execute(self, sql, params):
+                captured.append(str(sql))
+                return types.SimpleNamespace(rowcount=1)
+
+        f = Flusher.__new__(Flusher)
+        f.engine = types.SimpleNamespace(
+            url="postgresql+psycopg://u:p@localhost:5432/ens"
+        )
+        f._missing_table_warned = False
+        entry = PidRegistryEntry(
+            pid=1,
+            start_time=2,
+            kind="bash",
+            spawned_at="2026-10-18 10:00:00",
+            exited_at="2026-10-18 10:01:00",
+        )
+        f._write_pid_map(_CaptureConn(), [entry])
+        assert len(captured) == 1
+        sql = captured[0]
+        assert sql.upper().startswith("INSERT INTO RESOURCE_PID_MAP"), sql
+        assert "ON CONFLICT" not in sql.upper(), sql
+        assert "_NONEXISTENT" not in sql, sql

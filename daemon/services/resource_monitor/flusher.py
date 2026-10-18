@@ -53,6 +53,41 @@ from .rollup import (
 logger = logging.getLogger(__name__)
 
 
+def is_missing_relation_error(exc: BaseException) -> bool:
+    """True when ``exc`` is a RELATION-missing error (first-boot benign).
+
+    Hardening (P2 review C-1): the tolerance matches ONLY the
+    "table/relation does not exist" class —
+
+      * SQLite: ``no such table: <name>`` (OperationalError);
+      * PostgreSQL: ``relation "<name>" does not exist``
+        (SQLSTATE 42P01 / UndefinedTable);
+      * SQLAlchemy/DBAPI class name ``UndefinedTable`` (dialect
+        portability belt).
+
+    The bare ``"does not exist"`` substring must NOT be matched
+    on its own — PostgreSQL column errors (SQLSTATE 42703,
+    ``column "x" of relation "y" does not exist``) carry the same
+    phrase AND name the word ``relation``, and swallowing those
+    turned a real grammar bug into silent data loss (the
+    ``_NONEXISTENT`` ON CONFLICT incident). The match therefore
+    requires the message to NOT be a column error (42703 always
+    names ``column``); column errors propagate from every
+    tolerance site that uses this helper.
+    """
+    err = str(exc).lower()
+    if "no such table" in err:  # SQLite dialect
+        return True
+    if (
+        "does not exist" in err
+        and "column" not in err
+        and "no such column" not in err
+    ):
+        # PG 42P01: relation "x" does not exist.
+        return True
+    return type(exc).__name__.lower() == "undefinedtable"
+
+
 # Retention window for exited rows in ``resource_pid_map``.
 # 7 days keeps a useful forensic window for "why did this process
 # exit?" debugging without unbounded disk growth. Live rows
@@ -266,10 +301,12 @@ class Flusher:
                     conn, "resource_instance_sample", raw_cut
                 )
                 # 5. D4 — pid_map history write + sweep (additive,
-                # rides the SAME transaction; resource_pid_map has
-                # no UNIQUE constraint on the non-tier row shape so
-                # _write_pid_map uses ON CONFLICT DO NOTHING as a
-                # safe idempotent no-op — see _dialect_insert). The
+                # rides the SAME transaction). P2 review C-1:
+                # _write_pid_map is a PLAIN INSERT on both dialects —
+                # the partial UNIQUE (WHERE exited_at IS NULL) cannot
+                # serve as a column-list ON CONFLICT target, and
+                # drain-once semantics make an upsert unnecessary
+                # (see _write_pid_map / _dialect_insert). The
                 # sweep uses the SAME per-tier pattern but for the
                 # ``exited_at IS NOT NULL`` predicate: live rows
                 # (``exited_at IS NULL``) are NEVER touched.
@@ -480,8 +517,11 @@ class Flusher:
         uses ``exited_at`` — its only time column).
 
         Missing table → 0 (a fresh boot has no rows to sweep; a
-        ``no such table`` / ``relation does not exist`` error is a
-        benign first-boot state, never a flusher failure).
+        RELATION-missing error (``no such table`` / ``relation
+        does not exist`` / UndefinedTable) is a benign first-boot
+        state, never a flusher failure — see
+        :func:`is_missing_relation_error` for the narrowed match
+        (C-1 hardening: column errors are NOT tolerated)).
         """
         where = f"{ts_column} < :cutoff_iso"
         params: dict = {"cutoff_iso": cutoff_iso(cutoff_epoch_s)}
@@ -496,8 +536,7 @@ class Flusher:
                 params,
             )
         except Exception as exc:
-            err = str(exc).lower()
-            if "no such table" in err or "does not exist" in err:
+            if is_missing_relation_error(exc):
                 logger.debug(
                     "resource-monitor sweep: table %s absent (first boot "
                     "before create_all) — skipping",
@@ -520,6 +559,18 @@ class Flusher:
         ``command`` was sanitized at the seam caller (executable /
         argv-shape, never raw env/secret-bearing text). The
         flusher does NOT redact.
+
+        Dialect note (disclosed, P2 review C-1): ``idempotent=False``
+        — a PLAIN INSERT on BOTH dialects. The pid_map's only unique
+        index is the PARTIAL ``uq_resource_pid_map_pid_active …
+        WHERE exited_at IS NULL`` — a partial index cannot serve as
+        a column-list ``ON CONFLICT`` target on PostgreSQL (the
+        attempted ``ON CONFLICT (_NONEXISTENT)`` grammar raised
+        42703 on every exited-pid flush). Drain-once semantics make
+        an upsert unnecessary anyway: ``drain_history`` pops each
+        exited entry exactly once (the same rationale as the T2
+        write below), so a duplicate INSERT cannot recur within a
+        process lifetime.
         """
         if not entries:
             return 0
@@ -551,7 +602,7 @@ class Flusher:
                 "exited_at", "exit_code", "exit_kind", "peak_rss_kb",
                 "cpu_user_usec",
             ],
-            idempotent=True,
+            idempotent=False,
         )
         return self._tier_write(conn, sql, params)
 
@@ -618,12 +669,17 @@ class Flusher:
         the cause — the schema does not exist yet; create_all /
         migrations run later in the boot — file_change_monitor
         precedent). Any other error propagates.
+
+        C-1 hardening: "missing" matches the RELATION-missing class
+        ONLY (:func:`is_missing_relation_error`) — a PostgreSQL
+        column error (42703, ``column ... does not exist``) is a
+        real grammar bug and MUST surface, never be swallowed as a
+        benign first-boot state.
         """
         try:
             conn.execute(text(sql), params)
         except Exception as exc:
-            err = str(exc).lower()
-            if "no such table" in err or "does not exist" in err:
+            if is_missing_relation_error(exc):
                 if not self._missing_table_warned:
                     self._missing_table_warned = True
                     logger.warning(
@@ -643,13 +699,24 @@ class Flusher:
 
         SQLite: ``INSERT OR IGNORE INTO ... VALUES ...`` when
         idempotent, plain ``INSERT INTO ...`` otherwise.
-        PostgreSQL: ``INSERT ... ON CONFLICT (...) DO NOTHING`` when
-        idempotent, plain ``INSERT INTO ...`` otherwise.
+        PostgreSQL: ``INSERT ... ON CONFLICT (bucket_ts, interval_s)
+        DO NOTHING`` when idempotent, plain ``INSERT INTO ...``
+        otherwise.
 
         The compound unique target ``(bucket_ts, interval_s)`` is
         the idempotency key for tier-table writes (T1 / rollup).
-        For other tables (T3 / T4) the conflict target is omitted
-        because those tables have no UNIQUE constraint.
+
+        P2 review C-1: idempotent inserts are VALID ONLY for the
+        stacked-tier bucket table. The former ``ON CONFLICT
+        (_NONEXISTENT)`` fallback for other tables was invalid
+        PostgreSQL grammar (42703 on every flush of an exited pid
+        row — silently degraded to data loss by the then-bare
+        "does not exist" tolerance). A pid_map / T2 insert is now
+        ALWAYS a plain INSERT (drain-once semantics; the callers
+        pass ``idempotent=False``), and any future ``idempotent=True``
+        call against a table with no real compound target fails
+        LOUD here at SQL-generation time instead of silently at
+        flush time.
         """
         url = str(self.engine.url)
         is_sqlite = "sqlite" in url
@@ -659,14 +726,14 @@ class Flusher:
             return (
                 f"INSERT INTO {table} ({cols}) VALUES ({placeholders})"
             )
-        # Tier tables use the compound (bucket_ts, interval_s)
-        # unique key; other tables (pid_map / limit_policy) have
-        # no unique constraint, so ON CONFLICT DO NOTHING is a
-        # safe idempotent no-op (no conflict possible).
-        if "bucket" in table or "instance_sample" in table:
-            conflict_target = "(bucket_ts, interval_s)"
-        else:
-            conflict_target = "(_NONEXISTENT)"
+        if "bucket" not in table:
+            raise ValueError(
+                f"_dialect_insert: idempotent=True is only valid for the "
+                f"stacked-tier bucket table (got {table!r}); tables without "
+                f"the (bucket_ts, interval_s) unique key must use a plain "
+                f"INSERT (idempotent=False — drain-once semantics, C-1)"
+            )
+        conflict_target = "(bucket_ts, interval_s)"
         if is_sqlite:
             return (
                 f"INSERT OR IGNORE INTO {table} ({cols}) VALUES ({placeholders})"
@@ -714,4 +781,5 @@ __all__ = [
     "FLUSH_BUFFER_CAP",
     "FlusherCounters",
     "Flusher",
+    "is_missing_relation_error",
 ]
