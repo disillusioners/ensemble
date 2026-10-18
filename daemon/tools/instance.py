@@ -3158,12 +3158,23 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         """Clear the sticky parent-error flag so the governor can finalize as COMPLETED.
 
         The dependency bus marks the parent as ERROR if ANY child (councilor)
-        fails. This flag is STICKY — once set, the parent terminal status is
-        forced to ERROR even if synthesis succeeded. Call this tool AFTER
-        successful synthesis to clear the flag and allow COMPLETED finalization.
+        fails. This flag is STICKY across sibling errors — once set, the parent
+        terminal status is forced to ERROR even if synthesis succeeded. Call
+        this tool AFTER successful synthesis to clear the flag and allow
+        COMPLETED finalization.
 
         Do NOT call if synthesis failed (all councilors errored) — let ERROR
         propagate.
+
+        Retraction semantics (council S1, 2026-10-18): the flag is NO LONGER
+        unconditionally sticky on the bus side. The bus ALSO clears it
+        automatically when the SAME child that errored later completes
+        cleanly (revive-then-clean-complete recovery). This tool remains the
+        explicit finalize-time FULL clear — it drops every ``(parent,
+        child)`` recovery pair (including the ``(parent, None)`` sentinel
+        for legacy unattributable errors) so the next incarnation of the
+        parent starts clean. Pair-set retraction is owned by the bus, not
+        this tool.
 
         Returns:
             A short status string describing the outcome (cleared / warning).

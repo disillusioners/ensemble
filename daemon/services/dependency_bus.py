@@ -508,7 +508,7 @@ class DependencyBus:
         # (pair still present) keeps the flag set (counter-
         # constraint). See :meth:`_record_child_error_state` /
         # :meth:`_retract_recovered_child_errors`.
-        self._unrecovered_child_errors: set[tuple[str, str]] = set()
+        self._unrecovered_child_errors: set[tuple[str, str | None]] = set()
 
         # Serializes mutations of ``_parent_errored`` /
         # ``_parent_error_message`` / ``_unrecovered_child_errors``.
@@ -1881,9 +1881,15 @@ class DependencyBus:
 
         The flag is a plain dict read (atomic in CPython) and is
         safe to call from any context (event loop, worker thread,
-        sync gate). No lock is needed — the only writer is the
-        :meth:`emit_terminal` transition loop, which is
-        serialized per-task by the per-task lock above.
+        sync gate). No lock is needed — the only writers are the
+        two emit paths (:meth:`emit_terminal` and
+        :meth:`emit_terminal_for_child_instance`), both serialized
+        by the per-task lock above (the task-keyed path) or
+        serialized under ``_error_state_guard`` directly (the
+        instance-pair path). The clears are
+        :meth:`_retract_recovered_child_errors` (on a child's
+        clean completion) and :meth:`clear_parent_error` (finalize
+        time / explicit reset).
 
         Args:
             parent_id: The parent instance ID to check.
@@ -1956,11 +1962,18 @@ class DependencyBus:
 
         ``child_id=None`` (task-keyed emit whose watcher payloads
         carried no ``metadata.child_id`` — legacy rows) still
-        applies the legacy flag/message stamps but records no
-        pair: the error remains permanently sticky exactly as
-        pre-fix, which is the conservative direction for the
-        counter-constraint (genuine unrecovered errors still stamp
-        error).
+        applies the legacy flag/message stamps and records the
+        SENTINEL pair ``(parent_id, None)`` (council S1,
+        2026-10-18): the sentinel makes the unattributable error
+        VISIBLE to the retraction predicate
+        (:meth:`_retract_recovered_child_errors`) so a later clean
+        completion of an UNRELATED attributable child can never
+        clear the parent's flag while the legacy error is
+        genuinely unrecovered (``None`` matches no attributable
+        child id by exact equality — the sentinel retracts ONLY
+        via an explicit :meth:`clear_parent_error` or :meth:`stop`).
+        Set semantics make a repeated legacy stamp idempotent (the
+        ``(parent_id, None)`` tuple dedupes — no double-add).
 
         Thread-safety: caller must NOT hold ``_error_state_guard``
         (this method acquires it). Pure dict/set ops inside.
@@ -1968,8 +1981,11 @@ class DependencyBus:
         with self._error_state_guard:
             self._parent_errored[parent_id] = True
             self._parent_error_message[parent_id] = message
-            if child_id is not None:
-                self._unrecovered_child_errors.add((parent_id, child_id))
+            # Council S1 (2026-10-18): child_id=None records the
+            # SENTINEL pair (parent, None) — never a bare skip. The
+            # sentinel is what keeps a legacy unattributable error
+            # sticky against retraction-by-unrelated-recovery.
+            self._unrecovered_child_errors.add((parent_id, child_id))
 
     def _retract_recovered_child_errors(
         self, child_ids: set[str]
@@ -1995,7 +2011,12 @@ class DependencyBus:
         A sibling child whose error was never recovered keeps its
         pair, so the flag survives and the root still finalizes
         ``error``. ``status="terminated"`` does NOT retract —
-        termination is not clean completion.
+        termination is not clean completion. The ``(parent, None)``
+        SENTINEL (council S1) likewise never retracts here — a
+        legacy unattributable error stays sticky against the clean
+        completion of any UNRELATED attributable child; only an
+        explicit ``clear_parent_error`` (finalize-time full clear)
+        or ``stop`` (shutdown) drops it.
 
         Ordering note: the check-then-clear of the parent flag is
         the race window this method's ``_error_state_guard``
@@ -2018,9 +2039,21 @@ class DependencyBus:
         retracted: list[tuple[str, str]] = []
         affected_parents: set[str] = set()
         with self._error_state_guard:
-            for pair in sorted(self._unrecovered_child_errors):
+            # Council S1 (2026-10-18): the sort key coerces the
+            # sentinel's ``None`` child id to ``""`` so mixed sets
+            # (``(P, None)`` alongside ``(P, "child-a")``) sort
+            # without a None-vs-str TypeError. The sentinel NEVER
+            # matches ``child_ids`` (exact-equality membership;
+            # ``None`` is not any attributable child id), so it
+            # survives this loop and keeps ``still_errored`` True
+            # below — it retracts ONLY via ``clear_parent_error``
+            # or ``stop``.
+            for pair in sorted(
+                self._unrecovered_child_errors,
+                key=lambda p: (p[0], p[1] or ""),
+            ):
                 parent_id, child_id = pair
-                if child_id in child_ids:
+                if child_id is not None and child_id in child_ids:
                     self._unrecovered_child_errors.discard(pair)
                     retracted.append(pair)
                     affected_parents.add(parent_id)
@@ -2052,9 +2085,13 @@ class DependencyBus:
         discards the parent's ``(parent, child)`` recovery-tracking
         pairs — the finalize-time wholesale clear must leave NO
         residual subtree-error state for the next incarnation of
-        the instance id. All three clears run under
-        ``_error_state_guard`` atomically with the stamp /
-        retraction paths (same serialization domain).
+        the instance id. This is the FULL clear: it drops every
+        pair for the parent INCLUDING the ``(parent, None)``
+        sentinel recorded for legacy unattributable errors (which
+        the retraction path deliberately never auto-retracts —
+        council S1). All clears run under ``_error_state_guard``
+        atomically with the stamp / retraction paths (same
+        serialization domain).
 
         Args:
             parent_id: The parent instance ID whose flag and

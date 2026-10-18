@@ -302,11 +302,17 @@ async def test_null_error_outcome_does_not_stamp(bus):
 
 
 async def test_legacy_watcher_without_child_id_stays_sticky(bus, repo):
-    """Watcher rows without ``metadata.child_id`` keep pre-fix stickiness.
+    """Watcher rows without ``metadata.child_id`` stay sticky forever
+    (council S1, 2026-10-18).
 
-    The task-keyed emit cannot attribute the error to a child, so no
-    pair is recorded — conservative direction for the
-    counter-constraint.
+    The task-keyed emit cannot attribute the error to a child, so it
+    records the SENTINEL pair ``(parent_id, None)`` instead of a bare
+    skip — the sentinel is what makes the legacy error VISIBLE to the
+    retraction predicate (so an unrelated attributable child's clean
+    completion can never clear the flag while this error is
+    unrecovered). A later clean completion of any child — attributable
+    or unattributable — must NOT retract the sentinel (exact-equality
+    membership: ``None`` matches no attributable child id).
     """
     _seed_watcher(
         repo,
@@ -319,21 +325,28 @@ async def test_legacy_watcher_without_child_id_stays_sticky(bus, repo):
         outcome=Outcome(status="error", error="legacy row error"),
     )
     assert bus.had_parent_error(PARENT_ID) is True
-    assert bus._unrecovered_child_errors == set()
+    assert bus._unrecovered_child_errors == {(PARENT_ID, None)}
 
-    # A later clean completion (also unattributable — no child_id in
-    # the new watcher either) cannot retract what was never paired.
+    # A later clean completion of an attributable child (sibling) must
+    # NOT clear the sentinel — exact-equality membership preserves it.
     _seed_watcher(
         repo,
         source_task_id=TASK_T2,
         target_instance_id=PARENT_ID,
-        child_id=None,
+        child_id=CHILD_A,  # attributable — different child
     )
     await bus.emit_terminal(
         task_id=TASK_T2,
         outcome=Outcome(status="completed"),
     )
     assert bus.had_parent_error(PARENT_ID) is True
+    assert bus.parent_error_message(PARENT_ID) == "legacy row error"
+    assert bus._unrecovered_child_errors == {(PARENT_ID, None)}
+
+    # An explicit clear_parent_error (the FULL clear at finalize time
+    # / S1 escape hatch) drops the sentinel.
+    bus.clear_parent_error(PARENT_ID)
+    assert bus._unrecovered_child_errors == set()
 
 
 async def test_clear_parent_error_drops_pairs(bus):
@@ -363,3 +376,146 @@ async def test_retraction_only_affects_recovered_child(bus):
     assert ("other-parent", CHILD_B) in bus._unrecovered_child_errors
     assert bus.had_parent_error("other-parent") is True
     assert bus.had_parent_error(PARENT_ID) is False
+
+
+# -------------------------------------------------------------------------
+# Council S1 (2026-10-18) — mixed-shape + child_id-is-not-None invariants.
+# -------------------------------------------------------------------------
+
+
+async def test_mixed_shape_sentinel_preserves_legacy_against_unrelated_retraction(
+    bus, repo,
+):
+    """Council S1 — the counter-constraint that was structurally broken.
+
+    Sequence:
+      1. Legacy watcher on T1 (no ``metadata.child_id``) errors →
+         stamps flag + SENTINEL pair ``(P, None)`` (the new
+         behavior; pre-fix the helper was a bare skip).
+      2. Attributable watcher on T2 (child_id=CHILD_B) errors →
+         stamps flag + attributable pair ``(P, CHILD_B)``.
+      3. Real instance-pair clean completion for CHILD_B retracts
+         only the attributable pair — the sentinel must SURVIVE
+         and keep the parent flag set (counter-constraint: a
+         genuinely unrecovered legacy error must still stamp
+         error; pre-sentinel the flag would have cleared at
+         step 3 because the sentinel was absent).
+
+    Pre-fix: assertion fails (flag cleared / sentinel absent).
+    """
+    # 1) Legacy error via the REAL task-keyed emit path.
+    _seed_watcher(
+        repo,
+        source_task_id=TASK_T1,
+        target_instance_id=PARENT_ID,
+        child_id=None,  # legacy payload shape
+    )
+    await bus.emit_terminal(
+        task_id=TASK_T1,
+        outcome=Outcome(status="error", error="legacy row error"),
+    )
+    assert bus.had_parent_error(PARENT_ID) is True
+    assert bus._unrecovered_child_errors == {(PARENT_ID, None)}
+
+    # 2) Attributable sibling error via the REAL task-keyed emit path.
+    _seed_watcher(
+        repo,
+        source_task_id=TASK_T2,
+        target_instance_id=PARENT_ID,
+        child_id=CHILD_B,
+    )
+    await bus.emit_terminal(
+        task_id=TASK_T2,
+        outcome=Outcome(status="error", error="attributable error"),
+    )
+    assert (PARENT_ID, CHILD_B) in bus._unrecovered_child_errors
+    assert (PARENT_ID, None) in bus._unrecovered_child_errors
+
+    # 3) Unrelated attributable clean completion retracts ONLY the
+    #    attributable pair; the sentinel survives.
+    await bus.emit_terminal_for_child_instance(
+        parent_instance_id=PARENT_ID,
+        child_instance_id=CHILD_B,
+        outcome=Outcome(status="completed"),
+    )
+    assert (PARENT_ID, CHILD_B) not in bus._unrecovered_child_errors
+    assert (PARENT_ID, None) in bus._unrecovered_child_errors, (
+        "Council S1: the legacy sentinel must survive the unrelated "
+        "attributable clean completion — the structural guarantee "
+        "that a genuinely unrecovered legacy error still stamps "
+        "terminal_status=error."
+    )
+    assert bus.had_parent_error(PARENT_ID) is True, (
+        "Council S1: parent's flag must stay set while the sentinel "
+        "is present, regardless of how many UNRELATED attributable "
+        "child errors recover."
+    )
+    # Message reflects the LAST captured stamp (existing
+    # ``_parent_error_message`` semantics — the per-pair message
+    # is not a closed mapping). The counter-constraint this pin
+    # guards is the FLAG survival, not the message text.
+    assert bus.parent_error_message(PARENT_ID) == "attributable error"
+
+    # The escape hatch: explicit clear_parent_error drops the
+    # sentinel (the full clear at finalize time).
+    bus.clear_parent_error(PARENT_ID)
+    assert bus._unrecovered_child_errors == set()
+    assert bus.had_parent_error(PARENT_ID) is False
+
+
+async def test_child_id_is_not_none_invariant_at_real_emit_seams(bus, repo):
+    """Council S1 — invariant: every production emit path passes
+    ``child_id is not None`` to ``_record_child_error_state``.
+
+    Exercise the REAL task-keyed + instance-pair emit paths with
+    PRODUCTION-shaped followers (the ``_send_message`` /
+    ``FollowUp`` shape at ``daemon/tools/instance.py:1181-1194``
+    always stamps ``metadata.child_id``) and assert via a spy on
+    the helper that every captured ``child_id`` is non-None. The
+    sentinel exists for legacy defensive reasons but is not the
+    production path — a regression that re-introduced a None
+    child_id through any emit site would land here as a False.
+    """
+    captured: list[tuple[str, str | None, str]] = []
+    _original = bus._record_child_error_state
+    bus._record_child_error_state = (
+        lambda parent_id, child_id, message: (
+            captured.append((parent_id, child_id, message))
+        )
+        or _original(parent_id, child_id, message)
+    )
+    try:
+        # Production-shaped task-keyed error (instance.py stamps
+        # child_id in the watcher metadata at registration time).
+        _seed_watcher(
+            repo,
+            source_task_id=TASK_T1,
+            target_instance_id=PARENT_ID,
+            child_id=CHILD_A,
+        )
+        await bus.emit_terminal(
+            task_id=TASK_T1,
+            outcome=Outcome(status="error", error="A"),
+        )
+        # Production-shaped instance-pair error (parameter is
+        # required str — no path passes None here).
+        await bus.emit_terminal_for_child_instance(
+            parent_instance_id=PARENT_ID,
+            child_instance_id=CHILD_B,
+            outcome=Outcome(status="error", error="B"),
+        )
+    finally:
+        bus._record_child_error_state = _original
+
+    assert captured, "no error emit observed"
+    none_child_ids = [(p, c, m) for (p, c, m) in captured if c is None]
+    assert not none_child_ids, (
+        f"Council S1 invariant: no production emit path should pass "
+        f"child_id=None to _record_child_error_state. Captured: "
+        f"{captured!r}; offenders (None child_id): {none_child_ids!r}. "
+        f"Re-introducing a None child_id through a stamp site would "
+        f"create a sentinel pair the retraction path could later "
+        f"accidentally over-reach on (counter-constraint regression)."
+    )
+    assert {c for (_p, c, _m) in captured} == {CHILD_A, CHILD_B}
+

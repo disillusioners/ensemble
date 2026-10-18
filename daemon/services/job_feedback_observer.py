@@ -2215,6 +2215,13 @@ class JobFeedbackObserver:
                     # Non-failed receipts no longer slip the error
                     # string into the ``Result:`` slot (the
                     # settled-on-errored-mission cosmetic skew).
+                    # NOTE (council S2): the failed receipt's
+                    # ``Result:`` block rendering the authoritative
+                    # payload via ``result_summary=`` below is
+                    # DELIBERATE — a different surface from the
+                    # F-5 NO-Result contract at
+                    # child_reports.py:5172-5190 (ratified,
+                    # separate; do NOT touch that file).
                     if _per_kind_status == "failed":
                         _notified_count = await self._job_queue_service.notify_watchers(
                             _work_id, _per_kind_status,
