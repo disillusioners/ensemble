@@ -79,6 +79,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -487,6 +488,40 @@ class DependencyBus:
         # limitation" — see api.py crash-recovery docstring.
         self._parent_error_message: dict[str, str] = {}
 
+        # Sticky-subtree-error recovery tracking (2026-10-18,
+        # fix/finalize-subtree-error-payload — RCA job 6465391d).
+        # Set of ``(parent_id, child_id)`` pairs where the child
+        # emitted a truthy-error terminal that has NOT been
+        # recovered by a later clean completion of the SAME child.
+        # Populated next to the ``_parent_errored`` /
+        # ``_parent_error_message`` stamps in
+        # :meth:`emit_terminal` / :meth:`emit_terminal_for_child_instance`
+        # and retracted when the SAME child later emits
+        # ``status="completed"`` (the revive-then-clean-complete
+        # recovery fact — incident shape: child GraphRecursionError
+        # 04:04:35Z → leader revive 04:50:52Z → clean completion
+        # 05:10:27Z, yet the sticky flag finalized the root job
+        # FAILED at 08:21Z). When retraction empties a parent's
+        # pairs, the parent's flag + message clear — a RECOVERED
+        # child error must not contaminate the root terminal
+        # status, while a genuinely unrecovered sibling error
+        # (pair still present) keeps the flag set (counter-
+        # constraint). See :meth:`_record_child_error_state` /
+        # :meth:`_retract_recovered_child_errors`.
+        self._unrecovered_child_errors: set[tuple[str, str | None]] = set()
+
+        # Serializes mutations of ``_parent_errored`` /
+        # ``_parent_error_message`` / ``_unrecovered_child_errors``.
+        # A ``threading.Lock`` (NOT asyncio) because the guarded
+        # region is pure dict/set ops and one caller
+        # (:meth:`clear_parent_error`) is sync — the finalize path
+        # calls it from async code without an awaitable boundary.
+        # Held for microseconds only; never across an await or a
+        # DB call. Leaf lock: both emit methods acquire it AFTER
+        # (or without) their per-task asyncio locks and never hold
+        # it while acquiring another lock — no ordering cycle.
+        self._error_state_guard = threading.Lock()
+
         # Lifecycle flag. Set True by :meth:`start`, False by
         # :meth:`stop`. Public methods are tolerant of being called
         # outside the started/stopped window (e.g. :meth:`watch`
@@ -704,18 +739,58 @@ class DependencyBus:
                 # we're about to fire, then mark each as errored.
                 # Using a set avoids redundant dict writes when
                 # multiple watchers share the same parent.
-                errored_targets = {
-                    FollowUp.from_payload(r.follow_up_payload).target_instance_id
+                # 2026-10-18 (fix/finalize-subtree-error-payload):
+                # the legacy inline dict writes moved into
+                # ``_record_child_error_state`` so the flag/message
+                # stamp is ATOMIC with the recovery-tracking pair
+                # add under ``_error_state_guard`` (no lost-error
+                # interleaving with the retraction path). The
+                # child identity comes from the watcher payload's
+                # ``metadata.child_id`` (stamped by ``send_message``
+                # at watcher registration).
+                _errored_rows = [
+                    FollowUp.from_payload(r.follow_up_payload)
                     for r in pending_rows
+                ]
+                for fu in _errored_rows:
+                    self._record_child_error_state(
+                        fu.target_instance_id,
+                        fu.metadata.get("child_id"),
+                        outcome.error,
+                    )
+            elif outcome.status == "completed":
+                # 2026-10-18 (fix/finalize-subtree-error-payload,
+                # RCA job 6465391d): a clean completion of a child
+                # is the RECOVERY FACT for that child's previously
+                # recorded errors (the revive-then-clean-complete
+                # path). Retract the ``(parent, child)`` pairs so
+                # the parent's sticky error flag reflects only
+                # UNRECOVERED child errors at finalize time. No-op
+                # when the child never errored (the pair-set lookup
+                # finds nothing).
+                _completed_child_ids = {
+                    child_id
+                    for child_id in (
+                        FollowUp.from_payload(r.follow_up_payload)
+                        .metadata.get("child_id")
+                        for r in pending_rows
+                    )
+                    if child_id
                 }
-                for tgt in errored_targets:
-                    self._parent_errored[tgt] = True
-                    # Phase 1 (2026-06-24): capture the LAST child
-                    # error text per parent. ``outcome.error`` is the
-                    # authoritative source from the bus terminal
-                    # emit. It is GUARANTEED truthy by the
-                    # ``_has_truthy_error`` gate above.
-                    self._parent_error_message[tgt] = outcome.error
+                _retracted = self._retract_recovered_child_errors(
+                    _completed_child_ids
+                )
+                if _retracted:
+                    logger.info(
+                        "bus emit_terminal: retracted recovered "
+                        "child-error state for %d pair(s) "
+                        "(task_id=%s, children=%s) — parent flag "
+                        "cleared where no unrecovered errors remain",
+                        len(_retracted),
+                        task_id[:8],
+                        sorted({c for (_p, c) in _retracted}),
+                        extra={"completion_delivery_path": "bus"},
+                    )
 
             if not pending_rows:
                 logger.debug(
@@ -878,8 +953,9 @@ class DependencyBus:
         # block: stamp the parent's _parent_errored flag when the
         # child errored. Sticky per parent ("any error → parent
         # error") and consulted by the finalize path in
-        # JobFeedbackObserver._process_event. Plain dict writes,
-        # atomic in CPython, no lock needed (same as emit_terminal).
+        # JobFeedbackObserver._process_event. Error-state writes on
+        # both emit seams route through _record_child_error_state
+        # under _error_state_guard (same as emit_terminal).
         # F-1 gate (durability-f1-f2 / phase1, plan §1): same
         # truthy-error gate as :meth:`emit_terminal` — see
         # the ownership block in
@@ -898,12 +974,42 @@ class DependencyBus:
                 outcome.status,
             )
         if _has_truthy_error(outcome):
-            self._parent_errored[parent_instance_id] = True
-            # ``outcome.error`` is GUARANTEED truthy by the
-            # ``_has_truthy_error`` gate above.
-            self._parent_error_message[parent_instance_id] = (
-                outcome.error
+            # 2026-10-18 (fix/finalize-subtree-error-payload): the
+            # legacy inline dict writes moved into
+            # ``_record_child_error_state`` so the flag/message
+            # stamp is ATOMIC with the recovery-tracking pair add
+            # under ``_error_state_guard``. This emit carries the
+            # child identity directly (parameter), so the
+            # ``(parent, child)`` pair is always recordable here —
+            # this is the seam the revived-child clean completion
+            # retracts against.
+            self._record_child_error_state(
+                parent_instance_id,
+                child_instance_id,
+                outcome.error,
             )
+        elif outcome.status == "completed":
+            # 2026-10-18 (fix/finalize-subtree-error-payload, RCA
+            # job 6465391d): clean completion of the child retracts
+            # its previously recorded (parent, child) error pairs —
+            # the revive-then-clean-complete recovery fact. Runs
+            # BEFORE the pending-rows early return so the retraction
+            # fires even when no PENDING watcher matched (the
+            # recovery fact is instance-level, not watcher-level).
+            _retracted = self._retract_recovered_child_errors(
+                {child_instance_id}
+            )
+            if _retracted:
+                logger.info(
+                    "bus emit_terminal_for_child_instance: retracted "
+                    "recovered child-error state for %d pair(s) "
+                    "(parent=%s, child=%s) — parent flag cleared "
+                    "where no unrecovered errors remain",
+                    len(_retracted),
+                    parent_instance_id[:8],
+                    child_instance_id[:8],
+                    extra={"completion_delivery_path": "bus"},
+                )
 
         # DB is source of truth — read PENDING watchers by (parent,
         # child) pair, NOT the cache. The cache is keyed on
@@ -1628,6 +1734,12 @@ class DependencyBus:
         # are in-memory state that must be reset on shutdown so
         # a fresh process starts clean.
         self._parent_error_message.clear()
+        # 2026-10-18 (fix/finalize-subtree-error-payload): clear
+        # the recovery-tracking pairs too — same in-memory-only
+        # rationale (a crash between child-error and finalize
+        # loses the error state; the pair-set shares that known
+        # limitation, acceptable per the plan).
+        self._unrecovered_child_errors.clear()
         logger.info(
             f"bus stop: cleared {cache_size} cached watchers",
             extra={"completion_delivery_path": "bus"},
@@ -1755,7 +1867,13 @@ class DependencyBus:
         ``status="error"`` and any of its fired FollowUps target
         ``parent_id``. It is sticky — once True, the parent
         finalizes as ``"error"`` regardless of how many subsequent
-        children complete normally.
+        children complete normally — EXCEPT when the SAME child
+        that errored later completes cleanly (the
+        revive-then-clean-complete recovery path,
+        2026-10-18 fix/finalize-subtree-error-payload): the bus
+        retracts that child's ``(parent, child)`` pair and clears
+        the flag when no UNRECOVERED child errors remain (see
+        :meth:`_retract_recovered_child_errors`).
 
         Mirrors :class:`CorrelationManager._determine_terminal_status`'s
         "any child error → parent error" conservative rule that
@@ -1763,9 +1881,15 @@ class DependencyBus:
 
         The flag is a plain dict read (atomic in CPython) and is
         safe to call from any context (event loop, worker thread,
-        sync gate). No lock is needed — the only writer is the
-        :meth:`emit_terminal` transition loop, which is
-        serialized per-task by the per-task lock above.
+        sync gate). No lock is needed — the only writers are the
+        two emit paths (:meth:`emit_terminal` and
+        :meth:`emit_terminal_for_child_instance`), both serialized
+        by the per-task lock above (the task-keyed path) or
+        serialized under ``_error_state_guard`` directly (the
+        instance-pair path). The clears are
+        :meth:`_retract_recovered_child_errors` (on a child's
+        clean completion) and :meth:`clear_parent_error` (finalize
+        time / explicit reset).
 
         Args:
             parent_id: The parent instance ID to check.
@@ -1807,6 +1931,141 @@ class DependencyBus:
         """
         return self._parent_error_message.get(parent_id)
 
+    def _record_child_error_state(
+        self, parent_id: str, child_id: str | None, message: str
+    ) -> None:
+        """Stamp the per-parent error flag/message AND the per-(parent, child) pair.
+
+        2026-10-18 (fix/finalize-subtree-error-payload, RCA job
+        6465391d). The SINGLE guarded mutation for the error-half
+        of the bus's subtree-error state: applies the legacy
+        ``_parent_errored[parent_id] = True`` and
+        ``_parent_error_message[parent_id] = message`` writes AND
+        records the ``(parent_id, child_id)`` recovery-tracking
+        pair atomically under ``_error_state_guard``. Atomicity
+        with the retraction path
+        (:meth:`_retract_recovered_child_errors`) is what
+        structurally guarantees no lost error: a stamp that lands
+        concurrently with a retraction either fully precedes it
+        (flag set + pair added before the retraction's
+        check-then-clear ran → the retraction sees the pair and
+        keeps the flag) or fully follows it (the retraction
+        already cleared; the stamp re-sets both) — there is no
+        interleaving where the flag is cleared while an
+        unrecovered pair exists.
+
+        The pair is what makes the sticky flag RETRACTABLE: without
+        per-child identity the bus could not distinguish "child C
+        errored and never recovered" (flag must stay) from "child C
+        errored, was revived, completed cleanly" (flag must clear —
+        the incident's false-FAILED root stamp).
+
+        ``child_id=None`` (task-keyed emit whose watcher payloads
+        carried no ``metadata.child_id`` — legacy rows) still
+        applies the legacy flag/message stamps and records the
+        SENTINEL pair ``(parent_id, None)`` (council S1,
+        2026-10-18): the sentinel makes the unattributable error
+        VISIBLE to the retraction predicate
+        (:meth:`_retract_recovered_child_errors`) so a later clean
+        completion of an UNRELATED attributable child can never
+        clear the parent's flag while the legacy error is
+        genuinely unrecovered (``None`` matches no attributable
+        child id by exact equality — the sentinel retracts ONLY
+        via an explicit :meth:`clear_parent_error` or :meth:`stop`).
+        Set semantics make a repeated legacy stamp idempotent (the
+        ``(parent_id, None)`` tuple dedupes — no double-add).
+
+        Thread-safety: caller must NOT hold ``_error_state_guard``
+        (this method acquires it). Pure dict/set ops inside.
+        """
+        with self._error_state_guard:
+            self._parent_errored[parent_id] = True
+            self._parent_error_message[parent_id] = message
+            # Council S1 (2026-10-18): child_id=None records the
+            # SENTINEL pair (parent, None) — never a bare skip. The
+            # sentinel is what keeps a legacy unattributable error
+            # sticky against retraction-by-unrelated-recovery.
+            self._unrecovered_child_errors.add((parent_id, child_id))
+
+    def _retract_recovered_child_errors(
+        self, child_ids: set[str]
+    ) -> list[tuple[str, str]]:
+        """Retract error pairs for children that just completed cleanly.
+
+        2026-10-18 (fix/finalize-subtree-error-payload, RCA job
+        6465391d). Called from both emit seams on a
+        ``status="completed"`` outcome. A clean completion of child
+        C is the recovery FACT for every ``(parent, C)`` pair: the
+        same child instance that previously emitted a truthy error
+        went on to finish a full turn successfully (the
+        revive-then-clean-complete path). For each affected parent
+        whose pair-set becomes empty, the per-parent
+        ``_parent_errored`` flag and ``_parent_error_message`` are
+        cleared — the parent's terminal status is then decided by
+        the natural lifecycle (the observer's
+        ``_resolve_finalize_status`` consult) instead of the
+        inherited subtree-error override.
+
+        Counter-constraint guarantee (structural): the flag clears
+        ONLY when the parent has zero remaining unrecovered pairs.
+        A sibling child whose error was never recovered keeps its
+        pair, so the flag survives and the root still finalizes
+        ``error``. ``status="terminated"`` does NOT retract —
+        termination is not clean completion. The ``(parent, None)``
+        SENTINEL (council S1) likewise never retracts here — a
+        legacy unattributable error stays sticky against the clean
+        completion of any UNRELATED attributable child; only an
+        explicit ``clear_parent_error`` (finalize-time full clear)
+        or ``stop`` (shutdown) drops it.
+
+        Ordering note: the check-then-clear of the parent flag is
+        the race window this method's ``_error_state_guard``
+        exists for — a concurrent error stamp for the same parent
+        lands between this method's pair-discard and flag-clear at
+        most, and because BOTH the stamp path
+        (:meth:`_record_child_error_state` — flag + message + pair
+        in one guarded region) and this retraction take the same
+        guard, no lost-error interleaving is possible.
+
+        Args:
+            child_ids: The child instance ids that completed cleanly.
+
+        Returns:
+            The list of ``(parent_id, child_id)`` pairs retracted
+            (for observability logging by the callers).
+        """
+        if not child_ids:
+            return []
+        retracted: list[tuple[str, str]] = []
+        affected_parents: set[str] = set()
+        with self._error_state_guard:
+            # Council S1 (2026-10-18): the sort key coerces the
+            # sentinel's ``None`` child id to ``""`` so mixed sets
+            # (``(P, None)`` alongside ``(P, "child-a")``) sort
+            # without a None-vs-str TypeError. The sentinel NEVER
+            # matches ``child_ids`` (exact-equality membership;
+            # ``None`` is not any attributable child id), so it
+            # survives this loop and keeps ``still_errored`` True
+            # below — it retracts ONLY via ``clear_parent_error``
+            # or ``stop``.
+            for pair in sorted(
+                self._unrecovered_child_errors,
+                key=lambda p: (p[0], p[1] or ""),
+            ):
+                parent_id, child_id = pair
+                if child_id is not None and child_id in child_ids:
+                    self._unrecovered_child_errors.discard(pair)
+                    retracted.append(pair)
+                    affected_parents.add(parent_id)
+            for parent_id in affected_parents:
+                still_errored = any(
+                    p == parent_id for (p, _c) in self._unrecovered_child_errors
+                )
+                if not still_errored:
+                    self._parent_errored.pop(parent_id, None)
+                    self._parent_error_message.pop(parent_id, None)
+        return retracted
+
     def clear_parent_error(self, parent_id: str) -> None:
         """Clear the per-parent error flag AND error message (Phase 5 / Phase 1).
 
@@ -1822,12 +2081,30 @@ class DependencyBus:
         does not inherit the previous incarnation's last error
         text. Both clears are idempotent.
 
+        2026-10-18 (fix/finalize-subtree-error-payload): also
+        discards the parent's ``(parent, child)`` recovery-tracking
+        pairs — the finalize-time wholesale clear must leave NO
+        residual subtree-error state for the next incarnation of
+        the instance id. This is the FULL clear: it drops every
+        pair for the parent INCLUDING the ``(parent, None)``
+        sentinel recorded for legacy unattributable errors (which
+        the retraction path deliberately never auto-retracts —
+        council S1). All clears run under ``_error_state_guard``
+        atomically with the stamp / retraction paths (same
+        serialization domain).
+
         Args:
             parent_id: The parent instance ID whose flag and
                 message to clear.
         """
-        self._parent_errored.pop(parent_id, None)
-        self._parent_error_message.pop(parent_id, None)
+        with self._error_state_guard:
+            self._parent_errored.pop(parent_id, None)
+            self._parent_error_message.pop(parent_id, None)
+            self._unrecovered_child_errors = {
+                pair
+                for pair in self._unrecovered_child_errors
+                if pair[0] != parent_id
+            }
 
     def _now_iso(self) -> str:
         """Return current UTC time as ISO-8601 string.
