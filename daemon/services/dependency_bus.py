@@ -1692,7 +1692,9 @@ class DependencyBus:
            ``_get_parent_lock`` fetch at least this long ago (the touch
            clock refreshes on every fetch under the same guard, so an
            entry mid-use can never look idle). The bus is the SOLE
-           producer of activity for these keys.
+           producer of activity for these keys. This threshold is
+           enforced TWICE: once at the phase-1 snapshot and again at
+           pop time (remediation r1 — see the atomicity note below).
         3. **TERMINAL-or-gone owner** (task locks only) — the owning
            task id is NOT in the active set
            (``SELECT id FROM task WHERE status IN ('running','pending',
@@ -1709,20 +1711,33 @@ class DependencyBus:
            an in-flight re-arm keeps its lock).
 
         **Atomicity / residual window (documented honestly).** Snapshot
-        and verify-then-pop both run under the respective guard, and the
-        held-state check re-runs at pop time — a waiter that ACQUIRED
-        between snapshot and pop is seen held and skipped. One window
-        remains and is accepted: a caller that fetched the lock
-        reference BEFORE the reap and is suspended BEFORE its acquire
-        can end up serializing on an orphaned object while a later
-        caller builds a fresh one. That requires the owner to have been
-        fully quiet for a full reap cadence and then to race the
-        microsecond verify-pop window; the orphaned critical section is
-        exactly the register-during-terminalization class the
-        generation counters (:meth:`get_generation` consumers) already
-        absorb. A replayed task self-heals on its next reap cycle (the
-        fresh lock is the live one; the orphan drops out of the dict
-        forever).
+        and verify-then-pop both run under the respective guard, and BOTH
+        gate conditions re-run at pop time — the held-state check (a
+        waiter that ACQUIRED between snapshot and pop is seen held and
+        skipped) and, since remediation r1, the idle-threshold check (a
+        caller that FETCHED the reference in the phase-2 window refreshes
+        the touch clock and is no longer seen as idle). No await sits
+        between either re-check and the ``dict.pop``, so the pop stays
+        atomic under the guard.
+
+        One window remains and is accepted: a caller that fetched the
+        lock reference BEFORE the snapshot — so its touch was already
+        ≥ min_idle_s old when the snapshot ran — and is still suspended
+        BEFORE its acquire. The window is the PHASE-2 DB-PROBE INTERVAL
+        (the ``asyncio.to_thread`` await), which is exactly what the
+        quiet-for-a-cadence precondition does NOT remove: that
+        precondition is enforced AT SNAPSHOT, so any key already ≥1h
+        idle when the snapshot ran is eligible for the entire probe
+        interval. If the reap pops such an entry, the suspended caller
+        ends up serializing on the orphaned object while a later caller
+        builds a fresh one. The terminality signal differs by path:
+        PARENT locks self-heal through the parent-keyed generation
+        counters (``get_generation`` / ``increment_generation`` — that
+        guard covers the parent lock path ONLY), while TASK locks have
+        no generation guard and rely solely on the task-status probe
+        (criterion 3). A replayed task self-heals on its next reap cycle
+        (the fresh lock is the live one; the orphan drops out of the
+        dict forever).
 
         Args:
             min_idle_s: Minimum fetch-touch idle before eligibility.
@@ -1777,7 +1792,22 @@ class DependencyBus:
             for task_id, lock in reapable:
                 if lock.locked():
                     continue
+                # W1 (remediation r1): the idle threshold is RE-CHECKED
+                # here too, not only at the phase-1 snapshot. The phase-2
+                # probe awaits (``asyncio.to_thread``), so a ``_get_lock``
+                # landing in that window refreshes ``_lock_touch`` (under
+                # THIS guard) WITHOUT acquiring — the held-state check
+                # above misses it, and pre-fix the entry was still popped,
+                # orphaning the caller's lock object (a later caller then
+                # builds a fresh object; the two no longer serialize).
+                # Re-using the snapshot's ``now`` is the point: a refresh
+                # that landed after the snapshot sets ``touch >= now``, so
+                # ``idle_s <= 0 < min_idle_s`` and the entry is KEPT. No
+                # await between this check and the ``pop`` — atomicity is
+                # preserved exactly as before.
                 idle_s = now - self._lock_touch.get(task_id, now)
+                if idle_s < min_idle_s:
+                    continue
                 self._locks.pop(task_id, None)
                 self._lock_touch.pop(task_id, None)
                 reaped_tasks += 1
@@ -1791,7 +1821,14 @@ class DependencyBus:
             for parent_id, lock in parent_candidates:
                 if lock.locked():
                     continue
+                # Same W1 re-check as the task-lock loop above:
+                # ``_get_parent_lock`` can land in the phase-2 await
+                # window and refresh ``_parent_lock_touch`` without
+                # acquiring. Re-using the snapshot's ``now`` keeps such an
+                # entry (idle_s <= 0).
                 idle_s = now - self._parent_lock_touch.get(parent_id, now)
+                if idle_s < min_idle_s:
+                    continue
                 self._parent_locks.pop(parent_id, None)
                 self._parent_lock_touch.pop(parent_id, None)
                 reaped_parents += 1

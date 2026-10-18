@@ -2929,6 +2929,85 @@ class TestLockReap:
         lock.release()
 
     @pytest.mark.asyncio
+    async def test_refetch_in_probe_window_prevents_task_lock_reap(
+        self, reap_bus
+    ):
+        """W1 (remediation r1): a mid-window FETCH keeps the task lock.
+
+        The exact W1 shape: the phase-1 snapshot sees the lock unheld and
+        idle, the reap parks in the phase-2 DB probe, and a caller calls
+        ``_get_lock`` for the same key INSIDE that window WITHOUT
+        acquiring. The fetch refreshes ``_lock_touch``; the held-state
+        re-check alone (pre-fix behavior) would MISS that and pop the
+        entry, orphaning the caller's lock object. With the pop-time
+        idle-threshold re-check the entry is KEPT. MUTATION-SENSITIVE:
+        reverting that re-check makes this test fail.
+        """
+        lock = await reap_bus._get_lock("999")
+        self._age(reap_bus, "999")
+
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+
+        def gated_probe(task_ids):
+            probe_started.set()
+            release_probe.wait(timeout=5)
+            return set()  # owner "gone" → phase 3 is the only remaining gate
+
+        with patch.object(
+            reap_bus, "_fetch_active_task_ids_sync", gated_probe
+        ):
+            reap_task = asyncio.create_task(reap_bus.reap_stale_locks())
+            while not probe_started.is_set():
+                await asyncio.sleep(0.005)
+            # Snapshot done; reap parked in the probe. FETCH (NO acquire)
+            # — this refreshes the touch clock and is the W1 shape.
+            refetched = await reap_bus._get_lock("999")
+            assert refetched is lock
+            release_probe.set()
+            reaped_tasks, _ = await asyncio.wait_for(reap_task, timeout=5)
+        # ...and the reap must NOT have popped a freshly-fetched entry.
+        assert reaped_tasks == 0
+        assert "999" in reap_bus._locks
+        assert reap_bus._locks["999"] is lock
+
+    @pytest.mark.asyncio
+    async def test_refetch_in_probe_window_prevents_parent_lock_reap(
+        self, reap_bus
+    ):
+        """W1 (remediation r1) for the parent-lock path.
+
+        Same interleaving as the task-lock test, but the parent-candidate
+        branch also crosses the phase-2 ``await``; a ``_get_parent_lock``
+        landing in that window refreshes ``_parent_lock_touch`` and must
+        likewise keep the entry.
+        """
+        lock = await reap_bus._get_parent_lock("parent-X")
+        self._age(reap_bus, "parent-X", parent=True)
+
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+
+        def gated_probe(task_ids):
+            probe_started.set()
+            release_probe.wait(timeout=5)
+            return set()
+
+        with patch.object(
+            reap_bus, "_fetch_active_task_ids_sync", gated_probe
+        ):
+            reap_task = asyncio.create_task(reap_bus.reap_stale_locks())
+            while not probe_started.is_set():
+                await asyncio.sleep(0.005)
+            refetched = await reap_bus._get_parent_lock("parent-X")
+            assert refetched is lock
+            release_probe.set()
+            _, reaped_parents = await asyncio.wait_for(reap_task, timeout=5)
+        assert reaped_parents == 0
+        assert "parent-X" in reap_bus._parent_locks
+        assert reap_bus._parent_locks["parent-X"] is lock
+
+    @pytest.mark.asyncio
     async def test_min_idle_override_contract(self, reap_bus):
         """``min_idle_s`` parameter drives the threshold (cadence knob)."""
         await reap_bus._get_lock("999")
