@@ -252,4 +252,65 @@ describe('LiveTabComponent', () => {
       'never',
     );
   });
+
+  // ── Error-banner anti-flicker (hardening pass) ──────────────────────
+
+  it('hides the banner while an in-flight refresh runs with retained data, re-shows it on failure', () => {
+    jest.useFakeTimers();
+    startHappyPath();
+
+    // Background failure → banner shows (data retained underneath).
+    resourcesMock.getLive.mockReturnValueOnce(throwError(() => new Error('boom')));
+    resourcesMock.getSelfCost.mockReturnValueOnce(throwError(() => new Error('boom')));
+    jest.advanceTimersByTime(8000);
+    fixture.detectChanges();
+    expect(query('[data-test="live-error"]')).not.toBeNull();
+    expect(query('[data-test="live-content"]')).not.toBeNull();
+
+    // Next tick goes in flight with retained data → banner suppressed.
+    const pendingLive = new Subject<LivePayload>();
+    const pendingSelfCost = new Subject<SelfCostPayload>();
+    resourcesMock.getLive.mockReturnValueOnce(pendingLive.asObservable());
+    resourcesMock.getSelfCost.mockReturnValueOnce(pendingSelfCost.asObservable());
+    jest.advanceTimersByTime(8000);
+    fixture.detectChanges();
+    expect(query('[data-test="live-error"]')).toBeNull(); // suppressed in flight
+    expect(query('[data-test="live-skeleton"]')).toBeNull(); // never a skeleton flash
+    expect(query('[data-test="live-content"]')).not.toBeNull(); // data retained
+
+    // The in-flight tick FAILS → banner re-shows.
+    pendingSelfCost.error(new Error('boom'));
+    fixture.detectChanges();
+    expect(query('[data-test="live-error"]')).not.toBeNull();
+    expect(query('[data-test="live-content"]')).not.toBeNull();
+
+    // A subsequent successful tick retires the banner.
+    resourcesMock.getLive.mockReturnValueOnce(of(makeLive()));
+    resourcesMock.getSelfCost.mockReturnValueOnce(of(makeSelfCost()));
+    jest.advanceTimersByTime(8000);
+    fixture.detectChanges();
+    expect(query('[data-test="live-error"]')).toBeNull();
+  });
+
+  it('keeps the error branch during an in-flight retry when there is NO retained data', () => {
+    jest.useFakeTimers();
+    resourcesMock.getLive.mockReturnValueOnce(throwError(() => new Error('boom')));
+    resourcesMock.getSelfCost.mockReturnValueOnce(throwError(() => new Error('boom')));
+    fixture.detectChanges();
+
+    expect(query('[data-test="live-error"]')).not.toBeNull();
+    expect(query('[data-test="live-content"]')).toBeNull();
+
+    // Retry with a slow response and NO data — the error branch stays up
+    // (no skeleton flash, no empty content state).
+    const pendingLive = new Subject<LivePayload>();
+    resourcesMock.getLive.mockReturnValueOnce(pendingLive.asObservable());
+    resourcesMock.getSelfCost.mockReturnValueOnce(new Subject<SelfCostPayload>().asObservable());
+    query('[data-test="live-retry"]').nativeElement.click();
+    fixture.detectChanges();
+
+    expect(query('[data-test="live-error"]')).not.toBeNull();
+    expect(query('[data-test="live-skeleton"]')).toBeNull();
+    expect(query('[data-test="live-content"]')).toBeNull();
+  });
 });

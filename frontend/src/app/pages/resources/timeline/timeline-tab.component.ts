@@ -45,6 +45,13 @@ import {
  *  - A marker click runs `forkJoin({ evidence, traceback })` with the
  *    primitive's padded `t0`/`t1` (D10) and renders the drill-down
  *    panel below the chart.
+ *  - Stale-response supersede (hardening pass): every fetch captures a
+ *    monotonically increasing sequence token at start; a response that
+ *    resolves after a NEWER fetch on the same path is DISCARDED, never
+ *    allowed to overwrite newer state (window loads and drill-down
+ *    each own a token — they run concurrently, so a marker click must
+ *    not drop an in-flight window load and vice versa). A window
+ *    change invalidates any open drill-down via `clearDrilldown()`.
  *  - The `truncated` banner is rendered strictly from the frozen
  *    payload flag — NO FE fallback logic (D9).
  */
@@ -92,6 +99,15 @@ export class TimelineTabComponent implements OnInit {
   readonly drilldownLoading = signal(false);
   readonly drilldownError = signal<string | null>(null);
 
+  /**
+   * Stale-response supersede tokens (one per fetch path). Monotonic;
+   * a response whose captured token is no longer current is dropped.
+   * Window loads and drill-downs each own a token because they run
+   * concurrently — superseding one path must not drop the other.
+   */
+  private timelineSeq = 0;
+  private drilldownSeq = 0;
+
   /** Skeleton renders only before the first successful fetch (D7). */
   readonly showSkeleton = computed(
     () => this.history() === null && this.error() === null,
@@ -123,6 +139,7 @@ export class TimelineTabComponent implements OnInit {
   /** `forkJoin({ history, anomalies })` for the active window (D6 shape). */
   private loadTimeline(): void {
     const window = this.window();
+    const token = ++this.timelineSeq;
     this.error.set(null);
     forkJoin({
       history: this.resources.getHistory(window),
@@ -131,10 +148,16 @@ export class TimelineTabComponent implements OnInit {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: ({ history, anomalies }) => {
+          if (token !== this.timelineSeq) {
+            return; // superseded by a newer load — stale payload never lands
+          }
           this.history.set(history);
           this.anomalies.set(anomalies.anomalies);
         },
         error: (err) => {
+          if (token !== this.timelineSeq) {
+            return; // a newer load owns the outcome — no stale error flip
+          }
           // Retain last-good chart; only the error branch flips.
           this.error.set(
             'Unable to load resource history — showing the last known window.',
@@ -160,6 +183,7 @@ export class TimelineTabComponent implements OnInit {
   // ── Marker click → drill-down (D10 padded window from the primitive) ─
 
   onMarkerClick(click: TimelineMarkerClick): void {
+    const token = ++this.drilldownSeq;
     this.selectedAnomaly.set(click.anomaly);
     this.evidence.set(null);
     this.traceback.set(null);
@@ -173,11 +197,17 @@ export class TimelineTabComponent implements OnInit {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: ({ evidence, traceback }) => {
+          if (token !== this.drilldownSeq) {
+            return; // superseded by a newer drill-down/clear — stale never lands
+          }
           this.drilldownLoading.set(false);
           this.evidence.set(evidence);
           this.traceback.set(traceback);
         },
         error: (err) => {
+          if (token !== this.drilldownSeq) {
+            return; // a newer fetch owns the outcome
+          }
           this.drilldownLoading.set(false);
           this.drilldownError.set('Unable to load drill-down evidence for this window.');
           console.warn('[ResourcesTimeline] drill-down load failed:', err);
@@ -186,6 +216,9 @@ export class TimelineTabComponent implements OnInit {
   }
 
   clearDrilldown(): void {
+    // Invalidate any in-flight drill-down BEFORE clearing its state —
+    // a late response must never repopulate a closed panel.
+    this.drilldownSeq++;
     this.selectedAnomaly.set(null);
     this.evidence.set(null);
     this.traceback.set(null);

@@ -328,4 +328,127 @@ describe('TimelineTabComponent', () => {
     fixture.detectChanges();
     expect(queryAll('[data-test="series-line"]').length).toBe(before);
   });
+
+  // ── Stale-response supersede (hardening pass) ──────────────────────
+
+  it('drops an out-of-order window response — the newer window wins', () => {
+    // Window A ('1h' via ngOnInit) hangs in flight.
+    const historyA = new Subject<HistoryPayload>();
+    const anomaliesA = new Subject<AnomaliesPayload>();
+    resourcesMock.getHistory.mockReturnValueOnce(historyA.asObservable());
+    resourcesMock.getAnomalies.mockReturnValueOnce(anomaliesA.asObservable());
+    fixture.detectChanges(); // ngOnInit → loadTimeline('1h')
+
+    // Switch to window B — resolves immediately.
+    const historyB = makeHistory({ resolution_used: 'minute', truncated: true });
+    resourcesMock.getHistory.mockReturnValueOnce(of(historyB));
+    resourcesMock.getAnomalies.mockReturnValueOnce(of(makeAnomalies()));
+    component.selectWindow('24h');
+    fixture.detectChanges();
+
+    expect(resourcesMock.getHistory).toHaveBeenCalledTimes(2);
+    expect(resourcesMock.getHistory).toHaveBeenLastCalledWith('24h');
+    expect(component.history()).toBe(historyB); // B landed
+    expect(query('[data-test="truncated-banner"]')).not.toBeNull();
+
+    // A's slower response arrives LATE — it must be discarded.
+    historyA.next(makeHistory({ truncated: false }));
+    historyA.complete();
+    anomaliesA.next(makeAnomalies());
+    anomaliesA.complete();
+    fixture.detectChanges();
+
+    // UI/state still reflects B — A's stale payload never landed.
+    expect(component.window()).toBe('24h');
+    expect(component.history()).toBe(historyB);
+    expect(query('[data-test="truncated-banner"]')).not.toBeNull();
+  });
+
+  it('drops an out-of-order window ERROR — a stale failure never flips the banner', () => {
+    const historyA = new Subject<HistoryPayload>();
+    const anomaliesA = new Subject<AnomaliesPayload>();
+    resourcesMock.getHistory.mockReturnValueOnce(historyA.asObservable());
+    resourcesMock.getAnomalies.mockReturnValueOnce(anomaliesA.asObservable());
+    fixture.detectChanges(); // window A in flight
+
+    const historyB = makeHistory();
+    resourcesMock.getHistory.mockReturnValueOnce(of(historyB));
+    resourcesMock.getAnomalies.mockReturnValueOnce(of(makeAnomalies()));
+    component.selectWindow('24h');
+    fixture.detectChanges();
+    expect(query('[data-test="timeline-error"]')).toBeNull();
+
+    // A fails late, AFTER B already succeeded — no stale error branch.
+    historyA.error(new Error('late boom'));
+    fixture.detectChanges();
+
+    expect(query('[data-test="timeline-error"]')).toBeNull();
+    expect(component.history()).toBe(historyB);
+  });
+
+  it('drops an out-of-order drill-down response — the newer marker click wins', () => {
+    startHappyPath();
+
+    // First marker click hangs in flight.
+    const evidenceA = new Subject<EvidencePayload>();
+    const tracebackA = new Subject<TracebackPayload>();
+    resourcesMock.getEvidence.mockReturnValueOnce(evidenceA.asObservable());
+    resourcesMock.getTraceback.mockReturnValueOnce(tracebackA.asObservable());
+    query('[data-test="anomaly-marker"]').triggerEventHandler('click', null);
+    fixture.detectChanges();
+    expect(component.drilldownLoading()).toBe(true);
+    expect(component.evidence()).toBeNull();
+
+    // Second click on the marker supersedes it and resolves immediately.
+    const evidenceB = makeEvidence({
+      contributors: [{ instance_id: 'inst-9', agent_id: 'leader', share_pct: 99 }],
+    });
+    resourcesMock.getEvidence.mockReturnValueOnce(of(evidenceB));
+    resourcesMock.getTraceback.mockReturnValueOnce(of(makeTraceback()));
+    query('[data-test="anomaly-marker"]').triggerEventHandler('click', null);
+    fixture.detectChanges();
+    expect(component.drilldownLoading()).toBe(false);
+    expect(component.evidence()).toBe(evidenceB);
+
+    // A's slower drill-down arrives LATE — discarded.
+    evidenceA.next(makeEvidence());
+    evidenceA.complete();
+    tracebackA.next(makeTraceback());
+    tracebackA.complete();
+    fixture.detectChanges();
+
+    expect(component.drilldownError()).toBeNull();
+    expect(component.evidence()).toBe(evidenceB);
+    expect(query('[data-test="contributors"]').nativeElement.textContent).toContain('99');
+  });
+
+  it('drops an in-flight drill-down response after a window change closes the panel', () => {
+    startHappyPath();
+
+    const evidenceA = new Subject<EvidencePayload>();
+    const tracebackA = new Subject<TracebackPayload>();
+    resourcesMock.getEvidence.mockReturnValueOnce(evidenceA.asObservable());
+    resourcesMock.getTraceback.mockReturnValueOnce(tracebackA.asObservable());
+    query('[data-test="anomaly-marker"]').triggerEventHandler('click', null);
+    fixture.detectChanges();
+    expect(query('[data-test="drilldown-panel"]')).not.toBeNull();
+
+    // Window change closes the drill-down while its fetch is in flight.
+    resourcesMock.getHistory.mockReturnValue(of(makeHistory()));
+    resourcesMock.getAnomalies.mockReturnValue(of(makeAnomalies()));
+    component.selectWindow('24h');
+    fixture.detectChanges();
+    expect(query('[data-test="drilldown-panel"]')).toBeNull();
+
+    // The late drill-down response must NOT repopulate the closed panel.
+    evidenceA.next(makeEvidence());
+    evidenceA.complete();
+    tracebackA.next(makeTraceback());
+    tracebackA.complete();
+    fixture.detectChanges();
+
+    expect(query('[data-test="drilldown-panel"]')).toBeNull();
+    expect(component.evidence()).toBeNull();
+    expect(component.traceback()).toBeNull();
+  });
 });

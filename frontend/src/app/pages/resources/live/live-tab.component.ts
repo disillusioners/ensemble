@@ -32,7 +32,9 @@ import { ResourcesService } from '../../../services/resources.service';
  *    the skeleton.
  *  - A failing tick flips the SINGLE error branch (retry CTA). Retained
  *    data keeps rendering underneath it — a transient poll failure
- *    must not blank a page the user is reading.
+ *    must not blank a page the user is reading. While a refresh is
+ *    in flight with last-known data retained, the banner is SUPPRESSED
+ *    (no flicker); a failed-first fetch (no data) keeps the branch up.
  *  - A tick whose predecessor is still in flight is SKIPPED, never
  *    queued (R4 — a slow/hung endpoint cannot pile up ticks).
  *  - The tick lives in a Material-lazy-mounted tab body, so leaving
@@ -64,8 +66,15 @@ export class LiveTabComponent implements OnInit, OnDestroy {
   /** Skeleton renders only before the first successful fetch (D7). */
   readonly showSkeleton = computed(() => this.live() === null && this.error() === null);
 
-  /** Exactly ONE error branch — banner, never per-widget spinners. */
-  readonly showError = computed(() => this.error() !== null);
+  /**
+   * Exactly ONE error branch — banner, never per-widget spinners.
+   * Suppressed ONLY while a refresh is in flight with last-known data
+   * retained (anti-flicker); a failure with NO data (failed first
+   * fetch / no-data retry) keeps the branch up unconditionally.
+   */
+  readonly showError = computed(
+    () => this.error() !== null && !(this.fetchInFlight() && this.live() !== null),
+  );
 
   /** Retained last-good snapshot (also survives background failures). */
   readonly showContent = computed(() => this.live() !== null);
@@ -94,7 +103,9 @@ export class LiveTabComponent implements OnInit, OnDestroy {
       return;
     }
     this.fetchInFlight.set(true);
-    this.error.set(null);
+    // NOTE: the error message is intentionally NOT cleared here — the
+    // banner is suppressed while in flight via `showError`, so a failed
+    // tick can re-show the SAME message without a flicker gap.
     forkJoin({
       live: this.resources.getLive(),
       selfCost: this.resources.getSelfCost(),
@@ -105,6 +116,7 @@ export class LiveTabComponent implements OnInit, OnDestroy {
           this.fetchInFlight.set(false);
           this.live.set(live);
           this.selfCost.set(selfCost);
+          this.error.set(null); // success retires the banner
         },
         error: (err) => {
           this.fetchInFlight.set(false);
