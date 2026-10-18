@@ -6140,6 +6140,36 @@ Returns:
     secret_tool_list = create_secret_tools(manager, current_instance_id)
     tools.extend(secret_tool_list)
 
+    # ── settings tools (Phase 2 of settings-worker-slots,
+    # 2026-10-18) — three-tool category exposing
+    # ``settings_get`` / ``settings_set`` / ``settings_clear``
+    # over the daemon-global managed-key registry
+    # (``limits.llm_concurrency`` / ``limits.worker_pool_size`` /
+    # ``limits.chat_worker_pool_size``) via the wired
+    # ``SettingsService`` (the router-owned ``_settings_service``
+    # DI global — NOT a manager field; the council-B3 option-(b)
+    # seam reads it directly at call time). The category is
+    # entry #8 in ``PRIVILEGED_TOOL_CATEGORIES`` (septet →
+    # octet) — NEVER default-granted; the ari + leader
+    # ``tools.allow`` entries landed 2026-10-18 (P3). Every
+    # non-allowed agent still resolves ZERO settings tools through
+    # both the ``_strip_privileged_category_tools`` default-deny
+    # strip AND the ``resolve_tool_filter`` empty-allow branch. The
+    # factory tolerates a None-stub manager for the loader
+    # warm-list (the ``ens_env_tools`` pattern) — the tool
+    # bodies dereference the router DI global at call time.
+    # HONEST never-live contract (D5): every write/clear
+    # response states ``applies_at: "next daemon restart"`` +
+    # ``live: false``. Same three-step registration seam as the
+    # sibling categories: decorator (in ``settings_tools.py``) +
+    # ``CATEGORY_MODULES`` entry (``_tool_registry.py``) +
+    # DYNAMIC_TOOL_NAMES + KNOWN_TOOL_NAMES + this construction
+    # call — all required (decorator-only registration is
+    # SILENTLY INVISIBLE, instance.py:6091-6095).
+    from .settings_tools import create_settings_tools
+    settings_tool_list = create_settings_tools(manager, current_instance_id)
+    tools.extend(settings_tool_list)
+
     # ── Plugin subsystem Port tools (slice ⑤ tier-1 wiring; REC §4.3
     # row ⑤ PROVES line + ⑤b native-lane-LIVE precondition) ──
     # Native plugin tools (od.generate / od.compose_brief / od.save /

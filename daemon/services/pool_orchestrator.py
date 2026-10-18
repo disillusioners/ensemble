@@ -105,11 +105,8 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any
 
-from daemon.constants import (
-    CHAT_SOURCE_PREFIXES,
-    CHAT_WORKER_POOL_SIZE,
-    WORKER_POOL_SIZE,
-)
+from daemon.constants import CHAT_SOURCE_PREFIXES
+from daemon.utils import set_invoke_semaphore_cap
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -160,7 +157,7 @@ class PoolOrchestrator:
 
     # ── setup ─────────────────────────────────────────────────────
 
-    def setup(self, num_workers: int = WORKER_POOL_SIZE) -> None:
+    def setup(self, num_workers: int | None = None) -> None:
         """Construct the default + chat ``WorkerPool`` instances.
 
         Mirrors the previous ``InstanceManager.setup_worker_pool``
@@ -176,14 +173,24 @@ class PoolOrchestrator:
              failure (e.g., port-in-use) leaves the flag False
              (fail-open).
 
+        Sizing (settings-worker-slots, D2 — config READER, doctrine
+        preserved): ``num_workers=None`` is a sentinel meaning "resolve
+        from boot-applied config". Resolution happens ONCE, here: the
+        default lane uses ``num_workers`` when explicitly given (test
+        harness path keeps winning byte-for-byte) else
+        ``manager.config.limits.worker_pool_size``; the chat lane is a
+        config reader (``manager.config.limits.chat_worker_pool_size``).
+        NO chat-pool size kwarg is added — the public signature stays
+        single-knob; the doctrine's intent (one call-site signature) is
+        preserved, its mechanism (edit the constant + rebuild) is
+        replaced by the boot-resolved DB > env > yaml > default read.
+
         Args:
-            num_workers: Number of default-pool worker threads. The
-                chat pool is sized by ``CHAT_WORKER_POOL_SIZE`` (a
-                hardcoded constant; the chat-source-worker-lane
-                architecture does NOT take a chat-pool size kwarg
-                here — bumping it requires editing the constant and
-                rebuilding, same activation discipline as
-                ``WORKER_POOL_SIZE`` itself).
+            num_workers: Number of default-pool worker threads, or
+                ``None`` (default) to resolve from the boot-applied
+                ``manager.config.limits.worker_pool_size``. The chat
+                pool is always resolved from the boot-applied
+                ``manager.config.limits.chat_worker_pool_size``.
         """
         # Check feature flag from environment — the kill-switch.
         # Both pools gate on USE_WORKER_POOL=false; setting the flag
@@ -193,6 +200,20 @@ class PoolOrchestrator:
         if env_flag in ("false", "0", "no"):
             logger.info("Worker pool disabled (USE_WORKER_POOL=false)")
             return
+
+        # settings-worker-slots (D2) — resolve BOTH pool sizes ONCE from
+        # the boot-applied config. ``load_config()`` → boot apply
+        # (``apply_db_settings_overrides`` mutates Config in place) →
+        # ``InstanceManager(...)`` → this method, so the config values
+        # are already ladder-resolved (DB > env > yaml > default).
+        # Placed AFTER the kill-switch early return so a disabled boot
+        # performs no resolution side-effects (no pools, no boot line,
+        # no invoke-cap override).
+        limits = self._manager.config.limits
+        resolved_workers = (
+            num_workers if num_workers is not None else limits.worker_pool_size
+        )
+        resolved_chat = limits.chat_worker_pool_size
 
         # Local imports — keep module-load cheap and avoid
         # circular-import pressure (worker_pool, task_processor,
@@ -482,7 +503,7 @@ class PoolOrchestrator:
         # config.
         manager._worker_pool = WorkerPool(
             task_processor=manager._task_processor,
-            num_workers=num_workers,
+            num_workers=resolved_workers,
             timeout_minutes=svc.task_timeout_minutes,
             max_retries=svc.max_task_retries,
             retry_backoff_base=svc.task_retry_backoff_base,
@@ -497,6 +518,24 @@ class PoolOrchestrator:
             ),
         )
         manager._worker_pool.start()
+
+        # settings-worker-slots (D4) — derive the invoke semaphore cap from
+        # the RESOLVED default-pool size, right after default-pool
+        # construction (and BEFORE the chat lane). The override is computed
+        # from the SAME resolved value that sized the pool in this function,
+        # so the deadlock invariant (cap <= default-pool size - 1) holds by
+        # construction. The setter raises if the singleton already exists —
+        # a post-boot override would be a lie (loud failure, not silent drift).
+        #
+        # Documented acceptable edge (approver note N3): at
+        # ``resolved_workers == 1`` the ``max(1, ...)`` floor yields cap=1,
+        # one MORE than the ``pool - 1`` invariant (0) — a 1-worker pool has
+        # no free worker by construction. This is intentional and NOT
+        # "fixed": ``ge=1`` is the enforced floor, ``LIMITS_WORKER_POOL_SIZE
+        # >= 2`` is the practical floor (registry descriptions say so), and a
+        # cap of 0 would deadlock every invoke. Invariant vs floor reconciled
+        # here, once.
+        set_invoke_semaphore_cap(max(1, resolved_workers - 1))
 
         # Chat-source worker lane (chat-source-worker-lane, Phase 2
         # Task #2): construct the dedicated chat ``WorkerPool``
@@ -526,7 +565,7 @@ class PoolOrchestrator:
         # stop window (= fail-open restored, no stranding).
         manager._chat_worker_pool = WorkerPool(
             task_processor=manager._task_processor,
-            num_workers=CHAT_WORKER_POOL_SIZE,
+            num_workers=resolved_chat,
             timeout_minutes=svc.task_timeout_minutes,
             max_retries=svc.max_task_retries,
             retry_backoff_base=svc.task_retry_backoff_base,
@@ -564,7 +603,7 @@ class PoolOrchestrator:
         # ``tests/integration/test_chat_source_boot_line.py::test_chat_pool_started_substring_emitted``
         # + the SC#8 byte-exact literal).
         logger.info(
-            f"ChatSourceWorkerPool started: workers={CHAT_WORKER_POOL_SIZE}, "
+            f"ChatSourceWorkerPool started: workers={resolved_chat}, "
             f"prefixes={','.join(CHAT_SOURCE_PREFIXES)}"
         )
 

@@ -140,6 +140,19 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "secret_list",
     "secret_read_public",
     "secret_retire",
+    # settings-worker-slots P2 tools (2026-10-18) — created by
+    # create_settings_tools() factory
+    # (daemon/tools/settings_tools.py). Three factory-built tools
+    # behind the ``settings`` privileged category (#8 in
+    # ``PRIVILEGED_TOOL_CATEGORIES`` — septet → octet; ``secrets``
+    # joined 2026-10-17 before this entry). The ari + leader
+    # meta.json allow entries landed 2026-10-18 (P3); the category
+    # remains opt-in-only (NEVER default-granted). HONEST contract:
+    # the tools never claim liveness — every write reports
+    # ``applies_at: "next daemon restart"`` + ``live: false``.
+    "settings_get",
+    "settings_set",
+    "settings_clear",
     # scheduling tools (scheduled-tasks phase 2+4) — created by
     # create_scheduling_tools() factory (daemon/tools/scheduling.py).
     # Non-privileged category — granted per-agent via tools.allow
@@ -210,16 +223,19 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # is still exact-pinned below (now a quartet: ``ens-env`` joined per
 # the W4 leader decision, reviewer council 2026-10-02).
 #
-# SAME-PR RULE (D18/A14): the set is TRIPLE-pinned by exact-equality
-# asserts. Adding or removing a category REQUIRES updating ALL THREE
+# SAME-PR RULE (D18/A14): the set is FIVE-pin pinned by exact-equality
+# asserts. Adding or removing a category REQUIRES updating ALL FIVE
 # pins in the same commit:
 # ``tests/unit/tools/test_upgrade_registration.py``,
-# ``tests/unit/tools/test_attestation_registration.py``, and
-# ``tests/integration/test_maintenancer_spawn_resolves_tools.py``.
-# (Plus the integration sanity pin in
-# ``tests/integration/test_service_tool_flag_off_byte_identical.py``.)
-# Silent additions and silent removals (fail-open regressions) both
-# trip the pins.
+# ``tests/unit/tools/test_attestation_registration.py``,
+# ``tests/integration/test_maintenancer_spawn_resolves_tools.py``,
+# the integration sanity pin in
+# ``tests/integration/test_service_tool_flag_off_byte_identical.py``
+# (``test_privileged_category_set_is_pinned``), and
+# ``tests/unit/tools/test_secrets_registration.py:218`` (the
+# fifth exact-set pin — the originally-omitted one, added by the
+# iteration-002 council B2 correction). Silent additions and
+# silent removals (fail-open regressions) both trip the pins.
 PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
@@ -283,14 +299,43 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # (``daemon/tools/instance.py:6169``) AND the
     # ``resolve_tool_filter`` empty-allow branch
     # (``daemon/tools/instance.py:373``). NEVER default-granted
-    # — opt-in-only. SAME-PR triple-pin updates at
+    # — opt-in-only. SAME-PR FIVE-pin updates at
     # ``tests/unit/tools/test_upgrade_registration.py``,
     # ``tests/unit/tools/test_attestation_registration.py``,
     # ``tests/integration/test_maintenancer_spawn_resolves_tools.py``,
-    # and the integration sanity pin at
-    # ``tests/integration/test_service_tool_flag_off_byte_identical.py``
-    # are mandatory (the A14/D18 silent-additions-visible rule).
+    # the integration sanity pin at
+    # ``tests/integration/test_service_tool_flag_off_byte_identical.py``,
+    # and ``tests/unit/tools/test_secrets_registration.py:218``
+    # (the fifth exact-set pin — the originally-omitted one,
+    # added by the iteration-002 council B2 correction) are
+    # mandatory (the A14/D18 silent-additions-visible rule).
     "secrets",
+    # settings-worker-slots P2 (2026-10-18): ``settings`` is the
+    # daemon-runtime-settings tool category (#8 in
+    # PRIVILEGED_TOOL_CATEGORIES — septet → octet; ``secrets``
+    # joined 2026-10-17 making the count 7 before this entry).
+    # The category owns three factory-built tools
+    # (``settings_get`` / ``settings_set`` / ``settings_clear``)
+    # that read tier values and WRITE DB overrides for
+    # daemon-global managed keys (``limits.llm_concurrency`` /
+    # ``limits.worker_pool_size`` / ``limits.chat_worker_pool_size``)
+    # through the wired ``SettingsService``. Why privileged: the
+    # tools mutate daemon-global runtime state (pool sizes +
+    # LLM concurrency caps) and read tier values — the
+    # empty-allow inherit universe must NOT auto-grant them
+    # (R-SR16, same as every entry above). Structural
+    # enforcement is the standard pair: the
+    # ``_strip_privileged_category_tools`` default-deny strip
+    # (``daemon/tools/instance.py``) AND the
+    # ``resolve_tool_filter`` empty-allow branch. NEVER
+    # default-granted — opt-in-only; the ari + leader
+    # meta.json ``tools.allow`` entries landed 2026-10-18 (P3).
+    # The honest never-live contract
+    # (D5) is load-bearing: every write response states
+    # ``applies_at: "next daemon restart"`` + ``live: false``.
+    # SAME-PR pin updates at the FIVE files listed in the
+    # SAME-PR RULE comment above are mandatory.
+    "settings",
 })
 
 
@@ -811,6 +856,22 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # see ``daemon/tools/instance.py`` near the
     # ``create_ens_env_tools`` block for the parallel pattern.
     "secrets": "daemon.tools.secrets_tools",
+    # settings-worker-slots P2 (2026-10-18): the ``settings``
+    # category owns three factory-built tools
+    # (``settings_get`` / ``settings_set`` / ``settings_clear``)
+    # that read tier values and write DB overrides for the
+    # daemon-global managed keys through the wired
+    # ``SettingsService`` (router-owned DI global — the
+    # council-B3 option-(b) seam). Category is entry #8 in
+    # ``PRIVILEGED_TOOL_CATEGORIES`` (septet → octet; ``secrets``
+    # joined 2026-10-17 before this entry); opt-in only — the
+    # ari + leader ``tools.allow`` entries landed 2026-10-18 (P3).
+    # See ``daemon/tools/settings_tools.py`` for the honest
+    # never-live contract (D5). The list-extend in
+    # ``daemon/tools/instance.py`` (after the secrets block) is
+    # required — decorator-only registration is SILENTLY
+    # INVISIBLE.
+    "settings": "daemon.tools.settings_tools",
 }
 
 
@@ -1011,6 +1072,18 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "service_status",
     "service_stop",
     "set_instance_tunable",
+    # settings-worker-slots P2 (2026-10-18): three factory-built
+    # tools behind the ``settings`` privileged category. Same
+    # frozen-binary-fallback rationale as the ``secret_*`` block
+    # below — in PyInstaller-frozen binaries the source walker
+    # falls back to this static universe, so the validator never
+    # false-fails on a frozen install. Names match the actual
+    # tool NAMES exposed by
+    # ``daemon/tools/settings_tools.py:create_settings_tools``
+    # (flat snake_case convention).
+    "settings_clear",
+    "settings_get",
+    "settings_set",
     "shared_meta_kv",
     "skill_analyze",
     "skill_create",

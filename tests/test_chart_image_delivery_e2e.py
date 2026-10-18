@@ -1322,6 +1322,31 @@ class TestInstallerSkillHygiene:
 #     phase2-plan.md Seal-Trip Subsection. No
 #     .prompt-artifacts.sha256 regen (dispatcher.py is not an
 #     agent prompt artifact).
+#   - 2026-10-18 settings-worker-slots commission Phase 1 (worktree
+#     /home/nea/ensemble-src-wt-settings-worker-slots, branch
+#     feature/settings-worker-slots, base latest @ d0b475466):
+#     daemon/constants.py re-pinned 64c1dbe3336c0e5e4289a8bf44ed6731a3badd1f5989bc11c120ed5097ad4b9b
+#     → 9fb1f2c7304e81f92e27b15cbcc3e28a9ec71417ca306e44db0b04a96c520e38.
+#     Delta is EXACTLY this commission's three un-hardcode edits (D8):
+#     (a) WORKER_POOL_SIZE comment → "DEFAULT tier ONLY" mirror-note
+#     (constants now feed the LimitsConfig Field default, the runtime
+#     resolves DB > env > yaml > default at boot via managed key
+#     ``limits.worker_pool_size``); (b) the chat-lane comment block
+#     (:90-93) rewritten off "hardcoded, NO ENSEMBLE_* flags;
+#     activation = rebuild+restart" (became false once the managed key
+#     landed) to the same default-tier discipline for
+#     ``limits.chat_worker_pool_size``; (c) DELETE the dead
+#     ``LLM_CONCURRENCY`` constant (zero importers — verified; absent
+#     from the completeness set; a dead constant named like the managed
+#     key ``limits.llm_concurrency`` would invite a future agent to
+#     "fix" the semaphore by editing it). ZERO edits to any other
+#     sealed artifact. NOTE: daemon/constants.py was ALREADY stale at
+#     base (pinned 64c1dbe3…, actual 7026ed31…, last-touch c6f14a72c
+#     2026-10-12 — one of the 8 pre-existing red pins); this re-pin
+#     flips it red→green, leaving the 7 OTHER pre-existing stale pins
+#     (install-mermaid-cli.md, ari/workflow.md, 5 rule.md) untouched.
+#     Evidence pointer: Phase-1 scoped gate run (unit + integration +
+#     targeted seal) in the commission report.
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "870ec32faf071cc1478c0540690381ef46c0bd1ae6667163215845ad39992581",
@@ -1343,7 +1368,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # to this file still trips the tripwire.
     "daemon/sources/adapters/slack/adapter.py": "476ba0b5a17a297f652125ab9060af125ba3955d4b71e324e3de3bf177e1ef1e",
     "daemon/sources/adapters/telegram.py": "7e08882fc2fcc4291bed994ab992cb5afdc7a232a1444839f42da86fbfae063c",
-    "daemon/constants.py": "64c1dbe3336c0e5e4289a8bf44ed6731a3badd1f5989bc11c120ed5097ad4b9b",
+    "daemon/constants.py": "9fb1f2c7304e81f92e27b15cbcc3e28a9ec71417ca306e44db0b04a96c520e38",
     # Phase C — 20 agent canonical-home files
     "agents/approver/rule.md": "f8282f54a253540042874c1ed7690758aa2c9391a0568967fa427ef2f90b24f6",
     "agents/approver[v2]/rule.md": "f70d2a0b64332aab40445211437e8e29bb9860cb7996e9e09f28587427dfce3a",

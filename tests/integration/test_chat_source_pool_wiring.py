@@ -83,6 +83,36 @@ pytestmark = pytest.mark.integration
 chat_lane_flag_reset = chat_lane_flag_reset_fixture()
 
 
+@pytest.fixture(autouse=True)
+def _reset_invoke_semaphore_and_cap():
+    """F3 — reset the singleton invoke semaphore + cap override
+    before/after each test.
+
+    ``PoolOrchestrator.setup`` now calls
+    ``daemon.utils.set_invoke_semaphore_cap(...)``, which RAISES if the
+    singleton already exists (a post-boot override is a lie). The
+    module-global ``daemon.utils._invoke_semaphore`` is NOT reset across
+    tests, so a prior test that created it would make a later pool boot
+    raise order-dependently. This fixture guarantees a fresh module
+    state for every test in this module.
+
+    Reason this fixture exists (approver note N1): the phase-1 gate also
+    runs modules that boot pools with NON-default sizes —
+    ``tests/integration/test_daemon_startup_smoke.py:47``
+    (``setup_worker_pool(num_workers=0)``) and
+    ``tests/integration/test_wc_wake_pure_hang.py:411``
+    (``setup_worker_pool(num_workers=1)``) — so a leaked semaphore from
+    any prior pool boot (or any invoke-cap test) must not poison these.
+    """
+    import daemon.utils as utils_module
+
+    utils_module._invoke_semaphore = None
+    utils_module._invoke_cap_override = None
+    yield
+    utils_module._invoke_semaphore = None
+    utils_module._invoke_cap_override = None
+
+
 # ---------------------------------------------------------------------------
 # Engine fixture — file-backed SQLite, NullPool, WAL (chat-source F7)
 # ---------------------------------------------------------------------------
@@ -136,6 +166,20 @@ class TestBothPoolsConstructed:
                 assert worker_ids == [
                     f"worker-{i}" for i in range(WORKER_POOL_SIZE)
                 ]
+
+    def test_default_pool_resolved_from_config(self, engine):
+        """F4 / row 9 — resolved-path sibling: inject
+        ``manager.config.limits.worker_pool_size = 8`` on the CONFIG OBJECT
+        (plain mutable BaseSettings; NOT an env var — an env var alone could
+        pass vacuously through pydantic's env tier) BEFORE ``setup()``, then
+        call ``setup_worker_pool()`` with NO kwarg (resolved path) → 8
+        default-pool workers."""
+        with wire_manager_only(engine) as manager:
+            manager.config.limits.worker_pool_size = 8
+            manager.setup_worker_pool()  # no kwarg → resolve from config
+
+            assert manager._worker_pool is not None
+            assert len(manager._worker_pool._workers) == 8
 
     def test_chat_pool_present_with_chat_size(
         self, engine, caplog: pytest.LogCaptureFixture

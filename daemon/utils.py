@@ -586,18 +586,47 @@ def validate_agent_id(agent_id: str) -> tuple[str, Path]:
 # ── Agent-as-Tool: Synchronous Invoke ────────────────────────────────────────
 
 _invoke_semaphore: asyncio.Semaphore | None = None
+# settings-worker-slots (D4) — explicit boot-set cap override. ``None``
+# means "fall back to the constant-derived default". Set ONCE by
+# ``PoolOrchestrator.setup`` right after the default pool is constructed,
+# from the RESOLVED pool size, so the cap tracks a config-resolved pool
+# instead of a frozen constant. Must be set BEFORE first use (the setter
+# refuses a late override).
+_invoke_cap_override: int | None = None
+
+
+def set_invoke_semaphore_cap(cap: int) -> None:
+    """Set the invoke cap BEFORE first use (boot seam: PoolOrchestrator.setup).
+
+    Raises ``RuntimeError`` if the singleton already exists — a post-boot
+    override would be a lie (the running semaphore cannot be resized).
+    """
+    global _invoke_cap_override
+    if _invoke_semaphore is not None:
+        raise RuntimeError(
+            "invoke semaphore already created; cap override must precede "
+            "first use"
+        )
+    _invoke_cap_override = cap
 
 
 def _get_invoke_semaphore() -> asyncio.Semaphore:
     """Get or create the singleton semaphore for invoke_agent_and_wait.
     
     Lazy-initialized because asyncio.Semaphore needs a running event loop.
-    Cap is WORKER_POOL_SIZE - 1 (minimum 1) to guarantee a free worker.
+    Cap is the boot-set override (``max(1, resolved_default_workers - 1)``,
+    settings-worker-slots D4) when present, else ``WORKER_POOL_SIZE - 1``
+    (minimum 1) — the constant fallback path used by tests / no-pool boots.
+    Either way the cap guarantees a free worker.
     """
     global _invoke_semaphore
     if _invoke_semaphore is None:
         from .constants import WORKER_POOL_SIZE
-        cap = max(1, WORKER_POOL_SIZE - 1)
+        cap = (
+            _invoke_cap_override
+            if _invoke_cap_override is not None
+            else max(1, WORKER_POOL_SIZE - 1)
+        )
         _invoke_semaphore = asyncio.Semaphore(cap)
         logger_utils.info(f"invoke_agent_and_wait: concurrency cap = {cap}")
     return _invoke_semaphore
@@ -636,8 +665,11 @@ async def invoke_agent_and_wait(
     This is the primary mechanism for synchronous agent invocation.
     Used by knowledge tools to implement explore().
 
-    DEADLOCK PREVENTION: Uses an asyncio.Semaphore capped at WORKER_POOL_SIZE - 1
-    to ensure at least 1 worker thread remains free to process the spawned agent.
+    DEADLOCK PREVENTION: Uses an asyncio.Semaphore capped at the resolved
+    default-pool size - 1 (boot-set via ``set_invoke_semaphore_cap`` from
+    ``PoolOrchestrator.setup``; falls back to ``WORKER_POOL_SIZE - 1`` when
+    no pool booted) to ensure at least 1 worker thread remains free to
+    process the spawned agent.
 
     Args:
         manager: The InstanceManager instance.

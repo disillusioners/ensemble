@@ -152,7 +152,7 @@ from .cancellation import (
 )
 from .request_registry import ActiveRequestRegistry
 from .compaction import ContextCompactor
-from .constants import ALIVE_INSTANCE_STATUSES, WORKER_POOL_SIZE
+from .constants import ALIVE_INSTANCE_STATUSES
 from .write_pause_guard import WriteGuardSession, WritePauseGuard
 
 # Worker pool imports (lazy import to avoid circular dependency)
@@ -8384,25 +8384,34 @@ class InstanceManager:
 
     def setup_worker_pool(
         self,
-        num_workers: int = WORKER_POOL_SIZE,
+        num_workers: int | None = None,
     ) -> None:
         """Forward to :meth:`PoolOrchestrator.setup` (chat-lane-followups Phase B).
 
         Phase B extraction: the body of this method moved to
         :class:`daemon.services.pool_orchestrator.PoolOrchestrator.setup`
         to slim ``manager.py`` from the 11.6k-line monolith. The
-        signature is identical — every caller (``daemon/api.py:369``
-        is the only production caller; ``tests/integration/
-        chat_source_harness.py:371`` is the only test caller) keeps
-        working without edits. See the orchestrator module's
-        docstring for the full extraction narrative.
+        signature is identical — every caller keeps working without
+        edits. The ONLY production caller is ``daemon/api.py:608``
+        (passes no args → resolves from boot-applied config). All
+        PRE-EXISTING test call sites (``tests/integration/
+        chat_source_harness.py`` and the ``test_chat_source_*``
+        files) pass an explicit ``num_workers`` → byte-identical
+        behavior; the F4 resolved-path tests
+        (``test_chat_source_pool_wiring.py``,
+        ``test_messages_ref_path_worker_pool.py``,
+        ``test_chat_source_boot_line.py``) intentionally pass none
+        to exercise that no-kwarg path. See the orchestrator
+        module's docstring for the full extraction narrative.
 
         Args:
             num_workers: Number of default-pool worker threads
-                (forwarded to ``PoolOrchestrator.setup``). The chat
-                pool is sized by ``CHAT_WORKER_POOL_SIZE`` (a hard
-                constant — same activation discipline as
-                ``WORKER_POOL_SIZE``).
+                (forwarded to ``PoolOrchestrator.setup``). ``None``
+                (default) means "resolve from the boot-applied config"
+                — ``manager.config.limits.worker_pool_size``. The chat
+                pool is always resolved from
+                ``manager.config.limits.chat_worker_pool_size`` (no
+                chat-pool size kwarg; settings-worker-slots, D2).
         """
         # Facade-forwarding discipline: ``setup_worker_pool``'s
         # signature here is unchanged, so this is a strict no-op
