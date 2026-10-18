@@ -116,9 +116,17 @@ DEFAULT_SAMPLE_TOLERANCE_S = 30.0
 
 _LIFECYCLE_KIND = "instance_lifecycle"
 _NAIVE_FMT = "%Y-%m-%d %H:%M:%S.%f"
-#: Events older than this are not fetched; the CURRENT-status fallback
-#: (which is strictly newer information) decides those instances
-#: instead. 14 d covers the 168 h max window plus a week of pre-history.
+#: FALLBACK fetch bound — used ONLY when no candidate carries a
+#: parseable registry ``created_at`` (the normal lower bound is the
+#: oldest candidate's creation, which reaches a long-lived instance's
+#: FULL history; this fixed lookback does not). Residual envelope,
+#: stated honestly: for such candidates a latest pre-T event older
+#: than this is not fetched and the CURRENT-status fallback decides —
+#: and the fallback is CURRENT information, not at-T truth: it can
+#: silently EXCLUDE a now-terminal long-lived instance that was alive
+#: at T (false negative), or report ALIVE an instance that was already
+#: terminal at T and only revived afterwards (false positive). 14 d
+#: covers the 168 h max window plus a week of pre-history.
 _EVENT_LOOKBACK = timedelta(days=14)
 #: Max real-world UTC offset is ±14 h — the aware-string prefilter on
 #: ``event.created_at`` is widened by this pad on BOTH sides so
@@ -263,10 +271,17 @@ def instances_alive_at(
     created after ``at`` are excluded via the created-after-T guard),
     so the query set is bounded by the registry, not by event history.
     For each candidate the LATEST ``instance_lifecycle`` event at or
-    before ``at`` decides; with no event coverage the CURRENT status
-    snapshot decides. Both sources are labelled in the returned rows
-    (``source``: ``"event"`` / ``"status-snapshot"``) — the label is
-    internal (the FE-frozen wire carries instance_id/agent/status
+    before ``at`` decides — fetched over the candidate's FULL history
+    (the fetch's lower bound is the oldest candidate's own creation, so
+    a long-lived instance's at-T evidence is never aged out of the
+    fetch range). With no event coverage the CURRENT status snapshot
+    decides; that fallback is CURRENT information, not at-T truth (see
+    :data:`_EVENT_LOOKBACK` for its honestly-stated failure envelope)
+    and is reached only for genuinely event-less candidates — or, when
+    the candidate's ``created_at`` is unparseable, for events older
+    than the fallback lookback. Both sources are labelled in the
+    returned rows (``source``: ``"event"`` / ``"status-snapshot"``) —
+    the label is internal (the FE-frozen wire carries instance_id/agent/status
     only) and is what P4's contributor ranking consumes.
 
     Semantics note: an instance that was alive at ``at`` but
@@ -278,10 +293,12 @@ def instances_alive_at(
         reg_rows = conn.execute(_REGISTRY_SQL).fetchall()
 
     candidates: list[dict] = []
+    created_by_iid: dict[str, Optional[datetime]] = {}
     for iid, agent_id, agent_name, status, created_at in reg_rows:
         created = _read_dt(created_at)
         if created is not None and created > at:
             continue  # did not exist at T
+        created_by_iid[iid] = created
         candidates.append(
             {
                 "instance_id": iid,
@@ -293,10 +310,26 @@ def instances_alive_at(
         return []
 
     # Latest lifecycle event ≤ at, per instance (padded range prefilter
-    # + exact Python filter — see _LIFECYCLE_SQL / rule 3).
-    latest: dict[str, tuple[Optional[datetime], Any]] = {}
-    lo = _aware_bind(at - _EVENT_LOOKBACK - _TZ_PAD)
+    # + exact Python filter — see _LIFECYCLE_SQL / rule 3). The lower
+    # bound is anchored at the OLDEST candidate's own creation — an
+    # instance's lifecycle history cannot predate its row — so a
+    # long-lived instance's full at-T evidence is always inside the
+    # fetch range. (A fixed lookback here silently aged that evidence
+    # out: a now-terminal long-lived instance then fell to the
+    # CURRENT-status fallback and was wrongly excluded despite being
+    # alive at T.) Lifecycle rows are transition-only, so the widened
+    # fetch stays small per instance and the (instance_id, created_at)
+    # seek is unchanged.
+    known_created = [c for c in created_by_iid.values() if c is not None]
+    if known_created:
+        lo = _aware_bind(min(known_created) - _TZ_PAD)
+    else:
+        # No parseable creation on ANY candidate — keep the fetch
+        # bounded by the fallback lookback (see _EVENT_LOOKBACK for the
+        # honestly-stated residual envelope).
+        lo = _aware_bind(at - _EVENT_LOOKBACK - _TZ_PAD)
     hi = _aware_bind(at + _TZ_PAD)
+    latest: dict[str, tuple[Optional[datetime], Any]] = {}
     ids = [c["instance_id"] for c in candidates]
     with engine.connect() as conn:
         for i in range(0, len(ids), _CHUNK):

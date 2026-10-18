@@ -298,6 +298,31 @@ class TestJ1AliveAtT:
         assert [r["instance_id"] for r in alive] == ["i-d"]
         assert alive[0]["status"] == "running"  # the AT-T status, not the current one
 
+    def test_longlived_now_terminal_still_alive_at_T(self, engine):
+        """Review #1 regression: a long-lived instance whose latest
+        pre-T lifecycle event predates a fixed-14d lookback but which
+        is NOW terminal must still be reported alive at T — the event
+        fetch's lower bound is the candidate's own creation, so the
+        full at-T evidence is never aged out of range. (Under the old
+        fixed lookback the ``running`` event was never fetched, the
+        CURRENT-status fallback decided, and the instance was silently
+        excluded despite being alive at T.)"""
+        seed_instance(engine, "i-old", status="terminated",
+                      created_at="2026-09-20T00:30:00+00:00")  # ~28 d before T
+        seed_event(engine, "i-old", "running",
+                   "2026-09-20 00:30:30.000000+00:00")  # >14 d before T
+        seed_event(engine, "i-old", "terminated",
+                   "2026-10-18 02:30:00.000000+00:00")  # AFTER T
+        alive = rt.instances_alive_at(engine, T())
+        assert [(r["instance_id"], r["source"], r["status"]) for r in alive] == [
+            ("i-old", "event", "running")
+        ]
+        # the user-visible surface answers the same way
+        view = rt.build_window_view(
+            engine, "2026-10-18T01:00:00", "2026-10-18T02:00:00"
+        )
+        assert [r["instance_id"] for r in view["instances_alive"]] == ["i-old"]
+
     def test_terminal_now_without_preT_event_excluded(self, engine):
         """No lifecycle evidence ≤ T + terminal now ⇒ not claimed alive
         (cannot distinguish terminated-before-T from after-T)."""
