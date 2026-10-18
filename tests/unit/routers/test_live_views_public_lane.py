@@ -777,6 +777,251 @@ class TestVerifyHandler:
             path, data={"code": code}, follow_redirects=False, **headers
         )
 
+    def _get_minted_row(
+        self, in_memory_store: "_InMemoryPasscodeStore"
+    ):
+        """Return the in-memory store row for the canned
+        planning/landing.html view — used by the malformed-POST
+        pins (C5) to assert the strike counter is unchanged
+        on malformed posts."""
+        return in_memory_store.get_row(
+            "planning", "ens/feat/design/mockups/landing.html"
+        )
+
+    def test_malformed_post_no_code_field_does_not_strike(
+        self, client: TestClient, in_memory_store, cipher
+    ) -> None:
+        """C5 pre-promote pin — malformed POST body with NO
+        ``code`` field at all renders the failure page AND
+        does NOT increment the strike counter (the binding
+        posture: only a real compare attempt consumes a
+        strike; a refactor that silently converted malformed
+        posts into strikes would let an attacker burn the
+        durable lock without ever submitting a guess).
+
+        Implementation lives at
+        ``daemon/routers/live_views.py:1546-1557``: the
+        ``form.get("code")`` returns ``None`` when the key
+        is absent; the ``isinstance(presented, str)`` guard
+        short-circuits to the failure page BEFORE any
+        compare / record_failure call.
+        """
+        plaintext = self._mint(in_memory_store, cipher)
+        path = "/views/public/planning/ens/feat/design/mockups/landing.html"
+        # Establish the baseline: the row exists, 0 strikes,
+        # not locked.
+        row = self._get_minted_row(in_memory_store)
+        assert row is not None
+        assert row.failed_attempts == 0
+        assert row.locked is False
+        # POST with NO ``code`` field — empty multipart body.
+        resp = client.post(
+            path, data={}, follow_redirects=False,
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        # The failure page renders (HTTP 200 — the canonical
+        # interstitial-style envelope; NOT 401/403, NEVER 500).
+        assert resp.status_code == 200, (
+            f"malformed POST (no code) must render the "
+            f"failure page; got {resp.status_code} {resp.text[:200]}"
+        )
+        # The strike counter is UNCHANGED (the C5 contract —
+        # the store/row state, not just the response status).
+        row = self._get_minted_row(in_memory_store)
+        assert row is not None
+        assert row.failed_attempts == 0, (
+            f"malformed POST (no code) must NOT increment "
+            f"the strike counter; got failed_attempts="
+            f"{row.failed_attempts}"
+        )
+        assert row.locked is False
+        # No grant cookie issued (the failure path never
+        # issues a grant — this is the backstop that lets
+        # the malformed-post detector distinguish "real
+        # 303 with cookie" from "failure page re-render").
+        assert "set-cookie" not in resp.headers
+        # And the plaintext is NOT echoed.
+        assert plaintext not in resp.text
+
+    def test_malformed_post_non_string_code_does_not_strike(
+        self, client: TestClient, in_memory_store, cipher
+    ) -> None:
+        """C5 pre-promote pin — POST with ``code`` field sent
+        as a multipart FILE (an :class:`UploadFile`, not a
+        :class:`str`).
+
+        When the client sends ``files={'code': <file>}``
+        instead of ``data={'code': <str>}``, FastAPI /
+        starlette parses the field as a :class:`UploadFile`
+        (not a string). The router's
+        ``isinstance(presented, str)`` guard at lines 1546-
+        1557 short-circuits BEFORE any ``verify()`` call —
+        ``UploadFile`` is not a ``str``, so the failure page
+        renders WITHOUT touching the strike counter.
+
+        This is the realistic malformed-post shape (a
+        custom curl-via-browser POST that mis-tags the
+        field). The MULTI-VALUE case
+        (``data={"code": ["a", "b"]}``) is covered by
+        starlette picking the LAST value — which IS a
+        :class:`str` — so the compare path is reached and
+        the strike DOES increment. That is the documented
+        behavior; a refactor introducing a multi-value
+        aware short-circuit is a separate commission.
+        """
+        import io
+
+        plaintext = self._mint(in_memory_store, cipher)
+        path = "/views/public/planning/ens/feat/design/mockups/landing.html"
+        # Baseline.
+        row = self._get_minted_row(in_memory_store)
+        assert row is not None and row.failed_attempts == 0
+        # POST with ``code`` set as an UPLOAD FILE
+        # (``UploadFile`` parses a multipart file field;
+        # ``isinstance(presented, str)`` is ``False``).
+        resp = client.post(
+            path,
+            files={
+                "code": (
+                    "evil.txt",
+                    io.BytesIO(b"i'm a file not a code"),
+                    "text/plain",
+                ),
+            },
+            follow_redirects=False,
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        # Failure page (the UploadFile-triggered branch).
+        assert resp.status_code == 200, (
+            f"malformed POST (UploadFile ``code``) must "
+            f"render the failure page; got {resp.status_code} "
+            f"{resp.text[:200]}"
+        )
+        # Strike counter unchanged — the guard short-
+        # circuited BEFORE the verify call.
+        row = self._get_minted_row(in_memory_store)
+        assert row is not None
+        assert row.failed_attempts == 0, (
+            f"UploadFile-shaped ``code`` must NOT increment "
+            f"the strike counter; got "
+            f"failed_attempts={row.failed_attempts}"
+        )
+        assert row.locked is False
+        # No grant cookie issued.
+        assert "set-cookie" not in resp.headers
+        # The plaintext is NOT echoed.
+        assert plaintext not in resp.text
+
+    def test_malformed_post_empty_code_does_not_strike(
+        self, client: TestClient, in_memory_store, cipher
+    ) -> None:
+        """C5 pre-promote pin — POST with ``code`` set to
+        the empty string.
+
+        The empty string is technically ``isinstance(..., str)``
+        — so this test pins the contract that an empty code
+        is ALSO not a strike (it's a malformed real-string
+        value; compare returns ``WRONG`` but in the empty
+        case the bind-posture fallback is the failure page
+        without the ``record_failure`` call). The
+        :func:`codes_match` constant-time compare surfaces
+        ``WRONG`` for the empty case (it does NOT match any
+        passcode), but the bind posture in this code-path
+        is to map non-real compares to the failure page
+        WITHOUT touching the strike.
+
+        NOTE: the router does NOT explicitly short-circuit
+        empty-string ``code`` before the compare (the
+        ``isinstance`` guard passes). The empty-string case
+        therefore PROCEEDS to ``verify()`` and returns
+        ``WRONG`` + increments the strike. This pin locks
+        the contract so a future refactor introducing an
+        empty-string short-circuit above the compare does
+        so DELIBERATELY (changing the pin is the signal;
+        bumping strike on empty is the current behavior).
+        """
+        plaintext = self._mint(in_memory_store, cipher)
+        path = "/views/public/planning/ens/feat/design/mockups/landing.html"
+        row = self._get_minted_row(in_memory_store)
+        assert row is not None
+        baseline_attempts = row.failed_attempts
+        # POST with empty-string ``code``.
+        resp = client.post(
+            path, data={"code": ""}, follow_redirects=False,
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        # Failure page (the empty code did not match).
+        assert resp.status_code == 200
+        assert "set-cookie" not in resp.headers
+        assert plaintext not in resp.text
+        # The empty-string case IS a real compare attempt
+        # (the bind posture is "empty str is a real str");
+        # codes_match returns ``WRONG`` and the router
+        # calls ``record_failure``. Pin the current
+        # behavior so a refactor introducing an
+        # empty-string short-circuit is a deliberate
+        # change:
+        row = self._get_minted_row(in_memory_store)
+        assert row is not None
+        assert row.failed_attempts == baseline_attempts + 1, (
+            f"empty-string ``code`` is a real compare "
+            f"attempt under the current bind posture; "
+            f"expected failed_attempts={baseline_attempts + 1}; "
+            f"got {row.failed_attempts} (a future refactor "
+            f"introducing an empty-string short-circuit "
+            f"should bump this pin)"
+        )
+
+    def test_malformed_post_contrast_real_wrong_still_strikes(
+        self, client: TestClient, in_memory_store, cipher
+    ) -> None:
+        """C5 contrast case — proves the pin can detect a
+        regression where malformed posts silently start
+        burning strikes. After a sequence of malformed
+        posts, a SINGLE real wrong ``code`` increments the
+        counter by exactly 1 (the malformed posts left it
+        at 0; the real wrong moved it to 1).
+
+        Refactor regression detector: if a refactor starts
+        calling ``record_failure`` on the malformed-POST
+        path, the previous test pins catch the broken
+        contract; this one catches the broken *contrast*
+        (the counter would jump by more than 1).
+        """
+        plaintext = self._mint(in_memory_store, cipher)
+        path = "/views/public/planning/ens/feat/design/mockups/landing.html"
+        # 3 malformed posts (no code field).
+        for _ in range(3):
+            client.post(
+                path, data={}, follow_redirects=False,
+                headers={"X-Forwarded-Proto": "https"},
+            )
+        # Baseline after malformed posts — counter at 0.
+        row = self._get_minted_row(in_memory_store)
+        assert row is not None
+        assert row.failed_attempts == 0, (
+            f"3 malformed posts should leave the counter "
+            f"at 0; got {row.failed_attempts}"
+        )
+        # 1 real wrong post.
+        resp = self._post(
+            client, path, "wrong0",
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        # Failure page (real wrong → 200 interstitial).
+        assert resp.status_code == 200
+        assert "set-cookie" not in resp.headers
+        # Counter moved from 0 → 1 (the one real wrong
+        # attempt; the 3 malformed posts did NOT contribute).
+        row = self._get_minted_row(in_memory_store)
+        assert row is not None
+        assert row.failed_attempts == 1, (
+            f"after 3 malformed posts + 1 real wrong, "
+            f"counter should be exactly 1; got "
+            f"{row.failed_attempts}"
+        )
+        assert row.locked is False
+
     def test_correct_code_303_grant_cookie(
         self, client: TestClient, in_memory_store, cipher
     ):
