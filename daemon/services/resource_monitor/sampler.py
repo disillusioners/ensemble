@@ -628,6 +628,24 @@ class Sampler:
                     return os.path.basename(agent_dir.rstrip("/")) or None
             return None
 
+        def _status_of(iid: str) -> Optional[str]:
+            # P3 T2 status seam — the instance's status AT SAMPLE TIME
+            # (§2.6 rule: write the observed snapshot, never re-derive
+            # aliveness later). The sampler has NO DB access on the
+            # tick (D5 self-cost) and the DB registry value is not in
+            # any injected provider, so the snapshot is the honest
+            # two-state derivation over the maps this tick already
+            # holds: "running" = an active graph task exists;
+            # "idle" = graph cached without an active task (includes
+            # cached paused/completed instances — an acknowledged
+            # approximation); None = charge-only presence (status
+            # genuinely unknown at sample time — never guessed).
+            if iid in graph_tasks:
+                return "running"
+            if iid in instances:
+                return "idle"
+            return None
+
         def _row_for(iid: str) -> dict:
             rec = snap_all.get(iid) or {}
             charged = int(rec.get("charged_bytes") or 0)
@@ -665,7 +683,7 @@ class Sampler:
             return {
                 "instance_id": iid,
                 "agent_id": _agent_of(iid),
-                "status": None,  # sample-time snapshot — P3 seam, None for now
+                "status": _status_of(iid),  # sample-time snapshot (P3 seam)
                 "scan_kind": scan_kind,
                 "charged_bytes": charged,
                 "deep_bytes": deep if deep_scanned else None,
@@ -703,6 +721,7 @@ class Sampler:
                 {
                     "instance_id": OVERFLOW_SENTINEL,
                     "agent_id": None,
+                    # Aggregate pseudo-instance — no single status.
                     "status": None,
                     "scan_kind": "counter",
                     "charged_bytes": overflow_charged,

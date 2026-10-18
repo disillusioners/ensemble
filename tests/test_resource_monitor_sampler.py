@@ -986,3 +986,103 @@ class TestAttributionIntegration:
                 text("SELECT COUNT(*) FROM resource_instance_sample")
             ).scalar()
             assert n >= 2
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# P3 — T2 ``resource_instance_sample.status`` seam (sample-time snapshot)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestT2StatusSeam:
+    """The sampler writes the instance's status AT SAMPLE TIME (§2.6).
+
+    Two honest derivations over the maps the tick already holds (no DB
+    read on the tick — D5): ``running`` = active graph task, ``idle`` =
+    cached graph without an active task, ``None`` = charge-only
+    (status genuinely unknown — never guessed). The overflow sentinel
+    row is an aggregate pseudo-instance: ``None``.
+    """
+
+    def _sampler(self, tree, *, graph_cache=None, graph_tasks=None):
+        proc, cg_root = tree
+        ring = TierRing(tier="raw", maxlen=64)
+        instance_ring = TierRing(tier="instance", maxlen=128)
+        s = Sampler(
+            sample_seconds=30,
+            self_cpu_budget_pct=1.0,
+            self_rss_budget_mb=50,
+            detail_level="auto",
+            proc_root=proc,
+            cgroup_root=cg_root,
+            ring=ring,
+            instance_ring=instance_ring,
+            instance_cap=64,
+            graph_cache_provider=(
+                (lambda: graph_cache) if graph_cache is not None else None
+            ),
+            graph_tasks_provider=(
+                (lambda: graph_tasks) if graph_tasks is not None else None
+            ),
+        )
+        return s, instance_ring
+
+    def test_running_when_active_graph_task(self, tree, charge_env):
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append("i-run", {"payload": "x" * 32})
+        s, inst_ring = self._sampler(
+            tree,
+            graph_cache={"i-run": (object(), "/agents/dev")},
+            graph_tasks={"i-run": object()},
+        )
+        s.run_once()
+        rows = {r["instance_id"]: r for r in inst_ring.snapshot()}
+        assert rows["i-run"]["status"] == "running"
+
+    def test_idle_when_cached_without_task(self, tree, charge_env):
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append("i-idle", {"payload": "x" * 32})
+        s, inst_ring = self._sampler(
+            tree,
+            graph_cache={"i-idle": (object(), "/agents/dev")},
+            graph_tasks={},
+        )
+        s.run_once()
+        rows = {r["instance_id"]: r for r in inst_ring.snapshot()}
+        assert rows["i-idle"]["status"] == "idle"
+
+    def test_none_for_charge_only_unknown(self, tree, charge_env):
+        """Charge-only presence ⇒ status genuinely unknown ⇒ None."""
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append("i-ghost", {"payload": "x" * 32})
+        s, inst_ring = self._sampler(tree)  # no providers injected
+        s.run_once()
+        rows = {r["instance_id"]: r for r in inst_ring.snapshot()}
+        assert rows["i-ghost"]["status"] is None
+
+    def test_overflow_sentinel_status_none(self, tree, charge_env):
+        charge_mod.set_enabled(True)
+        for n in range(70):
+            charge_mod.note_message_append(f"i-{n:02d}", {"payload": "x" * (10 * n)})
+        s, inst_ring = self._sampler(
+            tree,
+            graph_cache={f"i-{n:02d}": (object(), "/agents/dev") for n in range(70)},
+        )
+        s.run_once()
+        rows = inst_ring.snapshot()
+        sentinels = [r for r in rows if r["instance_id"] == OVERFLOW_SENTINEL]
+        assert len(sentinels) == 1 and sentinels[0]["status"] is None
+
+    def test_status_key_within_allowed_t2_keys(self, tree, charge_env):
+        """The seam rides the EXISTING D14 allow-list (``status`` was
+        reserved at P1); the belt-and-braces tripwire must stay quiet."""
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append("i-run", {"payload": "x" * 32})
+        s, inst_ring = self._sampler(
+            tree,
+            graph_cache={"i-run": (object(), "/agents/dev")},
+            graph_tasks={"i-run": object()},
+        )
+        s.run_once()  # raises inside if a row carried a non-allowed key
+        assert "status" in ALLOWED_T2_ROW_KEYS
+        rows = inst_ring.snapshot()
+        assert all(set(r) <= ALLOWED_T2_ROW_KEYS for r in rows)
