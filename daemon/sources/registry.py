@@ -777,9 +777,41 @@ class SourceRegistry:
                 await asyncio.to_thread(self._source_repo.update_source_status, source_id, SourceStatus.RUNNING.value)
                 logger.info(f"Adapter running: {source_id}")
                 
-                # Record success and reset backoff
-                last_success_time = time.monotonic()
-                backoff = 2.0
+                # Record this run's start and conditionally forgive backoff.
+                #
+                # Defect fixed 2026-10-18 (critical note c6ae6582, commission
+                # item O4 Part A): this reset used to be UNCONDITIONAL, which
+                # pinned the retry cadence at ~2-5s during a sustained outage.
+                # ``start()`` succeeds almost instantly even when the upstream
+                # is down (the adapter merely reports RUNNING); the child then
+                # fails a health check seconds later and crashes. Because every
+                # successful START zeroed ``backoff``, the crash handler's own
+                # conditional reset below (>= success_threshold) could never
+                # accumulate a growing delay: backoff oscillated
+                # 2.0 -> 5.0 -> 2.0 -> 5.0 forever — the live
+                # plane/computer-use restart storm.
+                #
+                # Correct semantics: only a run that actually LIVED earns the
+                # reset. A start-then-immediate-death keeps the accumulated
+                # backoff, so repeated short crashes produce a growing retry
+                # cadence up to ``max_backoff``. NOTE: backoff is
+                # start-coupled (this site), NOT message-coupled —
+                # ``last_success_time`` never appears in ``_handle_message``.
+                #
+                # ``last_success_time`` doubles as THIS run's start timestamp;
+                # the crash handler below reuses it to measure the crashed
+                # run's duration (that conditional reset is correct as-is and
+                # unchanged).
+                now = time.monotonic()
+                if last_success_time > 0:
+                    prior_run_elapsed = now - last_success_time
+                    if prior_run_elapsed >= success_threshold:
+                        logger.info(
+                            f"Resetting backoff for {source_id} after "
+                            f"{prior_run_elapsed:.1f}s successful run"
+                        )
+                        backoff = 2.0
+                last_success_time = now
                 
                 # Keep the adapter running - wait until stopped or error
                 while self._running.get(source_id, False):
