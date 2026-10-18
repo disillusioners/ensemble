@@ -240,7 +240,16 @@ class McpConnectionManager:
             args=config.args,
             env=resolved_env,
         )
-        streams_cm = TaskScopedStdioClient(server_params)
+        # D5 — stamp seam. Pass the owning instance + server name so
+        # the MCP child registrations carry the right identity. The
+        # stdio_wrapper scans /proc after the streams are ready and
+        # registers each spawned pid with kind='mcp_child'; on close
+        # the same pids are marked exited.
+        streams_cm = TaskScopedStdioClient(
+            server_params,
+            instance_id=instance_id,
+            server_name=server_name,
+        )
         try:
             async with asyncio.timeout(timeout):
                 read_stream, write_stream = await streams_cm.__aenter__()
@@ -518,7 +527,15 @@ class McpConnectionManager:
             args=config.args,
             env=resolved_env,
         )
-        streams_cm = TaskScopedStdioClient(server_params)
+        # D5 — test sessions have no owning instance (connectivity
+        # probe only); the MCP child stamp still fires with
+        # instance_id=None (D11 NULLABLE) so a leaked test child is
+        # visible to the registry.
+        streams_cm = TaskScopedStdioClient(
+            server_params,
+            instance_id=None,
+            server_name="<test>",
+        )
         return await self._create_test_session_from_streams(streams_cm, timeout, is_streamable_http=False)
 
     async def _create_test_sse_session(
