@@ -19,6 +19,9 @@ from ._tool_registry import register_tool_category
 # ``secret_service`` / ``secret_resolver`` / ``kms_resolver`` do not
 # reach back into ``daemon.tools``.
 from daemon.services.kms_resolver import resolve_env as _kms_resolve_env
+from daemon.services.secret_persistence_scrub import (
+    get_process_secret_service as _get_process_secret_service,
+)
 from daemon.services.secret_resolver import (
     resolve_secret_markers as _resolve_secret_markers,
 )
@@ -144,37 +147,6 @@ def get_bash_process_registry() -> BashProcessRegistry:
 # child-NOT-spawned guarantee instead of a literal
 # ``__ENS_SECRET__…__`` leaking into a subprocess env.
 #
-# Service discovery mirrors the ``get_process_scrubber()`` pattern
-# (``secret_persistence_scrub.py``): the manager constructs ONE
-# SecretService per process and its ``__init__`` self-registers with
-# the scrub module; the seams read it LAZILY at call time. No
-# import-time side effects (design §0) — ``None`` service +
-# marker-shaped value raises the typed
-# ``secret_resolver_store_unavailable`` envelope (fail-closed;
-# design §3.2), never a broken turn.
-def _get_process_secret_service():
-    """Return the process-wide :class:`SecretService` or ``None``.
-
-    Lazy-import + registry read ONLY — no construction, no DB hit,
-    no side effects. ``None`` before the manager wires the service
-    (secret-free agents; design §0).
-    """
-    try:
-        from daemon.services.secret_persistence_scrub import (
-            get_process_scrubber,
-        )
-
-        scrubber = get_process_scrubber()
-    except Exception:  # pragma: no cover — defensive; scrub module on hot path
-        logger.debug(
-            "bash: secret-scrub registry unreachable; spawn-time "
-            "env marker resolution falls back to fail-closed",
-            exc_info=True,
-        )
-        return None
-    if scrubber is None:
-        return None
-    return getattr(scrubber, "_service", None)
 
 
 def _format_secret_envelope(exc) -> str:

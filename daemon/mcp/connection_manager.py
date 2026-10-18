@@ -29,38 +29,14 @@ from daemon.services.kms_resolver import resolve_env, resolve_headers
 # order-stable). Surface ``"mcp_spawn"`` (envelope + audit context).
 # ``build_pooled_stdio_config`` remains DO-NOT-TOUCH (R4 — resolving
 # there would persist plaintext into DB config).
+# Gap-2: service discovery consolidated into the scrub module's
+# public ``get_process_secret_service``.
+from daemon.services.secret_persistence_scrub import (
+    get_process_secret_service as _get_process_secret_service,
+)
 from daemon.services.secret_resolver import resolve_secret_markers
 
 logger = logging.getLogger(__name__)
-
-
-# agent-secrets P2 (design §1c) — lazy SecretService discovery for
-# the two cold-spawn paths. Defined AFTER ``logger`` (the helper
-# dereferences it in its defensive branch).
-def _get_process_secret_service():
-    """Return the process-wide :class:`SecretService` or ``None``.
-
-    agent-secrets P2 (design §1c) — mirrors the bash / proc seam
-    discovery (``get_process_scrubber()`` pattern); read LAZILY at
-    call time, no import-time side effects (design §0).
-    """
-    try:
-        from daemon.services.secret_persistence_scrub import (
-            get_process_scrubber,
-        )
-
-        scrubber = get_process_scrubber()
-    except Exception:  # pragma: no cover — defensive
-        logger.debug(
-            "mcp.connection_manager: secret-scrub registry unreachable; "
-            "spawn-time env marker resolution falls back to fail-closed",
-            exc_info=True,
-        )
-        return None
-    if scrubber is None:
-        return None
-    return getattr(scrubber, "_service", None)# STDIO: Needs time for subprocess spawn (npx/uvx package resolution + download) + handshake
-# On cold start, npx needs 8-15s and uvx needs 5-10s
 STDIO_DEFAULT_TIMEOUT = 30.0
 
 # Module-level singleton
@@ -253,6 +229,10 @@ class McpConnectionManager:
         resolved_env = resolve_secret_markers(
             resolve_env(config.env),
             secret_service=_get_process_secret_service(),
+            # Server-scoped (see warm-pool note): no agent context at
+            # cold spawn — audit actor is the ``<secret_resolver>``
+            # sentinel, explicit.
+            actor="<secret_resolver>",
             surface="mcp_spawn",
         )
         server_params = StdioServerParameters(
@@ -527,6 +507,10 @@ class McpConnectionManager:
         resolved_env = resolve_secret_markers(
             resolve_env(config.env),
             secret_service=_get_process_secret_service(),
+            # Server-scoped (see warm-pool note): no agent context at
+            # cold spawn — audit actor is the ``<secret_resolver>``
+            # sentinel, explicit.
+            actor="<secret_resolver>",
             surface="mcp_spawn",
         )
         server_params = StdioServerParameters(

@@ -145,6 +145,39 @@ class TestBashResolveSuccess:
         assert "__ENS_SECRET__" not in (result.env_value or "")
 
     @pytest.mark.asyncio
+    async def test_happy_path_stamps_bash_env_audit_context(
+        self, service: SecretService
+    ) -> None:
+        """Gap-2 tightening: the happy path stamps exactly ONE
+        ``use_marker`` row with ``context='bash_env'`` and the
+        CALLING instance as actor (the audit-side proof of §1a —
+        complements the child-side plaintext proof above)."""
+        from sqlmodel import select
+
+        minted = service.store(
+            name="bash-happy-audit", kind="generic",
+            value="pt-audit-77f", actor="worker",
+        )
+        result = await _run_bash_with_env(
+            {"P2_SECRET_TEST": minted["marker"]},
+            instance_id="inst-bash-audit",
+        )
+        assert result.returncode == 0, result.stderr
+        with service._engine.connect() as conn:
+            rows = conn.execute(
+                select(SecretAuditEvent).where(  # type: ignore[arg-type]
+                    SecretAuditEvent.action == "use_marker"
+                ).where(
+                    SecretAuditEvent.secret_id == minted["id"]
+                )
+            ).fetchall()
+        assert len(rows) == 1, (
+            f"expected exactly one use_marker row, got {len(rows)}"
+        )
+        assert rows[0].context == "bash_env"
+        assert rows[0].actor == "inst-bash-audit"
+
+    @pytest.mark.asyncio
     async def test_overlay_wins_over_os_environ(
         self, service: SecretService, monkeypatch
     ) -> None:

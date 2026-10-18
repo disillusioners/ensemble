@@ -185,9 +185,13 @@ def resolve_marker(
             signals an un-wired caller, which is a
             configuration error — never silent passthrough).
         actor: Agent id (Cardinal #2 — the calling agent).
-            Defaults to ``"<secret_resolver>"`` as a sentinel
-            for Phase 2 (no real callers exist yet). Phase 3
-            seams MUST pass the real agent id.
+            Defaults to ``"<secret_resolver>"`` as a sentinel.
+            Agent-side seams (bash §1a / proc §1b / pre-invoke §1d)
+            pass the real agent id; the MCP spawn sites (§1c) are
+            deliberately SERVER-SCOPED — no agent context exists at
+            spawn time, so they pass the sentinel explicitly and the
+            resulting audit rows are attributable to the server
+            lifecycle, not an agent.
         surface: Envelope ``surface`` tag — one of
             :data:`SECRET_ENVELOPE_SURFACES`. Defaults to
             ``"tool_param"`` (the canonical surface for the

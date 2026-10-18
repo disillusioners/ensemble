@@ -64,6 +64,12 @@ from ._tool_registry import register_tool_category
 # (never redefined; commission hard constraint). No import cycle:
 # ``secret_resolver`` / ``secret_service`` do not reach back into
 # ``daemon.tools``.
+# Gap-2: service discovery consolidated into the scrub module's
+# public ``get_process_secret_service`` (seam LOGIC stays separate
+# per design §1b — only the discovery is shared).
+from daemon.services.secret_persistence_scrub import (
+    get_process_secret_service as _get_process_secret_service,
+)
 from daemon.services.secret_resolver import (
     resolve_secret_markers as _resolve_secret_markers,
 )
@@ -495,41 +501,6 @@ def _verify_pid_ownership_ps(
         pid,
     )
     return False
-
-
-def _get_process_secret_service():
-    """Return the process-wide :class:`SecretService` or ``None``.
-
-    agent-secrets P2 (design §1b) — mirrors the bash seam's
-    discovery (``get_process_scrubber()`` pattern): the manager
-    constructs ONE SecretService per process and its ``__init__``
-    self-registers with the scrub module; the seam reads it LAZILY
-    at call time. No import-time side effects (design §0) — ``None``
-    service + marker-shaped value raises the typed
-    ``secret_resolver_store_unavailable`` envelope (fail-closed;
-    design §3.2), never a broken spawn.
-
-    Deliberately NOT unified with the bash seam's helper (design
-    §1b: separate edits, share ONLY ``resolve_secret_markers``).
-    """
-    try:
-        from daemon.services.secret_persistence_scrub import (
-            get_process_scrubber,
-        )
-
-        scrubber = get_process_scrubber()
-    except Exception:  # pragma: no cover — defensive
-        logger.debug(
-            "proc: secret-scrub registry unreachable; spawn-time "
-            "env marker resolution falls back to fail-closed",
-            exc_info=True,
-        )
-        return None
-    if scrubber is None:
-        return None
-    return getattr(scrubber, "_service", None)
-
-
 def _build_child_env(
     process_id: str,
     *,

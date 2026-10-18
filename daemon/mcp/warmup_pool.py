@@ -34,37 +34,12 @@ from daemon.services.kms_resolver import resolve_env
 # DB config; see p2-architecture-recommendation.md §1c). Surface
 # ``"mcp_spawn"`` (envelope + audit context — the two forms are
 # byte-identical for this seam).
+# Gap-2: service discovery consolidated into the scrub module's
+# public ``get_process_secret_service``.
+from daemon.services.secret_persistence_scrub import (
+    get_process_secret_service as _get_process_secret_service,
+)
 from daemon.services.secret_resolver import resolve_secret_markers
-
-
-def _get_process_secret_service():
-    """Return the process-wide :class:`SecretService` or ``None``.
-
-    agent-secrets P2 (design §1c) — mirrors the bash / proc seam
-    discovery (``get_process_scrubber()`` pattern): the manager
-    constructs ONE SecretService per process and its ``__init__``
-    self-registers with the scrub module; this seam reads it LAZILY
-    at call time. No import-time side effects (design §0) — ``None``
-    service + marker-shaped value raises the typed
-    ``secret_resolver_store_unavailable`` envelope (fail-closed).
-    """
-    try:
-        from daemon.services.secret_persistence_scrub import (
-            get_process_scrubber,
-        )
-
-        scrubber = get_process_scrubber()
-    except Exception:  # pragma: no cover — defensive
-        logger.debug(
-            "mcp.warmup_pool: secret-scrub registry unreachable; "
-            "spawn-time env marker resolution falls back to fail-closed",
-            exc_info=True,
-        )
-        return None
-    if scrubber is None:
-        return None
-    return getattr(scrubber, "_service", None)
-
 logger = logging.getLogger(__name__)
 
 # Module-level singleton
@@ -259,6 +234,14 @@ class McpWarmupPool:
             env=resolve_secret_markers(
                 resolve_env(config.env),
                 secret_service=_get_process_secret_service(),
+                # Server-scoped resolution: the pool spawns servers
+                # process-wide with NO agent in context — the audit
+                # row's actor is the ``<secret_resolver>`` sentinel
+                # (the resolver default, made explicit here). Which
+                # agent later USES the server is not knowable at
+                # spawn time; per-use attribution lives with the
+                # agent-side seams (§1a/§1d), not here.
+                actor="<secret_resolver>",
                 surface="mcp_spawn",
             ),
         )

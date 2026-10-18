@@ -215,6 +215,30 @@ def register_secret_service(service: SecretService) -> None:
         )
 
 
+def get_process_secret_service() -> Optional["SecretService"]:
+    """Return the process-wide :class:`SecretService` or ``None``.
+
+    agent-secrets P2 — Gap-2 consolidation: THE public discovery
+    helper for every resolution seam (bash ``env`` overlay §1a,
+    proc ``_build_child_env`` §1b, MCP spawn points §1c, the
+    ``SECRET_TYPED_ARGS`` pre-invoke pass §1d). The manager
+    constructs ONE ``SecretService`` per process and its
+    ``__init__`` self-registers via :func:`register_secret_service`;
+    seams read it LAZILY at call time. No import-time side effects
+    (design §0) — ``None`` service + a marker-shaped value raises
+    the typed ``secret_resolver_store_unavailable`` envelope at the
+    resolver (fail-closed; design §3.2).
+
+    This replaces the per-seam ``_get_process_secret_service``
+    copies (byte-identical logic ×5). Seam LOGIC stays deliberately
+    separate per §1b/§1c ("separate edits, share ONLY
+    ``resolve_secret_markers``") — only the service DISCOVERY is
+    shared, exactly like ``get_process_scrubber``.
+    """
+    with _PROCESS_LOCK:
+        return _PROCESS_SECRET_SERVICE
+
+
 def get_process_scrubber() -> Optional["SecretPersistenceScrubber"]:
     """Return the shared process scrubber, or ``None`` before any
     :class:`SecretService` exists (secret-free agents — the

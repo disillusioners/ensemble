@@ -525,3 +525,78 @@ class TestSecretTypedArgsZeroChangeAndComposition:
             _config(),
         )
         assert result["messages"][0].content == "undeclared:plain"
+
+    @pytest.mark.asyncio
+    async def test_fast_path_emits_zero_use_marker_rows(
+        self, lt_real, service: SecretService, monkeypatch
+    ) -> None:
+        """Gap-2 tightening: a REGISTERED service + a marker-free
+        batch with no declared tool → the fast path never touches
+        the service (zero ``use_marker`` rows; §0 zero-change,
+        audit-side proof)."""
+        from sqlmodel import select
+
+        # A stored secret exists (the service is live and queryable)
+        # but no marker rides the batch.
+        service.store(
+            name="nudge-zc", kind="generic",
+            value="plain-val-zc", actor="worker",
+        )
+        registry = lt_real.LongToolNudgeRegistry()
+        node = lt_real.wrapped_tools_node([undeclared_probe], registry)
+        result = await _run_through_real_graph(
+            lt_real, node, _state("call-zc-a", "undeclared_probe", {"other": "v"}), _config()
+        )
+        assert result["messages"][0].content == "undeclared:v"
+        with service._engine.connect() as conn:
+            rows = conn.execute(
+                select(SecretAuditEvent).where(  # type: ignore[arg-type]
+                    SecretAuditEvent.action == "use_marker"
+                )
+            ).fetchall()
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_secret_free_batch_zero_use_marker_rows(
+        self, lt_real, service: SecretService
+    ) -> None:
+        """Gap-2 tightening: markers present in a batch but NO
+        declared tool consumes them (dict-valued ``env`` shape) →
+        the pre-invoke pass skips resolution (spawn-time seam owns
+        it) and stamps ZERO rows at this seam."""
+        from sqlmodel import select
+
+        minted = service.store(
+            name="nudge-zc2", kind="generic",
+            value="plain-val-zc2", actor="worker",
+        )
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "undeclared_probe",
+                    "args": {"other": minted["marker"]},
+                    "id": "call-zc-b",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        registry = lt_real.LongToolNudgeRegistry()
+        node = lt_real.wrapped_tools_node([undeclared_probe], registry)
+        result = await _run_through_real_graph(
+            lt_real,
+            node,
+            {"messages": [ai]},
+            _config(),
+        )
+        tm = result["messages"][0]
+        assert tm.status is None or tm.status != "error"
+        with service._engine.connect() as conn:
+            rows = conn.execute(
+                select(SecretAuditEvent).where(  # type: ignore[arg-type]
+                    SecretAuditEvent.action == "use_marker"
+                ).where(
+                    SecretAuditEvent.secret_id == minted["id"]
+                )
+            ).fetchall()
+        assert rows == []

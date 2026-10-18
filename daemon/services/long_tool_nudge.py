@@ -129,41 +129,11 @@ from langchain_core.runnables import RunnableConfig
 
 from daemon.constants import INSTANCE_STATUS_PAUSED, TERMINAL_INSTANCE_STATUSES
 from daemon.services.pool_orchestrator import safe_notify_all_pools
+from daemon.services.secret_persistence_scrub import (
+    get_process_secret_service as _get_process_secret_service,
+)
 
 logger = logging.getLogger(__name__)
-
-
-# ─── agent-secrets P2 (design §1d) — pre-invoke resolution seam ──────────────
-
-def _get_process_secret_service():
-    """Return the process-wide :class:`SecretService` or ``None``.
-
-    agent-secrets P2 — mirrors the bash / proc seam discovery
-    (``get_process_scrubber()`` pattern): the manager constructs ONE
-    SecretService per process and its ``__init__`` self-registers
-    with the scrub module; this seam reads it LAZILY at call time.
-    No import-time side effects (design §0) — ``None`` service +
-    marker-shaped value raises the typed
-    ``secret_resolver_store_unavailable`` envelope (fail-closed).
-    """
-    try:
-        from daemon.services.secret_persistence_scrub import (
-            get_process_scrubber,
-        )
-
-        scrubber = get_process_scrubber()
-    except Exception:  # pragma: no cover — defensive
-        logger.debug(
-            "long_tool_nudge: secret-scrub registry unreachable; "
-            "pre-invoke resolution falls back to fail-closed",
-            exc_info=True,
-        )
-        return None
-    if scrubber is None:
-        return None
-    return getattr(scrubber, "_service", None)
-
-
 def _resolve_secret_typed_args_for_batch(
     state: Any,
     messages: Any,
