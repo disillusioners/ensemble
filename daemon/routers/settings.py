@@ -73,8 +73,9 @@ _DEFAULT_TZ_OFFSET = 7
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    # Type-only (db-backed-settings P1 t6) — runtime imports of the
-    # settings service stay lazy inside the DI delegation functions.
+    # Type-only (db-backed-settings P1 t6) — the laziness note covers
+    # SettingsService ONLY: MANAGED_KEYS, parse_and_validate and
+    # resolve are EAGER module-level imports (import block above).
     from daemon.services.settings_service import SettingsService
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -990,11 +991,14 @@ async def put_daemon_setting(
     subject = _actor_subject_from_request(request)
     service.set_override(key, parsed, updated_by=subject)
     # Audit (ruling O2): ONE INFO line per PUT carrying subject + key
-    # ("auth-off" for NULL updated_by rows).
+    # ("auth-off" for NULL updated_by rows). Sensitive keys log the
+    # literal "<redacted>" in place of the value (sensitive=True
+    # tripwire); the "value=" term stays present for grep-ability.
+    logged_value = "<redacted>" if spec.sensitive else parsed
     logger.info(
         "[Settings] db override set key=%s value=%r subject=%s",
         key,
-        parsed,
+        logged_value,
         subject or "auth-off",
     )
     return _daemon_entry_for(key, service.get_overrides())

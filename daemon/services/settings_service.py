@@ -40,7 +40,10 @@ ruling (c)):
 * **``sensitive=True` tripwire** — any future managed key carrying
   secret material in its value or tier values MUST set
   ``sensitive=True`` (GET/PUT responses omit the tier detail fields
-  for sensitive keys; omission is a review blocker if missing).
+  for sensitive keys; the PUT audit-log line in
+  ``daemon/routers/settings.py`` logs ``value='<redacted>'`` instead
+  of the raw value for sensitive keys; omission is a review blocker
+  if missing).
 
 v1 registry content: exactly ONE key — ``limits.llm_concurrency``.
 Adding a key = one registry entry + nothing else (the ladder, CRUD,
@@ -628,7 +631,6 @@ def apply_db_settings_overrides(
     # Step 2 — boot read via the throwaway engine, disposed on BOTH
     # success and failure (adopted note 8b).
     db_overrides: dict[str, Any] = {}
-    read_failed = False
     engine: Optional[Engine] = None
     try:
         engine = _build_bootstrap_engine(ensemble_config, config)
@@ -636,7 +638,6 @@ def apply_db_settings_overrides(
             db_overrides = _read_managed_rows(session)
     except Exception as exc:
         db_overrides = {}
-        read_failed = True
         logger.error(
             "[Settings] boot read failed (%s): %s — fail-open, lower tiers "
             "active; [Settings] applied 0 db override(s)",
@@ -671,7 +672,11 @@ def apply_db_settings_overrides(
             _set_config_value(config, spec.config_path, resolution["value"])
         snapshot[key]["applied_value"] = _get_config_value(config, spec.config_path)
 
-    if not read_failed:
-        logger.info("[Settings] applied %d db override(s)", applied_count)
+    # ONE summary INFO per invocation on ALL exit paths (council
+    # follow-up) — every apply_db_settings_overrides exit is uniformly
+    # grep-able. On a read-failure path applied_count is 0 by
+    # construction (db_overrides is reset to {} in the except above),
+    # so N always reflects reality.
+    logger.info("[Settings] applied %d db override(s)", applied_count)
 
     return config, snapshot

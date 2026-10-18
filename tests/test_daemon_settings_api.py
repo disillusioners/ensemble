@@ -399,6 +399,53 @@ class TestSensitiveMasking:
         assert v1["sensitive"] is False
 
     @pytest.mark.asyncio
+    async def test_put_audit_line_redacts_sensitive_value(
+        self, client_off, monkeypatch, settings_engine, caplog
+    ):
+        """The PUT audit line redacts a SENSITIVE key's value term to
+        the literal ``<redacted>`` (grep-able ``value=`` term kept)
+        while STILL carrying the subject — the audit-log surface of
+        the ``sensitive=True`` tripwire (registry docstring)."""
+        _no_env(monkeypatch)
+        fake = settings_service.ManagedKeySpec(
+            key="limits.fake_secret",
+            config_path="limits.fake_secret",
+            env_var="LIMITS_FAKE_SECRET",
+            value_type="int",
+            default=4,
+            ge=1,
+            sensitive=True,
+            description="fake secret-bearing key (test-only)",
+        )
+        # Double-binding precedent (test above) — the router holds a
+        # BY-VALUE import of MANAGED_KEYS, so patch BOTH bindings.
+        monkeypatch.setattr(settings_service, "MANAGED_KEYS", {**MANAGED_KEYS, fake.key: fake})
+        monkeypatch.setattr(routers_settings, "MANAGED_KEYS", {**MANAGED_KEYS, fake.key: fake})
+
+        with caplog.at_level(logging.INFO, logger=_AUDIT_LOGGER):
+            put = await client_off.put(
+                "/api/settings/daemon/limits.fake_secret", json={"value": 5}
+            )
+        assert put.status_code == 200, put.text
+        infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        audit = [m for m in infos if "db override set" in m and fake.key in m]
+        assert len(audit) == 1
+        # Subject still logged; value term present but REDACTED — the
+        # raw parsed value never reaches the log line.
+        assert "auth-off" in audit[0]
+        assert "<redacted>" in audit[0]
+        assert "value=5" not in audit[0]
+
+        # Contrast: the NON-sensitive real key keeps the raw value=%r.
+        with caplog.at_level(logging.INFO, logger=_AUDIT_LOGGER):
+            put2 = await client_off.put(KEY_URL, json={"value": 6})
+        assert put2.status_code == 200, put2.text
+        infos2 = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        audit2 = [m for m in infos2 if "db override set" in m and KEY in m]
+        assert len(audit2) == 1
+        assert "value=6" in audit2[0]
+
+    @pytest.mark.asyncio
     async def test_v1_registry_entry_pins(self):
         spec = MANAGED_KEYS[KEY]
         assert spec.sensitive is False

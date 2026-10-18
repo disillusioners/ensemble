@@ -1930,6 +1930,11 @@ class DaemonSettingsResponse(BaseModel):
     valid ``db_override``). It exists for API consumers/tooling and
     is documented as such; the FE keys off the PER-KEY
     ``requires_restart`` field (adopted ruling O3).
+
+    Post-DELETE the aggregate deliberately stays False (ruling O3):
+    the boot-applied value is still running while ``source`` re-reports
+    the lower tier, so that value-vs-source divergence no longer
+    implies a pending restart.
     """
 
     settings: list[DaemonSettingEntry] = Field(

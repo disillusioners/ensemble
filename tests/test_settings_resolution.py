@@ -178,6 +178,22 @@ class TestResolverLadder:
         assert result["db_override"] is None
         assert result["default"] == 10
 
+    def test_a_resolver_reads_live_env_not_snapshot_bookkeeping(self, monkeypatch):
+        """(a, unit pin) snapshot bookkeeping says env ABSENT
+        (``env_value=None``) WHILE the live env var is SET → the
+        resolver reads ``os.environ`` DIRECTLY, not the snapshot
+        bookkeeping, and reports the env tier with the PARSED value.
+        Must-FAIL against a snapshot-bookkeeping-trusting (or
+        pydantic-env-tier) implementation. Boot-level twin:
+        ``test_env_beats_yaml_at_boot_the_shadowing_fix``."""
+        _env(monkeypatch, "7")
+        snap = _snapshot(yaml_value=10, env_value=None)  # bookkeeping: no env
+        result = resolve(KEY, snap)
+        assert result["source"] == "env"
+        assert result["value"] == 7
+        assert result["env_value"] == 7
+        assert result["yaml_value"] == 10
+
     def test_b_db_beats_env(self, monkeypatch):
         """(b) override row + env set → db wins (three-POSITIONAL shape)."""
         _env(monkeypatch, "7")
