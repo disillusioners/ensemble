@@ -2734,7 +2734,10 @@ class InstanceManager:
         # Build pool with config-injected tool_call_timeout, then register it as
         # the module-level singleton so other call sites (e.g. _warmup_and_report,
         # _drain_warmup_pool) observe the same instance.
-        pool = McpWarmupPool(tool_call_timeout=self.config.mcp_pool.tool_call_timeout)
+        pool = McpWarmupPool(
+            tool_call_timeout=self.config.mcp_pool.tool_call_timeout,
+            idle_reap_seconds=self.config.mcp_pool.idle_reap_seconds,
+        )
         _warmup_pool_module._mcp_warmup_pool = pool
 
         registry = get_mcp_registry()

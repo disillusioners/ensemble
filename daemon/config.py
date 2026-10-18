@@ -2404,6 +2404,16 @@ class McpPoolConfig(BaseSettings):
     )
     health_check_interval: int = Field(default=60, ge=10, description="Health check interval in seconds")
     health_check_timeout: int = Field(default=5, ge=1, description="Health check timeout per connection in seconds")
+    idle_reap_seconds: int = Field(
+        default=1800,
+        ge=0,
+        description="Reap IDLE pooled STDIO connections after this many seconds "
+        "with no use (graceful close, then SIGKILL escalation via the transport "
+        "teardown; each reap is logged with the server name + idle duration). "
+        "Default 1800 (30 minutes). Set to 0 to disable idle reaping entirely. "
+        "In-use connections are never reaped — they are absent from the pool "
+        "queue while acquired.",
+    )
     tool_call_timeout: int = Field(
         default=120,
         ge=0,

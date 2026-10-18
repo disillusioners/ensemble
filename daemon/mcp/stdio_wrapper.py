@@ -155,6 +155,17 @@ class TaskScopedContextManager:
             raise self._error
         return self._streams
 
+    @property
+    def background_task(self) -> asyncio.Task | None:
+        """The task that owns the inner context manager's lifecycle.
+
+        Exposed so a bounded-teardown caller (e.g. the MCP warmup pool's
+        idle reap) can hard-cancel a teardown that has blown past its
+        grace window. ``None`` before ``__aenter__`` and after
+        ``__aexit__`` has drained the task.
+        """
+        return self._task
+
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool | None:
         """Signal the background task to close the inner context manager.
 
