@@ -15,9 +15,23 @@ P3 appends the drill-down endpoint:
   providers, which must not be imported by the join layer — the
   excluded-spine pin scopes to that module).
 
-P4 / P6 append their endpoints (``/anomalies``,
-``/control-capabilities``, ``POST /profile``) later; the router is
-the single mount for the whole family.
+P4 appends the anomaly endpoints:
+
+* ``GET /api/resources/anomalies`` — the finding journal as lean
+  ``Anomaly`` rows (window-filtered, deterministic ``(t_start,
+  series_key)`` order so the FE's markers never reshuffle between
+  8 s polls).
+* ``GET /api/resources/anomalies/{id}/evidence`` — the §2.8
+  drill-down payload; samples re-derive from the retained bucket
+  window, pids/children re-derive from T2/T3 via the P3 joins.
+* the ``/traceback`` handler now injects the journal's in-window
+  lean rows as the ``findings[]`` fill (the P3-reserved key) via
+  ``build_window_view(findings_provider=...)`` — absent engine ⇒
+  ``[]`` (P3 shape verbatim).
+
+P6 appends its endpoints (``/control-capabilities``, ``POST
+/profile``) later; the router is the single mount for the whole
+family.
 
 **DI pattern.** The router depends-injects the manager via
 ``request.app.state.manager`` and the monitor via
@@ -682,6 +696,91 @@ class TracebackResponse(BaseModel):
     findings: list[Any] = []
 
 
+# ── P4 — /anomalies + evidence response models ──────────────────────────────
+#
+# Element shapes BYTE-FOR-BYTE per the FE-frozen contract
+# (frontend/src/app/models/resources.models.ts): ``Anomaly`` /
+# ``AnomaliesPayload`` / ``EvidenceContributor`` / ``EvidencePayload``
+# (+ the e2e stub shapes the FE gate plays against). The journal's
+# FULL explainability finding (baseline as {method,value,n} object,
+# deviation, contributors) is deliberately FLATTENED here: the FE
+# ``Anomaly.baseline`` is a NUMBER — the full §2.7 payload lives in
+# the journal (contract-tested there), the wire stays FE-frozen.
+
+
+class ResourceAnomaly(BaseModel):
+    """FE ``Anomaly`` — the exact key set (marker + drill-down row).
+
+    ``id`` is process-local (changes across daemon restarts — accepted,
+    the FE re-fetches on every 8 s poll). ``t_start``/``t_end`` carry
+    the P1 naive-UTC bucket format so markers align with the /history
+    axis via the FE's ``parseNaiveUtc``.
+    """
+
+    id: str
+    kind: str
+    t_start: str
+    t_end: str
+    peak: float
+    baseline: float
+    severity: str
+    series_key: str
+    shape: str
+    instance_id: Optional[str] = None
+
+
+class AnomaliesResponse(BaseModel):
+    """FE ``AnomaliesPayload`` — EXACTLY ``{anomalies: [...]}``.
+
+    No extra keys: the FE's truncated-banner rides the /history body's
+    ``truncated`` field (landed in P1), deliberately NOT here.
+    """
+
+    anomalies: list[ResourceAnomaly] = []
+
+
+class EvidenceTaskStatus(BaseModel):
+    """FE ``EvidenceTaskStatus`` — via the J2/J3 task join."""
+
+    status: str
+    worker_id: Optional[str] = None
+
+
+class EvidenceContributorEvidence(BaseModel):
+    """FE ``EvidenceContributorEvidence`` — free-form sections."""
+
+    samples: Optional[list[Any]] = None
+    first_seen: Optional[str] = None
+    task_status: Optional[EvidenceTaskStatus] = None
+
+
+class EvidenceContributor(BaseModel):
+    """FE ``EvidenceContributor`` — share ranked; the ``unattributed``
+    row is the explicit honesty remainder (share_pct sums ≤100)."""
+
+    instance_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    work_id: Optional[str] = None
+    share_pct: float
+    evidence: Optional[EvidenceContributorEvidence] = None
+    unattributed: Optional[bool] = None
+
+
+class EvidenceResponse(BaseModel):
+    """FE ``EvidencePayload`` — the §2.8 drill-down shape.
+
+    ``samples`` re-derives from the retained bucket window;
+    ``top_pids_per_bucket`` / ``children_delta`` re-derive from T2/T3
+    reads through the P3 join layer at request time.
+    """
+
+    anomaly: ResourceAnomaly
+    samples: list[Any] = []
+    top_pids_per_bucket: list[Any] = []
+    children_delta: list[Any] = []
+    contributors: list[EvidenceContributor] = []
+
+
 def _empty_traceback_shape(t0_raw: str, t1_raw: str) -> dict:
     """The §2.8 /traceback empty shape (degrade — never 503, D11).
 
@@ -825,6 +924,20 @@ async def get_traceback(
         if manager is not None
         else None
     )
+    # P4 — the journal's in-window lean rows fill the reserved
+    # ``findings[]`` key. Absent engine (degraded boot / kill-switch)
+    # ⇒ provider None ⇒ [] (the P3 contract shape, verbatim).
+    monitor = _get_monitor(request)
+    anomaly_engine = getattr(monitor, "anomaly", None) if monitor is not None else None
+    findings_provider = None
+    if anomaly_engine is not None:
+
+        def _findings_provider() -> list:
+            t0a = resource_traceback.parse_window_param("t0", t0)
+            t1a = resource_traceback.parse_window_param("t1", t1)
+            return anomaly_engine.findings_in_window(t0a, t1a, limit=limit)
+
+        findings_provider = _findings_provider
     try:
         view = await asyncio.to_thread(
             resource_traceback.build_window_view,
@@ -834,6 +947,7 @@ async def get_traceback(
             kind=kind,
             limit=limit,
             structural_providers=providers,
+            findings_provider=findings_provider,
         )
     except ValueError as exc:
         # Caller input error — parameter validation, not degradation.
@@ -852,3 +966,105 @@ async def get_traceback(
             "[ResourcesRouter] traceback partial degrade: %s", degraded
         )
     return view
+
+
+# ── P4 — /anomalies + /anomalies/{id}/evidence ──────────────────────────────
+
+
+def _get_anomaly_engine(request: Request) -> Optional[Any]:
+    """The anomaly engine off the monitor facade, or ``None``.
+
+    ``None`` on a degraded boot (no monitor), a disabled monitor, or
+    the anomaly kill-switch — every consumer degrades to the EMPTY
+    shape (never 503, D11).
+    """
+    monitor = _get_monitor(request)
+    if monitor is None or not getattr(monitor, "enabled", False):
+        return None
+    return getattr(monitor, "anomaly", None)
+
+
+@router.get("/anomalies", response_model=AnomaliesResponse)
+async def get_anomalies(
+    request: Request,
+    window: str = Query(
+        default="1h",
+        description="Marker window — one of 15m|1h|24h|7d (default 1h)",
+    ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+        description="Max markers returned (default 100, hard cap 500)",
+    ),
+) -> AnomaliesResponse:
+    """§2.8 anomaly markers — the journal as lean ``Anomaly`` rows.
+
+    Ordering is deterministic ``(t_start, series_key)`` and ids are
+    stable within the process lifetime — the FE's markers must not
+    reshuffle between its 8 s polls (finding ids change across daemon
+    restarts; the FE re-fetches, accepted per phase4-plan).
+
+    Degrade contract: unknown ``window`` ⇒ 400 (house error envelope);
+    engine absent/disabled or ANY internal failure ⇒ 200 with the
+    empty shape — never 503 (D11, snapshots DI precedent).
+    """
+    window_seconds = _validate_window(window)
+    engine = _get_anomaly_engine(request)
+    if engine is None:
+        return AnomaliesResponse(anomalies=[])
+    try:
+        rows = await asyncio.to_thread(
+            engine.list_anomalies, window_seconds, limit
+        )
+        return AnomaliesResponse(
+            anomalies=[ResourceAnomaly(**row) for row in rows]
+        )
+    except Exception as exc:  # fail-soft: empty shape (D11)
+        logger.warning("[ResourcesRouter] anomalies degraded: %s", exc)
+        return AnomaliesResponse(anomalies=[])
+
+
+@router.get("/anomalies/{anomaly_id}/evidence", response_model=EvidenceResponse)
+async def get_anomaly_evidence(
+    request: Request,
+    anomaly_id: str,
+) -> EvidenceResponse:
+    """§2.8 drill-down — ``{anomaly, samples, top_pids_per_bucket,
+    children_delta, contributors}`` for one finding.
+
+    ``samples`` re-derive from the retained bucket window; the pid /
+    children sections re-derive from T2/T3 through the P3 join layer
+    at request time. Unknown id ⇒ 404 (house envelope); ANY internal
+    failure ⇒ 404 as well — never 503 (the caller treats a missing
+    drill-down as "no evidence", the degrade mapping the phase plan
+    pins).
+    """
+    engine = _get_anomaly_engine(request)
+
+    def _not_found(reason: str) -> HTTPException:
+        return HTTPException(status_code=404, detail={"error": reason})
+
+    if engine is None:
+        raise _not_found(f"anomaly engine unavailable; id {anomaly_id!r} unknown")
+    try:
+        payload = await asyncio.to_thread(engine.build_evidence, anomaly_id)
+    except Exception as exc:  # fail-soft: 404 (never 503 — D11)
+        logger.warning(
+            "[ResourcesRouter] anomaly evidence degraded: %s", exc
+        )
+        raise _not_found(
+            f"evidence unavailable for id {anomaly_id!r}"
+        ) from exc
+    if payload is None:
+        raise _not_found(f"unknown anomaly id {anomaly_id!r}")
+    return EvidenceResponse(
+        anomaly=ResourceAnomaly(**payload["anomaly"]),
+        samples=list(payload.get("samples") or []),
+        top_pids_per_bucket=list(payload.get("top_pids_per_bucket") or []),
+        children_delta=list(payload.get("children_delta") or []),
+        contributors=[
+            EvidenceContributor(**c)
+            for c in (payload.get("contributors") or [])
+        ],
+    )

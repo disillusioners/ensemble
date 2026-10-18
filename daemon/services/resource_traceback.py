@@ -77,9 +77,11 @@ predicates keep their exact instant semantics).
 Payload-surface note: the WIRE response is the FE-frozen shape
 (``frontend/src/app/models/resources.models.ts``
 ``TracebackPayload``): ``{window, instances_alive, in_flight_tasks,
-spawned_children, structural, findings}`` — ``findings`` is
-key-reserved for P4 and always ``[]`` here. The deeper per-question
-answers (J3 agent hop, J4 bridge, J5 resource rows, J6
+spawned_children, structural, findings}`` — ``findings`` was
+key-reserved for P4 and is filled by the router-injected
+``findings_provider`` (the anomaly journal's in-window lean rows);
+without a provider it stays ``[]`` (P3 behavior verbatim). The deeper
+per-question answers (J3 agent hop, J4 bridge, J5 resource rows, J6
 ``chart_render`` aggregate, source labels) are answered by the
 per-question functions below and consumed by P4 through this
 module's API; the router's ``response_model`` strips the internal
@@ -794,6 +796,7 @@ def build_window_view(
     limit: int = DEFAULT_LIMIT,
     sample_tolerance_s: float = DEFAULT_SAMPLE_TOLERANCE_S,
     structural_providers: Optional[Mapping[str, Callable[[], Any]]] = None,
+    findings_provider: Optional[Callable[[], list]] = None,
 ) -> dict:
     """Assemble the §2.8 traceback window view for ``[t0, t1]``.
 
@@ -806,6 +809,11 @@ def build_window_view(
     The wire dict carries exactly the FE-frozen keys plus the
     underscore-prefixed internal ``_degraded`` (stripped by the
     router's ``response_model``).
+
+    P4: ``findings_provider`` (optional callable → list) fills the
+    ``findings`` key — the router injects the anomaly journal's
+    in-window lean rows. Absent / ``None`` (P3 callers, degraded
+    boots) ⇒ ``[]`` — the P3 contract shape is unchanged.
     """
     t0_aware = parse_window_param("t0", t0)
     t1_aware = parse_window_param("t1", t1)
@@ -848,6 +856,18 @@ def build_window_view(
 
     structural = collect_structural(structural_providers)
 
+    # P4 — findings from the anomaly journal (lean rows). Degrades to
+    # [] like every other section; absent provider = P3 behavior.
+    findings: list = []
+    if findings_provider is not None:
+        try:
+            findings = list(findings_provider() or [])
+        except Exception as exc:
+            degraded.append(f"findings: {exc}")
+            logger.warning(
+                "[resource_traceback] findings degraded: %s", exc
+            )
+
     return {
         "window": {
             "t0": to_utc_iso(t0_aware),
@@ -883,6 +903,8 @@ def build_window_view(
             for r in children
         ],
         "structural": structural,
-        "findings": [],  # key reserved for P4 — contract stability
+        # P4 fills the key reserved in P3 — via findings_provider;
+        # without one the P3 reserved-empty shape holds.
+        "findings": findings,
         "_degraded": degraded,
     }
