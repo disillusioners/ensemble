@@ -187,8 +187,54 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# TTL for releasing in-memory graphs for non-active cached instances (in hours)
-INSTANCE_CACHE_TTL_HOURS = 24
+# ── O3 instance-graph cache bounding (resource-cost-control, 2026-10-18) ──
+# DEFAULT post-terminal TTL (hours) for releasing in-memory graphs of
+# non-active cached instances. Both constants are the DEFAULT tier of
+# their managed-key ladder (DB > env > yaml > default — see
+# ``daemon/services/settings_service.py``); the EFFECTIVE values are read
+# off ``config.limits`` via the ``_effective_instance_cache_*`` helpers
+# below and resolved + logged once at ``InstanceManager.__init__``. The
+# registry defaults in ``settings_service.py`` MUST mirror these.
+# Default NARROWED 24h → 6h (leader-ruled) so idle graphs release faster.
+INSTANCE_CACHE_TTL_HOURS = 6
+
+# LRU max-entries cap over the in-memory instance-graph cache. Beyond
+# the cap the least-recently-used NON-ACTIVE (terminal/paused) entries
+# are evicted; active entries are NEVER evicted and recency is last
+# graph ACCESS/reuse (see ``_touch_cached_instance``), not creation.
+INSTANCE_CACHE_MAX_ENTRIES = 64
+
+
+def _effective_instance_cache_ttl_hours(manager: Any) -> int:
+    """Effective post-terminal TTL (hours) for ``manager``'s graph cache.
+
+    Reads ``manager.config.limits.instance_cache_ttl_hours`` (mutated
+    in place at boot by ``apply_db_settings_overrides``) and falls back
+    to :data:`INSTANCE_CACHE_TTL_HOURS` when the attribute is missing or
+    non-numeric. The ``isinstance`` guard also pins spec'd MagicMock
+    managers — whose auto-attributes are NOT ints — to the default, so
+    the pre-existing eviction tests stay deterministic.
+    """
+    config = getattr(manager, "config", None)
+    limits = getattr(config, "limits", None)
+    raw = getattr(limits, "instance_cache_ttl_hours", None)
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw
+    return INSTANCE_CACHE_TTL_HOURS
+
+
+def _effective_instance_cache_max_entries(manager: Any) -> int:
+    """Effective LRU max-entries cap for ``manager``'s graph cache.
+
+    Same config-read + fallback posture as
+    :func:`_effective_instance_cache_ttl_hours`.
+    """
+    config = getattr(manager, "config", None)
+    limits = getattr(config, "limits", None)
+    raw = getattr(limits, "instance_cache_max_entries", None)
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw
+    return INSTANCE_CACHE_MAX_ENTRIES
 
 
 def _build_message_content(message: str, images: list[str] | None) -> str | list:
@@ -538,8 +584,44 @@ class InstanceManager:
         else:
             self._compactor = None
 
-        # Maps instance_id to tuple of (graph, agent_dir)
+        # Maps instance_id to tuple of (graph, agent_dir). INSERTION ORDER
+        # is the O3 LRU recency order: registration appends (newest), the
+        # graph ACCESS path (``InstanceLifecycleService.get_instance``)
+        # calls ``_touch_cached_instance`` to move a reused entry to the
+        # end. ``_enforce_instance_cache_cap`` evicts from the front.
         self.instances: dict[str, tuple[CompiledStateGraph, str]] = {}
+
+        # ── O3 instance-graph cache bounding (resource-cost-control) ──
+        # Resolve the effective knobs ONCE at construction
+        # (restart-required semantics — the config fields were already
+        # mutated in place by the boot-apply ``apply_db_settings_overrides``
+        # that runs strictly BEFORE ``InstanceManager(...)``). Cached on
+        # the instance so the periodic sweep never re-reads config.
+        self._instance_cache_ttl_hours = _effective_instance_cache_ttl_hours(self)
+        self._instance_cache_max_entries = _effective_instance_cache_max_entries(self)
+        # Source tier for the startup line — the boot-apply publishes its
+        # per-key resolution record; absent (e.g. direct construction in
+        # tests, or a pre-boot process) reads as "default".
+        _cache_tier = "default"
+        try:
+            from .services.settings_service import (
+                get_last_applied_resolution,
+            )
+
+            _res = (get_last_applied_resolution() or {}).get(
+                "limits.instance_cache_ttl_hours"
+            )
+            if _res:
+                _cache_tier = _res.get("source", "default")
+        except Exception:
+            _cache_tier = "default"
+        logger.info(
+            "[InstanceCache] effective: ttl_hours=%s max_entries=%s "
+            "(ttl source=%s; restart-required)",
+            self._instance_cache_ttl_hours,
+            self._instance_cache_max_entries,
+            _cache_tier,
+        )
 
         # Maps instance_id to the asyncio.Task currently running the graph for that instance
         # Used to cancel graph execution when stop is called
@@ -5747,6 +5829,94 @@ class InstanceManager:
             CancellationReason.SESSION_TERMINATED
         )
 
+    def _touch_cached_instance(self, instance_id: str) -> None:
+        """Mark a cached graph as most-recently-used (O3 LRU recency).
+
+        The ``instances`` dict's insertion order IS the LRU order
+        (registration appends); pop + reinsert moves an accessed entry
+        to the end. No-op when the id is not cached. Called on the graph
+        ACCESS path (``InstanceLifecycleService.get_instance`` cache
+        hit) so recency reflects last REUSE, not creation.
+        """
+        entry = self.instances.pop(instance_id, None)
+        if entry is not None:
+            self.instances[instance_id] = entry
+
+    def _terminal_cached_instance_ids(self) -> set[str]:
+        """Subset of cached ids whose status is non-active (evictable).
+
+        The non-active superset mirrors the TTL sweep's releasable
+        statuses — ``paused`` + ``{completed, error, terminated,
+        failed}`` — via the existing batched
+        ``InstanceRepository.list_paused_or_terminal_instance_ids``
+        helper (one query, no per-row fetch). Ids with no DB row (or any
+        lookup failure) are treated as ACTIVE (absent from the result)
+        so a live entry is never evicted on incomplete information.
+        """
+        repo = getattr(self, "_instance_repository", None)
+        if not repo:
+            return set()
+        ids = list(self.instances.keys())
+        if not ids:
+            return set()
+        try:
+            return set(repo.list_paused_or_terminal_instance_ids(ids))
+        except Exception as exc:
+            logger.warning(
+                "[InstanceCache] non-active status lookup failed (%s) — "
+                "treating all %d cached instance(s) as active, evicting nothing",
+                exc,
+                len(ids),
+            )
+            return set()
+
+    def _enforce_instance_cache_cap(self) -> int:
+        """Evict least-recently-used NON-ACTIVE cached graphs beyond the cap.
+
+        O3 LRU bounding. Returns the number of entries released. Active
+        (non-terminal / unknown-status) entries are NEVER evicted; if the
+        active entries alone meet or exceed the cap the cap is
+        unsatisfiable without touching them, so NOTHING is evicted and a
+        WARNING is logged. Recency = ``instances`` insertion order
+        (``_touch_cached_instance`` moves a reused entry to the end), so
+        the front of the dict is the least-recently-used eviction order.
+        """
+        max_entries = _effective_instance_cache_max_entries(self)
+        if max_entries <= 0:
+            return 0
+        total = len(self.instances)
+        if total <= max_entries:
+            return 0
+
+        evictable = self._terminal_cached_instance_ids()
+        active_count = total - len(evictable)
+        if active_count >= max_entries:
+            logger.warning(
+                "[InstanceCache] max_entries=%d unsatisfiable: %d active "
+                "(non-terminal) cached instance(s) alone meet/exceed the cap — "
+                "evicting nothing (active entries are never evicted)",
+                max_entries,
+                active_count,
+            )
+            return 0
+
+        # LRU order: dict insertion order, filtered to evictable ids.
+        lru_order = [iid for iid in self.instances.keys() if iid in evictable]
+        evicted = 0
+        for iid in lru_order:
+            if len(self.instances) <= max_entries:
+                break
+            self._release_cached_instance(iid)
+            evicted += 1
+        if evicted:
+            logger.info(
+                "[InstanceCache] LRU cap: released %d cached instance(s) "
+                "exceeding max_entries=%d",
+                evicted,
+                max_entries,
+            )
+        return evicted
+
     def release_context_usage_cache(self, instance_id: str) -> None:
         """Drop the per-instance context-usage dedup entry.
 
@@ -6042,9 +6212,13 @@ class InstanceManager:
     
     async def _cleanup_cached_instances(self) -> None:
         """Background task to release in-memory graphs for non-active cached instances exceeding TTL.
-        
+
         Cleans up instances in terminal/inactive states: COMPLETED, ERROR, TERMINATED, FAILED, PAUSED.
         Only affects in-memory cache — database records remain intact.
+
+        O3 (resource-cost-control): the TTL is the EFFECTIVE (config-resolved)
+        value, and after the TTL pass the same cadence enforces the LRU
+        max-entries cap (``_enforce_instance_cache_cap``).
         """
         while not self._shutting_down:
             try:
@@ -6062,7 +6236,10 @@ class InstanceManager:
                 ]
                 
                 now = datetime.now(timezone.utc)
-                ttl_seconds = INSTANCE_CACHE_TTL_HOURS * 3600
+                # O3: effective (config-resolved) TTL, defaulting to
+                # ``INSTANCE_CACHE_TTL_HOURS`` for stub/unresolved configs.
+                effective_ttl_hours = _effective_instance_cache_ttl_hours(self)
+                ttl_seconds = effective_ttl_hours * 3600
                 released_count = 0
                 
                 # Query each non-active status
@@ -6102,8 +6279,16 @@ class InstanceManager:
                 if released_count > 0:
                     logger.info(
                         f"Released {released_count} cached instance(s) exceeding "
-                        f"{INSTANCE_CACHE_TTL_HOURS}h TTL"
+                        f"{effective_ttl_hours}h TTL"
                     )
+
+                # O3: LRU max-entries cap, same cadence. Bounded by its own
+                # try/except so a cap-enforcement error can never kill the
+                # sweep loop.
+                try:
+                    self._enforce_instance_cache_cap()
+                except Exception as e:
+                    logger.warning(f"Instance cache cap enforcement failed: {e}")
 
                 # S1: TTL sweep orphaned injection queues. Runs in the same
                 # 10-minute cadence as the cached-instance cleanup so

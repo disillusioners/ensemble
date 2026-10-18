@@ -244,7 +244,12 @@ class TestGetDaemonSettings:
         assert set(body.keys()) == {"settings", "restart_required"}
         assert body["restart_required"] is False
         entries = body["settings"]
-        assert len(entries) == 1
+        # Registry-driven: one entry per registered key (v1.1 = 3 keys).
+        assert len(entries) == len(MANAGED_KEYS)
+        keys = [e["key"] for e in entries]
+        assert keys[0] == KEY  # insertion order — the original key leads
+        assert "limits.instance_cache_ttl_hours" in keys
+        assert "limits.instance_cache_max_entries" in keys
         entry = entries[0]
         assert entry["key"] == KEY
         assert entry["value"] == 10  # snapshot applied_value (boot truth)

@@ -592,6 +592,47 @@ class LimitsConfig(BaseSettings):
     graph_recursion_limit: int = Field(default=100)
     llm_concurrency: int = Field(default=10, ge=1, description="Maximum concurrent LLM calls across all instances")
 
+    # ── O3 instance-graph cache bounding (resource-cost-control, 2026-10-18) ──
+    # BOTH keys are MANAGED daemon settings (db-backed-settings registry,
+    # ``daemon/services/settings_service.py``). Resolution ladder
+    # (highest tier wins; the daemon re-resolves at every boot):
+    #   1. DB override  (app_settings row — set from the settings API)
+    #   2. env var      LIMITS_INSTANCE_CACHE_TTL_HOURS /
+    #                   LIMITS_INSTANCE_CACHE_MAX_ENTRIES
+    #   3. this yaml literal (tier 3 — kept; edit here still works)
+    #   4. built-in default (ttl 6h, max 64)
+    # The pydantic fields below are the tier-3/4 carriers that the boot
+    # apply mutates IN PLACE (``apply_db_settings_overrides``), so the
+    # manager reads EFFECTIVE values off ``config.limits`` at __init__.
+    # Restart-required — the cache is sized once at manager construction.
+    #
+    # ``instance_cache_ttl_hours`` bounds how long a NON-ACTIVE
+    # (terminal / paused) instance's compiled graph stays in the RAM
+    # cache after its last DB ``updated_at`` (paused_at for PAUSED) —
+    # the existing TTL-sweep semantics, default NARROWED 24h → 6h.
+    # ``instance_cache_max_entries`` is an LRU cap over the cache;
+    # active (non-terminal) entries are NEVER evicted and recency is
+    # last graph ACCESS/reuse, not creation.
+    instance_cache_ttl_hours: int = Field(
+        default=6,
+        ge=0,
+        description=(
+            "Post-terminal TTL (hours) for the in-memory instance-graph "
+            "cache. Non-active cached graphs older than this are released "
+            "on the periodic sweep. Env LIMITS_INSTANCE_CACHE_TTL_HOURS."
+        ),
+    )
+    instance_cache_max_entries: int = Field(
+        default=64,
+        ge=1,
+        description=(
+            "LRU max-entries cap for the in-memory instance-graph cache. "
+            "Beyond the cap the least-recently-used NON-ACTIVE entries are "
+            "evicted (active instances are never evicted). Env "
+            "LIMITS_INSTANCE_CACHE_MAX_ENTRIES."
+        ),
+    )
+
     # ── Governor recursive-spawn guard (Governor Recursion Guard, 2026-08-30) ──
     # Default ON (matches the locked design decision). The guard refuses to
     # spawn a governor instance when the prospective parent's chain (parent

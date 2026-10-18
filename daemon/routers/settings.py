@@ -949,7 +949,8 @@ def _daemon_entry_for(key: str, overrides: dict[str, Any]) -> DaemonSettingEntry
 async def get_daemon_settings():
     """List effective daemon settings with per-key tier reporting.
 
-    Registry-driven (v1: exactly one key, ``limits.llm_concurrency``).
+    Registry-driven (v1.1: 3 keys — ``limits.llm_concurrency`` plus the
+    two ``limits.instance_cache_*`` cache-bounding knobs).
     Raises 503 when the lifespan hasn't wired the settings service or
     the resolution snapshot (test-harness backstop).
     """

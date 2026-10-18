@@ -48,6 +48,12 @@ ruling (c)):
 v1 registry content: exactly ONE key — ``limits.llm_concurrency``.
 Adding a key = one registry entry + nothing else (the ladder, CRUD,
 API and FE render generically off the registry).
+
+v1.1 (resource-cost-control O3, 2026-10-18): two more managed keys
+join the registry — ``limits.instance_cache_ttl_hours`` and
+``limits.instance_cache_max_entries`` (the instance-graph cache
+bounding knobs). Same convention: registry entry + the mirroring
+``LimitsConfig`` field, nothing else.
 """
 
 from __future__ import annotations
@@ -150,6 +156,60 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "Effective precedence: DB override > env var "
             "LIMITS_LLM_CONCURRENCY > config.yaml literal > default; "
             "changes require a daemon restart."
+        ),
+    ),
+    # ── O3 instance-graph cache bounding (resource-cost-control, 2026-10-18) ──
+    # Two keys driving the in-memory instance-graph cache
+    # (``InstanceManager.instances``). Both live under the ``limits``
+    # section so the yaml tier rides the existing ``raw_yaml_limits``
+    # accessor untouched (the resolver's section model is
+    # ``limits``-only today). ``env_var`` mirrors the pydantic
+    # ``LimitsConfig`` env_prefix (``LIMITS_``) exactly — the same
+    # pairing as ``limits.llm_concurrency`` / ``LIMITS_LLM_CONCURRENCY``.
+    # Defaults mirror ``daemon.manager.INSTANCE_CACHE_TTL_HOURS`` (6) /
+    # ``INSTANCE_CACHE_MAX_ENTRIES`` (64) — the two must move together
+    # (the registry is the resolver's truth).
+    "limits.instance_cache_ttl_hours": ManagedKeySpec(
+        key="limits.instance_cache_ttl_hours",
+        config_path="limits.instance_cache_ttl_hours",
+        env_var="LIMITS_INSTANCE_CACHE_TTL_HOURS",
+        value_type="int",
+        # Mirrors LimitsConfig.instance_cache_ttl_hours Field(default=6,
+        # ge=0). Default NARROWED 24h → 6h by resource-cost-control O3.
+        default=6,
+        ge=0,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "Post-terminal TTL (hours) for the in-memory instance-graph "
+            "cache. Non-active cached graphs whose last DB timestamp is "
+            "older than this are released by the periodic cache sweep. "
+            "Ordering default is 6h (was 24h). Effective precedence: DB "
+            "override > env var LIMITS_INSTANCE_CACHE_TTL_HOURS > "
+            "config.yaml literal > default; changes require a daemon "
+            "restart."
+        ),
+    ),
+    "limits.instance_cache_max_entries": ManagedKeySpec(
+        key="limits.instance_cache_max_entries",
+        config_path="limits.instance_cache_max_entries",
+        env_var="LIMITS_INSTANCE_CACHE_MAX_ENTRIES",
+        value_type="int",
+        # Mirrors LimitsConfig.instance_cache_max_entries
+        # Field(default=64, ge=1).
+        default=64,
+        ge=1,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "LRU max-entries cap for the in-memory instance-graph cache. "
+            "Beyond the cap the least-recently-used NON-ACTIVE "
+            "(terminal/paused) entries are evicted on the periodic sweep; "
+            "active (non-terminal) entries are NEVER evicted and recency "
+            "is last graph ACCESS/reuse, not creation. Effective "
+            "precedence: DB override > env var "
+            "LIMITS_INSTANCE_CACHE_MAX_ENTRIES > config.yaml literal > "
+            "default; changes require a daemon restart."
         ),
     ),
 }
@@ -261,6 +321,44 @@ def get_settings_resolution_snapshot() -> dict[str, dict[str, Any]] | None:
     """Return the stored snapshot, or ``None`` when never set
     (the router-layer getter turns ``None`` into a 503)."""
     return _resolution_snapshot
+
+
+# =============================================================================
+# Last boot-apply resolution record (cheap read for boot-log consumers)
+# =============================================================================
+
+_last_applied_resolution: dict[str, dict[str, Any]] | None = None
+
+
+def get_last_applied_resolution() -> dict[str, dict[str, Any]] | None:
+    """Return the per-key resolution record from the most recent
+    :func:`apply_db_settings_overrides` boot-apply in this process —
+    ``{key: {value, source, default, env_value, yaml_value,
+    db_override}}`` — or ``None`` when the boot-apply has not run.
+
+    Cheap, side-effect-free read for boot-log consumers that need the
+    winning TIER of a managed key but are constructed BEFORE the
+    lifespan wires :func:`set_settings_resolution_snapshot` onto the
+    router (e.g. ``InstanceManager.__init__`` reporting the effective
+    cache knobs). The record is the SAME :func:`resolve` output the
+    boot apply used to mutate Config — never a second resolution
+    surface.
+    """
+    return _last_applied_resolution
+
+
+def set_last_applied_resolution(
+    resolution: Mapping[str, Mapping[str, Any]] | None,
+) -> None:
+    """Store the boot-apply per-key resolution record (module-global).
+
+    Called once at the tail of :func:`apply_db_settings_overrides`;
+    tests may reset it to ``None`` to simulate a pre-boot process.
+    """
+    global _last_applied_resolution
+    _last_applied_resolution = (
+        {k: dict(v) for k, v in resolution.items()} if resolution else None
+    )
 
 
 # =============================================================================
@@ -644,7 +742,10 @@ def apply_db_settings_overrides(
        despite the yaml literal (the shadowing fix). ``Config`` is a
        plain mutable BaseSettings (no ``frozen``, no
        ``validate_assignment``) so direct assignment works;
-       re-validation happened in the resolver.
+       re-validation happened in the resolver. The per-key
+       ``resolve`` records are also published via
+       :func:`set_last_applied_resolution` for late-constructing
+       boot-log consumers.
     4. Capture ``applied_value`` (post-apply, just before return)
        completing the per-key snapshot
        ``{default, env_value, yaml_value, applied_value}``.
@@ -694,8 +795,10 @@ def apply_db_settings_overrides(
 
     # Step 3+4 — resolve, mutate in place, capture applied_value.
     applied_count = 0
+    resolutions: dict[str, dict[str, Any]] = {}
     for key, spec in MANAGED_KEYS.items():
         resolution = resolve(key, snapshot, db_overrides=db_overrides)
+        resolutions[key] = resolution
         if resolution["source"] == "db":
             applied_count += 1
         current = _get_config_value(config, spec.config_path)
@@ -722,5 +825,9 @@ def apply_db_settings_overrides(
     # construction (db_overrides is reset to {} in the except above),
     # so N always reflects reality.
     logger.info("[Settings] applied %d db override(s)", applied_count)
+
+    # Publish the per-key resolution record for late-constructing
+    # boot-log consumers (e.g. InstanceManager.__init__).
+    set_last_applied_resolution(resolutions)
 
     return config, snapshot
