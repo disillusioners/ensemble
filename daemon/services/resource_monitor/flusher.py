@@ -275,6 +275,7 @@ class Flusher:
                     "resource_pid_map",
                     pid_map_cut_epoch,
                     extra_predicate="exited_at IS NOT NULL",
+                    ts_column="exited_at",
                 )
 
             self.counters.batches += 1
@@ -432,6 +433,7 @@ class Flusher:
         cutoff_epoch_s: int,
         interval_s: Optional[int] = None,
         extra_predicate: Optional[str] = None,
+        ts_column: str = "bucket_ts",
     ) -> int:
         """DELETE rows strictly older than the cutoff. Returns rowcount.
 
@@ -449,11 +451,15 @@ class Flusher:
         partial UNIQUE ``WHERE exited_at IS NULL`` only applies to
         INSERTs, not DELETEs, so this predicate is required.
 
+        ``ts_column`` selects the timestamp column the cutoff
+        compares against (default ``bucket_ts``; the pid-map table
+        uses ``exited_at`` — its only time column).
+
         Missing table → 0 (a fresh boot has no rows to sweep; a
         ``no such table`` / ``relation does not exist`` error is a
         benign first-boot state, never a flusher failure).
         """
-        where = "bucket_ts < :cutoff_iso"
+        where = f"{ts_column} < :cutoff_iso"
         params: dict = {"cutoff_iso": cutoff_iso(cutoff_epoch_s)}
         if interval_s is not None:
             where += " AND interval_s = :interval_s"
