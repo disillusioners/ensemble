@@ -736,6 +736,17 @@ class InstanceManager:
             McpKbKey,
         )
         from .models.app_settings import AppSetting  # noqa: F401  # db-backed-settings P1: register app_settings before create_all
+        # resource-cost-control Phase 1: register the 4 observability
+        # tables BEFORE create_all so the PG boot path lands them on
+        # existing PG databases (SQLModel.metadata.create_all is the
+        # PG source-of-truth per architecture-recommendation §2.4).
+        # SQLite path is the migration runner below.
+        from .models.resource_monitor import (  # noqa: F401  # resource-cost-control P1: register before create_all
+            ResourceDaemonBucket,
+            ResourceInstanceSample,
+            ResourcePidMap,
+            ResourceLimitPolicy,
+        )
 
         SQLModel.metadata.create_all(self._engine)
 
