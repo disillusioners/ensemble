@@ -97,13 +97,17 @@ Per series ≤ ``window_buckets`` buckets × 6 floats × 8 B
 (defaults: 48 × 6 × 8 = 2,304 B ≈ 2.3 KB); cardinality cap
 :data:`DEFAULT_MAX_SERIES` (≈211); DoW×hour map ≤ 168 floats/series.
 Worst case ≈ 769 KB < 1 MB. The findings journal is separately
-bounded: 256 × ~1 KB ≈ 256 KB. :meth:`SeriesStateStore.state_bytes`
-computes the actual accounting from the configured caps; the bounds
-test derives every number from those caps (no literals).
+byte-bounded: findings are MEASURED on append and oldest-first
+eviction keeps the journal's measured total STRICTLY under
+:data:`JOURNAL_MAX_BYTES` (256 KB). :meth:`SeriesStateStore.
+state_bytes` computes the store's accounting from the configured
+caps; the bounds test derives every number from those caps (no
+literals).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import threading
@@ -144,8 +148,10 @@ DOW_HOUR_SLOTS = 7 * 24
 #: Findings journal bound (entries, drop-oldest, append-only).
 JOURNAL_MAXLEN = 256
 
-#: Journal byte accounting basis (the A1 second bound: 256 × 1 KB).
-JOURNAL_FINDING_BYTES = 1024
+#: Journal BYTE budget — the A1 second bound: the journal is
+#: byte-aware (findings are measured on append; oldest-first eviction
+#: keeps the total STRICTLY under this budget). 262_144 = 256 KB.
+JOURNAL_MAX_BYTES = 262_144
 
 #: Self-cost budget for ONE pass (seconds). The pass is pure arithmetic
 #: over ≤211 series × ≤48 buckets; 5 s is ~1000× the expected cost and
@@ -677,11 +683,20 @@ def detect_leak(
     """Monotonic non-recovering upward drift — the leak fingerprint.
 
     Zero down-steps across ≥ LEAK_MIN_BUCKETS buckets + CUSUM⁺ at
-    threshold. Returns ``(window_start_index, cusum_p)`` or ``None``.
+    threshold + the rise DISTRIBUTED across the window (no single
+    bucket contributes more than half the total rise — a one-bucket
+    jump is a spike-class event, not a drift). Returns
+    ``(window_start_index, cusum_p)`` or ``None``.
     """
     tail = states[-LEAK_MIN_BUCKETS:]
     if len(tail) < LEAK_MIN_BUCKETS:
         return None
+    increments = [b.value - a.value for a, b in zip(tail, tail[1:])]
+    total_rise = tail[-1].value - tail[0].value
+    if total_rise <= 0:
+        return None
+    if max(increments) > 0.5 * total_rise:
+        return None  # a single-bucket jump — not a distributed drift
     for a, b in zip(tail, tail[1:]):
         if b.value < a.value:
             return None
@@ -847,25 +862,45 @@ class Finding:
         )
         return d
 
-    def approx_bytes(self) -> int:
-        """Byte accounting basis for the journal bound (~1 KB cap)."""
-        return JOURNAL_FINDING_BYTES
-
 
 class FindingJournal:
-    """Bounded append-only journal — ``deque(maxlen=JOURNAL_MAXLEN)``.
+    """Bounded append-only journal — ``deque(maxlen)`` + a BYTE budget.
+
+    Two bounds, both enforced drop-oldest on append:
+
+    * ``maxlen`` (default :data:`JOURNAL_MAXLEN` = 256 entries);
+    * ``max_bytes`` (default :data:`JOURNAL_MAX_BYTES` = 256 KB) —
+      each finding is MEASURED (``json`` length of its stored dict)
+      and the oldest findings are evicted until the total stays
+      STRICTLY under the budget.
 
     Drop-oldest; ids are monotonic within the process. A small lock
     guards append-against-snapshot (the pass runs on the flusher
     thread; the router reads from request threads).
     """
 
-    def __init__(self, maxlen: int = JOURNAL_MAXLEN) -> None:
+    def __init__(
+        self,
+        maxlen: int = JOURNAL_MAXLEN,
+        max_bytes: int = JOURNAL_MAX_BYTES,
+    ) -> None:
         self.maxlen = max(1, int(maxlen))
+        self.max_bytes = max(1, int(max_bytes))
         self._buf: Deque[Finding] = deque(maxlen=self.maxlen)
         self._seq = 0
         self._seen: Deque[Tuple[str, str]] = deque(maxlen=self.maxlen)
+        self._total_bytes = 0
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _measure(finding: Finding) -> int:
+        """The finding's stored size — the JSON length of its dict
+        (the honest measure; the ~1 KB/finding basis of the §2.7
+        arithmetic)."""
+        try:
+            return len(json.dumps(finding.full_dict(), default=str))
+        except (TypeError, ValueError):
+            return JOURNAL_MAX_BYTES  # unmeasurable ⇒ evict-first
 
     def append(self, finding: Finding) -> bool:
         """Append unless the (series, bucket) already has a finding.
@@ -877,11 +912,26 @@ class FindingJournal:
         with self._lock:
             if dedup_key in self._seen:
                 return False
+            nb = self._measure(finding)
+            # Drop-oldest until BOTH bounds have headroom for the new
+            # finding (the total stays STRICTLY < max_bytes).
+            while self._buf and (
+                len(self._buf) >= self.maxlen
+                or self._total_bytes + nb >= self.max_bytes
+            ):
+                old = self._buf.popleft()
+                self._total_bytes -= self._measure(old)
+                self._seen_leftpop()
             self._seq += 1
             finding.id = f"anom-{self._seq:06d}"
             self._buf.append(finding)
             self._seen.append(dedup_key)
+            self._total_bytes += nb
         return True
+
+    def _seen_leftpop(self) -> None:
+        if self._seen:
+            self._seen.popleft()
 
     def snapshot(self) -> List[Finding]:
         with self._lock:
@@ -894,9 +944,15 @@ class FindingJournal:
                     return f
         return None
 
-    def max_bytes(self) -> int:
-        """The journal's configured byte bound (A1's second bound)."""
-        return self.maxlen * JOURNAL_FINDING_BYTES
+    def total_bytes(self) -> int:
+        """The MEASURED total of the live findings (A1's strict bound:
+        ``< max_bytes`` by construction)."""
+        with self._lock:
+            return self._total_bytes
+
+    def max_bytes_budget(self) -> int:
+        """The configured byte budget (262_144 at defaults)."""
+        return self.max_bytes
 
 
 # ── Contributors (task 9 — through the P3 join layer, never forked) ─────────
@@ -984,9 +1040,12 @@ def build_contributors(
     status_by_iid = {
         r.get("instance_id"): r for r in task_rows if r.get("instance_id")
     }
-    for iid, delta in sorted(
-        charged.items(), key=lambda kv: kv[1], reverse=True
-    )[:MAX_CONTRIBUTORS]:
+    # Shares are computed against the FULL charged total; only the top
+    # MAX_CONTRIBUTORS rows are STORED — the truncated tail folds into
+    # the explicit unattributed remainder row (the honesty rule's
+    # partial-attribution case).
+    ranked = sorted(charged.items(), key=lambda kv: kv[1], reverse=True)
+    for iid, delta in ranked[:MAX_CONTRIBUTORS]:
         share = (delta / total * 100.0) if total > 0 else 0.0
         tr = status_by_iid.get(iid)
         task_status: Dict[str, Any] = {"status": (tr or {}).get("status") or "unknown"}
@@ -1005,7 +1064,8 @@ def build_contributors(
             row["agent_id"] = agent_id
         contributors.append(row)
 
-    # Clamp to ≤100 and report the remainder honestly.
+    # Clamp to ≤100 and report the remainder honestly (rounding slack
+    # + any truncated-beyond-top-N share + the fully-unattributed case).
     used = sum(c["share_pct"] for c in contributors)
     remainder = max(0.0, 100.0 - min(100.0, used))
     if remainder > 0.01 or not contributors:
@@ -1642,7 +1702,7 @@ __all__ = [
     "CUSUM_THRESHOLD",
     "DEFAULT_MAX_SERIES",
     "DOW_HOUR_SLOTS",
-    "JOURNAL_FINDING_BYTES",
+    "JOURNAL_MAX_BYTES",
     "JOURNAL_MAXLEN",
     "STATE_BUCKET_S",
     "STATE_FLOATS",
