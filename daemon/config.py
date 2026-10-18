@@ -679,6 +679,149 @@ class LimitsConfig(BaseSettings):
     attestation_run_deny_cap: int = Field(default=100, ge=1)
 
 
+# ── ResourceMonitorConfig ──────────────────────────────────────────────────
+# resource-cost-control Phase 1 — observability spine (sampler + storage +
+# roll-down + endpoint). 12 knobs per architecture-recommendation.md §2.9.
+# Env prefix ``RESOURCE_MONITOR_`` (unified per council — see plan §2).
+#
+# YAML block (config.yaml `resource_monitor:`) MUST stay free of literal
+# values: pydantic-settings init-kwargs beat env vars, so any yaml literal
+# silently kills the RESOURCE_MONITOR_* env tier. Same trap as
+# LIMITS_LLM_CONCURRENCY (see db-backed-settings P1). The defaults below
+# ARE the values; the yaml block carries comments documenting the defaults
+# only, or omits the block entirely.
+#
+# Managed-key registry alignment is recorded as OPTIONAL future work
+# (decisions.md AD14); NOT implemented in this commission.
+class ResourceMonitorConfig(BaseSettings):
+    """Resource monitor configuration (resource-cost-control Phase 1).
+
+    12 knobs per architecture-recommendation.md §2.9 (binding):
+
+    * ``enabled``                  — global kill-switch (default ``True``).
+    * ``sample_seconds``           — tick interval (default 30, ge=15, le=60).
+    * ``retention_raw_minutes``    — raw-tier retention (default 2880 = 48h;
+      floor 1440 = 24h).
+    * ``retention_minute_hours``   — minute-rollup retention (default 336 =
+      14d; floor 168 = 7d).
+    * ``retention_hour_days``      — hour-rollup retention (default 180;
+      floor 90).
+    * ``detail_level``         — sampler scan depth (``auto``/``full``/
+      ``reduced``/``minimal``).
+    * ``instance_cap``         — max per-tick instance rows (default 50;
+      ≤64 per architecture-recommendation §2.4).
+    * ``self_cpu_budget_pct``      — EMA self-throttle trigger (default 1.0).
+    * ``self_rss_budget_mb``       — runtime alarm/throttle knob (default 50;
+      distinct from the test-level <20 MB sampler-RSS-delta floor).
+    * ``profiling_enabled``        — opt-in on-demand profiling
+      (default ``False``).
+    * ``profile_timebox_s``        — profiler time-box (default 30,
+      ge=10, le=120).
+    * ``flush_batch_seconds``      — flusher batching window (default 60).
+
+    Env: ``RESOURCE_MONITOR_*``. Restart-required for any flip (matches
+    ``LIMITS_*`` precedent).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="RESOURCE_MONITOR_")
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Global kill-switch for the resource monitor subsystem. "
+            "Default ON; ``RESOURCE_MONITOR_ENABLED=false`` disables "
+            "sampling at boot without a code revert."
+        ),
+    )
+    sample_seconds: int = Field(
+        default=30,
+        ge=15,
+        le=60,
+        description=(
+            "Tick interval in seconds. Bound to [15, 60] per the "
+            "phase1-plan D3 ruling. Env RESOURCE_MONITOR_SAMPLE_SECONDS."
+        ),
+    )
+    retention_raw_minutes: int = Field(
+        default=2880,  # 48h
+        ge=1440,      # 24h floor
+        description=(
+            "Raw-tier retention in minutes. Default 2880 (48h); floor 1440 "
+            "(24h). Knob-tunable; sweep is floor-gated."
+        ),
+    )
+    retention_minute_hours: int = Field(
+        default=336,   # 14d
+        ge=168,        # 7d floor
+        description=(
+            "Minute-rollup retention in hours. Default 336 (14d); floor 168 "
+            "(7d)."
+        ),
+    )
+    retention_hour_days: int = Field(
+        default=180,
+        ge=90,  # 90d floor
+        description="Hour-rollup retention in days. Default 180; floor 90.",
+    )
+    detail_level: str = Field(
+        default="auto",
+        description=(
+            "Sampler scan depth. ``auto`` (default) lets the sampler "
+            "decide per-tick; ``full`` / ``reduced`` / ``minimal`` are "
+            "operator-pinned values."
+        ),
+    )
+    instance_cap: int = Field(
+        default=50,
+        ge=1,
+        le=64,
+        description=(
+            "Max per-tick instance rows emitted to the flusher (top-N + "
+            "overflow sentinel). Hard cap 64 per architecture-"
+            "recommendation §2.4 cardinality budget."
+        ),
+    )
+    self_cpu_budget_pct: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=100.0,
+        description=(
+            "EMA self-throttle trigger as percent of ``sample_seconds``. "
+            "EMA tick cost > this % ⇒ double interval + deep-scan off."
+        ),
+    )
+    self_rss_budget_mb: int = Field(
+        default=50,
+        ge=1,
+        description=(
+            "Runtime RSS budget for the sampler in MB. Distinct from "
+            "the test-level <20 MB sampler-RSS-delta floor (D12). "
+            "Exposed via /api/resources/self-cost (rss_budget_mb)."
+        ),
+    )
+    profiling_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in gate for on-demand profiling. Off by default; "
+            "operator flip required."
+        ),
+    )
+    profile_timebox_s: int = Field(
+        default=30,
+        ge=10,
+        le=120,
+        description="Profiler time-box in seconds. Bound to [10, 120].",
+    )
+    flush_batch_seconds: int = Field(
+        default=60,
+        ge=1,
+        description=(
+            "Flusher batching window in seconds. Bounded "
+            "executemany writes ride this window."
+        ),
+    )
+
+
 class PersistenceConfig(BaseSettings):
     """Persistence and checkpoint configuration."""
 
@@ -4250,6 +4393,13 @@ class Config(BaseSettings):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
+    # resource-cost-control Phase 1 — observability spine (sampler +
+    # storage + roll-down + /api/resources/*). Peer of `limits:`. The
+    # yaml block is kept free of literal values so the env tier
+    # (RESOURCE_MONITOR_*) stays live — see ResourceMonitorConfig docstring.
+    resource_monitor: ResourceMonitorConfig = Field(
+        default_factory=ResourceMonitorConfig
+    )
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     queue: QueueConfig = Field(default_factory=QueueConfig)
