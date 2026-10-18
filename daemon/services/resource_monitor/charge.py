@@ -194,6 +194,7 @@ class InstanceChargeRecord:
         "instance_id",
         "message_bytes",
         "checkpoint_bytes",
+        "all_state_messages_len",
         "deep_bytes",
         "deep_partial",
         "deep_scans",
@@ -204,6 +205,14 @@ class InstanceChargeRecord:
         self.instance_id = instance_id
         self.message_bytes = 0
         self.checkpoint_bytes = 0
+        # Cheap structural count (P2 T5): number of message APPENDS
+        # observed at the instance_messaging append/replace seam since
+        # the record was created. Replace keeps list length (never
+        # re-counted); compaction removals have no seam, so this is a
+        # monotone cheap estimate of the in-flight state-message list
+        # length — never a deep walk (D5). Covered by the row's
+        # ``estimated`` honesty labeling (D13).
+        self.all_state_messages_len = 0
         self.deep_bytes = 0
         self.deep_partial = False
         self.deep_scans = 0
@@ -221,6 +230,7 @@ class InstanceChargeRecord:
             "message_bytes": self.message_bytes,
             "checkpoint_bytes": self.checkpoint_bytes,
             "charged_bytes": self.charged_bytes,
+            "all_state_messages_len": self.all_state_messages_len,
             "deep_bytes": self.deep_bytes,
             "deep_partial": self.deep_partial,
             "deep_scans": self.deep_scans,
@@ -305,6 +315,17 @@ class ChargeRegistry:
         rec = self._get_or_create(instance_id)
         if rec is not None:
             rec.checkpoint_bytes += int(n)
+
+    def increment_message_count(self, instance_id: str) -> None:
+        """Cheap append counter for the T2 ``all_state_messages_len``
+        column (P2 T5). Fired ONLY from the append seam (a replace
+        preserves list length); monotone — compaction removals carry
+        no seam, the drift is covered by the row's ``estimated``
+        label (D13). Zero-cost when disabled / unknown instance.
+        """
+        rec = self._get_or_create(instance_id)
+        if rec is not None:
+            rec.all_state_messages_len += 1
 
     def set_deep_bytes(
         self, instance_id: str, deep_bytes: int, *, partial_walk: bool = False
@@ -400,6 +421,8 @@ def note_message_append(instance_id: str, obj: Any) -> None:
         )
         return
     _registry.add_message_bytes(instance_id, size)
+    # T5: cheap append count for the T2 all_state_messages_len column.
+    _registry.increment_message_count(instance_id)
 
 
 def note_message_replace(

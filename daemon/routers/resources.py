@@ -192,10 +192,6 @@ def _cpu_pct_from_rows(rows: list[dict]) -> Optional[float]:
     return round((delta_usec / (interval_s * 1_000_000.0)) * 100.0, 4)
 
 
-def _to_http_400(msg: str, **extra: Any) -> HTTPException:
-    return HTTPException(status_code=400, detail={"error": msg, **extra})
-
-
 # ── /live ───────────────────────────────────────────────────────────────────
 
 
@@ -267,19 +263,38 @@ async def get_live(request: Request) -> dict:
                 - _timedelta_seconds(delta_s)
             ).isoformat()
 
+        # ── P2 T11 — honesty surfacing (D7/D13) ──────────────────────
+        # attribution / instances / children come from the sampler's
+        # LAST TICK (RAM views built on the sampling thread) — the
+        # request path never samples (self-cost discipline). All
+        # degrade to empty when the sampler predates P2 (attribute
+        # absent) — D11.
+        sampler = getattr(monitor, "sampler", None)
+        attrib = getattr(sampler, "_attrib", None) or {}
+        attribution_block = {
+            "attributed_mb": round(
+                (attrib.get("attributed_bytes") or 0) / 1048576.0, 2
+            ),
+            "unattributed_mb": round(
+                (attrib.get("unattributed_kb") or 0) / 1024.0, 2
+            ),
+            "coverage_pct": round(float(attrib.get("coverage_pct") or 0.0), 4),
+        }
+        instances_block = list(
+            getattr(sampler, "last_instance_view", None) or []
+        )[:50]
+        children_block = list(
+            getattr(sampler, "last_children_view", None) or []
+        )[:50]
+
         return {
             "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "sample_level": counters.ladder_level,
             "daemon": daemon_block,
             "cgroup": cgroup_block,
-            # P1 — attribution empty; P2 populates.
-            "children": [],
-            "instances": [],
-            "attribution": {
-                "attributed_mb": 0,
-                "unattributed_mb": 0,
-                "coverage_pct": 0.0,
-            },
+            "children": children_block,
+            "instances": instances_block,
+            "attribution": attribution_block,
             "overruns": overruns,
             "self_cost": _self_cost_from_monitor(monitor),
         }
@@ -377,6 +392,74 @@ def _interval_for_resolution(resolution: str) -> int:
     return {"raw": 30, "minute": 60, "hour": 3600}.get(resolution, 30)
 
 
+def _floor_naive_iso(iso: str, bucket_s: int) -> str:
+    """Floor a naive-UTC ISO ts to a bucket boundary (portable).
+
+    Mirrors the rollup module's parsing contract (``...T...`` or
+    ``... ...`` form, fractional seconds tolerated).
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
+    s = str(iso).replace("T", " ")
+    if "." in s:
+        s = s.split(".")[0]
+    dt = _dt.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_tz.utc)
+    epoch = int(dt.timestamp())
+    epoch -= epoch % bucket_s
+    return (
+        _dt.fromtimestamp(epoch, tz=_tz.utc)
+        .replace(tzinfo=None)
+        .strftime("%Y-%m-%d %H:%M:%S")
+    )
+
+
+def _read_instances_active(
+    engine: Any,
+    resolution: str,
+    window_seconds: int,
+) -> dict[str, int]:
+    """Distinct instances sampled per bucket (P2 — ``instances_active``).
+
+    T2 (``resource_instance_sample``) is a RAW-tier-only table (no
+    roll-down), so for minute/hour resolutions the raw rows are
+    floored to the bucket boundary in Python (portable — no
+    ``date_trunc``/``strftime`` dialect split). The ``__overflow__``
+    sentinel is NOT an instance and is excluded. Bounded at 20 000
+    rows (a full default 48 h raw window at the ≤64-row cap is
+    ≈369 k rows — beyond the bound the counts under-count; the DB
+    remains the honest durable record). Missing table ⇒ ``{}``
+    (fresh boot / P1-era data).
+    """
+    from datetime import timedelta
+
+    bucket_s = _interval_for_resolution(resolution)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None)
+    cutoff = (cutoff - timedelta(seconds=window_seconds)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT bucket_ts, instance_id FROM "
+                    "resource_instance_sample WHERE bucket_ts >= :cutoff "
+                    "LIMIT 20000"
+                ),
+                {"cutoff": cutoff},
+            ).fetchall()
+    except Exception as exc:
+        err = str(exc).lower()
+        if "no such table" in err or "does not exist" in err:
+            return {}
+        raise
+    buckets: dict[str, set[str]] = {}
+    for ts, iid in rows:
+        if not ts or not iid or iid == "__overflow__":
+            continue
+        buckets.setdefault(_floor_naive_iso(ts, bucket_s), set()).add(iid)
+    return {k: len(v) for k, v in buckets.items()}
+
+
 def _read_history_points(
     engine: Any,
     resolution: str,
@@ -386,9 +469,15 @@ def _read_history_points(
 
     Sync (bridged via ``asyncio.to_thread``). Filters by the tier's
     ``interval_s`` + the window cutoff. Returns the §2.8 points
-    shape. Missing table ⇒ empty list (fresh boot).
+    shape. Missing table ⇒ empty list (fresh boot). P2:
+    ``instances_active`` is REAL — distinct instances sampled per
+    bucket from ``resource_instance_sample`` (was a P1 ``None``
+    stub).
     """
     interval_s = _interval_for_resolution(resolution)
+    instances_active = _read_instances_active(
+        engine, resolution, window_seconds
+    )
     cutoff = datetime.now(timezone.utc).replace(tzinfo=None)
     from datetime import timedelta
 
@@ -435,7 +524,9 @@ def _read_history_points(
                 round((r[4] or 0) / 1024.0, 2) if r[4] is not None else None
             ),
             "threads": r[5],
-            "instances_active": None,  # P2 populates
+            "instances_active": instances_active.get(
+                _floor_naive_iso(r[0], interval_s), 0
+            ),
         }
         out.append(point)
         prev_cpu = cpu_total

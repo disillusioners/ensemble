@@ -74,9 +74,24 @@ class ResourceMonitor:
         """Start the sampler + flusher threads. If either start
         fails, degrade — ``enabled=False`` + a one-shot boot log
         (D10). NEVER raises.
+
+        P2 T10: enabling the monitor ALSO arms the process-wide
+        charge registry (``charge.set_enabled(True)``) — the seams
+        are identity no-ops until this flip (lane-A integration
+        TODO closed here, per the dispatch brief). ``stop()``
+        disarms symmetrically.
         """
         if not self.enabled:
             return
+        try:
+            from . import charge as _charge
+
+            _charge.set_enabled(True)
+        except Exception:  # pragma: no cover — import is intra-package
+            logger.warning(
+                "resource-monitor: charge registry enable failed",
+                exc_info=True,
+            )
         try:
             self.sampler.start()
         except Exception as exc:
@@ -85,6 +100,14 @@ class ResourceMonitor:
             logger.error(
                 "resource-monitor DISABLED: %s", self.boot_error, exc_info=True
             )
+            # Symmetric disarm — the seams must not charge while the
+            # monitor is down.
+            try:
+                from . import charge as _charge
+
+                _charge.set_enabled(False)
+            except Exception:
+                pass
             return
         try:
             self.flusher.start()
@@ -96,6 +119,12 @@ class ResourceMonitor:
             )
             # Best-effort: stop the sampler too.
             self.sampler.stop()
+            try:
+                from . import charge as _charge
+
+                _charge.set_enabled(False)
+            except Exception:
+                pass
             return
         logger.info(
             "resource-monitor started: sample_s=%d flush_s=%d retention=%s",
@@ -111,11 +140,21 @@ class ResourceMonitor:
     def stop(self) -> None:
         """Signal stop on both. Non-blocking — join happens at the
         lifespan level on a detached thread (D10).
+
+        P2 T10: disarms the charge registry (``set_enabled(False)``)
+        — the seams return to identity no-ops the moment the monitor
+        stops (T1/AC1 contract).
         """
         self.stop_event.set()
         if self.enabled:
             self.sampler.stop()
             self.flusher.stop()
+        try:
+            from . import charge as _charge
+
+            _charge.set_enabled(False)
+        except Exception:
+            pass
 
     def join(self, timeout: float = 5.0) -> None:
         """Join both threads with a bounded timeout.
@@ -138,12 +177,26 @@ def build_resource_monitor(
     proc_root: Path | str = "/proc",
     cgroup_root: Path | str = "/sys/fs/cgroup",
     child_pids_provider: Optional[Callable[[], list[int]]] = None,
+    graph_cache_provider: Optional[Callable[[], object]] = None,
+    graph_tasks_provider: Optional[Callable[[], object]] = None,
+    state_message_counts_provider: Optional[Callable[[], object]] = None,
 ) -> ResourceMonitor:
     """Construct the facade from the typed config + engine.
 
     Called from ``daemon/api.py`` lifespan beside the stream-watchdog
     block. NEVER raises — a build failure degrades the subsystem
     (``enabled=False`` + boot_error) without crashing the lifespan.
+
+    P2 T10 provider params (all optional; wired from the api.py
+    lifespan with cheap lambdas over the manager):
+
+      * ``graph_cache_provider``        — ``manager.instances`` (the
+        deep-scan mapping + ``graph_cache_present`` membership).
+      * ``graph_tasks_provider``        — ``manager._graph_tasks``
+        (COUNT ONLY: len() + membership; no Task sizing, D5).
+      * ``state_message_counts_provider`` — the messaging service's
+        ``_last_seen_message_count`` map (cheap dict .get — the T5
+        ``all_state_messages_len`` source, no deep walk).
     """
     cfg = config_resource_monitor
 
@@ -212,6 +265,13 @@ def build_resource_monitor(
             retention_hour_days=cfg.retention_hour_days,
         )
         ring = TierRing(tier="raw", maxlen=raw_maxlen)
+        # P2 T10 — bounded instance-row ring (raw tier, no roll-down;
+        # sized for several flush windows of handoff headroom; the DB
+        # is the durable store).
+        instance_ring = TierRing(
+            tier="instance",
+            maxlen=max(2, 8 * (min(int(getattr(cfg, "instance_cap", 64)), 64) + 1)),
+        )
         sampler = Sampler(
             sample_seconds=cfg.sample_seconds,
             self_cpu_budget_pct=cfg.self_cpu_budget_pct,
@@ -221,12 +281,18 @@ def build_resource_monitor(
             cgroup_root=cgroup_root,
             ring=ring,
             child_pids_provider=child_pids_provider,
+            instance_ring=instance_ring,
+            instance_cap=int(getattr(cfg, "instance_cap", 64)),
+            graph_cache_provider=graph_cache_provider,
+            graph_tasks_provider=graph_tasks_provider,
+            state_message_counts_provider=state_message_counts_provider,
         )
         flusher = Flusher(
             engine=engine,
             raw_ring=ring,
             flush_batch_seconds=cfg.flush_batch_seconds,
             retention=retention,
+            instance_ring=instance_ring,
         )
     except Exception as exc:
         logger.error(

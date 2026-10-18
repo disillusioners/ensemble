@@ -491,6 +491,9 @@ class TestRegistrySemantics:
             "message_bytes",
             "checkpoint_bytes",
             "charged_bytes",
+            # P2 T5 (integration lane): cheap append-count scalar —
+            # additive, still D14-compliant (ids/counters only).
+            "all_state_messages_len",
             "deep_bytes",
             "deep_partial",
             "deep_scans",
@@ -503,6 +506,8 @@ class TestRegistrySemantics:
                 "message_bytes",
                 "checkpoint_bytes",
                 "charged_bytes",
+                # P2 T5 (integration lane): cheap append-count scalar.
+                "all_state_messages_len",
                 "deep_bytes",
                 "deep_partial",
                 "deep_scans",

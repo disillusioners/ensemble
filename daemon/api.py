@@ -1957,6 +1957,27 @@ async def lifespan(app: FastAPI):
         _resource_monitor = build_resource_monitor(
             config_resource_monitor=config.resource_monitor,
             engine=manager.engine,
+            # P2 T10/T5 provider wiring (resource-cost-control
+            # integration lane): cheap lambdas over the live manager —
+            # the deep-scan instances mapping, the graph-task COUNT
+            # (len only, D5), and the messaging service's
+            # last-seen-message-count map (cheap dict .get). All
+            # defensive getattr — a missing attribute degrades that
+            # column to None/False, never raises on the tick.
+            graph_cache_provider=lambda: getattr(
+                manager, "instances", None
+            )
+            or {},
+            graph_tasks_provider=lambda: getattr(
+                manager, "_graph_tasks", None
+            )
+            or {},
+            state_message_counts_provider=lambda: getattr(
+                getattr(manager, "_messaging_service", None),
+                "_last_seen_message_count",
+                None,
+            )
+            or {},
         )
         _resource_monitor.start()
         app.state.resource_monitor = _resource_monitor

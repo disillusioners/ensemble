@@ -117,6 +117,7 @@ class Flusher:
         pid_registry: Optional[PidRegistry] = None,
         wall_clock: Callable[[], float] = time.monotonic,
         now_utc_naive: Optional[Callable[[], datetime]] = None,
+        instance_ring: Optional[TierRing] = None,
     ) -> None:
         self.engine = engine
         self.raw_ring = raw_ring
@@ -129,6 +130,10 @@ class Flusher:
         # (moves ownership of the entries to its INSERT batch);
         # callers MUST NOT keep references past the flush.
         self._pid_registry = pid_registry or get_pid_registry()
+        # P2 T10 — per-instance rows (``resource_instance_sample``).
+        # Optional; when absent the flusher skips the T2 write (the
+        # P1 behavior). Drained inside the SAME engine.begin() window.
+        self._instance_ring = instance_ring
         self._wall_clock = wall_clock  # injectable for tests
         self._now_utc_naive = now_utc_naive or _default_now_utc_naive
 
@@ -214,6 +219,7 @@ class Flusher:
         )
 
         rows_written = 0
+        instance_rows_written = 0
         swept = {"raw": 0, "minute": 0, "hour": 0, "instance": 0,
                  "pid_map": 0}
         minute_rows: list[dict] = []
@@ -277,6 +283,23 @@ class Flusher:
                     extra_predicate="exited_at IS NOT NULL",
                     ts_column="exited_at",
                 )
+                # 6. P2 T10 — per-instance tier write (additive, same
+                # window): drain the sampler's instance ring and
+                # INSERT into resource_instance_sample. Raw-tier only
+                # (no roll-down; swept below at the raw cutoff).
+                if self._instance_ring is not None:
+                    instance_rows = self._instance_ring.drain()
+                    for row in instance_rows:
+                        row.setdefault(
+                            "bucket_ts",
+                            self._now_utc_naive().strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            ),
+                        )
+                    instance_rows_written = self._write_instance_rows(
+                        conn, instance_rows
+                    )
+                    rows_written += instance_rows_written
 
             self.counters.batches += 1
             self.counters.bytes_written += sum(
@@ -295,6 +318,7 @@ class Flusher:
 
         return {
             "rows_written": rows_written,
+            "instance_rows": instance_rows_written,
             "minute_rows": len(minute_rows),
             "hour_rows": len(hour_rows),
             "swept": swept,
@@ -528,6 +552,60 @@ class Flusher:
                 "cpu_user_usec",
             ],
             idempotent=True,
+        )
+        return self._tier_write(conn, sql, params)
+
+    def _write_instance_rows(
+        self, conn: Any, rows: list[dict]
+    ) -> int:
+        """Bulk-insert P2 T2 ``resource_instance_sample`` rows.
+
+        Additive tier-write (P2 T10): the sampler's instance ring is
+        drained here and written in ONE executemany inside the same
+        ``engine.begin()`` window as T1. No-op when the list is empty;
+        missing table ⇒ 0 via the shared ``_tier_write`` tolerance.
+
+        D14: the row payload carries ids/counters/durations ONLY —
+        the sampler's ``ALLOWED_T2_ROW_KEYS`` guard enforces the
+        shape upstream; this INSERT projects exactly the T2 columns.
+
+        Dialect note (disclosed): ``idempotent=False`` — a PLAIN
+        INSERT. T2 has NO unique constraint (its §2.4 indexes are
+        non-unique), so a conflict-target INSERT would be invalid on
+        PostgreSQL; duplicate protection comes from the drain
+        (rows leave the ring exactly once).
+        """
+        if not rows:
+            return 0
+        params = [
+            {
+                "bucket_ts": r.get("bucket_ts"),
+                "instance_id": r.get("instance_id"),
+                "agent_id": r.get("agent_id"),
+                "status": r.get("status"),
+                "scan_kind": r.get("scan_kind"),
+                "charged_bytes": r.get("charged_bytes"),
+                "deep_bytes": r.get("deep_bytes"),
+                "graph_cache_present": r.get("graph_cache_present"),
+                "in_flight_tasks": r.get("in_flight_tasks"),
+                "all_state_messages_len": r.get("all_state_messages_len"),
+                "child_rss_kb": r.get("child_rss_kb"),
+                "child_cpu_user_usec": r.get("child_cpu_user_usec"),
+                "cpu_share_usec_est": r.get("cpu_share_usec_est"),
+                "estimated": bool(r.get("estimated", True)),
+            }
+            for r in rows
+        ]
+        sql = self._dialect_insert(
+            "resource_instance_sample",
+            [
+                "bucket_ts", "instance_id", "agent_id", "status",
+                "scan_kind", "charged_bytes", "deep_bytes",
+                "graph_cache_present", "in_flight_tasks",
+                "all_state_messages_len", "child_rss_kb",
+                "child_cpu_user_usec", "cpu_share_usec_est", "estimated",
+            ],
+            idempotent=False,
         )
         return self._tier_write(conn, sql, params)
 

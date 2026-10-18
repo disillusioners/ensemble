@@ -237,12 +237,21 @@ class TestEndpointShapes:
         # the sampler stamps into the row, which the /live handler
         # surfaces here.
         assert j["daemon"]["pid"] == os.getpid()
-        # attribution zero-value in P1 (D13).
+        # P2 (D13): the attribution block carries REAL values. With
+        # the charge registry empty (nothing charged yet), attributed
+        # is 0 and unattributed = the whole anon pool (VmData 65536 kB
+        # = 64 MB in the synthetic fixture) — coverage 0. The zero
+        # block P1 pinned here was the stub; the honesty columns now
+        # demonstrate the arithmetic.
         assert j["attribution"] == {
             "attributed_mb": 0,
-            "unattributed_mb": 0,
+            "unattributed_mb": 64.0,
             "coverage_pct": 0.0,
         }
+        # The denominator is the DAEMON's own anon (VmData 65536 kB in
+        # the fixture — §2.2 in-process attribution), NOT the cgroup
+        # figure (which also covers children): 65536 kB = 64 MB.
+        assert j["attribution"]["unattributed_mb"] == 64.0
 
     def test_self_cost_exact_field_set(self, app_state):
         """AC11: /self-cost returns the EXACT §2.8 field set."""

@@ -35,17 +35,22 @@ Ladder (architecture §2.8):
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
+from . import charge as _charge
+from .deep_scan import DeepScanResult, DeepScanner
+from .pid_registry import PidRegistry, get_pid_registry, read_proc_stat_field
 from .proc_readers import (
     ChildSnapshot,
     CgroupSnapshot,
     DaemonProcSnapshot,
     ProcSnapshot,
+    read_child_snapshot,
     read_proc_snapshot,
 )
 from .ring import TierRing
@@ -64,6 +69,53 @@ RE_PROMOTE_CLEAN_TICKS = 3  # hysteresis: N clean ticks before re-promote
 # Detail-level resolution: how often we sample PSS (smaps_rollup).
 # ``deep`` / ``full``: 1/10 cadence. ``reduced`` / ``minimal``: never.
 PSS_CADENCE = 10
+
+
+# ── P2 T10 integration constants ────────────────────────────────────────────
+
+#: The single overflow sentinel row's ``instance_id`` (D12). Rows beyond
+#: the ≤64/tick cap collapse into this one aggregate row.
+OVERFLOW_SENTINEL = "__overflow__"
+
+#: Hard cap on per-child ``/proc`` reads per tick (self-cost tighten,
+#: dispatch brief). The registry snapshot can be longer; beyond this cap
+#: the remaining entries are skipped this tick (they re-appear next tick
+#: — the /live children view then reflects the walked prefix, honestly).
+CHILD_READ_CAP = 64
+
+#: Rows kept for the /live children view (§2.8 children[] ≤50).
+LIVE_CHILDREN_CAP = 50
+
+#: Rows kept for the /live instances view (§2.8 instances[] ≤50).
+LIVE_INSTANCES_CAP = 50
+
+#: Bounded maxlen for the sampler-internal instance-row ring when the
+#: facade does not pass one. 8 ticks × (cap + 1 sentinel) covers the
+#: flush window handoff many times over; the DB is the durable store.
+DEFAULT_INSTANCE_RING_TICKS = 8
+
+#: D14/AC11 — the EXACT key set a T2 ``resource_instance_sample`` row
+#: may carry. Ids, counters, durations, scalars ONLY. The row builder
+#: below constructs rows exclusively from this set, and the test pack
+#: asserts no canary / tool-arg / message-content key ever appears.
+ALLOWED_T2_ROW_KEYS = frozenset(
+    {
+        "bucket_ts",  # stamped by the flusher, not the sampler
+        "instance_id",
+        "agent_id",
+        "status",
+        "scan_kind",
+        "charged_bytes",
+        "deep_bytes",
+        "graph_cache_present",
+        "in_flight_tasks",
+        "all_state_messages_len",
+        "child_rss_kb",
+        "child_cpu_user_usec",
+        "cpu_share_usec_est",
+        "estimated",
+    }
+)
 
 
 # ── Sampler self-cost counters ─────────────────────────────────────────────
@@ -146,6 +198,18 @@ class Sampler:
         counters: Optional[SamplerCounters] = None,
         child_pids_provider: Optional[Callable[[], list[int]]] = None,
         wall_clock: Callable[[], float] = time.monotonic,
+        # ── P2 T10 integration (attribution) ──
+        instance_ring: Optional[TierRing] = None,
+        instance_cap: int = 64,
+        pid_registry: Optional[PidRegistry] = None,
+        deep_scanner: Optional[DeepScanner] = None,
+        graph_cache_provider: Optional[
+            Callable[[], Mapping[str, tuple]]
+        ] = None,
+        graph_tasks_provider: Optional[Callable[[], Mapping[str, object]]] = None,
+        state_message_counts_provider: Optional[
+            Callable[[], Mapping[str, int]]
+        ] = None,
     ) -> None:
         self.sample_seconds = sample_seconds
         self.self_cpu_budget_pct = self_cpu_budget_pct
@@ -157,6 +221,43 @@ class Sampler:
         self.counters = counters or SamplerCounters()
         self._child_pids_provider = child_pids_provider
         self._wall_clock = wall_clock  # injectable for tests
+
+        # ── P2 T10 — attribution wiring ────────────────────────────────
+        # Per-tick T2 rows land here; the flusher drains the SAME ring
+        # inside its single engine.begin() window. When no ring is
+        # passed (bare-sampler tests), an internal bounded ring keeps
+        # the /live latest-tick view working with zero DB coupling.
+        self.instance_ring = instance_ring or TierRing(
+            tier="instance",
+            maxlen=max(
+                2, DEFAULT_INSTANCE_RING_TICKS * (min(instance_cap, 64) + 1)
+            ),
+        )
+        # D12 — ≤64 instance rows/tick (config ``instance_cap``, env
+        # ``RESOURCE_MONITOR_INSTANCE_CAP``; the config layer clamps
+        # 1..64 — clamped here too so a bare-constructed sampler stays
+        # inside the contract).
+        self.instance_cap = max(1, min(int(instance_cap), 64))
+        self._pid_registry = pid_registry or get_pid_registry()
+        self._deep_scanner = deep_scanner or DeepScanner()
+        # Injectable manager/messaging state providers (D5 cheap
+        # counts + the deep-scan instances mapping). All optional —
+        # absent ⇒ the related columns degrade to None/False and the
+        # deep scan is a no-op (the P1 bare-sampler behavior).
+        self._graph_cache_provider = graph_cache_provider
+        self._graph_tasks_provider = graph_tasks_provider
+        self._state_message_counts_provider = state_message_counts_provider
+
+        # Latest-tick views for the /live handler (§2.8). The router
+        # NEVER samples on the request path (self-cost discipline);
+        # it reads these RAM copies.
+        self.last_instance_rows: list[dict] = []
+        self.last_instance_view: list[dict] = []
+        self.last_children_view: list[dict] = []
+        # Per-pid child CPU delta anchor: pid -> (cpu_user_usec, monotonic).
+        self._child_cpu_prev: dict[int, tuple[int, float]] = {}
+        # This tick's T1 attribution columns (set by _sample_attribution).
+        self._attrib: dict = {}
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -248,6 +349,15 @@ class Sampler:
             child_pids=child_pids,
         )
 
+        # P2 T10 — attribution sampling (registry children walk +
+        # charge snapshot + the 1/tick deep-scan reconcile). Runs
+        # BEFORE the overrun check so the tick cost honestly includes
+        # the attribution work (self-cost discipline). On overrun the
+        # rows are discarded, but the deep-scan correction is a stock
+        # update inside the charge registry and legitimately survives.
+        attribution = self._sample_attribution(snap, level)
+        self._attrib = attribution
+
         tick_end = self._wall_clock()
         tick_cost_ms = (tick_end - tick_start) * 1000.0
 
@@ -330,6 +440,20 @@ class Sampler:
             # Write the row into the ring (the only writer).
             if snap is not None:
                 self.ring.append(self._snapshot_to_row(snap, tick_cost_ms))
+                # P2 T10 — per-instance rows (≤ cap + 1 overflow
+                # sentinel) into the instance ring; the flusher drains
+                # the SAME ring inside its single engine.begin() window.
+                if attribution.get("instance_rows"):
+                    self.instance_ring.extend(attribution["instance_rows"])
+                    self.last_instance_rows = list(
+                        attribution["instance_rows"]
+                    )
+                self.last_instance_view = list(
+                    attribution.get("instances_view") or []
+                )
+                self.last_children_view = list(
+                    attribution.get("children_view") or []
+                )
                 # Track the cumulative CPU usec for the next tick's
                 # cpu_pct delta.
                 self.counters.prev_cpu_usec_total = (
@@ -337,6 +461,386 @@ class Sampler:
                 )
 
         return snap
+
+    # ── P2 T10 — attribution sampling (hybrid-C integration) ──────────
+
+    def _sample_attribution(
+        self, snap: Optional[ProcSnapshot], level: str
+    ) -> dict:
+        """One tick's attribution sample — the D1 hybrid-C integration.
+
+        Layers consumed (all fail-soft, never raising into the tick):
+
+          1. ``pid_registry.snapshot()`` — per-child ``/proc`` exact
+             reads (starttime-verified; PID-recycle safe), charged to
+             the OWNING instance. ``instance_id`` NULL entries (mcp
+             pools) stay server-scoped — never guessed onto an
+             instance (D11).
+          2. ``charge.snapshot_all()`` — the per-instance charged
+             stock (message + checkpoint bytes).
+          3. ``DeepScanner.scan_next()`` — the 1/tick bounded
+             reconcile over the graph cache (D4); gated by the ladder
+             level AND the EMA self-throttle (AC10 asserts the OFF
+             state, never assumes it).
+
+        **D13 blend rule** (the one implemented — documented per the
+        dispatch brief): per instance, ``attributed_i = max(
+        charged_i, deep_i)`` — the better of the two estimates, since
+        both measure the SAME heap region (charged counters drift
+        with compaction; the deep scan is a bounded undercount). The
+        two are NEVER summed (double-count) and NEVER blended into
+        each other's stored columns (charge keeps both side by
+        side). Daemon-wide ``attributed_bytes = Σ attributed_i``;
+        ``unattributed_kb = max(0, anon_bytes − attributed) // 1024``
+        (charged stock can transiently exceed anon RSS — checkpoint
+        reads include since-freed blobs — hence the clamp);
+        ``coverage_pct = min(1.0, attributed / anon_bytes)``, with
+        ``anon == 0 ⇒ 0.0`` (guard div-by-zero) — capped at 1.0
+        because no attribution can honestly exceed the whole anon
+        pool.
+
+        Returns a scalar-only dict (D14):
+        ``{attributed_bytes, unattributed_kb, coverage_pct,
+        instance_rows, children_view}``.
+        """
+        empty = {
+            "attributed_bytes": 0,
+            "unattributed_kb": 0,
+            "coverage_pct": 0.0,
+            "instance_rows": [],
+            "instances_view": [],
+            "children_view": [],
+        }
+        if snap is None:
+            return empty
+        try:
+            return self._sample_attribution_inner(snap, level)
+        except Exception:
+            # R2 — attribution must never break the sampler tick.
+            logger.warning(
+                "resource-monitor attribution sampling failed; "
+                "tick continues with empty attribution",
+                exc_info=True,
+            )
+            return empty
+
+    def _sample_attribution_inner(
+        self, snap: ProcSnapshot, level: str
+    ) -> dict:
+        walk_children = level in ("deep", "full")
+
+        # 1. Registry children — exact per-pid reads.
+        children_view, child_by_instance, child_snaps = self._walk_children(
+            walk_children
+        )
+
+        # Merge registry children into the P1 provider children
+        # (dedupe by pid) so T1 child_rss_total_kb covers BOTH paths.
+        seen_pids = {c.pid for c in snap.children}
+        for child in child_snaps:
+            if child.pid not in seen_pids:
+                snap.children.append(child)
+                seen_pids.add(child.pid)
+
+        # 2. Deep scan — 1/tick reconcile (D4). Gated on ladder level
+        # (reduced/minimal skip it, consistent with the children
+        # walk) and the EMA self-throttle (AC10).
+        instances: Mapping[str, tuple] = {}
+        if self._graph_cache_provider is not None:
+            try:
+                instances = self._graph_cache_provider() or {}
+            except Exception:
+                instances = {}
+        deep_result: Optional[DeepScanResult] = None
+        if (
+            self._deep_scan_enabled
+            and walk_children
+            and instances
+            and self._deep_scanner is not None
+        ):
+            deep_result = self._deep_scanner.scan_next(instances)
+
+        # 3. Charge registry snapshot (the per-instance stock).
+        snap_all = _charge.snapshot_all()
+        graph_tasks: Mapping[str, object] = {}
+        if self._graph_tasks_provider is not None:
+            try:
+                graph_tasks = self._graph_tasks_provider() or {}
+            except Exception:
+                graph_tasks = {}
+        state_counts: Mapping[str, int] = {}
+        if self._state_message_counts_provider is not None:
+            try:
+                state_counts = self._state_message_counts_provider() or {}
+            except Exception:
+                state_counts = {}
+
+        # ── D13 blend rule → T1 honesty columns ──
+        anon_bytes = max(0, snap.daemon.anon_kb or 0) * 1024
+        attributed = 0
+        charged_total = 0
+        for rec in snap_all.values():
+            charged = int(rec.get("charged_bytes") or 0)
+            deep = int(rec.get("deep_bytes") or 0)
+            charged_total += charged
+            attributed += charged if charged >= deep else deep
+        unattributed_kb = max(0, (anon_bytes - attributed) // 1024)
+        if anon_bytes > 0:
+            coverage = min(1.0, attributed / anon_bytes)
+        else:
+            coverage = 0.0  # anon=0 ⇒ coverage 0 (div-by-zero guard)
+
+        # Daemon CPU delta across ticks (for cpu_share_usec_est — an
+        # ESTIMATE, charged-share-proportional, labelled `_est`).
+        cur_total = snap.daemon.cpu_user_usec + snap.daemon.cpu_sys_usec
+        prev_total = self.counters.prev_cpu_usec_total
+        daemon_cpu_delta: Optional[int] = None
+        if prev_total is not None and cur_total >= prev_total:
+            daemon_cpu_delta = cur_total - prev_total
+
+        # ── T2 rows (D12 cap + D14 scalars-only) ──
+        universe = set(snap_all) | set(instances) | set(graph_tasks)
+        scored = sorted(
+            universe,
+            key=lambda iid: (
+                1 if iid in graph_tasks else 0,
+                int((snap_all.get(iid) or {}).get("charged_bytes") or 0),
+            ),
+            reverse=True,
+        )
+        kept = scored[: self.instance_cap]
+        overflow_ids = scored[self.instance_cap :]
+        charge_on = _charge.is_enabled()
+
+        def _agent_of(iid: str) -> Optional[str]:
+            entry = instances.get(iid)
+            if isinstance(entry, tuple) and len(entry) > 1:
+                agent_dir = entry[1]
+                if isinstance(agent_dir, str) and agent_dir:
+                    return os.path.basename(agent_dir.rstrip("/")) or None
+            return None
+
+        def _row_for(iid: str) -> dict:
+            rec = snap_all.get(iid) or {}
+            charged = int(rec.get("charged_bytes") or 0)
+            deep = int(rec.get("deep_bytes") or 0)
+            deep_scanned = (int(rec.get("deep_scans") or 0)) > 0
+            is_deep_target = (
+                deep_result is not None
+                and deep_result.instance_id == iid
+                and charge_on
+            )
+            scan_kind = "deep" if is_deep_target else "counter"
+            partial = (
+                bool(deep_result.partial_walk)
+                if (is_deep_target and deep_result is not None)
+                else False
+            )
+            # estimated = the row lacks a (complete) fresh deep scan.
+            # A partial_walk deep scan undercounts ⇒ still an estimate.
+            estimated = not (scan_kind == "deep" and not partial)
+            cc = child_by_instance.get(iid)
+            share: Optional[int] = None
+            if daemon_cpu_delta is not None and charged_total > 0:
+                share = int(
+                    round(daemon_cpu_delta * (charged / charged_total))
+                )
+            return {
+                "instance_id": iid,
+                "agent_id": _agent_of(iid),
+                "status": None,  # sample-time snapshot — P3 seam, None for now
+                "scan_kind": scan_kind,
+                "charged_bytes": charged,
+                "deep_bytes": deep if deep_scanned else None,
+                "graph_cache_present": (
+                    (iid in instances)
+                    if self._graph_cache_provider is not None
+                    else None
+                ),
+                "in_flight_tasks": (
+                    (1 if iid in graph_tasks else 0)
+                    if self._graph_tasks_provider is not None
+                    else None
+                ),
+                "all_state_messages_len": (
+                    state_counts.get(iid)
+                    if self._state_message_counts_provider is not None
+                    else None
+                ),
+                "child_rss_kb": int(cc[0]) if cc else 0,
+                "child_cpu_user_usec": int(cc[1]) if cc else 0,
+                "cpu_share_usec_est": share,
+                "estimated": bool(estimated),
+            }
+
+        rows = [_row_for(iid) for iid in kept]
+        if overflow_ids:
+            overflow_charged = sum(
+                int((snap_all.get(iid) or {}).get("charged_bytes") or 0)
+                for iid in overflow_ids
+            )
+            overflow_child = child_by_instance.get(OVERFLOW_SENTINEL)
+            child_rss_sum = sum(
+                child_by_instance.get(iid, (0, 0, 0))[0] for iid in overflow_ids
+            )
+            child_cpu_sum = sum(
+                child_by_instance.get(iid, (0, 0, 0))[1] for iid in overflow_ids
+            )
+            rows.append(
+                {
+                    "instance_id": OVERFLOW_SENTINEL,
+                    "agent_id": None,
+                    "status": None,
+                    "scan_kind": "counter",
+                    "charged_bytes": overflow_charged,
+                    "deep_bytes": None,
+                    "graph_cache_present": None,
+                    "in_flight_tasks": sum(
+                        1 for iid in overflow_ids if iid in graph_tasks
+                    ),
+                    "all_state_messages_len": None,
+                    "child_rss_kb": child_rss_sum,
+                    "child_cpu_user_usec": child_cpu_sum,
+                    "cpu_share_usec_est": None,
+                    "estimated": True,
+                }
+            )
+        # D14 belt-and-braces: a row may ONLY carry allowed scalar keys.
+        for r in rows:
+            extra = set(r) - ALLOWED_T2_ROW_KEYS
+            if extra:  # pragma: no cover — construction bug tripwire
+                raise ValueError(
+                    f"T2 row carried non-scalar/unknown keys: {sorted(extra)}"
+                )
+
+        # ── §2.8 /live views (built here, read by the router — the
+        # request path never samples) ──
+        live_instances = []
+        for r in rows:
+            if r["instance_id"] == OVERFLOW_SENTINEL:
+                continue
+            cc = child_by_instance.get(r["instance_id"])
+            live_instances.append(
+                {
+                    "instance_id": r["instance_id"],
+                    "agent": r["agent_id"],
+                    "estimated": r["estimated"],
+                    "charged_mb": round(r["charged_bytes"] / 1048576.0, 2),
+                    "child_rss_mb": round(r["child_rss_kb"] / 1024.0, 2),
+                    "children_n": (cc[2] if cc else 0),
+                    "in_flight_tasks": r["in_flight_tasks"],
+                }
+            )
+        live_instances = live_instances[:LIVE_INSTANCES_CAP]
+        children_view = children_view[:LIVE_CHILDREN_CAP]
+
+        return {
+            "attributed_bytes": int(attributed),
+            "unattributed_kb": int(unattributed_kb),
+            "coverage_pct": float(coverage),
+            "instance_rows": rows,
+            "instances_view": live_instances,
+            "children_view": children_view,
+        }
+
+    def _walk_children(
+        self, walk: bool
+    ) -> tuple[list[dict], dict[str, tuple[int, int, int]], list[ChildSnapshot]]:
+        """Exact per-child ``/proc`` reads off the pid registry.
+
+        Returns ``(children_view, by_instance, child_snaps)``:
+
+        * ``children_view`` — §2.8 ``children[]`` entries
+          ``{pid, kind, name, cpu_pct, rss_mb}`` (all kinds,
+          instance-owned AND server-scoped).
+        * ``by_instance`` — instance_id -> (rss_kb, cpu_user_usec, n)
+          aggregates for the OWNING instance only (``instance_id``
+          NULL entries are excluded — D11 server-scoped).
+        * ``child_snaps`` — the raw ChildSnapshots (merged into the
+          tick's T1 ``child_rss_total_kb``).
+
+        PID-recycle defense (D8): an entry is trusted only when
+        ``/proc/<pid>/stat`` field 22 STILL equals the registered
+        ``start_time`` — a recycled pid is never charged. Bounded at
+        ``CHILD_READ_CAP`` exact reads per tick (self-cost).
+        """
+        view: list[dict] = []
+        by_instance: dict[str, tuple[int, int, int]] = {}
+        child_snaps: list[ChildSnapshot] = []
+        if not walk:
+            return view, by_instance, child_snaps
+        try:
+            entries = self._pid_registry.snapshot()
+        except Exception:
+            entries = []
+        now = self._wall_clock()
+        for entry in entries[:CHILD_READ_CAP]:
+            try:
+                start_time_now = read_proc_stat_field(
+                    self.proc_root, entry.pid, 22
+                )
+                if start_time_now is None or start_time_now != entry.start_time:
+                    # Gone or recycled — never charge a stolen pid.
+                    self._child_cpu_prev.pop(entry.pid, None)
+                    continue
+                child = read_child_snapshot(self.proc_root, entry.pid)
+            except Exception:
+                continue
+            if child is None:
+                continue
+            child_snaps.append(child)
+            view.append(
+                {
+                    "pid": entry.pid,
+                    "kind": entry.kind,
+                    "name": _child_name(entry),
+                    "cpu_pct": self._child_cpu_pct(
+                        entry.pid, child.cpu_user_usec, now
+                    ),
+                    "rss_mb": round(child.rss_kb / 1024.0, 2),
+                }
+            )
+            if entry.instance_id:
+                agg = by_instance.get(entry.instance_id)
+                if agg is None:
+                    by_instance[entry.instance_id] = (
+                        child.rss_kb,
+                        child.cpu_user_usec,
+                        1,
+                    )
+                else:
+                    by_instance[entry.instance_id] = (
+                        agg[0] + child.rss_kb,
+                        agg[1] + child.cpu_user_usec,
+                        agg[2] + 1,
+                    )
+        # Bounded eviction of the per-pid CPU delta anchor.
+        if len(self._child_cpu_prev) > 1024:
+            live_pids = {e.pid for e in entries}
+            self._child_cpu_prev = {
+                p: v
+                for p, v in self._child_cpu_prev.items()
+                if p in live_pids
+            }
+        return view, by_instance, child_snaps
+
+    def _child_cpu_pct(
+        self, pid: int, cpu_user_usec: int, now: float
+    ) -> Optional[float]:
+        """Per-child cpu_pct from the delta across ticks (§2.8
+        children[].cpu_pct). ``None`` on first sight / non-monotonic
+        (honest — no estimate invented)."""
+        prev = self._child_cpu_prev.get(pid)
+        self._child_cpu_prev[pid] = (cpu_user_usec, now)
+        if prev is None:
+            return None
+        prev_cpu, prev_t = prev
+        dt = now - prev_t
+        if dt <= 0 or cpu_user_usec < prev_cpu:
+            return None
+        return round(
+            ((cpu_user_usec - prev_cpu) / (dt * 1_000_000.0)) * 100.0, 4
+        )
 
     def _read_pss_rollup(self) -> Optional[int]:
         """Read ``/proc/self/smaps_rollup`` for PSS in kB (via the
@@ -363,12 +867,13 @@ class Sampler:
     ) -> dict:
         """Convert a ``ProcSnapshot`` into the ring row shape.
 
-        P1 boundary (D13): the row carries the daemon + cgroup
-        fields plus sampler self-cost counters. Attribution
-        counters (charged_bytes / unattributed / coverage_pct)
-        are written as 0 by the sampler — P2 fills them.
+        P2 (D13): the attribution columns carry REAL values computed
+        by :meth:`_sample_attribution` this tick — the P1 zero
+        placeholders are gone. The blend rule (charged ∪ deep, never
+        summed) is documented there.
         """
         d = snap.daemon
+        attrib = getattr(self, "_attrib", None) or {}
         row: dict = {
             # The tick wall-clock (Naive-UTC ISO) is stamped at write
             # time by the flusher (T6); the sampler writes the
@@ -386,10 +891,10 @@ class Sampler:
             "cpu_user_usec": d.cpu_user_usec,
             "cpu_sys_usec": d.cpu_sys_usec,
             "child_rss_total_kb": sum(c.rss_kb for c in snap.children),
-            # P1 boundary — D13.
-            "attributed_bytes": 0,
-            "unattributed_kb": 0,
-            "coverage_pct": 0.0,
+            # P2 T10 (D13) — real honesty columns.
+            "attributed_bytes": int(attrib.get("attributed_bytes") or 0),
+            "unattributed_kb": int(attrib.get("unattributed_kb") or 0),
+            "coverage_pct": float(attrib.get("coverage_pct") or 0.0),
             "sample_cost_ms": tick_cost_ms,
             "sampler_lag_ms": self.counters.last_tick_lag_ms,
             "missed_samples": self.counters.missed_samples,
@@ -440,11 +945,37 @@ class Sampler:
                 slept += 0.1
 
 
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+
+def _child_name(entry) -> str:
+    """Derive the §2.8 ``children[].name`` from a registry entry.
+
+    Preference: the entry's ``detail`` (the MCP server name for
+    ``mcp_child`` stamps — D11 server-scoped identity), else the
+    basename of the sanitized ``command``'s argv[0], else ``pid-<n>``.
+    The command is ALREADY sanitized argv-shape at the seam (D14) —
+    this helper only narrows it further to a display token.
+    """
+    if entry.detail:
+        return str(entry.detail)
+    cmd = (entry.command or "").strip()
+    if cmd:
+        first = cmd.split()[0]
+        return os.path.basename(first) or first
+    return f"pid-{entry.pid}"
+
+
 __all__ = [
     "LADDER_LEVELS",
     "LADDER_DEFAULT",
     "RE_PROMOTE_CLEAN_TICKS",
     "PSS_CADENCE",
+    "CHILD_READ_CAP",
+    "LIVE_CHILDREN_CAP",
+    "LIVE_INSTANCES_CAP",
+    "OVERFLOW_SENTINEL",
+    "ALLOWED_T2_ROW_KEYS",
     "SamplerCounters",
     "Sampler",
 ]
