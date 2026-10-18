@@ -321,6 +321,36 @@ def main(run_preflight: bool = True):
     # must precede load_config().
     _boot_auth_config_preflight()
 
+    # Boot-time stale-subprocess sweep (resource-cost-control O8a,
+    # 2026-10-18). Reaps children orphaned by PRIOR daemon incarnations
+    # inside this unit's cgroup — the test-farm leak class from the
+    # 2026-10-17 OOM night (a child survived even systemd's cgroup-wide
+    # SIGKILL sweep: journal "Unit process 3393684 (MainThread) remains
+    # running after unit stopped"). Predicate is fail-closed (own-cgroup
+    # membership + starttime older than this process + never self /
+    # ancestors / descendants / kernel threads / zombies) and every
+    # signal passes the PID-recycle guard (starttime field-22 + pgid +
+    # cgroup re-check) immediately beforehand. Default-ON with the
+    # ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES kill-switch (leader ruling:
+    # guarded boot code — bounded, logged, revertible); TERM → bounded
+    # grace → SIGKILL, every action logged. Runs here — before config
+    # load, uvicorn, and any child-spawning subsystem — so the daemon's
+    # own tree is empty and the ancestry exclusion carries the launcher
+    # + PyInstaller bootloader. Fail-open: a sweep bug must never block
+    # boot. Full mechanism + census evidence: module docstring and
+    # docs/investigations/2026-10-18-o8-stale-subprocess-sweep-and-killmode-audit.md
+    try:
+        from .services.boot_subprocess_sweep import sweep_stale_subprocesses
+
+        sweep_stale_subprocesses()
+    except SystemExit:
+        raise
+    except Exception as exc:  # fail-open belt around the module's own fail-open
+        logger.warning(
+            "Boot stale-subprocess sweep: skipped (fail-open): %s: %s",
+            type(exc).__name__, exc,
+        )
+
     # Load config to get host/port
     config = load_config()
 
