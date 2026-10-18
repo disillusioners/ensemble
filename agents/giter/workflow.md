@@ -83,8 +83,15 @@ Fenced .env — MANDATORY at creation, before any daemon run (marker value `dev`
 # ENSEMBLE_SELF_ENV marker: this .env belongs to a git WORKTREE, never the main checkout.
 ENSEMBLE_SELF_ENV=dev
 # Target: DEV database only — NEVER prod. Values copied from main checkout dev .env.
+POSTGRES_HOST=127.0.0.1
+POSTGRES_PORT=5432
+POSTGRES_DB=ensemble_dev
+POSTGRES_USER=ensemble_dev_app
+POSTGRES_PASSWORD=<copy from main checkout dev .env>
+DAEMON_PORT=8079
 # ==== END FENCE ====
 ```
+MANDATORY: the POSTGRES_* + DAEMON_PORT assignment lines are REQUIRED in every worktree .env — a marker-only fence is INVALID. dev.sh does `set -a; source .env`; without them the daemon falls back to SQLite (fresh-migration DROP CONSTRAINT defect) or inherits ambient live POSTGRES_*. Verify at creation: `grep -E '^POSTGRES_DB=|^DAEMON_PORT=' .env` and assert POSTGRES_DB != ensemble_prod. (Bug fixed 2026-10-18: the settings-worker-slots worktree got a marker-only fence because this block previously omitted the assignment lines, forcing the tester to inject POSTGRES_DB manually.)
 wt.claim.<slug>: heartbeat per action; stale 10 min / census 15 min.
 Quiescence invariant BEFORE merge: NO merge until the worktree is CLEAN — WIP must be committed / stash-by-sha / discarded first. The merge IS the commit point.
 Chained cleanup AFTER merge — ONE atomic sequence, no lingering between steps: merge --no-ff into latest -> remove worktree -> delete branch (run `git branch -d` from a checkout on latest) -> delete_keys claim+census (remove-first). "Continue working" after merge = craft a NEW worktree; NEVER resurrect the old one (stateless continuation).
