@@ -21,11 +21,11 @@ category:
    fallback also carries the 6 names (drift equality is
    owned by ``test_frozen_tool_name_discovery``).
 
-Plus the privileged-category pin (sextet → septet):
+Plus the privileged-category pin (septet → octet):
 
-* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly seven entries
+* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly eight entries
   (``system_upgrade``, ``system-log``, ``ens-db``, ``ens-env``,
-  ``view-views``, ``cu``, ``secrets``) — NEVER default-granted
+  ``view-views``, ``cu``, ``secrets``, ``settings``) — NEVER default-granted
   (R-SR16: opt-in-only via per-agent ``tools.allow``).
 * The default-deny seam applies: an EMPTY-allow agent
   (watcher-like) gets ZERO ``secrets`` tools (R-SR16).

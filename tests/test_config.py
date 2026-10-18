@@ -327,6 +327,36 @@ class TestWorkerPoolYamlShadow:
         assert raw.get("worker_pool_size") == 5
         assert raw.get("chat_worker_pool_size") == 2
 
+    def test_shipped_repo_config_yaml_literals_pinned_to_constants(self):
+        """Pin the SHIPPED repo-root ``config.yaml`` artifact itself.
+
+        The three temp-config tests above each build their own
+        ``limits:`` section via ``ENSEMBLE_CONFIG`` — they prove the
+        F1 mechanism but are BLIND to the shipped file: deleting
+        either yaml literal (``worker_pool_size`` /
+        ``chat_worker_pool_size``) from the repo-root ``config.yaml``
+        would leave those suites green while real boots reinstated
+        the boot-time ValidationError this commission fixed (pydantic
+        would bind the env tier directly, and a malformed env value
+        would be fatal again). This test loads the REAL shipped file
+        (repo-root ``config.yaml``, anchored to the test tree; the
+        explicit-path call never consults ``ENSEMBLE_CONFIG`` — no
+        temp file involved) and asserts the raw yaml literals equal
+        ``daemon.constants.WORKER_POOL_SIZE`` /
+        ``CHAT_WORKER_POOL_SIZE`` — pinning the literal↔constant
+        drift coupling at the same time (the yaml mirror and the
+        constants must move together)."""
+        from daemon import constants
+        from daemon.config import raw_yaml_limits
+
+        shipped_config = Path(__file__).resolve().parent.parent / "config.yaml"
+
+        load_config(str(shipped_config))
+        raw = raw_yaml_limits()
+        assert raw is not None
+        assert raw.get("worker_pool_size") == constants.WORKER_POOL_SIZE
+        assert raw.get("chat_worker_pool_size") == constants.CHAT_WORKER_POOL_SIZE
+
 
 class TestConfigValidation:
     """Tests for Config model validation."""

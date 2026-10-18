@@ -123,7 +123,7 @@ class TestStaticRegistrationChecklist:
         ``agents/leader/meta.json`` is the only access path.
         ``secrets`` joined per the agent-secrets P1 commission
         (2026-10-17, plan f11965039) — the encrypted-secret-store
-        category (sextet → septet) is opt-in-only via
+        category (septet → octet) is opt-in-only via
         ``tools.allow: ["secrets"]`` on the day-one allow-list
         (``worker``, ``tester``, ``leader``, ``ari``); the trust
         ruling (plan §1.2) is unconditional — secret-given =
