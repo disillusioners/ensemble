@@ -96,7 +96,9 @@ from daemon.services.view_passcode_service import (
     codes_match,
     compute_ip_hmac,
     generate_passcode,
+    issue_grant_cookie,
     normalize_entry,
+    parse_grant_cookie,
 )
 
 
@@ -1317,3 +1319,238 @@ class TestRightmostXffIp:
 
     def test_none_headers_returns_none(self) -> None:
         assert _rightmost_xff_ip(None) is None
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Grant cookie codec (P4 — TTL/generation/tamper matrix)
+# ─────────────────────────────────────────────────────────────────────
+#
+# Architecture-recommendation.md D6:75 — grant cookie = Fernet
+# token over ``{root_name, rel_path, generation, exp = now +
+# 86400}``; Max-Age=86400; HttpOnly; Secure; SameSite=Lax. The
+# codec functions live in view_passcode_service.py
+# (:func:`issue_grant_cookie` + :func:`parse_grant_cookie`).
+#
+# Phase 4 (T4.1 — "cookie TTL/generation/tamper matrix") requires
+# the unit-tier primitive to be pinned via ``now`` injection —
+# **NEVER** ``time.sleep`` (the phase-plan risk note:
+# "TTL tests NEVER time.sleep — inject expiry via service
+# parameters"). The HTTP surface coverage for the same matrix
+# lives in tests/unit/routers/test_live_views_public_lane.py
+# (TestGrantCookie et al.); this class covers the codec
+# primitive directly so a future caller (a different router
+# lane, a CLI tool, ...) cannot accidentally skip the
+# expiry/generation/tamper validation.
+
+
+class TestGrantCookieCodec:
+    """AC8 — cookie TTL/generation/tamper matrix, unit tier
+    (codec primitive level)."""
+
+    def test_issue_sets_exp_to_now_plus_ttl(
+        self, cipher: ViewPasscodeCipher
+    ) -> None:
+        """The ``exp`` claim equals ``now + ttl_seconds`` —
+        the canonical TTL arithmetic."""
+        now = 1_700_000_000.0
+        token = issue_grant_cookie(
+            cipher=cipher,
+            root_name="planning",
+            rel_path="design/landing.html",
+            generation=1,
+            ttl_seconds=86400,
+            now=now,
+        )
+        claims = parse_grant_cookie(
+            cipher=cipher,
+            token=token,
+            expected_root="planning",
+            expected_rel="design/landing.html",
+            expected_generation=1,
+            now=now,
+        )
+        assert claims.exp == now + 86400
+
+    def test_parse_rejects_expired_cookie(
+        self, cipher: ViewPasscodeCipher
+    ) -> None:
+        """AC8 — cookie expired (``exp <= now``) → typed
+        validation error, NEVER a 500. The router maps
+        this to the interstitial."""
+        now = 1_700_000_000.0
+        token = issue_grant_cookie(
+            cipher=cipher,
+            root_name="planning",
+            rel_path="design/landing.html",
+            generation=1,
+            ttl_seconds=86400,
+            now=now,
+        )
+        # Advance the clock past expiry (the canonical
+        # "post-24h" simulation — never use time.sleep,
+        # always inject ``now`` per phase-plan risk note).
+        with pytest.raises(ViewPasscodeValidationError) as exc_info:
+            parse_grant_cookie(
+                cipher=cipher,
+                token=token,
+                expected_root="planning",
+                expected_rel="design/landing.html",
+                expected_generation=1,
+                now=now + 86400 + 1.0,
+            )
+        assert "expired" in str(exc_info.value).lower()
+
+    def test_parse_rejects_root_mismatch(
+        self, cipher: ViewPasscodeCipher
+    ) -> None:
+        """AC8 — cookie issued for root A, GET hits root B
+        → typed validation error (claims mismatch)."""
+        now = 1_700_000_000.0
+        token = issue_grant_cookie(
+            cipher=cipher,
+            root_name="planning",
+            rel_path="design/landing.html",
+            generation=1,
+            ttl_seconds=86400,
+            now=now,
+        )
+        with pytest.raises(ViewPasscodeValidationError) as exc_info:
+            parse_grant_cookie(
+                cipher=cipher,
+                token=token,
+                expected_root="other",
+                expected_rel="design/landing.html",
+                expected_generation=1,
+                now=now,
+            )
+        assert "root mismatch" in str(exc_info.value).lower()
+
+    def test_parse_rejects_rel_mismatch(
+        self, cipher: ViewPasscodeCipher
+    ) -> None:
+        """AC8 — cookie issued for rel A, GET hits rel B
+        → typed validation error."""
+        now = 1_700_000_000.0
+        token = issue_grant_cookie(
+            cipher=cipher,
+            root_name="planning",
+            rel_path="design/landing.html",
+            generation=1,
+            ttl_seconds=86400,
+            now=now,
+        )
+        with pytest.raises(ViewPasscodeValidationError) as exc_info:
+            parse_grant_cookie(
+                cipher=cipher,
+                token=token,
+                expected_root="planning",
+                expected_rel="different/file.html",
+                expected_generation=1,
+                now=now,
+            )
+        assert "rel mismatch" in str(exc_info.value).lower()
+
+    def test_parse_rejects_generation_mismatch(
+        self, cipher: ViewPasscodeCipher
+    ) -> None:
+        """AC8 — cookie issued under gen=1, row bumped to
+        gen=2 (post-refresh) → typed validation error."""
+        now = 1_700_000_000.0
+        token = issue_grant_cookie(
+            cipher=cipher,
+            root_name="planning",
+            rel_path="design/landing.html",
+            generation=1,
+            ttl_seconds=86400,
+            now=now,
+        )
+        with pytest.raises(ViewPasscodeValidationError) as exc_info:
+            parse_grant_cookie(
+                cipher=cipher,
+                token=token,
+                expected_root="planning",
+                expected_rel="design/landing.html",
+                expected_generation=2,
+                now=now,
+            )
+        assert "generation" in str(exc_info.value).lower()
+
+    def test_parse_rejects_tampered_ciphertext(
+        self, cipher: ViewPasscodeCipher
+    ) -> None:
+        """AC8 — tampered ciphertext (decrypt fail) → the
+        rotation-fail primitive (typed
+        ``ViewPasscodeRotationRequired``), NEVER a 500."""
+        now = 1_700_000_000.0
+        # A token that is structurally valid (Fernet-shaped)
+        # but signed with a different key.
+        from daemon.services.view_passcode_service import (
+            ViewPasscodeCipher as CipherCls,
+        )
+
+        rotated = CipherCls(encryption_key=b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+        rotated_token = rotated.wrap(b'{"root_name":"x","rel_path":"y","generation":1,"exp":9999999999.0}')
+        with pytest.raises(ViewPasscodeRotationRequired):
+            parse_grant_cookie(
+                cipher=cipher,
+                token=rotated_token,
+                expected_root="x",
+                expected_rel="y",
+                expected_generation=1,
+                now=now,
+            )
+
+    def test_parse_rejects_garbage_ciphertext(
+        self, cipher: ViewPasscodeCipher
+    ) -> None:
+        """A cookie that is NOT a Fernet token at all →
+        ``ViewPasscodeRotationRequired`` (the rotation-fail
+        primitive; the caller collapses to interstitial)."""
+        with pytest.raises(ViewPasscodeRotationRequired):
+            parse_grant_cookie(
+                cipher=cipher,
+                token=b"not-a-fernet-token",
+                expected_root="x",
+                expected_rel="y",
+                expected_generation=1,
+                now=1_700_000_000.0,
+            )
+
+    def test_issue_rejects_invalid_inputs(
+        self, cipher: ViewPasscodeCipher
+    ) -> None:
+        """AC8 + D12 — invalid ``generation`` / ``ttl_seconds``
+        / empty root / empty rel are rejected at the codec
+        boundary (typed error, never a silent 0/1 fallback)."""
+        with pytest.raises(ViewPasscodeValidationError):
+            issue_grant_cookie(
+                cipher=cipher,
+                root_name="",
+                rel_path="x",
+                generation=1,
+                ttl_seconds=86400,
+            )
+        with pytest.raises(ViewPasscodeValidationError):
+            issue_grant_cookie(
+                cipher=cipher,
+                root_name="x",
+                rel_path="",
+                generation=1,
+                ttl_seconds=86400,
+            )
+        with pytest.raises(ViewPasscodeValidationError):
+            issue_grant_cookie(
+                cipher=cipher,
+                root_name="x",
+                rel_path="y",
+                generation=0,
+                ttl_seconds=86400,
+            )
+        with pytest.raises(ViewPasscodeValidationError):
+            issue_grant_cookie(
+                cipher=cipher,
+                root_name="x",
+                rel_path="y",
+                generation=1,
+                ttl_seconds=0,
+            )

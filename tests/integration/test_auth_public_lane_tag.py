@@ -9,6 +9,33 @@ exercises the mechanism with auth middleware ON: the public
 sub-routes must pass ``AuthMiddleware`` while every other
 ``/views`` path stays default-deny.
 
+**P4 D19 cage fold-in disposition:** this file is RETAINED as
+**complementary HTTP-surface coverage** alongside the canonical
+S-19 cage extension at
+``tests/integration/test_auth_middleware_dispatch.py::
+TestS19AnonymousViewPaths::test_public_lane_code_seeded_prefix_tag_passes_auth``
+(phase4-plan.md D19 / phase4 T4.1 gap closure #2). The S-19 cage
+test pins the SAME core assertions (anonymous_view_paths empty,
+public lane passes via code-seeded prefix tag, direct lane stays
+default-deny, ``/views/livez`` + ``/views/assets/*`` unaffected,
+over-broad-tag exclusion pinned) inside the canonical S-19
+regression cage. This file adds the complementary HTTP-surface
+assertions below that the S-19 cage does NOT cover:
+
+* public asset alias (``/views/public/assets/mermaid/...``) passes
+  AuthMiddleware (T2.10 — the alias is the gate-free vendored
+  bundle mirrored for granted customers);
+* bare ``/views`` (no /public prefix) stays default-deny;
+* the PUBLIC-tagged route count assertion (>=5 routes carry the
+  AUTH_PUBLIC_ATTR — a canary that catches a future drift where
+  a route is added without the tag).
+
+Both homes are kept in sync: any change here MUST land in the
+S-19 cage test too (the canonical assertions); any change in
+the S-19 cage test is the binding update. Cross-reference is
+recorded here and in the P4 coverage matrix at
+``.agents/shared/planning/live-view-passcode/governor-review-pack.md``.
+
 Binding assertions (architecture-recommendation.md T2):
 
 * ``/views/public/{root}/{rel}`` passes the middleware with the

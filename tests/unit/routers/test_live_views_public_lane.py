@@ -564,6 +564,60 @@ class TestPublicUniform404:
         assert resp.status_code == 404
         assert resp.json() == {"error": "view not found"}
 
+    def test_public_lane_404_envelope_byte_identical_to_direct_lane(
+        self, client: TestClient
+    ):
+        """AC12 + D2:36 — the uniform-404 envelope on the
+        public lane is byte-identical to the direct lane
+        (same body, same headers). The ``_uniform_404()``
+        helper is the single seam; this test pins the
+        byte-equivalence across both lanes for every miss
+        class so a future drift on either side trips here
+        first.
+
+        Probed classes: unknown root, unknown path,
+        traversal, double-encoded traversal,
+        extension-not-allowed. Every probe on the public
+        lane must reproduce the direct-lane envelope
+        byte-for-byte.
+        """
+        direct_404 = client.get(
+            "/views/planning/ens/no-such-file.html"
+        )
+        assert direct_404.status_code == 404
+        direct_body = direct_404.content
+        direct_headers = dict(direct_404.headers)
+
+        public_probes = (
+            # unknown root
+            "/views/public/nonexistent/ens/foo.html",
+            # unknown path (unminted, well-formed root)
+            "/views/public/planning/ens/feat/design/mockups/never_minted.html",
+            # traversal
+            "/views/public/planning/ens/../etc/passwd",
+            # double-encoded traversal
+            "/views/public/planning/ens/%2e%2e/etc/passwd",
+            # extension-not-allowed
+            "/views/public/planning/ens/feat/design/mockups/landing.exe",
+        )
+        for probe in public_probes:
+            resp = client.get(probe)
+            assert resp.status_code == 404, probe
+            assert resp.content == direct_body, (
+                f"public-lane 404 body drifted from direct lane "
+                f"at {probe!r}: public={resp.content!r} "
+                f"direct={direct_body!r}"
+            )
+            # The header SET must match too (same hardening
+            # headers — both lanes ride the same
+            # ``_HARDENING_HEADERS`` constant).
+            assert set(resp.headers.keys()) == set(
+                direct_headers.keys()
+            ), (
+                f"public-lane 404 header set drifted from "
+                f"direct lane at {probe!r}"
+            )
+
 
 # ─────────────────────────────────────────────────────────────────
 # Group C — Gate surface (AC7 / T7 — locked page has no form)
@@ -1997,3 +2051,368 @@ class TestDirectLaneByteParity:
         assert resp.headers.get("content-length") == str(
             len(b"<h1>Landing</h1>")
         )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Group K — W1 rotation-fail end-to-end pin (P4)
+# ─────────────────────────────────────────────────────────────────
+#
+# architecture-recommendation.md D4:59 + decisions.md D-A2 + D-A3:
+# SYSTEM_ENCRYPTION_KEY rotation MUST collapse to the "regeneration
+# required" path — never a 500, never a plaintext error envelope.
+# The unit-tier primitive is pinned at
+# tests/unit/services/test_view_passcode_service.py
+# ::TestCipherConstruction + ::test_verify_rotation_required_on_tampered_ciphertext.
+#
+# The P4 commission requires an END-TO-END pin through the public
+# lane: mint under key A → flip to key B → GET with valid-shape
+# cookie + POST verify → both paths collapse to the interstitial
+# ("regeneration required" / failure page), NEVER a 500.
+#
+# Mechanic:
+#   1. Mint under cipher A; the in-memory store holds a row whose
+#      ``wrapped_passcode`` is encrypted under A; the issuance of
+#      a successful POST would mint a grant cookie under A.
+#   2. **Flip** ``app.state.view_passcode_cipher`` to a NEW cipher
+#      built with a DIFFERENT Fernet key (B). The row's
+#      ``wrapped_passcode`` (encrypted under A) is now unreadable
+#      under the rotated cipher.
+#   3. **Corrupt** the row's ``wrapped_passcode`` to a non-decrypt-
+#      able byte string under BOTH ciphers (the row-re-encrypt walk
+#      had not yet caught up to the rotation). This ensures the
+#      service-side ``verify`` raises ``ViewPasscodeRotationRequired``
+#      regardless of which cipher is in play.
+#   4. GET with the cookie issued under A → ``parse_grant_cookie``
+#      runs against cipher B → ``InvalidToken`` → router falls
+#      through → interstitial (cookie clear + the same HTML page a
+#      customer with no cookie sees).
+#   5. POST with the correct passcode → ``service.verify`` raises
+#      ``ViewPasscodeRotationRequired`` → router catches → failure
+#      page (the "regeneration required" interstitial variant).
+#
+# Neither path leaks a 500; neither path reveals the original
+# passcode or the corruption vector; the customer can retry once
+# the owner runs ``refresh=True`` (which would re-encrypt under
+# the new key).
+
+
+# A second Fernet key for the rotation pin. Never the
+# ``_TEST_FERNET_KEY`` above (caller bug = the rotation would
+# silently pass).
+_ROTATED_FERNET_KEY: bytes = (
+    b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+)
+
+
+def _build_rotated_cipher() -> ViewPasscodeCipher:
+    """A second ``ViewPasscodeCipher`` built from a Fernet key
+    distinct from :data:`_TEST_FERNET_KEY`. Used by the W1
+    pin to simulate SYSTEM_ENCRYPTION_KEY rotation mid-test.
+    """
+    return ViewPasscodeCipher(encryption_key=_ROTATED_FERNET_KEY)
+
+
+class TestWRotationFailPin:
+    """W1 end-to-end pin — SYSTEM_ENCRYPTION_KEY rotation
+    MUST collapse to the interstitial / failure page path,
+    NEVER a 500.
+
+    architecture-recommendation.md D4:59 — "rotation coupling
+    GROWS: SYSTEM_ENCRYPTION_KEY rotation must now also re-
+    encrypt live_view_passcodes.wrapped_passcode (add to the
+    rotation ceremony alongside the secrets walk; decrypt
+    failure → typed 'regeneration required', never a 500)".
+    """
+
+    def test_get_with_cookie_issued_under_old_cipher_returns_interstitial_under_rotated_cipher(
+        self,
+        client: TestClient,
+        in_memory_store: _InMemoryPasscodeStore,
+        cipher: ViewPasscodeCipher,
+    ):
+        """GET with a cookie issued under cipher A → cookie
+        decrypt fails under cipher B → interstitial (cookie
+        clear). NEVER a 500.
+
+        Step 1 — mint under cipher A and capture a grant
+        cookie issued under cipher A.
+        """
+        from daemon.services.view_passcode_service import generate_passcode
+
+        rel_path = "ens/feat/design/mockups/landing.html"
+        path = f"/views/public/planning/{rel_path}"
+        plaintext = generate_passcode()
+        wrapped = cipher.wrap(plaintext.encode("ascii"))
+        in_memory_store.upsert(
+            "planning", rel_path, wrapped_passcode=wrapped
+        )
+
+        # Step 1a — issue a grant cookie under cipher A.
+        post_resp = client.post(
+            path,
+            data={"code": plaintext},
+            follow_redirects=False,
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        assert post_resp.status_code == 303
+        cookie_value = post_resp.cookies.get("view_grant")
+        assert cookie_value, "expected grant cookie issued under cipher A"
+
+        # Step 2 — rotate the cipher on app.state (simulates
+        # SYSTEM_ENCRYPTION_KEY rotation). The cookie was
+        # issued under A; cipher B cannot read it.
+        rotated_cipher = _build_rotated_cipher()
+        client.app.state.view_passcode_cipher = rotated_cipher
+
+        # Step 3 — GET with the old cookie under the new
+        # cipher. The parse_grant_cookie call raises (it
+        # catches Exception → falls through to locked check /
+        # interstitial). The customer-facing outcome is the
+        # INTERSTITIAL (cookie clear + passcode form),
+        # NEVER a 500 / stack trace / service-unavailable.
+        # The cookie was captured from the prior POST
+        # response; set it explicitly on the test client
+        # jar (the production cookie name + the same
+        # token) so the GET under the rotated cipher sees
+        # a valid-shape-but-unreadable cookie.
+        client.cookies.clear()
+        client.cookies.set(GRANT_COOKIE_NAME, cookie_value)
+        get_resp = client.get(path)
+        assert get_resp.status_code == 200, (
+            f"expected interstitial (200) after cipher rotation, "
+            f"got {get_resp.status_code}"
+        )
+        body = get_resp.text.lower()
+        # The interstitial carries the passcode entry form
+        # — this is the "regeneration required" recovery path
+        # for a customer whose cookie was orphaned by the
+        # rotation (architecture-recommendation.md D4:59 +
+        # D6:79 "any failure → interstitial").
+        assert "<form" in body.lower(), (
+            "interstitial must carry the passcode entry form "
+            "so the customer can retry once the owner refreshes"
+        )
+        assert "passcode" in body
+        # The cookie-clear Set-Cookie is the contract:
+        # orphan cookies must NOT linger in the browser jar
+        # (architecture-recommendation.md D6:76 "decrypt /
+        # claims / exp failure → interstitial + cookie clear").
+        assert "set-cookie" in get_resp.headers
+        clear_cookie = get_resp.headers.get("set-cookie", "")
+        assert "view_grant=" in clear_cookie
+        # The cookie-clear header MUST match the exact-Path
+        # the original cookie was set to (architecture-
+        # recommendation.md §"Cookie-clear exact-Path pin").
+        assert "Path=/views/public/planning/ens/feat/design/mockups/landing.html" in clear_cookie
+
+    def test_post_verify_with_corrupt_wrapped_passcode_returns_failure_page_under_rotated_cipher(
+        self,
+        client: TestClient,
+        in_memory_store: _InMemoryPasscodeStore,
+        cipher: ViewPasscodeCipher,
+    ):
+        """POST verify → service.verify raises
+        ``ViewPasscodeRotationRequired`` (corrupt
+        ``wrapped_passcode``) → router catches → failure
+        page (the "regeneration required" path).
+
+        This is the ROTATION-RECOVERY primitive proven end-
+        to-end through the public lane. The customer sees
+        the failure page (NOT a 500, NOT a stack trace,
+        NOT the wrong-page that would aid brute force).
+        """
+        from daemon.services.view_passcode_service import generate_passcode
+
+        rel_path = "ens/feat/design/mockups/landing.html"
+        path = f"/views/public/planning/{rel_path}"
+
+        # Step 1 — mint under cipher A. The row is created.
+        plaintext = generate_passcode()
+        wrapped = cipher.wrap(plaintext.encode("ascii"))
+        row = in_memory_store.upsert(
+            "planning", rel_path, wrapped_passcode=wrapped
+        )
+
+        # Step 2 — simulate the rotation-then-not-yet-
+        # re-encrypted state: corrupt the row's
+        # ``wrapped_passcode`` to a non-decryptable byte
+        # string. Real-world equivalent: the row is
+        # encrypted under the OLD key A but the service is
+        # running under the NEW key B (the row-re-encrypt
+        # walk from the rotation ceremony hasn't caught up
+        # yet). Under BOTH ciphers the bytes are unreadable.
+        # This is the "decryption failure → typed error"
+        # primitive the unit tier pins at
+        # ``test_verify_rotation_required_on_tampered_ciphertext``
+        # driven end-to-end through the router.
+        row.wrapped_passcode = b"corrupt-rotation-walk-pending"
+
+        # Step 3 — flip the app.state cipher to the new
+        # key B. The router-side cookie issuance / validation
+        # runs against the rotated cipher; verify under the
+        # service runs against the service's bound cipher
+        # (still A in the in-memory shim). With BOTH
+        # ciphertext + cipher unaligned, both decrypt paths
+        # fail. The customer sees the failure page on the
+        # POST, the interstitial on subsequent GET — neither
+        # a 500.
+        rotated_cipher = _build_rotated_cipher()
+        client.app.state.view_passcode_cipher = rotated_cipher
+
+        # Step 4 — POST with the correct passcode. The
+        # service.verify call raises (corrupt
+        # wrapped_passcode under A). The router catches
+        # → failure page (the "regeneration required"
+        # interstitial variant). NEVER a 500.
+        resp = client.post(
+            path,
+            data={"code": plaintext},
+            follow_redirects=False,
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        assert resp.status_code == 200, (
+            f"expected failure page (200) after rotation-fail, "
+            f"got {resp.status_code} body={resp.text[:200]}"
+        )
+        # The failure page IS the interstitial re-render
+        # with a generic error — the customer can retry
+        # once the owner refreshes. NO 500, NO stack
+        # trace, NO plaintext error envelope.
+        body = resp.text
+        assert "<form" in body.lower(), (
+            "failure page must carry the passcode entry "
+            "form so the customer can retry"
+        )
+        # The plaintext passcode MUST NEVER appear in the
+        # failure page body (logging hygiene — ADR D11:131;
+        # the failure page is a logged envelope).
+        assert plaintext not in body, (
+            "plaintext passcode leaked into the failure page"
+        )
+        # No Set-Cookie issuance on the rotation-fail path
+        # (the success branch was never reached).
+        assert "set-cookie" not in resp.headers or (
+            "view_grant=" not in resp.headers.get("set-cookie", "")
+        ), (
+            "Set-Cookie issued on the rotation-fail path — "
+            "the success branch must NOT have been reached"
+        )
+
+    def test_rotation_recovery_full_cycle(
+        self,
+        client: TestClient,
+        passcode_service: ViewPasscodeService,
+        in_memory_store: _InMemoryPasscodeStore,
+        cipher: ViewPasscodeCipher,
+    ):
+        """Full rotation recovery cycle — mint under A →
+        flip to B → corrupt row → POST fails closed → RE-
+        encrypt the row under B → POST succeeds under B.
+
+        This is the "regeneration required → owner refreshes
+        → customer retries" loop pinned end-to-end. P1
+        ViewPasscodeService.refresh (not the in-memory
+        shim) emits a new passcode + generation+1; the
+        in-memory shim here does the same shape by
+        re-upserting the row with a fresh ciphertext under
+        B + resetting counters. The cookie issuance under
+        B completes the recovery.
+        """
+        from daemon.services.view_passcode_service import generate_passcode
+
+        rel_path = "ens/feat/design/mockups/landing.html"
+        path = f"/views/public/planning/{rel_path}"
+
+        # Mint under A.
+        plaintext_a = generate_passcode()
+        wrapped_a = cipher.wrap(plaintext_a.encode("ascii"))
+        in_memory_store.upsert(
+            "planning", rel_path, wrapped_passcode=wrapped_a
+        )
+
+        # Rotate + corrupt.
+        rotated_cipher = _build_rotated_cipher()
+        client.app.state.view_passcode_cipher = rotated_cipher
+        row = in_memory_store.get_row("planning", rel_path)
+        row.wrapped_passcode = b"corrupt-pending-rewalk"
+
+        # POST under rotated cipher → failure page.
+        fail_resp = client.post(
+            path,
+            data={"code": plaintext_a},
+            follow_redirects=False,
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        assert fail_resp.status_code == 200, (
+            "expected failure page (200) on rotation-fail POST"
+        )
+        assert "set-cookie" not in fail_resp.headers or (
+            "view_grant=" not in fail_resp.headers.get("set-cookie", "")
+        ), (
+            "rotation-fail POST must not issue a cookie — "
+            "the success branch was never reached"
+        )
+
+        # Owner runs ``refresh`` (simulated by re-upserting
+        # the row with a fresh ciphertext under B + counter
+        # reset, AND flipping the service's bound cipher to
+        # B so the row-re-encrypt walk + service.memory are
+        # consistent). The cookie issuance now runs against
+        # the rotated cipher; the row decrypts under B.
+        plaintext_b = generate_passcode()
+        wrapped_b = rotated_cipher.wrap(plaintext_b.encode("ascii"))
+        in_memory_store.upsert(
+            "planning",
+            rel_path,
+            wrapped_passcode=wrapped_b,
+            generation=2,
+            failed_attempts=0,
+            locked=False,
+        )
+        # Sync the service's bound cipher to the rotated
+        # cipher B (the production rotation ceremony does
+        # this in-process: the new key replaces the old
+        # across the cipher seam). Without this the service
+        # would still unwrap under A and the recovery POST
+        # would still see rotation-fail.
+        passcode_service._cipher = rotated_cipher
+
+        # POST the new passcode → 303 + Set-Cookie under B.
+        success_resp = client.post(
+            path,
+            data={"code": plaintext_b},
+            follow_redirects=False,
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        assert success_resp.status_code == 303, (
+            f"expected 303 PRG on recovery POST, got "
+            f"{success_resp.status_code} body={success_resp.text[:200]}"
+        )
+        cookie_header = success_resp.headers.get("set-cookie", "")
+        assert "view_grant=" in cookie_header
+        # The cookie was issued under cipher B — a GET with
+        # the cookie re-running parse_grant_cookie under B
+        # validates cleanly.
+        cookie_value = success_resp.cookies.get("view_grant")
+        assert cookie_value, "expected grant cookie on recovery POST"
+        client.cookies.clear()
+        client.cookies.set(GRANT_COOKIE_NAME, cookie_value)
+        get_resp = client.get(path)
+        assert get_resp.status_code == 200, (
+            f"expected 200 on recovery GET (cipher B can "
+            f"decrypt its own cookie), got {get_resp.status_code}"
+        )
+        # And a replay of the OLD passcode plaintext_a
+        # against the recovered row → WRONG (the recovery
+        # rotated the passcode; the old code is dead).
+        replay_resp = client.post(
+            path,
+            data={"code": plaintext_a},
+            follow_redirects=False,
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        assert replay_resp.status_code == 200
+        body = replay_resp.text.lower()
+        # WRONG path → failure page (the strike counter
+        # ticked; rotation does NOT bypass the lockout).
+        assert "<form" in body

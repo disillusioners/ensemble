@@ -222,6 +222,184 @@ class TestS19AnonymousViewPaths:
         )
         assert r.status_code != 401 or "AUTH_REQUIRED" not in r.text
 
+    def test_public_lane_code_seeded_prefix_tag_passes_auth(
+        self, tmp_path
+    ):
+        """D19 cage fold-in (P4 — per phase4-plan.md D19 / phase4 T4.1
+        gap closure #2): ``/views/public/*`` passes ``AuthMiddleware``
+        via the **code-seeded PUBLIC prefix tag** (the second
+        ``tag_routes_by_path(app, path_prefix='/views/public')`` call
+        at the create_app registration site), NOT via the
+        ``auth.anonymous_view_paths`` operator knob (which ships
+        EMPTY and stays empty per architecture-recommendation.md
+        D3:48 — the knob path was REJECTED).
+
+        The binding assertions (architecture-recommendation.md T2):
+
+        * ``anonymous_view_paths`` is asserted EMPTY in every test
+          below (the knob is NOT the mechanism).
+        * ``/views/public/{root}/{rel}`` GET + POST both pass the
+          middleware (the response is the public lane's own — never
+          the auth 401 contract).
+        * ``/views/{root}/{rel}`` (non-public) stays default-deny.
+        * ``/views/livez`` + ``/views/assets/*`` unaffected.
+        * The legacy parametrized template is NOT swept into the
+          ``/views/public`` prefix tag (the over-broad-tag exclusion
+          pin, T3 — matcher semantics can evolve).
+        """
+        from daemon.auth.route_meta import (
+            AUTH_PUBLIC_ATTR,
+            _template_prefix_matches,
+        )
+
+        cfg = on_auth_config()  # anonymous_view_paths default ()
+        # The knob ships EMPTY and stays empty — the code-seeded
+        # prefix tag is the ONLY mechanism (ADR D3:48).
+        assert cfg.anonymous_view_paths == (), (
+            "anonymous_view_paths must ship EMPTY (ADR D3:48) — "
+            "the code-seeded prefix tag is the mechanism; the knob "
+            "is reserved for v2 view_shares."
+        )
+        stub = FakeOidcStub()
+        app = create_app(auth_config=cfg)
+        attach_auth_state(app, cfg, stub, tmp_path)
+        fresh = TestClient(
+            app, base_url="http://testserver", follow_redirects=False
+        )
+
+        def _is_auth_401(resp) -> bool:
+            return (
+                resp.status_code == 401 and "AUTH_REQUIRED" in resp.text
+            )
+
+        # The public lane GET + POST pass AuthMiddleware via the
+        # code-seeded prefix tag.
+        r_get = fresh.get(
+            "/views/public/planning/ens/feat/design/mockups/landing.html",
+            headers={"Accept": "application/json"},
+        )
+        assert not _is_auth_401(r_get), (
+            f"/views/public/* GET was auth-gated — the code-seeded "
+            f"prefix tag did not pass the lane: {r_get.status_code} "
+            f"{r_get.text[:200]}"
+        )
+        r_post = fresh.post(
+            "/views/public/planning/ens/feat/design/mockups/landing.html",
+            data={"code": "anycod"},
+            headers={"Accept": "application/json"},
+        )
+        assert not _is_auth_401(r_post), (
+            f"/views/public/* POST was auth-gated — the verify "
+            f"endpoint must pass too: {r_post.status_code} "
+            f"{r_post.text[:200]}"
+        )
+
+        # The non-public direct lane stays default-deny.
+        r_direct = fresh.get(
+            "/views/planning/ens/feat/design/mockups/landing.html",
+            headers={"Accept": "application/json"},
+        )
+        assert _is_auth_401(r_direct), (
+            f"/views/<root>/<rel> must stay default-deny; got "
+            f"{r_direct.status_code} (the prefix tag swept the "
+            f"legacy parametrized route — over-broad-tag exclusion "
+            f"broke)"
+        )
+
+        # /views/livez + /views/assets/* unaffected — the
+        # exemption is exact-prefix on /views/public ONLY.
+        r_livez = fresh.get(
+            "/views/livez", headers={"Accept": "application/json"},
+        )
+        assert not _is_auth_401(r_livez), (
+            "/views/livez (existing PUBLIC exact-tag) must keep "
+            f"its exemption: {r_livez.status_code}"
+        )
+        r_assets = fresh.get(
+            "/views/assets/mermaid/mermaid.min.js",
+            headers={"Accept": "application/json"},
+        )
+        assert _is_auth_401(r_assets), (
+            "/views/assets/* must stay default-deny (the "
+            "exemption is exact-prefix on /views/public, NOT on "
+            "/views/assets); got "
+            f"{r_assets.status_code}"
+        )
+
+        # Over-broad-tag exclusion (T3) — matcher semantics pin
+        # (the matcher is shared code that can evolve).
+        assert (
+            _template_prefix_matches(
+                "/views/{root_name}/{rel_path:path}", "/views/public"
+            )
+            is False
+        )
+        assert (
+            _template_prefix_matches(
+                "/views/public/{root_name}/{rel_path:path}",
+                "/views/public",
+            )
+            is True
+        )
+        # The legacy parametrized route is NOT tagged PUBLIC in
+        # the live route table.
+        legacy = [
+            r
+            for r in app.routes
+            if getattr(r, "path", "") == "/views/{root_name}/{rel_path:path}"
+        ]
+        assert legacy, "legacy parametrized route missing from app.routes"
+        for route in legacy:
+            assert not getattr(route, AUTH_PUBLIC_ATTR, False), (
+                "the legacy /views/{root}/{rel} route was swept "
+                "into the /views/public prefix tag — over-broad-"
+                "tag exclusion broke (matcher evolution canary)"
+            )
+
+    def test_anonymous_view_paths_remains_empty_in_every_s19_test(
+        self, tmp_path
+    ):
+        """D19 cage: ``anonymous_view_paths`` is asserted EMPTY in
+        every S-19 test invocation — the knob is not the
+        mechanism. This test runs the cage explicitly to make the
+        D19 ruling searchable in the test surface (was implicit
+        across the S-19 cage before P4 fold-in)."""
+        # Default config.
+        cfg_default = on_auth_config()
+        assert cfg_default.anonymous_view_paths == (), (
+            "default anonymous_view_paths must be empty"
+        )
+        # Even when the operator sets a value for an UNRELATED
+        # path, the /views/public mechanism is still the
+        # code-seeded tag (the knob is NOT consulted for the
+        # public lane; the test pins the knob's freedom to be
+        # configured for OTHER exempt sub-trees without leaking
+        # the public lane).
+        cfg_with_other = on_auth_config(
+            anonymous_view_paths=["/views/designer-artifact"]
+        )
+        assert cfg_with_other.anonymous_view_paths == (
+            "/views/designer-artifact",
+        )
+        stub = FakeOidcStub()
+        app = create_app(auth_config=cfg_with_other)
+        attach_auth_state(app, cfg_with_other, stub, tmp_path)
+        fresh = TestClient(
+            app, base_url="http://testserver", follow_redirects=False
+        )
+        # The public lane STILL passes (the knob entry does not
+        # gate it; the code-seeded prefix tag is the mechanism).
+        r_public = fresh.get(
+            "/views/public/planning/ens/feat/design/mockups/landing.html",
+            headers={"Accept": "application/json"},
+        )
+        assert not (
+            r_public.status_code == 401 and "AUTH_REQUIRED" in r_public.text
+        ), (
+            "/views/public/* must pass via the code-seeded prefix "
+            "tag regardless of operator knob configuration"
+        )
+
 
 class TestSanitizeReturnTo:
     """D3.8 unit legs (the AC-25 table lives in test_auth_ux_contract)."""
