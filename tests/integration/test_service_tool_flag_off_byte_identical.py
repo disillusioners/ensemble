@@ -838,9 +838,17 @@ def test_privileged_category_set_is_pinned() -> None:
             # per-agent ``tools.allow`` category gate is the
             # ONLY access boundary.
             "secrets",
+            # settings-worker-slots P2 (2026-10-18): the
+            # daemon-runtime-settings category (settings_get /
+            # settings_set / settings_clear). opt-in-only;
+            # mutates daemon-global runtime state — NEVER
+            # default-granted (R-SR16); ari + leader allow
+            # entries land in Phase 3.
+            "settings",
         }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "
         f"trio + W4 ens-env + REWORK view-views + cu-mcp 'cu' + "
-        f"agent-secrets-P1 'secrets'; got {PRIVILEGED_TOOL_CATEGORIES}"
+        f"agent-secrets-P1 'secrets' + settings-worker-slots-P2 "
+        f"'settings'; got {PRIVILEGED_TOOL_CATEGORIES}"
     )

@@ -180,7 +180,8 @@ class TestStaticRegistrationChecklist:
         # here. W4 (leader decision 2026-10-02) adds ``ens-env``;
         # REWORK 2026-10-07 (M1) adds ``view-views``; cu-mcp
         # (2026-10-16) adds ``cu``; agent-secrets P1 (2026-10-17)
-        # adds ``secrets``.
+        # adds ``secrets``; settings-worker-slots P2 (2026-10-18)
+        # adds ``settings``.
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
@@ -197,6 +198,12 @@ class TestStaticRegistrationChecklist:
             # per-agent ``tools.allow`` category gate is the
             # ONLY access boundary.
             "secrets",
+            # settings-worker-slots P2 (2026-10-18): the
+            # daemon-runtime-settings category (settings_get /
+            # settings_set / settings_clear). opt-in-only;
+            # mutates daemon-global runtime state — NEVER
+            # default-granted (R-SR16).
+            "settings",
         })
 
 

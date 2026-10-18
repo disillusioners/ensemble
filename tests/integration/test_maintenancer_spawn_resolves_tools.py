@@ -285,7 +285,7 @@ class TestWorkerResolvesSystemLogOnly:
 
 
 class TestPrivilegedCategoryRegistryShape:
-    """PRIVILEGED_TOOL_CATEGORIES must be exactly five categories
+    """PRIVILEGED_TOOL_CATEGORIES must be exactly eight categories
     (the daemon-internal authority trio ``system_upgrade``,
     ``system-log``, ``ens-db`` plus ``ens-env`` per the W4 leader
     decision 2026-10-02 and ``view-views`` per the REWORK 2026-10-07
@@ -293,9 +293,11 @@ class TestPrivilegedCategoryRegistryShape:
     this set by user override 2026-09-16 (D4 reversed; see
     ``.agents/shared/planning/service-tool/decisions.md`` §D4
     override note) — R-SR16 silent additions are visible by pin;
-    this is pin file 3 of 3 per the A14 triple-pin discovery."""
+    this is pin file 3 of 5 per the A14/D18 same-PR pin rule
+    (the fifth exact-set pin added by the iteration-002 council B2
+    correction)."""
 
-    def test_privileged_categories_contains_seven_entries(self) -> None:
+    def test_privileged_categories_contains_eight_entries(self) -> None:
         # W4 (leader decision 2026-10-02): the set was a quartet —
         # ``ens-env`` joined (key-returning tool, explicit opt-in
         # only). REWORK 2026-10-07 (M1) added ``view-views`` (the
@@ -311,9 +313,13 @@ class TestPrivilegedCategoryRegistryShape:
         # ``tools.allow: ["secrets"]`` on the day-one allow-list
         # ``worker`` / ``tester`` / ``leader`` / ``ari``; the
         # trust ruling has no per-secret grants — per-agent
-        # ``tools.allow`` is the ONLY access boundary). Method
+        # ``tools.allow`` is the ONLY access boundary).
+        # settings-worker-slots P2 (2026-10-18) added
+        # ``settings`` (the daemon-runtime-settings category;
+        # opt-in-only; ari + leader allow entries land in
+        # Phase 3). Method
         # name kept for grep-stability; the count moved
-        # 3 → 4 → 5 → 6 → 7 with the same-PR pin updates
+        # 3 → 4 → 5 → 6 → 7 → 8 with the same-PR pin updates
         # (D18/A14).
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
@@ -326,6 +332,12 @@ class TestPrivilegedCategoryRegistryShape:
             # the encrypted-secret-store category. opt-in-only;
             # worker / tester / leader / ari day-one allow-list.
             "secrets",
+            # settings-worker-slots P2 (2026-10-18): the
+            # daemon-runtime-settings category (settings_get /
+            # settings_set / settings_clear). opt-in-only;
+            # mutates daemon-global runtime state — NEVER
+            # default-granted (R-SR16).
+            "settings",
         })
 
     def test_ens_db_registered_in_category_modules(self) -> None:
