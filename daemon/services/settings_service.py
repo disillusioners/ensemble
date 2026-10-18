@@ -45,9 +45,12 @@ ruling (c)):
   of the raw value for sensitive keys; omission is a review blocker
   if missing).
 
-v1 registry content: exactly ONE key — ``limits.llm_concurrency``.
-Adding a key = one registry entry + nothing else (the ladder, CRUD,
-API and FE render generically off the registry).
+v1.1 (settings-worker-slots) registry content: THREE keys —
+``limits.llm_concurrency`` plus ``limits.worker_pool_size`` and
+``limits.chat_worker_pool_size``. Adding a key = one registry entry +
+nothing else (the ladder, CRUD, API and FE render generically off the
+registry). The add-a-key rule stands: registry default mirrors the
+pydantic Field default (constants -> Field -> registry, ONE truth).
 """
 
 from __future__ import annotations
@@ -110,10 +113,6 @@ class ManagedKeySpec:
     ge: int | None = None
     requires_restart: bool = True
     sensitive: bool = False
-    # Documentation-grade only (Ruling 5) — NEVER enforced in code.
-    # Computed from daemon.constants AT IMPORT TIME so it cannot
-    # drift from the thread-pool constants.
-    effective_max: int | None = None
     description: str = ""
 
     def constraint_desc(self) -> str:
@@ -122,9 +121,12 @@ class ManagedKeySpec:
         return f"ge={self.ge}" if self.ge is not None else "none"
 
 
-#: The managed-key registry. v1: EXACTLY ONE entry (scope decision —
-#: see plan-overview "Out of Scope"; adding keys later is a registry
-#: entry + nothing else).
+#: The managed-key registry. v1.1 (settings-worker-slots): THREE entries —
+#: ``limits.llm_concurrency`` plus the two worker-pool sizes. Adding keys
+#: later is a registry entry + nothing else (the ladder, CRUD, API and FE
+#: render generically off the registry). The registry default MUST mirror
+#: the backing pydantic Field default — chain: ``daemon.constants`` →
+#: ``LimitsConfig`` Field → this registry default (ONE truth).
 MANAGED_KEYS: dict[str, ManagedKeySpec] = {
     "limits.llm_concurrency": ManagedKeySpec(
         key="limits.llm_concurrency",
@@ -138,18 +140,58 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
         ge=1,
         requires_restart=True,
         sensitive=False,
-        # Ruling 5: the emergent concurrent-graphs cap of the two
-        # fixed thread pools (5 worker + 2 chat = 7). Raising the knob
-        # above this is a no-op. Documentation-grade, never enforced.
-        effective_max=constants.WORKER_POOL_SIZE + constants.CHAT_WORKER_POOL_SIZE,
         description=(
             "Maximum concurrent LLM calls across all instances "
             "(daemon-wide semaphore). Real parallelism is also capped "
-            "by the fixed worker thread pools (5 worker + 2 chat = 7 "
-            "concurrent graphs — constants, not settable here). "
-            "Effective precedence: DB override > env var "
+            "by the worker thread pools — managed keys "
+            "``limits.worker_pool_size`` + ``limits.chat_worker_pool_size`` "
+            "on this page (effective concurrent graphs = "
+            "min(llm_concurrency, worker_pool_size + chat_worker_pool_size), "
+            "all boot-applied). Effective precedence: DB override > env var "
             "LIMITS_LLM_CONCURRENCY > config.yaml literal > default; "
             "changes require a daemon restart."
+        ),
+    ),
+    # ── settings-worker-slots (D1) — the two worker-pool sizes ──────────
+    # Default-pool worker threads. Mirrors LimitsConfig.worker_pool_size
+    # Field(default=WORKER_POOL_SIZE, ge=1). Boot-applied by the SAME
+    # generic machinery as llm_concurrency: PoolOrchestrator.setup reads
+    # ``manager.config.limits.worker_pool_size`` once at boot.
+    "limits.worker_pool_size": ManagedKeySpec(
+        key="limits.worker_pool_size",
+        config_path="limits.worker_pool_size",
+        env_var="LIMITS_WORKER_POOL_SIZE",
+        value_type="int",
+        default=constants.WORKER_POOL_SIZE,
+        ge=1,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "Default-pool worker threads. Running value is boot-applied; "
+            "changes apply at next daemon restart. Real LLM parallelism = "
+            "min(limits.llm_concurrency, this pool + the other pool's "
+            "boot-applied size). Precedence: DB override > env var "
+            "LIMITS_WORKER_POOL_SIZE > config.yaml literal > default."
+        ),
+    ),
+    # Chat-lane worker threads. Mirrors LimitsConfig.chat_worker_pool_size
+    # Field(default=CHAT_WORKER_POOL_SIZE, ge=1). Read once at boot by
+    # PoolOrchestrator.setup for the chat lane.
+    "limits.chat_worker_pool_size": ManagedKeySpec(
+        key="limits.chat_worker_pool_size",
+        config_path="limits.chat_worker_pool_size",
+        env_var="LIMITS_CHAT_WORKER_POOL_SIZE",
+        value_type="int",
+        default=constants.CHAT_WORKER_POOL_SIZE,
+        ge=1,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "Chat-lane worker threads. Running value is boot-applied; "
+            "changes apply at next daemon restart. Real LLM parallelism = "
+            "min(limits.llm_concurrency, this pool + the other pool's "
+            "boot-applied size). Precedence: DB override > env var "
+            "LIMITS_CHAT_WORKER_POOL_SIZE > config.yaml literal > default."
         ),
     ),
 }

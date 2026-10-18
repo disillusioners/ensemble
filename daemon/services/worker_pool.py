@@ -1249,7 +1249,7 @@ class WorkerPool:
     def __init__(
         self,
         task_processor,
-        num_workers: int = 4,
+        num_workers: int | None = None,
         timeout_minutes: float = 45.0,
         max_retries: int = 3,
         retry_backoff_base: int = 60,
@@ -1317,7 +1317,20 @@ class WorkerPool:
                 seam). The lane is a CLAIM ARGUMENT, never
                 processor state: ``TaskProcessor`` stays the shared
                 singleton across pools.
+
+        Raises:
+            ValueError: when ``num_workers`` is ``None``. Explicit
+                sizing is the contract — the prior ``= 4`` default was a
+                silent drift trap (4 != WORKER_POOL_SIZE=5). Every caller
+                (both production construction sites in
+                ``PoolOrchestrator.setup`` + direct-construction tests)
+                must pass an explicit size.
         """
+        if num_workers is None:
+            raise ValueError(
+                "num_workers is required (drift trap: explicit sizing is "
+                "the contract)"
+            )
         self._task_processor = task_processor
         self._num_workers = num_workers
         self._timeout_minutes = timeout_minutes

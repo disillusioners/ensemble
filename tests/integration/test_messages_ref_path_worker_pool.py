@@ -98,20 +98,38 @@ def _make_manager_with_semaphore_hold(
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def reset_invoke_semaphore():
-    """Reset the global invoke semaphore between tests so cap is fresh.
+    """Reset the global invoke semaphore + cap override between tests.
 
     Without this reset, a previous test that constructed a
     tracking-semaphore at cap=1 would bleed into this file (the
     singleton lives at module scope). Mirror of the
     ``reset_semaphore`` fixture in
     ``tests/unit/services/test_completion_registry.py``.
+
+    F3 (settings-worker-slots): ALSO zero ``_invoke_cap_override`` —
+    ``PoolOrchestrator.setup`` calls
+    ``daemon.utils.set_invoke_semaphore_cap(...)``, which RAISES if the
+    singleton already exists. Marked AUTOUSE so the cap-override test
+    below (which boots a real manager) always starts from a fresh
+    module state and the setter's late-set RuntimeError can never fire
+    order-dependently.
+
+    Reason this fixture exists (approver note N1): the phase-1 gate also
+    runs modules that boot pools with NON-default sizes —
+    ``tests/integration/test_daemon_startup_smoke.py:47``
+    (``setup_worker_pool(num_workers=0)``) and
+    ``tests/integration/test_wc_wake_pure_hang.py:411``
+    (``setup_worker_pool(num_workers=1)``) — so a leaked semaphore from
+    any prior pool boot must not poison these.
     """
     import daemon.utils as utils_module
     utils_module._invoke_semaphore = None
+    utils_module._invoke_cap_override = None
     yield
     utils_module._invoke_semaphore = None
+    utils_module._invoke_cap_override = None
 
 
 # ---------------------------------------------------------------------------
@@ -326,3 +344,60 @@ async def test_conversion_does_not_deadlock_under_saturated_invoke_semaphore(
         assert "[Image 2: a yellow flower]" in ret.content
         assert "[Image 3: a yellow flower]" in ret.content
         assert ret.image_refs == _REF_TRIPLET
+
+
+# ---------------------------------------------------------------------------
+# settings-worker-slots (D4/F4) — invoke cap follows the RESOLVED pool
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_invoke_cap_follows_resolved_default_pool(tmp_path):
+    """The invoke semaphore cap follows the RESOLVED default-pool size.
+
+    F4 injection: mutate the CONFIG OBJECT
+    (``manager.config.limits.worker_pool_size = 8``; plain mutable
+    BaseSettings) on the wired manager BEFORE ``setup()``, then boot via
+    the resolved path (``setup_worker_pool()`` with no kwarg).
+    ``PoolOrchestrator.setup`` calls
+    ``set_invoke_semaphore_cap(max(1, resolved_workers - 1)) = 7``, so a
+    fresh-module ``_get_invoke_semaphore()._value == 7``.
+
+    NOT env-var injection: env/DB tier fidelity is the ladder tests' job
+    (``tests/test_daemon_settings_api.py``) — an env var alone could pass
+    VACUOUSLY through pydantic's env tier when no yaml literal exists.
+    The autouse ``reset_invoke_semaphore`` fixture zeroes the singleton +
+    override before/after, so the setter's late-set RuntimeError cannot
+    fire order-dependently.
+    """
+    import daemon.utils as utils_module
+    from tests.integration.chat_source_harness import (
+        build_chat_source_engine,
+        wire_manager_only,
+    )
+
+    engine = build_chat_source_engine(str(tmp_path / "invoke_cap.db"))
+    try:
+        with wire_manager_only(engine) as manager:
+            manager.config.limits.worker_pool_size = 8
+            manager.setup_worker_pool()  # no kwarg → resolve from config
+
+            assert len(manager._worker_pool._workers) == 8
+            sem = utils_module._get_invoke_semaphore()
+            assert sem._value == 7, (
+                f"invoke cap should follow the resolved default pool "
+                f"(8 - 1 = 7); got {sem._value}"
+            )
+    finally:
+        engine.dispose()
+
+
+def test_set_invoke_cap_after_first_use_raises():
+    """D4 — a late cap override (after the singleton exists) is a LOUD
+    RuntimeError, never a silently-wrong cap. Mirrors the production
+    timing guarantee (set at boot, before first use)."""
+    import daemon.utils as utils_module
+
+    utils_module._get_invoke_semaphore()  # create the singleton
+    with pytest.raises(RuntimeError):
+        utils_module.set_invoke_semaphore_cap(9)

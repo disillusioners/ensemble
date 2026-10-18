@@ -217,6 +217,43 @@ class TestResolverLadder:
         assert result["db_override"] == 3
         assert result["env_value"] == 7
 
+    def test_a_new_pool_keys_shadowing_analog(self, monkeypatch):
+        """(a, settings-worker-slots D1) shadowing-analog for the two NEW
+        pool keys: a yaml literal present + env var set → the resolver reads
+        ``os.environ`` DIRECTLY and reports the env tier.
+
+        MUST-FAIL-BY-CONSTRUCTION against any implementation that derives the
+        env tier from the merged pydantic field: with a yaml literal merged
+        as an init kwarg, pydantic's env tier is dead (init kwargs win) → the
+        merged field shows the yaml value. Only a direct ``os.environ`` read
+        reports the env value. Registry-driven — no new resolution code.
+        """
+        monkeypatch.setenv("LIMITS_WORKER_POOL_SIZE", "8")
+        monkeypatch.setenv("LIMITS_CHAT_WORKER_POOL_SIZE", "3")
+        snap = {
+            "limits.worker_pool_size": {
+                "default": 5,
+                "env_value": "8",
+                "yaml_value": 5,
+            },
+            "limits.chat_worker_pool_size": {
+                "default": 2,
+                "env_value": "3",
+                "yaml_value": 2,
+            },
+        }
+        w = resolve("limits.worker_pool_size", snap)
+        assert (w["value"], w["source"]) == (8, "env")
+        # The yaml literal that a pydantic-env-tier implementation would
+        # wrongly report as the winner:
+        assert w["yaml_value"] == 5
+        assert w["default"] == 5
+
+        c = resolve("limits.chat_worker_pool_size", snap)
+        assert (c["value"], c["source"]) == (3, "env")
+        assert c["yaml_value"] == 2
+        assert c["default"] == 2
+
     def test_b_db_overrides_kwarg_shape(self, monkeypatch):
         """(b, deviation cover) the SAME case via the ``db_overrides=``
         keyword form — both invocation shapes must behave identically."""

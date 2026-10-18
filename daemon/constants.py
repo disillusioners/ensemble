@@ -83,15 +83,24 @@ BACKOFF_MULTIPLIER: float = 2.0  # Exponential backoff multiplier
 CIRCUIT_BREAKER_THRESHOLD: int = 5  # Failure threshold before circuit opens
 
 # ── Worker Pool ──────────────────────────────────────────────────────────────────
-WORKER_POOL_SIZE: int = 5  # Default number of worker threads
+# WORKER_POOL_SIZE is the DEFAULT tier ONLY (settings-worker-slots, D1/D8):
+# the runtime value resolves DB > env > yaml > this default at boot via the
+# managed key ``limits.worker_pool_size`` (env ``LIMITS_WORKER_POOL_SIZE``);
+# activation = daemon restart. It feeds the ``LimitsConfig.worker_pool_size``
+# Field default (daemon/config.py), which ``PoolOrchestrator.setup`` reads.
+WORKER_POOL_SIZE: int = 5  # Default-pool worker threads (default tier)
 WORKER_WAIT_TIMEOUT: float = 3.0  # Worker wait timeout (seconds)
 WORKER_STALE_CHECK_INTERVAL: int = 60  # Stale task recovery check interval (seconds)
 STALE_TASK_CANCEL_GRACE_S: int = 10  # Grace period before cancelling stale tasks
 ACTIVITY_UPDATE_INTERVAL: float = 5.0  # Activity callback update interval (seconds)
 
-# Chat-source worker lane (chat-source-worker-lane, D7 — hardcoded, NO
-# ENSEMBLE_* flags; activation = rebuild+restart, same as WORKER_POOL_SIZE).
-CHAT_WORKER_POOL_SIZE: int = 2  # Dedicated chat-lane worker threads (telegram/slack/discord)
+# Chat-source worker lane — CHAT_WORKER_POOL_SIZE is likewise the DEFAULT tier
+# ONLY (settings-worker-slots, D1/D8): the runtime value resolves
+# DB > env > yaml > this default at boot via the managed key
+# ``limits.chat_worker_pool_size`` (env ``LIMITS_CHAT_WORKER_POOL_SIZE``);
+# activation = daemon restart. It feeds the
+# ``LimitsConfig.chat_worker_pool_size`` Field default (daemon/config.py).
+CHAT_WORKER_POOL_SIZE: int = 2  # Dedicated chat-lane worker threads (default tier)
 
 # ── LCA unverified-completion surface (7d4a3bd9 fix, Fix 1) ─────────────────
 #
@@ -326,7 +335,6 @@ VACUUM_FULL_IDLE_IN_TXN_TIMEOUT_MS: int = 2 * 60 * 1000  # 2min
 
 # ── Graph & LLM ──────────────────────────────────────────────────────────────────
 GRAPH_RECURSION_LIMIT: int = 100  # LangGraph recursion limit
-LLM_CONCURRENCY: int = 10  # Max concurrent LLM calls
 RECENT_WINDOW_SIZE: int = 10  # Recent message window for compaction
 MIN_RECENT_WINDOW: int = 3  # Minimum recent window size
 

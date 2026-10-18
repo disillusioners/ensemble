@@ -55,6 +55,7 @@ from daemon.auth.context import (
     AuthContext,
 )
 from daemon.auth.scopes import SCOPE_TAXONOMY
+from daemon.constants import CHAT_WORKER_POOL_SIZE, WORKER_POOL_SIZE
 from daemon.models.app_settings import AppSetting
 from daemon.routers import settings as routers_settings
 from daemon.routers.settings import router as daemon_settings_router
@@ -244,7 +245,13 @@ class TestGetDaemonSettings:
         assert set(body.keys()) == {"settings", "restart_required"}
         assert body["restart_required"] is False
         entries = body["settings"]
-        assert len(entries) == 1
+        # settings-worker-slots (D1): the registry now carries THREE keys —
+        # llm_concurrency + the two pool sizes (insertion order preserved).
+        assert {e["key"] for e in entries} == {
+            KEY,
+            "limits.worker_pool_size",
+            "limits.chat_worker_pool_size",
+        }
         entry = entries[0]
         assert entry["key"] == KEY
         assert entry["value"] == 10  # snapshot applied_value (boot truth)
@@ -452,7 +459,65 @@ class TestSensitiveMasking:
         assert spec.default == 10
         assert spec.ge == 1
         assert spec.requires_restart is True
-        assert spec.effective_max == 7  # WORKER_POOL_SIZE(5) + CHAT_WORKER_POOL_SIZE(2)
+
+    @pytest.mark.asyncio
+    async def test_worker_slot_registry_entry_pins(self):
+        """settings-worker-slots (D1/D3): the two new pool keys mirror their
+        ``LimitsConfig`` Fields — env_var / default / ge / requires_restart /
+        sensitive. ``effective_max`` is REMOVED (D3) — no entry carries it."""
+        worker = MANAGED_KEYS["limits.worker_pool_size"]
+        assert worker.env_var == "LIMITS_WORKER_POOL_SIZE"
+        assert worker.config_path == "limits.worker_pool_size"
+        assert worker.value_type == "int"
+        assert worker.default == WORKER_POOL_SIZE
+        assert worker.ge == 1
+        assert worker.requires_restart is True
+        assert worker.sensitive is False
+        assert not hasattr(worker, "effective_max")
+
+        chat = MANAGED_KEYS["limits.chat_worker_pool_size"]
+        assert chat.env_var == "LIMITS_CHAT_WORKER_POOL_SIZE"
+        assert chat.config_path == "limits.chat_worker_pool_size"
+        assert chat.value_type == "int"
+        assert chat.default == CHAT_WORKER_POOL_SIZE
+        assert chat.ge == 1
+        assert chat.requires_restart is True
+        assert chat.sensitive is False
+        assert not hasattr(chat, "effective_max")
+
+    @pytest.mark.asyncio
+    async def test_two_worker_slot_keys_ladder(
+        self, client_off, monkeypatch, settings_engine
+    ):
+        """F4/row 17 — the two new keys ride the SAME resolver ladder:
+        ``limits.worker_pool_size`` DB override beats env; env-only
+        ``limits.chat_worker_pool_size`` reports source="env".
+
+        Registry-driven — the generic machinery resolves the new keys with
+        ZERO new code (proves the move-together chain constants → Field →
+        registry → resolver)."""
+        # worker_pool_size: BOTH a DB override AND an env var set → DB wins.
+        monkeypatch.setenv("LIMITS_WORKER_POOL_SIZE", "9")
+        put = await client_off.put(
+            "/api/settings/daemon/limits.worker_pool_size", json={"value": 7}
+        )
+        assert put.status_code == 200, put.text
+        # chat_worker_pool_size: env only → env wins.
+        monkeypatch.setenv("LIMITS_CHAT_WORKER_POOL_SIZE", "3")
+
+        body = (await client_off.get(URL)).json()
+        by_key = {e["key"]: e for e in body["settings"]}
+
+        worker = by_key["limits.worker_pool_size"]
+        assert worker["source"] == "db"
+        assert worker["db_override"] == 7
+        assert worker["env_value"] == 9  # env present but LOWER tier
+
+        chat = by_key["limits.chat_worker_pool_size"]
+        assert chat["source"] == "env"
+        assert chat["env_value"] == 3
+
+        assert body["restart_required"] is True  # a db-tier key is set
 
 
 # ────────────────────────────────────────────────────────────────────────────
