@@ -1,5 +1,5 @@
 """Resources HTTP surface — ``GET /api/resources/*`` (resource-cost-control
-P1).
+P1; P3 appends ``/traceback``).
 
 Three P1 endpoints (per phase1-plan §2.1 endpoint ownership):
 
@@ -7,7 +7,15 @@ Three P1 endpoints (per phase1-plan §2.1 endpoint ownership):
 * ``GET /api/resources/history``  — §2.8 history points + auto-resolution.
 * ``GET /api/resources/self-cost`` — §2.8 self-cost regression surface.
 
-P3 / P4 / P6 append their endpoints (``/traceback``, ``/anomalies``,
+P3 appends the drill-down endpoint:
+
+* ``GET /api/resources/traceback`` — §2.8 joined window view (the
+  join itself lives in ``daemon/services/resource_traceback.py``;
+  this module stays the thin HTTP seam + the LIVE structural
+  providers, which must not be imported by the join layer — the
+  excluded-spine pin scopes to that module).
+
+P4 / P6 append their endpoints (``/anomalies``,
 ``/control-capabilities``, ``POST /profile``) later; the router is
 the single mount for the whole family.
 
@@ -32,11 +40,13 @@ async via ``asyncio.to_thread`` — the project standard.
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from pydantic import BaseModel
 from sqlalchemy import text
 
 # C-1 hardening parity — the router's first-boot tolerances use the
@@ -45,6 +55,8 @@ from sqlalchemy import text
 from daemon.services.resource_monitor.flusher import (
     is_missing_relation_error as _is_missing_relation_error,
 )
+from daemon.services import resource_traceback
+from daemon.services.timestamps import to_utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -591,3 +603,252 @@ async def get_self_cost(request: Request) -> dict:
     except Exception as exc:  # fail-soft
         logger.warning("[ResourcesRouter] self-cost degraded: %s", exc)
         return _empty_self_cost_shape()
+
+
+# ── /traceback (P3) — response models ───────────────────────────────────────
+#
+# D3 home: THIS module. P1 established no separate schema module for
+# /api/resources (the P1 endpoints return plain dicts; the general
+# ``daemon/routers/schemas.py`` home carries job-queue/checkpoint
+# schemas only), so the traceback models live beside the endpoint —
+# keeping the byte-for-byte FE contract adjacent to the seam it
+# guards. Field names/order mirror
+# ``frontend/src/app/models/resources.models.ts`` (:202-248 at HEAD)
+# EXACTLY: ``TracebackPayload`` + its children. All list/scalar
+# optionals present-as-null on the wire; ``findings`` is key-reserved
+# for P4 and always ``[]`` in P3.
+
+
+class TracebackWindow(BaseModel):
+    """FE ``TracebackWindow`` — the normalized aware-UTC window echo."""
+
+    t0: str
+    t1: str
+
+
+class TracebackInstanceAlive(BaseModel):
+    """FE ``TracebackInstanceAlive`` — alive-at-window-end instance."""
+
+    instance_id: str
+    agent: Optional[str] = None
+    status: Optional[str] = None
+
+
+class TracebackInFlightTask(BaseModel):
+    """FE ``TracebackInFlightTask`` — in-flight-at-window-end task."""
+
+    task_id: Optional[str] = None
+    work_id: Optional[str] = None
+    instance_id: Optional[str] = None
+    status: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class TracebackSpawnedChild(BaseModel):
+    """FE ``TracebackSpawnedChild`` — child process alive in-window."""
+
+    pid: Optional[int] = None
+    kind: str
+    name: Optional[str] = None
+    spawned_at: Optional[str] = None
+    exited_at: Optional[str] = None
+    instance_id: Optional[str] = None
+
+
+class TracebackStructural(BaseModel):
+    """FE ``TracebackStructural`` — LIVE counters (null mid-boot)."""
+
+    queue_depth: Optional[int] = None
+    workers: Optional[int] = None
+    checkpoints: Optional[int] = None
+    gc_events: Optional[int] = None
+
+
+class TracebackResponse(BaseModel):
+    """FE ``TracebackPayload`` — the §2.8 traceback wire shape.
+
+    Declared as the endpoint's ``response_model`` so the wire is
+    contract-enforced by construction: the join layer's richer
+    internal rows (J3 agent hop, J4 bridge, J5 resource fields,
+    ``_degraded``) are stripped here — the layer API is P4's
+    consumption path for those.
+    """
+
+    window: TracebackWindow
+    instances_alive: list[TracebackInstanceAlive] = []
+    in_flight_tasks: list[TracebackInFlightTask] = []
+    spawned_children: list[TracebackSpawnedChild] = []
+    structural: TracebackStructural
+    findings: list[Any] = []
+
+
+def _empty_traceback_shape(t0_raw: str, t1_raw: str) -> dict:
+    """The §2.8 /traceback empty shape (degrade — never 503, D11).
+
+    Echoes the window normalized when parseable, verbatim otherwise —
+    the shape must stay valid even when the params themselves are
+    garbage (the 422 path handles those BEFORE this builder runs).
+    """
+    try:
+        window = {
+            "t0": to_utc_iso(resource_traceback.parse_window_param("t0", t0_raw)),
+            "t1": to_utc_iso(resource_traceback.parse_window_param("t1", t1_raw)),
+        }
+    except Exception:
+        window = {"t0": t0_raw, "t1": t1_raw}
+    return {
+        "window": window,
+        "instances_alive": [],
+        "in_flight_tasks": [],
+        "spawned_children": [],
+        "structural": {
+            "queue_depth": None,
+            "workers": None,
+            "checkpoints": None,
+            "gc_events": None,
+        },
+        "findings": [],
+    }
+
+
+# ── /traceback (P3) — LIVE structural providers ─────────────────────────────
+#
+# The structural counters read LIVE daemon state at query time. They
+# are built HERE and injected into the join layer as callables so
+# ``resource_traceback.py`` stays free of the excluded spines (the
+# boot-wiped queue + the checkpoint store are never imported there —
+# the unit pack's AST pin enforces it). Every provider may raise; the
+# layer guards each into ``null`` (plan task 6 / R5).
+
+
+def _traceback_structural_providers(manager: Any) -> dict[str, Callable[[], Any]]:
+    """Build the LIVE structural probes over the manager (best-effort)."""
+    engine = getattr(manager, "engine", None)
+
+    def _queue_depth() -> int:
+        # LIVE depth only — the queue is boot-wiped; historical queue
+        # state does not exist (§2.6 exclusion). Outstanding-work rows:
+        # pending/ready/processing/retrying.
+        if engine is None:
+            raise RuntimeError("engine unavailable")
+        with engine.connect() as conn:
+            return int(
+                conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM message_queue "
+                        "WHERE status IN "
+                        "('pending','ready','processing','retrying')"
+                    )
+                ).scalar()
+                or 0
+            )
+
+    def _workers() -> int:
+        # Started-worker count across both pools
+        # (``worker_pool.get_stats()["num_workers"] == len(_workers)``).
+        total = 0
+        found = False
+        for attr in ("_worker_pool", "_chat_worker_pool"):
+            pool = getattr(manager, attr, None)
+            if pool is None:
+                continue
+            found = True
+            total += int((pool.get_stats() or {}).get("num_workers") or 0)
+        if not found:
+            raise RuntimeError("no worker pool on manager")
+        return total
+
+    def _checkpoints() -> int:
+        # Count/estimate ONLY (plan task 6) — the store has zero time
+        # columns, so no historical join is attempted anywhere.
+        if engine is None:
+            raise RuntimeError("engine unavailable")
+        with engine.connect() as conn:
+            return int(
+                conn.execute(
+                    text("SELECT COUNT(*) FROM checkpoints")
+                ).scalar()
+                or 0
+            )
+
+    def _gc_events() -> int:
+        # Cumulative gc collections across generations since boot.
+        return int(
+            sum(int(g.get("collections") or 0) for g in gc.get_stats())
+        )
+
+    return {
+        "queue_depth": _queue_depth,
+        "workers": _workers,
+        "checkpoints": _checkpoints,
+        "gc_events": _gc_events,
+    }
+
+
+# ── /traceback (P3) — endpoint ──────────────────────────────────────────────
+
+
+@router.get("/traceback", response_model=TracebackResponse)
+async def get_traceback(
+    request: Request,
+    response: Response,
+    t0: str = Query(..., description="Window start, ISO-8601 (Z-suffixed accepted; naive ⇒ UTC)"),
+    t1: str = Query(..., description="Window end, ISO-8601 (Z-suffixed accepted; naive ⇒ UTC)"),
+    kind: Optional[str] = Query(
+        default=None,
+        description="Filter spawned_children to one kind (e.g. 'chart_render' — the 8.3 GB-class query)",
+    ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+        description="Per-list row cap (default 100, hard cap 500)",
+    ),
+) -> TracebackResponse:
+    """§2.8 joined window view — "why was RAM high at <T>?".
+
+    Thin seam: params → ``asyncio.to_thread(resource_traceback.
+    build_window_view, …)`` → the FE-frozen ``TracebackPayload``.
+    Caller input errors (unparseable t0/t1, ``t1 < t0``, span >
+    168 h) are 422; INTERNAL failures degrade to the empty-but-valid
+    shape with HTTP 200 + a WARN log + an
+    ``X-Resources-Traceback-Degraded`` response header carrying the
+    per-section reason (never 503 — D11, snapshots DI precedent).
+    The header is how "join yielded nothing" stays distinguishable
+    from "query failed" on the wire without breaking the frozen body
+    contract.
+    """
+    manager = getattr(request.app.state, "manager", None)
+    engine = getattr(manager, "engine", None) if manager is not None else None
+    providers = (
+        _traceback_structural_providers(manager)
+        if manager is not None
+        else None
+    )
+    try:
+        view = await asyncio.to_thread(
+            resource_traceback.build_window_view,
+            engine,
+            t0,
+            t1,
+            kind=kind,
+            limit=limit,
+            structural_providers=providers,
+        )
+    except ValueError as exc:
+        # Caller input error — parameter validation, not degradation.
+        raise HTTPException(status_code=422, detail={"error": str(exc)}) from exc
+    except Exception as exc:  # fail-soft: log + empty shape (D11)
+        logger.warning("[ResourcesRouter] traceback degraded: %s", exc)
+        response.headers["X-Resources-Traceback-Degraded"] = "internal-error"
+        return _empty_traceback_shape(t0, t1)
+
+    degraded = view.pop("_degraded", None) or []
+    if degraded:
+        response.headers["X-Resources-Traceback-Degraded"] = (
+            ";".join(str(d) for d in degraded)[:200]
+        )
+        logger.warning(
+            "[ResourcesRouter] traceback partial degrade: %s", degraded
+        )
+    return view
