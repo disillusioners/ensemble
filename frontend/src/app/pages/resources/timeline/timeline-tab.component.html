@@ -1,0 +1,211 @@
+<div class="timeline-tab" data-test="timeline-tab">
+  <div class="timeline-toolbar">
+    <mat-button-toggle-group
+      class="window-selector"
+      [value]="window()"
+      (change)="selectWindow($event.value)"
+      data-test="window-selector"
+      aria-label="History window"
+    >
+      @for (w of windows; track w) {
+        <mat-button-toggle [value]="w" [attr.data-test]="'window-' + w">{{ w }}</mat-button-toggle>
+      }
+    </mat-button-toggle-group>
+
+    <div class="series-toggles" data-test="series-toggles">
+      @for (def of seriesDefs; track def.key) {
+        <button
+          type="button"
+          class="series-toggle"
+          [class.enabled]="isSeriesEnabled(def.key)"
+          (click)="toggleSeries(def.key)"
+          [attr.data-test]="'series-toggle-' + def.key"
+          [attr.aria-pressed]="isSeriesEnabled(def.key)"
+        >
+          <span class="series-dot" [style.background]="def.color"></span>
+          {{ def.label }}
+        </button>
+      }
+    </div>
+  </div>
+
+  <!-- D9: rendered strictly from the frozen `truncated` flag — no FE fallback. -->
+  @if (truncated()) {
+    <div class="truncated-banner" data-test="truncated-banner" role="status">
+      <mat-icon>compress</mat-icon>
+      <span>
+        This window is rolled up (resolution: {{ resolutionUsed() }}); the series is
+        down-sampled, not raw. Narrow the window for finer detail.
+      </span>
+    </div>
+  }
+
+  <!-- D7: skeleton only before the first successful fetch. -->
+  @if (showSkeleton()) {
+    <div class="timeline-skeleton" data-test="timeline-skeleton" aria-busy="true">
+      <div class="skeleton-chart"></div>
+      <div class="skeleton-line skeleton-short"></div>
+    </div>
+  }
+
+  <!-- D7: exactly ONE error branch — banner with Retry CTA. Retained
+       last-good chart keeps rendering underneath. -->
+  @if (showError()) {
+    <div class="timeline-error" data-test="timeline-error" role="alert">
+      <mat-icon class="error-icon">error_outline</mat-icon>
+      <div class="error-copy">
+        <h3>History unavailable</h3>
+        <p>{{ error() }}</p>
+      </div>
+      <button mat-flat-button color="primary" (click)="onRetry()" data-test="timeline-retry">
+        <mat-icon>refresh</mat-icon>
+        Retry
+      </button>
+    </div>
+  }
+
+  @if (history(); as payload) {
+    <div class="timeline-chart-host" data-test="timeline-chart">
+      <app-svg-timeline
+        [points]="points()"
+        [anomalies]="anomalies()"
+        [series]="series()"
+        (markerClick)="onMarkerClick($event)"
+      ></app-svg-timeline>
+    </div>
+  }
+
+  <!-- ── Drill-down panel (marker click) ─────────────────────────── -->
+  @if (selectedAnomaly(); as anomaly) {
+    <section class="drilldown" data-test="drilldown-panel">
+      <header class="drilldown-header">
+        <h3>Anomaly drill-down</h3>
+        <button
+          mat-icon-button
+          type="button"
+          (click)="clearDrilldown()"
+          data-test="drilldown-close"
+          aria-label="Close drill-down"
+        >
+          <mat-icon>close</mat-icon>
+        </button>
+      </header>
+
+      <div class="anomaly-summary" data-test="anomaly-summary">
+        <span class="summary-chip" data-test="anomaly-kind">kind {{ anomaly.kind }}</span>
+        <span class="summary-chip" data-test="anomaly-shape">shape {{ anomaly.shape }}</span>
+        <span class="summary-chip" [attr.data-severity]="anomaly.severity" data-test="anomaly-severity">
+          severity {{ anomaly.severity }}
+        </span>
+        <span class="summary-chip">series {{ anomaly.series_key }}</span>
+        <span class="summary-chip">
+          window {{ utcLabel(anomaly.t_start) }}–{{ utcLabel(anomaly.t_end) }} UTC
+        </span>
+        <span class="summary-chip observed" data-test="anomaly-observed">
+          observed {{ anomaly.peak }}
+        </span>
+        <span class="summary-chip baseline" data-test="anomaly-baseline">
+          baseline {{ anomaly.baseline }}
+        </span>
+      </div>
+
+      @if (drilldownLoading()) {
+        <div class="drilldown-loading" data-test="drilldown-loading" aria-busy="true">
+          Loading evidence…
+        </div>
+      }
+
+      @if (drilldownError(); as ddError) {
+        <div class="drilldown-error" data-test="drilldown-error" role="alert">
+          <span>{{ ddError }}</span>
+          <button mat-button color="primary" (click)="retryDrilldown()" data-test="drilldown-retry">
+            Retry
+          </button>
+        </div>
+      }
+
+      @if (evidence(); as ev) {
+        <div class="drilldown-columns">
+          <div class="drilldown-col" data-test="contributors">
+            <h4>Contributors</h4>
+            <ul class="contributor-list">
+              @for (contributor of ev.contributors; track $index) {
+                <li class="contributor-row" [class.unattributed]="contributor.unattributed === true">
+                  <span class="contributor-name">
+                    {{ contributor.agent_id ?? contributor.instance_id ?? 'unattributed' }}
+                  </span>
+                  <span class="contributor-share">{{ contributor.share_pct | number: '1.0-1' }}%</span>
+                </li>
+              }
+            </ul>
+            <p class="honesty-note">
+              Attribution is a sample-time estimate; the <em>unattributed</em> remainder
+              is surfaced, never hidden.
+            </p>
+          </div>
+        </div>
+      }
+
+      @if (traceback(); as tb) {
+        <div class="drilldown-columns">
+          <div class="drilldown-col" data-test="traceback-window">
+            <h4>Window</h4>
+            <div class="kv"><span>t0</span><span>{{ utcLabel(tb.window.t0) }} UTC</span></div>
+            <div class="kv"><span>t1</span><span>{{ utcLabel(tb.window.t1) }} UTC</span></div>
+          </div>
+
+          <div class="drilldown-col" data-test="traceback-alive">
+            <h4>Alive instances ({{ tb.instances_alive.length }})</h4>
+            <ul class="plain-list">
+              @for (inst of tb.instances_alive; track inst.instance_id) {
+                <li>{{ inst.agent ?? 'agent' }} · {{ inst.instance_id }}</li>
+              }
+              @if (tb.instances_alive.length === 0) {
+                <li class="empty">none</li>
+              }
+            </ul>
+          </div>
+
+          <div class="drilldown-col" data-test="traceback-inflight">
+            <h4>In-flight tasks ({{ tb.in_flight_tasks.length }})</h4>
+            <ul class="plain-list">
+              @for (task of tb.in_flight_tasks; track $index) {
+                <li>{{ task.work_id ?? task.task_id ?? 'task' }} · {{ task.status ?? '—' }}</li>
+              }
+              @if (tb.in_flight_tasks.length === 0) {
+                <li class="empty">none</li>
+              }
+            </ul>
+          </div>
+
+          <div class="drilldown-col" data-test="traceback-children">
+            <h4>Spawned children ({{ tb.spawned_children.length }})</h4>
+            <ul class="plain-list">
+              @for (child of tb.spawned_children; track $index) {
+                <li
+                  class="child-row"
+                  [class.hot]="isHotChildKind(child.kind)"
+                  [attr.data-hot]="isHotChildKind(child.kind)"
+                >
+                  <span class="child-kind">{{ child.kind }}</span>
+                  <span class="child-name">{{ child.name ?? '' }}</span>
+                </li>
+              }
+              @if (tb.spawned_children.length === 0) {
+                <li class="empty">none</li>
+              }
+            </ul>
+          </div>
+
+          <div class="drilldown-col" data-test="traceback-structural">
+            <h4>Structural</h4>
+            <div class="kv"><span>queue depth</span><span>{{ tb.structural.queue_depth ?? '—' }}</span></div>
+            <div class="kv"><span>workers</span><span>{{ tb.structural.workers ?? '—' }}</span></div>
+            <div class="kv"><span>checkpoints</span><span>{{ tb.structural.checkpoints ?? '—' }}</span></div>
+            <div class="kv"><span>gc events</span><span>{{ tb.structural.gc_events ?? '—' }}</span></div>
+          </div>
+        </div>
+      }
+    </section>
+  }
+</div>
