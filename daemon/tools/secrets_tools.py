@@ -21,7 +21,11 @@ Tool surface (plan §5.2 table, authoritative):
   preview only).
 * ``secret_store(name: str, kind: str, value: str)`` —
   wrap-on-store, open to forward-compatible kinds. Returns
-  ``{id, name, marker}``.
+  ``{id, name, marker}``. P2 phase 2 (design §2.3): a ``value``
+  that IS a marker is an IDEMPOTENT passthrough — the existing
+  secret's ``{id, name}`` is returned without re-wrapping (the
+  Worker-B 🔴 retry-after-pause/resume case; unknown id → typed
+  ``secret_not_found`` envelope).
 * ``secret_list()`` — list active rows. Returns
   ``[{id, name, kind, public_material}, ...]``. No marker,
   no wrapped_secret, no plaintext.
@@ -115,6 +119,13 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from langchain_core.tools import tool
 from pydantic import Field
+
+# D2 (P2 phase 2): the FROZEN marker shape's parse helper — the
+# ``secret_store`` idempotent marker-passthrough keys on it (design
+# §2.3 PRIMARY ruling). Module-level import is safe: the marker
+# helpers are pure functions in the same feature family (no service
+# construction, no DB, no IO at import time).
+from daemon.services.secret_service import parse_marker
 
 from ._tool_registry import register_tool_category
 
@@ -267,6 +278,81 @@ def _resolve_service(manager: Any) -> Any:
             "tool is called"
         )
     return svc
+
+
+def _format_marker_resolution_envelope(exc: Any) -> str:
+    """Format a :class:`SecretMarkerResolutionError` into the design
+    §3.3 typed JSON envelope.
+
+    Shape: ``{"ok": false, "code": <code>, "surface": <surface>,
+    "message": "secret resolution failed: <code>"}`` — the
+    anti-differential phrasing family (§3.3: identical message
+    template across ``secret_not_found`` / ``secret_marker_malformed``
+    / ``secret_retired``; the ``code`` field is the only struct
+    distinction). NEVER carries the value or the marker literal.
+    Mirrors the resolver-side envelope vocabulary from P2 phase 1.
+    """
+    return json.dumps(
+        {
+            "ok": False,
+            "code": getattr(exc, "code", "secret_resolution_failed"),
+            "surface": getattr(exc, "surface", "tool_param"),
+            "message": str(exc),
+        }
+    )
+
+
+def _marker_passthrough_store(
+    svc: Any, actor: str, secret_id: str
+) -> str:
+    """D2 idempotent marker-passthrough for ``secret_store`` (design
+    §2.3 PRIMARY ruling, p2-architecture-recommendation).
+
+    The value passed ``fullmatch`` on the FROZEN marker regex. Two
+    branches:
+
+    * id EXISTS → return ``{id, name}`` of the EXISTING secret,
+      WITHOUT re-wrapping. This converts the Worker-B 🔴 retry case
+      (pause→resume between agent-node commit and tool completion
+      re-invokes ``secret_store`` with the S2-scrubbed arg — the
+      marker string) into an IDEMPOTENT SUCCESS: the re-invocation
+      returns the existing row instead of wrapping the marker as a
+      bogus new secret. Autonomy-preserving, no wedge path.
+    * id UNKNOWN → typed ``secret_not_found`` envelope via the
+      phase-1 resolver vocabulary
+      (:class:`SecretMarkerResolutionError`, ``code=secret_not_found``,
+      ``surface=tool_param``) — fail-closed, PB-F1 clean (no value,
+      anti-differential message).
+
+    Trust model (plan §1.2 — unchanged): the caller already passed
+    the ``tools.allow`` ``secrets`` category gate (privileged strip +
+    day-one allow-list). The passthrough adds NO new permission
+    surface — it re-reads the row through the same ``read_public``
+    path (pubkey-only rule intact: only id/name/kind/public_material
+    are touched; the audit row for that read is emitted as usual, so
+    the passthrough is fully audited).
+
+    Note: a MALFORMED marker-shaped value (prefix present, UUID4
+    fullmatch fails) is NOT intercepted here — ``parse_marker``
+    returns ``None`` and the value wraps literally, exactly as P1
+    did (the wrap-anything contract; the malformed marker would
+    fail closed at any future resolve seam anyway).
+    """
+    from daemon.services.secret_service import (
+        SECRET_CODE_NOT_FOUND,
+        SecretMarkerResolutionError,
+        SecretNotFoundError,
+    )
+
+    try:
+        row = svc.read_public(id=secret_id, actor=actor)
+    except SecretNotFoundError:
+        raise SecretMarkerResolutionError(
+            secret_id=secret_id,
+            code=SECRET_CODE_NOT_FOUND,
+            surface="tool_param",
+        )
+    return json.dumps({"id": row["id"], "name": row["name"]})
 
 
 def _resolve_actor(manager: Any, current_instance_id: str) -> str:
@@ -456,22 +542,46 @@ Use tool_help("secret_generate_api_token") for details."""
                     "The plaintext value to wrap-and-store. Held "
                     "only in memory until the Fernet.encrypt call "
                     "returns; the tool response carries only the "
-                    "marker (NOT the value, NOT a preview)."
+                    "marker (NOT the value, NOT a preview). If the "
+                    "value IS a marker (__ENS_SECRET__<id>__) the "
+                    "call is an idempotent passthrough: the existing "
+                    "secret's {id, name} is returned without "
+                    "re-wrapping."
                 )
             ),
         ],
     ) -> str:
         """Wrap-and-store an arbitrary value under a forward-compatible kind.
 
+Idempotent for marker values: passing __ENS_SECRET__<id>__ returns the existing secret's {id, name} (no re-wrap) — safe to retry after a pause/resume. Unknown id → typed secret_not_found envelope.
+
 Use tool_help("secret_store") for details."""
         try:
             svc = _resolve_service(caller_manager)
             actor = _resolve_actor(caller_manager, caller_instance_id)
+            # D2 marker-passthrough (design §2.3 PRIMARY ruling):
+            # a full-matching marker value NEVER re-wraps — the
+            # S2 args-scrub guarantees the persisted (and therefore
+            # retried) arg is the marker, so the retry-after-
+            # pause/resume re-invocation must be idempotent.
+            parsed_marker_id = parse_marker(value)
+            if parsed_marker_id is not None:
+                return _marker_passthrough_store(
+                    svc, actor, parsed_marker_id
+                )
             result = svc.store(
                 name=name, kind=kind, value=value, actor=actor
             )
             return json.dumps(result)
         except Exception as exc:  # noqa: BLE001
+            from daemon.services.secret_service import (
+                SecretMarkerResolutionError,
+            )
+
+            if isinstance(exc, SecretMarkerResolutionError):
+                # D2 typed envelope — design §3.3 family shape
+                # (anti-differential message, code/surface fields).
+                return _format_marker_resolution_envelope(exc)
             return _format_error_envelope(exc)
 
     @register_tool_category("secrets")
@@ -649,12 +759,30 @@ Args:
          the tool response carries only the marker (NOT
          the value, NOT a preview).
 
+Idempotent marker passthrough (P2, design §2.3 — retry-safe):
+
+  If ``value`` IS a marker (``__ENS_SECRET__<id>__``), the call
+  does NOT wrap it. It returns the EXISTING secret's
+  ``{"id": ..., "name": ...}`` — an idempotent success. This
+  makes retry-after-pause/resume safe: the transcript persists
+  the marker form of your arguments (the persistence scrub),
+  so a re-dispatched ``secret_store`` call arrives with the
+  marker as ``value``; the passthrough returns the existing row
+  instead of storing a bogus copy. An unknown id yields a typed
+  ``secret_not_found`` envelope (fail-closed).
+
+Trust model (plan §1.2 — unchanged): any caller reaching this
+tool already passed the ``secrets`` category gate; the
+passthrough adds no permission surface (it re-reads through the
+same pubkey-only ``read_public`` path, fully audited).
+
 Returns:
   JSON object: {
     "id":     "<UUID4>",
     "name":   "<label>",
     "marker": "__ENS_SECRET__<id>__"
   }
+  (marker-passthrough form: {"id": ..., "name": ...} only)
 
 The plaintext value NEVER crosses the tool boundary. To
 use the stored value later, the agent authors the marker

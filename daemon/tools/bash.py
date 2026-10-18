@@ -1,6 +1,7 @@
 """Bash execution tool for running shell commands."""
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -13,6 +14,18 @@ from langchain_core.tools import tool
 from pydantic import BaseModel
 
 from ._tool_registry import register_tool_category
+# agent-secrets P2 (design §1a) — the resolver vocabulary is IMPORTED
+# (never redefined; commission hard constraint). No import cycle:
+# ``secret_service`` / ``secret_resolver`` / ``kms_resolver`` do not
+# reach back into ``daemon.tools``.
+from daemon.services.kms_resolver import resolve_env as _kms_resolve_env
+from daemon.services.secret_persistence_scrub import (
+    get_process_secret_service as _get_process_secret_service,
+)
+from daemon.services.secret_resolver import (
+    resolve_secret_markers as _resolve_secret_markers,
+)
+from daemon.services.secret_service import SecretMarkerResolutionError
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +131,44 @@ def get_bash_process_registry() -> BashProcessRegistry:
         _bash_process_registry = BashProcessRegistry()
     return _bash_process_registry
 
+
+# ── agent-secrets P2 (design §1a) — spawn-time secret resolution ──────
+#
+# The bash ``env`` overlay (``BashInputSchema.env``) is resolved at
+# the SPAWN SITE (design §1a literal chain: assembled →
+# ``resolve_secret_markers`` → ``resolve_env`` (KMS-Lite) → spawn).
+# This chain is the SOLE bash.env resolution lane (review-r1
+# advisory A): the wrapped_tools_node pre-invoke pass does NOT cover
+# it — the ``env`` field is dict-valued and the pre-invoke walker
+# resolves STRING-typed declared fields only, so the former
+# ``SECRET_TYPED_ARGS["bash"]`` registration was a structural no-op
+# (now removed from ``daemon/tools/_auth.py``). The chain
+# short-circuits on marker-free values (resolver §0 fast path —
+# zero measurable latency) and FAILS CLOSED on a marker it cannot
+# resolve: the child is NOT spawned rather than a literal
+# ``__ENS_SECRET__…__`` leaking into a subprocess env (any caller —
+# wrapper or direct coroutine invocation — gets the same guarantee).
+#
+
+
+def _format_secret_envelope(exc) -> str:
+    """Format a :class:`SecretMarkerResolutionError` as the typed
+    JSON envelope (design §3.3 vocabulary — ``surface="bash.env"``).
+
+    PB-F1: the envelope carries code + surface + the anti-
+    differential message; the ``secret_id`` rides the exception's
+    attribute (operator diagnostics) but NEVER the agent-visible
+    payload.
+    """
+    return json.dumps(
+        {
+            "ok": False,
+            "code": getattr(exc, "code", "secret_resolver_store_unavailable"),
+            "surface": getattr(exc, "surface", "bash.env"),
+            "message": str(exc),
+        }
+    )
+
 CATEGORY_NAME = "Shell"
 CATEGORY_DOC = """\
 Execute shell commands.
@@ -198,12 +249,27 @@ def _read_file_bytes(path):
 
 
 class BashInputSchema(BaseModel):
-    """LLM-visible arguments for the bash tool."""
+    """LLM-visible arguments for the bash tool.
+
+    ``env`` (agent-secrets P2, design §1a): OPTIONAL overlay merged
+    atop ``os.environ`` for the child shell ONLY. Values may carry
+    ``__ENS_SECRET__<uuid4>__`` markers (mint via
+    ``secret_store``) — markers resolve to plaintext at spawn time
+    and NEVER round-trip back into the transcript (S1 scrubs
+    results). A marker that fails to resolve (missing id, malformed,
+    DB down) FAILS CLOSED: the command is NOT executed and a typed
+    ``{ok:false, code, surface:"bash.env", message}`` envelope is
+    returned. KMS-Lite markers (``__KMS_REF__…__`` /
+    ``__KMS_ENV__…__``) resolve too (chained, unchanged). Markers in
+    the ``command`` string are NOT resolved (plan §6.1 —
+    quoting-fragile).
+    """
 
     command: str | List[str]
     timeout: int | float | None = 1800
     workdir: str | None = None
     input: str | None = None
+    env: Dict[str, str] | None = None
 
 
 @register_tool_category("bash")
@@ -215,6 +281,7 @@ async def bash(
     timeout: int | float | None = 1800,
     workdir: str | None = None,
     input: str | None = None,
+    env: Dict[str, str] | None = None,
     instance_id: str | None = None,
 ) -> str:
     """Execute a bash command and return the output. Timeout is in seconds (0-1800, default 1800). Use tool_help("bash") for details."""
@@ -285,6 +352,29 @@ async def bash(
 
         try:
             stdin_arg = stdin_file if stdin_file is not None else asyncio.subprocess.DEVNULL
+            # ── agent-secrets P2 (design §1a) — spawn-time env chain ──
+            # assembled = os.environ.copy() ⊕ env overlay →
+            # resolve_secret_markers (P2, surface "bash.env") →
+            # resolve_env (KMS-Lite, chained — unchanged) → spawn.
+            # LITERAL §1a order: secrets-then-KMS (diverges from §1c's
+            # MCP order; marker shapes are disjoint so either order is
+            # correct — see the commission report for the reasoning).
+            # The SecretService is resolved lazily per call — ``None``
+            # fails closed ONLY when a marker-shaped value is present
+            # (the resolver's lazy service check); marker-free env
+            # passes through byte-identical (zero measurable latency).
+            assembled_env: Dict[str, str] | None = None
+            if env:
+                assembled_env = os.environ.copy()
+                # Overlay wins over os.environ (§1a semantics).
+                assembled_env.update(env)
+                assembled_env = _resolve_secret_markers(
+                    assembled_env,
+                    secret_service=_get_process_secret_service(),
+                    actor=instance_id or "<bash>",
+                    surface="bash.env",
+                )
+                assembled_env = _kms_resolve_env(assembled_env)
             if isinstance(command, list):
                 proc = await asyncio.create_subprocess_exec(
                     *command,
@@ -292,6 +382,7 @@ async def bash(
                     stdout=stdout_file,
                     stderr=stderr_file,
                     cwd=workdir,
+                    env=assembled_env,
                     **subproc_kwargs,
                 )
             else:
@@ -301,6 +392,7 @@ async def bash(
                     stdout=stdout_file,
                     stderr=stderr_file,
                     cwd=workdir,
+                    env=assembled_env,
                     **subproc_kwargs,
                 )
         finally:
@@ -393,6 +485,14 @@ For full output, redirect to file:
                 except BaseException:
                     pass  # best-effort during cancellation
         raise  # ALWAYS re-propagate the cancellation
+    except SecretMarkerResolutionError as secret_env_exc:
+        # agent-secrets P2 (design §1a) — typed envelope at the
+        # existing error site. Short-circuits BEFORE the generic
+        # ``ERROR: …`` string so the agent-visible payload carries
+        # the typed ``{ok:false, code, surface:"bash.env", message}``
+        # envelope; the child was NOT spawned (the resolve raised
+        # before ``create_subprocess_*`` — never partial env).
+        return _format_secret_envelope(secret_env_exc)
     except Exception as e:
         return f"ERROR: {str(e)}"
     finally:
@@ -426,6 +526,15 @@ Args:
     timeout: Maximum time to wait (in seconds). Must be 0-1800. Default: 1800 (30 minutes)
     workdir: Working directory for command execution (default: current directory)
     input: Optional string to pass to stdin
+    env: Optional dict merged atop os.environ for the child shell ONLY.
+        Values may carry __ENS_SECRET__<uuid4>__ markers (mint via
+        secret_store) — markers resolve to plaintext at spawn time and
+        never echo back into the transcript. KMS-Lite markers
+        (__KMS_REF__…__ / __KMS_ENV__…__) resolve too. A failing marker
+        (missing id, malformed, DB down) FAILS CLOSED: the command is
+        NOT executed and a typed {ok:false, code, surface:"bash.env"}
+        envelope is returned. Markers inside the `command` string are
+        NOT resolved.
 
 Returns:
     Command output including stdout, stderr, and exit code.

@@ -21,6 +21,7 @@ class TestInstanceIdAware:
             timeout=1800,
             workdir=None,
             input=None,
+            env=None,
             instance_id=None,
         ):
             received.append(instance_id)
@@ -44,6 +45,7 @@ class TestInstanceIdAware:
             timeout=1800,
             workdir=None,
             input=None,
+            env=None,
             instance_id=None,
         ):
             received.append(instance_id)
@@ -70,6 +72,7 @@ class TestInstanceIdAware:
             "timeout",
             "workdir",
             "input",
+            "env",
         ]
         assert "instance_id" not in wrapped.args_schema.model_fields
 
@@ -125,6 +128,7 @@ class TestInstanceIdAware:
             "timeout": 1800,
             "workdir": None,
             "input": None,
+            "env": None,
         }
         assert "instance_id" not in dumped
 
@@ -150,6 +154,7 @@ class TestInstanceIdAware:
             timeout=1800,
             workdir=None,
             input=None,
+            env=None,
             instance_id=None,
         ):
             received.append(instance_id)
@@ -181,6 +186,7 @@ class TestInstanceIdAware:
             timeout=1800,
             workdir=None,
             input=None,
+            env=None,
             instance_id=None,
         ):
             received.append(instance_id)
@@ -218,4 +224,5 @@ def test_bash_input_schema_does_not_advertise_instance_id():
         "timeout",
         "workdir",
         "input",
+        "env",
     }

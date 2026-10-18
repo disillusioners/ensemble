@@ -60,6 +60,19 @@ from typing import Any, List, Optional, Union
 from langchain_core.tools import tool
 
 from ._tool_registry import register_tool_category
+# agent-secrets P2 (design §1b) — resolver vocabulary is IMPORTED
+# (never redefined; commission hard constraint). No import cycle:
+# ``secret_resolver`` / ``secret_service`` do not reach back into
+# ``daemon.tools``.
+# Gap-2: service discovery consolidated into the scrub module's
+# public ``get_process_secret_service`` (seam LOGIC stays separate
+# per design §1b — only the discovery is shared).
+from daemon.services.secret_persistence_scrub import (
+    get_process_secret_service as _get_process_secret_service,
+)
+from daemon.services.secret_resolver import (
+    resolve_secret_markers as _resolve_secret_markers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -488,9 +501,11 @@ def _verify_pid_ownership_ps(
         pid,
     )
     return False
-
-
-def _build_child_env(process_id: str) -> dict:
+def _build_child_env(
+    process_id: str,
+    *,
+    process_env_overlay: Optional[dict] = None,
+) -> dict:
     """Build the child environment with the tracking id injected.
 
     Always starts from a copy of ``os.environ`` so the child inherits
@@ -498,10 +513,43 @@ def _build_child_env(process_id: str) -> dict:
     tracking id is added — if it is ALREADY in the parent env (e.g. a
     test that pre-sets it), ours overwrites it so the child gets the
     authoritative value tied to ``process_id``.
+
+    agent-secrets P2 (design §1b): an OPTIONAL ``process_env_overlay``
+    merges ATOP the assembled dict (overlay wins), then the merged
+    dict routes through :func:`resolve_secret_markers` (surface
+    ``"bash.env"`` — timing / locus / failure identical to the bash
+    seam per §1b). Marker-free env passes through byte-identical
+    (zero measurable latency — the resolver's short-circuit fast
+    path). A failing marker (missing id, malformed, DB down) raises
+    the typed :class:`SecretMarkerResolutionError` — the caller (the
+    spawn seam) must abort the spawn; never partial env. KMS-Lite
+    markers are NOT resolved here — the operator overlay is the
+    agent-secrets lane; KMS-Lite resolution of operator-supplied
+    env is out of this seam's scope (§1b is agent-secrets only).
+
+    Args:
+        process_id: The tracking id stamped into the child env.
+        process_env_overlay: OPTIONAL operator-supplied env entries
+            (NOT an LLM-visible argument — ``proc_run`` carries no
+            ``env`` field by design). ``None`` (the default) means
+            the child env is ``os.environ ⊕ tracking_id``, unchanged
+            from P1 behavior.
     """
     env = os.environ.copy()
     env[_TRACKING_ENV_VAR] = process_id
-    return env
+    if process_env_overlay:
+        env.update(process_env_overlay)
+    # Design §1b: timing / locus / failure identical to the bash
+    # seam (§1a) — resolution runs on the ASSEMBLED dict at spawn
+    # time, surface "bash.env" family. Marker-free env is a no-op
+    # (the resolver's per-value short-circuit); a failing marker
+    # propagates the typed envelope — the caller aborts the spawn.
+    return _resolve_secret_markers(
+        env,
+        secret_service=_get_process_secret_service(),
+        actor=process_id,
+        surface="bash.env",
+    )
 
 
 class BackgroundProcessManager:

@@ -7612,6 +7612,33 @@ class InstanceManager:
                 "ALTER TABLE prompt_versions ADD COLUMN IF NOT EXISTS "
                 "artifact_class TEXT NOT NULL DEFAULT 'CORE'"
             ),
+            # agent-secrets P2 phase 0 (2026-10-18):
+            # ``secrets_audit.context`` — the P2 resolution/scrub
+            # context tag (``'bash_env' | 'mcp_spawn' | 'tool_param' |
+            # 'scrub'``, NULL for P1-era rows). Fresh PostgreSQL
+            # databases get the column from
+            # ``SQLModel.metadata.create_all()`` via the
+            # ``SecretAuditEvent.context`` declaration at
+            # ``daemon/repositories/secrets/models.py``; existing
+            # databases need the ADD COLUMN here because the .sql
+            # migration runner is a NO-OP on PG. Nullable, NO CHECK
+            # constraint — the value set is validated at the service
+            # boundary in a later P2 phase so future values stay
+            # additive. No new index: the composite
+            # ``idx_secrets_audit_secret_id_at`` on ``(secret_id, at)``
+            # already covers the audit query path. SQLite companion
+            # migration lives at
+            # ``daemon/migrations/versions/20261018_000001_secrets_audit_add_context.sql``
+            # (plain portable ADD COLUMN — the IF NOT EXISTS variant
+            # is invalid SQLite syntax; re-run safety on the SQLite
+            # lane rides the ledger + the runner's duplicate-column
+            # idempotent catch, while THIS statement needs the
+            # IF NOT EXISTS form because the P2 phase-0 gate proved
+            # the plain form raises 42710 on PG re-run).
+            (
+                "ALTER TABLE secrets_audit ADD COLUMN IF NOT EXISTS "
+                "context TEXT"
+            ),
         ]
         with self._engine.begin() as conn:
             for stmt in statements:

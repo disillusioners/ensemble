@@ -73,8 +73,18 @@ from daemon.services.secret_service import (
     ENS_SECRET_MARKER_RE,
     ENS_SECRET_MARKER_RE_COMPILED,
     ENS_SECRET_MARKER_SUFFIX,
+    SECRET_AUDIT_RESOLVE_CONTEXTS,
+    SECRET_CODE_CIPHER_UNAVAILABLE,
+    SECRET_CODE_FERNET_KEY_MISMATCH,
+    SECRET_CODE_MARKER_MALFORMED,
+    SECRET_CODE_NOT_FOUND,
+    SECRET_CODE_RETIRED,
+    SECRET_CODE_STORE_UNAVAILABLE,
+    SECRET_ENVELOPE_CODES,
+    SECRET_ENVELOPE_SURFACES,
     SecretCipher,
     SecretCipherUnavailable,
+    SecretMarkerResolutionError,
     SecretNameConflictError,
     SecretNotFoundError,
     SecretService,
@@ -1790,6 +1800,684 @@ class TestAtomicityPin:
         finally:
             # Restore the atomic implementation.
             svc_mod._SqlSecretStore.insert_with_audit = original
+
+
+class TestEnvelopeVocabulary:
+    """The envelope vocabulary is FROZEN (design §3.3).
+
+    Codes live in :data:`SECRET_ENVELOPE_CODES`. Surfaces live
+    in :data:`SECRET_ENVELOPE_SURFACES`. Audit contexts live in
+    :data:`SECRET_AUDIT_RESOLVE_CONTEXTS`. The set is ADDITIVE
+    for context (no CHECK constraint — design §4) but the codes
+    and surfaces are frozen for v1 — adding a new value is a
+    """
+
+    def test_envelope_codes_frozen_set(self) -> None:
+        expected = frozenset({
+            "secret_not_found",
+            "secret_marker_malformed",
+            "secret_retired",
+            "secret_resolver_store_unavailable",
+            "secret_fernet_key_mismatch",
+            "secret_cipher_unavailable",
+        })
+        assert SECRET_ENVELOPE_CODES == expected, (
+            f"envelope codes drift: {sorted(SECRET_ENVELOPE_CODES)} "
+            f"!= {sorted(expected)}"
+        )
+
+    def test_envelope_surfaces_frozen_set(self) -> None:
+        expected = frozenset({"bash.env", "mcp_spawn", "tool_param"})
+        assert SECRET_ENVELOPE_SURFACES == expected, (
+            f"envelope surfaces drift: {sorted(SECRET_ENVELOPE_SURFACES)} "
+            f"!= {sorted(expected)}"
+        )
+
+    def test_audit_resolve_contexts_additive_set(self) -> None:
+        # bash_env, mcp_spawn, tool_param are the v1 seams; scrub is
+        # reserved-for-Phase-4 (persistence scrub; design §3.4). The
+        # set is additive today — a future phase can extend without
+        # a migration (no CHECK constraint per design §4).
+        assert "bash_env" in SECRET_AUDIT_RESOLVE_CONTEXTS
+        assert "mcp_spawn" in SECRET_AUDIT_RESOLVE_CONTEXTS
+        assert "tool_param" in SECRET_AUDIT_RESOLVE_CONTEXTS
+        assert "scrub" in SECRET_AUDIT_RESOLVE_CONTEXTS
+
+    def test_secret_retired_constant_defined_but_reserved(self) -> None:
+        """``secret_retired`` lives in the enum set (forward-
+        compatible with D1 leader-ratified soft-retire semantics)
+        but the resolver NEVER emits it while D1 holds — flipping
+        to revocation semantics is a one-branch change at the
+        resolver (design §8 D1)."""
+        assert SECRET_CODE_RETIRED == "secret_retired"
+        assert SECRET_CODE_RETIRED in SECRET_ENVELOPE_CODES
+
+    def test_secret_marker_resolution_error_validates_code(self) -> None:
+        """A mistyped code is a programmer error — fail loud."""
+        with pytest.raises(ValueError):
+            SecretMarkerResolutionError(
+                secret_id="00000000-0000-4000-8000-000000000000",
+                code="bogus",
+                surface="tool_param",
+            )
+
+    def test_secret_marker_resolution_error_validates_surface(self) -> None:
+        """An unknown surface is also a programmer error — fail loud."""
+        with pytest.raises(ValueError):
+            SecretMarkerResolutionError(
+                secret_id="00000000-0000-4000-8000-000000000000",
+                code=SECRET_CODE_NOT_FOUND,
+                surface="bogus",
+            )
+
+    def test_anti_differential_message_template(self) -> None:
+        """Anti-differential phrasing (design §3.3): the
+        ``secret_not_found`` / ``secret_marker_malformed`` /
+        ``secret_retired`` family shares the IDENTICAL message
+        template ``"secret resolution failed: <code>"``. Only
+        the ``code`` attribute differs."""
+        sid = "00000000-0000-4000-8000-000000000000"
+        e_not_found = SecretMarkerResolutionError(
+            secret_id=sid, code=SECRET_CODE_NOT_FOUND, surface="bash.env"
+        )
+        e_malformed = SecretMarkerResolutionError(
+            secret_id=sid, code=SECRET_CODE_MARKER_MALFORMED,
+            surface="bash.env",
+        )
+        # Both share the SAME template; the placeholder is
+        # replaced with the actual code value (a stable enum,
+        # not per-id — so UUID4 entropy stays the real
+        # enumeration control per design §3.3 + R7).
+        assert str(e_not_found) == (
+            f"secret resolution failed: {SECRET_CODE_NOT_FOUND}"
+        )
+        assert str(e_malformed) == (
+            f"secret resolution failed: {SECRET_CODE_MARKER_MALFORMED}"
+        )
+        # Same prefix on both.
+        assert (
+            str(e_not_found).split(":")[0]
+            == str(e_malformed).split(":")[0]
+        )
+
+
+class TestResolveMarker:
+    """Phase 2 marker resolver (design §1 + §3.2 + §3.4).
+
+    Covers ``SecretService.resolve_marker`` end-to-end:
+    success / retired-resolves / not-found / malformed /
+    store-unavailable / cipher-unavailable / fernet-key-
+    mismatch; the audit-row stamps (success AND rejection);
+    the typed envelope attributes; the per-context
+    validation; and the byte-identical passthrough for
+    non-marker values via the resolver wrapper.
+    """
+
+    def test_resolve_marker_returns_plaintext(
+        self, service: SecretService
+    ) -> None:
+        """Happy path: mint a secret, resolve via the
+        service, plaintext matches. The audit row carries
+        ``action='use_marker'``, the stamped ``secret_id``,
+        and the supplied ``context``."""
+        minted = service.store(
+            name="resolve-happy", kind="generic",
+            value="super-secret-value", actor="worker",
+        )
+        secret_id = minted["id"]
+        plaintext = service.resolve_marker(
+            actor="worker", secret_id=secret_id,
+            context="tool_param",
+        )
+        assert plaintext == "super-secret-value", (
+            f"resolve_marker returned {plaintext!r}"
+        )
+
+    def test_resolve_marker_audit_row_stamped_with_secret_id(
+        self, service: SecretService
+    ) -> None:
+        """The use_marker audit row stamps the resolved
+        ``secret_id`` AND the supplied ``context`` (design §3.4)."""
+        minted = service.store(
+            name="audit-stamp", kind="generic",
+            value="plaintext", actor="worker",
+        )
+        service.resolve_marker(
+            actor="worker", secret_id=minted["id"],
+            context="bash_env", surface="bash.env",
+        )
+        with _session(service._engine) as session:
+            from sqlmodel import select as _select
+
+            rows = session.exec(
+                _select(SecretAuditEvent).where(
+                    SecretAuditEvent.action == "use_marker"
+                )
+            ).all()
+        assert len(rows) == 1, (
+            f"expected 1 use_marker audit row, got {len(rows)}"
+        )
+        row = rows[0]
+        assert row.secret_id == minted["id"]
+        assert row.actor == "worker"
+        assert row.context == "bash_env"
+
+    def test_resolve_marker_retired_still_resolves(
+        self, service: SecretService
+    ) -> None:
+        """D1 leader-ratified semantics: retired markers KEEP
+        resolving (soft-retire = delist + audit, NOT revocation).
+        ``secret_retired`` envelope is RESERVED but NEVER emitted
+        while this ruling holds (design §8 D1)."""
+        minted = service.store(
+            name="retired-still-resolves", kind="generic",
+            value="still-here", actor="worker",
+        )
+        secret_id = minted["id"]
+        # Retire the row.
+        service.retire(id=secret_id, actor="worker")
+        # Resolve must STILL return the plaintext.
+        plaintext = service.resolve_marker(
+            actor="worker", secret_id=secret_id,
+            context="mcp_spawn", surface="mcp_spawn",
+        )
+        assert plaintext == "still-here", (
+            f"retired resolve returned {plaintext!r}; "
+            f"D1 says retired markers keep resolving"
+        )
+
+    def test_resolve_marker_not_found_raises_typed_code(
+        self, service: SecretService
+    ) -> None:
+        """Missing id → ``secret_not_found`` envelope with the
+        requested secret_id (design §3.2)."""
+        unknown_id = "00000000-0000-4000-8000-000000000000"
+        with pytest.raises(SecretMarkerResolutionError) as excinfo:
+            service.resolve_marker(
+                actor="worker", secret_id=unknown_id,
+                context="tool_param",
+            )
+        assert excinfo.value.code == SECRET_CODE_NOT_FOUND
+        assert excinfo.value.surface == "tool_param"
+        assert excinfo.value.secret_id == unknown_id
+
+    def test_resolve_marker_not_found_writes_audit_row_null_secret_id(
+        self, service: SecretService
+    ) -> None:
+        """Design §3.4: ``use_marker`` audit row stamped on
+        rejection too; ``secret_id`` is NULL for not-found."""
+        unknown_id = "00000000-0000-4000-8000-000000000000"
+        with pytest.raises(SecretMarkerResolutionError):
+            service.resolve_marker(
+                actor="worker", secret_id=unknown_id,
+                context="tool_param",
+            )
+        with _session(service._engine) as session:
+            from sqlmodel import select as _select
+
+            rows = session.exec(
+                _select(SecretAuditEvent).where(
+                    SecretAuditEvent.action == "use_marker"
+                )
+            ).all()
+        assert len(rows) == 1
+        assert rows[0].secret_id is None, (
+            f"not-found audit row MUST carry NULL secret_id; "
+            f"got {rows[0].secret_id!r}"
+        )
+        assert rows[0].context == "tool_param"
+
+    def test_resolve_marker_cipher_unavailable_raises_typed_code(
+        self,
+        sqlite_engine: Engine,
+        fernet_key: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cipher unavailable (no SYSTEM_ENCRYPTION_KEY env +
+        no explicit key) → the service raises the RAW
+        ``SecretCipherUnavailable`` BEFORE entering the
+        engine.begin(). The resolver wrapper is responsible
+        for translating it to ``secret_cipher_unavailable``
+        (tested in ``test_secret_resolver.py``); here we
+        verify the service-layer exception shape."""
+        monkeypatch.delenv("SYSTEM_ENCRYPTION_KEY", raising=False)
+        svc = SecretService(
+            engine=sqlite_engine,
+            cipher=SecretCipher(),
+        )
+        minted = SecretService(
+            engine=sqlite_engine,
+            cipher=SecretCipher(encryption_key=fernet_key),
+        ).store(
+            name="cipher-unavail", kind="generic",
+            value="x", actor="worker",
+        )
+        with pytest.raises(SecretCipherUnavailable):
+            svc.resolve_marker(
+                actor="worker", secret_id=minted["id"],
+                context="tool_param",
+            )
+
+    def test_resolve_marker_invalid_token_raises_fernet_key_mismatch(
+        self,
+        sqlite_engine: Engine,
+        fernet_key: str,
+    ) -> None:
+        """``Fernet.InvalidToken`` on unwrap (key rotated
+        without re-encrypting the row) → ``secret_fernet_
+        key_mismatch`` envelope (design §3.2)."""
+        # Mint with the canonical key.
+        minted = SecretService(
+            engine=sqlite_engine,
+            cipher=SecretCipher(encryption_key=fernet_key),
+        ).store(
+            name="wrong-key", kind="generic",
+            value="rotated", actor="worker",
+        )
+        # Resolve with a DIFFERENT key — Fernet refuses.
+        other_key = Fernet.generate_key().decode()
+        svc_wrong_key = SecretService(
+            engine=sqlite_engine,
+            cipher=SecretCipher(encryption_key=other_key),
+        )
+        with pytest.raises(SecretMarkerResolutionError) as excinfo:
+            svc_wrong_key.resolve_marker(
+                actor="worker", secret_id=minted["id"],
+                context="tool_param",
+            )
+        assert excinfo.value.code == SECRET_CODE_FERNET_KEY_MISMATCH
+        assert excinfo.value.surface == "tool_param"
+        assert excinfo.value.secret_id == minted["id"]
+
+    def test_resolve_marker_db_unavailable_raises_store_unavailable(
+        self,
+        sqlite_engine: Engine,
+        fernet_key: str,
+    ) -> None:
+        """SQLAlchemy ``OperationalError`` on the SELECT →
+        ``secret_resolver_store_unavailable`` envelope; no
+        retry inside the resolver (design §3.2)."""
+        from sqlalchemy.exc import OperationalError
+
+        minted = SecretService(
+            engine=sqlite_engine,
+            cipher=SecretCipher(encryption_key=fernet_key),
+        ).store(
+            name="db-down", kind="generic",
+            value="x", actor="worker",
+        )
+        fail_count = {"n": 0}
+
+        @sa_event.listens_for(sqlite_engine, "before_cursor_execute")
+        def _fail_select(
+            conn, cursor, statement, parameters, context, executemany
+        ):
+            normalized = " ".join(statement.lower().split())
+            if (
+                "select" in normalized
+                and "from secrets" in normalized
+                and fail_count["n"] == 0
+            ):
+                fail_count["n"] += 1
+                raise OperationalError(
+                    "injected DB outage", None, None
+                )
+
+        try:
+            svc = SecretService(
+                engine=sqlite_engine,
+                cipher=SecretCipher(encryption_key=fernet_key),
+            )
+            with pytest.raises(SecretMarkerResolutionError) as excinfo:
+                svc.resolve_marker(
+                    actor="worker", secret_id=minted["id"],
+                    context="tool_param",
+                )
+            assert excinfo.value.code == SECRET_CODE_STORE_UNAVAILABLE
+            assert excinfo.value.surface == "tool_param"
+        finally:
+            sa_event.remove(
+                sqlite_engine, "before_cursor_execute", _fail_select
+            )
+
+    def test_resolve_marker_interface_error_raises_store_unavailable(
+        self,
+        sqlite_engine: Engine,
+        fernet_key: str,
+    ) -> None:
+        """P2 review advisory pin: SQLAlchemy ``InterfaceError``
+        (a ``DBAPIError`` subclass — NOT ``OperationalError``)
+        on the SELECT still maps to the typed
+        ``secret_resolver_store_unavailable`` envelope at the
+        service boundary. The Phase 0+1 envelope covered
+        ``OperationalError`` only; the broadened
+        ``DBAPIError`` catch in :mod:`daemon.services.secret_service`
+        picks up driver-side / connection-level dropouts
+        siblings the original catch missed. ``IntegrityError``
+        (programmer-error class) MUST still propagate
+        untranslated — verified at the docstring / code level."""
+        from sqlalchemy.exc import InterfaceError
+
+        minted = SecretService(
+            engine=sqlite_engine,
+            cipher=SecretCipher(encryption_key=fernet_key),
+        ).store(
+            name="iface-down", kind="generic",
+            value="x", actor="worker",
+        )
+        fail_count = {"n": 0}
+
+        @sa_event.listens_for(sqlite_engine, "before_cursor_execute")
+        def _fail_select(
+            conn, cursor, statement, parameters, context, executemany
+        ):
+            normalized = " ".join(statement.lower().split())
+            if (
+                "select" in normalized
+                and "from secrets" in normalized
+                and fail_count["n"] == 0
+            ):
+                fail_count["n"] += 1
+                raise InterfaceError(
+                    "injected interface error", None, None
+                )
+
+        try:
+            svc = SecretService(
+                engine=sqlite_engine,
+                cipher=SecretCipher(encryption_key=fernet_key),
+            )
+            with pytest.raises(SecretMarkerResolutionError) as excinfo:
+                svc.resolve_marker(
+                    actor="worker", secret_id=minted["id"],
+                    context="tool_param",
+                )
+            assert excinfo.value.code == SECRET_CODE_STORE_UNAVAILABLE
+            assert excinfo.value.surface == "tool_param"
+            # Typed envelope — NOT a raw InterfaceError escape.
+            assert not isinstance(excinfo.value, InterfaceError)
+        finally:
+            sa_event.remove(
+                sqlite_engine, "before_cursor_execute", _fail_select
+            )
+
+    def test_resolve_marker_rejects_invalid_context(
+        self, service: SecretService
+    ) -> None:
+        """``context`` MUST be in :data:`SECRET_AUDIT_RESOLVE_CONTEXTS`;
+        the service boundary rejects unknown values BEFORE the DB call
+        (design §3.4: validated at the service boundary; additive
+        set, no CHECK constraint)."""
+        minted = service.store(
+            name="bad-context", kind="generic",
+            value="x", actor="worker",
+        )
+        with pytest.raises(SecretValidationError) as excinfo:
+            service.resolve_marker(
+                actor="worker", secret_id=minted["id"],
+                context="bogus_context",
+            )
+        assert "bogus_context" in str(excinfo.value)
+        assert "SECRET_AUDIT_RESOLVE_CONTEXTS" in str(excinfo.value)
+
+    def test_resolve_marker_audit_atomic_with_select(
+        self, service: SecretService
+    ) -> None:
+        """Pin: the use_marker audit row commits in the same
+        ``engine.begin()`` as the SELECT. After resolve, both
+        the secret row and the audit row are visible (design
+        §1 + M1 atomicity contract, governor pre-promote fix
+        2026-10-17)."""
+        minted = service.store(
+            name="atomic-pin", kind="generic",
+            value="atomic-value", actor="worker",
+        )
+        service.resolve_marker(
+            actor="worker", secret_id=minted["id"],
+            context="tool_param",
+        )
+        with _session(service._engine) as session:
+            from sqlmodel import select as _select
+
+            secrets_rows = session.exec(
+                _select(Secret).where(Secret.id == minted["id"])
+            ).all()
+            audit_rows = session.exec(
+                _select(SecretAuditEvent).where(
+                    SecretAuditEvent.action == "use_marker"
+                )
+            ).all()
+        assert len(secrets_rows) == 1, (
+            "atomic-pin: secret row not visible after resolve"
+        )
+        assert len(audit_rows) == 1, (
+            "atomic-pin: use_marker audit row not visible after resolve"
+        )
+        assert audit_rows[0].secret_id == minted["id"]
+
+    def test_resolve_marker_does_not_cache_plaintext(
+        self,
+        sqlite_engine: Engine,
+        fernet_key: str,
+    ) -> None:
+        """No RAM plaintext cache at any layer — a fresh
+        PG read happens per resolution (design §3.1, LANE-2
+        mirror). Rotating the wrapped_secret in place is
+        reflected on the next resolve (a synthetic proof of
+        the re-read — the design claim is "restart-durable
+        by construction")."""
+        svc = SecretService(
+            engine=sqlite_engine,
+            cipher=SecretCipher(encryption_key=fernet_key),
+        )
+        minted = svc.store(
+            name="no-cache", kind="generic",
+            value="first-value", actor="worker",
+        )
+        # First resolve.
+        first = svc.resolve_marker(
+            actor="worker", secret_id=minted["id"],
+            context="tool_param",
+        )
+        assert first == "first-value"
+        # Mutate wrapped_secret via UPDATE to a NEW ciphertext
+        # (re-wrap under the same key). If the service held a
+        # RAM plaintext cache, the second resolve would still
+        # return "first-value". The design demands a fresh
+        # re-read — verify the second resolve reflects the
+        # UPDATE.
+        from sqlalchemy import text as sql_text
+
+        cipher = SecretCipher(encryption_key=fernet_key)
+        new_wrapped = cipher.wrap(b"second-value")
+        with sqlite_engine.begin() as conn:
+            conn.execute(
+                sql_text(
+                    "UPDATE secrets SET wrapped_secret = :w "
+                    "WHERE id = :id"
+                ),
+                {"w": new_wrapped, "id": minted["id"]},
+            )
+        # Second resolve must reflect the UPDATE.
+        second = svc.resolve_marker(
+            actor="worker", secret_id=minted["id"],
+            context="tool_param",
+        )
+        assert second == "second-value", (
+            f"RAM plaintext cache suspected: second resolve "
+            f"returned {second!r} after the wrapped_secret UPDATE"
+        )
+
+    def test_resolve_marker_invalid_actor_raises_validation(
+        self, service: SecretService
+    ) -> None:
+        """Empty actor → :class:`SecretValidationError` at the
+        service boundary (mirrors the P1 surface; ``_assert_actor``
+        pre-guard)."""
+        minted = service.store(
+            name="actor-check", kind="generic",
+            value="x", actor="worker",
+        )
+        with pytest.raises(SecretValidationError):
+            service.resolve_marker(
+                actor="", secret_id=minted["id"],
+                context="tool_param",
+            )
+
+    def test_resolve_marker_invalid_secret_id_raises_validation(
+        self, service: SecretService
+    ) -> None:
+        """Empty secret_id → :class:`SecretValidationError` at the
+        service boundary. The service is the UUID4-id boundary;
+        marker parsing is the resolver's job."""
+        with pytest.raises(SecretValidationError):
+            service.resolve_marker(
+                actor="worker", secret_id="",
+                context="tool_param",
+            )
+
+    def test_resolve_marker_envelope_attributes_are_complete(
+        self, service: SecretService
+    ) -> None:
+        """The raised envelope carries ``secret_id``, ``code``,
+        ``surface``, AND a non-empty ``message`` (the
+        structured-envelope reader contract — design §3.3)."""
+        minted = service.store(
+            name="envelope-shape", kind="generic",
+            value="x", actor="worker",
+        )
+        # Not-found path (the cleanest surface for envelope
+        # attribute inspection — no Fernet/cipher concerns).
+        with pytest.raises(SecretMarkerResolutionError) as excinfo:
+            service.resolve_marker(
+                actor="worker",
+                secret_id="00000000-0000-4000-8000-000000000000",
+                context="tool_param", surface="bash.env",
+            )
+        e = excinfo.value
+        # All four struct fields are populated.
+        assert e.secret_id == "00000000-0000-4000-8000-000000000000"
+        assert e.code == SECRET_CODE_NOT_FOUND
+        assert e.surface == "bash.env"
+        assert str(e) == (
+            f"secret resolution failed: {SECRET_CODE_NOT_FOUND}"
+        )
+        # The envelope is a ``RuntimeError`` subclass (mirror
+        # of ``KMSMarkerResolutionError`` shape).
+        assert isinstance(e, RuntimeError)
+
+    def test_resolve_marker_does_not_leak_value_in_envelope(
+        self, service: SecretService
+    ) -> None:
+        """PB-F1 rule (design §3.3): the error envelope NEVER
+        carries the value. The plaintext / wrapped_secret /
+        raw bytes MUST NOT appear in ``str(exc)`` or any
+        envelope attribute."""
+        minted = service.store(
+            name="pb-f1-pin", kind="generic",
+            value="DO-NOT-LEAK-MARKER", actor="worker",
+        )
+        # Force a failure (use a not-found id).
+        with pytest.raises(SecretMarkerResolutionError) as excinfo:
+            service.resolve_marker(
+                actor="worker",
+                secret_id="00000000-0000-4000-8000-000000000000",
+                context="tool_param",
+            )
+        blob = str(excinfo.value)
+        assert "DO-NOT-LEAK-MARKER" not in blob
+        assert minted["id"] not in blob
+        # The plaintext MUST not appear on the envelope attrs either.
+        for attr in ("secret_id", "code", "surface"):
+            value = getattr(excinfo.value, attr)
+            if isinstance(value, str):
+                assert "DO-NOT-LEAK-MARKER" not in value
+
+    def test_resolve_marker_kms_shaped_value_passes_through_untouched(
+        self, service: SecretService
+    ) -> None:
+        """P2 review advisory pin (service-layer KMS-lane
+        negative): a stored PLAINTEXT whose VALUE happens to
+        LOOK like a KMS-Lite marker (``__KMS_REF__KMS_HANDLE_...__``
+        or ``__KMS_ENV__...__``) MUST come back byte-exact from
+        ``resolve_marker``. The secret-service resolve path
+        does NOT re-enter the secret marker resolver NOR
+        any KMS interpolation logic. Defense-in-depth against
+        a future refactor that inlines one resolver into the
+        other — today the do-not-touch lanes (kms_lite,
+        kms_resolver, ens_env_tools, warmup_pool) are kept
+        byte-clean, but a round-trip pin locks the contract
+        at the service surface where the inlining risk lives.
+
+        Uses the existing ``service`` fixture only — no new
+        fixtures (Finding 5 review note: skip if fixtures
+        beyond the existing file's style are required)."""
+        # Realistic KMS-Lite marker SHAPES. The handle form
+        # carries a UUID4 placeholder; the env-ref form
+        # carries a variable name. Neither is anything the
+        # secret-resolver should ever substitute against.
+        kms_ref_value = "__KMS_REF__KMS_HANDLE_0123456789abcdef01234567__"
+        kms_env_value = "__KMS_ENV__OPENAI_API_KEY__"
+        stored_ref = service.store(
+            name="kms-ref-shape", kind="generic",
+            value=kms_ref_value, actor="worker",
+        )
+        stored_env = service.store(
+            name="kms-env-shape", kind="generic",
+            value=kms_env_value, actor="worker",
+        )
+        # Resolved plaintext is byte-exact with the stored
+        # value: no marker substitution, no env-var lookup,
+        # no KMS resolution (those run elsewhere, never here).
+        assert service.resolve_marker(
+            actor="worker", secret_id=stored_ref["id"],
+            context="tool_param",
+        ) == kms_ref_value
+        assert service.resolve_marker(
+            actor="worker", secret_id=stored_env["id"],
+            context="tool_param",
+        ) == kms_env_value
+
+    def test_secret_retired_constant_present_but_resolver_never_emits(
+        self, service: SecretService
+    ) -> None:
+        """``secret_retired`` is RESERVED but the resolver
+        MUST NEVER emit it while D1 holds (leader-ratified
+        soft-retire semantics; design §8 D1 + §3.2). Verify
+        by retiring a row and resolving it — the envelope
+        code is ``secret_not_found`` ONLY if the id is
+        missing; the retired-but-resolvable path emits no
+        envelope at all (success)."""
+        minted = service.store(
+            name="retired-no-emit", kind="generic",
+            value="keep", actor="worker",
+        )
+        service.retire(id=minted["id"], actor="worker")
+        # Retired row continues to resolve — no envelope.
+        plaintext = service.resolve_marker(
+            actor="worker", secret_id=minted["id"],
+            context="tool_param",
+        )
+        assert plaintext == "keep"
+        # The ``secret_retired`` code is in the enum set but
+        # never emitted by the resolver today.
+        assert SECRET_CODE_RETIRED in SECRET_ENVELOPE_CODES
+        # Audit history: no row carries ``action='use_marker'``
+        # AND ``code=secret_retired`` (the resolver never
+        # stamps a retired-failure audit row).
+        with _session(service._engine) as session:
+            from sqlmodel import select as _select
+
+            rows = session.exec(
+                _select(SecretAuditEvent).where(
+                    SecretAuditEvent.action == "use_marker"
+                )
+            ).all()
+        assert len(rows) == 1, (
+            "retired-resolves path MUST stamp exactly one "
+            "use_marker audit row (success), not failure"
+        )
+        assert rows[0].secret_id == minted["id"]
 
 
 # ─────────────────────────────────────────────────────────────────────

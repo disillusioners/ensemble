@@ -156,6 +156,15 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         A proxy object that behaves like the saver but retries each
         method call once on a connection-class failure.
     """
+    # S2 (agent-secrets P2): lazy factory-call import (mirrors the
+    # long_tool_nudge ToolNode discipline — call-time resolution so
+    # the repo conftest's langgraph mock lifecycle can't freeze a
+    # stale binding, and so a scrub-module import failure surfaces
+    # HERE, at wrapper build, never silently mid-write). Before any
+    # SecretService exists the helper is an identity function.
+    from daemon.services.secret_persistence_scrub import (
+        scrub_saver_write_args,
+    )
 
     class _SaverRetryProxy(BaseCheckpointSaver):
         """One-shot retry proxy — see module docstring for rationale.
@@ -289,6 +298,23 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         # layer. They are the LangGraph hot path (reads/writes during
         # pregel turns). Everything else on the base surface forwards
         # WITHOUT retry — see the class docstring for the rationale.
+        #
+        # S2 — agent-secrets P2 persisted-snapshot scrub (design §2.2,
+        # p2-architecture-recommendation): the four WRITE methods scrub
+        # a COPY of the snapshot (AIMessage tool-call args + the
+        # OpenAI-flavor additional_kwargs fallback + ToolMessage
+        # content) before the wrapped saver serializes it. Live state
+        # objects are NEVER touched — at this boundary the checkpoint's
+        # ``channel_values`` carry LIVE objects (``chan.checkpoint()``
+        # returns the channel's live value), so the transform mirrors
+        # the saver's own ``copy = checkpoint.copy()`` discipline and
+        # hands the wrapped saver scrubbed deep copies. Idempotent
+        # under re-save (markers fullmatch the skip guard). Before any
+        # SecretService exists the helper is an identity function
+        # (zero behavior change — the K-guard contract below stays
+        # green); a scrub failure is swallowed + logged (never fails
+        # a checkpoint write). This is the sibling of the
+        # ``redact_exc_str`` log-scrub in ``_call_with_retry``.
         async def aget(self, *args, **kwargs):
             return await self._call_with_retry("aget", args, kwargs)
 
@@ -296,9 +322,13 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
             return await self._call_with_retry("aget_tuple", args, kwargs)
 
         async def aput(self, *args, **kwargs):
+            args, kwargs = scrub_saver_write_args("aput", args, kwargs)
             return await self._call_with_retry("aput", args, kwargs)
 
         async def aput_writes(self, *args, **kwargs):
+            args, kwargs = scrub_saver_write_args(
+                "aput_writes", args, kwargs
+            )
             return await self._call_with_retry("aput_writes", args, kwargs)
 
         async def aget_delta_channel_history(self, *args, **kwargs):
@@ -374,6 +404,9 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         # forwarders route to the wrapped saver's own implementations
         # either way, so a stray sync caller gets upstream behavior,
         # not a proxy artifact. NO retry (never invoked by the daemon).
+        # ``put`` / ``put_writes`` carry the SAME S2 scrub as their
+        # async twins (design §2.2 pins :386/:389 + :298/:301 alike)
+        # so a future sync caller cannot become the unscrubbed hole.
         def get_tuple(self, *args, **kwargs):
             return self._saver.get_tuple(*args, **kwargs)
 
@@ -384,9 +417,13 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
             return self._saver.list(*args, **kwargs)
 
         def put(self, *args, **kwargs):
+            args, kwargs = scrub_saver_write_args("put", args, kwargs)
             return self._saver.put(*args, **kwargs)
 
         def put_writes(self, *args, **kwargs):
+            args, kwargs = scrub_saver_write_args(
+                "put_writes", args, kwargs
+            )
             return self._saver.put_writes(*args, **kwargs)
 
         def delete_thread(self, *args, **kwargs):

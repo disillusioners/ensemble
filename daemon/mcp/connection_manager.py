@@ -20,11 +20,23 @@ from daemon.mcp.managed_session import ManagedClientSession
 from daemon.mcp.stdio_wrapper import TaskScopedContextManager, TaskScopedStdioClient
 from daemon.repositories.mcp_server.models import McpServer
 from daemon.services.kms_resolver import resolve_env, resolve_headers
+# agent-secrets P2 (design §1c) — cold-spawn wrap. The stored env
+# keeps BOTH marker families (``__KMS_REF__…__`` / ``__ENS_SECRET__…__``);
+# only the subprocess env ever sees plaintext. LITERAL composition:
+# ``resolve_secret_markers(resolve_env(config.env))`` — KMS-Lite
+# resolves FIRST (pre-existing seam), agent-secrets resolves on the
+# KMS-resolved dict (marker shapes are disjoint — the composition is
+# order-stable). Surface ``"mcp_spawn"`` (envelope + audit context).
+# ``build_pooled_stdio_config`` remains DO-NOT-TOUCH (R4 — resolving
+# there would persist plaintext into DB config).
+# Gap-2: service discovery consolidated into the scrub module's
+# public ``get_process_secret_service``.
+from daemon.services.secret_persistence_scrub import (
+    get_process_secret_service as _get_process_secret_service,
+)
+from daemon.services.secret_resolver import resolve_secret_markers
 
 logger = logging.getLogger(__name__)
-
-# STDIO: Needs time for subprocess spawn (npx/uvx package resolution + download) + handshake
-# On cold start, npx needs 8-15s and uvx needs 5-10s
 STDIO_DEFAULT_TIMEOUT = 30.0
 
 # Module-level singleton
@@ -207,7 +219,22 @@ class McpConnectionManager:
         # KMS marker → plaintext substitution (P3-WP6). Stored env keeps
         # ``__KMS_REF__<handle>__`` markers; only the subprocess env ever
         # sees plaintext. resolve_env returns a NEW dict.
-        resolved_env = resolve_env(config.env)
+        # agent-secrets P2 (design §1c) — cold spawn #1: LITERAL
+        # composition ``resolve_secret_markers(resolve_env(...))`` —
+        # agent-secrets markers resolve on the KMS-resolved dict at the
+        # SPAWN POINT (stored config NEVER holds resolved values, R1).
+        # A failing marker raises the typed envelope BEFORE the
+        # subprocess spawns — the server does NOT start with literal
+        # markers or partial env (fail-closed).
+        resolved_env = resolve_secret_markers(
+            resolve_env(config.env),
+            secret_service=_get_process_secret_service(),
+            # Server-scoped (see warm-pool note): no agent context at
+            # cold spawn — audit actor is the ``<secret_resolver>``
+            # sentinel, explicit.
+            actor="<secret_resolver>",
+            surface="mcp_spawn",
+        )
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,
@@ -472,7 +499,20 @@ class McpConnectionManager:
         # KMS marker → plaintext substitution (P3-WP6). Stored env keeps
         # ``__KMS_REF__<handle>__`` markers; only the subprocess env ever
         # sees plaintext. resolve_env returns a NEW dict.
-        resolved_env = resolve_env(config.env)
+        # agent-secrets P2 (design §1c) — cold spawn #2 (test sessions
+        # carry the same markers as real sessions): LITERAL composition
+        # ``resolve_secret_markers(resolve_env(...))`` — identical to
+        # cold spawn #1 and the warm pool (BOTH cold paths must be
+        # wrapped, not just the pool).
+        resolved_env = resolve_secret_markers(
+            resolve_env(config.env),
+            secret_service=_get_process_secret_service(),
+            # Server-scoped (see warm-pool note): no agent context at
+            # cold spawn — audit actor is the ``<secret_resolver>``
+            # sentinel, explicit.
+            actor="<secret_resolver>",
+            surface="mcp_spawn",
+        )
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,

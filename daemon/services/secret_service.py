@@ -104,6 +104,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -113,7 +114,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from sqlalchemy import text as sql_text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlmodel import Session, SQLModel, and_, select
 
 from daemon.repositories.secrets.models import (
@@ -804,7 +805,19 @@ class _SqlSecretStore:
 
     def list_active(self) -> list[Secret]:
         with Session(self._engine) as session:
-            stmt = select(Secret).where(Secret.retired_at.is_(None))
+            # ``ORDER BY created_at ASC`` — anchors the §2.4
+            # collision-determinism rule at the store seam too: the
+            # ``secrets.list`` tool view AND the scrubber's row set
+            # see the same ordering (the design §2.4 anchor
+            # ``list_active()`` at ``secret_service.py:805`` carries
+            # NO explicit ORDER BY — surfacing it here stops the
+            # scrub set from being a footgun for the collision
+            # ruling when the engine hands rows in arbitrary order).
+            stmt = (
+                select(Secret)
+                .where(Secret.retired_at.is_(None))
+                .order_by(Secret.created_at.asc())
+            )
             return list(session.exec(stmt).all())
 
     # ─────────────────────────────────────────────────────
@@ -1018,6 +1031,7 @@ def _append_audit_in_conn(
     action: str,
     secret_id: Optional[str],
     actor: str,
+    context: Optional[str] = None,
 ) -> None:
     """Insert one :class:`SecretAuditEvent` row inside the
     caller's ``engine.begin()`` transaction.
@@ -1042,6 +1056,14 @@ def _append_audit_in_conn(
     at the audit-insert site rather than a later
     IntegrityError).
 
+    Context (P2, design §3.4): when ``context`` is non-None
+    it MUST live in :data:`SECRET_AUDIT_RESOLVE_CONTEXTS`.
+    P1 callers pass ``context=None`` (default) and skip
+    the validation entirely — the additive value set stays
+    additive without a CHECK constraint (design §4: the
+    set is validated at the SERVICE boundary in a later
+    P2 phase so future values stay additive).
+
     Mirrors the
     ``daemon/repositories/prompt_version/repository.py``
     ``_append_audit_in_conn`` helper (the named
@@ -1053,12 +1075,25 @@ def _append_audit_in_conn(
             f"_append_audit_in_conn: action {action!r} not "
             f"in SECRET_AUDIT_ACTIONS"
         )
+    # Defense-in-depth: the public resolve_marker entry
+    # already validates the additive set, but a future
+    # caller that bypasses the public boundary gets an
+    # immediate ValueError rather than a silently-bad
+    # audit row. P1 callers never hit this branch
+    # (context=None).
+    if context is not None and context not in SECRET_AUDIT_RESOLVE_CONTEXTS:
+        raise ValueError(
+            f"_append_audit_in_conn: context {context!r} "
+            f"not in SECRET_AUDIT_RESOLVE_CONTEXTS "
+            f"({sorted(SECRET_AUDIT_RESOLVE_CONTEXTS)})"
+        )
     conn.execute(
         SecretAuditEvent.__table__.insert().values(
             action=action,
             secret_id=secret_id,
             actor=actor,
             at=datetime.now(timezone.utc).isoformat(),
+            context=context,
         )
     )
 
@@ -1176,6 +1211,37 @@ class SecretService:
         self._engine = engine
         self._cipher = cipher or SecretCipher()
         self._store: _SecretStorePort = _SqlSecretStore(engine)
+        # P2 R3 invalidation event (p2-architecture-recommendation
+        # §2.5): a plain in-process callback list guarded by a lock
+        # (the v1 pub/sub shape the commission sanctions). The
+        # persistence scrubber (``daemon/services/
+        # secret_persistence_scrub.py``) is the single production
+        # subscriber: the callback drops its cached id set so the
+        # next scrub re-queries. Retire does NOT fire this event —
+        # retired rows REMAIN in the scrub set (design §2.4 binding;
+        # the set is unchanged by retire).
+        self._store_listeners: list[Callable[[], None]] = []
+        self._store_listeners_lock = threading.Lock()
+        # Process-wide registration (lazy in-method import — the
+        # repo's cycle-break convention; the scrub module imports
+        # THIS module at its own module top). Never fails
+        # construction: a registration error would only mean the
+        # scrubber runs TTL-backstop-only or not at all, never a
+        # broken service. Zero effect on secret-free agents (no
+        # DB, no IO — a dict write + one callback-list append).
+        try:
+            from daemon.services.secret_persistence_scrub import (
+                register_secret_service,
+            )
+
+            register_secret_service(self)
+        except Exception:  # pragma: no cover — defensive
+            logger.debug(
+                "[SecretService] persistence-scrub registration "
+                "skipped (import failed); scrub falls back to "
+                "unwired/identity",
+                exc_info=True,
+            )
 
     @property
     def is_available(self) -> bool:
@@ -1233,6 +1299,130 @@ class SecretService:
                 f"is not set or is invalid"
             )
         return self._cipher
+
+    # ─────────────────────────────────────────────────────────
+    # P2 store-event pub/sub + scrub-audit sink
+    # (p2-architecture-recommendation §2.5 R3 + §3.4)
+    # ─────────────────────────────────────────────────────────
+
+    def add_store_listener(self, callback: Callable[[], None]) -> None:
+        """Subscribe ``callback`` to the row-created event.
+
+        The event design (P2 phase 2, commission item E): a small
+        in-process pub/sub — this plain callback list, lock-guarded,
+        stdlib only (the sanctioned v1 shape). Fired whenever a NEW
+        secret row is created (``store`` / ``generate_ssh_keypair`` /
+        ``generate_api_token`` — all three mint rows the scrub set
+        must see). NOT fired by ``retire`` (retired rows REMAIN in
+        the scrub set — design §2.4 binding; the set is unchanged by
+        retire).
+
+        The single production subscriber is the persistence
+        scrubber's id-set invalidation callback (R3 primary
+        defense); the list shape keeps future subscribers additive.
+        Listener exceptions are ISOLATED (fire loops each callback
+        and swallows) — one bad subscriber can never break a store
+        path.
+        """
+        with self._store_listeners_lock:
+            self._store_listeners.append(callback)
+
+    def _fire_store_listeners(self) -> None:
+        """Fire the row-created event (called AFTER the insert
+        transaction commits — a listener that re-queries must see
+        the new row). Best-effort: listener exceptions are logged
+        and swallowed so the store response path is never broken by
+        observability."""
+        with self._store_listeners_lock:
+            listeners = list(self._store_listeners)
+        for callback in listeners:
+            try:
+                callback()
+            except Exception:
+                logger.exception(
+                    "[SecretService] store listener raised; "
+                    "continuing (event is best-effort)"
+                )
+
+    def record_scrub_substitution(
+        self, *, secret_id: str, actor: str
+    ) -> None:
+        """Stamp ONE scrub audit row (P2 phase 2, design §3.4).
+
+        ``action='use_marker'`` (the enum entry meaning "a marker
+        reference was (re)created in place of the value"; no
+        ``scrub`` action exists in :data:`SECRET_AUDIT_ACTIONS` and
+        adding one would touch the P1 model file) with
+        ``context='scrub'``. Emitted PER-SUBSTITUTION (per distinct
+        secret whose value was actually replaced in a scrub call)
+        — NEVER per-write (§3.4 flood rule).
+
+        The audit write is the ONLY persistence the scrub path does
+        beyond reads; it rides its own short ``engine.begin()``
+        transaction (the scrub path has no caller transaction to
+        join — S1/S2/S3 call it outside any store transaction).
+
+        Args:
+            secret_id: The id whose plaintext was replaced. Required.
+            actor: The calling instance/agent id (Cardinal #2); the
+                scrub wiring sites pass the instance id, falling
+                back to the ``<scrub>`` sentinel when unresolvable.
+
+        Raises:
+            SecretValidationError: empty ``secret_id`` / ``actor``.
+            sqlalchemy exceptions: propagate (the scrubber's audit
+                emission is best-effort and catches them — a failed
+                audit row never fails the scrub).
+        """
+        _assert_nonempty_str(secret_id, label="secret_id")
+        _assert_nonempty_str(actor, label="actor")
+        with self._engine.begin() as conn:
+            _append_audit_in_conn(
+                conn,
+                action="use_marker",
+                secret_id=secret_id,
+                actor=actor,
+                context=SCRUB_AUDIT_CONTEXT,
+            )
+
+    def iter_scrub_rows(self) -> list[tuple[str, str, bytes]]:
+        """Read the metadata row set for the persistence scrubber.
+
+        Returns ``[(secret_id, created_at_iso, wrapped_bytes), ...]``
+        ordered by ``created_at ASC`` (the §2.4 collision-determinism
+        anchor the scrub set realizes). ALL rows — retired INCLUDED
+        (§2.4 binding — retired rows must keep scrubbing because old
+        transcripts may still carry their plaintext; retire is
+        presentation-layer delist, NOT revocation).
+
+        The scrubber is the sole caller. The accessor exists so the
+        scrub module does NOT reach into ``self._engine`` directly
+        with raw SQL — the read path lives on the service seam and
+        can grow (e.g. a future remote-store port) without reshaping
+        the scrubber. The list return (NOT a generator) mirrors the
+        scrubber's existing "snapshot at load time" contract; the
+        TTL backstop in the scrubber decides when to call again.
+
+        Returns an empty list on any DB failure (fail-closed at the
+        call site is wrong — the scrubber needs to differentiate
+        "empty" from "down", and the existing try/except in
+        ``SecretPersistenceScrubber._current_rows`` owns the
+        fail-open policy; this accessor surfaces the exception so
+        that path can keep working unchanged).
+        """
+        from sqlalchemy import text as sql_text
+
+        with self._engine.connect() as conn:
+            result = conn.execute(
+                sql_text(
+                    "SELECT id, created_at, wrapped_secret FROM secrets "
+                    "ORDER BY created_at ASC"
+                )
+            )
+            return [
+                (str(row[0]), str(row[1] or ""), bytes(row[2]))
+                for row in result
+            ]
 
     # ─────────────────────────────────────────────────────────
     # generate_ssh_keypair
@@ -1322,6 +1512,14 @@ class SecretService:
         # SecretNameConflictError before the ``del``). The
         # sibling creators (``generate_api_token``,
         # ``store``) follow the same pattern.
+
+        # P2 R3: fire the row-created event AFTER the insert
+        # commits (a re-querying listener must see the new row).
+        # Design §2.5 names ``store`` as the firing site; the
+        # generate_* paths mint rows too, so they fire the SAME
+        # event (a generated keypair/token is equally invisible to
+        # a stale scrub set).
+        self._fire_store_listeners()
 
         return {
             "id": secret_id,
@@ -1444,6 +1642,10 @@ class SecretService:
         # the wrapped form in the row).
         del token_bytes, wrapped
 
+        # P2 R3: fire the row-created event AFTER the insert
+        # commits (a re-querying listener must see the new row).
+        self._fire_store_listeners()
+
         return {
             "id": secret_id,
             "name": name,
@@ -1519,6 +1721,14 @@ class SecretService:
         # wrap is committed; the only remaining reference
         # is the wrapped form in the row).
         del wrapped
+
+        # P2 R3: fire the row-created event AFTER the insert
+        # commits (a re-querying listener must see the new row).
+        # Design §2.5 names ``store`` as the firing site; the
+        # generate_* paths mint rows too, so they fire the SAME
+        # event (a generated keypair/token is equally invisible to
+        # a stale scrub set).
+        self._fire_store_listeners()
 
         return {
             "id": secret_id,
@@ -1637,10 +1847,278 @@ class SecretService:
             "retired_at": now_iso,
         }
 
+    # ─────────────────────────────────────────────────────────
+    # resolve_marker (P2 — design §1, §3.1, §3.2, §3.4)
+    # ─────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────
-# Service-layer error types
-# ─────────────────────────────────────────────────────────────────────
+    def resolve_marker(
+        self,
+        actor: str,
+        secret_id: str,
+        context: str,
+        *,
+        surface: str = "tool_param",
+    ) -> str:
+        """Resolve a marker ``secret_id`` to its plaintext value.
+
+        ONE ``engine.begin()`` transaction (design §1 + §3.1):
+
+          1. ``SELECT id, wrapped_secret, retired_at FROM secrets
+             WHERE id = :id`` — re-read per resolution (no RAM
+             plaintext cache anywhere in the resolver stack;
+             the LANE-2 mirror — restart-durable by construction).
+          2. ``SecretCipher.unwrap`` — Fernet decrypt the
+             ``wrapped_secret`` bytes.
+          3. Stamp one ``use_marker`` audit row INSIDE the same
+             transaction — on success AND on rejection
+             (``secret_id`` stamped for hits; ``NULL`` for
+             not-found per design §3.4).
+          4. Return plaintext decoded as UTF-8.
+
+        Failure mapping (design §3.2 — fail-closed at every
+        branch; ``secret_retired`` is RESERVED and NEVER emitted
+        while D1 soft-retire semantics hold):
+
+          * missing id → ``secret_not_found``
+          * malformed marker (pre-DB) → ``secret_marker_malformed``
+            — detected at the resolver wrapper, not here; the
+            service only sees a UUID4 string
+          * retired id → CONTINUES TO RESOLVE (D1 leader-ratified
+            semantics; soft-retire = delist + audit, not
+            revocation). The ``retired_at`` column is selected
+            but NEVER causes a branch — its presence is ignored.
+          * SQLAlchemy ``OperationalError`` on the SELECT →
+            ``secret_resolver_store_unavailable`` (one-shot,
+            no retry inside the resolver; retry belongs to the
+            agent loop — design §3.2)
+          * ``Fernet.InvalidToken`` at unwrap →
+            ``secret_fernet_key_mismatch`` (names the
+            SYSTEM_ENCRYPTION_KEY rotation coupling)
+          * ``SecretCipher.is_available()`` ``False`` at the
+            service boundary → ``secret_cipher_unavailable``
+
+        Args:
+            actor: Agent id (Cardinal #2). NON-EMPTY — enforced
+                at the service boundary.
+            secret_id: UUID4 string (the inner part of the
+                marker — parsed by the resolver wrapper).
+                NON-EMPTY — enforced here.
+            context: Audit-context tag, MUST be one of
+                :data:`SECRET_AUDIT_RESOLVE_CONTEXTS`.
+                Validated at the service boundary so future
+                values stay additive without a CHECK constraint
+                (design §4).
+            surface: One of :data:`SECRET_ENVELOPE_SURFACES` —
+                stamped on the raised
+                :class:`SecretMarkerResolutionError` so the
+                seam can format the JSON envelope without
+                re-deriving it. Defaults to ``"tool_param"``
+                because the single-value resolver form is the
+                tool-param pre-invoke call site (design §1d);
+                the dict form's wrapper overrides to
+                ``"bash.env"`` / ``"mcp_spawn"`` per seam.
+
+        Returns:
+            The decrypted plaintext as a UTF-8 ``str``. NEVER
+            cached at any layer — the caller holds the only
+            live reference; the function returns and the
+            reference leaves the service scope immediately.
+
+        Raises:
+            SecretValidationError: ``actor`` empty,
+                ``secret_id`` empty, or ``context`` not in
+                :data:`SECRET_AUDIT_RESOLVE_CONTEXTS`.
+            SecretCipherUnavailable: The cipher refused to
+                operate (``SYSTEM_ENCRYPTION_KEY`` absent or
+                invalid). Mapped to
+                ``secret_cipher_unavailable`` envelope — the
+                resolver wrapper raises the typed error with
+                ``code=SECRET_CODE_CIPHER_UNAVAILABLE``.
+            SecretMarkerResolutionError: Typed envelope for
+                the DB-layer failure modes — ``code`` carries
+                the envelope code, ``surface`` carries the
+                seam tag, ``secret_id`` carries the inner id
+                (never the value). Raised AFTER the audit
+                row commits (design §3.4: stamp on rejection).
+        """
+        self._assert_actor(actor)
+        _assert_nonempty_str(secret_id, label="secret_id")
+        # Validate context at the service boundary (design §3.4 +
+        # §4: no CHECK constraint, additive value set validated
+        # here so future values stay additive).
+        if context not in SECRET_AUDIT_RESOLVE_CONTEXTS:
+            raise SecretValidationError(
+                f"context {context!r} not in "
+                f"SECRET_AUDIT_RESOLVE_CONTEXTS "
+                f"({sorted(SECRET_AUDIT_RESOLVE_CONTEXTS)})"
+            )
+
+        # Cipher check — fail-CLOSED before any DB work.
+        # The resolver wrapper maps the raised
+        # ``SecretCipherUnavailable`` to the typed envelope.
+        cipher = self._wrap_required()
+
+        # The resolver wrapper passes a validated surface
+        # from the seam; double-check here as defense-in-
+        # depth so a future caller cannot sneak an unknown
+        # surface onto a raised envelope.
+        if surface not in SECRET_ENVELOPE_SURFACES:
+            raise SecretValidationError(
+                f"surface {surface!r} not in "
+                f"SECRET_ENVELOPE_SURFACES "
+                f"({sorted(SECRET_ENVELOPE_SURFACES)})"
+            )
+
+        # Outcome flags — populated inside the transaction,
+        # read OUTSIDE the with block (so the audit row
+        # commits before any exception propagates).
+        _not_found = False
+        _fernet_failure = False
+        _cipher_failure = False
+        _plaintext_str: Optional[str] = None
+
+        try:
+            with self._engine.begin() as conn:
+                row = conn.execute(
+                    select(
+                        Secret.id,
+                        Secret.wrapped_secret,
+                        Secret.retired_at,
+                    ).where(Secret.id == secret_id)
+                ).first()
+                if row is None:
+                    # NOT-found — stamp use_marker audit row
+                    # with NULL secret_id (design §3.4). The
+                    # audit row commits WITH the transaction;
+                    # the typed raise happens AFTER the with
+                    # block so the row is visible.
+                    _append_audit_in_conn(
+                        conn,
+                        action="use_marker",
+                        secret_id=None,
+                        actor=actor,
+                        context=context,
+                    )
+                    _not_found = True
+                else:
+                    # Row exists. ``retired_at`` is read but
+                    # NEVER branched on — D1 keeps retired
+                    # markers resolving (design §3.2).
+                    try:
+                        plaintext_bytes = cipher.unwrap(
+                            row.wrapped_secret
+                        )
+                    except SecretCipherUnavailable:
+                        # Defensive — ``_wrap_required()``
+                        # checked at construction; this is a
+                        # mid-flight env change. Stamp a
+                        # use_marker audit row carrying the
+                        # secret_id (we found the row, just
+                        # couldn't decrypt) and raise.
+                        _append_audit_in_conn(
+                            conn,
+                            action="use_marker",
+                            secret_id=secret_id,
+                            actor=actor,
+                            context=context,
+                        )
+                        _cipher_failure = True
+                    except InvalidToken:
+                        # SYSTEM_ENCRYPTION_KEY rotated
+                        # without re-encrypting the row
+                        # (design §3.2 + §7.1 — rotation
+                        # coupling). Stamp the use_marker
+                        # row with the secret_id (we know
+                        # the id; the row exists; the
+                        # ciphertext is wrong).
+                        _append_audit_in_conn(
+                            conn,
+                            action="use_marker",
+                            secret_id=secret_id,
+                            actor=actor,
+                            context=context,
+                        )
+                        _fernet_failure = True
+                    else:
+                        # Success path — design §1: SELECT +
+                        # unwrap + audit-stamp in ONE
+                        # transaction. The plaintext is
+                        # returned via the flag; the
+                        # reference leaves the service
+                        # scope on return (no in-RAM
+                        # plaintext cache at this layer).
+                        _append_audit_in_conn(
+                            conn,
+                            action="use_marker",
+                            secret_id=secret_id,
+                            actor=actor,
+                            context=context,
+                        )
+                        _plaintext_str = (
+                            plaintext_bytes.decode("utf-8")
+                        )
+        except DBAPIError as exc:
+            # DB unavailable / flapping (design §3.2) is
+            # broader than ``OperationalError`` alone — sibling
+            # DBAPIError subclasses (``InterfaceError`` for
+            # connection-level dropouts, ``DatabaseError`` for
+            # driver-side faults) land here too. One-shot
+            # fail-closed: NO retry at this layer — retry
+            # belongs to the agent loop. The audit row never
+            # committed (the transaction was rolled back by
+            # the DBAPIError); that's acceptable — the
+            # design's "use_marker on success AND rejection"
+            # rule applies to resolution-time failures, not
+            # to DB-completely-down conditions where we
+            # cannot write anything.
+            #
+            # ``IntegrityError`` is a ``DBAPIError`` subclass
+            # but a PROGRAMMER-error class (UNIQUE collision /
+            # FK violation / NOT NULL etc.) — NOT a "DB
+            # unavailable" condition. Re-raise so the envelope
+            # contract does NOT paper over real bugs; the
+            # typed envelope is reserved for genuine flapping
+            # / down conditions.
+            if isinstance(exc, IntegrityError):
+                raise
+            raise SecretMarkerResolutionError(
+                secret_id=secret_id,
+                code=SECRET_CODE_STORE_UNAVAILABLE,
+                surface=surface,
+            ) from exc
+
+        # Raise AFTER the transaction commits so the audit
+        # row is visible to subsequent reads in the same
+        # agent loop. Order: typed envelope carries
+        # ``secret_id`` (never the value), ``code``, and
+        # ``surface`` — PB-F1 clean (design §3.3).
+        if _not_found:
+            raise SecretMarkerResolutionError(
+                secret_id=secret_id,
+                code=SECRET_CODE_NOT_FOUND,
+                surface=surface,
+            )
+        if _cipher_failure:
+            raise SecretMarkerResolutionError(
+                secret_id=secret_id,
+                code=SECRET_CODE_CIPHER_UNAVAILABLE,
+                surface=surface,
+            )
+        if _fernet_failure:
+            raise SecretMarkerResolutionError(
+                secret_id=secret_id,
+                code=SECRET_CODE_FERNET_KEY_MISMATCH,
+                surface=surface,
+            )
+
+        # ``_plaintext_str`` is non-None on the success
+        # branch (the decode() is unconditional inside the
+        # ``else`` arm). Type-narrowing for the linter.
+        assert _plaintext_str is not None, (
+            "resolve_marker: success branch produced no "
+            "plaintext — internal invariant violated"
+        )
+        return _plaintext_str
 #
 # All errors are structured; the tool boundary catches each one
 # and returns a JSON envelope. The tool boundary NEVER raises a
@@ -1662,3 +2140,181 @@ class SecretNameConflictError(SecretServiceError):
 
 class SecretNotFoundError(SecretServiceError, LookupError):
     """Raised when ``id`` is unknown (read_public / retire)."""
+
+
+# ─────────────────────────────────────────────────────────────────────
+# P2 resolution envelope vocabulary
+#   (p2-architecture-recommendation §3.3 + §3.4)
+# ─────────────────────────────────────────────────────────────────────
+#
+# Every ``SecretService.resolve_marker`` failure maps to ONE
+# of the typed envelope codes below. The codes are the SINGLE
+# SOURCE OF TRUTH for the JSON envelope the seams format; the
+# error envelope NEVER carries the value (PB-F1 family).
+#
+# Anti-differential phrasing (design §3.3): the
+# ``secret_not_found`` / ``secret_marker_malformed`` /
+# ``secret_retired`` family shares the IDENTICAL message
+# template ``"secret resolution failed: <code>"`` — only the
+# ``code`` attribute distinguishes them. The PRIMARY
+# enumeration control is UUID4 entropy (2^122 is infeasible
+# to guess); identical phrasing is the SECONDARY hardening
+# (R7, 🟡). Which id is live stays in the audit log only.
+#
+# Markers minted in v0.21.0 MUST keep resolving in P2 — the
+# marker format is FROZEN and no re-mint happens (design §3.1).
+
+#: Typed envelope code — the SELECT returned zero rows for the
+#: requested ``secret_id``. Fail-closed: child/server NOT spawned.
+SECRET_CODE_NOT_FOUND: str = "secret_not_found"
+#: Typed envelope code — the marker string fullmatch failed
+#: (e.g. marker prefix without a valid UUID4 inside). Detected
+#: at the resolver wrapper, pre-DB (design §3.2).
+SECRET_CODE_MARKER_MALFORMED: str = "secret_marker_malformed"
+#: Typed envelope code — **RESERVED**. Soft-retire semantics in
+#: v1 keep retired markers RESOLVABLE (D1 leader-ratified;
+#: ``secret_retired`` envelope is NEVER emitted while this
+#: ruling holds). Flipping to revocation semantics is a one-
+#: branch change at the resolver — see ``p2-architecture-
+#: recommendation.md §8 D1``. Retired VALUES remain in the
+#: scrub set regardless of resolve policy (design §2.4).
+SECRET_CODE_RETIRED: str = "secret_retired"
+#: Typed envelope code — SQLAlchemy ``OperationalError`` (or
+#: sibling DB-unavailable exception) on the SELECT. One-shot
+#: fail-closed; the resolver NEVER retries — retry belongs to
+#: the agent loop (design §3.2). The seams format this into a
+#: typed envelope; partial env / partial spawn is impossible.
+SECRET_CODE_STORE_UNAVAILABLE: str = "secret_resolver_store_unavailable"
+#: Typed envelope code — ``cryptography.fernet.InvalidToken``
+#: on the unwrap (the Fernet key was rotated without
+#: re-encrypting ``secrets.wrapped_secret``). The code names
+#: the SYSTEM_ENCRYPTION_KEY rotation coupling explicitly so
+#: operators can find it in the runbook (design §3.2).
+SECRET_CODE_FERNET_KEY_MISMATCH: str = "secret_fernet_key_mismatch"
+#: Typed envelope code — ``SecretCipher.is_available()`` was
+#: ``False`` at the service boundary (mirror of
+#: ``KMSUnavailableError`` at ``kms_lite.py:130-141``). The
+#: service refused to operate — fail-closed (design §3.2).
+SECRET_CODE_CIPHER_UNAVAILABLE: str = "secret_cipher_unavailable"
+
+#: Audit ``context`` value emitted by the P2 persistence-scrub paths
+#: (``SecretService.record_scrub_substitution``; design §3.4 — the
+#: ``scrub`` context rides ``use_marker`` rows). Member of
+#: :data:`SECRET_AUDIT_RESOLVE_CONTEXTS`.
+SCRUB_AUDIT_CONTEXT: str = "scrub"
+
+#: Frozen set of all envelope codes. ``SecretMarkerResolutionError``
+#: validates against this set at construction so a future caller
+#: that mistypes a code fails loud (defense-in-depth). ``secret_retired``
+#: lives here for forward compatibility — emitting it is a
+#: programmer error while D1 soft-retire semantics hold.
+SECRET_ENVELOPE_CODES: frozenset[str] = frozenset({
+    SECRET_CODE_NOT_FOUND,
+    SECRET_CODE_MARKER_MALFORMED,
+    SECRET_CODE_RETIRED,
+    SECRET_CODE_STORE_UNAVAILABLE,
+    SECRET_CODE_FERNET_KEY_MISMATCH,
+    SECRET_CODE_CIPHER_UNAVAILABLE,
+})
+
+#: Audit-context values the service boundary accepts for
+#: ``resolve_marker`` (``context`` column on ``secrets_audit``).
+#: The set is ADDITIVE — a future P2 phase can extend it
+#: without a migration (no CHECK constraint, design §4).
+#: P1 paths (``create`` / ``read_public`` / ``retire``) keep
+#: ``context=NULL``; only ``use_marker`` (this phase) and
+#: ``scrub`` (Phase 4) populate it.
+SECRET_AUDIT_RESOLVE_CONTEXTS: frozenset[str] = frozenset({
+    "bash_env",
+    "mcp_spawn",
+    "tool_param",
+    # ``scrub`` is emitted by the Phase-4 persistence-scrub
+    # paths (design §3.4 + §2.5); the constant lives here so
+    # the additive set is canonical today and Phase 4 needs
+    # no schema review.
+    "scrub",
+})
+
+#: Envelope ``surface`` strings — the per-seam tag the seams
+#: stamp on the JSON error envelope (``{ok:false, code,
+#: surface, message}``). Note ``bash.env`` carries a DOT
+#: while the audit context is the underscore form ``bash_env``;
+#: the other two surfaces are byte-identical between envelope
+#: and audit forms. The mapping lives at the resolver wrapper.
+SECRET_ENVELOPE_SURFACES: frozenset[str] = frozenset({
+    "bash.env",
+    "mcp_spawn",
+    "tool_param",
+})
+
+
+class SecretMarkerResolutionError(RuntimeError):
+    """Typed envelope raised when ``SecretService.resolve_marker``
+    fails — the canonical error class for P2 marker resolution
+    (design §1 + §3).
+
+    Carries:
+
+    * ``secret_id``: the UUID4 string the caller asked for
+      (NEVER the value — PB-F1 family).
+    * ``code``: one of :data:`SECRET_ENVELOPE_CODES`.
+    * ``surface``: one of :data:`SECRET_ENVELOPE_SURFACES`,
+      stamped by the resolver wrapper from the seam caller
+      so the seam can format the JSON envelope without
+      re-deriving the surface.
+
+    ``secret_id`` is **operator-diagnostics only**. It is held
+    on the instance attribute (``self.secret_id``) so a
+    postmortem operator can correlate the failure with the
+    stored row, but it MUST NEVER be serialized into any
+    envelope, log line, or ``str(exc)`` / ``repr(exc)`` form
+    that crosses an agent / tool / consumer boundary. The
+    ``secret_id`` field that does cross the boundary lives on
+    the JSON envelope and is structurally shaped by the seam
+    as a separate column / key, not derived from this
+    attribute — the convention is enforced by the
+    ``test_resolve_marker_malformed_raw_payload_never_in_envelope``
+    pin in :mod:`tests.unit.test_secret_resolver`.
+
+    Anti-differential message phrasing (design §3.3):
+    ``str(exc)`` is the literal ``"secret resolution failed:
+    <code>"`` — the SAME template across the
+    ``secret_not_found`` / ``secret_marker_malformed`` /
+    ``secret_retired`` family. The ``code`` attribute is the
+    only struct field that distinguishes them; the primary
+    enumeration control is UUID4 entropy (R7, 🟡).
+
+    Mirrors the KMS resolver shape (``kms_resolver.py:82-98``):
+    a ``RuntimeError`` subclass carrying ``handle``/``secret_id``
+    (never the value) plus the failure code.
+    """
+
+    def __init__(
+        self,
+        *,
+        secret_id: str,
+        code: str,
+        surface: str,
+    ) -> None:
+        if code not in SECRET_ENVELOPE_CODES:
+            # Defensive — a mistyped code is a programmer error.
+            raise ValueError(
+                f"SecretMarkerResolutionError: code {code!r} "
+                f"not in SECRET_ENVELOPE_CODES "
+                f"({sorted(SECRET_ENVELOPE_CODES)})"
+            )
+        if surface not in SECRET_ENVELOPE_SURFACES:
+            # Same defense — surface must be a known seam.
+            raise ValueError(
+                f"SecretMarkerResolutionError: surface {surface!r} "
+                f"not in SECRET_ENVELOPE_SURFACES "
+                f"({sorted(SECRET_ENVELOPE_SURFACES)})"
+            )
+        self.secret_id = secret_id
+        self.code = code
+        self.surface = surface
+        # Anti-differential phrasing — identical template across
+        # the family; only the ``code`` attribute differs (which
+        # a structured-envelope reader uses). PB-F1 rule: NEVER
+        # include the value or the marker literal here.
+        super().__init__(f"secret resolution failed: {code}")

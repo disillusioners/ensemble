@@ -25,7 +25,21 @@ from daemon.mcp.tool_adapter import _slugify, adapt_mcp_tools
 # resolver so pooled connections see plaintext (never ``__KMS_REF__…__``)
 # in the subprocess env. resolve_env is idempotent for non-marker values.
 from daemon.services.kms_resolver import resolve_env
-
+# agent-secrets P2 (design §1c) — LITERAL composition:
+# ``resolve_secret_markers(resolve_env(config.env))``. KMS-Lite runs
+# FIRST (the pre-existing seam), agent-secrets markers resolve on the
+# KMS-resolved dict (marker shapes are disjoint — the composition is
+# order-stable). Spawn-point resolution ONLY: ``build_pooled_stdio_config``
+# is DO-NOT-TOUCH (R4 — resolving there would persist plaintext into
+# DB config; see p2-architecture-recommendation.md §1c). Surface
+# ``"mcp_spawn"`` (envelope + audit context — the two forms are
+# byte-identical for this seam).
+# Gap-2: service discovery consolidated into the scrub module's
+# public ``get_process_secret_service``.
+from daemon.services.secret_persistence_scrub import (
+    get_process_secret_service as _get_process_secret_service,
+)
+from daemon.services.secret_resolver import resolve_secret_markers
 logger = logging.getLogger(__name__)
 
 # Module-level singleton
@@ -207,10 +221,29 @@ class McpWarmupPool:
             Exception: On connection failure (after cleanup)
         """
         config = self._configs[server_name]
+        # agent-secrets P2 (design §1c) — LITERAL composition:
+        # ``resolve_secret_markers(resolve_env(config.env))``. Stored
+        # config NEVER holds resolved values (R1); the resolution
+        # happens at the SPAWN POINT, mirroring KMS-Lite. A failing
+        # marker (missing id, malformed, DB down) raises the typed
+        # envelope BEFORE the subprocess spawns — the server does NOT
+        # start with literal markers or partial env (fail-closed).
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,
-            env=resolve_env(config.env),
+            env=resolve_secret_markers(
+                resolve_env(config.env),
+                secret_service=_get_process_secret_service(),
+                # Server-scoped resolution: the pool spawns servers
+                # process-wide with NO agent in context — the audit
+                # row's actor is the ``<secret_resolver>`` sentinel
+                # (the resolver default, made explicit here). Which
+                # agent later USES the server is not knowable at
+                # spawn time; per-use attribution lives with the
+                # agent-side seams (§1a/§1d), not here.
+                actor="<secret_resolver>",
+                surface="mcp_spawn",
+            ),
         )
         streams_cm = TaskScopedStdioClient(server_params)
         read_stream = write_stream = None
