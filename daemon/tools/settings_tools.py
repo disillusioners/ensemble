@@ -205,8 +205,8 @@ Visibility: the ``settings`` category is privileged (entry #8 in
 ``PRIVILEGED_TOOL_CATEGORIES``; ``secrets`` joined 2026-10-17
 before this entry) — the tools mutate daemon-global runtime
 state. NEVER default-granted: an agent reaches them ONLY through
-an explicit ``tools.allow`` entry (ari + leader allow entries
-landed 2026-10-18, P3). All other agents get ZERO of these
+an explicit ``tools.allow`` entry — the ari + leader allow
+entries landed 2026-10-18 (P3). All other agents get ZERO of these
 tools through the standard ``_strip_privileged_category_tools``
 default-deny seam.
 """
@@ -645,9 +645,9 @@ the next daemon restart. Sensitive keys report null tier details.
 
 Visibility: the ``settings`` category is privileged (#8 in
 ``PRIVILEGED_TOOL_CATEGORIES``; ``secrets`` joined 2026-10-17
-before this entry). NEVER default-granted — an explicit
-``tools.allow`` entry is the only access path (ari + leader
-allow entries landed 2026-10-18, P3).
+before this entry). NEVER default-granted — the only access path
+is an explicit ``tools.allow`` entry; the ari + leader allow
+entries landed 2026-10-18 (P3).
 """
 
 _FULL_DOC_SET = """\

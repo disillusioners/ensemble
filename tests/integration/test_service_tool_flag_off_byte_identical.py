@@ -850,7 +850,7 @@ def test_privileged_category_set_is_pinned() -> None:
             # settings_set / settings_clear). opt-in-only;
             # mutates daemon-global runtime state — NEVER
             # default-granted (R-SR16); ari + leader allow
-            # entries land in Phase 3.
+            # entries landed 2026-10-18 (P3).
             "settings",
         }
     ), (
