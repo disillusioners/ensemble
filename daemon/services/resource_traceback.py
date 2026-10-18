@@ -673,7 +673,8 @@ _PID_MAP_SQL = text(
 
 _SERVICE_TRACKING_SQL = text(
     "SELECT started_by_instance_id, start_time, name FROM service_tracking "
-    "WHERE pid = :pid ORDER BY id DESC LIMIT 1"
+    "WHERE pid = :pid AND (:st IS NULL OR start_time = :st) "
+    "ORDER BY id DESC LIMIT 1"
 )
 
 
@@ -688,8 +689,12 @@ def resolve_pid_instance(
     the row whose kernel ``start_time`` (field-22 jiffies) matches the
     target — the pid-recycle guard (two rows, same pid, different
     start_time ⇒ the correct-era row wins). Without a map row, the LIVE
-    ``service_tracking`` fallback (``idx_service_tracking_pid``).
-    ``source`` labels which spine answered; ``None`` when neither does.
+    ``service_tracking`` fallback (``idx_service_tracking_pid``) — with
+    the SAME ``start_time`` guard applied: a recycled pid must not be
+    answered by a tracking row from a different era, so a caller-
+    supplied ``start_time`` matching no tracking row is an honest
+    ``None`` rather than a wrong-era guess. ``source`` labels which
+    spine answered; ``None`` when neither does.
     """
     with engine.connect() as conn:
         rows = conn.execute(_PID_MAP_SQL, {"pid": pid}).fetchall()
@@ -711,7 +716,7 @@ def resolve_pid_instance(
                 "source": "resource_pid_map",
             }
         srow = conn.execute(
-            _SERVICE_TRACKING_SQL, {"pid": pid}
+            _SERVICE_TRACKING_SQL, {"pid": pid, "st": start_time}
         ).first()
         if srow is not None:
             return {

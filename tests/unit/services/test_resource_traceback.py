@@ -182,9 +182,11 @@ def seed_child(eng, pid, kind, spawned_at, exited_at=None, iid="i-alive",
     })
 
 
-def seed_service(eng, pid, iid, start_time=777):
+def seed_service(eng, pid, iid, start_time=777, name=None):
+    # ``name`` is UNIQUE in service_tracking — recycled-pid tests need
+    # distinct names per era row.
     _insert(eng, "service_tracking", {
-        "name": f"svc-{pid}", "pid": pid, "start_time": start_time,
+        "name": name or f"svc-{pid}", "pid": pid, "start_time": start_time,
         "started_by_instance_id": iid, "status": "running",
         "command": "svc",
     })
@@ -555,6 +557,24 @@ class TestJ7PidResolve:
         row = rt.resolve_pid_instance(engine, 333)
         assert row["source"] == "service_tracking"
         assert row["instance_id"] == "i-live"
+
+    def test_service_tracking_fallback_respects_start_time(self, engine):
+        """Review #4 regression: the LIVE fallback honors the caller's
+        kernel ``start_time`` guard — a recycled pid must resolve to
+        the caller's OWN era's tracking row, not blindly to the newest
+        (``service_tracking.start_time`` exists and carries the same
+        jiffies the caller observed)."""
+        seed_service(engine, 333, "i-old", start_time=100, name="svc-333-era1")
+        seed_service(engine, 333, "i-new", start_time=900, name="svc-333-era2")
+        row = rt.resolve_pid_instance(engine, 333, start_time=100)
+        assert row["source"] == "service_tracking"
+        assert row["instance_id"] == "i-old"  # the caller's era, not the newest
+        # no caller guard (st=None) keeps the previous newest-wins shape
+        row = rt.resolve_pid_instance(engine, 333)
+        assert row["instance_id"] == "i-new"
+        # a start_time matching NO tracking row ⇒ honest no-answer
+        # (a wrong-era row must not be guessed)
+        assert rt.resolve_pid_instance(engine, 333, start_time=424242) is None
 
     def test_neither_spine_none(self, engine):
         assert rt.resolve_pid_instance(engine, 999999) is None
