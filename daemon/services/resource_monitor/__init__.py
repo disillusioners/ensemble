@@ -15,6 +15,7 @@ wiring, T7) composes the sampler + flusher + ring into a single
 lifespan-managed subsystem.
 """
 
+from .facade import ResourceMonitor, build_resource_monitor
 from .flusher import FLUSH_BUFFER_CAP, Flusher, FlusherCounters
 from .proc_readers import (
     ChildSnapshot,
@@ -79,4 +80,7 @@ __all__ = [
     "rollup_to_hour",
     "rollup_to_minute",
     "sweep_query",
+    # facade
+    "ResourceMonitor",
+    "build_resource_monitor",
 ]

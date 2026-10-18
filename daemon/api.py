@@ -1941,6 +1941,39 @@ async def lifespan(app: FastAPI):
             exc_info=True,
         )
 
+    # ── Resource monitor (resource-cost-control Phase 1) ──────────────
+    # Observability spine: ONE sampler thread + ONE flusher thread
+    # (both ``threading.Thread(daemon=True)`` — NEVER asyncio tasks;
+    # D1). Boot failure of either degrades the subsystem to
+    # disabled (D10) without crashing the lifespan. The facade is
+    # reachable via ``app.state.resource_monitor`` for the
+    # /api/resources/* endpoints (T8). Construction is wrapped in a
+    # try/except so a monitor error can never break boot.
+    try:
+        from daemon.services.resource_monitor.facade import (
+            build_resource_monitor,
+        )
+        _resource_monitor = build_resource_monitor(
+            config_resource_monitor=config.resource_monitor,
+            engine=manager.engine,
+        )
+        _resource_monitor.start()
+        app.state.resource_monitor = _resource_monitor
+        if _resource_monitor.enabled:
+            logger.info("[ResourceMonitor] started")
+        else:
+            logger.warning(
+                "[ResourceMonitor] DISABLED — %s",
+                _resource_monitor.boot_error,
+            )
+    except Exception as resource_monitor_boot_exc:
+        app.state.resource_monitor = None
+        logger.error(
+            "[ResourceMonitor] DISABLED — boot failed: %s",
+            resource_monitor_boot_exc,
+            exc_info=True,
+        )
+
     # Reconcile terminal watches — notify watchers for jobs that already reached terminal state
     reconciled = await job_queue_service.reconcile_terminal_watches()
     if reconciled > 0:
@@ -2848,6 +2881,36 @@ async def lifespan(app: FastAPI):
             logger.warning(f"[StreamWatchdog] shutdown error: {e}")
     app.state.llm_stream_watchdog_thread = None
     app.state.llm_stream_watchdog_stop = None
+
+    # Resource monitor shutdown (resource-cost-control Phase 1).
+    # D10: set the stop Event then join with a timeout on a DETACHED
+    # thread — NEVER block the event loop (precedent
+    # ``daemon/services/file_change_monitor.py:180-196``). The
+    # sampler + flusher are daemon threads; a thread that fails to
+    # stop in time still dies with the process.
+    _resource_monitor = getattr(app.state, "resource_monitor", None)
+    if _resource_monitor is not None:
+        try:
+            _resource_monitor.stop()
+        except Exception as resource_monitor_stop_exc:  # noqa: BLE001
+            logger.warning(
+                "[ResourceMonitor] stop-event set failed: %s",
+                resource_monitor_stop_exc,
+            )
+        # Detach the join — never blocks the loop.
+        try:
+            threading.Thread(
+                target=_resource_monitor.join,
+                kwargs={"timeout": 5.0},
+                name="resource-monitor-shutdown",
+                daemon=True,
+            ).start()
+        except Exception as resource_monitor_join_exc:  # noqa: BLE001
+            logger.warning(
+                "[ResourceMonitor] detached join failed: %s",
+                resource_monitor_join_exc,
+            )
+    app.state.resource_monitor = None
 
     # Batch A — A3 (2026-09-11): stop the eligible-PENDING sweep.
     # The service exposes ``stop()`` which cancels + awaits the

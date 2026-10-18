@@ -365,13 +365,29 @@ class Flusher:
         return len(params)
 
     def _sweep(self, conn: Any, table: str, cutoff_epoch_s: int) -> int:
-        """DELETE rows strictly older than the cutoff. Returns rowcount."""
-        result = conn.execute(
-            text(
-                f"DELETE FROM {table} WHERE bucket_ts < :cutoff_iso"
-            ),
-            {"cutoff_iso": cutoff_iso(cutoff_epoch_s)},
-        )
+        """DELETE rows strictly older than the cutoff. Returns rowcount.
+
+        Missing table → 0 (a fresh boot has no rows to sweep; a
+        ``no such table`` / ``relation does not exist`` error is a
+        benign first-boot state, never a flusher failure).
+        """
+        try:
+            result = conn.execute(
+                text(
+                    f"DELETE FROM {table} WHERE bucket_ts < :cutoff_iso"
+                ),
+                {"cutoff_iso": cutoff_iso(cutoff_epoch_s)},
+            )
+        except Exception as exc:
+            err = str(exc).lower()
+            if "no such table" in err or "does not exist" in err:
+                logger.debug(
+                    "resource-monitor sweep: table %s absent (first boot "
+                    "before create_all) — skipping",
+                    table,
+                )
+                return 0
+            raise
         return int(result.rowcount or 0)
 
     def _dialect_insert(
