@@ -35,6 +35,12 @@ from typing import Any, Callable, Optional
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from .pid_registry import (
+    EXIT_KIND_UNKNOWN,
+    PidRegistry,
+    PidRegistryEntry,
+    get_pid_registry,
+)
 from .ring import TierRing
 from .rollup import (
     RetentionPolicy,
@@ -45,6 +51,15 @@ from .rollup import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Retention window for exited rows in ``resource_pid_map``.
+# 7 days keeps a useful forensic window for "why did this process
+# exit?" debugging without unbounded disk growth. Live rows
+# (``exited_at IS NULL``) are NEVER swept — the registry owns them.
+# Constant lives here (not in :class:`ResourceMonitorConfig`)
+# because pid-map history is a forensic lane, not an operator knob.
+_PID_MAP_HISTORY_DAYS = 7
 
 
 # Bounded drop-oldest buffer for the in-flight rows between
@@ -99,6 +114,7 @@ class Flusher:
         flush_batch_seconds: int,
         retention: RetentionPolicy,
         flusher_counters: Optional[FlusherCounters] = None,
+        pid_registry: Optional[PidRegistry] = None,
         wall_clock: Callable[[], float] = time.monotonic,
         now_utc_naive: Optional[Callable[[], datetime]] = None,
     ) -> None:
@@ -107,6 +123,12 @@ class Flusher:
         self.flush_batch_seconds = flush_batch_seconds
         self.retention = retention
         self.counters = flusher_counters or FlusherCounters()
+        # D4 — pid_registry hookup. Default = the process singleton;
+        # tests inject a fresh registry via ``reset_pid_registry_for_tests``
+        # or pass one explicitly. The flusher DRAINS the queue
+        # (moves ownership of the entries to its INSERT batch);
+        # callers MUST NOT keep references past the flush.
+        self._pid_registry = pid_registry or get_pid_registry()
         self._wall_clock = wall_clock  # injectable for tests
         self._now_utc_naive = now_utc_naive or _default_now_utc_naive
 
@@ -192,9 +214,14 @@ class Flusher:
         )
 
         rows_written = 0
-        swept = {"raw": 0, "minute": 0, "hour": 0, "instance": 0}
+        swept = {"raw": 0, "minute": 0, "hour": 0, "instance": 0,
+                 "pid_map": 0}
         minute_rows: list[dict] = []
         hour_rows: list[dict] = []
+        # D4 — drained pid-map history (one read per window; the
+        # registry queues the rows in memory between ticks so we
+        # can batch them here).
+        pid_history: list[PidRegistryEntry] = []
         try:
             with self.engine.begin() as conn:
                 # 1. Raw tier — ONE executemany for the bounded buffer.
@@ -231,6 +258,23 @@ class Flusher:
                 )
                 swept["instance"] = self._sweep(
                     conn, "resource_instance_sample", raw_cut
+                )
+                # 5. D4 — pid_map history write + sweep (additive,
+                # rides the SAME transaction; resource_pid_map has
+                # no UNIQUE constraint on the non-tier row shape so
+                # _write_pid_map uses ON CONFLICT DO NOTHING as a
+                # safe idempotent no-op — see _dialect_insert). The
+                # sweep uses the SAME per-tier pattern but for the
+                # ``exited_at IS NOT NULL`` predicate: live rows
+                # (``exited_at IS NULL``) are NEVER touched.
+                pid_history = self._pid_registry.drain_history()
+                rows_written += self._write_pid_map(conn, pid_history)
+                pid_map_cut_epoch = now_epoch - (_PID_MAP_HISTORY_DAYS * 86400)
+                swept["pid_map"] = self._sweep(
+                    conn,
+                    "resource_pid_map",
+                    pid_map_cut_epoch,
+                    extra_predicate="exited_at IS NOT NULL",
                 )
 
             self.counters.batches += 1
@@ -387,6 +431,7 @@ class Flusher:
         table: str,
         cutoff_epoch_s: int,
         interval_s: Optional[int] = None,
+        extra_predicate: Optional[str] = None,
     ) -> int:
         """DELETE rows strictly older than the cutoff. Returns rowcount.
 
@@ -397,6 +442,13 @@ class Flusher:
         sweeps the whole table (raw-only tables such as T2
         ``resource_instance_sample``).
 
+        ``extra_predicate`` is AND-ed onto the WHERE for tables that
+        need a structural guard beyond the timestamp cutoff. The
+        pid-map sweep uses ``exited_at IS NOT NULL`` so live rows
+        (which the registry owns in RAM) are NEVER touched — the
+        partial UNIQUE ``WHERE exited_at IS NULL`` only applies to
+        INSERTs, not DELETEs, so this predicate is required.
+
         Missing table → 0 (a fresh boot has no rows to sweep; a
         ``no such table`` / ``relation does not exist`` error is a
         benign first-boot state, never a flusher failure).
@@ -406,6 +458,8 @@ class Flusher:
         if interval_s is not None:
             where += " AND interval_s = :interval_s"
             params["interval_s"] = interval_s
+        if extra_predicate:
+            where += f" AND {extra_predicate}"
         try:
             result = conn.execute(
                 text(f"DELETE FROM {table} WHERE {where}"),
@@ -422,6 +476,54 @@ class Flusher:
                 return 0
             raise
         return int(result.rowcount or 0)
+
+    def _write_pid_map(
+        self, conn: Any, entries: list[PidRegistryEntry]
+    ) -> int:
+        """Bulk-insert exited pid_map rows (D4 — batched executemany).
+
+        One INSERT per window for every exited entry the registry
+        drained this tick. No-op when the list is empty (the sweep
+        still runs). Missing table ⇒ 0 (first-boot benign).
+
+        D14 alignment: the entry payload carries scalars/ids only.
+        ``command`` was sanitized at the seam caller (executable /
+        argv-shape, never raw env/secret-bearing text). The
+        flusher does NOT redact.
+        """
+        if not entries:
+            return 0
+        params = [
+            {
+                "pid": e.pid,
+                "pgid": e.pgid,
+                "start_time": e.start_time,
+                "instance_id": e.instance_id,
+                "agent_id": e.agent_id,
+                "kind": e.kind,
+                "command": e.command,
+                "detail": e.detail,
+                "parent_pid": e.parent_pid,
+                "spawned_at": e.spawned_at,
+                "exited_at": e.exited_at,
+                "exit_code": e.exit_code,
+                "exit_kind": e.exit_kind or EXIT_KIND_UNKNOWN,
+                "peak_rss_kb": e.peak_rss_kb,
+                "cpu_user_usec": e.cpu_user_usec,
+            }
+            for e in entries
+        ]
+        sql = self._dialect_insert(
+            "resource_pid_map",
+            [
+                "pid", "pgid", "start_time", "instance_id", "agent_id",
+                "kind", "command", "detail", "parent_pid", "spawned_at",
+                "exited_at", "exit_code", "exit_kind", "peak_rss_kb",
+                "cpu_user_usec",
+            ],
+            idempotent=True,
+        )
+        return self._tier_write(conn, sql, params)
 
     def _tier_write(self, conn: Any, sql: str, params: list[dict]) -> int:
         """Execute one tier INSERT with first-flush missing-table
