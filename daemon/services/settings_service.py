@@ -212,6 +212,39 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "default; changes require a daemon restart."
         ),
     ),
+    # ── O2 chromium render concurrency (resource-cost-control, 2026-10-18) ──
+    # One key driving the process-wide chromium render gate
+    # (``daemon/tools/chart_tools.py``). Lives under ``limits`` so the
+    # yaml tier rides the existing ``raw_yaml_limits`` accessor (the
+    # resolver's section model is ``limits``-only today); env_var mirrors
+    # the pydantic ``LimitsConfig`` env_prefix exactly. Default mirrors
+    # ``LimitsConfig.chart_render_concurrency`` Field(default=2) — the
+    # two must move together (the registry is the resolver's truth).
+    # CEREMONY-GATED: default ships in the resource-cost-control branch;
+    # live effect only at the next promote ceremony.
+    "limits.chart_render_concurrency": ManagedKeySpec(
+        key="limits.chart_render_concurrency",
+        config_path="limits.chart_render_concurrency",
+        env_var="LIMITS_CHART_RENDER_CONCURRENCY",
+        value_type="int",
+        # Mirrors LimitsConfig.chart_render_concurrency
+        # Field(default=2, ge=1). The consumer CLAMPS the resolved value
+        # into [1, 4] with a WARN (registry v1 constraint model is
+        # ge-only — Ruling 1; the gate must stay sane regardless).
+        default=2,
+        ge=1,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "Max concurrent chromium renders daemon-wide (resource-cost-"
+            "control O2). Each concurrent render spawns a 150-400MB "
+            "chromium child; this gate bounds them. The consumer clamps "
+            "the resolved value to [1, 4]. Effective precedence: DB "
+            "override > env var LIMITS_CHART_RENDER_CONCURRENCY > "
+            "config.yaml literal > default; changes require a daemon "
+            "restart."
+        ),
+    ),
 }
 
 

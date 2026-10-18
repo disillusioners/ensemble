@@ -7,6 +7,7 @@ generated ``generate_chart`` tool delegates to the ``charter`` agent via
 ``invoke_agent_and_wait`` and returns the validated Mermaid output.
 """
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -62,6 +63,228 @@ _DEFAULT_TIMEOUT_S = 600.0   # 10 min — render_image=False (validate-only)
 # any copy-edit must update both. The ``_full_doc_`` docstring mention
 # (~:558) is left literal as written.
 _BUSY_MSG = "Error: Charter busy; pass fresh=True for parallel charts."
+
+# ── O2 — chromium render concurrency gate (resource-cost-control) ────────
+#
+# CEREMONY-GATED posture: the default cap below ships IN THIS BRANCH and
+# takes live effect only at the next promote ceremony (a daemon restart
+# resolves the knob and builds the gate). This work performed ZERO
+# live-host mutations — no live renders, no service restarts, no config
+# writes against the live host.
+#
+# WHY: charter frontend renders spawn chromium children at 150-400 MB
+# EACH with no global cap (verified at HEAD 4d572f561: zero semaphore
+# coverage on the render path). Stacked renders are the prime suspect
+# for the 2026-10-17 OOM night (/system.slice peak ≈9.6 GB ≈ 97 % of the
+# box; kernel OOM-killed the daemon 23:19:14Z).
+#
+# SATURATION POLICY (chosen: BOUNDED WAIT QUEUE, documented per the O2
+# brief): a render (``render_image=True``) must acquire a slot from a
+# process-wide ``asyncio.Semaphore`` sized by
+# ``limits.chart_render_concurrency`` (default 2; the consumption-side
+# reader clamps any out-of-range config into [1, 4] with a WARN).
+# Waiting is bounded TWICE over so the tool lane can never hang:
+#   * at most ``_RENDER_QUEUE_MAX`` (4) waiters may queue — beyond that
+#     the call FAILS FAST with a typed error envelope (the wait queue
+#     itself is bounded; never unbounded growth), and
+#   * each waiter may wait at most ``_RENDER_SLOT_WAIT_S`` (120 s) for
+#     a slot — beyond that it also returns a typed error envelope.
+# A render that cannot get a slot therefore always returns a clear
+# error envelope instead of hanging its turn. The slot is released in
+# ``finally`` on EVERY exit path, so no path can deadlock the gate.
+# Non-render paths (``render_image=False``) never touch the gate and
+# never consume slots.
+#
+# TIMEOUT-KILL AUDIT (found vs fixed): the pre-existing enforcement —
+# ``invoke_agent_and_wait`` → ``registry.wait_for(timeout)`` →
+# FIRE-AND-FORGET ``_try_terminate_orphan`` — ABANDONED the child: the
+# tool returned its timeout envelope while the charter and its
+# chromium/mmdc bash children could keep running unboundedly (the
+# terminate was best-effort background work whose failure is silently
+# swallowed — "stale task recovery or watchdog" was the only backstop).
+# The charter-side bash lane itself DOES kill children on timeout and
+# on cancellation (``bash.py`` ``_kill_process``: SIGTERM → 5 s grace →
+# SIGKILL, and the shielded cancellation handler) — the gap was that
+# nothing reliably DROVE that lane at the render-call boundary. The fix
+# makes the kill bounded and AWAITED (see ``_kill_render_child``): on
+# expiry we await ``manager.terminate_instance(...)`` under a hard
+# grace cap, then belt-and-braces SIGKILL any bash process groups the
+# cascade missed, and log the outcome. The 1200 s render budget
+# semantics are UNCHANGED — only what happens AT expiry is hardened.
+_DEFAULT_RENDER_CONCURRENCY = 2
+_RENDER_CONCURRENCY_FLOOR = 1
+_RENDER_CONCURRENCY_CEILING = 4
+_RENDER_SLOT_WAIT_S = 120.0   # bounded slot wait — ≪ the 600/1200 s budgets
+_RENDER_QUEUE_MAX = 4         # bounded waiter queue — fail-fast beyond this
+_RENDER_KILL_GRACE_S = 30.0   # hard cap on the awaited terminate at expiry
+
+# Process-lifetime gate state. Built lazily on the FIRST render call
+# (inside the running loop — asyncio primitives must not be constructed
+# at import time) and intentionally NOT rebuilt on config change: the
+# knob is ``requires_restart=True`` (managed-settings ladder), so a
+# mid-process config edit picks up at the next daemon restart.
+_render_gate: asyncio.Semaphore | None = None
+_render_gate_cap = 0
+_render_waiters = 0
+
+# Statuses at which a child is left alone at expiry: terminal statuses
+# have already had their lifecycle cleanup run, and PAUSED reflects
+# explicit operator intent (never fight a pause with a kill).
+_NO_KILL_STATUSES = frozenset(
+    {
+        InstanceStatus.COMPLETED.value,
+        InstanceStatus.TERMINATED.value,
+        InstanceStatus.ERROR.value,
+        InstanceStatus.FAILED.value,
+        InstanceStatus.PAUSED.value,
+    }
+)
+
+
+def _effective_render_concurrency(manager: "InstanceManager") -> int:
+    """Effective chromium render concurrency cap (O2 knob reader).
+
+    Mirrors the O3 ``_effective_instance_cache_ttl_hours`` consumption
+    pattern: read ``manager.config.limits.chart_render_concurrency``
+    (mutated in place at boot by ``apply_db_settings_overrides``), fall
+    back to ``_DEFAULT_RENDER_CONCURRENCY`` when the attribute is
+    missing/non-numeric, and CLAMP any out-of-range value into
+    [``_RENDER_CONCURRENCY_FLOOR``, ``_RENDER_CONCURRENCY_CEILING``]
+    with a WARN. Clamping at the consumer is deliberate: the managed
+    settings ladder validates ``ge=1`` per the registry's v1 constraint
+    model (no ``le``), while the gate itself must stay sane regardless
+    of what a DB/env/yaml tier says.
+    """
+    raw = getattr(
+        getattr(getattr(manager, "config", None), "limits", None),
+        "chart_render_concurrency",
+        None,
+    )
+    if raw is None:
+        return _DEFAULT_RENDER_CONCURRENCY
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "chart render concurrency: non-numeric config %r — using "
+            "default %d",
+            raw,
+            _DEFAULT_RENDER_CONCURRENCY,
+        )
+        return _DEFAULT_RENDER_CONCURRENCY
+    if (
+        value < _RENDER_CONCURRENCY_FLOOR
+        or value > _RENDER_CONCURRENCY_CEILING
+    ):
+        clamped = min(
+            max(value, _RENDER_CONCURRENCY_FLOOR),
+            _RENDER_CONCURRENCY_CEILING,
+        )
+        logger.warning(
+            "chart render concurrency: config %d outside [%d, %d] — "
+            "clamped to %d",
+            value,
+            _RENDER_CONCURRENCY_FLOOR,
+            _RENDER_CONCURRENCY_CEILING,
+            clamped,
+        )
+        return clamped
+    return value
+
+
+def _get_render_gate(manager: "InstanceManager") -> asyncio.Semaphore:
+    """Return the process-lifetime render gate, building it on first use.
+
+    The cap is resolved from config ONCE per process (the knob is
+    requires-restart); see the O2 block above for the posture.
+    """
+    global _render_gate, _render_gate_cap
+    if _render_gate is None:
+        cap = _effective_render_concurrency(manager)
+        _render_gate = asyncio.Semaphore(cap)
+        _render_gate_cap = cap
+        logger.info(
+            "chart render gate: created (cap=%d, queue_max=%d, "
+            "slot_wait_s=%.0f, ceremony_gated=True)",
+            cap,
+            _RENDER_QUEUE_MAX,
+            _RENDER_SLOT_WAIT_S,
+        )
+    return _render_gate
+
+
+def _reset_render_gate_for_tests() -> None:
+    """Reset the process-lifetime gate state (tests only).
+
+    asyncio primitives are loop-bound, so each test's fresh event loop
+    needs a fresh gate. Mirrors the module-global reset convention used
+    by ``tests/test_chart_tools_reuse_integration.py``.
+    """
+    global _render_gate, _render_gate_cap, _render_waiters
+    _render_gate = None
+    _render_gate_cap = 0
+    _render_waiters = 0
+
+
+async def _acquire_render_slot(
+    manager: "InstanceManager", caller_id: str
+) -> str | None:
+    """Bounded acquire of a render slot (O2 saturation policy).
+
+    Returns ``None`` when a slot was acquired, or a typed error
+    envelope string when the bounded queue is full or the bounded slot
+    wait expired. Never raises; never waits unboundedly.
+    """
+    global _render_waiters
+    if _render_waiters >= _RENDER_QUEUE_MAX:
+        logger.warning(
+            "chart render gate saturated (queue full): caller=%s "
+            "waiters=%d queue_max=%d cap=%d",
+            caller_id[:8],
+            _render_waiters,
+            _RENDER_QUEUE_MAX,
+            _render_gate_cap,
+        )
+        return (
+            "Error: Chart render lane saturated — "
+            f"{_render_waiters} renders already queued (queue cap "
+            f"{_RENDER_QUEUE_MAX}, concurrency cap {_render_gate_cap}). "
+            "Retry shortly."
+        )
+    gate = _get_render_gate(manager)
+    _render_waiters += 1
+    try:
+        try:
+            await asyncio.wait_for(gate.acquire(), timeout=_RENDER_SLOT_WAIT_S)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "chart render gate slot wait expired: caller=%s waited="
+                "%.0fs cap=%d — returning error envelope",
+                caller_id[:8],
+                _RENDER_SLOT_WAIT_S,
+                _render_gate_cap,
+            )
+            return (
+                "Error: Chart render lane busy — no slot became free "
+                f"within {_RENDER_SLOT_WAIT_S:.0f}s (concurrency cap "
+                f"{_render_gate_cap}). Retry shortly."
+            )
+    finally:
+        _render_waiters -= 1
+    logger.info(
+        "chart render gate: slot acquired caller=%s cap=%d in_flight=%d",
+        caller_id[:8],
+        _render_gate_cap,
+        _render_gate_cap - gate._value + 1,  # type: ignore[attr-defined]
+    )
+    return None
+
+
+def _release_render_slot() -> None:
+    """Release a previously acquired render slot (every-exit path)."""
+    if _render_gate is not None:
+        _render_gate.release()
+        logger.debug("chart render gate: slot released")
 
 CATEGORY_NAME = "Chart"
 CATEGORY_DOC = """\
@@ -380,6 +603,135 @@ async def _reuse_charter(
         _inflight_reuse.discard(charter_id)
 
 
+# ── O2 — timeout-kill helpers ────────────────────────────────────────────────
+#
+# Found (audit): the fresh-path timeout enforcement was fire-and-forget —
+# ``invoke_agent_and_wait`` scheduled ``manager.terminate_instance`` via
+# ``asyncio.ensure_future`` and returned the timeout envelope immediately,
+# so a failed/slow terminate left the charter's chromium/mmdc tree alive
+# with no synchronous signal to the caller. The charter-side bash lane
+# already kills children correctly on timeout and cancellation; the gap
+# was that nothing reliably DROVE that lane at the render-call boundary.
+# Fixed (below): bounded, awaited kill at expiry + belt-and-braces
+# bash-group sweep, with the outcome logged.
+
+
+def _fetch_child_status(
+    manager: "InstanceManager", child_id: str
+) -> tuple[bool, str | None]:
+    """Read a child row's status. ``(exists, status_lower_or_None)``.
+
+    Repository errors degrade to ``(False, None)`` — a kill decision
+    must never be blocked by a read failure, but an unknown row is also
+    never killed (nothing was spawned).
+    """
+    try:
+        row = manager._instance_repository.get(child_id)
+    except Exception:
+        return (False, None)
+    if row is None:
+        return (False, None)
+    return (True, (getattr(row, "status", "") or "").lower())
+
+
+async def _bash_sweep_render_tree(child_id: str) -> int:
+    """SIGKILL any bash process groups still tracked for ``child_id``.
+
+    Belt-and-braces behind the terminate cascade: the lifecycle
+    terminate already sweeps the bash registry, but a cascade that
+    failed/timed out leaves groups behind — each is a 150-400 MB
+    chromium/mmdc tree. Never raises; returns the killed-group count.
+    """
+    try:
+        from daemon.tools.bash import get_bash_process_registry
+
+        return await get_bash_process_registry().cleanup_instance(child_id)
+    except Exception as exc:
+        logger.error(
+            "chart render kill: bash sweep failed for child %s: %s: %s",
+            child_id[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return 0
+
+
+async def _kill_render_child(
+    manager: "InstanceManager", child_id: str | None
+) -> None:
+    """Bounded, AWAITED kill of a timed-out render child (fresh lane).
+
+    Closes the fire-and-forget gap: when this returns, either the
+    terminate cascade has run (graph-task cancel → the bash lane's own
+    SIGTERM→SIGKILL handlers) or its failure is loudly logged — and the
+    bash-group sweep has SIGKILLed anything the cascade missed. Terminal
+    and PAUSED children are left alone (PAUSED = operator intent).
+    """
+    if not child_id:
+        return
+    exists, status = _fetch_child_status(manager, child_id)
+    if not exists or (status or "") in _NO_KILL_STATUSES:
+        return
+    try:
+        await asyncio.wait_for(
+            manager.terminate_instance(child_id), timeout=_RENDER_KILL_GRACE_S
+        )
+        logger.warning(
+            "chart render kill: terminated timed-out child %s (status=%s)",
+            child_id[:8],
+            status,
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "chart render kill: terminate grace (%.0fs) expired for child "
+            "%s — falling through to bash sweep",
+            _RENDER_KILL_GRACE_S,
+            child_id[:8],
+        )
+    except Exception as exc:
+        logger.error(
+            "chart render kill: terminate failed for child %s: %s: %s",
+            child_id[:8],
+            type(exc).__name__,
+            exc,
+        )
+    killed = await _bash_sweep_render_tree(child_id)
+    if killed:
+        logger.warning(
+            "chart render kill: SIGKILLed %d leftover bash group(s) of "
+            "child %s",
+            killed,
+            child_id[:8],
+        )
+
+
+async def _sweep_render_process_tree(
+    manager: "InstanceManager", charter_id: str
+) -> None:
+    """Sweep ONLY the process tree of a timed-out REUSED charter.
+
+    M8 (charter shared/durable) is preserved: the charter INSTANCE is
+    never terminated or state-mutated here — other callers may be
+    queued on it and the service-side revive-on-send owns its state
+    machine. Only the charter's tracked bash process groups (the
+    chromium/mmdc render trees) are SIGKILLed so a wedged render cannot
+    outlive the tool call burning memory. Called ONLY on the reuse
+    lane's timeout envelope — busy/pause rejects never reach this
+    (another waiter may own the in-flight render).
+    """
+    exists, status = _fetch_child_status(manager, charter_id)
+    if not exists or (status or "") in _NO_KILL_STATUSES:
+        return
+    killed = await _bash_sweep_render_tree(charter_id)
+    if killed:
+        logger.warning(
+            "chart render sweep (reuse, M8-safe): SIGKILLed %d bash "
+            "group(s) of timed-out charter %s (instance state untouched)",
+            killed,
+            charter_id[:8],
+        )
+
+
 def create_chart_tools(manager: "InstanceManager", current_instance_id: str) -> list:
     """Create chart generation tools with injected manager reference.
 
@@ -465,100 +817,138 @@ def create_chart_tools(manager: "InstanceManager", current_instance_id: str) -> 
         # directive is threaded into the dispatch message below.
         timeout_s = _RENDER_TIMEOUT_S if render_image else _DEFAULT_TIMEOUT_S
 
-        # Construct a structured prompt for the charter agent. Mirrors the
-        # ``explore()`` style at knowledge_tools.py — short label-style header
-        # lines so the agent has explicit context for type and project scope.
-        # Message construction is IDENTICAL on the reuse and fresh paths (M9).
-        # The RENDER_IMAGE directive is a test-pinnable contract — the charter
-        # workflow.md Step 5 conditional gate parses this exact line and
-        # skips the render/persist/marker step when the value is false (or
-        # when the line is absent, which is the validated-Mermaid-only
-        # default).
-        chart_message = (
-            f"Create a {diagram_type} diagram.\n\n"
-            f"Description: {description}\n"
-            f"RENDER_IMAGE: {str(render_image).lower()}\n"
-        )
-        if pid:
-            chart_message += f"Project: {pid}\n"
-
-        # Charter reuse (default): discover the caller's most recent charter
-        # child and refine it in place. ``fresh=True`` skips discovery and
-        # always spawns a new charter. Exactly ONE mode log line per call.
-        mode_logged = False
-        if not fresh:
-            reusable = _find_reusable_charter(manager, current_instance_id)
-            if reusable is not None:
-                charter_id = reusable.instance_id
-                prior_status = (reusable.status or "").lower()
-                if (
-                    prior_status
-                    in (
-                        InstanceStatus.ERROR.value,
-                        InstanceStatus.FAILED.value,
-                    )
-                    and _reuse_revive_attempts.get(charter_id, 0) >= 1
-                ):
-                    # One revive already consumed for this charter (T6
-                    # miss side, adjudicated P5) — respawn fresh. The
-                    # respawn line IS this call's single mode log, so the
-                    # generic fresh-spawn log below is skipped.
-                    logger.info(
-                        "generate_chart: caller=%s charter=%s mode=%s prior_status=%s",
-                        current_instance_id[:8],
-                        charter_id[:8],
-                        "reuse-respawn-after-failure",
-                        prior_status,
-                    )
-                    mode_logged = True
-                else:
-                    content, _reused_charter_id = await _reuse_charter(
-                        manager=manager,
-                        charter_id=charter_id,
-                        message=chart_message,
-                        caller_id=current_instance_id,
-                        timeout=timeout_s,
-                    )
-                    return content
-        if not mode_logged:
-            logger.info(
-                "generate_chart: caller=%s charter=%s mode=%s prior_status=%s",
-                current_instance_id[:8],
-                "spawn",
-                "fresh",
-                "none",
+        # ── O2 — bounded chromium render gate (renders only) ────────
+        # Validate-only paths never consume a slot. Saturation policy:
+        # bounded wait queue (queue cap + slot-wait cap) → typed error
+        # envelope; see the O2 block at the module constants.
+        render_slot_held = False
+        if render_image:
+            gate_error = await _acquire_render_slot(
+                manager, current_instance_id
             )
-
-        # Invoke charter agent synchronously — the tool waits for the
-        # validated Mermaid output. Always returns ``(content, instance_id)``
-        # tuple when ``return_instance_id=True``.
-        #
-        # Never-raise contract: a raise from ``invoke_agent_and_wait``
-        # (transport error, internal failure) must not escape the tool
-        # coroutine into the LLM tool loop — collapse it to an ``Error:``
-        # string, mirroring the ``None``-content branch below.
+            if gate_error is not None:
+                return gate_error
+            render_slot_held = True
         try:
-            result, child_instance_id = await invoke_agent_and_wait(
-                manager=manager,
-                agent_id="charter",
-                message=chart_message,
-                project_id=pid,
-                parent_id=current_instance_id,
-                instance_name=f"chart-{description[:30]}",
-                timeout=timeout_s,
-                return_instance_id=True,
+            # Construct a structured prompt for the charter agent. Mirrors the
+            # ``explore()`` style at knowledge_tools.py — short label-style header
+            # lines so the agent has explicit context for type and project scope.
+            # Message construction is IDENTICAL on the reuse and fresh paths (M9).
+            # The RENDER_IMAGE directive is a test-pinnable contract — the charter
+            # workflow.md Step 5 conditional gate parses this exact line and
+            # skips the render/persist/marker step when the value is false (or
+            # when the line is absent, which is the validated-Mermaid-only
+            # default).
+            chart_message = (
+                f"Create a {diagram_type} diagram.\n\n"
+                f"Description: {description}\n"
+                f"RENDER_IMAGE: {str(render_image).lower()}\n"
             )
-        except Exception as exc:
-            return f"Error: Charter agent invocation failed: {exc}"
+            if pid:
+                chart_message += f"Project: {pid}\n"
 
-        # Handle error results — ``invoke_agent_and_wait`` returns
-        # ``"Error: ..."`` on failure / timeout when ``return_instance_id`` is
-        # True we still get the tuple; collapse to a single string for the
-        # tool response. A ``None`` content means the agent never produced a
-        # result (e.g. hard timeout during cleanup).
-        if result is None:
-            return "Error: Charter agent timed out or failed. Try a simpler description."
-        return result
+            # Charter reuse (default): discover the caller's most recent charter
+            # child and refine it in place. ``fresh=True`` skips discovery and
+            # always spawns a new charter. Exactly ONE mode log line per call.
+            mode_logged = False
+            if not fresh:
+                reusable = _find_reusable_charter(manager, current_instance_id)
+                if reusable is not None:
+                    charter_id = reusable.instance_id
+                    prior_status = (reusable.status or "").lower()
+                    if (
+                        prior_status
+                        in (
+                            InstanceStatus.ERROR.value,
+                            InstanceStatus.FAILED.value,
+                        )
+                        and _reuse_revive_attempts.get(charter_id, 0) >= 1
+                    ):
+                        # One revive already consumed for this charter (T6
+                        # miss side, adjudicated P5) — respawn fresh. The
+                        # respawn line IS this call's single mode log, so the
+                        # generic fresh-spawn log below is skipped.
+                        logger.info(
+                            "generate_chart: caller=%s charter=%s mode=%s prior_status=%s",
+                            current_instance_id[:8],
+                            charter_id[:8],
+                            "reuse-respawn-after-failure",
+                            prior_status,
+                        )
+                        mode_logged = True
+                    else:
+                        content, _reused_charter_id = await _reuse_charter(
+                            manager=manager,
+                            charter_id=charter_id,
+                            message=chart_message,
+                            caller_id=current_instance_id,
+                            timeout=timeout_s,
+                        )
+                        # O2 timeout-kill (reuse lane) — M8-safe: the
+                        # charter instance is NEVER terminated here; only
+                        # a TIMED-OUT render sweeps the charter's tracked
+                        # bash process groups (chromium/mmdc). Busy/pause
+                        # rejects never reach this (exact-prefix gated
+                        # below — another waiter may own the render).
+                        if content.startswith(
+                            "Error: Charter timed out after"
+                        ):
+                            await _sweep_render_process_tree(
+                                manager, _reused_charter_id
+                            )
+                        return content
+            if not mode_logged:
+                logger.info(
+                    "generate_chart: caller=%s charter=%s mode=%s prior_status=%s",
+                    current_instance_id[:8],
+                    "spawn",
+                    "fresh",
+                    "none",
+                )
+
+            # Invoke charter agent synchronously — the tool waits for the
+            # validated Mermaid output. Always returns ``(content, instance_id)``
+            # tuple when ``return_instance_id=True``.
+            #
+            # Never-raise contract: a raise from ``invoke_agent_and_wait``
+            # (transport error, internal failure) must not escape the tool
+            # coroutine into the LLM tool loop — collapse it to an ``Error:``
+            # string, mirroring the ``None``-content branch below.
+            try:
+                result, child_instance_id = await invoke_agent_and_wait(
+                    manager=manager,
+                    agent_id="charter",
+                    message=chart_message,
+                    project_id=pid,
+                    parent_id=current_instance_id,
+                    instance_name=f"chart-{description[:30]}",
+                    timeout=timeout_s,
+                    return_instance_id=True,
+                )
+            except Exception as exc:
+                return f"Error: Charter agent invocation failed: {exc}"
+
+            # Handle error results — ``invoke_agent_and_wait`` returns
+            # ``"Error: ..."`` on failure / timeout when ``return_instance_id`` is
+            # True we still get the tuple; collapse to a single string for the
+            # tool response. A ``None`` content means the agent never produced a
+            # result (e.g. hard timeout during cleanup).
+            # O2 timeout-kill (fresh lane): bounded, AWAITED kill of a
+            # timed-out render child — closes the fire-and-forget gap so
+            # the chromium/mmdc tree cannot outlive this tool call.
+            if result is None or (
+                isinstance(result, str)
+                and result.startswith("Error: Agent timed out after")
+            ):
+                await _kill_render_child(manager, child_instance_id)
+            if result is None:
+                return "Error: Charter agent timed out or failed. Try a simpler description."
+            return result
+        finally:
+            # O2 — every-exit release: no path may hold a render slot
+            # past this function returning.
+            if render_slot_held:
+                _release_render_slot()
 
     generate_chart._full_doc_ = """\
 Generate a validated Mermaid diagram by delegating to the Charter agent.

@@ -151,22 +151,71 @@ def test_pin_04_passthrough_adjacency() -> None:
     The `return result` immediately precedes `generate_chart._full_doc_ = `
     assignment. Content-addressable: find the first `return result` and
     verify the next non-blank line begins with `generate_chart._full_doc_`.
+
+    RE-PINNED 2026-10-18 (resource-cost-control O2 — bounded chromium
+    render concurrency + hard child-killing timeout, branch
+    feature/resource-cost-control, HEAD 4d572f561 base): the O2 gate's
+    every-exit ``finally:`` release block now sits between the tool
+    body's final ``return result`` and the ``_full_doc_`` stamp. The
+    pin's intent is preserved — the body's last statement is still the
+    result return, and the ``_full_doc_`` assignment still directly
+    stamps ``generate_chart`` — and the allowed interlude is BOUNDED to
+    exactly the O2 release block (a ``finally:`` header, its two-line
+    comment, the ``if render_slot_held:`` guard, and the
+    ``_release_render_slot()`` call — six non-blank lines, nothing
+    else). Pre-O2 attribution: pin authored at the chart-image-delivery
+    Phase B completion (see the SEALED_SHA_BASELINES provenance block in
+    tests/test_chart_image_delivery_e2e.py); the pre-O2 adjacency was
+    `return result` → `generate_chart._full_doc_` with only blank lines
+    between. Any OTHER interlude still fails this pin.
     """
     chart = _read(CHART_TOOLS)
     lines = chart.splitlines()
     saw_return = False
+    following: list[str] = []
     for line in lines:
-        if saw_return:
-            if line.strip():
-                assert line.lstrip().startswith("generate_chart._full_doc_"), (
-                    f"expected next non-blank line to start with "
-                    f"`generate_chart._full_doc_`; got: {line!r}"
-                )
-                return
+        if not saw_return:
+            if line.strip() == "return result":
+                saw_return = True
             continue
-        if line.strip() == "return result":
-            saw_return = True
-    pytest.fail("never found a `return result` line in chart_tools.py")
+        if line.strip():
+            following.append(line.strip())
+            if line.lstrip().startswith("generate_chart._full_doc_"):
+                break
+        if len(following) > 6:
+            break
+    assert saw_return, "never found a `return result` line in chart_tools.py"
+    assert following, (
+        "no non-blank line after the final `return result` in "
+        "chart_tools.py"
+    )
+    if following[0] == "finally:":
+        # O2 re-pin (2026-10-18): ONLY the bounded gate-release block may
+        # sit between the return and the _full_doc_ stamp.
+        assert following[-1].startswith("generate_chart._full_doc_"), (
+            f"expected the O2 release block to be followed by the "
+            f"`generate_chart._full_doc_` stamp; got: {following!r}"
+        )
+        assert following[1].startswith("#"), (
+            f"expected the O2 release-block comment; got: {following!r}"
+        )
+        assert "if render_slot_held:" in following, (
+            f"expected the O2 slot guard in the release block; "
+            f"got: {following!r}"
+        )
+        assert "_release_render_slot()" in following, (
+            f"expected the O2 release call in the block; got: {following!r}"
+        )
+        assert len(following) == 6, (
+            f"O2 release interlude must stay bounded to exactly 6 non-blank "
+            f"lines (finally, 2-line comment, guard, release, _full_doc_); "
+            f"got: {following!r}"
+        )
+        return
+    assert following[0].startswith("generate_chart._full_doc_"), (
+        f"expected next non-blank line to start with "
+        f"`generate_chart._full_doc_`; got: {following[0]!r}"
+    )
 
 
 def test_pin_05_no_colon_skip_pre_extraction() -> None:

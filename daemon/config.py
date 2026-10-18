@@ -633,6 +633,32 @@ class LimitsConfig(BaseSettings):
         ),
     )
 
+    # ── O2 chromium render concurrency (resource-cost-control) ──────────
+    # MANAGED daemon setting (db-backed-settings registry,
+    # ``daemon/services/settings_service.py``) driving the process-wide
+    # chromium render gate in ``daemon/tools/chart_tools.py``. Resolution
+    # ladder (highest wins; re-resolved at every boot):
+    #   1. DB override (app_settings row — set from the settings API)
+    #   2. env var LIMITS_CHART_RENDER_CONCURRENCY
+    #   3. this yaml literal (tier 3 — kept; edit here still works)
+    #   4. built-in default (2)
+    # CEREMONY-GATED: the default ships in the resource-cost-control
+    # branch; LIVE effect only at the next promote ceremony (the gate is
+    # built once per process at the first render — requires_restart).
+    # The consumption-side reader CLAMPS into [1, 4] with a WARN (the
+    # registry's v1 constraint model is ge-only; the gate must stay sane
+    # regardless of what any tier says).
+    chart_render_concurrency: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Max concurrent chromium renders across the daemon (O2). "
+            "Concurrent renders spawn 150-400MB chromium children each; "
+            "the gate bounds them. Effective value is clamped to [1, 4] "
+            "by the consumer. Env LIMITS_CHART_RENDER_CONCURRENCY."
+        ),
+    )
+
     # ── Governor recursive-spawn guard (Governor Recursion Guard, 2026-08-30) ──
     # Default ON (matches the locked design decision). The guard refuses to
     # spawn a governor instance when the prospective parent's chain (parent
