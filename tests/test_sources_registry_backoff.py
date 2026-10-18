@@ -104,16 +104,27 @@ def _drive_supervisor(
     clock: _FakeClock,
     cycles: int,
     monkeypatch,
+    advance_clock_on_sleep: bool = False,
 ) -> list[float]:
     """Run the REAL supervisor loop for exactly ``cycles`` crash cycles.
 
     Returns the recorded backoff sleep durations (one per cycle). Jitter is
     pinned to 1.0 so ``sleep_time == backoff`` and the cadence is exact.
+
+    ``advance_clock_on_sleep`` controls whether the fake monotonic clock
+    advances by each backoff sleep's duration — i.e. whether time actually
+    passes while the supervisor waits to restart. Real waiting does advance
+    the clock; leaving it frozen makes the measured interval
+    ``now - last_success_time`` equal the prior run's lifetime alone, which
+    is what masks the interval-measurement defect (see the MUTATION-SENSITIVE
+    storm test below).
     """
     sleeps: list[float] = []
 
     async def _recording_sleep(delay, *args, **kwargs):
         sleeps.append(float(delay))
+        if advance_clock_on_sleep:
+            clock.advance(float(delay))
         if len(sleeps) >= cycles:
             # Signal the supervisor to exit on its next loop-turn check.
             registry_obj._running[adapter.source_id] = False
@@ -156,6 +167,44 @@ def test_sustained_outage_grows_backoff_across_cycles(monkeypatch):
     assert sleeps[1] > sleeps[0]
     assert sleeps[2] > sleeps[1]
     assert sleeps[3] > sleeps[2]
+
+
+def test_sustained_outage_reaches_max_backoff_with_advancing_clock(monkeypatch):
+    """Storm reproducer WITH time actually passing during the backoff sleeps.
+
+    MUTATION-SENSITIVE companion to the frozen-clock test above. That sibling
+    never advances the clock across ``asyncio.sleep`` calls, so
+    ``now - last_success_time`` collapses to the prior run's lifetime alone
+    and the measurement defect stays invisible. Here the fake clock advances
+    by each backoff sleep — the real-world shape — so
+    ``now - last_success_time`` also carries the ACCUMULATED inter-run sleep.
+
+    Correct semantics: across >=8 short-death cycles (start succeeds ->
+    health check fails) the cadence must climb monotonically to
+    ``max_backoff`` (300s) and STAY there — a young-dying run must never earn
+    the reset. The defect instead sawtooths (2 -> 5 -> 12.5 -> 31.25 ->
+    78.125 -> ~2 -> repeat) once the accumulated sleep crosses 60s.
+    """
+    clock = _FakeClock()
+    adapter = _CrashAfterRunAdapter(clock, run_durations=[1.0] * 16)
+
+    sleeps = _drive_supervisor(
+        adapter,
+        clock,
+        cycles=8,
+        monkeypatch=monkeypatch,
+        advance_clock_on_sleep=True,
+    )
+
+    # Exact cadence: 2 * 2.5^k, clamped at 300, once each cycle.
+    assert sleeps == pytest.approx(
+        [2.0, 5.0, 12.5, 31.25, 78.125, 195.3125, 300.0, 300.0]
+    )
+    # Strictly growing up to the clamp ...
+    assert all(b > a for a, b in zip(sleeps[:6], sleeps[1:7]))
+    # ... then flat at max_backoff — no reset to base while runs die young.
+    assert sleeps[6:] == pytest.approx([300.0, 300.0])
+    assert 2.0 not in sleeps[1:]
 
 
 def test_short_lived_crash_does_not_reset_backoff(monkeypatch):

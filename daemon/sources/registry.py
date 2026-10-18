@@ -756,6 +756,14 @@ class SourceRegistry:
         max_backoff: float = 300.0  # max backoff in seconds
         multiplier: float = 2.5
         last_success_time: float = 0.0
+        # The PRIOR crashed run's OWN lifetime (its start -> crash/health-fail
+        # interval), captured by the crash handler below. Gate the successful-
+        # start reset on THIS quantity — NOT on ``now - last_success_time``,
+        # which would also include the inter-run backoff sleep and would
+        # falsely earn the reset once the accumulated sleep reached
+        # ``success_threshold`` (sawtooth 2->5->12.5->...->~78->reset->...).
+        # Initialised to 0 so the first start (no prior run) never resets.
+        last_run_duration: float = 0.0
         success_threshold: float = 60.0  # reset backoff after 60s of successful run
         
         while self._running.get(source_id, False):
@@ -791,26 +799,36 @@ class SourceRegistry:
                 # 2.0 -> 5.0 -> 2.0 -> 5.0 forever — the live
                 # plane/computer-use restart storm.
                 #
-                # Correct semantics: only a run that actually LIVED earns the
-                # reset. A start-then-immediate-death keeps the accumulated
-                # backoff, so repeated short crashes produce a growing retry
-                # cadence up to ``max_backoff``. NOTE: backoff is
-                # start-coupled (this site), NOT message-coupled —
+                # Round-2 fix 2026-10-18 (review remediation): the gate was then
+                # computed as ``now - last_success_time`` here. That interval is the prior
+                # run's lifetime PLUS the inter-run backoff sleep — so once
+                # the accumulated sleep reached ``success_threshold`` a
+                # short-death run falsely earned the reset and the cadence
+                # sawtoothed (2 -> 5 -> 12.5 -> 31.25 -> 78.125 -> ~2 ->
+                # repeat) instead of climbing to ``max_backoff``. The gate
+                # now reads ``last_run_duration`` — the PRIOR crashed run's
+                # OWN lifetime (start -> crash/health-fail), captured by the
+                # crash handler below — which is the correct quantity.
+                #
+                # Correct semantics: only a run that actually LIVED earns
+                # the reset. A start-then-immediate-death keeps the
+                # accumulated backoff, so repeated short crashes produce a
+                # growing retry cadence up to ``max_backoff``. NOTE: backoff
+                # is start-coupled (this site), NOT message-coupled —
                 # ``last_success_time`` never appears in ``_handle_message``.
                 #
-                # ``last_success_time`` doubles as THIS run's start timestamp;
-                # the crash handler below reuses it to measure the crashed
-                # run's duration (that conditional reset is correct as-is and
-                # unchanged).
+                # ``last_success_time`` is still stamped on every successful
+                # start because the crash handler below reuses it to measure
+                # the crashed run's duration and assign ``last_run_duration``
+                # (that conditional reset is correct as-is and unchanged — we
+                # only ADD a one-line capture alongside it).
                 now = time.monotonic()
-                if last_success_time > 0:
-                    prior_run_elapsed = now - last_success_time
-                    if prior_run_elapsed >= success_threshold:
-                        logger.info(
-                            f"Resetting backoff for {source_id} after "
-                            f"{prior_run_elapsed:.1f}s successful run"
-                        )
-                        backoff = 2.0
+                if last_run_duration >= success_threshold:
+                    logger.info(
+                        f"Resetting backoff for {source_id} after "
+                        f"{last_run_duration:.1f}s successful prior run"
+                    )
+                    backoff = 2.0
                 last_success_time = now
                 
                 # Keep the adapter running - wait until stopped or error
@@ -870,6 +888,12 @@ class SourceRegistry:
                 # Check if we should reset backoff based on successful runtime
                 if last_success_time > 0:
                     elapsed = time.monotonic() - last_success_time
+                    # Round-2 capture: record the PRIOR run's OWN lifetime
+                    # so the next successful start can gate its reset on
+                    # THIS quantity (not ``now - last_success_time``, which
+                    # would also include the inter-run sleep — see O4
+                    # review remediation at the top of this loop).
+                    last_run_duration = elapsed
                     if elapsed >= success_threshold:
                         logger.info(
                             f"Resetting backoff for {source_id} after {elapsed:.1f}s "
