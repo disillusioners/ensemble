@@ -93,6 +93,13 @@ _STAT_PART_OFFSET = 3
 # only a buffer for the persistence lane.
 HISTORY_QUEUE_CAP = 1024
 
+# Bound on the instance→kind hint map (W-1). One entry per chart
+# render child instance; drop-oldest beyond the cap so a long-lived
+# daemon cannot grow the map without bound. Entries are hints for
+# the bash stamp site — a dropped entry degrades to kind='bash'
+# (the pre-W-1 behavior), never to an error.
+INSTANCE_KIND_MAP_CAP = 512
+
 
 # Kind discriminator enum (string-valued to keep the column type
 # portable; matches the table DDL ``kind TEXT``). The bash lane
@@ -258,6 +265,15 @@ class PidRegistry:
         self._history: list[PidRegistryEntry] = []
         self._lock = threading.Lock()
         self._proc_root = Path(proc_root)
+        # W-1 — instance→kind hint map. The chart lane records
+        # ``{child_instance_id → 'chart_render'}`` AFTER the
+        # invoke returns (the production graph executes on a worker
+        # THREAD via run_coroutine_threadsafe, so a ContextVar set
+        # in the chart tool's asyncio context never reaches the
+        # charter's bash stamps — see bash._resolve_pid_kind). The
+        # map is keyed by the SPAWNED CHILD INSTANCE, which the
+        # bash stamp site already knows as its own ``instance_id``.
+        self._instance_kinds: dict[str, str] = {}
         # Injectable for tests; the live ``time.monotonic`` is fine
         # in production (used only as a soft debug anchor today).
         self._wall_clock = wall_clock
@@ -465,6 +481,51 @@ class PidRegistry:
         with self._lock:
             return len(self._live)
 
+    # ── Public API — instance→kind hint map (W-1) ────────────────────
+
+    def note_instance_kind(self, instance_id: str, kind: str) -> None:
+        """Record ``{instance_id → kind}`` for the bash stamp site.
+
+        W-1: the chart lane calls this with the SPAWNED CHILD
+        instance id (the charter) right after ``invoke_agent_and_wait``
+        returns — any bash subprocess that charter spawns during the
+        render window carries ``instance_id == child_instance_id``,
+        so the bash stamp site resolves
+        ``kind_for_instance(instance_id)`` instead of defaulting to
+        ``'bash'``. Unlike the ``_PID_KIND_HINT`` ContextVar this
+        keying is THREAD-PROOF: the production graph executes on a
+        worker thread whose fresh context never carries the chart
+        tool's ContextVar.
+
+        Best-effort by contract: unknown kinds raise (same
+        validation as :meth:`register`); an empty ``instance_id``
+        is ignored. Bounded drop-oldest (INSTANCE_KIND_MAP_CAP).
+        """
+        if not instance_id:
+            return
+        if kind not in VALID_KINDS:
+            raise ValueError(
+                f"pid_registry.note_instance_kind: invalid kind "
+                f"{kind!r}; expected one of {sorted(VALID_KINDS)}"
+            )
+        with self._lock:
+            if len(self._instance_kinds) >= INSTANCE_KIND_MAP_CAP:
+                # Drop-oldest (dict preserves insertion order).
+                for stale_key in list(self._instance_kinds)[:1]:
+                    del self._instance_kinds[stale_key]
+            self._instance_kinds[instance_id] = kind
+
+    def kind_for_instance(self, instance_id: Optional[str]) -> Optional[str]:
+        """Return the recorded kind hint for ``instance_id`` (or None).
+
+        Cheap lock-guarded probe — the bash stamp site's fallback
+        ladder is ContextVar hint → this map → ``KIND_BASH``.
+        """
+        if not instance_id:
+            return None
+        with self._lock:
+            return self._instance_kinds.get(instance_id)
+
     def pending_history(self) -> int:
         """Return the current size of the history queue (cheap probe)."""
         with self._lock:
@@ -497,6 +558,7 @@ class PidRegistry:
         with self._lock:
             self._live.clear()
             self._history.clear()
+            self._instance_kinds.clear()
 
     def _enqueue_history_locked(self, entry: PidRegistryEntry) -> None:
         """Append ``entry`` to the history queue; bounded drop-oldest.
@@ -573,4 +635,5 @@ __all__ = [
     "get_pid_registry",
     "reset_pid_registry_for_tests",
     "read_proc_stat_field",
+    "INSTANCE_KIND_MAP_CAP",
 ]

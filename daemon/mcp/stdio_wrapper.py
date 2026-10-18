@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -47,6 +48,20 @@ import mcp
 from mcp import StdioServerParameters
 
 logger = logging.getLogger(__name__)
+
+# ── W-3 (P2 review) — claim-once ledger for MCP child stamps ────────────────
+#
+# Concurrent same-command MCP sessions scan the SAME /proc children:
+# without a claim ledger each session appended BOTH pids to its own
+# ``_registered`` list, and the FIRST ``on_close`` marked the
+# still-live sibling exited (false history row + the child vanished
+# from live attribution). The ledger is keyed ``(pid, start_time)``
+# (the PID-recycle-safe pair): the first session to claim a child
+# owns its stamp + exit-mark; later sessions skip it entirely.
+# Claims are released at ``_mark_children_exit`` so a genuinely new
+# child reusing the key later can be claimed again.
+_claimed_children: set[tuple[int, int]] = set()
+_claimed_children_lock = threading.Lock()
 
 # Type alias for a factory that returns an async context manager.
 # We accept any callable to also support lambdas that close over
@@ -140,17 +155,24 @@ def scan_mcp_child_pids(
 
     Returns ``[(pid, starttime_jiffies)]`` for every process whose
     ppid == ``parent_pid`` (default ``os.getpid()``) AND whose
-    ``cmdline`` argv[0] basename matches ``command`` (and, when
-    ``args`` is supplied, whose argv[1:] starts with ``args``).
+    ``cmdline`` argv[0] basename matches ``command`` AND whose
+    ``argv[1:]`` starts with ``args``.
 
-    Bounded: iterates a single ``iterdir()`` over the proc root;
-    any entry that is not a numeric pid directory is skipped. Never
-    raises — a missing /proc (macOS/Windows) yields ``[]``.
+    W-3: ``args`` must be NON-EMPTY. A server configured with
+    ``args=[]``/``None`` would otherwise wildcard-match ANY
+    same-basename child of the daemon (every ``uvx`` invocation,
+    bash-spawned or not) — a basename-only match is too
+    wildcard-prone to attribute safely, so an args-less server
+    matches NOTHING (skip rather than wildcard). Never raises —
+    a missing /proc (macOS/Windows) yields ``[]``.
     """
     root = proc_root if proc_root is not None else _PROC_ROOT
     want_ppid = parent_pid if parent_pid is not None else os.getpid()
     want_comm = _basename_command(command)
     if not want_comm:
+        return []
+    if not args:
+        # W-3 — no disambiguating argv → no match (never wildcard).
         return []
     matches: list[tuple[int, int]] = []
     try:
@@ -175,9 +197,8 @@ def scan_mcp_child_pids(
             continue
         if _basename_command(argv[0]) != want_comm:
             continue
-        if args:
-            if argv[1:1 + len(args)] != list(args):
-                continue
+        if argv[1:1 + len(args)] != list(args):
+            continue
         matches.append((pid, starttime))
     return matches
 
@@ -491,6 +512,15 @@ class TaskScopedStdioClient(TaskScopedContextManager):
             return
         registry = get_pid_registry()
         for pid, starttime in matches:
+            # W-3 claim-once: check-and-claim ATOMICALLY under the
+            # ledger lock — two concurrent same-command sessions
+            # cannot both win the same (pid, start_time), so only
+            # the claiming session appends to ``_registered`` and
+            # only its ``on_close`` exit-marks the child.
+            with _claimed_children_lock:
+                if (pid, starttime) in _claimed_children:
+                    continue
+                _claimed_children.add((pid, starttime))
             try:
                 registry.register(
                     pid=pid,
@@ -507,6 +537,10 @@ class TaskScopedStdioClient(TaskScopedContextManager):
                 )
                 self._registered.append((pid, starttime))
             except Exception as exc:
+                # Release the failed claim so a later session can
+                # stamp the child (the registry row never landed).
+                with _claimed_children_lock:
+                    _claimed_children.discard((pid, starttime))
                 logger.warning(
                     "mcp_child stamp: register(pid=%d) failed: %s: %s",
                     pid, type(exc).__name__, exc,
@@ -542,4 +576,11 @@ class TaskScopedStdioClient(TaskScopedContextManager):
                     "mcp_child stamp: mark_exit(pid=%d) failed: %s: %s",
                     pid, type(exc).__name__, exc,
                 )
+        # W-3 — release the claims BEFORE clearing ``_registered``
+        # (the keys being released ARE the session's registered
+        # pairs) so a child spawned later under the same
+        # (pid, start_time) key can be claimed again.
+        with _claimed_children_lock:
+            for key in self._registered:
+                _claimed_children.discard(key)
         self._registered.clear()

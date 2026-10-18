@@ -27,6 +27,20 @@ from daemon.utils import invoke_agent_and_wait
 # ``kind='bash'``. Token is restored in finally so the hint does
 # not leak into a sibling chart call or a follow-up bash tool
 # call from the same parent task.
+#
+# W-1 (P2 review): the ContextVar is the RESIDUAL lane only — the
+# production graph executes on a worker THREAD
+# (worker_pool → task_processor → main_loop_bridge via
+# run_coroutine_threadsafe), which copies the WORKER thread's
+# fresh context, so the hint never reaches the charter's bash
+# stamps in production. The LOAD-BEARING path is the
+# instance-keyed map: after ``invoke_agent_and_wait`` returns we
+# record ``{child_instance_id → 'chart_render'}`` on the pid
+# registry (``note_instance_kind``); the bash stamp site resolves
+# its own ``instance_id`` (== the charter child) through
+# ``_resolve_pid_kind`` and lands on 'chart_render' without any
+# context propagation.
+from daemon.services.resource_monitor.pid_registry import get_pid_registry
 from daemon.tools.bash import KIND_CHART_RENDER, _PID_KIND_HINT
 
 if TYPE_CHECKING:
@@ -927,16 +941,14 @@ def create_chart_tools(manager: "InstanceManager", current_instance_id: str) -> 
             # coroutine into the LLM tool loop — collapse it to an ``Error:``
             # string, mirroring the ``None``-content branch below.
             #
-            # D5 — chart_render stamp seam (pinned line: 918 —
-            # ``invoke_agent_and_wait(...)``). The ContextVar
-            # ``_PID_KIND_HINT`` rides the asyncio context through
-            # the ``invoke_agent_and_wait`` call; any bash
-            # subprocess the charter instance spawns during this
-            # window (chromium / mmdc / shell helpers) inherits
-            # the hint via the ContextVar copy mechanism and
-            # registers with ``kind='chart_render'`` rather than
-            # the default ``kind='bash'``. Only push the hint when
-            # ``render_image=True`` — the validate-only path
+            # D5 — chart_render stamp seam (pinned line:
+            # ``invoke_agent_and_wait(...)`` directly below). The
+            # ContextVar hint pushed here is the RESIDUAL lane for
+            # direct in-context callers (tests / future same-context
+            # invokes) — see the W-1 note at the imports: in the
+            # production worker-thread topology it does NOT cross
+            # into the charter's bash stamps. Only push the hint
+            # when ``render_image=True`` — the validate-only path
             # (``render_image=False``) never spawns a render and
             # tagging those bash children with the wrong kind
             # would muddy the sampler attribution. Token is
@@ -961,6 +973,26 @@ def create_chart_tools(manager: "InstanceManager", current_instance_id: str) -> 
             finally:
                 if kind_hint_token is not None:
                     _PID_KIND_HINT.reset(kind_hint_token)
+
+            # W-1 — instance-keyed kind stamp (the LOAD-BEARING
+            # production path). The charter's bash children carry
+            # ``instance_id == child_instance_id``; recording the
+            # kind against the SPAWNED CHILD instance survives the
+            # worker-thread context boundary that defeats the
+            # ContextVar. Best-effort: a registry failure must not
+            # break the chart call (the stamp degrades to
+            # kind='bash', the pre-W-1 behavior).
+            if render_image and child_instance_id:
+                try:
+                    get_pid_registry().note_instance_kind(
+                        child_instance_id, KIND_CHART_RENDER
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "generate_chart: pid_registry.note_instance_kind "
+                        "failed for child instance %.8s: %s: %s",
+                        str(child_instance_id), type(exc).__name__, exc,
+                    )
 
             # Handle error results — ``invoke_agent_and_wait`` returns
             # ``"Error: ..."`` on failure / timeout when ``return_instance_id`` is

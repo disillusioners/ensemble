@@ -304,8 +304,15 @@ class TestAC5BashSuccessPath:
     def test_n_success_runs_zero_monotonic_growth(
         self, patched_singleton, proc_root
     ):
-        """N successful bash calls ⇒ ZERO registry growth."""
-        from daemon.tools.bash import bash
+        """N successful bash calls ⇒ ZERO growth in BOTH registries
+        (N-1: the pid_registry twin AND the old BashProcessRegistry
+        killpg tracker)."""
+        from daemon.tools.bash import bash, get_bash_process_registry
+
+        # Hermetic start: the old registry is a process singleton
+        # shared across the pack — clear any residue from earlier
+        # tests before asserting zero growth.
+        get_bash_process_registry()._entries.clear()
 
         async def _run_n(n: int):
             for _ in range(n):
@@ -316,6 +323,13 @@ class TestAC5BashSuccessPath:
         asyncio.run(_run_n(15))
         assert patched_singleton.live_count() == 0, (
             f"LEAK: {patched_singleton.live_count()} live entries "
+            f"after 15 successful runs"
+        )
+        # N-1: the OLD registry must also return to zero — the
+        # success arm unregisters its (instance_id, pid, pgid) row.
+        assert get_bash_process_registry().tracked_count() == 0, (
+            f"LEAK (old registry): "
+            f"{get_bash_process_registry().tracked_count()} tracked rows "
             f"after 15 successful runs"
         )
         hist = patched_singleton.drain_history()
@@ -747,3 +761,366 @@ class TestEntryShape:
         snap = registry.snapshot()
         snap.clear()
         assert registry.live_count() == 1
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# W-1 — instance-keyed chart kind (production topology path)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestW1InstanceKeyedChartKind:
+    """W-1 (P2 review): the ContextVar hint CANNOT cross the
+    production graph boundary — the charter executes on a worker
+    THREAD (worker_pool → task_processor → main_loop_bridge via
+    run_coroutine_threadsafe), whose fresh context drops the hint.
+    The load-bearing path records ``{child_instance_id →
+    'chart_render'}`` on the registry; the bash stamp site resolves
+    its OWN instance_id through the map."""
+
+    def test_instance_keyed_kind_stamps_bash_children(
+        self, patched_singleton, proc_root
+    ):
+        """NO ContextVar set (production shape) — the registry map
+        keyed by the bash caller's own instance_id must drive the
+        kind to chart_render."""
+        from daemon.tools.bash import bash
+
+        patched_singleton.note_instance_kind(
+            "charter-child-1", KIND_CHART_RENDER
+        )
+
+        async def _run():
+            await bash.coroutine(
+                command=["echo", "render"],
+                timeout=5,
+                instance_id="charter-child-1",
+            )
+
+        asyncio.run(_run())
+        hist = patched_singleton.drain_history()
+        assert len(hist) == 1
+        assert hist[0].kind == KIND_CHART_RENDER, (
+            f"instance-keyed hint lost: got {hist[0].kind!r}"
+        )
+
+    def test_instance_keyed_kind_scoped_to_owning_instance(
+        self, patched_singleton, proc_root
+    ):
+        """A DIFFERENT instance's bash call stays kind='bash' — the
+        map must not leak the chart kind across instances."""
+        from daemon.tools.bash import bash
+
+        patched_singleton.note_instance_kind(
+            "charter-child-2", KIND_CHART_RENDER
+        )
+
+        async def _run():
+            await bash.coroutine(
+                command=["echo", "plain"],
+                timeout=5,
+                instance_id="some-other-instance",
+            )
+
+        asyncio.run(_run())
+        hist = patched_singleton.drain_history()
+        assert len(hist) == 1
+        assert hist[0].kind == KIND_BASH
+
+    def test_note_instance_kind_drop_oldest_cap(self, patched_singleton):
+        """The hint map is bounded (drop-oldest) — a long-lived
+        daemon cannot grow it without bound."""
+        from daemon.services.resource_monitor.pid_registry import (
+            INSTANCE_KIND_MAP_CAP,
+        )
+
+        for i in range(INSTANCE_KIND_MAP_CAP + 5):
+            patched_singleton.note_instance_kind(f"inst-{i}", KIND_BASH)
+        # Oldest entries dropped; size stays at the cap.
+        assert patched_singleton.kind_for_instance("inst-0") is None
+        assert patched_singleton.kind_for_instance("inst-4") is None
+        assert patched_singleton.kind_for_instance(
+            f"inst-{INSTANCE_KIND_MAP_CAP + 4}"
+        ) == KIND_BASH
+
+    def test_note_instance_kind_rejects_invalid_kind(
+        self, patched_singleton
+    ):
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError):
+            patched_singleton.note_instance_kind("x", "bogus")
+
+    def test_chart_tools_records_child_instance_kind(self):
+        """Source pin: chart_tools records the spawned child
+        instance's kind after invoke_agent_and_wait returns (the
+        W-1 load-bearing line), alongside the retained ContextVar
+        residual lane."""
+        chart_src = (
+            Path(__file__).resolve().parent.parent
+            / "daemon" / "tools" / "chart_tools.py"
+        ).read_text()
+        assert "get_pid_registry().note_instance_kind(" in chart_src
+        assert "child_instance_id, KIND_CHART_RENDER" in chart_src
+        assert "if render_image and child_instance_id:" in chart_src
+        # Residual ContextVar lane retained + reset discipline kept.
+        assert "kind_hint_token = _PID_KIND_HINT.set(KIND_CHART_RENDER)" in chart_src
+        assert "_PID_KIND_HINT.reset(kind_hint_token)" in chart_src
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# W-2 — sanitizer redaction (list + string branches)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestW2SanitizerRedaction:
+    """W-2 (P2 review): the sanitizer must neutralize BOTH
+    secret-bearing shapes — env-assignment argv/string tokens and
+    secret-marker tokens — because resource_pid_map.command /
+    .detail persist OUTSIDE the secrets-P2 scrub seams."""
+
+    CANARY_LIST = "sk-canary-list-1234567890"
+    CANARY_STR = "sk-canary-string-0987654321"
+
+    def test_list_env_assign_token_redacted(
+        self, patched_singleton, proc_root, caplog
+    ):
+        """Canary as an argv LIST token (``cmd KEY=value …`` idiom):
+        the KEY= prefix survives, the value never persists (row or
+        logs)."""
+        from daemon.tools.bash import bash
+
+        async def _run():
+            await bash.coroutine(
+                command=["echo", f"OPENAI_API_KEY={self.CANARY_LIST}"],
+                timeout=5,
+                instance_id="w2-list",
+            )
+
+        with caplog.at_level("DEBUG"):
+            asyncio.run(_run())
+        hist = patched_singleton.drain_history()
+        assert len(hist) == 1
+        e = hist[0]
+        joined = f"{e.command or ''} {e.detail or ''}"
+        assert self.CANARY_LIST not in joined, f"argv leak: {joined!r}"
+        assert "OPENAI_API_KEY=<redacted>" in joined, joined
+        assert self.CANARY_LIST not in caplog.text, "argv leak into logs"
+
+    def test_string_head_of_line_env_assign_stripped(
+        self, patched_singleton, proc_root, caplog
+    ):
+        """Canary in a head-of-line KEY=value STRING token (the
+        exact class the old ``split(None, 1)[0]`` persisted): argv0
+        becomes the real command; neither row nor log carries the
+        canary — INCLUDING the detail's argv0 echo."""
+        from daemon.tools.bash import bash
+
+        async def _run():
+            res = await bash.coroutine(
+                command=f"OPENAI_API_KEY={self.CANARY_STR} echo hi",
+                timeout=5,
+                instance_id="w2-string",
+            )
+            assert "EXIT CODE: 0" in res  # the command still ran fine
+
+        with caplog.at_level("DEBUG"):
+            asyncio.run(_run())
+        hist = patched_singleton.drain_history()
+        assert len(hist) == 1
+        e = hist[0]
+        joined = f"{e.command or ''} {e.detail or ''}"
+        assert self.CANARY_STR not in joined, f"head-of-line leak: {joined!r}"
+        assert e.command == "echo", f"argv0 should be 'echo': {e.command!r}"
+        assert "argv0='echo'" in (e.detail or ""), e.detail
+        assert self.CANARY_STR not in caplog.text, "head-of-line leak into logs"
+
+    def test_string_all_assignments_fall_back_to_redacted_first(
+        self, patched_singleton
+    ):
+        """An all-env-assignments string keeps a (redacted)
+        fingerprint instead of an empty command."""
+        from daemon.tools.bash import _sanitize_command_for_registry
+
+        cmd, detail = _sanitize_command_for_registry(
+            f"FOO={self.CANARY_STR}", env=None
+        )
+        assert cmd == "FOO=<redacted>"
+        assert self.CANARY_STR not in detail
+
+    def test_marker_token_redacted(self, patched_singleton, proc_root):
+        """A token carrying a __ENS_SECRET__ marker persists as
+        ``<redacted>`` — the marker id never reaches the row."""
+        from daemon.tools.bash import bash
+
+        marker_id = "3f2b8c1a-9d4e-4f6a-b7c8-d1e2f3a4b5c6"
+        marker = f"__ENS_SECRET__{marker_id}__"
+
+        async def _run():
+            await bash.coroutine(
+                command=["echo", marker, "plain-arg"],
+                timeout=5,
+                instance_id="w2-marker",
+            )
+
+        asyncio.run(_run())
+        hist = patched_singleton.drain_history()
+        assert len(hist) == 1
+        e = hist[0]
+        joined = f"{e.command or ''} {e.detail or ''}"
+        assert marker_id not in joined, f"marker id leak: {joined!r}"
+        assert "<redacted>" in joined
+
+    def test_kms_marker_token_redacted(self, patched_singleton):
+        """KMS-Lite markers (LANE-1 / LANE-2 shapes) never persist."""
+        from daemon.tools.bash import _sanitize_command_for_registry
+
+        for marker in (
+            "__KMS_REF__KMS_HANDLE_123e4567-e89b-12d3-a456-426614174000__",
+            "__KMS_ENV__OPENAI_API_KEY__",
+        ):
+            cmd, detail = _sanitize_command_for_registry(
+                ["run", marker], env=None
+            )
+            joined = f"{cmd} {detail}"
+            assert marker not in joined, joined
+            assert "<redacted>" in joined
+
+    def test_plain_argv_still_persists(self):
+        """The redaction is surgical — a clean fingerprint is kept."""
+        from daemon.tools.bash import _sanitize_command_for_registry
+
+        cmd, _ = _sanitize_command_for_registry(
+            ["mmdc", "-i", "in.mmd", "-o", "out.png"], env=None
+        )
+        assert cmd == "mmdc -i in.mmd -o out.png"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# W-3 — mcp child claim-once + args=[] guard
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestW3McpClaimOnce:
+    """W-3 (P2 review): concurrent same-command sessions must get
+    DISJOINT registrations (first claim wins), and an args=[]
+    server must match NOTHING (never wildcard by basename)."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_claim_ledger(self):
+        import daemon.mcp.stdio_wrapper as sw
+
+        sw._claimed_children.clear()
+        yield
+        sw._claimed_children.clear()
+
+    def test_concurrent_same_command_sessions_disjoint(
+        self, patched_singleton, tmp_path
+    ):
+        import types
+        from contextlib import asynccontextmanager
+        from unittest.mock import patch
+
+        import daemon.mcp.stdio_wrapper as sw
+
+        proc = tmp_path / "proc"
+        _write_proc_stat(proc, 85001, ppid=os.getpid(), starttime=90001,
+                         comm="uvx")
+        (proc / "85001" / "cmdline").write_bytes(
+            b"\x00".join([b"uvx", b"mcp-server-shared"]) + b"\x00"
+        )
+        patched_singleton._proc_root = proc
+        orig_proc_root = sw._PROC_ROOT
+        sw._PROC_ROOT = proc
+
+        @asynccontextmanager
+        async def fake_client(server_params):
+            yield ("r", "w")
+
+        async def _run():
+            params = types.SimpleNamespace(
+                command="uvx", args=["mcp-server-shared"]
+            )
+            with patch.object(sw.mcp, "stdio_client", fake_client):
+                a = sw.TaskScopedStdioClient(
+                    params, instance_id="sess-a", server_name="sa"
+                )
+                b = sw.TaskScopedStdioClient(
+                    params, instance_id="sess-b", server_name="sb"
+                )
+                await a.__aenter__()
+                await b.__aenter__()
+                # DISJOINT: the first claim owns the child; the
+                # second session registered nothing.
+                assert a.registered_child_pids == [(85001, 90001)]
+                assert b.registered_child_pids == [], (
+                    "double-claim: both sessions registered the same pid"
+                )
+                assert patched_singleton.live_count() == 1
+                await a.__aexit__(None, None, None)
+                # The still-live child was NOT falsely exited by the
+                # sibling's close... it WAS legitimately exited by its
+                # OWNER's close; the point is: exactly ONE exit-mark.
+                assert patched_singleton.live_count() == 0
+                await b.__aexit__(None, None, None)
+
+        try:
+            asyncio.run(_run())
+        finally:
+            sw._PROC_ROOT = orig_proc_root
+        hist = patched_singleton.drain_history()
+        # Exactly ONE history row for the shared child — the old
+        # double-registration produced a false exit + a missing live
+        # row on the first close.
+        assert len(hist) == 1, f"expected 1 exit row, got {len(hist)}"
+        assert hist[0].exit_kind == "exit"
+        assert patched_singleton.live_count() == 0
+
+    def test_args_empty_server_never_matches(self, patched_singleton, tmp_path):
+        """args=[] configured ⇒ NO match even when a same-basename
+        child of the daemon exists (skip, never wildcard)."""
+        import types
+        from contextlib import asynccontextmanager
+        from unittest.mock import patch
+
+        import daemon.mcp.stdio_wrapper as sw
+
+        proc = tmp_path / "proc"
+        _write_proc_stat(proc, 86001, ppid=os.getpid(), starttime=91001,
+                         comm="uvx")
+        (proc / "86001" / "cmdline").write_bytes(
+            b"\x00".join([b"uvx", b"mcp-server-noargs"]) + b"\x00"
+        )
+        patched_singleton._proc_root = proc
+        orig_proc_root = sw._PROC_ROOT
+        sw._PROC_ROOT = proc
+
+        # Scan level: empty args never match.
+        assert sw.scan_mcp_child_pids(
+            command="uvx", args=[], proc_root=proc,
+            parent_pid=os.getpid(),
+        ) == []
+        assert sw.scan_mcp_child_pids(
+            command="uvx", args=None, proc_root=proc,
+            parent_pid=os.getpid(),
+        ) == []
+
+        # Wrapper level: an args-less server stamps nothing.
+        @asynccontextmanager
+        async def fake_client(server_params):
+            yield ("r", "w")
+
+        async def _run():
+            params = types.SimpleNamespace(command="uvx", args=[])
+            with patch.object(sw.mcp, "stdio_client", fake_client):
+                cm = sw.TaskScopedStdioClient(params)
+                await cm.__aenter__()
+                assert patched_singleton.live_count() == 0, (
+                    "args=[] server wildcard-matched a same-basename child"
+                )
+                await cm.__aexit__(None, None, None)
+
+        try:
+            asyncio.run(_run())
+        finally:
+            sw._PROC_ROOT = orig_proc_root
+        assert patched_singleton.drain_history() == []

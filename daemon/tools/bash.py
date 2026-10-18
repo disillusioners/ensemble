@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import tempfile
@@ -58,6 +59,20 @@ logger = logging.getLogger(__name__)
 # around its ``invoke_agent_and_wait`` call (a ContextVar token is
 # restored in the finally block so the hint does not outlive the
 # chart call).
+#
+# RESIDUAL ROLE (W-1, P2 review): the ContextVar hint CANNOT carry
+# the chart_render kind across the production graph boundary — the
+# charter's graph executes on a worker THREAD (worker_pool →
+# task_processor → main_loop_bridge via run_coroutine_threadsafe),
+# which copies the worker thread's FRESH context, so a hint set in
+# the chart tool's asyncio context never reaches the charter's
+# bash stamps. The load-bearing production path is the
+# INSTANCE-KEYED map on the pid registry
+# (``chart_tools`` records ``{child_instance_id → 'chart_render'}``
+# after ``invoke_agent_and_wait`` returns; the bash stamp site
+# consults it via :func:`_resolve_pid_kind`). The ContextVar
+# remains for direct in-context callers (tests; any future caller
+# that invokes bash inside the setter's own context).
 _PID_KIND_HINT: ContextVar[Optional[str]] = ContextVar(
     "ens_bash_pid_kind_hint", default=None
 )
@@ -68,6 +83,78 @@ def _current_pid_kind() -> str:
     return _PID_KIND_HINT.get() or KIND_BASH
 
 
+def _resolve_pid_kind(instance_id: Optional[str]) -> str:
+    """Resolve the pid-registry ``kind`` for a bash stamp (W-1).
+
+    Ladder: ContextVar hint (in-context callers) → the registry's
+    instance-keyed map (production chart lane — thread-proof) →
+    ``KIND_BASH``. Resolved at STAMP time against the live
+    singleton so the test fixture's patched registry is honoured.
+    """
+    hint = _PID_KIND_HINT.get()
+    if hint:
+        return hint
+    mapped = get_pid_registry().kind_for_instance(instance_id)
+    if mapped:
+        return mapped
+    return KIND_BASH
+
+
+# ── W-2 (P2 review) — sanitizer redaction primitives ────────────────────────
+#
+# ``resource_pid_map.command`` / ``.detail`` are persisted OUTSIDE
+# the secrets-P2 scrub seams (the scrub covers tool ARGS + results
+# + queue rows; the pid-registry stamp is a derived observability
+# lane), so the sanitizer itself must neutralize the two
+# secret-bearing shapes that reach it:
+#
+#   * env-assignment tokens (``KEY=value``) — the head-of-line
+#     ``OPENAI_API_KEY=sk-... curl …`` idiom puts the KEY=value
+#     pair in the FIRST token, which is exactly what the old
+#     string-mode ``split(None, 1)[0]`` persisted; list-mode argv
+#     tokens can carry the same shape via ``env CMD …``;
+#   * ensemble secret markers (``__ENS_SECRET__<uuid4>__``, FROZEN
+#     shape — daemon/services/secret_service.py) and KMS-Lite
+#     markers (``__KMS_REF__…__`` / ``__KMS_ENV__…__``) riding
+#     inside any token.
+#
+# The KEY= prefix is KEPT on redacted env-assignments (forensic
+# correlation without material — same discipline as the
+# env_keys-only detail).
+_ENV_ASSIGN_TOKEN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SECRET_MARKER_TOKEN_PREFIXES = (
+    "__ENS_SECRET__",
+    "__KMS_REF__",
+    "__KMS_ENV__",
+)
+# Belt: sweep well-formed ENS markers out of any JOINED string
+# (covers markers embedded mid-token in string-mode argv0).
+_SECRET_MARKER_SEARCH_RE = re.compile(
+    r"__ENS_SECRET__[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}"
+    r"-[0-9a-f]{4}-[0-9a-f]{12}__"
+)
+
+
+def _redact_registry_token(token: str) -> str:
+    """Redact one argv token for the pid-registry stamp (W-2).
+
+    Marker-carrying tokens → ``<redacted>`` entirely; env-assignment
+    tokens → ``KEY=<redacted>`` (KEY kept, value dropped); anything
+    else passes through unchanged.
+    """
+    if token.startswith(_SECRET_MARKER_TOKEN_PREFIXES):
+        return "<redacted>"
+    m = _ENV_ASSIGN_TOKEN_RE.match(token)
+    if m:
+        return f"{token[: m.end()]}<redacted>"
+    return token
+
+
+def _strip_secret_markers(text: str) -> str:
+    """Belt-and-braces marker sweep over a joined persisted string."""
+    return _SECRET_MARKER_SEARCH_RE.sub("<redacted>", text)
+
+
 def _sanitize_command_for_registry(
     command: "str | List[str]",
     env: Optional[Dict[str, str]],
@@ -76,18 +163,31 @@ def _sanitize_command_for_registry(
 
     D14 alignment (secrets): ``resource_pid_map.command`` MUST NEVER
     carry secret-bearing text — markers, plaintext keys, raw env
-    values. The sanitizer returns the argv-shape ONLY:
+    values. The sanitizer returns the argv-shape ONLY, with W-2
+    redaction applied:
 
       * list command → ``"<argv0> <argv1> …"`` truncated to a small
         budget (full argv is recoverable from the agent log lane;
-        the registry just needs the fingerprint).
-      * string command → ``"<argv0>"`` only — the rest of the shell
-        line could be ``KEY=value …`` prefixes we never want to
-        persist.
+        the registry just needs the fingerprint). Each token passes
+        :func:`_redact_registry_token` — env-assignment-shaped argv
+        tokens (``env KEY=value CMD`` idiom) persist as
+        ``KEY=<redacted>`` and marker-carrying tokens persist as
+        ``<redacted>`` (argv IS a tool-call arg — a secret in an
+        argv token would otherwise land in resource_pid_map
+        outside the secrets-P2 scrub seams).
+      * string command → the first NON-env-assignment token —
+        leading ``KEY=value …`` prefixes are stripped BEFORE taking
+        argv[0] (the old ``split(None, 1)[0]`` persisted the
+        head-of-line ``OPENAI_API_KEY=sk-...`` pair itself — the
+        exact class the docstring excluded). An all-assignments
+        string falls back to the REDACTED first token so the row
+        still carries a fingerprint.
 
     The ``detail`` column carries the full shape (length, argv
     count, env overlay KEYS only — never values) so forensics can
-    correlate without leaking material.
+    correlate without leaking material; the embedded ``argv0=``
+    echo is the SANITIZED token (W-2: the old shape echoed the raw
+    head-of-line KEY=value pair into ``detail``).
 
     Args:
         command: The bash input (str or list[str]).
@@ -98,13 +198,21 @@ def _sanitize_command_for_registry(
     """
     cmd_budget = 256
     if isinstance(command, list):
-        argv: Sequence[str] = command
+        argv: Sequence[str] = [_redact_registry_token(str(t)) for t in command]
         cmd_str = " ".join(argv[:8])
         if len(cmd_str) > cmd_budget:
             cmd_str = cmd_str[: cmd_budget - 3] + "..."
-        shape_detail = f"list argv={len(argv)}"
+        shape_detail = f"list argv={len(command)}"
     else:
-        first_token = command.split(None, 1)[0] if command else ""
+        tokens = command.split() if command else []
+        body = tokens
+        while body and _ENV_ASSIGN_TOKEN_RE.match(body[0]):
+            body = body[1:]
+        first_raw = (
+            body[0] if body
+            else (tokens[0] if tokens else "")
+        )
+        first_token = _redact_registry_token(first_raw)
         cmd_str = first_token[:cmd_budget]
         shape_detail = (
             f"string len={len(command)} argv0={first_token[:64]!r}"
@@ -119,7 +227,12 @@ def _sanitize_command_for_registry(
             env_part += f" (+{len(keys) - 16} more)"
     else:
         env_part = ""
-    return cmd_str, shape_detail + env_part
+    # Final belt: no well-formed ENS marker survives into either
+    # persisted string (covers mid-token markers in string mode).
+    return (
+        _strip_secret_markers(cmd_str),
+        _strip_secret_markers(shape_detail + env_part),
+    )
 
 
 def _read_proc_start_time(pid: int) -> Optional[int]:
@@ -271,6 +384,16 @@ class BashProcessRegistry:
             ]
             if not self._entries[instance_id]:
                 del self._entries[instance_id]
+
+    def tracked_count(self) -> int:
+        """Total tracked subprocess rows across all instances (probe).
+
+        N-1: the zero-monotonic-growth test asserts BOTH registries
+        return to zero after successful bash calls — this is the
+        cheap counter for the old registry (the pid_registry twin
+        is :meth:`PidRegistry.live_count`).
+        """
+        return sum(len(v) for v in self._entries.values())
 
     async def cleanup_instance(self, instance_id: str) -> int:
         """Kill all tracked process groups for one instance."""
@@ -663,7 +786,15 @@ async def bash(
                 _pid_registry_register(
                     pid=proc.pid,
                     start_time=bash_start_time_jiffies,
-                    kind=_current_pid_kind(),
+                    # W-1: resolve via the instance-keyed ladder
+                    # (ContextVar hint → registry map → 'bash').
+                    # In the production topology the ContextVar set
+                    # by the chart tool never crosses the worker-
+                    # thread boundary, so the registry map (keyed
+                    # by THIS instance_id == the charter child) is
+                    # what makes chart renders stamp
+                    # kind='chart_render'.
+                    kind=_resolve_pid_kind(instance_id),
                     instance_id=instance_id,
                     pgid=pgid,
                     command=sanitized_command,
@@ -721,6 +852,15 @@ async def bash(
         # read returns None and we fall back to the spawn-time
         # floor captured above (VmHWM is monotonic, so the spawn
         # floor is the tightest lower bound we can guarantee).
+        #
+        # N-3 (P2 review, comment-only caveat): that post-wait read
+        # ~always MISSES in practice — wait() reaps the child before
+        # this line runs, so /proc/<pid>/status is gone and the
+        # column lands on the SPAWN-TIME floor. Treat
+        # ``peak_rss_kb`` as an honest UNDER-REPORT (a lower bound
+        # near the exec floor), never a steady-state peak; a true
+        # VmHWM would need pre-reap polling the bash lane does not
+        # do. No behavior change.
         if not timed_out and instance_id is not None and proc is not None:
             post_wait_peak_kb = _read_proc_vm_hwm_kb(proc.pid)
             peak_kb_for_exit = (
@@ -735,6 +875,24 @@ async def bash(
                 exit_kind=EXIT_KIND_SUCCESS,
                 peak_rss_kb=peak_kb_for_exit,
             )
+            # N-1 (P2 review): the success arm must ALSO release the
+            # OLD BashProcessRegistry entry — before this line the
+            # pid_registry was marked but the (instance_id, pid,
+            # pgid) killpg-tracking entry leaked one row per
+            # successful call until cleanup_instance. Mirror of the
+            # timeout arm's unregister (which already runs after
+            # _kill_process). Best-effort: a failure here must not
+            # break the bash lane's return path.
+            try:
+                await get_bash_process_registry().unregister(
+                    instance_id, proc.pid
+                )
+            except Exception as exc:
+                logger.warning(
+                    "bash: BashProcessRegistry.unregister failed on the "
+                    "success arm (instance=%.8s pid=%d): %s: %s",
+                    instance_id, proc.pid, type(exc).__name__, exc,
+                )
 
         # Read captured output from the temp files (best-effort: also try on
         # timeout to surface whatever was written before the kill).
