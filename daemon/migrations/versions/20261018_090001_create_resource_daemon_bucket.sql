@@ -47,7 +47,13 @@
 CREATE TABLE IF NOT EXISTS resource_daemon_bucket (
     -- SQLite-friendly autoincrement serial. PG mirror uses BIGSERIAL.
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    bucket_ts TEXT NOT NULL UNIQUE,
+    -- Naive-UTC ISO-8601 (D9). Compound UNIQUE with interval_s
+    -- allows raw (30) + minute roll-up (60) + hour roll-up (3600)
+    -- rows to coexist; the 4-table spec (§2.5) keeps them in one
+    -- table. The PK remains the autoincrement id; the UNIQUE index
+    -- ``uq_resource_daemon_bucket_ts_interval`` is the idempotency
+    -- guarantee for retry / overlap-safe writes.
+    bucket_ts TEXT NOT NULL,
     interval_s INTEGER,
     rss_kb INTEGER,
     pss_kb INTEGER,
@@ -75,6 +81,13 @@ CREATE TABLE IF NOT EXISTS resource_daemon_bucket (
     missed_samples INTEGER
 );
 
+-- Compound UNIQUE keeps the 4-table spec while letting the three
+-- tiers (raw / minute / hour) coexist. The PG mirror at
+-- SQLModel.metadata.create_all emits the same name.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_resource_daemon_bucket_ts_interval
+    ON resource_daemon_bucket (bucket_ts, interval_s);
+
 -- DOWN
 
+DROP INDEX IF EXISTS uq_resource_daemon_bucket_ts_interval;
 DROP TABLE IF EXISTS resource_daemon_bucket;

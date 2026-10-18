@@ -15,6 +15,7 @@ wiring, T7) composes the sampler + flusher + ring into a single
 lifespan-managed subsystem.
 """
 
+from .flusher import FLUSH_BUFFER_CAP, Flusher, FlusherCounters
 from .proc_readers import (
     ChildSnapshot,
     CgroupCpu,
@@ -28,6 +29,14 @@ from .proc_readers import (
     read_proc_snapshot,
 )
 from .ring import TierRing, default_ring_sizes
+from .rollup import (
+    RetentionPolicy,
+    cutoff_iso,
+    retention_cutoffs,
+    rollup_to_hour,
+    rollup_to_minute,
+    sweep_query,
+)
 from .sampler import (
     LADDER_DEFAULT,
     LADDER_LEVELS,
@@ -59,4 +68,15 @@ __all__ = [
     "RE_PROMOTE_CLEAN_TICKS",
     "Sampler",
     "SamplerCounters",
+    # flusher
+    "FLUSH_BUFFER_CAP",
+    "Flusher",
+    "FlusherCounters",
+    # rollup
+    "RetentionPolicy",
+    "cutoff_iso",
+    "retention_cutoffs",
+    "rollup_to_hour",
+    "rollup_to_minute",
+    "sweep_query",
 ]

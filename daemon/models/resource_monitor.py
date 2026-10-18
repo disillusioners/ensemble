@@ -65,23 +65,28 @@ class ResourceDaemonBucket(SQLModel, table=True):
     __tablename__ = "resource_daemon_bucket"
 
     __table_args__ = (
-        # Architecture §2.4 T1 indexes: ``UNIQUE(bucket_ts)`` only.
-        # SQLModel emits the UNIQUE index when we set
-        # ``unique=True`` on the column below (Field-level), so the
-        # 3-site name parity check is enforced by byte-comparing the
-        # model + .sql index declarations in the storage test pack.
+        # Architecture §2.4 T1 indexes: UNIQUE(bucket_ts, interval_s)
+        # so raw (interval_s=30) + minute roll-up (60) + hour roll-up
+        # (3600) coexist in the same table — the spec keeps the table
+        # count at 4 (§2.5 arithmetic note). The 3-site lockstep
+        # (D7) byte-identity is checked via the storage test pack.
+        Index(
+            "uq_resource_daemon_bucket_ts_interval",
+            "bucket_ts", "interval_s",
+            unique=True,
+        ),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
 
     # Naive-UTC TIMESTAMP per D9. NOT NULL — every bucket has a
-    # well-defined wall-clock anchor. The companion .sql migration
-    # declares the column as ``TEXT`` (ISO-8601 naive digits) for
-    # dialect parity; the Python side stamps via
-    # ``daemon.services.timestamps.now_utc_naive``.
+    # well-defined wall-clock anchor. The compound UNIQUE index
+    # ``uq_resource_daemon_bucket_ts_interval`` on (bucket_ts,
+    # interval_s) allows raw (30s) + minute roll-up (60s) + hour
+    # roll-up (3600s) rows to coexist in this table.
     bucket_ts: str = Field(
-        sa_column=Column("bucket_ts", Text, nullable=False, unique=True),
-        description="Naive-UTC ISO-8601 string. UNIQUE — one bucket per tick.",
+        sa_column=Column("bucket_ts", Text, nullable=False),
+        description="Naive-UTC ISO-8601 string. UNIQUE-with-interval_s.",
     )
 
     interval_s: Optional[int] = Field(default=None)
