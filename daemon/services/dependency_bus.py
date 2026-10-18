@@ -953,8 +953,9 @@ class DependencyBus:
         # block: stamp the parent's _parent_errored flag when the
         # child errored. Sticky per parent ("any error → parent
         # error") and consulted by the finalize path in
-        # JobFeedbackObserver._process_event. Plain dict writes,
-        # atomic in CPython, no lock needed (same as emit_terminal).
+        # JobFeedbackObserver._process_event. Error-state writes on
+        # both emit seams route through _record_child_error_state
+        # under _error_state_guard (same as emit_terminal).
         # F-1 gate (durability-f1-f2 / phase1, plan §1): same
         # truthy-error gate as :meth:`emit_terminal` — see
         # the ownership block in
