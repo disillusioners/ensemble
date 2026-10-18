@@ -107,7 +107,15 @@ class DeepScanner:
         start = self._cursor % len(keys)
         self._cursor = (start + 1) % len(keys)
         instance_id = keys[start]
-        entry: Any = instances[instance_id]
+        # N-2 (P2 review): dict access sits BEFORE the walk-try, so a
+        # manager-cache eviction racing the sampler raised KeyError
+        # and discarded the WHOLE tick's attribution. ``.get`` + skip
+        # degrades a single missing instance to a no-op — the cursor
+        # has already advanced, so the scan retries on a later tick
+        # by the natural round-robin (documented above).
+        entry: Any = instances.get(instance_id)
+        if entry is None:
+            return None
         agent_dir: Optional[str] = None
         graph: Any = entry
         if isinstance(entry, tuple) and entry:

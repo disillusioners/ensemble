@@ -202,6 +202,43 @@ class TestTickPacing:
         assert scanner.scan_next(fresh).instance_id == "f1"
 
 
+class TestW2EvictionRace:
+    """N-2 (P2 review): the keyed dict access in ``scan_next`` sat
+    OUTSIDE the walk-try — a manager-cache eviction racing the
+    sampler raised KeyError and discarded the WHOLE tick's
+    attribution. A missing instance must degrade to a skip (None),
+    with the cursor already advanced so the scan retries later."""
+
+    def test_missing_instance_degrades_to_skip(self):
+        scanner = DeepScanner()
+
+        class _EvictingMapping:
+            """keys() includes the id; get() finds nothing — the
+            eviction raced between the caller's snapshot and the
+            dict access."""
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def keys(self):
+                return self._inner.keys()
+
+            def get(self, key, default=None):
+                return None
+
+            def __getitem__(self, key):
+                return self._inner[key]
+
+        scanner.scan_next(_instances("warm-1"))  # cursor mid-stream
+        result = scanner.scan_next(_EvictingMapping(_instances("gone-1")))
+        assert result is None, "evicted instance must skip, not raise"
+        assert scanner.scans_completed == 1  # unchanged by the skip
+        # The scanner survives: the next REAL tick still reconciles.
+        follow = scanner.scan_next(_instances("fresh-1"))
+        assert follow is not None
+        assert scanner.scans_completed == 2
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Correction lands in the charge registry (T4 output contract)
 # ──────────────────────────────────────────────────────────────────────────

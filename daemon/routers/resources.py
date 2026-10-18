@@ -39,6 +39,13 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import text
 
+# C-1 hardening parity — the router's first-boot tolerances use the
+# SAME narrowed RELATION-missing matcher as the flusher (the bare
+# "does not exist" substring also matches PG column errors 42703).
+from daemon.services.resource_monitor.flusher import (
+    is_missing_relation_error as _is_missing_relation_error,
+)
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/resources", tags=["resources"])
@@ -280,12 +287,35 @@ async def get_live(request: Request) -> dict:
             ),
             "coverage_pct": round(float(attrib.get("coverage_pct") or 0.0), 4),
         }
-        instances_block = list(
-            getattr(sampler, "last_instance_view", None) or []
-        )[:50]
-        children_block = list(
-            getattr(sampler, "last_children_view", None) or []
-        )[:50]
+        instances_block = [
+            dict(row) for row in (
+                getattr(sampler, "last_instance_view", None) or []
+            )[:50]
+        ]
+        children_block = [
+            dict(row) for row in (
+                getattr(sampler, "last_children_view", None) or []
+            )[:50]
+        ]
+
+        # W-5 (P2 review): the landed FE types
+        # (frontend/src/app/models/resources.models.ts) declare
+        # ``agent`` / ``in_flight_tasks`` / ``cpu_pct`` NON-null.
+        # The sampler legitimately emits nulls (``agent`` None for
+        # charge-only D11 instances, ``in_flight_tasks`` None on a
+        # provider degrade, ``cpu_pct`` None on first sight before
+        # a delta anchor exists) — coalesce HERE at the router so
+        # the wire shape matches the FE contract. The copies above
+        # keep the sampler's cached RAM views honest (None = "not
+        # known"); the /live wire is the presentation seam.
+        for row in instances_block:
+            if row.get("agent") is None:
+                row["agent"] = ""
+            if row.get("in_flight_tasks") is None:
+                row["in_flight_tasks"] = 0
+        for row in children_block:
+            if row.get("cpu_pct") is None:
+                row["cpu_pct"] = 0.0
 
         return {
             "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
@@ -429,6 +459,14 @@ def _read_instances_active(
     ≈369 k rows — beyond the bound the counts under-count; the DB
     remains the honest durable record). Missing table ⇒ ``{}``
     (fresh boot / P1-era data).
+
+    W-4: the LIMIT is paired with ``ORDER BY bucket_ts DESC`` —
+    without an ORDER BY the row order is unspecified (SQLite
+    rowid / PG heap order), so past the cap the DROPPED rows were
+    the NEWEST buckets and ``instances_active`` read 0 at the
+    newest end. DESC keeps the newest buckets inside the bound
+    (the documented under-count then applies only to the OLDEST
+    end, which is also what the FE timeline renders first-cut).
     """
     from datetime import timedelta
 
@@ -443,13 +481,12 @@ def _read_instances_active(
                 text(
                     "SELECT bucket_ts, instance_id FROM "
                     "resource_instance_sample WHERE bucket_ts >= :cutoff "
-                    "LIMIT 20000"
+                    "ORDER BY bucket_ts DESC LIMIT 20000"
                 ),
                 {"cutoff": cutoff},
             ).fetchall()
     except Exception as exc:
-        err = str(exc).lower()
-        if "no such table" in err or "does not exist" in err:
+        if _is_missing_relation_error(exc):
             return {}
         raise
     buckets: dict[str, set[str]] = {}
@@ -498,8 +535,7 @@ def _read_history_points(
                 {"interval_s": interval_s, "cutoff": cutoff},
             ).fetchall()
     except Exception as exc:
-        err = str(exc).lower()
-        if "no such table" in err or "does not exist" in err:
+        if _is_missing_relation_error(exc):
             return []
         raise
     out: list[dict] = []

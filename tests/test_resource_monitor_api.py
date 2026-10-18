@@ -465,8 +465,10 @@ class TestLiveHonesty:
 
     def test_children_block_reflects_registry(self, app_state, p2_env):
         """children[] comes from the pid registry (kind/name/rss from
-        the entry + the synthetic /proc read), cpu_pct None on first
-        sight (honest), server-scoped mcp children included."""
+        the entry + the synthetic /proc read), cpu_pct COALESCED to
+        0.0 on first sight (W-5 — the FE types are non-null; the
+        router coalesces, the sampler's RAM view stays honest),
+        server-scoped mcp children included."""
         _charge_mod, registry = p2_env
         proc = app_state[1]
         child = proc / "8791"
@@ -498,7 +500,9 @@ class TestLiveHonesty:
         assert c["pid"] == 8791
         assert c["kind"] == "mcp_child"
         assert c["name"] == "context7"
-        assert c["cpu_pct"] is None  # first sight — no invented estimate
+        # W-5: coalesced at the router — first sight None → 0.0
+        # (the FE contract is non-null; the sampler view keeps None).
+        assert c["cpu_pct"] == 0.0
         assert c["rss_mb"] == 4.0
 
     def test_history_instances_active_real(self, app_state, p2_env):
@@ -534,3 +538,141 @@ class TestLiveHonesty:
             "unattributed_mb": 0,
             "coverage_pct": 0.0,
         }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# P2 review batch — W-4 (newest-buckets order) + W-5 (coalesced nulls)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestW4InstancesActiveNewestFirst:
+    """W-4: ``_read_instances_active`` bounded at 20 000 rows — the
+    LIMIT must be paired with ``ORDER BY bucket_ts DESC`` so past
+    the cap the DROPPED rows are the OLDEST, never the newest
+    (un-ordered LIMIT reads SQLite rowid order = insertion order =
+    oldest-first ⇒ instances_active read 0 at the newest end)."""
+
+    def test_newest_buckets_survive_the_cap(self, app_state):
+        from datetime import datetime, timedelta, timezone
+
+        from sqlalchemy import text as _text
+
+        from daemon.routers.resources import (
+            _floor_naive_iso,
+            _read_instances_active,
+        )
+
+        _app, _proc, _cg, engine = app_state
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        old_ts = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        new_ts = (now - timedelta(seconds=10)).strftime("%Y-%m-%d %H:%M:%S")
+
+        rows = [
+            # 20 000 OLD rows FIRST (insertion order = the old
+            # un-ordered read order) — one persistent instance.
+            (old_ts, "inst-old") for _ in range(20000)
+        ]
+        # 3 NEWEST rows LAST — the rows the old code dropped.
+        rows += [
+            (new_ts, "inst-new-1"),
+            (new_ts, "inst-new-2"),
+            (new_ts, "inst-new-3"),
+        ]
+        with engine.begin() as conn:
+            conn.execute(
+                _text(
+                    "INSERT INTO resource_instance_sample "
+                    "(bucket_ts, instance_id, estimated) "
+                    "VALUES (:ts, :iid, 1)"
+                ),
+                [{"ts": ts, "iid": iid} for ts, iid in rows],
+            )
+
+        result = _read_instances_active(engine, "raw", 24 * 3600)
+        newest_bucket = _floor_naive_iso(new_ts, 30)
+        assert result.get(newest_bucket) == 3, (
+            f"newest bucket lost past the cap (W-4): "
+            f"buckets={sorted(result.items())[:5]}… "
+            f"n={len(result)}"
+        )
+
+    def test_under_cap_still_counts_all_buckets(self, app_state):
+        from daemon.routers.resources import (
+            _floor_naive_iso,
+            _read_instances_active,
+        )
+
+        _app, _proc, _cg, engine = app_state
+        from sqlalchemy import text as _text
+        with engine.begin() as conn:
+            conn.execute(
+                _text(
+                    "INSERT INTO resource_instance_sample "
+                    "(bucket_ts, instance_id, estimated) VALUES (:ts, :iid, 1)"
+                ),
+                [
+                    {"ts": "2026-10-18 10:00:01", "iid": "a"},
+                    {"ts": "2026-10-18 10:00:20", "iid": "b"},
+                    {"ts": "2026-10-18 10:01:02", "iid": "a"},
+                ],
+            )
+        result = _read_instances_active(engine, "raw", 24 * 3600)
+        # Window robustness: if the box clock precedes the seeded ts
+        # the rows fall outside the cutoff — assert only when the
+        # window actually covers them.
+        if result:
+            b1 = _floor_naive_iso("2026-10-18 10:00:01", 30)
+            b2 = _floor_naive_iso("2026-10-18 10:01:02", 30)
+            assert result.get(b1) == 2
+            assert result.get(b2) == 1
+
+
+class TestW5CoalescedNullsForFE:
+    """W-5: the /live wire coalesces the sampler's honest nulls to
+    the FE contract types (agent '' / in_flight_tasks 0 / cpu_pct
+    0.0). The sampler's cached RAM views must stay None (the
+    coalescing works on COPIES)."""
+
+    def test_live_coalesces_null_fields(self, app_state, p2_env):
+        _charge_mod, _reg = p2_env
+        app, proc, cg, engine = app_state
+        mon = build_resource_monitor(
+            config_resource_monitor=ResourceMonitorConfig(),
+            engine=engine, proc_root=proc, cgroup_root=cg,
+        )
+        mon.enabled = True
+        app.state.resource_monitor = mon
+        # Seed the sampler's RAM views with the null shapes the
+        # sampler legitimately emits (charge-only D11 instance,
+        # provider-degrade in_flight_tasks, first-sight cpu_pct).
+        mon.sampler.last_instance_view = [
+            {
+                "instance_id": "charge-only",
+                "agent": None,
+                "estimated": True,
+                "charged_mb": 1.0,
+                "child_rss_mb": 0.0,
+                "children_n": 0,
+                "in_flight_tasks": None,
+            },
+        ]
+        mon.sampler.last_children_view = [
+            {
+                "pid": 4242,
+                "kind": "bash",
+                "name": "worker",
+                "cpu_pct": None,
+                "rss_mb": 12.5,
+            },
+        ]
+        client = TestClient(app)
+        j = client.get("/api/resources/live").json()
+        inst = j["instances"][0]
+        assert inst["agent"] == ""
+        assert inst["in_flight_tasks"] == 0
+        child = j["children"][0]
+        assert child["cpu_pct"] == 0.0
+        # The RAM views stay honest (coalescing on copies).
+        assert mon.sampler.last_instance_view[0]["agent"] is None
+        assert mon.sampler.last_instance_view[0]["in_flight_tasks"] is None
+        assert mon.sampler.last_children_view[0]["cpu_pct"] is None
