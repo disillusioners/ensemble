@@ -16,6 +16,18 @@ from langchain_core.tools import tool
 from ._tool_registry import register_tool_category
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.utils import invoke_agent_and_wait
+# D5 — chart_render kind hint. The bash subprocesses the charter
+# agent spawns (chromium / mmdc / shell helper) are bash children
+# of the charter's instance graph. Pushing
+# ``_PID_KIND_HINT.set(KIND_CHART_RENDER)`` around the
+# ``invoke_agent_and_wait`` call propagates the kind into the
+# charter's bash lane via the ContextVar copy — every bash child
+# the charter spawns during this window registers with
+# ``kind='chart_render'`` rather than the default
+# ``kind='bash'``. Token is restored in finally so the hint does
+# not leak into a sibling chart call or a follow-up bash tool
+# call from the same parent task.
+from daemon.tools.bash import KIND_CHART_RENDER, _PID_KIND_HINT
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -914,6 +926,25 @@ def create_chart_tools(manager: "InstanceManager", current_instance_id: str) -> 
             # (transport error, internal failure) must not escape the tool
             # coroutine into the LLM tool loop — collapse it to an ``Error:``
             # string, mirroring the ``None``-content branch below.
+            #
+            # D5 — chart_render stamp seam (pinned line: 918 —
+            # ``invoke_agent_and_wait(...)``). The ContextVar
+            # ``_PID_KIND_HINT`` rides the asyncio context through
+            # the ``invoke_agent_and_wait`` call; any bash
+            # subprocess the charter instance spawns during this
+            # window (chromium / mmdc / shell helpers) inherits
+            # the hint via the ContextVar copy mechanism and
+            # registers with ``kind='chart_render'`` rather than
+            # the default ``kind='bash'``. Only push the hint when
+            # ``render_image=True`` — the validate-only path
+            # (``render_image=False``) never spawns a render and
+            # tagging those bash children with the wrong kind
+            # would muddy the sampler attribution. Token is
+            # reset in finally so the hint does not leak into a
+            # sibling chart call.
+            kind_hint_token = None
+            if render_image:
+                kind_hint_token = _PID_KIND_HINT.set(KIND_CHART_RENDER)
             try:
                 result, child_instance_id = await invoke_agent_and_wait(
                     manager=manager,
@@ -927,6 +958,9 @@ def create_chart_tools(manager: "InstanceManager", current_instance_id: str) -> 
                 )
             except Exception as exc:
                 return f"Error: Charter agent invocation failed: {exc}"
+            finally:
+                if kind_hint_token is not None:
+                    _PID_KIND_HINT.reset(kind_hint_token)
 
             # Handle error results — ``invoke_agent_and_wait`` returns
             # ``"Error: ..."`` on failure / timeout when ``return_instance_id`` is

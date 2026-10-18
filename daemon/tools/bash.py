@@ -38,6 +38,7 @@ from daemon.services.resource_monitor.pid_registry import (
     EXIT_KIND_TIMEOUT,
     EXIT_KIND_UNKNOWN,
     KIND_BASH,
+    KIND_CHART_RENDER,
     get_pid_registry,
 )
 
