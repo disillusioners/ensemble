@@ -2165,7 +2165,6 @@ class JobFeedbackObserver:
                 == InstanceStatus.COMPLETED.value
             ):
                 _observ_default_status = "completed"
-                _observ_extra = db_result.result_summary
             elif (
                 db_result.terminal_status
                 == InstanceStatus.ERROR.value
@@ -2174,16 +2173,13 @@ class JobFeedbackObserver:
                 == InstanceStatus.FAILED.value
             ):
                 _observ_default_status = "failed"
-                _observ_extra = db_result.error_message
             elif (
                 db_result.terminal_status
                 == InstanceStatus.TERMINATED.value
             ):
                 _observ_default_status = "cancelled"
-                _observ_extra = None
             else:
                 _observ_default_status = None
-                _observ_extra = None
 
             for _work_id in candidate_work_ids:
                 if _observ_default_status is None:
@@ -2197,35 +2193,38 @@ class JobFeedbackObserver:
                                 default=_observ_default_status,
                             )
                         )
-                    # Failed carries the error string; everything else
-                    # carries the result summary (matches the
-                    # pre-N8 contract per ``notify_work_watchers``).
-                    _per_kind_extra = (
-                        db_result.error_message
-                        if _per_kind_status == "failed"
-                        else _observ_extra
-                    )
-                    # F2 (RC2 slot wiring, 2026-09-23): failed →
-                    # ``error=``; everything else → ``result_summary=``.
-                    # The pre-fix call passed ``_per_kind_extra``
-                    # POSITIONALLY — for a non-failed receipt that put
-                    # the mission instance's latest-assistant-message
-                    # into the third positional parameter (``error=``),
-                    # where caller-error precedence
-                    # (``effective_error = error if error is not None
-                    # else work_record.error``) masked the receipt's own
-                    # error in the rendered [JOB_EVENT] (incident
-                    # 2026-09-23: one shared assistant text on every
-                    # duplicate receipt; every task.error NULL).
+                    # D2 payload unification (2026-10-18,
+                    # fix/finalize-subtree-error-payload, RCA job
+                    # 6465391d): every receipt now threads
+                    # ``db_result.result_summary`` — the SAME
+                    # authoritative final payload the
+                    # JOB_COMPLETED event row publish carries
+                    # (both sourced from the finalize-time
+                    # ``_get_last_assistant_message_raw`` fetch).
+                    # Pre-fix, the failed lane passed ``error=``
+                    # ONLY, so ``notify_work_watchers`` fell back
+                    # to the WorkRecord resolver's
+                    # ``Task.result`` — the FROZEN FIRST-TURN
+                    # text for any multi-turn job (the incident's
+                    # terminal [JOB_EVENT] rendered task-16551's
+                    # first-turn text under ``Result:`` while the
+                    # event-publish lane carried the real report).
+                    # The failed receipt ALSO keeps its F2
+                    # ``error=`` slot (error string + payload are
+                    # both rendered by ``_build_event_envelope``).
+                    # Non-failed receipts no longer slip the error
+                    # string into the ``Result:`` slot (the
+                    # settled-on-errored-mission cosmetic skew).
                     if _per_kind_status == "failed":
                         _notified_count = await self._job_queue_service.notify_watchers(
                             _work_id, _per_kind_status,
-                            error=_per_kind_extra,
+                            error=db_result.error_message,
+                            result_summary=db_result.result_summary,
                         )
                     else:
                         _notified_count = await self._job_queue_service.notify_watchers(
                             _work_id, _per_kind_status,
-                            result_summary=_per_kind_extra,
+                            result_summary=db_result.result_summary,
                         )
                     # PP1 (2026-10-03, report-delivery-bug-family) —
                     # observer outbox fire site: terminal event with

@@ -2839,8 +2839,21 @@ class TestNotifySlotWiring:
         for c in calls:
             assert c.args[1] == "failed"
             assert c.kwargs.get("error") == "child exploded"
-            assert "result_summary" not in c.kwargs or (
-                c.kwargs.get("result_summary") is None
+            # D2 payload unification (2026-10-18,
+            # fix/finalize-subtree-error-payload, RCA job 6465391d):
+            # the failed receipt NOW threads the authoritative final
+            # payload alongside the error string. Pre-fix this pin
+            # asserted ``result_summary`` was absent — the clause
+            # starved the failed notice of the real payload and let
+            # the notify-side resolver fallback render the FROZEN
+            # first-turn task text under ``Result:`` (the task-16551
+            # incident). The RC2 core is unchanged: the assistant
+            # text must NEVER land in the ``error=`` slot, and the
+            # failure text must occupy it.
+            assert c.kwargs.get("result_summary") == "partial progress notes", (
+                "D2: the failed receipt must carry the authoritative "
+                "final payload in result_summary= (same source as the "
+                "JOB_COMPLETED event row publish)."
             )
 
     @pytest.mark.asyncio

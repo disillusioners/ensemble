@@ -557,6 +557,54 @@ async def notify_work_watchers(
             result_summary if result_summary is not None
             else work_record.result_summary
         )
+        # D2 resolver-fallback unification (2026-10-18,
+        # fix/finalize-subtree-error-payload — RCA job 6465391d).
+        # For TERMINAL receipts of JOB-kind work whose caller did
+        # NOT thread the payload, the resolver value is the linked
+        # FIRST task's ``Task.result`` — frozen at the first turn
+        # for any multi-turn job (the incident's terminal
+        # [JOB_EVENT] rendered task-16551's first-turn text under
+        # ``Result:`` while the event-publish lane carried the real
+        # report). Prefer the authoritative final payload — the
+        # instance's last assistant message via the SAME seam the
+        # event-publish lane uses
+        # (``_get_last_assistant_message_raw``, ``skip_repair=True``
+        # so no LLM repair fires on the notify path) — and fail
+        # OPEN to the resolver value when the seam is missing,
+        # raises, or yields nothing (pre-fix behavior preserved).
+        # Scope is deliberately narrow: TASK-kind records keep the
+        # resolver value (each task's own result is that work
+        # unit's correct payload), and non-terminal receipts are
+        # untouched (``in_progress`` etc. never reach this branch's
+        # callers with a stale class).
+        if (
+            result_summary is None
+            and effective_result is not None
+            and getattr(work_record, "kind", None) == "job"
+            and getattr(work_record, "instance_id", None)
+            and _is_terminal(status)
+        ):
+            _final_fetch = getattr(
+                instance_manager, "_get_last_assistant_message_raw", None
+            )
+            if callable(_final_fetch):
+                try:
+                    _final_payload = await _final_fetch(
+                        work_record.instance_id, skip_repair=True
+                    )
+                except Exception as seam_exc:  # noqa: BLE001 — fail-open
+                    logger.debug(
+                        "notify_work_watchers: authoritative-payload "
+                        "fetch raised for work_id=%s instance=%s — "
+                        "keeping resolver result_summary "
+                        "(fail-open): %s",
+                        work_id[:8],
+                        work_record.instance_id[:8],
+                        seam_exc,
+                    )
+                    _final_payload = None
+                if _final_payload:
+                    effective_result = _final_payload
         # Prefer the caller-supplied error for ``failed`` notifications
         # (this is the most-recent failure reason, including the
         # caller-context like "max retries exceeded"). Fall back to
