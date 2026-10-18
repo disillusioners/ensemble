@@ -190,6 +190,21 @@ limits:
   max_children_per_instance: 50
   instance_timeout_minutes: 60
   graph_recursion_limit: 300
+  # llm_concurrency is a MANAGED daemon setting (db-backed-settings).
+  # Resolution ladder (highest tier wins; the daemon re-resolves at
+  # every boot):
+  #   1. DB override — set from the FE settings page / the
+  #      /api/settings/daemon endpoints (persists in app_settings)
+  #   2. env var LIMITS_LLM_CONCURRENCY — now EFFECTIVE for this key
+  #      even with the yaml literal present (previously shadowed by
+  #      this literal: yaml init-kwargs beat the env tier in
+  #      pydantic-settings)
+  #   3. this yaml literal (tier 3 — kept; edit here still works)
+  #   4. built-in default (10)
+  # A daemon RESTART is still required for any change to take effect
+  # (the semaphore is constructed once at boot). Real parallelism is
+  # also capped by the fixed worker thread pools (5 worker + 2 chat
+  # = 7 concurrent graphs — constants, not settable here).
   llm_concurrency: 10
   # S5 degenerate re-invoke cap (empty-response-guard Phase 1): max
   # consecutive reasoning-only / <think>-tag-only AI responses the

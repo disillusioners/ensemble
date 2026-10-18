@@ -1,3 +1,14 @@
+/**
+ * Settings page — the operator's single settings surface.
+ *
+ * Sub-systems covered: language preference, editor preference, VS Code
+ * server control, blueprint peak hours, timezone preference, and the
+ * DB-backed daemon runtime settings section (db-backed-settings P3 —
+ * registry-driven, renders generically as managed keys are added).
+ * Grows by one `// ── <Section> ──` divider block per new surface;
+ * the daemon-settings state/methods are the template for any future
+ * API-backed section (load + save + reset + re-fetch).
+ */
 import { Component, OnDestroy, OnInit, computed, signal, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
@@ -9,6 +20,7 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 import { SettingsService } from '../../services/settings.service';
 import { WorkspaceService } from '../../services/workspace.service';
 import type { EditorType, VSCodeStatus } from '../../models';
+import type { DaemonSettingEntry, DaemonSettingSource } from '../../services/settings.service';
 import {
   SearchableSelectComponent,
   SearchableSelectOption,
@@ -99,6 +111,36 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly peakHoursLoading = signal<boolean>(false);
   readonly peakHoursSaving = signal<boolean>(false);
 
+  // ── Daemon runtime settings (db-backed-settings P3) ────────────────
+  //
+  // Data-driven over the frozen GET /api/settings/daemon registry
+  // payload — future managed keys appear with no new markup. Two
+  // fields are rendered SEPARATELY per key, never collapsed:
+  //
+  //   * ``entry.value`` — the BOOT-APPLIED running truth (what the
+  //     daemon actually constructed at startup);
+  //   * ``entry.source`` — the LIVE winning tier (db > env > yaml >
+  //     default).
+  //
+  // After a save or a server-side reset the running value
+  // deliberately lags the new tier until the next daemon restart;
+  // that divergence is rendered as distinct fields plus a pending
+  // hint, never as one number.
+
+  /** One entry per registered managed key (registry order). */
+  readonly daemonSettings = signal<DaemonSettingEntry[]>([]);
+  readonly daemonLoading = signal<boolean>(false);
+  /** Keys with an in-flight PUT/DELETE — disables only that key's controls. */
+  readonly daemonSavingKeys = signal<ReadonlySet<string>>(new Set());
+  /**
+   * Raw per-key input drafts (string so empty / non-integer input is
+   * distinguishable for validation). A missing entry means the input
+   * shows the entry's current effective value and is not dirty.
+   */
+  readonly daemonDrafts = signal<Record<string, string>>({});
+  /** Post-action notes per key ("Saved — …" / "Override cleared — …"). */
+  readonly daemonNotes = signal<Record<string, string>>({});
+
   // ── Timezone preference (user-timezone-setting feature) ───────────
   //
   // Mirrors the language preference flow (loadFromStorage → API seed
@@ -119,6 +161,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
   readonly selectedTimezone = signal<string>(TZ_AUTO_VALUE);
   readonly customTimezone = signal<string>('');
   readonly savingTimezone = signal<boolean>(false);
+  /**
   /**
    * Server-sourced IANA zone list. Populated by
    * ``loadTimezoneOptionsFromApi()`` — `null` means not yet loaded
@@ -236,6 +279,7 @@ export class SettingsComponent implements OnInit, OnDestroy {
     this.loadTimezoneFromStorage();
     this.loadTimezoneFromApi();
     this.loadTimezoneOptionsFromApi();
+    this.loadDaemonSettings();
   }
 
   ngOnDestroy(): void {
@@ -882,5 +926,228 @@ export class SettingsComponent implements OnInit, OnDestroy {
     } catch {
       // silently ignore
     }
+  }
+
+  // ──────── Daemon runtime settings (db-backed-settings P3) ────────
+
+  /**
+   * Fetch the effective daemon settings from
+   * ``GET /api/settings/daemon``. Failure surfaces a toast (consistent
+   * with the other load methods) and leaves previously loaded entries
+   * untouched so the rest of the page is never broken by this section.
+   */
+  private loadDaemonSettings(): void {
+    this.daemonLoading.set(true);
+    this.settingsService.getDaemonSettings().subscribe({
+      next: (resp) => {
+        this.daemonSettings.set(resp?.settings ?? []);
+        this.daemonLoading.set(false);
+      },
+      error: () => {
+        this.daemonLoading.set(false);
+        this.snackBar.open('Failed to load daemon settings', 'Dismiss', {
+          duration: 5000,
+          panelClass: 'error-snackbar',
+        });
+      },
+    });
+  }
+
+  /** Replace one entry in place with a server-refreshed copy. */
+  private applyDaemonEntry(updated: DaemonSettingEntry): void {
+    this.daemonSettings.update((entries) =>
+      entries.map((e) => (e.key === updated.key ? updated : e)),
+    );
+  }
+
+  private setDaemonSaving(key: string, saving: boolean): void {
+    this.daemonSavingKeys.update((keys) => {
+      const next = new Set(keys);
+      if (saving) {
+        next.add(key);
+      } else {
+        next.delete(key);
+      }
+      return next;
+    });
+  }
+
+  isDaemonSaving(key: string): boolean {
+    return this.daemonSavingKeys().has(key);
+  }
+
+  /** Clear one key's draft so the input falls back to the entry value. */
+  private clearDaemonDraft(key: string): void {
+    this.daemonDrafts.update((drafts) => {
+      if (!(key in drafts)) {
+        return drafts;
+      }
+      const { [key]: _removed, ...rest } = drafts;
+      return rest;
+    });
+  }
+
+  /**
+   * Raw input handler — stores the draft string per key. Validation
+   * (integer-only, min 1) gates the Save button; we do not coerce or
+   * reject keystrokes so the user sees exactly what they typed.
+   */
+  onDaemonDraftInput(entry: DaemonSettingEntry, event: Event): void {
+    const raw = (event.target as HTMLInputElement).value;
+    this.daemonDrafts.update((drafts) => ({ ...drafts, [entry.key]: raw }));
+  }
+
+  /**
+   * The value the input should display: the user's in-progress draft
+   * when one exists, otherwise the entry's current effective value.
+   */
+  daemonDraftFor(entry: DaemonSettingEntry): string {
+    const drafts = this.daemonDrafts();
+    const draft = drafts[entry.key];
+    return draft !== undefined ? draft : String(entry.value);
+  }
+
+  /** True when the draft differs from the entry's effective value. */
+  daemonDirty(entry: DaemonSettingEntry): boolean {
+    return this.daemonDraftFor(entry) !== String(entry.value);
+  }
+
+  /**
+   * Validation for the current draft — integer-only, minimum 1.
+   * Returns a human-readable problem, or null when the draft is a
+   * valid save candidate. ``/^[0-9]+$/`` keeps "3.5", "-2" and "1e3"
+   * out of the PUT (the backend registry validator is the second
+   * gate — this is the client-side mirror, not a replacement).
+   */
+  daemonDraftError(entry: DaemonSettingEntry): string | null {
+    const raw = this.daemonDraftFor(entry).trim();
+    if (raw === '') {
+      return 'Enter a value — an integer of at least 1.';
+    }
+    if (!/^[0-9]+$/.test(raw)) {
+      return 'Value must be a whole number (integer only).';
+    }
+    if (parseInt(raw, 10) < 1) {
+      return 'Value must be at least 1.';
+    }
+    return null;
+  }
+
+  /** Save is enabled only for a dirty, valid, not-in-flight draft. */
+  canSaveDaemon(entry: DaemonSettingEntry): boolean {
+    return (
+      !this.isDaemonSaving(entry.key) &&
+      this.daemonDirty(entry) &&
+      this.daemonDraftError(entry) === null
+    );
+  }
+
+  /**
+   * Persist the draft as a DB override via PUT. On success the bare
+   * refreshed entry is merged in, a restart-semantics note is shown
+   * (never a live-apply pretense), and the effective state is
+   * re-fetched. On failure the draft is kept so the operator can
+   * correct it without retyping.
+   */
+  saveDaemonSetting(entry: DaemonSettingEntry): void {
+    if (!this.canSaveDaemon(entry)) {
+      return;
+    }
+    const value = parseInt(this.daemonDraftFor(entry).trim(), 10);
+    this.setDaemonSaving(entry.key, true);
+    this.settingsService.putDaemonSetting(entry.key, value).subscribe({
+      next: (updated) => {
+        if (updated) {
+          this.applyDaemonEntry(updated);
+        }
+        this.daemonNotes.update((notes) => ({
+          ...notes,
+          [entry.key]: 'Saved — takes effect after daemon restart',
+        }));
+        this.clearDaemonDraft(entry.key);
+        this.setDaemonSaving(entry.key, false);
+        this.loadDaemonSettings();
+      },
+      error: () => {
+        this.setDaemonSaving(entry.key, false);
+        this.snackBar.open('Failed to save daemon setting', 'Dismiss', {
+          duration: 5000,
+          panelClass: 'error-snackbar',
+        });
+      },
+    });
+  }
+
+  /**
+   * Clear the DB override via DELETE ("Reset to file/env"). Same
+   * post-action flow as save: merge refreshed entry, note, re-fetch.
+   * The running (boot-applied) value stays visible next to the NEW
+   * source tier until the next restart — rendered distinctly by the
+   * template, never collapsed into one number.
+   */
+  resetDaemonSetting(entry: DaemonSettingEntry): void {
+    if (this.isDaemonSaving(entry.key) || this.daemonLoading()) {
+      return;
+    }
+    this.setDaemonSaving(entry.key, true);
+    this.settingsService.deleteDaemonSetting(entry.key).subscribe({
+      next: (updated) => {
+        if (updated) {
+          this.applyDaemonEntry(updated);
+        }
+        this.daemonNotes.update((notes) => ({
+          ...notes,
+          [entry.key]: 'Override cleared — file/env/default applies after restart',
+        }));
+        this.clearDaemonDraft(entry.key);
+        this.setDaemonSaving(entry.key, false);
+        this.loadDaemonSettings();
+      },
+      error: () => {
+        this.setDaemonSaving(entry.key, false);
+        this.snackBar.open('Failed to reset daemon setting', 'Dismiss', {
+          duration: 5000,
+          panelClass: 'error-snackbar',
+        });
+      },
+    });
+  }
+
+  /** Chip label for a source tier — DB / ENV / YAML / DEFAULT. */
+  daemonTierLabel(source: DaemonSettingSource): string {
+    return source.toUpperCase();
+  }
+
+  /**
+   * The resolved value of the entry's CURRENT winning tier: db →
+   * db_override, env → env_value, yaml → yaml_value, default →
+   * default. Falls back to ``value`` when a tier detail field was
+   * masked/omitted so the divergence computation never lies.
+   */
+  daemonSourceValue(entry: DaemonSettingEntry): number {
+    switch (entry.source) {
+      case 'db':
+        return entry.db_override ?? entry.value;
+      case 'env':
+        return entry.env_value ?? entry.value;
+      case 'yaml':
+        return entry.yaml_value ?? entry.value;
+      default:
+        return entry.default;
+    }
+  }
+
+  /**
+   * True when the boot-applied running value lags the live winning
+   * tier — the restart-required divergence rendered as distinct
+   * fields (value line + tier chip + pending hint).
+   */
+  daemonIsDivergent(entry: DaemonSettingEntry): boolean {
+    return this.daemonSourceValue(entry) !== entry.value;
+  }
+
+  /** Post-action note for a key, or null when none is pending. */
+  daemonNote(key: string): string | null {
+    return this.daemonNotes()[key] ?? null;
   }
 }

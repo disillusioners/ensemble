@@ -1,9 +1,29 @@
+/**
+ * Settings page spec — mirrors the component's section layout.
+ *
+ * Sub-systems covered: language/editor/timezone preference flows, VS
+ * Code server control, blueprint peak hours, and the db-backed-settings
+ * P3 daemon-settings section (render + validation + tier chips +
+ * value-vs-source divergence + service contract). New sections append
+ * one `// ═══ <Section> ═══` divider block (see the Timezone and
+ * Daemon settings blocks for the house style); shared payload factories
+ * (e.g. `daemonEntry()`) live beside the section that owns them.
+ */
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
+import { provideHttpClient } from '@angular/common/http';
+import {
+  HttpTestingController,
+  provideHttpClientTesting,
+} from '@angular/common/http/testing';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { signal } from '@angular/core';
 import { of, throwError, Subject } from 'rxjs';
 import type { VSCodeStatusState } from '../../models';
+import type {
+  DaemonSettingEntry,
+  DaemonSettingsResponse,
+} from '../../services/settings.service';
 import { SettingsComponent } from './settings.component';
 import { SettingsService } from '../../services/settings.service';
 import { WorkspaceService } from '../../services/workspace.service';
@@ -1381,6 +1401,14 @@ class TimezoneTestBedService {
     .fn()
     .mockReturnValue(of({ timezone: null, utc_offset: null }));
   getTimezoneOptions = jest.fn().mockReturnValue(of({ timezones: [] }));
+  // Daemon runtime settings (db-backed-settings P3) — safe defaults so
+  // specs that don't care about the section still satisfy the
+  // component's ngOnInit load.
+  getDaemonSettings = jest
+    .fn()
+    .mockReturnValue(of({ settings: [daemonEntry()], restart_required: false }));
+  putDaemonSetting = jest.fn();
+  deleteDaemonSetting = jest.fn();
 }
 
 class TimezoneTestBedWorkspaceService {
@@ -1835,6 +1863,13 @@ describe('Settings page does not render relocated snapshot blocks', () => {
       setBlueprintPeakHours: jest
         .fn()
         .mockReturnValue(of({ start: 12, end: 20, tz_offset: 7 })),
+      // Daemon runtime settings (db-backed-settings P3) — safe default
+      // so the section loads without interfering with these assertions.
+      getDaemonSettings: jest
+        .fn()
+        .mockReturnValue(of({ settings: [daemonEntry()], restart_required: false })),
+      putDaemonSetting: jest.fn(),
+      deleteDaemonSetting: jest.fn(),
     };
     const workspaceServiceMock = { setEditorMode: jest.fn() };
 
@@ -1867,5 +1902,360 @@ describe('Settings page does not render relocated snapshot blocks', () => {
       h.textContent?.trim() ?? '',
     );
     expect(headings).not.toContain('Snapshot Usage Metrics');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Daemon settings section (db-backed-settings P3)
+//
+// The fifth settings section, data-driven over the P2-frozen
+// GET /api/settings/daemon payload. Binding acceptance under test:
+//   (a) renders from the mocked payload (registry-driven, no new
+//       markup per future key)
+//   (b) validation — 0 / empty / non-integer drafts disable Save
+//   (c) "Requires restart" badge present when requires_restart:true
+//   (d) tier chip reflects source exactly (one case per tier)
+//   (e) DIVERGENCE — value (boot-applied running truth) and source
+//       (live tier) render as SEPARATE visible fields after a
+//       server-side DELETE; never collapsed into one number
+//   (f) save → putDaemonSetting; reset → deleteDaemonSetting; both
+//       re-fetch the effective state
+//   (g) regression guard — the four existing sections still render
+// ═══════════════════════════════════════════════════════════════════
+
+const DAEMON_KEY = 'limits.llm_concurrency';
+
+function daemonEntry(overrides: Partial<DaemonSettingEntry> = {}): DaemonSettingEntry {
+  return {
+    key: DAEMON_KEY,
+    value: 4,
+    source: 'default',
+    default: 4,
+    requires_restart: true,
+    sensitive: false,
+    description: 'Maximum concurrent LLM-bound agent graphs.',
+    ...overrides,
+  };
+}
+
+class DaemonTestBedService {
+  getLanguagePreference = jest.fn().mockReturnValue(of({ language: 'Auto' }));
+  setLanguagePreference = jest.fn();
+  getEditorPreference = jest.fn().mockReturnValue(of({ editor: 'builtin' }));
+  setEditorPreference = jest.fn().mockReturnValue(of({ editor: 'builtin' }));
+  getVscodeStatus = jest.fn().mockReturnValue(of({ status: 'starting' }));
+  startVscodeServer = jest.fn();
+  stopVscodeServer = jest.fn();
+  getBlueprintPeakHours = jest
+    .fn()
+    .mockReturnValue(of({ start: 12, end: 20, tz_offset: 7 }));
+  setBlueprintPeakHours = jest.fn();
+  getTimezonePreference = jest
+    .fn()
+    .mockReturnValue(of({ timezone: null, utc_offset: null }));
+  setTimezonePreference = jest
+    .fn()
+    .mockReturnValue(of({ timezone: null, utc_offset: null }));
+  getTimezoneOptions = jest.fn().mockReturnValue(of({ timezones: [] }));
+  getDaemonSettings = jest.fn();
+  putDaemonSetting = jest.fn();
+  deleteDaemonSetting = jest.fn();
+}
+
+describe('Daemon settings section (db-backed-settings P3)', () => {
+  let service: DaemonTestBedService;
+  let fixture: ComponentFixture<SettingsComponent>;
+  let component: SettingsComponent;
+
+  const section = (): HTMLElement | undefined => {
+    const sections = Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll('section'),
+    );
+    return sections.find((s) =>
+      s.querySelector('h2')?.textContent?.includes('Daemon'),
+    );
+  };
+
+  const keyRow = (): HTMLElement | null =>
+    section()?.querySelector(`.daemon-key-row[data-key="${DAEMON_KEY}"]`) ?? null;
+
+  const saveButton = (): HTMLButtonElement =>
+    keyRow()!.querySelector<HTMLButtonElement>('.daemon-save-btn')!;
+
+  const resetButton = (): HTMLButtonElement =>
+    keyRow()!.querySelector<HTMLButtonElement>('.daemon-reset-btn')!;
+
+  const valueInput = (): HTMLInputElement =>
+    keyRow()!.querySelector<HTMLInputElement>('.daemon-input input')!;
+
+  const typeDraft = (raw: string): void => {
+    const input = valueInput();
+    input.value = raw;
+    input.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+  };
+
+  const mockGet = (entry: DaemonSettingEntry): void => {
+    service.getDaemonSettings.mockReturnValue(
+      of({ settings: [entry], restart_required: false }),
+    );
+  };
+
+  beforeEach(async () => {
+    service = new DaemonTestBedService();
+    await TestBed.configureTestingModule({
+      imports: [SettingsComponent],
+      providers: [
+        provideNoopAnimations(),
+        { provide: SettingsService, useValue: service },
+        { provide: WorkspaceService, useValue: { setEditorMode: jest.fn() } },
+        { provide: MatSnackBar, useValue: { open: jest.fn() } },
+      ],
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(SettingsComponent);
+    component = fixture.componentInstance;
+  });
+
+  afterEach(() => fixture.destroy());
+
+  // ── (a) renders from the mocked GET payload ──────────────────────
+  it('renders the Daemon section from the mocked getDaemonSettings payload', () => {
+    mockGet(daemonEntry());
+    fixture.detectChanges();
+
+    expect(component.daemonSettings().length).toBe(1);
+    const row = keyRow();
+    expect(row).not.toBeNull();
+    expect(row!.querySelector('.daemon-key')!.textContent).toContain(DAEMON_KEY);
+    expect(row!.querySelector('.daemon-effective-value')!.textContent!.trim()).toBe('4');
+    expect(row!.textContent).toContain('Maximum concurrent LLM-bound agent graphs.');
+  });
+
+  // ── (b) validation — invalid drafts disable Save ─────────────────
+  it('disables Save when the draft is 0 (below the minimum of 1)', () => {
+    mockGet(daemonEntry());
+    fixture.detectChanges();
+    typeDraft('0');
+    expect(saveButton().disabled).toBe(true);
+  });
+
+  it('disables Save when the draft is empty', () => {
+    mockGet(daemonEntry());
+    fixture.detectChanges();
+    typeDraft('');
+    expect(saveButton().disabled).toBe(true);
+  });
+
+  it('disables Save when the draft is a non-integer', () => {
+    mockGet(daemonEntry());
+    fixture.detectChanges();
+    typeDraft('3.5');
+    expect(saveButton().disabled).toBe(true);
+  });
+
+  it('enables Save for a valid dirty integer draft', () => {
+    mockGet(daemonEntry());
+    fixture.detectChanges();
+    typeDraft('8');
+    expect(saveButton().disabled).toBe(false);
+  });
+
+  // ── (c) restart badge — present exactly when requires_restart ────
+  it('shows the Requires restart badge when requires_restart is true', () => {
+    mockGet(daemonEntry({ requires_restart: true }));
+    fixture.detectChanges();
+    const badge = keyRow()!.querySelector('.restart-badge');
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toContain('Requires restart');
+  });
+
+  it('omits the restart badge when requires_restart is false', () => {
+    mockGet(daemonEntry({ requires_restart: false }));
+    fixture.detectChanges();
+    expect(keyRow()!.querySelector('.restart-badge')).toBeNull();
+  });
+
+  // ── (d) tier chip — one case per source tier ─────────────────────
+  it.each(['db', 'env', 'yaml', 'default'] as const)(
+    'renders the tier chip reflecting source=%s exactly',
+    (src) => {
+      mockGet(daemonEntry({ source: src }));
+      fixture.detectChanges();
+      const chip = keyRow()!.querySelector('.tier-chip')!;
+      expect(chip.textContent!.trim()).toBe(src.toUpperCase());
+      expect(chip.classList.contains(`tier-${src}`)).toBe(true);
+    },
+  );
+
+  // ── (e) DIVERGENCE — value and source render distinctly ──────────
+  it('renders boot-applied value AND the new source tier distinctly after a reset (divergence)', () => {
+    // Post-DELETE payload: the override row is gone (source fell back
+    // to env = 4), but the daemon still RUNS the boot-applied value 8.
+    mockGet(daemonEntry({ value: 8, source: 'env', env_value: 4, default: 4 }));
+    fixture.detectChanges();
+
+    const row = keyRow()!;
+    const valueEl = row.querySelector('.daemon-effective-value')!;
+    const chipEl = row.querySelector('.tier-chip')!;
+
+    // BOTH rendered, as separate elements — never one collapsed number.
+    expect(valueEl).not.toBeNull();
+    expect(chipEl).not.toBeNull();
+    expect(valueEl.textContent!.trim()).toBe('8');
+    expect(chipEl.textContent!.trim()).toBe('ENV');
+    expect(valueEl.textContent!.trim()).not.toBe(chipEl.textContent!.trim());
+
+    // The divergence hint surfaces the pending tier value.
+    expect(row.querySelector('.daemon-divergence')!.textContent).toContain('4');
+    // Lower-tier read-only detail is present too.
+    expect(row.querySelector('.daemon-tier-details')!.textContent).toContain('ENV: 4');
+  });
+
+  // ── (f) save → PUT, reset → DELETE, both re-fetch ────────────────
+  it('save calls putDaemonSetting with the draft value and re-fetches effective state', () => {
+    mockGet(daemonEntry());
+    fixture.detectChanges();
+    expect(service.getDaemonSettings).toHaveBeenCalledTimes(1);
+
+    service.putDaemonSetting.mockReturnValue(
+      of(daemonEntry({ source: 'db', db_override: 8 })),
+    );
+    typeDraft('8');
+    saveButton().click();
+    fixture.detectChanges();
+
+    expect(service.putDaemonSetting).toHaveBeenCalledWith(DAEMON_KEY, 8);
+    expect(service.getDaemonSettings).toHaveBeenCalledTimes(2);
+    // Restart-semantics wording — never a live-apply pretense.
+    expect(keyRow()!.querySelector('.daemon-action-note')!.textContent).toContain(
+      'Saved — takes effect after daemon restart',
+    );
+    // Badge persists after save (still requires a restart).
+    expect(keyRow()!.querySelector('.restart-badge')).not.toBeNull();
+  });
+
+  it('reset calls deleteDaemonSetting and re-fetches effective state', () => {
+    mockGet(daemonEntry({ source: 'db', db_override: 8 }));
+    fixture.detectChanges();
+    expect(service.getDaemonSettings).toHaveBeenCalledTimes(1);
+
+    service.deleteDaemonSetting.mockReturnValue(
+      of(daemonEntry({ value: 8, source: 'env', env_value: 4 })),
+    );
+    resetButton().click();
+    fixture.detectChanges();
+
+    expect(service.deleteDaemonSetting).toHaveBeenCalledWith(DAEMON_KEY);
+    expect(service.getDaemonSettings).toHaveBeenCalledTimes(2);
+    expect(keyRow()!.querySelector('.daemon-action-note')!.textContent).toContain(
+      'Override cleared — file/env/default applies after restart',
+    );
+  });
+
+  // ── (g) regression guard — existing sections still render ────────
+  it('still renders the four existing sections alongside the Daemon section', () => {
+    mockGet(daemonEntry());
+    fixture.detectChanges();
+    const headings = Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll('h2'),
+    ).map((h) => h.textContent?.trim() ?? '');
+    expect(headings).toContain('Language Preference');
+    expect(headings).toContain('Timezone');
+    expect(headings).toContain('Editor');
+    expect(headings).toContain('Blueprint Peak Hours');
+    expect(headings).toContain('Daemon');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Daemon settings service contract (db-backed-settings P3)
+//
+// Contract-shape assertions against the P2-FROZEN API: the service
+// hits /api/settings/daemon[/{key}] and mirrors the frozen schema
+// (bare DaemonSettingEntry write responses — never wrapped).
+// Same HttpTestingController idiom as settings.service.spec.ts.
+// ═══════════════════════════════════════════════════════════════════
+
+describe('Daemon settings service contract (db-backed-settings P3)', () => {
+  let service: SettingsService;
+  let httpTesting: HttpTestingController;
+
+  beforeEach(() => {
+    TestBed.configureTestingModule({
+      providers: [provideHttpClient(), provideHttpClientTesting()],
+    });
+    service = TestBed.inject(SettingsService);
+    httpTesting = TestBed.inject(HttpTestingController);
+  });
+
+  afterEach(() => {
+    httpTesting.verify();
+  });
+
+  it('GET /api/settings/daemon returns the frozen DaemonSettingsResponse shape', (done) => {
+    const payload: DaemonSettingsResponse = {
+      settings: [daemonEntry()],
+      restart_required: false,
+    };
+
+    service.getDaemonSettings().subscribe({
+      next: (resp) => {
+        expect(resp).toEqual(payload);
+        expect(Array.isArray(resp.settings)).toBe(true);
+        expect(resp.settings[0].key).toBe(DAEMON_KEY);
+        expect(resp.settings[0].source).toBe('default');
+        expect(resp.restart_required).toBe(false);
+        done();
+      },
+      error: done.fail,
+    });
+
+    const req = httpTesting.expectOne('/api/settings/daemon');
+    expect(req.request.method).toBe('GET');
+    req.flush(payload);
+  });
+
+  it('PUT /api/settings/daemon/{key} sends {value} and returns the BARE refreshed entry', (done) => {
+    const refreshed = daemonEntry({ source: 'db', db_override: 8 });
+
+    service.putDaemonSetting(DAEMON_KEY, 8).subscribe({
+      next: (resp) => {
+        // Bare entry — frozen write shape: no DaemonSettingsResponse
+        // wrapper, no top-level restart_required on writes.
+        expect(resp).toEqual(refreshed);
+        expect('settings' in resp).toBe(false);
+        expect('restart_required' in resp).toBe(false);
+        expect(resp.source).toBe('db');
+        expect(resp.db_override).toBe(8);
+        done();
+      },
+      error: done.fail,
+    });
+
+    const req = httpTesting.expectOne(`/api/settings/daemon/${DAEMON_KEY}`);
+    expect(req.request.method).toBe('PUT');
+    expect(req.request.body).toEqual({ value: 8 });
+    req.flush(refreshed);
+  });
+
+  it('DELETE /api/settings/daemon/{key} returns the BARE refreshed entry', (done) => {
+    const refreshed = daemonEntry({ value: 8, source: 'env', env_value: 4 });
+
+    service.deleteDaemonSetting(DAEMON_KEY).subscribe({
+      next: (resp) => {
+        expect(resp).toEqual(refreshed);
+        expect('settings' in resp).toBe(false);
+        expect(resp.source).toBe('env');
+        expect(resp.db_override).toBeUndefined();
+        done();
+      },
+      error: done.fail,
+    });
+
+    const req = httpTesting.expectOne(`/api/settings/daemon/${DAEMON_KEY}`);
+    expect(req.request.method).toBe('DELETE');
+    expect(req.request.body).toBeNull();
+    req.flush(refreshed);
   });
 });

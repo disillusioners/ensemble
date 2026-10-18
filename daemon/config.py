@@ -5524,6 +5524,31 @@ def resolve_injected_notes_absorb() -> bool:
 _spawn_intelligence_tier_boot_warned = False
 
 
+# db-backed-settings P1 (iteration-003, shape (a)) — raw-limits module
+# accessor. The PROCESSED limits-section dict is captured inside
+# ``load_config`` BELOW, BEFORE the pydantic merge, and exposed via
+# :func:`raw_yaml_limits`. The settings resolver
+# (daemon/services/settings_service.py) uses it to read the yaml tier
+# as the RAW FILE LITERAL (present = literally in the file, absent
+# otherwise) — the pydantic-merged Config field can NEVER serve this
+# role because it cannot distinguish a yaml literal from the field
+# default. Precedent: the ``_install_service_tool_enabled`` module-
+# cache + getter idiom. This accessor is the ONLY config.py change
+# the db-backed-settings commission carries.
+_RAW_YAML_LIMITS: Dict[str, Any] | None = None
+
+
+def raw_yaml_limits() -> Dict[str, Any] | None:
+    """Return the RAW processed ``limits`` section dict from the most
+    recent :func:`load_config` call in this process, or ``None`` when
+    the loaded file had no ``limits`` section (or ``load_config`` has
+    not run). Values are pre-pydantic-merge literals (post env-var
+    interpolation) — consumers must validate before use. Read-only
+    evidence accessor: nobody mutates the returned dict on the
+    module's behalf (the copy is taken at capture time)."""
+    return _RAW_YAML_LIMITS
+
+
 def load_config(config_path: str | None = None) -> Config:
     """
     Load configuration from YAML file with environment variable substitution.
@@ -5681,6 +5706,17 @@ def load_config(config_path: str | None = None) -> Config:
     config_dict["llm"] = llm_config
     if "daemon" in processed_config:
         config_dict["daemon"] = processed_config["daemon"]
+    # db-backed-settings P1 — capture the RAW processed limits-section
+    # dict BEFORE the pydantic merge (the merged field cannot
+    # distinguish a yaml literal from a field default). Exposed via
+    # :func:`raw_yaml_limits`; consumed by the settings resolver's
+    # yaml tier. Copy taken so later mutation of processed_config
+    # cannot rewrite history.
+    global _RAW_YAML_LIMITS
+    raw_limits_section = processed_config.get("limits")
+    _RAW_YAML_LIMITS = (
+        dict(raw_limits_section) if isinstance(raw_limits_section, dict) else None
+    )
     if "limits" in processed_config:
         config_dict["limits"] = processed_config["limits"]
     if "persistence" in processed_config:

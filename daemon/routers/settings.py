@@ -1,11 +1,21 @@
-"""Settings API endpoints."""
+"""Settings API endpoints.
+
+Sub-systems covered: language/timezone/editor preferences, VS Code
+server control, default agent versions, blueprint peak hours, Plane
+config, agent-snapshot toggle/metrics, and the DB-backed daemon
+runtime settings section (``/settings/daemon``, db-backed-settings).
+Grows by one ``# ==================== <Surface> ====================``
+divider block per new surface; sync DB/repository work in handlers
+stays behind ``asyncio.to_thread`` (file-wide idiom — see the
+daemon-settings endpoints for the pattern).
+"""
 import asyncio
 import json
 import logging
 import os
 import re
 import shutil
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from sqlmodel import Session
@@ -27,7 +37,15 @@ from daemon.services.vscode_server_manager import (
     VSCodeServerError,
 )
 from daemon import constants
+from daemon.auth.context import AUTH_METHOD_BEARER, AUTH_METHOD_SESSION
 from daemon.util.tz import _validate_iana
+from daemon.services.settings_service import (
+    MANAGED_KEYS,
+    get_settings_resolution_snapshot as _svc_get_snapshot,
+    parse_and_validate,
+    resolve,
+    set_settings_resolution_snapshot as _svc_set_snapshot,
+)
 from daemon.routers.snapshots import _proxy_to_snapshots_metrics
 from .schemas import (
     LanguagePreferenceResponse,
@@ -47,6 +65,9 @@ from .schemas import (
     SnapshotCreatePreferenceResponse,
     SnapshotCreatePreferenceUpdate,
     SnapshotUsageMetricsResponse,
+    DaemonSettingEntry,
+    DaemonSettingsResponse,
+    DaemonSettingUpdate,
 )
 
 # Peak-hours gate metadata keys — these are the same keys read by
@@ -63,6 +84,12 @@ _DEFAULT_PEAK_END = 20
 _DEFAULT_TZ_OFFSET = 7
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    # Type-only (db-backed-settings P1 t6) — the laziness note covers
+    # SettingsService ONLY: MANAGED_KEYS, parse_and_validate and
+    # resolve are EAGER module-level imports (import block above).
+    from daemon.services.settings_service import SettingsService
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -101,6 +128,48 @@ def get_project_repository() -> SQLModelProjectRepository:
 def set_project_repository(repo: SQLModelProjectRepository) -> None:
     global _project_repo
     _project_repo = repo
+
+
+# ==================== Daemon Runtime Settings — module DI (db-backed-settings P1 t6) ====================
+# Ownership invariant (plan-overview.md:66, Shape A): these DI symbols
+# are created HERE, in Phase 1, and are the ONLY creation site — every
+# other phase consumes them. Exact idiom of get_project_repository /
+# set_project_repository above; both getters fail identically with
+# 503-when-unwired (a cheap backstop for test harnesses that bypass
+# the lifespan — not load-bearing in production, where uvicorn gates
+# request serving on lifespan completion).
+
+
+_settings_service: "SettingsService | None" = None
+
+
+def get_settings_service() -> "SettingsService":
+    if _settings_service is None:
+        raise HTTPException(status_code=503, detail={"error": "Settings service not initialized"})
+    return _settings_service
+
+
+def set_settings_service(service: "SettingsService") -> None:
+    global _settings_service
+    _settings_service = service
+
+
+def set_settings_resolution_snapshot(snapshot: dict[str, dict[str, Any]]) -> None:
+    """Store the boot resolution snapshot (delegates to the service
+    module's module-global — the SSOT storage; ONE copy, not two)."""
+    _svc_set_snapshot(snapshot)
+
+
+def get_settings_resolution_snapshot() -> dict[str, dict[str, Any]]:
+    """Return the boot resolution snapshot — 503 when the lifespan
+    hasn't wired it (same unwired idiom as ``get_settings_service``)."""
+    snapshot = _svc_get_snapshot()
+    if snapshot is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Settings resolution snapshot not initialized"},
+        )
+    return snapshot
 
 
 def _resolve_vscode_binary(config: Any) -> str | None:
@@ -761,3 +830,218 @@ async def get_snapshot_usage_metrics_deprecated(
     response.headers["Sunset"] = "Sun, 31 Dec 2026 23:59:59 GMT"
     response.headers["Link"] = '</api/snapshots/metrics>; rel="successor-version"'
     return await _proxy_to_snapshots_metrics(request)
+
+
+# ==================== Daemon Runtime Settings endpoints (db-backed-settings P2 t3+t4) ====================
+# GET /api/settings/daemon — gated settings:read; PUT/DELETE
+# /api/settings/daemon/{key} — gated settings:write (architect
+# Ruling 4: the infrastructure precedent class — this surface reports
+# effective daemon config incl. env/yaml tier values; its right
+# precedent is instances/maintenance, NOT the ungated
+# language/timezone preference family). Both scopes are registered in
+# SCOPE_TAXONOMY (closed taxonomy — registration is mandatory).
+# Gates are inert when auth is OFF.
+
+
+def _actor_subject_from_request(request: Request) -> str | None:
+    """Extract the acting subject for ``updated_by`` / audit lines.
+
+    REPLICATES the ``actor_from_request`` pattern
+    (daemon/repositories/prompt_version/repository.py:593-637 —
+    getattr-based extraction off ``request.state.auth_context``)
+    WITHOUT importing that helper verbatim: it RAISES on auth-off and
+    internal-lane callers, and this surface must record ``None``
+    instead (auth-off => NULL ``updated_by`` row, never an error).
+
+    Guards, in the same order as the precedent:
+
+    * no ``auth_context`` on request.state → ``None`` (auth OFF or
+      resolution failed — same recording posture);
+    * ``auth_method`` not in {session, bearer} → ``None`` (the
+      ``internal`` lane is reserved for in-process submitters; an
+      HTTP request presenting it is a forgery attempt (S16) — we do
+      not raise here, we simply record no actor);
+    * empty ``subject`` → ``None``.
+
+    NEVER body-asserted (the request body is not a source of actor
+    identity — decisions.md R3); NEVER a ``request.client.host``
+    fallback.
+    """
+    auth_ctx = getattr(request.state, "auth_context", None)
+    if auth_ctx is None:
+        return None
+    auth_method = getattr(auth_ctx, "auth_method", "")
+    if auth_method not in (AUTH_METHOD_SESSION, AUTH_METHOD_BEARER):
+        return None
+    subject = getattr(auth_ctx, "subject", None)
+    if not subject or not isinstance(subject, str):
+        return None
+    return subject
+
+
+def _build_daemon_entries(
+    overrides: dict[str, Any],
+) -> tuple[list[DaemonSettingEntry], bool]:
+    """Build one entry per registered key + the derived
+    ``restart_required`` flag.
+
+    ``value`` = ``snapshot.applied_value`` (boot-applied running
+    truth — carried from the P1 snapshot, NOT re-resolved);
+    ``source`` = LIVE re-resolve via the ONE shared resolver over
+    (live DB row > live env > snapshot yaml > default). Divergence
+    between the two is the honest restart-required reporting.
+    Sensitive keys omit the tier detail fields entirely (security
+    addendum 1 — omitted via None + response_model_exclude_none).
+    """
+    snapshot = get_settings_resolution_snapshot()
+    entries: list[DaemonSettingEntry] = []
+    restart_required = False
+    for key, spec in MANAGED_KEYS.items():
+        resolution = resolve(key, snapshot, db_overrides=overrides)
+        if resolution["source"] == "db":
+            restart_required = True
+        applied = snapshot.get(key, {}).get("applied_value")
+        if applied is None:
+            # Defensive: a hand-built snapshot without applied_value
+            # (test harness) falls back to the live resolved value.
+            applied = resolution["value"]
+        if spec.sensitive:
+            env_value = yaml_value = db_override = None
+        else:
+            env_value = resolution["env_value"]
+            yaml_value = resolution["yaml_value"]
+            db_override = resolution["db_override"]
+        entries.append(
+            DaemonSettingEntry(
+                key=key,
+                value=applied,
+                source=resolution["source"],
+                default=resolution["default"],
+                env_value=env_value,
+                yaml_value=yaml_value,
+                db_override=db_override,
+                requires_restart=spec.requires_restart,
+                sensitive=spec.sensitive,
+                description=spec.description,
+            )
+        )
+    return entries, restart_required
+
+
+def _daemon_entry_for(key: str, overrides: dict[str, Any]) -> DaemonSettingEntry:
+    """Return the refreshed bare entry for one key (PUT/DELETE
+    response body — the t1-frozen write shape)."""
+    entries, _ = _build_daemon_entries(overrides)
+    for entry in entries:
+        if entry.key == key:
+            return entry
+    # Unreachable: _build_daemon_entries iterates MANAGED_KEYS and
+    # the caller has already 404-rejected unknown keys.
+    raise HTTPException(status_code=404, detail={"error": f"Unknown managed setting key: {key}"})
+
+
+@router.get(
+    "/daemon",
+    response_model=DaemonSettingsResponse,
+    dependencies=[scope_required("settings:read")],
+    response_model_exclude_none=True,
+)
+async def get_daemon_settings():
+    """List effective daemon settings with per-key tier reporting.
+
+    Registry-driven (v1: exactly one key, ``limits.llm_concurrency``).
+    Raises 503 when the lifespan hasn't wired the settings service or
+    the resolution snapshot (test-harness backstop).
+    """
+    service = get_settings_service()  # raises 503 if not initialized
+    # Sync DB call — kept off the event loop (same to_thread idiom as
+    # every other repository read in this file, e.g. the peak-hours
+    # metadata reads above).
+    overrides = await asyncio.to_thread(service.get_overrides)
+    entries, restart_required = _build_daemon_entries(overrides)
+    return DaemonSettingsResponse(settings=entries, restart_required=restart_required)
+
+
+@router.put(
+    "/daemon/{key}",
+    response_model=DaemonSettingEntry,
+    dependencies=[scope_required("settings:write")],
+    response_model_exclude_none=True,
+)
+async def put_daemon_setting(
+    key: str,
+    update: DaemonSettingUpdate,
+    request: Request,
+):
+    """Set the DB override for a managed key.
+
+    404 for keys outside the registry; 422 when the value fails the
+    registry validator (parse / range, e.g. ge=1). Persists via the
+    runtime SettingsService (manager's shared engine). Response: the
+    BARE refreshed entry (source now "db"; ``value`` stays the
+    boot-applied truth — restart-required is carried by the entry's
+    own ``requires_restart`` / the value-vs-source divergence).
+    """
+    if key not in MANAGED_KEYS:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": f"Unknown managed setting key: {key}"},
+        )
+    service = get_settings_service()  # raises 503 if not initialized
+    spec = MANAGED_KEYS[key]
+    ok, parsed, failure_class, detail = parse_and_validate(spec, update.value)
+    if not ok:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": f"Invalid value for {key}",
+                "failure_class": failure_class,
+                "constraint": spec.constraint_desc(),
+                "detail": detail,
+            },
+        )
+    subject = _actor_subject_from_request(request)
+    await asyncio.to_thread(service.set_override, key, parsed, updated_by=subject)
+    # Audit (ruling O2): ONE INFO line per PUT carrying subject + key
+    # ("auth-off" for NULL updated_by rows). Sensitive keys log the
+    # literal "<redacted>" in place of the value (sensitive=True
+    # tripwire); the "value=" term stays present for grep-ability.
+    logged_value = "<redacted>" if spec.sensitive else parsed
+    logger.info(
+        "[Settings] db override set key=%s value=%r subject=%s",
+        key,
+        logged_value,
+        subject or "auth-off",
+    )
+    return _daemon_entry_for(key, await asyncio.to_thread(service.get_overrides))
+
+
+@router.delete(
+    "/daemon/{key}",
+    response_model=DaemonSettingEntry,
+    dependencies=[scope_required("settings:write")],
+    response_model_exclude_none=True,
+)
+async def delete_daemon_setting(key: str, request: Request):
+    """Clear the DB override for a managed key (falls back down the
+    ladder: env > yaml > default on the next boot / live re-resolve).
+
+    404 for keys outside the registry; idempotent on a missing row.
+    Response: the BARE refreshed entry.
+    """
+    if key not in MANAGED_KEYS:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": f"Unknown managed setting key: {key}"},
+        )
+    service = get_settings_service()  # raises 503 if not initialized
+    subject = _actor_subject_from_request(request)
+    await asyncio.to_thread(service.clear_override, key)
+    # Audit (ruling O2): ONE INFO line per DELETE carrying subject +
+    # key ("auth-off" for NULL updated_by rows).
+    logger.info(
+        "[Settings] db override cleared key=%s subject=%s",
+        key,
+        subject or "auth-off",
+    )
+    return _daemon_entry_for(key, await asyncio.to_thread(service.get_overrides))
