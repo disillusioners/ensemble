@@ -736,9 +736,62 @@ class TestBuildWindowView:
 
 class TestExcludedSpinePin:
     _MODULE = Path(rt.__file__)
+    _BANNED_FRAGMENTS = ("message_queue", "checkpoint")
 
     def _tree(self):
         return ast.parse(self._MODULE.read_text(encoding="utf-8"))
+
+    @classmethod
+    def _docstring_constant_ids(cls, tree):
+        """``id()`` of every Constant node that IS a docstring (module
+        and member first-statement strings alike). Docstrings
+        deliberately NAME the exclusions — the module self-documents
+        its closed spine set and ``collect_structural`` honestly says
+        what its injected providers count — so documentation stays
+        exempt exactly as the module docstring always was; executable
+        strings (raw SQL, labels, f-string parts) do not get the
+        exemption."""
+        ids = set()
+        for node in ast.walk(tree):
+            if isinstance(
+                node,
+                (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+            ):
+                body = node.body
+                if (
+                    body
+                    and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)
+                ):
+                    ids.add(id(body[0].value))
+        return ids
+
+    @classmethod
+    def _banned_string_constant_hits(cls, tree):
+        """Scan non-docstring string constants for the excluded spines
+        (review #3: the Attribute/Name walk is blind at string
+        constants — a raw ``text("SELECT … FROM message_queue")`` used
+        to pass)."""
+        doc_ids = cls._docstring_constant_ids(tree)
+        hits = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if id(node) in doc_ids:
+                    continue
+                if node.value in rt._STRUCTURAL_KEYS:
+                    # exact live-counter wire vocabulary (e.g.
+                    # "checkpoints" — the injected provider's key in
+                    # the FE-frozen structural block), NOT a spine
+                    # reference; a raw SQL string like "FROM
+                    # checkpoints" is a different constant and stays
+                    # scanned.
+                    continue
+                low = node.value.lower()
+                for frag in cls._BANNED_FRAGMENTS:
+                    if frag in low:
+                        hits.append(f"{frag} in string constant: {node.value[:80]!r}")
+        return hits
 
     def test_no_import_of_excluded_spines(self):
         """No import may touch the boot-wiped queue or a checkpoint store."""
@@ -762,6 +815,25 @@ class TestExcludedSpinePin:
                 assert "message_queue" not in node.attr.lower()
             elif isinstance(node, ast.Name):
                 assert "message_queue" not in node.id.lower()
+
+    def test_no_raw_sql_string_reference_to_excluded_spines(self):
+        """Review #3: the pin is NOT blind at string constants — no
+        non-docstring constant may reference the boot-wiped queue
+        spine or any checkpoint store (a future raw
+        ``text("SELECT … FROM message_queue")`` fails here)."""
+        assert self._banned_string_constant_hits(self._tree()) == []
+
+    def test_mutation_string_constant_injection_fails_pin(self):
+        """Mutation check for the constant scan: injecting a raw-SQL
+        reference into the REAL module source must flip the pin to
+        failing (a pin that cannot fail is not a pin)."""
+        mutated = self._MODULE.read_text(encoding="utf-8") + (
+            "\n\ndef _mutant(conn):\n"
+            "    return conn.execute("
+            "text('SELECT COUNT(*) FROM message_queue'))\n"
+        )
+        hits = self._banned_string_constant_hits(ast.parse(mutated))
+        assert any("message_queue" in h for h in hits), hits
 
     def test_module_does_use_the_timestamps_seam(self):
         """Positive control: the TZ seam import contract (rule 1) holds."""
