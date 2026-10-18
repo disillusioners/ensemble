@@ -645,6 +645,7 @@ class InstanceManager:
         from .repositories.mcp_kb_keys.models import (  # noqa: F401
             McpKbKey,
         )
+        from .models.app_settings import AppSetting  # noqa: F401  # db-backed-settings P1: register app_settings before create_all
 
         SQLModel.metadata.create_all(self._engine)
 

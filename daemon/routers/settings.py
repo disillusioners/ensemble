@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import shutil
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from sqlmodel import Session
@@ -64,6 +64,11 @@ _DEFAULT_TZ_OFFSET = 7
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    # Type-only (db-backed-settings P1 t6) — runtime imports of the
+    # settings service stay lazy inside the DI delegation functions.
+    from daemon.services.settings_service import SettingsService
+
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 _default_versions_lock = asyncio.Lock()
@@ -101,6 +106,52 @@ def get_project_repository() -> SQLModelProjectRepository:
 def set_project_repository(repo: SQLModelProjectRepository) -> None:
     global _project_repo
     _project_repo = repo
+
+
+# ==================== Daemon Runtime Settings — module DI (db-backed-settings P1 t6) ====================
+# Ownership invariant (plan-overview.md:66, Shape A): these DI symbols
+# are created HERE, in Phase 1, and are the ONLY creation site — every
+# other phase consumes them. Exact idiom of get_project_repository /
+# set_project_repository above; both getters fail identically with
+# 503-when-unwired (a cheap backstop for test harnesses that bypass
+# the lifespan — not load-bearing in production, where uvicorn gates
+# request serving on lifespan completion).
+
+
+_settings_service: "SettingsService | None" = None
+
+
+def get_settings_service() -> "SettingsService":
+    if _settings_service is None:
+        raise HTTPException(status_code=503, detail={"error": "Settings service not initialized"})
+    return _settings_service
+
+
+def set_settings_service(service: "SettingsService") -> None:
+    global _settings_service
+    _settings_service = service
+
+
+def set_settings_resolution_snapshot(snapshot: dict) -> None:
+    """Store the boot resolution snapshot (delegates to the service
+    module's module-global — the SSOT storage; ONE copy, not two)."""
+    from daemon.services.settings_service import set_settings_resolution_snapshot as _set_snapshot
+
+    _set_snapshot(snapshot)
+
+
+def get_settings_resolution_snapshot() -> dict:
+    """Return the boot resolution snapshot — 503 when the lifespan
+    hasn't wired it (same unwired idiom as ``get_settings_service``)."""
+    from daemon.services.settings_service import get_settings_resolution_snapshot as _get_snapshot
+
+    snapshot = _get_snapshot()
+    if snapshot is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Settings resolution snapshot not initialized"},
+        )
+    return snapshot
 
 
 def _resolve_vscode_binary(config: Any) -> str | None:

@@ -400,6 +400,24 @@ async def lifespan(app: FastAPI):
     # Load config first
     config = load_config()
 
+    # ── db-backed-settings P1 t6 ────────────────────────────────
+    # Apply DB-backed overrides (fail-open) BETWEEN load_config and
+    # InstanceManager: the manager constructs the daemon-wide LLM
+    # semaphore from config.limits.llm_concurrency at __init__
+    # (daemon/manager.py:555), so the mutation must land before the
+    # manager exists. The returned snapshot is the PRISTINE
+    # pre-override tier record consumed by the ONE shared resolver
+    # (daemon/services/settings_service.resolve) and wired into the
+    # settings router below (set_settings_resolution_snapshot).
+    from daemon.config import raw_yaml_limits
+    from daemon.services.settings_service import apply_db_settings_overrides
+
+    config, settings_snapshot = apply_db_settings_overrides(
+        config,
+        ensemble_config,
+        raw_yaml_limits=raw_yaml_limits(),
+    )
+
     # ─────────────────────────────────────────────────────────────
     # Phase 1 / clipboard-image-chat / Task 3 + Task 8 — wire the
     # transient image store BEFORE the routers are mounted, so the
@@ -2451,6 +2469,23 @@ async def lifespan(app: FastAPI):
     # Set project repository for settings router injection (Phase 1: user language preference)
     from daemon.routers.settings import set_project_repository as set_settings_project_repo
     set_settings_project_repo(manager._project_repository)
+
+    # ── db-backed-settings P1 t6 ────────────────────────────────
+    # Wire the RUNTIME settings service + resolution snapshot onto the
+    # settings router's module DI. The service rides the manager's
+    # SINGLE shared engine (Ruling 2 — no second pool; the throwaway
+    # bootstrap engine existed only inside apply_db_settings_overrides
+    # above and was already disposed). The snapshot (captured at the
+    # boot-apply call near api.py:401) is the resolver's yaml-tier
+    # SSOT for the /settings/daemon endpoints.
+    from daemon.routers.settings import (
+        set_settings_resolution_snapshot,
+        set_settings_service,
+    )
+    from daemon.services.settings_service import SettingsService
+
+    set_settings_service(SettingsService(engine=manager.engine))
+    set_settings_resolution_snapshot(settings_snapshot)
 
     # Also set project repository for queues router (has its own dependency injection)
     from daemon.routers.queues import set_project_repository as set_queues_project_repository
