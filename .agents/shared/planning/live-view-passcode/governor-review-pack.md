@@ -2,7 +2,8 @@
 
 > **Commission:** `liveview-passcode-1` (worktree
 > `feature/live-view-passcode` @ `54169410b`).
-> **Status:** READY for governor verdict dispatch.
+> **Status:** ✅ SECURITY REVIEW COMPLETE — verdict **PASS-WITH-CONDITIONS** recorded in §(i)
+> (reviewer, 2026-10-18, worktree HEAD `1483a3984`).
 > **Verdict-request lane:** the leader (T4.4) — this pack is the
 > merge-gate INPUT, the dispatch is the leader's lane. Governor
 > security review is the merge GATE per requirement 9
@@ -476,8 +477,92 @@ The chart-image seal re-pin discipline applies if a seal-pinned file references 
 
 ## (i) Footer
 
-> **Governor verdict: PENDING — security-weighted review dispatch is the leader's lane (T4.4). This pack is the merge-gate INPUT.**
+> **Governor verdict: ✅ PASS-WITH-CONDITIONS** — security-weighted merge-gate review of the
+> **implemented code**, governor-council deep-review (2 councilors, `worker` agent, models
+> `agentic`+`coding`, skill `security-review`, read-only), **unanimous 2/2, Round 0** (no
+> refinement rounds). **0 critical findings.** Five named conditions below; the two
+> architect-signed deviations **V1/V3 adjudicated ACCEPT**; residuals **R3/R4/R9 CONFIRMED
+> bounded**. Reviewed at HEAD `1483a3984` (12 commits from base `a3e9f1bda`).
 >
-> The governor verdict (APPROVE / APPROVE-WITH-CONDITIONS / REJECT) lands on this pack as the §0 status change + the verdict line at the top of this pack. Any REQUIRED condition becomes a pre-merge task (fold back into the owning phase file additively); any disclosed caveat is carried into the stage-RC report (P5) explicitly.
+> **Reviewer:** `reviewer[v2]` — dispatch lane only. This verdict is the governor council's
+> synthesized output, aggregated and recorded here by the reviewer (Cardinal #1: the reviewer
+> never analyzes code directly). Council governor instance `de0cf661-189d-4fe3-8983-a753b6ad4251`
+> (`review-council-liveview-passcode`). Read-only mandate held by both councilors; one flagged
+> gray-zone noted for the record (§ behavioral note below).
 >
-> This pack was assembled by the Coder agent at worktree HEAD `54169410b` (with the P4 commits at `e4e4f304e`-style SHA) for the liveview-passcode-1 commission. The pack will be staged for the leader's T4.4 dispatch at the next P5 / leader-gated step.
+> **Verdict line:** **PASS-WITH-CONDITIONS** — controls adequate for merge; five conditions as
+> pre-promote tasks (C4/C5 code, C1/C2 evidence+doc, C3 doc-portion lands with the merge,
+> code-portion is a follow-up ticket). **No condition touches the security-critical enforcement
+> path.** No blocking findings (🔴 critical: 0).
+
+---
+
+### (i.1) Conditions
+
+**C1 — amended test transcript covering the `tests/integration/` files** · tier: *blocking-evidence*
+The committed `evidence/phase4-suite-transcript.txt` names only unit+migration paths; it cannot collect the two integration files (36 tests incl. the canonical State-B cage test), violating the pack's own "name which files ran" discipline (§(h)). **Substance independently closed:** the `coding` councilor empirically executed all five live-view test files on the worktree → **182 passed / 0 failed (51.1s)**. Remaining gap = the committed evidence artifact, not test health.
+*Fix:* commit an amended transcript covering both `tests/integration/` files.
+
+**C2 — runbook false exemption claim** · tier: *blocking-doc (user-facing migration deliverable)*
+`docs/runbooks/live-view-passcode-deployment.md:27-29` claims `/views/assets/**` is "already PUBLIC exact-tagged". **False:** only `/views/livez` carries the public exact tag; the S-19 cage asserts `/views/assets/*` stays default-deny (401). This is the operator's manual State-A→B migration note — a wrong instruction there is operationally dangerous.
+*Fix:* correct the runbook to state `/views/assets/*` stays authenticated/401.
+
+**C3 — XFF trust-model doc claim (provably false) + direct-exposure warning** · tier: *doc-portion with merge; code-portion = follow-up ticket*
+`daemon/services/view_passcode_service.py:1772-1773` (block `:1762-1792`) asserts the trust posture "degrades to shared bucket = over-throttle, never bypass". That is false under direct/no-proxy-front exposure, which the shipped runbook itself acknowledges (`:37`). Docstring must be corrected **with the merge**; the trust-knob code (gate XFF on an operator-declared proxy-front — e.g. honor XFF only when `external_base_url` is set) is a follow-up ticket.
+**Severity: WARNING (CWE-348).** The two councilors split on label (`agentic` WARNING vs `coding` ADVISORY); the governor adjudicated WARNING on three grounds — (a) a *provably false* trust claim in code misleads future maintainers; (b) forgeable audit `ip_hmac` degrades forensic attribution even though access control holds (strikes are row-keyed, not IP-keyed, so rotation never passes the 10 durable strikes); (c) the operator-reachable direct shape is acknowledged in the runbook. **Reviewer upholds the WARNING label**; the condition set is identical if the reader prefers ADVISORY — only the label moves.
+
+**C4 — dead security knob** · tier: *blocking pre-promote*
+`daemon/config.py:2714-2722`: `passcode_lockout_threshold` claims request-time consumption but has **zero consumers** — `ENSEMBLE_LIVE_VIEWS_PASSCODE_LOCKOUT_THRESHOLD=3` silently no-ops (the ceiling is the frozen constant). An operator-facing security knob must not silently no-op.
+*Fix:* wire it through service construction (as the sister knob `passcode_grant_ttl_seconds` **is** wired, `daemon/api.py:1612-1621`) **or** delete the field + docstring.
+
+**C5 — missing malformed-POST no-strike router pin** · tier: *blocking pre-promote*
+Behavior is implemented (`daemon/routers/live_views.py:1546-1557` `isinstance(presented, str)` guard; defensive TypeError catch `:1562-1570`) but **unpinned**. A refactor reordering the guard behind `record_failure` would convert malformed posts into silent strikes with no failing test.
+*Fix:* add a router pin: POST with missing/non-str `code` → failure page **and** `failed_attempts == 0` **and** unlocked.
+
+---
+
+### (i.2) Rulings — architect-signed deviations (axis 9, unanimous)
+
+- **V1 (reversible Fernet at rest + plaintext re-display at every mint) — ACCEPT.** Hash-only is arithmetically incompatible with commission requirement 2 (`view_link` ALWAYS returns the passcode, `daemon/tools/live_views.py:148-158`). The at-rest threat (DB compromise) already presupposes `SYSTEM_ENCRYPTION_KEY` for every other secret class (ratified agent-secrets P1, 2026-10-17). Strengthening argument on record: **Fernet is strictly stronger than a password hash against the keyless DB-dump attacker** — offline guessing through Fernet requires the key's HMAC verification, whereas a hash is offline-guessable with no key at all; residual risk concentrates in the already-documented SEK rotation coupling.
+- **V3 (locked page = HTTP 200 + notice, not 423/404) — ACCEPT.** Existence is already disclosed pre-lock to a URL-holder (the R3 class); 423-vs-200 carries **zero information delta**; the pre-lock boundary stays uniform-404; the locked page carries no form / no attempt count / no content (verify short-circuits). Loop closure: **HEAD `Content-Length` leaks lock-state regardless** (advisory A9), so even a strict 404/423 would not close that oracle — the passcode remains the 29.7-bit gate.
+
+### (i.3) Residuals — CONFIRMED bounded
+
+- **R3 (minted-vs-404 existence oracle) — CONFIRMED bounded.** 29.7-bit + 10 durable strikes ⇒ online success ≈ 1.1×10⁻⁸ per view per generation. Notes recorded: GET enumeration is unthrottled (the limiter is POST-only) and root names are freely discoverable via the pre-existing `/views/livez` roster (A2) — so the practical guessing cost sits on the rel path, not the root.
+- **R4 (lockout-DoS) — CONFIRMED availability-only.** Grant cookies are checked **BEFORE** the locked short-circuit (code order verified *and* pinned end-to-end); recovery = one owner `refresh`. A9 (HEAD lock-state channel) folds in here as a bounded disclosure, not a control failure.
+- **R9 (lock-boundary race) — CONFIRMED structurally closed.** Single-statement `UPDATE … WHERE locked = 0` + same-`engine.begin()` audit (`daemon/services/view_passcode_service.py:834-859`, `:900-908`). The exactly-one-lockout-audit boundary pins are **non-vacuous** (removing the guard or splitting the transaction yields 0 or ≥2 rows and fails the test). Thread-concurrency is not exercised, but the race is unrepresentable at this tier given row serialization.
+
+### (i.4) Advisory findings (non-blocking)
+
+| # | Finding | Anchor |
+|---|---|---|
+| A1 | Prefix matcher not segment-bound — a future `/views/publication` would be swept into the public tag | `daemon/auth/route_meta.py:119-123` |
+| A2 | `/views/livez` roots disclosure (pre-existing at base) | — |
+| A4 | Set-Cookie `Path` `;`-truncation edge | `daemon/routers/live_views.py:832-858` |
+| A5 | Grant audit emitted before the https short-circuit; grant/deny own-txn asymmetry | `daemon/routers/live_views.py:1616-1634` |
+| A6 | Stale comments | `daemon/api.py:4186-4188`; test docstring `:1220` |
+| A7 | Oracle-pin absent (single funnel by construction; pin needs nonce normalization) | — |
+| A8 | Predicate text divergence: `<>0` vs `IS TRUE` | migration `:154` vs `models.py:222-223` |
+| A9 | HEAD `Content-Length` lock-state channel | `daemon/routers/live_views.py:1430-1462` |
+
+### (i.5) Axis verification summary (verified in code, not prose)
+
+**1** attack surface — exact-prefix exemption (`route_meta.py:119-123`), 3-layer reserved-root guard (`config.py:2771-2823`, `routers:1318,1165`), default-deny elsewhere. **2** lifecycle — CSPRNG 31-symbol mint, fail-closed cipher, constant-time verify, zero leakage across all 7 log sites, queryless cookie `Path`. **3** lockout — genuinely atomic in-SQL increment, same-txn audit, no auto-unlock anywhere (exhaustive grep). **4** rate limiting — rightmost-XFF keying, bucket ahead of the strike lock, 429 ≠ strike pinned. **5** page/CSP — byte-exact headers, zero JS, uniform-404 across all 5 miss classes. **6** auth interplay — `tag_routes_by_path` fires AFTER `include_router` (`daemon/api.py:4180/4205/4267`), middleware byte-untouched vs base, golden parity is a real base-tree capture. **7** migration/storage — portable predicates, domain-separated `ip_hmac`, closed action set. **8** rotation — typed `ViewPasscodeRotationRequired` → interstitial/failure/envelope, never 500; W1 pins non-vacuous; re-encrypt walk documented at 4 seams + runbook. **11** test-reality — pins spot-verified non-vacuous; 182/182 empirically reproduced.
+
+### (i.6) Surfaced disagreement (retained, not averaged)
+
+XFF trust severity: `agentic` **WARNING (CWE-348)** vs `coding` **ADVISORY** — same facts, same fix, different tier. Resolved as WARNING in C3 (see rationale). No other councilor disagreement; no factual contradictions.
+
+### (i.7) Behavioral note
+
+Read-only discipline held by both councilors. One gray-zone action flagged for the record: the `coding` councilor **executed** the five-file live-view test suite (`pytest` with `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider` and a post-run byte-clean worktree verification). This is a write-suppressed *verification* run, not a source mutation; its evidentiary value (empirical 182/182) is incorporated into C1. One transient `shared_meta_kv` metadata failure occurred mid-run and was retried once successfully — no manifest drift. Governor confidence: **high** (full 2-model council, unanimous verdict + both rulings, one severity-label divergence surfaced).
+
+### (i.8) Disposition
+
+- **Pre-promote blockers:** C1, C2 (evidence/doc), C4, C5 (code) — plus the C3 docstring correction landing with the merge.
+- **Follow-up ticket:** C3 trust-knob code (gate XFF on operator-declared proxy-front).
+- **Carry into the stage-RC report (P5):** the C3 direct-exposure warning, the A1–A9 advisories, and the 4 surviving residual classes (R3/R4/R5/R6).
+
+> This pack was assembled by the Coder agent at worktree HEAD `54169410b` for the `liveview-passcode-1`
+> commission; §(i) verdict recorded by `reviewer[v2]` at HEAD `1483a3984` (2026-10-18). No merge or push
+> was performed by the reviewer.
