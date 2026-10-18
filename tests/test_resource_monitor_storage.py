@@ -707,3 +707,212 @@ class TestRollDown:
         assert warnings_second == [], (
             "warn-once violated: second flush produced a degrade warning"
         )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# P2 T10 — resource_instance_sample tier write (additive, same window)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestInstanceSampleWrites:
+    """P2 T10: the flusher drains the sampler's instance ring and
+    persists T2 rows inside the SAME engine.begin() window."""
+
+    def _instance_row(self, instance_id="inst-a", *, bucket_ts=None, **over):
+        row = {
+            "instance_id": instance_id,
+            "agent_id": "agent-a",
+            "status": None,
+            "scan_kind": "counter",
+            "charged_bytes": 12345,
+            "deep_bytes": None,
+            "graph_cache_present": True,
+            "in_flight_tasks": 1,
+            "all_state_messages_len": 3,
+            "child_rss_kb": 8192,
+            "child_cpu_user_usec": 100_000,
+            "cpu_share_usec_est": 4321,
+            "estimated": True,
+        }
+        if bucket_ts:
+            row["bucket_ts"] = bucket_ts
+        row.update(over)
+        return row
+
+    def test_instance_rows_persist_with_populated_columns(
+        self, sqlite_engine
+    ):
+        """AC7 extension: T2 rows persist with the P2-populated
+        attribution columns (charged_bytes / deep_bytes / estimated
+        NOT NULL / honesty fields typed)."""
+        raw_ring = TierRing(tier="raw", maxlen=16)
+        instance_ring = TierRing(tier="instance", maxlen=64)
+        instance_ring.extend(
+            [
+                self._instance_row("inst-a"),
+                self._instance_row(
+                    "inst-b",
+                    scan_kind="deep",
+                    deep_bytes=999999,
+                    estimated=False,
+                ),
+                self._instance_row("__overflow__", agent_id=None),
+            ]
+        )
+        flusher = Flusher(
+            engine=sqlite_engine,
+            raw_ring=raw_ring,
+            flush_batch_seconds=60,
+            retention=RetentionPolicy(2880, 336, 180),
+            instance_ring=instance_ring,
+        )
+        result = flusher.run_once()
+        assert result["instance_rows"] == 3
+        assert result["rows_written"] >= 3
+        with sqlite_engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT instance_id, agent_id, scan_kind, charged_bytes, "
+                    "deep_bytes, graph_cache_present, in_flight_tasks, "
+                    "all_state_messages_len, child_rss_kb, "
+                    "child_cpu_user_usec, cpu_share_usec_est, estimated "
+                    "FROM resource_instance_sample ORDER BY instance_id"
+                )
+            ).fetchall()
+        by_id = {r[0]: r for r in rows}
+        assert set(by_id) == {"inst-a", "inst-b", "__overflow__"}
+        a = by_id["inst-a"]
+        assert a[1] == "agent-a"
+        assert a[2] == "counter"
+        assert a[3] == 12345
+        assert a[4] is None  # never deep-scanned ⇒ NULL (side-by-side)
+        assert a[5] == 1  # sqlite bool
+        assert a[6] == 1
+        assert a[7] == 3
+        assert a[8] == 8192
+        assert a[9] == 100_000
+        assert a[10] == 4321
+        assert a[11] == 1  # estimated NOT NULL
+        b = by_id["inst-b"]
+        assert b[2] == "deep"
+        assert b[4] == 999999
+        assert b[11] == 0  # complete fresh deep scan ⇒ estimated False
+        # The instance ring was DRAINED (rows leave exactly once).
+        assert len(instance_ring) == 0
+
+    def test_estimated_defaults_true_when_missing(self, sqlite_engine):
+        """A row without ``estimated`` persists estimated=True — the
+        NOT NULL contract is enforced at the write seam."""
+        instance_ring = TierRing(tier="instance", maxlen=8)
+        row = self._instance_row("inst-x")
+        row.pop("estimated")
+        instance_ring.extend([row])
+        flusher = Flusher(
+            engine=sqlite_engine,
+            raw_ring=TierRing(tier="raw", maxlen=4),
+            flush_batch_seconds=60,
+            retention=RetentionPolicy(2880, 336, 180),
+            instance_ring=instance_ring,
+        )
+        flusher.run_once()
+        with sqlite_engine.connect() as conn:
+            est = conn.execute(
+                text(
+                    "SELECT estimated FROM resource_instance_sample "
+                    "WHERE instance_id = 'inst-x'"
+                )
+            ).scalar()
+        assert est == 1
+
+    def test_no_instance_ring_is_p1_noop(self, sqlite_engine):
+        """A P1-constructed flusher (no instance ring) skips the T2
+        write — back-compat."""
+        flusher = Flusher(
+            engine=sqlite_engine,
+            raw_ring=TierRing(tier="raw", maxlen=4),
+            flush_batch_seconds=60,
+            retention=RetentionPolicy(2880, 336, 180),
+        )
+        result = flusher.run_once()
+        assert result["instance_rows"] == 0
+        with sqlite_engine.connect() as conn:
+            n = conn.execute(
+                text("SELECT COUNT(*) FROM resource_instance_sample")
+            ).scalar()
+        assert n == 0
+
+    def test_instance_rows_swept_at_raw_cutoff(self, sqlite_engine):
+        """T2 is raw-tier-only: rows older than the raw cutoff are
+        swept with the populated columns present (AC7 retention)."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        old = (now - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
+        recent = (now - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+        instance_ring = TierRing(tier="instance", maxlen=8)
+        instance_ring.extend(
+            [
+                self._instance_row("inst-old", bucket_ts=old),
+                self._instance_row("inst-new", bucket_ts=recent),
+            ]
+        )
+        flusher = Flusher(
+            engine=sqlite_engine,
+            raw_ring=TierRing(tier="raw", maxlen=4),
+            flush_batch_seconds=60,
+            retention=RetentionPolicy(2880, 336, 180),
+            instance_ring=instance_ring,
+        )
+        flusher.run_once()
+        result = flusher.run_once()  # second window sweeps the old row
+        assert result["swept"]["instance"] == 1
+        with sqlite_engine.connect() as conn:
+            ids = {
+                r[0]
+                for r in conn.execute(
+                    text(
+                        "SELECT instance_id FROM resource_instance_sample"
+                    )
+                ).fetchall()
+            }
+        assert ids == {"inst-new"}
+
+    def test_t2_write_rides_same_single_transaction(self, sqlite_engine):
+        """The T2 write shares the ONE engine.begin() window with T1
+        (AC8 shape preserved)."""
+        from sqlalchemy.event import listen
+
+        events: list[str] = []
+        listen(
+            sqlite_engine,
+            "begin",
+            lambda c: events.append("begin"),
+        )
+        raw_ring = TierRing(tier="raw", maxlen=8)
+        raw_ring.append(
+            {
+                "bucket_ts": "2026-10-18 10:00:00",
+                "interval_s": 30,
+                "rss_kb": 1,
+                "cpu_user_usec": 1,
+                "cpu_sys_usec": 1,
+                "threads": 1,
+                "fds": 1,
+                "sample_cost_ms": 0.1,
+                "attributed_bytes": 0,
+                "unattributed_kb": 0,
+                "coverage_pct": 0.0,
+                "missed_samples": 0,
+            }
+        )
+        instance_ring = TierRing(tier="instance", maxlen=8)
+        instance_ring.extend([self._instance_row("inst-a")])
+        flusher = Flusher(
+            engine=sqlite_engine,
+            raw_ring=raw_ring,
+            flush_batch_seconds=60,
+            retention=RetentionPolicy(2880, 336, 180),
+            instance_ring=instance_ring,
+        )
+        events.clear()
+        result = flusher.run_once()
+        assert result["rows_written"] >= 2  # T1 + T2 (+ rollups)
+        assert events.count("begin") == 1

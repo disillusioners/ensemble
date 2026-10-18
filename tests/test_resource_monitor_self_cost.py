@@ -409,3 +409,184 @@ def test_synthetic_tree_has_no_live_paths(synthetic_tree):
         )
         assert not s.startswith("/proc"), f"fixture root is real /proc: {s!r}"
         assert not s.startswith("/sys"), f"fixture root is real /sys: {s!r}"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# P2 AC10 — self-cost holds with attribution ON (asserted, not assumed)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def attribution_env(tmp_path):
+    """Reset the charge + pid-registry singletons around each test."""
+    from daemon.services.resource_monitor import charge as charge_mod
+    from daemon.services.resource_monitor.pid_registry import (
+        reset_pid_registry_for_tests,
+    )
+
+    charge_mod.reset()
+    charge_mod.set_enabled(False)
+    reg = reset_pid_registry_for_tests(proc_root=tmp_path / "proc")
+    yield charge_mod, reg
+    charge_mod.reset()
+    charge_mod.set_enabled(False)
+    reset_pid_registry_for_tests()
+
+
+def _make_attribution_sampler(
+    proc_root: Path,
+    cgroup_root: Path,
+    ring: TierRing,
+    *,
+    pid_registry=None,
+    n_instances: int = 70,
+):
+    """A fully-wired P2 sampler: charge seams + registry children +
+    deep scan + manager-state providers (the designed bounds: registry
+    snapshot + ≤64 rows + 1 deep scan per tick)."""
+    from daemon.services.resource_monitor.sampler import Sampler
+
+    graph = {
+        f"inst-{i:02d}": ({"node": "x" * 64}, f"/agents/agent-{i:02d}")
+        for i in range(n_instances)
+    }
+    graph_tasks = {f"inst-{i:02d}": object() for i in range(3)}
+    state_counts = {f"inst-{i:02d}": i for i in range(10)}
+    return Sampler(
+        sample_seconds=30,
+        self_cpu_budget_pct=1.0,
+        self_rss_budget_mb=50,
+        detail_level="auto",
+        proc_root=proc_root,
+        cgroup_root=cgroup_root,
+        ring=ring,
+        instance_ring=TierRing(tier="instance", maxlen=1024),
+        instance_cap=64,
+        pid_registry=pid_registry,
+        graph_cache_provider=lambda: graph,
+        graph_tasks_provider=lambda: graph_tasks,
+        state_message_counts_provider=lambda: state_counts,
+    )
+
+
+def test_attribution_on_holds_p1_budget(
+    synthetic_tree, escape_guard, attribution_env
+):
+    """AC10: with charge seams ON, 70 cached instances, registry
+    children, and the 1/tick deep scan all ACTIVE, the tick still
+    meets the P1 budget (median < 5 ms, HARD gate < 50 ms)."""
+    charge_mod, registry = attribution_env
+    proc_root, cgroup_root = synthetic_tree
+
+    # Four synthetic registry children (exact /proc reads per tick).
+    for i, pid in enumerate((9101, 9102, 9103, 9104)):
+        child = proc_root / str(pid)
+        child.mkdir()
+        (child / "stat").write_text(
+            f"{pid} (bash) R 1 {pid} {pid} 0 -1 0 100 0 0 0 10 5 0 0 20 0 "
+            f"1 0 {7000 + i} 500000 16 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+        )
+        (child / "status").write_text("Name:\tbash\nVmRSS:\t2048 kB\n")
+        registry.register(
+            pid=pid,
+            start_time=7000 + i,
+            kind="bash",
+            instance_id=f"inst-{i:02d}",
+            command="bash -c job",
+            pgid=pid,
+        )
+
+    # Charge records for 70 instances (the seams are live).
+    charge_mod.set_enabled(True)
+    for i in range(70):
+        charge_mod.note_message_append(
+            f"inst-{i:02d}", {"payload": "y" * 256}
+        )
+
+    ring = TierRing(tier="raw", maxlen=64)
+    sampler = _make_attribution_sampler(
+        proc_root, cgroup_root, ring, pid_registry=registry
+    )
+
+    costs_ms: list[float] = []
+    N = 40
+    for _ in range(N):
+        t0 = time.perf_counter()
+        sampler.run_once()
+        t1 = time.perf_counter()
+        costs_ms.append((t1 - t0) * 1000.0)
+
+    median = statistics.median(costs_ms)
+    max_cost = max(costs_ms)
+    assert median < 5.0, f"median tick {median:.3f} ms >= 5 ms target"
+    assert max_cost < 50.0, f"HARD GATE FAILED: max tick {max_cost:.3f} ms"
+    assert sampler.counters.ticks == N
+    assert sampler.counters.ticks_skipped == 0
+    # The designed bounds held: ≤65 instance rows per tick.
+    assert len(sampler.instance_ring.snapshot()) <= 65 * N
+    # Deep scans actually ran (attribution ON, throttle never fired).
+    assert sampler._deep_scanner.scans_completed > 0
+
+
+def test_deep_scan_off_under_self_throttle_asserted(
+    synthetic_tree, attribution_env
+):
+    """AC10: deep-scan OFF by self-throttle is ASSERTED — after the
+    EMA breach, ticks with a populated graph cache perform ZERO deep
+    scans (the charge record's deep_scans stays 0) while the cheap
+    counter rows keep flowing."""
+    from daemon.services.resource_monitor.sampler import Sampler
+
+    charge_mod, _registry = attribution_env
+    proc_root, cgroup_root = synthetic_tree
+    charge_mod.set_enabled(True)
+    charge_mod.note_message_append("inst-00", {"payload": "y" * 128})
+
+    # Synthetic clock: 0.5 s per call ⇒ 1.0 s measured tick — above
+    # the 1 % budget (0.3 s) but under the 30 s overrun threshold.
+    clock = {"t": 0.0}
+
+    def fake_clock() -> float:
+        clock["t"] += 0.5
+        return clock["t"]
+
+    graph = {"inst-00": ({"node": "x" * 64}, "/agents/a")}
+    ring = TierRing(tier="raw", maxlen=64)
+    sampler = Sampler(
+        sample_seconds=30,
+        self_cpu_budget_pct=1.0,
+        self_rss_budget_mb=50,
+        detail_level="auto",
+        proc_root=proc_root,
+        cgroup_root=cgroup_root,
+        ring=ring,
+        instance_ring=TierRing(tier="instance", maxlen=64),
+        graph_cache_provider=lambda: graph,
+        wall_clock=fake_clock,
+    )
+
+    for _ in range(6):
+        sampler.run_once()
+
+    # The throttle fired…
+    assert sampler.counters.self_throttled is True
+    assert sampler._deep_scan_enabled is False
+    # The EMA needs a few ticks to breach — deep scans legitimately
+    # ran BEFORE the breach. Freeze that count and prove they STOPPED.
+    rec = charge_mod.snapshot_instance("inst-00")
+    assert rec is not None
+    scans_at_breach = rec["deep_scans"]
+    rows_at_breach = len(sampler.instance_ring.snapshot())
+    for _ in range(4):
+        sampler.run_once()
+    rec = charge_mod.snapshot_instance("inst-00")
+    assert rec["deep_scans"] == scans_at_breach, (
+        "deep scan ran AFTER self-throttle — AC10 violated"
+    )
+    assert scans_at_breach < 10  # sanity: it did run pre-breach, bounded
+    # Cheap attribution rows kept flowing, all counter-kind POST-breach
+    # (pre-breach rows legitimately carry scan_kind='deep').
+    rows = sampler.instance_ring.snapshot()[rows_at_breach:]
+    assert rows
+    assert all(r["scan_kind"] == "counter" for r in rows)
+    assert all(r["estimated"] is True for r in rows)

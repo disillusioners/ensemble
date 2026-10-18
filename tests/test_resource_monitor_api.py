@@ -347,3 +347,190 @@ class TestErrorEnvelope:
             assert isinstance(detail, dict)
             assert "error" in detail
             assert isinstance(detail["error"], str)
+
+# ──────────────────────────────────────────────────────────────────────────
+# P2 T11 — /live honesty surfacing (AC8, D7/D13)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def p2_env(tmp_path):
+    """Reset the charge + pid-registry singletons around each test."""
+    from daemon.services.resource_monitor import charge as charge_mod
+    from daemon.services.resource_monitor.pid_registry import (
+        reset_pid_registry_for_tests,
+    )
+
+    charge_mod.reset()
+    charge_mod.set_enabled(False)
+    reg = reset_pid_registry_for_tests(proc_root=tmp_path / "proc")
+    yield charge_mod, reg
+    charge_mod.reset()
+    charge_mod.set_enabled(False)
+    reset_pid_registry_for_tests()
+
+
+class TestLiveHonesty:
+    """AC8: attribution block + per-instance fields typed; children[]
+    reflects the registry snapshot."""
+
+    def _build(self, app_state, p2_env, *, providers=True):
+        charge_mod, registry = p2_env
+        app, proc, cg, engine = app_state
+        kwargs = {}
+        if providers:
+            graph = {
+                "inst-live": (object(), "/agents/live-agent"),
+                "inst-idle": (object(), "/agents/idle-agent"),
+            }
+            kwargs = dict(
+                graph_cache_provider=lambda: graph,
+                graph_tasks_provider=lambda: {"inst-live": object()},
+                state_message_counts_provider=lambda: {"inst-live": 4},
+            )
+        mon = build_resource_monitor(
+            config_resource_monitor=ResourceMonitorConfig(),
+            engine=engine,
+            proc_root=proc,
+            cgroup_root=cg,
+            **kwargs,
+        )
+        mon.enabled = True
+        app.state.resource_monitor = mon
+        return mon
+
+    def test_attribution_block_real_values(self, app_state, p2_env):
+        """The attribution block carries the D13 arithmetic: with 1 MB
+        charged, attributed_mb > 0, unattributed = anon − attributed,
+        coverage ∈ [0, 1]."""
+        charge_mod, _reg = p2_env
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append(
+            "inst-live", {"blob": "x" * (2 * 1024 * 1024)}
+        )
+        mon = self._build(app_state, p2_env)
+        mon.sampler.run_once()
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app_state[0])
+        r = client.get("/api/resources/live")
+        assert r.status_code == 200
+        j = r.json()
+        attributed_bytes = mon.sampler._attrib["attributed_bytes"]
+        assert j["attribution"]["attributed_mb"] == round(
+            attributed_bytes / 1048576.0, 2
+        )
+        assert j["attribution"]["attributed_mb"] > 0
+        anon_bytes = 65536 * 1024  # fixture VmData
+        assert j["attribution"]["unattributed_mb"] == round(
+            (anon_bytes - attributed_bytes) // 1024 / 1024.0, 2
+        )
+        assert 0.0 <= j["attribution"]["coverage_pct"] <= 1.0
+
+    def test_instances_block_fields_typed(self, app_state, p2_env):
+        """instances[] matches §2.8 EXACTLY (P5 consumes this — the
+        field set is frozen)."""
+        charge_mod, _reg = p2_env
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append("inst-live", {"blob": "z" * (1024 * 1024)})
+        mon = self._build(app_state, p2_env)
+        mon.sampler.run_once()
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app_state[0])
+        j = client.get("/api/resources/live").json()
+        instances = j["instances"]
+        assert len(instances) == 2  # overflow sentinel excluded
+        by_id = {i["instance_id"]: i for i in instances}
+        live = by_id["inst-live"]
+        assert set(live.keys()) == {
+            "instance_id", "agent", "estimated", "charged_mb",
+            "child_rss_mb", "children_n", "in_flight_tasks",
+        }
+        assert live["agent"] == "live-agent"
+        # inst-live is the FIRST key in the graph cache ⇒ it received
+        # this tick's deep-scan reconcile (tiny graph ⇒ complete walk
+        # ⇒ estimated False — the honesty rule working as designed).
+        assert live["estimated"] is False
+        assert live["charged_mb"] > 0
+        assert live["child_rss_mb"] == 0.0
+        assert live["children_n"] == 0
+        assert live["in_flight_tasks"] == 1
+        idle = by_id["inst-idle"]
+        assert idle["agent"] == "idle-agent"
+        assert idle["charged_mb"] == 0.0
+        assert idle["in_flight_tasks"] == 0
+        # estimated is never None anywhere.
+        assert all(i["estimated"] is not None for i in instances)
+
+    def test_children_block_reflects_registry(self, app_state, p2_env):
+        """children[] comes from the pid registry (kind/name/rss from
+        the entry + the synthetic /proc read), cpu_pct None on first
+        sight (honest), server-scoped mcp children included."""
+        _charge_mod, registry = p2_env
+        proc = app_state[1]
+        child = proc / "8791"
+        child.mkdir()
+        (child / "stat").write_text(
+            "8791 (node) R 1 8791 8791 0 -1 0 100 0 0 0 10 5 0 0 20 0 "
+            "1 0 31337 500000 16 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+        )
+        (child / "status").write_text("Name:\tnode\nVmRSS:\t4096 kB\n")
+        registry.register(
+            pid=8791,
+            start_time=31337,
+            kind="mcp_child",
+            instance_id=None,  # server-scoped pool child (D11)
+            command="node server.js",
+            detail="context7",
+            pgid=8791,
+        )
+        mon = self._build(app_state, p2_env)
+        mon.sampler.run_once()
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app_state[0])
+        j = client.get("/api/resources/live").json()
+        children = j["children"]
+        assert len(children) == 1
+        c = children[0]
+        assert set(c.keys()) == {"pid", "kind", "name", "cpu_pct", "rss_mb"}
+        assert c["pid"] == 8791
+        assert c["kind"] == "mcp_child"
+        assert c["name"] == "context7"
+        assert c["cpu_pct"] is None  # first sight — no invented estimate
+        assert c["rss_mb"] == 4.0
+
+    def test_history_instances_active_real(self, app_state, p2_env):
+        """/history points carry REAL instances_active (was a P1
+        None stub) — distinct instances sampled per bucket."""
+        charge_mod, _reg = p2_env
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append("inst-live", {"b": "y" * 1024})
+        charge_mod.note_message_append("inst-idle", {"b": "y" * 1024})
+        mon = self._build(app_state, p2_env)
+        mon.sampler.run_once()
+        mon.flusher.run_once()
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app_state[0])
+        r = client.get("/api/resources/history?window=1h&resolution=raw")
+        assert r.status_code == 200
+        points = r.json()["points"]
+        assert points, "expected at least one history point"
+        assert points[-1]["instances_active"] == 2
+
+    def test_degraded_still_empty_shape(self, app_state):
+        """D11 preserved: no monitor ⇒ attribution zero block +
+        empty instances/children (never 503)."""
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app_state[0])
+        j = client.get("/api/resources/live").json()
+        assert j["instances"] == []
+        assert j["children"] == []
+        assert j["attribution"] == {
+            "attributed_mb": 0,
+            "unattributed_mb": 0,
+            "coverage_pct": 0.0,
+        }

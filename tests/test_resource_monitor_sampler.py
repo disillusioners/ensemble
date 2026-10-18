@@ -20,11 +20,14 @@ built under pytest ``tmp_path``; the real ``/proc`` and
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import StaticPool
 
 from daemon.services.resource_monitor import (
     LADDER_DEFAULT,
@@ -33,7 +36,15 @@ from daemon.services.resource_monitor import (
     TierRing,
     read_proc_snapshot,
 )
-from daemon.services.resource_monitor.sampler import RE_PROMOTE_CLEAN_TICKS
+from daemon.services.resource_monitor import charge as charge_mod
+from daemon.services.resource_monitor.pid_registry import (
+    reset_pid_registry_for_tests,
+)
+from daemon.services.resource_monitor.sampler import (
+    ALLOWED_T2_ROW_KEYS,
+    OVERFLOW_SENTINEL,
+    RE_PROMOTE_CLEAN_TICKS,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -428,3 +439,550 @@ class TestTickLadder:
             ring.append({"i": i})
         assert len(ring) == 3
         assert [r["i"] for r in ring.snapshot()] == [2, 3, 4]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# P2 T10/T5 — attribution integration (AC7, AC11, D12/D13/D14)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def charge_env(tmp_path):
+    """Reset the charge + pid-registry singletons around each test.
+
+    The sampler consumes the PROCESS-WIDE charge registry — without
+    this fixture a test that enables charging would leak records into
+    every later pack in the session.
+    """
+    charge_mod.reset()
+    charge_mod.set_enabled(False)
+    reg = reset_pid_registry_for_tests(proc_root=tmp_path / "proc")
+    yield reg
+    charge_mod.reset()
+    charge_mod.set_enabled(False)
+    reset_pid_registry_for_tests()
+
+
+class TestAttributionIntegration:
+    """AC7 (cardinality + honesty) / T5 (cheap counts) / AC11 (D14)."""
+
+    def _sampler(
+        self,
+        tree,
+        *,
+        instance_cap=64,
+        graph_cache=None,
+        graph_tasks=None,
+        state_counts=None,
+        ring_maxlen=256,
+        pid_registry=None,
+    ):
+        proc, cg_root = tree
+        ring = TierRing(tier="raw", maxlen=ring_maxlen)
+        instance_ring = TierRing(tier="instance", maxlen=512)
+        s = Sampler(
+            sample_seconds=30,
+            self_cpu_budget_pct=1.0,
+            self_rss_budget_mb=50,
+            detail_level="auto",
+            proc_root=proc,
+            cgroup_root=cg_root,
+            ring=ring,
+            instance_ring=instance_ring,
+            instance_cap=instance_cap,
+            graph_cache_provider=(
+                (lambda: graph_cache) if graph_cache is not None else None
+            ),
+            graph_tasks_provider=(
+                (lambda: graph_tasks) if graph_tasks is not None else None
+            ),
+            state_message_counts_provider=(
+                (lambda: state_counts) if state_counts is not None else None
+            ),
+            pid_registry=pid_registry,
+        )
+        return s, ring, instance_ring
+
+    # ── AC7 — cardinality cap + overflow sentinel ──
+
+    def test_n70_instances_give_64_rows_plus_overflow(self, tree, charge_env):
+        """AC7: N=70 instances ⇒ 64 top-N rows + ONE ``__overflow__``."""
+        graph = {f"inst-{i:02d}": (object(), f"/agents/agent-{i:02d}") for i in range(70)}
+        charge_mod.set_enabled(True)
+        # Give 68 instances distinct charged bytes (inst-00 smallest).
+        for i in range(68):
+            charge_mod.note_message_append(
+                f"inst-{i:02d}", {"payload": "x" * (10 * (i + 1))}
+            )
+        # 2 instances in flight (NOT among the top-charged).
+        graph_tasks = {"inst-00": object(), "inst-01": object()}
+        s, _ring, inst_ring = self._sampler(
+            tree,
+            instance_cap=64,
+            graph_cache=graph,
+            graph_tasks=graph_tasks,
+        )
+        s.run_once()
+        rows = inst_ring.snapshot()
+        assert len(rows) == 65  # 64 + 1 overflow sentinel
+        non_sentinel = [r for r in rows if r["instance_id"] != OVERFLOW_SENTINEL]
+        sentinels = [r for r in rows if r["instance_id"] == OVERFLOW_SENTINEL]
+        assert len(non_sentinel) == 64
+        assert len(sentinels) == 1
+        # Both in-flight instances survive the cap (in-flight ranks first).
+        kept_ids = {r["instance_id"] for r in non_sentinel}
+        assert {"inst-00", "inst-01"} <= kept_ids
+        # The sentinel aggregates what collapsed: 70 − 64 = 6 instances.
+        ov = sentinels[0]
+        assert ov["estimated"] is True
+        assert ov["scan_kind"] == "counter"
+        assert ov["in_flight_tasks"] == 0  # both in-flight were kept
+        collapsed_charged = sum(
+            (charge_mod.snapshot_instance(f"inst-{i:02d}") or {}).get(
+                "charged_bytes", 0
+            )
+            for i in range(2, 8)  # the 6 smallest charged (inst-02..07)
+            if f"inst-{i:02d}" not in kept_ids
+        )
+        assert ov["charged_bytes"] == collapsed_charged
+
+    def test_cap_respected_and_no_sentinel_under_cap(self, tree, charge_env):
+        """Under the cap there is NO sentinel row."""
+        graph = {f"i{i}": (object(), f"/agents/a{i}") for i in range(5)}
+        charge_mod.set_enabled(True)
+        for i in range(5):
+            charge_mod.note_message_append(f"i{i}", {"x": "y"})
+        s, _ring, inst_ring = self._sampler(
+            tree, instance_cap=64, graph_cache=graph
+        )
+        s.run_once()
+        rows = inst_ring.snapshot()
+        assert len(rows) == 5
+        assert all(r["instance_id"] != OVERFLOW_SENTINEL for r in rows)
+
+    # ── AC7 — coverage math (D13 blend rule) ──
+
+    def test_coverage_math_unattributed_clamped_and_bounded(self, tree, charge_env):
+        """coverage_pct ∈ [0,1]; unattributed_kb = anon − attributed."""
+        from daemon.services.resource_monitor.charge import bounded_deep_size
+
+        charge_mod.set_enabled(True)
+        msg = {"blob": "x" * 1_000_000}  # 1 MB payload
+        charged, _nodes, _partial = bounded_deep_size(msg)
+        charge_mod.note_message_append("inst-a", msg)
+        s, ring, _inst = self._sampler(tree)
+        s.run_once()
+        row = ring.snapshot()[-1]
+        anon_bytes = 65536 * 1024  # VmData in the synthetic fixture
+        assert row["attributed_bytes"] == charged
+        assert row["unattributed_kb"] == (anon_bytes - charged) // 1024
+        assert 0.0 <= row["coverage_pct"] <= 1.0
+        assert row["coverage_pct"] == pytest.approx(
+            min(1.0, charged / anon_bytes), abs=1e-9
+        )
+
+    def test_coverage_never_exceeds_one_and_unattributed_never_negative(
+        self, tmp_path, charge_env
+    ):
+        """Charged stock over anon ⇒ clamp: unattributed 0, coverage 1."""
+        # Tiny-anon daemon fixture (VmData 100 kB) so a modest charge
+        # exceeds the whole anon pool.
+        proc = tmp_path / "proc"
+        cg_root = tmp_path / "sys" / "fs" / "cgroup"
+        (proc / "self").mkdir(parents=True)
+        (proc / "self" / "cgroup").write_text("0::/system.slice/t.service\n")
+        (proc / "self" / "stat").write_text(
+            "1 (python) R 1 1 1 0 -1 0 1 1 1 1 1 1 0 0 20 0 1 0 1 1 1 "
+            "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+        )
+        (proc / "self" / "status").write_text(
+            "Name:\tpython\nVmRSS:\t100 kB\nVmHWM:\t100 kB\n"
+            "VmSize:\t100 kB\nVmData:\t100 kB\nThreads:\t1\n"
+        )
+        (proc / "self" / "statm").write_text("25 25 0 0 0 0 0")
+        (proc / "self" / "fd").mkdir()
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append("inst-big", {"blob": "x" * 1_000_000})
+        s, ring, _inst = self._sampler((proc, cg_root))
+        s.run_once()
+        row = ring.snapshot()[-1]
+        assert row["attributed_bytes"] > 100 * 1024  # charged > anon
+        assert row["unattributed_kb"] == 0
+        assert row["coverage_pct"] == 1.0
+
+    def test_anon_zero_gives_coverage_zero(self, tmp_path, charge_env):
+        """anon=0 ⇒ coverage 0 (div-by-zero guard), never a crash."""
+        proc = tmp_path / "proc"
+        cg_root = tmp_path / "sys" / "fs" / "cgroup"
+        (proc / "self").mkdir(parents=True)
+        (proc / "self" / "cgroup").write_text("0::/system.slice/t.service\n")
+        (proc / "self" / "stat").write_text(
+            "1 (python) R 1 1 1 0 -1 0 1 1 1 1 1 1 0 0 20 0 1 0 1 1 1 "
+            "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+        )
+        (proc / "self" / "status").write_text(
+            "Name:\tpython\nVmRSS:\t0 kB\nVmHWM:\t0 kB\n"
+            "VmSize:\t0 kB\nVmData:\t0 kB\nThreads:\t1\n"
+        )
+        (proc / "self" / "statm").write_text("0 0 0 0 0 0 0")
+        (proc / "self" / "fd").mkdir()
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append("inst-z", {"blob": "x" * 12345})
+        s, ring, _inst = self._sampler(
+            (proc, cg_root),
+        )
+        s.run_once()
+        row = ring.snapshot()[-1]
+        assert row["attributed_bytes"] > 0
+        assert row["unattributed_kb"] == 0
+        assert row["coverage_pct"] == 0.0
+
+    # ── deep-scan reconcile on the tick (scan_kind / estimated) ──
+
+    def test_deep_scanned_row_marked_and_others_estimated(
+        self, tree, charge_env
+    ):
+        """scan_kind='deep' + estimated=False ONLY on the fresh
+        complete deep scan; every other row is counter/True (D13)."""
+        from daemon.services.resource_monitor.deep_scan import DeepScanner
+
+        graph = {f"inst-{i}": ({"node": "x" * 50}, f"/agents/a{i}") for i in range(4)}
+        charge_mod.set_enabled(True)
+        for i in range(4):
+            charge_mod.note_message_append(f"inst-{i}", {"p": "y"})
+        s, _ring, inst_ring = self._sampler(
+            tree, graph_cache=graph, instance_cap=64
+        )
+        s.run_once()
+        rows = {r["instance_id"]: r for r in inst_ring.snapshot()}
+        assert set(rows) == {f"inst-{i}" for i in range(4)}
+        # Cursor starts at 0 ⇒ inst-0 scanned this tick (complete walk —
+        # tiny graph, far under the node cap ⇒ estimated False).
+        assert rows["inst-0"]["scan_kind"] == "deep"
+        assert rows["inst-0"]["estimated"] is False
+        assert rows["inst-0"]["deep_bytes"] == charge_mod.snapshot_instance(
+            "inst-0"
+        )["deep_bytes"]
+        assert rows["inst-0"]["deep_bytes"] > 0
+        for i in (1, 2, 3):
+            assert rows[f"inst-{i}"]["scan_kind"] == "counter"
+            assert rows[f"inst-{i}"]["estimated"] is True
+            assert rows[f"inst-{i}"]["deep_bytes"] is None
+        # estimated is NEVER None anywhere (NOT NULL contract).
+        assert all(r["estimated"] is not None for r in rows.values())
+
+    # ── T5 — cheap counts match driven state ──
+
+    def test_cheap_counts_match_driven_state(self, tree, charge_env):
+        """T5/AC3: graph_cache_present / in_flight_tasks /
+        all_state_messages_len match the driven providers."""
+        graph = {
+            "inst-cache": (object(), "/agents/cached"),
+            "inst-idle": (object(), "/agents/idle"),
+        }
+        graph_tasks = {"inst-cache": object()}
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append("inst-cache", {"m": "z"})
+        # 3 appends ⇒ charge-record counter == 3 for inst-cache.
+        for _ in range(2):
+            charge_mod.note_message_append("inst-cache", {"m": "z"})
+        # inst-nothing: charged (1 append) but absent from the
+        # graph cache / provider maps — the fallback counter must
+        # still surface its cheap count.
+        charge_mod.note_message_append("inst-nothing", {"m": "q"})
+        s, _ring, inst_ring = self._sampler(
+            tree,
+            graph_cache=graph,
+            graph_tasks=graph_tasks,
+            state_counts={"inst-cache": 7},
+        )
+        s.run_once()
+        rows = {r["instance_id"]: r for r in inst_ring.snapshot()}
+        cache_row = rows["inst-cache"]
+        assert cache_row["graph_cache_present"] is True
+        assert cache_row["in_flight_tasks"] == 1
+        # Provider map wins when present; the charge-record counter is
+        # the fallback source (3 appends observed).
+        assert cache_row["all_state_messages_len"] == 7
+        idle_row = rows["inst-idle"]
+        assert idle_row["graph_cache_present"] is True
+        assert idle_row["in_flight_tasks"] == 0
+        assert idle_row["all_state_messages_len"] is None
+        nothing_row = rows["inst-nothing"]
+        assert nothing_row["graph_cache_present"] is False
+        assert nothing_row["all_state_messages_len"] == 1
+
+    def test_all_state_messages_len_falls_back_to_charge_counter(
+        self, tree, charge_env
+    ):
+        """Without the state-counts provider, the charge append-count
+        is the T5 source (cheap len — no deep walk)."""
+        charge_mod.set_enabled(True)
+        for _ in range(3):
+            charge_mod.note_message_append("inst-c", {"m": "z"})
+        s, _ring, inst_ring = self._sampler(tree)
+        s.run_once()
+        row = inst_ring.snapshot()[0]
+        assert row["all_state_messages_len"] == 3
+
+    # ── T10 — registry children charged to the OWNING instance ──
+
+    def _register_child(self, registry, proc: Path, *, pid, start_time,
+                        kind, instance_id, command="bash -c x"):
+        child = proc / str(pid)
+        child.mkdir(parents=True)
+        # Field 4=ppid, 5=pgid, 22=starttime (jiffies); utime=10, stime=5.
+        # Field 22 MUST equal the registered start_time — the sampler's
+        # recycle defense reads it back (parts[19] after the comm strip).
+        (child / "stat").write_text(
+            f"{pid} (bash) R 1 {pid} {pid} 0 -1 0 100 0 0 0 10 5 0 0 20 0 "
+            f"1 0 {start_time} 500000 16 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+        )
+        (child / "status").write_text(
+            "Name:\tbash\nVmRSS:\t8192 kB\nVmHWM:\t9216 kB\n"
+        )
+        return registry.register(
+            pid=pid,
+            start_time=start_time,
+            kind=kind,
+            instance_id=instance_id,
+            command=command,
+            pgid=pid,
+        )
+
+    def test_child_exact_reads_charged_to_owning_instance(
+        self, tree, charge_env
+    ):
+        proc = tree[0]
+        self._register_child(
+            charge_env, proc, pid=5678, start_time=8888,
+            kind="bash", instance_id="inst-owner",
+        )
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append("inst-owner", {"m": "z"})
+        charge_mod.note_message_append("inst-other", {"m": "z"})
+        s, ring, inst_ring = self._sampler(
+            tree, graph_cache={"inst-owner": (object(), "/agents/o"),
+                               "inst-other": (object(), "/agents/x")},
+        )
+        s.run_once()
+        rows = {r["instance_id"]: r for r in inst_ring.snapshot()}
+        # EXACT child read charged to the OWNER only.
+        assert rows["inst-owner"]["child_rss_kb"] == 8192
+        assert rows["inst-owner"]["child_cpu_user_usec"] == 10 * 10_000
+        assert rows["inst-other"]["child_rss_kb"] == 0
+        # T1 child_rss_total_kb covers the registry child too.
+        assert ring.snapshot()[-1]["child_rss_total_kb"] == 8192
+
+    def test_recycled_pid_never_charged(self, tree, charge_env):
+        """D8 at the sampler: /proc starttime mismatch ⇒ skip."""
+        proc = tree[0]
+        self._register_child(
+            charge_env, proc, pid=4242, start_time=111111,
+            kind="bash", instance_id="inst-owner",
+        )
+        # Rewrite the stat with a DIFFERENT starttime (recycled pid).
+        (proc / "4242" / "stat").write_text(
+            "4242 (evil) R 1 4242 4242 0 -1 0 100 0 0 0 99 5 0 0 20 0 "
+            "1 0 9999 500000 16 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+        )
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append("inst-owner", {"m": "z"})
+        s, ring, inst_ring = self._sampler(
+            tree, graph_cache={"inst-owner": (object(), "/agents/o")}
+        )
+        s.run_once()
+        rows = {r["instance_id"]: r for r in inst_ring.snapshot()}
+        assert rows["inst-owner"]["child_rss_kb"] == 0
+        assert ring.snapshot()[-1]["child_rss_total_kb"] == 0
+
+    def test_mcp_pool_child_stays_server_scoped(self, tree, charge_env):
+        """instance_id NULL (mcp pool) ⇒ NO instance gets the bytes;
+        the child still shows in the §2.8 children view (D11)."""
+        proc = tree[0]
+        self._register_child(
+            charge_env, proc, pid=7171, start_time=31337,
+            kind="mcp_child", instance_id=None,
+            command="node server.js",
+        )
+        charge_env_entries = None  # silence lint
+        # give the entry a server-scoped detail
+        charge_env._live[7171].detail = "context7"
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append("inst-a", {"m": "z"})
+        s, ring, inst_ring = self._sampler(
+            tree, graph_cache={"inst-a": (object(), "/agents/a")}
+        )
+        s.run_once()
+        rows = {r["instance_id"]: r for r in inst_ring.snapshot()}
+        assert rows["inst-a"]["child_rss_kb"] == 0
+        assert ring.snapshot()[-1]["child_rss_total_kb"] == 8192
+        view = s.last_children_view
+        assert len(view) == 1
+        assert view[0] == {
+            "pid": 7171,
+            "kind": "mcp_child",
+            "name": "context7",
+            "cpu_pct": None,  # first sight — honest None
+            "rss_mb": 8.0,
+        }
+
+    def test_children_cpu_pct_second_tick(self, tree, charge_env):
+        """cpu_pct is a delta — None on first sight, a number on the
+        second (never invented)."""
+        proc = tree[0]
+        self._register_child(
+            charge_env, proc, pid=5150, start_time=777,
+            kind="bash", instance_id="inst-owner",
+        )
+        charge_mod.set_enabled(True)
+        s, _ring, _inst = self._sampler(
+            tree, graph_cache={"inst-owner": (object(), "/agents/o")}
+        )
+        s.run_once()
+        assert s.last_children_view[0]["cpu_pct"] is None
+        # Bump the child's utime (10 → 20 jiffies), SAME starttime —
+        # tick again.
+        (proc / "5150" / "stat").write_text(
+            "5150 (bash) R 1 5150 5150 0 -1 0 100 0 0 0 20 5 0 0 20 0 "
+            "1 0 777 500000 16 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+        )
+        s.run_once()
+        pct = s.last_children_view[0]["cpu_pct"]
+        assert pct is not None and pct > 0.0
+
+    # ── AC11 — D14 no-raw-args guard (schema + canary) ──
+
+    def test_t2_row_schema_scalars_only(self, tree, charge_env):
+        """AC11: the T2 row carries ONLY the allowed scalar keys."""
+        graph = {"inst-a": (object(), "/agents/a")}
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append("inst-a", {"m": "z"})
+        s, _ring, inst_ring = self._sampler(
+            tree, graph_cache=graph,
+            graph_tasks={"inst-a": object()},
+            state_counts={"inst-a": 1},
+        )
+        s.run_once()
+        for row in inst_ring.snapshot():
+            extra = set(row) - ALLOWED_T2_ROW_KEYS
+            assert not extra, extra
+            missing = {
+                "instance_id", "scan_kind", "charged_bytes",
+                "child_rss_kb", "child_cpu_user_usec", "estimated",
+            } - set(row)
+            assert not missing, missing
+
+    def test_canary_secret_never_reaches_rows_or_logs(
+        self, tree, charge_env, tmp_path, caplog, monkeypatch
+    ):
+        """AC11 canary: a secret planted in a synthetic tool-arg /
+        message must not appear in ANY resource_* row nor in any
+        resource_monitor log line across a full tick+flush cycle."""
+        import logging
+
+        CANARY = "SECRET_CANARY__ENS__pb-f1-plaintext"
+
+        # Apply the 4 migrations to a file SQLite.
+        engine = create_engine(
+            f"sqlite:///{tmp_path / 'canary.db'}",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        migrations = (
+            Path(__file__).resolve().parent.parent
+            / "daemon" / "migrations" / "versions"
+        )
+
+        def split_sql(sql_text):
+            if "-- DOWN" in sql_text:
+                sql_text = sql_text.split("-- DOWN")[0]
+            code = "\n".join(
+                ln for ln in sql_text.splitlines()
+                if not ln.lstrip().startswith("--")
+            )
+            return [s.strip() for s in code.split(";") if s.strip()]
+
+        from daemon.services.resource_monitor import Flusher
+        from daemon.services.resource_monitor.rollup import RetentionPolicy
+
+        for fn in [
+            "20261018_090001_create_resource_daemon_bucket.sql",
+            "20261018_090002_create_resource_instance_sample.sql",
+            "20261018_090003_create_resource_pid_map.sql",
+            "20261018_090004_create_resource_limit_policy.sql",
+        ]:
+            sql = (migrations / fn).read_text()
+            with engine.begin() as conn:
+                for stmt in split_sql(sql):
+                    conn.execute(text(stmt))
+
+        # Plant the canary EVERYWHERE the seams could conceivably leak:
+        # a message object (append), a checkpoint blob, and a graph
+        # node the deep scan walks.
+        charge_mod.set_enabled(True)
+        charge_mod.note_message_append(
+            "inst-canary", {"tool_args": {"cmd": CANARY}, "content": CANARY}
+        )
+        charge_mod.note_checkpoint_read("inst-canary", {"blob": CANARY})
+        graph = {"inst-canary": ({"secret": CANARY}, "/agents/canary")}
+
+        # A registry child whose (sanitized-shape) command carries the
+        # canary — even a BAD seam caller must not leak through us.
+        proc = tree[0]
+        self._register_child(
+            charge_env, proc, pid=9090, start_time=424242,
+            kind="bash", instance_id="inst-canary",
+            command=f"bash -c {CANARY}",
+        )
+
+        s, ring, inst_ring = self._sampler(
+            tree, graph_cache=graph,
+        )
+        flusher = Flusher(
+            engine=engine,
+            raw_ring=ring,
+            flush_batch_seconds=60,
+            retention=RetentionPolicy(2880, 336, 180),
+            instance_ring=inst_ring,
+            pid_registry=charge_env,
+        )
+
+        with caplog.at_level(
+            logging.DEBUG, logger="daemon.services.resource_monitor"
+        ):
+            s.run_once()
+            s.run_once()  # 2 ticks — cpu_pct delta + a second deep scan
+            flusher.run_once()
+
+        # 1. Every persisted resource_* row is canary-free.
+        with engine.connect() as conn:
+            for table in (
+                "resource_daemon_bucket",
+                "resource_instance_sample",
+                "resource_pid_map",
+                "resource_limit_policy",
+            ):
+                rows = conn.execute(
+                    text(f"SELECT * FROM {table}")
+                ).fetchall()
+                for row in rows:
+                    rendered = json.dumps(
+                        [str(c) for c in row], default=str
+                    )
+                    assert CANARY not in rendered, (
+                        f"CANARY LEAKED into {table}: {rendered[:200]}"
+                    )
+        # 2. The in-RAM T2 rows are canary-free too.
+        for row in inst_ring.snapshot():
+            assert CANARY not in json.dumps(row, default=str)
+        # 3. No resource_monitor log line carried the canary.
+        for rec in caplog.records:
+            assert CANARY not in rec.getMessage()
+            assert CANARY not in str(rec.exc_info)
+        # 4. And the rows EXIST (the cycle was real, not vacuous).
+        with engine.connect() as conn:
+            n = conn.execute(
+                text("SELECT COUNT(*) FROM resource_instance_sample")
+            ).scalar()
+            assert n >= 2
