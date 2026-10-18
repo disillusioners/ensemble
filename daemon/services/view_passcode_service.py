@@ -613,8 +613,26 @@ class _SqlViewPasscodeStore:
     audit row commit atomically (M1 atomicity contract).
     """
 
-    def __init__(self, engine: Any) -> None:
+    def __init__(
+        self, engine: Any, *, strike_ceiling: int,
+    ) -> None:
         self._engine = engine
+        # C4 wiring (D14): honor the operator-configured
+        # ceiling from ``ViewPasscodeService`` (which itself
+        # receives it from
+        # ``config.live_views.passcode_lockout_threshold`` via
+        # ``daemon/api.py``). Stored locally so the atomic
+        # UPDATE in ``record_failure_with_audit`` uses the
+        # CONFIGURED value rather than the module-level spec
+        # constant — re-binding a class-level alias inside
+        # ``__init__`` would race with shared default-arg
+        # reads.
+        if not isinstance(strike_ceiling, int) or strike_ceiling < 1:
+            raise ValueError(
+                f"_SqlViewPasscodeStore.strike_ceiling must be "
+                f"a positive int; got {strike_ceiling!r}"
+            )
+        self._strike_ceiling = strike_ceiling
 
     def get_row(
         self, root_name: str, rel_path: str
@@ -798,7 +816,7 @@ class _SqlViewPasscodeStore:
         service caller MUST check the row exists BEFORE
         invoking this method, or accept the sentinel.
         """
-        ceiling = LIVE_VIEW_PASSCODE_STRIKE_CEILING
+        ceiling = self._strike_ceiling
         now_iso = datetime.now(timezone.utc).isoformat()
         with self._engine.begin() as conn:
             # Existence probe — the atomic UPDATE below cannot
@@ -990,16 +1008,42 @@ class ViewPasscodeService:
     #: ``self.STRIKE_CEILING`` resolvable from the service
     #: boundary. The module-level constant is the canonical
     #: source of truth.
+    #: Strike ceiling — the Nth wrong verify flips ``locked``
+    #: (ADR D5). The class-level alias mirrors the spec
+    #: constant from ``daemon/repositories/view_passcodes/
+    #: models.py`` (``LIVE_VIEW_PASSCODE_STRIKE_CEILING``) and
+    #: is REPLACED at instance construction time when the
+    #: caller passes ``strike_ceiling=...`` (the C4 wiring;
+    #: ``daemon/api.py`` forwards
+    #: ``config.live_views.passcode_lockout_threshold``).
     STRIKE_CEILING: int = LIVE_VIEW_PASSCODE_STRIKE_CEILING
 
     def __init__(
         self,
         engine: Any,
         cipher: ViewPasscodeCipher,
+        *,
+        strike_ceiling: int = LIVE_VIEW_PASSCODE_STRIKE_CEILING,
     ) -> None:
         self._engine = engine
         self._cipher = cipher
-        self._store: _ViewPasscodeStorePort = _SqlViewPasscodeStore(engine)
+        # C4 wiring (D14): honor the operator-configured
+        # ceiling when present, fall back to the spec default
+        # for unconfigured callers (tests + the legacy
+        # ``ViewPasscodeService(engine, cipher)`` shape). The
+        # service-level instance attribute overrides the
+        # class-level alias so ``self.STRIKE_CEILING``
+        # resolves to the configured value at request time.
+        if not isinstance(strike_ceiling, int) or strike_ceiling < 1:
+            raise ValueError(
+                f"ViewPasscodeService.strike_ceiling must be a "
+                f"positive int; got {strike_ceiling!r}"
+            )
+        self.STRIKE_CEILING = strike_ceiling
+        self._strike_ceiling = strike_ceiling
+        self._store: _ViewPasscodeStorePort = _SqlViewPasscodeStore(
+            engine, strike_ceiling=strike_ceiling,
+        )
 
     @property
     def is_available(self) -> bool:
@@ -1763,19 +1807,49 @@ def _rightmost_xff_ip(headers: "Mapping[str, str] | None") -> str | None:
     """Return the rightmost X-Forwarded-For entry (architecture-
     recommendation.md D7:83-86).
 
-    Behind a single trusted Envoy hop the rightmost entry is
-    the address APPENDED by our proxy = the real client;
-    leftmost entries are client-supplied and spoofable
-    (rotation voids the limiter). Rightmost dominates in every
-    topology: proxy appends → rightmost trustworthy; proxy
-    overwrites → single entry (leftmost == rightmost);
-    unknown topology → degrades to a shared bucket =
-    over-throttle, never bypass.
+    TRUST MODEL — read before changing the bucket key
+    ---------------------------------------------------
+    Rightmost-XFF keying is sound ONLY behind a trusted-proxy front
+    that *appends* the real client IP as the rightmost entry. Under
+    that topology:
 
-    Header is comma-separated per RFC 7239; we trim whitespace
-    before returning. Empty / whitespace-only entries are
-    skipped (a header that is all commas / spaces returns
-    None).
+        proxy appends → rightmost == the address our proxy saw
+                       == the real client (correct keying).
+
+    Under any other topology the whole XFF header is
+    client-supplied (rightmost included) and trivially spoofable.
+    In particular, under DIRECT exposure (no fronting proxy) every
+    XFF value is whatever the client put on the wire — rightmost
+    keying still picks the spoofed entry, and the bucket degrades
+    from per-IP throttle to a spoofable-key throttle. The router
+    in this code-path runs at the daemon edge, which sits behind
+    Envoy + oauth2-proxy in State A and behind the in-house OAuth2
+    module in State B — for those topologies the
+    rightmost-keying choice holds. Under direct exposure the
+    bucket is NOT a security control; the
+    **durable 10-strike lock (PG-backed row column, ``locked``
+    bit, locked-page semantics in ADR V3) remains the
+    authoritative control regardless**. The bucket is the soft
+    front (fail-open, ADR V6); over-throttle is the worst
+    degradation direction — never bypass (see also §3.4-X in
+    docs/runbooks/live-view-passcode-deployment.md for the
+    three-outcome XFF topology drill that empirically settles
+    whether State A appends or overwrites — pin at ceremony,
+    don't assume).
+
+    FOLLOW-UP TICKET (NOT IMPLEMENTED HERE)
+    ----------------------------------------
+    The XFF trust knob (a config flag asserting "the daemon sits
+    behind a known-append topology; trust rightmost") is a
+    separate commission. Wiring it requires a config field +
+    a startup topology probe or operator declaration +
+    integration into the §3.4-X drill + retirement of the
+    direct-exposure code path. Out of scope for the pre-promote
+    C-fix sweep; do not introduce it inline.
+
+    Header is comma-separated per RFC 7239; whitespace is trimmed
+    before returning. Empty / whitespace-only entries are skipped
+    (a header that is all commas / spaces returns None).
     """
     if headers is None:
         return None

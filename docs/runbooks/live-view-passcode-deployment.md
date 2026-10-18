@@ -25,8 +25,13 @@ What rides under the prefix (all of it, nothing else):
 - the gate-free mermaid asset alias `/views/public/assets/mermaid/mermaid.min.js`.
 
 What must NEVER ride it: `/views/<root>/<rel>` (the direct lane — OAuth-guarded, no
-passcode), `/api/**` (the daemon API), `/views/livez` and `/views/assets/**` (already
-PUBLIC exact-tagged in code — they need no proxy exemption).
+passcode), `/api/**` (the daemon API). `/views/livez` carries an existing PUBLIC
+exact-path tag (State A pre-existing rule, untouched by this feature — exempting it
+here is redundant and `oauth2-proxy` already lets it through by config), but
+**`/views/assets/**` is NOT public and stays default-deny under auth-ON** — the
+`/views/public/assets/mermaid/mermaid.min.js` alias under the public prefix is the
+*only* unauthenticated asset path. This is pinned by `tests/integration/test_auth_public_lane_tag.py::TestAuthOnPublicLaneExemption::test_views_assets_stays_default_deny`
+and `tests/integration/test_auth_public_lane_tag.py::TestAuthOnPublicLaneExemption::test_views_livez_unchanged_public_exact_tag`.
 
 The prefix is a **frozen code constant**, not config: `PUBLIC_NAMESPACE = "/views/public"`
 (`daemon/services/live_views.py:155`), with `public` a reserved root name
@@ -291,7 +296,7 @@ and enables the in-house OAuth2 module (`auth.enabled`, default OFF,
 | `GET /views/public/<root>/<file>` | daemon answer (interstitial 200 / uniform 404) — **no** 302 to `/api/auth/login` | code-seeded prefix tag passes `AuthMiddleware` |
 | `GET /views/<root>/<file>` (direct lane) | **302 → `/api/auth/login?return_to=…`** (browser) — default-deny | direct lane stays OAuth-guarded |
 | `GET /views/livez` | 200 (PUBLIC exact tag) | unaffected |
-| `GET /views/assets/...` | served (asset route) — *from OAuth'd context or exact-tagged paths only; the alias under the public prefix is `/views/public/assets/...`* | unaffected |
+| `GET /views/assets/...` | **401** (default-deny) — `/views/assets/*` is NOT public; only `/views/public/assets/...` is | direct asset path stays protected (pinned by `test_views_assets_stays_default_deny` in `tests/integration/test_auth_public_lane_tag.py`) |
 
 Executed drill + transcript: **§3.3 (State B dry-run) — DONE locally, evidence at
 `.agents/shared/planning/live-view-passcode/evidence/`.**
