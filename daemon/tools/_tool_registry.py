@@ -146,10 +146,9 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # behind the ``settings`` privileged category (#8 in
     # ``PRIVILEGED_TOOL_CATEGORIES`` — septet → octet; ``secrets``
     # joined 2026-10-17 before this entry). The ari + leader
-    # meta.json allow entries land in Phase 3; until then the
-    # category resolves ZERO tools on every agent (opt-in-only,
-    # NEVER default-granted). HONEST contract: the tools never
-    # claim liveness — every write reports
+    # meta.json allow entries landed 2026-10-18 (P3); the category
+    # remains opt-in-only (NEVER default-granted). HONEST contract:
+    # the tools never claim liveness — every write reports
     # ``applies_at: "next daemon restart"`` + ``live: false``.
     "settings_get",
     "settings_set",
@@ -233,7 +232,7 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # the integration sanity pin in
 # ``tests/integration/test_service_tool_flag_off_byte_identical.py``
 # (``test_privileged_category_set_is_pinned``), and
-# ``tests/unit/tools/test_secrets_registration.py:212`` (the
+# ``tests/unit/tools/test_secrets_registration.py:218`` (the
 # fifth exact-set pin — the originally-omitted one, added by the
 # iteration-002 council B2 correction). Silent additions and
 # silent removals (fail-open regressions) both trip the pins.
@@ -306,7 +305,7 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # ``tests/integration/test_maintenancer_spawn_resolves_tools.py``,
     # the integration sanity pin at
     # ``tests/integration/test_service_tool_flag_off_byte_identical.py``,
-    # and ``tests/unit/tools/test_secrets_registration.py:212``
+    # and ``tests/unit/tools/test_secrets_registration.py:218``
     # (the fifth exact-set pin — the originally-omitted one,
     # added by the iteration-002 council B2 correction) are
     # mandatory (the A14/D18 silent-additions-visible rule).
@@ -330,8 +329,8 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # (``daemon/tools/instance.py``) AND the
     # ``resolve_tool_filter`` empty-allow branch. NEVER
     # default-granted — opt-in-only; the ari + leader
-    # meta.json ``tools.allow`` entries land in Phase 3 of
-    # settings-worker-slots. The honest never-live contract
+    # meta.json ``tools.allow`` entries landed 2026-10-18 (P3).
+    # The honest never-live contract
     # (D5) is load-bearing: every write response states
     # ``applies_at: "next daemon restart"`` + ``live: false``.
     # SAME-PR pin updates at the FIVE files listed in the
@@ -866,7 +865,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # council-B3 option-(b) seam). Category is entry #8 in
     # ``PRIVILEGED_TOOL_CATEGORIES`` (septet → octet; ``secrets``
     # joined 2026-10-17 before this entry); opt-in only — the
-    # ari + leader ``tools.allow`` entries land in Phase 3.
+    # ari + leader ``tools.allow`` entries landed 2026-10-18 (P3).
     # See ``daemon/tools/settings_tools.py`` for the honest
     # never-live contract (D5). The list-extend in
     # ``daemon/tools/instance.py`` (after the secrets block) is

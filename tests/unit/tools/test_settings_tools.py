@@ -23,8 +23,9 @@ agent-facing surface of the honest never-live contract (D5):
   resolves exactly the three tools through the REAL
   ``create_instance_tools()`` path; non-allow / empty-allow /
   no-tools-config agents resolve ZERO (R-SR16 privileged
-  default-deny). NOTE: the ari/leader meta.json allow entries are
-  Phase 3 — this file intentionally does NOT assert them.
+  default-deny). NOTE: the ari/leader meta.json allow entries
+  landed 2026-10-18 (P3) — this file intentionally does NOT
+  assert them.
 
 Service harness: a REAL ``SettingsService`` on an in-memory
 SQLite engine (the ``app_settings`` table only) + a hand-built
@@ -614,7 +615,8 @@ class TestAuditAndAttribution:
 # ────────────────────────────────────────────────────────────────────────────
 # Allow-list / privileged-category gates (R-SR16) — synthetic agents
 # through the REAL create_instance_tools() path. The ari/leader
-# meta.json entries are Phase 3 and deliberately NOT asserted here.
+# meta.json entries landed 2026-10-18 (P3) and are deliberately
+# NOT asserted here.
 # ────────────────────────────────────────────────────────────────────────────
 
 

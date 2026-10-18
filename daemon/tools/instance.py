@@ -6140,10 +6140,10 @@ Returns:
     # seam reads it directly at call time). The category is
     # entry #8 in ``PRIVILEGED_TOOL_CATEGORIES`` (septet →
     # octet) — NEVER default-granted; the ari + leader
-    # ``tools.allow`` entries land in Phase 3, so until then
-    # every agent resolves ZERO settings tools through both the
-    # ``_strip_privileged_category_tools`` default-deny strip
-    # AND the ``resolve_tool_filter`` empty-allow branch. The
+    # ``tools.allow`` entries landed 2026-10-18 (P3). Every
+    # non-allowed agent still resolves ZERO settings tools through
+    # both the ``_strip_privileged_category_tools`` default-deny
+    # strip AND the ``resolve_tool_filter`` empty-allow branch. The
     # factory tolerates a None-stub manager for the loader
     # warm-list (the ``ens_env_tools`` pattern) — the tool
     # bodies dereference the router DI global at call time.

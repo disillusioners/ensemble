@@ -8366,12 +8366,16 @@ class InstanceManager:
         to slim ``manager.py`` from the 11.6k-line monolith. The
         signature is identical — every caller keeps working without
         edits. The ONLY production caller is ``daemon/api.py:608``
-        (passes no args → resolves from boot-applied config); the ~20
-        test call sites (``tests/integration/chat_source_harness.py``
-        and the ``test_chat_source_*`` files) ALL pass an explicit
-        ``num_workers`` → byte-identical behavior. See the
-        orchestrator module's docstring for the full extraction
-        narrative.
+        (passes no args → resolves from boot-applied config). All
+        PRE-EXISTING test call sites (``tests/integration/
+        chat_source_harness.py`` and the ``test_chat_source_*``
+        files) pass an explicit ``num_workers`` → byte-identical
+        behavior; the F4 resolved-path tests
+        (``test_chat_source_pool_wiring.py``,
+        ``test_messages_ref_path_worker_pool.py``,
+        ``test_chat_source_boot_line.py``) intentionally pass none
+        to exercise that no-kwarg path. See the orchestrator
+        module's docstring for the full extraction narrative.
 
         Args:
             num_workers: Number of default-pool worker threads

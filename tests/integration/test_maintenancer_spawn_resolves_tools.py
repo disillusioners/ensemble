@@ -316,8 +316,8 @@ class TestPrivilegedCategoryRegistryShape:
         # ``tools.allow`` is the ONLY access boundary).
         # settings-worker-slots P2 (2026-10-18) added
         # ``settings`` (the daemon-runtime-settings category;
-        # opt-in-only; ari + leader allow entries land in
-        # Phase 3). Method
+        # opt-in-only; ari + leader allow entries landed
+        # 2026-10-18, P3). Method
         # name kept for grep-stability; the count moved
         # 3 → 4 → 5 → 6 → 7 → 8 with the same-PR pin updates
         # (D18/A14).

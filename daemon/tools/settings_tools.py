@@ -5,7 +5,7 @@ category (#8 in ``PRIVILEGED_TOOL_CATEGORIES`` — septet → octet;
 ``secrets`` joined 2026-10-17 making the count 7 before this
 entry). The category is opt-in-only via the per-agent
 ``tools.allow`` gate; the ari + leader meta.json allow entries
-land in Phase 3 (NOT in this module's scope).
+landed 2026-10-18 (P3).
 
 Tool surface (phase2-plan.md task 1, authoritative):
 
@@ -116,7 +116,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 
 from langchain_core.tools import tool
 from pydantic import Field
@@ -129,9 +129,6 @@ from daemon.services.settings_service import (
     resolve,
 )
 from ._tool_registry import register_tool_category
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -208,8 +205,8 @@ Visibility: the ``settings`` category is privileged (entry #8 in
 ``PRIVILEGED_TOOL_CATEGORIES``; ``secrets`` joined 2026-10-17
 before this entry) — the tools mutate daemon-global runtime
 state. NEVER default-granted: an agent reaches them ONLY through
-an explicit ``tools.allow`` entry (ari + leader land in Phase 3
-of settings-worker-slots). All other agents get ZERO of these
+an explicit ``tools.allow`` entry (ari + leader allow entries
+landed 2026-10-18, P3). All other agents get ZERO of these
 tools through the standard ``_strip_privileged_category_tools``
 default-deny seam.
 """
@@ -260,16 +257,29 @@ def _resolve_service(manager: Any = None) -> Any:
 def _resolve_actor(manager: Any, current_instance_id: str) -> str:
     """Resolve the actor string for audit attribution.
 
-    Cardinal #2 source discipline (the secrets ``_resolve_actor``
-    pattern): the agent id — resolved from the calling instance's
-    row (``manager._instance_repository.get(current_instance_id)
+    Cardinal #2 source discipline (mirrors the secrets
+    ``_resolve_actor`` pattern — keep in sync with
+    ``daemon/tools/secrets_tools.py::_resolve_actor``): the agent
+    id (NOT the HTTP subject, NOT the parent instance id). The
+    canonical resolution path is
+    ``manager._instance_repository.get(current_instance_id)
     .agent_id``, the same provenance the message-routing layer
-    uses) — NEVER the HTTP subject. Falls back to the instance id
-    string when the lookup fails (test-only call sites, manager
-    is None); attribution never fails the tool body.
+    uses. We FIRST probe a ``manager._resolve_agent_id_for_actor``
+    shortcut (DORMANT BY DESIGN — no manager defines it today; the
+    probe is retained for parity with the secrets implementation
+    so a future pre-computed-identity wrapper is picked up for
+    free). Falls back to the instance id string when the lookup
+    fails (test-only call sites, manager is None); attribution
+    never fails the tool body.
     """
     if manager is None:
         return current_instance_id or "<unknown>"
+    # Dormant by design: the manager may pre-compute and cache the
+    # agent id for the calling instance. No manager defines this
+    # today (grep ``_resolve_agent_id_for_actor`` finds no
+    # definition); the probe exists for parity with
+    # ``daemon/tools/secrets_tools.py::_resolve_actor`` and for
+    # future optimizations. Keep in sync with that function.
     resolver = getattr(manager, "_resolve_agent_id_for_actor", None)
     if callable(resolver):
         try:
@@ -366,18 +376,14 @@ def _honest_write_response(
     ``requires_restart=True``).
     """
     entry = _entry_for_key(key, overrides, snapshot)
-    if spec.requires_restart:
-        note = (
-            f"NOT live — requires_restart: the running daemon keeps "
-            f"{entry['value']!r}; the change applies at the next "
-            f"daemon restart"
-        )
-    else:
-        note = (
-            f"NOT live — the running daemon keeps "
-            f"{entry['value']!r}; the change applies at the next "
-            f"daemon restart"
-        )
+    # All current ManagedKeySpecs are requires_restart=True; the
+    # note is the restart-required shape for every key. Revisit if
+    # a False key is ever added (it would need a non-restart note).
+    note = (
+        f"NOT live — requires_restart: the running daemon keeps "
+        f"{entry['value']!r}; the change applies at the next "
+        f"daemon restart"
+    )
     return {
         "key": key,
         "written": written,
@@ -640,8 +646,8 @@ the next daemon restart. Sensitive keys report null tier details.
 Visibility: the ``settings`` category is privileged (#8 in
 ``PRIVILEGED_TOOL_CATEGORIES``; ``secrets`` joined 2026-10-17
 before this entry). NEVER default-granted — an explicit
-``tools.allow`` entry is the only access path (ari + leader land
-in Phase 3 of settings-worker-slots).
+``tools.allow`` entry is the only access path (ari + leader
+allow entries landed 2026-10-18, P3).
 """
 
 _FULL_DOC_SET = """\

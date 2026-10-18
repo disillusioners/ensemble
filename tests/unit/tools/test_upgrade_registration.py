@@ -130,15 +130,15 @@ class TestStaticRegistrationChecklist:
         trusted for autonomous use — and the per-agent allow gate
         is the ONLY access boundary. settings-worker-slots P2
         (2026-10-18) adds ``settings`` (the daemon-runtime-settings
-        category; opt-in-only; ari + leader allow entries land in
-        Phase 3). Adding a category here is a
+        category; opt-in-only; ari + leader allow entries landed
+        2026-10-18, P3). Adding a category here is a
         deliberate trust decision, and this pin makes silent
         additions visible (D18/A14 —
         same-PR pin updates; this is pin file 1 of 5; the
         integration sanity pin lives at
         ``tests/integration/test_service_tool_flag_off_byte_identical.py``
         and the fifth exact-set pin at
-        ``tests/unit/tools/test_secrets_registration.py:212``."""
+        ``tests/unit/tools/test_secrets_registration.py:218``."""
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
