@@ -465,6 +465,29 @@ def read_child_snapshot(proc_root: Path, pid: int) -> Optional[ChildSnapshot]:
     )
 
 
+def read_pss_rollup(proc_root: Path) -> Optional[int]:
+    """Read ``/proc/self/smaps_rollup`` for PSS in kB.
+
+    Gated by ``detail_level`` in the sampler (1/10 cadence under
+    ``deep`` / ``full``). Routed through the module's ``_read_text``
+    so the fenced tests can instrument the read (escape guard).
+    Returns None on any read failure — never crashes the sampler.
+    """
+    text = _read_text(proc_root / "self" / "smaps_rollup")
+    if text is None:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("Pss:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    return int(parts[1])
+                except (ValueError, TypeError):
+                    return None
+    return None
+
+
 # ── Top-level entry ────────────────────────────────────────────────────────
 
 
@@ -519,4 +542,5 @@ __all__ = [
     "read_daemon_snapshot",
     "read_child_snapshot",
     "read_proc_snapshot",
+    "read_pss_rollup",
 ]

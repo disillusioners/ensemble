@@ -339,27 +339,13 @@ class Sampler:
         return snap
 
     def _read_pss_rollup(self) -> Optional[int]:
-        """Read ``/proc/self/smaps_rollup`` for PSS in kB.
-
-        The plan gates smaps_rollup on ``detail_level`` (env-gated).
-        When the sampler runs in ``deep`` / ``full`` mode every 10th
-        tick reads it; the result is plumbed through the daemon row.
-        Returns None on any read failure — never crashes the sampler.
+        """Read ``/proc/self/smaps_rollup`` for PSS in kB (via the
+        proc_readers helper so the fenced tests' escape guard sees
+        it).
         """
-        try:
-            text = (self.proc_root / "self" / "smaps_rollup").read_text()
-        except (FileNotFoundError, PermissionError, OSError):
-            return None
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("Pss:"):
-                parts = line.split()
-                if len(parts) >= 2:
-                    try:
-                        return int(parts[1])
-                    except (ValueError, TypeError):
-                        return None
-        return None
+        from .proc_readers import read_pss_rollup
+
+        return read_pss_rollup(self.proc_root)
 
     def _default_ladder_for_detail(self) -> str:
         """Translate the configured ``detail_level`` into a starting
