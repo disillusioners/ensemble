@@ -576,6 +576,27 @@ class TestJ7PidResolve:
         # (a wrong-era row must not be guessed)
         assert rt.resolve_pid_instance(engine, 333, start_time=424242) is None
 
+    def test_pid_map_fetch_bounded_at_50(self, engine):
+        """Review #5 regression: a heavily-recycled pid (55 eras) must
+        not pull its entire history — the fetch is bounded at the 50
+        NEWEST rows (newest-era suffices after the start_time match),
+        and public resolution still answers from the newest era."""
+        base = datetime(2026, 10, 17, 0, 0, 0)
+        newest_iid = "i-era54"
+        for n in range(55):
+            spawned = (base + timedelta(minutes=n)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            seed_child(engine, 77, "bash", spawned,
+                       exited_at="2026-10-18 00:00:00",
+                       iid=f"i-era{n}", start_time=1000 + n)
+        with engine.connect() as conn:
+            got = conn.execute(rt._PID_MAP_SQL, {"pid": 77}).fetchall()
+        assert len(got) == 50  # bounded — not all 55 eras
+        assert got[0].instance_id == newest_iid  # newest era first
+        row = rt.resolve_pid_instance(engine, 77)
+        assert row["instance_id"] == newest_iid
+
     def test_neither_spine_none(self, engine):
         assert rt.resolve_pid_instance(engine, 999999) is None
 

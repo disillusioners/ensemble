@@ -666,9 +666,13 @@ def chart_render_aggregate(engine: Any, at: datetime) -> dict:
 
 # ── J7 — historical pid→instance ────────────────────────────────────────────
 
+#: ``LIMIT 50`` — a heavily-recycled pid's 50 NEWEST eras suffice:
+#: the start_time match (or the newest-row preference when no era
+#: matches) never needs deeper history, and the bound keeps a
+#: pathological pid's row count off the read path.
 _PID_MAP_SQL = text(
     "SELECT pid, start_time, instance_id, agent_id, spawned_at, exited_at "
-    "FROM resource_pid_map WHERE pid = :pid ORDER BY spawned_at DESC"
+    "FROM resource_pid_map WHERE pid = :pid ORDER BY spawned_at DESC LIMIT 50"
 )
 
 _SERVICE_TRACKING_SQL = text(
