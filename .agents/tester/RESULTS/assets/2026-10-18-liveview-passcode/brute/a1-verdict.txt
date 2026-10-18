@@ -1,0 +1,3 @@
+A1: status=303 cookie_captured=yes
+A1: PASS
+A1-content: grant renders view content (PASS)

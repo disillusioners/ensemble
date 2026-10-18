@@ -1,0 +1,10 @@
+HTTP/1.1 303 See Other
+date: Sun, 18 Oct 2026 05:01:29 GMT
+server: uvicorn
+x-content-type-options: nosniff
+cache-control: private, max-age=60
+location: /views/public/journeyroot1/hello.md
+set-cookie: view_grant=gAAAAABq1FKq1QHftHgBoiWNSSwzkyKjXi3UiTqwnAvoUFWhNpXD7d9u6SUqawvjClq1lDzn_auoC4Nl1uir-l-oYD4JnL33Ja6glk75hN4TUcSbP6_5YmatCOE4BSdha31teG9xBmCQlPDF3Fpg-rvLBM8Pd8orOjsXhemTdrDqqltcbfizJTW4X81HWz1WT-e9Ab1QaC6M; Path=/views/public/journeyroot1/hello.md; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+content-length: 0
+access-control-allow-credentials: true
+

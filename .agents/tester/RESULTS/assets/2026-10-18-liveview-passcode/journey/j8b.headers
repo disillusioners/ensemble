@@ -1,0 +1,10 @@
+HTTP/1.1 303 See Other
+date: Sun, 18 Oct 2026 05:01:30 GMT
+server: uvicorn
+x-content-type-options: nosniff
+cache-control: private, max-age=60
+location: /views/public/tmp-images/8f820b5fa8934ae19b9da54f9c040cab
+set-cookie: view_grant=gAAAAABq1FKqVCFhTyWrJVfIUFJKa-AAxHhEFayi184tFO91Ee0_OEsL8CUO4S2YOFaf_voGze_9Jv_7ZgHxIDFkuXpbkDXXOy9Sylyz_XA9pGERPBI79RHoCxEyzpeKQcrC2SGH1SXGTrpGIbEsuVKcOgAs8yrxBtXuCDVn8ntv6ENZ1rgLNYsSb8MNCGXu5Q43GzHb4MDtczqkn7sLUYVl56CCNmPdp2dq-9hMsutLIb3fcfmi1ls=; Path=/views/public/tmp-images/8f820b5fa8934ae19b9da54f9c040cab; HttpOnly; Secure; SameSite=Lax; Max-Age=86400
+content-length: 0
+access-control-allow-credentials: true
+

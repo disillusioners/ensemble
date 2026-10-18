@@ -1,0 +1,10 @@
+HTTP/1.1 404 Not Found
+date: Sun, 18 Oct 2026 05:01:32 GMT
+server: uvicorn
+x-content-type-options: nosniff
+cache-control: private, max-age=60
+content-length: 26
+content-type: application/json
+
+--- BODY (26 bytes) ---
+{"error":"view not found"}

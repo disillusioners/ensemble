@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+date: Sun, 18 Oct 2026 05:01:30 GMT
+server: uvicorn
+x-content-type-options: nosniff
+cache-control: private, max-age=60
+content-security-policy: default-src 'self'; script-src 'self' 'nonce-hYemgVBALLNJOjb29mZazQ'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+referrer-policy: no-referrer
+content-length: 4596
+content-type: text/html; charset=utf-8
+

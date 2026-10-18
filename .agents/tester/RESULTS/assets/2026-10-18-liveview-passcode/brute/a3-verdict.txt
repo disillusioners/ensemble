@@ -1,0 +1,2 @@
+a3_status=303
+A3: PASS correct-code verify succeeded post-429 + new grant renders

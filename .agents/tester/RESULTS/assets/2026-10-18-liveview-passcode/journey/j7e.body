@@ -1,0 +1,5 @@
+flowchart TD
+    A[Customer] -->|opens link| B{Passcode gate}
+    B -->|correct code| C[View served]
+    B -->|wrong code| D[Rejected]
+    D --> B

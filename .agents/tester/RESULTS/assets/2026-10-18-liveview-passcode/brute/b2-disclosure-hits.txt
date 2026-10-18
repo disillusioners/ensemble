@@ -1,0 +1,57 @@
+4:  <meta charset="utf-8">
+5:  <meta name="viewport" content="width=device-width, initial-scale=1">
+7:  <style nonce="b5b06b3af042471d7b56a849e91b8494">* { box-sizing: border-box; }
+8:html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+9:.wrap { max-width: 480px; margin: 0 auto; padding: 24px 16px; }
+10:h1 { font-size: 20px; margin: 0 0 12px 0; }
+11:p { font-size: 15px; line-height: 1.5; margin: 0 0 16px 0; }
+12:label { display: block; font-size: 14px; margin: 0 0 6px 0; }
+14:  display: block; width: 100%; padding: 12px;
+15:  font-size: 22px; letter-spacing: 4px; text-align: center;
+16:  border: 1px solid #ccc; border-radius: 4px; background: #fff;
+20:  display: block; width: 100%; margin-top: 12px; padding: 12px;
+21:  font-size: 15px; background: #2563eb; color: #fff;
+22:  border: 0; border-radius: 4px; cursor: pointer;
+24:button:hover { background: #1d4ed8; }
+25:.error { color: #b91c1c; margin-top: 12px; font-size: 14px; }
+26:.note { color: #555; font-size: 13px; margin-top: 16px; }
+31:<h1>This view is locked</h1>
+32:<p>Too many incorrect passcode attempts. Please ask the person who shared this link for a fresh one.</p>
+4:  <meta charset="utf-8">
+5:  <meta name="viewport" content="width=device-width, initial-scale=1">
+7:  <style nonce="cb81888b33b5fffec3572c903750747c">* { box-sizing: border-box; }
+8:html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+9:.wrap { max-width: 480px; margin: 0 auto; padding: 24px 16px; }
+10:h1 { font-size: 20px; margin: 0 0 12px 0; }
+11:p { font-size: 15px; line-height: 1.5; margin: 0 0 16px 0; }
+12:label { display: block; font-size: 14px; margin: 0 0 6px 0; }
+14:  display: block; width: 100%; padding: 12px;
+15:  font-size: 22px; letter-spacing: 4px; text-align: center;
+16:  border: 1px solid #ccc; border-radius: 4px; background: #fff;
+20:  display: block; width: 100%; margin-top: 12px; padding: 12px;
+21:  font-size: 15px; background: #2563eb; color: #fff;
+22:  border: 0; border-radius: 4px; cursor: pointer;
+24:button:hover { background: #1d4ed8; }
+25:.error { color: #b91c1c; margin-top: 12px; font-size: 14px; }
+26:.note { color: #555; font-size: 13px; margin-top: 16px; }
+31:<h1>This view is locked</h1>
+32:<p>Too many incorrect passcode attempts. Please ask the person who shared this link for a fresh one.</p>
+4:  <meta charset="utf-8">
+5:  <meta name="viewport" content="width=device-width, initial-scale=1">
+7:  <style nonce="c5bd35c456284e2d05d52819da6156c5">* { box-sizing: border-box; }
+8:html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+9:.wrap { max-width: 480px; margin: 0 auto; padding: 24px 16px; }
+10:h1 { font-size: 20px; margin: 0 0 12px 0; }
+11:p { font-size: 15px; line-height: 1.5; margin: 0 0 16px 0; }
+12:label { display: block; font-size: 14px; margin: 0 0 6px 0; }
+14:  display: block; width: 100%; padding: 12px;
+15:  font-size: 22px; letter-spacing: 4px; text-align: center;
+16:  border: 1px solid #ccc; border-radius: 4px; background: #fff;
+20:  display: block; width: 100%; margin-top: 12px; padding: 12px;
+21:  font-size: 15px; background: #2563eb; color: #fff;
+22:  border: 0; border-radius: 4px; cursor: pointer;
+24:button:hover { background: #1d4ed8; }
+25:.error { color: #b91c1c; margin-top: 12px; font-size: 14px; }
+26:.note { color: #555; font-size: 13px; margin-top: 16px; }
+31:<h1>This view is locked</h1>
+32:<p>Too many incorrect passcode attempts. Please ask the person who shared this link for a fresh one.</p>

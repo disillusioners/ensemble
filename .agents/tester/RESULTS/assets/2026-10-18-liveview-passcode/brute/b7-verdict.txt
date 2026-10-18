@@ -1,0 +1,1 @@
+B7: PASS — zero 5xx in any transcript across all boots

@@ -1,0 +1,1 @@
+B3: PASS pre-lock grant renders view content through lockout

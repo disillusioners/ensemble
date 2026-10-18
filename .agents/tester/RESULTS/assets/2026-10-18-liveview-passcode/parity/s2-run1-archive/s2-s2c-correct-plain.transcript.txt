@@ -1,0 +1,50 @@
+HTTP/1.1 200 OK
+date: Sun, 18 Oct 2026 04:59:56 GMT
+server: uvicorn
+content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-e6d3bc7ef8ffecb74a67ecf3ce6d5e38'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+x-content-type-options: nosniff
+cache-control: no-store
+referrer-policy: no-referrer
+content-type: text/html; charset=utf-8
+content-length: 1398
+access-control-allow-credentials: true
+access-control-allow-origin: http://127.0.0.1:8085
+vary: Origin
+
+--- BODY (1398 bytes) ---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Secure connection required</title>
+  <style nonce="e6d3bc7ef8ffecb74a67ecf3ce6d5e38">* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: #fafafa; color: #222; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+.wrap { max-width: 480px; margin: 0 auto; padding: 24px 16px; }
+h1 { font-size: 20px; margin: 0 0 12px 0; }
+p { font-size: 15px; line-height: 1.5; margin: 0 0 16px 0; }
+label { display: block; font-size: 14px; margin: 0 0 6px 0; }
+input[type="text"] {
+  display: block; width: 100%; padding: 12px;
+  font-size: 22px; letter-spacing: 4px; text-align: center;
+  border: 1px solid #ccc; border-radius: 4px; background: #fff;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+button {
+  display: block; width: 100%; margin-top: 12px; padding: 12px;
+  font-size: 15px; background: #2563eb; color: #fff;
+  border: 0; border-radius: 4px; cursor: pointer;
+}
+button:hover { background: #1d4ed8; }
+.error { color: #b91c1c; margin-top: 12px; font-size: 14px; }
+.note { color: #555; font-size: 13px; margin-top: 16px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+<h1>Secure connection required</h1>
+<p>This link requires HTTPS. Please open it via the canonical secure URL.</p>
+
+  </div>
+</body>
+</html>

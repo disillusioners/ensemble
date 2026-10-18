@@ -1,0 +1,8 @@
+HTTP/1.1 200 OK
+date: Sun, 18 Oct 2026 05:01:32 GMT
+server: uvicorn
+content-length: 54
+content-type: application/json
+
+--- BODY (54 bytes) ---
+{"status":"ok","enabled":true,"roots":["parityroot1"]}

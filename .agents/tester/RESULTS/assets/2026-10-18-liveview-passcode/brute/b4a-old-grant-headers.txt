@@ -1,0 +1,12 @@
+HTTP/1.1 200 OK
+date: Sun, 18 Oct 2026 04:51:29 GMT
+server: uvicorn
+content-security-policy: default-src 'none'; script-src 'none'; style-src 'nonce-91c5b9856873356a72b18f44bb3f9a62'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'
+x-content-type-options: nosniff
+cache-control: no-store
+referrer-policy: no-referrer
+content-type: text/html; charset=utf-8
+content-length: 1775
+set-cookie: view_grant=; Path=/views/public/bruteroot1/target.md; HttpOnly; Secure; SameSite=Lax; Max-Age=0
+set-cookie: view_grant=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0
+

@@ -1,0 +1,8 @@
+HTTP/1.1 302 Found
+date: Sun, 18 Oct 2026 05:01:32 GMT
+server: uvicorn
+content-type: text/plain; charset=utf-8
+location: /api/auth/login?return_to=/api/instances
+content-length: 0
+
+--- BODY (0 bytes) ---

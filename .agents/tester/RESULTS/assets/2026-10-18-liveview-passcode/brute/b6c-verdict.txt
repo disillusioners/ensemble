@@ -1,0 +1,1 @@
+B6c: PASS pre-restart grant renders (grants + lock durable)
