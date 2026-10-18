@@ -708,6 +708,9 @@ class LimitsConfig(BaseSettings):
 # ── ResourceMonitorConfig ──────────────────────────────────────────────────
 # resource-cost-control Phase 1 — observability spine (sampler + storage +
 # roll-down + endpoint). 12 knobs per architecture-recommendation.md §2.9.
+# Phase 4 extends the block with the 4 anomaly keys (anomaly_enabled /
+# anomaly_interval_s / anomaly_mad_threshold / anomaly_min_baseline_points)
+# per phase4-plan — 16 knobs total, env prefix unchanged.
 # Env prefix ``RESOURCE_MONITOR_`` (unified per council — see plan §2).
 #
 # YAML block (config.yaml `resource_monitor:`) MUST stay free of literal
@@ -722,7 +725,8 @@ class LimitsConfig(BaseSettings):
 class ResourceMonitorConfig(BaseSettings):
     """Resource monitor configuration (resource-cost-control Phase 1).
 
-    12 knobs per architecture-recommendation.md §2.9 (binding):
+    16 knobs per architecture-recommendation.md §2.9 (binding) + the
+    Phase-4 anomaly extension (phase4-plan Deliverables):
 
     * ``enabled``                  — global kill-switch (default ``True``).
     * ``sample_seconds``           — tick interval (default 30, ge=15, le=60).
@@ -744,6 +748,17 @@ class ResourceMonitorConfig(BaseSettings):
     * ``profile_timebox_s``        — profiler time-box (default 30,
       ge=10, le=120).
     * ``flush_batch_seconds``      — flusher batching window (default 60).
+
+    Phase-4 anomaly keys (phase4-plan; extends §2.9, re-opens no ruling):
+
+    * ``anomaly_enabled``          — anomaly-pass kill-switch (default
+      ``True``); ``false`` ⇒ pass inert + endpoints return empty lists.
+    * ``anomaly_interval_s``       — monotonic-interval gate between passes
+      (default 600, ge=300, le=900 — the 5-15 min window). The pass
+      piggybacks the FLUSHER thread; no new thread.
+    * ``anomaly_mad_threshold``    — robust-z flag threshold (default 6.0).
+    * ``anomaly_min_baseline_points`` — cold-start guard (default 12): the
+      pass stays QUIET until a series carries ≥ this many baseline points.
 
     Env: ``RESOURCE_MONITOR_*``. Restart-required for any flip (matches
     ``LIMITS_*`` precedent).
@@ -844,6 +859,45 @@ class ResourceMonitorConfig(BaseSettings):
         description=(
             "Flusher batching window in seconds. Bounded "
             "executemany writes ride this window."
+        ),
+    )
+
+    # ── Phase-4 anomaly keys (phase4-plan; env tier unchanged) ─────────
+    anomaly_enabled: bool = Field(
+        default=True,
+        description=(
+            "Anomaly-pass kill-switch (Phase 4). Default ON; "
+            "``RESOURCE_MONITOR_ANOMALY_ENABLED=false`` makes the pass "
+            "inert (zero findings; /anomalies + evidence endpoints "
+            "return empty lists) without touching sampling."
+        ),
+    )
+    anomaly_interval_s: int = Field(
+        default=600,
+        ge=300,
+        le=900,
+        description=(
+            "Minimum seconds between anomaly passes. The pass "
+            "piggybacks the FLUSHER thread behind this monotonic-"
+            "interval gate — no new thread. Bound [300, 900] = the "
+            "5-15 min window per phase4-plan."
+        ),
+    )
+    anomaly_mad_threshold: float = Field(
+        default=6.0,
+        gt=0.0,
+        description=(
+            "Robust-z (MAD) flag threshold. A single-bucket deviation "
+            "beyond this many robust sigmas is a spike candidate."
+        ),
+    )
+    anomaly_min_baseline_points: int = Field(
+        default=12,
+        ge=1,
+        description=(
+            "Cold-start guard: the pass stays QUIET for a series "
+            "until its baseline carries ≥ this many points (default "
+            "12 = 1 h of 5-min buckets). Quiet, not an error."
         ),
     )
 

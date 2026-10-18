@@ -119,7 +119,8 @@ def tree(tmp_path):
 
 
 class TestResourceMonitorConfig:
-    def test_defaults_all_12_keys(self):
+    def test_defaults_all_16_keys(self):
+        """P1's 12 keys + the 4 Phase-4 anomaly keys (phase4-plan)."""
         from daemon.config import ResourceMonitorConfig
 
         c = ResourceMonitorConfig()
@@ -135,6 +136,11 @@ class TestResourceMonitorConfig:
         assert c.profiling_enabled is False
         assert c.profile_timebox_s == 30
         assert c.flush_batch_seconds == 60
+        # Phase-4 anomaly extension (D2).
+        assert c.anomaly_enabled is True
+        assert c.anomaly_interval_s == 600
+        assert c.anomaly_mad_threshold == 6.0
+        assert c.anomaly_min_baseline_points == 12
 
     def test_env_prefix_is_resource_monitor(self):
         from daemon.config import ResourceMonitorConfig
@@ -159,6 +165,11 @@ class TestResourceMonitorConfig:
         monkeypatch.setenv("RESOURCE_MONITOR_PROFILING_ENABLED", "true")
         monkeypatch.setenv("RESOURCE_MONITOR_PROFILE_TIMEBOX_S", "45")
         monkeypatch.setenv("RESOURCE_MONITOR_FLUSH_BATCH_SECONDS", "30")
+        # Phase-4 anomaly keys.
+        monkeypatch.setenv("RESOURCE_MONITOR_ANOMALY_ENABLED", "false")
+        monkeypatch.setenv("RESOURCE_MONITOR_ANOMALY_INTERVAL_S", "900")
+        monkeypatch.setenv("RESOURCE_MONITOR_ANOMALY_MAD_THRESHOLD", "4.5")
+        monkeypatch.setenv("RESOURCE_MONITOR_ANOMALY_MIN_BASELINE_POINTS", "24")
 
         c = ResourceMonitorConfig()
         assert c.enabled is False
@@ -173,6 +184,10 @@ class TestResourceMonitorConfig:
         assert c.profiling_enabled is True
         assert c.profile_timebox_s == 45
         assert c.flush_batch_seconds == 30
+        assert c.anomaly_enabled is False
+        assert c.anomaly_interval_s == 900
+        assert c.anomaly_mad_threshold == 4.5
+        assert c.anomaly_min_baseline_points == 24
 
     def test_sample_seconds_bound_low(self):
         from daemon.config import ResourceMonitorConfig
@@ -196,6 +211,26 @@ class TestResourceMonitorConfig:
             ResourceMonitorConfig(profile_timebox_s=5)
         with pytest.raises(ValidationError):
             ResourceMonitorConfig(profile_timebox_s=121)
+
+    def test_anomaly_interval_bounds(self):
+        """Phase 4: the 5-15 min window is enforced by the config tier
+        (ge=300, le=900 per phase4-plan)."""
+        from daemon.config import ResourceMonitorConfig
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ResourceMonitorConfig(anomaly_interval_s=299)
+        with pytest.raises(ValidationError):
+            ResourceMonitorConfig(anomaly_interval_s=901)
+        assert ResourceMonitorConfig(anomaly_interval_s=300).anomaly_interval_s == 300
+        assert ResourceMonitorConfig(anomaly_interval_s=900).anomaly_interval_s == 900
+
+    def test_anomaly_mad_threshold_positive(self):
+        from daemon.config import ResourceMonitorConfig
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ResourceMonitorConfig(anomaly_mad_threshold=0.0)
 
     def test_root_settings_exposes_resource_monitor(self):
         from daemon.config import Config
