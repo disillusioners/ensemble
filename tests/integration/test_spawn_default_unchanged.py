@@ -70,10 +70,11 @@ class TestDefaultUnchangedPrimary:
             version_tag=None,
         )
 
-        # (1) The facade returns a pool-selected model — membership
-        # assertion (pool non-determinism — R5.1 membership set).
-        assert validated_model_override in {"agentic", "coding", "coding2"}, (
-            f"no-param spawn must return a weighted-pool model; got: "
+        # (1) The facade returns the selected model — the worker/coder
+        # is single-string-pinned to ``llm_model="coding"`` (R5.1
+        # membership set).
+        assert validated_model_override == "coding", (
+            f"no-param spawn must return the single-string-pinned coding model; got: "
             f"{validated_model_override!r}"
         )
         # (2) instance_id returned.

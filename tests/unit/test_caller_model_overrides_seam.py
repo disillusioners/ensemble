@@ -600,7 +600,7 @@ class TestSpawnSeamPrecedence:
 
         child_meta = _make_agent_metadata(
             agent_id="worker",
-            llm_models=["agentic", "coding", "coding2"],  # weighted pool
+            llm_models=["coding"],  # synthetic 1-entry pool demonstrating pool-beats-single precedence (production worker uses llm_model="coding" single-string)
             llm_model="vision",  # single-model — should NOT win
         )
         manager._instance_repository.get.return_value = None
@@ -616,7 +616,7 @@ class TestSpawnSeamPrecedence:
 
         llm_config = build_graph_mock.call_args.kwargs.get("llm_config", {})
         # Pool wins; llm_model is shadowed.
-        assert llm_config["model"] in {"agentic", "coding", "coding2"}
+        assert llm_config["model"] == "coding"
 
         log_line = _extract_spawn_log_line(logger_mock)
         assert "source=llm_models" in log_line
