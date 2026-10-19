@@ -283,9 +283,43 @@ Not present. Directory contains only `meta.json`, `rule.md`, `soul.md`, `tools_n
 
 ## 5. Seal-pinning exposure
 
+### 5.0 ERRATUM — 2026-10-19 — TWO baselines, not one (read this before the tables below)
+
+**The original §5 of this research doc conflated two DIFFERENT baselines and was therefore WRONG on 2 of its 5
+"NOT pinned" entries.** Corrected below. Any future commission that reasons about "the seal" must name
+**which** baseline it means.
+
+| | **Baseline A — the COMMITTED MANIFEST** | **Baseline B — the TEST TRIPWIRE** |
+|---|---|---|
+| What it is | `agents/.prompt-artifacts.sha256` — a **committed repo artefact**, 161 rows, `<sha256>  <path>` per row | `SEALED_SHA_BASELINES` — a **Python dict constant inside a test file**, 35 entries |
+| Where | repo root, `agents/.prompt-artifacts.sha256` | `tests/test_chart_image_delivery_e2e.py:1350-1398` (referenced, not defined, by `tests/test_chart_image_delivery_audit.py:167`) |
+| Scope | **every versioned prompt artefact** (all `.md` under `agents/`) | 35 hand-picked files from the Phase A/B/C re-pin — a **subset** of the manifest's universe |
+| Enforcement | the **fail-closed file-tool write guards** (`daemon/tools/filesystem.py` — `write_file` **and** `edit_file`, via `_check_prompt_artifact_write`); `tools_note.md` + the legacy `tools.md` are in `VERSIONED_PROMPT_ARTIFACTS` (`daemon/tools/prompt_artifacts.py:119-127`) | the **seal test** — `pytest tests/test_chart_image_delivery_e2e.py` fails on any mismatch |
+| Failure mode | a file edited without a same-commit manifest row = a **stale manifest row** | a **red test** (the tripwire fires) |
+
+**The two erroneous entries in the original "NOT pinned" list were `agents/ari/soul.md` and
+`agents/ari/tools_note.md`** — both are rows in Baseline A (manifest `:27` and `:28` respectively), so they
+**were** manifest-covered. The list below now states coverage **per baseline**, never once for both.
+
+**Verified coverage (this worktree, HEAD `10dca0921`, base `630cefebb`):** `agents/.prompt-artifacts.sha256`
+has **161 rows**; `grep -c 'meta.json'` = **0** ⇒ **no `meta.json` is manifest-covered**. Its ari rows are
+`rule.md` (:26), `soul.md` (:27), `tools_note.md` (:28), `workflow.md` (:29); its leader rows are
+`growth.md` (:102), `rule.md` (:103), `soul.md` (:104), `tools_note.md` (:105), `workflow.md` (:106).
+`agents/ari/user.md` appears in **neither** baseline.
+
+**Measured seal-test baseline:** `SEALED_SHA_BASELINES` currently mismatches on **7** of its 35 entries at this
+HEAD — `agents/charter/skills-template/install-mermaid-cli.md`, `agents/ari/workflow.md`, and 5 `rule.md` files
+(`approver`, `developer`, `planner`, `reviewer`, `tidier`). The tripwire's own provenance comment
+(`tests/test_chart_image_delivery_e2e.py:1343-1349`) records the **historical 8** — `daemon/constants.py` was
+re-pinned red→green by a prior commission, leaving **7**. **The seal test is therefore RED at HEAD**; it is
+**not** a satisfiable "green" gate. The correct acceptance form is **"no NEW stale pins beyond the measured
+baseline (7); mismatch count before == after"** — and the **7 are NOT ours to fix**.
+
+### 5.1 Coverage, stated per baseline
+
 `SEALED_SHA_BASELINES` is defined in **`tests/test_chart_image_delivery_e2e.py:1350-1398`** (35 entries). `tests/test_chart_image_delivery_audit.py` references its provenance block at `:167` but does not define a separate dict.
 
-Pinned `agents/ari/*` and `agents/leader/*` paths:
+**Baseline B (test tripwire) — pinned `agents/ari/*` and `agents/leader/*` paths:**
 
 | Path | Baseline location |
 |---|---|
@@ -293,7 +327,33 @@ Pinned `agents/ari/*` and `agents/leader/*` paths:
 | `agents/ari/rule.md` | `tests/test_chart_image_delivery_e2e.py:1381` |
 | `agents/leader/rule.md` | `tests/test_chart_image_delivery_e2e.py:1388` |
 
-NOT pinned: `agents/ari/meta.json`, `agents/ari/soul.md`, `agents/ari/tools_note.md`, `agents/ari/user.md`, `agents/leader/meta.json`.
+**Baseline B — NOT pinned:** `agents/ari/meta.json`, `agents/ari/soul.md`, `agents/ari/tools_note.md`,
+`agents/ari/user.md`, `agents/leader/meta.json`.
+
+**Baseline A (committed manifest) — the ari/leader rows:**
+
+| Path | Manifest row | Also in Baseline B? |
+|---|---|---|
+| `agents/ari/rule.md` | `:26` | **yes** |
+| `agents/ari/soul.md` | `:27` | no |
+| `agents/ari/tools_note.md` | `:28` | no |
+| `agents/ari/workflow.md` | `:29` | **yes** |
+| `agents/leader/growth.md` | `:102` | no |
+| `agents/leader/rule.md` | `:103` | **yes** |
+| `agents/leader/soul.md` | `:104` | no |
+| `agents/leader/tools_note.md` | `:105` | no |
+| `agents/leader/workflow.md` | `:106` | no |
+
+**Baseline A — NOT pinned:** `agents/ari/meta.json`, `agents/leader/meta.json`, `agents/ari/user.md`
+(`grep -c 'meta.json'` = 0 across all 161 rows).
+
+⇒ **The operative statement for the `ari-tools` commission:** the `meta.json` allow-list edits carry **no**
+re-stamp obligation under **either** baseline, but `tools_note.md` / `rule.md` / `workflow.md` / `soul.md` **ARE**
+manifest-covered, so an edit to any of them is a **seal event** under Baseline A — with a **fail-closed
+file-tool write guard** behind it (the file tools refuse the write; the sanctioned lane is the bash/git escape
+hatch **plus** a same-commit manifest re-stamp; the prompt-versions API is a **runtime DB lane**, not the
+repo-commit path). See [plan-overview.md §8](plan-overview.md) for the conventions step that owns the ONE
+in-commit re-stamp pass.
 
 Mechanism (`tests/test_chart_image_delivery_e2e.py:1418-1450`):
 ```python
@@ -308,7 +368,24 @@ if missing:   pytest.fail("Sealed artifacts missing ...")
 if mismatches: pytest.fail("Phase D modified sealed Phase A/B/C artifacts: ...")
 ```
 
-Re-pin procedure structurally: any commission that intentionally edits a sealed file must (1) attribute the mismatch via git-log last-touch, (2) update the baseline constant to the new sha with a provenance comment, (3) run the seal test green, (4) commit the re-pin as an explicit, provenance-labeled step. Recent in-tree precedent is the re-pin comments at `tests/test_chart_image_delivery_e2e.py:1362-1367` and `:1343-1349`.
+**Re-pin procedure — Baseline B (the test tripwire).** Any commission that intentionally edits a file in
+`SEALED_SHA_BASELINES` must (1) attribute the mismatch via git-log last-touch, (2) update the baseline constant
+to the new sha with a provenance comment, (3) run the seal test, (4) commit the re-pin as an explicit,
+provenance-labeled step. Recent in-tree precedent is the re-pin comments at
+`tests/test_chart_image_delivery_e2e.py:1362-1367` and `:1343-1349`.
+
+**Caveat on step (3) — "run the seal test green" is NOT satisfiable at HEAD.** The tripwire carries **7
+pre-existing stale pins** (§5.0) ⇒ the test is **red before** any commission touches it. The correct
+acceptance form is **"no NEW stale pins beyond the measured baseline (7); mismatch count before == after"**.
+Re-pinning an **already-stale** entry would flip it red→green — that is **someone else's drift being absorbed**,
+it moves the measured baseline, and it is **out of scope**. The `ari-tools` conventions step therefore re-pins
+**only** the Baseline B entries it edits **that are currently green**.
+
+**Re-stamp procedure — Baseline A (the committed manifest).** Separate and simpler: for every covered file the
+commission edits, recompute `sha256sum` and replace that file's row in `agents/.prompt-artifacts.sha256` **in the
+same commit** as the edit. This is a **live committed artefact**, not a test fixture — a file edited without its
+same-commit manifest row leaves the manifest stale, which is the seal violation the file-tool write guards exist
+to prevent.
 
 ---
 

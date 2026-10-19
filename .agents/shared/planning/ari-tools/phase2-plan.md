@@ -33,7 +33,8 @@ schedule that fires exactly once at the stated instant, into an instance that ca
 - One-shot post-fire lifecycle (engine-native "stopped") + honest statement of what the wrapper cannot observe.
 - Self-contained reminder message (fresh-instance actionability) with board-link injection.
 - Board `due_at` → alarm glue: **picked** (§D8) with a documented v2 deferral.
-- Prompt surface in `agents/ari/tools_note.md` (new `## Self-Alarm` section) — **not** seal-pinned.
+- The **tool** + its `_full_doc_` + the error hints (the discovery surface for phase 2).
+- **Prompt surface — DEFERRED to the conventions step** ([plan-overview.md §8](plan-overview.md), step 4 of this commission): the new `## Self-Alarm` section of `agents/ari/tools_note.md` is authored **there**, not in phase 2. `tools_note.md` **IS** manifest-covered (161-entry committed manifest `agents/.prompt-artifacts.sha256`, row `:28`) ⇒ editing it in phase 2 would create a **second** re-stamp pass, which the **C1① consolidation ruling** forbids. Phase 2 therefore ships **no prompt-artefact edit** and **no re-stamp task**; the section's content spec lives in [plan-overview.md §8.4](plan-overview.md) and in D13 below.
 
 ### Out of scope
 - Any new table, migration, daemon-side scheduler, or engine change (the engine already exists and is unchanged).
@@ -41,10 +42,17 @@ schedule that fires exactly once at the stated instant, into an instance that ca
 - A "list my alarms" tool (Ari already has `task_schedule_list`; phase 3 may add a board-scoped view).
 - Natural-language time parsing ("in a bit", "next tuesday-ish") and an interval recurrence ("every 1h") — the
   grammar is deliberately small and `create_schedule` exposes no interval variant (§D3; OQ-3 **DEFERRED-to-v2**).
-- Editing `agents/ari/rule.md` / `agents/ari/workflow.md` / `agents/leader/*` — `rule.md`+`workflow.md` are
-  SHA-seal-pinned (`tests/test_chart_image_delivery_e2e.py:1350-1398`) and `agents/ari/workflow.md` is **already**
-  drifting at plan time (7 stale pins measured) — a new edit would add an 8th and force a re-pin commission.
-  `agents/ari/meta.json` + `agents/ari/tools_note.md` are **not** pinned (`research-db-agents.md` §5).
+- Editing **any** prompt artefact in this phase — `agents/ari/rule.md` / `soul.md` / `tools_note.md` / `workflow.md`
+  and the leader equivalents (`growth.md` / `rule.md` / `soul.md` / `tools_note.md` / `workflow.md`). **Two DIFFERENT
+  baselines cover them** and both are live: the **committed 161-entry manifest** `agents/.prompt-artifacts.sha256`
+  (ari rows `:26`–`:29`, leader rows `:102`–`:106`) and the **35-entry `SEALED_SHA_BASELINES` test tripwire**
+  (`tests/test_chart_image_delivery_e2e.py:1350-1398`, which covers `agents/ari/{rule,workflow}.md` +
+  `agents/leader/rule.md` among them). The tripwire is **already red** — `agents/ari/workflow.md` is one of the **7
+  stale pins measured at this HEAD** — so a new edit would move that baseline, and every prompt-artefact edit is
+  **deferred to the conventions step** ([plan-overview.md §8](plan-overview.md), step 4), which owns the ONE
+  in-commit re-stamp pass. **Only** `agents/ari/meta.json` is untouched by both baselines (zero `meta.json` rows in
+  the manifest; absent from the tripwire) ⇒ **this phase's allow-list edit carries NO re-stamp obligation**.
+  See [research-db-agents.md §5](research-db-agents.md) for the two-baseline distinction and the erratum.
 
 ---
 
@@ -134,9 +142,11 @@ now, zone)` (`scheduling_service.py:474-478`) ⇒ DST fold/gap semantics are ide
 
 ### Tool-doc obligations (binding — architect §4.1, §4.2, §4.4)
 
-`self_alarm._full_doc_` **and** the `agents/ari/tools_note.md` `## Self-Alarm` section must state all five items below;
-a doc-pin test asserts each one is present (same pattern as the forbidden-token/cross-ref closure in
-`tests/unit/test_scheduling_registration.py:44-58`).
+`self_alarm._full_doc_` — shipped in **phase 2** — **and** the `agents/ari/tools_note.md` `## Self-Alarm` section —
+authored in the **conventions step** ([plan-overview.md §8](plan-overview.md), step 4) — must state all five items below.
+A doc-pin test asserts each one is present in `_full_doc_` (same pattern as the forbidden-token/cross-ref closure in
+`tests/unit/test_scheduling_registration.py:44-58`); the prompt-side assertions move to the conventions step's
+checklist (§8.6), because the section does not exist during phase 2.
 
 1. **Lateness — both cap states, named explicitly, plus the skip signature.** `one_shot_max_lateness_seconds` is
    daemon-global config (`daemon/config.py:2617-2623`) read at fire time; the wrapper cannot set or override it.
@@ -295,7 +305,11 @@ recurrence family** and has a documented <1 s missed-fire window (`scheduling_se
 terminal + label burn + hidden history; (5) the board service is built **in parallel** in phase 1 and its API is not frozen —
 coupling phase 2 to its internals creates a merge-order dependency. ⇒ Phase 2 arms from the **agent side**: the convention
 ("whenever you set or move a board item's due date, arm or re-arm a self_alarm for it and pass `link_board_item`") lives in
-`agents/ari/tools_note.md` (new `## Self-Alarm` section — not seal-pinned) + the tool's `_full_doc_` + the tool's error hints. The
+the tool's `_full_doc_` + the tool's error hints **in phase 2**, and in the `## Self-Alarm` section of
+`agents/ari/tools_note.md` — which is authored in the **conventions step** ([plan-overview.md §8](plan-overview.md), step
+4 of this commission), because `tools_note.md` **IS** manifest-covered (committed manifest `agents/.prompt-artifacts.sha256`
+row `:28`) and the **C1① consolidation ruling** defers every prompt-artefact edit to that single step ⇒ **one** in-commit
+re-stamp pass for the whole commission. The
 board's `due_at` stays the **source of truth for the deadline**; the alarm is the **reminder mechanism**; the board status
 transition stays Ari-driven. The wrapper embeds the board id **verbatim** (validated `^wi-[0-9a-f]{8}$`) and instructs the fresh
 instance to `board_get` it ⇒ phase 2 depends on phase 1 only through the pinned id format, never its internals.
@@ -350,7 +364,7 @@ layers, each independent:
 | `tests/unit/tools/test_secrets_registration.py` | `:218-232` |
 
 The prose claims "exactly eight entries" in the surrounding test docstrings are **not** assertions but go stale on this pass — update
-them to nine in the same commit.
+them to **ten** in the same commit.
 
 **Registering test must prove the property directly:** `resolve_tool_filter` yields **no** `self_alarm` for a non-ari agent with an
 **EMPTY allow list** — not merely that only one `meta.json` names the category. The ari allow-list assertion stays as a second,
@@ -374,12 +388,23 @@ alarm must be refused, not armed.
 **D12 — Board id validated, not parsed.** `link_board_item` must match `^wi-[0-9a-f]{8}$` (the pinned phase-1 format); a mismatch is
 a typed error. The id is embedded **verbatim** (no title/status lookup) ⇒ zero runtime dependency on the board service.
 
-**D13 — Prompt surface.** One new `## Self-Alarm` section in `agents/ari/tools_note.md` (agent-POV, first person, no daemon
-internals — the forbidden-token list in `tests/unit/test_scheduling_registration.py:44-58` is the pattern to mirror). No edit to
-`agents/ari/rule.md` / `workflow.md` (seal-pinned; `workflow.md` already drifting). Content spec of that section: the five
-**Tool-doc obligations** above (lateness both-ways, board-is-the-surface / never-a-ping, unobservable fire, list semantics,
-`self-alarm:` namespace) + the D8 `due_at` convention. The section is a second home for the grammar only by reference — the tool
-doc stays canonical.
+**D13 — Prompt surface, DEFERRED to the conventions step.** The new `## Self-Alarm` section in `agents/ari/tools_note.md`
+(agent-POV, first person, no daemon internals — the forbidden-token list in
+`tests/unit/test_scheduling_registration.py:44-58` is the pattern to mirror) is authored in the **conventions step**
+([plan-overview.md §8](plan-overview.md) — step 4 of this commission, before merge + stage), **not** in phase 2. Reason:
+`tools_note.md` **IS** manifest-covered (161-entry committed manifest `agents/.prompt-artifacts.sha256`, row `:28`) — it
+is **not** in the `SEALED_SHA_BASELINES` tripwire, but it **is** in the committed manifest, and the manifest is what the
+fail-closed file-tool write guards protect. Editing it in phase 2 would create a **second** re-stamp pass; the **C1①
+consolidation ruling** defers every prompt-artefact edit to one place so the commission produces exactly **one**
+in-commit re-stamp pass. ⇒ **Phase 2 ships no prompt-artefact edit and carries no re-stamp task.** Content spec of that section
+(the five **Tool-doc obligations** above — lateness both-ways, board-is-the-surface / never-a-ping, unobservable fire, list
+semantics, `self-alarm:` namespace — plus the D8 `due_at` convention, the ≥30 min vs <30 min decision, and the board's
+role as the user-visible surface) is written out in [plan-overview.md §8.4](plan-overview.md). The section is a second
+home for the grammar only by reference — the tool doc stays canonical. **Write lane (binding):** the file tools
+**HARD-REFUSE** writes to a versioned prompt artefact (`VERSIONED_PROMPT_ARTIFACTS`,
+`daemon/tools/prompt_artifacts.py:119-127`; fail-closed guards in `daemon/tools/filesystem.py` — `write_file` **and**
+`edit_file`) — the sanctioned lane is the **bash/git escape hatch** with a **same-commit manifest re-stamp**; the
+**prompt-versions API is a runtime DB lane**, not the repo-commit path, and does not satisfy the manifest seal.
 
 ---
 
@@ -393,11 +418,11 @@ doc stays canonical.
 | 4 | Register **six surfaces**: `PRIVILEGED_TOOL_CATEGORIES` + `DYNAMIC_TOOL_NAMES` + `KNOWN_TOOL_NAMES` + `CATEGORY_MODULES["self-alarm"] = "daemon.tools.self_alarm"` in `daemon/tools/_tool_registry.py`; the **five exact-set pins** (one line each); `create_self_alarm_tools_if_available(manager, …)` + `tools.extend(…)` in `daemon/tools/instance.py` **before** `create_help_tool`/`scan_tools_for_full_docs`/`_apply_tool_filter` (next to the scheduling extend, `:5773-5775`) | 3 | Tool visible in a real instance tool list; all five pins exact-set green; a decorator-only variant is proven insufficient (comment mirrors `:2286-2289`); `CATEGORY_MODULES` value is a `daemon.tools.*` path |
 | 5 | Dedupe/reuse implementation (D4): `self-alarm:` namespace → `project_id` resolve-first → label lookup → create / reuse-via-`update_schedule(paused=False)` + response assertion / `stopped`-label strictly-later re-arm (message-only REFUSED) / burned-label `-2` candidate collision-check + post-create duplicate report (never cancel the loser) / per-family recurrence-mismatch error | 3, 4 | Each branch covered by a unit test; `paused=False` and the `paused/status/next_run_at` assertion proven; the effective label is always echoed |
 | 6 | **Three-layer** ARI-only: privileged category + runtime gate (`agent_id != "ari"` ⇒ error) + `"self-alarm"` added to **`agents/ari/meta.json`** only | 3 | `grep -rl "self-alarm" agents/*/meta.json` → exactly one file; an **empty-allow** non-ari agent resolves **no** `self_alarm` (`resolve_tool_filter`) |
-| 7 | New `## Self-Alarm` section in `agents/ari/tools_note.md` (agent POV, zero forbidden tokens, cross-refs resolve) | 3 | Matches the guide's forbidden-token + cross-ref conventions; no seal pin touched (files edited: `tools_note.md`, `meta.json` only) |
+| 7 | **Prompt surface — DEFERRED to the conventions step** ([plan-overview.md §8](plan-overview.md), step 4). Phase 2 ships **only** the tool + `_full_doc_` + the error hints; the `## Self-Alarm` section of `agents/ari/tools_note.md` is authored in step 4, where its manifest row is re-stamped **in the same commit**. | 3 | Phase 2 edits **no** prompt artefact and carries **no** re-stamp task (`tools_note.md` **IS** manifest-covered — the 161-entry committed manifest `agents/.prompt-artifacts.sha256`, row `:28`; the C1① consolidation ruling forbids a second re-stamp pass). The **prompt-content assertions** that used to live here move to the conventions step's checklist (guide forbidden-token + cross-ref closure). |
 | 8 | Tests: `tests/unit/test_self_alarm_service.py` (grammar, floor boundary, tz parity, message composition, board-id regex) | 2 | Boundary: 29 m ⇒ reject, 30 m ⇒ accept, 30 m + 1 s ⇒ accept; **family-aware rejection text** with the computed next fire (one-shot vs recurring); parity vs `_resolve_schedule_timezone` matrix |
 | 9 | Tests: `tests/unit/tools/test_self_alarm_tools.py` (mocked service; `await tool.coroutine(...)`) | 3, 5 | Covers create / reuse (`paused=False` + response assertion) / stopped-label strictly-later re-arm / **message-only re-arm refusal** / burned-label `-2` collision-check + duplicate report / per-family recurrence-mismatch / non-ari gate / non-ari **empty-allow** gate / `project_id`-resolve-first (no row, no label burn) / family-aware floor text with computed next fire / `lateness_cap_seconds` + `tz_warning` + actual `status` echo / engine-error paths |
-| 10 | Tests: `tests/unit/test_self_alarm_registration.py` (mirror `tests/unit/test_scheduling_registration.py`): allow ⊆ registry universe, category resolution, name in `DYNAMIC_TOOL_NAMES` + `KNOWN_TOOL_NAMES`, **`"self-alarm"` in `PRIVILEGED_TOOL_CATEGORIES`**, **ari-only** allow, tools_note forbidden tokens + cross-refs, the five tool-doc obligation pins | 4, 6, 7 | Green; asserts NO other agent grants the category; `resolve_tool_filter` for an empty-allow non-ari agent yields no `self_alarm` |
-| 11 | Regression run: the new tests + `tests/unit/test_scheduling_registration.py` + `tests/unit/tools/test_frozen_tool_name_discovery.py` + `tests/unit/tools/test_tool_config_validation_boot.py` + **the five privileged-set pin files** + the seal test | 8-10 | Zero NEW failures; all five exact-set pins green with nine entries; the stale-seal count stays at the measured baseline (7) — no `agents/ari/rule.md` / `workflow.md` edit |
+| 10 | Tests: `tests/unit/test_self_alarm_registration.py` (mirror `tests/unit/test_scheduling_registration.py`): allow ⊆ registry universe, category resolution, name in `DYNAMIC_TOOL_NAMES` + `KNOWN_TOOL_NAMES`, **`"self-alarm"` in `PRIVILEGED_TOOL_CATEGORIES`**, **ari-only** allow, the five tool-doc obligation pins | 4, 6, 7 | Green; asserts NO other agent grants the category; `resolve_tool_filter` for an empty-allow non-ari agent yields no `self_alarm`. The **tools_note forbidden-token + cross-ref assertions** are NOT in this phase — the section is authored in the conventions step, so they move to that step's checklist ([plan-overview.md §8.6](plan-overview.md)) |
+| 11 | Regression run: the new tests + `tests/unit/test_scheduling_registration.py` + `tests/unit/tools/test_frozen_tool_name_discovery.py` + `tests/unit/tools/test_tool_config_validation_boot.py` + **the five privileged-set pin files** + the seal test | 8-10 | Zero NEW failures; all five exact-set pins green with **ten** entries; the seal-test mismatch count **before == after** (the measured baseline at this HEAD is **7** — the tripwire is **already red** on 7 pre-existing stale pins, which are **NOT ours to fix**; the acceptance is "no NEW stale pins beyond the baseline", NOT "green") — phase 2 edits **no** prompt artefact |
 | 12 | Record the deviations/notes into the phase-2 decisions feed (`decisions.md` in this planning dir) | 1-11 | Each of D1-D13 has an anchor; deviations from pre-rulings flagged explicitly |
 
 ---
@@ -410,14 +435,14 @@ doc stays canonical.
 | `daemon/tools/self_alarm.py` | **new** | Factory + `self_alarm` tool + `_full_doc_` + `CATEGORY_NAME`/`CATEGORY_DOC` |
 | `daemon/tools/_tool_registry.py` | modify | **4 edits**: `PRIVILEGED_TOOL_CATEGORIES` (+`"self-alarm"` → entry #10), `DYNAMIC_TOOL_NAMES`, `KNOWN_TOOL_NAMES`, `CATEGORY_MODULES["self-alarm"] = "daemon.tools.self_alarm"` (a `daemon.tools.*` path is mandatory) |
 | `daemon/tools/instance.py` | modify | `create_self_alarm_tools_if_available` + one `tools.extend(...)` **before** `create_help_tool`/`scan_tools_for_full_docs`/`_apply_tool_filter` |
-| `tests/unit/tools/test_upgrade_registration.py` · `tests/unit/tools/test_attestation_registration.py` · `tests/integration/test_maintenancer_spawn_resolves_tools.py` · `tests/integration/test_service_tool_flag_off_byte_identical.py` · `tests/unit/tools/test_secrets_registration.py` | modify | **the five exact-set pins** — one inserted literal line each (`"self-alarm"`, nine entries); update the stale "exactly eight entries" prose in the test docstrings |
+| `tests/unit/tools/test_upgrade_registration.py` · `tests/unit/tools/test_attestation_registration.py` · `tests/integration/test_maintenancer_spawn_resolves_tools.py` · `tests/integration/test_service_tool_flag_off_byte_identical.py` · `tests/unit/tools/test_secrets_registration.py` | modify | **the five exact-set pins** — one inserted literal line each (`"self-alarm"`, **ten** entries); update the stale "exactly eight entries" prose in the test docstrings |
 | `agents/ari/meta.json` | modify | add `"self-alarm"` to `tools.allow` — **only** allow-list touched |
-| `agents/ari/tools_note.md` | modify | new `## Self-Alarm` section (not seal-pinned) |
+| `agents/ari/tools_note.md` | **unchanged in phase 2** | the `## Self-Alarm` section is authored in the **conventions step** ([plan-overview.md §8](plan-overview.md), step 4) — `tools_note.md` **IS** manifest-covered (committed manifest row `:28`), so phase 2 carries **no** re-stamp task |
 | `tests/unit/test_self_alarm_service.py` | **new** | Pure-logic unit tests |
 | `tests/unit/tools/test_self_alarm_tools.py` | **new** | Tool-level unit tests (mocked service) |
 | `tests/unit/test_self_alarm_registration.py` | **new** | Registration + allow-list + prompt-closure pins |
 | `daemon/services/scheduling_service.py`, `daemon/sources/adapters/scheduler.py` | **unchanged** | The engine is reused verbatim |
-| `agents/ari/rule.md`, `agents/ari/workflow.md`, `agents/leader/*` | **unchanged** | Seal-pinned / pre-ruled out |
+| `agents/ari/rule.md`, `agents/ari/soul.md`, `agents/ari/workflow.md`, `agents/leader/*` | **unchanged** | All are **manifest-covered** (committed manifest `agents/.prompt-artifacts.sha256`); `agents/ari/{rule,workflow}.md` + `agents/leader/rule.md` are **also** in the `SEALED_SHA_BASELINES` tripwire. Every prompt-artefact edit is deferred to the conventions step |
 
 ---
 
@@ -495,7 +520,7 @@ doc stays canonical.
 | 6 | The reminder is actionable by a fresh instance | The message-composition test + a manual read of a real composed message | Contains prefix, label, scheduled local+UTC instant, board id + `board_get` instruction, fresh-instance note, action text |
 | 7 | No collateral damage | The phase-2 regression run | Zero new failures; the stale-seal count unchanged (7); no `agents/ari/rule.md` / `workflow.md` diff |
 | 8 | The phase-1 board contract is respected | The board-id regex test | `wi-<8 hex>` accepted; anything else ⇒ typed error; no phase-1 module imported |
-| 9 | `self-alarm` is **privileged** | `PRIVILEGED_TOOL_CATEGORIES` membership + all five exact-set pins | Present in all five pins (nine entries); an empty-allow non-ari agent resolves no `self_alarm` |
+| 9 | `self-alarm` is **privileged** | `PRIVILEGED_TOOL_CATEGORIES` membership + all five exact-set pins | Present in all five pins (**ten** entries); an empty-allow non-ari agent resolves no `self_alarm` |
 | 10 | A fired label re-arms **armed** | re-arm unit tests | `paused=False` passed and asserted; a message-only re-arm is refused |
 | 11 | Lateness exposure is visible | response field + doc pins | `lateness_cap_seconds` echoed; both cap states + the skip signature documented |
 | 12 | The user-visible surface is named | doc pins | The board is promised; a chat ping is explicitly **not** promised |

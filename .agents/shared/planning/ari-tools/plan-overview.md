@@ -75,9 +75,9 @@ always the board that exists. Plus `board_link()` to mint that URL.
 | Phase | Deliverable | New files | Key edit sites | Owning plan doc |
 |---|---|---|---|---|
 | 1 | Workbook: 3 tables + `BoardService` + 4 tools in a new **privileged** `"board"` category | **8** — `daemon/models/board.py`, `daemon/services/board_service.py`, `daemon/tools/board_tools.py`, `daemon/migrations/versions/20261020_060000_create_board_tables.sql`, 4 test files | `daemon/manager.py` (late model import before `create_all`; service construction; `board_service` property) · `daemon/tools/_tool_registry.py` (`DYNAMIC_TOOL_NAMES` + `CATEGORY_MODULES` + `KNOWN_TOOL_NAMES` + `PRIVILEGED_TOOL_CATEGORIES`) · `daemon/tools/instance.py` (factory + `tools.extend`) · **the 5 SAME-PR privileged-set pin files** (entry #9 — the **8 → 9** pass) · `agents/ari/meta.json`, `agents/leader/meta.json` (allow-list) | [phase1-plan.md](phase1-plan.md) |
-| 2 | `self_alarm`: pure service module + tool module | **5** — `daemon/services/self_alarm_service.py`, `daemon/tools/self_alarm.py`, 3 test files | `daemon/tools/_tool_registry.py` (3 entries + `PRIVILEGED_TOOL_CATEGORIES`) · `daemon/tools/instance.py` (factory + extend) · **the 5 SAME-PR privileged-set pin files** (entry #10 — the **9 → 10** pass) · `agents/ari/meta.json` (`"self-alarm"`, ari only) · `agents/ari/tools_note.md` (new `## Self-Alarm` section) | [phase2-plan.md](phase2-plan.md) |
+| 2 | `self_alarm`: pure service module + tool module | **5** — `daemon/services/self_alarm_service.py`, `daemon/tools/self_alarm.py`, 3 test files | `daemon/tools/_tool_registry.py` (3 entries + `PRIVILEGED_TOOL_CATEGORIES`) · `daemon/tools/instance.py` (factory + extend) · **the 5 SAME-PR privileged-set pin files** (entry #10 — the **9 → 10** pass) · `agents/ari/meta.json` (`"self-alarm"`, ari only) — **phase 2 edits NO prompt artefact**: the `## Self-Alarm` section is authored in the conventions step (§8) | [phase2-plan.md](phase2-plan.md) |
 | 3 | `view_write` tool + live board view + `board_link` tool | **7** — `daemon/tools/view_write.py`, `daemon/tools/board_link.py`, `daemon/services/board_view_service.py`, `daemon/services/board_view_pages.py`, 3 test files | `daemon/api.py` (lifespan `reports`-root injection) · `daemon/services/live_views.py` (reserved name + 2 accessors) · `daemon/routers/live_views.py` (board GET/HEAD **before** the public catch-all) · `daemon/tools/_tool_registry.py` (incl. `PRIVILEGED_TOOL_CATEGORIES`) · `daemon/tools/instance.py` · **the 5 SAME-PR privileged-set pin files** (entries #11–12 — the **10 → 12** pass) · `agents/ari/meta.json`, `agents/leader/meta.json` · `config.yaml` (doc-only note) | [phase3-plan.md](phase3-plan.md) |
-| | **Total** | **20 new files** (P1 8 · P2 5 · P3 7 — architect §7.4 confirms the count) | **15 shared edit files** (the corrected set — see the note below) | |
+| | **Total** | **20 new files** (P1 8 · P2 5 · P3 7 — architect §7.4 confirms the count) | **14 shared edit files** in phases 1–3 (the corrected set — see the note below) **+ 2 prompt-artefact files in the conventions step (§8)** | |
 
 **Shared-edit-file count (CORRECTED — architect §7.4).** The old summary row said "3 shared edit files"
 (`_tool_registry.py`, `instance.py`, `agents/ari/meta.json`); the per-phase rows above always listed more, and
@@ -85,15 +85,18 @@ the architect's file map is the authority. The true shared set is:
 
 `daemon/manager.py` · `daemon/tools/_tool_registry.py` · `daemon/tools/instance.py` · `agents/ari/meta.json` ·
 `agents/leader/meta.json` · **the 5 SAME-PR privileged-set pin files** · `daemon/api.py` (phase-3 lifespan) ·
-`daemon/services/live_views.py` + `daemon/routers/live_views.py` (phase 3) · `config.yaml` (doc-only) ·
-`agents/ari/tools_note.md` (phase 2's prompt surface — the architect notes the old summary row omitted it
-entirely).
+`daemon/services/live_views.py` + `daemon/routers/live_views.py` (phase 3) · `config.yaml` (doc-only).
 
-⇒ **15 shared edit files in v1** (14 from the architect's set + `tools_note.md`).
+⇒ **14 shared edit files in phases 1–3** (the architect's set). **`agents/ari/tools_note.md` is NO LONGER a
+phase edit file** — under the **C1① consolidation ruling** every prompt-artefact edit (the phase-2
+`## Self-Alarm` section, the optional phase-1 `## Board` section, and the session open/close procedure) is
+**deferred to the conventions step (§8)**, which is **step 4 of this commission, before merge + stage**. The
+prompt-artefact edit set for the WHOLE commission is therefore **2 files** — `agents/ari/tools_note.md` and
+`agents/ari/workflow.md` — edited **once**, with **one** re-stamp pass.
 
-`daemon/loader.py` — the **optional** warm-scan edit — is the **16th**, and it is **SKIPPED in v1** (leader
+`daemon/loader.py` — the **optional** warm-scan edit — is the **15th**, and it is **SKIPPED in v1** (leader
 ruling **R-loader**: the lifespan-injected `reports` root suffices for correctness; skipping keeps the
-phase-3 diff minimal). It stays on the deferred list (§8) — not a defect, not a gap.
+phase-3 diff minimal). It stays on the deferred list (§9) — not a defect, not a gap.
 
 **Migration count: exactly 1** (phase 1's `daemon/migrations/versions/20261020_060000_create_board_tables.sql`
 — distinct **day** prefix, leader ruling **R-prefix**). Phases 2 and 3 add **no** table and
@@ -185,7 +188,7 @@ order is *not* strictly serial, both matter:
    `agents/leader/meta.json` (`"board"`, `"board-link"`). **Merge-ordering note:** all edits append at the END
    of the array (phase-1 D15), and each phase's allow-list pin test is per-phase — so a phase-3 merge must not
    assume phase 1's or phase 2's entries exist, and vice versa. `agents/ari/meta.json` and
-   `agents/leader/meta.json` are **not** seal-pinned (the pinned set is `.md` artefacts only), which is why all
+   `agents/leader/meta.json` are in **neither** seal baseline — the committed 161-entry manifest\n`agents/.prompt-artifacts.sha256` has **zero** `meta.json` rows (`grep -c 'meta.json'` = 0), and the 35-entry\n`SEALED_SHA_BASELINES` test tripwire lists `agents/charter/meta.json` but neither ari nor leader `meta.json` —\nwhich is why all three phases can touch them freely. **This is a statement about `meta.json` ONLY**: the\n`.md` prompt artefacts of ari/leader (`rule.md`, `soul.md`, `tools_note.md`, `workflow.md`, and leader's\n`growth.md`) **ARE** manifest-covered, and an edit to any of them is a seal event (see §6 R7 and §8).
    three phases can touch them freely.
 4. **The privileged-set pin files (all three phases → the same five files).**
    `PRIVILEGED_TOOL_CATEGORIES` is asserted by **exact-set equality** in five test files
@@ -214,6 +217,11 @@ order is *not* strictly serial, both matter:
 Deduplicated across the three phase plans; where two phases describe the same hazard, the **highest-severity**
 and **most-specific** variant is kept and the other phase's id is noted in the row.
 
+**Numbering note (advisory A-3).** phase-3's own local risk table ([phase3-plan.md §8](phase3-plan.md)) carries a
+**non-contiguous** id set — **R36–R42, R45 and R47**; the phase-2 rows **R43**, **R44** and **R46** live in
+[phase2-plan.md](phase2-plan.md) and are consolidated here. A phase-3 row id is therefore **not** a
+plan-overview row id, and the two tables are **not** 1:1 — read the **row text**, not the id.
+
 | # | Risk | Impact | Likelihood | Mitigation | Source |
 |---|---|---|---|---|---|
 | R1 | **Duplicate migration prefix ⇒ fresh-SQLite boot failure.** The runner enforces one ledger row per version prefix; a collision yields `UNIQUE constraint failed: schema_migrations.version`. The runner does **not** catch `IntegrityError`. The repo already carries pre-existing duplicates (`20260628_000002`, `20261018_000001`). | **High** | Low | Verify prefix uniqueness **before** writing the file (`ls daemon/migrations/versions/ \| grep '^20261020_'` → **exactly** the one board file) **and re-verify at merge time** (leader ruling **R-prefix** — a distinct **day** prefix; a same-hour concurrent commission would collide). Never copy the pre-existing defect. | P1-R8 |
@@ -222,7 +230,7 @@ and **most-specific** variant is kept and the other phase's id is noted in the r
 | R4 | **Live-views mount order.** The board route declared *below* the public catch-all ⇒ the catch-all resolves `board` as a file and the board **silently 404s** (Starlette is first-match-wins). | **High** | Low | The board GET/HEAD is declared **immediately before** the catch-all with a loud comment restating the rule; a route-order assertion pins the resolution. | P3-R1 |
 | R5 | **Config-roots-replace footgun.** An operator `live_views.roots:` block **replaces** the seed dict (`config.py:2903-2914`) ⇒ a config-declared `reports` root would silently vanish. | **High** | Low | The `reports` root is **lifespan-injected**, never operator-declared; injection is idempotent and never overrides an operator-declared entry. `config.yaml` gets a **doc-only** note. | P3-R2, P3-D1 |
 | R6 | **32 MiB served-page cap.** A page larger than the served cap can never be served; a page that cannot be served must never be written. | Low | Low | The write path imports the **same** `MAX_SERVED_BYTES` constant the serve path uses (one source of truth) and refuses oversize input with a typed error naming the limit and the byte count. | P3-R8, P3-D6 |
-| R7 | **Seal-pinning re-pin obligation.** Any edit to `agents/ari/{rule,workflow}.md` or `agents/leader/rule.md` requires an adjudicated seal re-pin. `agents/ari/workflow.md` is **already drifting** — **7 stale pins measured at plan time**, which are **NOT ours to fix** and must not be silently absorbed. A new edit would add an 8th. | **Medium** | Medium | **No phase in this commission edits any seal-pinned file.** Phase 2's prompt surface is `agents/ari/tools_note.md` (not pinned); phase 3 touches only `meta.json` (the seal covers `.md` artefacts only — `meta.json` appears zero times). The stale-pin count must stay at the measured baseline (7); the conventions edit + its re-pin is a **separate phase-5 commission**. | P2-scope note, P3-D19 |
+| R7 | **Prompt-artifact seal obligation — TWO baselines, and the conventions step now owns the ONE re-stamp pass.** (1) The **committed 161-entry manifest** `agents/.prompt-artifacts.sha256` covers the versioned prompt artefacts; its ari rows are `rule.md` (:26), `soul.md` (:27), `tools_note.md` (:28), `workflow.md` (:29) and its leader rows are `growth.md` (:102), `rule.md` (:103), `soul.md` (:104), `tools_note.md` (:105), `workflow.md` (:106). (2) The **35-entry `SEALED_SHA_BASELINES` test tripwire** (`tests/test_chart_image_delivery_e2e.py:1350-1398`) is a **DIFFERENT** baseline and covers only `agents/ari/{rule,workflow}.md` + `agents/leader/rule.md` among the ari/leader files. `agents/ari/meta.json` and `agents/leader/meta.json` are in **neither** baseline ⇒ the allow-list edits carry **no** re-stamp. But `tools_note.md` / `rule.md` / `workflow.md` / `soul.md` **ARE** manifest-covered ⇒ **any** edit to them is a seal event, and the file tools HARD-REFUSE such writes (§8). The test tripwire is **already red**: **7 stale pins measured at this HEAD** (the historical 8 lost one when `daemon/constants.py` was re-pinned green) — the 7 are `install-mermaid-cli.md`, `ari/workflow.md`, and 5 `rule.md` files. | **Medium** | Medium | **ALL prompt-artefact edits are DEFERRED to the conventions step (step 4 of THIS commission, §8)** — phases 1–3 are **code-only + `meta.json` allow-list edits**, so **no phase carries a re-stamp task** (neither `meta.json` is manifest-covered). The conventions step performs **exactly ONE in-commit re-stamp pass** over the files it edits: recompute sha256, update the manifest row, commit together — and re-pin the `SEALED_SHA_BASELINES` constant **only for entries it edits that are currently green**; an already-stale entry (e.g. `agents/ari/workflow.md`) is **NOT** re-pinned, because re-pinning it would silently absorb a pre-existing red and move the measured baseline. **The 7 pre-existing stale pins are NOT ours to fix** — out of scope, flagged, not absorbed. Acceptance: the mismatch count **before == after**. | P1-T10, P2-scope note, P2-T7/T11/D13, P3-D19, §8 |
 | R8 | **Proxy `/views/public/**` exemption invariant.** `/views/public/**` must stay proxy-exempt in **both** deployment states (State A merge+apply / State B zero-operator), with the canonical gate daemon-side. Any new surface outside `/views/public/**` would break the contract. | **High** | Low | Both new surfaces live under `/views/public/**` already ⇒ **zero proxy change**; no gate-free route is added; Host preservation is untouched (the same-host CSRF check depends on it). The existing public-prefix exemption integration test stays green. | P3-D18, P3-§6 |
 | R9 | **Cross-phase seam drift** — phase 1 renames/moves the service or changes the item shape ⇒ phase 3 breaks. | **High** | Medium | Exactly one adapter file is the coupling point; it is shape-tolerant and degrades to an explicit "unavailable" notice, never a 500. **The phase-3 builder MUST reconcile against the landed phase-1 code before merging.** | P3-R4 |
 | R10 | **Schema freeze.** `create_all` does not ALTER existing tables; after the first board boot, any phase-2/3 column ADD needs *both* an `_ensure_postgres_columns` entry *and* a `.sql` ALTER. | Medium | Medium (certain, if a column is added) | Phase 1 pins the four hooks phases 2 and 3 need, so no later ADD is required. | P1-R4 |
@@ -263,6 +271,8 @@ and **most-specific** variant is kept and the other phase's id is noted in the r
 | **R45** | **The create-response `status` is racing** — it moves `'stopped'` → `'starting'` → `'running'`. | 🟢 **Low** | High | Echo the **actual** status; treat `'starting'` as armed. | P2-Risk 18 |
 | **R46** | **`tz_warning` erasure** — passing an explicit `timezone` short-circuits the engine's chain and suppresses the engine's UTC-fallback warning. | 🟡 **Medium** | Medium | Echo the **wrapper's own** warning. | P2-Risk 19 |
 | **R47** | **Truncation is invisible** — >50 rendered rows and >500 filter values are cut with no signal. | 🟡 **Medium** | High | Render a **"showing N of M"** disclosure + a cap notice. | P3-R47 |
+| **R48** | **`reports/` growth is UNBOUNDED.** Every `view_write` page is a plain `.html` file under the daemon-global `reports` root; the only ceiling is the **per-page** 32 MiB serve cap (R6). There is **no retention policy, no total-size cap, and no sweep** — the directory grows monotonically with every published page, and a page that is never overwritten is never reclaimed. The `tmp_images` substrate's 30-day sweep does **NOT** apply here: `reports` is a plain filesystem root (P3-D2). | 🟡 **Medium** | Medium | **Flagged, not designed — the sweep is NOT specced in v1.** Mitigation options for the operator, in the order the leader should prefer: (a) an operator-level housekeeping note (the live-view runbook carries a "published pages are not reclaimed; prune `reports/` yourself" line); (b) a **future** daemon-side retention sweep keyed on mtime, sized like the `tmp_images` 30-day sweep — **a separate commission with its own design**; (c) a total-size budget on the `reports` root that refuses new writes past a threshold (mirrors the write-time 32 MiB refusal, so the failure is a typed error rather than a disk-full). Until one of these lands, the operator must know the directory is unbounded. **Runbook note (to be carried into `docs/runbooks/live-view-passcode-deployment.md` at the phase-3 landing):** "`reports/` is not reclaimed automatically — published pages persist until an operator prunes them." | P3-D2, P3-D6, R6 |
+| **R49** | **≈30-bit passcode entropy residual.** The public-link passcode is **6 characters over a 31-character alphabet** (`"23456789abcdefghjkmnpqrstuvwxyz"` — 8 digits + 23 letters, `daemon/repositories/view_passcodes/models.py:461`; length at `:464`) ⇒ **≈29.7 bits** of entropy, generated with `secrets.choice` (stdlib CSPRNG — the RNG is not the weak link). The per-row **10-strike ceiling** (`LIVE_VIEW_PASSCODE_STRIKE_CEILING`, `:470`) bounds online guessing, and the board is a **single** passcode row (P3-D11) ⇒ one ceiling covers the whole board. The residual is that the ceiling is **per row, not per source**, and a lockout locks the legitimate holder out too (R30). | 🟡 **Medium** | Low | **Accepted for v1, with the assumption stated plainly:** the board and the published reports are treated as **non-sensitive** content — the passcode is a sharing gate, not an authorisation boundary. The board's own content is already visible to every agent holding the `board` category. `refresh=True` mints a fresh passcode and revokes outstanding grants, so a brute-force attempt cannot be amortised across generations. If the board ever holds sensitive content, the mitigation is a **longer passcode / a per-source rate limit** — a change to the **FROZEN** passcode shape (ADR D4) and therefore a separate commission, not a phase-3 tweak. | P3-D4, P3-D11, R30 |
 
 ---
 
@@ -319,14 +329,114 @@ Each phase carries its own measurable criteria; this is the commission-level rol
     the privileged category is registered + pinned in the same commit); `board` is ari + leader; `board-link` is
     ari + leader. **The privileged-set trajectory is 8 → 9 → 10 → 12 across THREE pin passes** — the merge
     verifies that #9 (P1) and #10 (P2) landed before P3's 10 → 12 pass.
-15. Zero seal violations: the seal test is green and `agents/ari/{rule,workflow}.md` + `agents/leader/rule.md`
-    are byte-identical; the stale-pin count stays at the measured baseline (7).
+15. Zero seal violations **introduced by this commission**: the seal-test mismatch count **before == after**
+    (the measured baseline at this HEAD is **7** — the test is **already red** on 7 pre-existing stale pins, which
+    are **NOT ours to fix**); no manifest-covered file is edited **outside** the conventions step (§8), and every
+    file that step edits has its `agents/.prompt-artifacts.sha256` row re-stamped **in the same commit**.
 16. Zero new failures in the regression run; the frozen-tool-name drift pin stays green; **no** release is
     staged or promoted by any phase.
 
 ---
 
-## 8. What was deliberately NOT designed (v2 + deferred)
+## 8. Step 4 — the `agents/ari` conventions update (IN-SCOPE in this commission)
+
+**This is step 4 of the commission, BEFORE merge + stage.** The user's commission deliverable 3 ("Ari's agent
+files") is delivered **here** — not in a later phase-5 commission, and not after the landing. The binding
+sequence is: **P1 → P2 → P3 → conventions (this section) → merge `latest` + bump + stage + staged
+verification (NO promote)** — the binding sequence paragraph lives in [decisions.md](decisions.md) §A-ADJUDICATED.
+
+### 8.1 What this step is — and what it is NOT
+
+- **It IS** the authoring of the prompt surface for the four new tool families (`board_*`, `self_alarm`,
+  `view_write`, `board_link`) plus the session open/close procedure.
+- **It is NOT** a phase-5 commission and **NOT** a separate later step. It ships inside this commission,
+  before the merge.
+- **It carries the ONE and ONLY in-commit re-stamp pass** for the ari prompt files. Phases 1–3 ship
+  **code-only + `meta.json` allow-list edits** and therefore carry **no** re-stamp task — because **neither
+  `agents/ari/meta.json` nor `agents/leader/meta.json` is manifest-covered** (verified: zero `meta.json` rows
+  in the 161-entry manifest `agents/.prompt-artifacts.sha256`; neither appears in the 35-entry
+  `SEALED_SHA_BASELINES` test tripwire). Every prompt-artefact edit — `tools_note.md`, `rule.md`,
+  `workflow.md`, `soul.md` — is **deferred here**, so the commission produces exactly **one** re-stamp pass.
+
+### 8.2 Write lane (binding)
+
+| Lane | Verdict |
+|---|---|
+| **File tools (`write_file` / `edit_file`)** | **HARD-REFUSE — do not attempt.** Versioned prompt artefacts are in `VERSIONED_PROMPT_ARTIFACTS` (`daemon/tools/prompt_artifacts.py:119-127` — a frozenset that includes `tools_note.md` and the legacy `tools.md`), and the fail-closed write guards (`daemon/tools/filesystem.py` — `write_file` **and** `edit_file`, via `_check_prompt_artifact_write`) reject a write to any of them under a worktree-rooted dev daemon. **This is the posture our fencing prescribes.** |
+| **bash / git escape hatch** | **THE SANCTIONED LANE.** The conventions step writes the prompt artefacts through `bash` (here-doc / patch) + `git`, and the manifest re-stamp lands in the **SAME COMMIT** as the file edit. A file edit without its same-commit manifest row is a seal violation. |
+| **prompt-versions API** | **NOT the repo-commit path.** The prompt-versions API is a **runtime DB lane** (per-instance prompt versions in the database). It does **not** write `agents/**` in the repo and does **not** satisfy the committed manifest seal — using it here would leave the repo manifest stale. |
+
+### 8.3 Per-file disposition
+
+The guide (`docs/agent-prompt-writing-guide.md` §2 file-roles table + §2 canonical-home rule) decides where each
+item lives. **One canonical home per artefact; other files link by section name** (convention v2 — no path or
+filename tokens in prompt prose).
+
+| File | Disposition | Owns (canonical home) | Why |
+|---|---|---|---|
+| `agents/ari/tools_note.md` | **EDIT** | The **new-tool usage notes** — one section per tool family: `## Board` (`board_create` / `board_update` / `board_list` / `board_get`), `## Self-Alarm` (`self_alarm`), `## Live Views` (`view_write`, `board_link`). Also the **≥30 min vs <30 min decision** and the **"the board is the user-visible surface"** statement. | `tools_note.md` owns "tool-by-tool reference (what each tool does, when to use/avoid)" (guide §2). The ≥30-min rule is exactly a when-to-use/avoid rule for `self_alarm`. |
+| `agents/ari/workflow.md` | **EDIT** | The **session open/close procedure**: session open ⇒ `board_list(open)`; session close ⇒ append a **handoff note** to each open board item I own. | `workflow.md` owns "step-by-step process" (guide §2). The tool *reference* stays in `tools_note.md`; `workflow.md` links to it by section name. |
+| `agents/ari/rule.md` | **NO EDIT** | — | Nothing here is a new *hard constraint* that is not already a rule or a process step: the ≥30-min rule is tool-usage guidance (tools_note), the open/close procedure is process (workflow). Editing `rule.md` would duplicate content the guide forbids duplicating, risk the ≤7-Cardinal ceiling, and put `agents/ari/rule.md` — which **IS** in the `SEALED_SHA_BASELINES` tripwire — into the seal blast radius for no benefit. |
+| `agents/ari/soul.md` | **NO EDIT** | — | `soul.md` owns identity / personality / tone (guide §2, §5). The new material carries no tone directive and changes no identity. |
+| `agents/leader/*` | **NO EDIT** | — | The conventions content is **ari-specific** (ari alone holds `self_alarm` and `view_write`; the board/session discipline is ari's). Leader holds `board` + `board-link` only and gains no session procedure. |
+
+**⇒ The seal blast radius of the conventions step is exactly TWO files**: `agents/ari/tools_note.md`
+(manifest-covered only) and `agents/ari/workflow.md` (manifest-covered **and** in the `SEALED_SHA_BASELINES`
+tripwire — and **already one of the 7 stale pins**).
+
+### 8.4 Binding content items (all FIVE must appear)
+
+1. **Session open ⇒ `board_list(open)`.** The first thing I do at the start of a session is read the open board,
+   so the state I inherited from my previous session is in front of me before I act.
+2. **Session close ⇒ handoff note appended to the open board items.** Before I end a session, each open item I
+   own gets a note saying where it stands. The note is **appended** — never an edit — so the timeline stays the
+   record.
+3. **≥30 min ⇒ `self_alarm`; <30 min ⇒ bash `sleep` in-turn.** For anything I must be reminded of in **30
+   minutes or more**, I arm `self_alarm`. For anything shorter, I `sleep` in-turn — a short wait does not
+   deserve a scheduled reminder. (The wrapper enforces the floor and rejects a sub-30-minute arm with this same
+   hint.)
+4. **The board is THE user-visible surface of a fired alarm — no ping is promised.** When an alarm fires, the
+   board is where the change becomes visible to the user. I never tell the user they will be "pinged" or
+   "notified" — there is no such promise to make.
+5. **New-tool usage notes in agent POV.** `board_*`, `self_alarm`, `view_write` and `board_link` each get
+   agent-POV usage guidance (what it does, when I use it, when I avoid it), per the guide: first person; **no**
+   `meta.json` / `tools.allow` / `daemon/` / `skill-set.yaml` / `innate_skills` / test-path tokens;
+   cross-references by **section name** only; no false "stated once" claims.
+
+### 8.5 The ONE in-commit re-stamp task (binding)
+
+- **Manifest (`agents/.prompt-artifacts.sha256`, 161 entries, committed artefact).** For **every** covered file
+  the conventions step edits: recompute the sha256, replace that file's row, and commit the row **in the same
+  commit** as the file edit. A covered file edited without its same-commit manifest row is a seal violation.
+- **Test tripwire (`SEALED_SHA_BASELINES`, 35 entries, `tests/test_chart_image_delivery_e2e.py:1350-1398`).**
+  Re-pin **only** the entries the conventions step edits **that are currently green**. An entry that is
+  **already stale** (pre-existing drift) is **NOT** re-pinned — `agents/ari/workflow.md` is exactly that case:
+  re-pinning it would silently absorb a pre-existing red into this commission and move the measured baseline.
+- **The 7 pre-existing stale pins are NOT ours to fix** — they are out of scope, flagged, and left exactly as
+  they are. **Acceptance: the seal-test mismatch count BEFORE the conventions step == the count AFTER it**
+  (7 == 7 at this HEAD).
+
+### 8.6 Step-4 checklist
+
+- [ ] Author the §8.3 dispositions — `tools_note.md` (three new sections + the two binding statements) and
+      `workflow.md` (the session open/close procedure) only. No other agent file is touched.
+- [ ] Run the guide's **pre-commit checklist** (`docs/agent-prompt-writing-guide.md` §10) over the edited files:
+      no system internals; one canonical home per artefact; no false "stated once"; ≤7 Cardinals (`rule.md`
+      untouched, so trivially true); cross-references resolve by section name; tone present (`soul.md`
+      untouched).
+- [ ] Run the guide's §3 **cross-reference closure grep** over the edited agent dir and confirm every surviving
+      hit is an operational path, not a cross-reference.
+- [ ] **Re-stamp (same commit):** recompute the sha256 of every covered file edited and update its
+      `agents/.prompt-artifacts.sha256` row in the **same commit**.
+- [ ] **Re-pin (same commit, green entries only):** update the `SEALED_SHA_BASELINES` constant for any entry
+      the step edits **that is currently green**; leave already-stale entries alone.
+- [ ] **Baseline check:** the seal-test mismatch count before == after (7 == 7) — a changed count means the step
+      absorbed someone else's drift.
+- [ ] Confirm **no phase-1/2/3 commit** in this branch touched a manifest-covered file (`git log --name-only`
+      over the phase range shows only `meta.json` among `agents/**`).
+
+---
+## 9. What was deliberately NOT designed (v2 + deferred)
 
 These are recorded as **deferred with reasons**, not as gaps. Each is listed in its owning phase plan.
 
@@ -341,12 +451,12 @@ These are recorded as **deferred with reasons**, not as gaps. Each is listed in 
 | **Pagination cursor on `board_list`** | [phase1-plan.md Q3](phase1-plan.md) | `limit` + truncation metadata is accepted in v1; add `offset`/`cursor` when the board exceeds a few hundred items. |
 | **Clearing `due_at` / `project_id` / `priority`**, and **soft-delete of items** | [phase1-plan.md Q2, Q4](phase1-plan.md) | **DEFERRED-to-v2** (ledger theme 4). The bound `board_update` shape has no clear-flag; `clear_fields` is a v1.1 amendment on demand. A soft delete is mandatory (never a hard one — the notes audit trail must survive), and the **child FKs (NO ACTION) now enforce it at the schema level**: the database refuses a hard item delete. |
 | **Interval recurrence** (`every 1h`) | [phase2-plan.md OQ-3](phase2-plan.md) | **DEFERRED-to-v2** (ledger theme 8). `create_schedule` exposes no interval variant; it is rejected with a hint (`cron */60 * * * *`). A real engine change is a separate commission. |
-| **The `agents/ari/{rule,workflow}.md` conventions edit + its adjudicated seal re-pin** | [phase3-plan.md D19](phase3-plan.md) | That is a **separate phase-5** commission; it owns the re-pin, and it must be sequenced so the re-pin covers the post-phase-3 tree. The phase-2 `agents/ari/tools_note.md` surface is **not** seal-pinned, so phase 2 carries no seal obligation. |
+| **The `agents/ari` conventions update + its adjudicated seal re-stamp** | **[plan-overview.md §8](plan-overview.md) — STEP 4 OF THIS COMMISSION** | **NOT deferred — IN-SCOPE as step 4, before merge + stage.** The user's commission deliverable 3 ("Ari's agent files") is delivered by this step. It is **not** a phase-5 commission and **not** a post-landing item. It owns the **ONE** in-commit re-stamp pass. Phases 1–3 are **code-only + `meta.json` allow-list edits** ⇒ **no phase carries a re-stamp task** (neither `meta.json` is manifest-covered). The step edits `agents/ari/tools_note.md` + `agents/ari/workflow.md` only (§8.3). |
 | **The optional `daemon/loader.py` warm-scan edit** — the cold-boot path can pin an empty category doc into the no-TTL prompt cache. | architect §3.3 | **DEFERRED (leader ruling R-loader).** The edit is **SKIPPED in v1**: the lifespan-injected `reports` root is sufficient for correctness, and skipping keeps the phase-3 diff minimal. It is the 16th shared edit file and is **not** part of the v1 file map. Not a defect, not a gap. |
 
 ---
 
-## 9. Landing note
+## 10. Landing note
 
 **Normal stage flow — no special ceremony for this commission:**
 
@@ -382,8 +492,14 @@ worktree (feature/ari-tools)  →  merge --no-ff into latest  →  push
   superset of the one it knows, which it ignores — and the board data is *retained*, not destroyed, so a
   re-promote restores it. (4) Therefore the delta is additive-only in the semantic sense, `ENSEMBLE_ROLLBACK_SAFE=1`
   is legitimate, and auto-rollback is safe and desirable — it must be able to fire on a failed gate.*
-- **Seal posture:** no phase touches a seal-pinned file ⇒ the prompt-artifact seal is **not** re-pinned by this
-  commission. If the separate phase-5 conventions edit is commissioned later, it owns its own re-pin.
+- **Seal posture:** phases 1–3 touch **no** manifest-covered file — the allow-list edits are to
+  `agents/{ari,leader}/meta.json`, which are in **neither** seal baseline ⇒ **no phase carries a re-stamp task**.
+  The **conventions step (§8) is step 4 of this commission, before merge + stage**, and it owns the **ONE**
+  in-commit re-stamp pass over the two files it edits (`agents/ari/tools_note.md`, `agents/ari/workflow.md`): the
+  `agents/.prompt-artifacts.sha256` rows are recomputed and committed **with** the edits, and the
+  `SEALED_SHA_BASELINES` constant is re-pinned **only** for the entries the step edits **that are currently
+  green**. The **7 pre-existing stale test pins are NOT ours to fix** and are left untouched; the acceptance is
+  mismatch-count-before == mismatch-count-after.
 - **Proxy / infra posture:** **zero** proxy change. Both new public surfaces ride `/views/public/**`, which is
   already proxy-exempt in both deployment states.
 - **Merge-order note:** all three phases land on the **same branch** and merge to `latest` **once**, in build
@@ -392,7 +508,7 @@ worktree (feature/ari-tools)  →  merge --no-ff into latest  →  push
 
 ---
 
-## 10. Document map
+## 11. Document map
 
 | Document | Role |
 |---|---|
@@ -422,7 +538,8 @@ adjudication to the three phase plans (phase1 486 lines, phase2 543 lines, phase
 |----|-----|-------------|--------------|
 | **A-43** | P0 | §6 (R2, R3, R11, R12, R15, R18, R19, R28) | **R2 → RESOLVED** (leader ruling **R-C1**: `"board"` is privileged from Phase 1's first commit — kept as a decision record, not a live risk). **R3** corrected — the capped path is a **5-second daemon-wide re-evaluation loop with no self-heal and no user-visible signal** (`scheduler.py:559`); default `None`, no cap in v1, and the wrapper MUST echo `lateness_cap_seconds`. **R18** corrected — the **service** retries once on an id collision; the agent never supplies the id and never retries. **R19** corrected — the daemon's SQLite engine sets `PRAGMA foreign_keys=ON` on every connection (`factory.py:175`) ⇒ FK behaviour holds on **both** drivers at runtime. **R15** corrected — four categories across three phases ⇒ **THREE** pin passes (8 → 9 → 10 → 12), not one. **R11/R12** reconciled — the ari-only rule is now **three** layers (privileged category + allow-list + runtime gate). **R28** resolved by batched hydration in phase 1 (≤3 queries per render). |
 | **A-44** | P0 | §6 (new rows **R33–R47**) | **15 risks added with the architect's severities**: R33 `stopped`-label reuse disarms the alarm 🔴 · R34 message-only re-arm collapses 🔴 · R35 `self-alarm` non-privileged ⇒ `watcher` ⇒ Ari executes attacker-influenced text 🔴 · R36 relative `reports` path kills `view_write` 🔴 · R37 `str.format` + CSS braces ⇒ 500 on every board GET 🔴 · R38 `Cache-Control` merge-order trap 🟡 · R39 no render byte cap 🟡 · R40 `board_link` URL when live-views is disabled 🟡 · R41 no `fsync` before `os.replace` 🟡 · R42 a future `has_root` check breaks the board 🟡 · R43 default schedule list hides armed alarms 🟡 · R44 label namespace shared with non-scheduler sources 🟡 · R45 create-response `status` racing 🟢 · R46 `tz_warning` erasure 🟡 · R47 invisible truncation 🟡 |
-| **A-45** | P1 | §3 (phase table + total row + the shared-edit note) | The "3 shared edit files" summary was **wrong** — the architect's file map is the authority: `daemon/manager.py` · `daemon/tools/_tool_registry.py` · `daemon/tools/instance.py` · `agents/ari/meta.json` · `agents/leader/meta.json` · **the 5 SAME-PR pin files** · `daemon/api.py` · `daemon/services/live_views.py` + `daemon/routers/live_views.py` · `config.yaml` (doc-only) · `agents/ari/tools_note.md` ⇒ **15 shared edit files in v1**; `daemon/loader.py` is the 16th and is **SKIPPED** (leader ruling **R-loader**). The phase rows now name the pin files and the **8 → 9 / 9 → 10 / 10 → 12** passes. |
+| **A-45** | P1 | §3 (phase table + total row + the shared-edit note) | The "3 shared edit files" summary was **wrong** — the architect's file map is the authority: `daemon/manager.py` · `daemon/tools/_tool_registry.py` · `daemon/tools/instance.py` · `agents/ari/meta.json` · `agents/leader/meta.json` · **the 5 SAME-PR pin files** · `daemon/api.py` · `daemon/services/live_views.py` + `daemon/routers/live_views.py` · `config.yaml` (doc-only) · `agents/ari/tools_note.md` ⇒ **15 shared edit files in v1**; `daemon/loader.py` is the 16th and is **SKIPPED** (leader ruling **R-loader**). The phase rows now name the pin files and the **8 → 9 / 9 → 10 / 10 → 12** passes. **⚠️ SUPERSEDED IN PART by the 2026-10-19 re-gate (see the RE-GATE row below):** under the **C1① consolidation ruling** `agents/ari/tools_note.md` is **no longer a phase edit file** — every prompt-artefact edit is deferred to the conventions step (§8) — so the operative count is **14 shared edit files in phases 1–3 + 2 prompt-artefact files in the conventions step**, and `daemon/loader.py` is the **15th**. The row above is retained as the historical A-45 record. |
 | **A-46** | P1 | §4 (new bullet), §5 (heading + new item 4) | The privileged set is a **cross-phase coupling with THREE pin passes** (8 → 9 → 10 → 12), not one — the plan's "phase 3 pays the pin cost once" statement is **no longer true**. Each pass is one inserted literal line per file and ships **in the same commit** as its category entry ⇒ no red window, but the cost is re-paid in every phase that adds a category. |
-| **A-47** | P1 | §9 (migration posture + the pre-drafted adjudication) | The migration posture now names the **adopted prefix** `20261020_060000`, the mandatory `-- DOWN` section, and the **non-empty** delta — which means the stage gate will demand an explicit rollback-safety adjudication. The **text is pre-drafted** (additive-only semantics: no `ALTER`, no existing-row change, `create_all` never drops, a rollback tears nothing down and retains the board data) so it is not discovered at stage time; the standing rule requires the semantic reasoning, not a reflex verdict. |
-| **DRIFT** | P1 | §3 (migration count), §4 (`create_all` anchor), §5.2 (prefix rule), §7 (criteria 2, 3, 13, 14), §8 (deferred rows), §10 (doc map) | Counts and claims that the adjudication invalidated: the migration filename/prefix (the old phase-1 prefix → the adopted distinct-day `20261020_060000…`) in §3/§5.2; the `create_all` anchor (`daemon/manager.py:6597-6605` → the call at `:751`, the "does not ALTER" docstring at `:6596-6604`); §7 criterion 2 (the runner is **SQLite-only**, `create_all` runs first on both drivers, the model is the source of truth); §7 criterion 3 (the **SQL-capture guard is the primary** append-only proof, the static scan secondary); §7 criterion 13 (an empty allow list means "everything **except** privileged" — the gating is proven against the **empty** allow list, and the in-body `agent_id` gate is required because a literal tool-name allow entry bypasses the category gate); §7 criterion 14 (the privileged trajectory + merge verification of #9/#10); §8 (the chat-bridge row now carries the ruling, and themes 4 and 8 are marked DEFERRED-to-v2; the `daemon/loader.py` row is added); §10 (the architect's document added to the map). |
+| **A-47** | P1 | §10 (migration posture + the pre-drafted adjudication) | The migration posture now names the **adopted prefix** `20261020_060000`, the mandatory `-- DOWN` section, and the **non-empty** delta — which means the stage gate will demand an explicit rollback-safety adjudication. The **text is pre-drafted** (additive-only semantics: no `ALTER`, no existing-row change, `create_all` never drops, a rollback tears nothing down and retains the board data) so it is not discovered at stage time; the standing rule requires the semantic reasoning, not a reflex verdict. |
+| **RE-GATE** | P0 | §3 (phase table + shared-edit count), §5 (allow-list item), §6 (**R7** rewritten · **R48**, **R49** added · numbering note), §7 (criterion 15), **§8 (NEW — the conventions step-4 content spec)**, §9 (deferred row), §10 (seal posture) | Reviewer re-gate amendment (C1 + W1–W4 + A1–A7, leader-ruled and binding). **C1** — the seal-manifest facts were wrong: `agents/.prompt-artifacts.sha256` is a **161-entry committed manifest** that **DOES** cover ari/leader `rule.md` / `soul.md` / `tools_note.md` / `workflow.md` / `growth.md`; only `meta.json` is uncovered, so the **phase edits carry no re-stamp** but **every prompt-artefact edit is a seal event**. All prompt-artefact edits are **deferred to the conventions step (§8)** (C1① consolidation) — one in-commit re-stamp pass for the whole commission; every false "not pinned / no seal obligation" claim is corrected (C1②); the **write lane** is named (C1③: file tools HARD-REFUSE, bash/git escape hatch + same-commit re-stamp is sanctioned, prompt-versions API is runtime-only); the two-baseline confusion is erratum'd in [research-db-agents.md §5](research-db-agents.md) (C1④). **W1** — the conventions update is **step 4 of this commission** (not a phase-5 commission) and its **content spec** is written here in §8 (it was specced nowhere). **W2** — phase-2's "nine entries" → **ten** (×4). **W3** — phase-1 T11's "the seal test must be green" is **unsatisfiable** at HEAD (7 pre-existing reds) ⇒ reworded to "no NEW stale pins beyond the measured baseline (7); mismatch count before == after". **W4** — the ari-only rule is **thrice** (privileged category + allow-list + runtime gate), not twice. **A4**/**A5** — two new consolidated risk rows (**R48** reports growth unbounded, **R49** ≈30-bit passcode entropy residual). **A3** — the phase-3 §8 numbering note. |
+| **DRIFT** | P1 | §3 (migration count), §4 (`create_all` anchor), §5.2 (prefix rule), §7 (criteria 2, 3, 13, 14), §9 (deferred rows), §11 (doc map) | Counts and claims that the adjudication invalidated: the migration filename/prefix (the old phase-1 prefix → the adopted distinct-day `20261020_060000…`) in §3/§5.2; the `create_all` anchor (`daemon/manager.py:6597-6605` → the call at `:751`, the "does not ALTER" docstring at `:6596-6604`); §7 criterion 2 (the runner is **SQLite-only**, `create_all` runs first on both drivers, the model is the source of truth); §7 criterion 3 (the **SQL-capture guard is the primary** append-only proof, the static scan secondary); §7 criterion 13 (an empty allow list means "everything **except** privileged" — the gating is proven against the **empty** allow list, and the in-body `agent_id` gate is required because a literal tool-name allow entry bypasses the category gate); §7 criterion 14 (the privileged trajectory + merge verification of #9/#10); §9 (the chat-bridge row now carries the ruling, and themes 4 and 8 are marked DEFERRED-to-v2; the `daemon/loader.py` row is added); §11 (the architect's document added to the map). |
