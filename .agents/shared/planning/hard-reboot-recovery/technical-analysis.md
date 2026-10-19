@@ -285,6 +285,8 @@ These are operational/UX gaps, not correctness gaps. **Recommendation:** add to 
 
 **Total new surface across recommendations: ≤150 Python LOC + ≤70 test LOC + ≤85 ops/runbook LOC = ~305 LOC**, dominated by the G6 retry hook + G2 new service. **All recommendations ride existing plug points** (no new plug-point needed).
 
+> **Reconciliation pointer (architect-folded A1, 2026-10-19):** the in-scope LOC totals above are pre-fold; the post-fold plan-docs tables (`plan-overview.md` §6 + `phase1-plan.md`) supersede this section by reference. Post-fold: `≈44 / ≤155 / ≤113` (net Python −26). The preflight-reuse + `connect_timeout=10s` lane replaces the planned `_init_manager_with_pg_retry` helper (architect: the constructor fails first at `api.py:562-568`, making the retry dead code; the preflight is the existing, better-shaped lane; the exit-3 exhaustion path was a regression). This section is the gap-doc's pre-fold evidence; the post-fold plan is authoritative. No history rewrite per FOLD (one canonical home per artifact).
+
 ---
 
 ## References
