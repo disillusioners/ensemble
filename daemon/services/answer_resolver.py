@@ -21,10 +21,14 @@ repositories).
 
 Resolution order (one shared helper — both surfaces call it):
 
-1. **Fast path** — the work's own instance already holds the pack the
-   caller means (a RAM pack, or a durable ``question_pack_id`` shadow
-   matching the supplied pack id). Used unchanged: zero extra queries,
-   and the "asker IS the mission root" case keeps today's behaviour.
+1. **Fast path** — the work's own instance already holds the PENDING
+   pack the caller means (a RAM pack, or a durable ``question_pack_id``
+   shadow matching the supplied pack id). A RAM pack that is NOT
+   pending (e.g. an ANSWERED pack left behind on the mission root —
+   RAM packs survive answer consumption) never short-circuits the
+   resolution: the answer must reach the instance that still holds a
+   live question. Used unchanged otherwise: zero extra queries, and the
+   "asker IS the mission root" case keeps today's behaviour.
 2. **Pack id** (strongest key) — the subtree instance whose durable
    ``question_pack_id`` shadow (or pending RAM pack) matches the
    supplied pack id.
@@ -266,7 +270,21 @@ def resolve_answer_target(
     # ── 1. FAST PATH — the work's own instance already holds the pack ─
     ram_pack = qm.get_question_pack(work_instance_id) if qm is not None else None
     ram_pack_id = _pack_id_of(ram_pack)
-    if ram_pack_id is not None and (
+    # The fast path accepts ONLY a PENDING pack. A RAM pack SURVIVES
+    # answer consumption — only the durable metadata shadow is cleared
+    # at consumption — so an ANSWERED pack can sit on the mission root
+    # long after its own question was answered. Short-circuiting on it
+    # routes the answer at the root: the CAS then LOSES (the pack is
+    # already answered) and the caller gets a silent 200
+    # ``already_delivered`` while the LIVE question on a CHILD asker is
+    # never answered and the child stays paused. A non-pending pack
+    # must fall through to the subtree pack-id scan / awaiting-answer
+    # handle scan so the resolution lands on the real asker.
+    ram_pack_pending = (
+        ram_pack_id is not None
+        and getattr(ram_pack, "status", None) == "pending"
+    )
+    if ram_pack_pending and (
         question_pack_id is None or ram_pack_id == question_pack_id
     ):
         # The asker IS the mission-scoped instance (today's behaviour,
@@ -470,7 +488,11 @@ def raise_unresolved_target(target: AnswerTarget) -> NoReturn:
 
     * ``ambiguous`` → **400** ``INVALID_REQUEST``. The request is
       under-specified: several instances hold a question and the caller
-      did not supply ``question_pack_id``. ``INVALID_REQUEST`` is the
+      did not supply ``question_pack_id``; OR the supplied
+      ``question_pack_id`` matched SEVERAL instances (a data anomaly —
+      a pack id is unique); OR the supplied pack id matched nobody while
+      several instances hold an awaiting-answer handle. In every shape
+      the resolver refuses to guess. ``INVALID_REQUEST`` is the
       repo's existing generic 400 token (the answer route already uses
       it for a malformed body) — reusing it keeps the wire vocabulary
       closed and avoids a new ``ErrorCodes`` member that no consumer

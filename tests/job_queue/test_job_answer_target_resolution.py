@@ -135,6 +135,35 @@ def _seed_mission_work(harness, root_id: str) -> str:
     )
 
 
+def _seed_stale_answered_pack(harness, root_id: str) -> object:
+    """Leave a STALE ANSWERED RAM pack on the mission root.
+
+    RAM packs SURVIVE answer consumption — only the durable
+    ``instance_metadata`` shadow is cleared at consumption (the RAM
+    store keeps the pack with ``status="answered"``). This is the
+    geometry that broke the resolver's fast path: the root's stale pack
+    short-circuited the resolution, the answer was routed at the root,
+    the CAS lost, and the caller got a silent ``already_delivered``
+    while the CHILD's live question was never answered.
+
+    Returns the stale pack.
+    """
+    pack = harness.qm.set_question_pack(
+        root_id, [{"id": "q1", "text": "Stale root question?"}]
+    )
+    # The durable shadow the create-site stamps.
+    harness.instance_repo.set_metadata(root_id, "question_pack_id", pack.id)
+    harness.instance_repo.set_metadata(
+        root_id, "question_pack_payload", pack_to_dict(pack)
+    )
+    # The answer consumption: the pack flips to ``answered`` and the
+    # durable shadow is cleared (midflight_qa.clear_question_pack_metadata).
+    harness.qm.set_answers(root_id, {"q1": "stale answer"})
+    harness.instance_repo.delete_metadata(root_id, "question_pack_id")
+    harness.instance_repo.delete_metadata(root_id, "question_pack_payload")
+    return pack
+
+
 # =============================================================================
 # Router mounts (bare-app pattern — tests/job_queue/test_midflight_qa.py)
 # =============================================================================
@@ -637,3 +666,59 @@ class TestInstanceScopedRouteUnchanged:
         assert resp.status_code == 404, resp.text
         detail = resp.json()["detail"]
         assert detail["code"] == ErrorCodes.INSTANCE_NOT_FOUND.value
+
+
+# =============================================================================
+# (f) Stale ANSWERED RAM pack on the mission root — the fast path must
+#     NOT short-circuit on a non-pending pack
+# =============================================================================
+
+
+class TestStaleAnsweredRootPackDoesNotShortCircuit:
+    """(f) A RAM pack SURVIVES answer consumption (only the durable
+    shadow is cleared), so the mission root can hold a STALE ANSWERED
+    pack while a CHILD holds the live pending question. The resolver's
+    fast path must accept a PENDING pack only: short-circuiting on the
+    stale pack routes the answer at the root, the CAS loses, and the
+    caller gets a silent 200 ``already_delivered`` while the child's
+    question is never answered and the child stays paused."""
+
+    def test_route_without_pack_id_answers_the_child_not_the_stale_root(
+        self, harness, jobs_client
+    ):
+        root = _seed_mission_root(harness)
+        _seed_stale_answered_pack(harness, root)
+        child, pack = _seed_asking_child(harness, root)
+        work_id = _seed_mission_work(harness, root)
+
+        # The HTTP route permits omitting ``question_pack_id``.
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={"answers": {"q1": "Approach A"}},
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        # NOT the silent CAS-loss no-op on the root's stale pack.
+        assert body["status"] == "answered"
+        assert body["resume_route"] != "already_delivered"
+
+        # The answer landed on the CHILD — the live asker.
+        assert body["instance_id"] == child
+        assert body["answer_target"]["instance_id"] == child
+        assert body["answer_target"]["work_instance_id"] == root
+        assert body["answer_target"]["route"] == "subtree_answer_handle"
+
+        # The child's pending pack was answered …
+        assert harness.qm.get_question_pack(child).status == "answered"
+        # … and the root's stale pack was NOT re-answered (its stored
+        # answers are the original ones).
+        root_pack = harness.qm.get_question_pack(root)
+        assert root_pack.status == "answered"
+        assert root_pack.answers == {"q1": "stale answer"}
+
+        # The CHILD was resumed (its pause cleared) — the resume seams
+        # were driven for the child, not for the root.
+        assert harness.manager.resume_processing_job.await_args.args[0] == child
+        harness.manager.resume_instance_cascade.assert_awaited_once_with(child)

@@ -1120,7 +1120,7 @@ async def resend_deferred_foreground(
     dependencies=[scope_required("jobs:write")],
     responses={
         200: {"description": "Answer stored and delivered"},
-        400: {"description": "question_pack_id mismatch (QUESTION_PACK_MISMATCH)"},
+        400: {"description": "question_pack_id mismatch (QUESTION_PACK_MISMATCH) or ambiguous answer target (INVALID_REQUEST)"},
         404: {"description": "Unknown work_id (JOB_NOT_FOUND) or no pending question"},
         410: {"description": "Asker terminal (ANSWER_TARGET_TERMINAL) or pack lost (QUESTION_PACK_LOST)"},
         503: {"description": "Writes paused (migration)"},

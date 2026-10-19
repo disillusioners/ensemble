@@ -655,9 +655,11 @@ Args:
     answers: Dict of user-supplied answers keyed by question id
         (preferred) or question text.
     question_pack_id: The pack id echoed by the caller for the T1″
-        stale-answers correlation guard. When present and ≠ the
-        current pending pack's id the call is refused with a 400
-        ``QUESTION_PACK_MISMATCH`` error string.
+        stale-answers correlation guard — REQUIRED by this tool (it is
+        also the disambiguator when several instances of the mission
+        hold a pending question). When ≠ the current pending pack's id
+        the call is refused with a 400 ``QUESTION_PACK_MISMATCH``
+        error string.
 
 Access control: the caller's ``project_id`` must match the job's
 ``project_id`` (when both are set); system-default (unscoped-or-root)
@@ -684,11 +686,18 @@ Returns:
       * ``400 QUESTION_PACK_MISMATCH: ...`` — stale answers for a
         superseded pack (T1″ hijack guard); the agent should re-fetch
         the pending pack id and retry.
-      * ``400 INVALID_REQUEST: ...`` — AMBIGUOUS target: several
-        instances of the mission hold a pending question and no
-        ``question_pack_id`` was supplied to pick one. The message
-        names the candidate instances — re-issue the call with the
-        pack id of the question being answered.
+      * ``400 INVALID_REQUEST: ...`` — AMBIGUOUS target: the asker
+        could not be resolved to exactly ONE instance of the mission,
+        so the resolver refused to guess. The message names the
+        candidate instances. Reachable here as (a) the supplied
+        ``question_pack_id`` matching MORE THAN ONE instance (a data
+        anomaly — a pack id is unique) or (b) the supplied pack id
+        matching nobody while SEVERAL instances of the mission hold an
+        awaiting-answer handle. NOTE: ``question_pack_id`` is REQUIRED
+        by this tool, so the HTTP route's variant ("several instances
+        hold a pending question and NO pack id was supplied") is NOT
+        reachable here — the pack id is the disambiguator and is always
+        supplied; on the HTTP route it stays optional.
       * ``404 JOB_NOT_FOUND: ...`` — ``work_id`` does not resolve to
         any task or job; the work is unknown to the daemon.
       * ``404 INSTANCE_NOT_FOUND: ...`` — the resolved ``instance_id``
