@@ -5,6 +5,14 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.3] — 2026-10-19
+
+- Fix interrupted turns never re-dispatched after a daemon restart — boot sweep re-dispatches RUNNING instances whose latest task is neither COMPLETED nor CANCELLED, guarded by a `boot_epoch` generation barrier, an in-loop TOCTOU re-check, and a soft-deleted-JobItem selector exclusion
+
+## [0.25.2] — 2026-10-19
+
+- Fix question packs lost across daemon restart — rehydrate pass moved from `initialize()` to an explicit post-`setup_worker_pool()` lifespan step with a loud boot signal
+
 ## [0.25.1] — 2026-10-19
 
 - Pin worker/coder agents to a single 'coding' model — drop client-side weighted balancing (proxy now load-balances)
