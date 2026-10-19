@@ -43,6 +43,22 @@ function makeLive(overrides: Partial<LivePayload> = {}): LivePayload {
   };
 }
 
+/**
+ * §2.8 degraded 200 shape — what the router emits on monitor
+ * absent / disabled / first-tick / non-cgroup-v2 (D11).
+ * `daemon` scalars and `cgroup` itself are `null`; `self_cost`
+ * has `cpu_pct`/`threads` null but counts remain literal 0.
+ * The FE must render with '—' placeholders, NOT throw during
+ * change detection, NOT flip the single error branch.
+ */
+function makeDegradedLive(): LivePayload {
+  return makeLive({
+    daemon: { pid: null, cpu_pct: null, rss_mb: null, threads: null, fds: null, uptime_s: null },
+    cgroup: null,
+    self_cost: makeSelfCost({ cpu_pct: null, threads: null }),
+  });
+}
+
 // ── Harness ─────────────────────────────────────────────────────────
 
 describe('LiveTabComponent', () => {
@@ -312,5 +328,128 @@ describe('LiveTabComponent', () => {
     expect(query('[data-test="live-error"]')).not.toBeNull();
     expect(query('[data-test="live-skeleton"]')).toBeNull();
     expect(query('[data-test="live-content"]')).toBeNull();
+  });
+
+  // ── Degraded-wire resilience (merge-blocking defect fix) ──────────
+  //
+  // The §2.8 /live endpoint is a 200 with a valid-but-degraded body
+  // on three legitimate paths: monitor disabled, first-tick empty
+  // ring, non-cgroup-v2 host (D11). The FE must render placeholders,
+  // NOT throw during change detection, NOT flip the single error
+  // branch, and NOT show the skeleton. Before the fix, the unguarded
+  // `payload.cgroup.*` derefs + `fmt()` without null-safety threw a
+  // TypeError and blanked the page.
+
+  it('renders cards with placeholders when the wire is fully degraded (cgroup null + daemon scalars null)', () => {
+    jest.useFakeTimers();
+    resourcesMock.getLive.mockReturnValue(of(makeDegradedLive()));
+    resourcesMock.getSelfCost.mockReturnValue(of(makeSelfCost({ cpu_pct: null, threads: null })));
+    // The component must complete construction + first render
+    // without throwing — the bug class is a TypeError during
+    // change detection on `payload.cgroup.memory.current_mb`.
+    expect(() => fixture.detectChanges()).not.toThrow();
+
+    // No skeleton, no error — degraded 200 is NOT an error.
+    expect(query('[data-test="live-skeleton"]')).toBeNull();
+    expect(query('[data-test="live-error"]')).toBeNull();
+    expect(query('[data-test="live-content"]')).not.toBeNull();
+
+    // All four cards are still present (the user sees the page).
+    expect(query('[data-test="stat-daemon"]')).not.toBeNull();
+    expect(query('[data-test="stat-cgroup-memory"]')).not.toBeNull();
+    expect(query('[data-test="stat-attribution"]')).not.toBeNull();
+    expect(query('[data-test="stat-overruns"]')).not.toBeNull();
+  });
+
+  it('renders "—" in every null-bearing stat value place (daemon card)', () => {
+    jest.useFakeTimers();
+    resourcesMock.getLive.mockReturnValue(of(makeDegradedLive()));
+    resourcesMock.getSelfCost.mockReturnValue(of(makeSelfCost({ cpu_pct: null, threads: null })));
+    fixture.detectChanges();
+
+    const daemonCard = query('[data-test="stat-daemon"]');
+    expect(daemonCard).not.toBeNull();
+    const daemonText = daemonCard.nativeElement.textContent as string;
+    // Each null daemon scalar renders as '—'.
+    expect(daemonText).toContain('—');
+    // Specifically the typed test hooks used by the existing test suite.
+    expect(query('[data-test="stat-daemon-cpu"]').nativeElement.textContent).toContain('—');
+    expect(query('[data-test="stat-daemon-rss"]').nativeElement.textContent).toContain('—');
+  });
+
+  it('renders "—" in the cgroup card when the whole cgroup block is null', () => {
+    jest.useFakeTimers();
+    resourcesMock.getLive.mockReturnValue(of(makeDegradedLive()));
+    resourcesMock.getSelfCost.mockReturnValue(of(makeSelfCost()));
+    fixture.detectChanges();
+
+    const cgroupCard = query('[data-test="stat-cgroup-memory"]');
+    expect(cgroupCard).not.toBeNull();
+    const cgroupText = cgroupCard.nativeElement.textContent as string;
+    // Eight unguarded derefs (5 memory + 2 usec/1e6 + nr_throttled)
+    // survive the null cgroup block — every value becomes '—'.
+    // Card title stays visible so the user sees the slot exists.
+    expect(cgroupText).toContain('Cgroup memory');
+    expect((cgroupText.match(/—/g) ?? []).length).toBeGreaterThanOrEqual(8);
+  });
+
+  it('renders "—" for self-cost chip cpu_pct + threads when the wire omits them', () => {
+    jest.useFakeTimers();
+    resourcesMock.getLive.mockReturnValue(of(makeLive()));
+    resourcesMock.getSelfCost.mockReturnValue(of(makeSelfCost({ cpu_pct: null, threads: null })));
+    fixture.detectChanges();
+
+    const chip = query('[data-test="self-cost-chip"]');
+    expect(chip).not.toBeNull();
+    const chipText = chip.nativeElement.textContent as string;
+    // cpu_pct + threads both nullable; counts (samples/ticks_skipped)
+    // remain literal numbers.
+    expect(chipText).toContain('—');
+    // The samples count is not nullable on the wire (literal 0) —
+    // it must still render as a literal number, NOT '—'.
+    expect(chipText).toContain('320');
+  });
+
+  it('survives a mid-tick degraded shape (first ring row only — daemon pid/threads null, cpu_pct/rss null)', () => {
+    // §2.8 mid-tick degraded shape (one row only — the delta anchor
+    // is missing for cpu_pct; pid/threads/fds/uptime are still null).
+    // This is the exact shape `_empty_live_shape()` produces when
+    // the monitor exists but the ring has not produced a row pair.
+    const midTick = makeLive({
+      daemon: { pid: null, cpu_pct: null, rss_mb: null, threads: null, fds: null, uptime_s: null },
+      cgroup: null,
+    });
+    jest.useFakeTimers();
+    resourcesMock.getLive.mockReturnValue(of(midTick));
+    resourcesMock.getSelfCost.mockReturnValue(of(makeSelfCost()));
+    expect(() => fixture.detectChanges()).not.toThrow();
+    expect(query('[data-test="live-error"]')).toBeNull();
+    expect(query('[data-test="live-skeleton"]')).toBeNull();
+    expect(query('[data-test="live-content"]')).not.toBeNull();
+  });
+
+  it('background-tick to a degraded wire replaces the snapshot with placeholders (no error banner, no skeleton)', () => {
+    jest.useFakeTimers();
+    startHappyPath();
+    // Sanity: the initial populated snapshot is what the user sees.
+    expect(query('[data-test="stat-daemon-rss"]').nativeElement.textContent).toContain('1720');
+
+    // Background tick returns the degraded shape. A degraded 200 is
+    // a SUCCESSFUL tick — the new shape replaces the last snapshot
+    // (placeholders where the wire is null), and the single error
+    // branch stays DOWN. This contrasts with the transport-failure
+    // path (a real throwError), which retains the last-known data
+    // AND flips the banner.
+    resourcesMock.getLive.mockReturnValueOnce(of(makeDegradedLive()));
+    resourcesMock.getSelfCost.mockReturnValueOnce(of(makeSelfCost()));
+    jest.advanceTimersByTime(8000);
+    fixture.detectChanges();
+
+    expect(query('[data-test="live-error"]')).toBeNull();
+    expect(query('[data-test="live-skeleton"]')).toBeNull();
+    expect(query('[data-test="live-content"]')).not.toBeNull();
+    // The freshest tick's wire shape is what the user sees — a
+    // degraded 200 supersedes the last-good populated snapshot.
+    expect(query('[data-test="stat-daemon-rss"]').nativeElement.textContent).toContain('—');
   });
 });

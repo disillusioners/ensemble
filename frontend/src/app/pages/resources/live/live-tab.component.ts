@@ -131,6 +131,30 @@ export class LiveTabComponent implements OnInit, OnDestroy {
 
   // ── Display helpers ─────────────────────────────────────────────
 
+  /** Computed '—' or numeric MB label for the cgroup memory card.
+   *
+   * The template writes ``{{ fmt(cgroup?.memory?.xxx_mb, 0) }}``
+   * directly — works for plain scalars because ``?.`` returns
+   * ``undefined`` for missing paths and ``fmt`` returns '—' for
+   * any non-finite value.
+   */
+  /** Computed '—' or number label for `cgroup.cpu.usage_usec`. The
+   * per-tick division has to happen INSIDE the helper: a literal
+   * ``payload.cgroup?.cpu?.usage_usec / 1_000_000`` in the template
+   * coerces ``null / number`` to ``0`` (JS spec) before ``fmt``
+   * sees it, surfacing as '0s' instead of '—'. The TS-side null
+   * check short-circuits the division. */
+  readonly cgroupUsageSec = computed(() => {
+    const usec = this.live()?.cgroup?.cpu?.usage_usec;
+    return usec === null || usec === undefined ? '—' : this.fmt(usec / 1_000_000, 0);
+  });
+
+  /** Companion helper for `cgroup.cpu.throttled_usec`. */
+  readonly cgroupThrottledSec = computed(() => {
+    const usec = this.live()?.cgroup?.cpu?.throttled_usec;
+    return usec === null || usec === undefined ? '—' : this.fmt(usec / 1_000_000, 2);
+  });
+
   readonly selfCostBuffersMb = computed(() => {
     const selfCost = this.selfCost();
     return selfCost === null ? '' : (selfCost.buffers_bytes / 1_048_576).toFixed(1);
@@ -144,7 +168,10 @@ export class LiveTabComponent implements OnInit, OnDestroy {
       : date.toISOString().replace('T', ' ').slice(0, 19);
   }
 
-  uptimeLabel(uptimeS: number): string {
+  uptimeLabel(uptimeS: number | null | undefined): string {
+    if (uptimeS === null || uptimeS === undefined || !Number.isFinite(uptimeS)) {
+      return '—';
+    }
     const total = Math.max(0, Math.floor(uptimeS));
     const days = Math.floor(total / 86_400);
     const hours = Math.floor((total % 86_400) / 3_600);
@@ -154,7 +181,21 @@ export class LiveTabComponent implements OnInit, OnDestroy {
     return days > 0 ? `${days}d ${clock}` : clock;
   }
 
-  fmt(value: number, digits = 1): string {
+  /**
+   * Numeric display formatter with a degraded-wire guard.
+   *
+   * The §2.8 /live endpoint is a 200 with a valid-but-degraded body
+   * on monitor-absent / first-tick / non-cgroup-v2 paths (D11). Scalars
+   * arrive as literal ``None`` — the previous `value.toFixed(digits)`
+   * would throw a TypeError during change detection and blank the
+   * page. This helper survives ``null`` / ``undefined`` / ``NaN`` /
+   * ``±Infinity`` by returning '—' (the §2.8 placeholder glyph),
+   * keeping the single error branch reserved for genuine unreachability.
+   */
+  fmt(value: number | null | undefined, digits = 1): string {
+    if (value === null || value === undefined || !Number.isFinite(value)) {
+      return '—';
+    }
     return value.toFixed(digits);
   }
 }

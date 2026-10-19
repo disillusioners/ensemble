@@ -440,12 +440,22 @@ export class SvgTimelineComponent {
 
     return TIMELINE_SERIES_DEFS.filter((def) => enabled.includes(def.key)).map(
       (def) => {
+        // Type-predicate narrow (`Number.isFinite` does NOT narrow
+        // for TS): post-filter, both `ms` and `value` are guaranteed
+        // finite — the `as never` line was previously load-bearing
+        // for `Math.min(...values.map(entry => entry.value))`; the
+        // `number | null` widening in resources.models.ts (degraded
+        // first-bucket `daemon_cpu` / nullable DB columns for
+        // `daemon_rss_mb` / `cgroup_mem_mb`) needs this assertion.
         const values = points
           .map((point) => ({
             ms: parseNaiveUtc(point.t).getTime(),
             value: point[def.key],
           }))
-          .filter((entry) => Number.isFinite(entry.ms) && Number.isFinite(entry.value));
+          .filter(
+            (entry): entry is { ms: number; value: number } =>
+              Number.isFinite(entry.ms) && Number.isFinite(entry.value),
+          );
 
         if (!domain || values.length === 0) {
           return {

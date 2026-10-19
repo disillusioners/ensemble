@@ -250,3 +250,92 @@ test('[AC8] deep-link /resources renders without a daemon', async ({ page }) => 
   // swallowed nothing unexpected beyond known boot calls.
   expect(unstubbedCalls.some((u) => u.includes('/api/resources/'))).toBe(false);
 });
+
+// ── Degraded-wire resilience (merge-blocking defect fix) ──────────────
+//
+// Three legitimate paths reach this body (D11): monitor disabled,
+// first-tick empty ring, non-cgroup-v2 host. The §2.8 router returns
+// HTTP 200 with a valid-but-degraded shape — NOT 503. The FE must
+// render placeholder cards (`<div data-test="stat-daemon-cpu">` must
+// show "—" not `null`) without throwing during change detection.
+// The beforeEach instruments `pageerror` + console-error — a TypeError
+// or `Cannot read properties of null` would surface as one or both.
+test('[AC8] /resources survives a degraded 200 body (cgroup null + daemon scalars null) with no pageerror', async ({
+  page,
+}) => {
+  const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
+  page.on('console', (msg) => {
+    if (msg.type() === 'error') consoleErrors.push(msg.text());
+  });
+  page.on('pageerror', (err) => pageErrors.push(err.message));
+
+  // Override ONLY the /live stub with a fully-degraded body. The
+  // /self-cost stub returns the empty shape's nullable cpu_pct /
+  // threads. Every other endpoint keeps the rich fixture — proves
+  // the card layout still mounts the rest of the page.
+  const degraded = {
+    ts: '2026-10-18T17:00:00',
+    sample_level: 'full',
+    daemon: { pid: null, cpu_pct: null, rss_mb: null, threads: null, fds: null, uptime_s: null },
+    cgroup: null,
+    children: [],
+    instances: [],
+    attribution: { attributed_mb: 240, unattributed_mb: 60, coverage_pct: 80 },
+    overruns: { count: 0, last_ts: null },
+    self_cost: {
+      cpu_pct: null,
+      cumulative_cpu_s: 12.5,
+      buffers_bytes: 2_097_152,
+      rss_budget_mb: 50,
+      threads: null,
+      samples: 320,
+      ticks_skipped: 2,
+      flush: { batches: 5, bytes: 4096, errors: 0 },
+      profiling: { active: false, capabilities: [] },
+    },
+  };
+  await page.route('**/api/resources/live', (route) => jsonRoute(route, degraded));
+  await page.route('**/api/resources/self-cost', (route) => jsonRoute(route, degraded.self_cost));
+
+  await page.goto('/resources');
+
+  // Page renders. Live content card mounts.
+  await expect(page.locator('[data-test="live-content"]')).toBeVisible();
+
+  // Degraded 200 is NOT a transport failure — the error branch
+  // must stay down and the skeleton must not flash (D7).
+  await expect(page.locator('[data-test="live-error"]')).toHaveCount(0);
+  await expect(page.locator('[data-test="live-skeleton"]')).toHaveCount(0);
+
+  // The bug's load-bearing symptom: `payload.cgroup.memory.current_mb`
+  // threw during CD before the fix. The cgroup card now renders with
+  // its title visible and every numeric row shows the '—' placeholder
+  // glyph (the §2.8 placeholder for nullable scalars).
+  const cgroupCard = page.locator('[data-test="stat-cgroup-memory"]');
+  await expect(cgroupCard).toBeVisible();
+  await expect(cgroupCard).toContainText('Cgroup memory');
+  // 8 unguarded deref sites: 5 memory + 2 usec/1e6 (mapped to '0.0' →
+  // now '—') + nr_throttled. All must resolve to '—' when cgroup is null.
+  const cgroupText = (await cgroupCard.textContent()) ?? '';
+  expect((cgroupText.match(/—/g) ?? []).length).toBeGreaterThanOrEqual(8);
+
+  // The daemon card's two typed test hooks prove numeric placeholders.
+  await expect(page.locator('[data-test="stat-daemon-cpu"]')).toContainText('—');
+  await expect(page.locator('[data-test="stat-daemon-rss"]')).toContainText('—');
+
+  // Failure-mode evidence: ZERO page errors during the visit. A
+  // pre-fix run shows a TypeError ("Cannot read properties of null
+  // (reading 'memory')") in `pageErrors`. The fix's contract:
+  // a degraded 200 renders cards with placeholders, NOT the error
+  // branch, NOT a page-level exception.
+  expect(pageErrors).toEqual([]);
+  // Filter the kernel-noise sources the existing spec already
+  // tolerates (Angular dev-mode / sourcemaps do not log errors
+  // here in a healthy build). A canonical `null` rendering bug
+  // would print via `console.error` from Angular's core.
+  const blockingConsoleErrors = consoleErrors.filter(
+    (m) => !m.includes('favicon') && !m.includes('DevTools'),
+  );
+  expect(blockingConsoleErrors).toEqual([]);
+});

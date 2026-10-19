@@ -29,27 +29,36 @@ export type AnomalySeverity = 'low' | 'medium' | 'high';
 
 // ── GET /api/resources/live ─────────────────────────────────────────
 
+/**
+ * Daemon scalars are nullable on the wire — the §2.8 router emits
+ * literal ``None`` for every scalar in the degraded shape (D11:
+ * monitor absent / disabled / first-tick empty ring) and may also
+ * emit ``None`` for ``rss_mb`` / ``threads`` / ``fds`` / ``pid``
+ * mid-tick. The FE renders them as '—' placeholders; the single
+ * error branch covers transport-level reachability, NOT degraded
+ * body shape (which is a legitimate 200).
+ */
 export interface LiveDaemon {
-  pid: number;
-  cpu_pct: number;
-  rss_mb: number;
-  threads: number;
-  fds: number;
-  uptime_s: number;
+  pid: number | null;
+  cpu_pct: number | null;
+  rss_mb: number | null;
+  threads: number | null;
+  fds: number | null;
+  uptime_s: number | null;
 }
 
 export interface LiveCgroupMemory {
   current_mb: number;
-  peak_mb: number;
-  anon_mb: number;
-  file_mb: number;
-  slab_mb: number;
+  peak_mb: number | null;
+  anon_mb: number | null;
+  file_mb: number | null;
+  slab_mb: number | null;
 }
 
 export interface LiveCgroupCpu {
-  usage_usec: number;
-  throttled_usec: number;
-  nr_throttled: number;
+  usage_usec: number | null;
+  throttled_usec: number | null;
+  nr_throttled: number | null;
 }
 
 export interface LiveCgroup {
@@ -98,13 +107,21 @@ export interface SelfCostProfiling {
   capabilities: string[];
 }
 
-/** `GET /api/resources/self-cost` payload (also embedded in `live.self_cost`). */
+/** `GET /api/resources/self-cost` payload (also embedded in `live.self_cost`).
+ *
+ * ``cpu_pct`` and ``threads`` are nullable on the wire — the §2.8
+ * ``_self_cost_from_monitor`` helper returns ``None`` for both before
+ * a ring row pair exists or when the ring is empty. Counts
+ * (``samples``, ``ticks_skipped``, ``cumulative_cpu_s``,
+ * ``buffers_bytes``) are NON-null even on the empty shape (literal
+ * 0) and stay ``number``.
+ */
 export interface SelfCostPayload {
-  cpu_pct: number;
+  cpu_pct: number | null;
   cumulative_cpu_s: number;
   buffers_bytes: number;
   rss_budget_mb: number;
-  threads: number;
+  threads: number | null;
   samples: number;
   ticks_skipped: number;
   flush: SelfCostFlush;
@@ -115,7 +132,14 @@ export interface LivePayload {
   ts: string;
   sample_level: SampleLevel;
   daemon: LiveDaemon;
-  cgroup: LiveCgroup;
+  /**
+   * ``null`` on a host where cgroup-v2 stats are not exposed
+   * (e.g. _empty_live_shape), when the sampler's first tick hasn't
+   * observed a cgroup row yet, or when the monitor is disabled.
+   * The card body uses `?.` chains + null-safe ``fmt`` to render
+   * '—' placeholders in place of any field.
+   */
+  cgroup: LiveCgroup | null;
   children: LiveChild[];
   instances: LiveInstance[];
   attribution: LiveAttribution;
@@ -125,11 +149,21 @@ export interface LivePayload {
 
 // ── GET /api/resources/history ──────────────────────────────────────
 
+/**
+ * History point — the §2.8 history series.
+ *
+ * ``daemon_cpu`` is ``null`` on the very first bucket (the rate needs
+ * a delta anchor; the router emits ``None`` while ``prev_cpu is
+ * None``). ``daemon_rss_mb`` and ``cgroup_mem_mb`` are ``null`` when
+ * the underlying DB column is NULL for that bucket. The timeline
+ * already drops non-finite values on its way to the SVG path, so
+ * widening here is type-truth without a behavior change.
+ */
 export interface HistoryPoint {
   t: string;
-  daemon_cpu: number;
-  daemon_rss_mb: number;
-  cgroup_mem_mb: number;
+  daemon_cpu: number | null;
+  daemon_rss_mb: number | null;
+  cgroup_mem_mb: number | null;
   threads: number;
   instances_active: number;
 }
