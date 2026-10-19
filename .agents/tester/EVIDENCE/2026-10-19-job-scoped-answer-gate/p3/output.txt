@@ -1,0 +1,51 @@
+bringing up nodes...
+bringing up nodes...
+
+........................................................................ [ 32%]
+........................................................................ [ 65%]
+......F................................................................. [ 98%]
+....                                                                     [100%]
+=================================== FAILURES ===================================
+______ TestJobAnswerRegistration.test_create_job_tools_returns_job_answer ______
+[gw3] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_job_answer_tool.py:676: in test_create_job_tools_returns_job_answer
+    assert last.name == "job_answer", (
+E   AssertionError: Last tool in create_job_tools() should be 'job_answer', got 'job_resume'
+E   assert 'job_resume' == 'job_answer'
+E     
+E     - job_answer
+E     + job_resume
+=============================== warnings summary ===============================
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/job_queue/test_answer_resume_real_chain.py: 1 warning
+tests/job_queue/test_question_watch_fanout.py: 15 warnings
+tests/unit/test_answer_gate_resume_chain.py: 6 warnings
+  /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+tests/unit/test_question_graph.py::TestBuildInstanceGraphWithManager::test_build_instance_graph_with_manager_does_not_raise_name_error
+tests/unit/test_question_graph.py::TestBuildInstanceGraphWithManager::test_build_instance_graph_with_manager_does_not_raise_name_error
+  /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/runnables/utils.py:756: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    return asyncio.iscoroutinefunction(func) or (
+
+tests/unit/test_question_graph.py::TestBuildInstanceGraphWithManager::test_build_instance_graph_with_manager_does_not_raise_name_error
+tests/unit/test_question_graph.py::TestBuildInstanceGraphWithManager::test_build_instance_graph_with_manager_does_not_raise_name_error
+  /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/runnables/utils.py:758: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    and asyncio.iscoroutinefunction(func.__call__)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/job_queue/test_job_answer_tool.py::TestJobAnswerRegistration::test_create_job_tools_returns_job_answer
+1 failed, 219 passed, 35 warnings in 17.37s
+PYTEST_EXIT=1

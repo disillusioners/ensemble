@@ -1,0 +1,259 @@
+FFFFFFFFFFFF.F.FFFFFFFFFFFF.FFFFFFFFFFFFF                                [100%]
+=================================== FAILURES ===================================
+_ TestJobAnswerLandsOnChildAsker.test_tool_answer_reaches_child_asker_not_mission_root _
+tests/job_queue/test_job_answer_target_resolution.py:278: in test_tool_answer_reaches_child_asker_not_mission_root
+    assert "error" not in result, result.get("error")
+E   AssertionError: 410 QUESTION_PACK_LOST: No question pack for instance inst-37c... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow). (work_id=ac2482ca-7727-4fb9-a0dd-da6c160253f3, instance_id=inst-37c7184b-262a-42dd-8aec-c89624fc3d66) — no pending question pack for this job; use job_continue for completed instances
+E   assert 'error' not in {'error': '410 QUESTION_PACK_LOST: No question pack for instance inst-37c... in memory or in instance_metadata — the p...c7184b-262a-42dd-8aec-c89624fc3d66) — no pending question pack for this job; use job_continue for completed instances'}
+_ TestJobAnswerLandsOnChildAsker.test_tool_answer_never_reports_question_pack_lost _
+tests/job_queue/test_job_answer_target_resolution.py:319: in test_tool_answer_never_reports_question_pack_lost
+    assert ErrorCodes.QUESTION_PACK_LOST.value not in str(result)
+E   assert 'QUESTION_PACK_LOST' not in "{'error': '... instances'}"
+E     
+E     'QUESTION_PACK_LOST' is contained here:
+E       {'error': '410 QUESTION_PACK_LOST: No question pack for instance inst-a7f... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow). (work_id=c7f94533-625d-40e9-a57d-96da7bc04513, instance_id=inst-a7f72679-eb58-4ca7-b39e-124942221f66) — no pending question pack for this job; use job_continue for completed instances'}
+E     ?                ++++++++++++++++++
+__ TestJobAnswerLandsOnChildAsker.test_tool_answer_resumes_child_from_paused ___
+tests/job_queue/test_job_answer_target_resolution.py:355: in test_tool_answer_resumes_child_from_paused
+    assert result["status"] == "answered"
+           ^^^^^^^^^^^^^^^^
+E   KeyError: 'status'
+_____ TestJobRouteLandsOnChildAsker.test_route_answer_reaches_child_asker ______
+tests/job_queue/test_job_answer_target_resolution.py:381: in test_route_answer_reaches_child_asker
+    assert resp.status_code == 200, resp.text
+E   AssertionError: {"detail":{"code":"QUESTION_PACK_LOST","message":"No question pack for instance inst-920... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow).","details":{"instance_id":"inst-9201dd43-a68d-496b-ba92-2a17941d0e17"}}}
+E   assert 410 == 200
+E    +  where 410 = <Response [410 Gone]>.status_code
+_ TestJobRouteLandsOnChildAsker.test_route_without_pack_id_resolves_via_answer_handle _
+tests/job_queue/test_job_answer_target_resolution.py:408: in test_route_without_pack_id_resolves_via_answer_handle
+    assert resp.status_code == 200, resp.text
+E   AssertionError: {"detail":{"code":"QUESTION_PACK_LOST","message":"No question pack for instance inst-b5f... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow).","details":{"instance_id":"inst-b5f190fa-8a20-47e9-b90d-e2008aee6ca4"}}}
+E   assert 410 == 200
+E    +  where 410 = <Response [410 Gone]>.status_code
+__ TestPackIdDisambiguatesMultipleAskers.test_pack_id_selects_the_right_child __
+tests/job_queue/test_job_answer_target_resolution.py:440: in test_pack_id_selects_the_right_child
+    assert "error" not in result, result.get("error")
+E   AssertionError: 410 QUESTION_PACK_LOST: No question pack for instance inst-24e... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow). (work_id=f8b54bb9-cd64-420a-8aac-93ecce4f779a, instance_id=inst-24ed633f-dff4-45ca-86aa-57c552cb3efb) — no pending question pack for this job; use job_continue for completed instances
+E   assert 'error' not in {'error': '410 QUESTION_PACK_LOST: No question pack for instance inst-24e... in memory or in instance_metadata — the p...ed633f-dff4-45ca-86aa-57c552cb3efb) — no pending question pack for this job; use job_continue for completed instances'}
+_ TestPackIdDisambiguatesMultipleAskers.test_ambiguous_without_pack_id_is_refused _
+tests/job_queue/test_job_answer_target_resolution.py:461: in test_ambiguous_without_pack_id_is_refused
+    from daemon.services.answer_resolver import resolve_answer_target
+E   ModuleNotFoundError: No module named 'daemon.services.answer_resolver'
+_ TestPackIdDisambiguatesMultipleAskers.test_route_ambiguity_is_400_with_candidates _
+tests/job_queue/test_job_answer_target_resolution.py:500: in test_route_ambiguity_is_400_with_candidates
+    assert resp.status_code == 400, resp.text
+E   AssertionError: {"detail":{"code":"QUESTION_PACK_LOST","message":"No question pack for instance inst-630... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow).","details":{"instance_id":"inst-6307fedf-ad73-4571-8783-378f53ffc5c8"}}}
+E   assert 410 == 400
+E    +  where 410 = <Response [410 Gone]>.status_code
+_ TestGenuinelyMissingPackIsAccurate410.test_missing_pack_is_410_without_restart_claim _
+tests/job_queue/test_job_answer_target_resolution.py:548: in test_missing_pack_is_410_without_restart_claim
+    assert "daemon restart" not in result["error"]
+E   AssertionError: assert 'daemon restart' not in '410 QUESTIO...ed instances'
+E     
+E     'daemon restart' is contained here:
+E       was lost (daemon restart without a durable shadow). (work_id=e551b8c0-f6ed-427a-9aac-10620b5276c4, instance_id=inst-49d67543-e6ec-434e-8d79-507eb239c416) — no pending question pack for this job; use job_continue for completed instances
+E     ?           ++++++++++++++
+_ TestGenuinelyMissingPackIsAccurate410.test_missing_pack_details_carry_resolution_fields _
+tests/job_queue/test_job_answer_target_resolution.py:565: in test_missing_pack_details_carry_resolution_fields
+    from daemon.services.answer_resolver import resolve_answer_target
+E   ModuleNotFoundError: No module named 'daemon.services.answer_resolver'
+_____ TestGenuinelyMissingPackIsAccurate410.test_route_missing_pack_is_410 _____
+tests/job_queue/test_job_answer_target_resolution.py:612: in test_route_missing_pack_is_410
+    assert "daemon restart" not in detail["message"]
+E   AssertionError: assert 'daemon restart' not in 'No question...ble shadow).'
+E     
+E     'daemon restart' is contained here:
+E       was lost (daemon restart without a durable shadow).
+E     ?           ++++++++++++++
+__ TestNoAskerInSubtreeIs404.test_route_reports_404_when_nobody_holds_a_pack ___
+tests/job_queue/test_job_answer_target_resolution.py:639: in test_route_reports_404_when_nobody_holds_a_pack
+    assert resp.status_code == 404, resp.text
+E   AssertionError: {"detail":{"code":"QUESTION_PACK_LOST","message":"No question pack for instance inst-c5c... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow).","details":{"instance_id":"inst-c5ce7cbc-998d-4fec-9f83-12686e3d7443"}}}
+E   assert 410 == 404
+E    +  where 410 = <Response [410 Gone]>.status_code
+_ TestInstanceScopedRouteUnchanged.test_instance_scoped_missing_pack_still_410 _
+tests/job_queue/test_job_answer_target_resolution.py:688: in test_instance_scoped_missing_pack_still_410
+    assert "daemon restart" not in detail["message"]
+E   AssertionError: assert 'daemon restart' not in 'No question...ble shadow).'
+E     
+E     'daemon restart' is contained here:
+E       was lost (daemon restart without a durable shadow).
+E     ?           ++++++++++++++
+_ TestStaleAnsweredRootPackDoesNotShortCircuit.test_route_without_pack_id_answers_the_child_not_the_stale_root _
+tests/job_queue/test_job_answer_target_resolution.py:739: in test_route_without_pack_id_answers_the_child_not_the_stale_root
+    assert body["status"] == "answered"
+E   AssertionError: assert 'already_delivered' == 'answered'
+E     
+E     - answered
+E     + already_delivered
+_ TestPrePauseWindowChildIsACandidate.test_route_with_pack_id_reaches_the_pre_pause_child _
+tests/job_queue/test_job_answer_target_resolution.py:792: in test_route_with_pack_id_reaches_the_pre_pause_child
+    assert resp.status_code == 200, resp.text
+E   AssertionError: {"detail":{"code":"QUESTION_PACK_LOST","message":"No question pack for instance inst-872... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow).","details":{"instance_id":"inst-872d91c0-ba93-48be-a17a-af58fe14867b"}}}
+E   assert 410 == 200
+E    +  where 410 = <Response [410 Gone]>.status_code
+_ TestPrePauseWindowChildIsACandidate.test_route_without_pack_id_reaches_the_pre_pause_child _
+tests/job_queue/test_job_answer_target_resolution.py:812: in test_route_without_pack_id_reaches_the_pre_pause_child
+    assert resp.status_code == 200, resp.text
+E   AssertionError: {"detail":{"code":"QUESTION_PACK_LOST","message":"No question pack for instance inst-935... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow).","details":{"instance_id":"inst-93551dd5-51a1-4faa-8452-0f4b653fd218"}}}
+E   assert 410 == 200
+E    +  where 410 = <Response [410 Gone]>.status_code
+_ TestAmbiguousCandidatesAreRefused.test_route_refuses_root_plus_child_without_pack_id _
+tests/job_queue/test_job_answer_target_resolution.py:849: in test_route_refuses_root_plus_child_without_pack_id
+    assert resp.status_code == 400, resp.text
+E   AssertionError: {"work_id":"b5e52f6f-d9a8-4b7a-b394-ea24fb1684b1","status":"answered","instance_id":"inst-12e11e87-9bc5-497c-adcc-36eb449fcd6e","question_pack":{"instance_id":"inst-12e11e87-9bc5-497c-adcc-36eb449fcd6e","pack_id":"b3ef75f9-56c6-4bd2-9991-8ccafe3a5d8e","status":"answered","created_at":"2026-10-19T23:40:55.261007+00:00","questions":[{"id":"qr","text":"Root question?","options":[],"allow_custom":true,"required":true,"answer":null,"option_descriptions":{}}],"answers":{"q1":"Approach A"}},"resume_route":"answer_gate_existing_turn","resume_info":{"resumed":true,"resumed_ids":["x"],"skipped_ids":[],"target_id":"x","resume_results":{"inst-12e11e87-9bc5-497c-adcc-36eb449fcd6e":{"status":"resumed","instance_id":"x"}}}}
+E   assert 200 == 400
+E    +  where 200 = <Response [200 OK]>.status_code
+___ TestAmbiguousCandidatesAreRefused.test_resolver_reports_both_candidates ____
+tests/job_queue/test_job_answer_target_resolution.py:864: in test_resolver_reports_both_candidates
+    from daemon.services.answer_resolver import resolve_answer_target
+E   ModuleNotFoundError: No module named 'daemon.services.answer_resolver'
+_ TestStalePendingShadowIsNotAuthoritative.test_route_ignores_stale_root_shadow_and_answers_the_child _
+tests/job_queue/test_job_answer_target_resolution.py:907: in test_route_ignores_stale_root_shadow_and_answers_the_child
+    assert body["instance_id"] == child
+E   AssertionError: assert 'inst-4f6134a...-88641967159f' == 'inst-5721c41...-c828bc4f0fe4'
+E     
+E     - inst-5721c41a-9fe5-4b88-8a39-c828bc4f0fe4
+E     + inst-4f6134ae-36fc-4790-adb5-88641967159f
+_ TestMissionRootIsReachableWhenTheWorkResolvesToAChild.test_route_answers_the_root_when_the_work_is_a_child _
+tests/job_queue/test_job_answer_target_resolution.py:951: in test_route_answers_the_root_when_the_work_is_a_child
+    assert resp.status_code == 200, resp.text
+E   AssertionError: {"detail":{"code":"QUESTION_PACK_LOST","message":"No question pack for instance inst-8b0... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow).","details":{"instance_id":"inst-8b050a19-cca7-4195-b82e-38398947ce13"}}}
+E   assert 410 == 200
+E    +  where 410 = <Response [410 Gone]>.status_code
+_ TestMissionRootIsReachableWhenTheWorkResolvesToAChild.test_route_answers_the_root_without_a_pack_id _
+tests/job_queue/test_job_answer_target_resolution.py:996: in test_route_answers_the_root_without_a_pack_id
+    assert resp.status_code == 200, resp.text
+E   AssertionError: {"detail":{"code":"QUESTION_PACK_LOST","message":"No question pack for instance inst-547... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow).","details":{"instance_id":"inst-547c1fab-772a-4e7d-8bc1-374704d9c672"}}}
+E   assert 410 == 200
+E    +  where 410 = <Response [410 Gone]>.status_code
+_ TestLargeSubtreeWithSuppliedPackId.test_asker_beyond_the_cap_is_reached_with_a_pack_id _
+tests/job_queue/test_job_answer_target_resolution.py:1019: in test_asker_beyond_the_cap_is_reached_with_a_pack_id
+    from daemon.services.answer_resolver import (
+E   ModuleNotFoundError: No module named 'daemon.services.answer_resolver'
+_ TestLargeSubtreeWithSuppliedPackId.test_cap_still_applies_without_a_pack_id __
+tests/job_queue/test_job_answer_target_resolution.py:1070: in test_cap_still_applies_without_a_pack_id
+    from daemon.services.answer_resolver import (
+E   ModuleNotFoundError: No module named 'daemon.services.answer_resolver'
+_ TestTerminalWorkInstanceKeepsItsSignal.test_route_reports_answer_target_terminal[completed] _
+tests/job_queue/test_job_answer_target_resolution.py:1129: in test_route_reports_answer_target_terminal
+    assert detail["details"]["work_instance_status"] == status
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'work_instance_status'
+_ TestTerminalWorkInstanceKeepsItsSignal.test_route_reports_answer_target_terminal[terminated] _
+tests/job_queue/test_job_answer_target_resolution.py:1129: in test_route_reports_answer_target_terminal
+    assert detail["details"]["work_instance_status"] == status
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'work_instance_status'
+_ TestAskerIsRootFastPath.test_fast_path_resolves_without_any_candidate_pass_read _
+tests/job_queue/test_job_answer_target_resolution.py:1183: in test_fast_path_resolves_without_any_candidate_pass_read
+    from daemon.services.answer_resolver import resolve_answer_target
+E   ModuleNotFoundError: No module named 'daemon.services.answer_resolver'
+__________ TestAskerIsRootFastPath.test_route_answers_the_root_asker ___________
+tests/job_queue/test_job_answer_target_resolution.py:1284: in test_route_answers_the_root_asker
+    assert body["answer_target"]["route"] == "direct_ram_pack"
+           ^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'answer_target'
+_ TestAskerIsRootFastPath.test_answered_pack_on_the_work_instance_resolves_via_fast_path _
+tests/job_queue/test_job_answer_target_resolution.py:1317: in test_answered_pack_on_the_work_instance_resolves_via_fast_path
+    orig_meta_bulk = harness.instance_repo.find_by_metadata_value
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'SQLModelInstanceRepository' object has no attribute 'find_by_metadata_value'. Did you mean: 'get_metadata_value'?
+____ TestToolLaneErrorStringSeams.test_tool_404_no_pending_question_string _____
+tests/job_queue/test_job_answer_target_resolution.py:1386: in test_tool_404_no_pending_question_string
+    assert ErrorCodes.NO_PENDING_QUESTION.value in result["error"]
+E   AssertionError: assert 'NO_PENDING_QUESTION' in '410 QUESTION_PACK_LOST: No question pack for instance inst-989... in memory or in instance_metadata — the pack was lo...89045c7-f3fe-4ab0-9727-d0865d8d5d51) — no pending question pack for this job; use job_continue for completed instances'
+E    +  where 'NO_PENDING_QUESTION' = <ErrorCodes.NO_PENDING_QUESTION: 'NO_PENDING_QUESTION'>.value
+E    +    where <ErrorCodes.NO_PENDING_QUESTION: 'NO_PENDING_QUESTION'> = ErrorCodes.NO_PENDING_QUESTION
+______ TestToolLaneErrorStringSeams.test_tool_400_invalid_request_string _______
+tests/job_queue/test_job_answer_target_resolution.py:1411: in test_tool_400_invalid_request_string
+    assert ErrorCodes.INVALID_REQUEST.value in result["error"]
+E   AssertionError: assert 'INVALID_REQUEST' in '410 QUESTION_PACK_LOST: No question pack for instance inst-9e1... in memory or in instance_metadata — the pack was lo...e1cfab0-7f6b-4567-9a67-5d9286541733) — no pending question pack for this job; use job_continue for completed instances'
+E    +  where 'INVALID_REQUEST' = <ErrorCodes.INVALID_REQUEST: 'INVALID_REQUEST'>.value
+E    +    where <ErrorCodes.INVALID_REQUEST: 'INVALID_REQUEST'> = ErrorCodes.INVALID_REQUEST
+_ TestAlreadyDeliveredRetryIsIdempotent.test_route_retry_of_delivered_answer_is_already_delivered _
+tests/job_queue/test_job_answer_target_resolution.py:1488: in test_route_retry_of_delivered_answer_is_already_delivered
+    assert resp.status_code == 200, resp.text
+E   AssertionError: {"detail":{"code":"QUESTION_PACK_LOST","message":"No question pack for instance inst-035... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow).","details":{"instance_id":"inst-0351781f-ae66-484b-a320-4497ed7a17ed"}}}
+E   assert 410 == 200
+E    +  where 410 = <Response [410 Gone]>.status_code
+_ TestAlreadyDeliveredRetryIsIdempotent.test_tool_retry_of_delivered_answer_is_already_delivered _
+tests/job_queue/test_job_answer_target_resolution.py:1520: in test_tool_retry_of_delivered_answer_is_already_delivered
+    assert "error" not in result, result.get("error")
+E   AssertionError: 410 QUESTION_PACK_LOST: No question pack for instance inst-9ba... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow). (work_id=1223e795-ddba-4ef4-ba73-02104092dce5, instance_id=inst-9ba9c0a9-a1ec-43e8-98a0-de1cef0ceab1) — no pending question pack for this job; use job_continue for completed instances
+E   assert 'error' not in {'error': '410 QUESTION_PACK_LOST: No question pack for instance inst-9ba... in memory or in instance_metadata — the p...a9c0a9-a1ec-43e8-98a0-de1cef0ceab1) — no pending question pack for this job; use job_continue for completed instances'}
+_ TestAlreadyDeliveredRetryIsIdempotent.test_route_retry_does_not_report_a_false_terminal_signal _
+tests/job_queue/test_job_answer_target_resolution.py:1550: in test_route_retry_does_not_report_a_false_terminal_signal
+    assert resp.status_code == 200, resp.text
+E   AssertionError: {"detail":{"code":"ANSWER_TARGET_TERMINAL","message":"Asker instance inst-cf3... is 'completed' — the answer cannot be delivered. The instance reached a terminal state while the question was pending.","details":{"instance_id":"inst-cf39a57d-7e2b-4dc0-88fd-45a47c7a57f7","status":"completed"}}}
+E   assert 410 == 200
+E    +  where 410 = <Response [410 Gone]>.status_code
+_ TestTargetedLookupsAreBounded.test_pack_id_lookup_issues_one_metadata_query_and_no_handle_query _
+tests/job_queue/test_job_answer_target_resolution.py:1579: in test_pack_id_lookup_issues_one_metadata_query_and_no_handle_query
+    from daemon.services.answer_resolver import (
+E   ModuleNotFoundError: No module named 'daemon.services.answer_resolver'
+_ TestTargetedLookupsAreBounded.test_handle_lookup_is_one_query_for_a_wide_mission _
+tests/job_queue/test_job_answer_target_resolution.py:1653: in test_handle_lookup_is_one_query_for_a_wide_mission
+    from daemon.services.answer_resolver import (
+E   ModuleNotFoundError: No module named 'daemon.services.answer_resolver'
+_ TestScanSignalsReachTheSuccessEnvelope.test_route_answer_target_carries_the_scan_signals _
+tests/job_queue/test_job_answer_target_resolution.py:1715: in test_route_answer_target_carries_the_scan_signals
+    assert resp.status_code == 200, resp.text
+E   AssertionError: {"detail":{"code":"QUESTION_PACK_LOST","message":"No question pack for instance inst-bd5... in memory or in instance_metadata — the pack was lost (daemon restart without a durable shadow).","details":{"instance_id":"inst-bd54e2c8-7d52-478f-8c72-527d22b2fd21"}}}
+E   assert 410 == 200
+E    +  where 410 = <Response [410 Gone]>.status_code
+_ TestScanSignalsReachTheSuccessEnvelope.test_tool_answer_target_carries_the_scan_signals _
+tests/job_queue/test_job_answer_target_resolution.py:1735: in test_tool_answer_target_carries_the_scan_signals
+    target = result["answer_target"]
+             ^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'answer_target'
+_ TestTruncatedSearchIsRefused.test_route_refuses_a_truncated_search_with_400 __
+tests/job_queue/test_job_answer_target_resolution.py:1753: in test_route_refuses_a_truncated_search_with_400
+    from daemon.services.answer_resolver import MAX_SUBTREE_SCAN
+E   ModuleNotFoundError: No module named 'daemon.services.answer_resolver'
+=============================== warnings summary ===============================
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestJobAnswerLandsOnChildAsker::test_tool_answer_reaches_child_asker_not_mission_root
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestJobAnswerLandsOnChildAsker::test_tool_answer_never_reports_question_pack_lost
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestJobAnswerLandsOnChildAsker::test_tool_answer_resumes_child_from_paused
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestJobRouteLandsOnChildAsker::test_route_answer_reaches_child_asker
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestJobRouteLandsOnChildAsker::test_route_without_pack_id_resolves_via_answer_handle
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestPackIdDisambiguatesMultipleAskers::test_pack_id_selects_the_right_child
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestPackIdDisambiguatesMultipleAskers::test_ambiguous_without_pack_id_is_refused
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestPackIdDisambiguatesMultipleAskers::test_route_ambiguity_is_400_with_candidates
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestGenuinelyMissingPackIsAccurate410::test_missing_pack_is_410_without_restart_claim
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestGenuinelyMissingPackIsAccurate410::test_missing_pack_details_carry_resolution_fields
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestGenuinelyMissingPackIsAccurate410::test_route_missing_pack_is_410
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestNoAskerInSubtreeIs404::test_route_reports_404_when_nobody_holds_a_pack
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestInstanceScopedRouteUnchanged::test_instance_scoped_missing_pack_still_410
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestStaleAnsweredRootPackDoesNotShortCircuit::test_route_without_pack_id_answers_the_child_not_the_stale_root
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestPrePauseWindowChildIsACandidate::test_route_with_pack_id_reaches_the_pre_pause_child
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestPrePauseWindowChildIsACandidate::test_route_without_pack_id_reaches_the_pre_pause_child
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestAmbiguousCandidatesAreRefused::test_route_refuses_root_plus_child_without_pack_id
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestAmbiguousCandidatesAreRefused::test_resolver_reports_both_candidates
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestStalePendingShadowIsNotAuthoritative::test_route_ignores_stale_root_shadow_and_answers_the_child
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestMissionRootIsReachableWhenTheWorkResolvesToAChild::test_route_answers_the_root_when_the_work_is_a_child
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestMissionRootIsReachableWhenTheWorkResolvesToAChild::test_route_answers_the_root_without_a_pack_id
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestLargeSubtreeWithSuppliedPackId::test_asker_beyond_the_cap_is_reached_with_a_pack_id
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestLargeSubtreeWithSuppliedPackId::test_cap_still_applies_without_a_pack_id
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestTerminalWorkInstanceKeepsItsSignal::test_route_reports_answer_target_terminal[completed]
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestTerminalWorkInstanceKeepsItsSignal::test_route_reports_answer_target_terminal[terminated]
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestAskerIsRootFastPath::test_fast_path_resolves_without_any_candidate_pass_read
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestAskerIsRootFastPath::test_route_answers_the_root_asker
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestAskerIsRootFastPath::test_answered_pack_on_the_work_instance_resolves_via_fast_path
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestToolLaneErrorStringSeams::test_tool_404_no_pending_question_string
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestToolLaneErrorStringSeams::test_tool_400_invalid_request_string
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestAlreadyDeliveredRetryIsIdempotent::test_route_retry_of_delivered_answer_is_already_delivered
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestAlreadyDeliveredRetryIsIdempotent::test_tool_retry_of_delivered_answer_is_already_delivered
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestAlreadyDeliveredRetryIsIdempotent::test_route_retry_does_not_report_a_false_terminal_signal
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestTargetedLookupsAreBounded::test_pack_id_lookup_issues_one_metadata_query_and_no_handle_query
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestTargetedLookupsAreBounded::test_handle_lookup_is_one_query_for_a_wide_mission
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestScanSignalsReachTheSuccessEnvelope::test_route_answer_target_carries_the_scan_signals
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestScanSignalsReachTheSuccessEnvelope::test_tool_answer_target_carries_the_scan_signals
+FAILED tests/job_queue/test_job_answer_target_resolution.py::TestTruncatedSearchIsRefused::test_route_refuses_a_truncated_search_with_400
+38 failed, 3 passed, 1 warning in 9.43s
