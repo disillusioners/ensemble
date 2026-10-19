@@ -445,6 +445,13 @@ def resolve_answer_target(
 ) -> AnswerTarget:
     """Resolve the ASKING instance for a job-scoped answer request.
 
+    The REACHABLE TARGET SET is the permanent lineage of the mission
+    root (the root + every descendant) plus the work instance itself —
+    WIDENED (the root's own pending pack must be reachable even when
+    the work resolves to a child) but still MISSION-SCOPED: the lineage
+    of one mission root never leaves that mission (one project by
+    construction). See :func:`_reachable_set`.
+
     Args:
         manager: The ``InstanceManager`` (read-only use here).
         work_instance_id: ``WorkRecord.instance_id`` — the mission-scoped
