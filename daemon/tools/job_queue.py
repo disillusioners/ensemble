@@ -684,9 +684,10 @@ Returns:
     work_instance_id`` (the mission-scoped instance the ``work_id``
     resolved to), ``mission_root_id``, ``route`` (how the asker was
     identified), ``reachable_count`` (the size of the mission-scoped
-    search set) and ``scan_uncapped`` (True when the search ran
-    without the scan cap — the signal is visible on the SUCCESS path,
-    not only in the error envelope).
+    search set; ``null`` when the fast path resolved the pack without
+    any scan — no reachable set was enumerated) and ``scan_uncapped``
+    (True when the search ran without the scan cap — the signal is
+    visible on the SUCCESS path, not only in the error envelope).
 
     IDEMPOTENCY: re-sending an answer for a pack that was ALREADY
     delivered returns ``status="already_delivered"`` /
@@ -728,13 +729,20 @@ Returns:
       * ``404 NO_PENDING_QUESTION: ...`` — no instance of the mission
         holds a pack (the mission was searched). Hint: for completed
         instances use ``job_continue`` instead.
-      * ``410 ANSWER_TARGET_TERMINAL: ...`` — the work instance is
-        COMPLETED/TERMINATED AND no instance of the mission holds a
-        pack, so the answer cannot be delivered (no silent-revive —
-        leader decision 1). The signal only survives when there is no
-        pack-holding asker: a pack holder is reached (and answered)
-        first, so a terminal work instance does not mask a live
-        question.
+      * ``410 ANSWER_TARGET_TERMINAL: ...`` — TWO triggers share this
+        code: (a) the WORK instance is COMPLETED/TERMINATED AND no
+        instance of the mission holds a pack, so the answer cannot be
+        delivered (no silent-revive — leader decision 1); the signal
+        only survives when there is no pack-holding asker: a pack
+        holder is reached (and answered) first, so a terminal work
+        instance does not mask a live question; or (b) the RESOLVED
+        ASKER itself is terminal — it reached COMPLETED/TERMINATED
+        while the question was pending, which the shared helper's own
+        pre-check rejects after the asker has been resolved (a terminal
+        CHILD asker also produces this code). NOTE: the truncation
+        precedence documented on the HTTP route cannot apply here —
+        this tool REQUIRES ``question_pack_id``, so the no-pack-id
+        truncated-search 400 is unreachable.
       * ``410 QUESTION_PACK_LOST: ...`` — the asker was identified
         (by pack id or by its awaiting-answer handle) but the pack is
         absent from BOTH the in-memory store and the durable
@@ -3608,7 +3616,9 @@ def create_job_tools(
             # asker the answer actually went to, plus the resolver's
             # scan signals (``reachable_count`` / ``scan_uncapped`` —
             # the uncapped search happens on the SUCCESS path, so they
-            # must be visible here and not only in the error string).
+            # must be visible here and not only in the error string;
+            # ``reachable_count`` is ``int | None`` — ``null`` when the
+            # fast path resolved without a scan).
             return {
                 "work_id": work_id,
                 "answer_target": {

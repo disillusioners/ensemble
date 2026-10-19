@@ -22,9 +22,10 @@ repositories).
 Resolution (one shared helper — both surfaces call it)
 -------------------------------------------------------
 
-**TARGETED lookups, not per-instance scans.** The resolver asks TWO
-questions of the database, each as ONE query restricted to the
-mission-scoped id set:
+**TARGETED lookups, not per-instance scans.** The resolver has TWO
+targeted questions available, ONE per lane — never a per-instance loop,
+and never both on the same request when the pack-id lane short-circuits.
+Each is ONE query restricted to the mission-scoped id set:
 
 * the durable-shadow lookup (``SQLModelInstanceRepository.
   find_by_metadata_value``) — "which instance of this mission holds the
@@ -39,8 +40,16 @@ mission-scoped id set:
   per-instance primitive ``find_suspended_turn_for_answer``.
 
 The per-instance N+1 loops (one metadata read + one handle lookup per
-mission member) are gone: a 501-node mission cost ~3N queries before,
-now it costs the mission enumeration plus TWO queries.
+mission member) are gone: a 501-node mission cost ~3N queries before.
+What remains is the mission enumeration plus ONE targeted bulk query
+per lane — the two lanes do NOT both run on every request:
+
+* the pack-id lane asks the durable-shadow question (ONE query) and,
+  when it finds the holder, SHORT-CIRCUITS before the handle lookup
+  runs (ZERO handle queries);
+* the no-pack-id lane asks the handle question (ONE query) and then
+  reads the durable shadow of each handle-holding CANDIDATE — K reads
+  for K candidates, never N.
 
 **Fast path (a pack id IS supplied).** The resolver may return the
 WORK instance immediately — before any lookup runs — when that
@@ -178,7 +187,13 @@ class AnswerTarget:
             resolved to (the old, wrong target in the defect class).
         mission_root_id: The mission root of ``work_instance_id``
             (permanent lineage).
-        subtree_scanned: True when the candidate-collection pass ran.
+        subtree_scanned: True when the reachable-set enumeration /
+            candidate scan was ATTEMPTED — including a TRUNCATED
+            attempt (a refusal still enumerates the set, so the flag is
+            ``True`` on the ``truncated`` return). It does NOT mean the
+            pass COMPLETED; ``subtree_truncated`` carries the
+            completion/truncation meaning. ``False`` on the fast path,
+            which returns before any enumeration.
         subtree_truncated: True when the pass hit ``MAX_SUBTREE_SCAN``
             (only possible without a supplied pack id).
         reachable_count: The size of the reachable set the candidate

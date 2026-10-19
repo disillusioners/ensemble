@@ -1173,10 +1173,22 @@ async def answer_questions_job(
           ``question_pack_id`` is not the pack the resolved asker holds.
         * ``404 NO_PENDING_QUESTION`` — no instance of the mission holds
           a pack (the mission was searched).
-        * ``410 ANSWER_TARGET_TERMINAL`` — the work instance is
-          COMPLETED/TERMINATED and NO pack-holding asker was found
-          anywhere in the mission: if a live asker exists elsewhere in
-          the mission, the answer is delivered THERE instead of raising.
+        * ``410 ANSWER_TARGET_TERMINAL`` — TWO triggers share this code:
+          (a) the WORK instance is COMPLETED/TERMINATED and NO
+          pack-holding asker was found anywhere in the mission (if a
+          live asker exists elsewhere in the mission, the answer is
+          delivered THERE instead of raising); or (b) the RESOLVED
+          ASKER itself is terminal (it reached COMPLETED/TERMINATED
+          while the question was pending — the shared helper's own
+          pre-check fires after the asker has been resolved, so a
+          terminal CHILD asker also produces this code). The error
+          ``details`` carry the terminal status either way
+          (``work_instance_status`` on trigger (a); ``instance_id`` +
+          ``status`` on trigger (b)).
+          Precedence: when NO ``question_pack_id`` is supplied and the
+          mission is wider than the scan cap, the truncated-search
+          ``400 INVALID_REQUEST`` PRE-EMPTS this 410 — the truncation
+          branch returns before the terminal classification.
         * ``410 QUESTION_PACK_LOST`` — the asker was identified but the
           pack is gone from both its memory store and its durable
           metadata shadow.
@@ -1314,6 +1326,8 @@ async def answer_questions_job(
     # ``reachable_count`` / ``scan_uncapped`` carry the resolver's scan
     # signals — the uncapped search happens on the SUCCESS path, so
     # they must be visible here and not only in the error envelope.
+    # ``reachable_count`` is ``int | None``: ``None`` when the fast path
+    # resolved the pack without a scan (``scan_uncapped`` stays False).
     return {
         "work_id": work_id,
         "answer_target": {

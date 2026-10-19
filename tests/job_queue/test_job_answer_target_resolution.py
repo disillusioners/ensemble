@@ -1167,7 +1167,15 @@ class TestAskerIsRootFastPath:
     spelling of the general scan. The pin asserts both the route label
     AND the absence of any per-instance repository read — if the fast
     path were deleted, the candidate pass would run and the read
-    counters would move."""
+    counters would move.
+
+    The counter set covers BOTH lookup generations: the per-instance
+    primitives (``get_metadata_value`` / ``find_suspended_turn_for_answer``)
+    AND the bulk accessors the N-2 candidate pass actually uses
+    (``find_by_metadata_value`` / ``find_instances_with_answer_handle``)
+    — a pin over the per-instance primitives alone stopped
+    discriminating once the candidate pass moved to the bulk accessors
+    (W2, round-3 review)."""
 
     def test_fast_path_resolves_without_any_candidate_pass_read(
         self, harness, monkeypatch
@@ -1184,31 +1192,50 @@ class TestAskerIsRootFastPath:
         )
         _seed_task(harness.engine, root, status=TaskStatus.PAUSED.value)
 
-        reads = {"metadata": 0, "handle": 0, "tree": 0}
+        reads = {
+            "metadata": 0,
+            "metadata_bulk": 0,
+            "handle": 0,
+            "handle_bulk": 0,
+            "tree": 0,
+        }
         orig_meta = harness.instance_repo.get_metadata_value
+        orig_meta_bulk = harness.instance_repo.find_by_metadata_value
         orig_handle = harness.task_repo.find_suspended_turn_for_answer
+        orig_handle_bulk = harness.task_repo.find_instances_with_answer_handle
         orig_tree = harness.instance_repo.get_tree_ids_permanent
 
-        def _counted_meta(*args, **kwargs):
-            reads["metadata"] += 1
-            return orig_meta(*args, **kwargs)
+        def _counted(key, fn):
+            def _wrapper(*args, **kwargs):
+                reads[key] += 1
+                return fn(*args, **kwargs)
 
-        def _counted_handle(*args, **kwargs):
-            reads["handle"] += 1
-            return orig_handle(*args, **kwargs)
-
-        def _counted_tree(*args, **kwargs):
-            reads["tree"] += 1
-            return orig_tree(*args, **kwargs)
+            return _wrapper
 
         monkeypatch.setattr(
-            harness.instance_repo, "get_metadata_value", _counted_meta
+            harness.instance_repo,
+            "get_metadata_value",
+            _counted("metadata", orig_meta),
         )
         monkeypatch.setattr(
-            harness.task_repo, "find_suspended_turn_for_answer", _counted_handle
+            harness.instance_repo,
+            "find_by_metadata_value",
+            _counted("metadata_bulk", orig_meta_bulk),
         )
         monkeypatch.setattr(
-            harness.instance_repo, "get_tree_ids_permanent", _counted_tree
+            harness.task_repo,
+            "find_suspended_turn_for_answer",
+            _counted("handle", orig_handle),
+        )
+        monkeypatch.setattr(
+            harness.task_repo,
+            "find_instances_with_answer_handle",
+            _counted("handle_bulk", orig_handle_bulk),
+        )
+        monkeypatch.setattr(
+            harness.instance_repo,
+            "get_tree_ids_permanent",
+            _counted("tree", orig_tree),
         )
 
         target = resolve_answer_target(harness.manager, root, pack.id)
@@ -1218,8 +1245,16 @@ class TestAskerIsRootFastPath:
         assert target.route == "direct_ram_pack"
         assert target.subtree_scanned is False
 
-        # The fast path performed NO candidate-pass read at all.
-        assert reads == {"metadata": 0, "handle": 0, "tree": 0}
+        # The fast path performed NO candidate-pass read at all — not
+        # through the per-instance primitives, and not through the bulk
+        # accessors the candidate pass uses.
+        assert reads == {
+            "metadata": 0,
+            "metadata_bulk": 0,
+            "handle": 0,
+            "handle_bulk": 0,
+            "tree": 0,
+        }
 
     def test_route_answers_the_root_asker(self, harness, jobs_client):
         """The behavioural pin: the asker IS the mission root (the
@@ -1248,6 +1283,82 @@ class TestAskerIsRootFastPath:
         assert body["instance_id"] == root
         assert body["answer_target"]["route"] == "direct_ram_pack"
         assert harness.qm.get_question_pack(root).status == "answered"
+
+    def test_answered_pack_on_the_work_instance_resolves_via_fast_path(
+        self, harness, jobs_client, monkeypatch
+    ):
+        """N-1 on the fast path — the WORK instance itself holds an
+        ANSWERED RAM pack matching the supplied id.
+
+        The N-1 relaxation (a pack id identifies its holder REGARDLESS
+        of the pack's status) was previously only pinned for a child
+        holder; the fast-path variant was untested. The retry of an
+        already-delivered answer must resolve via ``direct_ram_pack``
+        (zero bulk/scan reads) and the shared helper's CAS must lose →
+        ``200 already_delivered``.
+        """
+        root = _seed_mission_root(harness)
+        pack = harness.qm.set_question_pack(
+            root, [{"id": "q1", "text": "Approach A or B?"}]
+        )
+        # The create-site shadow …
+        harness.instance_repo.set_metadata(root, "question_pack_id", pack.id)
+        harness.instance_repo.set_metadata(
+            root, "question_pack_payload", pack_to_dict(pack)
+        )
+        # … then answer consumption: pack → answered, shadow CLEARED
+        # (the RAM pack survives on the work instance).
+        harness.qm.set_answers(root, {"q1": "already answered"})
+        harness.instance_repo.delete_metadata(root, "question_pack_id")
+        harness.instance_repo.delete_metadata(root, "question_pack_payload")
+        work_id = _seed_mission_work(harness, root)
+
+        reads = {"metadata_bulk": 0, "handle_bulk": 0, "tree": 0}
+        orig_meta_bulk = harness.instance_repo.find_by_metadata_value
+        orig_handle_bulk = harness.task_repo.find_instances_with_answer_handle
+        orig_tree = harness.instance_repo.get_tree_ids_permanent
+
+        def _counted(key, fn):
+            def _wrapper(*args, **kwargs):
+                reads[key] += 1
+                return fn(*args, **kwargs)
+
+            return _wrapper
+
+        monkeypatch.setattr(
+            harness.instance_repo,
+            "find_by_metadata_value",
+            _counted("metadata_bulk", orig_meta_bulk),
+        )
+        monkeypatch.setattr(
+            harness.task_repo,
+            "find_instances_with_answer_handle",
+            _counted("handle_bulk", orig_handle_bulk),
+        )
+        monkeypatch.setattr(
+            harness.instance_repo,
+            "get_tree_ids_permanent",
+            _counted("tree", orig_tree),
+        )
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={
+                "answers": {"q1": "already answered"},
+                "question_pack_id": pack.id,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # The fast path resolved it — no bulk lookup, no lineage scan.
+        assert body["instance_id"] == root
+        assert body["answer_target"]["route"] == "direct_ram_pack"
+        assert body["answer_target"]["reachable_count"] is None
+        assert reads == {"metadata_bulk": 0, "handle_bulk": 0, "tree": 0}
+        # … and the helper's exactly-once CAS lost (OQ-3 / §8.5).
+        assert body["status"] == "already_delivered"
+        assert body["resume_route"] == "already_delivered"
 
 
 class TestToolLaneErrorStringSeams:
@@ -1450,10 +1561,17 @@ class TestAlreadyDeliveredRetryIsIdempotent:
 class TestTargetedLookupsAreBounded:
     """N-2 — the pack-id path used to be an unbounded enumeration: one
     metadata read + one handle lookup PER mission member (a 501-node
-    mission → ~3N queries). The resolver now asks TWO targeted
-    questions, each ONE query restricted to the mission id set."""
+    mission → ~3N queries). The resolver now asks ONE targeted bulk
+    question per lane, each restricted to the mission id set:
 
-    def test_pack_id_lookup_issues_one_metadata_and_one_handle_query(
+    * pack-id lane → the durable-shadow lookup (ONE metadata query);
+      when it finds the holder the lane SHORT-CIRCUITS, so ZERO handle
+      queries run;
+    * no-pack-id lane → the awaiting-answer handle lookup (ONE handle
+      query), plus the per-candidate shadow reads of the handle holders
+      (K = number of handle-holding candidates, never N)."""
+
+    def test_pack_id_lookup_issues_one_metadata_query_and_no_handle_query(
         self, harness
     ):
         from sqlalchemy import event
@@ -1489,17 +1607,42 @@ class TestTargetedLookupsAreBounded:
         assert target.reachable_count >= MAX_SUBTREE_SCAN + 18
         assert target.scan_uncapped is True
 
-        # The candidate-pass lookups are NOT per-instance: exactly ONE
-        # metadata lookup and at most ONE handle lookup, whatever the
-        # mission size.
+        # The bulk metadata lookup binds the KEY as a PARAMETER
+        # (``json_extract(metadata, :path)`` on SQLite /
+        # ``metadata ->> :key`` on PostgreSQL — see
+        # ``SQLModelInstanceRepository.find_by_metadata_value``), so the
+        # literal ``question_pack_id`` NEVER appears in the rendered
+        # SQL. Discriminating on the literal (the previous shape of this
+        # test) counted ZERO statements and asserted ``<= 1`` over an
+        # empty list — vacuously true. Match the ACTUAL statement shape
+        # instead (W1, round-3 review).
         metadata_queries = [
-            s for s in statements if "question_pack_id" in s
+            s for s in statements if "json_extract" in s or "->>" in s
         ]
+        # The awaiting-answer handle lookup renders its
+        # ``suspension_reason`` predicate as a COLUMN reference (it is
+        # not bound), so this discriminator is non-vacuous.
         handle_queries = [
             s for s in statements if "suspension_reason" in s
         ]
-        assert len(metadata_queries) <= 1, metadata_queries
-        assert len(handle_queries) <= 1, handle_queries
+
+        # NON-VACUITY: exactly ONE bulk metadata query for the whole
+        # pack-id lane — and the discriminator MUST have matched it (a
+        # future param-shape change fails LOUDLY here instead of
+        # silently passing on an empty list).
+        assert len(metadata_queries) == 1, (
+            "expected exactly ONE bulk metadata query on the pack-id "
+            f"lane; matched {metadata_queries!r} of {statements!r}"
+        )
+        # … and pin WHY the old discriminator was vacuous: the key is a
+        # bound parameter, so its literal is absent from every rendered
+        # statement. Nobody may "restore" the literal match.
+        assert not [s for s in statements if "question_pack_id" in s]
+
+        # The pack-id lane SHORT-CIRCUITS: the metadata holder returns
+        # before ``_handle_holders`` ever runs — ZERO handle queries on
+        # this path.
+        assert handle_queries == [], handle_queries
 
     def test_handle_lookup_is_one_query_for_a_wide_mission(self, harness):
         """The no-pack-id lane's handle lookup is ONE query over the
