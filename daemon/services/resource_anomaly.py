@@ -109,7 +109,10 @@ REUSED, never forked. Per P3 adjudication B, a T2 ``status`` of
 **TZ discipline (R5).** Bucket keys are the P1 naive-UTC digits;
 DoW/hour keys derive from the bucket digits read as UTC
 (:func:`_parse_bucket_ts` — ``datetime.strptime`` + ``timezone.utc``).
-No wallclock math happens in this module.
+Wallclock usage: ``datetime.now(timezone.utc)`` appears ONCE in
+:meth:`AnomalyEngine.list_anomalies` to compute the window-cutoff
+epoch (TZ-correct via ``timezone.utc``; no injectable clock is
+needed — the cutoff is a pure, non-test-dependent boundary).
 
 **Bounded state (the §2.7 arithmetic — the A1 acceptance bound).**
 Per series ≤ ``window_buckets`` buckets × 6 floats × 8 B
