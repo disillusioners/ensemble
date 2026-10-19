@@ -1009,13 +1009,17 @@ class TestLargeSubtreeWithSuppliedPackId:
     """W-2 — ``MAX_SUBTREE_SCAN`` truncated the candidate pass BEFORE the
     pack-id scan, so an asker beyond the cap produced a false 404 even
     though the caller named the pack exactly. A supplied pack id lifts
-    the cap (the enumeration stays bounded by the repository's own
-    traversal depth)."""
+    the cap — and the lifted scan is REPORTED (``scan_uncapped`` /
+    ``reachable_count``), because the enumeration is bounded in DEPTH
+    only, not in node count."""
 
     def test_asker_beyond_the_cap_is_reached_with_a_pack_id(
         self, harness, jobs_client
     ):
-        from daemon.services.answer_resolver import MAX_SUBTREE_SCAN
+        from daemon.services.answer_resolver import (
+            MAX_SUBTREE_SCAN,
+            resolve_answer_target,
+        )
 
         root = _seed_mission_root(harness)
         work_id = _seed_mission_work(harness, root)
@@ -1030,6 +1034,20 @@ class TestLargeSubtreeWithSuppliedPackId:
                 asker, asker_pack = child, pack
 
         assert asker is not None and asker_pack is not None
+
+        # The lifted cap is REPORTED, not silent: the whole reachable
+        # set was scanned (nothing was missed — ``subtree_truncated``
+        # stays False) and that set exceeded the cap.
+        #
+        # Probed BEFORE the answer is delivered: the RAM pack survives
+        # consumption (it flips to 'answered'), so a probe after the
+        # POST would see a different candidate set.
+        target = resolve_answer_target(harness.manager, root, asker_pack.id)
+        details = target.detail_fields()
+        assert target.asker_instance_id == asker
+        assert details["scan_uncapped"] is True
+        assert details["subtree_truncated"] is False
+        assert details["reachable_count"] == MAX_SUBTREE_SCAN + 18
 
         resp = jobs_client.post(
             f"/jobs/{work_id}/answer",

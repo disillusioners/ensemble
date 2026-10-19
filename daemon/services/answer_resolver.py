@@ -24,10 +24,22 @@ Resolution (one shared helper — both surfaces call it)
 
 **SINGLE candidate-collection pass.** Every instance of the reachable
 set is probed ONCE for the two live signals, and the collected
-candidates are then arbitrated. The resolver never returns a candidate
-before the whole set has been collected — an early return is exactly
-what made the "root wins unconditionally" ambiguity hole (the root
-short-circuited the scan, so a second asker was never seen).
+candidates are then arbitrated. On the NO-PACK-ID path the resolver
+never returns a candidate before the whole set has been collected — an
+early return is exactly what made the "root wins unconditionally"
+ambiguity hole (the root short-circuited the scan, so a second asker
+was never seen).
+
+**Fast path (a pack id IS supplied).** The resolver may return the
+WORK instance immediately — before any candidate-collection pass runs —
+when that instance holds a LIVE PENDING RAM pack whose id IS the
+supplied one. Precondition: a LIVE PENDING RAM pack on the work
+instance (a durable shadow alone does NOT qualify — a shadow is a
+frozen ask-time snapshot, not an open question). This is safe because
+a pack id is a uuid4 that identifies exactly ONE pack: the holder is
+unique, so the pack-id uniqueness scan the general path performs
+cannot change the outcome. The fast path reads the RAM pack only — no
+candidate-collection pass, no repository scan.
 
 A candidate is an instance that either
 
@@ -105,15 +117,19 @@ logger = logging.getLogger(__name__)
 # strongest key, so the caller has told us exactly which pack to
 # deliver — truncating the scan before reaching the holder would
 # produce a false 404 for an asker that sits beyond the cap. The
-# enumeration itself stays bounded by the repository's own
-# ``_MAX_TRAVERSAL_DEPTH`` (256) in ``get_tree_ids_permanent``.
+# enumeration itself is bounded in DEPTH only — the repository's own
+# ``_MAX_TRAVERSAL_DEPTH`` (256) in ``get_tree_ids_permanent`` caps
+# the BFS DEPTH, NOT the node count (the fan-out at each level is
+# unbounded), so a wide mission can still yield far more than 256
+# reachable instances. The uncapped pass is therefore REPORTED rather
+# than silent: ``scan_uncapped`` / ``reachable_count`` in
+# :meth:`AnswerTarget.detail_fields`.
 MAX_SUBTREE_SCAN = 64
 
 
 # ── Resolution routes (diagnostic — surfaced in the success envelope) ──
 
 ROUTE_DIRECT_RAM_PACK = "direct_ram_pack"
-ROUTE_DIRECT_METADATA_SHADOW = "direct_metadata_shadow"
 ROUTE_SUBTREE_PACK_ID = "subtree_pack_id"
 ROUTE_SUBTREE_PENDING_PACK = "subtree_pending_pack"
 ROUTE_SUBTREE_ANSWER_HANDLE = "subtree_answer_handle"
@@ -143,6 +159,16 @@ class AnswerTarget:
         subtree_scanned: True when the candidate-collection pass ran.
         subtree_truncated: True when the pass hit ``MAX_SUBTREE_SCAN``
             (only possible without a supplied pack id).
+        reachable_count: The size of the reachable set the candidate
+            pass considered — the FULL set size, counted BEFORE any
+            truncation is applied. ``None`` when no candidate pass ran
+            (the fast path returned before the reachable set was
+            enumerated).
+        scan_uncapped: True when a supplied pack id LIFTED the
+            ``MAX_SUBTREE_SCAN`` cap and the whole reachable set was
+            scanned. The scan completed (nothing was missed) and
+            ``subtree_truncated`` stays ``False`` — the flag marks an
+            unbounded-work scan, not a truncated one.
         candidate_ids: The candidate instance ids that were considered
             (populated for the ambiguous case).
         pack_id_searched: The pack id the caller asked for (may be
@@ -161,6 +187,8 @@ class AnswerTarget:
     mission_root_id: str
     subtree_scanned: bool = False
     subtree_truncated: bool = False
+    reachable_count: int | None = None
+    scan_uncapped: bool = False
     candidate_ids: tuple[str, ...] = ()
     pack_id_searched: str | None = None
     error: str | None = None
@@ -180,6 +208,8 @@ class AnswerTarget:
             "question_pack_id": self.pack_id_searched,
             "subtree_scanned": self.subtree_scanned,
             "subtree_truncated": self.subtree_truncated,
+            "reachable_count": self.reachable_count,
+            "scan_uncapped": self.scan_uncapped,
             "resolution_route": self.route or None,
             "candidate_ids": list(self.candidate_ids),
             "work_instance_status": self.work_instance_status,
@@ -517,21 +547,41 @@ def resolve_answer_target(
 
     # ── REACHABLE SET (widened, mission-scoped) ──────────────────────
     reachable = _reachable_set(instance_repo, mission_root_id, work_instance_id)
+    # The FULL reachable-set size, counted BEFORE any truncation — the
+    # number the cap decisions below are made against.
+    reachable_count = len(reachable)
 
     # The cap is lifted when a pack id was supplied — the caller named
     # the pack, so truncating the scan before reaching its holder would
     # produce a false 404 for an asker that sits beyond the cap.
     truncated = False
-    if question_pack_id is None and len(reachable) > MAX_SUBTREE_SCAN:
+    scan_uncapped = False
+    if question_pack_id is None and reachable_count > MAX_SUBTREE_SCAN:
         logger.warning(
             "answer_resolver: candidate scan capped at %d instances "
             "(mission %s has %d) — an asker beyond the cap may be missed",
             MAX_SUBTREE_SCAN,
             mission_root_id[:8],
-            len(reachable),
+            reachable_count,
         )
         reachable = reachable[:MAX_SUBTREE_SCAN]
         truncated = True
+    elif question_pack_id is not None and reachable_count > MAX_SUBTREE_SCAN:
+        # The pack-id path scans the WHOLE reachable set (no truncation),
+        # and the enumeration is bounded in DEPTH only — the node count
+        # is unbounded. Nothing is MISSED (the scan completed), but the
+        # unbounded work is REPORTED rather than silent: without this
+        # signal a wide mission would look identical to a narrow one.
+        scan_uncapped = True
+        logger.warning(
+            "answer_resolver: uncapped pack-id scan over %d reachable "
+            "instances (mission %s, pack %s, cap %d) — the enumeration is "
+            "bounded in depth only, not in node count",
+            reachable_count,
+            mission_root_id[:8],
+            question_pack_id[:8],
+            MAX_SUBTREE_SCAN,
+        )
 
     # ── SINGLE CANDIDATE-COLLECTION PASS ─────────────────────────────
     candidates = _collect_candidates(instance_repo, qm, task_repo, reachable)
@@ -546,6 +596,8 @@ def resolve_answer_target(
             mission_root_id=mission_root_id,
             subtree_scanned=True,
             subtree_truncated=truncated,
+            reachable_count=reachable_count,
+            scan_uncapped=scan_uncapped,
             pack_id_searched=question_pack_id,
         )
 
@@ -564,6 +616,8 @@ def resolve_answer_target(
             mission_root_id=mission_root_id,
             subtree_scanned=True,
             subtree_truncated=truncated,
+            reachable_count=reachable_count,
+            scan_uncapped=scan_uncapped,
             candidate_ids=tuple(candidate_ids),
             pack_id_searched=question_pack_id,
             error=ERROR_AMBIGUOUS,
@@ -618,6 +672,8 @@ def resolve_answer_target(
         mission_root_id=mission_root_id,
         subtree_scanned=True,
         subtree_truncated=truncated,
+        reachable_count=reachable_count,
+        scan_uncapped=scan_uncapped,
         pack_id_searched=question_pack_id,
         error=error,
         work_instance_status=work_status,
@@ -731,7 +787,6 @@ __all__ = [
     "ERROR_NOT_FOUND",
     "ERROR_TERMINAL",
     "MAX_SUBTREE_SCAN",
-    "ROUTE_DIRECT_METADATA_SHADOW",
     "ROUTE_DIRECT_RAM_PACK",
     "ROUTE_SUBTREE_ANSWER_HANDLE",
     "ROUTE_SUBTREE_PACK_ID",

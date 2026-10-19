@@ -1167,7 +1167,10 @@ async def answer_questions_job(
         * ``404 NO_PENDING_QUESTION`` — no instance of the mission holds
           a pack (the subtree was scanned).
         * ``410 ANSWER_TARGET_TERMINAL`` — the work instance is
-          COMPLETED/TERMINATED (the signal survives the resolution).
+          COMPLETED/TERMINATED (the signal survives the resolution) and
+          NO pack-holding asker was found anywhere in the mission: if a
+          live asker exists elsewhere in the mission, the answer is
+          delivered THERE instead of raising.
         * ``410 QUESTION_PACK_LOST`` — the asker was identified but the
           pack is gone from both its memory store and its durable
           metadata shadow.
