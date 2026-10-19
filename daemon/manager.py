@@ -8186,6 +8186,135 @@ class InstanceManager:
             "idempotent)"
         )
 
+        # ── resource-cost-control Phase 1 / observability: INTEGER → BOOLEAN ──
+        # Three boolean columns shipped in v0.25.0 with the wrong
+        # ``sa_column=Column(..., Integer, nullable=False)`` override on
+        # their SQLModel declarations
+        # (``daemon/models/resource_monitor.py``); ``SQLModel.metadata.create_all``
+        # emitted ``INTEGER`` on PostgreSQL, the flusher bound Python
+        # ``bool`` values, and the resulting
+        # ``DatatypeMismatch: column "estimated" is of type integer but
+        # expression is of type boolean`` raised on every flush window.
+        # The ``_tier_write`` amplifier escalated the failure to a
+        # whole-transaction rollback — 2.5 h of write-path data loss.
+        #
+        # The SQLModel declarations are now ``Boolean`` (so fresh PG
+        # databases get the correct type via ``create_all``), but
+        # ``create_all`` is a no-op for tables that already exist; the
+        # existing live columns need a one-time ALTER. The probe-gated
+        # ``DO $$`` body below runs on EVERY boot, is a no-op when the
+        # columns are already ``boolean`` (idempotent under repeated /
+        # concurrent boot), and the ``USING (col <> 0)`` cast is
+        # lossless on every legitimate 0/1 value.
+        #
+        # Audit-trail mirror:
+        # ``daemon/migrations/versions/20261019_120822_alter_resource_monitor_booleans.sql``
+        # is MANUAL: TRUE — the runner never auto-applies it
+        # (runner.py:737-746). It is the operator/audit document; this
+        # runtime hook is the source of truth.
+        #
+        # Shared-file flag: this method (``_ensure_postgres_columns``)
+        # is the documented convention for ALL PG schema evolution that
+        # the .sql runner cannot carry — the
+        # ``maintenance_runs.expected_bytes`` widening (20260928),
+        # ``job_queue_items.admission_state`` (20260628), etc. live
+        # here for the same reason. The block is additive only — no
+        # restructuring, no edits to existing entries. If the
+        # boot-orphan-sweep commission is editing this method in
+        # parallel, re-sequence before the merge.
+        if (
+            self._ensemble_config is not None
+            and self._ensemble_config.is_postgres
+        ):
+            # Three (table, column, new_default) tuples — same shape
+            # applied identically. The probe on
+            # ``information_schema.columns.data_type='integer'`` makes
+            # the DO body a no-op once the column is already
+            # ``boolean``. ``ALTER COLUMN ... TYPE boolean USING
+            # (col <> 0)`` is lossless on the documented 0|1 storage
+            # (0 → FALSE, 1 → TRUE).
+            _resource_monitor_bool_repair = (
+                (
+                    "resource_instance_sample",
+                    "estimated",
+                    True,  # documented default (NOT NULL DEFAULT true)
+                ),
+                (
+                    "resource_limit_policy",
+                    "enabled",
+                    False,  # documented default (NOT NULL DEFAULT false)
+                ),
+                (
+                    "resource_limit_policy",
+                    "user_gated",
+                    True,  # documented default (NOT NULL DEFAULT true)
+                ),
+            )
+            _bool_repair_applied: list[str] = []
+            _bool_repair_skipped: list[str] = []
+            try:
+                with self._engine.begin() as conn:
+                    for tbl, col, new_default in _resource_monitor_bool_repair:
+                        probe = conn.execute(
+                            text(
+                                "SELECT data_type FROM information_schema.columns "
+                                "WHERE table_schema = 'public' "
+                                "  AND table_name = :t "
+                                "  AND column_name = :c"
+                            ),
+                            {"t": tbl, "c": col},
+                        ).first()
+                        if probe is None:
+                            # Table or column absent — fresh-DB path,
+                            # SQLModel create_all handles it. Skip
+                            # silently (drift_events index parity
+                            # convention).
+                            _bool_repair_skipped.append(f"{tbl}.{col}=missing")
+                            continue
+                        if str(probe[0]).lower() != "integer":
+                            # Already boolean (or otherwise non-integer
+                            # — defensive): no-op. This is the
+                            # repeated-boot / concurrent-boot idempotency.
+                            _bool_repair_skipped.append(
+                                f"{tbl}.{col}={probe[0]}"
+                            )
+                            continue
+                        # Literal ``true`` / ``false`` PG syntax for the
+                        # SET DEFAULT — keeps the SQL portable across
+                        # PG versions and matches the model declaration.
+                        _default_lit = "true" if new_default else "false"
+                        conn.execute(
+                            text(
+                                f"ALTER TABLE {tbl} "
+                                f"ALTER COLUMN {col} TYPE boolean "
+                                f"USING ({col} <> 0), "
+                                f"ALTER COLUMN {col} SET DEFAULT {_default_lit}"
+                            )
+                        )
+                        _bool_repair_applied.append(f"{tbl}.{col}")
+            except Exception as exc:
+                # Fail-loud is DELIBERATE: a failed PG repair leaves
+                # the write path broken (the v0.25.0 defect class).
+                # Match the host function's convention — abort boot,
+                # surface the cause, let the operator fix and retry.
+                # FIX-3 (tuning-only ALTERs never boot-block) does NOT
+                # apply here: this is a correctness ALTER, not tuning,
+                # and silent continuation would mask a regression.
+                logger.error(
+                    "_ensure_postgres_columns: resource_monitor INTEGER→"
+                    "BOOLEAN conversion FAILED (%s: %s) — write path "
+                    "remains broken; aborting boot",
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
+                raise
+            logger.info(
+                "_ensure_postgres_columns: resource_monitor boolean repair "
+                "complete (applied=%s, already_ok=%s)",
+                _bool_repair_applied,
+                _bool_repair_skipped,
+            )
+
         # ── Section 1 / vacuum-maintenance: ensure autovacuum reloptions ──
         # Backend-DB-space reclamation (commission
         # ``backend-db-space-reclamation``). Tightens the

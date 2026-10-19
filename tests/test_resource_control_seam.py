@@ -76,11 +76,21 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _MIGRATIONS_DIR = _REPO_ROOT / "daemon" / "migrations" / "versions"
 
 # The EXACT P1 migration set — AC6 asserts this never grows in P6.
+# 2026-10-19 (resource-telemetry fix): the post-fix audit file
+# 20261019_120822_alter_resource_monitor_booleans.sql is the ONLY
+# allowed addition and only carries ``MANUAL: TRUE`` + comments (no
+# executable DDL) — same pattern as the 20260928 expected-bytes
+# widening. The control-seam invariant — "P6 adds zero DDL" — is
+# preserved: this file is a P1 fix, NOT P6 work, and its MANUAL: TRUE
+# flag means the runner never auto-applies it (it is the
+# audit/operator document for the runtime hook in
+# ``_ensure_postgres_columns``).
 _P1_RESOURCE_MIGRATIONS = [
     "20261018_090001_create_resource_daemon_bucket.sql",
     "20261018_090002_create_resource_instance_sample.sql",
     "20261018_090003_create_resource_pid_map.sql",
     "20261018_090004_create_resource_limit_policy.sql",
+    "20261019_120822_alter_resource_monitor_booleans.sql",
 ]
 
 _DORMANT_COLUMNS = ("action", "action_by", "acted_at")
@@ -448,17 +458,23 @@ class TestT4EmptyPostBoot:
 
 class TestZeroDDL:
     def test_resource_migration_set_is_exactly_p1(self):
-        """``ls daemon/migrations/versions/ | grep -c resource`` == 4,
-        and the 4 are byte-for-byte the P1 filenames — P6 adds zero
-        DDL (phase6-plan D4; a missing column discovered by the boot
-        tests above is a P1 acceptance failure, not P6 work)."""
+        """``ls daemon/migrations/versions/ | grep -c resource`` == 5
+        (the four P1 CREATE files + the 2026-10-19 P1 fix audit file),
+        and the set is byte-for-byte the listed filenames. P6 adds
+        zero DDL (phase6-plan D4; a missing column discovered by the
+        boot tests above is a P1 acceptance failure, not P6 work).
+        The 2026-10-19 fix file is ``MANUAL: TRUE`` — comments-only,
+        no executable DDL (same pattern as the 20260928 expected-bytes
+        widening) — so the P6 invariant ("zero P6 DDL") is preserved
+        by the runtime hook in ``_ensure_postgres_columns``, not by
+        any .sql migration."""
         actual = sorted(
             p.name
             for p in _MIGRATIONS_DIR.glob("*.sql")
             if "resource" in p.name
         )
         assert actual == sorted(_P1_RESOURCE_MIGRATIONS)
-        assert len(actual) == 4
+        assert len(actual) == 5
 
 
 # ──────────────────────────────────────────────────────────────────────────
