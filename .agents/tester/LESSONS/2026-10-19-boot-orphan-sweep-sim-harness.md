@@ -16,6 +16,13 @@ The SQL selector (`find_orphaned_live_turns`) surfaces current-generation turns 
 
 Two test lanes ran simultaneously in the boot-orphan-sweep worktree (corpus + concurrency pack). Correct attribution: capture a pre-run file baseline, then `find -newermt` over the lane's exact wall-clock window; a directory mtime bump is NOT write evidence (a concurrent lane's `.pytest_cache` dir mtime bumped while its files stayed old). PYTHONDONTWRITEBYTECODE=1 holds for imports but NOT for pytest's assertion-rewrite hook — `-p no:cacheprovider` plus post-run window scan is the reliable combo.
 
-## 5. Prior commission lessons re-confirmed (no new content)
+## 5. Round-2 environment gotchas (merged-HEAD rebuild, main checkout — 2026-10-19)
+
+- **The MAIN checkout `.env` has NO `ENSEMBLE_SELF_ENV`** — unlike the feature worktree's fenced .env. Ambient poison `ENSEMBLE_SELF_ENV=live` SURVIVES `set -a; . ./.env; set +a` for that var (POSTGRES_* were correctly overridden). Fence protocol in the main checkout must explicitly `export ENSEMBLE_SELF_ENV=dev` AND assert it Python-side; a bash-only fence silently carries a live identity marker (only read by upgrade-lane identity detection, daemon/tools/upgrade_tools.py:228 — but assert anyway).
+- **`data/ensemble.json` in the main checkout is stale (`{"database":"sqlite"}`, Sep 24)** — `EnsembleConfig.load_or_create` must be forced onto a scratch `ENSEMBLE_DATA_DIR` or the harness resolves the wrong DB shape (the feature worktree had no such file).
+- **Double log-capture = phantom evidence**: attaching a capture buffer to both `daemon` and child `daemon.manager` double-captures every record via propagation — produced a phantom "2 resume schedules" on first attempt. Capture on the `daemon` root logger only.
+- Importing `daemon.api` (composition probe) is heavy (~40% wall increase) and appends harness-tagged lines to the gitignored `data/logs/ensemble.log` — run such imports with a scratch `ENSEMBLE_DATA_DIR` when possible; gitignored artifacts are acceptable IF porcelain stays byte-identical and it's disclosed.
+
+## 6. Prior commission lessons re-confirmed (no new content)
 
 POSIX `. ./.env` fence + Python re-derive + assert before ANY DB touch (ambient `10.44.0.2/ensemble_prod` poison present in every lane this session); `CAST(:p AS jsonb)` not `:p::jsonb`; `PIPESTATUS` is bash-only — under dash it exits 2 AFTER the inner block already reported success (don't rerun to "fix" a wrapper artifact).
