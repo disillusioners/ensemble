@@ -76,6 +76,25 @@ A detector firing with NO matching shape rule (e.g. the newest bucket
 has no future data to show recovery) falls back conservatively to
 ``spike`` with a WARN — a fired deviation is never silently dropped.
 
+**One-sided CUSUM (rationale).** ``cusum_m`` is computed and stored on
+every bucket (the plan's 6-float state includes both ``cusum⁺`` and
+``cusum⁻``) but no detector reads it. Detection is INTENTIONALLY
+ONE-SIDED upward:
+
+* the FE-frozen shape taxonomy is ``spike | ramp | leak | step`` —
+  every shape names an upward-resource event;
+* a downward shift IS a baseline-level change, not an anomaly — it
+  re-baselines through the next stratum-conditional cycle (the cold
+  stratum's own observations become the new baseline);
+* the configured-limit conditioning treats intentional reductions
+  (operator-managed ``limits.llm_concurrency`` drops) as stratum
+  changes that re-baseline, never as anomalies.
+
+``cusum_m`` is retained on the bucket struct for symmetry / future
+extension; it is not consulted by any detector today. Adding new
+shapes that read it would be a NEW feature (FE-frozen enum
+constraint — see phase4-plan §Structural).
+
 **Honesty rule.** ``contributors`` rank instances by share of the
 charged bytes in the finding window; shares sum ≤100 and the
 unattributable remainder is reported as an explicit
