@@ -144,6 +144,7 @@ from daemon.routers import (
     missions_router,          # /api/missions (M4-i pull-forward: mission read-model HTTP surface)
     tmp_images_router,        # /api/tmp_images (Phase 1: clipboard-image-chat upload+serve)
     prompts_router,           # /api/prompts (Phase B T5: agent-prompt-immutability approval REST)
+    resources_router,         # /api/resources (resource-cost-control P1: live + history + self-cost)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
@@ -1941,6 +1942,60 @@ async def lifespan(app: FastAPI):
             exc_info=True,
         )
 
+    # ── Resource monitor (resource-cost-control Phase 1) ──────────────
+    # Observability spine: ONE sampler thread + ONE flusher thread
+    # (both ``threading.Thread(daemon=True)`` — NEVER asyncio tasks;
+    # D1). Boot failure of either degrades the subsystem to
+    # disabled (D10) without crashing the lifespan. The facade is
+    # reachable via ``app.state.resource_monitor`` for the
+    # /api/resources/* endpoints (T8). Construction is wrapped in a
+    # try/except so a monitor error can never break boot.
+    try:
+        from daemon.services.resource_monitor.facade import (
+            build_resource_monitor,
+        )
+        _resource_monitor = build_resource_monitor(
+            config_resource_monitor=config.resource_monitor,
+            engine=manager.engine,
+            # P2 T10/T5 provider wiring (resource-cost-control
+            # integration lane): cheap lambdas over the live manager —
+            # the deep-scan instances mapping, the graph-task COUNT
+            # (len only, D5), and the messaging service's
+            # last-seen-message-count map (cheap dict .get). All
+            # defensive getattr — a missing attribute degrades that
+            # column to None/False, never raises on the tick.
+            graph_cache_provider=lambda: getattr(
+                manager, "instances", None
+            )
+            or {},
+            graph_tasks_provider=lambda: getattr(
+                manager, "_graph_tasks", None
+            )
+            or {},
+            state_message_counts_provider=lambda: getattr(
+                getattr(manager, "_messaging_service", None),
+                "_last_seen_message_count",
+                None,
+            )
+            or {},
+        )
+        _resource_monitor.start()
+        app.state.resource_monitor = _resource_monitor
+        if _resource_monitor.enabled:
+            logger.info("[ResourceMonitor] started")
+        else:
+            logger.warning(
+                "[ResourceMonitor] DISABLED — %s",
+                _resource_monitor.boot_error,
+            )
+    except Exception as resource_monitor_boot_exc:
+        app.state.resource_monitor = None
+        logger.error(
+            "[ResourceMonitor] DISABLED — boot failed: %s",
+            resource_monitor_boot_exc,
+            exc_info=True,
+        )
+
     # Reconcile terminal watches — notify watchers for jobs that already reached terminal state
     reconciled = await job_queue_service.reconcile_terminal_watches()
     if reconciled > 0:
@@ -2848,6 +2903,36 @@ async def lifespan(app: FastAPI):
             logger.warning(f"[StreamWatchdog] shutdown error: {e}")
     app.state.llm_stream_watchdog_thread = None
     app.state.llm_stream_watchdog_stop = None
+
+    # Resource monitor shutdown (resource-cost-control Phase 1).
+    # D10: set the stop Event then join with a timeout on a DETACHED
+    # thread — NEVER block the event loop (precedent
+    # ``daemon/services/file_change_monitor.py:180-196``). The
+    # sampler + flusher are daemon threads; a thread that fails to
+    # stop in time still dies with the process.
+    _resource_monitor = getattr(app.state, "resource_monitor", None)
+    if _resource_monitor is not None:
+        try:
+            _resource_monitor.stop()
+        except Exception as resource_monitor_stop_exc:  # noqa: BLE001
+            logger.warning(
+                "[ResourceMonitor] stop-event set failed: %s",
+                resource_monitor_stop_exc,
+            )
+        # Detach the join — never blocks the loop.
+        try:
+            threading.Thread(
+                target=_resource_monitor.join,
+                kwargs={"timeout": 5.0},
+                name="resource-monitor-shutdown",
+                daemon=True,
+            ).start()
+        except Exception as resource_monitor_join_exc:  # noqa: BLE001
+            logger.warning(
+                "[ResourceMonitor] detached join failed: %s",
+                resource_monitor_join_exc,
+            )
+    app.state.resource_monitor = None
 
     # Batch A — A3 (2026-09-11): stop the eligible-PENDING sweep.
     # The service exposes ``stop()`` which cancels + awaits the
@@ -4028,6 +4113,7 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     api_router.include_router(database_router)        # /api/database
     api_router.include_router(settings_router)       # /api/settings (Phase 1: user language preference)
     api_router.include_router(snapshots_router)        # /api/snapshots (snapshot-uiux v1: read-only list/detail/metrics)
+    api_router.include_router(resources_router)         # /api/resources (resource-cost-control P1: live + history + self-cost)
     api_router.include_router(skill_bank_router)        # /api/skill-bank (Skill Bank CRUD)
     api_router.include_router(blueprints_router)        # /api/projects/{project_id}/blueprints (Project Blueprints CRUD)
     api_router.include_router(workspace_router)         # /api/workspace (Phase 1: workspace viewer)

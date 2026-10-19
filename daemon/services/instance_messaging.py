@@ -31,6 +31,10 @@ from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .main_loop_bridge import MainLoopBridge
 from .pool_orchestrator import safe_notify_all_pools
+from .resource_monitor.charge import (
+    note_message_append as _charge_note_message_append,
+    note_message_replace as _charge_note_message_replace,
+)
 from .messaging_types import AsyncMessageResult, LinkageContractError
 from .message_tap import (  # Phase 1 C2 — langgraph-checkpoint-perf
     MessageTapSlot,
@@ -4995,8 +4999,16 @@ class InstanceMessagingService:
                                 msg_index = {m.id: i for i, m in enumerate(all_state_messages) if hasattr(m, 'id')}
                                 for m in node_messages:
                                     if hasattr(m, 'id') and m.id in msg_index:
+                                        # P2 T2 charge seam (resource-cost-control):
+                                        # replace ⇒ DELTA only (D2), before the
+                                        # list slot is overwritten. Identity no-op
+                                        # while the monitor is disabled.
+                                        _charge_note_message_replace(instance_id, m, all_state_messages[msg_index[m.id]])
                                         all_state_messages[msg_index[m.id]] = m  # Replace existing
                                     else:
+                                        # P2 T2 charge seam: append ⇒ deep-size of
+                                        # the message itself (D2).
+                                        _charge_note_message_append(instance_id, m)
                                         all_state_messages.append(m)
                         
                         if not any_new:

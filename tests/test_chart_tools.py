@@ -1219,3 +1219,365 @@ class TestGenerateChartRenderImageOptIn:
         """d5 spec: render_image=true → 1200s, false → 600s, hoisted."""
         assert chart_tools_module._RENDER_TIMEOUT_S == 1200.0
         assert chart_tools_module._DEFAULT_TIMEOUT_S == 600.0
+
+
+# ---------------------------------------------------------------------------
+# O2 — chromium render concurrency gate + hard child-killing timeout
+# (resource-cost-control). Ceremony-gated: the defaults ship in-branch and
+# take live effect only at the next promote ceremony; this test pack fakes
+# the charter lane entirely — no real renders, no chromium, zero live-host
+# mutation.
+# ---------------------------------------------------------------------------
+
+
+class TestRenderConcurrencyGate:
+    """O2 render gate: cap enforcement, saturation policy, timeout kill."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_render_gate(self):
+        """Fresh gate state per test — asyncio primitives are loop-bound."""
+        chart_tools_module._reset_render_gate_for_tests()
+        yield
+        chart_tools_module._reset_render_gate_for_tests()
+
+    def _manager(self, cap: int = 2):
+        manager = _make_manager()
+        manager.config.limits.chart_render_concurrency = cap
+        return manager
+
+    async def test_cap_enforced_under_saturation(self):
+        """cap=1: two concurrent renders — invoke #2 waits for slot #1.
+
+        The saturation policy is a bounded wait queue: the second render
+        queues (bounded), and proceeds ONLY after the first releases its
+        slot in the every-exit ``finally``.
+        """
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = self._manager(cap=1)
+        events: list[str] = []
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_invoke(**kwargs):
+            events.append("start")
+            started.set()
+            await release.wait()
+            events.append("end")
+            return ("ok", "child-1")
+
+        with patch(
+            "daemon.tools.chart_tools.invoke_agent_and_wait", slow_invoke
+        ):
+            tools = create_chart_tools(manager, "caller-1")
+            t1 = asyncio.create_task(
+                tools[0].coroutine(description="A", render_image=True)
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            t2 = asyncio.create_task(
+                tools[0].coroutine(description="B", render_image=True)
+            )
+            # cap=1 → render #2 must NOT have entered invoke while #1 holds
+            # the slot.
+            await asyncio.sleep(0.05)
+            assert events == ["start"]
+            release.set()
+            assert await asyncio.wait_for(
+                asyncio.gather(t1, t2), timeout=5
+            ) == ["ok", "ok"]
+            assert events.count("start") == 2
+
+    async def test_non_render_paths_do_not_consume_slots(self):
+        """``render_image=False`` proceeds while the gate is fully held.
+
+        Only renders consume slots (O2 brief — non-render paths must not).
+        """
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = self._manager(cap=1)
+        gate = chart_tools_module._get_render_gate(manager)
+        await gate.acquire()
+        try:
+            mock_invoke = AsyncMock(return_value=("ok", "child"))
+            with patch(
+                "daemon.tools.chart_tools.invoke_agent_and_wait", mock_invoke
+            ):
+                tools = create_chart_tools(manager, "caller-1")
+                result = await asyncio.wait_for(
+                    tools[0].coroutine(description="A", render_image=False),
+                    timeout=3,
+                )
+            assert result == "ok"
+        finally:
+            gate.release()
+
+    async def test_saturation_returns_typed_envelope_immediately(self):
+        """Queue full → immediate typed error envelope; invoke never called.
+
+        The wait queue itself is bounded (``_RENDER_QUEUE_MAX``) — beyond
+        it the render FAILS FAST instead of growing the queue unboundedly.
+        """
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = self._manager(cap=1)
+        gate = chart_tools_module._get_render_gate(manager)
+        await gate.acquire()  # exhaust the only slot
+        chart_tools_module._render_waiters = (
+            chart_tools_module._RENDER_QUEUE_MAX
+        )
+        try:
+            mock_invoke = AsyncMock(return_value=("ok", "child"))
+            with patch(
+                "daemon.tools.chart_tools.invoke_agent_and_wait", mock_invoke
+            ):
+                tools = create_chart_tools(manager, "caller-1")
+                result = await asyncio.wait_for(
+                    tools[0].coroutine(description="A", render_image=True),
+                    timeout=3,
+                )
+            assert result.startswith("Error: Chart render lane saturated")
+            mock_invoke.assert_not_called()
+        finally:
+            gate.release()
+            chart_tools_module._render_waiters = 0
+
+    async def test_slot_wait_expires_with_error_envelope(self, monkeypatch):
+        """Bounded slot wait: no slot within the bound → error envelope.
+
+        Never hangs the tool lane — the wait is capped well under the
+        600s/1200s render budgets.
+        """
+        from daemon.tools.chart_tools import create_chart_tools
+
+        monkeypatch.setattr(chart_tools_module, "_RENDER_SLOT_WAIT_S", 0.05)
+        manager = self._manager(cap=1)
+        gate = chart_tools_module._get_render_gate(manager)
+        await gate.acquire()
+        try:
+            mock_invoke = AsyncMock(return_value=("ok", "child"))
+            with patch(
+                "daemon.tools.chart_tools.invoke_agent_and_wait", mock_invoke
+            ):
+                tools = create_chart_tools(manager, "caller-1")
+                result = await asyncio.wait_for(
+                    tools[0].coroutine(description="A", render_image=True),
+                    timeout=5,
+                )
+            assert result.startswith("Error: Chart render lane busy")
+            mock_invoke.assert_not_called()
+        finally:
+            gate.release()
+
+    async def test_no_deadlock_after_saturation_then_release(self):
+        """Saturated → slot released → the queued render proceeds.
+
+        The every-exit ``finally`` guarantees the slot returns even when
+        the holder errors out; the queued waiter then acquires cleanly.
+        """
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = self._manager(cap=1)
+        gate = chart_tools_module._get_render_gate(manager)
+        await gate.acquire()
+
+        async def failing_invoke(**kwargs):
+            raise RuntimeError("boom")
+
+        with patch(
+            "daemon.tools.chart_tools.invoke_agent_and_wait", failing_invoke
+        ):
+            tools = create_chart_tools(manager, "caller-1")
+            waiter = asyncio.create_task(
+                tools[0].coroutine(description="A", render_image=True)
+            )
+            await asyncio.sleep(0.05)  # let the waiter park on the slot
+            gate.release()  # holder exits (here: explicit release)
+            result = await asyncio.wait_for(waiter, timeout=5)
+        assert result == "Error: Charter agent invocation failed: boom"
+
+    async def test_timeout_kills_child_fresh_path(self):
+        """Fresh-lane timeout → AWAITED terminate + bash-group sweep.
+
+        Closes the fire-and-forget gap: the kill happens before the tool
+        returns its timeout envelope, and the leftover chromium/mmdc
+        process groups are SIGKILLed by the belt-and-braces sweep.
+        """
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = self._manager(cap=2)
+        manager._instance_repository.get = MagicMock(
+            return_value=SimpleNamespace(status="running")
+        )
+        manager.terminate_instance = AsyncMock(return_value=True)
+
+        mock_invoke = AsyncMock(
+            return_value=(
+                "Error: Agent timed out after 1200.0s. "
+                "Instance abcdef12... may still be running.",
+                "child-1",
+            )
+        )
+        sweep = AsyncMock(return_value=2)
+        with patch(
+            "daemon.tools.chart_tools.invoke_agent_and_wait", mock_invoke
+        ), patch("daemon.tools.bash.get_bash_process_registry") as mock_reg:
+            mock_reg.return_value.cleanup_instance = sweep
+            tools = create_chart_tools(manager, "caller-1")
+            result = await tools[0].coroutine(
+                description="A", render_image=True
+            )
+
+        assert result.startswith("Error: Agent timed out after")
+        manager.terminate_instance.assert_awaited_once_with("child-1")
+        sweep.assert_awaited_once_with("child-1")
+
+    async def test_timeout_kill_skips_terminal_child(self):
+        """Terminal children are never killed (cleanup already ran)."""
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = self._manager(cap=2)
+        manager._instance_repository.get = MagicMock(
+            return_value=SimpleNamespace(status="completed")
+        )
+        manager.terminate_instance = AsyncMock(return_value=True)
+        sweep = AsyncMock(return_value=0)
+
+        mock_invoke = AsyncMock(return_value=(None, "child-1"))
+        with patch(
+            "daemon.tools.chart_tools.invoke_agent_and_wait", mock_invoke
+        ), patch("daemon.tools.bash.get_bash_process_registry") as mock_reg:
+            mock_reg.return_value.cleanup_instance = sweep
+            tools = create_chart_tools(manager, "caller-1")
+            result = await tools[0].coroutine(
+                description="A", render_image=True
+            )
+
+        assert result.startswith("Error: Charter agent timed out or failed")
+        manager.terminate_instance.assert_not_called()
+        sweep.assert_not_called()
+
+    async def test_reuse_lane_timeout_sweeps_without_terminating(self):
+        """M8 preserved: reuse timeout sweeps process tree, NEVER the charter.
+
+        The charter is shared/durable (M8) — the reuse lane's timeout
+        sweeps only its tracked bash process groups (chromium/mmdc);
+        ``terminate_instance`` must NOT be called on it.
+        """
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = self._manager(cap=2)
+        manager._instance_repository.get = MagicMock(
+            return_value=SimpleNamespace(status="running")
+        )
+        manager.terminate_instance = AsyncMock(return_value=True)
+        charter_row = SimpleNamespace(
+            instance_id="charter-9",
+            id="row-1",
+            status="idle",
+            agent_id="charter",
+            instance_metadata={"invoked_as_tool": True},
+            last_activity_at=None,  # NULL → sorts oldest (S8 direction rule)
+            created_at="2026-10-18T00:00:00+00:00",
+        )
+        manager._instance_repository.get_children = MagicMock(
+            return_value=[charter_row]
+        )
+
+        async def fake_reuse(**kwargs):
+            return (
+                "Error: Charter timed out after 1200.0s. "
+                "Instance charter-9... may still be running.",
+                "charter-9",
+            )
+
+        sweep = AsyncMock(return_value=1)
+        with patch.object(
+            chart_tools_module, "_reuse_charter", fake_reuse
+        ), patch("daemon.tools.bash.get_bash_process_registry") as mock_reg:
+            mock_reg.return_value.cleanup_instance = sweep
+            tools = create_chart_tools(manager, "caller-1")
+            result = await tools[0].coroutine(
+                description="A", render_image=True
+            )
+
+        assert result.startswith("Error: Charter timed out after")
+        sweep.assert_awaited_once_with("charter-9")
+        manager.terminate_instance.assert_not_called()
+
+    async def test_reuse_busy_reject_does_not_sweep(self):
+        """Busy/pause rejects never trigger a sweep (another waiter's render)."""
+        from daemon.tools.chart_tools import create_chart_tools
+
+        manager = self._manager(cap=2)
+        charter_row = SimpleNamespace(
+            instance_id="charter-9",
+            id="row-1",
+            status="idle",
+            agent_id="charter",
+            instance_metadata={"invoked_as_tool": True},
+            last_activity_at=None,  # NULL → sorts oldest (S8 direction rule)
+            created_at="2026-10-18T00:00:00+00:00",
+        )
+        manager._instance_repository.get_children = MagicMock(
+            return_value=[charter_row]
+        )
+        manager.terminate_instance = AsyncMock(return_value=True)
+
+        async def fake_reuse(**kwargs):
+            return (chart_tools_module._BUSY_MSG, "charter-9")
+
+        sweep = AsyncMock(return_value=1)
+        with patch.object(
+            chart_tools_module, "_reuse_charter", fake_reuse
+        ), patch("daemon.tools.bash.get_bash_process_registry") as mock_reg:
+            mock_reg.return_value.cleanup_instance = sweep
+            tools = create_chart_tools(manager, "caller-1")
+            result = await tools[0].coroutine(
+                description="A", render_image=True
+            )
+
+        assert result == chart_tools_module._BUSY_MSG
+        sweep.assert_not_called()
+        manager.terminate_instance.assert_not_called()
+
+
+class TestRenderConcurrencyConfig:
+    """O2 config surfaces: managed-key registration + default + clamping."""
+
+    def test_managed_key_registered_with_default_and_env(self):
+        from daemon.services.settings_service import MANAGED_KEYS
+
+        spec = MANAGED_KEYS["limits.chart_render_concurrency"]
+        assert spec.default == 2
+        assert spec.env_var == "LIMITS_CHART_RENDER_CONCURRENCY"
+        assert spec.config_path == "limits.chart_render_concurrency"
+        assert spec.value_type == "int"
+        assert spec.ge == 1
+        assert spec.requires_restart is True
+
+    def test_limits_config_field_mirrors_default(self):
+        """Registry default and pydantic Field default move together."""
+        from daemon.config import LimitsConfig
+
+        fields = LimitsConfig.model_fields
+        assert "chart_render_concurrency" in fields
+        assert fields["chart_render_concurrency"].default == 2
+
+    async def test_effective_cap_reads_clamps_and_falls_back(self):
+        """Consumer-side clamping into [1, 4]; fallback to default 2."""
+        manager = _make_manager()
+        cases: dict[object, int] = {
+            2: 2,
+            1: 1,
+            4: 4,
+            0: 1,
+            -3: 1,
+            99: 4,
+            "3": 3,
+            None: 2,
+            "abc": 2,
+        }
+        for raw, expected in cases.items():
+            manager.config.limits.chart_render_concurrency = raw
+            actual = chart_tools_module._effective_render_concurrency(manager)
+            assert actual == expected, f"raw={raw!r} → {actual}, want {expected}"

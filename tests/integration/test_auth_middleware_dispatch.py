@@ -182,16 +182,47 @@ class TestDispatchMatrix:
 
     def test_default_deny_smuggle_rejected(self, on_client):
         """AC-23: a path that is NOT tagged public must never pass —
-        including near-misses of public templates."""
+        including near-misses of public templates.
+
+        resource-cost-control P1 (aa95fc438) mounted
+        /api/resources — the new family's near-miss probes are
+        pinned here too: same-origin /api, UNAUTHENTICATED, the
+        default-deny dispatch gives the JSON 401 contract (never
+        200), exactly like every other untagged /api family.
+
+        The ``/livezz`` probe (non-/api near-miss of ``/livez``)
+        rides the SPA-shell lane: the catch-all ``/{path:path}``
+        serves ``index.html`` (200 text/html) for any path outside
+        the api/ws/vscode/views carve-outs WHEN a built FE dist
+        exists on disk (frontend/dist/.../index.html), and 404s
+        when it does not (AuthMiddleware is branch-untouched; the
+        SPA-asset pass rule IS the deployed deep-link-refresh
+        behavior). The AC-23 invariant that matters is never
+        violated either way: no JSON API 200 leaks — a 200 here is
+        the SPA shell itself (text/html only)."""
         client, fresh, _, _ = on_client
         for probe in (
             "/livez/../api/agents",
             "/api/health/extra",
-            "/livezz",
             "/api/auth/login/extra",
+            # resource-cost-control P1 family — default-deny holds.
+            "/api/resources/live",
+            "/api/resources/control-capabilities",
+            "/api/resources/anomalies",
+            "/livezz",  # SPA-shell lane — see the docstring contract
         ):
             r = fresh.get(probe, headers={"Accept": "application/json"})
-            assert r.status_code in (401, 404), probe  # never 200
+            if probe == "/livezz":
+                if r.status_code == 200:
+                    # SPA shell ONLY — never a JSON API body.
+                    assert "text/html" in r.headers.get("content-type", ""), (
+                        f"{probe}: 200 must be the SPA shell, got "
+                        f"{r.headers.get('content-type')!r}"
+                    )
+                else:
+                    assert r.status_code in (401, 404), probe
+            else:
+                assert r.status_code in (401, 404), probe  # never 200
 
 
 class TestS19AnonymousViewPaths:

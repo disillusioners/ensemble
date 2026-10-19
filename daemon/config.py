@@ -617,6 +617,73 @@ class LimitsConfig(BaseSettings):
         ),
     )
 
+    # ── O3 instance-graph cache bounding (resource-cost-control, 2026-10-18) ──
+    # BOTH keys are MANAGED daemon settings (db-backed-settings registry,
+    # ``daemon/services/settings_service.py``). Resolution ladder
+    # (highest tier wins; the daemon re-resolves at every boot):
+    #   1. DB override  (app_settings row — set from the settings API)
+    #   2. env var      LIMITS_INSTANCE_CACHE_TTL_HOURS /
+    #                   LIMITS_INSTANCE_CACHE_MAX_ENTRIES
+    #   3. this yaml literal (tier 3 — kept; edit here still works)
+    #   4. built-in default (ttl 6h, max 64)
+    # The pydantic fields below are the tier-3/4 carriers that the boot
+    # apply mutates IN PLACE (``apply_db_settings_overrides``), so the
+    # manager reads EFFECTIVE values off ``config.limits`` at __init__.
+    # Restart-required — the cache is sized once at manager construction.
+    #
+    # ``instance_cache_ttl_hours`` bounds how long a NON-ACTIVE
+    # (terminal / paused) instance's compiled graph stays in the RAM
+    # cache after its last DB ``updated_at`` (paused_at for PAUSED) —
+    # the existing TTL-sweep semantics, default NARROWED 24h → 6h.
+    # ``instance_cache_max_entries`` is an LRU cap over the cache;
+    # active (non-terminal) entries are NEVER evicted and recency is
+    # last graph ACCESS/reuse, not creation.
+    instance_cache_ttl_hours: int = Field(
+        default=6,
+        ge=0,
+        description=(
+            "Post-terminal TTL (hours) for the in-memory instance-graph "
+            "cache. Non-active cached graphs older than this are released "
+            "on the periodic sweep. Env LIMITS_INSTANCE_CACHE_TTL_HOURS."
+        ),
+    )
+    instance_cache_max_entries: int = Field(
+        default=64,
+        ge=1,
+        description=(
+            "LRU max-entries cap for the in-memory instance-graph cache. "
+            "Beyond the cap the least-recently-used NON-ACTIVE entries are "
+            "evicted (active instances are never evicted). Env "
+            "LIMITS_INSTANCE_CACHE_MAX_ENTRIES."
+        ),
+    )
+
+    # ── O2 chromium render concurrency (resource-cost-control) ──────────
+    # MANAGED daemon setting (db-backed-settings registry,
+    # ``daemon/services/settings_service.py``) driving the process-wide
+    # chromium render gate in ``daemon/tools/chart_tools.py``. Resolution
+    # ladder (highest wins; re-resolved at every boot):
+    #   1. DB override (app_settings row — set from the settings API)
+    #   2. env var LIMITS_CHART_RENDER_CONCURRENCY
+    #   3. this yaml literal (tier 3 — kept; edit here still works)
+    #   4. built-in default (2)
+    # CEREMONY-GATED: the default ships in the resource-cost-control
+    # branch; LIVE effect only at the next promote ceremony (the gate is
+    # built once per process at the first render — requires_restart).
+    # The consumption-side reader CLAMPS into [1, 4] with a WARN (the
+    # registry's v1 constraint model is ge-only; the gate must stay sane
+    # regardless of what any tier says).
+    chart_render_concurrency: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Max concurrent chromium renders across the daemon (O2). "
+            "Concurrent renders spawn 150-400MB chromium children each; "
+            "the gate bounds them. Effective value is clamped to [1, 4] "
+            "by the consumer. Env LIMITS_CHART_RENDER_CONCURRENCY."
+        ),
+    )
+
     # ── Governor recursive-spawn guard (Governor Recursion Guard, 2026-08-30) ──
     # Default ON (matches the locked design decision). The guard refuses to
     # spawn a governor instance when the prospective parent's chain (parent
@@ -661,6 +728,203 @@ class LimitsConfig(BaseSettings):
     # COMPLETED-UNVERIFIED), never as a GraphRecursionError → instance
     # 'error'. Restart-required (module global installed at boot).
     attestation_run_deny_cap: int = Field(default=100, ge=1)
+
+
+# ── ResourceMonitorConfig ──────────────────────────────────────────────────
+# resource-cost-control Phase 1 — observability spine (sampler + storage +
+# roll-down + endpoint). 12 knobs per architecture-recommendation.md §2.9.
+# Phase 4 extends the block with the 4 anomaly keys (anomaly_enabled /
+# anomaly_interval_s / anomaly_mad_threshold / anomaly_min_baseline_points)
+# per phase4-plan — 16 knobs total, env prefix unchanged.
+# Env prefix ``RESOURCE_MONITOR_`` (unified per council — see plan §2).
+#
+# YAML block (config.yaml `resource_monitor:`) MUST stay free of literal
+# values: pydantic-settings init-kwargs beat env vars, so any yaml literal
+# silently kills the RESOURCE_MONITOR_* env tier. Same trap as
+# LIMITS_LLM_CONCURRENCY (see db-backed-settings P1). The defaults below
+# ARE the values; the yaml block carries comments documenting the defaults
+# only, or omits the block entirely.
+#
+# Managed-key registry alignment is recorded as OPTIONAL future work
+# (decisions.md AD14); NOT implemented in this commission.
+class ResourceMonitorConfig(BaseSettings):
+    """Resource monitor configuration (resource-cost-control Phase 1).
+
+    16 knobs per architecture-recommendation.md §2.9 (binding) + the
+    Phase-4 anomaly extension (phase4-plan Deliverables):
+
+    * ``enabled``                  — global kill-switch (default ``True``).
+    * ``sample_seconds``           — tick interval (default 30, ge=15, le=60).
+    * ``retention_raw_minutes``    — raw-tier retention (default 2880 = 48h;
+      floor 1440 = 24h).
+    * ``retention_minute_hours``   — minute-rollup retention (default 336 =
+      14d; floor 168 = 7d).
+    * ``retention_hour_days``      — hour-rollup retention (default 180;
+      floor 90).
+    * ``detail_level``         — sampler scan depth (``auto``/``full``/
+      ``reduced``/``minimal``).
+    * ``instance_cap``         — max per-tick instance rows (default 50;
+      ≤64 per architecture-recommendation §2.4).
+    * ``self_cpu_budget_pct``      — EMA self-throttle trigger (default 1.0).
+    * ``self_rss_budget_mb``       — runtime alarm/throttle knob (default 50;
+      distinct from the test-level <20 MB sampler-RSS-delta floor).
+    * ``profiling_enabled``        — opt-in on-demand profiling
+      (default ``False``).
+    * ``profile_timebox_s``        — profiler time-box (default 30,
+      ge=10, le=120).
+    * ``flush_batch_seconds``      — flusher batching window (default 60).
+
+    Phase-4 anomaly keys (phase4-plan; extends §2.9, re-opens no ruling):
+
+    * ``anomaly_enabled``          — anomaly-pass kill-switch (default
+      ``True``); ``false`` ⇒ pass inert + endpoints return empty lists.
+    * ``anomaly_interval_s``       — monotonic-interval gate between passes
+      (default 600, ge=300, le=900 — the 5-15 min window). The pass
+      piggybacks the FLUSHER thread; no new thread.
+    * ``anomaly_mad_threshold``    — robust-z flag threshold (default 6.0).
+    * ``anomaly_min_baseline_points`` — cold-start guard (default 12): the
+      pass stays QUIET until a series carries ≥ this many baseline points.
+
+    Env: ``RESOURCE_MONITOR_*``. Restart-required for any flip (matches
+    ``LIMITS_*`` precedent).
+    """
+
+    model_config = SettingsConfigDict(env_prefix="RESOURCE_MONITOR_")
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Global kill-switch for the resource monitor subsystem. "
+            "Default ON; ``RESOURCE_MONITOR_ENABLED=false`` disables "
+            "sampling at boot without a code revert."
+        ),
+    )
+    sample_seconds: int = Field(
+        default=30,
+        ge=15,
+        le=60,
+        description=(
+            "Tick interval in seconds. Bound to [15, 60] per the "
+            "phase1-plan D3 ruling. Env RESOURCE_MONITOR_SAMPLE_SECONDS."
+        ),
+    )
+    retention_raw_minutes: int = Field(
+        default=2880,  # 48h
+        ge=1440,      # 24h floor
+        description=(
+            "Raw-tier retention in minutes. Default 2880 (48h); floor 1440 "
+            "(24h). Knob-tunable; sweep is floor-gated."
+        ),
+    )
+    retention_minute_hours: int = Field(
+        default=336,   # 14d
+        ge=168,        # 7d floor
+        description=(
+            "Minute-rollup retention in hours. Default 336 (14d); floor 168 "
+            "(7d)."
+        ),
+    )
+    retention_hour_days: int = Field(
+        default=180,
+        ge=90,  # 90d floor
+        description="Hour-rollup retention in days. Default 180; floor 90.",
+    )
+    detail_level: str = Field(
+        default="auto",
+        description=(
+            "Sampler scan depth. ``auto`` (default) lets the sampler "
+            "decide per-tick; ``full`` / ``reduced`` / ``minimal`` are "
+            "operator-pinned values."
+        ),
+    )
+    instance_cap: int = Field(
+        default=50,
+        ge=1,
+        le=64,
+        description=(
+            "Max per-tick instance rows emitted to the flusher (top-N + "
+            "overflow sentinel). Hard cap 64 per architecture-"
+            "recommendation §2.4 cardinality budget."
+        ),
+    )
+    self_cpu_budget_pct: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=100.0,
+        description=(
+            "EMA self-throttle trigger as percent of ``sample_seconds``. "
+            "EMA tick cost > this % ⇒ double interval + deep-scan off."
+        ),
+    )
+    self_rss_budget_mb: int = Field(
+        default=50,
+        ge=1,
+        description=(
+            "Runtime RSS budget for the sampler in MB. Distinct from "
+            "the test-level <20 MB sampler-RSS-delta floor (D12). "
+            "Exposed via /api/resources/self-cost (rss_budget_mb)."
+        ),
+    )
+    profiling_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in gate for on-demand profiling. Off by default; "
+            "operator flip required."
+        ),
+    )
+    profile_timebox_s: int = Field(
+        default=30,
+        ge=10,
+        le=120,
+        description="Profiler time-box in seconds. Bound to [10, 120].",
+    )
+    flush_batch_seconds: int = Field(
+        default=60,
+        ge=1,
+        description=(
+            "Flusher batching window in seconds. Bounded "
+            "executemany writes ride this window."
+        ),
+    )
+
+    # ── Phase-4 anomaly keys (phase4-plan; env tier unchanged) ─────────
+    anomaly_enabled: bool = Field(
+        default=True,
+        description=(
+            "Anomaly-pass kill-switch (Phase 4). Default ON; "
+            "``RESOURCE_MONITOR_ANOMALY_ENABLED=false`` makes the pass "
+            "inert (zero findings; /anomalies + evidence endpoints "
+            "return empty lists) without touching sampling."
+        ),
+    )
+    anomaly_interval_s: int = Field(
+        default=600,
+        ge=300,
+        le=900,
+        description=(
+            "Minimum seconds between anomaly passes. The pass "
+            "piggybacks the FLUSHER thread behind this monotonic-"
+            "interval gate — no new thread. Bound [300, 900] = the "
+            "5-15 min window per phase4-plan."
+        ),
+    )
+    anomaly_mad_threshold: float = Field(
+        default=6.0,
+        gt=0.0,
+        description=(
+            "Robust-z (MAD) flag threshold. A single-bucket deviation "
+            "beyond this many robust sigmas is a spike candidate."
+        ),
+    )
+    anomaly_min_baseline_points: int = Field(
+        default=12,
+        ge=1,
+        description=(
+            "Cold-start guard: the pass stays QUIET for a series "
+            "until its baseline carries ≥ this many points (default "
+            "12 = 1 h of 5-min buckets). Quiet, not an error."
+        ),
+    )
 
 
 class PersistenceConfig(BaseSettings):
@@ -2388,6 +2652,16 @@ class McpPoolConfig(BaseSettings):
     )
     health_check_interval: int = Field(default=60, ge=10, description="Health check interval in seconds")
     health_check_timeout: int = Field(default=5, ge=1, description="Health check timeout per connection in seconds")
+    idle_reap_seconds: int = Field(
+        default=1800,
+        ge=0,
+        description="Reap IDLE pooled STDIO connections after this many seconds "
+        "with no use (graceful close, then SIGKILL escalation via the transport "
+        "teardown; each reap is logged with the server name + idle duration). "
+        "Default 1800 (30 minutes). Set to 0 to disable idle reaping entirely. "
+        "In-use connections are never reaped — they are absent from the pool "
+        "queue while acquired.",
+    )
     tool_call_timeout: int = Field(
         default=120,
         ge=0,
@@ -4224,6 +4498,13 @@ class Config(BaseSettings):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
+    # resource-cost-control Phase 1 — observability spine (sampler +
+    # storage + roll-down + /api/resources/*). Peer of `limits:`. The
+    # yaml block is kept free of literal values so the env tier
+    # (RESOURCE_MONITOR_*) stays live — see ResourceMonitorConfig docstring.
+    resource_monitor: ResourceMonitorConfig = Field(
+        default_factory=ResourceMonitorConfig
+    )
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     queue: QueueConfig = Field(default_factory=QueueConfig)

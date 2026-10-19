@@ -37,6 +37,10 @@ npx playwright test project-tabs.spec.ts
 npx playwright show-report
 ```
 
+### Daemon-free page gates
+
+`npx playwright test --config=playwright.resources-gate.config.ts` runs the `/resources` page gate with ALL APIs stubbed via `page.route` — zero daemon, zero DB (same pattern as `playwright.snapshots-v2stub.config.ts`; port 14202, override via `RESOURCES_GATE_PORT`).
+
 ## Test Configuration
 
 The Playwright configuration (`playwright.config.ts`) handles:

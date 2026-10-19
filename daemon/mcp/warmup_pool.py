@@ -42,6 +42,19 @@ from daemon.services.secret_persistence_scrub import (
 from daemon.services.secret_resolver import resolve_secret_markers
 logger = logging.getLogger(__name__)
 
+# ── idle reap (O4 Part B) ────────────────────────────────────────────────────
+# Bound on the WHOLE teardown of a reaped idle connection. The STDIO transport
+# teardown performed inside the ``mcp`` library closes the child's stdin, waits
+# briefly for exit, and then escalates SIGTERM -> SIGKILL over the child's
+# process group (``mcp.os.posix.utilities.terminate_posix_process_tree``). This
+# window is the outer guard: a teardown that wedges past it must not stall the
+# pool's maintenance pass, so we hard-cancel the owning task (see
+# ``McpWarmupPool._reap_idle_connection``).
+REAP_CLOSE_GRACE_SECONDS: float = 10.0
+# How long to wait for a hard-cancelled teardown task to actually unwind before
+# giving up on it (the residual is logged at WARNING).
+REAP_CANCEL_JOIN_GRACE_SECONDS: float = 2.0
+
 # Module-level singleton
 _mcp_warmup_pool: McpWarmupPool | None = None
 
@@ -68,13 +81,21 @@ class McpWarmupPool:
 
     DEFAULT_POOL_SIZE = 1
 
-    def __init__(self, tool_call_timeout: int = 120) -> None:
+    def __init__(
+        self,
+        tool_call_timeout: int = 120,
+        idle_reap_seconds: int = 1800,
+    ) -> None:
         """Initialize the warmup pool with empty state.
 
         Args:
             tool_call_timeout: Default timeout (seconds) applied to MCP tool calls
                 when adapting discovered tools. Defaults to 120 for backward
                 compatibility.
+            idle_reap_seconds: Reap pooled connections that have been idle
+                (sitting unused in the pool queue) for at least this many
+                seconds. Default 1800 (30 minutes). ``0`` disables idle
+                reaping. Mirrors ``McpPoolConfig.idle_reap_seconds``.
         """
         self._pools: dict[str, asyncio.Queue[PooledConnection]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -86,6 +107,7 @@ class McpWarmupPool:
         self._replenish_tasks: set[asyncio.Task] = set()
         self._replenish_semaphore: asyncio.Semaphore = asyncio.Semaphore(2)
         self._tool_call_timeout: int = tool_call_timeout
+        self._idle_reap_seconds: int = idle_reap_seconds
         # Per-server timeout overrides. Servers without an entry fall back to
         # ``self._tool_call_timeout``. A value of ``0`` is meaningful here —
         # it disables the per-call timeout wrap entirely, so we must use
@@ -564,6 +586,10 @@ class McpWarmupPool:
         Perform health check on all pooled connections.
 
         Checks each connection via ping, evicts dead ones, replenishes to target size.
+        Also reaps connections that have been idle longer than
+        ``idle_reap_seconds`` (``0`` disables idle reaping) — see
+        :meth:`_reap_idle_connection`. Both eviction paths ride this single
+        existing maintenance pass; there is no separate loop or thread.
         """
         for server_name, pool in self._pools.items():
             lock = self._locks[server_name]
@@ -579,6 +605,21 @@ class McpWarmupPool:
                 # Check health and separate healthy from dead
                 healthy: list[PooledConnection] = []
                 for conn in snapshot:
+                    # Idle reap (O4 Part B). Only connections resting in the
+                    # QUEUE reach this loop: a connection that is in use has
+                    # been ``acquire()``-d out of the queue (ownership
+                    # transferred to the caller), so it is structurally absent
+                    # here and can never be reaped mid-use. Should such a
+                    # connection ever return to the pool it is re-considered on
+                    # a later pass. The snapshot-and-drain under the per-server
+                    # lock is what makes this guard airtight.
+                    if self._idle_reap_seconds > 0:
+                        idle_seconds = time.monotonic() - conn.created_at
+                        if idle_seconds >= self._idle_reap_seconds:
+                            await self._reap_idle_connection(
+                                server_name, conn, idle_seconds
+                            )
+                            continue
                     try:
                         await asyncio.wait_for(conn.session.send_ping(), timeout=5.0)
                         healthy.append(conn)
@@ -592,9 +633,80 @@ class McpWarmupPool:
                 for conn in healthy:
                     await pool.put(conn)
 
-                # Replenish if below target
+                # Replenish if below target. Reaped-as-idle slots refill here
+                # on the same cadence as health-evicted ones — the pool keeps
+                # its warm-start contract; only a connection's LIFETIME is
+                # bounded by ``idle_reap_seconds``.
                 if len(healthy) < self._pool_sizes.get(server_name, self.DEFAULT_POOL_SIZE):
                     self._start_tracked_replenish(server_name)
+
+    async def _reap_idle_connection(
+        self,
+        server_name: str,
+        conn: PooledConnection,
+        idle_seconds: float,
+    ) -> None:
+        """Reap one idle pooled connection with a bounded, escalating teardown.
+
+        Called by :meth:`health_check` for a connection that has been idle at
+        least ``idle_reap_seconds``. Uses the standard close path
+        (``session.stop()`` + stream-CM ``__aexit__``), which for the STDIO
+        transport closes the child's stdin and — inside the ``mcp`` library —
+        waits briefly before escalating SIGTERM -> SIGKILL over the child's
+        process group. That IS the graceful-terminate -> SIGKILL-after-a-grace
+        contract; this method adds the outer bound (``REAP_CLOSE_GRACE_SECONDS``)
+        so a wedged teardown cannot stall the pool's maintenance pass, plus a
+        hard-cancel escalation on expiry. Every reap/reap-failure is logged
+        with the server name and the idle duration.
+
+        Args:
+            server_name: Server the connection belongs to.
+            conn: The idle pooled connection to reap.
+            idle_seconds: How long ``conn`` has been idle (for the log/audit).
+        """
+        logger.info(
+            f"Reaping idle pooled MCP connection: server='{server_name}' "
+            f"idle={idle_seconds:.0f}s (idle_reap_seconds={self._idle_reap_seconds})"
+        )
+        try:
+            await asyncio.wait_for(
+                self._close_connection(conn), timeout=REAP_CLOSE_GRACE_SECONDS
+            )
+            return
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Idle reap teardown for server='{server_name}' exceeded the "
+                f"{REAP_CLOSE_GRACE_SECONDS:.0f}s grace window "
+                f"(idle={idle_seconds:.0f}s); escalating to hard teardown cancel"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Idle reap teardown error for server='{server_name}' "
+                f"(idle={idle_seconds:.0f}s): {type(e).__name__}: {e}"
+            )
+            return
+
+        # Escalation: the graceful window expired. Hard-cancel the task that
+        # owns the inner context manager so the wedged ``__aexit__`` cannot
+        # keep a live task (and the child it holds) around, and so the
+        # maintenance pass always makes progress. Non-``asyncio.Task`` stubs
+        # (test fakes) are left alone.
+        task = getattr(conn.stream_cm, "background_task", None)
+        if isinstance(task, asyncio.Task) and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait(
+                    {task}, timeout=REAP_CANCEL_JOIN_GRACE_SECONDS
+                )
+            except Exception:
+                pass
+            if not task.done():
+                logger.warning(
+                    f"Idle reap teardown for server='{server_name}' still "
+                    f"pending after hard cancel "
+                    f"(idle={idle_seconds:.0f}s) — child may linger until "
+                    f"process exit"
+                )
 
     async def _health_check_loop(self, interval: float) -> None:
         """

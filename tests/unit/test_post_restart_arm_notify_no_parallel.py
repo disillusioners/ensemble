@@ -70,6 +70,7 @@ import pytest
 # PR description. Silent relaxation is a release blocker.
 PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     "agents_router",        # /api/agents
+    "custom_agents_router", # /api/custom-agents (Phase C: R-A1/A2 lifecycle)
     "instances_router",     # /api/instances
     "messages_router",      # /api/instances/{id}/messages, /api/instances/{id}/events
     "sources_router",       # /api/sources
@@ -90,6 +91,7 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     "database_router",      # /api/database
     "settings_router",      # /api/settings
     "snapshots_router",     # /api/snapshots (snapshot-uiux v1: reviewed 28th router admission)
+    "resources_router",     # /api/resources (resource-cost-control P1: live/history/self-cost)
     "skill_bank_router",    # /api/skill-bank
     "blueprints_router",    # /api/projects/{project_id}/blueprints
     "workspace_router",     # /api/workspace
@@ -97,13 +99,14 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     "maintenance_router",   # /api/maintenance
     "plane_router",         # /api/plane
     "tmp_images_router",    # /api/tmp_images
+    "prompts_router",       # /api/prompts (agent-prompt-immutability Phase B T5)
     # oauth2-auth v1 DESIGNED mounts (refreshed pin): +2 over the
-    # pre-auth baseline, both registered ONLY under `if auth_enabled:`
+    # unconditional set, both registered ONLY under `if auth_enabled:`
     # in daemon/api.py (OFF-state route table untouched, G3.2).
     # Accounting matches tests/unit/test_router_scope_manifest.py
-    # (30 textual include_router matches = 28 unconditional + these
+    # (33 textual include_router matches = 31 unconditional + these
     # 2 auth-ON-gated families). The guard's intent is UNCHANGED: an
-    # unauthorized 31st mount still fails this test loudly.
+    # unauthorized 34th mount still fails this test loudly.
     "mcp_kb_keys_router",   # /api/mcp/kb/keys (OAuth2 human lane)
     "auth_router",          # /api/auth/*
 )

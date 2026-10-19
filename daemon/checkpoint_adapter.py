@@ -23,7 +23,7 @@ operations (aget, aput, etc.) that are not covered by this adapter.
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Optional
 
 try:
     # Incident 2026-10-10 review fix: the retry proxy subclasses
@@ -44,6 +44,9 @@ except ImportError:
     BaseCheckpointSaver = object  # type: ignore[assignment,misc]
 
 from daemon._redact import redact_exc_str
+# P2 T3 charge seam (resource-cost-control): stdlib-only module, no
+# import-cycle risk — see daemon/services/resource_monitor/charge.py.
+from daemon.services.resource_monitor.charge import note_checkpoint_read
 from daemon.constants import (
     CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE,
     CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES,
@@ -133,6 +136,49 @@ def _is_retryable_connection_error(exc: BaseException) -> bool:
     ):
         return True
     return False
+
+
+def _charge_instance_from_args(args: tuple, kwargs: dict) -> Optional[str]:
+    """Extract the requesting instance_id from a checkpoint READ call.
+
+    MECHANISM (pinned for the P2 charge seam, T3 / plan D3): LangGraph
+    invokes ``aget`` / ``aget_tuple`` with the runnable config as the
+    first positional argument, and every ensemble graph runs with
+    ``config = {"configurable": {"thread_id": instance_id}}``
+    (instance_messaging.py:1195/:1830/:1844, manager.py:11275/:11296;
+    ``thread_id == instance_id`` per manager.py:3162). The read call
+    site therefore ALREADY carries the instance identity — no
+    context-var threading is needed. Unattributable calls (no config /
+    no thread_id) are skipped, never guessed.
+    """
+    if args:
+        cfg = args[0]
+    else:
+        cfg = kwargs.get("config")
+    if not isinstance(cfg, dict):
+        return None
+    configurable = cfg.get("configurable")
+    if not isinstance(configurable, dict):
+        return None
+    thread_id = configurable.get("thread_id")
+    if isinstance(thread_id, str) and thread_id:
+        return thread_id
+    return None
+
+
+def _charge_checkpoint_read(args: tuple, kwargs: dict, result: Any) -> None:
+    """Charge a decoded checkpoint READ payload to the requesting
+    instance (P2 T3). Fires ONCE per successful outer call — the retry
+    wrapper (``_call_with_retry``) has already settled when this runs,
+    so a transient connection retry NEVER double-charges (AC1). All
+    failure modes are swallowed inside the charge module: observability
+    must never break the read path (R1)."""
+    if result is None:
+        return
+    instance_id = _charge_instance_from_args(args, kwargs)
+    if instance_id is None:
+        return
+    note_checkpoint_read(instance_id, result)
 
 
 def _wrap_saver_with_connection_retry(saver: Any) -> Any:
@@ -316,10 +362,17 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         # a checkpoint write). This is the sibling of the
         # ``redact_exc_str`` log-scrub in ``_call_with_retry``.
         async def aget(self, *args, **kwargs):
-            return await self._call_with_retry("aget", args, kwargs)
+            # P2 T3 charge seam: decoded payload charged AFTER the retry
+            # wrapper settles ⇒ transient retry charges ONCE (AC1).
+            result = await self._call_with_retry("aget", args, kwargs)
+            _charge_checkpoint_read(args, kwargs, result)
+            return result
 
         async def aget_tuple(self, *args, **kwargs):
-            return await self._call_with_retry("aget_tuple", args, kwargs)
+            # P2 T3 charge seam: same once-per-outer-call contract.
+            result = await self._call_with_retry("aget_tuple", args, kwargs)
+            _charge_checkpoint_read(args, kwargs, result)
+            return result
 
         async def aput(self, *args, **kwargs):
             args, kwargs = scrub_saver_write_args("aput", args, kwargs)

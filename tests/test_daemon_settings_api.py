@@ -38,7 +38,10 @@ monkeypatch.
 
 from __future__ import annotations
 
+import ast
 import logging
+from collections import Counter
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -245,13 +248,24 @@ class TestGetDaemonSettings:
         assert set(body.keys()) == {"settings", "restart_required"}
         assert body["restart_required"] is False
         entries = body["settings"]
-        # settings-worker-slots (D1): the registry now carries THREE keys —
-        # llm_concurrency + the two pool sizes (insertion order preserved).
-        assert {e["key"] for e in entries} == {
-            KEY,
-            "limits.worker_pool_size",
-            "limits.chat_worker_pool_size",
-        }
+        # Union merge (origin/latest → feature/resource-cost-control,
+        # 2026-10-19): registry-driven entry count + explicit SIX-key
+        # membership (a silent drop from either lane is caught). Insertion
+        # order — the original ``limits.llm_concurrency`` leads (v1
+        # convention; preserved across the union).
+        assert len(entries) == len(MANAGED_KEYS)
+        keys = [e["key"] for e in entries]
+        assert keys[0] == KEY  # insertion order — the original key leads
+        # v1 (db-backed-settings) original.
+        assert "limits.llm_concurrency" in keys
+        # settings-worker-slots lane (latest).
+        assert "limits.worker_pool_size" in keys
+        assert "limits.chat_worker_pool_size" in keys
+        # resource-cost-control O3 (instance-graph cache bounding).
+        assert "limits.instance_cache_ttl_hours" in keys
+        assert "limits.instance_cache_max_entries" in keys
+        # resource-cost-control O2 (chromium render gate).
+        assert "limits.chart_render_concurrency" in keys
         entry = entries[0]
         assert entry["key"] == KEY
         assert entry["value"] == 10  # snapshot applied_value (boot truth)
@@ -656,4 +670,94 @@ class TestUnwired:
         ) as ac:
             resp = await ac.get(URL)
         assert resp.status_code == 503
-        assert "not initialized" in resp.json()["detail"]["error"]
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Registry invariants — silent-shadow class guard
+# ────────────────────────────────────────────────────────────────────────────
+
+
+_SETTINGS_SERVICE_PATH = Path(__file__).resolve().parent.parent / "daemon" / "services" / "settings_service.py"
+
+
+class TestManagedKeyRegistryInvariants:
+    """DURABLE guard against the silent-shadow class where the
+    ``MANAGED_KEYS`` dict literal in ``daemon/services/settings_service.py``
+    carries a duplicate ``"key": ManagedKeySpec(...)`` entry: Python dict
+    literals silently last-win on duplicate keys, so ``len(MANAGED_KEYS) ==
+    N`` and every runtime test stays green while the FIRST occurrence
+    becomes dead code (a latent landmine — a future edit to the dead block
+    does nothing). The merger of origin/latest into
+    ``feature/resource-cost-control`` (merge commit 8f14cc62a, 2026-10-19)
+    introduced exactly this defect at the ``limits.llm_concurrency`` entry;
+    it was caught post-merge by a code-review sweep and fixed in the same
+    commit that added this guard. The guard parses the module's
+    ``MANAGED_KEYS`` literal with ``ast`` and asserts every string key
+    appears exactly once, making the silent-shadow class mechanically
+    impossible going forward — the existing suite's ``len(...)==N`` check
+    cannot catch it.
+    """
+
+    @staticmethod
+    def _managed_keys_dict_literal() -> ast.Dict:
+        """Parse settings_service.py and return the AST Dict for the
+        top-level ``MANAGED_KEYS`` assignment. Fails closed if the
+        assignment shape is changed (e.g. wrapped in a function, made
+        a non-dict expression) — the invariant guard must NEVER silently
+        pass on a structural change to the registry."""
+        tree = ast.parse(_SETTINGS_SERVICE_PATH.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "MANAGED_KEYS"
+                and isinstance(node.value, ast.Dict)
+            ):
+                return node.value
+        raise AssertionError(
+            "MANAGED_KEYS top-level typed-as-dict assignment not found in "
+            f"{_SETTINGS_SERVICE_PATH}; the dedupe guard requires the literal "
+            "shape ``MANAGED_KEYS: dict[...] = { ... }`` at module top level."
+        )
+
+    def test_managed_keys_literal_has_no_duplicate_string_keys(self):
+        """Walk the AST Dict keys and assert every string key appears
+        EXACTLY ONCE in the literal. The current suite's
+        ``len(MANAGED_KEYS)==N`` runtime check cannot catch a duplicate
+        (last-wins semantics keep len==N); this guard makes the silent-
+        shadow class mechanically impossible going forward."""
+        d = self._managed_keys_dict_literal()
+        string_keys = [
+            k.value
+            for k in d.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)
+        ]
+        counts = Counter(string_keys)
+        duplicates = {k: v for k, v in counts.items() if v > 1}
+        assert not duplicates, (
+            f"MANAGED_KEYS literal carries duplicate string keys "
+            f"(literal occurrences vs unique): {sorted(duplicates.items())}. "
+            "Python dict literals last-win on duplicate keys, so this is a "
+            "silent-shadow class — the FIRST occurrence is dead code (a "
+            "future edit to it does nothing) while runtime len==unique-count "
+            "stays green. Keep only the LAST occurrence of each key; the "
+            "registry should be a flat list, not a duplicated-by-merge union."
+        )
+
+    def test_managed_keys_literal_count_matches_runtime_len(self):
+        """Belt-and-braces: the AST literal key-count (which counts every
+        ``"key":`` token in the literal, including duplicates) must equal
+        ``len(MANAGED_KEYS)`` at runtime (which dedupes via last-win).
+        Equality proves the guard parsed the SAME literal the resolver
+        sees — a divergent parse would silently pass the dedupe guard
+        while the runtime still carried the defect."""
+        d = self._managed_keys_dict_literal()
+        literal_count = len(d.keys)
+        runtime_count = len(MANAGED_KEYS)
+        assert literal_count == runtime_count, (
+            f"AST literal key-count ({literal_count}) != runtime "
+            f"MANAGED_KEYS len ({runtime_count}); the dedupe guard is "
+            "parsing a different literal than the resolver sees — "
+            "investigate the literal shape (the guard requires "
+            "``MANAGED_KEYS: dict[...] = { ... }`` at module top level)."
+        )

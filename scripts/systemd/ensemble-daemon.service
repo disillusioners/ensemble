@@ -56,6 +56,19 @@
 #                            (DAEMON_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS) +
 #                            launcher margin 70s → 90 bounds the systemd
 #                            side (KillMode=mixed escalates after this).
+#   Environment=MALLOC_ARENA_MAX=2  static glibc allocator cap (O1,
+#                            resource-cost-control 2026-10-18): glibc
+#                            defaults to 8 × CPU-core malloc arenas and
+#                            never shrinks them back — per-thread arena
+#                            retention is a top contributor to daemon
+#                            anon RSS on multi-core hosts. MALLOC_ARENA_MAX
+#                            is a libc tunable parsed at libc init (before
+#                            the process starts), so it must ride the unit
+#                            env — an in-process setdefault is too late
+#                            for the daemon itself. Static and host-
+#                            independent (same value every install); an
+#                            operator can still override per install via
+#                            a systemd drop-in override.conf.
 #   NO WatchdogSec — DEFERRED BY DESIGN (P4 decision; sd_notify is not wired
 #   into the launcher/daemon; a WatchdogSec without notify would be an
 #   unconditional restart loop). See docs/runbooks/systemd-adoption.md.
@@ -86,6 +99,11 @@ KillMode=mixed
 StandardOutput=journal
 StandardError=journal
 TimeoutStopSec=90
+# Allocator cap (resource-cost-control O1, 2026-10-18): static, host-
+# independent directive — see the header rationale. The env-lines token
+# below splices ONLY the staged PORT/POSTGRES_* keys; this line is the
+# shared baseline (override per install via a systemd drop-in).
+Environment=MALLOC_ARENA_MAX=2
 # NO WatchdogSec — deferred by design (see header + systemd-adoption.md).
 __ENV_LINES__
 

@@ -60,6 +60,10 @@ export const routes: Routes = [
   { path: 'persona', loadComponent: () => import('./pages/persona/persona.component').then(m => m.PersonaComponent), title: 'Persona' },
   { path: 'schedules', loadComponent: () => import('./pages/schedules/schedules.component').then(m => m.SchedulesComponent) },
   { path: 'snapshots', loadComponent: () => import('./pages/snapshots/snapshots.component').then(m => m.SnapshotsComponent), title: 'Snapshots' },
+  // Resources — resource-observability page (live snapshot + history).
+  // Lazy loadComponent keeps the page cost off the initial bundle
+  // (mirrors the snapshots route pattern).
+  { path: 'resources', loadComponent: () => import('./pages/resources/resources.component').then(m => m.ResourcesComponent), title: 'Resources' },
   { path: 'mcp-servers', loadComponent: () => import('./components/mcp-server-list/mcp-server-list.component').then(m => m.McpServerListComponent) },
   { path: 'migration', loadComponent: () => import('./components/migration/migration.component').then(m => m.MigrationComponent) },
   // /plan is a thin route whose content is rendered by the root-mounted

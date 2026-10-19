@@ -1,0 +1,233 @@
+// Raw slate hex per D5 — the component-scoped `:root` custom-property
+// pattern is provably inert in this codebase; do not reintroduce it.
+$bg-card: #1e293b;
+$bg-card-alt: #172033;
+$border-color: #334155;
+$text-primary: #f1f5f9;
+$text-secondary: #94a3b8;
+$text-muted: #64748b;
+$accent-cyan: #10a7f7;
+$error: #ef4444;
+
+:host {
+  display: block;
+  width: 100%;
+}
+
+.live-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.live-meta {
+  font-size: 0.8rem;
+  color: $text-muted;
+
+  .meta-sep {
+    margin: 0 0.4rem;
+  }
+}
+
+// ── Skeleton (first fetch only) ─────────────────────────────────────
+
+.live-skeleton {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+}
+
+.skeleton-card {
+  background: $bg-card-alt;
+  border: 1px solid $border-color;
+  border-radius: 8px;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.skeleton-line {
+  height: 0.75rem;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #1e293b 25%, #2b3a52 50%, #1e293b 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+
+  &.skeleton-title {
+    width: 40%;
+    height: 1rem;
+  }
+
+  &.skeleton-wide {
+    width: 80%;
+  }
+
+  &.skeleton-mid {
+    width: 60%;
+  }
+
+  &.skeleton-short {
+    width: 35%;
+  }
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+// ── Single error branch (D7) ────────────────────────────────────────
+
+.live-error {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: rgba($error, 0.08);
+  border: 1px solid rgba($error, 0.45);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+
+  .error-icon {
+    color: $error;
+    flex: 0 0 auto;
+  }
+
+  .error-copy {
+    flex: 1;
+
+    h3 {
+      margin: 0 0 0.25rem;
+      font-size: 1rem;
+      color: $text-primary;
+    }
+
+    p {
+      margin: 0;
+      color: $text-secondary;
+      font-size: 0.85rem;
+    }
+  }
+}
+
+// ── Self-cost chip ──────────────────────────────────────────────────
+
+.self-cost-chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem;
+  align-self: flex-start;
+  background: $bg-card-alt;
+  border: 1px solid $border-color;
+  border-radius: 999px;
+  padding: 0.35rem 1rem;
+  font-size: 0.78rem;
+  color: $text-secondary;
+
+  .chip-icon {
+    font-size: 1rem;
+    width: 1rem;
+    height: 1rem;
+    color: $accent-cyan;
+  }
+
+  .chip-title {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.68rem;
+    color: $text-muted;
+  }
+
+  .chip-item {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.3rem;
+  }
+
+  .chip-value {
+    color: $text-primary;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+}
+
+// ── Stat cards ──────────────────────────────────────────────────────
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+}
+
+.stat-card {
+  background: $bg-card;
+  border: 1px solid $border-color;
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+
+  h3 {
+    margin: 0 0 0.35rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: $text-primary;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .stat-subtitle {
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: $text-muted;
+  }
+}
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.82rem;
+
+  .stat-label {
+    color: $text-secondary;
+  }
+
+  .stat-value {
+    color: $text-primary;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.honesty-tag {
+  font-size: 0.62rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: $accent-cyan;
+  border: 1px solid rgba($accent-cyan, 0.5);
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+}
+
+.honesty-note {
+  margin: 0.4rem 0 0;
+  font-size: 0.72rem;
+  color: $text-muted;
+  line-height: 1.4;
+
+  em {
+    color: $text-secondary;
+    font-style: normal;
+  }
+}

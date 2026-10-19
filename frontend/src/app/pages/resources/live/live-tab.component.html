@@ -1,0 +1,181 @@
+<div class="live-tab" data-test="live-tab">
+  <!-- D7: skeleton fires ONLY before the first successful fetch. -->
+  @if (showSkeleton()) {
+    <div class="live-skeleton" data-test="live-skeleton" aria-busy="true">
+      @for (i of [1, 2, 3]; track i) {
+        <div class="skeleton-card">
+          <div class="skeleton-line skeleton-title"></div>
+          <div class="skeleton-line skeleton-wide"></div>
+          <div class="skeleton-line skeleton-mid"></div>
+          <div class="skeleton-line skeleton-short"></div>
+        </div>
+      }
+    </div>
+  }
+
+  <!-- D7: exactly ONE error branch — banner with a Retry CTA. Retained
+       last-good data keeps rendering underneath (background failure). -->
+  @if (showError()) {
+    <div class="live-error" data-test="live-error" role="alert">
+      <mat-icon class="error-icon">error_outline</mat-icon>
+      <div class="error-copy">
+        <h3>Resource monitor unreachable</h3>
+        <p>{{ error() }}</p>
+      </div>
+      <button mat-flat-button color="primary" (click)="onRetry()" data-test="live-retry">
+        <mat-icon>refresh</mat-icon>
+        Retry
+      </button>
+    </div>
+  }
+
+  @if (live(); as payload) {
+    <div class="live-content" data-test="live-content">
+      <div class="live-meta">
+        <span>Sampled {{ tsLabel(payload.ts) }} UTC</span>
+        <span class="meta-sep">·</span>
+        <span>level {{ payload.sample_level }}</span>
+      </div>
+
+      <!-- Self-cost chip — the monitor's own footprint (AC6).
+           The §2.8 self-cost wire is nullable on `cpu_pct` / `threads`
+           (None on monitor-disabled / first-tick / ring-empty); null-safe
+           `fmt()` covers the numeric rows, `?? '—'` covers the literal
+           scalar. Counts (`samples` / `ticks_skipped`) are NON-null on
+           the wire (literal 0 in the empty shape). -->
+      @if (selfCost(); as cost) {
+        <div
+          class="self-cost-chip"
+          data-test="self-cost-chip"
+          [matTooltip]="
+            'The resource monitor measures itself: cpu %, cumulative CPU seconds, buffer memory (MB), threads, samples taken, and ticks skipped while the previous sample was still running.'
+          "
+        >
+          <mat-icon class="chip-icon">speed</mat-icon>
+          <span class="chip-title">monitor cost</span>
+          <span class="chip-item"><span class="chip-value">{{ fmt(cost.cpu_pct, 2) }}%</span>cpu</span>
+          <span class="chip-item"><span class="chip-value">{{ fmt(cost.cumulative_cpu_s, 1) }}s</span>cpu total</span>
+          <span class="chip-item"><span class="chip-value">{{ selfCostBuffersMb() }}</span>MB buffers</span>
+          <span class="chip-item"><span class="chip-value">{{ cost.threads ?? '—' }}</span>threads</span>
+          <span class="chip-item"><span class="chip-value">{{ cost.samples }}</span>samples</span>
+          <span class="chip-item"><span class="chip-value">{{ cost.ticks_skipped }}</span>ticks skipped</span>
+        </div>
+      }
+
+      <div class="stat-grid">
+        <!-- Daemon process card.
+           The §2.8 daemon wire is nullable on every scalar (D11 empty
+           shape populates with literal None) — `fmt()` covers the
+           numeric rows, `?? '—'` covers the literal scalars, and
+           `uptimeLabel()` itself accepts nullable input. -->
+        <section class="stat-card" data-test="stat-daemon">
+          <h3>Daemon process</h3>
+          <div class="stat-row">
+            <span class="stat-label">PID</span>
+            <span class="stat-value">{{ payload.daemon.pid ?? '—' }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">CPU</span>
+            <span class="stat-value" data-test="stat-daemon-cpu">{{ fmt(payload.daemon.cpu_pct, 1) }}%</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">RSS</span>
+            <span class="stat-value" data-test="stat-daemon-rss">{{ fmt(payload.daemon.rss_mb, 0) }} MB</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Threads</span>
+            <span class="stat-value">{{ payload.daemon.threads ?? '—' }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">FDs</span>
+            <span class="stat-value">{{ payload.daemon.fds ?? '—' }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Uptime</span>
+            <span class="stat-value">{{ uptimeLabel(payload.daemon.uptime_s) }}</span>
+          </div>
+        </section>
+
+        <!-- Cgroup memory card.
+           `payload.cgroup` is nullable on the wire (None on monitor
+           absent / first-tick / non-cgroup-v2). The `?.` chains
+           resolve each scalar to `undefined` when the block is
+           absent; `fmt()` renders '—' for any non-finite value, and
+           the literal `?? '—'` covers `nr_throttled`. Card shape
+           stays constant — the user still sees "Cgroup memory" with
+           placeholders rather than a missing card. -->
+        <section class="stat-card" data-test="stat-cgroup-memory">
+          <h3>Cgroup memory</h3>
+          <div class="stat-row">
+            <span class="stat-label">Current</span>
+            <span class="stat-value">{{ fmt(payload.cgroup?.memory?.current_mb, 0) }} MB</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Peak</span>
+            <span class="stat-value">{{ fmt(payload.cgroup?.memory?.peak_mb, 0) }} MB</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Anonymous</span>
+            <span class="stat-value">{{ fmt(payload.cgroup?.memory?.anon_mb, 0) }} MB</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">File cache</span>
+            <span class="stat-value">{{ fmt(payload.cgroup?.memory?.file_mb, 0) }} MB</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Slab</span>
+            <span class="stat-value">{{ fmt(payload.cgroup?.memory?.slab_mb, 0) }} MB</span>
+          </div>
+          <div class="stat-subtitle">cgroup cpu</div>
+          <div class="stat-row">
+            <span class="stat-label">Usage</span>
+            <span class="stat-value">{{ cgroupUsageSec() }}s</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Throttled</span>
+            <span class="stat-value">{{ cgroupThrottledSec() }}s</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">nr_throttled</span>
+            <span class="stat-value">{{ payload.cgroup?.cpu?.nr_throttled ?? '—' }}</span>
+          </div>
+        </section>
+
+        <section class="stat-card" data-test="stat-attribution">
+          <!-- Honesty labels (§2.2): attribution is partial by physics. -->
+          <h3>Attribution <span class="honesty-tag">estimated</span></h3>
+          <div class="stat-row">
+            <span class="stat-label">Attributed</span>
+            <span class="stat-value">{{ fmt(payload.attribution.attributed_mb, 0) }} MB</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Unattributed</span>
+            <span class="stat-value">{{ fmt(payload.attribution.unattributed_mb, 0) }} MB</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Coverage</span>
+            <span class="stat-value" data-test="stat-coverage">{{ fmt(payload.attribution.coverage_pct, 0) }}%</span>
+          </div>
+          <p class="honesty-note">
+            Per-instance RAM is a sample-time estimate; the remainder is
+            reported as <em>unattributed</em>, never hidden.
+          </p>
+        </section>
+
+        <section class="stat-card" data-test="stat-overruns">
+          <h3>Self-cost overruns</h3>
+          <div class="stat-row">
+            <span class="stat-label">Count</span>
+            <span class="stat-value">{{ payload.overruns.count }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Last</span>
+            <span class="stat-value">
+              {{ payload.overruns.last_ts === null ? 'never' : tsLabel(payload.overruns.last_ts) }} UTC
+            </span>
+          </div>
+        </section>
+      </div>
+    </div>
+  }
+</div>

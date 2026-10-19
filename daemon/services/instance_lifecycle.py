@@ -4276,6 +4276,12 @@ class InstanceLifecycleService:
         # Check in-memory cache first (sync, fast path)
         if instance_id in self._manager.instances:
             graph, _ = self._manager.instances[instance_id]
+            # O3 LRU recency: a cache HIT is a graph reuse — mark the entry
+            # most-recently-used so the cap sweep evicts truly cold entries
+            # first. No-op when the manager lacks the helper (test stubs).
+            touch = getattr(self._manager, "_touch_cached_instance", None)
+            if touch is not None:
+                touch(instance_id)
             return graph
 
         # Cold-load: ensure MCP tools are preloaded BEFORE restoring

@@ -243,6 +243,42 @@ limits:
   #   LIMITS_MAX_GOVERNOR_ANCESTORS=N             → K threshold
   #     (default 1). Set to 0 to disable the guard entirely.
 
+# Resource Monitor (resource-cost-control Phase 1; Phase 4 extends)
+# --------------------------------------------------------------------------
+# The ``resource_monitor:`` block is intentionally COMMENT-ONLY.
+#
+# Any yaml literal here would silently kill the RESOURCE_MONITOR_* env
+# tier: pydantic-settings init-kwargs beat env vars, so a yaml literal
+# overrides the env (same trap as LIMITS_LLM_CONCURRENCY before the
+# db-backed-settings P1 fix). To tune a knob, set the env var and
+# restart the daemon. All 16 defaults per architecture-recommendation.md
+# §2.9 (+ the phase4-plan anomaly extension) are pinned in
+# daemon.config.ResourceMonitorConfig.
+#
+#   enabled                   (bool, default true)
+#   sample_seconds            (int,  default 30,   ge=15 le=60)
+#   retention_raw_minutes     (int,  default 2880, ge=1440)
+#   retention_minute_hours    (int,  default 336,  ge=168)
+#   retention_hour_days       (int,  default 180,  ge=90)
+#   detail_level              (str,  default auto)
+#   instance_cap              (int,  default 50,   ge=1 le=64)
+#   self_cpu_budget_pct       (float, default 1.0)
+#   self_rss_budget_mb        (int,  default 50)
+#   profiling_enabled         (bool, default false)
+#   profile_timebox_s         (int,  default 30,   ge=10 le=120)
+#   flush_batch_seconds       (int,  default 60)
+#   anomaly_enabled           (bool, default true)  — Phase 4 kill-switch
+#   anomaly_interval_s        (int,  default 600,  ge=300 le=900)
+#   anomaly_mad_threshold     (float, default 6.0)
+#   anomaly_min_baseline_points (int, default 12)
+#
+# Example (env-side; NOT yaml):
+#   RESOURCE_MONITOR_ENABLED=false          # kill-switch
+#   RESOURCE_MONITOR_SAMPLE_SECONDS=15      # tighter cadence
+#   RESOURCE_MONITOR_RETENTION_HOUR_DAYS=90 # longer forensics
+#   RESOURCE_MONITOR_ANOMALY_ENABLED=false  # anomaly pass off (Phase 4)
+#   RESOURCE_MONITOR_ANOMALY_INTERVAL_S=900 # pass every 15 min
+
 # Persistence Settings
 persistence:
   db_path: ./data/instances.db

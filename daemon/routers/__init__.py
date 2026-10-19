@@ -29,6 +29,7 @@ from .tmp_images import router as tmp_images_router  # Phase 1: clipboard-image-
 from .maintenance import router as maintenance_router  # Section 1: checkpoint cleanup
 from .prompts import router as prompts_router  # Phase B T5: agent-prompt-immutability approval REST
 from .custom_agents import router as custom_agents_router  # Phase C: User Directive #5A custom-agent lifecycle
+from .resources import router as resources_router  # resource-cost-control P1: /api/resources
 
 __all__ = [
     "agents_router",
@@ -60,4 +61,5 @@ __all__ = [
     "maintenance_router",
     "prompts_router",
     "custom_agents_router",
+    "resources_router",
 ]

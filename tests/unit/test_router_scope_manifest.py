@@ -95,6 +95,14 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     "/api/skill-bank": "*",
     "/api/skills": "*",
     "/api/snapshots": "*",                  # §5.4 names no scope for the family
+    # resource-cost-control P1 (aa95fc438): the /api/resources family
+    # mounts 8 routes (GET /live, /history, /self-cost, /traceback,
+    # /anomalies, /anomalies/{id}/evidence, /control-capabilities +
+    # POST /profile) — none carries an @require_scope decoration
+    # (observe-only seam; the degrade-never-503 posture ships
+    # unauthenticated same-origin per the commission's house
+    # posture), so the family manifests the wildcard D9 posture.
+    "/api/resources": "*",
     "/api/tmp_images": "*",
     "/api/webhooks": "*",                   # MODULE-LANE (D19) — never OAuth2-gated
     "/api/work": "*",
@@ -218,8 +226,8 @@ class TestSourceMatchTarget:
     """The F3-pinned cage match target: ``api_router.include_router(``."""
 
     def test_census_pinned(self):
-        """The textual census: 32 ``api_router.include_router(`` matches
-        at the current tree = 30 unconditional + 2 auth-ON-gated
+        """The textual census: 33 ``api_router.include_router(`` matches
+        at the current tree = 31 unconditional + 2 auth-ON-gated
         (mcp-kb keys, auth-self). A drift here fails the cage and
         forces a manifest review.
 
@@ -231,12 +239,17 @@ class TestSourceMatchTarget:
         custom_agents_router (30 unconditional; was 29 pre-F1) — the
         cage must reflect this with the new /api/custom-agents
         family pinned in the manifest above.
+
+        resource-cost-control P1 (aa95fc438) added the
+        resources_router (31 unconditional; was 30 pre-P1) — the
+        cage reflects this with the /api/resources family pinned in
+        the manifest above.
         """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
-        assert len(matches) == 32, (
+        assert len(matches) == 33, (
             f"api_router.include_router( census drifted: {len(matches)} "
-            "(pinned 32 = 30 unconditional + 2 auth-ON-gated). New mount? "
+            "(pinned 33 = 31 unconditional + 2 auth-ON-gated). New mount? "
             "Declare its family in PINNED_SCOPE_MANIFEST above."
         )
 

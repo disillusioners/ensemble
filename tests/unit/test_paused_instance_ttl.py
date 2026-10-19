@@ -444,7 +444,7 @@ class TestCleanupCachedInstances:
         mock_graph = MagicMock()
         mock_manager.instances[instance_id] = (mock_graph, "/agents/test")
         
-        # Create cached instance that was updated 25 hours ago (past 24h TTL)
+        # Create cached instance that was updated 25 hours ago (past the 6h TTL)
         # Use timezone-aware datetime (+00:00) to match production code's datetime.now(timezone.utc)
         expired_time = (datetime.utcnow() - timedelta(hours=25)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
         mock_instance = self._make_cached_instance(instance_id, expired_time, status=status)
@@ -494,8 +494,8 @@ class TestHotColdResume:
         # should remain in memory for fast hot resume
         from daemon.manager import INSTANCE_CACHE_TTL_HOURS
         
-        # TTL should be 24 hours
-        assert INSTANCE_CACHE_TTL_HOURS == 24
+        # TTL default narrowed 24h → 6h (resource-cost-control O3)
+        assert INSTANCE_CACHE_TTL_HOURS == 6
 
     def test_cold_resume_after_ttl_concept(self):
         """After TTL release, resuming the instance works (graph rebuilt from checkpoint)."""
@@ -504,7 +504,7 @@ class TestHotColdResume:
         # We verify the TTL constant is defined correctly.
         from daemon.manager import INSTANCE_CACHE_TTL_HOURS
 
-        assert INSTANCE_CACHE_TTL_HOURS == 24
+        assert INSTANCE_CACHE_TTL_HOURS == 6
 
 
 class TestTTLConstants:
@@ -514,7 +514,7 @@ class TestTTLConstants:
         """Verify TTL constant is defined and reasonable."""
         from daemon.manager import INSTANCE_CACHE_TTL_HOURS
         
-        assert INSTANCE_CACHE_TTL_HOURS == 24
+        assert INSTANCE_CACHE_TTL_HOURS == 6  # O3: was 24
         assert INSTANCE_CACHE_TTL_HOURS > 0
         assert INSTANCE_CACHE_TTL_HOURS < 168  # Less than 1 week
 

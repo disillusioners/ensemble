@@ -572,7 +572,12 @@ export class App implements OnInit {
     // appends (checkMigrationAvailability / checkMaintenanceAvailability
     // via settingsMenuItems.update(...)) stay at the tail of the menu
     // (snapshot-uiux §1.1 / amendment #7).
-    { label: 'Snapshots', icon: 'bookmarks', route: '/snapshots' }
+    { label: 'Snapshots', icon: 'bookmarks', route: '/snapshots' },
+    // Resources — resource-observability page. Appended AFTER Snapshots
+    // so the conditional Database/Maintenance appends still land at the
+    // menu tail. Static (not conditional): the endpoint ships in the
+    // same promote train and degrades to empty shapes, never 503 (D2).
+    { label: 'Resources', icon: 'insights', route: '/resources' }
   ]);
 
   constructor() {

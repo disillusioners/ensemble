@@ -19,6 +19,34 @@ from pathlib import Path
 
 from .config import load_config, warn_default_allowed_models_applied, warn_deprecated_allowed_models_env, warn_deprecated_reasoning_echo_env
 
+# ── Allocator cap (resource-cost-control O1, 2026-10-18) ──────────────────
+# Belt-and-braces env default. Scope, verified against the glibc tunables
+# model and this repo's actual boot paths:
+#
+#   CANNOT cap THIS process's own glibc arenas. MALLOC_ARENA_MAX is a libc
+#     tunable parsed at libc init — before main()/the interpreter starts —
+#     so an in-process setdefault is always too late for the parent. The
+#     parent-side cap comes from the pre-exec surfaces instead: the systemd
+#     unit template (scripts/systemd/ensemble-daemon.service) and
+#     launcher.sh main(), which both set the env BEFORE process start.
+#
+#   CAN reach child processes that inherit os.environ — the meaningful lane
+#     is bash/proc tool children (daemon/tools/bash.py spawns with
+#     env=None → inherited environ, or os.environ.copy() + overlay), i.e.
+#     agent-driven node/npm/test-farm processes pick the cap up.
+#
+#   CAN cover boot paths that bypass launcher.sh: the frozen PyInstaller
+#     entry (run_app.py imports this module before anything spawns) and
+#     `python -m daemon`. NOT the dev.sh `python -m uvicorn daemon.api:app`
+#     path (never imports this module), and NOT MCP stdio children
+#     (daemon/mcp/connection_manager.py builds their env fresh from the
+#     stored server config via resolve_env — os.environ is deliberately
+#     never merged there). Both gaps are known O1 residuals, out of scope.
+#
+# Module level = runs at import, before uvicorn/threads/any child spawn on
+# every path that reaches it. setdefault: a staged MALLOC_ARENA_MAX wins.
+os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+
 # ── Process exit-code contract (Auto-Restart ADR-010/011) ─────────────────
 # The launcher (Phase 1) maps exit codes to restart policy:
 #
@@ -292,6 +320,46 @@ def main(run_preflight: bool = True):
     # budget concern). See _boot_auth_config_preflight for why this
     # must precede load_config().
     _boot_auth_config_preflight()
+
+    # Boot-time stale-subprocess sweep (resource-cost-control O8a,
+    # 2026-10-18). Reaps children orphaned by PRIOR daemon incarnations
+    # inside this unit's cgroup — the test-farm leak class from the
+    # 2026-10-17 OOM night (a child survived even systemd's cgroup-wide
+    # SIGKILL sweep: journal "Unit process 3393684 (MainThread) remains
+    # running after unit stopped"). Predicate is fail-closed (own-cgroup
+    # membership + starttime older than this process + never self /
+    # ancestors / descendants / kernel threads / zombies) and every
+    # signal passes the PID-recycle guard (starttime field-22 + pgid +
+    # cgroup re-check) immediately beforehand. Default is lane-
+    # conditional (remediation r2, 2026-10-18): prod = ON (the promoted
+    # frozen PyInstaller binary running under systemd — ``sys.frozen``
+    # truthy), dev/test/manual = OFF (source-mode ``python -m daemon``
+    # / launcher.sh source runs / every ``pytest`` — ``sys.frozen``
+    # falsy). Override is bidirectional in BOTH lanes via
+    # ``ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES`` (any non-disable value
+    # forces ON; ``0``/``false``/``no``/``off`` forces OFF). Default
+    # honors the leader ruling of "ships default-ON at promote"; the
+    # source-mode default-OFF avoids collateral-kill breadth in the
+    # login-session-scope cgroup and ``main()``-driving tests that
+    # never patch the kill-switch env (see W1/W2 review). TERM →
+    # bounded grace → SIGKILL, every action logged. Runs here — before
+    # config load, uvicorn, and any child-spawning subsystem — so the
+    # daemon's own tree is empty and the ancestry exclusion carries
+    # the launcher + PyInstaller bootloader. Fail-open: a sweep bug
+    # must never block boot. Full mechanism + census evidence: module
+    # docstring and
+    # docs/investigations/2026-10-18-o8-stale-subprocess-sweep-and-killmode-audit.md
+    try:
+        from .services.boot_subprocess_sweep import sweep_stale_subprocesses
+
+        sweep_stale_subprocesses()
+    except SystemExit:
+        raise
+    except Exception as exc:  # fail-open belt around the module's own fail-open
+        logger.warning(
+            "Boot stale-subprocess sweep: skipped (fail-open): %s: %s",
+            type(exc).__name__, exc,
+        )
 
     # Load config to get host/port
     config = load_config()

@@ -83,6 +83,17 @@ assert_not_contains() {
 }
 section() { printf '\n== %s ==\n' "$1"; }
 
+# Strip pure-comment lines from a blob (lines whose first non-whitespace
+# character is '#'). Preserves byte content of every other line. Used by
+# the MALLOC_ARENA_MAX pins because the template header rationale comment
+# (scripts/systemd/ensemble-daemon.service:59) names the directive by the
+# same literal string — without stripping, a substring match on the
+# directive would also match the comment and the pin would pass even when
+# the real [Service] directive (line 106) had been deleted.
+_strip_comments() {
+    printf '%s\n' "$1" | sed '/^[[:space:]]*#/d'
+}
+
 # one fixture install per case: launcher + .env (+ optional extras)
 # $1 = dir
 make_install() {
@@ -316,6 +327,22 @@ H_OUT="$(ADOPT_SC_LOG="$WORK/sc.log" UNIT_DIR="$UNITDIR" POLKIT_RULES_DIR="$POLK
 H_RC=$?
 assert_eq "DRY_RUN happy: exit 0" "0" "$H_RC"
 
+# static allocator cap (resource-cost-control O1): the TEMPLATE carries it
+# (a content pin on the repo file itself — survives even if adoption of a
+# given install predates this directive), and adoption rides it through to
+# every generated unit via the directive loop below.
+#
+# DIRECTIVE-SPECIFIC pin: the template's header rationale comment at
+# scripts/systemd/ensemble-daemon.service:59 also names the literal
+# ``Environment=MALLOC_ARENA_MAX=2`` (it documents the directive). A raw
+# substring match would therefore pass via the comment alone, letting a
+# deleted real [Service] directive slip past. The matched haystack is
+# stripped of pure-comment lines first so the needle can only land on a
+# real directive line.
+assert_contains "template carries static MALLOC_ARENA_MAX cap as a real directive" \
+    "Environment=MALLOC_ARENA_MAX=2" \
+    "$(_strip_comments "$(cat "$REPO_ROOT/scripts/systemd/ensemble-daemon.service")")"
+
 # substituted values
 assert_contains "ExecStart is the ABSOLUTE fixture launcher" "ExecStart=$FIX/launcher.sh" "$H_OUT"
 assert_contains "User substituted" "User=ens-adm" "$H_OUT"
@@ -324,13 +351,23 @@ assert_contains "Environment=PORT substituted" "Environment=PORT=18095" "$H_OUT"
 assert_contains "Environment=POSTGRES_HOST substituted" "Environment=POSTGRES_HOST=10.44.0.2" "$H_OUT"
 assert_contains "Environment=POSTGRES_DB substituted" "Environment=POSTGRES_DB=ensemble_adopt" "$H_OUT"
 
-# every template directive rides through
+# every template directive rides through. MALLOC_ARENA_MAX is checked
+# separately BELOW with a comment-stripped haystack — see that pin's note
+# for the rationale (the header also names it by string, which would let
+# the directive loop's substring match pass against the comment alone).
 for directive in "Type=simple" "Restart=on-failure" "RestartSec=10" \
                  "RestartPreventExitStatus=78" "SuccessExitStatus=143" \
                  "KillMode=mixed" "StandardOutput=journal" "StandardError=journal" \
                  "TimeoutStopSec=90" "WantedBy=multi-user.target"; do
     assert_contains "directive $directive present" "$directive" "$H_OUT"
 done
+# MALLOC_ARENA_MAX — directive-specific pin (see _strip_comments above).
+# The real [Service] directive rode through from the template; matching
+# the comment-stripped haystack ensures the needle can only land on a
+# real directive line, not on the header rationale.
+assert_contains "directive Environment=MALLOC_ARENA_MAX=2 present (directive-specific)" \
+    "Environment=MALLOC_ARENA_MAX=2" \
+    "$(_strip_comments "$H_OUT")"
 assert_not_contains "NO WatchdogSec (deferred by design)" "WatchdogSec=" "$H_OUT"
 assert_not_contains "torn-token guard: no __TOKEN__ survived" "__" "$H_OUT"
 

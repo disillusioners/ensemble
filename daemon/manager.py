@@ -111,6 +111,7 @@ from .services.dependency_bus import get_dependency_bus
 from .services.instance_lifecycle import InstanceLifecycleService
 from .services.instance_messaging import InstanceMessagingService
 from .services.context_messages import emit_ambient_kv_fresh_boot_log
+from .services.malloc_tuner import trim_malloc_heap
 from .services.report_integrity_guard import (
     emit_report_integrity_b_guard_boot_log,
 )
@@ -186,8 +187,54 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# TTL for releasing in-memory graphs for non-active cached instances (in hours)
-INSTANCE_CACHE_TTL_HOURS = 24
+# ── O3 instance-graph cache bounding (resource-cost-control, 2026-10-18) ──
+# DEFAULT post-terminal TTL (hours) for releasing in-memory graphs of
+# non-active cached instances. Both constants are the DEFAULT tier of
+# their managed-key ladder (DB > env > yaml > default — see
+# ``daemon/services/settings_service.py``); the EFFECTIVE values are read
+# off ``config.limits`` via the ``_effective_instance_cache_*`` helpers
+# below and resolved + logged once at ``InstanceManager.__init__``. The
+# registry defaults in ``settings_service.py`` MUST mirror these.
+# Default NARROWED 24h → 6h (leader-ruled) so idle graphs release faster.
+INSTANCE_CACHE_TTL_HOURS = 6
+
+# LRU max-entries cap over the in-memory instance-graph cache. Beyond
+# the cap the least-recently-used NON-ACTIVE (terminal/paused) entries
+# are evicted; active entries are NEVER evicted and recency is last
+# graph ACCESS/reuse (see ``_touch_cached_instance``), not creation.
+INSTANCE_CACHE_MAX_ENTRIES = 64
+
+
+def _effective_instance_cache_ttl_hours(manager: Any) -> int:
+    """Effective post-terminal TTL (hours) for ``manager``'s graph cache.
+
+    Reads ``manager.config.limits.instance_cache_ttl_hours`` (mutated
+    in place at boot by ``apply_db_settings_overrides``) and falls back
+    to :data:`INSTANCE_CACHE_TTL_HOURS` when the attribute is missing or
+    non-numeric. The ``isinstance`` guard also pins spec'd MagicMock
+    managers — whose auto-attributes are NOT ints — to the default, so
+    the pre-existing eviction tests stay deterministic.
+    """
+    config = getattr(manager, "config", None)
+    limits = getattr(config, "limits", None)
+    raw = getattr(limits, "instance_cache_ttl_hours", None)
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw
+    return INSTANCE_CACHE_TTL_HOURS
+
+
+def _effective_instance_cache_max_entries(manager: Any) -> int:
+    """Effective LRU max-entries cap for ``manager``'s graph cache.
+
+    Same config-read + fallback posture as
+    :func:`_effective_instance_cache_ttl_hours`.
+    """
+    config = getattr(manager, "config", None)
+    limits = getattr(config, "limits", None)
+    raw = getattr(limits, "instance_cache_max_entries", None)
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw
+    return INSTANCE_CACHE_MAX_ENTRIES
 
 
 def _build_message_content(message: str, images: list[str] | None) -> str | list:
@@ -537,8 +584,44 @@ class InstanceManager:
         else:
             self._compactor = None
 
-        # Maps instance_id to tuple of (graph, agent_dir)
+        # Maps instance_id to tuple of (graph, agent_dir). INSERTION ORDER
+        # is the O3 LRU recency order: registration appends (newest), the
+        # graph ACCESS path (``InstanceLifecycleService.get_instance``)
+        # calls ``_touch_cached_instance`` to move a reused entry to the
+        # end. ``_enforce_instance_cache_cap`` evicts from the front.
         self.instances: dict[str, tuple[CompiledStateGraph, str]] = {}
+
+        # ── O3 instance-graph cache bounding (resource-cost-control) ──
+        # Resolve the effective knobs ONCE at construction
+        # (restart-required semantics — the config fields were already
+        # mutated in place by the boot-apply ``apply_db_settings_overrides``
+        # that runs strictly BEFORE ``InstanceManager(...)``). Cached on
+        # the instance so the periodic sweep never re-reads config.
+        self._instance_cache_ttl_hours = _effective_instance_cache_ttl_hours(self)
+        self._instance_cache_max_entries = _effective_instance_cache_max_entries(self)
+        # Source tier for the startup line — the boot-apply publishes its
+        # per-key resolution record; absent (e.g. direct construction in
+        # tests, or a pre-boot process) reads as "default".
+        _cache_tier = "default"
+        try:
+            from .services.settings_service import (
+                get_last_applied_resolution,
+            )
+
+            _res = (get_last_applied_resolution() or {}).get(
+                "limits.instance_cache_ttl_hours"
+            )
+            if _res:
+                _cache_tier = _res.get("source", "default")
+        except Exception:
+            _cache_tier = "default"
+        logger.info(
+            "[InstanceCache] effective: ttl_hours=%s max_entries=%s "
+            "(ttl source=%s; restart-required)",
+            self._instance_cache_ttl_hours,
+            self._instance_cache_max_entries,
+            _cache_tier,
+        )
 
         # Maps instance_id to the asyncio.Task currently running the graph for that instance
         # Used to cancel graph execution when stop is called
@@ -653,6 +736,17 @@ class InstanceManager:
             McpKbKey,
         )
         from .models.app_settings import AppSetting  # noqa: F401  # db-backed-settings P1: register app_settings before create_all
+        # resource-cost-control Phase 1: register the 4 observability
+        # tables BEFORE create_all so the PG boot path lands them on
+        # existing PG databases (SQLModel.metadata.create_all is the
+        # PG source-of-truth per architecture-recommendation §2.4).
+        # SQLite path is the migration runner below.
+        from .models.resource_monitor import (  # noqa: F401  # resource-cost-control P1: register before create_all
+            ResourceDaemonBucket,
+            ResourceInstanceSample,
+            ResourcePidMap,
+            ResourceLimitPolicy,
+        )
 
         SQLModel.metadata.create_all(self._engine)
 
@@ -2651,7 +2745,10 @@ class InstanceManager:
         # Build pool with config-injected tool_call_timeout, then register it as
         # the module-level singleton so other call sites (e.g. _warmup_and_report,
         # _drain_warmup_pool) observe the same instance.
-        pool = McpWarmupPool(tool_call_timeout=self.config.mcp_pool.tool_call_timeout)
+        pool = McpWarmupPool(
+            tool_call_timeout=self.config.mcp_pool.tool_call_timeout,
+            idle_reap_seconds=self.config.mcp_pool.idle_reap_seconds,
+        )
         _warmup_pool_module._mcp_warmup_pool = pool
 
         registry = get_mcp_registry()
@@ -3397,6 +3494,38 @@ class InstanceManager:
                 execute_fn=self._blueprint_scan_service.execute,
                 last_run=last_run_dt,
             )
+
+        # ── Idle-time glibc heap trim (resource-cost-control O1) ─────
+        # Hourly piggyback on the EXISTING MaintenanceService loop —
+        # no new thread, no new asyncio task (O1 brief). The ``_is_idle``
+        # gate keeps it off in-flight work; the callback is the
+        # never-raises ctypes wrapper in daemon/services/malloc_tuner.py,
+        # so a non-glibc platform collapses to a debug-logged no-op.
+        # Returns whole free heap pages to the OS after per-turn
+        # transients have been freed to the allocator (the RSS-return
+        # step obmalloc/glibc do not perform on their own).
+        self._maintenance_service.register(
+            "malloc_trim",
+            min_interval_hours=1.0,
+            execute_fn=self._run_malloc_trim,
+        )
+
+        # ── DependencyBus lock-map reap (resource-cost-control) ──────
+        # Hourly piggyback on the EXISTING MaintenanceService loop —
+        # no new thread, no new asyncio task (same pattern as the O1
+        # malloc_trim registration above; the ``_is_idle`` gate keeps
+        # it off in-flight work). Reaps the bus's terminal-owner UNHELD
+        # lock-map entries (``_locks`` / ``_parent_locks`` are tiny but
+        # monotonic over daemon lifetime); held or recently-touched
+        # locks are never reaped — see
+        # ``DependencyBus.reap_stale_locks`` for the full safety
+        # contract. The knob falls out for free: the cadence IS this
+        # registration's interval (no settings plumbing).
+        self._maintenance_service.register(
+            "dependency_bus_lock_reap",
+            min_interval_hours=1.0,
+            execute_fn=self._run_dependency_bus_lock_reap,
+        )
 
         # Section 1 / T8 + W1 + W2 (v3 fix pass) — boot sweep of
         # orphaned ``running`` rows (AM-7): unconditional
@@ -5731,6 +5860,94 @@ class InstanceManager:
             CancellationReason.SESSION_TERMINATED
         )
 
+    def _touch_cached_instance(self, instance_id: str) -> None:
+        """Mark a cached graph as most-recently-used (O3 LRU recency).
+
+        The ``instances`` dict's insertion order IS the LRU order
+        (registration appends); pop + reinsert moves an accessed entry
+        to the end. No-op when the id is not cached. Called on the graph
+        ACCESS path (``InstanceLifecycleService.get_instance`` cache
+        hit) so recency reflects last REUSE, not creation.
+        """
+        entry = self.instances.pop(instance_id, None)
+        if entry is not None:
+            self.instances[instance_id] = entry
+
+    def _terminal_cached_instance_ids(self) -> set[str]:
+        """Subset of cached ids whose status is non-active (evictable).
+
+        The non-active superset mirrors the TTL sweep's releasable
+        statuses — ``paused`` + ``{completed, error, terminated,
+        failed}`` — via the existing batched
+        ``InstanceRepository.list_paused_or_terminal_instance_ids``
+        helper (one query, no per-row fetch). Ids with no DB row (or any
+        lookup failure) are treated as ACTIVE (absent from the result)
+        so a live entry is never evicted on incomplete information.
+        """
+        repo = getattr(self, "_instance_repository", None)
+        if not repo:
+            return set()
+        ids = list(self.instances.keys())
+        if not ids:
+            return set()
+        try:
+            return set(repo.list_paused_or_terminal_instance_ids(ids))
+        except Exception as exc:
+            logger.warning(
+                "[InstanceCache] non-active status lookup failed (%s) — "
+                "treating all %d cached instance(s) as active, evicting nothing",
+                exc,
+                len(ids),
+            )
+            return set()
+
+    def _enforce_instance_cache_cap(self) -> int:
+        """Evict least-recently-used NON-ACTIVE cached graphs beyond the cap.
+
+        O3 LRU bounding. Returns the number of entries released. Active
+        (non-terminal / unknown-status) entries are NEVER evicted; if the
+        active entries alone meet or exceed the cap the cap is
+        unsatisfiable without touching them, so NOTHING is evicted and a
+        WARNING is logged. Recency = ``instances`` insertion order
+        (``_touch_cached_instance`` moves a reused entry to the end), so
+        the front of the dict is the least-recently-used eviction order.
+        """
+        max_entries = _effective_instance_cache_max_entries(self)
+        if max_entries <= 0:
+            return 0
+        total = len(self.instances)
+        if total <= max_entries:
+            return 0
+
+        evictable = self._terminal_cached_instance_ids()
+        active_count = total - len(evictable)
+        if active_count >= max_entries:
+            logger.warning(
+                "[InstanceCache] max_entries=%d unsatisfiable: %d active "
+                "(non-terminal) cached instance(s) alone meet/exceed the cap — "
+                "evicting nothing (active entries are never evicted)",
+                max_entries,
+                active_count,
+            )
+            return 0
+
+        # LRU order: dict insertion order, filtered to evictable ids.
+        lru_order = [iid for iid in self.instances.keys() if iid in evictable]
+        evicted = 0
+        for iid in lru_order:
+            if len(self.instances) <= max_entries:
+                break
+            self._release_cached_instance(iid)
+            evicted += 1
+        if evicted:
+            logger.info(
+                "[InstanceCache] LRU cap: released %d cached instance(s) "
+                "exceeding max_entries=%d",
+                evicted,
+                max_entries,
+            )
+        return evicted
+
     def release_context_usage_cache(self, instance_id: str) -> None:
         """Drop the per-instance context-usage dedup entry.
 
@@ -5740,6 +5957,64 @@ class InstanceManager:
         ``_graph_tasks``.
         """
         self._last_context_usage.pop(instance_id, None)
+
+    async def _run_malloc_trim(self) -> None:
+        """Idle-time glibc heap trim (resource-cost-control O1).
+
+        Registered hourly with :class:`MaintenanceService`; the
+        ``_is_idle`` gate keeps it away from in-flight work.
+        ``trim_malloc_heap`` (daemon/services/malloc_tuner.py) carries a
+        never-raises contract of its own; the belt-and-braces ``except``
+        below keeps the host maintenance loop unkillable even if that
+        contract is ever violated. Non-glibc platforms collapse to the
+        DEBUG-logged no-op inside the helper.
+        """
+        try:
+            if trim_malloc_heap():
+                logger.info(
+                    "malloc_trim: glibc heap trimmed — free pages "
+                    "returned to OS"
+                )
+            else:
+                logger.debug(
+                    "malloc_trim: nothing returned / unsupported platform"
+                )
+        except Exception as exc:  # noqa: BLE001 — host loop must never die
+            logger.debug(f"_run_malloc_trim skipped: {type(exc).__name__}: {exc}")
+
+    async def _run_dependency_bus_lock_reap(self) -> None:
+        """Idle-time DependencyBus lock-map reap (resource-cost-control).
+
+        Registered hourly with :class:`MaintenanceService` (same
+        cadence pattern as the O1 ``malloc_trim`` registration); the
+        ``_is_idle`` gate keeps it away from in-flight work. The bus
+        singleton may legitimately be absent (``set_dependency_bus``
+        never called in a stripped-down test manager) — that is a
+        DEBUG-logged no-op. The belt-and-braces ``except`` keeps the
+        host maintenance loop unkillable; the reap itself fails open
+        per-cycle (a DB probe error reaps nothing — see
+        ``DependencyBus.reap_stale_locks``).
+        """
+        try:
+            bus = get_dependency_bus()
+            if bus is None:
+                logger.debug(
+                    "dependency_bus_lock_reap: bus singleton absent — skipped"
+                )
+                return
+            reaped_tasks, reaped_parents = await bus.reap_stale_locks()
+            if reaped_tasks or reaped_parents:
+                logger.info(
+                    "dependency_bus_lock_reap: reaped %d task lock(s), "
+                    "%d parent lock(s)",
+                    reaped_tasks,
+                    reaped_parents,
+                )
+        except Exception as exc:  # noqa: BLE001 — host loop must never die
+            logger.debug(
+                f"_run_dependency_bus_lock_reap skipped: "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     async def _run_skill_orphan_sweep(self) -> None:
         """Periodic sweep of stale ``selected=True`` usage records.
@@ -6002,9 +6277,13 @@ class InstanceManager:
     
     async def _cleanup_cached_instances(self) -> None:
         """Background task to release in-memory graphs for non-active cached instances exceeding TTL.
-        
+
         Cleans up instances in terminal/inactive states: COMPLETED, ERROR, TERMINATED, FAILED, PAUSED.
         Only affects in-memory cache — database records remain intact.
+
+        O3 (resource-cost-control): the TTL is the EFFECTIVE (config-resolved)
+        value, and after the TTL pass the same cadence enforces the LRU
+        max-entries cap (``_enforce_instance_cache_cap``).
         """
         while not self._shutting_down:
             try:
@@ -6022,7 +6301,10 @@ class InstanceManager:
                 ]
                 
                 now = datetime.now(timezone.utc)
-                ttl_seconds = INSTANCE_CACHE_TTL_HOURS * 3600
+                # O3: effective (config-resolved) TTL, defaulting to
+                # ``INSTANCE_CACHE_TTL_HOURS`` for stub/unresolved configs.
+                effective_ttl_hours = _effective_instance_cache_ttl_hours(self)
+                ttl_seconds = effective_ttl_hours * 3600
                 released_count = 0
                 
                 # Query each non-active status
@@ -6062,8 +6344,16 @@ class InstanceManager:
                 if released_count > 0:
                     logger.info(
                         f"Released {released_count} cached instance(s) exceeding "
-                        f"{INSTANCE_CACHE_TTL_HOURS}h TTL"
+                        f"{effective_ttl_hours}h TTL"
                     )
+
+                # O3: LRU max-entries cap, same cadence. Bounded by its own
+                # try/except so a cap-enforcement error can never kill the
+                # sweep loop.
+                try:
+                    self._enforce_instance_cache_cap()
+                except Exception as e:
+                    logger.warning(f"Instance cache cap enforcement failed: {e}")
 
                 # S1: TTL sweep orphaned injection queues. Runs in the same
                 # 10-minute cadence as the cached-instance cleanup so

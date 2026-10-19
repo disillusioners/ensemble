@@ -45,12 +45,31 @@ ruling (c)):
   of the raw value for sensitive keys; omission is a review blocker
   if missing).
 
-v1.1 (settings-worker-slots) registry content: THREE keys —
-``limits.llm_concurrency`` plus ``limits.worker_pool_size`` and
-``limits.chat_worker_pool_size``. Adding a key = one registry entry +
-nothing else (the ladder, CRUD, API and FE render generically off the
-registry). The add-a-key rule stands: registry default mirrors the
-pydantic Field default (constants -> Field -> registry, ONE truth).
+v1 registry content: exactly ONE key — ``limits.llm_concurrency``.
+Adding a key = one registry entry + nothing else (the ladder, CRUD,
+API and FE render generically off the registry).
+
+v1.1 union (2026-10-19): registry carries SIX managed keys
+(origin/latest merged into feature/resource-cost-control — union of
+managed-key registries). All six ride the SAME ladder (DB > env >
+yaml > registry default) via the GENERIC resolver:
+
+* ``limits.llm_concurrency`` (db-backed-settings v1; existing).
+* ``limits.worker_pool_size`` (settings-worker-slots lane, 2026-10-18;
+  default-pool worker threads).
+* ``limits.chat_worker_pool_size`` (settings-worker-slots lane,
+  2026-10-18; chat-lane worker threads).
+* ``limits.instance_cache_ttl_hours`` (resource-cost-control O3,
+  2026-10-18; instance-graph cache post-terminal TTL).
+* ``limits.instance_cache_max_entries`` (resource-cost-control O3,
+  2026-10-18; instance-graph cache LRU max-entries cap).
+* ``limits.chart_render_concurrency`` (resource-cost-control O2,
+  2026-10-18; chromium render gate).
+
+The add-a-key rule stands: registry default mirrors the pydantic
+Field default — chain ``daemon.constants`` → ``LimitsConfig`` Field
+→ this registry default (ONE truth). ``effective_max`` is REMOVED
+(D3, settings-worker-slots) — no entry carries it.
 """
 
 from __future__ import annotations
@@ -121,13 +140,18 @@ class ManagedKeySpec:
         return f"ge={self.ge}" if self.ge is not None else "none"
 
 
-#: The managed-key registry. v1.1 (settings-worker-slots): THREE entries —
-#: ``limits.llm_concurrency`` plus the two worker-pool sizes. Adding keys
-#: later is a registry entry + nothing else (the ladder, CRUD, API and FE
-#: render generically off the registry). The registry default MUST mirror
-#: the backing pydantic Field default — chain: ``daemon.constants`` →
-#: ``LimitsConfig`` Field → this registry default (ONE truth).
+#: The managed-key registry. v1.1 union (2026-10-19): SIX entries —
+#: ``limits.llm_concurrency`` (db-backed-settings v1) plus the two
+#: worker-pool sizes (settings-worker-slots, 2026-10-18) plus the two
+#: instance-graph cache bounding keys (resource-cost-control O3,
+#: 2026-10-18) plus ``limits.chart_render_concurrency`` (resource-cost-
+#: control O2, 2026-10-18). Adding keys later is a registry entry + nothing
+#: else (the ladder, CRUD, API and FE render generically off the registry).
+#: The registry default MUST mirror the backing pydantic Field default —
+#: chain: ``daemon.constants`` → ``LimitsConfig`` Field → this registry
+#: default (ONE truth).
 MANAGED_KEYS: dict[str, ManagedKeySpec] = {
+    # ── v1 (db-backed-settings, 2026-10-15) — the original semaphore knob ──
     "limits.llm_concurrency": ManagedKeySpec(
         key="limits.llm_concurrency",
         config_path="limits.llm_concurrency",
@@ -192,6 +216,93 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "min(limits.llm_concurrency, this pool + the other pool's "
             "boot-applied size). Precedence: DB override > env var "
             "LIMITS_CHAT_WORKER_POOL_SIZE > config.yaml literal > default."
+        ),
+    ),
+    # ── O3 instance-graph cache bounding (resource-cost-control, 2026-10-18) ──
+    # Two keys driving the in-memory instance-graph cache
+    # (``InstanceManager.instances``). Both live under the ``limits``
+    # section so the yaml tier rides the existing ``raw_yaml_limits``
+    # accessor untouched (the resolver's section model is
+    # ``limits``-only today). ``env_var`` mirrors the pydantic
+    # ``LimitsConfig`` env_prefix (``LIMITS_``) exactly — the same
+    # pairing as ``limits.llm_concurrency`` / ``LIMITS_LLM_CONCURRENCY``.
+    # Defaults mirror ``daemon.manager.INSTANCE_CACHE_TTL_HOURS`` (6) /
+    # ``INSTANCE_CACHE_MAX_ENTRIES`` (64) — the two must move together
+    # (the registry is the resolver's truth).
+    "limits.instance_cache_ttl_hours": ManagedKeySpec(
+        key="limits.instance_cache_ttl_hours",
+        config_path="limits.instance_cache_ttl_hours",
+        env_var="LIMITS_INSTANCE_CACHE_TTL_HOURS",
+        value_type="int",
+        # Mirrors LimitsConfig.instance_cache_ttl_hours Field(default=6,
+        # ge=0). Default NARROWED 24h → 6h by resource-cost-control O3.
+        default=6,
+        ge=0,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "Post-terminal TTL (hours) for the in-memory instance-graph "
+            "cache. Non-active cached graphs whose last DB timestamp is "
+            "older than this are released by the periodic cache sweep. "
+            "Ordering default is 6h (was 24h). Effective precedence: DB "
+            "override > env var LIMITS_INSTANCE_CACHE_TTL_HOURS > "
+            "config.yaml literal > default; changes require a daemon "
+            "restart."
+        ),
+    ),
+    "limits.instance_cache_max_entries": ManagedKeySpec(
+        key="limits.instance_cache_max_entries",
+        config_path="limits.instance_cache_max_entries",
+        env_var="LIMITS_INSTANCE_CACHE_MAX_ENTRIES",
+        value_type="int",
+        # Mirrors LimitsConfig.instance_cache_max_entries
+        # Field(default=64, ge=1).
+        default=64,
+        ge=1,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "LRU max-entries cap for the in-memory instance-graph cache. "
+            "Beyond the cap the least-recently-used NON-ACTIVE "
+            "(terminal/paused) entries are evicted on the periodic sweep; "
+            "active (non-terminal) entries are NEVER evicted and recency "
+            "is last graph ACCESS/reuse, not creation. Effective "
+            "precedence: DB override > env var "
+            "LIMITS_INSTANCE_CACHE_MAX_ENTRIES > config.yaml literal > "
+            "default; changes require a daemon restart."
+        ),
+    ),
+    # ── O2 chromium render concurrency (resource-cost-control, 2026-10-18) ──
+    # One key driving the process-wide chromium render gate
+    # (``daemon/tools/chart_tools.py``). Lives under ``limits`` so the
+    # yaml tier rides the existing ``raw_yaml_limits`` accessor (the
+    # resolver's section model is ``limits``-only today); env_var mirrors
+    # the pydantic ``LimitsConfig`` env_prefix exactly. Default mirrors
+    # ``LimitsConfig.chart_render_concurrency`` Field(default=2) — the
+    # two must move together (the registry is the resolver's truth).
+    # CEREMONY-GATED: default ships in the resource-cost-control branch;
+    # live effect only at the next promote ceremony.
+    "limits.chart_render_concurrency": ManagedKeySpec(
+        key="limits.chart_render_concurrency",
+        config_path="limits.chart_render_concurrency",
+        env_var="LIMITS_CHART_RENDER_CONCURRENCY",
+        value_type="int",
+        # Mirrors LimitsConfig.chart_render_concurrency
+        # Field(default=2, ge=1). The consumer CLAMPS the resolved value
+        # into [1, 4] with a WARN (registry v1 constraint model is
+        # ge-only — Ruling 1; the gate must stay sane regardless).
+        default=2,
+        ge=1,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "Max concurrent chromium renders daemon-wide (resource-cost-"
+            "control O2). Each concurrent render spawns a 150-400MB "
+            "chromium child; this gate bounds them. The consumer clamps "
+            "the resolved value to [1, 4]. Effective precedence: DB "
+            "override > env var LIMITS_CHART_RENDER_CONCURRENCY > "
+            "config.yaml literal > default; changes require a daemon "
+            "restart."
         ),
     ),
 }
@@ -303,6 +414,44 @@ def get_settings_resolution_snapshot() -> dict[str, dict[str, Any]] | None:
     """Return the stored snapshot, or ``None`` when never set
     (the router-layer getter turns ``None`` into a 503)."""
     return _resolution_snapshot
+
+
+# =============================================================================
+# Last boot-apply resolution record (cheap read for boot-log consumers)
+# =============================================================================
+
+_last_applied_resolution: dict[str, dict[str, Any]] | None = None
+
+
+def get_last_applied_resolution() -> dict[str, dict[str, Any]] | None:
+    """Return the per-key resolution record from the most recent
+    :func:`apply_db_settings_overrides` boot-apply in this process —
+    ``{key: {value, source, default, env_value, yaml_value,
+    db_override}}`` — or ``None`` when the boot-apply has not run.
+
+    Cheap, side-effect-free read for boot-log consumers that need the
+    winning TIER of a managed key but are constructed BEFORE the
+    lifespan wires :func:`set_settings_resolution_snapshot` onto the
+    router (e.g. ``InstanceManager.__init__`` reporting the effective
+    cache knobs). The record is the SAME :func:`resolve` output the
+    boot apply used to mutate Config — never a second resolution
+    surface.
+    """
+    return _last_applied_resolution
+
+
+def set_last_applied_resolution(
+    resolution: Mapping[str, Mapping[str, Any]] | None,
+) -> None:
+    """Store the boot-apply per-key resolution record (module-global).
+
+    Called once at the tail of :func:`apply_db_settings_overrides`;
+    tests may reset it to ``None`` to simulate a pre-boot process.
+    """
+    global _last_applied_resolution
+    _last_applied_resolution = (
+        {k: dict(v) for k, v in resolution.items()} if resolution else None
+    )
 
 
 # =============================================================================
@@ -686,7 +835,10 @@ def apply_db_settings_overrides(
        despite the yaml literal (the shadowing fix). ``Config`` is a
        plain mutable BaseSettings (no ``frozen``, no
        ``validate_assignment``) so direct assignment works;
-       re-validation happened in the resolver.
+       re-validation happened in the resolver. The per-key
+       ``resolve`` records are also published via
+       :func:`set_last_applied_resolution` for late-constructing
+       boot-log consumers.
     4. Capture ``applied_value`` (post-apply, just before return)
        completing the per-key snapshot
        ``{default, env_value, yaml_value, applied_value}``.
@@ -736,8 +888,10 @@ def apply_db_settings_overrides(
 
     # Step 3+4 — resolve, mutate in place, capture applied_value.
     applied_count = 0
+    resolutions: dict[str, dict[str, Any]] = {}
     for key, spec in MANAGED_KEYS.items():
         resolution = resolve(key, snapshot, db_overrides=db_overrides)
+        resolutions[key] = resolution
         if resolution["source"] == "db":
             applied_count += 1
         current = _get_config_value(config, spec.config_path)
@@ -764,5 +918,9 @@ def apply_db_settings_overrides(
     # construction (db_overrides is reset to {} in the except above),
     # so N always reflects reality.
     logger.info("[Settings] applied %d db override(s)", applied_count)
+
+    # Publish the per-key resolution record for late-constructing
+    # boot-log consumers (e.g. InstanceManager.__init__).
+    set_last_applied_resolution(resolutions)
 
     return config, snapshot

@@ -5,6 +5,56 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] — 2026-10-19
+
+### Added — resource-cost-control observability subsystem (P1, LANDED) (`resource-cost-control`, branch `feature/resource-cost-control`, base `8b8b32dcc`)
+
+> **CHANGELOG (feature):** *Slice 1 of the resource-cost-control commission: an always-on in-daemon resource observability spine — ONE sampler thread (cgroup v2 + raw `/proc`, no psutil), ONE batched flusher with roll-down + retention sweeps, four `resource_*` tables, the first three `/api/resources/*` endpoints, and the self-cost budget as an enforced acceptance criterion (the monitor measures itself and throttles before it costs more than it explains).*
+
+- **Sampler + storage + roll-down** — `daemon/services/resource_monitor/` (sampler, ring, flusher, rollup, proc_readers, pid_registry, facade) with lifespan wiring; 12 `RESOURCE_MONITOR_*` knobs (`daemon/config.py` `ResourceMonitorConfig`: sample cadence 30 s clamp 15–60, raw/minute/hour retention 48 h/14 d/180 d with floors, detail ladder, instance cap ≤64, self-cost budgets, opt-in profiling, flush batching).
+- **4 dual-dialect migrations** — `daemon/migrations/versions/20261018_0900{01..04}_create_resource_*.sql` (`resource_daemon_bucket` / `resource_instance_sample` / `resource_pid_map` / `resource_limit_policy`) + SQLModel canonicals (`daemon/models/resource_monitor.py`).
+- **`GET /api/resources/live` / `history` / `self-cost`** (`daemon/routers/resources.py`, mounted P1) — live one-shot sample with daemon/cgroup/attribution/overruns blocks; history with `window=15m|1h|24h|7d` + auto-resolution fall-down (`resolution_used`/`rollup`/`truncated`); self-cost exact field set `{cpu_pct, cumulative_cpu_s, buffers_bytes, rss_budget_mb, threads, samples, ticks_skipped, flush:{batches,bytes,errors}, profiling:{active,capabilities}}`. All degrade to the empty shape, never 503.
+- **Self-cost regression gate** (`tests/test_resource_monitor_self_cost.py`) — median tick < 5 ms, hard gate 50 ms, EMA > 1 % ⇒ interval doubled + deep-scan off, sampler RSS delta < 20 MB, zero reader-call fixture escapes; fenced (`mktemp` FAKE_HOME + escape guard — never live-shaped paths).
+- **Honesty columns surfaced, never buried** — `unattributed_kb` / `estimated` / `coverage_pct` carried in the storage tier (`resource_daemon_bucket`), MB-rounded in `/live`'s `attribution` block: per-instance truth is partial by physics in one shared process and the docs say so.
+
+### Added (forward — part of the same release train; not yet in the merged tree at this writing)
+
+- **Instance attribution + honesty surface (P2)** — per-instance `resource_instance_sample` population, children/instances attribution in `/live`, and the honesty columns filled with real values. The storage layer is already landing on the branch (live pid registry + pid_map history `079cc9a37`/`0eac74037`; bash success-path exit-mark + kind-hint ContextVar stamping `dc1c21396`/`5981b41ba`; MCP stdio spawn-seam stamp `ce2fc1cca`) — the `/live` attribution population ships with the train.
+- **Traceback window (P3)** — `GET /api/resources/traceback` (Z-suffixed ISO t0/t1 from the timeline drill-down).
+- **Anomaly layer (P4)** — `GET /api/resources/anomalies` (`?window=` enum `{15m,1h,24h,7d}`, default `1h`) + `/anomalies/{id}/evidence`; shapes `spike | ramp | leak | step`; baselines conditioned on `(n_active_workers, dow, hour)`.
+- **Control seam, observe-only (P6)** — `GET /api/resources/control-capabilities` + opt-in `POST /profile` (`RESOURCE_MONITOR_PROFILING_ENABLED=false` by default).
+
+### Added (LANDED, FE) — `/resources` page
+
+- **Lazy gear-menu route + page** (`feature` commits `8d648127d`…`c512bc1e6`, P5) — gear-menu `Resources` entry + lazy `loadComponent` route (zero initial-bundle cost), live tab with gated 8 s poll (skeleton / retain-last-data / single error branch) and self-cost chip, dependency-free inline SVG timeline with anomaly markers + click→window drill-down (default window `1h`, Z-suffixed ISO timestamps), daemon-free Playwright gate.
+
+### Changed — performance (LANDED)
+
+> **CHANGELOG (performance):** *The adjudicated optimization set from the same commission — each an independent, individually revertible commit.*
+
+- **O1 — glibc arena cap** (`a64e82c2c`): `MALLOC_ARENA_MAX=2` at all four boot surfaces (systemd template `Environment=` line, launcher default-only setdefault — a staged value wins, `__main__` module-level setdefault) + a never-raises `malloc_trim(0)` tuner on the existing hourly/idle-gated maintenance loop. Expected −10~30 % anon (soft estimate — the runbook's measurement protocol at T+24 h/T+72 h vs the 1.68–1.72 GB baseline decides it; real reduction < 5 % ⇒ O3 is the dominant lever).
+- **O3 — instance-graph cache bounded** (`60f382bd1`): `LIMITS_INSTANCE_CACHE_TTL_HOURS` (default 6 h, post-terminal, active never evicted) + `LIMITS_INSTANCE_CACHE_MAX_ENTRIES` (LRU 64) via the settings resolver. User-visible: instance graphs evict 6 h after terminal instead of 24 h; shorter TTL ⇒ more recompiles on revive (bounded, metric-visible).
+- **O4 — retry storm + pool hygiene** (`778a49cb2` + `8fb77a7b5` + `9186cdd4a`): the source-adapter backoff reset is now gated on the crashed run having actually lived ≥ 60 s (start-then-immediate-death keeps the accumulated backoff — repeated short crashes grow the cadence instead of pinning ~2–5 s; user-visible: the plane/computer-use MCP retry storm is fixed) + floor-preserving idle reap for warm-pool STDIO MCP children (`MCP_POOL_IDLE_REAP_SECONDS`, default 1800, 0 disables; in-use connections never reaped; user-visible: idle MCP servers are reaped after the configured idle window).
+- **DependencyBus lock reap (LANDED)** (`d89843691` + `a023a7ddb`): terminal-or-gone, unheld, idle ≥ 3600 s, not-pending locks reaped on the hourly idle-gated hook with a pop-time idle re-check closing the race; guard-lock pattern and `stop()` untouched.
+- **O8 — stale-subprocess defenses** (`a94000ae5` + `c86462dc3` + `4d572f561`): boot-time stale-subprocess sweep (`daemon/services/boot_subprocess_sweep.py` — prod-lane default via `sys.frozen`, env kill-switch `ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES`, every reap through the PID-recycle guard starttime-field-22 + pgid) + read-only KillMode audit (verdict: no unit-file change warranted — `KillMode=mixed` stop-phase semantics documented). Motivated by the demonstrated Oct-17 kernel OOM (3 deaths, daemon killed 23:19:14Z, `MemoryMax=infinity`, zero swap, test-farm children leaking across restarts).
+- **O5 — bash live-dict leak closed (via P2's success-path exit-mark)** (`dc1c21396`): the bash subprocess live dict grew by one entry per call because the success path never marked exit; the success path now routes through `PidRegistry.mark_exit` with uniform `exit_kind` routing (owned by P2 per phase7 D9, superseding the standalone-O5 plan).
+
+### Changed — O2 ceremony-gated (its own line, explicit)
+
+- **Bounded chromium render concurrency** (`0d0a67179`): `LIMITS_CHART_RENDER_CONCURRENCY` (default 2, effective clamp [1, 4]) + hard per-render timeout with awaited child kill is IN THE TREE but takes **LIVE effect only at the user's promote nonce ceremony** — this commission performs no promote. User-visible once live: concurrent chart renders may queue under saturation instead of stacking 150–400 MB chromium children.
+
+### Docs
+
+- **Operator runbook** `docs/runbooks/resource-cost-control.md` — reading `/resources` (all 8 endpoints with owning-phase landed/forward labels), honesty-column doctrine, the full knob-tuning table (grep-verified against the merged config), anomaly-shape glossary, the verified NO-OP ledger, and the systemd-bounds/swap/tripwire OOM-delta section.
+- **Operator hygiene checklist** `docs/runbooks/resource-hygiene-operator-checklist.md` — O7's exact-command surface: systemd `MemoryHigh=7G`/`MemoryMax=8G` drop-in, swap (USER DECISION), dry-run-first pattern+age-gated test-DB cleanup, orphaned context7-mcp kill, demo-daemon keep/kill (USER DECISION), `MALLOC_ARENA_MAX` on the installed unit, O1 verification protocol. Operator-executed only — agents never execute any of it against live.
+
+### Deferred
+
+- **O6 — per-turn streaming projection**: deferred awaiting a per-turn `tracemalloc` snapshot as evidence first — the P6 profiling seam (`RESOURCE_MONITOR_PROFILING_ENABLED`) is its future evidence source; no speculative memory surgery without it.
+- *(O5 was on the deferral ledger but is CLOSED — landed via P2's bash success-path exit-mark, see Changed above.)*
+
+---
+
 ## [0.24.0] — 2026-10-19
 
 ### Added — DB-managed worker-pool sizing + agent settings tools (`settings-worker-slots`, merged to `latest` @ `50f809940`)

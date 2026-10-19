@@ -552,6 +552,14 @@ class TestWebFetchBootstrapIntegration:
         config.mcp_pool.health_check_interval = 60
         config.mcp_pool.health_check_timeout = 5
         config.mcp_pool.tool_call_timeout = 120
+        # ``InstanceManager._init_mcp_warmup_pool`` reads
+        # ``mcp_pool.idle_reap_seconds`` (manager.py, McpWarmupPool
+        # construction; landed with the idle-reap pool feature —
+        # McpPoolConfig default 1800). The spec'd ``McpPoolConfig``
+        # mock does not auto-expose the Pydantic v2 instance field,
+        # so we set it explicitly (same convention as service_tool
+        # above).
+        config.mcp_pool.idle_reap_seconds = 1800
 
         config.job_system = MagicMock(spec=JobSystemConfig)
         config.job_system.default_max_retries = 3
