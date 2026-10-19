@@ -475,6 +475,101 @@ class TestFEContractParity:
             "unattributed"
         ].is_required()
 
+    def test_ts_parity_pinned_fields_in_FE_source(self):
+        """Strengthen the FE contract pin (#6): a TS-side rename of an
+        interface field fails this test, not just a PY-side rename.
+
+        Reads ``frontend/src/app/models/resources.models.ts`` and
+        asserts every pinned PY field name appears in the
+        corresponding TS interface block. Read-only file access —
+        no FE modification; the pin lives in the BE test pack per
+        the dispatch's prescribed-findings directive. The TS file
+        path is derived from this test file's ``__file__`` (the
+        worktree-relative convention).
+        """
+        import re as _re
+        from pathlib import Path as _Path
+
+        ts_path = (
+            _Path(__file__).resolve().parents[3]
+            / "frontend" / "src" / "app" / "models" / "resources.models.ts"
+        )
+        src = ts_path.read_text(encoding="utf-8")
+
+        def _block(name: str) -> str:
+            """Extract the body of ``export interface Name { ... }``."""
+            m = _re.search(
+                rf"export interface {name}\s*\{{(?P<body>.*?)\n\}}",
+                src,
+                _re.DOTALL,
+            )
+            assert m is not None, f"TS interface {name!r} not found"
+            return m.group("body")
+
+        # Anomaly: every PY-required field name appears as a TS field
+        # declaration. Word-boundary regex (NOT substring) — `id` is
+        # NOT contained in `instance_id`, so the pin catches renames
+        # without false positives from cross-field overlaps.
+        anomaly_body = _block("Anomaly")
+        for field_name in (
+            "id", "kind", "t_start", "t_end", "peak", "baseline",
+            "severity", "series_key", "shape",
+        ):
+            assert _re.search(
+                rf"^\s*{_re.escape(field_name)}\s*[?:]", anomaly_body,
+                _re.MULTILINE,
+            ), (
+                f"Anomaly TS interface missing field {field_name!r}"
+            )
+        # instance_id is the sole optional (FE ``instance_id?``).
+        assert _re.search(
+            r"^\s*instance_id\?\s*:", anomaly_body, _re.MULTILINE,
+        ), "Anomaly TS interface missing optional instance_id?"
+
+        # AnomaliesPayload — exact key.
+        body = _block("AnomaliesPayload")
+        assert _re.search(r"^\s*anomalies\s*[?:]", body, _re.MULTILINE), (
+            "AnomaliesPayload TS interface missing 'anomalies'"
+        )
+
+        # EvidencePayload — every PY field name appears.
+        evidence_body = _block("EvidencePayload")
+        for field_name in (
+            "anomaly", "samples", "top_pids_per_bucket",
+            "children_delta", "contributors",
+        ):
+            assert _re.search(
+                rf"^\s*{_re.escape(field_name)}\s*[?:]", evidence_body,
+                _re.MULTILINE,
+            ), (
+                f"EvidencePayload TS interface missing field {field_name!r}"
+            )
+
+        # EvidenceContributor — every PY field name appears; the
+        # optional ones carry ``?`` in TS. The required ones use the
+        # bare name (NOT ``?``); the optional ones use ``?``.
+        contrib_body = _block("EvidenceContributor")
+        for field_name in ("share_pct",):
+            assert _re.search(
+                rf"^\s*{_re.escape(field_name)}\s*:", contrib_body,
+                _re.MULTILINE,
+            ), (
+                f"EvidenceContributor TS interface missing required "
+                f"field {field_name!r}"
+            )
+        for opt in ("instance_id", "agent_id", "work_id", "unattributed"):
+            assert _re.search(
+                rf"^\s*{_re.escape(opt)}\?\s*:", contrib_body,
+                _re.MULTILINE,
+            ), (
+                f"EvidenceContributor TS interface missing optional {opt}?"
+            )
+        # ``evidence?`` is the contract — optional on PY; the TS body
+        # MUST carry it as ``evidence?`` (the evidence sub-object).
+        assert _re.search(
+            r"^\s*evidence\?\s*:", contrib_body, _re.MULTILINE,
+        ), "EvidenceContributor TS interface missing 'evidence?'"
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # Traceback findings fill (D5)
