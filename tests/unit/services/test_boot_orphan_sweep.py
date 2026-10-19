@@ -101,9 +101,22 @@ def _seed_instance(
 
 
 def _seed_jobitem(
-    engine: Engine, instance_id: str, admission_state: str
+    engine: Engine,
+    instance_id: str,
+    admission_state: str,
+    deleted_at: str | None = None,
 ) -> str:
-    """Insert a JobItem bound to ``instance_id``. Returns the job_id."""
+    """Insert a JobItem bound to ``instance_id``. Returns the job_id.
+
+    ``deleted_at`` is a tombstone marker — a set value simulates the
+    soft-delete state documented at
+    ``daemon/repositories/job_queue/repository.py:79-84`` (where
+    ``admission_state`` is FROZEN at deletion time, NOT a liveness
+    claim, so every reconcile query filters ``deleted_at IS NULL``
+    deliberately). The default ``None`` keeps all pre-existing call
+    sites identical — only new tests that probe the soft-delete
+    tombstone behavior should pass a non-None value.
+    """
     job_id = f"job-{uuid4().hex[:12]}"
     with Session(engine) as s:
         s.add(
@@ -116,6 +129,7 @@ def _seed_jobitem(
                 queue_id="queue-test",
                 instance_id=instance_id,
                 admission_state=admission_state,
+                deleted_at=deleted_at,
             )
         )
         s.commit()
@@ -276,6 +290,51 @@ def test_orphan_with_queued_jobitem_returned(
     _seed_jobitem(engine, iid, admission_state=AdmissionState.QUEUED.value)
     out = task_repo.find_orphaned_live_turns(boot_epoch=now_utc_naive())
     assert out == [iid]
+
+
+def test_soft_deleted_jobitem_not_swept(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """A soft-deleted JobItem tombstone MUST NOT satisfy the active clause.
+
+    Regression for boot-orphan-sweep review advisory A1: the
+    canonical live-JobItem predicate in this codebase requires
+    BOTH ``admission_state IN (ACTIVE_ADMISSION_STATES)`` AND
+    ``deleted_at IS NULL`` (see
+    ``daemon/services/job_queue_service.py:2602-2608`` and
+    ``daemon/repositories/job_queue/repository.py:79-84`` — soft-delete
+    semantics). A JobItem row with frozen
+    ``admission_state='queued'`` but ``deleted_at`` SET is a
+    tombstone — its ``admission_state`` is a deletion-time
+    snapshot, NOT a liveness claim — and the boot-orphan-sweep
+    selector must exclude it. Otherwise the instance would be
+    spuriously swept/resumed at boot.
+
+    Shape: orphan-looking instance (status='running', no active
+    task row) + a single JobItem whose ``admission_state`` matches
+    the active set BUT whose ``deleted_at`` is set → selector
+    returns ``[]``.
+    """
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    _seed_jobitem(
+        engine,
+        iid,
+        admission_state=AdmissionState.QUEUED.value,
+        # Set ``deleted_at`` to a non-empty deletion-time snapshot
+        # string — mirrors the soft-delete tombstone shape the
+        # canonical predicate is designed to exclude.
+        deleted_at="2026-10-19T12:00:00",
+    )
+    out = task_repo.find_orphaned_live_turns(boot_epoch=now_utc_naive())
+    assert out == [], (
+        "Soft-deleted JobItem (deleted_at set, admission_state frozen "
+        "at 'queued') MUST NOT satisfy the exists() subquery — its "
+        "admission_state is a deletion-time snapshot, NOT a liveness "
+        "claim; the canonical live-JobItem predicate requires BOTH "
+        "admission_state IN active AND deleted_at IS NULL. Returning "
+        "the instance here would spuriously sweep / resume it at boot."
+    )
 
 
 def test_idle_instance_not_swept(

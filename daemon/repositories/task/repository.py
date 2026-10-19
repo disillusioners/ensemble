@@ -1244,6 +1244,22 @@ class TaskRepository:
                         col(JobItem.admission_state).in_(
                             list(ACTIVE_ADMISSION_STATES)
                         )
+                    # Soft-delete semantics: JobItem with ``deleted_at``
+                    # set is a tombstone — its ``admission_state`` is
+                    # frozen at deletion time, NOT a liveness claim.
+                    # The canonical live-JobItem predicate in this
+                    # codebase requires BOTH ``admission_state IN
+                    # (ACTIVE_ADMISSION_STATES)`` AND
+                    # ``deleted_at IS NULL``; see
+                    # ``daemon/services/job_queue_service.py:2602-2608``
+                    # and ``daemon/repositories/job_queue/repository.py:79-84``.
+                    # Without this clause a soft-deleted JobItem row
+                    # with frozen 'queued'/'active' would falsely
+                    # satisfy the exists() subquery, sweeping /
+                    # resuming the instance at boot (A1 review
+                    # advisory on boot-orphan-sweep).
+                    ).where(
+                        col(JobItem.deleted_at).is_(None)
                     )
                 )
                 .order_by(col(Instance.created_at).asc())
