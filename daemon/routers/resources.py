@@ -29,9 +29,25 @@ P4 appends the anomaly endpoints:
   ``build_window_view(findings_provider=...)`` — absent engine ⇒
   ``[]`` (P3 shape verbatim).
 
-P6 appends its endpoints (``/control-capabilities``, ``POST
-/profile``) later; the router is the single mount for the whole
-family.
+P6 appends the OBSERVE-ONLY control seam:
+
+* ``GET /api/resources/control-capabilities`` — §2.8 static shape
+  ``{enforcement:"observe-only", actions:[{name,user_gated,
+  available:false},…], policy_rows}`` — it ADVERTISES the seam,
+  never capability (every action ``available:false``; the T4 policy
+  table is empty by design).
+* ``POST /api/resources/profile`` — the profile-action SEAM ONLY
+  (D2b): refuses when ``profiling_enabled=false`` (403), returns
+  409 while a profile reservation is open, clamps ``seconds ≤
+  profile_timebox_s``, capability-probes, and counts invocations.
+  It NEVER invokes a profiler, NEVER resolves a backend, NEVER
+  writes a row — the profiler itself is a separate commission
+  behind this seam. The T3 dormant columns stay NULL and the T4
+  policy table stays EMPTY (both pinned by the control-seam pack;
+  this docstring deliberately does not name the dormant columns —
+  the dormancy audit allows only the model definition to).
+
+The router is the single mount for the whole family.
 
 **DI pattern.** The router depends-injects the manager via
 ``request.app.state.manager`` and the monitor via
@@ -56,11 +72,13 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
-from datetime import datetime, timezone
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 # C-1 hardening parity — the router's first-boot tolerances use the
@@ -1068,3 +1086,245 @@ async def get_anomaly_evidence(
             for c in (payload.get("contributors") or [])
         ],
     )
+
+
+# ── P6 — observe-only control seam (/control-capabilities, /profile) ────────
+#
+# ZERO enforcement (phase6-plan D1/D6): this section ADVERTISES the
+# control seam; it never kills, throttles, or enforces anything. The
+# T4 ``resource_limit_policy`` table stays EMPTY in v1 (no seed rows,
+# no CRUD endpoints) and the T3 dormant columns stay NULL — both
+# pinned by ``tests/test_resource_control_seam.py`` (which also
+# forbids naming the dormant columns anywhere but the model
+# definition), so any future enforcement code fails the suite until
+# the fence is consciously lifted.
+
+# The T4 ``op`` vocabulary (architecture §2.4) — advertised as
+# ``available:false`` by /control-capabilities, NEVER implemented here.
+_CONTROL_ACTION_NAMES = ("alert", "throttle", "kill")
+
+
+def _count_policy_rows(engine: Any) -> int:
+    """Row-count of T4 ``resource_limit_policy`` (proves v1 emptiness).
+
+    Missing table (fresh boot before the migration/metadata pass)
+    ⇒ 0 — the same tolerate-missing-relation rule the /history
+    readers use. Other failures propagate to the endpoint's
+    degrade wrapper (D11 — never 503).
+    """
+    with engine.connect() as conn:
+        return int(
+            conn.execute(
+                text("SELECT COUNT(*) FROM resource_limit_policy")
+            ).scalar()
+            or 0
+        )
+
+
+@router.get("/control-capabilities")
+async def get_control_capabilities(request: Request) -> dict:
+    """§2.8 capability advertisement — observe-only, static-shaped.
+
+    Exactly ``{enforcement:"observe-only", actions:[{name,
+    user_gated, available:false},…], policy_rows}``. Every action is
+    ``available:false`` — the endpoint advertises the SEAM, not
+    capability (D4). ``policy_rows`` is a live repo-read of the T4
+    row-count (0 by design in v1); absent manager/engine or a
+    failed read degrades to ``policy_rows: 0`` — never 503 (D11).
+    """
+    policy_rows = 0
+    manager = getattr(request.app.state, "manager", None)
+    engine = getattr(manager, "engine", None) if manager is not None else None
+    if engine is not None:
+        try:
+            policy_rows = await asyncio.to_thread(_count_policy_rows, engine)
+        except Exception as exc:  # fail-soft: degrade, never 503 (D11)
+            logger.warning(
+                "[ResourcesRouter] control-capabilities policy_rows "
+                "degraded: %s",
+                exc,
+            )
+            policy_rows = 0
+    return {
+        "enforcement": "observe-only",
+        "actions": [
+            {"name": name, "user_gated": True, "available": False}
+            for name in _CONTROL_ACTION_NAMES
+        ],
+        "policy_rows": policy_rows,
+    }
+
+
+# ── P6 — POST /profile: the profile-action SEAM ONLY (D2b) ──────────────────
+#
+# The profiler itself is OUT OF SCOPE (separate commission behind this
+# seam). The endpoint implements ONLY the gates: refuse when
+# ``profiling_enabled=false`` (403), 409 while a reservation is open,
+# clamp ``seconds ≤ profile_timebox_s``, capability-probe. It never
+# invokes a profiler, never resolves a backend, never writes a row —
+# the ONLY state it keeps is the in-RAM reservation + the
+# ``profile_seam_invocations`` counter below.
+
+
+class _ProfileSeamState:
+    """In-RAM reservation bookkeeping for the profile seam.
+
+    ``active`` means a reservation window is open (a future profiler
+    commission would own the real lifecycle; the seam owns only the
+    gate). Monotonic-clock based so wall-clock changes cannot extend
+    a reservation. ``invocations`` counts EVERY POST /profile call
+    (gate outcomes included) — it is the ONLY durable trace the seam
+    keeps (D2b: "never write a row beyond a
+    ``profile_seam_invocations`` counter").
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active_until_monotonic: float = 0.0
+        self.active_scope: Optional[str] = None
+        self.invocations: int = 0
+
+    def active(self) -> bool:
+        with self._lock:
+            return time.monotonic() < self.active_until_monotonic
+
+    def reserve(self, scope: str, seconds: float) -> None:
+        with self._lock:
+            self.active_scope = scope
+            self.active_until_monotonic = time.monotonic() + seconds
+
+    def bump(self) -> int:
+        with self._lock:
+            self.invocations += 1
+            return self.invocations
+
+    def active_until_iso(self) -> Optional[str]:
+        """Naive-UTC ISO of the open reservation's end (D9 posture)."""
+        with self._lock:
+            now = time.monotonic()
+            if now >= self.active_until_monotonic:
+                return None
+            remaining = self.active_until_monotonic - now
+        return (
+            datetime.now(timezone.utc).replace(tzinfo=None)
+            + timedelta(seconds=remaining)
+        ).isoformat()
+
+    def reset(self) -> None:
+        """Clear the reservation (tests + operator tooling)."""
+        with self._lock:
+            self.active_until_monotonic = 0.0
+            self.active_scope = None
+
+
+_profile_seam_state = _ProfileSeamState()
+
+
+def _profile_capability_probe() -> dict:
+    """The seam's capability probe — ALWAYS 'no profiler provisioned'.
+
+    This is the probe's whole truth in v1: there is no backend to
+    resolve (D2b forbids it), so the probe reports the absence. A
+    future profiler commission replaces the body behind the same
+    envelope key.
+    """
+    return {
+        "available": False,
+        "profiler": None,
+        "note": (
+            "observe-only seam; the profiler backend is a separate "
+            "commission behind this gate"
+        ),
+    }
+
+
+class ProfileRequestBody(BaseModel):
+    """§2.8 POST /profile body — ``{scope, kind, seconds}``."""
+
+    scope: str = Field(default="daemon")
+    kind: Optional[str] = None
+    seconds: Optional[int] = Field(default=None, ge=1)
+    requested_by: Optional[str] = None
+
+
+@router.post("/profile")
+async def post_profile(request: Request, body: ProfileRequestBody) -> dict:
+    """Profile-action SEAM ONLY (§2.8 / phase6-plan D2b).
+
+    Gate order: capability config → busy → clamp → capability probe.
+    Responses are the typed gate outcomes ONLY:
+
+    * ``403`` ``{"error":…, "code":"profiling_disabled"}`` — the
+      ``profiling_enabled`` config knob is false (or the config is
+      absent — fail-closed; a degraded boot cannot prove enablement).
+    * ``409`` ``{"error":…, "code":"profile_active", …}`` — a
+      profile reservation is already open (in-RAM flag).
+    * ``400`` ``{"error":…}`` — invalid ``scope``.
+    * ``200`` — all gates passed: the reservation is recorded in RAM
+      for the (clamped) seconds, the capability probe block is
+      attached, and NO profiler runs, NO backend is resolved, and NO
+      row is written (the invocation counter is in-RAM).
+    """
+    count = _profile_seam_state.bump()
+
+    cfg_block = getattr(request.app.state, "ensemble_config", None)
+    monitor_cfg = getattr(cfg_block, "resource_monitor", None)
+    profiling_enabled = bool(getattr(monitor_cfg, "profiling_enabled", False))
+    timebox_s = int(
+        getattr(monitor_cfg, "profile_timebox_s", 30) or 30
+    )
+    if not profiling_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": (
+                    "profiling disabled "
+                    "(RESOURCE_MONITOR_PROFILING_ENABLED=false); the "
+                    "profile seam is observe-only"
+                ),
+                "code": "profiling_disabled",
+            },
+        )
+
+    scope = (body.scope or "").strip()
+    if scope != "daemon" and not scope.startswith("instance:"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    "invalid scope; expected 'daemon' or 'instance:<id>'"
+                )
+            },
+        )
+
+    if _profile_seam_state.active():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "a profile is already active",
+                "code": "profile_active",
+                "active_scope": _profile_seam_state.active_scope,
+                "active_until": _profile_seam_state.active_until_iso(),
+            },
+        )
+
+    requested = body.seconds if body.seconds is not None else timebox_s
+    clamped = requested > timebox_s
+    effective = min(requested, timebox_s)
+
+    _profile_seam_state.reserve(scope, effective)
+    return {
+        "accepted": True,
+        "scope": scope,
+        "kind": body.kind,
+        "requested_by": body.requested_by or "operator",
+        "seconds": effective,
+        "requested_seconds": requested,
+        "clamped": clamped,
+        "active_until": (
+            datetime.now(timezone.utc).replace(tzinfo=None)
+            + timedelta(seconds=effective)
+        ).isoformat(),
+        "capability": _profile_capability_probe(),
+        "profile_seam_invocations": count,
+    }

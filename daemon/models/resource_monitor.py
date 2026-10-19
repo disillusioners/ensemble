@@ -40,6 +40,34 @@ Tables (all dual-dialect, no ``now()``, no native enums, no
   ``action`` / ``action_by`` / ``acted_at`` columns for P6.
 * **T4** ``resource_limit_policy`` — control seam. EMPTY in v1;
   ``enabled`` default false, ``user_gated`` NOT NULL default true.
+
+Future enforcement port (P6 seam note — dormancy is DISCOVERABLE,
+not accidental)
+=================================================================
+
+v1 (P1–P6) is **observe-only**: ZERO enforcement code ships. The
+dormant T3 ``action`` / ``action_by`` / ``acted_at`` columns and the
+T4 ``resource_limit_policy`` table exist so that enforcement — when
+it ever arrives — lands as a **NEW port behind this SAME schema**:
+no migration rework, no table sprawl, no schema drift (architecture
+§6: "seam + dormant table = zero rework later").
+
+* **Consumer contract.** A future enforcement port reads T4 policy
+  rows and consumes them at its own seam; this module stays the
+  schema home only.
+* **First expected consumer:** the O2 chromium concurrency policy —
+  leader ruling 2026-10-18: ceremony-gated, default cap=2
+  configurable 1–4, hard per-render timeout — landing later as a
+  ``scope='child_kind', target='chart_render'`` policy row consumed
+  at the chart-render SPAWN SEAM (the ``child_kind='chart_render'``
+  lane of ``daemon/tools/chart_tools.py``). Nothing in P1–P6
+  implements it.
+* **Dormancy is enforced, not hoped for:** the control-seam pack
+  (``tests/test_resource_control_seam.py``) pins the T3 dormant
+  columns NULL-only, audits ``daemon/`` for write sites (only this
+  model definition may name them), and fences enforcement code out
+  of the monitor package + resources router until the fence is
+  consciously lifted.
 """
 
 from __future__ import annotations
