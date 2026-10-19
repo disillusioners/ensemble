@@ -1143,15 +1143,41 @@ async def answer_questions_job(
 
     Body:
         ``answers`` (dict, required) — keyed by question id (preferred)
-        or question text; ``question_pack_id`` (str, optional) — echo
-        of the pack id from the question payload for the stale-answers
-        correlation guard; ``resume_message`` (str, optional).
+        or question text; ``question_pack_id`` (str, optional) — the
+        pack id from the question payload; ``resume_message``
+        (str, optional).
+
+    ``question_pack_id`` is not merely "optional": it is THE
+    DISAMBIGUATOR. The ``work_id`` resolves to the MISSION-SCOPED
+    instance (usually the mission root) while the question may have
+    been asked by a CHILD instance, so the asker is resolved from the
+    mission subtree (shared resolver —
+    ``daemon/services/answer_resolver.py``). When several instances of
+    the mission hold a pending question and no ``question_pack_id`` was
+    supplied, the request is REFUSED with ``400 INVALID_REQUEST``
+    (the candidates are named) rather than answered to an arbitrary
+    instance. Supplying the pack id always selects the right asker.
+
+    Errors (job-addressed surface):
+        * ``404 JOB_NOT_FOUND`` — the ``work_id`` resolves to no work.
+        * ``400 INVALID_REQUEST`` — ambiguous asker (see above) or a
+          malformed ``answers`` body.
+        * ``400 QUESTION_PACK_MISMATCH`` — the supplied
+          ``question_pack_id`` is not the pack the resolved asker holds.
+        * ``404 NO_PENDING_QUESTION`` — no instance of the mission holds
+          a pack (the subtree was scanned).
+        * ``410 ANSWER_TARGET_TERMINAL`` — the work instance is
+          COMPLETED/TERMINATED (the signal survives the resolution).
+        * ``410 QUESTION_PACK_LOST`` — the asker was identified but the
+          pack is gone from both its memory store and its durable
+          metadata shadow.
+        * ``503`` — writes are paused (migration mode).
 
     Resolution is watcher-independent: the pack lives on the ASKER;
     ``WorkResolver.resolve_work(work_id)`` maps the work_id to the
     owning instance via Task.work_id / JobItem.job_id lookups — any
-    mission receipt (live or already-settled) resolves to the asker,
-    so the ``work_id`` on the question line needs no watch row.
+    mission receipt (live or already-settled) resolves into the same
+    mission, so the ``work_id`` on the question line needs no watch row.
     """
     from pydantic import ValidationError
 
