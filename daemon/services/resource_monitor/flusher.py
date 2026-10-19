@@ -95,6 +95,48 @@ def is_missing_relation_error(exc: BaseException) -> bool:
     return type(exc).__name__.lower() == "undefinedtable"
 
 
+def _extract_sqlstate(exc: BaseException) -> Optional[str]:
+    """Best-effort SQLSTATE extraction for diagnostic logging.
+
+    Postgres errors expose ``.diag.sqlstate`` (psycopg3) or
+    ``.pgcode`` (psycopg2) or ``.sqlstate`` (DBAPI fallback). On
+    non-Postgres dialects the return is ``None`` — the diagnostic
+    log line falls back to the exception class name. The helper
+    never raises; a nested-dive failure returns ``None`` so the
+    flusher never escalates a logging error into a write error (the
+    defensive catch logs the exception TYPE at DEBUG so a
+    persistently broken dialect stays diagnosable).
+    """
+    try:
+        orig = getattr(exc, "orig", None)
+        if orig is not None:
+            diag = getattr(orig, "diag", None)
+            if diag is not None:
+                code = getattr(diag, "sqlstate", None)
+                if code:
+                    return str(code)
+            code = getattr(orig, "pgcode", None)
+            if code:
+                return str(code)
+            code = getattr(orig, "sqlstate", None)
+            if code:
+                return str(code)
+        # Final fallback — the DBAPI-level attribute. Normalize to
+        # ``str`` here too: a non-string code (e.g. an int) would
+        # otherwise reach the log's ``%s`` as-is while every other
+        # branch returns a string, so the same SQLSTATE could be
+        # rendered two different ways across branches.
+        code = getattr(exc, "sqlstate", None)
+        return str(code) if code else None
+    except Exception as catch_exc:  # pragma: no cover - defensive
+        logger.debug(
+            "resource-monitor flusher: SQLSTATE extraction raised %s: %s",
+            type(catch_exc).__name__,
+            str(catch_exc)[:200],
+        )
+        return None
+
+
 # Retention window for exited rows in ``resource_pid_map``.
 # 7 days keeps a useful forensic window for "why did this process
 # exit?" debugging without unbounded disk growth. Live rows
@@ -558,8 +600,13 @@ class Flusher:
         RELATION-missing error (``no such table`` / ``relation
         does not exist`` / UndefinedTable) is a benign first-boot
         state, never a flusher failure — see
-        :func:`is_missing_relation_error` for the narrowed match
-        (C-1 hardening: column errors are NOT tolerated)).
+        :func:`is_missing_relation_error` for the narrowed match.
+        C-1 hardening: that HELPER is a CLASSIFIER, not the swallow
+        policy — it does not classify a column error (42703) as
+        relation-missing, so a column error takes the NON-tolerated
+        branch below, which the amplifier hardening then ABSORBS
+        (logged + savepoint rollback + return 0) rather than
+        re-raising.
 
         Final-gate FINDING #2: like ``_tier_write``, the DELETE
         runs inside a SAVEPOINT — on PostgreSQL a tolerated 42P01
@@ -568,6 +615,14 @@ class Flusher:
         (``InFailedSqlTransaction``); the savepoint rollback
         clears the aborted state so the window degrades to 0 and
         continues instead of raising.
+
+        Amplifier hardening (2026-10-19): per the ``_tier_write``
+        contract, a non-missing-relation error here ALSO rolls
+        back the savepoint and returns 0 (with a logged error)
+        instead of re-raising — the four retention sweeps run
+        inside the same ``engine.begin()`` window as the tier
+        writes and must not abort the window on a non-fatal
+        error.
         """
         where = f"{ts_column} < :cutoff_iso"
         params: dict = {"cutoff_iso": cutoff_iso(cutoff_epoch_s)}
@@ -591,7 +646,27 @@ class Flusher:
                     table,
                 )
                 return 0
-            raise
+            sqlstate = _extract_sqlstate(exc)
+            logger.error(
+                "resource-monitor flusher sweep FAILED on %s — "
+                "savepoint rolled back, window continues "
+                "(sqlstate=%s, exc=%s: %s)",
+                table,
+                sqlstate or "-",
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            # MUST surface on the ``flush.errors`` metric. The
+            # swallow path keeps the window alive, so the window's
+            # own ``except`` (which is the only OTHER place that
+            # increments the counter) never fires — without this
+            # increment a dead sweep path reports ``flush.errors =
+            # 0`` while ``flush.batches`` climbs, which is the same
+            # silent-failure blindness the savepoint hardening was
+            # meant to remove, now on the metric axis
+            # (``/self-cost`` reads the counter directly).
+            self.counters.errors += 1
+            return 0
         nested.commit()
         return int(result.rowcount or 0)
 
@@ -717,13 +792,25 @@ class Flusher:
         Missing table → 0 + ONE warning (the first degradation logs
         the cause — the schema does not exist yet; create_all /
         migrations run later in the boot — file_change_monitor
-        precedent). Any other error propagates.
+        precedent). Any other error ALSO rolls back the per-tier
+        SAVEPOINT and logs distinctly, but NEVER escapes the flush
+        window (amplifier hardening, 2026-10-19). The triggering
+        incident was a ``DatatypeMismatch`` (SQLSTATE 42804: column
+        "estimated" is INTEGER but the bound expression is boolean):
+        a single tier's column-type error raised out of
+        ``_tier_write`` and aborted the shared ``engine.begin()``
+        window, rolling back every other tier's writes as collateral.
+        Per-tier savepoints now isolate the failure and the function
+        returns 0 so the next tier can still write.
 
         C-1 hardening: "missing" matches the RELATION-missing class
         ONLY (:func:`is_missing_relation_error`) — a PostgreSQL
         column error (42703, ``column ... does not exist``) is a
-        real grammar bug and MUST surface, never be swallowed as a
-        benign first-boot state.
+        real grammar bug and is NOT lumped in with first-boot noise:
+        it takes the non-tolerated branch, whose ERROR line names
+        the SQLSTATE and the exception class (``exc=``), so a
+        regression stays distinguishable from first-boot noise in
+        the log.
 
         Final-gate FINDING #2 (PG txn-abort): on PostgreSQL a
         failed statement ABORTS the surrounding transaction
@@ -736,11 +823,13 @@ class Flusher:
         SAVEPOINT (:meth:`Connection.begin_nested`): a tolerated
         error rolls back ONLY the savepoint (which clears the
         aborted state on PG) and the window continues; a
-        non-tolerated error still propagates (the outer
-        ``engine.begin()`` window rolls back wholesale). SQLite is
-        unaffected either way (no mid-txn abort) — the savepoint is
-        dialect-portable (both supported dialects emit SAVEPOINT /
-        RELEASE natively).
+        non-tolerated error ALSO rolls back the savepoint and the
+        function returns 0 — the next tier's savepoint starts on a
+        clean transaction state because the outer ``engine.begin()``
+        window never saw the failure. SQLite is unaffected either
+        way (no mid-txn abort) — the savepoint is dialect-portable
+        (both supported dialects emit SAVEPOINT / RELEASE
+        natively).
         """
         nested = conn.begin_nested()
         try:
@@ -757,7 +846,38 @@ class Flusher:
                         "(resource_daemon_bucket missing)"
                     )
                 return 0
-            raise
+            # Amplifier hardening (2026-10-19): any non-missing-relation
+            # error (column type mismatch, integrity violation,
+            # constraint conflict, etc.) used to re-raise, escape the
+            # outer ``engine.begin()`` window, and roll back every
+            # OTHER tier's writes as collateral. Log + return 0 here
+            # so the per-tier savepoint absorbs the failure and the
+            # remaining tiers continue. The error is logged with the
+            # SQLSTATE class so a regression is distinguishable from
+            # first-boot noise.
+            sqlstate = _extract_sqlstate(exc)
+            logger.error(
+                "resource-monitor flusher tier write FAILED — "
+                "savepoint rolled back, other tiers continue "
+                "(sqlstate=%s, exc=%s: %s). First 200 chars of SQL: %s",
+                sqlstate or "-",
+                type(exc).__name__,
+                str(exc)[:200],
+                sql[:200],
+            )
+            # MUST surface on the ``flush.errors`` metric. The
+            # swallow path keeps the window alive, so the window's
+            # own ``except`` (which is the only OTHER place that
+            # increments the counter) never fires — without this
+            # increment a dead tier write path reports
+            # ``flush.errors = 0`` while ``flush.batches`` climbs,
+            # which is the same silent-failure blindness the
+            # savepoint hardening was meant to remove, now on the
+            # metric axis (``/self-cost`` reads the counter
+            # directly). The sibling tiers' rows still persist —
+            # the failure is ISOLATED, not silent.
+            self.counters.errors += 1
+            return 0
         nested.commit()
         return len(params)
 

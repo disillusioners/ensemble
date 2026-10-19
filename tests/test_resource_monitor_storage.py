@@ -41,6 +41,7 @@ from daemon.models.resource_monitor import (
 from daemon.services.resource_monitor import (
     FLUSH_BUFFER_CAP,
     Flusher,
+    FlusherCounters,
     RetentionPolicy,
     TierRing,
     rollup_to_hour,
@@ -1098,10 +1099,20 @@ class TestPGGrammarPins:
 
 
 class TestRelationMissingTolerance:
-    """C-1 hardening: the first-boot tolerance matches the
-    RELATION-missing class ONLY. A PG column error (42703,
-    ``column ... does not exist``) must PROPAGATE — the old bare
-    substring swallowed it (the C-1 silent-loss amplifier)."""
+    """Tolerance semantics — narrowed matcher + amplifier isolation.
+
+    The C-1 hardening intent (don't lump column errors in with
+    first-boot noise) is preserved by logging distinctly. The
+    amplifier hardening (2026-10-19) changes the OUTCOME: a
+    column-shaped error used to raise out of ``_tier_write`` /
+    ``_sweep`` and abort the shared ``engine.begin()`` window,
+    rolling back every other tier's writes as collateral. After
+    the fix: per-tier savepoints absorb the failure, the function
+    returns 0 with a logged error, and the next tier continues.
+    The OLD tests in this class asserted the propagate-out
+    behavior — they are renamed and re-asserted here to pin the
+    NEW amplifier behavior.
+    """
 
     class _RaisingConn:
         class _NoopSavepoint:
@@ -1130,9 +1141,27 @@ class TestRelationMissingTolerance:
         f = Flusher.__new__(Flusher)
         f.engine = types.SimpleNamespace(url="sqlite:///:memory:")
         f._missing_table_warned = False
+        # The real ``Flusher.__init__`` ALWAYS sets ``self.counters``
+        # (that dataclass IS the /self-cost metric surface). This
+        # stub bypasses ``__init__``, so it must supply the
+        # attribute itself: the swallowed-failure paths increment
+        # ``counters.errors`` (MUST 1 — a swallowed failure must
+        # reach the metric, not only the log).
+        f.counters = FlusherCounters()
         return f
 
-    def test_pg_column_error_propagates(self):
+    def test_pg_column_error_amplifier_isolated(self, caplog):
+        """Amplifier hardening (2026-10-19): a PG column error
+        (42703, ``column ... does not exist``) is logged with its
+        SQLSTATE class and returns 0 instead of escaping the flush
+        window. The OLD assertion (this test used to RAISE) is the
+        exact behavior that masked the v0.25.0 defect — a single
+        tier's column-type error rolled back every other tier's
+        writes as collateral. The new behavior isolates the
+        failure to the per-tier savepoint and lets the remaining
+        tiers continue."""
+        import logging
+
         f = self._flusher()
         conn = self._RaisingConn(
             Exception(
@@ -1140,8 +1169,18 @@ class TestRelationMissingTolerance:
                 '"resource_pid_map" does not exist'
             )
         )
-        with pytest.raises(Exception, match="_nonexistent"):
-            f._tier_write(conn, "INSERT INTO x VALUES (1)", [{}])
+        with caplog.at_level(logging.ERROR, logger="daemon.services.resource_monitor.flusher"):
+            result = f._tier_write(conn, "INSERT INTO x VALUES (1)", [{}])
+        assert result == 0
+        # The C-1 narrowing intent is preserved by a distinct log
+        # line — the regression is distinguishable from first-boot
+        # noise by the "tier write FAILED" prefix.
+        joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "tier write FAILED" in joined
+        assert "_nonexistent" in joined
+        # MUST 1: the swallowed failure also reaches the
+        # ``flush.errors`` METRIC (not only the log).
+        assert f.counters.errors == 1
 
     def test_pg_relation_missing_still_tolerated(self):
         f = self._flusher()
@@ -1150,6 +1189,7 @@ class TestRelationMissingTolerance:
         )
         assert f._tier_write(conn, "INSERT INTO x VALUES (1)", [{}]) == 0
         assert f._missing_table_warned is True
+        assert f.counters.errors == 0
 
     def test_sqlite_no_such_table_still_tolerated(self):
         f = self._flusher()
@@ -1167,15 +1207,26 @@ class TestRelationMissingTolerance:
         conn = self._RaisingConn(UndefinedTable("syntax-level miss"))
         assert f._tier_write(conn, "INSERT INTO x VALUES (1)", [{}]) == 0
 
-    def test_sweep_column_error_propagates(self, sqlite_engine):
-        """The sweep shares the narrowed matcher — a column-shaped
-        DELETE error surfaces instead of returning 0."""
+    def test_sweep_column_error_amplifier_isolated(self, caplog):
+        """Sweep mirror of the amplifier hardening: a column-shaped
+        DELETE error is logged + returns 0 (NOT raises). The sweep
+        runs inside the same ``engine.begin()`` window as the tier
+        writes — a raise would abort every other tier's write."""
+        import logging
+
         f = self._flusher()
         conn = self._RaisingConn(
             Exception('column "nope" does not exist')
         )
-        with pytest.raises(Exception, match="nope"):
-            f._sweep(conn, "resource_pid_map", 12345)
+        with caplog.at_level(logging.ERROR, logger="daemon.services.resource_monitor.flusher"):
+            result = f._sweep(conn, "resource_pid_map", 12345)
+        assert result == 0
+        joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "sweep FAILED" in joined
+        assert "nope" in joined
+        # MUST 1 (sweep half): the metric mirror of the
+        # tier-write contract above.
+        assert f.counters.errors == 1
 
     def test_sweep_relation_missing_returns_zero(self):
         f = self._flusher()
@@ -1183,6 +1234,7 @@ class TestRelationMissingTolerance:
             Exception('relation "resource_pid_map" does not exist')
         )
         assert f._sweep(conn, "resource_pid_map", 12345) == 0
+        assert f.counters.errors == 0
 
     def test_write_pid_map_emits_plain_insert_pg(self):
         """Call-site pin: driving the REAL flusher's pid_map write
@@ -1397,12 +1449,22 @@ class TestPGTxnAbortWindowSurvival:
         assert len(deletes) == 5, conn.executed
         assert conn.aborted is False
 
-    def test_non_tolerated_error_still_propagates_through_savepoint(self):
-        """C-1 hardening survives the savepoint path: a 42703
-        column-shaped error is NOT missing-relation and MUST
-        surface (never swallowed as first-boot benign)."""
+    def test_non_tolerated_error_now_isolated_by_amplifier(self, caplog):
+        """Amplifier hardening (2026-10-19): a 42703 column-shaped
+        error was the exact defect class that masked the v0.25.0
+        write-path loss. Per-tier savepoints now absorb the failure
+        and the window CONTINUES — the previous assertion (this test
+        used to assert ``pytest.raises``) IS the bug we are fixing.
+
+        The OLD intent — "column errors are NOT missing-relation,
+        never lumped in with first-boot noise" — is preserved by
+        the distinct ERROR log line. The behavior CHANGED in 2026-10-19:
+        the error is logged with SQLSTATE class and the function
+        returns 0; the NEXT tier's savepoint starts on a clean
+        transaction state and persists."""
+        import logging
+
         conn = self._AbortEmulatingConn()
-        # Re-arm the fault with the column-error shape.
         conn.execute_orig = conn.execute
 
         def _fail_column(sql, params=None):
@@ -1417,11 +1479,24 @@ class TestPGTxnAbortWindowSurvival:
         import unittest.mock as _mock
 
         with _mock.patch.object(conn, "execute", side_effect=_fail_column):
-            with pytest.raises(Exception, match="nope"):
-                flusher.run_once()
-        # The savepoint was rolled back and the error STILL surfaced —
-        # the tolerance did NOT swallow a column-shaped error (C-1
-        # hardening intact through the savepoint path). The abort
-        # state itself is cleared by the savepoint rollback before
-        # the tolerance check (implementation detail); the observable
-        # contract is the PROPAGATION asserted above.
+            with caplog.at_level(
+                logging.ERROR,
+                logger="daemon.services.resource_monitor.flusher",
+            ):
+                # MUST NOT raise — the amplifier absorbs the failure.
+                result = flusher.run_once()
+        # rows_written stays 0 because the armed fault hit before
+        # any successful tier write. The window returned cleanly.
+        assert result["rows_written"] == 0
+        # The distinct log line preserves the C-1 narrowing intent
+        # (column errors are NOT first-boot noise) — distinguishable
+        # from missing-relation warnings.
+        joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "sweep FAILED" in joined
+        assert "nope" in joined
+        # MUST 1: the swallowed sweep failure ALSO reached the
+        # ``flush.errors`` metric — one forced failure, one
+        # increment, and the window itself still completed
+        # (``batches`` counted the window, not the failure).
+        assert flusher.counters.errors == 1
+        assert flusher.counters.batches == 1

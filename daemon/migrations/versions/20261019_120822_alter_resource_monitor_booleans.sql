@@ -1,0 +1,214 @@
+-- Migration: alter resource_monitor boolean columns from INTEGER to BOOLEAN
+-- Created: 2026-10-19
+-- MANUAL: TRUE
+-- Author: resource-telemetry fix commission
+-- Description:
+--
+--   The resource-cost-control P1 observability spine shipped three boolean
+--   columns whose ``sa_column=Column(..., Integer, nullable=False)``
+--   override made ``SQLModel.metadata.create_all()`` emit ``INTEGER`` on
+--   PostgreSQL. Combined with the flusher binding Python ``bool`` values,
+--   the resulting PostgreSQL error
+--   ``DatatypeMismatch: column "estimated" is of type integer but
+--   expression is of type boolean`` raised on EVERY flush window and
+--   rolled back ALL four tables (T1/T2/T3/T4) via the shared
+--   ``engine.begin()`` window — 2.5 h of continuous write-path data
+--   loss since the v0.25.0 promote (~06:13:51Z). The amplification
+-- detector is ``is_missing_relation_error`` only swallowing the 42P01
+-- (UndefinedTable) class; the 42804 (DatatypeMismatch) class
+-- re-raises, escapes ``_tier_write``, and aborts the surrounding
+-- transaction on the next statement. (22002 is null_value_not_allowed
+-- and is NOT the code this defect produced.)
+--
+--   This migration file is the audit/operator document. The runtime
+--   correction lives in
+--   ``daemon/manager.py::_ensure_postgres_columns`` (the
+--   ``MigrationRunner`` is a NO-OP on non-SQLite engines per
+--   ``daemon/migrations/runner.py:721-726``; the PG schema evolution
+--   convention is the runtime hook).
+--
+-- COLUMNS IN SCOPE (all three were the same defect class):
+--
+--   * ``resource_instance_sample.estimated``    — INTEGER NOT NULL
+--   * ``resource_limit_policy.enabled``        — INTEGER NOT NULL
+--   * ``resource_limit_policy.user_gated``     — INTEGER NOT NULL
+--
+--   DEFAULT SHAPE — stated accurately: on PostgreSQL the live columns
+--   carry NO server default (``information_schema.columns.column_default``
+--   is EMPTY). ``SQLModel.metadata.create_all`` emits only the column
+--   TYPE and NOT NULL from ``sa_column``; the ``Field(default=...)``
+--   is a Python-side ORM default and is NOT emitted as DDL. The
+--   SQLite companion migrations DO declare ``DEFAULT 1``/``DEFAULT 0``,
+--   but SQLite type affinity makes that inert for storage. The runtime
+--   hook therefore sets a server default explicitly
+--   (``SET DEFAULT true|false``) so a raw INSERT that omits the column
+--   gets the documented value.
+--
+-- DUAL-DRIVER NOTES:
+--
+--   * For PostgreSQL: ``SQLModel.metadata.create_all()`` on a FRESH
+--     database now emits the correct ``BOOLEAN`` type because the
+--     three SQLModel ``sa_column`` overrides switched from
+--     ``Integer`` to ``Boolean`` (see
+--     ``daemon/models/resource_monitor.py``). It does NOT emit a
+--     server default (``Field(default=...)`` is Python-side), so
+--     fresh PG columns are ``boolean NOT NULL`` with no default.
+--     Existing databases receive the three-step conversion
+--     (DROP DEFAULT → TYPE boolean USING (col <> 0) → SET DEFAULT)
+--     from the idempotent ``information_schema.columns``
+--     probe-gated block in ``InstanceManager._ensure_postgres_columns``
+--     (added 2026-10-19 alongside this file). Conversion is safe on
+--     empty AND non-empty tables (the ``USING (col <> 0)`` cast maps
+--     every NONZERO integer to TRUE, 0 to FALSE), idempotent on
+--     repeated boots (the probe gates on ``data_type='integer'``),
+--     and a concurrent second boot fails LOUDLY on the ALTER and
+--     self-heals on restart (see the concurrency note below).
+--
+--   * For SQLite: the runner applies this file (it's MANUAL: TRUE
+--     so the runner actually skips it; see ``runner.py:737-746``).
+--     The ``INTEGER`` declared by the four existing
+--     ``20261018_09000{1..4}_create_resource_*.sql`` companion
+--     migrations is type-affinity-agnostic for SQLite booleans (the
+--     declared type is informational; storage is integer 0/1 either
+--     way). SQLite storage remains INTEGER 0/1, which is the same
+--     wire shape the flusher binds and the same read shape the
+--     routers/traceback coerce via Pydantic — no DDL change is
+--     needed on the SQLite lane.
+--
+--   * Why MANUAL: TRUE (2026-10-19, post-20260714-000001 incident):
+--     a PG-only ``DO $$ ... ALTER COLUMN ... TYPE boolean USING
+--     (col <> 0)`` body would CORRUPT a fresh SQLite boot — SQLite
+--     does not parse PL/pgSQL ``DO`` blocks nor the
+--     ``ALTER COLUMN TYPE`` grammar. Prior precedent
+--     (migration 20260714_000001_widen_job_queue_type_constraint.sql)
+--     broke EVERY fresh-SQLite boot with a single PG-only line
+--     until it was ledger-pre-marked with a skip note. ``MANUAL:
+--     TRUE`` skips the auto-apply path entirely
+--     (``runner.py:737-746``) so the file is NEVER executed by the
+--     runtime — it is purely the audit/operator record. The runtime
+--     PG correction lives in ``_ensure_postgres_columns``; the
+--     SQLite lane needs no schema change.
+--
+-- IDEMPOTENCY / SAFETY:
+--
+--   * The runtime hook is probe-gated on
+--     ``information_schema.columns.data_type = 'integer'`` — once
+--     the column is already ``boolean`` the conversion is a no-op.
+--   * The ``USING (col <> 0)`` cast semantics: every NONZERO integer
+--     maps to TRUE (``1``, ``2``, ``-1`` …), ``0`` maps to FALSE, and
+--     NULL stays NULL (the columns are NOT NULL, so no NULL is
+--     expected; the cast is defensive). This is the documented intent
+--     of ``0|1 in SQLite, false|true on PG``.
+--   * int → bool is NOT a metadata-only change: PostgreSQL takes an
+--     ACCESS EXCLUSIVE lock and REWRITES the table. At the live
+--     ``ensemble_prod`` scale (4 empty tables today — the historical
+--     data is unrecoverable; nothing to backfill), the rewrite is
+--     effectively free; at scale it would be expensive. The runtime
+--     probe gates the rewrite so a single successful boot converts
+--     exactly once.
+--   * CONCURRENCY — stated accurately (NOT "no race hazard"): the
+--     information_schema probe and the ALTER are not atomic and there
+--     is no advisory lock between them. Two boots can both pass the
+--     probe; the second's ALTER then blocks on the first's ACCESS
+--     EXCLUSIVE lock and, after the first commits, runs against an
+--     already-``boolean`` column — ``USING (col <> 0)`` has no valid
+--     operator on a boolean, so that boot ABORTS LOUDLY. This is a
+--     loud failure, not silent corruption; the next boot re-probes,
+--     sees ``boolean``, and no-ops (self-heal on restart).
+--   * The default ``SET DEFAULT true`` (estimated) / ``SET DEFAULT
+--     false`` (enabled) / ``SET DEFAULT true`` (user_gated)
+--     preserves the documented INSERT-without-column behavior. The
+--     SET DEFAULTs are idempotent (re-issuing the same default is
+--     a no-op).
+--
+-- PG CANONICAL DDL (operator-portable, runtime-applied at boot
+-- via the _ensure_postgres_columns hook). Per column, THREE statements
+-- — the combined single-statement form fails on a default-bearing
+-- column because PostgreSQL refuses ``TYPE boolean`` when the existing
+-- default cannot be auto-cast (DatatypeMismatch, 42804):
+--
+--   DO $$
+--   BEGIN
+--       -- resource_instance_sample.estimated
+--       IF EXISTS (
+--           SELECT 1 FROM information_schema.columns
+--           WHERE table_schema = 'public'
+--             AND table_name = 'resource_instance_sample'
+--             AND column_name = 'estimated'
+--             AND data_type = 'integer'
+--       ) THEN
+--           ALTER TABLE resource_instance_sample
+--             ALTER COLUMN estimated DROP DEFAULT;
+--           ALTER TABLE resource_instance_sample
+--             ALTER COLUMN estimated TYPE boolean USING (estimated <> 0);
+--           ALTER TABLE resource_instance_sample
+--             ALTER COLUMN estimated SET DEFAULT true;
+--       END IF;
+--
+--       -- resource_limit_policy.enabled
+--       IF EXISTS (
+--           SELECT 1 FROM information_schema.columns
+--           WHERE table_schema = 'public'
+--             AND table_name = 'resource_limit_policy'
+--             AND column_name = 'enabled'
+--             AND data_type = 'integer'
+--       ) THEN
+--           ALTER TABLE resource_limit_policy
+--             ALTER COLUMN enabled DROP DEFAULT;
+--           ALTER TABLE resource_limit_policy
+--             ALTER COLUMN enabled TYPE boolean USING (enabled <> 0);
+--           ALTER TABLE resource_limit_policy
+--             ALTER COLUMN enabled SET DEFAULT false;
+--       END IF;
+--
+--       -- resource_limit_policy.user_gated
+--       IF EXISTS (
+--           SELECT 1 FROM information_schema.columns
+--           WHERE table_schema = 'public'
+--             AND table_name = 'resource_limit_policy'
+--             AND column_name = 'user_gated'
+--             AND data_type = 'integer'
+--       ) THEN
+--           ALTER TABLE resource_limit_policy
+--             ALTER COLUMN user_gated DROP DEFAULT;
+--           ALTER TABLE resource_limit_policy
+--             ALTER COLUMN user_gated TYPE boolean USING (user_gated <> 0);
+--           ALTER TABLE resource_limit_policy
+--             ALTER COLUMN user_gated SET DEFAULT true;
+--       END IF;
+--   END $$;
+--
+-- NOTE: ``DROP DEFAULT`` is a no-op when the column has no default
+-- (the live PG shape), so the same sequence handles both the
+-- no-default and the default-bearing shapes.
+
+-- UP
+--
+-- Informational: the runtime hook in
+-- ``InstanceManager._ensure_postgres_columns`` is the source of
+-- truth for PG schema evolution. The runner is a SQLite-only
+-- by-design (runner.py:721-726) and the MANUAL: TRUE flag above
+-- ensures the runner never auto-applies this file. SQLite needs
+-- no schema change (INTEGER 0|1 is the documented boolean wire
+-- shape there; the SQLModel ``Boolean`` maps to INTEGER on SQLite
+-- via dynamic-type affinity, identical to the original
+-- ``INTEGER NOT NULL DEFAULT 1`` shape). Listed here for
+-- discoverability — an operator who runs this file manually
+-- against PG would see the runtime already-applied (the probe is
+-- idempotent) and the SQLite path is a no-op.
+--
+-- (No executable UP statements — MANUAL: TRUE + SQLite
+-- type-affinity-equivalence make any statement unnecessary or
+-- dialect-unsafe.)
+
+-- DOWN
+--
+-- No DOWN section. The ``INTEGER → BOOLEAN`` conversion is the
+-- permanent fix; a rollback would re-introduce the write-path
+-- defect. The runtime hook re-runs the conversion on every boot
+-- regardless of prior state, so a code revert + daemon restart
+-- restores the conversion automatically (the probe-clause
+-- ``data_type='integer'`` catches a partial rollback that landed
+-- half-way). Belt-and-braces: a manual operator rollback is a
+-- ``ALTER COLUMN ... TYPE integer USING (estimated::int)`` — the
+-- runtime hook will undo it on the next boot.

@@ -6762,6 +6762,36 @@ class InstanceManager:
           (MANUAL: TRUE; conceptual-only — SQLite INTEGER is already
           8 bytes via the dynamic-type affinity, so no schema
           migration is needed on the SQLite path).
+        - resource_monitor boolean columns: INTEGER → BOOLEAN
+          conversion (2026-10-19, resource-telemetry fix): three
+          observability-spine columns shipped in v0.25.0 with an
+          ``sa_column=Column(..., Integer, ...)`` override where
+          boolean semantics were intended —
+          ``resource_instance_sample.estimated``,
+          ``resource_limit_policy.enabled`` and
+          ``resource_limit_policy.user_gated``. ``create_all`` then
+          emitted ``INTEGER`` on PostgreSQL, the flusher bound
+          Python ``bool``, and every flush window raised
+          ``DatatypeMismatch`` (SQLSTATE 42804). The SQLModel
+          declarations are now ``Boolean`` (fresh databases get the
+          correct type from ``create_all``); existing databases are
+          repaired here by a probe-gated three-step ALTER per column
+          (``DROP DEFAULT`` → ``TYPE boolean USING (col <> 0)`` →
+          ``SET DEFAULT <true|false>``), gated on
+          ``information_schema.columns.data_type='integer'`` so it
+          is a no-op once the column is boolean (idempotent under
+          repeated boot). The three-step form is REQUIRED: the
+          combined ``TYPE ..., SET DEFAULT ...`` statement fails on
+          a default-bearing column (42804). A column whose type is
+          neither boolean nor integer is reported as
+          ``unrecognised`` (WARNING) and is NOT auto-converted.
+          This is a CORRECTNESS ALTER, so a conversion failure
+          aborts the boot (fail-loud) — the same fail-loud
+          convention as the ``maintenance_runs.expected_bytes``
+          widening above. Audit record (MANUAL: TRUE; the runner
+          never auto-applies it):
+          ``daemon/migrations/versions/
+          20261019_120822_alter_resource_monitor_booleans.sql``.
 
         When a new column needs this treatment: add the IF NOT EXISTS
         ALTER + (optional) CREATE INDEX here. Do NOT add raw
@@ -8185,6 +8215,218 @@ class InstanceManager:
             "ix_drift_events_observed_at — CREATE INDEX IF NOT EXISTS is "
             "idempotent)"
         )
+
+        # ── resource-cost-control Phase 1 / observability: INTEGER → BOOLEAN ──
+        # Three boolean columns shipped in v0.25.0 with the wrong
+        # ``sa_column=Column(..., Integer, nullable=False)`` override on
+        # their SQLModel declarations
+        # (``daemon/models/resource_monitor.py``); ``SQLModel.metadata.create_all``
+        # emitted ``INTEGER`` on PostgreSQL, the flusher bound Python
+        # ``bool`` values, and the resulting
+        # ``DatatypeMismatch: column "estimated" is of type integer but
+        # expression is of type boolean`` raised on every flush window.
+        # The ``_tier_write`` amplifier escalated the failure to a
+        # whole-transaction rollback — 2.5 h of write-path data loss.
+        #
+        # The SQLModel declarations are now ``Boolean`` (so fresh PG
+        # databases get the correct type via ``create_all``), but
+        # ``create_all`` is a no-op for tables that already exist; the
+        # existing live columns need a one-time ALTER. The probe-gated
+        # block below runs on EVERY boot and is a no-op once the
+        # columns are already ``boolean`` (idempotent under repeated
+        # boot). The ``USING (col <> 0)`` cast maps every NONZERO
+        # integer to TRUE and 0 to FALSE (NULL stays NULL; the columns
+        # are NOT NULL).
+        #
+        # CONCURRENCY (stated accurately): the information_schema probe
+        # and the ALTER are NOT atomic — there is no advisory lock
+        # between them. Two boots racing the same columns can both pass
+        # the probe; the second's ALTER then blocks on the first's
+        # ACCESS EXCLUSIVE lock and, once the first commits, runs
+        # against an already-``boolean`` column (``USING (col <> 0)``
+        # on a boolean has no valid operator) and ABORTS ITS BOOT
+        # LOUDLY. That is a loud failure, not silent corruption; the
+        # next boot re-probes, sees ``boolean``, and no-ops (self-heal
+        # on restart). A single boot that wins the probe converts
+        # exactly once.
+        #
+        # Audit-trail mirror:
+        # ``daemon/migrations/versions/20261019_120822_alter_resource_monitor_booleans.sql``
+        # is MANUAL: TRUE — the runner never auto-applies it
+        # (runner.py:737-746). It is the operator/audit document; this
+        # runtime hook is the source of truth.
+        #
+        # Shared-file flag: this method (``_ensure_postgres_columns``)
+        # is the documented convention for ALL PG schema evolution that
+        # the .sql runner cannot carry — the
+        # ``maintenance_runs.expected_bytes`` widening (20260928),
+        # ``job_queue_items.admission_state`` (20260628), etc. live
+        # here for the same reason. The block is additive only — no
+        # restructuring, no edits to existing entries. If the
+        # boot-orphan-sweep commission is editing this method in
+        # parallel, re-sequence before the merge.
+        if (
+            self._ensemble_config is not None
+            and self._ensemble_config.is_postgres
+        ):
+            # Three (table, column, new_default) tuples — same shape
+            # applied identically. The probe on
+            # ``information_schema.columns.data_type='integer'`` makes
+            # the conversion a no-op once the column is already
+            # ``boolean``. Each conversion is the three-step form
+            # (DROP DEFAULT → TYPE boolean USING (col <> 0) →
+            # SET DEFAULT), which is safe on a default-bearing column:
+            # every NONZERO integer → TRUE, 0 → FALSE, NULL stays NULL.
+            _resource_monitor_bool_repair = (
+                (
+                    "resource_instance_sample",
+                    "estimated",
+                    True,  # documented default (NOT NULL DEFAULT true)
+                ),
+                (
+                    "resource_limit_policy",
+                    "enabled",
+                    False,  # documented default (NOT NULL DEFAULT false)
+                ),
+                (
+                    "resource_limit_policy",
+                    "user_gated",
+                    True,  # documented default (NOT NULL DEFAULT true)
+                ),
+            )
+            _bool_repair_applied: list[str] = []
+            _bool_repair_already_ok: list[str] = []
+            _bool_repair_unrecognised: list[str] = []
+            _bool_repair_missing: list[str] = []
+            try:
+                with self._engine.begin() as conn:
+                    for tbl, col, new_default in _resource_monitor_bool_repair:
+                        probe = conn.execute(
+                            text(
+                                "SELECT data_type FROM information_schema.columns "
+                                "WHERE table_schema = 'public' "
+                                "  AND table_name = :t "
+                                "  AND column_name = :c"
+                            ),
+                            {"t": tbl, "c": col},
+                        ).first()
+                        if probe is None:
+                            # Table or column absent — fresh-DB path,
+                            # SQLModel create_all handles it. Skip
+                            # silently (drift_events index parity
+                            # convention).
+                            _bool_repair_missing.append(f"{tbl}.{col}=missing")
+                            continue
+                        if str(probe[0]).lower() == "boolean":
+                            # Already boolean — the repeated-boot
+                            # idempotency surface.
+                            _bool_repair_already_ok.append(
+                                f"{tbl}.{col}={probe[0]}"
+                            )
+                            continue
+                        if str(probe[0]).lower() != "integer":
+                            # UNRECOGNISED type — neither ``boolean``
+                            # nor ``integer`` (e.g. a drifted
+                            # ``bigint``/``smallint``/``text``). This
+                            # is NOT "already OK": the flusher binds
+                            # Python ``bool``, so a non-boolean
+                            # column breaks the write path exactly the
+                            # way the INTEGER defect did. It is
+                            # surfaced distinctly (its own bucket +
+                            # a WARNING naming the type) instead of
+                            # being silently lumped in with the
+                            # boolean no-op. It is NOT auto-converted:
+                            # the repair cast is integer-specific and
+                            # reshaping an unknown column is an
+                            # operator decision, not a boot-time
+                            # side effect.
+                            _bool_repair_unrecognised.append(
+                                f"{tbl}.{col}={probe[0]}"
+                            )
+                            logger.warning(
+                                "_ensure_postgres_columns: resource_monitor "
+                                "column %s.%s has UNRECOGNISED type %r — "
+                                "not boolean and not integer; NOT converted "
+                                "and NOT reported as already-OK (the "
+                                "boolean write path needs a native "
+                                "boolean column)",
+                                tbl,
+                                col,
+                                probe[0],
+                            )
+                            continue
+                        # Three-step per-column conversion (review F1a).
+                        # The combined single-statement form
+                        # (``TYPE ... , SET DEFAULT ...``) FAILS on a
+                        # default-bearing column: PostgreSQL refuses
+                        # the TYPE change when the EXISTING default
+                        # cannot be auto-cast (DatatypeMismatch, 42804).
+                        # The live prod shape is INTEGER NOT NULL with
+                        # NO server default (``Field(default=True)`` is
+                        # a Python-side ORM default, not a DDL default),
+                        # but the legacy SQLite migration declares
+                        # DEFAULT 1 and a future re-shape could carry a
+                        # default — so handle both:
+                        #   1. DROP DEFAULT — hoists any existing
+                        #      old-type default out of the way. It is a
+                        #      no-op when the column has no default.
+                        #   2. TYPE boolean USING (c <> 0) — every
+                        #      NONZERO integer is TRUE, 0 is FALSE,
+                        #      NULL stays NULL (the column is NOT NULL).
+                        #   3. SET DEFAULT <lit> — restores the
+                        #      documented default for INSERTs that omit
+                        #      the column.
+                        _default_lit = "true" if new_default else "false"
+                        conn.execute(
+                            text(
+                                f"ALTER TABLE {tbl} "
+                                f"ALTER COLUMN {col} DROP DEFAULT"
+                            )
+                        )
+                        conn.execute(
+                            text(
+                                f"ALTER TABLE {tbl} "
+                                f"ALTER COLUMN {col} TYPE boolean "
+                                f"USING ({col} <> 0)"
+                            )
+                        )
+                        conn.execute(
+                            text(
+                                f"ALTER TABLE {tbl} "
+                                f"ALTER COLUMN {col} "
+                                f"SET DEFAULT {_default_lit}"
+                            )
+                        )
+                        _bool_repair_applied.append(f"{tbl}.{col}")
+            except Exception as exc:
+                # Fail-loud is DELIBERATE: a failed PG repair leaves
+                # the write path broken (the v0.25.0 defect class).
+                # This block follows a THIRD convention — the host
+                # method carries two (additive DDL is best-effort and
+                # logs-and-continues; tuning-only ALTERs never
+                # boot-block per FIX-3). A CORRECTNESS ALTER is
+                # neither: abort the boot, surface the cause, let the
+                # operator fix and retry. FIX-3 (tuning-only ALTERs
+                # never boot-block) does NOT apply here — silent
+                # continuation would mask a regression that leaves
+                # the flusher writing to an INTEGER column.
+                logger.error(
+                    "_ensure_postgres_columns: resource_monitor INTEGER→"
+                    "BOOLEAN conversion FAILED (%s: %s) — write path "
+                    "remains broken; aborting boot",
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
+                raise
+            logger.info(
+                "_ensure_postgres_columns: resource_monitor boolean repair "
+                "complete (applied=%s, already_ok=%s, unrecognised=%s, "
+                "missing=%s)",
+                _bool_repair_applied,
+                _bool_repair_already_ok,
+                _bool_repair_unrecognised,
+                _bool_repair_missing,
+            )
 
         # ── Section 1 / vacuum-maintenance: ensure autovacuum reloptions ──
         # Backend-DB-space reclamation (commission

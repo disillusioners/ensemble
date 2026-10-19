@@ -74,7 +74,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import BigInteger, Column, Index, Integer, Text, text
+from sqlalchemy import BigInteger, Boolean, Column, Index, Text, text
 from sqlmodel import Field, SQLModel
 
 
@@ -218,10 +218,19 @@ class ResourceInstanceSample(SQLModel, table=True):
         default=None,
         sa_column=Column("cpu_share_usec_est", BigInteger, nullable=True),
     )
-    # Labelled — NOT NULL to surface the residual honestly.
+    # Labelled — NOT NULL to surface the residual honestly. Boolean
+    # column (PG-native ``BOOLEAN`` on PostgreSQL via
+    # ``SQLModel.metadata.create_all``; INTEGER 0|1 on SQLite via
+    # dynamic-type affinity — the ``graph_cache_present`` precedent
+    # above). The previous ``Integer`` override caused the
+    # ``DatatypeMismatch: column "estimated" is of type integer but
+    # expression is of type boolean`` failure on PG flusher writes
+    # (incident 2026-10-19; _ensure_postgres_columns carries the
+    # live-DB repair for existing rows). See
+    # ``daemon/migrations/versions/20261019_120822_alter_resource_monitor_booleans.sql``.
     estimated: bool = Field(
         default=True,
-        sa_column=Column("estimated", Integer, nullable=False),
+        sa_column=Column("estimated", Boolean, nullable=False),
         description=(
             "Whether per-instance CPU/RAM is an estimate (in-process "
             "shared process; per-byte attribution is partial by physics)."
@@ -346,14 +355,20 @@ class ResourceLimitPolicy(SQLModel, table=True):
     )
     threshold: Optional[float] = Field(default=None)
     window_s: Optional[int] = Field(default=None)
+    # ``enabled`` is Boolean (PG ``BOOLEAN``; SQLite INTEGER via
+    # type affinity). Same defect class as ``estimated`` above —
+    # folded into the same _ensure_postgres_columns entry.
     enabled: bool = Field(
         default=False,
-        sa_column=Column("enabled", Integer, nullable=False),
+        sa_column=Column("enabled", Boolean, nullable=False),
         description="Default FALSE — v1 ships observe-only.",
     )
+    # ``user_gated`` is Boolean (PG ``BOOLEAN``; SQLite INTEGER via
+    # type affinity). Same defect class as ``estimated`` above —
+    # folded into the same _ensure_postgres_columns entry.
     user_gated: bool = Field(
         default=True,
-        sa_column=Column("user_gated", Integer, nullable=False),
+        sa_column=Column("user_gated", Boolean, nullable=False),
         description=(
             "NOT NULL DEFAULT TRUE — policies must be gated by default; "
             "the un-gated form lands via the user-ceremony nonce gate."
