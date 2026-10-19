@@ -1426,7 +1426,7 @@ class AnomalyEngine:
         sql = (
             "SELECT bucket_ts, rss_kb, cpu_user_usec, cpu_sys_usec, "
             "threads, fds, anon_kb FROM resource_daemon_bucket "
-            "WHERE interval_s = 60 ORDER BY bucket_ts ASC LIMIT :lim"
+            "WHERE interval_s = 60 ORDER BY bucket_ts DESC LIMIT :lim"
         )
         try:
             with self.db_engine.connect() as conn:
@@ -1440,6 +1440,15 @@ class AnomalyEngine:
                 exc,
             )
             return 0
+        # DESC was used so the LIMIT selects the MOST-RECENT
+        # window_buckets*4 rows (not the OLDEST, which would warm the
+        # store on stale ~14-day-old data and FP the live level on the
+        # first pass after restart). Reverse to ASC time-order before
+        # the replay ingests, so the store's same-stride re-ingest
+        # replacement (idempotent pop+re-observe) walks the window in
+        # time order.
+        rows = list(rows)
+        rows.reverse()
         out = [
             {
                 "bucket_ts": r[0],

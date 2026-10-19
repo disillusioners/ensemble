@@ -897,6 +897,109 @@ class TestRestartRecompute:
         n2 = len(engine.store.states("daemon.rss_kb"))
         assert n1 == n2
 
+    def test_replay_from_db_uses_recent_window(self, tmp_path):
+        """#1 — replay selects the RECENT window_buckets*4 rows, not the OLDEST.
+
+        Probe-proven failure: ``ORDER BY bucket_ts ASC LIMIT :lim`` warmed
+        the store on stale ~14-day-old data, FP-ing the live level on the
+        first pass after a restart (the first new bucket at the live
+        current level trips ``mad_z`` against the stale baseline). Fix:
+        ``ORDER BY bucket_ts DESC`` + ``rows.reverse()`` before ASC
+        ingest so the LIMIT selects the MOST-RECENT window.
+
+        This test seeds > window_buckets*4 rows with a distinct OLD vs
+        RECENT split and asserts:
+
+        * (a) **recency** — the ring's newest bucket is close to
+          ``base`` (within the 1h window used for the recent rows),
+          not stale;
+        * (b) **no FP** — observing one more bucket at the recent
+          stable level (the natural continuation) and running a pass
+          journals NO finding. With the OLD shape, the ring warms on
+          stale levels and the new 1000 obs fires ``mad_z=100`` → SPIKE
+          FIRES.
+        """
+        from daemon.models.resource_monitor import ResourceDaemonBucket
+        from sqlmodel import SQLModel, Session
+
+        base = datetime(2026, 10, 18, 12, 0, 0, tzinfo=timezone.utc)
+        # > window_buckets*4 = 192 (default) → SELECT must choose.
+        old_n, recent_n = 100, 240
+        rows = []
+        for i in range(old_n):
+            ts = (base - timedelta(minutes=(old_n + recent_n - i)))
+            rows.append({
+                "bucket_ts": ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "rss_kb": 500.0,
+                "threads": 40, "fds": 10, "anon_kb": 5000.0,
+                "cpu_user_usec": 1_000_000 * (i + 1),
+                "cpu_sys_usec": 500_000 * (i + 1),
+            })
+        for i in range(recent_n):
+            ts = (base - timedelta(minutes=(recent_n - i)))
+            rows.append({
+                "bucket_ts": ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "rss_kb": 1000.0,
+                "threads": 40, "fds": 10, "anon_kb": 5000.0,
+                "cpu_user_usec": 1_000_000 * (old_n + i + 1),
+                "cpu_sys_usec": 500_000 * (old_n + i + 1),
+            })
+
+        db = create_engine(
+            f"sqlite:///{tmp_path / 'recency.db'}",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(
+            db, tables=[ResourceDaemonBucket.__table__]
+        )
+        with Session(db) as session:
+            for row in rows:
+                session.add(ResourceDaemonBucket(
+                    bucket_ts=row["bucket_ts"], interval_s=60,
+                    rss_kb=int(row["rss_kb"]),
+                    cpu_user_usec=int(row["cpu_user_usec"]),
+                    cpu_sys_usec=int(row["cpu_sys_usec"]),
+                    threads=int(row["threads"]),
+                    fds=int(row["fds"]),
+                    anon_kb=int(row["anon_kb"]),
+                ))
+            session.commit()
+
+        # Defaults: window_buckets=48, bucket_s=300.
+        e = AnomalyEngine(
+            store=SeriesStateStore(), db_engine=db,
+        )
+        n = e.replay_from_db()
+        assert n == 192  # window_buckets*4
+
+        # (a) RECENCY — the newest bucket in the ring is close to
+        # ``base``, not >1h stale. The ring's bucket count is bounded
+        # by window_buckets but reduced by the 5-min stride flooring
+        # (last-wins within a stride bucket — the store's same-stride
+        # re-ingest replacement).
+        states = e.store.states("daemon.rss_kb")
+        assert states, "replay produced no buckets"
+        assert len(states) <= 48  # window_buckets cap
+        newest_dt = datetime.strptime(
+            states[-1].ts, "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=timezone.utc)
+        staleness_min = (base - newest_dt).total_seconds() / 60
+        assert staleness_min <= 60 + 5, (
+            f"replay warmed on stale data: staleness={staleness_min:.1f}min"
+        )
+
+        # (b) NO FP — observe one more recent-stable bucket (the
+        # natural continuation that follows a successful warm) and run
+        # a pass. NO finding should fire.
+        e.store.observe(
+            "daemon.rss_kb",
+            base.strftime("%Y-%m-%d %H:%M:%S"),
+            1000.0, "?|?",
+        )
+        assert e.run_pass() == 0
+        assert e.journal.snapshot() == []
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # Contributors — P3 joins reused, honesty remainder, idle ≠ aliveness
