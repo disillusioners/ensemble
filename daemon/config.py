@@ -6650,6 +6650,71 @@ def probe_critical_notes_boot_state(*, engine: Any) -> None:
         )
 
 
+# ── agent-restart safety-rail knobs (§4 rails b/c1/c2 + §4f gate) ─────────────
+#
+# LIVE-ONLY anti-flap rails (demo/dev/sandbox stay FREE — §1.2/§4 Env
+# column). Read per call (NOT cached at boot) so an operator flip takes
+# effect on the next system_restart without a daemon restart. The
+# journal-side budget helpers (daemon/tools/upgrade_journal.py) honor the
+# SAME env names — one knob surface, two readers.
+#
+#   ENSEMBLE_RESTART_MIN_UPTIME_S      default 600 (launcher horizon,
+#                                      launcher.sh:59) — rail c1
+#   ENSEMBLE_RESTART_BUDGET_24H        default 3                  — rail c2
+#   ENSEMBLE_RESTART_BUDGET_WINDOW_S   default 86400              — rail c2
+#   ENSEMBLE_RESTART_GATE_REQUIRE_READY default 1 (true)          — §4f:
+#                                      /readyz required in the restart
+#                                      gate; 0 = report-only
+
+RESTART_MIN_UPTIME_S: int = 600
+RESTART_BUDGET_24H: int = 3
+RESTART_BUDGET_WINDOW_S: int = 86400
+
+
+def _restart_int_knob(env_name: str, default: int) -> int:
+    """Best-effort int knob (agent-restart §4). Unset/empty → default;
+    garbage → default (logged by the caller's structured refusal — the
+    rails fail CLOSED on their own unavailable signals, but a knob typo
+    degrades to the documented default rather than wedging the tool)."""
+    raw = os.environ.get(env_name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        val = int(raw.strip())
+    except (TypeError, ValueError):
+        return default
+    return val if val > 0 else default
+
+
+def restart_min_uptime_s() -> int:
+    """Rail c1 threshold (seconds) — live-only minimum uptime before a
+    restart may arm (``now − boot_epoch ≥ threshold``)."""
+    return _restart_int_knob("ENSEMBLE_RESTART_MIN_UPTIME_S", RESTART_MIN_UPTIME_S)
+
+
+def restart_budget_24h() -> int:
+    """Rail c2 cap — live-only sliding-window restart budget."""
+    return _restart_int_knob("ENSEMBLE_RESTART_BUDGET_24H", RESTART_BUDGET_24H)
+
+
+def restart_budget_window_s() -> int:
+    """Rail c2 window (seconds) for the sliding budget."""
+    return _restart_int_knob(
+        "ENSEMBLE_RESTART_BUDGET_WINDOW_S", RESTART_BUDGET_WINDOW_S
+    )
+
+
+def restart_gate_require_ready() -> bool:
+    """§4f: is /readyz REQUIRED in the restart.sh gate? Default true;
+    ``ENSEMBLE_RESTART_GATE_REQUIRE_READY=0`` makes the probe
+    report-only. Mirrors the shell-side default
+    (``${ENSEMBLE_RESTART_GATE_REQUIRE_READY:-1}`` in restart.sh)."""
+    raw = os.environ.get("ENSEMBLE_RESTART_GATE_REQUIRE_READY")
+    if raw is None or not raw.strip():
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
 # Convenience function for getting the config
 def get_config(config_path: str | None = None) -> Config:
     """Get the configuration, loading it if not already loaded."""
