@@ -403,10 +403,15 @@ class TestBaselineEngine:
         # And the old stratum's buckets are untouched.
         assert all(b.baseline == 1000.0 for b in states[:10])
 
-    def test_dow_hour_fallback_for_periodic_workload(self):
+    def test_dow_hour_map_keying_pins_periodic_workload(self):
         """A periodic rise at a fixed UTC hour keys the DoW×hour map —
-        the fallback baseline answers when the stratum history is thin
-        (R5: keys read as UTC from the bucket digits)."""
+        the map's store-level keying absorbs the per-slot mean across
+        days. NOTE: this test pins ONLY the MAP KEYING
+        (``dow_hour_mean``). The end-to-end preference + n-gate in
+        ``_pass_series`` is pinned separately by
+        ``test_dow_hour_baseline_engages_for_periodic_workload``
+        (#3 reachability adjudication). R5: keys read as UTC from
+        the bucket digits."""
         store = SeriesStateStore(bucket_s=3600, window_s=7 * 24 * 3600)
         # 3 days × the same hour: value 100 at 09:00, 10 elsewhere.
         for day in range(3):
@@ -420,6 +425,65 @@ class TestBaselineEngine:
         assert n == 1 and abs(val - 100.0) < 1e-9
         val, n = store.dow_hour_mean("x", "4|4", (0, 8))
         assert n == 1 and abs(val - 10.0) < 1e-9
+
+    def test_dow_hour_baseline_engages_for_periodic_workload(self):
+        """#3 — the dow_hour fallback must ENGAGE for periodic workloads.
+
+        Constructed so that:
+
+        * ``len(states) >= min_baseline_points`` — the cold-start
+          guard at the top of ``_pass_series`` passes;
+        * ``base_n`` (same-stratum count with the latest bucket's
+          workers) ``< min_baseline_points`` — the rolling branch is
+          COLD and the dow_hour fallback engages;
+        * the dow_hour slot at the latest bucket's stratum has
+          ``>= DOW_HOUR_MIN_N`` prior obs (3 Mondays at ``(0, 9)``).
+
+        Without this fix, every morning load pattern is a false
+        positive (rolling median of mixed low + occasional morning
+        high would FP). With the fallback engaged, the finding cites
+        ``method='dow_hour_mean'`` and the deviation is anchored to
+        the warm-slot typical value.
+        """
+        store = SeriesStateStore()  # defaults: window_buckets=48
+        base = datetime(2026, 10, 12, 0, 0, 0)  # Monday
+
+        def _obs(day_offset, hour, value, workers):
+            ts = (base + timedelta(days=day_offset, hours=hour)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            store.observe("x", ts, value, workers)
+
+        # 3 Mondays at (0, 9) at "4|4" — populates ("4|4", 0, 9) with
+        # n=3 (the WARM dow_hour slot for the latest stratum).
+        for d in (0, 7, 14):
+            _obs(d, 9, 1000.0, "4|4")
+        # 4 obs at a DIFFERENT stratum ("3|3") — these inflate
+        # len(states) past min_baseline_points WITHOUT contributing
+        # to the "4|4" same-stratum count. The rolling baseline for
+        # "4|4" stays COLD (4 same-stratum < 5).
+        for d, h in [(0, 10), (2, 10), (4, 10), (6, 10)]:
+            _obs(d, h, 100.0, "3|3")
+        # New obs at the next Monday's (0, 9) at "4|4" — a 50% rise
+        # above the warm slot's typical value. The "3|3" obs are
+        # already aged out of the rolling window for "4|4"
+        # (4 "4|4" < 5 → COLD) so the dow_hour fallback MUST
+        # engage; the rolling-only path would FP.
+        _obs(21, 9, 1500.0, "4|4")
+
+        engine = _engine(store)  # min_baseline_points=5 default
+        emitted = engine.run_pass()
+        # (a) ENGAGES — a finding is journaled.
+        assert emitted >= 1, (
+            "dow_hour fallback did not engage: no finding journaled"
+        )
+        # (b) The finding's baseline method is 'dow_hour_mean'
+        # (NOT 'rolling_median' — the rolling branch was COLD).
+        finding = engine.journal.snapshot()[0]
+        assert finding.baseline["method"] == "dow_hour_mean", (
+            f"finding baseline must cite dow_hour_mean; got "
+            f"{finding.baseline['method']!r}"
+        )
 
     def test_dow_hour_map_capped_at_slots(self):
         store = SeriesStateStore(

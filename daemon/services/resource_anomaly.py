@@ -208,6 +208,25 @@ STEP_MIN_POST_BUCKETS = 3
 #: Step rule: minimum same-stratum pre-window baseline points.
 STEP_MIN_PRE_POINTS = 6
 
+#: DoW×hour baseline minimum slot size — the fallback path engages a
+#: periodic-workload baseline when the same-stratum rolling history is
+#: thin AND the latest bucket's (dow, hour) slot has at least this many
+#: prior observations across days (one per day at bucket_s=3600). The
+#: default 3 ⇒ three days of data at the same hour is enough for the
+#: fallback to discriminate the periodic morning rise from a real
+#: anomaly. Lower ⇒ reachable in ordinary deployments; the rolling
+#: branch still wins whenever the same-stratum history is warm
+#: (any window with ≥ min_baseline_points same-stratum buckets).
+#:
+#: Preference adjudication (test-driven, 2026-10-19): with rolling-
+#: preferred (rolling first; dow_hour as fallback for cold stratum),
+#: the periodic-workload test (``test_dow_hour_baseline_engages_for_
+#: periodic_workload``) PASSES via the reachability fix alone — no
+#: preference flip to dow_hour-first-when-slot-warm was required.
+#: The mandated FP tests (``test_worker_count_increase_is_not_anomaly``
+#: A/B/C) stay green; rolling still wins when the stratum is warm.
+DOW_HOUR_MIN_N = 3
+
 #: Ramp rule: consecutive EWMA-rise buckets required.
 RAMP_MIN_BUCKETS = 4
 
@@ -1302,7 +1321,7 @@ class AnomalyEngine:
                 if dh
                 else (0.0, 0)
             )
-            if dh_n < self.min_baseline_points:
+            if dh_n < DOW_HOUR_MIN_N:
                 return 0  # quiet — cold start, not an error
             baseline = {"method": "dow_hour_mean", "value": dh_val, "n": dh_n}
 
