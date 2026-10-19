@@ -33,15 +33,30 @@ The harness builds a real ``InstanceManager`` with the wiring-only
 seam pattern from ``tests/integration/chat_source_harness.py`` — no
 full lifespan (no LLM, no graph stack) but real repos, real
 ``setup_worker_pool()`` and real ``QuestionManager``.
+
+Phase-3 ordering contract (added in the test-only follow-up commission):
+
+* ``test_setup_worker_pool_wires_task_repo_then_rehydrate_restores`` —
+  BEHAVIORAL: drives the REAL ``manager.setup_worker_pool()`` facade
+  (the wiring site for ``_task_repo``) and asserts the helper call
+  restores the pack. The wrapper around ``PoolOrchestrator.setup`` runs
+  the real wiring path and stubs only pool construction.
+* ``test_lifespan_structural_ordering_contract`` — STRUCTURAL PIN:
+  reads ``daemon/api.py`` lifespan source and pins the literal call
+  order (``manager.setup_worker_pool()`` BEFORE
+  ``_boot_rehydrate_question_packs(manager)``, exactly once).
+
+Together these two tests close the Phase-3 AC gap: a future regression
+that moves the helper back above ``setup_worker_pool()`` (the parent
+bug) or removes the helper call entirely fails at parse-time AND at
+runtime.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -558,4 +573,335 @@ def test_boot_rehydrate_summary_log_line(engine, caplog):
     assert any(": 1" in line for line in summary_lines), (
         f"Summary log lines {summary_lines!r} did not include the "
         f"restored count (1 for one seeded asker)."
+    )
+
+
+# ─── Ordering-contract tests (Phase-3 AC gap closure) ──────────────────────
+#
+# These tests pin the boot ordering so a future regression that moves
+# the rehydrate pass back above ``manager.setup_worker_pool()`` (the
+# parent bug class) cannot pass the suite.
+#
+# Companion roles:
+#
+# * ``test_setup_worker_pool_wires_task_repo_then_rehydrate_restores`` —
+#   BEHAVIORAL: drives the REAL ``manager.setup_worker_pool()`` facade
+#   and asserts the wiring contract (``_task_repo`` is wired BY it, not
+#   manually by the test) AND that the helper then restores the pack.
+# * ``test_lifespan_structural_ordering_contract`` — STRUCTURAL PIN:
+#   reads ``daemon/api.py`` lifespan source and pins the literal call
+#   order (helper AFTER ``setup_worker_pool()``, exactly once).
+#
+# The BEHAVIORAL test catches a runtime re-ordering that the STRUCTURAL
+# PIN would also catch, but with finer-grained signal (wiring-vs-call
+# attribution). The STRUCTURAL PIN catches a source-level regression
+# that the BEHAVIORAL test cannot see (e.g., a no-op refactor that
+# removes the call entirely while keeping ``setup_worker_pool``).
+#
+
+
+def _wire_only_setup_wrapper(manager):
+    """Run the wiring portion of ``PoolOrchestrator.setup``, skip pool construction.
+
+    Production ``PoolOrchestrator.setup``
+    (daemon/services/pool_orchestrator.py) wires
+    ``manager._task_repo`` at pool_orchestrator.py:245 BEFORE pool
+    construction (the WorkerPool thread fan-out + StaleTaskRecovery
+    thread start come later in the method). The wiring sequence we
+    mirror is the minimum required to satisfy the rehydrate path:
+
+      1. Construct ``TaskRepository`` against the manager's engine.
+      2. Assign ``manager._task_repo = task_repo`` (the wiring site
+         we are testing).
+      3. Call ``manager._maintenance_service.set_task_repository(
+         task_repo)`` (the production co-wiring that lives
+         immediately after the ``_task_repo`` assignment).
+
+    We return BEFORE pool construction + thread fan-out
+    (``WorkerPool(...)``, ``StaleTaskRecovery.start()``, the
+    ``ReportDeliveryRecoveryService`` wiring, etc.). The acceptance
+    bar — ``manager._task_repo`` is wired BY
+    ``manager.setup_worker_pool()`` (the real facade) — is met
+    because this wrapper RUNS INSIDE the facade's call to
+    ``self._orchestrator.setup(num_workers=num_workers)``
+    (manager.py:8675 — Phase B extraction).
+    """
+    from daemon.repositories.task.repository import TaskRepository
+
+    task_repo = TaskRepository(
+        engine=manager._engine,
+        on_pending_task=lambda: manager._notify_all_pools(),
+    )
+    manager._task_repo = task_repo
+    manager._maintenance_service.set_task_repository(task_repo)
+
+
+def test_setup_worker_pool_wires_task_repo_then_rehydrate_restores(
+    engine, caplog
+):
+    """BEHAVIORAL ordering contract: ``setup_worker_pool()`` must wire
+    ``_task_repo`` so the boot rehydrate pass can use it.
+
+    Drives the SAME boot sequence the production lifespan runs:
+
+      1. ``manager.setup_worker_pool()`` — the REAL facade at
+         ``daemon/manager.py:8675``. The test does NOT manually assign
+         ``manager._task_repo``; the wiring MUST come from
+         ``setup_worker_pool()`` (the acceptance bar).
+      2. ``await _boot_rehydrate_question_packs(manager)`` — the new
+         explicit post-``setup_worker_pool()`` site at
+         ``daemon/api.py:725``.
+
+    Real ``PoolOrchestrator.setup`` constructs both ``WorkerPool``
+    instances + starts their worker threads +
+    ``StaleTaskRecovery.start()`` — too heavy for a hermetic unit
+    test (threads + SQLite StaticPool interaction would be flaky).
+    We patch the underlying ``manager._orchestrator.setup`` with a
+    wrapper that runs the REAL wiring path (TaskRepository +
+    ``manager._task_repo = task_repo`` +
+    ``_maintenance_service.set_task_repository``) and returns BEFORE
+    pool construction. The wiring runs INSIDE the real facade's call
+    to ``self._orchestrator.setup(num_workers=num_workers)``, so the
+    ``_task_repo`` assignment is attributed to ``setup_worker_pool()``
+    in the test's perspective — the same attribution the production
+    lifespan has.
+
+    On parent 333b2c225 the helper ``_boot_rehydrate_question_packs``
+    does not exist in ``daemon.api`` — the import at the bottom of
+    this test fails with ``ImportError`` (same failure mode as the
+    companion ``test_boot_rehydrate_helper_exists_in_daemon_api``
+    test). The companion STRUCTURAL PIN
+    (``test_lifespan_structural_ordering_contract``) proves the
+    structural half — see that test for the source-level FAIL@parent
+    witness via ``git show 333b2c225:daemon/api.py``.
+    """
+    import asyncio
+
+    manager = _build_real_manager(engine)
+
+    # Wire the per-instance repository that the rehydrate reads. This
+    # is NOT the wiring we are testing — ``_task_repo`` is what we are
+    # testing. The instance-repo wiring is a separate concern (the
+    # helper's metadata-read path).
+    from daemon.repositories.instance.repository import (
+        SQLModelInstanceRepository,
+    )
+    manager._instance_repository = SQLModelInstanceRepository(engine)
+
+    # Acceptance precondition: ``_task_repo`` MUST be unwired before
+    # ``setup_worker_pool()`` is called. If it is already wired (e.g.,
+    # via InstanceManager.__init__ side-effects) the test is NOT
+    # exercising the wiring contract — it would be passing because of
+    # pre-wiring, not because ``setup_worker_pool()`` did the work.
+    assert not hasattr(manager, "_task_repo") or manager._task_repo is None, (
+        "manager._task_repo must NOT be wired before setup_worker_pool() "
+        "is called — the test relies on setup_worker_pool being the "
+        "sole wiring site. The test's harness should not pre-wire this."
+    )
+
+    # Patch the underlying ``PoolOrchestrator.setup`` (bound to this
+    # orchestrator instance). The real facade forwards via
+    # ``self._orchestrator.setup(num_workers=num_workers)`` at
+    # manager.py:8675 (Phase B extraction); patching the bound
+    # orchestrator replaces the orchestrator-side setup method for
+    # this test only.
+    def wiring_only_setup(num_workers=None):
+        _wire_only_setup_wrapper(manager)
+
+    original_setup = manager._orchestrator.setup
+    manager._orchestrator.setup = wiring_only_setup
+    try:
+        # Call the REAL facade — this is what production lifespan does.
+        manager.setup_worker_pool()
+    finally:
+        # Restore the original orchestrator setup. Defensive: this
+        # test does not share state with siblings, but the discipline
+        # mirrors ``chat_source_harness`` teardown safety-net.
+        manager._orchestrator.setup = original_setup
+
+    # ── Acceptance bar ─────────────────────────────────────────────
+    # ``_task_repo`` is wired BY ``setup_worker_pool()`` (the facade
+    # we just called), NOT by the test. If the wiring didn't happen,
+    # ``manager._task_repo`` is still None.
+    from daemon.repositories.task.repository import TaskRepository
+
+    assert manager._task_repo is not None, (
+        "manager._task_repo must be wired BY setup_worker_pool() — "
+        "the test wrapper failed to run the real wiring path. "
+        "Check that _wire_only_setup_wrapper assigns "
+        "manager._task_repo = task_repo BEFORE returning."
+    )
+    assert isinstance(manager._task_repo, TaskRepository), (
+        f"manager._task_repo should be a real TaskRepository instance "
+        f"from the wiring path, got "
+        f"{type(manager._task_repo).__name__}."
+    )
+    # The wired repo must target the same engine the manager has, so
+    # the rehydrate path can actually find the suspended-turn rows.
+    assert manager._task_repo.engine is manager._engine, (
+        "manager._task_repo must be bound to manager._engine — the "
+        "wiring site uses manager._engine, not a stale engine ref."
+    )
+
+    # ── Re-hydrate end-to-end ──────────────────────────────────────
+    # Seed the durable pack shadow AFTER setup_worker_pool so the
+    # rehydrate can find it. With ``_task_repo`` wired, the
+    # AttributeError silent-skip path is closed.
+    iid, _work_id, original_pack_id, original_qid, _payload = (
+        _seed_asker_with_durable_pack(engine)
+    )
+
+    from daemon.api import _boot_rehydrate_question_packs
+
+    with caplog.at_level(logging.INFO, logger="daemon"):
+        coro = _boot_rehydrate_question_packs(manager)
+        if asyncio.iscoroutine(coro):
+            asyncio.run(coro)
+
+    # The pack must be restored into RAM with the ORIGINAL pack id
+    # (the T1″ correlation contract — a fresh uuid would break
+    # answer correlation).
+    qm = manager._question_manager
+    restored = qm.get_question_pack(iid)
+    assert restored is not None, (
+        "Boot rehydrate did not restore the pack after "
+        "setup_worker_pool wired _task_repo — the wiring is "
+        "necessary but the helper call must ALSO run."
+    )
+    assert restored.id == original_pack_id, (
+        f"Restored pack id {restored.id!r} differs from the original "
+        f"{original_pack_id!r} — the T1″ correlation contract is "
+        f"violated; post-restart answers would 400 "
+        f"QUESTION_PACK_MISMATCH."
+    )
+    assert restored.status == "pending", (
+        f"Restored pack status {restored.status!r} — expected "
+        f"'pending'; a non-pending restoration is the wrong boot "
+        f"contract."
+    )
+    assert len(restored.questions) == 1
+    assert restored.questions[0].id == original_qid
+
+
+def test_lifespan_structural_ordering_contract():
+    """STRUCTURAL PIN: ``daemon/api.py`` lifespan must call
+    ``_boot_rehydrate_question_packs(manager)`` EXACTLY ONCE AND
+    AFTER ``manager.setup_worker_pool()``.
+
+    Companion to
+    ``test_setup_worker_pool_wires_task_repo_then_rehydrate_restores``:
+    the BEHAVIORAL test asserts that ``_task_repo`` is wired BY the
+    real ``setup_worker_pool()`` facade AND that the helper call
+    restores the pack; this STRUCTURAL PIN asserts that the literal
+    lifespan SOURCE keeps the call in the correct order with the
+    correct multiplicity. A future regression that:
+
+      * moves ``await _boot_rehydrate_question_packs(manager)`` back
+        ABOVE ``manager.setup_worker_pool()`` (the parent bug), or
+      * removes the helper call entirely, or
+      * adds a second rehydrate call (the drift class), or
+      * adds a sibling helper that races with the boot pass
+
+    fails at parse-time, not at runtime.
+
+    FAIL@parent (333b2c225): the helper
+    ``_boot_rehydrate_question_packs`` does NOT exist in
+    ``daemon/api.py`` on the parent — the helper-call regex finds
+    ZERO matches in the lifespan block and the "exactly once"
+    assertion fails with the structural pin assertion message. The
+    evidence:
+
+        $ git show 333b2c225:daemon/api.py | grep -c _boot_rehydrate_question_packs
+        0
+
+    The companion BEHAVIORAL test additionally fails at the
+    ``from daemon.api import _boot_rehydrate_question_packs`` import
+    line — see ``test_boot_rehydrate_helper_exists_in_daemon_api``
+    for the primary import-side FAIL@parent witness.
+
+    On a regression that moves the helper call ABOVE
+    ``manager.setup_worker_pool()`` (the parent bug class), this
+    test fails the BEFORE-check assertion. Verified by a temporary
+    edit + revert cycle — see the commission report.
+    """
+    import re
+    from pathlib import Path
+
+    api_path = (
+        Path(__file__).resolve().parent.parent / "daemon" / "api.py"
+    )
+    api_source = api_path.read_text(encoding="utf-8")
+
+    # Locate the lifespan function block: from ``async def lifespan(``
+    # to the next top-level ``def``/``async def`` (or EOF). Top-level
+    # = at column 0 (no leading whitespace), so nested defs inside
+    # other functions do NOT bound the search prematurely.
+    lifespan_match = re.search(
+        r"^async def lifespan\(", api_source, re.MULTILINE
+    )
+    assert lifespan_match, (
+        "Could not locate ``async def lifespan(`` in daemon/api.py — "
+        "the lifespan function must exist for the boot rehydrate "
+        "contract."
+    )
+
+    after_lifespan = api_source[lifespan_match.end():]
+    next_top_level = re.search(
+        r"^(?:async\s+)?def\s+\w+\(", after_lifespan, re.MULTILINE
+    )
+    if next_top_level:
+        lifespan_end = lifespan_match.end() + next_top_level.start()
+    else:
+        lifespan_end = len(api_source)
+    lifespan_source = api_source[lifespan_match.start():lifespan_end]
+
+    # Pattern 1: ``manager.setup_worker_pool()`` calls in lifespan.
+    setup_worker_pool_calls = list(
+        re.finditer(
+            r"\bmanager\.setup_worker_pool\s*\(", lifespan_source
+        )
+    )
+    assert setup_worker_pool_calls, (
+        "Expected ``manager.setup_worker_pool()`` to be called inside "
+        "daemon/api.py lifespan — the boot wire order contract is "
+        "broken. The worker pool wiring is the production site for "
+        "manager._task_repo and must run BEFORE the helper invocation."
+    )
+
+    # Pattern 2: ``_boot_rehydrate_question_packs(manager)`` calls in
+    # lifespan. Word-boundary on the leading underscore so we do NOT
+    # match unrelated identifiers (e.g., ``_pre_boot_rehydrate_...``).
+    # The literal ``(manager)`` after the open paren pins the call
+    # signature so a refactor to ``_boot_rehydrate_question_packs(
+    # manager, foo=bar)`` does not silently bypass the pin.
+    helper_calls = list(
+        re.finditer(
+            r"\b_boot_rehydrate_question_packs\s*\(\s*manager\s*\)",
+            lifespan_source,
+        )
+    )
+
+    # (ii) The helper call appears EXACTLY ONCE in lifespan.
+    assert len(helper_calls) == 1, (
+        f"Expected EXACTLY ONE ``_boot_rehydrate_question_packs(manager)`` "
+        f"call in daemon/api.py lifespan, found {len(helper_calls)}. "
+        f"Multiple calls would re-hydrate the same packs (idempotent "
+        f"but wasteful + log-noisy); zero calls loses the boot pass "
+        f"entirely and regresses the fix."
+    )
+
+    # (i) The helper call appears AFTER ``manager.setup_worker_pool()``.
+    first_setup = setup_worker_pool_calls[0].start()
+    first_helper = helper_calls[0].start()
+    assert first_setup < first_helper, (
+        f"Expected ``manager.setup_worker_pool()`` to appear BEFORE "
+        f"``_boot_rehydrate_question_packs(manager)`` in daemon/api.py "
+        f"lifespan — that is the boot wiring contract "
+        f"(setup_worker_pool assigns manager._task_repo at "
+        f"pool_orchestrator.py:245; the helper then reads it). "
+        f"Found setup_worker_pool at offset {first_setup} and helper "
+        f"at offset {first_helper} (helper is "
+        f"{'AFTER' if first_setup < first_helper else 'BEFORE'} "
+        f"setup_worker_pool). Reordering is the parent bug — "
+        f"verify by inspecting daemon/api.py lifespan directly."
     )
