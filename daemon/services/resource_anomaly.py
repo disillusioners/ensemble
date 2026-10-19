@@ -1138,6 +1138,7 @@ class AnomalyEngine:
         min_baseline_points: int = 12,
         workers_provider: Optional[Callable[[], Optional[int]]] = None,
         configured_limit_provider: Optional[Callable[[], Any]] = None,
+        configured_limit_ttl_s: float = 300.0,
         db_engine: Any = None,
         store: Optional[SeriesStateStore] = None,
         journal: Optional[FindingJournal] = None,
@@ -1147,6 +1148,8 @@ class AnomalyEngine:
         self.min_baseline_points = max(1, int(min_baseline_points))
         self._workers_provider = workers_provider
         self._limit_provider = configured_limit_provider
+        self._limit_ttl_s = max(0.0, float(configured_limit_ttl_s))
+        self._limit_cache: Optional[Tuple[float, Any]] = None
         self.db_engine = db_engine
         self.store = store or SeriesStateStore()
         self.journal = journal or FindingJournal()
@@ -1176,12 +1179,32 @@ class AnomalyEngine:
             return None
 
     def _sample_configured_limit(self) -> Any:
+        """Cached read of the configured-limit provider.
+
+        The provider is invoked on every ``ingest`` (~1/min on the
+        flusher thread) AND on every pass, so a fresh DB query per call
+        over 60 s × multiple providers quickly adds up. The cache holds
+        the LAST read value for ``configured_limit_ttl_s`` (default
+        300 s = anomaly_interval_s / 2 at the default 600 s cadence).
+        Mid-window behavior: if the operator flips the limit during
+        the TTL window, in-flight buckets carry the OLD value (the
+        documented "label mid-window buckets with the pass-time
+        value"); the NEXT refresh (after TTL expiry) sees the NEW
+        value. The stratum switch then re-baselines on its own
+        (the cold-stratum guard). Read-only semantics preserved.
+        """
         if self._limit_provider is None:
             return None
+        now = time.monotonic()
+        cached = self._limit_cache
+        if cached is not None and now < cached[0]:
+            return cached[1]
         try:
-            return self._limit_provider()
+            v = self._limit_provider()
         except Exception:
             return None
+        self._limit_cache = (now + self._limit_ttl_s, v)
+        return v
 
     def _refresh_stratum(self) -> str:
         w = self._sample_workers()

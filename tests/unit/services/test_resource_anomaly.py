@@ -1233,3 +1233,42 @@ class TestConfiguredLimitProvider:
 
         assert make_configured_limit_provider(_Boom())() is None
         assert make_configured_limit_provider(None)() is None
+
+    def test_sample_configured_limit_caches_within_ttl(self, tmp_path):
+        """#7 — the configured-limit read is CACHED for the TTL window.
+
+        The provider is invoked on every ``ingest`` (~1/min on the
+        flusher thread) AND on every pass. Caching at TTL=300 s
+        bounds the DB query rate to ≤ once per anomaly pass. Mid-
+        window flips are absorbed by the cached value (the documented
+        "label mid-window buckets with the pass-time value"); the
+        stratum switch re-baselines on its own.
+        """
+        from daemon.services.resource_anomaly import AnomalyEngine
+
+        call_count = 0
+
+        def provider():
+            nonlocal call_count
+            call_count += 1
+            return call_count  # each call returns a different value
+
+        eng = AnomalyEngine(
+            store=SeriesStateStore(),
+            configured_limit_provider=provider,
+            configured_limit_ttl_s=300.0,
+        )
+        # Within the TTL window, all calls return the same cached value.
+        v1 = eng._sample_configured_limit()
+        v2 = eng._sample_configured_limit()
+        v3 = eng._sample_configured_limit()
+        assert call_count == 1, (
+            f"provider called {call_count}× within the TTL window; "
+            f"expected 1 (cache miss on first call, hit after)"
+        )
+        assert v1 == v2 == v3 == 1
+        # After the TTL expires, the cache refreshes.
+        eng._limit_cache = (eng._limit_cache[0] - 301, eng._limit_cache[1])
+        v4 = eng._sample_configured_limit()
+        assert call_count == 2
+        assert v4 == 2
