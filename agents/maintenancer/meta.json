@@ -10,7 +10,7 @@
   "no_force_explore": true,
   "tools": {
     "allow": ["system-log", "ens-db", "knowledge", "system_upgrade", "db"],
-    "deny": ["git_commit", "edit_file", "write_file", "system_restart"]
+    "deny": ["git_commit", "edit_file", "write_file"]
   },
   "team_members": ["explorer", "worker", "coder"]
 }

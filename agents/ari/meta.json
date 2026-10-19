@@ -26,6 +26,7 @@
       "job_inject",
       "pause_instance",
       "resume_instance",
+      "system_restart",
       "system_upgrade",
       "mission",
       "service",

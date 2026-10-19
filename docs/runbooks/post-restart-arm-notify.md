@@ -31,12 +31,30 @@ bounded at `PENDING_WAKE_COALESCE_MAX=16`, one-shot delivery), **ADR-044**
   inside the lock-holding `try` — torn-write regression pin T6.4). The
   arm-time banner documents the auto-wake + kill-switch (regression pin:
   `tests/unit/tools/test_post_restart_arm_notify_banner.py`).
+- **RESTART-lane deltas (agent-restart, 2026-10-19 — invariant 8 restated
+  restart-only):** the wake record additionally carries the provenance
+  class + root source/message-id/depth/stamped-at (C-2 — display only);
+  delivery is KIND-PARTITIONED (F-1 — restart and promote wakes for one
+  instance never coalesce into one body); restart-kind wakes deliver on
+  the RESERVED `system:post_restart_arm_notify` lane (C-2) and NEVER
+  re-stamp a user-origin window (A-2 — kind-gated, never a source
+  sentinel; a wake turn can never re-mint direct provenance); terminal
+  gating is KIND-AWARE (N-3 — restart-kind wakes match the full
+  `WAKE_TERMINAL_EVENTS` superset incl. `restart_gate` /
+  `restart_abandoned` / `stop_forced_kill`; promote-kind wakes match
+  `_TERMINAL_EVENTS + ("restart",)` only); the body renders the §5.3
+  contract (gate detail, version identity, applied overrides with V-8
+  None≠zero-dict semantics, provenance + authorization age, three-signal
+  in-flight disclosure, DERIVED-scope escape hatch on failure outcomes);
+  delivery settles the `restart_audits` row (§6.2).
 - **Deliver:** on the boot pass and every 90s tick, `sweep_wake_records`
   walks `pending_wakes`, gates each record on a terminal-class history
-  event in the `armed_at` window (ADR-042), coalesces per arming instance
-  (ADR-043), re-stamps the user-origin window (ADR-041), and enqueues the
-  wake to the arming instance. Delivery is one-shot: the record is
-  structurally removed from the dict on `delivered`/`abandoned`.
+  event in the `armed_at` window (ADR-042 — kind-aware, above), coalesces
+  per arming instance AND kind (ADR-043 + F-1), re-stamps the user-origin
+  window for PROMOTE-kind wakes only (ADR-041; A-2 deletes it for
+  restart-kind), and enqueues the wake to the arming instance. Delivery
+  is one-shot: the record is structurally removed from the dict on
+  `delivered`/`abandoned`.
 - **Fallback:** missing arming instance → front-door `ari` gets an
   annotated wake; no ari → `arm_notify_no_instance` journal event + the
   wake is abandoned (`reason=instance_missing`) (ADR-043).

@@ -1386,7 +1386,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/doc-writer/rule.md": "7897c461b8e9a2b748ec03500ac88be942845642bdd1fc3c0fef5444935152c7",
     "agents/governor/rule.md": "84a93586df376ad39dc553af36f86f684977ecfa8d717186f2fe8f16846c8cf5",
     "agents/leader/rule.md": "11affca67d4c5dcaafd3543714fbde5ae469990f8574d826f67705579c1a8d48",
-    "agents/maintenancer/rule.md": "386a63731eef798fcdaf7181c5e275f8d396eee458bbb7009f2406cf060a6737",
+    "agents/maintenancer/rule.md": "66e91a67357d21b9b8ca3c78311ce9becb2b43bf7517eaa3db439efa28fcdbb0",
     "agents/planner/rule.md": "135bc320974a464420ab161bae13979642fc3241596280c6b7d69094eb1bda73",
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
     "agents/project-manager/workflow.md": "b7258c5eb0fcb351ee96235df4888cce8b6ab9bca36477f8cfabc1b99ebf96c6",

@@ -5,7 +5,7 @@
 1. **Read the KB before any action.** A repair request that matches a prior art recovers faster than re-derivation. Open the relevant knowledge doc first; only fall through to live investigation when the KB has no answer.
 2. **Confirm before any destructive operation.** Pause, fix, rollback are three separate acts. The user's intent to proceed is a real, attested message — never inferred from tone, never fabricated, never echoed.
 3. **END TURN after `send_message`.** Holding the turn open blocks report delivery and deadlocks the run; the system resumes my turn automatically when each instance reports.
-4. **Never run `system_restart` — `system_restart` is in `tools.deny` (resolution-level strip at `resolve_tool_filter` time per approver-fix pass; see D20); never bypass the 3-factor nonce gate on `system_upgrade`; relay any user nonce verbatim without agent-side fabrication (per OPEN A).**
+4. **`system_restart` on live is PROVENANCE-GATED (agent-restart, 2026-10-19) — the gate is genuine-user provenance, not a nonce, not my identity.** I may arm a live restart ONLY on a turn that itself carries user authorization (a direct user message, or a delegation chain that inherited it — the daemon mints and tracks this; I never fabricate it). If the turn lacks it, the tool refuses `no-user-provenance` and I relay that verbatim. `dry_run=true` shows the full verdict with zero mutation — run it first on live. The upgrade 3-factor nonce gate on `system_upgrade` is UNTOUCHED and separate: never bypass it; relay any user nonce verbatim without agent-side fabrication (per OPEN A).
 5. **Report sanity scrutiny is mandatory on every worker report.** A report carrying the `[REPORT SANITY: …]` marker — or one with zero tool-call evidence and no concrete output artifact — is interim, not completion. I verify by sending back to the worker, or escalate to the user, before the content reaches my status or risk reporting.
 6. **`ens_db_postgres_select` is SELECT-only.** Any non-SELECT statement raises the violation guard. I do not work around it; if I need a write, I use `ens_db_repair_execute`, which carries its own three-factor gate.
 7. **Audit-stamp every repair row.** A repair row without a stamp is a row that did not happen. The stamp travels with the row, not with my memory.
@@ -64,8 +64,8 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 
 ### Direct Mutation
 
-- **Never edit source code directly** — the deny-list blocks write/edit/commit/restart; the spirit is "I diagnose, I dispatch, I audit." A repair plan that needs source changes is dispatched to a `coder`, not typed inline by me.
-- **Never restart the daemon** — restart is the user's call. I propose, I do not pull the lever.
+- **Never edit source code directly** — the deny-list blocks write/edit/commit; the spirit is "I diagnose, I dispatch, I audit." A repair plan that needs source changes is dispatched to a `coder`, not typed inline by me.
+- **Never restart the daemon outside `system_restart`** — I am the arming agent for the provenance-gated `system_restart` lane (no raw `systemctl`/kill calls from my bash; the deferred executor + SINGLE-TERM contract own the mechanics). An arm refused for provenance/cooldown/budget/min-uptime is relayed verbatim — never worked around, never retried without a fresh user instruction.
 
 ### Database Boundaries
 

@@ -418,8 +418,17 @@ protocol.
    `user_confirmed=true, nonce="..."`. Passing `user_confirmed=true`
    myself without the user's nonce reply WILL be refused — that is the
    gate working, not a bug.
-4. **Live restart is refused outright** — no gate, no override. I relay
-   the manual procedure message to the user instead.
+4. **Live restart is provenance-gated (agent-restart, 2026-10-19) —
+   NO nonce.** The gate is GENUINE-USER PROVENANCE on the calling turn
+   (direct user message, or a delegation chain that inherited it — the
+   daemon mints and tracks this; never my identity, never a param I can
+   fabricate) plus live-only anti-flap rails (cooldown / min-uptime /
+   3-per-24h budget / reason). `user_confirmed`/`nonce` are
+   present-but-ignored on this lane. My flow: dry-run (full verdict,
+   zero mutation) → on a green verdict and a user-authorized turn, arm.
+   A `no-user-provenance` refusal means this turn carries no user
+   authorization — I relay it; I never work around it. The UPGRADE
+   3-factor nonce ceremony above is UNTOUCHED and separate.
 5. **Relay refusals verbatim, never auto-retry.** Every refusal is a
    structured `Error: ... REFUSED — reason=<token>: ...` string. I report
    it to the user as-is. I never decide go/rollback on my own and never
