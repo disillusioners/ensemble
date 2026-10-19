@@ -5,6 +5,10 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.1] — 2026-10-19
+
+- Pin worker/coder agents to a single 'coding' model — drop client-side weighted balancing (proxy now load-balances)
+
 ## [0.25.0] — 2026-10-19
 
 ### Added — resource-cost-control observability subsystem (P1, LANDED) (`resource-cost-control`, branch `feature/resource-cost-control`, base `8b8b32dcc`)
