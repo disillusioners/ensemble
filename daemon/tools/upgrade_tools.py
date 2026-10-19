@@ -3051,6 +3051,12 @@ Returns:
                         "provenance_stamped_at": prov_fields.get("stamped_at"),
                         "provenance_expires_at": prov_fields.get("expires_at"),
                         "wake_source": uj.RESTART_WAKE_SOURCE,
+                        # N-3: the notify-body re-run path renders the
+                        # ABSOLUTE scripts_dir captured at arm time (the
+                        # live target has no scripts/ under
+                        # ~/agents-ensemble — a relative path would be
+                        # unusable at render time).
+                        "scripts_dir": str(scripts_dir),
                         "armed_at": op.armed_at,
                         "executed_at": None,
                         "outcome": "pending",
