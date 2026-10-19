@@ -560,6 +560,14 @@ class Flusher:
         state, never a flusher failure — see
         :func:`is_missing_relation_error` for the narrowed match
         (C-1 hardening: column errors are NOT tolerated)).
+
+        Final-gate FINDING #2: like ``_tier_write``, the DELETE
+        runs inside a SAVEPOINT — on PostgreSQL a tolerated 42P01
+        would otherwise abort the surrounding transaction and the
+        NEXT statement in the same window would die with 25P02
+        (``InFailedSqlTransaction``); the savepoint rollback
+        clears the aborted state so the window degrades to 0 and
+        continues instead of raising.
         """
         where = f"{ts_column} < :cutoff_iso"
         params: dict = {"cutoff_iso": cutoff_iso(cutoff_epoch_s)}
@@ -568,12 +576,14 @@ class Flusher:
             params["interval_s"] = interval_s
         if extra_predicate:
             where += f" AND {extra_predicate}"
+        nested = conn.begin_nested()
         try:
             result = conn.execute(
                 text(f"DELETE FROM {table} WHERE {where}"),
                 params,
             )
         except Exception as exc:
+            nested.rollback()
             if is_missing_relation_error(exc):
                 logger.debug(
                     "resource-monitor sweep: table %s absent (first boot "
@@ -582,6 +592,7 @@ class Flusher:
                 )
                 return 0
             raise
+        nested.commit()
         return int(result.rowcount or 0)
 
     def _write_pid_map(
@@ -713,10 +724,29 @@ class Flusher:
         column error (42703, ``column ... does not exist``) is a
         real grammar bug and MUST surface, never be swallowed as a
         benign first-boot state.
+
+        Final-gate FINDING #2 (PG txn-abort): on PostgreSQL a
+        failed statement ABORTS the surrounding transaction
+        (SQLSTATE 25P02 on the NEXT statement,
+        ``InFailedSqlTransaction``) — so the bare tolerance above
+        caught the 42P01 but the same-window sweep then died with
+        25P02 (NOT missing-relation class, correctly NOT
+        swallowed) and the whole window RAISED instead of
+        degrading to 0. The statement therefore runs inside a
+        SAVEPOINT (:meth:`Connection.begin_nested`): a tolerated
+        error rolls back ONLY the savepoint (which clears the
+        aborted state on PG) and the window continues; a
+        non-tolerated error still propagates (the outer
+        ``engine.begin()`` window rolls back wholesale). SQLite is
+        unaffected either way (no mid-txn abort) — the savepoint is
+        dialect-portable (both supported dialects emit SAVEPOINT /
+        RELEASE natively).
         """
+        nested = conn.begin_nested()
         try:
             conn.execute(text(sql), params)
         except Exception as exc:
+            nested.rollback()
             if is_missing_relation_error(exc):
                 if not self._missing_table_warned:
                     self._missing_table_warned = True
@@ -728,6 +758,7 @@ class Flusher:
                     )
                 return 0
             raise
+        nested.commit()
         return len(params)
 
     def _dialect_insert(

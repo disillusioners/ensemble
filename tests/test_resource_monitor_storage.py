@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import time as _time_mod
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1103,11 +1104,25 @@ class TestRelationMissingTolerance:
     substring swallowed it (the C-1 silent-loss amplifier)."""
 
     class _RaisingConn:
+        class _NoopSavepoint:
+            def commit(self):
+                pass
+
+            def rollback(self):
+                pass
+
         def __init__(self, exc: BaseException):
             self._exc = exc
 
         def execute(self, *a, **k):
             raise self._exc
+
+        def begin_nested(self):
+            # Post-FINDING-#2 the tolerance runs inside a SAVEPOINT;
+            # this double only exercises the tolerance semantics, so
+            # a no-op savepoint suffices (rollback/commit never touch
+            # state here).
+            return self._NoopSavepoint()
 
     def _flusher(self) -> Flusher:
         import types
@@ -1189,6 +1204,12 @@ class TestRelationMissingTolerance:
                 captured.append(str(sql))
                 return types.SimpleNamespace(rowcount=1)
 
+            def begin_nested(self):
+                # FINDING #2 savepoint surface — no-op double.
+                return types.SimpleNamespace(
+                    commit=lambda: None, rollback=lambda: None
+                )
+
         f = Flusher.__new__(Flusher)
         f.engine = types.SimpleNamespace(
             url="postgresql+psycopg://u:p@localhost:5432/ens"
@@ -1207,3 +1228,200 @@ class TestRelationMissingTolerance:
         assert sql.upper().startswith("INSERT INTO RESOURCE_PID_MAP"), sql
         assert "ON CONFLICT" not in sql.upper(), sql
         assert "_NONEXISTENT" not in sql, sql
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Final-gate FINDING #2 — PG txn-abort window survival (savepoint lane)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class TestPGTxnAbortWindowSurvival:
+    """FINDING #2 (final gate, advisory): on PostgreSQL a tolerated
+    42P01 (relation-missing INSERT) ABORTS the surrounding
+    transaction — the same-window sweep then dies with 25P02
+    (``InFailedSqlTransaction``, correctly NOT classified
+    missing-relation) and the window RAISES instead of degrading
+    to 0. The fix runs every tier-write AND sweep statement inside
+    a SAVEPOINT (:meth:`Connection.begin_nested`) with the
+    tolerance catch INSIDE the nested block, so the savepoint
+    rollback clears the aborted state and the window degrades to 0
+    and continues.
+
+    SQLite cannot discriminate the fix (no mid-transaction abort —
+    the pre-fix code was unit-green by dialect leniency), so this
+    test EMULATES the PG abort semantics on a duck-typed
+    connection: after one statement fails, every subsequent
+    statement raises the 25P02-shaped error UNLESS a savepoint
+    rollback ran in between (exactly what ``ROLLBACK TO SAVEPOINT``
+    does on PG).
+    """
+
+    _42P01 = 'relation "resource_daemon_bucket" does not exist'
+    _25P02 = (
+        "current transaction is aborted, commands ignored until end "
+        "of transaction block"
+    )
+    _42703 = 'column "nope" of relation "resource_pid_map" does not exist'
+
+    class _AbortEmulatingConn:
+        """Duck-typed connection with PG abort semantics: after a
+        failing statement, EVERY subsequent execute raises 25P02
+        until a savepoint rollback clears the state."""
+
+        def __init__(self):
+            self.aborted = False
+            self.executed: list[str] = []
+            self._armed = True  # fail the FIRST statement once
+
+        def execute(self, sql, params=None):
+            import types as _types
+
+            if self.aborted:
+                raise Exception(TestPGTxnAbortWindowSurvival._25P02)
+            s = str(sql)
+            self.executed.append(s)
+            if self._armed:
+                self._armed = False
+                self.aborted = True
+                raise Exception(TestPGTxnAbortWindowSurvival._42P01)
+            return _types.SimpleNamespace(rowcount=0)
+
+        def begin_nested(self):
+            conn = self
+
+            class _SP:
+                def commit(self):  # RELEASE SAVEPOINT — no state change
+                    pass
+
+                def rollback(self):  # ROLLBACK TO SAVEPOINT — clears abort
+                    conn.aborted = False
+
+            return _SP()
+
+    class _AbortEmulatingEngine:
+        """``begin()`` yields the shared emulating connection (the
+        flusher's ONE-window contract — no reuse beyond it)."""
+
+        def __init__(self, conn):
+            self._conn = conn
+            self.url = "postgresql+psycopg://u:p@localhost:5432/ens"
+
+        def begin(self):
+            eng = self
+
+            class _Tx:
+                def __enter__(self):
+                    return eng._conn
+
+                def __exit__(self, *a):
+                    return False
+
+            return _Tx()
+
+    def _flusher_over(self, conn, ring):
+        """A Flusher shell over the emulating engine (the same
+        ``__new__`` shell convention as TestRelationMissingTolerance).
+        pid registry stub drains empty; no instance ring; no gate."""
+        import types as _types
+
+        from daemon.services.resource_monitor.flusher import FlusherCounters
+
+        f = Flusher.__new__(Flusher)
+        f.engine = self._AbortEmulatingEngine(conn)
+        f.raw_ring = ring
+        f.flush_batch_seconds = 60
+        f.retention = RetentionPolicy(2880, 336, 180)
+        f.counters = FlusherCounters()
+        f._pid_registry = _types.SimpleNamespace(drain_history=lambda: [])
+        f._instance_ring = None
+        f._wall_clock = _time_mod.monotonic
+        f._now_utc_naive = None  # constructor default wired below
+        if f._now_utc_naive is None:
+            from daemon.services.resource_monitor.flusher import (
+                _default_now_utc_naive,
+            )
+
+            f._now_utc_naive = _default_now_utc_naive
+        f._anomaly_gate = None
+        f._buffer = []
+        f._missing_table_warned = False
+        return f
+
+    def test_write_path_tolerated_error_no_longer_kills_the_window(self):
+        """The tester's real-PG sequence: the raw tier INSERT hits
+        42P01 mid-window; post-fix the savepoint rollback clears the
+        abort and the minute/hour writes + ALL sweeps complete — the
+        window returns instead of raising."""
+        conn = self._AbortEmulatingConn()
+        ring = TierRing(tier="raw", maxlen=16)
+        ring.append(
+            {
+                "bucket_ts": "2026-10-18 10:00:00",
+                "interval_s": 30,
+                "rss_kb": 100000,
+                "cpu_user_usec": 1000,
+                "cpu_sys_usec": 100,
+                "threads": 4,
+                "fds": 5,
+                "sample_cost_ms": 0.5,
+                "attributed_bytes": 0,
+                "unattributed_kb": 0,
+                "coverage_pct": 0.0,
+                "missed_samples": 0,
+            }
+        )
+        flusher = self._flusher_over(conn, ring)
+        result = flusher.run_once()  # pre-fix: RAISES 25P02-shaped
+        assert "swept" in result
+        assert result["swept"]["pid_map"] == 0
+        # The window continued past the failed raw write: minute/hour
+        # inserts ran, and every sweep DELETE executed.
+        deletes = [s for s in conn.executed if "DELETE FROM" in s]
+        assert len(deletes) == 5, conn.executed
+        assert any("resource_pid_map" in s for s in deletes)
+        # The savepoint rollback cleared the PG abort state.
+        assert conn.aborted is False
+        assert flusher._missing_table_warned is True
+
+    def test_sweep_path_tolerated_error_no_longer_kills_the_window(self):
+        """Empty-buffer window: the FIRST sweep DELETE hits 42P01;
+        post-fix the remaining 4 sweeps + the pid_map write still
+        run (pre-fix: the second sweep died 25P02 and the window
+        raised)."""
+        conn = self._AbortEmulatingConn()
+        ring = TierRing(tier="raw", maxlen=16)  # empty
+        flusher = self._flusher_over(conn, ring)
+        result = flusher.run_once()
+        assert result["rows_written"] == 0
+        deletes = [s for s in conn.executed if "DELETE FROM" in s]
+        assert len(deletes) == 5, conn.executed
+        assert conn.aborted is False
+
+    def test_non_tolerated_error_still_propagates_through_savepoint(self):
+        """C-1 hardening survives the savepoint path: a 42703
+        column-shaped error is NOT missing-relation and MUST
+        surface (never swallowed as first-boot benign)."""
+        conn = self._AbortEmulatingConn()
+        # Re-arm the fault with the column-error shape.
+        conn.execute_orig = conn.execute
+
+        def _fail_column(sql, params=None):
+            if conn._armed:
+                conn._armed = False
+                conn.aborted = True
+                raise Exception(TestPGTxnAbortWindowSurvival._42703)
+            return conn.execute_orig(sql, params)
+
+        ring = TierRing(tier="raw", maxlen=16)
+        flusher = self._flusher_over(conn, ring)
+        import unittest.mock as _mock
+
+        with _mock.patch.object(conn, "execute", side_effect=_fail_column):
+            with pytest.raises(Exception, match="nope"):
+                flusher.run_once()
+        # The savepoint was rolled back and the error STILL surfaced —
+        # the tolerance did NOT swallow a column-shaped error (C-1
+        # hardening intact through the savepoint path). The abort
+        # state itself is cleared by the savepoint rollback before
+        # the tolerance check (implementation detail); the observable
+        # contract is the PROPAGATION asserted above.
