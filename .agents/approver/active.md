@@ -1,10 +1,9 @@
 # Approver Active State
 
-Plan: db-backed-settings (DB-backed runtime settings — LLM worker limit limits.llm_concurrency first key + FE settings page; plan-overview + phase1-4 + decisions + architecture-recommendation)
-Slug: db-backed-settings
-Status: APPROVED
-Iteration: 002 (FINAL)
-Started: 2026-10-18T00:06:35Z
-Last Verdict: APPROVED (iteration 002, 2026-10-18T00:30:00Z — approve-worker-plan 3a726538: 0 blocking, 4 non-blocking notes; ~30 anchors verified @ e0e826866; iter-001 blockers confirmed addressed)
-Verdict 001 (superseded): REJECTED (2026-10-18 — yaml_value non-existent accessor w/ config.py read-only pin; GET frozen contract lacks post-boot-mutation state carriage)
-Note: Prior approved plans: db-backed-settings 2026-10-18 (002 FINAL APPROVED), image-gen-tool 2026-10-14 (001 FINAL APPROVED), agent-base-v2 2026-10-13 (003 FINAL APPROVED), oauth2-auth v1.4 delta D001 (2026-10-10), scheduled-tasks 2026-10-01, maintenance-console 2026-09-26, midflight-qa-channel 2026-09-21, clipboard-image-chat 2026-09-19. snapshot-uiux ESCALATED 10-05 (superseded).
+Plan: resource-cost-control (ensemble daemon CPU/RAM cost control — observability/profiling subsystem + optimizations + frontend menu; plan set at worktree /home/nea/ensemble-src-wt-resource-cost-control/.agents/shared/planning/resource-cost-control/ — plan-overview.md, decisions.md, phase1..8-plan.md, architecture-recommendation.md, approach-comparison.md; branch feature/resource-cost-control, base latest @ 8b8b32dcc; landed O1/O3/O4/O8 commits a64e82c2c..4d572f561, code FROZEN at 4d572f561)
+Slug: resource-cost-control
+Status: ESCALATED
+Iteration: 003 (FINAL)
+Started: 2026-10-18T11:38:00Z
+Last Verdict: REJECTED (iteration 003 FINAL, 2026-10-18T~16:4xZ — max iterations reached (3), escalated to Leader). Iter-001 blocker #1 (O4 mechanism) + #2 (MemoryHigh) RESOLVED; iter-002 blockers (phase7 O1/O3 landed-state fold; /self-cost ownership; CHANGELOG [Unreleased]) ALL RESOLVED and verified. Iter-003 NEW blocking (documentation-level, neither blocks implementation START): (1) decisions.md §F.2 lines 94/103 false freeze-re-pin claim for manager.py :541/:545/:655 (actual :592/:628/:738; propagated phase1 D2, phase2 D3/D5, plan-overview :134) — doc-only, ~15 min; (2) phase2 D5 (:25)/T9 (:65) + arch §2.3 (:90) mcp_child stamp names "warmup_pool.py Popen" which does not exist at HEAD (zero Popen in daemon/mcp/*.py; real seam = mcp.stdio_client wrapped at daemon/mcp/stdio_wrapper.py:258) — absorbable DURING (T9 1/12 tasks, best-effort, R5/D11 escape paths) but rows must be corrected first. 2 workers: obs-core 24b61ec7 REJECTED (revived once after rate-limit error) / opt-fe 57634b82 APPROVED. Tracking: .agents/approver/resource-cost-control-tracking.md)
+Note: Prior approved plans: settings-worker-slots 2026-10-18 (001 FINAL APPROVED), db-backed-settings 2026-10-18 (002 FINAL APPROVED), live-view-passcode 2026-10-17, image-gen-tool 2026-10-14, agent-base-v2 2026-10-13 (003 FINAL APPROVED), oauth2-auth v1.4 delta D001 (2026-10-10), scheduled-tasks 2026-10-01, maintenance-console 2026-09-26, midflight-qa-channel 2026-09-21, clipboard-image-chat 2026-09-19. snapshot-uiux ESCALATED 10-05 (superseded).
