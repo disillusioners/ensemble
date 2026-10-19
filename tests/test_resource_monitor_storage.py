@@ -1189,6 +1189,7 @@ class TestRelationMissingTolerance:
         )
         assert f._tier_write(conn, "INSERT INTO x VALUES (1)", [{}]) == 0
         assert f._missing_table_warned is True
+        assert f.counters.errors == 0
 
     def test_sqlite_no_such_table_still_tolerated(self):
         f = self._flusher()
@@ -1233,6 +1234,7 @@ class TestRelationMissingTolerance:
             Exception('relation "resource_pid_map" does not exist')
         )
         assert f._sweep(conn, "resource_pid_map", 12345) == 0
+        assert f.counters.errors == 0
 
     def test_write_pid_map_emits_plain_insert_pg(self):
         """Call-site pin: driving the REAL flusher's pid_map write
