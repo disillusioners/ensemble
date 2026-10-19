@@ -5,7 +5,7 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.25.0] — 2026-10-19
 
 ### Added — resource-cost-control observability subsystem (P1, LANDED) (`resource-cost-control`, branch `feature/resource-cost-control`, base `8b8b32dcc`)
 
@@ -54,6 +54,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(O5 was on the deferral ledger but is CLOSED — landed via P2's bash success-path exit-mark, see Changed above.)*
 
 ---
+
+## [0.24.0] — 2026-10-19
+
+### Added — DB-managed worker-pool sizing + agent settings tools (`settings-worker-slots`, merged to `latest` @ `50f809940`)
+
+> **CHANGELOG (feature):** *Worker and chat-worker pool sizes are un-hardcoded and become managed runtime settings: env-settable (`LIMITS_WORKER_POOL_SIZE` / `LIMITS_CHAT_WORKER_POOL_SIZE`), DB-backed via the `app_settings` 4-tier resolver (DB > env > yaml > defaults), surfaced to agents through a new `settings` tool category (ari/leader), and mirrored by an honest FE capacity hint. No behavior change on a vanilla deployment — the shipped defaults (5 / 2) are now yaml shadow literals instead of code constants.*
+
+- **Un-hardcoded pools + derived invoke cap** (`0da58a36a`) — `daemon/config.py` limits gain `worker_pool_size` / `chat_worker_pool_size` fields with yaml shadow literals; the invoke-parallelism cap derives from the resolved worker pool size instead of a parallel constant (seal re-pin accompanies the change).
+- **Boot-robustness shadow literals [council F1]** (`93ff3427f`) — the two new `LIMITS_*` fields previously had NO yaml literal, so pydantic bound the env tier directly at `load_config()` and a malformed value (e.g. `LIMITS_WORKER_POOL_SIZE=abc`) hard-failed BOOT; the shadow literals restore the documented skip/fail-open resolver contract. Shipped `config.yaml` pool-size literals are pinned by test (`9ac9e417f`).
+- **Agent-facing settings tool category** (`c98600ecd`, `20f6b6a24`) — a new `settings` tool category (read/write-gated API surface) exposed to `ari` and `leader`; the FE settings surface gains an honest capacity hint instead of a static number.
+- **Test surface** — `tests/unit/tools/test_settings_tools.py` (+744 lines) plus registration-count pins updated across attestation/secrets/upgrade tool suites.
+
+### Fixed — giter worktree fence template carries `POSTGRES_*` + `DAEMON_PORT` (`8e06eb30e`, merged to `latest` @ `f3507b7da`)
+
+- The Giter worktree fence template (the `.env` written into newly fenced linked worktrees) now carries `POSTGRES_*` parts and `DAEMON_PORT` explicitly — previously an inherited-ambient-env gap could boot a worktree lane against the wrong database/port shape (the env-poison occ family). Mandatory keys are stamped into every new fenced worktree at creation time.
 
 ## [0.23.0] — 2026-10-18
 
