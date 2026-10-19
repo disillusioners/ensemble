@@ -140,14 +140,15 @@ class TestStaticRegistrationChecklist:
         )
 
     def test_attestation_not_in_privileged_categories(self) -> None:
-        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly seven entries
+        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly eight entries
         (the daemon-internal authority trio ``system_upgrade``,
         ``system-log``, ``ens-db`` plus ``ens-env`` per the W4
         leader decision 2026-10-02, ``view-views`` per the
         REWORK 2026-10-07 M1 user refinement, ``cu`` per
-        the cu-mcp task 2026-10-16, and ``secrets`` per the
-        agent-secrets P1 commission 2026-10-17). The attestation
-        category is opt-in-only by convention (fail-closed authz),
+        the cu-mcp task 2026-10-16, ``secrets`` per the
+        agent-secrets P1 commission 2026-10-17, and ``settings``
+        per the settings-worker-slots P2 commission 2026-10-18).
+        The attestation category is opt-in-only by convention (fail-closed authz),
         NOT because it is privileged — D7 sub-question RESOLVED-
         by-leader: NOT privileged. Adding ``attestation`` to
         ``PRIVILEGED_TOOL_CATEGORIES`` would be a regression (it
@@ -180,7 +181,8 @@ class TestStaticRegistrationChecklist:
         # here. W4 (leader decision 2026-10-02) adds ``ens-env``;
         # REWORK 2026-10-07 (M1) adds ``view-views``; cu-mcp
         # (2026-10-16) adds ``cu``; agent-secrets P1 (2026-10-17)
-        # adds ``secrets``.
+        # adds ``secrets``; settings-worker-slots P2 (2026-10-18)
+        # adds ``settings``.
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
@@ -197,6 +199,12 @@ class TestStaticRegistrationChecklist:
             # per-agent ``tools.allow`` category gate is the
             # ONLY access boundary.
             "secrets",
+            # settings-worker-slots P2 (2026-10-18): the
+            # daemon-runtime-settings category (settings_get /
+            # settings_set / settings_clear). opt-in-only;
+            # mutates daemon-global runtime state — NEVER
+            # default-granted (R-SR16).
+            "settings",
         })
 
 

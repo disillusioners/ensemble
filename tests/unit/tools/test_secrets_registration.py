@@ -21,11 +21,11 @@ category:
    fallback also carries the 6 names (drift equality is
    owned by ``test_frozen_tool_name_discovery``).
 
-Plus the privileged-category pin (sextet → septet):
+Plus the privileged-category pin (septet → octet):
 
-* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly seven entries
+* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly eight entries
   (``system_upgrade``, ``system-log``, ``ens-db``, ``ens-env``,
-  ``view-views``, ``cu``, ``secrets``) — NEVER default-granted
+  ``view-views``, ``cu``, ``secrets``, ``settings``) — NEVER default-granted
   (R-SR16: opt-in-only via per-agent ``tools.allow``).
 * The default-deny seam applies: an EMPTY-allow agent
   (watcher-like) gets ZERO ``secrets`` tools (R-SR16).
@@ -191,22 +191,28 @@ class TestStaticRegistrationChecklist:
 
     def test_secrets_in_privileged_categories(self) -> None:
         """The ``secrets`` category is entry #7 in
-        ``PRIVILEGED_TOOL_CATEGORIES`` (sextet → septet
-        per the Q2 ruling 2026-10-17). It is NEVER
+        ``PRIVILEGED_TOOL_CATEGORIES`` (sextet → septet → octet;
+        the sextet→septet step per the Q2 ruling 2026-10-17
+        promoted ``secrets`` to #7, then the septet→octet step
+        per the settings-worker-slots P2 commission 2026-10-18
+        promoted ``settings`` to #8). It is NEVER
         default-granted (R-SR16: opt-in-only via
         per-agent ``tools.allow``).
 
-        The full set is exactly seven entries:
+        The full set is exactly eight entries:
         ``system_upgrade``, ``system-log``, ``ens-db``,
-        ``ens-env``, ``view-views``, ``cu``, and
-        ``secrets``. Adding another category without
+        ``ens-env``, ``view-views``, ``cu``,
+        ``secrets``, and ``settings`` (settings-worker-slots
+        P2, 2026-10-18). Adding another category without
         bumping this pin is a deliberate trust
         decision (the same-PR pin update rule per
         D18/A14).
         """
         assert SECRETS_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
-        # The full set is exactly seven entries — the
-        # same-PR pin (the 3+1 file rule). The 3+1
+        # The full set is exactly eight entries — the
+        # same-PR pin (the FIVE-file rule; the fifth
+        # exact-set pin was added by the iteration-002
+        # council B2 correction). The 3+1
         # integration sanity pin lives at
         # ``tests/integration/test_service_tool_flag_off_byte_identical.py``.
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
@@ -217,6 +223,12 @@ class TestStaticRegistrationChecklist:
             "view-views",
             "cu",
             "secrets",
+            # settings-worker-slots P2 (2026-10-18): the
+            # daemon-runtime-settings category (settings_get /
+            # settings_set / settings_clear). opt-in-only;
+            # mutates daemon-global runtime state — NEVER
+            # default-granted (R-SR16).
+            "settings",
         })
 
 

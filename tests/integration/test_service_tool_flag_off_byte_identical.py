@@ -791,24 +791,31 @@ def test_manager_logs_disabled_when_off(
 # ─────────────────────────────────────────────────────────────────────
 # Sanity — PRIVILEGED_TOOL_CATEGORIES is the post-override trio
 # (system_upgrade + system-log + ens-db) plus ``ens-env`` (W4 leader
-# decision 2026-10-02). The 3-site pin lives in
+# decision 2026-10-02), ``view-views`` (REWORK 2026-10-07 M1),
+# ``cu`` (cu-mcp 2026-10-16), ``secrets`` (agent-secrets P1
+# 2026-10-17), and ``settings`` (settings-worker-slots P2
+# 2026-10-18). The 5-site pin lives in
 # tests/unit/tools/test_upgrade_registration.py,
-# tests/unit/tools/test_attestation_registration.py, and
-# tests/integration/test_maintenancer_spawn_resolves_tools.py.
+# tests/unit/tools/test_attestation_registration.py,
+# tests/integration/test_maintenancer_spawn_resolves_tools.py,
+# tests/integration/test_service_tool_flag_off_byte_identical.py,
+# and tests/unit/tools/test_secrets_registration.py.
 # ─────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.integration
 def test_privileged_category_set_is_pinned() -> None:
-    """Sanity: the 3-site pin at ``PRIVILEGED_TOOL_CATEGORIES``
+    """Sanity: the 5-site pin at ``PRIVILEGED_TOOL_CATEGORIES``
     is intact — ``service`` was REMOVED from the union by user
     override 2026-09-16 (D4 reversed; see decisions.md §D4
     override note).
 
-    The 3-site pin lives in
+    The 5-site pin lives in
     ``tests/unit/tools/test_upgrade_registration.py``,
-    ``tests/unit/tools/test_attestation_registration.py``, and
-    ``tests/integration/test_maintenancer_spawn_resolves_tools.py``
+    ``tests/unit/tools/test_attestation_registration.py``,
+    ``tests/integration/test_maintenancer_spawn_resolves_tools.py``,
+    ``tests/integration/test_service_tool_flag_off_byte_identical.py``,
+    and ``tests/unit/tools/test_secrets_registration.py``
     (the SAME-PR RULE per D18 / A14). This integration-layer sanity
     pin duplicates the set check to ensure the OFF flag test runs in
     a category universe where the trio is the canonical set.
@@ -838,9 +845,17 @@ def test_privileged_category_set_is_pinned() -> None:
             # per-agent ``tools.allow`` category gate is the
             # ONLY access boundary.
             "secrets",
+            # settings-worker-slots P2 (2026-10-18): the
+            # daemon-runtime-settings category (settings_get /
+            # settings_set / settings_clear). opt-in-only;
+            # mutates daemon-global runtime state — NEVER
+            # default-granted (R-SR16); ari + leader allow
+            # entries landed 2026-10-18 (P3).
+            "settings",
         }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "
         f"trio + W4 ens-env + REWORK view-views + cu-mcp 'cu' + "
-        f"agent-secrets-P1 'secrets'; got {PRIVILEGED_TOOL_CATEGORIES}"
+        f"agent-secrets-P1 'secrets' + settings-worker-slots-P2 "
+        f"'settings'; got {PRIVILEGED_TOOL_CATEGORIES}"
     )

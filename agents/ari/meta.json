@@ -32,7 +32,8 @@
       "scheduling",
       "view-views",
       "cu",
-      "secrets"
+      "secrets",
+      "settings"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },

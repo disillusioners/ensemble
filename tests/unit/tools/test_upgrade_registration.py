@@ -99,10 +99,11 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_seven_entries(self) -> None:
-        """The default-deny set is exactly seven entries —
+    def test_privileged_categories_is_exactly_eight_entries(self) -> None:
+        """The default-deny set is exactly eight entries —
         ``system_upgrade``, ``system-log``, ``ens-db``,
-        ``ens-env``, ``view-views``, ``cu``, and ``secrets``.
+        ``ens-env``, ``view-views``, ``cu``, ``secrets``, and
+        ``settings``.
 
         ``service`` was REMOVED from this set by user override
         2026-09-16 (D4 reversed; see
@@ -122,17 +123,22 @@ class TestStaticRegistrationChecklist:
         ``agents/leader/meta.json`` is the only access path.
         ``secrets`` joined per the agent-secrets P1 commission
         (2026-10-17, plan f11965039) — the encrypted-secret-store
-        category (sextet → septet) is opt-in-only via
+        category (septet → octet) is opt-in-only via
         ``tools.allow: ["secrets"]`` on the day-one allow-list
         (``worker``, ``tester``, ``leader``, ``ari``); the trust
         ruling (plan §1.2) is unconditional — secret-given =
         trusted for autonomous use — and the per-agent allow gate
-        is the ONLY access boundary. Adding a category here is a
+        is the ONLY access boundary. settings-worker-slots P2
+        (2026-10-18) adds ``settings`` (the daemon-runtime-settings
+        category; opt-in-only; ari + leader allow entries landed
+        2026-10-18, P3). Adding a category here is a
         deliberate trust decision, and this pin makes silent
         additions visible (D18/A14 —
-        same-PR pin updates; this is pin file 1 of 3+1; the
+        same-PR pin updates; this is pin file 1 of 5; the
         integration sanity pin lives at
-        ``tests/integration/test_service_tool_flag_off_byte_identical.py``."""
+        ``tests/integration/test_service_tool_flag_off_byte_identical.py``
+        and the fifth exact-set pin at
+        ``tests/unit/tools/test_secrets_registration.py:218``."""
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
@@ -151,6 +157,12 @@ class TestStaticRegistrationChecklist:
             # per-agent ``tools.allow`` category gate is the
             # ONLY access boundary.
             "secrets",
+            # settings-worker-slots P2 (2026-10-18): the
+            # daemon-runtime-settings category (settings_get /
+            # settings_set / settings_clear). opt-in-only;
+            # mutates daemon-global runtime state — NEVER
+            # default-granted (R-SR16).
+            "settings",
         })
 
     def test_checklist_comment_block_present_in_module(self) -> None:

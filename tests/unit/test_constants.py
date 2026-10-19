@@ -123,7 +123,10 @@ class TestConstants:
     # ── Worker Pool ────────────────────────────────────────────────────────────
 
     def test_worker_pool_size(self):
-        """WORKER_POOL_SIZE should be 5."""
+        """WORKER_POOL_SIZE should be 5 — the DEFAULT tier only
+        (settings-worker-slots, D1/D8): the runtime value resolves
+        DB > env > yaml > default at boot via managed key
+        ``limits.worker_pool_size``."""
         assert constants.WORKER_POOL_SIZE == 5
 
     def test_worker_wait_timeout(self):
@@ -131,8 +134,10 @@ class TestConstants:
         assert constants.WORKER_WAIT_TIMEOUT == 3.0
 
     def test_chat_worker_pool_size(self):
-        """CHAT_WORKER_POOL_SIZE should be 2 (chat-source-worker-lane,
-        D7 — hardcoded, no env flag)."""
+        """CHAT_WORKER_POOL_SIZE should be 2 — the DEFAULT tier only
+        (settings-worker-slots, D1/D8): the runtime value resolves
+        DB > env > yaml > default at boot via managed key
+        ``limits.chat_worker_pool_size`` (LIMITS_CHAT_WORKER_POOL_SIZE)."""
         assert constants.CHAT_WORKER_POOL_SIZE == 2
 
     def test_chat_source_prefixes(self):

@@ -38,6 +38,7 @@ from .llm_error_classifier import (
 )
 
 from .constants import (
+    CHAT_WORKER_POOL_SIZE,
     CHECKPOINT_TTL_HOURS,
     CHECKPOINT_CLEANUP_INTERVAL_HOURS,
     CHECKPOINT_MAX_PER_THREAD_FLOOR,
@@ -50,6 +51,7 @@ from .constants import (
     VACUUM_DEAD_TUP_SCALE_FRACTION,
     VACUUM_ENABLED,
     VACUUM_INTERVAL_HOURS,
+    WORKER_POOL_SIZE,
 )
 
 logger = logging.getLogger(__name__)
@@ -591,6 +593,29 @@ class LimitsConfig(BaseSettings):
     instance_timeout_minutes: int = Field(default=60)
     graph_recursion_limit: int = Field(default=100)
     llm_concurrency: int = Field(default=10, ge=1, description="Maximum concurrent LLM calls across all instances")
+    # settings-worker-slots (D1): the two worker-pool sizes are ordinary
+    # limits.* config resolved by the SAME 4-tier ladder as llm_concurrency
+    # (DB > os.environ > yaml literal > default). The defaults are imported
+    # FROM daemon.constants so the constant stays the single canonical
+    # default-tier truth; env names fall out of ``env_prefix="LIMITS_"``:
+    # ``LIMITS_WORKER_POOL_SIZE`` / ``LIMITS_CHAT_WORKER_POOL_SIZE``. The
+    # manager resolves these once at boot via PoolOrchestrator.setup.
+    worker_pool_size: int = Field(
+        default=WORKER_POOL_SIZE,
+        ge=1,
+        description=(
+            "Default-pool worker threads (boot-applied; DB/env/yaml resolve "
+            "at boot via managed keys)"
+        ),
+    )
+    chat_worker_pool_size: int = Field(
+        default=CHAT_WORKER_POOL_SIZE,
+        ge=1,
+        description=(
+            "Chat-lane worker threads (boot-applied; DB/env/yaml resolve "
+            "at boot via managed keys)"
+        ),
+    )
 
     # ── O3 instance-graph cache bounding (resource-cost-control, 2026-10-18) ──
     # BOTH keys are MANAGED daemon settings (db-backed-settings registry,

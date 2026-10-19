@@ -20,6 +20,8 @@ from __future__ import annotations
 import threading
 from unittest.mock import MagicMock
 
+import pytest
+
 from daemon.services.task_processor import TaskProcessor
 from daemon.services.worker_pool import WorkerPool
 
@@ -53,6 +55,19 @@ def _drain_pool(pool: WorkerPool) -> None:
 
 class TestWorkerPoolPrefixKwarg:
     """worker_id_prefix stamps the constructed worker ids (D10.5)."""
+
+    def test_default_ctor_rejects_none_num_workers(self):
+        """Pin: ``WorkerPool(task_processor, num_workers=None)`` raises
+        ValueError — the drift-trap guard at ``worker_pool.py:1320-1342``
+        refuses implicit sizing. Every caller (both production
+        construction sites in ``PoolOrchestrator.setup`` +
+        direct-construction tests) must pass an explicit size; the
+        prior ``= 4`` default was a silent drift trap (4 !=
+        WORKER_POOL_SIZE=5). The guard exists but was unpinned."""
+        processor = MagicMock(name="TaskProcessor")
+        with pytest.raises(ValueError) as exc_info:
+            WorkerPool(task_processor=processor, num_workers=None)
+        assert "num_workers" in str(exc_info.value)
 
     def test_chat_pool_worker_ids_use_prefix(self):
         """``WorkerPool(worker_id_prefix="chat-worker-", num_workers=2)``

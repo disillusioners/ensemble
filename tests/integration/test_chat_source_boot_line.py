@@ -28,6 +28,7 @@ from tests.integration.chat_source_harness import (
     build_chat_source_engine,
     build_live_pool_manager,
     chat_lane_flag_reset_fixture,
+    wire_manager_only,
 )
 
 pytestmark = pytest.mark.integration
@@ -42,6 +43,36 @@ pytestmark = pytest.mark.integration
 # decoration travels with the harness factory's returned object, so
 # this single module-level assignment wires it for every test here.
 chat_lane_flag_reset = chat_lane_flag_reset_fixture()
+
+
+@pytest.fixture(autouse=True)
+def _reset_invoke_semaphore_and_cap():
+    """F3 — reset the singleton invoke semaphore + cap override
+    before/after each test.
+
+    ``PoolOrchestrator.setup`` now calls
+    ``daemon.utils.set_invoke_semaphore_cap(...)``, which RAISES if the
+    singleton already exists (a post-boot override is a lie). The
+    module-global ``daemon.utils._invoke_semaphore`` is NOT reset across
+    tests, so a prior test that created it would make a later pool boot
+    raise order-dependently. This fixture guarantees a fresh module
+    state for every test in this module.
+
+    Reason this fixture exists (approver note N1): the phase-1 gate also
+    runs modules that boot pools with NON-default sizes —
+    ``tests/integration/test_daemon_startup_smoke.py:47``
+    (``setup_worker_pool(num_workers=0)``) and
+    ``tests/integration/test_wc_wake_pure_hang.py:411``
+    (``setup_worker_pool(num_workers=1)``) — so a leaked semaphore from
+    any prior pool boot (or any invoke-cap test) must not poison these.
+    """
+    import daemon.utils as utils_module
+
+    utils_module._invoke_semaphore = None
+    utils_module._invoke_cap_override = None
+    yield
+    utils_module._invoke_semaphore = None
+    utils_module._invoke_cap_override = None
 
 
 @pytest.fixture
@@ -146,5 +177,27 @@ class TestChatSourceBootLine:
         )
         assert expected_full in caplog.text, (
             f"expected full boot line {expected_full!r} in log; "
+            f"got: {caplog.text!r}"
+        )
+
+    def test_boot_line_renders_resolved_chat_count(
+        self, engine, caplog: pytest.LogCaptureFixture
+    ):
+        """F4 / row 8 — the boot line renders the RESOLVED chat-lane count,
+        not the constant. Inject via the CONFIG OBJECT
+        (``manager.config.limits.chat_worker_pool_size = 3``; plain mutable
+        BaseSettings, NOT an env var) pre-setup, then call
+        ``setup_worker_pool()`` with NO kwarg (resolved path) → the boot line
+        carries ``workers=3`` and the chat pool is sized 3."""
+        with caplog.at_level(logging.INFO):
+            with wire_manager_only(engine) as manager:
+                manager.config.limits.chat_worker_pool_size = 3
+                manager.setup_worker_pool()  # no kwarg → resolve from config
+
+                assert manager._chat_worker_pool is not None
+                assert len(manager._chat_worker_pool._workers) == 3
+
+        assert "workers=3" in caplog.text, (
+            f"expected resolved chat count 'workers=3' in boot log; "
             f"got: {caplog.text!r}"
         )
