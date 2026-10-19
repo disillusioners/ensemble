@@ -116,9 +116,36 @@ def main():
     print("\nRunning uv sync...")
     subprocess.run(["uv", "sync"], check=True)
 
-    # Git commit
+    # Git commit — TARGETED adds, never `git add -A` (v0.24.0 staging
+    # finding, 2026-10-19): a dirty worktree (.agents/* tracking spillover,
+    # verifier artifacts) must never be swept into a release bump commit.
+    # Stage exactly the files this bump touched, plus CHANGELOG.md when the
+    # operator has performed the [Unreleased] -> [<ver>] header rename (the
+    # repo's 5-file bump-commit convention). Anything else in the working
+    # tree stays uncommitted — commit it separately, by hand.
+    if len(files_updated) != 4:
+        print(
+            f"WARNING: partial bump — only {len(files_updated)}/4 version files "
+            "updated (a prior partial bump may have left exact-string matching "
+            "missing); committing only the fileset that DID change."
+        )
+    add_targets = list(files_updated)
+    changelog = ROOT / "CHANGELOG.md"
+    if changelog.exists():
+        diff = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD", "--", "CHANGELOG.md"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if diff.returncode == 0 and "CHANGELOG.md" in diff.stdout.split():
+            add_targets.append("CHANGELOG.md")
+            print("Including CHANGELOG.md (unstaged header rename detected) — 5-file bump-commit convention")
+        else:
+            print("NOTE: no CHANGELOG.md change detected — committing the version fileset only")
     print("\nCreating commit...")
-    subprocess.run(["git", "add", "-A"], check=True, cwd=ROOT)
+    if add_targets:
+        subprocess.run(["git", "add", "--"] + add_targets, check=True, cwd=ROOT)
     result = subprocess.run(
         ["git", "commit", "-m", f"! New version {new_version}"],
         cwd=ROOT,
