@@ -54,6 +54,7 @@ runtime.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -337,6 +338,22 @@ def test_boot_rehydrate_helper_exists_in_daemon_api():
         "daemon.api._boot_rehydrate_question_packs must be callable "
         "for the lifespan startup to invoke it after setup_worker_pool()"
     )
+    # Coroutine-function guard: the lifespan startup in daemon/api.py:725
+    # ``await``s the helper, and every test in this file dispatches via
+    # ``asyncio.iscoroutine(...)`` + ``asyncio.run`` so a sync-drift
+    # (someone replaced ``async def`` with ``def``) would slip past the
+    # ``callable`` check above and the existing tests' defensive
+    # ``if asyncio.iscoroutine(coro): asyncio.run(coro)`` branches
+    # (those silently no-op when handed a non-awaitable). Pin the
+    # async-ness here so future sync-drift fails this test loudly.
+    assert inspect.iscoroutinefunction(_boot_rehydrate_question_packs), (
+        "daemon.api._boot_rehydrate_question_packs must be an "
+        "async/coroutine function — the lifespan startup awaits it "
+        "(daemon/api.py:725) and every caller in this file expects "
+        "an awaitable. A sync-drift would silently no-op under the "
+        "existing ``if asyncio.iscoroutine(coro): asyncio.run(coro)`` "
+        "branches and the rehydrate pass would never run."
+    )
 
 
 def test_boot_rehydrate_restores_pack_with_original_id(engine, caplog):
@@ -381,6 +398,11 @@ def test_boot_rehydrate_restores_pack_with_original_id(engine, caplog):
     # the end of ``setup_worker_pool``. We avoid the full pool start
     # to keep this test hermetic (no thread fan-out, no chat pool,
     # no LLM, no MCP).
+    # Wiring-contract authority: see
+    # ``test_setup_worker_pool_wires_task_repo_then_rehydrate_restores``
+    # — that test drives the REAL ``manager.setup_worker_pool()`` facade
+    # and pins the wiring attribution; this test exercises the rehydrate
+    # contract in isolation (helper → RAM restore with original pack id).
     from daemon.repositories.task.repository import TaskRepository
 
     manager._task_repo = TaskRepository(engine)
@@ -548,6 +570,12 @@ def test_boot_rehydrate_summary_log_line(engine, caplog):
     from daemon.repositories.task.repository import TaskRepository
 
     manager._instance_repository = SQLModelInstanceRepository(engine)
+    # Wiring-contract authority: see
+    # ``test_setup_worker_pool_wires_task_repo_then_rehydrate_restores``
+    # — that test drives the REAL ``manager.setup_worker_pool()`` facade
+    # and pins the wiring attribution; this test exercises the summary-log
+    # contract in isolation (helper → ``question-packs rehydrated: N``
+    # INFO line).
     manager._task_repo = TaskRepository(engine)
 
     from daemon.api import _boot_rehydrate_question_packs
