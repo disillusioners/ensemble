@@ -275,6 +275,15 @@ if [ -z "$GATE_FAIL" ]; then
             _warn "readyz unreachable — REPORT-ONLY (ENSEMBLE_RESTART_GATE_REQUIRE_READY=0); continuing"
         fi
     fi
+else
+    # livez already failed — the daemon is down; a budgeted readyz probe
+    # would burn its window for a foregone conclusion. ONE-SHOT probe so
+    # the detail channel still records the per-gate result (§5.3).
+    if READYZ_ONCE="$(_probe_once "/readyz" "$PORT")"; then
+        GATE_DETAIL="$GATE_DETAIL readyz=pass(one-shot)"
+    else
+        GATE_DETAIL="$GATE_DETAIL readyz=FAIL(one-shot; livez failed first)"
+    fi
 fi
 
 # Version verify = IDENTITY assertion (agent-restart §3.3: same binary, no

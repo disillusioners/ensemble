@@ -711,6 +711,7 @@ class UpgradeJournalSweepService:
             f"Outcome: `{label}` ({terminal_outcome}). "
             + (f"Gate detail: {gate_detail}. " if gate_detail else "")
             + f"Version now live: {version_frag} (identity — same binary, no version swap). "
+            + f"{overrides_frag} "
             + f"Reason (echo): \"{reason}\". "
             + f"{prov_frag} "
             + "In-flight work at stop: turns resume from checkpoints; a "

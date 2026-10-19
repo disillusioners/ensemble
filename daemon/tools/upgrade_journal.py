@@ -2039,6 +2039,8 @@ def close_stale_restart_arm(install_dir: Path) -> str | None:
         return None
     # Live-executor skip: pid alive ⇒ the run is in flight — boot pass
     # must not race a surviving executor (unit outlives daemon death).
+    # NOTE: os.kill(pid, 0) raises EPERM (not ESRCH) when the pid EXISTS
+    # but belongs to another uid — EPERM is therefore ALIVE evidence.
     if op.owner_pid and op.owner_pid > 0:
         try:
             os.kill(op.owner_pid, 0)
@@ -2048,8 +2050,17 @@ def close_stale_restart_arm(install_dir: Path) -> str | None:
                 op.owner_pid, op.run_id,
             )
             return None
+        except PermissionError:
+            # Exists but not probeable — treat as ALIVE (conservative).
+            logger.info(
+                "upgrade_journal: close_stale_restart_arm skipped — "
+                "executor pid=%s not probeable (EPERM = alive) for "
+                "run_id=%s",
+                op.owner_pid, op.run_id,
+            )
+            return None
         except OSError:
-            pass  # dead — fall through to closure
+            pass  # ESRCH — dead; fall through to closure
     in_flight = data.get("in_flight")
     variant = "b (in_flight set)" if isinstance(in_flight, dict) else "a (no in_flight)"
     try:

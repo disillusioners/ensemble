@@ -3139,8 +3139,7 @@ Returns:
                 "executes_after_turn: yes",
                 "reply_delivery: best-effort (head-start grace 15s; reply may "
                 "be lost — post-restart arm-notify is the durable report)",
-                "notify: armed (post-restart auto-wake to this instance; "
-                "kill-switch ENSEMBLE_POST_RESTART_ARM_NOTIFY)",
+                f"notify: armed (run_id={run_id}) — on daemon restart an auto-wake will be delivered to this instance to report the outcome — no user action required; kill-switch ENSEMBLE_POST_RESTART_ARM_NOTIFY=0 in <install_dir>/.env",
                 _render_overrides_line(pending_overrides),
                 f"journal: releases/state.json pending-op opened (kind=restart) audit=restart_audits/{run_id}",
             ]
@@ -3222,7 +3221,9 @@ only): unknown-mode, invalid-target-env, env-marker-absent,
 env-self-match, no-user-provenance (live: no genuine-user turn — direct
 or inherited), cooldown-active, restart-too-soon,
 restart-budget-exceeded, reason-required, pipeline-busy (open txn /
-armed pending-op / lock held — names the active run_id),
+armed pending-op / lock held — names the active run_id; the rail's
+sibling tokens adoption-in-progress and pipeline-not-settled share the
+same vocabulary),
 restart-under-burst-abort (launcher exit-1 latch),
 executor-scripts-unavailable, no-staged-install, journal-unavailable.
 Refused live attempts record a restart_audits row (outcome=refused +

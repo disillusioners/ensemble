@@ -1040,7 +1040,7 @@ class TestActorEnvGates:
     async def test_invalid_target_env_actor(self, harness) -> None:
         tools, _, _ = harness
         for name, extra in (
-            ("system_restart", {"reason": "x"}),
+            ("system_restart", {"reason": "fix pool size"}),
             ("system_upgrade", {}),
         ):
             out = await tools[name].ainvoke(dict(extra, target_env="production"))
@@ -1050,7 +1050,7 @@ class TestActorEnvGates:
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError):
-            await tools["system_restart"].ainvoke({"reason": "x"})
+            await tools["system_restart"].ainvoke({"reason": "fix pool size"})
 
     async def test_env_marker_absent_actor_fail_closed(
         self, unresolved_env: Path, install: Path, monkeypatch: pytest.MonkeyPatch
@@ -1074,7 +1074,7 @@ class TestActorEnvGates:
         manager._task_repo = None
         tools = _build_tools(manager)
         for name, kwargs in (
-            ("system_restart", {"reason": "x"}),
+            ("system_restart", {"reason": "fix pool size"}),
             ("system_upgrade", {}),
         ):
             out = await tools[name].ainvoke(dict(kwargs, target_env="demo"))
@@ -1083,7 +1083,7 @@ class TestActorEnvGates:
     async def test_env_self_match_actor_both_directions(self, harness) -> None:
         tools, _, _ = harness  # self=demo
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "live", "reason": "x"}
+            {"target_env": "live", "reason": "fix pool size"}
         )
         assert _refusal_reason(out) == "env-self-match"
         out2 = await tools["system_upgrade"].ainvoke({"target_env": "sandbox"})
@@ -1122,7 +1122,7 @@ class TestActorEnvGates:
         manager._task_repo = None
         tools = _build_tools(manager)
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "live", "reason": "x"}
+            {"target_env": "live", "reason": "fix pool size"}
         )
         assert _refusal_reason(out) == "env-marker-absent", (spoof, out)
         out2 = await tools["system_upgrade"].ainvoke({"target_env": "live"})
@@ -1502,10 +1502,12 @@ class TestAutoResolution:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """An auto-resolved live daemon refuses ``system_restart``
-        outright (A2/§3.1), matching the explicit-marker live contract.
-        Auto-detection does NOT weaken the restart-refused invariant.
-        """
+        """agent-restart: an auto-resolved live daemon WITHOUT user
+        provenance refuses ``system_restart`` with
+        ``no-user-provenance`` (the A2 outright refusal is superseded —
+        the provenance gate applies identically to auto-derived envs).
+        ZERO journal mutation on the refusal."""
+        import json as _json
         fake_home = tmp_path / "fake-home"
         fake_home.mkdir()
         live_install = fake_home / "agents-ensemble"
@@ -1522,19 +1524,51 @@ class TestAutoResolution:
         manager = MagicMock()
         manager.config.daemon.port = 9797
         manager._task_repo = None
+        # NO user-origin window, NO inherited window (agent-initiated).
+        manager._user_origin_windows = {}
+        manager._inherited_provenance_windows = {}
+        manager._user_origin_last_stamp = {}
         tools = _build_tools(manager)
-        # Every dry_run mode + every confirmation shape — still refused.
-        for dry in (True, False):
-            out = await tools["system_restart"].ainvoke(
-                {
-                    "target_env": "live",
-                    "reason": "x",
-                    "dry_run": dry,
-                    "user_confirmed": True,
-                    "nonce": "CONFIRM-ABCDEFGH",
-                }
-            )
-            assert _refusal_reason(out) == "live-restart-refused", (dry, out)
+        uj.journal_init(live_install)
+        before = uj.journal_path(live_install).read_bytes()
+        # dry_run renders the VERDICT (read-only) and names the failing
+        # token; dry_run=false is a REAL refusal with the same token.
+        out_dry = await tools["system_restart"].ainvoke(
+            {
+                "target_env": "live",
+                "reason": "apply worker_pool_size 5→7",
+                "dry_run": True,
+                "user_confirmed": True,
+                "nonce": "CONFIRM-ABCDEFGH",
+            }
+        )
+        assert "no-user-provenance" in out_dry, out_dry
+        assert not out_dry.startswith("Error: RESTART REFUSED"), out_dry  # verdict formatter, not _refusal
+        out = await tools["system_restart"].ainvoke(
+            {
+                "target_env": "live",
+                "reason": "apply worker_pool_size 5→7",
+                "dry_run": False,
+                "user_confirmed": True,
+                "nonce": "CONFIRM-ABCDEFGH",
+            }
+        )
+        assert _refusal_reason(out) == "no-user-provenance", out
+        # Zero journal mutation by the refused (and dry) attempts on the
+        # PIPELINE fields; the refused-attempt audit row is ADDITIVE
+        # (restart_audits outcome=refused — N-5).
+        data = uj.journal_read(live_install)
+        assert data.get("pending_op") is None
+        assert data.get("in_flight") is None
+        row = (data.get("restart_audits") or {}).get(
+            _json.loads(_json.dumps({})) and "" or ""
+        )
+        audits = data.get("restart_audits") or {}
+        assert any(
+            (r or {}).get("outcome") == "refused"
+            and (r or {}).get("refusal_token") == "no-user-provenance"
+            for r in audits.values()
+        ), audits
 
     async def test_auto_derive_env_self_match_refuses_cross_env(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1735,7 +1769,7 @@ class TestAutoResolution:
         manager._task_repo = None
         tools = _build_tools(manager)
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x"}
+            {"target_env": "demo", "reason": "fix pool size"}
         )
         assert _refusal_reason(out) == "env-marker-absent", out
         # Operator DID opt out — the hint must reflect that.
@@ -1768,7 +1802,7 @@ class TestAutoResolution:
         manager._task_repo = None
         tools = _build_tools(manager)
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x"}
+            {"target_env": "demo", "reason": "fix pool size"}
         )
         assert _refusal_reason(out) == "env-marker-absent", out
         # Operator set a typo — the hint reflects that.
@@ -1804,7 +1838,7 @@ class TestAutoResolution:
         manager._task_repo = None
         tools = _build_tools(manager)
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x"}
+            {"target_env": "demo", "reason": "fix pool size"}
         )
         assert _refusal_reason(out) == "env-marker-absent", out
         # No marker, no opt-out — the hint reflects that.
@@ -1929,39 +1963,57 @@ class TestSystemRestartMatrix:
     async def test_unknown_mode(self, harness) -> None:
         tools, _, _ = harness
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x", "mode": "force"}
+            {"target_env": "demo", "reason": "fix pool size", "mode": "force"}
         )
         assert _refusal_reason(out) == "unknown-mode"
 
-    async def test_live_restart_refused_unconditional(
+    async def test_live_restart_agent_initiated_refused_no_provenance(
         self, install: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A2: live restart refused outright — no gate, no override, no
-        dry-run exception (FAKE live marker; /tmp fixture install)."""
+        """agent-restart §8 case 2: agent-initiated (no window) on LIVE ⇒
+        ``no-user-provenance`` + ZERO pipeline mutation (FAKE live
+        marker; /tmp fixture install). Supersedes the A2 unconditional
+        refusal — user_confirmed/nonce alone never pass the gate."""
         monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")
         monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: install)
         manager = MagicMock()
         manager.config.daemon.port = 0
         manager._task_repo = None
+        manager._user_origin_windows = {}
+        manager._inherited_provenance_windows = {}
+        manager._user_origin_last_stamp = {}
         tools = _build_tools(manager)
         for dry in (True, False):
             out = await tools["system_restart"].ainvoke(
                 {
                     "target_env": "live",
-                    "reason": "x",
+                    "reason": "apply worker_pool_size 5→7",
                     "dry_run": dry,
                     "user_confirmed": True,  # even with every confirm factor
                     "nonce": "CONFIRM-ABCDEFGH",
                 }
             )
-            assert _refusal_reason(out) == "live-restart-refused", (dry, out)
-            assert "manual" in out.lower()
+            if dry:
+                # rev-5: dry-run renders the read-only VERDICT naming the
+                # token — never the refusal STRING, zero mutation.
+                assert "no-user-provenance" in out, (dry, out)
+                assert not out.startswith("Error: RESTART REFUSED"), (dry, out)
+                assert _refusal_reason(out) is None, (dry, out)
+                assert "NO mutation happened" in out
+            else:
+                assert _refusal_reason(out) == "no-user-provenance", (dry, out)
+                assert "no live user-origin provenance" in out
+        # pipeline untouched (no pending_op/in_flight/lock)
+        data = uj.journal_read(install)
+        assert data.get("pending_op") is None
+        assert data.get("in_flight") is None
+        assert not uj.lock_dir(install).exists()
 
     async def test_no_staged_install(self, harness, monkeypatch) -> None:
         tools, _, _ = harness
         monkeypatch.setattr(ut, "_resolve_install_dir", lambda self_env: None)
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x"}
+            {"target_env": "demo", "reason": "fix pool size"}
         )
         assert _refusal_reason(out) == "no-staged-install"
 
@@ -1969,7 +2021,7 @@ class TestSystemRestartMatrix:
         tools, _, _ = harness
         uj.journal_path(install).unlink()
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x", "dry_run": False}
+            {"target_env": "demo", "reason": "fix pool size", "dry_run": False}
         )
         assert _refusal_reason(out) == "journal-unavailable"
         assert "absent" in out  # distinct from no-staged-install (nit #11)
@@ -1978,7 +2030,7 @@ class TestSystemRestartMatrix:
         tools, _, _ = harness
         uj.journal_path(install).write_text('{"current":', encoding="utf-8")
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x", "dry_run": False}
+            {"target_env": "demo", "reason": "fix pool size", "dry_run": False}
         )
         assert _refusal_reason(out) == "journal-unavailable"
         assert "torn" in out
@@ -1998,7 +2050,7 @@ class TestSystemRestartMatrix:
 
         monkeypatch.setattr(uj, "write_pending_op", _boom)
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x", "dry_run": False}
+            {"target_env": "demo", "reason": "fix pool size", "dry_run": False}
         )
         assert out.startswith("Error: system_restart failed while arming")
         assert "unwound" in out  # remediation hint present
@@ -2020,10 +2072,10 @@ class TestSystemRestartMatrix:
 
         monkeypatch.setattr(uj, "reconcile_pending_op", _boom)
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x", "dry_run": True}
+            {"target_env": "demo", "reason": "fix pool size", "dry_run": True}
         )
         assert _refusal_reason(out) is None, out
-        assert "RESTART PREVIEW" in out  # healthy journal read → preview
+        assert "RESTART VERDICT" in out  # healthy journal read → verdict
         assert any(
             "reconcile_pending_op failed" in str(r.message) for r in caplog.records
         )
@@ -2037,7 +2089,7 @@ class TestSystemRestartMatrix:
              "flipped": False, "owner_pid": 999, "run_id": "r-busy-1"},
         )
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x", "dry_run": False}
+            {"target_env": "demo", "reason": "fix pool size", "dry_run": False}
         )
         assert _refusal_reason(out) == "pipeline-busy"
         assert "r-busy-1" in out
@@ -2049,7 +2101,7 @@ class TestSystemRestartMatrix:
         )
         uj.write_pending_op(install, op)
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x", "dry_run": False}
+            {"target_env": "demo", "reason": "fix pool size", "dry_run": False}
         )
         assert _refusal_reason(out) == "pipeline-busy"
         assert "r-pending-1" in out
@@ -2059,7 +2111,7 @@ class TestSystemRestartMatrix:
         uj.lock_acquire(install, "r-lock-1", owner_pid=os.getpid())
         try:
             out = await tools["system_restart"].ainvoke(
-                {"target_env": "demo", "reason": "x", "dry_run": False}
+                {"target_env": "demo", "reason": "fix pool size", "dry_run": False}
             )
             assert _refusal_reason(out) == "pipeline-busy"
             assert "r-lock-1" in out
@@ -2076,7 +2128,7 @@ class TestSystemRestartMatrix:
             encoding="utf-8",
         )
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x", "dry_run": False}
+            {"target_env": "demo", "reason": "fix pool size", "dry_run": False}
         )
         assert _refusal_reason(out) == "restart-under-burst-abort"
 
@@ -2093,7 +2145,7 @@ class TestSystemRestartMatrix:
             encoding="utf-8",
         )
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x", "dry_run": False}
+            {"target_env": "demo", "reason": "fix pool size", "dry_run": False}
         )
         assert "RESTART SCHEDULED" in out, out
 
@@ -2101,7 +2153,7 @@ class TestSystemRestartMatrix:
         tools, _, _ = harness
         monkeypatch.setattr(ut, "_resolve_scripts_dir", lambda install_dir: None)
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x", "dry_run": False}
+            {"target_env": "demo", "reason": "fix pool size", "dry_run": False}
         )
         assert _refusal_reason(out) == "executor-scripts-unavailable"
 
@@ -2111,7 +2163,7 @@ class TestSystemRestartMatrix:
         out = await tools["system_restart"].ainvoke(
             {"target_env": "demo", "reason": "preview"}
         )  # dry_run defaults TRUE
-        assert "RESTART PREVIEW (dry-run)" in out
+        assert "RESTART VERDICT (dry-run, zero mutation)" in out
         assert "NO mutation happened" in out
         assert _journal_bytes(install) == before
         assert not (install / "releases" / "rollback.lock.d").exists()
@@ -3471,8 +3523,18 @@ class TestRefusalTaxonomy:
         "invalid-target-env",
         "env-marker-absent",
         "env-self-match",
-        "live-restart-refused",
+        # agent-restart (§7.3): the 8 restart-lane tokens —
+        # live-restart-refused is REMOVED from the tool vocabulary
+        # (re-homed as the restart.sh guard-trip journal event riding
+        # executor_exit).
         "pipeline-busy",
+        "adoption-in-progress",
+        "pipeline-not-settled",
+        "cooldown-active",
+        "no-user-provenance",
+        "reason-required",
+        "restart-too-soon",
+        "restart-budget-exceeded",
         "restart-under-burst-abort",
         "executor-scripts-unavailable",
         "no-staged-install",
@@ -3516,7 +3578,7 @@ class TestRefusalTaxonomy:
         tests above, not here)."""
         tools, _, _ = harness
         out = await tools["system_restart"].ainvoke(
-            {"target_env": "demo", "reason": "x", "mode": "force"}
+            {"target_env": "demo", "reason": "fix pool size", "mode": "force"}
         )
         assert out.startswith("Error: RESTART REFUSED — reason=unknown-mode: ")
         out2 = await tools["system_upgrade"].ainvoke({"target_env": "prod"})
@@ -3556,13 +3618,17 @@ class TestManagerDrainPendingExecution:
         held when the executor takes over)."""
         calls: list = []
 
-        def _rec(argv, install_dir, extra_env=None, *, run_id=None) -> tuple:
+        def _rec(
+            argv, install_dir, extra_env=None, *, run_id=None,
+            unit_prefix: str = "ensemble-upgrade-",
+        ) -> tuple:
             inst = Path(str(install_dir))
             calls.append(
                 {
                     "argv": list(argv),
                     "install": inst,
                     "extra_env": dict(extra_env or {}),
+                    "unit_prefix": unit_prefix,
                     "lock_held_at_spawn": uj.lock_dir(inst).exists(),
                 }
             )
@@ -4033,7 +4099,10 @@ class TestManagerDrainPendingExecution:
         # the refusal event with the executor-systemd-unavailable
         # token (mirror of ``_refuse_systemd_unavailable`` at
         # ``upgrade_journal.py:2121-2145``), THEN raise.
-        def _loud_refusal_spawn(argv, install_dir, extra_env=None, *, run_id=None):
+        def _loud_refusal_spawn(
+            argv, install_dir, extra_env=None, *, run_id=None,
+            unit_prefix: str = "ensemble-upgrade-",
+        ):
             from daemon.tools.upgrade_journal import ExecutorSystemdUnavailable
             detail = (
                 "executor spawn refused: systemd transient unit "

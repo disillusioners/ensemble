@@ -498,32 +498,79 @@ async def s1_parity(tools: dict) -> None:
 
 
 async def s2_live_restart_refusal(tools: dict, mgr: _ManagerFacade) -> None:
+    # agent-restart (2026-10-19): the A2 outright refusal is superseded by
+    # the genuine-user provenance gate. Two pins:
+    #   (a) AGENT-initiated (no window) -> REAL refusal no-user-provenance;
+    #       pipeline journal unchanged, no lock, no marker.
+    #   (b) GENUINE-USER turn (stamped direct window + rails passable) ->
+    #       NOT refused on provenance: the arm SCHEDULES (receipt), the
+    #       marker arms, the executor spec carries provenance_ok.
     set_self_env("live")
     before = journal_bytes(FAKE_LIVE)
-    # all-factors-satisfied case: HUMAN origin stamped + user_confirmed + valid
-    # nonce + dry_run=false — still refused outright, before any gate logic.
-    mgr.stamp_user_origin_window(INSTANCE_ID, "api", "msg-s2")
+    # (a) no user-origin window on the turn
     out = await call(tools, "system_restart", target_env="live",
-                     reason="p2.2 dynamic sandbox", user_confirmed=True,
-                     mode="graceful-now", nonce="CONFIRM-AAAAAAAA", dry_run=False)
+                     reason="agent-initiated should refuse",
+                     user_confirmed=True, mode="graceful-now",
+                     nonce="CONFIRM-AAAAAAAA", dry_run=False)
     r1 = reason_of(out)
     out_dry = await call(tools, "system_restart", target_env="live",
-                         reason="p2.2 dynamic sandbox", dry_run=True)
+                         reason="agent-initiated dry verdict", dry_run=True)
     r2 = reason_of(out_dry)
-    unchanged = journal_bytes(FAKE_LIVE) == before
+    # N-5: the refused attempt records an ADDITIVE restart_audits row
+    # (outcome=refused) — so byte-identity no longer holds; the PIPELINE
+    # fields must stay untouched instead.
+    refused_data = uj.journal_read(FAKE_LIVE)
+    pipeline_untouched = (
+        refused_data.get("pending_op") is None
+        and refused_data.get("in_flight") is None
+        and refused_data.get("in_flight") is not False
+        and any(
+            (r or {}).get("outcome") == "refused"
+            and (r or {}).get("refusal_token") == "no-user-provenance"
+            for r in (refused_data.get("restart_audits") or {}).values()
+        )
+    )
     no_lock = not uj.lock_dir(FAKE_LIVE).exists()
     no_marker = not mgr._pending_system_executions
-    if (r1, r2) == ("live-restart-refused", "live-restart-refused") \
-            and unchanged and no_lock and no_marker:
+    s2a_ok = (
+        r1 == "no-user-provenance"
+        and "no-user-provenance" in out_dry
+        and "REFUSED" not in out_dry.splitlines()[0]
+        and pipeline_untouched and no_lock and no_marker
+    )
+    # (b) genuine-user turn: stamp direct provenance + set boot epoch so the
+    # min-uptime rail can pass; the arm should SCHEDULE.
+    mgr.stamp_user_origin_window(INSTANCE_ID, "api", "msg-s2")
+    from datetime import datetime, timedelta, timezone as _tz
+    from daemon.services.boot_epoch import set_boot_epoch
+    # boot epoch 20 minutes AGO so the 600s min-uptime rail passes
+    set_boot_epoch(
+        (datetime.now(_tz.utc) - timedelta(seconds=1200)).replace(tzinfo=None)
+    )
+    out_arm = await call(tools, "system_restart", target_env="live",
+                         reason="apply worker_pool_size 5→7",
+                         mode="graceful-now", dry_run=False)
+    scheduled = "RESTART SCHEDULED" in out_arm
+    marker_armed = bool(mgr._pending_system_executions)
+    provenance_ok = any(
+        spec.get("provenance_ok") is True
+        for spec in mgr._pending_system_executions.values()
+    )
+    receipt_class = "class=direct" in out_arm
+    s2b_ok = scheduled and marker_armed and provenance_ok and receipt_class
+    if s2a_ok and s2b_ok:
         record("S2", "PASS",
-               "target_env=live refused outright with reason=live-restart-refused "
-               "even with user_confirmed=true + stamped HUMAN origin + nonce + "
-               f"dry_run=false (and in dry_run too); fake-live journal bytes "
-               f"unchanged={unchanged}, no lock, no execution marker")
+               "live restart provenance-gated: agent-initiated refused "
+               "no-user-provenance (pipeline unchanged, no marker); genuine-"
+               "user turn SCHEDULED with provenance_ok marker + receipt "
+               "class=direct (A2 superseded per agent-restart)")
     else:
         record("S2", "FAIL",
-               f"armed-reason={r1} dry-reason={r2} journal-unchanged={unchanged} "
-               f"no-lock={no_lock} no-marker={no_marker}")
+               f"armed-reason={r1} dry-token-in={'no-user-provenance' in out_dry} "
+               f"pipeline-untouched={pipeline_untouched} no-lock={no_lock} "
+               f"no-marker={no_marker} scheduled={scheduled} "
+               f"marker_armed={marker_armed} provenance_ok={provenance_ok} "
+               f"receipt_class={receipt_class}")
 
 
 async def s3_taxonomy(tools: dict, mgr: _ManagerFacade) -> None:
@@ -719,7 +766,7 @@ async def s5_spawn_proof(tools: dict, mgr: _ManagerFacade) -> tuple[str, int] | 
     preview = await call(tools, "system_restart", target_env="demo",
                          reason="p2.2 s5 preview")
     zero_mut = (
-        "RESTART PREVIEW (dry-run)" in preview
+        "RESTART VERDICT (dry-run, zero mutation)" in preview
         and journal_bytes(FAKE_DEMO) == before
         and not uj.lock_dir(FAKE_DEMO).exists()
         and not mgr._pending_system_executions
