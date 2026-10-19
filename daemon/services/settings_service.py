@@ -140,41 +140,18 @@ class ManagedKeySpec:
         return f"ge={self.ge}" if self.ge is not None else "none"
 
 
-#: The managed-key registry. v1.1 (settings-worker-slots): THREE entries —
-#: ``limits.llm_concurrency`` plus the two worker-pool sizes. Adding keys
-#: later is a registry entry + nothing else (the ladder, CRUD, API and FE
-#: render generically off the registry). The registry default MUST mirror
-#: the backing pydantic Field default — chain: ``daemon.constants`` →
-#: ``LimitsConfig`` Field → this registry default (ONE truth).
+#: The managed-key registry. v1.1 union (2026-10-19): SIX entries —
+#: ``limits.llm_concurrency`` (db-backed-settings v1) plus the two
+#: worker-pool sizes (settings-worker-slots, 2026-10-18) plus the two
+#: instance-graph cache bounding keys (resource-cost-control O3,
+#: 2026-10-18) plus ``limits.chart_render_concurrency`` (resource-cost-
+#: control O2, 2026-10-18). Adding keys later is a registry entry + nothing
+#: else (the ladder, CRUD, API and FE render generically off the registry).
+#: The registry default MUST mirror the backing pydantic Field default —
+#: chain: ``daemon.constants`` → ``LimitsConfig`` Field → this registry
+#: default (ONE truth).
 MANAGED_KEYS: dict[str, ManagedKeySpec] = {
-    "limits.llm_concurrency": ManagedKeySpec(
-        key="limits.llm_concurrency",
-        config_path="limits.llm_concurrency",
-        env_var="LIMITS_LLM_CONCURRENCY",
-        value_type="int",
-        # Mirrors LimitsConfig.llm_concurrency Field(default=10, ge=1)
-        # (daemon/config.py) — the default tier of the ladder. The two
-        # must move together; the registry is the resolver's truth.
-        default=10,
-        ge=1,
-        requires_restart=True,
-        sensitive=False,
-        description=(
-            "Maximum concurrent LLM calls across all instances "
-            "(daemon-wide semaphore). Real parallelism is also capped "
-            "by the worker thread pools — managed keys "
-            "``limits.worker_pool_size`` + ``limits.chat_worker_pool_size`` "
-            "on this page (effective concurrent graphs = "
-            "min(llm_concurrency, worker_pool_size + chat_worker_pool_size), "
-            "all boot-applied). Effective precedence: DB override > env var "
-            "LIMITS_LLM_CONCURRENCY > config.yaml literal > default; "
-            "changes require a daemon restart."
-        ),
-    ),
-# ── v1 (db-backed-settings, 2026-10-15) — the original semaphore knob ──
-    # Mirrors LimitsConfig.llm_concurrency Field(default=10, ge=1)
-    # (daemon/config.py) — the default tier of the ladder. The two
-    # must move together; the registry is the resolver's truth.
+    # ── v1 (db-backed-settings, 2026-10-15) — the original semaphore knob ──
     "limits.llm_concurrency": ManagedKeySpec(
         key="limits.llm_concurrency",
         config_path="limits.llm_concurrency",
