@@ -492,3 +492,320 @@ async def continue_running_instances_after_restart(
         result.duration_seconds = time.monotonic() - loop_started
 
     return result
+# ---------------------------------------------------------------------------
+# Task-less orphan sweep (D13 follow-up)
+# ---------------------------------------------------------------------------
+#
+# The existing ``continue_running_instances_after_restart`` pass covers
+# instances that have a surviving ``task`` row in ``status='running'``.
+# The orphan class this pass addresses is the **complement** —
+# instances whose ``status='running'`` but whose ``task`` row was lost
+# (PROCESSING rolled back at restart, paused-then-killed, OOM-killed
+# mid-tool-call, etc.). Without a boot reader for this class, an
+# instance is frozen in ``running`` + checkpoint-alive + no-task
+# forever — exactly the leader turn ``897011bb`` and rcc mission
+# ``6b1630e7`` RCAs of 2026-10-19.
+#
+# See ``.agents/shared/planning/hard-reboot-recovery/decisions.md``
+# (D13 / D18 / NG-8) for the mandate.
+#
+# The pass reuses:
+#
+#   * The kill-switch ``ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART`` (the
+#     operator toggle is shared with the AutoContinue pass because the
+#     two passes are the SAME logical action — auto-continue RUNNING
+#     instances after restart — for disjoint sub-classes of the orphan
+#     state).
+#   * ``_schedule_explicit_handle_resume`` (the graph-resume
+#     primitive; kwargs-only, idempotent at LangGraph level via
+#     ``astream(None)``).
+#   * ``boot_epoch`` (process-global generation barrier; never
+#     persisted across restarts).
+#
+# Safety narrowing vs. the commission-recommended shape:
+#
+#   * **Status clause: ``running`` only** — NOT
+#     ``running + idle``. An ``idle`` instance has its graph at the
+#     END node (terminal). A silent resume against a terminal
+#     checkpoint either no-ops or re-executes the END node — both can
+#     manufacture spurious side effects (a wake to the user / source
+#     adapter). The parked-parent concern named in the commission
+#     binds to ``WAITING_CHILDREN`` (a distinct status) which is
+#     already excluded by the existing pass. See
+#     ``tests/unit/services/test_boot_orphan_sweep.py`` ::
+#     ``test_parked_parent_waiting_children_not_swept``.
+#
+#   * **Checkpoint last-write < boot_epoch** — natural immunity, NOT a
+#     new column. After a successful resume the LangGraph superstep
+#     loop rewrites the checkpoint with a fresh ``ts`` (at-or-after
+#     ``boot_epoch``). The selector excludes any instance whose
+#     checkpoint was written by the CURRENT process, so a second boot
+#     in the SAME generation does not re-sweep. A NEW restart produces
+#     a fresh ``boot_epoch``; the prior-generation checkpoint's ``ts``
+#     is older, so any new orphan from a later restart IS swept.
+#
+#   * **Per-instance failure isolation** — the per-candidate loop
+#     wraps each instance in a ``try/except``; a sweep exception on
+#     one instance does NOT abort the rest (Layer 1 of the three-layer
+#     never-wedge envelope; the sweep-level ``try/except`` is Layer 2;
+#     the lifespan-level envelope at ``daemon/api.py:2361`` is Layer 3).
+#
+# Observability contract — always-emitted summary line so the boot
+# pass is visible even when zero orphans exist (N=0): the line is
+# the ``[BOOT_CONTINUE] orphan-sweep summary`` line at the end of
+# this function. Per-instance detail is INFO; per-instance failures
+# are WARNING with the exception class + reason.
+
+
+async def _get_checkpoint_last_write_naive_utc(
+    manager, instance_id: str
+) -> "datetime | None":
+    """Read the LangGraph checkpoint's last-write timestamp.
+
+    Returns the naive-UTC ``datetime`` parsed from
+    ``CheckpointTuple.checkpoint['ts']`` (ISO 8601 with the
+    ``+00:00`` suffix stripped), or ``None`` if no checkpoint
+    exists or the read fails.
+
+    The naive-UTC frame matches the ``auto_continued_at`` /
+    ``boot_epoch`` storage frame used by the companion
+    ``find_auto_continue_candidates`` pass.
+    """
+    try:
+        config = {"configurable": {"thread_id": instance_id}}
+        ckpt_tuple = await manager.checkpointer.raw_saver.aget_tuple(  # type: ignore[attr-defined]
+            config
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Defensive — checkpoint read is async IO; a failure is
+        # logged but does NOT abort the sweep. The orphan falls to
+        # the no-checkpoint skip counter; StaleTaskRecovery owns
+        # the eventual reap at boot+10min.
+        logger.info(
+            "[BOOT_CONTINUE] orphan-sweep checkpoint-read failed "
+            "instance=%s: %s: %s",
+            instance_id[:8], type(exc).__name__, exc,
+        )
+        return None
+    if ckpt_tuple is None:
+        return None
+    ts_iso = (ckpt_tuple.checkpoint or {}).get("ts")
+    if not ts_iso:
+        return None
+    try:
+        # ISO 8601 ``ts`` is timezone-aware (e.g. ``2026-10-19T12:00:00.123456+00:00``).
+        # Strip the tz suffix and return naive-UTC digits — matches
+        # the storage frame of ``boot_epoch`` (see
+        # ``daemon/services/boot_epoch.py:88,114``).
+        parsed = datetime.fromisoformat(ts_iso)
+        if parsed.tzinfo is not None:
+            parsed = parsed.replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return None
+
+
+async def sweep_orphaned_live_turns(
+    manager: "InstanceManager",
+    boot_epoch: datetime | None,
+) -> ContinueResult:
+    """Boot-time task-less orphan sweep.
+
+    Sister pass to :func:`continue_running_instances_after_restart`;
+    covers the disjoint sub-class of RUNNING instances whose ``task``
+    row was lost. The two passes share the same kill-switch, the
+    same resume primitive, and the same boot-epoch generation
+    barrier; they are NEVER run in parallel within one boot (the
+    existing pass executes first at ``daemon/api.py:2365``; this
+    pass runs immediately after).
+
+    Args:
+        manager: The ``InstanceManager`` (``daemon/manager.py:425``).
+        boot_epoch: The process-global boot epoch captured at
+            daemon startup. ``None`` short-circuits with
+            ``skipped_no_boot_epoch``.
+
+    Returns:
+        ``ContinueResult`` — the same shape as
+        :func:`continue_running_instances_after_restart`. The pass
+        emits a single ``[BOOT_CONTINUE] orphan-sweep summary`` line
+        at INFO with the per-boot totals so the operator can verify
+        the sweep ran.
+    """
+    result = ContinueResult()
+
+    # (1) Kill-switch (shared with AutoContinue — operator toggle
+    #     is the same logical action).
+    if not _auto_continue_enabled():
+        result.skipped_kill_switch = 1
+        logger.info(
+            "[BOOT_CONTINUE] orphan-sweep OFF: %s=0 — pass skipped "
+            "(StaleTaskRecovery backstop continues to own orphans)",
+            AUTO_CONTINUE_KILL_SWITCH_ENV,
+        )
+        return result
+
+    # (2) boot_epoch None → SKIP (mirrors AutoContinue).
+    if boot_epoch is None:
+        result.skipped_no_boot_epoch = 1
+        logger.warning(
+            "[BOOT_CONTINUE] orphan-sweep SKIPPED: boot_epoch=None "
+            "— StaleTaskRecovery backstop will catch orphans at "
+            "boot+10min (never-fail-closed)"
+        )
+        return result
+
+    # (3) Repo handle (defensive — same shape as AutoContinue).
+    task_repo = manager._task_repo  # type: ignore[attr-defined]
+    assert task_repo is not None, (
+        "Boot orphan sweep requires _task_repo to be wired by "
+        "initialize() before boot subsystems run"
+    )
+
+    loop_started = time.monotonic()
+    try:
+        # (4) Selection — read-only repo method.
+        try:
+            instance_ids = await asyncio.to_thread(
+                task_repo.find_orphaned_live_turns, boot_epoch=boot_epoch
+            )
+        except Exception as exc:
+            result.errors += 1
+            logger.warning(
+                "[BOOT_CONTINUE] orphan-sweep selection failed "
+                "(orphans caught by StaleTaskRecovery at boot+10min): "
+                "%s: %s",
+                type(exc).__name__, exc,
+            )
+            result.duration_seconds = time.monotonic() - loop_started
+            return result
+
+        result.candidates = len(instance_ids)
+
+        # (5) Per-instance loop with per-instance try/except (Layer 1).
+        for instance_id in instance_ids:
+            try:
+                # (5a) Read checkpoint last-write; filter on
+                #      ``last_write < boot_epoch`` (natural immunity).
+                ckpt_ts = await _get_checkpoint_last_write_naive_utc(
+                    manager, instance_id
+                )
+                if ckpt_ts is None:
+                    result.skipped_no_checkpoint += 1
+                    logger.info(
+                        "[BOOT_CONTINUE] orphan-sweep SKIPPED "
+                        "instance=%s: no checkpoint (next boot "
+                        "retries; STR backstop at boot+10min if "
+                        "persistent)",
+                        instance_id[:8],
+                    )
+                    continue
+                if ckpt_ts >= boot_epoch:
+                    # The checkpoint was written by the current
+                    # process — either a previous pass already swept
+                    # this orphan, or the orphan is a pre-existing
+                    # pass-managed resume. Skip.
+                    result.skipped_resume_refused += 1
+                    logger.info(
+                        "[BOOT_CONTINUE] orphan-sweep SKIPPED "
+                        "instance=%s: checkpoint last-write "
+                        "(%s) >= boot_epoch (%s) — natural "
+                        "immunity / pre-existing resume",
+                        instance_id[:8],
+                        ckpt_ts.isoformat(),
+                        boot_epoch.isoformat(),
+                    )
+                    continue
+
+                # (5b) Schedule the silent resume. The orphan has no
+                #      surviving ``task`` row, so the resume path
+                #      receives a synthetic ``work_id``. The resume
+                #      primitive's dedup gate is
+                #      ``_graph_tasks[instance_id]``
+                #      (manager.py:12036-12046), NOT a ``work_id``
+                #      lookup, so a fresh work_id is safe. The
+                #      terminalizer at
+                #      ``manager.py:12736-12777`` looks up the Task
+                #      row by ``old_job_id`` and no-ops when no row
+                #      exists — natural safety.
+                synthetic_wid = (
+                    f"orphan-sweep-{instance_id[:8]}-"
+                    f"{int(time.monotonic() * 1000)}"
+                )
+                resume = await manager._schedule_explicit_handle_resume(  # type: ignore[attr-defined]
+                    instance_id=instance_id,
+                    message="",
+                    silent=True,
+                    images=None,
+                    target_work_id=synthetic_wid,
+                    selected_suspension_reason=None,
+                    handle_work_id=synthetic_wid,
+                    route_outcome="boot_continue_orphan_sweep",
+                    image_refs=None,
+                )
+
+                if (
+                    resume is None
+                    or not isinstance(resume, dict)
+                    or resume.get("status") != "resuming"
+                ):
+                    result.skipped_resume_refused += 1
+                    logger.info(
+                        "[BOOT_CONTINUE] orphan-sweep SKIPPED "
+                        "instance=%s: resume refused (resume=%r)",
+                        instance_id[:8], resume,
+                    )
+                    continue
+
+                result.scheduled += 1
+                logger.info(
+                    "[BOOT_CONTINUE] orphan-sweep instance=%s "
+                    "epoch=%s ckpt_ts=%s",
+                    instance_id[:8],
+                    boot_epoch.isoformat(),
+                    ckpt_ts.isoformat(),
+                )
+
+                # Stagger cadence (mirrors AutoContinue Δ5 / D22).
+                if result.scheduled % STAGGER_EVERY == 0:
+                    await asyncio.sleep(STAGGER_SLEEP_SECONDS)
+
+            except Exception as exc:
+                # Per-instance exception (Layer 1) — never raise.
+                result.errors += 1
+                logger.warning(
+                    "[BOOT_CONTINUE] orphan-sweep instance=%s "
+                    "failed: %s: %s",
+                    instance_id[:8],
+                    type(exc).__name__, exc,
+                )
+                continue
+    except Exception as exc:
+        # Sweep-level exception (Layer 2) — never raise.
+        result.errors += 1
+        logger.warning(
+            "Boot orphan sweep failed (orphans caught by "
+            "StaleTaskRecovery at boot+10min): %s: %s",
+            type(exc).__name__, exc,
+        )
+    finally:
+        result.duration_seconds = time.monotonic() - loop_started
+
+    # (6) Observability summary line — always emitted (even when N=0)
+    #     so the operator can verify the sweep ran.
+    logger.info(
+        "[BOOT_CONTINUE] orphan-sweep summary: candidates=%d "
+        "scheduled=%d skipped_no_checkpoint=%d skipped_resume_refused=%d "
+        "skipped_kill_switch=%d skipped_no_boot_epoch=%d "
+        "errors=%d duration_s=%.3f boot_epoch=%s",
+        result.candidates,
+        result.scheduled,
+        result.skipped_no_checkpoint,
+        result.skipped_resume_refused,
+        result.skipped_kill_switch,
+        result.skipped_no_boot_epoch,
+        result.errors,
+        result.duration_seconds,
+        boot_epoch.isoformat(),
+    )
+    return result

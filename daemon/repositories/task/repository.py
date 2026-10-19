@@ -1162,6 +1162,98 @@ class TaskRepository:
             )
             return list(db_session.exec(stmt).all())
 
+    def find_orphaned_live_turns(
+        self, *, boot_epoch: datetime
+    ) -> list[str]:
+        """Return ``instance_id`` rows for the boot-time orphan sweep.
+
+        Feature: boot-orphan-sweep (D13 follow-up). NG-8 in the
+        hard-reboot-recovery plan
+        (``.agents/shared/planning/hard-reboot-recovery/decisions.md``
+        D13 / D18). The orphan class is the conjunction:
+
+          * ``instances.status = 'running'``
+            (NOT ``idle`` — see safety analysis below)
+          * NO active ``task`` row exists for the instance
+            (``task.status IN ('pending', 'running', 'paused')`` returns 0)
+          * An active ``JobItem`` (``job_queue_items.admission_state
+            IN ('active')`` OR via the model's
+            ``ACTIVE_ADMISSION_STATES``) is bound to the instance —
+            without an active job the orphan has no observable
+            consequence on the JobQueue lane (the JobItem is the
+            surface the operator dashboards read)
+
+        The ``running``-only status filter is a HARD safety narrowing
+        relative to the commission's recommended shape
+        (``status IN ('running','idle')``). An ``idle`` instance has
+        its graph at the END node (terminal). A silent resume against
+        a terminal checkpoint either no-ops or re-executes the END
+        node — both can manufacture side effects (a spurious wake to
+        the user / source adapter). The parked-parent concern named
+        in the commission is bound to ``WAITING_CHILDREN`` (a distinct
+        status), NOT ``idle`` — ``WAITING_CHILDREN`` is already in the
+        existing ``find_auto_continue_candidates`` exclusion set at
+        :py:meth:`find_auto_continue_candidates`. Therefore the
+        ``running``-only narrowing preserves coverage of every
+        legitimate orphan while excluding the parked-parent false
+        positive. Regression test:
+        ``tests/unit/services/test_boot_orphan_sweep.py`` —
+        ``test_parked_parent_waiting_children_not_swept`` (the WC
+        instance must NOT appear in the result list).
+
+        The active-JobItem clause avoids sweeping instances whose
+        surviving process is an internal orchestrator state (e.g. a
+        SkillBank keepalive) — those rows would have a status row but
+        no job surface to finalize, and silently re-dispatching them
+        is observable noise without a corresponding user-visible
+        surface.
+
+        Returns:
+            Ordered list of ``instance_id`` strings (oldest-first by
+            ``instances.created_at`` to match the existing
+            :py:meth:`find_auto_continue_candidates` ordering). Empty
+            list if no orphan exists.
+        """
+        if boot_epoch is None:
+            # Defensive — the boot pass already SKIPs on boot_epoch=None
+            # (mirrors ``find_auto_continue_candidates``).
+            return []
+        with SQLModelSession(self.engine) as db_session:
+            active_task_subq = (
+                select(Task.instance_id)
+                .where(
+                    Task.status.in_([
+                        TaskStatus.PENDING.value,
+                        TaskStatus.RUNNING.value,
+                        TaskStatus.PAUSED.value,
+                    ])
+                )
+                # DISTINCT on instance_id keeps the subquery cheap
+                # for instances with many completed/historical rows.
+                .group_by(Task.instance_id)
+            )
+            stmt = (
+                select(Instance.instance_id)
+                .where(Instance.status == InstanceStatus.RUNNING.value)
+                .where(col(Instance.instance_id).not_in(active_task_subq))
+                # Active JobItem bound to this instance
+                .where(
+                    exists().where(
+                        col(JobItem.instance_id) == Instance.instance_id
+                    ).where(
+                        col(JobItem.admission_state).in_(
+                            list(ACTIVE_ADMISSION_STATES)
+                        )
+                    )
+                )
+                .order_by(col(Instance.created_at).asc())
+            )
+            # ``db_session.exec(stmt).all()`` on a single-column
+            # SELECT returns a list of scalars (string values, NOT
+            # Row objects). Indexing ``row[0]`` would slice the first
+            # CHARACTER off the id; iterate directly instead.
+            return list(db_session.exec(stmt).all())
+
     def mark_task_auto_continued(
         self, task_id: int, boot_epoch: datetime
     ) -> bool:

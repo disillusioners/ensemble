@@ -2361,14 +2361,15 @@ async def lifespan(app: FastAPI):
         try:
             from daemon.services.auto_continue_boot_pass import (
                 continue_running_instances_after_restart,
+                sweep_orphaned_live_turns,
             )
             continue_result = await continue_running_instances_after_restart(
-                manager=manager,
-                boot_epoch=get_boot_epoch(),
+                manager=manager, boot_epoch=get_boot_epoch(),
             )
-            logger.info(
-                "AutoContinue boot pass: %s",
-                continue_result,
+            logger.info("AutoContinue boot pass: %s", continue_result)
+            # D13 follow-up (NG-8) — task-less orphan sweep; never raises.
+            await sweep_orphaned_live_turns(
+                manager=manager, boot_epoch=get_boot_epoch(),
             )
         except Exception as cont_boot_exc:  # noqa: BLE001
             logger.warning(
