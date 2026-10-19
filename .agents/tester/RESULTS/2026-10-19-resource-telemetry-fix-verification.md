@@ -350,3 +350,59 @@ Error hygiene: 0 console errors from `/api/resources/*`, 0 pageerrors. Unrelated
 | `/tmp/rt-verify/ensure/` | `concurrency_atomic.log` |
 
 Total: 113 files, ~1.2 MB. Scratch DB/role names and all commands are recorded inline above.
+
+
+---
+
+# R2 — INTEGRATED-TREE RE-VERIFICATION @ `8d7c33884` (2026-10-19)
+
+**Context:** the branch was behind `latest`; `origin/latest` (`ac1e6454b`, v0.25.3) was merged in with a true `--no-ff` merge. Parents: `3bab2790b` (docs) + `ac1e6454b`. Only conflict: `.agents/tester/PACKS.md` (keep-both/newest-first). Zero product-code conflicts. `latest` later moved to `5b524cf17` (docs/test-evidence only, deferred to final integration).
+
+| R2 item | Verdict | Evidence |
+|---|---|---|
+| 1. Payload intact after merge | **PASS 7/7** | restricted diff `ac1e6454b..HEAD -- daemon/ tests/ frontend/` = exactly the 7 expected files (+1995/−47); no `latest` leak |
+| 2. Resource family | **PASS** | PG pack 12, storage 45, control_seam 32, sampler 41, api 18, self_cost 8 |
+| 3. Merged-in sibling suites | **PASS** | `test_question_pack_boot_rehydrate.py` 7/7; `test_boot_orphan_sweep.py` 32/32 |
+| 4. Boot smoke (merged code) | **PASS** | `/livez` 200 @23.15s (v0.25.3), `/readyz` 200 (database/queue/services/checkpointer all true); ensure line `applied=[], already_ok=[3× boolean]`; monitor started; zero 42804 |
+
+## R2-1 — Payload audit detail
+- Merge identity: `8d7c3388496d215aefa01c57ba6a7c788c7c7e1d`, parents `3bab2790b779…` + `ac1e6454bad…`; `merge-base --is-ancestor ac1e6454b HEAD` rc=0; tree clean.
+- Restricted diff paths: `daemon/manager.py` M, `daemon/models/resource_monitor.py` M, `daemon/services/resource_monitor/flusher.py` M, `20261019_120822_...sql` A, `tests/postgres/test_resource_monitor_estimated_bool_pg.py` A, `tests/test_resource_control_seam.py` M, `tests/test_resource_monitor_storage.py` M.
+- Nothing lost: `git diff 3bab2790b..HEAD` **empty** for the 6 files `latest` did not touch.
+- Nothing duplicated: `manager.py` delta vs `3bab2790b` is **only** the question-pack rehydrate move (20+/20−, call moved to `daemon.api._boot_rehydrate_question_packs` after `setup_worker_pool()`), not inside `_ensure_postgres_columns`. The 221-line boolean block is **byte-identical** between `3bab2790b` and HEAD (`sha256 93d92d646d52c364499025cfebd9f45d8f8356d93f6ef6359d3908e95ec56566`). 3 column tuples + the success log string each appear exactly once; +3 `ALTER COLUMN` lines, 0 removed.
+- `py_compile` rc=0 on manager/model/flusher; zero real conflict markers (strict anchored grep).
+- PACKS.md: our section exactly once at line 3; latest sections restored below (keep-both correct).
+
+## R2-2/3 — Suites detail
+Each run: separate `timeout 300`, `-p no:randomly`, no xdist, no `-x`; PG pack on scratch `ensemble_rt_scratch_r2`; unit suites with `env -u POSTGRES_DB`.
+
+| Suite | Passed | Failed | Errors | Skipped | Exact summary |
+|---|---|---|---|---|---|
+| `tests/postgres/test_resource_monitor_estimated_bool_pg.py` | 12 | 0 | 0 | 0 | `12 passed, 1 warning in 14.98s` |
+| `tests/test_resource_monitor_storage.py` | 45 | 0 | 0 | 0 | `45 passed, 1 warning in 3.48s` |
+| `tests/test_resource_control_seam.py` | 32 | 0 | 0 | 0 | `32 passed, 1 warning in 15.03s` |
+| `tests/test_resource_monitor_sampler.py` | 41 | 0 | 0 | 0 | `41 passed, 1 warning in 0.77s` |
+| `tests/test_resource_monitor_api.py` | 18 | 0 | 0 | 0 | `18 passed, 1 warning in 4.89s` |
+| `tests/test_resource_monitor_self_cost.py` | 8 | 0 | 0 | 0 | `8 passed, 1 warning in 0.60s` |
+| `tests/test_question_pack_boot_rehydrate.py` (merged-in) | 7 | 0 | 0 | 0 | `7 passed, 1 warning in 5.14s` |
+| `tests/unit/services/test_boot_orphan_sweep.py` (merged-in) | 32 | 0 | 0 | 0 | `32 passed, 1 warning in 53.63s` |
+| **TOTAL** | **195** | **0** | **0** | **0** | — |
+
+No failures/skips ⇒ nothing to attribute; no A/B against pre-merge needed. Scratch `ensemble_rt_scratch_r2` + role dropped (0/0); sibling boot DB untouched.
+
+## R2-4 — Boot smoke detail
+- Daemon: worktree `python -m daemon`, PID 939236, port 8079, env fence `POSTGRES_DB=ensemble_rt_scratch_boot` / `POSTGRES_USER=rt_verify_boot` / `DAEMON_PORT=8079` / `ENSEMBLE_SELF_ENV=dev`.
+- `/livez` → 200, `{"status":"alive","version":"0.25.3"}`, first success t=23.15s (uptime 5.49s). `/readyz` → 200, `{"status":"ready","components":{"database":true,"queue_freshness":true,"services":true,"checkpoint_saver":true},"draining":false}`. Re-polled at 18.5 min: still 200.
+- Ensure line: `_ensure_postgres_columns: resource_monitor boolean repair complete (applied=[], already_ok=['resource_instance_sample.estimated=boolean', 'resource_limit_policy.enabled=boolean', 'resource_limit_policy.user_gated=boolean'], unrecognised=[], missing=[])`.
+- Merged boot passes ran: `AutoContinue boot pass: ContinueResult(candidates=0 … errors=0)`; `[BOOT_CONTINUE] orphan-sweep summary: … errors=0`; `question-packs rehydrated: 0`.
+- Monitor start: `resource-monitor started: sample_s=30 flush_s=60 retention=(2880, 336, 180)`.
+- Forbidden patterns absent: `DatatypeMismatch` 0, `42804` 0, ensure-error 0, ALTER failure 0.
+- DB: columns `boolean`; `resource_daemon_bucket` 35→37 (live writes); T2/T3 0 (no instances yet); T4 0 by design; rollback-scoped policy insert stored `t`/`t` then rolled back.
+- Connections: 6 backends, all `ensemble_rt_scratch_boot`; zero to any other DB.
+- Cleanup: graceful SIGTERM (port-owner re-verified) exit 2s; 8079 free; scratch DB/role 0/0; fence HOME removed; tree clean; 9797 untouched.
+- **Scope caveat:** fresh DB → `create_all` already produced booleans, so the INTEGER→BOOLEAN **conversion branch was not exercised** in this smoke. It is proven separately by R1 item A on a genuine legacy integer fixture.
+- **Pre-existing noise:** 25 MCP ERROR lines (`libXtst.so.6` missing → computer-use; plane connection closed). Not merge- or fix-caused; branch diff has zero files under `daemon/mcp/**` or MCP services.
+- **New informational (display-only):** checkpointer log reads `Creating PostgreSQL checkpointer for localhost:5432/ensemble` from raw config (`daemon/persistence.py:221-225`) while `pg_stat_activity` proves the actual connection is the scratch DB. Mislabelled log line, no functional impact.
+
+## R2 verdict
+**No merge-caused regressions. The integrated tree `8d7c33884` is green: payload byte-intact, 195/195 suites, boot healthy with both health endpoints 200 and the resource-monitor ensure/monitor intact.**
