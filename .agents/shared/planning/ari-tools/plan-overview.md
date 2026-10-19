@@ -188,8 +188,13 @@ order is *not* strictly serial, both matter:
    `agents/leader/meta.json` (`"board"`, `"board-link"`). **Merge-ordering note:** all edits append at the END
    of the array (phase-1 D15), and each phase's allow-list pin test is per-phase — so a phase-3 merge must not
    assume phase 1's or phase 2's entries exist, and vice versa. `agents/ari/meta.json` and
-   `agents/leader/meta.json` are in **neither** seal baseline — the committed 161-entry manifest\n`agents/.prompt-artifacts.sha256` has **zero** `meta.json` rows (`grep -c 'meta.json'` = 0), and the 35-entry\n`SEALED_SHA_BASELINES` test tripwire lists `agents/charter/meta.json` but neither ari nor leader `meta.json` —\nwhich is why all three phases can touch them freely. **This is a statement about `meta.json` ONLY**: the\n`.md` prompt artefacts of ari/leader (`rule.md`, `soul.md`, `tools_note.md`, `workflow.md`, and leader's\n`growth.md`) **ARE** manifest-covered, and an edit to any of them is a seal event (see §6 R7 and §8).
-   three phases can touch them freely.
+   `agents/leader/meta.json` are in **neither** seal baseline — the committed 161-entry manifest
+   `agents/.prompt-artifacts.sha256` has **zero** `meta.json` rows (`grep -c 'meta.json'` = 0), and the
+   35-entry `SEALED_SHA_BASELINES` test tripwire lists `agents/charter/meta.json` but neither ari nor
+   leader `meta.json` — which is why all three phases can touch them freely. **This is a statement about
+   `meta.json` ONLY**: the `.md` prompt artefacts of ari/leader (`rule.md`, `soul.md`, `tools_note.md`,
+   `workflow.md`, and leader's `growth.md`) **ARE** manifest-covered, and an edit to any of them is a seal
+   event (see §6 R7 and §8).
 4. **The privileged-set pin files (all three phases → the same five files).**
    `PRIVILEGED_TOOL_CATEGORIES` is asserted by **exact-set equality** in five test files
    (`tests/unit/tools/test_upgrade_registration.py`, `tests/unit/tools/test_attestation_registration.py`,
@@ -375,7 +380,7 @@ filename tokens in prompt prose).
 | File | Disposition | Owns (canonical home) | Why |
 |---|---|---|---|
 | `agents/ari/tools_note.md` | **EDIT** | The **new-tool usage notes** — one section per tool family: `## Board` (`board_create` / `board_update` / `board_list` / `board_get`), `## Self-Alarm` (`self_alarm`), `## Live Views` (`view_write`, `board_link`). Also the **≥30 min vs <30 min decision** and the **"the board is the user-visible surface"** statement. | `tools_note.md` owns "tool-by-tool reference (what each tool does, when to use/avoid)" (guide §2). The ≥30-min rule is exactly a when-to-use/avoid rule for `self_alarm`. |
-| `agents/ari/workflow.md` | **EDIT** | The **session open/close procedure**: session open ⇒ `board_list(open)`; session close ⇒ append a **handoff note** to each open board item I own. | `workflow.md` owns "step-by-step process" (guide §2). The tool *reference* stays in `tools_note.md`; `workflow.md` links to it by section name. |
+| `agents/ari/workflow.md` | **EDIT** | The **session open/close procedure**: session open ⇒ `board_list(status="open")` — the **full open board** (one global board; cross-instance continuity is the goal), bounded by the `limit` param (default **50**); session close ⇒ append a **handoff note** to **each open item in that open set** (**no ownership filter** — see §8.4 item 2). | `workflow.md` owns "step-by-step process" (guide §2). The tool *reference* stays in `tools_note.md`; `workflow.md` links to it by section name. |
 | `agents/ari/rule.md` | **NO EDIT** | — | Nothing here is a new *hard constraint* that is not already a rule or a process step: the ≥30-min rule is tool-usage guidance (tools_note), the open/close procedure is process (workflow). Editing `rule.md` would duplicate content the guide forbids duplicating, risk the ≤7-Cardinal ceiling, and put `agents/ari/rule.md` — which **IS** in the `SEALED_SHA_BASELINES` tripwire — into the seal blast radius for no benefit. |
 | `agents/ari/soul.md` | **NO EDIT** | — | `soul.md` owns identity / personality / tone (guide §2, §5). The new material carries no tone directive and changes no identity. |
 | `agents/leader/*` | **NO EDIT** | — | The conventions content is **ari-specific** (ari alone holds `self_alarm` and `view_write`; the board/session discipline is ari's). Leader holds `board` + `board-link` only and gains no session procedure. |
@@ -386,11 +391,25 @@ tripwire — and **already one of the 7 stale pins**).
 
 ### 8.4 Binding content items (all FIVE must appear)
 
-1. **Session open ⇒ `board_list(open)`.** The first thing I do at the start of a session is read the open board,
-   so the state I inherited from my previous session is in front of me before I act.
-2. **Session close ⇒ handoff note appended to the open board items.** Before I end a session, each open item I
-   own gets a note saying where it stands. The note is **appended** — never an edit — so the timeline stays the
-   record.
+**FIVE binding content items** (1–5 below). Item 5 additionally carries the **five Self-Alarm Tool-doc
+obligations** — a *different* five, enumerated in its sub-list.
+
+1. **Session open ⇒ `board_list(status="open")` — the FULL open board.** The first thing I do at the start
+   of a session is read the open board — **every** open item, not a filtered subset — so the state I
+   inherited from my previous session (or from a sibling instance) is in front of me before I act. There is
+   **ONE global board** (cross-instance continuity is the whole point of this commission), so the open
+   board **is** the inherited state. The result is bounded by the `board_list` **`limit`** param —
+   **default 50**, range 1–200 (`BoardListInput.limit` default and the `board_list` signature default,
+   [phase1-plan.md](phase1-plan.md) §7.1/§7.2). `status="open"` is the documented magic value ⇒
+   `status IN ('todo','in_progress','blocked')` (`done` is the only terminal status) — no other magic values.
+2. **Session close ⇒ handoff note appended to the open board items.** Before I end a session, each open item in
+   the open set (the **same full set** read at session open) gets a note saying where it stands. The note is
+   **appended** — never an edit — so the timeline stays the record.
+   **There is NO ownership filter.** I do not skip an item because "someone else" created it: `board_list`
+   has **no author filter**, and `created_by_instance` is **audit metadata ONLY** — it stamps the writing
+   session, is per-session, and carries **no ownership semantics** across instances (filtering on it would
+   defeat the cross-instance continuity this commission exists to provide). ⇒ **Every open item gets a
+   handoff note.**
 3. **≥30 min ⇒ `self_alarm`; <30 min ⇒ bash `sleep` in-turn.** For anything I must be reminded of in **30
    minutes or more**, I arm `self_alarm`. For anything shorter, I `sleep` in-turn — a short wait does not
    deserve a scheduled reminder. (The wrapper enforces the floor and rejects a sub-30-minute arm with this same
@@ -402,6 +421,20 @@ tripwire — and **already one of the 7 stale pins**).
    agent-POV usage guidance (what it does, when I use it, when I avoid it), per the guide: first person; **no**
    `meta.json` / `tools.allow` / `daemon/` / `skill-set.yaml` / `innate_skills` / test-path tokens;
    cross-references by **section name** only; no false "stated once" claims.
+   **Optional practice (NOT a requirement):** if agent-level ownership filtering is ever wanted, tag a board
+   item with **`owner:ari`** at creation time. This is a **convention-level practice documented in the
+   `tools_note.md` content spec only** — it is **not** a schema field, **not** a schema/convention
+   requirement, and **not** a substitute for the full-open-board session procedure in items 1–2.
+
+   **The `## Self-Alarm` section additionally carries the FIVE Tool-doc obligations** — the same five the
+   `self_alarm._full_doc_` doc-pin test asserts in phase 2 ([phase2-plan.md](phase2-plan.md)
+   §"Tool-doc obligations", binding, architect §4.1/§4.2/§4.4). All five must appear in the shipped
+   `## Self-Alarm` section; enumerated here, one line each:
+   1. **Lateness — both cap states, named explicitly, plus the skip signature.** `one_shot_max_lateness_seconds` is daemon-global config the wrapper cannot set or override: default `None` ⇒ **unlimited** (an alarm whose instant passed while the daemon was down fires late at the next boot); cap set to N ⇒ a boot later than N writes a `schedule_executions` row `status='skipped'`, **no dispatch**, and the schedule **stays armed** (it re-evaluates the same past instant every 5 s with **no self-heal** and **no user-visible signal** — the only remedy is a manual `task_schedule_update`); every response echoes `lateness_cap_seconds` so the agent knows its exposure.
+   2. **The board is the user-visible surface — promise the board, never a ping.** Promise: the alarm is delivered into a fresh Ari instance at the scheduled instant; that instance performs the action and leaves evidence **on the board** (status/notes) and in any job it dispatches; the phase-3 live board view shows the change. Must **not** promise: a ping in chat/Discord/Slack, a reminder in the conversation, or an interruption.
+   3. **What the wrapper cannot observe.** There is no agent-facing post-fire hook; "it fired" is readable only from the row (`status='stopped'`, `enabled=False`). No auto-cleanup, no auto-done on the board item.
+   4. **List semantics.** `task_schedule_list` is **not** status-filtered by default and is capped at **100** rows (`created_at DESC`) ⇒ armed rows eventually hide behind stopped ones; use `status='running'` to see armed alarms. `stopped` means **dispatched**, not **acted upon** — the completion callback fires right after the enqueue.
+   5. **Label namespace.** Every wrapper-minted label carries the `self-alarm:` prefix (D4) — the wrapper's namespace is disjoint from MCP-server / Slack source names, because the label lookup has no `source_type` filter.
 
 ### 8.5 The ONE in-commit re-stamp task (binding)
 
@@ -420,6 +453,20 @@ tripwire — and **already one of the 7 stale pins**).
 
 - [ ] Author the §8.3 dispositions — `tools_note.md` (three new sections + the two binding statements) and
       `workflow.md` (the session open/close procedure) only. No other agent file is touched.
+- [ ] **Assert all five Self-Alarm tool-doc obligations are present in the shipped `## Self-Alarm` section
+      (enumerate them):** (1) lateness — both cap states, named explicitly, plus the skip signature;
+      (2) the board is the user-visible surface — promise the board, never a ping; (3) what the wrapper
+      cannot observe; (4) list semantics; (5) label namespace. (These are the same five the phase-2
+      `self_alarm._full_doc_` doc-pin test asserts — [phase2-plan.md](phase2-plan.md) §"Tool-doc
+      obligations". The `## Self-Alarm` section is authored in THIS step, so the prompt-side assertion
+      lives here, not in phase 2.)
+- [ ] **Assert the session open/close procedure has NO ownership filter:** session open reads the **full**
+      open board via `board_list(status="open")` — **one global board**; cross-instance continuity is the
+      goal — bounded by the `limit` param, whose **default is 50** (range 1–200; the `BoardListInput.limit`
+      default and the `board_list` signature default — [phase1-plan.md](phase1-plan.md) §7.1/§7.2); session
+      close appends a handoff note to **every** open item in that set. `created_by_instance` is **audit
+      metadata only** (no ownership semantics). The optional `owner:ari` **tag** is a documented practice,
+      **not** a requirement.
 - [ ] Run the guide's **pre-commit checklist** (`docs/agent-prompt-writing-guide.md` §10) over the edited files:
       no system internals; one canonical home per artefact; no false "stated once"; ≤7 Cardinals (`rule.md`
       untouched, so trivially true); cross-references resolve by section name; tone present (`soul.md`
@@ -452,7 +499,11 @@ These are recorded as **deferred with reasons**, not as gaps. Each is listed in 
 | **Clearing `due_at` / `project_id` / `priority`**, and **soft-delete of items** | [phase1-plan.md Q2, Q4](phase1-plan.md) | **DEFERRED-to-v2** (ledger theme 4). The bound `board_update` shape has no clear-flag; `clear_fields` is a v1.1 amendment on demand. A soft delete is mandatory (never a hard one — the notes audit trail must survive), and the **child FKs (NO ACTION) now enforce it at the schema level**: the database refuses a hard item delete. |
 | **Interval recurrence** (`every 1h`) | [phase2-plan.md OQ-3](phase2-plan.md) | **DEFERRED-to-v2** (ledger theme 8). `create_schedule` exposes no interval variant; it is rejected with a hint (`cron */60 * * * *`). A real engine change is a separate commission. |
 | **The `agents/ari` conventions update + its adjudicated seal re-stamp** | **[plan-overview.md §8](plan-overview.md) — STEP 4 OF THIS COMMISSION** | **NOT deferred — IN-SCOPE as step 4, before merge + stage.** The user's commission deliverable 3 ("Ari's agent files") is delivered by this step. It is **not** a phase-5 commission and **not** a post-landing item. It owns the **ONE** in-commit re-stamp pass. Phases 1–3 are **code-only + `meta.json` allow-list edits** ⇒ **no phase carries a re-stamp task** (neither `meta.json` is manifest-covered). The step edits `agents/ari/tools_note.md` + `agents/ari/workflow.md` only (§8.3). |
-| **The optional `daemon/loader.py` warm-scan edit** — the cold-boot path can pin an empty category doc into the no-TTL prompt cache. | architect §3.3 | **DEFERRED (leader ruling R-loader).** The edit is **SKIPPED in v1**: the lifespan-injected `reports` root is sufficient for correctness, and skipping keeps the phase-3 diff minimal. It is the 16th shared edit file and is **not** part of the v1 file map. Not a defect, not a gap. |
+| **The optional `daemon/loader.py` warm-scan edit** — the cold-boot path can pin an empty category doc into the no-TTL prompt cache. | architect §3.3 | **DEFERRED (leader ruling R-loader).** The edit is **SKIPPED in v1**: the lifespan-injected `reports` root is sufficient for correctness, and skipping keeps the phase-3 diff minimal. It is the **15th** shared edit site and is **not** part of the v1 file map — the count is the one in §3:
+**14** shared edit files in phases 1–3 **+ 2** prompt-artefact files in the conventions step (§8) ⇒
+`daemon/loader.py` is the **15th**. (The historical "16th" was the pre-C1① count that still counted
+`agents/ari/tools_note.md` as a phase edit file; see the A-45 row in the amendment log.) Not a defect, not a
+gap. |
 
 ---
 
