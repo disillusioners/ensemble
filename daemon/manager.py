@@ -8202,10 +8202,23 @@ class InstanceManager:
         # databases get the correct type via ``create_all``), but
         # ``create_all`` is a no-op for tables that already exist; the
         # existing live columns need a one-time ALTER. The probe-gated
-        # ``DO $$`` body below runs on EVERY boot, is a no-op when the
-        # columns are already ``boolean`` (idempotent under repeated /
-        # concurrent boot), and the ``USING (col <> 0)`` cast is
-        # lossless on every legitimate 0/1 value.
+        # block below runs on EVERY boot and is a no-op once the
+        # columns are already ``boolean`` (idempotent under repeated
+        # boot). The ``USING (col <> 0)`` cast maps every NONZERO
+        # integer to TRUE and 0 to FALSE (NULL stays NULL; the columns
+        # are NOT NULL).
+        #
+        # CONCURRENCY (stated accurately): the information_schema probe
+        # and the ALTER are NOT atomic — there is no advisory lock
+        # between them. Two boots racing the same columns can both pass
+        # the probe; the second's ALTER then blocks on the first's
+        # ACCESS EXCLUSIVE lock and, once the first commits, runs
+        # against an already-``boolean`` column (``USING (col <> 0)``
+        # on a boolean has no valid operator) and ABORTS ITS BOOT
+        # LOUDLY. That is a loud failure, not silent corruption; the
+        # next boot re-probes, sees ``boolean``, and no-ops (self-heal
+        # on restart). A single boot that wins the probe converts
+        # exactly once.
         #
         # Audit-trail mirror:
         # ``daemon/migrations/versions/20261019_120822_alter_resource_monitor_booleans.sql``
@@ -8229,10 +8242,11 @@ class InstanceManager:
             # Three (table, column, new_default) tuples — same shape
             # applied identically. The probe on
             # ``information_schema.columns.data_type='integer'`` makes
-            # the DO body a no-op once the column is already
-            # ``boolean``. ``ALTER COLUMN ... TYPE boolean USING
-            # (col <> 0)`` is lossless on the documented 0|1 storage
-            # (0 → FALSE, 1 → TRUE).
+            # the conversion a no-op once the column is already
+            # ``boolean``. Each conversion is the three-step form
+            # (DROP DEFAULT → TYPE boolean USING (col <> 0) →
+            # SET DEFAULT), which is safe on a default-bearing column:
+            # every NONZERO integer → TRUE, 0 → FALSE, NULL stays NULL.
             _resource_monitor_bool_repair = (
                 (
                     "resource_instance_sample",
@@ -8251,7 +8265,8 @@ class InstanceManager:
                 ),
             )
             _bool_repair_applied: list[str] = []
-            _bool_repair_skipped: list[str] = []
+            _bool_repair_already_ok: list[str] = []
+            _bool_repair_missing: list[str] = []
             try:
                 with self._engine.begin() as conn:
                     for tbl, col, new_default in _resource_monitor_bool_repair:
@@ -8269,26 +8284,56 @@ class InstanceManager:
                             # SQLModel create_all handles it. Skip
                             # silently (drift_events index parity
                             # convention).
-                            _bool_repair_skipped.append(f"{tbl}.{col}=missing")
+                            _bool_repair_missing.append(f"{tbl}.{col}=missing")
                             continue
                         if str(probe[0]).lower() != "integer":
                             # Already boolean (or otherwise non-integer
                             # — defensive): no-op. This is the
-                            # repeated-boot / concurrent-boot idempotency.
-                            _bool_repair_skipped.append(
+                            # repeated-boot idempotency surface.
+                            _bool_repair_already_ok.append(
                                 f"{tbl}.{col}={probe[0]}"
                             )
                             continue
-                        # Literal ``true`` / ``false`` PG syntax for the
-                        # SET DEFAULT — keeps the SQL portable across
-                        # PG versions and matches the model declaration.
+                        # Three-step per-column conversion (review F1a).
+                        # The combined single-statement form
+                        # (``TYPE ... , SET DEFAULT ...``) FAILS on a
+                        # default-bearing column: PostgreSQL refuses
+                        # the TYPE change when the EXISTING default
+                        # cannot be auto-cast (DatatypeMismatch, 42804).
+                        # The live prod shape is INTEGER NOT NULL with
+                        # NO server default (``Field(default=True)`` is
+                        # a Python-side ORM default, not a DDL default),
+                        # but the legacy SQLite migration declares
+                        # DEFAULT 1 and a future re-shape could carry a
+                        # default — so handle both:
+                        #   1. DROP DEFAULT — hoists any existing
+                        #      old-type default out of the way. It is a
+                        #      no-op when the column has no default.
+                        #   2. TYPE boolean USING (c <> 0) — every
+                        #      NONZERO integer is TRUE, 0 is FALSE,
+                        #      NULL stays NULL (the column is NOT NULL).
+                        #   3. SET DEFAULT <lit> — restores the
+                        #      documented default for INSERTs that omit
+                        #      the column.
                         _default_lit = "true" if new_default else "false"
                         conn.execute(
                             text(
                                 f"ALTER TABLE {tbl} "
+                                f"ALTER COLUMN {col} DROP DEFAULT"
+                            )
+                        )
+                        conn.execute(
+                            text(
+                                f"ALTER TABLE {tbl} "
                                 f"ALTER COLUMN {col} TYPE boolean "
-                                f"USING ({col} <> 0), "
-                                f"ALTER COLUMN {col} SET DEFAULT {_default_lit}"
+                                f"USING ({col} <> 0)"
+                            )
+                        )
+                        conn.execute(
+                            text(
+                                f"ALTER TABLE {tbl} "
+                                f"ALTER COLUMN {col} "
+                                f"SET DEFAULT {_default_lit}"
                             )
                         )
                         _bool_repair_applied.append(f"{tbl}.{col}")
@@ -8310,9 +8355,10 @@ class InstanceManager:
                 raise
             logger.info(
                 "_ensure_postgres_columns: resource_monitor boolean repair "
-                "complete (applied=%s, already_ok=%s)",
+                "complete (applied=%s, already_ok=%s, missing=%s)",
                 _bool_repair_applied,
-                _bool_repair_skipped,
+                _bool_repair_already_ok,
+                _bool_repair_missing,
             )
 
         # ── Section 1 / vacuum-maintenance: ensure autovacuum reloptions ──

@@ -15,9 +15,10 @@
 --   ``engine.begin()`` window — 2.5 h of continuous write-path data
 --   loss since the v0.25.0 promote (~06:13:51Z). The amplification
 -- detector is ``is_missing_relation_error`` only swallowing the 42P01
--- class; the 22002 (DatatypeMismatch, 42804) class re-raises,
--- escapes ``_tier_write``, and aborts the surrounding transaction on
--- the next statement.
+-- (UndefinedTable) class; the 42804 (DatatypeMismatch) class
+-- re-raises, escapes ``_tier_write``, and aborts the surrounding
+-- transaction on the next statement. (22002 is null_value_not_allowed
+-- and is NOT the code this defect produced.)
 --
 --   This migration file is the audit/operator document. The runtime
 --   correction lives in
@@ -28,9 +29,20 @@
 --
 -- COLUMNS IN SCOPE (all three were the same defect class):
 --
---   * ``resource_instance_sample.estimated``    — was INTEGER NOT NULL DEFAULT 1
---   * ``resource_limit_policy.enabled``        — was INTEGER NOT NULL DEFAULT 0
---   * ``resource_limit_policy.user_gated``     — was INTEGER NOT NULL DEFAULT 1
+--   * ``resource_instance_sample.estimated``    — INTEGER NOT NULL
+--   * ``resource_limit_policy.enabled``        — INTEGER NOT NULL
+--   * ``resource_limit_policy.user_gated``     — INTEGER NOT NULL
+--
+--   DEFAULT SHAPE — stated accurately: on PostgreSQL the live columns
+--   carry NO server default (``information_schema.columns.column_default``
+--   is EMPTY). ``SQLModel.metadata.create_all`` emits only the column
+--   TYPE and NOT NULL from ``sa_column``; the ``Field(default=...)``
+--   is a Python-side ORM default and is NOT emitted as DDL. The
+--   SQLite companion migrations DO declare ``DEFAULT 1``/``DEFAULT 0``,
+--   but SQLite type affinity makes that inert for storage. The runtime
+--   hook therefore sets a server default explicitly
+--   (``SET DEFAULT true|false``) so a raw INSERT that omits the column
+--   gets the documented value.
 --
 -- DUAL-DRIVER NOTES:
 --
@@ -38,16 +50,19 @@
 --     database now emits the correct ``BOOLEAN`` type because the
 --     three SQLModel ``sa_column`` overrides switched from
 --     ``Integer`` to ``Boolean`` (see
---     ``daemon/models/resource_monitor.py``). Existing databases
---     receive the ALTER COLUMN conversion from the idempotent
---     ``information_schema.columns`` probe-gated ``DO $$`` body in
---     ``EnsembleManager._ensure_postgres_columns`` (added 2026-10-19
---     alongside this file). Conversion is safe on empty AND non-empty
---     tables (the ``USING (col <> 0)`` cast maps legacy 0/1 → FALSE/TRUE
---     regardless of cardinality), idempotent on repeated boots (the
---     probe gates on ``data_type='integer'``), and safe under
---     concurrent boot (a second boot sees the column already
---     converted and exits the probe no-op).
+--     ``daemon/models/resource_monitor.py``). It does NOT emit a
+--     server default (``Field(default=...)`` is Python-side), so
+--     fresh PG columns are ``boolean NOT NULL`` with no default.
+--     Existing databases receive the three-step conversion
+--     (DROP DEFAULT → TYPE boolean USING (col <> 0) → SET DEFAULT)
+--     from the idempotent ``information_schema.columns``
+--     probe-gated block in ``EnsembleManager._ensure_postgres_columns``
+--     (added 2026-10-19 alongside this file). Conversion is safe on
+--     empty AND non-empty tables (the ``USING (col <> 0)`` cast maps
+--     every NONZERO integer to TRUE, 0 to FALSE), idempotent on
+--     repeated boots (the probe gates on ``data_type='integer'``),
+--     and a concurrent second boot fails LOUDLY on the ALTER and
+--     self-heals on restart (see the concurrency note below).
 --
 --   * For SQLite: the runner applies this file (it's MANUAL: TRUE
 --     so the runner actually skips it; see ``runner.py:737-746``).
@@ -78,23 +93,28 @@
 --
 --   * The runtime hook is probe-gated on
 --     ``information_schema.columns.data_type = 'integer'`` — once
---     the column is already ``boolean`` the DO body is a no-op.
---   * The ``USING (col <> 0)`` cast is lossless on every legitimate
---     value (0 → FALSE, 1 → TRUE; any other integer is a NULL-typing
---     anomaly that surfaces as FALSE — the documented intent of
---     ``0|1 in SQLite, false|true on PG``).
+--     the column is already ``boolean`` the conversion is a no-op.
+--   * The ``USING (col <> 0)`` cast semantics: every NONZERO integer
+--     maps to TRUE (``1``, ``2``, ``-1`` …), ``0`` maps to FALSE, and
+--     NULL stays NULL (the columns are NOT NULL, so no NULL is
+--     expected; the cast is defensive). This is the documented intent
+--     of ``0|1 in SQLite, false|true on PG``.
 --   * int → bool is NOT a metadata-only change: PostgreSQL takes an
 --     ACCESS EXCLUSIVE lock and REWRITES the table. At the live
 --     ``ensemble_prod`` scale (4 empty tables today — the historical
 --     data is unrecoverable; nothing to backfill), the rewrite is
 --     effectively free; at scale it would be expensive. The runtime
---     probe gates the rewrite so it runs exactly once across all
---     boots.
---   * Under concurrent boot: a second daemon process hitting the
---     probe while the first is mid-rewrite will block on the
---     ACCESS EXCLUSIVE lock; once the first commits, the second
---     sees ``data_type='boolean'`` and exits no-op. No race
---     hazard.
+--     probe gates the rewrite so a single successful boot converts
+--     exactly once.
+--   * CONCURRENCY — stated accurately (NOT "no race hazard"): the
+--     information_schema probe and the ALTER are not atomic and there
+--     is no advisory lock between them. Two boots can both pass the
+--     probe; the second's ALTER then blocks on the first's ACCESS
+--     EXCLUSIVE lock and, after the first commits, runs against an
+--     already-``boolean`` column — ``USING (col <> 0)`` has no valid
+--     operator on a boolean, so that boot ABORTS LOUDLY. This is a
+--     loud failure, not silent corruption; the next boot re-probes,
+--     sees ``boolean``, and no-ops (self-heal on restart).
 --   * The default ``SET DEFAULT true`` (estimated) / ``SET DEFAULT
 --     false`` (enabled) / ``SET DEFAULT true`` (user_gated)
 --     preserves the documented INSERT-without-column behavior. The
@@ -102,7 +122,10 @@
 --     a no-op).
 --
 -- PG CANONICAL DDL (operator-portable, runtime-applied at boot
--- via the _ensure_postgres_columns hook):
+-- via the _ensure_postgres_columns hook). Per column, THREE statements
+-- — the combined single-statement form fails on a default-bearing
+-- column because PostgreSQL refuses ``TYPE boolean`` when the existing
+-- default cannot be auto-cast (DatatypeMismatch, 42804):
 --
 --   DO $$
 --   BEGIN
@@ -115,7 +138,10 @@
 --             AND data_type = 'integer'
 --       ) THEN
 --           ALTER TABLE resource_instance_sample
---             ALTER COLUMN estimated TYPE boolean USING (estimated <> 0),
+--             ALTER COLUMN estimated DROP DEFAULT;
+--           ALTER TABLE resource_instance_sample
+--             ALTER COLUMN estimated TYPE boolean USING (estimated <> 0);
+--           ALTER TABLE resource_instance_sample
 --             ALTER COLUMN estimated SET DEFAULT true;
 --       END IF;
 --
@@ -128,7 +154,10 @@
 --             AND data_type = 'integer'
 --       ) THEN
 --           ALTER TABLE resource_limit_policy
---             ALTER COLUMN enabled TYPE boolean USING (enabled <> 0),
+--             ALTER COLUMN enabled DROP DEFAULT;
+--           ALTER TABLE resource_limit_policy
+--             ALTER COLUMN enabled TYPE boolean USING (enabled <> 0);
+--           ALTER TABLE resource_limit_policy
 --             ALTER COLUMN enabled SET DEFAULT false;
 --       END IF;
 --
@@ -141,10 +170,17 @@
 --             AND data_type = 'integer'
 --       ) THEN
 --           ALTER TABLE resource_limit_policy
---             ALTER COLUMN user_gated TYPE boolean USING (user_gated <> 0),
+--             ALTER COLUMN user_gated DROP DEFAULT;
+--           ALTER TABLE resource_limit_policy
+--             ALTER COLUMN user_gated TYPE boolean USING (user_gated <> 0);
+--           ALTER TABLE resource_limit_policy
 --             ALTER COLUMN user_gated SET DEFAULT true;
 --       END IF;
 --   END $$;
+--
+-- NOTE: ``DROP DEFAULT`` is a no-op when the column has no default
+-- (the live PG shape), so the same sequence handles both the
+-- no-default and the default-bearing shapes.
 
 -- UP
 --

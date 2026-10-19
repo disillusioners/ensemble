@@ -1476,5 +1476,5 @@ class TestPGTxnAbortWindowSurvival:
         # (column errors are NOT first-boot noise) — distinguishable
         # from missing-relation warnings.
         joined = "\n".join(rec.getMessage() for rec in caplog.records)
-        assert "FAILED" in joined
+        assert "sweep FAILED" in joined
         assert "nope" in joined

@@ -1,9 +1,11 @@
 """Real-PG proof for the resource-telemetry estimated-bool fix.
 
-Sits on the SCRATCH PG database ``ensemble_resource_fix_test`` (created
-by the commissioning gate, NOT by this test). The fixture here is a
-fresh SQLModel.create_all against an empty DB — a "fresh PG boot"
-simulation. The four AC-level properties proven:
+Runs on a SCRATCH PostgreSQL database resolved from ``PG_TEST_DB``
+(default ``ensemble_test``; the commissioning gate points it at
+``ensemble_resource_fix_test``). The shared ``tests/postgres/conftest.py``
+owns the connection and the scratch-DB lifecycle; this module refuses
+to run against a forbidden live/demo database (``_tripwire_check``,
+wired into ``scratch_engine``). The five properties proven:
 
 (a) FRESH PG BOOT — ``SQLModel.metadata.create_all`` emits ``BOOLEAN``
     for ``estimated`` (T2), ``enabled`` (T4), and ``user_gated`` (T4)
@@ -17,27 +19,33 @@ simulation. The four AC-level properties proven:
     ``resource_limit_policy`` row (T4 — observe-only in v1, no
     flusher tier; the row here is the policy-API write path). All
     four tables hold rows after a single run_once.
-(d) AMPLIFIER ISOLATION — a forced failure on one tier (T2 with a
-    row missing the NOT NULL ``estimated`` column) is absorbed by
-    the per-tier SAVEPOINT; the T1 raw insert and the V1 fail-soft
-    bound STILL persist. The pre-fix behavior aborted the entire
-    ``engine.begin()`` window and rolled back every tier as
-    collateral — that is the exact regression we are pinning.
+(c) REAL RUNTIME HOOK — ``InstanceManager._ensure_postgres_columns``
+    (the actual production method, on a two-attribute stub) converts
+    both the no-default integer shape and the DEFAULT-bearing integer
+    shape; a second invocation applies 0 changes.
+(d) AMPLIFIER ISOLATION — the T2 table is recreated in the broken
+    v0.25.0 ``estimated INTEGER`` shape; running the flusher then
+    fails T2 with ``DatatypeMismatch`` while T1 raw STILL persists.
+    The pre-fix amplifier aborted the entire ``engine.begin()``
+    window and rolled back every tier as collateral — the regression
+    pinned here.
 (e) REPAIR PATH — start from a hand-crafted OLD ``integer`` schema
-    that mirrors the broken v0.25.0 prod state; invoke the runtime
-    hook in ``_ensure_postgres_columns``; assert the column converts
-    to ``boolean`` (information_schema confirmed) and a fresh insert
-    with both ``True`` and ``False`` lands successfully.
+    that mirrors the broken v0.25.0 prod state; run the three-step
+    conversion; assert the columns become ``boolean``
+    (information_schema confirmed) and both ``True`` and ``False``
+    insert successfully.
 
-Fence discipline (incident 2026-10-12): the scratch DB name is
-explicit and dropped in finally — no HOME-derived paths. The
-fixture refuses ``ensemble_prod`` / ``ensemble_dev`` /
-``ensemble_sandbox`` as a tripwire (mirror of
-``tests/unit/auth_pg_scratch_helper.py``).
+Fence discipline (incident 2026-10-12): scratch coordinates only —
+never HOME-derived. ``_tripwire_check`` refuses a forbidden
+``PG_TEST_DB`` (``ensemble_prod`` / ``ensemble_dev`` /
+``ensemble_sandbox`` / ``ensemble``) or a non-scratch-shaped name.
+Scratch DB CREATE/DROP is owned by the commissioning gate, not this
+module.
 
 Run with::
 
-    .venv/bin/pytest tests/postgres/test_resource_monitor_estimated_bool_pg.py \\
+    PG_TEST_DB=ensemble_resource_fix_test .venv/bin/pytest \\
+        tests/postgres/test_resource_monitor_estimated_bool_pg.py \\
         --override-ini="addopts=" -m postgres -q --tb=short -p no:randomly
 """
 
@@ -45,11 +53,10 @@ from __future__ import annotations
 
 import logging
 import os
-import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlmodel import SQLModel
 
@@ -70,46 +77,41 @@ from daemon.services.resource_monitor import (
 pytestmark = pytest.mark.postgres
 
 # ─────────────────────────────────────────────────────────────────────────
-# Scratch-DB coordinates — FENCE
+# Scratch-DB fence
 # ─────────────────────────────────────────────────────────────────────────
+#
+# The shared ``tests/postgres/conftest.py`` resolves the engine URL from
+# the ``PG_TEST_*`` env vars (``PG_TEST_DB`` defaults to ``ensemble_test``).
+# This module refuses to run against any live/demo database: the guard
+# below inspects the EFFECTIVE ``PG_TEST_DB`` and raises if it is a
+# forbidden name or is not visibly scratch-shaped. It is WIRED INTO the
+# ``scratch_engine`` fixture below, so no test body executes without it.
 
-_SCRATCH_DB = "ensemble_resource_fix_test"
 _FORBIDDEN_DBS = {"ensemble_prod", "ensemble_dev", "ensemble_sandbox", "ensemble"}
-
-_PG_HOST = os.environ.get("PG_TEST_HOST", "localhost")
-_PG_PORT = int(os.environ.get("PG_TEST_PORT", "5432"))
-_PG_USER = os.environ.get("PG_TEST_USER", "ensemble")
-_PG_PASSWORD = os.environ.get("PG_TEST_PASSWORD", "ensemble_dev")
-
-_SCRATCH_URL = (
-    f"postgresql+psycopg://{_PG_USER}:{_PG_PASSWORD}@{_PG_HOST}:{_PG_PORT}/{_SCRATCH_DB}"
-)
 
 
 def _tripwire_check() -> None:
-    """Fail-closed against ambient env poison — must NEVER touch
-    ``ensemble_prod`` etc. on a config mistake."""
-    if _SCRATCH_DB.lower() in _FORBIDDEN_DBS:
-        raise RuntimeError(
-            f"refused: scratch DB name {_SCRATCH_DB!r} is forbidden "
-            "(scratch-only lane)"
-        )
-    ambient = os.environ.get("POSTGRES_HOST")
-    if ambient and ambient == _PG_HOST:
-        raise RuntimeError(
-            f"scratch DB host {_PG_HOST!r} equals ambient POSTGRES_HOST "
-            "— refusing (env-poison tripwire)"
-        )
+    """Fail-closed guard against ambient env poison / live-DB writes.
 
-
-def _probe_postgres() -> Engine | None:
-    try:
-        engine = create_engine(_SCRATCH_URL, pool_pre_ping=True, future=True)
-        with engine.connect() as c:
-            c.execute(text("SELECT 1"))
-        return engine
-    except Exception as exc:
-        pytest.skip(f"scratch PG not reachable: {type(exc).__name__}: {exc}")
+    Refuses to run when ``PG_TEST_DB`` resolves to a forbidden
+    live/demo database, or to a name that is not visibly scratch
+    ("test"/"scratch" in the name). Called by ``scratch_engine`` before
+    any test body runs — the fence the module docstring promises.
+    """
+    effective_db = os.environ.get("PG_TEST_DB", "ensemble_test")
+    if effective_db.lower() in _FORBIDDEN_DBS:
+        raise RuntimeError(
+            f"refused: PG_TEST_DB={effective_db!r} is a forbidden live/demo "
+            "database — the resource-monitor tests are scratch-only"
+        )
+    if (
+        "test" not in effective_db.lower()
+        and "scratch" not in effective_db.lower()
+    ):
+        raise RuntimeError(
+            f"refused: PG_TEST_DB={effective_db!r} is not scratch-shaped "
+            "(name must contain 'test' or 'scratch')"
+        )
 
 
 def _drop_all_resource_tables(engine: Engine) -> None:
@@ -129,23 +131,6 @@ def _drop_all_resource_tables(engine: Engine) -> None:
                 "resource_limit_policy CASCADE"
             )
         )
-
-
-def _scratch_engine_from(pg_engine: Engine) -> Engine:
-    """Wrap the SHARED ``pg_engine`` from the conftest — do NOT
-    open a new connection. The conftest already created all
-    SQLModel tables (including the four resource ones), applied
-    autouse TRUNCATE before each test, and owns the
-    schema_migrations lifecycle. Reusing the shared engine
-    prevents the conftest's autouse from racing on a
-    half-populated scratch DB.
-
-    The four resource_monitor tables are dropped+recreated per
-    test (callers do this via ``_drop_all_resource_tables`` +
-    ``SQLModel.metadata.create_all`` filtered to those four) so
-    each test starts from a clean resource-monitor schema.
-    """
-    return pg_engine
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -263,6 +248,7 @@ def scratch_engine(pg_engine):
          populated post-test is safe (the autouse wipe handles
          data; we recreate via step 3 on the NEXT test entry).
     """
+    _tripwire_check()
     _drop_all_resource_tables(pg_engine)
     for tbl in (
         ResourceDaemonBucket.__table__,
@@ -553,7 +539,7 @@ class TestAmplifierTierIsolationOnPG:
         # The amplifier logged the failure distinctly (column error
         # is NOT missing-relation; C-1 narrowing intent preserved).
         joined = "\n".join(rec.getMessage() for rec in caplog.records)
-        assert "FAILED" in joined
+        assert "tier write FAILED" in joined
 
         # Belt-and-braces: a SECOND ``run_once`` works cleanly
         # because the outer transaction was never aborted — the
@@ -598,6 +584,194 @@ class TestAmplifierTierIsolationOnPG:
             ).first()
         assert row[0] == "inst-recovery"
         assert row[1] is True
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# (c) REAL RUNTIME HOOK — invoke _ensure_postgres_columns itself
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestRealRuntimeHook:
+    """F1(b): the REAL ``InstanceManager._ensure_postgres_columns``
+    executes against both integer shapes that matter.
+
+    The executed code is the production method BY CONSTRUCTION — a
+    bare ``__new__`` stub carrying only ``_engine`` and
+    ``_ensemble_config`` runs the real body. Full ``InstanceManager``
+    construction is deliberately avoided (it wires
+    repositories/sources/graph — not cheap). This mirrors
+    ``tests/integration/test_maintenance_checkpoint_cleanup_api.py:935``.
+
+    The two shapes:
+      (i)  ``INTEGER NOT NULL`` with NO server default — the live
+           ``ensemble_prod`` shape.
+      (ii) ``INTEGER NOT NULL DEFAULT 1``/``0`` — default-bearing, the
+           shape the old combined single-statement form could not
+           convert (PG refuses TYPE when the existing default cannot
+           auto-cast).
+    """
+
+    def _install_legacy_resource_tables(self, engine, *, with_default: bool):
+        """Drop the four resource tables and recreate them in the legacy
+        integer shape. ``resource_daemon_bucket`` / ``resource_pid_map``
+        are recreated from the (post-fix) SQLModel so they exist for the
+        autouse TRUNCATE; the two tables the hook converts are created
+        with the legacy INTEGER bool columns.
+
+        Before anything else, register the FULL boot-time model surface
+        and ``create_all`` (checkfirst) so every table the REAL hook
+        references exists. The shared conftest only imports a subset of
+        models; importing ``daemon.manager`` registers 50+ tables and the
+        two extra inline-imported models cover the rest.
+        """
+        import daemon.manager  # noqa: F401  registers the model surface
+        import daemon.models.app_settings  # noqa: F401
+        import daemon.plugin_subsystem.drift_event_publisher  # noqa: F401
+        import daemon.repositories.maintenance_runs.models  # noqa: F401
+
+        SQLModel.metadata.create_all(engine)
+
+        _drop_all_resource_tables(engine)
+        ResourceDaemonBucket.__table__.create(engine, checkfirst=False)
+        ResourcePidMap.__table__.create(engine, checkfirst=False)
+        d1 = "DEFAULT 1" if with_default else ""
+        d0 = "DEFAULT 0" if with_default else ""
+        with engine.begin() as c:
+            c.execute(
+                text(
+                    "CREATE TABLE resource_instance_sample ("
+                    " id BIGSERIAL PRIMARY KEY,"
+                    f" estimated INTEGER NOT NULL {d1})"
+                )
+            )
+            c.execute(
+                text(
+                    "CREATE TABLE resource_limit_policy ("
+                    " id BIGSERIAL PRIMARY KEY,"
+                    f" enabled INTEGER NOT NULL {d0},"
+                    f" user_gated INTEGER NOT NULL {d1})"
+                )
+            )
+
+    @staticmethod
+    def _real_hook(engine):
+        """Call the REAL production method on a two-attribute stub."""
+        from types import SimpleNamespace
+
+        from daemon.manager import InstanceManager
+
+        mgr = InstanceManager.__new__(InstanceManager)
+        mgr._engine = engine
+        mgr._ensemble_config = SimpleNamespace(is_postgres=True)
+        return mgr
+
+    @staticmethod
+    def _col_state(engine, table, column):
+        with engine.connect() as c:
+            row = c.execute(
+                text(
+                    "SELECT data_type, column_default, is_nullable "
+                    "FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name=:t "
+                    "AND column_name=:c"
+                ),
+                {"t": table, "c": column},
+            ).first()
+        return None if row is None else (row[0], row[1], row[2])
+
+    def _assert_converted(self, engine):
+        """All three columns end boolean with the per-column documented
+        default (estimated=true, enabled=false, user_gated=true) and
+        remain NOT NULL."""
+        expected = {
+            ("resource_instance_sample", "estimated"): "true",
+            ("resource_limit_policy", "enabled"): "false",
+            ("resource_limit_policy", "user_gated"): "true",
+        }
+        for (table, col), default in expected.items():
+            state = self._col_state(engine, table, col)
+            assert state is not None, f"{table}.{col} missing"
+            data_type, column_default, is_nullable = state
+            assert data_type == "boolean", f"{table}.{col} type={data_type!r}"
+            # PG renders a boolean default as the literal ``true``/``false``.
+            assert str(column_default).lower() == default, (
+                f"{table}.{col} default={column_default!r} expected {default!r}"
+            )
+            assert is_nullable == "NO", f"{table}.{col} nullable={is_nullable!r}"
+
+    def test_real_hook_no_default_shape(self, scratch_engine, caplog):
+        """Shape (i): INTEGER NOT NULL, NO server default (live prod)."""
+        import logging
+
+        self._install_legacy_resource_tables(scratch_engine, with_default=False)
+        # Precondition: integer, no default.
+        for table, col in (
+            ("resource_instance_sample", "estimated"),
+            ("resource_limit_policy", "enabled"),
+            ("resource_limit_policy", "user_gated"),
+        ):
+            data_type, column_default, _ = self._col_state(
+                scratch_engine, table, col
+            )
+            assert data_type == "integer"
+            assert column_default is None, (
+                f"{table}.{col} unexpectedly has default {column_default!r}"
+            )
+
+        # REAL hook, first run.
+        with caplog.at_level(
+            logging.INFO, logger="daemon.manager"
+        ):
+            self._real_hook(scratch_engine)._ensure_postgres_columns()
+        self._assert_converted(scratch_engine)
+        joined = "\n".join(r.getMessage() for r in caplog.records)
+        assert "resource_monitor boolean repair complete" in joined
+        assert "applied=['resource_instance_sample.estimated'" in joined
+
+        # REAL hook, second run — idempotent (0 applied).
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="daemon.manager"):
+            self._real_hook(scratch_engine)._ensure_postgres_columns()
+        self._assert_converted(scratch_engine)
+        joined2 = "\n".join(r.getMessage() for r in caplog.records)
+        assert "boolean repair complete (applied=[]" in joined2, joined2
+
+    def test_real_hook_default_bearing_shape(self, scratch_engine, caplog):
+        """Shape (ii): INTEGER NOT NULL DEFAULT 1/0 — the default-bearing
+        shape the old combined single-statement form could not convert."""
+        import logging
+
+        self._install_legacy_resource_tables(scratch_engine, with_default=True)
+        # Precondition: integer WITH a default.
+        for table, col in (
+            ("resource_instance_sample", "estimated"),
+            ("resource_limit_policy", "enabled"),
+            ("resource_limit_policy", "user_gated"),
+        ):
+            data_type, column_default, _ = self._col_state(
+                scratch_engine, table, col
+            )
+            assert data_type == "integer"
+            assert column_default is not None, (
+                f"{table}.{col} expected a default, got None"
+            )
+
+        # REAL hook, first run — MUST succeed on the default-bearing
+        # shape (the regression the combined form could not clear).
+        with caplog.at_level(logging.INFO, logger="daemon.manager"):
+            self._real_hook(scratch_engine)._ensure_postgres_columns()
+        self._assert_converted(scratch_engine)
+        joined = "\n".join(r.getMessage() for r in caplog.records)
+        assert "resource_monitor boolean repair complete" in joined
+        assert "applied=['resource_instance_sample.estimated'" in joined
+
+        # Second run — idempotent.
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="daemon.manager"):
+            self._real_hook(scratch_engine)._ensure_postgres_columns()
+        self._assert_converted(scratch_engine)
+        joined2 = "\n".join(r.getMessage() for r in caplog.records)
+        assert "boolean repair complete (applied=[]" in joined2, joined2
 
 
 # ─────────────────────────────────────────────────────────────────────────

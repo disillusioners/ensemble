@@ -766,14 +766,14 @@ class Flusher:
         migrations run later in the boot — file_change_monitor
         precedent). Any other error ALSO rolls back the per-tier
         SAVEPOINT and logs distinctly, but NEVER escapes the flush
-        window (amplifier hardening, 2026-10-19 — the
-        ``DatatypeMismatch: column `` estimated too integer
-        bug-but-expression-is-of-type-boolean`` incident:
+        window (amplifier hardening, 2026-10-19). The triggering
+        incident was a ``DatatypeMismatch`` (SQLSTATE 42804: column
+        "estimated" is INTEGER but the bound expression is boolean):
         a single tier's column-type error raised out of
         ``_tier_write`` and aborted the shared ``engine.begin()``
-        window, rolling back every other tier's writes as
-        collateral. Per-tier savepoints now isolate the failure and
-        the function returns 0 so the next tier can still write.)
+        window, rolling back every other tier's writes as collateral.
+        Per-tier savepoints now isolate the failure and the function
+        returns 0 so the next tier can still write.
 
         C-1 hardening: "missing" matches the RELATION-missing class
         ONLY (:func:`is_missing_relation_error`) — a PostgreSQL
