@@ -600,3 +600,51 @@ class TestTracebackFindingsFill:
         )
         assert r.status_code == 200
         assert r.json()["findings"] == []
+
+    def test_findings_in_window_keeps_newest_under_full_journal(self, tmp_path):
+        """#8 — under a full journal (> limit), the NEWEST findings
+        in window are kept (the old code dropped them in favor of the
+        oldest journal entries).
+
+        Seed a journal with 60 distinct (time_bucket, series_key)
+        findings, ask for limit=50, assert the LAST 50 by
+        (t_start, series_key) come back — not the FIRST 50.
+        """
+        from daemon.services.resource_anomaly import Finding
+
+        eng = _seeded_engine()
+        # Empty the journal first (the seed fixture ran run_pass which
+        # journaled 1 finding).
+        eng.journal = eng.journal.__class__()
+        n = 60
+        limit = 50
+        for i in range(n):
+            f = Finding(
+                id="",
+                series_key=f"s.{i}",
+                time_bucket=_ts(n - i),  # ASCENDING order in time
+                window_end=_ts(n - i),
+                shape="spike",
+                severity="low",
+                peak=1.0,
+                baseline={"method": "rolling_median", "value": 1.0, "n": 1},
+                observed=2.0,
+                deviation={"metric": "mad_z", "value": 7.0, "threshold": 6.0},
+                contributors=[],
+            )
+            eng.journal.append(f)
+        # Wide window so all 60 are in-window.
+        out = eng.findings_in_window(
+            datetime(2020, 1, 1, tzinfo=timezone.utc),
+            datetime(2030, 1, 1, tzinfo=timezone.utc),
+            limit=limit,
+        )
+        assert len(out) == limit
+        # ASC by (t_start, series_key); the LAST limit (= newest) are
+        # kept. Oldest retained series_key indices: 0..10 (n-limit=10).
+        # Newest retained series_key indices: 11..59.
+        series_keys = [o["series_key"] for o in out]
+        assert series_keys == [f"s.{i}" for i in range(10, 60)], (
+            f"expected the NEWEST {limit} findings (s.10..s.59); "
+            f"got {series_keys[:5]}...{series_keys[-5:]}"
+        )

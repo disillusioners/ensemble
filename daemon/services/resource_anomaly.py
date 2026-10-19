@@ -1644,19 +1644,35 @@ class AnomalyEngine:
         self, t0_aware: datetime, t1_aware: datetime, limit: int = 50
     ) -> List[Dict[str, Any]]:
         """Lean findings whose bucket falls in ``[t0, t1]`` — the P3
-        ``/traceback`` ``findings[]`` fill (D5)."""
+        ``/traceback`` ``findings[]`` fill (D5).
+
+        Ordering + stability match :meth:`list_anomalies` — sort by
+        ``(time_bucket, series_key)`` ASC, then truncate to keep the
+        LAST ``limit`` (= newest). The previous journal-order
+        iteration with early break dropped the NEWEST entries under a
+        full journal and produced a non-deterministic order across
+        8 s polls (markers reshuffled between consecutive reads).
+        """
         t0n = _parse_bucket_ts(_fmt_bucket_ts(t0_aware))
         t1n = _parse_bucket_ts(_fmt_bucket_ts(t1_aware))
         if t0n is None or t1n is None:
             return []
-        out = []
+        matched: List[Tuple[str, str, Dict[str, Any]]] = []
         for f in self.journal.snapshot():
             ts = _parse_bucket_ts(f.time_bucket)
             if ts is not None and t0n <= ts <= t1n:
-                out.append(f.lean_row())
-            if len(out) >= limit:
-                break
-        return out
+                matched.append(
+                    (f.time_bucket, f.series_key, f.lean_row())
+                )
+        # Sort ASC by (t_start, series_key) — matches list_anomalies'
+        # ordering. Truncate from the END (= keep the newest ``limit``,
+        # not the oldest) so a full journal does NOT drop recent
+        # findings.
+        matched.sort(key=lambda r: (r[0], r[1]))
+        cap = max(1, int(limit))
+        if len(matched) > cap:
+            matched = matched[-cap:]
+        return [r[2] for r in matched]
 
 
 # ── The configured-limit provider (managed-setting shape, read-only) ────────
