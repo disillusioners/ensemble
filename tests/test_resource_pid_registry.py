@@ -995,6 +995,128 @@ class TestW2SanitizerRedaction:
         assert cmd == "mmdc -i in.mmd -o out.png"
 
 
+class TestW2DashFlagRedaction:
+    """W-2 extension (final-gate FINDING #1, real-PG canary): the
+    dash-prefixed flag-assignment shape (``--api-key=sk-...``) and
+    standalone secret-prefixed tokens PERSISTED verbatim into
+    ``resource_pid_map.command`` — the ``_ENV_ASSIGN_TOKEN_RE``
+    class covered identifier ``KEY=`` + the 3 marker families only.
+    The sanitizer must redact the VALUE (flag name kept for
+    forensics) and any token CARRYING known secret material."""
+
+    CANARY_FLAG = "sk-flagcanary-1234567890"
+    CANARY_SHORT = "sk-shortcanary-0987654321"
+    CANARY_GHP = "ghp_ghpcanary1122334455667788990011"
+    CANARY_STANDALONE = "sk-sacanary-5566778899001122"
+
+    def test_list_dash_flag_value_redacted(
+        self, patched_singleton, proc_root, caplog
+    ):
+        """The EXACT tester canary shape: ``--api-key=sk-...`` as a
+        list argv token → ``--api-key=<redacted>`` in the row; the
+        value never persists (row or logs)."""
+        from daemon.tools.bash import bash
+
+        async def _run():
+            await bash.coroutine(
+                command=["echo", f"--api-key={self.CANARY_FLAG}"],
+                timeout=5,
+                instance_id="w2-flag",
+            )
+
+        with caplog.at_level("DEBUG"):
+            asyncio.run(_run())
+        hist = patched_singleton.drain_history()
+        assert len(hist) == 1
+        e = hist[0]
+        joined = f"{e.command or ''} {e.detail or ''}"
+        assert self.CANARY_FLAG not in joined, f"flag-value leak: {joined!r}"
+        assert "--api-key=<redacted>" in joined, joined
+        assert self.CANARY_FLAG not in caplog.text, "flag-value leak into logs"
+
+    def test_list_short_flag_value_redacted(
+        self, patched_singleton, proc_root
+    ):
+        """Single-dash short form ``-k=sk-...`` → ``-k=<redacted>``."""
+        from daemon.tools.bash import bash
+
+        async def _run():
+            await bash.coroutine(
+                command=["echo", f"-k={self.CANARY_SHORT}"],
+                timeout=5,
+                instance_id="w2-shortflag",
+            )
+
+        asyncio.run(_run())
+        hist = patched_singleton.drain_history()
+        assert len(hist) == 1
+        e = hist[0]
+        joined = f"{e.command or ''} {e.detail or ''}"
+        assert self.CANARY_SHORT not in joined, f"short-flag leak: {joined!r}"
+        assert "-k=<redacted>" in joined, joined
+
+    def test_list_ghp_flag_value_redacted(self, patched_singleton):
+        """``--token=ghp_...`` (GitHub PAT family) →
+        ``--token=<redacted>``."""
+        from daemon.tools.bash import _sanitize_command_for_registry
+
+        cmd, detail = _sanitize_command_for_registry(
+            ["run", f"--token={self.CANARY_GHP}"], env=None
+        )
+        joined = f"{cmd} {detail}"
+        assert self.CANARY_GHP not in joined, joined
+        assert "--token=<redacted>" in joined, joined
+
+    def test_standalone_secret_prefixed_token_redacted(
+        self, patched_singleton
+    ):
+        """A STANDALONE token carrying secret material (no ``=`` at
+        all) → ``<redacted>`` entirely — sk-/ghp_/xox[baprs]-/AKIA/
+        glpat- families, regardless of position in the token."""
+        from daemon.tools.bash import _sanitize_command_for_registry
+
+        for tok, fam in (
+            (self.CANARY_STANDALONE, "sk-"),
+            ("ghp_bare123456", "ghp_"),
+            ("xoxb-223344556677", "xoxb-"),
+            ("xoxp-abcdef123456", "xoxp-"),
+            ("AKIAIOSFODNN7EXAMPLE", "AKIA"),
+            ("glpat-abc123XYZdef", "glpat-"),
+        ):
+            cmd, detail = _sanitize_command_for_registry(
+                ["run", tok], env=None
+            )
+            joined = f"{cmd} {detail}"
+            assert tok not in joined, f"{fam} leak: {joined!r}"
+            assert "<redacted>" in joined, (fam, joined)
+
+    def test_benign_lookalike_tokens_survive(self):
+        """The standalone-prefix scan requires a token-boundary
+        lookbehind — benign words that merely CONTAIN the letters
+        (``task-123``, ``risk-a``, ``desk-1``) keep their
+        fingerprint (over-redaction would destroy the lane's
+        utility). An empty-RHS ``--flag=`` also passes (nothing to
+        redact)."""
+        from daemon.tools.bash import _sanitize_command_for_registry
+
+        cmd, _ = _sanitize_command_for_registry(
+            ["run", "task-123", "risk-a", "desk-1", "--flag="],
+            env=None,
+        )
+        assert cmd == "run task-123 risk-a desk-1 --flag=", cmd
+
+    def test_flag_value_redaction_covers_string_mode_argv0(self):
+        """String mode: a head-of-line flag-assignment token persists
+        REDACTED (flag kept) — same discipline as list mode."""
+        from daemon.tools.bash import _sanitize_command_for_registry
+
+        cmd, detail = _sanitize_command_for_registry(
+            f"--api-key={self.CANARY_FLAG} serve", env=None
+        )
+        assert cmd == "--api-key=<redacted>", cmd
+        assert self.CANARY_FLAG not in detail
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # W-3 — mcp child claim-once + args=[] guard
 # ──────────────────────────────────────────────────────────────────────────

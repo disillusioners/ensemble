@@ -105,23 +105,52 @@ def _resolve_pid_kind(instance_id: Optional[str]) -> str:
 # ``resource_pid_map.command`` / ``.detail`` are persisted OUTSIDE
 # the secrets-P2 scrub seams (the scrub covers tool ARGS + results
 # + queue rows; the pid-registry stamp is a derived observability
-# lane), so the sanitizer itself must neutralize the two
-# secret-bearing shapes that reach it:
+# lane), so the sanitizer itself must neutralize the secret-bearing
+# shapes that reach it:
 #
 #   * env-assignment tokens (``KEY=value``) — the head-of-line
 #     ``OPENAI_API_KEY=sk-... curl …`` idiom puts the KEY=value
 #     pair in the FIRST token, which is exactly what the old
 #     string-mode ``split(None, 1)[0]`` persisted; list-mode argv
 #     tokens can carry the same shape via ``env CMD …``;
+#   * flag-assignment tokens (``--api-key=sk-...`` / ``-k=sk-...``)
+#     — the final-gate FINDING #1 class (real-PG canary proved the
+#     dash-flag value persisted verbatim);
+#   * tokens CARRYING well-known secret-token material (``sk-`` /
+#     ``ghp_`` / ``xox[baprs]-`` / ``AKIA`` / ``glpat-``) regardless
+#     of position in the token;
 #   * ensemble secret markers (``__ENS_SECRET__<uuid4>__``, FROZEN
 #     shape — daemon/services/secret_service.py) and KMS-Lite
 #     markers (``__KMS_REF__…__`` / ``__KMS_ENV__…__``) riding
 #     inside any token.
 #
-# The KEY= prefix is KEPT on redacted env-assignments (forensic
+# The KEY=/FLAG= prefix is KEPT on redacted assignments (forensic
 # correlation without material — same discipline as the
 # env_keys-only detail).
 _ENV_ASSIGN_TOKEN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# W-2 (final-gate FINDING #1): flag-assignment argv tokens —
+# ``--api-key=sk-...`` / ``-k=sk-...`` (any dash-prefixed flag with
+# an ``=``-attached value) are exactly as secret-bearing as the
+# ``KEY=value`` shape, and they PERSIST verbatim otherwise (the
+# real-PG canary proved ``--api-key=sk-…`` survives into
+# ``resource_pid_map.command``). The flag NAME is kept (forensic
+# correlation — same discipline as KEY=); only the RHS is dropped.
+# Requires a non-empty value (``--flag=`` with an empty RHS carries
+# nothing and passes through).
+_FLAG_ASSIGN_TOKEN_RE = re.compile(r"^(--?[A-Za-z0-9_.-]+)=(.+)$")
+# W-2 (final-gate FINDING #1, second shape): a STANDALONE token that
+# CARRIES well-known secret-token material regardless of shape — the
+# literal secret itself as an argv token, or riding mid-token. The
+# prefix families are the canary classes the final gate pinned
+# (sk- / ghp_ / xox[baprs]- / AKIA / glpat-); ENS/KMS markers keep
+# their own dedicated machinery above (startswith exact families +
+# the joined-string sweep). The lookbehind requires the prefix to
+# start at a non-alphanumeric boundary so benign words that merely
+# CONTAIN the letters (``task-123``, ``risk-a``, ``desk-1``) do NOT
+# trip it — ``sk-`` after ``=``/``:``/``/``/start-of-token does.
+_SECRET_VALUE_PREFIX_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:sk-|ghp_|xox[baprs]-|AKIA|glpat-)"
+)
 _SECRET_MARKER_TOKEN_PREFIXES = (
     "__ENS_SECRET__",
     "__KMS_REF__",
@@ -139,14 +168,40 @@ def _redact_registry_token(token: str) -> str:
     """Redact one argv token for the pid-registry stamp (W-2).
 
     Marker-carrying tokens → ``<redacted>`` entirely; env-assignment
-    tokens → ``KEY=<redacted>`` (KEY kept, value dropped); anything
-    else passes through unchanged.
+    tokens → ``KEY=<redacted>`` (KEY kept, value dropped);
+    flag-assignment tokens (``--api-key=sk-...`` / ``-k=...``) →
+    ``FLAG=<redacted>`` (flag kept, value dropped); tokens CARRYING
+    known secret-token material (``sk-`` / ``ghp_`` / ``xox[baprs]-``
+    / ``AKIA`` / ``glpat-`` at a token boundary, anywhere in the
+    token) → ``<redacted>`` entirely; anything else passes through
+    unchanged.
+
+    Deliberate residuals (documented, not accidental):
+
+      * ``--flag <value>`` SPACE-separated form: the value token has
+        NO assignment shape and (unless it itself carries a secret
+        prefix) no known-secret marker — a bare ``abc123`` is
+        indistinguishable from any positional argument, and
+        redacting every non-flag token would destroy the
+        fingerprint's forensic utility. Callers must pass secrets
+        as ``--flag=<value>`` (assignment shape) or via env/KMS
+        markers.
+      * Unknown/custom secret formats that match none of the pinned
+        prefix families pass through unless assignment-shaped.
     """
     if token.startswith(_SECRET_MARKER_TOKEN_PREFIXES):
         return "<redacted>"
     m = _ENV_ASSIGN_TOKEN_RE.match(token)
     if m:
         return f"{token[: m.end()]}<redacted>"
+    m = _FLAG_ASSIGN_TOKEN_RE.match(token)
+    if m:
+        # group(1) end — NOT m.end() (the trailing (.+) makes the
+        # whole-match end the END OF STRING, which would keep the
+        # secret in the persisted token).
+        return f"{token[: m.end(1)]}=<redacted>"
+    if _SECRET_VALUE_PREFIX_RE.search(token):
+        return "<redacted>"
     return token
 
 
@@ -171,7 +226,10 @@ def _sanitize_command_for_registry(
         the registry just needs the fingerprint). Each token passes
         :func:`_redact_registry_token` — env-assignment-shaped argv
         tokens (``env KEY=value CMD`` idiom) persist as
-        ``KEY=<redacted>`` and marker-carrying tokens persist as
+        ``KEY=<redacted>``, flag-assignment tokens
+        (``--api-key=sk-...``) persist as ``FLAG=<redacted>``,
+        tokens carrying known secret-prefixed material persist as
+        ``<redacted>``, and marker-carrying tokens persist as
         ``<redacted>`` (argv IS a tool-call arg — a secret in an
         argv token would otherwise land in resource_pid_map
         outside the secrets-P2 scrub seams).
@@ -179,9 +237,13 @@ def _sanitize_command_for_registry(
         leading ``KEY=value …`` prefixes are stripped BEFORE taking
         argv[0] (the old ``split(None, 1)[0]`` persisted the
         head-of-line ``OPENAI_API_KEY=sk-...`` pair itself — the
-        exact class the docstring excluded). An all-assignments
-        string falls back to the REDACTED first token so the row
-        still carries a fingerprint.
+        exact class the docstring excluded). The retained argv0
+        still passes :func:`_redact_registry_token`, so a
+        head-of-line ``--api-key=sk-...`` flag token persists as
+        ``--api-key=<redacted>`` (flag kept, value dropped) and a
+        secret-prefixed argv0 persists as ``<redacted>``. An
+        all-assignments string falls back to the REDACTED first
+        token so the row still carries a fingerprint.
 
     The ``detail`` column carries the full shape (length, argv
     count, env overlay KEYS only — never values) so forensics can
