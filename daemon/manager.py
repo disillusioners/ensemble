@@ -3282,25 +3282,21 @@ class InstanceManager:
             asyncio.create_task(self._eager_warm_loader_caches())
         )
 
-        # Mid-flight QA channel (§5.4 durability, 2026-09-21): one-shot
-        # boot rehydration of pending question packs from the durable
-        # ``instance_metadata`` shadow. RAM packs are lost on restart
-        # while the task handle (suspension_reason='awaiting_answer')
-        # survives — without this pass every answer after a restart
-        # would 410 QUESTION_PACK_LOST. The scan reads ONLY
-        # ``status='paused'`` tasks (served by the
-        # idx_task_status_type_created prefix) and post-filters
-        # ``suspension_reason`` in Python — NEVER a suspension_reason
-        # table scan (OQ-1: no index change). One-shot at boot, not
-        # periodic — constraint-compliant.
-        try:
-            await self._rehydrate_question_packs_at_boot()
-        except Exception as e:  # noqa: BLE001 — boot must never fail on this
-            logger.warning(
-                f"Question-pack boot rehydration failed (non-fatal): "
-                f"{type(e).__name__}: {e}",
-                exc_info=True,
-            )
+        # Mid-flight QA channel (§5.4 durability, 2026-09-21): the
+        # boot-time question-pack rehydration pass lives in
+        # ``daemon.api._boot_rehydrate_question_packs`` and runs AFTER
+        # ``manager.setup_worker_pool()`` — it dereferences
+        # ``self._task_repo.find_suspended_turn_for_answer`` which is
+        # only wired by ``PoolOrchestrator.setup`` at pool_orchestrator.py:245.
+        # Running it here would raise AttributeError (the surrounding
+        # try/except would WARN it and silently skip — every answer
+        # after a restart would then 410 QUESTION_PACK_LOST until the
+        # next time the answer helper's per-instance fallback fires).
+        # The matching loud-signal ERROR log lives in
+        # ``daemon.api._boot_rehydrate_question_packs`` if the wiring
+        # is ever missing. See the comment at manager.py:3327-3330
+        # below documenting why the adjacent maintenance wiring cannot
+        # move into this block either.
 
         # Initialize maintenance service with checkpoint cleanup
         self._maintenance_service = MaintenanceService(
@@ -3311,7 +3307,11 @@ class InstanceManager:
         # NOTE: set_task_repository() is wired in setup_worker_pool() AFTER
         # self._task_repo is assigned (line ~2438). initialize() runs before
         # setup_worker_pool() per daemon/api.py startup order, so calling it
-        # here would raise AttributeError.
+        # here would raise AttributeError. The boot-time question-pack
+        # rehydration pass follows the same constraint (it dereferences
+        # ``self._task_repo.find_suspended_turn_for_answer``) and runs
+        # from ``daemon.api._boot_rehydrate_question_packs`` AFTER
+        # setup_worker_pool() returns — see the block-comment above.
 
         # Section 1 / T3 — single-flight gate (MaintenanceRunLock) +
         # audit row persistence (MaintenanceRunsRepository) wired at

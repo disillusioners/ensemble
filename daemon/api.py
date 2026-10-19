@@ -335,6 +335,100 @@ async def _deferred_delete_doomed_ids(manager, app, doomed_ids: list[str]) -> No
         manager._pending_doomed_ids = []
 
 
+async def _boot_rehydrate_question_packs(manager) -> None:
+    """Boot rehydrate of pending question packs from the durable shadow.
+
+    fix/question-pack-boot-rehydrate, 2026-10-19. Mid-flight QA channel
+    (§5.4 durability): ``QuestionManager._packs`` is RAM-only and is
+    wiped on every daemon restart, while the task handle
+    (``status='paused'``, ``suspension_reason='awaiting_answer'`` +
+    ``resume_target_turn_id``) and the durable ``instance_metadata``
+    shadow ``question_pack_payload`` survive. Without this pass every
+    answer after a restart 410s ``QUESTION_PACK_LOST`` until the
+    per-instance fallback in ``_resolve_pack_or_raise``
+    (answer_helper.py:235-251) rehydrates one pack at a time as
+    answer requests come in.
+
+    This helper is the SINGLE entry point for the boot pass and is
+    invoked from ``lifespan`` AFTER ``manager.setup_worker_pool()``
+    returns — ``PoolOrchestrator.setup`` (pool_orchestrator.py:245)
+    is the only site that wires ``manager._task_repo`` and it runs at
+    the end of ``setup_worker_pool``. The previous call site inside
+    ``manager.initialize()`` ran BEFORE that wiring and was silently
+    swallowed by the boot-never-fails try/except — a future
+    AttributeError would vanish from the boot log again unless this
+    loud-signal contract is preserved.
+
+    Loud-signal contract:
+
+    * ``_task_repo`` is ``None`` — ERROR-level log naming the missing
+      wiring. This is a structural defect (someone broke the boot
+      order) and must NEVER regress to a quiet WARNING.
+    * ``_task_repo`` is set but the rehydrate method itself raises —
+      ERROR-level (it's NOT a per-row error, which stays WARNING inside
+      ``rehydrate_from_payloads``).
+    * Pass returns 0 of M — INFO line
+      ``question-packs rehydrated: 0 (candidates M)`` so a future
+      candidate-set drift is visible.
+    * Pass returns N of M — INFO line ``question-packs rehydrated: N``
+      with candidate count appended when M > 0.
+    """
+    task_repo = getattr(manager, "_task_repo", None)
+    if task_repo is None:
+        # Loud ERROR — wiring defect. Per the boot-order contract
+        # this helper is only called after setup_worker_pool() so a
+        # missing task_repo is a regression that MUST surface.
+        daemon_logger.error(
+            "Question-pack boot rehydration SKIPPED: manager._task_repo "
+            "is not wired. setup_worker_pool() must run BEFORE the "
+            "rehydrate pass. Check daemon/api.py lifespan startup order."
+        )
+        return
+
+    # Discover candidate set WITHOUT consuming the rehydrate pass's
+    # per-row error handling — so the summary log has a real "candidates
+    # considered" denominator. Mirrors the index-served prefix scan in
+    # ``InstanceManager._rehydrate_question_packs_at_boot`` (status
+    # 'paused' only, OQ-1 — no suspension_reason table scan).
+    candidates_count = 0
+    engine = getattr(manager, "_engine", None)
+    if engine is not None:
+        from sqlalchemy import text
+
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text("SELECT DISTINCT instance_id FROM task WHERE status = 'paused'")
+            ).fetchall()
+        candidates_count = sum(1 for r in rows if r[0])
+
+    try:
+        restored = await manager._rehydrate_question_packs_at_boot()
+    except Exception as exc:  # noqa: BLE001 — structural pass error
+        # Loud ERROR — distinguishes from the per-row WARNings inside
+        # the method. Without this level the boot log could lose the
+        # signal entirely if the inner try/except chain swallows.
+        daemon_logger.error(
+            "Question-pack boot rehydration FAILED (non-fatal but "
+            "loud): %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+        return
+
+    if candidates_count > 0:
+        daemon_logger.info(
+            "question-packs rehydrated: %d (candidates=%d)",
+            restored,
+            candidates_count,
+        )
+    else:
+        daemon_logger.info(
+            "question-packs rehydrated: %d",
+            restored,
+        )
+
+
 def _readyz_still_green(readiness_composite) -> bool:
     """Cheap still-green check for the +1 s arm (C5, council
     2026-10-12): the CALLER polls app.state.readiness_composite fresh
@@ -608,6 +702,27 @@ async def lifespan(app: FastAPI):
     # Set up worker pool for message processing
     manager.setup_worker_pool()
     start_time = time.time()
+
+    # ─────────────────────────────────────────────────────────────────
+    # Boot rehydrate of pending question packs (fix/question-pack-boot-
+    # rehydrate, 2026-10-19). Mid-flight QA channel (§5.4): RAM packs
+    # are lost on restart while the task handle
+    # (``suspension_reason='awaiting_answer'`` + ``resume_target_turn_id``)
+    # survives — without this pass every answer after a restart 410s
+    # QUESTION_PACK_LOST until the per-instance fallback in
+    # ``_resolve_pack_or_raise`` rehydrates one at a time. The earlier
+    # call site lived inside ``manager.initialize()`` but that runs
+    # BEFORE ``setup_worker_pool()`` (which assigns ``self._task_repo``
+    # at pool_orchestrator.py:245) — the rehydrate method dereferences
+    # ``self._task_repo.find_suspended_turn_for_answer``, so the early
+    # call raised AttributeError and was silently swallowed by the
+    # boot-never-fails try/except. THIS site is the single ordered
+    # entry point after wiring is complete. Per-instance failures stay
+    # WARNING (best-effort rehydrate of a single shadow row); a missing
+    # ``self._task_repo`` is a wiring defect and is logged at ERROR
+    # level so a future regression is visible from the boot log
+    # instead of buried in a WARN line.
+    await _boot_rehydrate_question_packs(manager)
 
     # Initialize MigrationWorker (SQLite → PostgreSQL migration orchestrator).
     # Must be created AFTER manager.initialize() so the worker can read the
