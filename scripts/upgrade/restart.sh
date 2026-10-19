@@ -22,9 +22,16 @@
 #   3 start      detached launcher re-exec (restart_via_launcher — the
 #                launcher does NOT respawn on clean exit, so the executor's
 #                detached re-exec is REQUIRED, not optional)
-#   4 gate       /livez ≤60s (ADR-016) + version verify vs the CURRENT
-#                release manifest binary_version (ADR-027; skipped with a
-#                warning when no current manifest resolves)
+#   4 gate       /livez (LIVEZ_BUDGET_S) + /readyz (READYZ_BUDGET_S, NEW
+#                for this lane — required when
+#                ENSEMBLE_RESTART_GATE_REQUIRE_READY=1, default) + version
+#                verify = IDENTITY assertion vs the CURRENT release
+#                manifest binary_version (ADR-027; skipped with a warning
+#                when no current manifest resolves). A ``restart_gate``
+#                detail event (per-gate pass/fail + latency + budget) is
+#                journaled ALONGSIDE the existing terminal in BOTH
+#                directions (§3.3 rev-5 mapping — never a replacement
+#                terminal).
 #   5 journal    history 'restart' event · close the restart txn
 #                (in_flight=null) · clear pending_restart + pending_op ·
 #                lock release
@@ -60,7 +67,7 @@ LOG_TAG="upgrade-restart"
 TARGET_ARG=""
 RUN_ID=""
 REASON=""
-GRACE_S=5
+GRACE_S=15
 args=("$@")
 i=0
 while [ $i -lt ${#args[@]} ]; do
@@ -89,7 +96,7 @@ if [ -z "$UP_TARGET_SEL" ]; then
     exit 78
 fi
 resolve_env "$UP_TARGET_SEL"
-require_live_guard "$UP_TARGET"
+require_live_guard_restart "$UP_TARGET"
 echo_env_triple
 
 if [ -z "$RUN_ID" ]; then
@@ -233,26 +240,65 @@ if ! restart_via_launcher; then
     exit 1
 fi
 
-# ═══════════════════════════ 4. GATE (/livez ≤60s + version) ════════════════
+# ═══════════════ 4. GATE (/livez + /readyz + version identity) ═══════════════
+# agent-restart §4(f) rev-5: /livez (LIVEZ_BUDGET_S) always gates; /readyz
+# (READYZ_BUDGET_S) is NEW for this lane — REQUIRED when
+# ENSEMBLE_RESTART_GATE_REQUIRE_READY=1 (default), report-only at 0. Per-gate
+# results (pass/fail, latency, budget) accumulate into GATE_DETAIL and are
+# journaled in the ``restart_gate`` detail event written ALONGSIDE the
+# existing terminal in BOTH directions (§3.3 — classification record, never
+# a replacement terminal; append-order: restart_gate BEFORE the terminal so
+# the kind-aware wake reader reports the terminal, not the detail event).
 GATE_FAIL=""
+GATE_DETAIL=""
+_gate_latency() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.1f", (b-a)}'; }
+
+LZ_T0="$(_now_epoch)"
 if LIVEZ_JSON="$(gate_livez)"; then
+    GATE_DETAIL="livez=pass latency=$(_gate_latency "$LZ_T0" "$(_now_epoch)")s budget=${LIVEZ_BUDGET_S}s"
     _log "livez OK:"; _logv "$LIVEZ_JSON"
 else
+    GATE_DETAIL="livez=FAIL latency=$(_gate_latency "$LZ_T0" "$(_now_epoch)")s budget=${LIVEZ_BUDGET_S}s"
     GATE_FAIL="/livez unreachable >${LIVEZ_BUDGET_S}s"
 fi
 
-# Version verify against the CURRENT release manifest (ADR-027 — runtime
-# truth). A restart does not change the release; no resolvable current
-# manifest → warn + skip (degraded-but-known, ADR-033 posture).
+if [ -z "$GATE_FAIL" ]; then
+    RZ_T0="$(_now_epoch)"
+    if READYZ_JSON="$(gate_readyz)"; then
+        GATE_DETAIL="$GATE_DETAIL readyz=pass latency=$(_gate_latency "$RZ_T0" "$(_now_epoch)")s budget=${READYZ_BUDGET_S}s"
+        _log "readyz OK:"; _logv "$READYZ_JSON"
+    else
+        GATE_DETAIL="$GATE_DETAIL readyz=FAIL latency=$(_gate_latency "$RZ_T0" "$(_now_epoch)")s budget=${READYZ_BUDGET_S}s"
+        if [ "${ENSEMBLE_RESTART_GATE_REQUIRE_READY:-1}" = "1" ]; then
+            GATE_FAIL="/readyz unreachable >${READYZ_BUDGET_S}s (ENSEMBLE_RESTART_GATE_REQUIRE_READY=1)"
+        else
+            _warn "readyz unreachable — REPORT-ONLY (ENSEMBLE_RESTART_GATE_REQUIRE_READY=0); continuing"
+        fi
+    fi
+fi
+
+# Version verify = IDENTITY assertion (agent-restart §3.3: same binary, no
+# version swap). Source of the expected version: the CURRENT release
+# manifest binary_version (ADR-027 — runtime truth). A restart does not
+# change the release; no resolvable current manifest → warn + skip
+# (degraded-but-known, ADR-033 posture).
 if [ -z "$GATE_FAIL" ] && [ -L "$INSTALL_DIR/current" ]; then
     CUR_NAME="$(readlink "$INSTALL_DIR/current")"
     CUR_NAME="${CUR_NAME##*/}"
     WANT_VER="$(manifest_field "$CUR_NAME" binary_version 2>/dev/null)"
     if [ -n "$WANT_VER" ]; then
-        gate_version "$WANT_VER" || GATE_FAIL="version verify mismatch (expected $WANT_VER)"
+        if gate_version "$WANT_VER"; then
+            GATE_DETAIL="$GATE_DETAIL version=identity-ok ver=$WANT_VER source=current-release-manifest"
+        else
+            GATE_FAIL="version verify mismatch (expected $WANT_VER)"
+            GATE_DETAIL="$GATE_DETAIL version=IDENTITY-MISMATCH expected=$WANT_VER source=current-release-manifest"
+        fi
     else
         _warn "no binary_version in current release $CUR_NAME manifest — skipping version verify (degraded)"
+        GATE_DETAIL="$GATE_DETAIL version=skipped-no-manifest source=current-release-manifest"
     fi
+else
+    GATE_DETAIL="$GATE_DETAIL version=skipped-no-current-symlink"
 fi
 
 # ═══════════════════════════ 5. JOURNAL FINALIZE ═══════════════════════════
@@ -264,6 +310,13 @@ if [ -n "$GATE_FAIL" ]; then
     journal_close_txn                     || journal_fail_loud "restart halt: close_txn" 78
     journal_update "pending_op" "null"    || journal_fail_loud "restart halt: clear pending_op" 78
     journal_update "pending_restart" "null" || journal_fail_loud "restart halt: clear pending_restart" 78
+    # agent-restart §3.3 rev-5 mapping: ``restart_gate`` is the
+    # classification/detail record written ALONGSIDE the authoritative
+    # ``halt`` terminal — APPENDED BEFORE it (N-1 append-order: the
+    # kind-aware wake reader returns the LATEST match, so the terminal,
+    # not the detail event, is the reported outcome).
+    journal_history_append restart_gate "restart run_id=$RUN_ID gate FAILED ($GATE_FAIL); per-gate: $GATE_DETAIL; expected-live-version source=current-release-manifest; outcome-mapping: halt⇒halted" \
+                                             || true
     journal_history_append halt "intentional restart run_id=$RUN_ID completed but GATE FAILED ($GATE_FAIL) — daemon may be down/flapping; launcher burst budget owns recovery" \
                                              || true
     _warn "RESTART GATE FAILED: $GATE_FAIL — markers cleared; launcher burst budget owns recovery"
@@ -274,7 +327,11 @@ fi
 journal_close_txn                       || journal_fail_loud "restart: close_txn"
 journal_update "pending_op" "null"      || journal_fail_loud "restart: clear pending_op"
 journal_update "pending_restart" "null" || journal_fail_loud "restart: clear pending_restart"
-journal_history_append restart "intentional restart run_id=$RUN_ID complete (reason: ${REASON:-<none>}; SINGLE-TERM + launcher re-exec + /livez gate green)" \
+# Success direction: ``restart_gate`` BEFORE the ``restart`` terminal (N-1
+# append-order — the wake reader reports ``restart`` ⇒ outcome=applied).
+journal_history_append restart_gate "restart run_id=$RUN_ID gate PASSED; per-gate: $GATE_DETAIL; live-version=identity (same binary); outcome-mapping: restart⇒applied" \
+                                          || true
+journal_history_append restart "intentional restart run_id=$RUN_ID complete (reason: ${REASON:-<none>}; SINGLE-TERM + launcher re-exec + /livez+/readyz gate green)" \
                                           || true
 _log "RESTART COMPLETE: run_id=$RUN_ID — serving on :$PORT"
 lock_release

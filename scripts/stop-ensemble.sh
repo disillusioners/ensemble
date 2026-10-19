@@ -494,6 +494,15 @@ _stop_pids() {
     done
     for pid in $still; do
         _log "SIGKILL $pid (still alive after ${WAIT_S}s)"
+        # agent-restart §3.3 (rev-5 wording: a NEW event this commission
+        # ADDS — it existed nowhere before): a forced KILL voids the
+        # in-flight checkpoint write (uvicorn's graceful lifespan teardown
+        # never ran), so the stop lane journals the escalation for the
+        # wake sweep's kind-aware reader (RESTART_TERMINAL_EVENTS member —
+        # completes restart-kind wakes; NEVER closes a promote op). The
+        # append is best-effort lock-free: a stop in progress has no lock
+        # guarantees and must NEVER block the KILL itself.
+        journal_history_append stop_forced_kill "stop-ensemble: pid=$pid survived TERM + ${WAIT_S}s wait — SIGKILL escalated (graceful checkpoint write VOIDED; resumed turns may replay from the last committed node boundary)" >/dev/null 2>&1 || true
         kill -9 "$pid" 2>/dev/null || true
     done
 }
