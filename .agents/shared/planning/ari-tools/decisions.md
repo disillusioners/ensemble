@@ -36,10 +36,27 @@ wrong and must be amended.
 |---|---|---|---|
 | **L1** | **`board` category → ari + leader.** | [phase1-plan.md E10/E11](phase1-plan.md) | `"board"` is appended to `agents/ari/meta.json` **and** `agents/leader/meta.json` allow lists. **No other agent** may hold it. (Caveat: the *mechanism* by which this is enforced is an open architect question — see §C.1.) |
 | **L2** | **`self_alarm` → ari only.** | [phase2-plan.md D10](phase2-plan.md) | `"self-alarm"` goes into `agents/ari/meta.json` **only** — never leader. Enforced twice: the allow-list **and** a runtime `agent_id != "ari"` gate in the tool body (an allow-list is a visibility boundary, not a security boundary). |
+| **L2a** | **`self_alarm` is PRIVILEGED** — leader ruling **R-self-alarm** (architect §1.4). | [phase2-plan.md D10](phase2-plan.md) · architect §1.4 | `"self-alarm"` is **entry #10** of `PRIVILEGED_TOOL_CATEGORIES` from Phase 2's **first** commit, **on top of** L2's two layers. **Three** enforcement layers, not two: (1) the **privileged category** (opt-in — a non-privileged category is default-granted to the empty-allow universe, so `watcher` — the only in-tree agent with an empty allow list — would otherwise resolve the tool); (2) the **allow-list** (`agents/ari/meta.json` only, never leader); (3) the **runtime `agent_id != "ari"` gate** in the tool body — defence in depth, and the only layer that also closes the **literal-tool-name** bypass (`daemon/tools/instance.py:471-478`). Why the escalation is structural, not cosmetic: a watcher-reachable `self_alarm` spawns a **fresh Ari instance** whose message carries the caller's action text **verbatim** ⇒ an attacker-influenced text-execution path, not merely a visibility leak. |
 | **L3** | **`view_write` → ari only.** | [phase3-plan.md D3](phase3-plan.md) | `"view-write"` is a **privileged** category granted to ari only. Leader gains **no** write authority — the existing `view-views` category (ari + leader + designer) is untouched. |
 | **L4** | **Tags storage preference.** | [phase1-plan.md D2, §4.4](phase1-plan.md) | Tags are stored in a shape that supports **relational filtering** (the board filters by tag), not an embedded JSON list. Resolved during planning to a **junction table** `board_item_tags` with composite PK `(item_id, tag)`. The embedded-`JSONBType` pattern is for lists that are **not** relationally filtered. (Refinement of the pre-ruling, not a contradiction of it — §C.2 is the one place where a pre-ruling-adjacent choice genuinely diverged from house convention.) |
 | **L5** | **Reports root is daemon-GLOBAL, not per-project.** | [phase3-plan.md D1, D5](phase3-plan.md) | The `reports` root is `<data_dir>/reports`, **daemon-injected** at lifespan — not a project workdir, not operator-declared. A report is not a project artefact and must survive a project's absence. |
 | **L6** | **`board` is a reserved root name.** | [phase3-plan.md D10, §4.1](phase3-plan.md) | `board` is **not** a registered live-views root; it is **reserved**. An operator cannot declare a root named `board` (boot refusal), the direct lane `/views/board/index.html` 404s, and `view_link("board", …)` returns the reserved-name envelope — so the board's public link is **not** mintable by the `view-views` holders. |
+
+### A-ADJUDICATED — the leader's post-architect rulings (BINDING)
+
+The architect's adjudication ([architecture-recommendation.md](architecture-recommendation.md), 541 lines,
+planning head `2b297db7d`) was **ACCEPTED IN FULL** by the leader: every verdict is a **binding ruling**, not a
+review comment. These are recorded here in the same tier as §A1/§A2 — they close items that were open when this
+ledger was first written, and each names the architect section it comes from.
+
+| # | Ruling | Architect ref | Binding consequence |
+|---|---|---|---|
+| **R-C1** | **The `board` category is PRIVILEGED from Phase 1's FIRST commit.** The planner's "flip it in Phase 3" plan is **OVERTURNED**. | §1.1–§1.3 | `"board"` = **entry #9** of `PRIVILEGED_TOOL_CATEGORIES`, added in phase 1's first commit **with** the five SAME-PR exact-set pin insertions **in the same commit** — marginal cost **5 file-touches, zero extra lines**. The **privileged category AND** the in-body `agent_id ∈ {"ari","leader"}` gate are **both** required: a **literal tool-name** allow entry bypasses the category gate outright (`daemon/tools/instance.py:471-478`), so the category alone is not sufficient. The commission's privileged-set trajectory is **8 → 9 (P1: `board`) → 10 (P2: `self-alarm`) → 12 (P3: `view-write`, `board-link`)** ⇒ **THREE pin passes** over the same five files, not one. |
+| **R-self-alarm** | **`self-alarm` is PRIVILEGED** — the privilege model extends to phase 2. | §1.4 | See **L2a** above: privileged category (entry #10) + allow-list + runtime gate = **three** layers. The registration test must prove the property directly: `resolve_tool_filter` yields **no** `self_alarm` for a non-ari agent with an **EMPTY** allow list — not merely that one `meta.json` names the category. |
+| **R-lateness** | **Lateness cap: default `None`, NO cap in v1.** | §4.1 | The cap is **daemon-global**, so the wrapper **cannot override** it. With a cap set, a missed alarm enters a **5-second daemon-wide re-evaluation loop** (`daemon/sources/adapters/scheduler.py:559`; `SCHEDULER_ERROR_RETRY_S = 5.0`) with **no self-heal** and **no user-visible signal** (only a `skipped` history row; the schedule still reads `running`) ⇒ a late-but-real delivery becomes a silent, permanent, non-self-healing loss. The late path is self-announcing (the composed message states the scheduled instant). ⇒ the wrapper **MUST** read and **echo** `lateness_cap_seconds` (`<int\|null>`) so the agent knows whether a missed alarm would be delivered late or skipped forever. |
+| **R-chat-bridge** | **No new infrastructure for a chat bridge in v1.** | §4.2 | There is **no structural path** from a fired alarm to a chat surface (the scheduler source is one-way; the receiving instance is scheduler-owned with no chat identity). ⇒ **THE BOARD is the user-visible surface of a fired alarm** — the alarm lands in a fresh Ari instance, which acts and leaves evidence **on the board**; the live board view shows the change. The contract **promises** the board and **must NOT** promise a ping, a reminder, or an interruption. Carried explicitly in phase 2's tool doc and in the `agents/ari` conventions. |
+| **R-prefix** | **Migration prefix `20261020_060000` adopted** (distinct **day** prefix). | §2.6 | The file is `daemon/migrations/versions/20261020_060000_create_board_tables.sql`. A same-hour concurrent commission would collide — a duplicate prefix aborts a **fresh SQLite boot** (the runner does not catch `IntegrityError`) — and two duplicate prefixes already exist in the tree (`20260628_000002`, `20261018_000001`); do not copy the defect. The **developer re-verifies PK uniqueness at write time** (`ls daemon/migrations/versions/ \| grep '^20261020_'` → exactly this one file) **and at merge time**. |
+| **R-loader** | **`daemon/loader.py` warm-scan edit — SKIPPED in v1** (deferred). | §3.3 | The optional warm-scan edit (a cold boot can pin an empty category doc into the no-TTL prompt cache) is **not** taken: the lifespan-injected `reports` root is sufficient for correctness, and skipping it keeps the phase-3 diff minimal. Recorded as a **deferred** item (plan-overview §8) — not a defect, not a gap. |
 
 ---
 
@@ -76,7 +93,7 @@ shape. Everything else is a one-liner pointing at its owner.
 | P1-D3 | `notes` = append-only child table `board_notes` (no `updated_at`/`deleted_at`/`revision` column ⇒ the schema cannot express an edit). |
 | P1-D4 | `linked_job_ids` = embedded `JSONBType` list, no FK (no v1 job filter; job rows are soft-deleted). |
 | P1-D5 | Service = **class** `BoardService` (one dependency: the `Engine`). |
-| P1-D6 | Category `"board"` is **NON-privileged** (default-grant consequence disclosed as Q1 — see §C.1). |
+| P1-D6 | Category `"board"` is **PRIVILEGED** — **entry #9** of `PRIVILEGED_TOOL_CATEGORIES`, from Phase 1's **first** commit (leader ruling **R-C1**, architect §1.3; the phase-1 Q1 is **RESOLVED** — see §C.1). |
 | P1-D7 | All timestamps fixed-width UTC ISO-8601, microseconds always on (board-local `_now_iso`) — **deviation** from the house helper (§C.2). |
 | P1-D8 | `due_at`: naive input rejected, tz-aware accepted, stored as UTC (no tz-chain in phase 1; phase 2 owns tz resolution). |
 | P1-D9 | Status transitions **unrestricted** (any → any, `done` reopenable); the 4-value enum is validated at the service boundary, not at the model. |
@@ -140,25 +157,35 @@ shape. Everything else is a one-liner pointing at its owner.
 > needs a ruling. C2–C4 are refinements of pre-rulings or house conventions. C5 is the consolidated open-question
 > ledger. C6 is an operator-facing migration note that must survive into the changelog/runbook.
 
-### C1 — CROSS-PHASE TENSION: privileged vs non-privileged board category — **ARCHITECT-TO-RULE**
+### C1 — CROSS-PHASE TENSION: privileged vs non-privileged board category — ✅ **RESOLVED** (leader ruling **R-C1**)
 
-**The conflict, stated plainly.** Phase 1 chose a **non-privileged** `"board"` category (P1-D6), disclosing the
-consequence as its Q1: a non-privileged category is **default-granted** to every agent with an empty allow list,
-so "ari + leader" (L1) is diluted. Phase 3 argues that restrictive semantics **require** privileged categories
-(P3-D3, P3-D13): its `view-write` is privileged, and it splits `board-link` into its own privileged category
-*precisely because* phase 1's `"board"` is non-privileged and therefore default-granted.
+> **Status: RESOLVED.** The architect's adjudication ([architecture-recommendation.md](architecture-recommendation.md)
+> §1.1–§1.5) was **ACCEPTED as binding** by the leader. The ruling **supersedes** the planner's original
+> recommendation ("non-privileged in phase 1, flip in phase 3") and the *"Status: ARCHITECT-TO-RULE"* line this
+> section previously carried. The conflict narrative is **retained as the decision record**; every sentence that
+> describes the *pre-ruling* state is marked SUPERSEDED, and **no** present-tense claim of a non-privileged
+> `board` survives anywhere in the five planning documents.
 
-**Side A — phase 1's position (non-privileged).**
+**The conflict, as it stood (HISTORICAL — SUPERSEDED).** Phase 1 originally chose a **non-privileged** `"board"`
+category (P1-D6 as written before the fold), disclosing the consequence as its Q1: a non-privileged category is
+**default-granted** to every agent with an empty allow list, so "ari + leader" (L1) is diluted. Phase 3 argued that
+restrictive semantics **require** privileged categories (P3-D3, P3-D13): its `view-write` is privileged, and it
+split `board-link` into its own privileged category *on the premise that* phase 1's `"board"` was non-privileged
+and therefore default-granted. **That premise is GONE** — see the ruling below.
+
+**Side A — phase 1's original position (SUPERSEDED — retained as the decision record).**
 - The board is a **benign work surface**: no secrets, no authority, no externally reachable surface. Its content
-  is internal work items.
+  is internal work items. *(The architect's answer: a benign surface still must not be **writable by the
+  untrusted-input evaluator** — see the ruling.)*
 - A non-privileged category avoids the **SAME-PR five-pin ceremony** (`daemon/tools/_tool_registry.py:226-238`) —
-  five exact-set pin files that must be updated **in the same commit** as the category addition.
-- The default-grant consequence is bounded and disclosed: anyone who can reach an empty-allow agent can read and
-  write the global board.
-- Phase 1's own recommendation: **keep non-privileged in v1**; revisit only if the board ever carries sensitive
-  content.
+  five exact-set pin files that must be updated **in the same commit** as the category addition. *(Superseded: the
+  ceremony costs five inserted literal lines — see correction 4 below.)*
+- The default-grant consequence was treated as bounded and disclosed. *(Superseded: it is not bounded — the
+  inheriting population is unbounded — see correction 3 below.)*
+- Phase 1's own recommendation was: **keep non-privileged in v1**; revisit only if the board ever carries
+  sensitive content. *(OVERTURNED.)*
 
-**Side B — phase 3's position (privileged).**
+**Side B — phase 3's position (privileged — the ruling's content, now the whole answer).**
 - `resolve_tool_filter` returns "everything allowed" for an empty allow+deny pair
   (`daemon/tools/instance.py:373-434`), and the default-deny strip removes **only** privileged categories
   (`daemon/tools/instance.py:6243-6271`) ⇒ a non-privileged category **cannot enforce** an "ari + leader" list.
@@ -168,34 +195,54 @@ so "ari + leader" (L1) is diluted. Phase 3 argues that restrictive semantics **r
 - Phase 3 already demonstrates the resolution pattern: **own module + own privileged category**
   (`board-link`), which also removes the phase-1 merge conflict on the `"board"` category entirely.
 
-**Cost of each side, symmetric.**
+**Cost of each side, symmetric (as it stood — the ruling's answer is in the two columns' "enforcement" row).**
 
 | | Privileged `"board"` | Non-privileged `"board"` |
 |---|---|---|
 | **Mechanism cost** | The SAME-PR five-pin ceremony: 5 exact-set pin files updated in the **same commit** as the category addition (`tests/unit/tools/test_upgrade_registration.py`, `tests/unit/tools/test_attestation_registration.py`, `tests/integration/test_maintenancer_spawn_resolves_tools.py`, `tests/integration/test_service_tool_flag_off_byte_identical.py::test_privileged_category_set_is_pinned`, `tests/unit/tools/test_secrets_registration.py:218`). | Zero pin work. |
-| **Enforcement cost** | The category becomes **opt-in**: only agents whose allow list names it receive the 4 tools. L1 ("ari + leader") becomes **enforceable**. | The category is **default-granted**: every empty-allow agent (worker, tester, developer, designer, …) inherits the 4 tools. L1 becomes **convention only**. |
-| **Marginal cost in *this* commission** | **Zero** — phase 3 already adds two privileged categories (`view-write`, `board-link`) and therefore already pays the five-pin cost **in the same commit**. Adding `"board"` to that same set costs **no additional pin work**. | Zero. |
-| **Plan amendment cost if flipped** | Phase 1's D6 and Q1, plus the allow-list test's negative case (which already uses a non-empty allow list), need a one-line amendment. | — |
+| **Enforcement cost** | The category becomes **opt-in**: only agents whose allow list names it receive the 4 tools. L1 ("ari + leader") becomes **enforceable**. | The category is **default-granted**: every empty-allow agent inherits the 4 tools. L1 becomes **convention only**. *(Corrected by the architect: the inheriting population is `watcher` + tools-less custom agents — NOT worker/tester/developer/designer, whose allow lists are non-empty.)* |
+| **Marginal cost in *this* commission** | **5 file-touches, zero extra lines** — the pins are exact-set assertions with **no `len()` check** anywhere, so each file takes one inserted literal line. Phase 3 no longer "already pays" the cost: the commission now makes **three** pin passes (8 → 9 → 10 → 12), one per phase. | Zero. |
+| **Plan amendment cost if flipped** | Phase 1's D6 and Q1, plus the allow-list test's negative case, need a one-line amendment — **done** in this fold (phase 1 §13 D6, §12 Q1, §3.2.1). | — |
 
-**Recommendation (evidence-based — the architect rules, not this ledger):** make `"board"` **privileged**, in the
-**same commit** that adds `view-write` and `board-link`.
-1. The five-pin cost is **already being paid** in that commit ⇒ the marginal cost of privileged is zero, which
-   removes the only argument for the non-privileged side (Phase 1's own reasoning for choosing non-privileged was
-   that it *avoids* the ceremony).
-2. Only a privileged category actually enforces the leader's own pre-ruling L1 ("ari + leader"). The non-privileged
-   choice silently widens the grant to the empty-allow universe — the opposite of the pre-ruling's intent, and a
-   silent widening is the failure mode this commission is most exposed to (the board is global by design).
-3. Phase 3 has already established the module/category separation pattern; flipping `"board"` needs no new
-   module, no new file, and no change to phase 3's read adapter.
-4. The counter-argument is symmetric and modest: the board's content is internal, so the widened grant is not a
-   *secret* leak — it is an **authority** leak (any empty-allow agent can write the global board). Phase 1 itself
-   classifies the absence of per-item ACL as a Low-impact risk (P1-R6) — but that risk assessment was made on the
-   assumption that the category is opt-in.
+**THE RULING (leader ruling R-C1 / architect §1.3).** `"board"` is **PRIVILEGED**, added in **Phase 1's first
+commit** — the architect **OVERTURNED** the planner's "flip it in Phase 3" recommendation. The reasoning:
 
-**Status: ARCHITECT-TO-RULE.** Until ruled: phase 1's plan (non-privileged) stands as written, and phase 3's
-privileged `board-link` / `view-write` categories stand as written. A ruling of "privileged" triggers a small
-amendment to `phase1-plan.md` D6/Q1 — it does **not** change the schema, the tools, the service, or the phase
-ordering.
+1. The planner's arithmetic ("phase 3 already pays the pin cost ⇒ zero marginal cost there") is arithmetically true
+   but answers the wrong question. The pins are cheap in absolute terms, and deferring buys a 5-file saving in
+   exchange for shipping a category whose stated audience the mechanism does **not** enforce. A **silent widening**
+   is the failure mode this commission is most exposed to, because the board is global by design.
+2. Only a privileged category actually enforces L1 ("ari + leader"). The alternative silently widens the grant to
+   the empty-allow universe — the opposite of the pre-ruling's intent.
+3. Flipping `"board"` needs no new module, no new file, and no change to phase 3's read adapter.
+4. The counter-argument (the board's content is internal, so the widened grant is an **authority** leak rather than
+   a *secret* leak) is real but **modest and bounded** — whereas the exposure it protects against is *not* modest:
+   the inheriting population includes the untrusted-input evaluator. Phase 1's own Low-impact ACL assessment
+   (P1-R6) was made on the assumption that the category is opt-in — that assumption is now false.
+
+**The four corrections of architect §1.1** (the architect's evidence base; all independently re-verified against
+this worktree at fold time):
+
+| # | Correction |
+|---|---|
+| **0 — the mechanism is confirmed** | A non-privileged category **cannot** enforce L1: empty allow + empty deny ⇒ everything (`daemon/tools/instance.py:401-406`); `None` ⇒ all-minus-privileged (`:6337-6340`); the default-deny strip removes **only** privileged categories (`:6243-6271`); no `tools` key at all ⇒ the same default-open path (`:6300-6304`). |
+| **1 — the blast radius was wrong** | `worker` (21 allow entries), `tester` (22), `developer` (13) and `designer` (17) all carry **non-empty** allow lists ⇒ a non-privileged `board` would have reached **none** of them (`daemon/tools/instance.py:471-478`). |
+| **2 — the real exposure is worse in kind, narrower in count** | Exactly **one** in-tree agent carries an empty allow list — **`agents/watcher/meta.json`** ("Security-focused tool call evaluator — intercepts every tool call from a watched instance before execution"), whose context is **attacker-influenced**; under a non-privileged category it would hold **write authority over the global board**. The second population is **unbounded**: `agent_create` writes a `meta.json` with **no `tools` key** (`daemon/tools/agent_mother.py:282-295` ⇒ `instance.py:6300-6304`), and custom agents with an empty allow/deny triple normalise to `tools = None` (`daemon/repositories/custom_agent_configs/repository.py:193-198`). |
+| **3 — the "five-pin ceremony" is not a meaningful cost** | All five pins are **exact-set equality** and there is **no `len()` assertion anywhere** (grep: zero hits) ⇒ **one inserted literal line per file**; marginal cost = **5 file-touches, zero extra lines**. |
+
+**Defence in depth is mandatory, not optional (architect §1.3).** Because a **literal tool-name** allow entry
+bypasses the category gate (`daemon/tools/instance.py:471-478`), the privileged category alone is insufficient.
+All four `board_*` bodies gate on `agent_id ∈ {"ari","leader"}` through **one** module-level helper — there is **no**
+existing two-agent-set precedent in `daemon/tools/` (the `blueprint` precedent is single-agent,
+`daemon/tools/blueprint.py:71-73`) ⇒ a shared `_is_board_authorized()` is required, not four copies.
+
+**What the ruling does NOT change.** The schema, the four tools, the service, the phase ordering, and the
+`board-link` / `view-write` categories are untouched. The **marginal cost is 5 file-touches and zero extra
+lines**, and the pins ship **in the same commit** as the category entry ⇒ no red window between phases.
+
+**Consequence for P3-D13 (kept, rationale amended — see §C.4).** `board-link` stays in its own category; the
+original privilege-based justification is **GONE** and the decision survives on the two **enduring** reasons:
+(a) `view_link` **cannot** mint the reserved name `board`; (b) **audience separation** — ari+leader may **mint**
+the link, while the `board` data tools are what the page **reads**.
 
 ### C2 — P1-D7: fixed-width microsecond timestamps vs the house `_now_iso()`
 
@@ -211,6 +258,20 @@ ordering.
 - **Architect question.** Accept the local divergence (recommended — it is contained, and normalising the house
   helper would touch every timestamped table in the repo, which is out of this commission's scope), or normalise
   the house helper in a separate, explicitly-scoped change. **Not a blocker for the build.**
+
+**✅ RESOLVED (leader ruling; architect §2.2 S-1) — the local fixed-width helper is ACCEPTED, and the missing half
+is ADDED.** The divergence from the house helper stands exactly as designed (a board-local `_now_iso`,
+microseconds always on). But the architect found the *other half* of the contract missing, and it is a **blocking
+defect**, not a style question: `due_at` is stored fixed-width UTC, while the **`due_before` filter parameter**
+accepted any tz-aware ISO string — and a raw agent string must never reach SQL. Left unhandled the filter
+**silently inverts**: `'2026-10-20T08:00:00+07:00' < '2026-10-20T01:55:40.123456+00:00'` evaluates **False** although
+01:00Z < 01:55Z ⇒ the filter returns the *later* items and drops the *earlier* ones, with no error and no visible
+symptom.
+
+⇒ **One `_to_utc_iso()` is used by BOTH the `due_at` write path AND the `due_before` filter** (a naive input is
+rejected; the mixed-offset inversion probe and the round-trip are pinned by the phase-1 test N5). Carried as a
+**MUST-FIX** implementation constraint in `phase1-plan.md` §6.1, §7.1, §8 (N5), §11 (R11) and §13 (D7/D8); the
+phase-1 plan is the canonical home for the body.
 
 ### C3 — P2's six refinements of the pre-rulings (no pre-ruling is re-litigated)
 
@@ -234,12 +295,16 @@ ordering.
   existing file's bytes are preserved when the flag is absent.
 - **P3-D13 — `board_link` gets its own module + its own privileged category.** `daemon/tools/board_link.py`,
   category `board-link` (ari + leader). Three reasons: (1) `view_link` **cannot** mint it — `board` is a reserved
-  root name — and `view-views` is reachable by designer; (2) phase 1's `"board"` category is **non-privileged** ⇒
-  default-granted ⇒ a board-link tool placed there would let **any** empty-allow agent mint the internal board's
-  public link; (3) a separate module + category removes the phase-1 merge conflict entirely. **This decision is
-  entangled with §C1** — if the architect rules `"board"` privileged, `board-link` could in principle fold into it;
-  the phase-3 plan's recommendation is to keep them separate regardless (the mint tool and the data tools have
-  different audiences: ari+leader may mint the link, but the data tools are what the board page reads).
+  root name — and `view-views` is reachable by designer; (2) a separate module + category removes the phase-1
+  merge conflict entirely; (3) **audience separation** — ari+leader may **mint** the link, while the `board` data
+  tools are what the board page **reads** (mint ≠ read).
+  **⚠️ RATIONALE AMENDED (leader ruling R-C1 / architect §1.5):** the original second reason — *"phase 1's
+  `"board"` category is non-privileged ⇒ default-granted ⇒ a board-link tool placed there would let any
+  empty-allow agent mint the internal board's public link"* — is **GONE**: `board` is **PRIVILEGED** from Phase 1's
+  first commit (§C.1). The decision survives on the two **enduring** reasons — **audience separation** and
+  **reserved-name impossibility** — plus the phase-merge hygiene it cites. The `board-link` category stays
+  privileged in its own right: link-minting is a distinct capability from board read/write, and keeping it separate
+  keeps the two audiences independent. **Keep the split.**
 
 ### C5 — Consolidated open questions (18 source questions → 15 grouped themes)
 
@@ -248,21 +313,25 @@ P2 OQ-1…OQ-6 (6), P3 OQ-1…OQ-6 (6) = **18**.
 
 | Theme | Questions | What is being asked | Status / recommendation |
 |---|---|---|---|
-| **1. Privilege semantics of the board category** | **P1-Q1 + P3-OQ-2** (2) | Should `"board"` be privileged? Where should `board_link` live — its own category, or inside phase 1's `"board"`? | **MERGED — this is §C1. ARCHITECT-TO-RULE.** Phase 3's answer to the second half is already implemented in its plan (own module + own privileged category, P3-D13). |
-| **2. Author provenance** | **P1-Q5** (1) | `created_by_instance` / note `author_instance` are stamped by the **service** from the tool closure, so an agent cannot spoof them. Confirm this is the intended contract (vs. an agent-supplied author)? | Recommended: keep service-stamped. It matches the repo's provenance discipline and makes the audit trail trustworthy. |
-| **3. List / render ceiling and pagination** | **P1-Q3 + P3-OQ-5** (2) | `board_list` has no pagination cursor; the board page renders ≤50 rows and fetches ≤500 for the filter options. Is 50/500 right? | Recommended: accept `limit` + truncation metadata in v1; add `offset`/`cursor` when the board exceeds a few hundred items. Phase 3's render ceiling is a **rendering** choice over the same bounded set. |
-| **4. Item mutation surface — clear-flags and deletion** | **P1-Q2 + P1-Q4** (2) | v1 cannot CLEAR `due_at` / `project_id` / `priority`; and should items be deletable at all? | Recommended: keep the bound `board_update` shape now (a `clear_fields` param is a v1.1 amendment); if deletion is needed, add a **soft** delete — never a hard one, because the notes audit trail must survive. |
-| **5. REST twin in phase 1** | **P1-Q6** (1) | Should phase 1 also expose a REST router for the board? | Recommended: **no** — the bound phase-1 shape is tools-only; phase 3's view calls the service directly. |
-| **6. Chat bridge for the alarm's reply** | **P2-OQ-1** (1) | The scheduler source is one-way ⇒ the human sees nothing. Should phase 3 bridge a fired alarm's summary back to the originating chat surface? | A **product** call, not a code call: the receiving instance is scheduler-owned with **no chat context**, so there is no originating surface to bridge to without new ownership plumbing. **Deferred** — deliberately not designed (§8 of the overview). |
-| **7. Recurring arm-now-imminent** | **P2-OQ-2** (1) | `daily 06:30` armed at 06:15 ⇒ first fire in 15 min ⇒ currently **rejected**. Alternative: auto-skip to the next occurrence. | Recommended: **confirm reject** (see §C.3(v)). |
-| **8. Interval recurrence / engine change** | **P2-OQ-3** (1) | `every 1h` is rejected because `create_schedule` exposes no interval variant (the adapter has an INTERVAL type; the create path does not). Worth an engine change? | Out of phase-2 scope. Rejected with a hint (`cron */60 * * * *`). A real engine change is a separate commission. |
-| **9. Lateness-cap deployment policy** | **P2-OQ-4** (1) | Should the deployment set `ENSEMBLE_SCHEDULING_ONE_SHOT_MAX_LATENESS_SECONDS`? | **No phase-2 change, documented only.** With the cap set, a missed alarm becomes a permanently-armed skip-loop that never fires without an operator update; without it, a missed alarm fires very late. The trade-off is deployment policy, and it must be documented either way (risk R3). |
-| **10. Auto-arm v2 confirmation** | **P2-OQ-5** (1) | If the board service is to own `due_at → alarm`, it needs a caller-agent concept + a label/recurrence-change policy. Confirm the deferral, or commission a v2 slice? | Recommended: **confirm the deferral** (five blockers, §B0 #7). v1 = prompt convention. |
-| **11. Alarm scope semantics** | **P2-OQ-6** (1) | Does "ari-only" mean *the alarm is for ari itself* (today), or also *"ari may arm alarms **for** other agents"*? | Recommended: the former. "Arm for others" is a different tool and is out of scope. |
-| **12. Notes hydration N+1 / the list projection** | **P3-OQ-1** (1) | Phase 1's `list_items` returns items **without** `notes[]`; the board hydrates them per row via `get_item` (bounded N+1, ≤50 reads/render). Can phase 1 include `notes[]` in the list projection cheaply? | If yes, the N+1 disappears. The phase-3 adapter is **tolerant of both shapes** and degrades per row ("notes unavailable"), so this is an optimisation, not a blocker. Risk R28. |
-| **13. Interstitial copy** | **P3-OQ-3** (1) | The reused interstitial says "view this document" for a board. Accept the cosmetic mismatch, add a board-specific template, or generalise `render_interstitial` with a `subject` kwarg? | Recommended: **(a) accept** — the interstitial is shared by four other paths and diverging it adds gate-contract risk for zero functional gain. |
-| **14. Board layout** | **P3-OQ-4** (1) | Flat filtered table with a `<details>` per row, vs. grouped per-project sections? | A **rendering-only** change — no schema, no service, no route impact. Flat table recommended. |
-| **15. Headline link: public vs direct lane** | **P3-OQ-6** (1) | Should the board page be the public (passcode) link or the direct (OAuth) lane? | The public URL is the headline; the direct lane 404s **by design** (P3-D20) and its "Authenticated URL" line is informational only. |
+| **1. Privilege semantics of the board category** | **P1-Q1 + P3-OQ-2** (2) | Should `"board"` be privileged? Where should `board_link` live — its own category, or inside phase 1's `"board"`? | **✅ RESOLVED (leader ruling R-C1 / architect §1.3, §6 theme 1).** `"board"` is **PRIVILEGED from Phase 1's FIRST commit** (entry #9, five pins in the same commit) and `board-link` **stays separate** on the two enduring reasons — **audience separation** + **reserved-name impossibility** (architect §1.5). See §C.1 and §C.4. |
+| **2. Author provenance** | **P1-Q5** (1) | `created_by_instance` / note `author_instance` are stamped by the **service** from the tool closure, so an agent cannot spoof them. Confirm this is the intended contract (vs. an agent-supplied author)? | **✅ RESOLVED — keep service-stamped.** The author is stamped by the **service** from the tool closure; an agent cannot spoof it. It matches the repo's provenance discipline and makes the audit trail trustworthy. |
+| **3. List / render ceiling and pagination** | **P1-Q3 + P3-OQ-5** (2) | `board_list` has no pagination cursor; the board page renders ≤50 rows and fetches ≤500 for the filter options. Is 50/500 right? | **✅ RESOLVED — `limit` + truncation metadata in v1, and the render shows "showing N of M" NOW** (one template line, not a deferral) whenever `count > limit`, plus a notice when the filter-option set caps at 500. A pagination **cursor is a v2** item. |
+| **4. Item mutation surface — clear-flags and deletion** | **P1-Q2 + P1-Q4** (2) | v1 cannot CLEAR `due_at` / `project_id` / `priority`; and should items be deletable at all? | **⏸ DEFERRED-to-v2.** Keep the bound `board_update` shape; `clear_fields` is a **v1.1 amendment**; any delete must be **soft** — and the child FKs now enforce the soft-delete-only position **at the schema level** (NO ACTION ⇒ the database refuses a hard item delete, architect §2.5). |
+| **5. REST twin in phase 1** | **P1-Q6** (1) | Should phase 1 also expose a REST router for the board? | **✅ RESOLVED — no.** The bound phase-1 shape is **tools-only**; phase 3's view calls the service directly. |
+| **6. Chat bridge for the alarm's reply** | **P2-OQ-1** (1) | The scheduler source is one-way ⇒ the human sees nothing. Should phase 3 bridge a fired alarm's summary back to the originating chat surface? | **✅ RESOLVED (leader ruling R-chat-bridge / architect §4.2) — no new infra in v1; THE BOARD is the user-visible surface.** There is **no structural path** to a chat surface; the contract promises the board (the fired alarm acts, leaves evidence on the board, and the live view shows the change) and **must NOT** promise a ping, a reminder, or an interruption. |
+| **7. Recurring arm-now-imminent** | **P2-OQ-2** (1) | `daily 06:30` armed at 06:15 ⇒ first fire in 15 min ⇒ currently **rejected**. Alternative: auto-skip to the next occurrence. | **✅ RESOLVED — confirm the reject** (see §C.3(v)), with **family-aware** error text that always prints the computed next fire (the bash-sleep hint is wrong advice for a recurring alarm). |
+| **8. Interval recurrence / engine change** | **P2-OQ-3** (1) | `every 1h` is rejected because `create_schedule` exposes no interval variant (the adapter has an INTERVAL type; the create path does not). Worth an engine change? | **⏸ DEFERRED-to-v2.** Reject with a hint (`cron */60 * * * *`); a real engine change is a **separate commission**. |
+| **9. Lateness-cap deployment policy** | **P2-OQ-4** (1) | Should the deployment set `ENSEMBLE_SCHEDULING_ONE_SHOT_MAX_LATENESS_SECONDS`? | **✅ RESOLVED (leader ruling R-lateness / architect §4.1) — default `None`, NO cap in v1.** With a cap set, a missed alarm enters a **5-second daemon-wide re-evaluation loop** (`scheduler.py:559`) with **no self-heal** and **no user-visible signal**; the cap is daemon-global, so the wrapper **cannot override** it ⇒ the wrapper **MUST echo `lateness_cap_seconds`**. Both behaviours + the skip state's signature are documented in the tool doc (risk R3). |
+| **10. Auto-arm v2 confirmation** | **P2-OQ-5** (1) | If the board service is to own `due_at → alarm`, it needs a caller-agent concept + a label/recurrence-change policy. Confirm the deferral, or commission a v2 slice? | **✅ RESOLVED — confirm the deferral** (five blockers, §B0 #7). v1 = prompt convention. |
+| **11. Alarm scope semantics** | **P2-OQ-6** (1) | Does "ari-only" mean *the alarm is for ari itself* (today), or also *"ari may arm alarms **for** other agents"*? | **✅ RESOLVED — Ari-for-ari only.** "Arm for others" is a different tool and is out of scope. |
+| **12. Notes hydration N+1 / the list projection** | **P3-OQ-1** (1) | Phase 1's `list_items` returns items **without** `notes[]`; the board hydrates them per row via `get_item` (bounded N+1, ≤50 reads/render). Can phase 1 include `notes[]` in the list projection cheaply? | **✅ RESOLVED — batch in Phase 1.** `list_items(..., with_notes=False)` + internal batched loaders for notes **and** tags (`WHERE item_id IN (…)`, then group in Python; ≈15–20 lines). The **tool's item shape is unchanged** (no `notes[]` in `board_list`), so the payload and the truncation behaviour are untouched; phase 3 keeps its tolerant "notes unavailable" fallback and works against **both** shapes. `list_items` / `get_item` are **frozen** (names + keyword names) as the binding phase-3 interface. Cost ≤3 queries per render vs 1+50 = 51 (worst case 201). Risk R28. |
+| **13. Interstitial copy** | **P3-OQ-3** (1) | The reused interstitial says "view this document" for a board. Accept the cosmetic mismatch, add a board-specific template, or generalise `render_interstitial` with a `subject` kwarg? | **✅ RESOLVED — (a) accept** the shared interstitial; **no** board-specific template (gate-contract risk for zero functional gain). |
+| **14. Board layout** | **P3-OQ-4** (1) | Flat filtered table with a `<details>` per row, vs. grouped per-project sections? | **✅ RESOLVED — a flat filtered table with a `<details>` per row** (rendering-only; no schema, service, or route impact). |
+| **15. Headline link: public vs direct lane** | **P3-OQ-6** (1) | Should the board page be the public (passcode) link or the direct (OAuth) lane? | **✅ RESOLVED — the public URL is the headline**; the direct lane 404s **by design** (P3-D20) and its "Authenticated URL" line is informational only. |
+
+**Adjudication summary: 13 RESOLVED / 2 DEFERRED-to-v2 / 0 ESCALATED** (15 themes, 18 source questions) —
+architect §6. The two deferred themes are **4** (item mutation surface — v1.1/v2) and **8** (interval
+recurrence / engine change — a separate commission).
 
 ### C6 — Operator migration note: an existing live-views root literally named `board`
 
@@ -287,5 +356,41 @@ what lets the operator's root exist at all.
 **Architect option (not blocking).** The phase-3 plan chooses **hard boot refusal + actionable message**.
 Alternatives — auto-rename, or grandfathering the existing root with a warning — would soften the operator's
 experience at the cost of a silent divergence between the operator's named root and the reserved board name.
+
 Recommendation: **keep the hard refusal**; it is the same posture the `public` reservation already takes, and it
 fails loudly at boot rather than silently later.
+
+
+### C7 — Post-adjudication verification flags (fold-time evidence register)
+
+Raised by the phase-plan fold workers while applying the architect's amendments, and checked against **this
+worktree** at fold time. **No flag blocks the reviewer** — they are recorded so the approver can see what was
+verified, what was corrected, and what was deliberately **not** edited.
+
+| # | Flag | Evidence (this worktree) | Disposition |
+|---|---|---|---|
+| **F1** | The architect's cited precedent for the **NO-ACTION child FK** — `SecretAuditEvent.secret_id` — carries **no actual FK**: the model declares a plain `Optional[str] = Field(default=None, max_length=64, …)`, and only the *docstring* says "Foreign key to `secrets.id`". | `daemon/repositories/secrets/models.py:335-346` (the field) vs `:289-291` (the docstring claim) | **The ruling STANDS** (child FKs = NO ACTION, architect §2.5). The **precedent is corrected** to the `project_tags` junction — `ProjectTagLink`, `daemon/repositories/project/models.py:146-158` — which really does declare `Field(foreign_key="projects.project_id", primary_key=True)` with **no** `ondelete=` ⇒ the default **NO ACTION**. An **inline caveat** is carried in `phase1-plan.md` §4.2. |
+| **F2** | **Anchor drift in the architect's own citations** — corrected at fold time. | `create_all` = `daemon/manager.py:751` (the architect wrote `:750`); `PRAGMA foreign_keys=ON` = `daemon/repositories/factory.py:175` (the pragma block is `:170-177`); the index-emit loop = `sqlalchemy/sql/ddl.py:1023-1025` in SQLAlchemy **2.0.48** (the "does not exist yet" table filter is `:962-964`; the architect's `:1020-1022` is off by three) | **The corrected anchors are the ones carried in the phase plans.** No decision changes; the re-verified anchors are the authority. |
+| **F3** | **Pre-existing anchor drift in `phase1-plan.md` §4.4 / D9 / D10** — the "forward-compatible enum tag, frozenset-validated at the service boundary, NOT at the model" precedent is cited as `daemon/repositories/secrets/models.py:44-52`, but that range is the **Secret** model's attribute docstring (`id` / `wrapped_secret` / `public_material` / `retired_at`). The quoted text actually lives at `:59-61` (the `action` enum bullet) and `:293-296` (the `SecretAuditEvent` attribute docstring). | `daemon/repositories/secrets/models.py:44-52` vs `:59-61` / `:293-296` | **FLAGGED, NOT EDITED** — the phase plans are not this fold's edit surface (the dispatcher restricted this fold to `decisions.md` + `plan-overview.md`). Raised for the phase-1 builder / the next fold pass. |
+| **F4** | The **five SAME-PR pin files** carry stale **prose** alongside their exact-set assertions — "`PRIVILEGED_TOOL_CATEGORIES` is exactly eight entries" / `test_privileged_categories_is_exactly_eight_entries`. The *assertions* are exact-set and fail loudly on a stale set; only the human-readable text goes stale. | `tests/unit/tools/test_upgrade_registration.py:102-103`; `tests/unit/tools/test_attestation_registration.py:143`; `tests/integration/test_maintenancer_spawn_resolves_tools.py:288,300`; `tests/unit/tools/test_secrets_registration.py:26,202,212` | **Planned as same-commit docstring updates** in the phase that adds the next entry — the docstring is corrected in the same commit as the pin change. A hygiene item, not a defect. |
+| **F5** | **Label arithmetic (phase 2)** — the engine caps `label` at **128** characters, and the stored name is the 11-character `self-alarm:` prefix + the input + up to a 2-character `-N` retry suffix ⇒ the **input cap is 115**, not 128. | `daemon/services/scheduling_service.py:131` — `label: str = Field(..., min_length=1, max_length=128)` | **Folded as a new constraint** in `phase2-plan.md` (the wrapper validates **1–115**; a 116-character label gets a typed length error). Recorded here so the cap is traceable to the engine constant rather than to a hand-computed number. |
+
+---
+
+## Amendment log (post-architect 2b297db7d)
+
+The architect's adjudication ([architecture-recommendation.md](architecture-recommendation.md), 541 lines) landed on
+this branch at `2b297db7d`; the leader **ACCEPTED every verdict as a binding ruling**. The amendments below are
+**folded into the body above** — this ledger reads as-if-decided-so, not as a changelog; the log exists for
+traceability only. P0 = correctness (must land before reviewer); P1 = clarity/consistency.
+
+| ID | Pri | Folded into | What changed |
+|----|-----|-------------|--------------|
+| **A-01** | P0 | §C.1 (heading, status, sides, cost table, ruling) + §B1 (P1-D6) | §C.1 → **RESOLVED** (leader ruling **R-C1**): `"board"` is **PRIVILEGED from Phase 1's FIRST commit** — the planner's "flip in phase 3" is **OVERTURNED**; marginal cost = **5 file-touches, zero extra lines**; the five pins ship **in the same commit**; the four corrections of architect §1.1 are folded in (mechanism confirmed; blast-radius correction — `worker`/`tester`/`developer`/`designer` all carry **non-empty** allow lists; the real exposure — **`watcher`** (the only in-tree empty-allow agent) plus tools-less custom agents; and the "five-pin ceremony is not a meaningful cost" correction) + the mandatory defence-in-depth rule (privileged category **and** the shared `_is_board_authorized()` body gate — a literal tool-name allow entry bypasses the category gate, `instance.py:471-478`) |
+| **A-02** | P0 | §C.5 (all 15 theme rows + the summary line) | Ledger adjudicated: **13 RESOLVED / 2 DEFERRED-to-v2 / 0 ESCALATED** (15 themes, 18 source questions) per architect §6. Theme 1 RESOLVED (privileged from P1); themes **4** and **8** DEFERRED-to-v2; the remaining 12 RESOLVED |
+| **A-03** | P1 | §C.2 | The board-local fixed-width helper is **ACCEPTED** — and the missing half is added: **one `_to_utc_iso()` on BOTH the `due_at` write path and the `due_before` filter** (a blocking-defect fix — the mixed-offset filter silently inverts; the phase-1 plan carries it as a MUST-FIX in §6.1 / §7.1 / §8 (N5) / §11 (R11) / §13 D7-D8) |
+| **A-04** | P1 | §C.4 (P3-D13 rationale) | The "phase-1 `board` is non-privileged" premise is **GONE**; `board-link` survives on the two **enduring** reasons — **audience separation** (mint ≠ read) + **reserved-name impossibility** — plus the phase-merge hygiene |
+| **A-05** | P0 | §A2 (new row **L2a**) | `self-alarm` is **PRIVILEGED** (leader ruling **R-self-alarm** / architect §1.4) — **entry #10** from Phase 2's first commit, with **three** enforcement layers (privileged category + allow-list + runtime `agent_id` gate) |
+| **ADJ** | — | new **§A-ADJUDICATED** | Six leader rulings recorded as binding ADJUDICATED entries, each citing its architect section: **R-C1** (board privileged from the first commit; trajectory **8 → 9 → 10 → 12**; **THREE** pin passes), **R-self-alarm**, **R-lateness** (default `None`, no cap in v1; the wrapper MUST echo `lateness_cap_seconds`), **R-chat-bridge** (no new infra; **the board is the user-visible surface**; no ping promised), **R-prefix** (`20261020_060000`; re-verify PK uniqueness at write time **and** merge time), **R-loader** (`daemon/loader.py` warm-scan edit **skipped** in v1 — deferred) |
+| **F1–F5** | — | new **§C7** (verification-flags register) | Five fold-time verification flags with worktree evidence: **F1** the FK-precedent correction (`SecretAuditEvent.secret_id` carries no actual FK ⇒ corrected precedent = the `project_tags` junction), **F2** anchor drift (create_all `manager.py:751`; pragma `factory.py:175`; `ddl.py:1023-1025`), **F3** flagged-not-edited drift inside `phase1-plan.md`, **F4** stale "exactly eight entries" prose in the five pin files, **F5** the phase-2 label arithmetic (engine cap 128 ⇒ 115-character input cap) |
+
