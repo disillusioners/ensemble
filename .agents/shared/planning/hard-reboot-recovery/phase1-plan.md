@@ -21,7 +21,7 @@ A hard reboot on a host where PostgreSQL is also systemd-managed does NOT cause 
 | File | Nature of change | LOC |
 |---|---|---:|
 | `scripts/systemd/ensemble-daemon.service:84-87` | +3 lines (G6.A amended: `After=postgresql.service` ONLY; 2 comment lines stating the host-dependent intent and pointing to the runbook drop-in) | 3 (template) + 2 (comments) = 5 |
-| `daemon/factory.py:232-284` | +1 LOC: add `connect_timeout=BOOT_DB_TIMEOUT_S=10` to `create_postgres_engine` (alongside the existing `pool_pre_ping`) | 1 |
+| `daemon/repositories/factory.py:232-284` | +1 LOC: add `connect_timeout=BOOT_DB_TIMEOUT_S=10` to `create_postgres_engine` (alongside the existing `pool_pre_ping`) | 1 |
 | `daemon/__main__.py:143-247` | **NO CHANGE** — preflight + exit-75 lane reused as-is (architect A1) | 0 |
 | `daemon/launcher.sh:1340-1346,1576-1590` | **NO CHANGE** — exit-75 budget-exempt infinite backoff reused as-is | 0 |
 | `tests/unit/test_connect_timeout.py` | NEW — verify `connect_timeout=BOOT_DB_TIMEOUT_S=10` set; preflight reuse (mocked) shows it called once, not three times; firewall-DROP mock hangs ≤10s, not 75–130s; `After=` is the only PG-related unit directive (regression guard for the dropped `Wants=`) | ≤15 |
@@ -42,7 +42,7 @@ No changes to `daemon/services/auto_continue_boot_pass.py` (read as the envelope
 | **0.2** | Write `.agents/shared/planning/hard-reboot-recovery/worktree-claim.txt` | File contains WT path + branch SHA + `import daemon` resolution path + env-fence confirmation | new file | 0.1 | — | AC5 |
 | **0.3** | Add worktree-gate fixture (`tests/conftest_worktree.py` ext.) | Pytest FAILS LOUDLY (exit 1) if `import daemon` resolves outside the WT; **+ failure-injection check (A5/R-07)**: temporarily point the fixture at a fake path, `pytest tests/unit -q` MUST refuse to run, revert | new fixture | 0.1 | R-07 | AC5 |
 | **1.1** | Edit `scripts/systemd/ensemble-daemon.service:84-87` to add `After=postgresql.service` ONLY (NO `Wants=`, NO `Requires=`) + a 2-line comment block explaining the choice (host-dependent intent; points to the runbook drop-in for the G6.A delivery on existing installs because `adopt-unit.sh:537` refuses template clobber) | grep on the unit file shows EXACTLY `After=postgresql.service`; manual inspect against the template; the new runbook drop-in example `/etc/systemd/system/ensemble-main.service.d/10-pg-order.conf` (D15) is the delivery mechanism for existing installs (Phase 3) | unit file | 0.3 | R-05 (non-systemd-PG installs — covered by D15 drop-in) | AC1, AC2 |
-| **1.2** | Add `connect_timeout=BOOT_DB_TIMEOUT_S=10` to `create_postgres_engine` at `daemon/factory.py:232-284` (alongside the existing `pool_pre_ping`). Read `BOOT_DB_TIMEOUT_S` from `daemon/constants.py:70` (already declared; no new constant) | grep on `daemon/factory.py` shows the new arg; `BOOT_DB_TIMEOUT_S=10` is set; no other `create_postgres_engine` callsites are broken (full test dir must stay green) | `daemon/factory.py` | 1.1 | R-01 (connect_timeout regresses fast-path — verified by test: preflight shows it called once, not three times) | AC1, AC2, AC3 |
+| **1.2** | Add `connect_timeout=BOOT_DB_TIMEOUT_S=10` to `create_postgres_engine` at `daemon/repositories/factory.py:232-284` (alongside the existing `pool_pre_ping`). Read `BOOT_DB_TIMEOUT_S` from `daemon/constants.py:70` (already declared; no new constant). **Approver-requested clarification:** the shared-factory `connect_timeout` bounds the POST-preflight engine-open hang; the preflight has its own local engine — the two timeouts are complementary, not duplicated. | grep on `daemon/repositories/factory.py` shows the new arg; `BOOT_DB_TIMEOUT_S=10` is set; no other `create_postgres_engine` callsites are broken (full test dir must stay green) | `daemon/repositories/factory.py` | 1.1 | R-01 (connect_timeout regresses fast-path — verified by test: preflight shows it called once, not three times) | AC1, AC2, AC3 |
 | **1.3** | Verify the existing `_boot_db_preflight` + exit-75 lane covers the canonical boot path (architect A1: preflight-reuse is the whole point). Read `daemon/__main__.py:143-247` + `daemon/run_app.py:70` (frozen binary) + `daemon/__main__.py:467` (`python -m daemon`) + `daemon/launcher.sh:1340-1346,1576-1590` (exit-75 budget-exempt infinite backoff) — confirm both entry paths reach the preflight, and the launcher maps 75 to the budget-exempt lane. **No code change** — this is a verification task, not an implementation task | grep + manual read confirms preflight is on the canonical boot path; `cat` the constants file confirms `BOOT_DB_TIMEOUT_S=10`; the existing test (if any) for preflight is still green | none — verification only | 1.2 | — | AC1, AC2, AC4 |
 | **1.4** | Write `tests/unit/test_connect_timeout.py` covering: (a) `connect_timeout=BOOT_DB_TIMEOUT_S=10` IS set on the engine after `create_postgres_engine` returns; (b) firewall-DROP mock hangs ≤10s, NOT 75–130s (the original bug); (c) preflight reuse (mocked `__main__.py:143-247` `SELECT 1`) is called ONCE per boot, not 3 times; (d) `After=postgresql.service` is the ONLY PG-related unit directive in `scripts/systemd/ensemble-daemon.service` (regression guard for the dropped `Wants=`); (e) `Wants=postgresql.service` and `Requires=postgresql.service` are BOTH absent | test file ≤15 LOC; each case green; `pytest tests/unit -q` green; `pytest tests/unit/test_connect_timeout.py -q` green | `tests/unit/test_connect_timeout.py` | 1.3 | — | AC1, AC2, AC3, AC4 |
 | **1.5** | Run the FULL unit directory as a regression gate | `pytest tests/unit -q` green (no regressions) | none | 1.4 | — | AC1 |
@@ -54,7 +54,7 @@ No changes to `daemon/services/auto_continue_boot_pass.py` (read as the envelope
 | ID | Criterion |
 |----|-----------|
 | **AC1** | The systemd unit file at `scripts/systemd/ensemble-daemon.service` declares `After=postgresql.service` ONLY (NO `Wants=`, NO `Requires=` per architect R-A5 and D2 — preserves the operator's debug affordance AND avoids the wasted-RAM side-effect on remote-PG hosts); verified by grep + a manual inspect against the template; the runbook drop-in example `/etc/systemd/system/ensemble-main.service.d/10-pg-order.conf` (D15) is the delivery mechanism for existing installs (Phase 3) |
-| **AC2** | `daemon/factory.py:232-284` `create_postgres_engine` carries `connect_timeout=BOOT_DB_TIMEOUT_S=10` alongside the existing `pool_pre_ping`; verified by grep showing the new arg; full `tests/unit` regression gate green |
+| **AC2** | `daemon/repositories/factory.py:232-284` `create_postgres_engine` carries `connect_timeout=BOOT_DB_TIMEOUT_S=10` alongside the existing `pool_pre_ping`; verified by grep showing the new arg; full `tests/unit` regression gate green |
 | **AC3** | Firewall-DROP mock hangs ≤10s per attempt (not 75–130s as previously); preflight `SELECT 1` is called ONCE per boot, not 3 times; `After=postgresql.service` is the ONLY PG-related unit directive (regression guard for the dropped `Wants=`); `Wants=` and `Requires=` are BOTH absent; verified by `tests/unit/test_connect_timeout.py` |
 | **AC4** | Existing `_boot_db_preflight` + launcher exit-75 lane covers the canonical boot path (both entry paths: `run_app.py:70` frozen binary; `__main__.py:467` `python -m daemon`); `BOOT_DB_TIMEOUT_S=10` is read from `daemon/constants.py:70`; launcher maps 75 → budget-exempt infinite backoff; no regression in preflight behaviour; verified by Task 1.3 (verification task; no code change) + `test_connect_timeout.py` |
 | **AC5** | `tests/conftest_worktree.py` fixture prevents silent tests-on-wrong-tree (mirrors prior-art Δ7 / D20) — `pytest tests/unit -q` REFUSES to run if `import daemon` resolves outside `/home/nea/ensemble-src-wt-hard-reboot-recovery`; **failure-injection check (A5/R-07)**: temporarily point the fixture at a fake path, observe LOUD refusal, revert |
@@ -67,7 +67,7 @@ No changes to `daemon/services/auto_continue_boot_pass.py` (read as the envelope
 - **Tight with** the worktree gate (Phase 0; AC5 is the tripwire for every other AC in this phase; without it, every AC can silently test the wrong branch).
 - **Loose with** the lifespan envelope (Phase 2 G2.A rides the same envelope shape at `api.py:582`; Phase 1 does NOT touch the lifespan, so the two compose cleanly).
 - **Independent of** the AutoContinue pass (read the envelope pattern only, never modify; the PG-wait lane is upstream of AutoContinue at `__main__.py:143-247`).
-- **Independent of** Phase 2 G2 (the MQ recovery service has its own lifespan envelope slot; Phase 1's `factory.py:connect_timeout` edit is orthogonal to G2's repo method).
+- **Independent of** Phase 2 G2 (the MQ recovery service has its own lifespan envelope slot; Phase 1's `daemon/repositories/factory.py:connect_timeout` edit is orthogonal to G2's repo method).
 - **Never touches** `daemon/services/auto_continue_boot_pass.py:230-494` (read-only anchor), `daemon/manager.py` body, `daemon/api.py:569` lifespan (no helper wrap), or the existing `find_stuck_messages` selector body.
 
 ---
@@ -90,9 +90,9 @@ No changes to `daemon/services/auto_continue_boot_pass.py` (read as the envelope
    ```
    Both green.
 
-3. **Multi-edit read-back (repo trap #2):** after editing `daemon/factory.py` AND `scripts/systemd/ensemble-daemon.service`, re-read both diffs (`git diff`) and confirm exactly the intended hunks landed:
+3. **Multi-edit read-back (repo trap #2):** after editing `daemon/repositories/factory.py` AND `scripts/systemd/ensemble-daemon.service`, re-read both diffs (`git diff`) and confirm exactly the intended hunks landed:
    - Unit file: ONE place gained `After=postgresql.service` + 2 comment lines. NO `Wants=`, NO `Requires=` line was added.
-   - `daemon/factory.py`: ONE arg `connect_timeout=BOOT_DB_TIMEOUT_S=10` was added to `create_postgres_engine`. NO other lines changed.
+   - `daemon/repositories/factory.py`: ONE arg `connect_timeout=BOOT_DB_TIMEOUT_S=10` was added to `create_postgres_engine`. NO other lines changed.
    - **NO** other lines in either file changed.
 
 4. **Systemd unit template verification (AC1, AC3 regression guard):**
@@ -124,7 +124,7 @@ No changes to `daemon/services/auto_continue_boot_pass.py` (read as the envelope
 | AC | Task(s) that produce it |
 |----|--------------------------|
 | AC1 | 1.1 (template edit) + Task 1.4 (regression-guard test) |
-| AC2 | 1.2 (`connect_timeout` in `factory.py`) |
+| AC2 | 1.2 (`connect_timeout` in `daemon/repositories/factory.py`) |
 | AC3 | 1.4 (boundary + regression-guard test) |
 | AC4 | 1.3 (verification task; no code change) + Task 1.4 |
 | AC5 | 0.3 (fixture + failure-injection) |
@@ -136,7 +136,7 @@ No changes to `daemon/services/auto_continue_boot_pass.py` (read as the envelope
 
 Revert commits delete:
 - the 3-line unit-template edit (no schema migration, so `git revert` is one atomic restore),
-- the 1-LOC `connect_timeout=BOOT_DB_TIMEOUT_S=10` addition to `daemon/factory.py:232-284`.
+- the 1-LOC `connect_timeout=BOOT_DB_TIMEOUT_S=10` addition to `daemon/repositories/factory.py:232-284`.
 
 No DB migration exists. No env-knob default is `ON` (the architect-folded A1 ELIMINATED `ENSEMBLE_INIT_RETRY` entirely per D16). The worktree gate (Phase 0 task 0.3) stays — it is the prior-art convention; the worktree itself is the rollback target. Phase 2/3/4 have not shipped yet, so no follow-up fallout.
 
@@ -149,7 +149,7 @@ If the rollback lands DURING the demo E2E (Phase 4), the runner reverts to "no G
 | Layer | What | Why |
 |-------|------|-----|
 | **Ops (this phase)** | 3-line unit template edit at `scripts/systemd/ensemble-daemon.service:84-87` (`After=postgresql.service` ONLY + 2 comment lines) | G6.A amended — the OPS half of the corrected mechanism; the bottleneck is unit ordering on canonical install shapes, NOT retry policy (architect A1) |
-| **Code (this phase)** | +1 LOC `connect_timeout=BOOT_DB_TIMEOUT_S=10` in `daemon/factory.py:232-284` (alongside existing `pool_pre_ping`) | Architect A1 amendment — removes the firewall-DROP hang (75–130s → ≤10s) that would have made any retry budget fiction; this is the only code change in Phase 1 |
+| **Code (this phase)** | +1 LOC `connect_timeout=BOOT_DB_TIMEOUT_S=10` in `daemon/repositories/factory.py:232-284` (alongside existing `pool_pre_ping`) | Architect A1 amendment — removes the firewall-DROP hang (75–130s → ≤10s) that would have made any retry budget fiction; this is the only code change in Phase 1 |
 | **Reused (no change)** | `_boot_db_preflight` at `daemon/__main__.py:143-247` + `run_app.py:70` (frozen) + `__main__.py:467` (`python -m daemon`); launcher exit-75 budget-exempt infinite backoff at `launcher.sh:1340-1346,1576-1590`; `BOOT_DB_TIMEOUT_S=10` at `daemon/constants.py:70` | The preflight + exit-75 IS the canonical PG-wait lane. Zero new code needed here. |
 | **Runbook (Phase 3)** | drop-in example `/etc/systemd/system/ensemble-main.service.d/10-pg-order.conf` (D15) for non-systemd-PG / existing installs; per-state RTO table for G8; D13 triage query | operator UX |
 | **Test (Phase 4)** | manual smoke on a real systemd-installed host (Phase 6 AC6) | real-environment proof |
