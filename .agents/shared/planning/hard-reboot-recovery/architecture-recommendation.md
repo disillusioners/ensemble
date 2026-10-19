@@ -135,7 +135,7 @@ Lifespan failure → uvicorn `sys.exit(STARTUP_FAILURE=3)` (`uvicorn/main.py:43,
 
 **Already shipped**: `daemon/__main__.py:143-247` does `SELECT 1` with `connect_timeout=BOOT_DB_TIMEOUT_S=10` (`constants.py:70`); exits **75** (EX_TEMPFAIL) on unreachable PG, **78** on auth refusal; called on both entry paths (`run_app.py:70` frozen binary; `__main__.py:467` `python -m daemon`). Launcher maps 75 → 5–60s capped backoff, **budget-exempt, infinite** (`launcher.sh:1340-1346,1576-1590`) — the canonical "wait for a transient dependency" lane. A 5-min WAL replay resolves with the daemon starting cleanly the moment PG accepts connections; no crash-budget burn; systemd never sees a failure.
 
-**Amendment (P1 rewrite)**: delete the in-lifespan retry helper; (i) verify preflight coverage is on the canonical boot path (it is, both entry modes); (ii) **+1 LOC: add `connect_timeout` to `create_postgres_engine`** (`factory.py:232-284` currently sets only `pool_pre_ping` — a firewall-DROP hangs 75–130s per attempt, making every retry budget fiction); (iii) template comments per §4.1. `ENSEMBLE_INIT_RETRY` knob: **eliminated** (no new knob; the preflight is the existing, better-shaped lane). Kill-switch count stays at one (`ENSEMBLE_HARD_REBOOT_BOOT_PASS`).
+**Amendment (P1 rewrite)**: delete the in-lifespan retry helper; (i) verify preflight coverage is on the canonical boot path (it is, both entry modes); (ii) **+1 LOC: add `connect_timeout` to `create_postgres_engine`** (`daemon/repositories/factory.py:232-284` currently sets only `pool_pre_ping` — a firewall-DROP hangs 75–130s per attempt, making every retry budget fiction); (iii) template comments per §4.1. `ENSEMBLE_INIT_RETRY` knob: **eliminated** (no new knob; the preflight is the existing, better-shaped lane). Kill-switch count stays at one (`ENSEMBLE_HARD_REBOOT_BOOT_PASS`).
 
 ### 4.4 Template edits do not reach existing installs
 
@@ -222,7 +222,7 @@ All amendments fit the plan's ≤315 total ceiling; the ≤70 Python ceiling is 
 | Constructor-first DB I/O defeats retry seam | A, B | `api.py:562-568`; `manager.py:657,751,755-757,773,973-1166` |
 | Preflight + exit-75 lane exists | A | `daemon/__main__.py:143-247`; `run_app.py:70`; `launcher.sh:1340-1346,1576-1590`; `constants.py:70` |
 | Exit-3 crash-budget abort | A | `uvicorn/main.py:43,614`; launcher crash lane |
-| Missing `connect_timeout` | A | `factory.py:232-284` |
+| Missing `connect_timeout` | A | `daemon/repositories/factory.py:232-284` |
 | Selector select-only; R-03 citation false | B, C | `repository.py:385-423` vs `dequeue():302-313` |
 | 3600s predicate boot-invalid | A, B, C | `repository.py:67,413-423`; claim stamps `:298-300,357-359` |
 | No READY consumer; task-driven dispatch | A, B, C | `repository.py:138-150,257-322`; `message_processing_pipeline.py:678`; `instance_messaging.py:2001-2340` |
