@@ -85,6 +85,7 @@ def _seed_asking_child(
     *,
     project_id: str = PROJECT_ID,
     with_pack: bool = True,
+    with_handle: bool = True,
 ) -> tuple[str, object | None]:
     """Seed a CHILD instance that ASKED a question.
 
@@ -97,6 +98,12 @@ def _seed_asking_child(
     ``with_pack=False`` seeds the child with the handle but WITHOUT any
     pack (RAM + shadow) — the "genuinely lost pack" shape.
 
+    ``with_handle=False`` seeds the child with the pack but WITHOUT the
+    awaiting-answer handle — the PRE-PAUSE WINDOW: ``question_tools.py``
+    stores the pack and stamps the durable shadow BEFORE the pause
+    fires, so a child that asked a moment ago holds a live pending pack
+    while no handle exists yet.
+
     Returns ``(child_id, pack_or_None)``.
     """
     child = _seed_instance(
@@ -106,8 +113,9 @@ def _seed_asking_child(
         parent_id=parent_id,
         agent_id="devops",
     )
-    # The authoritative awaiting-answer handle.
-    _seed_task(harness.engine, child, status=TaskStatus.PAUSED.value)
+    if with_handle:
+        # The authoritative awaiting-answer handle.
+        _seed_task(harness.engine, child, status=TaskStatus.PAUSED.value)
 
     if not with_pack:
         return child, None
@@ -120,6 +128,33 @@ def _seed_asking_child(
         child, "question_pack_payload", pack_to_dict(pack)
     )
     return child, pack
+
+
+def _seed_stale_pending_shadow(harness, instance_id: str) -> str:
+    """Stamp a PENDING durable shadow on ``instance_id`` WITHOUT a live pack.
+
+    The shadow's ``status`` is a FROZEN ask-time snapshot: the instance
+    metadata can still say ``pending`` long after the turn moved on
+    (the shadow is only cleared at answer consumption / dismiss). Such a
+    stale shadow must never win the asker resolution — it would route
+    the answer at an instance that is not waiting for one.
+
+    Returns the shadowed pack id.
+    """
+    pack_id = str(uuid.uuid4())
+    harness.instance_repo.set_metadata(instance_id, "question_pack_id", pack_id)
+    harness.instance_repo.set_metadata(
+        instance_id,
+        "question_pack_payload",
+        {
+            "instance_id": instance_id,
+            "id": pack_id,
+            "status": "pending",
+            "questions": [{"id": "q1", "text": "Stale question?"}],
+            "answers": {},
+        },
+    )
+    return pack_id
 
 
 def _seed_mission_work(harness, root_id: str) -> str:
@@ -722,3 +757,530 @@ class TestStaleAnsweredRootPackDoesNotShortCircuit:
         # were driven for the child, not for the root.
         assert harness.manager.resume_processing_job.await_args.args[0] == child
         harness.manager.resume_instance_cascade.assert_awaited_once_with(child)
+
+
+# =============================================================================
+# W-1 — SINGLE candidate-collection pass (remediation cycle 1)
+# =============================================================================
+
+
+class TestPrePauseWindowChildIsACandidate:
+    """W-1a — the PRE-PAUSE WINDOW.
+
+    ``question_tools.py`` stores the pack and stamps the durable shadow
+    BEFORE the ``awaiting_answer`` pause fires. A child that asked a
+    moment ago therefore holds a LIVE PENDING PACK while NO
+    awaiting-answer handle exists yet. The resolver used to scan for
+    paused handles only, so this geometry produced a false 404 — the
+    answer was never stored and the child stayed paused."""
+
+    def test_route_with_pack_id_reaches_the_pre_pause_child(
+        self, harness, jobs_client
+    ):
+        root = _seed_mission_root(harness)
+        child, pack = _seed_asking_child(harness, root, with_handle=False)
+        work_id = _seed_mission_work(harness, root)
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={
+                "answers": {"q1": "Approach A"},
+                "question_pack_id": pack.id,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["instance_id"] == child
+        assert body["answer_target"]["route"] == "subtree_pack_id"
+        assert harness.qm.get_question_pack(child).status == "answered"
+
+    def test_route_without_pack_id_reaches_the_pre_pause_child(
+        self, harness, jobs_client
+    ):
+        """Without a pack id the LIVE PENDING PACK is the only candidate
+        signal available in the pre-pause window — it must count."""
+        root = _seed_mission_root(harness)
+        child, pack = _seed_asking_child(harness, root, with_handle=False)
+        work_id = _seed_mission_work(harness, root)
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={"answers": {"q1": "Approach A"}},
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["instance_id"] == child
+        # No handle → the live pending pack is what identified it.
+        assert body["answer_target"]["route"] == "subtree_pending_pack"
+        assert harness.qm.get_question_pack(child).status == "answered"
+
+
+class TestAmbiguousCandidatesAreRefused:
+    """W-1b — the ambiguity refusal must NOT be pre-empted.
+
+    Root pending + child pending and NO pack id: the root used to win
+    unconditionally (the direct lane short-circuited the scan), so a
+    second asker was never even seen. Both surfaces now collect ALL
+    candidates first and refuse to guess."""
+
+    def test_route_refuses_root_plus_child_without_pack_id(
+        self, harness, jobs_client
+    ):
+        root = _seed_mission_root(harness)
+        root_pack = harness.qm.set_question_pack(
+            root, [{"id": "qr", "text": "Root question?"}]
+        )
+        harness.instance_repo.set_metadata(root, "question_pack_id", root_pack.id)
+        harness.instance_repo.set_metadata(
+            root, "question_pack_payload", pack_to_dict(root_pack)
+        )
+        _seed_task(harness.engine, root, status=TaskStatus.PAUSED.value)
+
+        child, child_pack = _seed_asking_child(harness, root)
+        work_id = _seed_mission_work(harness, root)
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={"answers": {"q1": "Approach A"}},
+        )
+
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == ErrorCodes.INVALID_REQUEST.value
+        # BOTH candidates are named — the caller must disambiguate.
+        assert root in detail["message"]
+        assert child in detail["message"]
+        assert set(detail["details"]["candidate_ids"]) == {root, child}
+
+        # NEITHER pack was answered — refusing is the contract.
+        assert harness.qm.get_question_pack(root).status == "pending"
+        assert harness.qm.get_question_pack(child).status == "pending"
+
+    def test_resolver_reports_both_candidates(self, harness):
+        """The shared resolver (both lanes) collects every candidate
+        before it returns."""
+        from daemon.services.answer_resolver import resolve_answer_target
+
+        root = _seed_mission_root(harness)
+        root_pack = harness.qm.set_question_pack(
+            root, [{"id": "qr", "text": "Root question?"}]
+        )
+        harness.instance_repo.set_metadata(root, "question_pack_id", root_pack.id)
+        _seed_task(harness.engine, root, status=TaskStatus.PAUSED.value)
+        child, child_pack = _seed_asking_child(harness, root)
+
+        target = resolve_answer_target(harness.manager, root, None)
+
+        assert target.asker_instance_id is None
+        assert target.error == "ambiguous"
+        assert set(target.candidate_ids) == {root, child}
+
+
+class TestStalePendingShadowIsNotAuthoritative:
+    """W-1c — the durable shadow is a FROZEN ask-time snapshot.
+
+    A stale PENDING shadow on the mission root (the pack is gone; the
+    turn moved on) must never short-circuit the resolution — it would
+    route the answer at an instance that is not waiting for one and
+    hide the LIVE question of the real asker."""
+
+    def test_route_ignores_stale_root_shadow_and_answers_the_child(
+        self, harness, jobs_client
+    ):
+        root = _seed_mission_root(harness)
+        _seed_stale_pending_shadow(harness, root)
+        # The root has NO live RAM pack and NO awaiting-answer handle.
+        assert harness.qm.get_question_pack(root) is None
+
+        child, pack = _seed_asking_child(harness, root)
+        work_id = _seed_mission_work(harness, root)
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={"answers": {"q1": "Approach A"}},
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["instance_id"] == child
+        assert body["answer_target"]["instance_id"] == child
+        assert harness.qm.get_question_pack(child).status == "answered"
+
+
+class TestMissionRootIsReachableWhenTheWorkResolvesToAChild:
+    """W-1d — the direct lanes were keyed on the WORK instance while the
+    scan ran on the MISSION ROOT: the root's own pending pack was
+    unreachable when the work resolved to a child. The mission root is
+    now folded into the reachable set."""
+
+    def test_route_answers_the_root_when_the_work_is_a_child(
+        self, harness, jobs_client
+    ):
+        root = _seed_mission_root(harness)
+        root_pack = harness.qm.set_question_pack(
+            root, [{"id": "qr", "text": "Root question?"}]
+        )
+        harness.instance_repo.set_metadata(root, "question_pack_id", root_pack.id)
+        harness.instance_repo.set_metadata(
+            root, "question_pack_payload", pack_to_dict(root_pack)
+        )
+        _seed_task(harness.engine, root, status=TaskStatus.PAUSED.value)
+
+        # A plain child — the work unit resolves to IT.
+        work_child = _seed_instance(
+            harness.engine,
+            status=InstanceStatus.RUNNING.value,
+            project_id=PROJECT_ID,
+            parent_id=root,
+            agent_id="worker",
+        )
+        work_id = _seed_task(
+            harness.engine, work_child, status=TaskStatus.RUNNING.value
+        )
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={
+                "answers": {"qr": "Root answer"},
+                "question_pack_id": root_pack.id,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["instance_id"] == root
+        assert body["answer_target"]["instance_id"] == root
+        assert body["answer_target"]["work_instance_id"] == work_child
+        assert body["answer_target"]["mission_root_id"] == root
+        assert harness.qm.get_question_pack(root).status == "answered"
+
+    def test_route_answers_the_root_without_a_pack_id(
+        self, harness, jobs_client
+    ):
+        """The root's LIVE pending pack must be reachable even when the
+        work resolves to a CHILD and no pack id was supplied.
+
+        The direct lanes were keyed on the work instance (the child), so
+        the root's own pack was invisible to them; and the old
+        handle-only subtree scan missed it while the root is still in
+        the PRE-PAUSE window (live pack, no handle yet)."""
+        root = _seed_mission_root(harness)
+        root_pack = harness.qm.set_question_pack(
+            root, [{"id": "qr", "text": "Root question?"}]
+        )
+        harness.instance_repo.set_metadata(root, "question_pack_id", root_pack.id)
+        harness.instance_repo.set_metadata(
+            root, "question_pack_payload", pack_to_dict(root_pack)
+        )
+        # NOTE: no paused task on the root → no awaiting-answer handle
+        # yet (the pre-pause window).
+
+        work_child = _seed_instance(
+            harness.engine,
+            status=InstanceStatus.RUNNING.value,
+            project_id=PROJECT_ID,
+            parent_id=root,
+            agent_id="worker",
+        )
+        work_id = _seed_task(
+            harness.engine, work_child, status=TaskStatus.RUNNING.value
+        )
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={"answers": {"qr": "Root answer"}},
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["instance_id"] == root
+        assert body["answer_target"]["work_instance_id"] == work_child
+        assert harness.qm.get_question_pack(root).status == "answered"
+
+
+# =============================================================================
+# W-2 — the candidate scan is NOT truncated when a pack id is supplied
+# =============================================================================
+
+
+class TestLargeSubtreeWithSuppliedPackId:
+    """W-2 — ``MAX_SUBTREE_SCAN`` truncated the candidate pass BEFORE the
+    pack-id scan, so an asker beyond the cap produced a false 404 even
+    though the caller named the pack exactly. A supplied pack id lifts
+    the cap (the enumeration stays bounded by the repository's own
+    traversal depth)."""
+
+    def test_asker_beyond_the_cap_is_reached_with_a_pack_id(
+        self, harness, jobs_client
+    ):
+        from daemon.services.answer_resolver import MAX_SUBTREE_SCAN
+
+        root = _seed_mission_root(harness)
+        work_id = _seed_mission_work(harness, root)
+
+        # A mission tree wider than the cap; the asker is the LAST child
+        # (well beyond MAX_SUBTREE_SCAN).
+        asker = None
+        asker_pack = None
+        for index in range(MAX_SUBTREE_SCAN + 17):
+            child, pack = _seed_asking_child(harness, root)
+            if index == MAX_SUBTREE_SCAN + 16:
+                asker, asker_pack = child, pack
+
+        assert asker is not None and asker_pack is not None
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={
+                "answers": {"q1": "Approach A"},
+                "question_pack_id": asker_pack.id,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["instance_id"] == asker
+        assert harness.qm.get_question_pack(asker).status == "answered"
+
+    def test_cap_still_applies_without_a_pack_id(self, harness):
+        """Without a pack id the cap holds (it bounds the per-instance
+        reads) — and the truncation is reported in the details."""
+        from daemon.services.answer_resolver import (
+            MAX_SUBTREE_SCAN,
+            resolve_answer_target,
+        )
+
+        root = _seed_mission_root(harness)
+        for _ in range(MAX_SUBTREE_SCAN + 5):
+            _seed_instance(
+                harness.engine,
+                status=InstanceStatus.RUNNING.value,
+                project_id=PROJECT_ID,
+                parent_id=root,
+                agent_id="worker",
+            )
+
+        target = resolve_answer_target(harness.manager, root, None)
+
+        assert target.error == "not_found"
+        assert target.subtree_truncated is True
+        assert target.detail_fields()["subtree_truncated"] is True
+
+
+# =============================================================================
+# W-4 — the TERMINAL signal survives the resolution
+# =============================================================================
+
+
+class TestTerminalWorkInstanceKeepsItsSignal:
+    """W-4 — before the asker resolution existed, the job-scoped route
+    answered the WORK instance directly and a terminal work instance
+    raised 410 ANSWER_TARGET_TERMINAL from the helper's pre-check. The
+    resolution must not swallow that signal behind a 404."""
+
+    @pytest.mark.parametrize(
+        "status",
+        [InstanceStatus.COMPLETED.value, InstanceStatus.TERMINATED.value],
+    )
+    def test_route_reports_answer_target_terminal(
+        self, harness, jobs_client, status
+    ):
+        root = _seed_instance(
+            harness.engine,
+            status=status,
+            project_id=PROJECT_ID,
+            agent_id="leader",
+        )
+        work_id = _seed_task(
+            harness.engine, root, status=TaskStatus.RUNNING.value
+        )
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={"answers": {"q1": "Approach A"}},
+        )
+
+        assert resp.status_code == 410, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == ErrorCodes.ANSWER_TARGET_TERMINAL.value
+        assert detail["details"]["work_instance_status"] == status
+        assert root in detail["message"]
+
+    @pytest.mark.asyncio
+    async def test_tool_lane_reports_answer_target_terminal(self, harness):
+        """The agent tool carries the same typed code."""
+        root = _seed_instance(
+            harness.engine,
+            status=InstanceStatus.COMPLETED.value,
+            project_id=PROJECT_ID,
+            agent_id="leader",
+        )
+        work_id = _seed_task(
+            harness.engine, root, status=TaskStatus.RUNNING.value
+        )
+
+        tool = _make_job_answer_tool(harness)
+        result = await tool.ainvoke(
+            {
+                "work_id": work_id,
+                "answers": {"q1": "Approach A"},
+                "question_pack_id": str(uuid.uuid4()),
+            }
+        )
+
+        assert "error" in result
+        assert ErrorCodes.ANSWER_TARGET_TERMINAL.value in result["error"]
+        assert "410" in result["error"]
+
+
+# =============================================================================
+# W-8 — test pins
+# =============================================================================
+
+
+class TestAskerIsRootFastPath:
+    """W-8(i) — the fast path (the work instance holds the requested
+    pack) must be PINNED: it is a distinct code path, not just another
+    spelling of the general scan. The pin asserts both the route label
+    AND the absence of any per-instance repository read — if the fast
+    path were deleted, the candidate pass would run and the read
+    counters would move."""
+
+    def test_fast_path_resolves_without_any_candidate_pass_read(
+        self, harness, monkeypatch
+    ):
+        from daemon.services.answer_resolver import resolve_answer_target
+
+        root = _seed_mission_root(harness)
+        pack = harness.qm.set_question_pack(
+            root, [{"id": "qr", "text": "Root question?"}]
+        )
+        harness.instance_repo.set_metadata(root, "question_pack_id", pack.id)
+        harness.instance_repo.set_metadata(
+            root, "question_pack_payload", pack_to_dict(pack)
+        )
+        _seed_task(harness.engine, root, status=TaskStatus.PAUSED.value)
+
+        reads = {"metadata": 0, "handle": 0, "tree": 0}
+        orig_meta = harness.instance_repo.get_metadata_value
+        orig_handle = harness.task_repo.find_suspended_turn_for_answer
+        orig_tree = harness.instance_repo.get_tree_ids_permanent
+
+        def _counted_meta(*args, **kwargs):
+            reads["metadata"] += 1
+            return orig_meta(*args, **kwargs)
+
+        def _counted_handle(*args, **kwargs):
+            reads["handle"] += 1
+            return orig_handle(*args, **kwargs)
+
+        def _counted_tree(*args, **kwargs):
+            reads["tree"] += 1
+            return orig_tree(*args, **kwargs)
+
+        monkeypatch.setattr(
+            harness.instance_repo, "get_metadata_value", _counted_meta
+        )
+        monkeypatch.setattr(
+            harness.task_repo, "find_suspended_turn_for_answer", _counted_handle
+        )
+        monkeypatch.setattr(
+            harness.instance_repo, "get_tree_ids_permanent", _counted_tree
+        )
+
+        target = resolve_answer_target(harness.manager, root, pack.id)
+
+        # The asker IS the root.
+        assert target.asker_instance_id == root
+        assert target.route == "direct_ram_pack"
+        assert target.subtree_scanned is False
+
+        # The fast path performed NO candidate-pass read at all.
+        assert reads == {"metadata": 0, "handle": 0, "tree": 0}
+
+    def test_route_answers_the_root_asker(self, harness, jobs_client):
+        """The behavioural pin: the asker IS the mission root (the
+        classic geometry) — the answer lands on the root."""
+        root = _seed_mission_root(harness)
+        pack = harness.qm.set_question_pack(
+            root, [{"id": "qr", "text": "Root question?"}]
+        )
+        harness.instance_repo.set_metadata(root, "question_pack_id", pack.id)
+        harness.instance_repo.set_metadata(
+            root, "question_pack_payload", pack_to_dict(pack)
+        )
+        _seed_task(harness.engine, root, status=TaskStatus.PAUSED.value)
+        work_id = _seed_mission_work(harness, root)
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={
+                "answers": {"qr": "Root answer"},
+                "question_pack_id": pack.id,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["instance_id"] == root
+        assert body["answer_target"]["route"] == "direct_ram_pack"
+        assert harness.qm.get_question_pack(root).status == "answered"
+
+
+class TestToolLaneErrorStringSeams:
+    """W-8(ii) — the tool lane formats its failures through
+    ``_format_answer_http_error`` (a DIFFERENT code path from the HTTP
+    lane). The typed codes must survive that shaping."""
+
+    @pytest.mark.asyncio
+    async def test_tool_404_no_pending_question_string(self, harness):
+        """No pack-holding asker anywhere in the mission → the tool
+        surfaces the typed 404 token (and the ``job_continue`` hint)."""
+        root = _seed_mission_root(harness)
+        work_id = _seed_mission_work(harness, root)
+
+        tool = _make_job_answer_tool(harness)
+        result = await tool.ainvoke(
+            {
+                "work_id": work_id,
+                "answers": {"q1": "Approach A"},
+                "question_pack_id": str(uuid.uuid4()),
+            }
+        )
+
+        assert "error" in result
+        assert ErrorCodes.NO_PENDING_QUESTION.value in result["error"]
+        assert "404" in result["error"]
+        assert "job_continue" in result["error"]
+        assert work_id in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_tool_400_invalid_request_string(self, harness):
+        """The tool CAN produce the typed 400: the supplied pack id
+        matches nobody while SEVERAL instances hold an awaiting-answer
+        handle."""
+        root = _seed_mission_root(harness)
+        child_a, _ = _seed_asking_child(harness, root)
+        child_b, _ = _seed_asking_child(harness, root)
+        work_id = _seed_mission_work(harness, root)
+
+        tool = _make_job_answer_tool(harness)
+        result = await tool.ainvoke(
+            {
+                "work_id": work_id,
+                "answers": {"q1": "Approach A"},
+                "question_pack_id": str(uuid.uuid4()),
+            }
+        )
+
+        assert "error" in result
+        assert ErrorCodes.INVALID_REQUEST.value in result["error"]
+        assert "400" in result["error"]
+        # Both candidate instances are named in the error string.
+        assert child_a in result["error"]
+        assert child_b in result["error"]
+        # Neither pack was answered.
+        assert harness.qm.get_question_pack(child_a).status == "pending"
+        assert harness.qm.get_question_pack(child_b).status == "pending"
