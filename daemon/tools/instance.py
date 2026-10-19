@@ -951,7 +951,7 @@ async def _auto_dispatch_first_turn(
             source=(
                 f"internal_agent:{caller_instance_id}"
                 if caller_instance_id
-                else "api"
+                else "auto_dispatch_fallback"
             ),
         )
         # ── R18 result-inspection invariant (2026-10-04) ──

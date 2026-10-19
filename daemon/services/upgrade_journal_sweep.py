@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from daemon.tools import upgrade_journal as uj
+from daemon.tools.upgrade_journal import RESTART_WAKE_SOURCE
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -424,7 +425,14 @@ class UpgradeJournalSweepService:
         out: list[tuple[uj.PendingWake, str]] = []
         for wake in pending:
             try:
-                outcome = uj.wake_terminal_event_after(journal, wake.armed_at)
+                # agent-restart N3: kind-aware reader — restart-kind wakes
+                # match the full WAKE superset; promote-kind wakes match
+                # _TERMINAL_EVENTS + ("restart",) ONLY (a stop_forced_kill
+                # / restart_gate / restart_abandoned event must never
+                # complete a promote wake — T0(b′)).
+                outcome = uj.wake_terminal_event_after(
+                    journal, wake.armed_at, kind=wake.kind
+                )
             except uj.JournalTorn:
                 logger.warning(
                     "UpgradeJournalSweepService: journal torn during "
@@ -520,13 +528,24 @@ class UpgradeJournalSweepService:
         list that the caller journals via ``wake_coalesce_overflow``
         history events.
 
-        Returns a dict keyed by ``arming_instance_id`` — ``{(wakes,
-        outcomes)}``. Preserves input order for stability.
+        agent-restart F-1 (§2.5 row (j) — mixed-kind coalescing BLOCKED):
+        the partition key is the COMPOSITE ``(arming_instance_id, kind)``.
+        A restart-kind wake and a promote-kind wake armed by the SAME
+        instance NEVER coalesce into one body/delivery (T0b mixed-group
+        pin) — the restart wake's reserved-source routing and
+        kind-scoped terminal matching must stay isolated from the
+        promote lane's. Returns a dict keyed by
+        ``(arming_instance_id, kind)`` — ``{(wakes, outcomes)}``.
+        Preserves input order for stability.
         """
-        groups: dict[str, list[tuple[uj.PendingWake, str]]] = {}
+        groups: dict[tuple[str, str], list[tuple[uj.PendingWake, str]]] = {}
         for wake, outcome in terminal_wakes:
-            groups.setdefault(wake.arming_instance_id, []).append((wake, outcome))
-        coalesced: dict[str, tuple[list[uj.PendingWake], list[str]]] = {}
+            groups.setdefault(
+                (wake.arming_instance_id, wake.kind), []
+            ).append((wake, outcome))
+        coalesced: dict[
+            tuple[str, str], tuple[list[uj.PendingWake], list[str]]
+        ] = {}
         for instance_id, items in groups.items():
             # Newest first by armed_at; secondary key: run_id (stable).
             sorted_items = sorted(
@@ -837,7 +856,14 @@ class UpgradeJournalSweepService:
             result = await self._manager.enqueue_message(
                 instance_id=ari_instance_id,
                 message=annotated_body,
-                source=wake.source or "api",
+                # agent-restart C-2: same reserved-lane rule as the direct
+                # deliver path — restart-kind wakes NEVER ride a user
+                # source, even on the ari fall-back.
+                source=(
+                    RESTART_WAKE_SOURCE
+                    if wake.kind == "restart"
+                    else (wake.source or "api")
+                ),
                 priority=2,
                 metadata=metadata,
             )
@@ -1012,7 +1038,7 @@ class UpgradeJournalSweepService:
             try:
                 deliverable = (
                     uj.wake_terminal_event_after(
-                        grace_journal, wake.armed_at
+                        grace_journal, wake.armed_at, kind=wake.kind
                     )
                     is not None
                 )
@@ -1232,13 +1258,21 @@ class UpgradeJournalSweepService:
             # ``PENDING_WAKE_COALESCE_MAX``).
             overflow_total = 0
             try:
-                groups_input: dict[str, list[tuple[uj.PendingWake, str]]] = {}
+                # agent-restart A-1: the overflow accounting mirrors the
+                # F-1 composite partition key ``(arming_instance_id,
+                # kind)`` EXACTLY — a restart/promote pair for one
+                # instance forms TWO groups, never one (T0b: 17 restart +
+                # 0 promote ⇒ 1 group; 17+17 ⇒ 2; mixed kinds ⇒ 0
+                # overflow where same-kind would have dropped one).
+                groups_input: dict[
+                    tuple[str, str], list[tuple[uj.PendingWake, str]]
+                ] = {}
                 for w, o in terminal_wakes:
                     groups_input.setdefault(
-                        w.arming_instance_id, []
+                        (w.arming_instance_id, w.kind), []
                     ).append((w, o))
-                for instance_id, items in groups_input.items():
-                    kept = len(coalesced.get(instance_id, ([], []))[0])
+                for group_key, items in groups_input.items():
+                    kept = len(coalesced.get(group_key, ([], []))[0])
                     overflow_total += max(0, len(items) - kept)
                 if overflow_total > 0:
                     try:
@@ -1271,7 +1305,7 @@ class UpgradeJournalSweepService:
             )
             # (h) per-group delivery.
             delivered_count = 0
-            for instance_id, (wakes, outcomes) in coalesced.items():
+            for (instance_id, _group_kind), (wakes, outcomes) in coalesced.items():
                 # Per-group try-block.
                 try:
                     if not wakes:
@@ -1301,19 +1335,26 @@ class UpgradeJournalSweepService:
                                 instance_id,
                             )
                             continue
-                        # Re-stamp window if any wake in the group has a
-                        # recorded source (defensive/redundant per ADR-041).
-                        for w in wakes:
-                            if w.source:
-                                try:
-                                    self._manager.stamp_user_origin_window(
-                                        w.arming_instance_id,
-                                        source=w.source,
-                                        message_id=w.message_id,
-                                    )
-                                except Exception:  # noqa: BLE001
-                                    pass
-                                break
+                        # agent-restart A-2 (§2.5 row (i)): the re-stamp
+                        # is KIND-GATED — restart-kind wakes NEVER re-stamp
+                        # a user-origin window (the wake turn must carry
+                        # NO direct provenance; the restart gate reads
+                        # class=direct only from a REAL user turn). The
+                        # gate is on ``wake.kind``, NEVER on a source
+                        # sentinel. Promote-kind wakes keep the ADR-041
+                        # re-stamp (defensive/redundant, unchanged).
+                        if head.kind != "restart":
+                            for w in wakes:
+                                if w.source:
+                                    try:
+                                        self._manager.stamp_user_origin_window(
+                                            w.arming_instance_id,
+                                            source=w.source,
+                                            message_id=w.message_id,
+                                        )
+                                    except Exception:  # noqa: BLE001
+                                        pass
+                                    break
                         metadata = {
                             "system_context": {
                                 "kind": "post_restart_arm_notify",
@@ -1330,7 +1371,16 @@ class UpgradeJournalSweepService:
                         result_msg = await self._manager.enqueue_message(
                             instance_id=head.arming_instance_id,
                             message=body,
-                            source=head.source or "api",
+                            # agent-restart C-2: restart-kind wakes deliver
+                            # on the RESERVED internal lane (never a user
+                            # source, never "api") — the wake turn can
+                            # never re-mint direct provenance (§2.5 row
+                            # (i)); promote-kind keeps today's routing.
+                            source=(
+                                RESTART_WAKE_SOURCE
+                                if head.kind == "restart"
+                                else (head.source or "api")
+                            ),
                             priority=2,
                             metadata=metadata,
                         )

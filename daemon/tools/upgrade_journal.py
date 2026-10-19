@@ -412,6 +412,14 @@ def ensure_extensions(install_dir: Path) -> dict[str, Any]:
     ``pending_wakes`` key (default ``{}``) is present. The wake record
     rides this same helper so every consumer (Phase 2 sweep, future
     forensic tools) sees a structurally stable top-level shape.
+
+    agent-restart §6.2 (decision A — REUSE, no new table, no migration):
+    also ensures ``restart_audits`` (dict keyed by ``run_id``, capped 50
+    drop-oldest) and ``restart_window`` (``{"events": [...]}`` — the
+    Python-only sliding budget list; deliberately NOT the fixed
+    ``JOURNAL_EMPTY`` rollback bucket, whose counter must survive the
+    restart it meters). New top-level keys are invisible to lib.sh's
+    field-targeted splice (ADR-034), so the shell lane is unaffected.
     """
     data = journal_read(install_dir)
     changed = False
@@ -427,9 +435,143 @@ def ensure_extensions(install_dir: Path) -> dict[str, Any]:
     if "pending_wakes" not in data:
         data["pending_wakes"] = {}
         changed = True
+    if "restart_audits" not in data:
+        data["restart_audits"] = {}
+        changed = True
+    if "restart_window" not in data:
+        data["restart_window"] = {"events": []}
+        changed = True
     if changed:
         journal_write(install_dir, data)
     return data
+
+
+# ── restart_audits + restart_window (agent-restart §6.2 — file-backed,
+# additive-only; zero .sql migration ⇒ rollback_safe stays true) ────────────
+
+RESTART_AUDITS_CAP: int = 50
+"""Drop-oldest cap on the ``restart_audits`` dict (journal RMW growth,
+§10 risk 10)."""
+
+RESTART_BUDGET_DEFAULT_24H: int = 3
+RESTART_BUDGET_DEFAULT_WINDOW_S: int = 24 * 60 * 60
+RESTART_MIN_UPTIME_DEFAULT_S: int = 600
+
+
+def _restart_budget_caps() -> tuple[int, int]:
+    """Env-overridable budget caps (§4 rails c1/c2; config knobs land in
+    daemon/config.py — this reader honors the same env names for the
+    journal-side helpers so the shell lane and the tool lane agree).
+    Fail-closed parsing: garbage → defaults."""
+    def _int_env(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None or not raw.strip():
+            return default
+        try:
+            val = int(raw.strip())
+        except ValueError:
+            return default
+        return val if val > 0 else default
+
+    return (
+        _int_env("ENSEMBLE_RESTART_BUDGET_24H", RESTART_BUDGET_DEFAULT_24H),
+        _int_env("ENSEMBLE_RESTART_BUDGET_WINDOW_S", RESTART_BUDGET_DEFAULT_WINDOW_S),
+    )
+
+
+def restart_budget_count(install_dir: Path) -> int:
+    """Sliding-window count of restart events (§4 rail c2 read side).
+
+    Reads ``restart_window.events`` (Python-only ISO list), drops entries
+    older than the window, and returns the surviving count. Torn journal
+    or malformed list → 0 (best-effort read; the arm path's increment
+    side re-reads under the lock).
+    """
+    try:
+        data = journal_read(install_dir)
+    except (JournalTorn, OSError):
+        return 0
+    return _count_window_events(data.get("restart_window"))
+
+
+def _count_window_events(window: Any) -> int:
+    _cap_n, window_s = _restart_budget_caps()
+    now_dt = datetime.now(tz=timezone.utc)
+    if not isinstance(window, dict):
+        return 0
+    events = window.get("events")
+    if not isinstance(events, list):
+        return 0
+    kept = 0
+    for ts in events:
+        parsed = parse_iso_utc(ts)
+        if parsed is not None and (now_dt - parsed).total_seconds() <= window_s:
+            kept += 1
+    return kept
+
+
+def restart_budget_increment(install_dir: Path) -> int:
+    """Increment-FIRST budget consume (V-1 budget envelope).
+
+    MUST be called INSIDE the caller-acquired journal lock, as the FIRST
+    journal mutation of the arm envelope (before ``in_flight`` /
+    ``pending_op`` / wake writes) — crash-ordering safety: an arm that
+    dies mid-envelope still consumed budget (over-count = safe; abandoned
+    arms consume, no refund). Appends ``now`` to ``restart_window.events``
+    and prunes entries older than the window. Returns the post-increment
+    count. Raises JournalTorn/OSError on journal failure (the arm path
+    unwinds — never arm with an unreadable budget).
+    """
+    data = journal_read(install_dir)
+    window = data.get("restart_window")
+    if not isinstance(window, dict):
+        window = {"events": []}
+    events = window.get("events")
+    if not isinstance(events, list):
+        events = []
+    _cap_n, window_s = _restart_budget_caps()
+    now = now_iso()
+    now_dt = parse_iso_utc(now)
+    events.append(now)
+    # Prune out-of-window entries in the same write (bounded growth).
+    if now_dt is not None:
+        events = [
+            ts for ts in events
+            if isinstance(ts, str)
+            and (
+                (parsed := parse_iso_utc(ts)) is not None
+                and (now_dt - parsed).total_seconds() <= window_s
+            )
+        ]
+    data["restart_window"] = {"events": events}
+    journal_write(install_dir, data)
+    return len(events)
+
+
+def record_restart_audit(install_dir: Path, run_id: str, fields: dict[str, Any]) -> None:
+    """Create/patch a ``restart_audits[run_id]`` row (§6.2).
+
+    CREATE shape: the arm path writes the static fields + pending
+    override set + ``outcome="pending"`` under the lock. PATCH shape:
+    later writers (boot settle, refusal path) merge keys in place. The
+    dict is capped at ``RESTART_AUDITS_CAP`` (drop-oldest by insertion
+    order). Raises JournalTorn/OSError on failure (callers wrap per
+    their never-wedge contract).
+    """
+    data = ensure_extensions(install_dir)
+    audits = data.get("restart_audits")
+    if not isinstance(audits, dict):
+        audits = {}
+    row = audits.get(run_id)
+    if not isinstance(row, dict):
+        row = {}
+    row.update(fields)
+    audits[run_id] = row
+    while len(audits) > RESTART_AUDITS_CAP:
+        oldest = next(iter(audits))
+        audits.pop(oldest, None)
+    data["restart_audits"] = audits
+    journal_write(install_dir, data)
 
 
 # ── Terminal-class alert emission (P2.3 B3 / T8a — D4 deterministic SSE) ────
@@ -782,6 +924,36 @@ def lock_run_id(install_dir: Path | None) -> str | None:
     return _lock_read_file(lock_dir(install_dir), "run_id") or None
 
 
+def lock_release_run_id(install_dir: Path, run_id: str) -> bool:
+    """Run_id-matched lock release — the boot-lane authority form
+    (agent-restart §3.3 N5 + rev-5 lock release).
+
+    ``lock_release`` is OWNERSHIP-guarded (current pid must match the
+    lock's owner file) — correct for the arming daemon, useless at boot
+    where the owner is dead by construction. This helper releases the
+    lock when its ``run_id`` file matches (the stale arm's identity),
+    which is the boot lane's equivalent proof of authority. A mismatch
+    or missing lock is a no-op (never releases someone else's lock).
+
+    Boot-lane ONLY: never call this from a live turn — a live executor
+    legitimately holds the lock while its run is in flight.
+    """
+    lock = lock_dir(install_dir)
+    if not lock.is_dir():
+        return True
+    held = _lock_read_file(lock, "run_id")
+    if held != run_id:
+        logger.warning(
+            "upgrade_journal: lock_release_run_id: lock run_id=%r ≠ %r — "
+            "leaving it (never release another run's lock)",
+            held or "?",
+            run_id,
+        )
+        return False
+    shutil.rmtree(lock, ignore_errors=True)
+    return True
+
+
 # ── pending_op (D-FA1.1 — the journaled contract) ───────────────────────────
 
 
@@ -928,6 +1100,15 @@ class PendingWake:
     Captured at arm time from the manager's in-memory user-origin window
     (RAM-only; wiped at boot — see ADR-041). The wake sweep (Phase 2)
     re-stamps the window from this record for the wake turn.
+
+    agent-restart C-2 (§2.4 arm-time capture): the record additionally
+    carries the PROVENANCE CLASS (``direct | inherited | ""`` — empty =
+    captured before the class existed / non-user-origin arm) and the root
+    provenance fields (root source, root message id, depth,
+    root_stamped_at). DISPLAY-ONLY: the wake turn itself delivers on the
+    reserved lane (restart-kind) and never re-mints a window — these
+    fields exist so the notify body can render the authorization age
+    (§5.3) without consulting in-memory state that died at restart.
     """
 
     run_id: str
@@ -940,6 +1121,12 @@ class PendingWake:
     message_metadata: dict[str, Any] = field(default_factory=dict)
     target_version: str | None = None
     mode: str | None = None      # restart-only
+    # agent-restart C-2 provenance capture (display-only on the wake lane)
+    provenance_class: str = ""   # "direct" | "inherited" | ""
+    provenance_root_source: str | None = None
+    provenance_root_message_id: str | None = None
+    provenance_depth: int = 0
+    provenance_stamped_at: str | None = None
     armed_at: str = field(default_factory=now_iso)
     expires_at: str = field(default_factory=now_iso)
     abandon_after: str = ""
@@ -971,6 +1158,15 @@ class PendingWake:
 # Kill-switch name (shared Phase 1 + Phase 2). The arm-side and sweep-side
 # both gate on the same env; default ON.
 ARM_NOTIFY_KILL_SWITCH_ENV = "ENSEMBLE_POST_RESTART_ARM_NOTIFY"
+
+# agent-restart C-2 (§2.5 row (i)): the reserved internal source restart-
+# kind wakes deliver on. Reserved by the ``system:`` prefix family
+# (daemon/constants.py RESERVED_SOURCE_PREFIXES) — the wake turn can never
+# re-mint direct provenance (classify_user_origin fails reserved sources
+# BEFORE the registry). The sweep's restart-kind enqueues (direct AND ari
+# fall-back) use this literal; the kind-gated re-stamp deletion (A-2)
+# complements it.
+RESTART_WAKE_SOURCE = "system:post_restart_arm_notify"
 
 
 def _arm_notify_enabled() -> bool:
@@ -1620,17 +1816,51 @@ _TERMINAL_EVENTS: tuple[str, ...] = (
 # vocabulary, P1 Item 5 — NOT the wake sweep's). Both surfaces derive
 # from ``_TERMINAL_EVENTS`` by tuple concat; the wake constant is the
 # authoritative one for the wake sweep.
-WAKE_TERMINAL_EVENTS: tuple[str, ...] = _TERMINAL_EVENTS + ("restart",)
+#
+# agent-restart (F-2 / C-3 / A-3, §3.3): the restart lane's OWN terminal
+# events live in a NEW concatenated constant — ``_TERMINAL_EVENTS`` is
+# NEVER mutated (the C-3 trap: adding these names there would let
+# restart events close PROMOTE ops via ``reconcile_pending_op``).
+# A-3 membership decision (build-start, recommended form adopted): the
+# three terminal restart events — ``restart_gate`` (the health-gate
+# classification/detail record written ALONGSIDE the existing terminal
+# in both directions), ``restart_abandoned`` (boot-lane stale-arm
+# closure), ``stop_forced_kill`` (NEW event written at the stop script's
+# TERM→KILL escalation) — join the WAKE superset; ``live-restart-refused``
+# does NOT (it is the restart.sh guard-trip journal event riding
+# ``executor_exit`` for terminal classification — no terminal-set
+# membership of its own). N6 asymmetry accepted: restart-kind wakes
+# match the full superset (conservative direction only) while
+# promote-kind wakes match only ``_TERMINAL_EVENTS + ("restart",)`` —
+# see the kind-aware reader below.
+RESTART_TERMINAL_EVENTS: tuple[str, ...] = (
+    "restart_gate",
+    "restart_abandoned",
+    "stop_forced_kill",
+)
+WAKE_TERMINAL_EVENTS: tuple[str, ...] = _TERMINAL_EVENTS + ("restart",) + RESTART_TERMINAL_EVENTS
 
 
 def wake_terminal_event_after(
-    journal: dict[str, Any], armed_at: str
+    journal: dict[str, Any], armed_at: str, kind: str = "promote"
 ) -> str | None:
     """Wake-owned terminal reader (Phase 2 T13, ADR-042 addendum r4 fold
-    C1/r5 fold N2). Mirrors ``_terminal_event_after`` exactly: TS-scope
-    (``entry.ts >= armed_at``) + event-class membership over
-    ``WAKE_TERMINAL_EVENTS``, NOTHING MORE — the reader is lane-agnostic
-    and has NO ``run_id`` knowledge.
+    C1/r5 fold N2; agent-restart N3 — KIND-AWARE). Mirrors
+    ``_terminal_event_after`` exactly: TS-scope (``entry.ts >= armed_at``)
+    + event-class membership, NOTHING MORE — the reader has NO ``run_id``
+    knowledge.
+
+    Kind scoping (agent-restart §3.3 N3 — BOTH sweep call sites updated
+    atomically: the deliver pass and the grace pass):
+
+    * ``kind == "restart"`` → full superset ``WAKE_TERMINAL_EVENTS``
+      (= ``_TERMINAL_EVENTS + ("restart",) + RESTART_TERMINAL_EVENTS``;
+      N6 asymmetry, conservative direction only).
+    * every other kind (promote, legacy records without a kind) →
+      ``_TERMINAL_EVENTS + ("restart",)`` — a ``stop_forced_kill`` /
+      ``restart_gate`` / ``restart_abandoned`` event must NEVER complete
+      a promote wake (T0(b′): promote wake NOT completed by
+      ``stop_forced_kill``).
 
     Returns the LATEST matching event name (or ``None``). The journal's
     history entries are FLAT ``{"ts": <iso>, "event": <name>, "detail":
@@ -1651,11 +1881,16 @@ def wake_terminal_event_after(
     ``JournalTorn`` or malformed history → ``None`` (best-effort; the
     sweep's caller logs and continues).
     """
+    events: tuple[str, ...]
+    if kind == "restart":
+        events = WAKE_TERMINAL_EVENTS
+    else:
+        events = _TERMINAL_EVENTS + ("restart",)
     return latest_matching_event(
         journal,
         run_id="<wake-reader-lane-agnostic>",  # accepted, NOT used
         armed_at=armed_at,
-        events=WAKE_TERMINAL_EVENTS,
+        events=events,
     )
 
 
@@ -1757,6 +1992,101 @@ def reconcile_pending_op(install_dir: Path) -> str | None:
             return None
         return f"pending_op run_id={op.run_id} cleared (expired, no executor evidence)"
     return None
+
+
+def close_stale_restart_arm(install_dir: Path) -> str | None:
+    """Boot-lane stale restart-arm closure (agent-restart §3.3 N5 + rev-5).
+
+    An abandoned restart arm NEVER expires on its own — without this
+    closure it wedges ``pipeline-busy`` indefinitely (and, since the arm
+    holds ``rollback.lock.d``, wedges the PROMOTE pipeline too until a
+    daemon restart). Called ONCE from the api lifespan boot reconcile
+    (BEFORE the wake boot sweep, so the wake-abandonment notify rides the
+    same boot pass — the ``restart_abandoned`` event is a WAKE-superset
+    member for restart-kind wakes).
+
+    Covers BOTH variants:
+      (a) ``pending_op.kind == "restart"`` with NO ``in_flight``;
+      (b) ``pending_op.kind == "restart"`` with ``in_flight`` still set
+          AND no live executor (``owner_pid`` dead or 0 / owner_kind
+          ``tool-arm`` — the executor never fired).
+
+    Actions (one convergence): journal a ``restart_abandoned`` event
+    (RESTART_TERMINAL_EVENTS member), clear ``pending_op`` +
+    ``pending_restart`` (+ ``in_flight`` when set), AND FREE the arm's
+    journal lock via the run_id-matched release — without the lock
+    release a killed arm keeps the promote pipeline wedged. NEVER
+    auto-executes a stale arm (F-3 invariant: daemon death between arm
+    and drain ⇒ abandoned, never execution).
+
+    Skip conditions (leave everything untouched): op is not
+    restart-kind; the executor pid is ALIVE (``os.kill(pid, 0)`` OK —
+    the run is genuinely in flight; periodic-tick skip preserved);
+    journal torn. Returns a one-line note when a closure happened,
+    ``None`` otherwise. Never raises.
+    """
+    try:
+        data = journal_read(install_dir)
+    except (JournalTorn, OSError) as exc:
+        logger.warning(
+            "upgrade_journal: close_stale_restart_arm journal read "
+            "FAILED (leaving any stale arm untouched): %s",
+            exc,
+        )
+        return None
+    op = PendingOp.from_json(data.get("pending_op"))
+    if op is None or op.kind != "restart":
+        return None
+    # Live-executor skip: pid alive ⇒ the run is in flight — boot pass
+    # must not race a surviving executor (unit outlives daemon death).
+    if op.owner_pid and op.owner_pid > 0:
+        try:
+            os.kill(op.owner_pid, 0)
+            logger.info(
+                "upgrade_journal: close_stale_restart_arm skipped — "
+                "executor pid=%s still alive for run_id=%s",
+                op.owner_pid, op.run_id,
+            )
+            return None
+        except OSError:
+            pass  # dead — fall through to closure
+    in_flight = data.get("in_flight")
+    variant = "b (in_flight set)" if isinstance(in_flight, dict) else "a (no in_flight)"
+    try:
+        ensure_extensions(install_dir)
+        if isinstance(in_flight, dict):
+            journal_update_field(install_dir, "in_flight", None)
+        clear_pending_op(install_dir)
+        journal_history_append(
+            install_dir,
+            "restart_abandoned",
+            f"stale restart arm run_id={op.run_id} closed at boot "
+            f"(variant {variant}; executor never observed — daemon died "
+            f"between arm and drain; NEVER auto-executed; pipeline + "
+            f"lock freed for the next arm)",
+        )
+    except (JournalTorn, OSError, KeyError) as exc:
+        logger.warning(
+            "upgrade_journal: close_stale_restart_arm closure write "
+            "FAILED (arm left as-is — operator inspects %s): %s",
+            journal_path(install_dir),
+            exc,
+        )
+        return None
+    # rev-5 lock release — run_id-matched; a mismatched/absent lock is a
+    # logged no-op (never free another run's lock).
+    try:
+        lock_release_run_id(install_dir, op.run_id)
+    except Exception as exc:  # noqa: BLE001 — never wedge boot
+        logger.warning(
+            "upgrade_journal: close_stale_restart_arm lock release "
+            "FAILED for run_id=%s: %s",
+            op.run_id, exc,
+        )
+    return (
+        f"stale restart arm run_id={op.run_id} closed at boot "
+        f"(variant {variant}); lock freed"
+    )
 
 
 # ── Daemonized executor spawn (D-FA1.3 / D4 / T5) ───────────────────────────
@@ -1897,7 +2227,16 @@ def executor_log_path(install_dir: Path) -> Path:
 # Sentinel object the spawner uses to thread the run_id (and ONLY the
 # run_id) into the unit name. Production code passes the run_id via the
 # existing reaper-enqueue seam, NOT through argv mutation.
+#
+# agent-restart §3.3 (V-7 / A-5 named constants): the prefix is
+# KIND-SCOPED. ``UNIT_NAME_PREFIX`` stays the promote default (byte-
+# compatible with every existing reference/test); restart executors
+# pass ``unit_prefix=UNIT_NAME_PREFIX_RESTART`` so their transient unit
+# reads ``ensemble-restart-<run_id>``. All four unit-name sites below
+# (:1900 constant, :2116 build_service_argv, :2197 _reset_failed_unit,
+# :2362 spawn_executor note) consume the parameterized prefix.
 UNIT_NAME_PREFIX = "ensemble-upgrade-"
+UNIT_NAME_PREFIX_RESTART = "ensemble-restart-"
 
 # LOUD-refusal journal token (ruling R6 / hard rule 4 of the commission).
 # Journaled as a ``refusal`` history event detail suffix
@@ -2083,6 +2422,7 @@ def build_service_argv(
     env: dict[str, str],
     log_path: Path,
     unit_properties: list[str] | None = None,
+    unit_prefix: str = UNIT_NAME_PREFIX,
 ) -> list[str]:
     """Build the systemd-run argv running ``inner_argv`` inside a transient
     SERVICE unit named ``ensemble-upgrade-<run_id>`` (rulings R1-R3).
@@ -2113,7 +2453,7 @@ def build_service_argv(
     """
     if not run_id or not _UNIT_NAME_SAFE_RE.match(run_id):
         raise ValueError(f"unsafe systemd unit run_id: {run_id!r}")
-    unit = f"{UNIT_NAME_PREFIX}{run_id}"
+    unit = f"{unit_prefix}{run_id}"
     props: list[str] = [f"Restart={_RESTART_LOAD_BEARING}"]  # R1, always
     for prop in (unit_properties or []):
         key, _, val = prop.partition("=")
@@ -2187,14 +2527,19 @@ def _resolve_run_id(argv: list[str], run_id: str | None) -> str:
     return f"spawn-{os.getpid()}-{int(time.time())}"
 
 
-def _reset_failed_unit(run_id: str, bus_kind: str, env: dict[str, str]) -> None:
+def _reset_failed_unit(
+    run_id: str,
+    bus_kind: str,
+    env: dict[str, str],
+    unit_prefix: str = UNIT_NAME_PREFIX,
+) -> None:
     """Ruling R4 hygiene — ``systemctl [--user] reset-failed <unit>``
     BEFORE the start, so a stale FAILED unit from a prior same-name run (a
     crash without --collect, or a prior daemon generation) cannot wedge
     the new transient start. Best-effort: any failure logs a warning and
     continues — the systemd-run start itself is the loud authority on
     bus/authorization problems."""
-    unit = f"{UNIT_NAME_PREFIX}{run_id}"
+    unit = f"{unit_prefix}{run_id}"
     argv = ["systemctl"]
     if bus_kind == "user":
         argv.append("--user")
@@ -2270,6 +2615,7 @@ def spawn_executor(
     extra_env: dict[str, str] | None = None,
     *,
     run_id: str | None = None,
+    unit_prefix: str = UNIT_NAME_PREFIX,
 ) -> tuple[int, str]:
     """Daemonize the executor payload. THREE BRANCHES (Option D):
 
@@ -2315,12 +2661,18 @@ def spawn_executor(
     survive BOTH tool-harness teardown AND daemon death.
 
     ``run_id`` (kw-only): when supplied, the UNIT NAME carries it directly
-    (``ensemble-upgrade-<run_id>``), giving journal↔unit correlation and a
+    (``<unit_prefix><run_id>``), giving journal↔unit correlation and a
     stable per-promote unit identity even when argv lacks ``--run-id``.
     When ``None``, falls back to argv extraction (legacy behavior) and
     finally to a pid+epoch sentinel. The manager's drain path threads
     ``run_id`` explicitly so the unit name is reliable; tests and any
     future call site may omit it.
+
+    ``unit_prefix`` (kw-only, A-5): the transient-unit name family —
+    ``UNIT_NAME_PREFIX`` (``ensemble-upgrade-``, default/promote) or
+    ``UNIT_NAME_PREFIX_RESTART`` (``ensemble-restart-``, agent-restart
+    §3.3 V-7). Every unit-name site downstream (argv build, R4
+    reset-failed, mode note) consumes the same parameter.
 
     Raises:
         ExecutorSystemdUnavailable: branch 3 only (loud refusal).
@@ -2339,9 +2691,11 @@ def spawn_executor(
 
     if branch == SERVICE_BRANCH_SERVICE:
         run_id = _resolve_run_id(argv, run_id)
-        wrapped_argv = build_service_argv(argv, run_id, bus_kind, env, log)
+        wrapped_argv = build_service_argv(
+            argv, run_id, bus_kind, env, log, unit_prefix=unit_prefix
+        )
         # R4 hygiene BEFORE the start (best-effort; see helper).
-        _reset_failed_unit(run_id, bus_kind, env)
+        _reset_failed_unit(run_id, bus_kind, env, unit_prefix=unit_prefix)
         proc = subprocess.Popen(
             wrapped_argv,
             stdin=subprocess.DEVNULL,
@@ -2359,7 +2713,7 @@ def spawn_executor(
             start_new_session=False,
             close_fds=True,
         )
-        note = f"service={UNIT_NAME_PREFIX}{run_id} (bus={bus_kind})"
+        note = f"service={unit_prefix}{run_id} (bus={bus_kind})"
         try:
             rc = proc.wait(timeout=SERVICE_CLIENT_FAST_FAIL_S)
         except subprocess.TimeoutExpired:

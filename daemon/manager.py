@@ -187,6 +187,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ── agent-restart §2.4: inherited-provenance depth cap ──────────────────────
+# Mechanism-B inherited windows deepen at most 4 levels
+# (user → ari → maintenancer → grandchild); a dispatch whose claim would
+# exceed the cap is CLEARED, never minted (fail-closed; §2.5 vector (b)).
+_INHERITED_PROVENANCE_MAX_DEPTH: int = 4
+
 # ── O3 instance-graph cache bounding (resource-cost-control, 2026-10-18) ──
 # DEFAULT post-terminal TTL (hours) for releasing in-memory graphs of
 # non-active cached instances. Both constants are the DEFAULT tier of
@@ -1515,6 +1521,30 @@ class InstanceManager:
         # say why. In-memory only, dies with the daemon (the gate refusal
         # degrades to "no stamp recorded" after a restart — still fail-closed).
         self._user_origin_last_stamp: dict[str, dict] = {}
+
+        # Per-instance INHERITED provenance windows (agent-restart §2.4,
+        # mechanism B — system-minted inherited stamp). Written ONLY by the
+        # dispatch funnel (:meth:`_inherit_provenance_window`, called from
+        # the :meth:`_process_message_with_tracking` stamp site adjacent to
+        # the ``stamp_user_origin_window`` call) when the dispatch source is
+        # ``internal_agent:<caller_iid>`` AND the caller's direct window or
+        # inherited entry is live at claim time. Entry shape:
+        # ``{root_source, root_message_id, root_stamped_at, depth,
+        # expires_at}`` — the restart provenance gate reads BOTH stores via
+        # a dedicated helper; the upgrade factor-2 gate NEVER touches this
+        # store (§2.6 decision-layer isolation). Anti-spoof: depth cap 4,
+        # ``expires_at = min(parent_expiry, now + 60min)`` (monotonic decay),
+        # cleared on every non-inheriting dispatch, wiped by daemon restart
+        # (fail-closed), revive = fresh dispatch. In-memory only.
+        self._inherited_provenance_windows: dict[str, dict] = {}
+
+        # Runtime SettingsService seam (agent-restart §5.2): the api
+        # lifespan wires the router-module service onto the manager so the
+        # restart arm path can read pending managed-setting overrides
+        # (``requires_restart ∧ divergent``) inside the lock-holding try.
+        # ``None`` until wired (unit seams, partial boot) — the arm path
+        # degrades to an empty override list, never blocks.
+        self._settings_service: Any = None
 
         # Per-instance DEFERRED SYSTEM-EXECUTION marker (D-FA1.4). The actor
         # tools (system_restart / system_upgrade) set it while arming (the
@@ -4834,6 +4864,104 @@ class InstanceManager:
                 exc,
             )
 
+    def _inherit_provenance_window(self, instance_id: str, source: str | None) -> None:
+        """Mint (or CLEAR) the per-instance inherited provenance window
+        (agent-restart §2.4, mechanism B — system-minted inherited stamp).
+
+        Called ONLY from the dispatch funnel (the stamp site in
+        :meth:`_process_message_with_tracking`) — never from the wake-sweep
+        re-stamp, never from tool code. In-memory, never raises, and leaves
+        ``_user_origin_windows`` byte-identical (the upgrade factor-2 gate
+        reads that store exactly as before; the restart gate reads BOTH via
+        its own helper — §2.6 two-layer isolation).
+
+        Inherit lane (N1): keys ONLY on ``internal_agent:<caller_iid>``.
+        ``internal_invoke_and_wait:{parent}`` NEVER inherits (reserved; the
+        motivating delegation runs on ``send_message``/``internal_agent:``).
+        Every other source (``system:*``, ``agent:*``,
+        ``internal_invoke_and_wait:*``, ``internal_report:*``, ``None``,
+        plain ``api``/chat sources) CLEARS the inherited entry — per-turn
+        semantics, fail-closed. Silent resume is the ONLY skip (the funnel
+        never calls this on a silent dispatch — the original turn's entry
+        stands; §2.4 residual: silent resume MUST NOT inherit, and it
+        cannot — no call happens).
+
+        Entry: ``{root_source, root_message_id, root_stamped_at, depth,
+        expires_at}`` where ``expires_at = min(parent_expiry, now + 60min)``
+        (monotonic decay) and depth caps at 4 (a depth-cap overflow refuses
+        the mint — clears — rather than deepening an unbounded chain).
+        """
+        try:
+            prefix = "internal_agent:"
+            if not isinstance(source, str) or not source.startswith(prefix):
+                # Non-inheriting dispatch — per-turn clear (fail-closed).
+                self._inherited_provenance_windows.pop(instance_id, None)
+                return
+            caller_iid = source[len(prefix):].strip()
+            if not caller_iid:
+                # Malformed internal_agent source (empty caller) — clear.
+                self._inherited_provenance_windows.pop(instance_id, None)
+                return
+            from daemon.tools import upgrade_journal as _uj
+
+            now = _uj.now_iso()
+            now_dt = _uj.parse_iso_utc(now)
+            if now_dt is None:  # pragma: no cover — now_iso is always parseable
+                self._inherited_provenance_windows.pop(instance_id, None)
+                return
+            ttl_expiry = _uj.parse_iso_utc(_uj.iso_plus(now, _uj.NONCE_TTL_S))
+            # Claim: the caller's DIRECT window (live at claim time) …
+            direct = self._user_origin_windows.get(caller_iid)
+            inherited = self._inherited_provenance_windows.get(caller_iid)
+            parent: dict | None = None
+            depth = 1
+            if isinstance(direct, dict):
+                exp = _uj.parse_iso_utc(direct.get("expires_at"))
+                if exp is not None and exp >= now_dt:
+                    parent = {
+                        "root_source": direct.get("source"),
+                        "root_message_id": direct.get("message_id"),
+                        "root_stamped_at": direct.get("stamped_at"),
+                        "depth": 0,
+                        "expires_at": direct.get("expires_at"),
+                    }
+            if parent is None and isinstance(inherited, dict):
+                exp = _uj.parse_iso_utc(inherited.get("expires_at"))
+                if exp is not None and exp >= now_dt:
+                    parent = dict(inherited)
+                    depth = int(inherited.get("depth") or 0) + 1
+            if parent is None:
+                # No live caller authorization at claim time — clear
+                # (fail-closed; §2.2 verdict: the delegation cannot pass).
+                self._inherited_provenance_windows.pop(instance_id, None)
+                return
+            if depth > _INHERITED_PROVENANCE_MAX_DEPTH:
+                # Depth cap — refuse the mint (clear), never deepen past 4.
+                self._inherited_provenance_windows.pop(instance_id, None)
+                return
+            # Monotonic decay: expires_at = min(parent_expiry, now + TTL).
+            parent_exp = _uj.parse_iso_utc(parent.get("expires_at"))
+            final_exp = parent_exp if (
+                parent_exp is not None and parent_exp < ttl_expiry
+            ) else ttl_expiry
+            self._inherited_provenance_windows[instance_id] = {
+                "root_source": parent.get("root_source"),
+                "root_message_id": parent.get("root_message_id"),
+                "root_stamped_at": parent.get("root_stamped_at"),
+                "depth": depth,
+                "expires_at": final_exp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+        except Exception as exc:  # never break message dispatch
+            logger.warning(
+                "_inherit_provenance_window failed for %s: %s",
+                instance_id[:8] if isinstance(instance_id, str) else instance_id,
+                exc,
+            )
+            try:
+                self._inherited_provenance_windows.pop(instance_id, None)
+            except Exception:  # pragma: no cover — defensive
+                pass
+
     def set_pending_system_execution(self, instance_id: str, spec: dict) -> None:
         """Arm the post-turn executor trigger marker (D-FA1.4). Called by the
         actor tools at arm time; consumed by
@@ -4938,6 +5066,19 @@ class InstanceManager:
                 ]
                 if spec.get("reason"):
                     argv += ["--reason", str(spec["reason"])]
+                # agent-restart §3.4 (C-1/F-3): the ONLY sanctioned
+                # attestation lane for the restart executor. The arm path
+                # stamps ``spec["provenance_ok"] = True`` POST-GATE (the
+                # marker ⇒ gate-passed invariant); the drain mints
+                # ``ENSEMBLE_RESTART_LIVE=1`` IFF the marker is present —
+                # absent ⇒ nothing is minted and restart.sh's
+                # ``require_live_guard_restart`` exits 78 fail-closed
+                # (daemon death between arm and drain ⇒ the op is closed
+                # ``restart_abandoned`` by the boot lane, never executed).
+                # Deliberately disjoint from ``ENSEMBLE_UPGRADE_LIVE``
+                # (§3.4 — the two vars stay disjoint forever; T0c).
+                if spec.get("provenance_ok"):
+                    extra_env["ENSEMBLE_RESTART_LIVE"] = "1"
             elif kind == "promote":
                 # Handoff: promote.sh acquires the lock itself at preflight;
                 # releasing here keeps exactly one lock holder at a time.
@@ -4992,7 +5133,17 @@ class InstanceManager:
                 return False
 
             child_pid, _spawn_mode_note = _uj.spawn_executor(
-                argv, install_dir, extra_env, run_id=run_id
+                argv, install_dir, extra_env, run_id=run_id,
+                # agent-restart §3.3 (V-7 / A-5): transient unit names are
+                # kind-scoped — ``ensemble-restart-<run_id>`` for restart
+                # executors, ``ensemble-upgrade-<run_id>`` (the default
+                # promote prefix) otherwise. The prefix is a named
+                # constant threaded through every UNIT_NAME site.
+                unit_prefix=(
+                    _uj.UNIT_NAME_PREFIX_RESTART
+                    if kind == "restart"
+                    else _uj.UNIT_NAME_PREFIX
+                ),
             )
             # Option D (Stage-2.2a): log the ACTUAL spawn mode — the
             # transient-service unit name when the service branch fired,
@@ -9400,6 +9551,14 @@ class InstanceManager:
         # window alive (fail-closed direction).
         if not silent:
             self.stamp_user_origin_window(instance_id, message_source, message_id)
+            # agent-restart §2.4 (mechanism B): inherited-provenance lane —
+            # mint/clear the SEPARATE inherited store at the SAME funnel.
+            # ``stamp_user_origin_window`` itself stays byte-identical
+            # (the upgrade factor-2 read of ``_user_origin_windows`` and
+            # its write-set are untouched); the inherited store is written
+            # ONLY here (the funnel) — the wake-sweep re-stamp path never
+            # touches it (§2.1 stamp-machinery call-site discipline).
+            self._inherit_provenance_window(instance_id, message_source)
 
         return await self._messaging_service._process_message_with_tracking(
             instance_id=instance_id,

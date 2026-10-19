@@ -922,6 +922,16 @@ RESERVED_SOURCE_PREFIXES: frozenset[str] = frozenset({
     "admin-endpoint",
     "auto-scan",
     "scheduler",
+    # agent-restart §2.5 row (h) (T0a′): the R18 auto-dispatch
+    # first-turn fallback previously minted a bare ``"api"`` source when
+    # no caller id resolved — an AGENT-path dispatch stamped with the
+    # HTTP-chat-lane literal, which is inside the provenance arm set
+    # (``classify_user_origin`` exact-``"api"``). The fallback now mints
+    # this reserved literal (never user-origin — fail-closed), removing
+    # an agent-path-minted direct-window input from BOTH the upgrade
+    # factor-2 classifier surface (strictly-strengthening, N4) and the
+    # restart provenance gate.
+    "auto_dispatch_fallback",
 })
 
 

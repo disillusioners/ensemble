@@ -2442,6 +2442,29 @@ async def lifespan(app: FastAPI):
                     "UpgradeJournalSweepService boot reconcile: %s",
                     boot_note,
                 )
+            # agent-restart §3.3 N5 + rev-5: boot-lane stale restart-arm
+            # closure — an abandoned kind=restart op (daemon died between
+            # arm and drain) NEVER expires on its own; this closes it as
+            # ``restart_abandoned`` + frees the run_id-matched journal
+            # lock BEFORE the wake boot sweep below (the event is a WAKE
+            # superset member, so the arming instance receives the
+            # wake-abandonment notify on this same boot pass). Never
+            # auto-executes. Wrapped — never aborts boot.
+            try:
+                stale_note = _boot_uj.close_stale_restart_arm(
+                    upgrade_install_dir
+                )
+                if stale_note:
+                    logger.info(
+                        "agent-restart boot stale-arm closure: %s",
+                        stale_note,
+                    )
+            except Exception as stale_exc:  # noqa: BLE001 — never wedge boot
+                logger.warning(
+                    "agent-restart boot stale-arm closure failed "
+                    "(periodic reconcile remains): %s",
+                    stale_exc,
+                )
             # Post-Restart Arm-Notify (Phase 2 T9, D-FA5.4 + ADR-040):
             # the wake sweep's boot pass. Wrapped in try/except (never
             # aborts boot); the wake sweep itself is wrapped at TWO levels
@@ -2756,8 +2779,14 @@ async def lifespan(app: FastAPI):
     )
     from daemon.services.settings_service import SettingsService
 
-    set_settings_service(SettingsService(engine=manager.engine))
+    _boot_settings_service = SettingsService(engine=manager.engine)
+    set_settings_service(_boot_settings_service)
     set_settings_resolution_snapshot(settings_snapshot)
+    # agent-restart §5.2 (access seam): the SAME service instance is wired
+    # onto the manager so the restart arm path can read the pending
+    # managed-setting override set (``requires_restart ∧ divergent``)
+    # inside its lock-holding try — no second engine, no second service.
+    manager._settings_service = _boot_settings_service
 
     # Also set project repository for queues router (has its own dependency injection)
     from daemon.routers.queues import set_project_repository as set_queues_project_repository
