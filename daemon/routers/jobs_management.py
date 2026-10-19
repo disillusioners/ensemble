@@ -1158,23 +1158,35 @@ async def answer_questions_job(
     (the candidates are named) rather than answered to an arbitrary
     instance. Supplying the pack id always selects the right asker.
 
-    Errors (job-addressed surface):
+    Errors (job-addressed surface — the SAME contract the ``job_answer``
+    agent tool documents):
+
         * ``404 JOB_NOT_FOUND`` — the ``work_id`` resolves to no work.
-        * ``400 INVALID_REQUEST`` — ambiguous asker (see above) or a
-          malformed ``answers`` body.
+        * ``400 INVALID_REQUEST`` — the asker could not be resolved to
+          exactly ONE instance of the mission (the resolver refuses to
+          guess; the candidates are named), OR the asker search was
+          TRUNCATED because the mission is wider than the scan cap and
+          no ``question_pack_id`` was supplied (a truncated search is
+          never reported as a completed one), OR a malformed
+          ``answers`` body.
         * ``400 QUESTION_PACK_MISMATCH`` — the supplied
           ``question_pack_id`` is not the pack the resolved asker holds.
         * ``404 NO_PENDING_QUESTION`` — no instance of the mission holds
-          a pack (the subtree was scanned).
+          a pack (the mission was searched).
         * ``410 ANSWER_TARGET_TERMINAL`` — the work instance is
-          COMPLETED/TERMINATED (the signal survives the resolution) and
-          NO pack-holding asker was found anywhere in the mission: if a
-          live asker exists elsewhere in the mission, the answer is
-          delivered THERE instead of raising.
+          COMPLETED/TERMINATED and NO pack-holding asker was found
+          anywhere in the mission: if a live asker exists elsewhere in
+          the mission, the answer is delivered THERE instead of raising.
         * ``410 QUESTION_PACK_LOST`` — the asker was identified but the
           pack is gone from both its memory store and its durable
           metadata shadow.
         * ``503`` — writes are paused (migration mode).
+
+    Idempotency: re-sending an answer for a pack that was ALREADY
+    delivered returns ``200`` with ``status="already_delivered"``
+    (the exactly-once CAS loser — OQ-3 / §8.5). The holder of an
+    ANSWERED pack is still the holder of that pack id, so the retry
+    reaches it instead of 404-ing.
 
     Resolution is watcher-independent: the pack lives on the ASKER;
     ``WorkResolver.resolve_work(work_id)`` maps the work_id to the
@@ -1299,6 +1311,9 @@ async def answer_questions_job(
     # ``answer_target`` is ADDITIVE: it names the asker the answer was
     # actually delivered to (plus how it was resolved) so a watcher
     # can see that a mission-root work_id routed to a child asker.
+    # ``reachable_count`` / ``scan_uncapped`` carry the resolver's scan
+    # signals — the uncapped search happens on the SUCCESS path, so
+    # they must be visible here and not only in the error envelope.
     return {
         "work_id": work_id,
         "answer_target": {
@@ -1306,6 +1321,8 @@ async def answer_questions_job(
             "work_instance_id": work_instance_id,
             "mission_root_id": target.mission_root_id,
             "route": target.route,
+            "reachable_count": target.reachable_count,
+            "scan_uncapped": target.scan_uncapped,
         },
         **result,
     }

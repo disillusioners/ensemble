@@ -1063,8 +1063,10 @@ class TestLargeSubtreeWithSuppliedPackId:
         assert harness.qm.get_question_pack(asker).status == "answered"
 
     def test_cap_still_applies_without_a_pack_id(self, harness):
-        """Without a pack id the cap holds (it bounds the per-instance
-        reads) — and the truncation is reported in the details."""
+        """Without a pack id the cap holds — and a TRUNCATED search is
+        never reported as a completed one (N-5): the resolver refuses
+        with the ``truncated`` error kind instead of answering (or
+        404-ing) from an incomplete candidate set."""
         from daemon.services.answer_resolver import (
             MAX_SUBTREE_SCAN,
             resolve_answer_target,
@@ -1082,9 +1084,10 @@ class TestLargeSubtreeWithSuppliedPackId:
 
         target = resolve_answer_target(harness.manager, root, None)
 
-        assert target.error == "not_found"
+        assert target.error == "truncated"
         assert target.subtree_truncated is True
         assert target.detail_fields()["subtree_truncated"] is True
+        assert target.reachable_count == MAX_SUBTREE_SCAN + 6
 
 
 # =============================================================================
@@ -1302,3 +1305,328 @@ class TestToolLaneErrorStringSeams:
         # Neither pack was answered.
         assert harness.qm.get_question_pack(child_a).status == "pending"
         assert harness.qm.get_question_pack(child_b).status == "pending"
+
+
+# =============================================================================
+# N-1 (BLOCKING) — the duplicate-answer idempotency contract
+# =============================================================================
+
+
+def _seed_answered_pack_asker(harness, parent_id: str):
+    """Seed a CHILD whose question was ALREADY answered.
+
+    The exact geometry of the regression: the pack is ANSWERED (a RAM
+    pack SURVIVES answer consumption — only the durable metadata
+    shadow is cleared at consumption), the turn has resumed (NO
+    awaiting-answer handle), and the shadow is gone.
+
+    A retry of that already-delivered answer must reach the holder:
+    the shared helper's exactly-once CAS then LOSES and returns the
+    documented ``200 resume_route="already_delivered"`` (OQ-3 / §8.5).
+    Filtering the holder out by pack STATUS turns the retry into a
+    404 (and, on a terminal work instance, into a false 410).
+
+    Returns ``(child_id, pack)``.
+    """
+    child = _seed_instance(
+        harness.engine,
+        status=InstanceStatus.PAUSED.value,
+        project_id=PROJECT_ID,
+        parent_id=parent_id,
+        agent_id="devops",
+    )
+    pack = harness.qm.set_question_pack(
+        child, [{"id": "q1", "text": "Approach A or B?"}]
+    )
+    harness.instance_repo.set_metadata(child, "question_pack_id", pack.id)
+    harness.instance_repo.set_metadata(
+        child, "question_pack_payload", pack_to_dict(pack)
+    )
+    # The answer consumption: the pack flips to ``answered`` and the
+    # durable shadow is cleared (midflight_qa.clear_question_pack_metadata).
+    harness.qm.set_answers(child, {"q1": "already answered"})
+    harness.instance_repo.delete_metadata(child, "question_pack_id")
+    harness.instance_repo.delete_metadata(child, "question_pack_payload")
+    # NOTE: no paused task → the handle was consumed by the resume.
+    return child, pack
+
+
+class TestAlreadyDeliveredRetryIsIdempotent:
+    """N-1 — the duplicate-answer idempotency contract.
+
+    The retry of an ALREADY-DELIVERED answer must reach the holder of
+    the (now ANSWERED) pack and return ``200 already_delivered`` — the
+    documented OQ-3 / §8.5 contract. It must NOT 404 (nobody holds a
+    pending pack) and must NOT 410 (a false terminal signal)."""
+
+    def test_route_retry_of_delivered_answer_is_already_delivered(
+        self, harness, jobs_client
+    ):
+        root = _seed_mission_root(harness)
+        child, pack = _seed_answered_pack_asker(harness, root)
+        work_id = _seed_mission_work(harness, root)
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={
+                "answers": {"q1": "Approach A"},
+                "question_pack_id": pack.id,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "already_delivered"
+        assert body["resume_route"] == "already_delivered"
+        # The answer was routed to the HOLDER of the pack.
+        assert body["instance_id"] == child
+        assert body["answer_target"]["instance_id"] == child
+
+        # The stored answers were NOT overwritten (the CAS lost).
+        stored = harness.qm.get_question_pack(child)
+        assert stored.status == "answered"
+        assert stored.answers == {"q1": "already answered"}
+
+    @pytest.mark.asyncio
+    async def test_tool_retry_of_delivered_answer_is_already_delivered(
+        self, harness
+    ):
+        """The tool lane (whose ``question_pack_id`` is REQUIRED — it is
+        the timeout-retry caller) carries the same contract."""
+        root = _seed_mission_root(harness)
+        child, pack = _seed_answered_pack_asker(harness, root)
+        work_id = _seed_mission_work(harness, root)
+
+        tool = _make_job_answer_tool(harness)
+        result = await tool.ainvoke(
+            {
+                "work_id": work_id,
+                "answers": {"q1": "Approach A"},
+                "question_pack_id": pack.id,
+            }
+        )
+
+        assert "error" not in result, result.get("error")
+        assert result["status"] == "already_delivered"
+        assert result["resume_route"] == "already_delivered"
+        assert result["instance_id"] == child
+
+    def test_route_retry_does_not_report_a_false_terminal_signal(
+        self, harness, jobs_client
+    ):
+        """A TERMINAL work instance must not turn the retry into a false
+        410 ANSWER_TARGET_TERMINAL — the pack-id holder is reached
+        first, and the helper answers it (already delivered)."""
+        root = _seed_instance(
+            harness.engine,
+            status=InstanceStatus.COMPLETED.value,
+            project_id=PROJECT_ID,
+            agent_id="leader",
+        )
+        child, pack = _seed_answered_pack_asker(harness, root)
+        work_id = _seed_task(
+            harness.engine, root, status=TaskStatus.RUNNING.value
+        )
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={
+                "answers": {"q1": "Approach A"},
+                "question_pack_id": pack.id,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["status"] == "already_delivered"
+        assert body["instance_id"] == child
+
+
+# =============================================================================
+# N-2 — the lookups are TARGETED, not per-instance scans
+# =============================================================================
+
+
+class TestTargetedLookupsAreBounded:
+    """N-2 — the pack-id path used to be an unbounded enumeration: one
+    metadata read + one handle lookup PER mission member (a 501-node
+    mission → ~3N queries). The resolver now asks TWO targeted
+    questions, each ONE query restricted to the mission id set."""
+
+    def test_pack_id_lookup_issues_one_metadata_and_one_handle_query(
+        self, harness
+    ):
+        from sqlalchemy import event
+
+        from daemon.services.answer_resolver import (
+            MAX_SUBTREE_SCAN,
+            resolve_answer_target,
+        )
+
+        root = _seed_mission_root(harness)
+        asker = None
+        asker_pack = None
+        for index in range(MAX_SUBTREE_SCAN + 17):
+            child, pack = _seed_asking_child(harness, root)
+            if index == MAX_SUBTREE_SCAN + 16:
+                asker, asker_pack = child, pack
+        assert asker is not None and asker_pack is not None
+
+        statements: list[str] = []
+
+        def _count(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        event.listen(harness.engine, "before_cursor_execute", _count)
+        try:
+            target = resolve_answer_target(
+                harness.manager, root, asker_pack.id
+            )
+        finally:
+            event.remove(harness.engine, "before_cursor_execute", _count)
+
+        assert target.asker_instance_id == asker
+        assert target.reachable_count >= MAX_SUBTREE_SCAN + 18
+        assert target.scan_uncapped is True
+
+        # The candidate-pass lookups are NOT per-instance: exactly ONE
+        # metadata lookup and at most ONE handle lookup, whatever the
+        # mission size.
+        metadata_queries = [
+            s for s in statements if "question_pack_id" in s
+        ]
+        handle_queries = [
+            s for s in statements if "suspension_reason" in s
+        ]
+        assert len(metadata_queries) <= 1, metadata_queries
+        assert len(handle_queries) <= 1, handle_queries
+
+    def test_handle_lookup_is_one_query_for_a_wide_mission(self, harness):
+        """The no-pack-id lane's handle lookup is ONE query over the
+        mission id set (the N+1 ``find_suspended_turn_for_answer`` loop
+        is gone)."""
+        from sqlalchemy import event
+
+        from daemon.services.answer_resolver import (
+            MAX_SUBTREE_SCAN,
+            resolve_answer_target,
+        )
+
+        root = _seed_mission_root(harness)
+        # Stay UNDER the cap (root + 60 children = 61 instances) so the
+        # search completes instead of being refused as truncated.
+        for _ in range(60):
+            _seed_instance(
+                harness.engine,
+                status=InstanceStatus.RUNNING.value,
+                project_id=PROJECT_ID,
+                parent_id=root,
+                agent_id="worker",
+            )
+
+        statements: list[str] = []
+
+        def _count(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        event.listen(harness.engine, "before_cursor_execute", _count)
+        try:
+            # A mission at the cap boundary → NOT truncated → the search
+            # completes.
+            target = resolve_answer_target(harness.manager, root, None)
+        finally:
+            event.remove(harness.engine, "before_cursor_execute", _count)
+
+        assert target.error == "not_found"
+        handle_queries = [
+            s for s in statements if "suspension_reason" in s
+        ]
+        assert len(handle_queries) == 1, handle_queries
+
+
+# =============================================================================
+# N-3 — the scan signals reach the SUCCESS envelope on BOTH surfaces
+# =============================================================================
+
+
+class TestScanSignalsReachTheSuccessEnvelope:
+    """N-3 — ``reachable_count`` / ``scan_uncapped`` used to reach only
+    the ERROR envelope, while the uncapped search happens on the
+    SUCCESS path. Both surfaces must surface them."""
+
+    def test_route_answer_target_carries_the_scan_signals(
+        self, harness, jobs_client
+    ):
+        root = _seed_mission_root(harness)
+        child, pack = _seed_asking_child(harness, root)
+        work_id = _seed_mission_work(harness, root)
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={
+                "answers": {"q1": "Approach A"},
+                "question_pack_id": pack.id,
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        target = resp.json()["answer_target"]
+        assert target["reachable_count"] >= 2
+        assert target["scan_uncapped"] is False
+
+    @pytest.mark.asyncio
+    async def test_tool_answer_target_carries_the_scan_signals(self, harness):
+        root = _seed_mission_root(harness)
+        child, pack = _seed_asking_child(harness, root)
+        work_id = _seed_mission_work(harness, root)
+
+        tool = _make_job_answer_tool(harness)
+        result = await tool.ainvoke(
+            {
+                "work_id": work_id,
+                "answers": {"q1": "Approach A"},
+                "question_pack_id": pack.id,
+            }
+        )
+
+        target = result["answer_target"]
+        assert target["reachable_count"] >= 2
+        assert target["scan_uncapped"] is False
+
+
+# =============================================================================
+# N-5 — a truncated search is never reported as a completed one
+# =============================================================================
+
+
+class TestTruncatedSearchIsRefused:
+    """N-5 — the no-pack-id lane is capped at ``MAX_SUBTREE_SCAN``. A
+    TRUNCATED search must never be presented as a completed one (a 404
+    or an answer derived from a partial candidate set): the resolver
+    refuses with ``400 INVALID_REQUEST`` and asks for the
+    disambiguator."""
+
+    def test_route_refuses_a_truncated_search_with_400(self, harness, jobs_client):
+        from daemon.services.answer_resolver import MAX_SUBTREE_SCAN
+
+        root = _seed_mission_root(harness)
+        for _ in range(MAX_SUBTREE_SCAN + 5):
+            _seed_instance(
+                harness.engine,
+                status=InstanceStatus.RUNNING.value,
+                project_id=PROJECT_ID,
+                parent_id=root,
+                agent_id="worker",
+            )
+        work_id = _seed_mission_work(harness, root)
+
+        resp = jobs_client.post(
+            f"/jobs/{work_id}/answer",
+            json={"answers": {"q1": "Approach A"}},
+        )
+
+        assert resp.status_code == 400, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == ErrorCodes.INVALID_REQUEST.value
+        assert "question_pack_id" in detail["message"]
+        assert detail["details"]["subtree_truncated"] is True

@@ -679,23 +679,42 @@ Returns:
     details: ``resumed``, ``resumed_ids``, ``skipped_ids``,
     ``target_id``, ``resume_results``).
 
+    ``answer_target`` is ADDITIVE and names the asker the answer was
+    actually delivered to: ``instance_id`` (the asker), ``
+    work_instance_id`` (the mission-scoped instance the ``work_id``
+    resolved to), ``mission_root_id``, ``route`` (how the asker was
+    identified), ``reachable_count`` (the size of the mission-scoped
+    search set) and ``scan_uncapped`` (True when the search ran
+    without the scan cap — the signal is visible on the SUCCESS path,
+    not only in the error envelope).
+
+    IDEMPOTENCY: re-sending an answer for a pack that was ALREADY
+    delivered returns ``status="already_delivered"`` /
+    ``resume_route="already_delivered"`` (the exactly-once CAS loser —
+    OQ-3 / §8.5). The holder of an ANSWERED pack is still the holder
+    of that pack id, so the retry reaches it instead of 404-ing.
+
     ``{"error": "..."}`` on every guarded failure. Error strings
     carry the typed code (the same vocabulary the HTTP route emits)
-    so a downstream agent can branch on the exact cause:
+    so a downstream agent can branch on the exact cause. The HTTP
+    route documents the SAME contract on
+    ``POST /api/jobs/{work_id}/answer``:
 
       * ``400 QUESTION_PACK_MISMATCH: ...`` — stale answers for a
         superseded pack (T1″ hijack guard); the agent should re-fetch
         the pending pack id and retry.
-      * ``400 INVALID_REQUEST: ...`` — AMBIGUOUS target: the asker
-        could not be resolved to exactly ONE instance of the mission,
-        so the resolver refused to guess. The message names the
-        candidate instances. Reachable here as (a) the supplied
-        ``question_pack_id`` matching MORE THAN ONE instance (a data
-        anomaly — a pack id is unique) or (b) the supplied pack id
-        matching nobody while SEVERAL instances of the mission hold an
-        awaiting-answer handle. NOTE: ``question_pack_id`` is REQUIRED
-        by this tool, so the HTTP route's variant ("several instances
-        hold a pending question and NO pack id was supplied") is NOT
+      * ``400 INVALID_REQUEST: ...`` — the asker could not be resolved
+        to exactly ONE instance of the mission, so the resolver
+        refused to guess; the message names the candidate instances.
+        Reachable here as (a) the supplied ``question_pack_id``
+        matching MORE THAN ONE instance (a data anomaly — a pack id is
+        unique) or (b) the supplied pack id matching nobody while
+        SEVERAL instances of the mission hold a pending question (a
+        live pending pack or an awaiting-answer handle). NOTE:
+        ``question_pack_id`` is REQUIRED by this tool, so the HTTP
+        route's variants ("several instances hold a pending question
+        and NO pack id was supplied", "the asker search was truncated
+        because the mission is wider than the scan cap") are NOT
         reachable here — the pack id is the disambiguator and is always
         supplied; on the HTTP route it stays optional.
       * ``404 JOB_NOT_FOUND: ...`` — ``work_id`` does not resolve to
@@ -706,13 +725,16 @@ Returns:
         know it). The work is reachable from the job surface but the
         asker is not; the answer cannot be routed. Hint: re-fetch the
         work_id and confirm the instance still exists.
-      * ``404 NO_PENDING_QUESTION: ...`` — the instance exists but has
-        no pending pack, OR no instance of the mission holds a pack
-        (the mission subtree was scanned). Hint: for completed
+      * ``404 NO_PENDING_QUESTION: ...`` — no instance of the mission
+        holds a pack (the mission was searched). Hint: for completed
         instances use ``job_continue`` instead.
-      * ``410 ANSWER_TARGET_TERMINAL: ...`` — asker reached a terminal
-        state while the question was pending; the answer cannot be
-        delivered (no silent-revive — leader decision 1).
+      * ``410 ANSWER_TARGET_TERMINAL: ...`` — the work instance is
+        COMPLETED/TERMINATED AND no instance of the mission holds a
+        pack, so the answer cannot be delivered (no silent-revive —
+        leader decision 1). The signal only survives when there is no
+        pack-holding asker: a pack holder is reached (and answered)
+        first, so a terminal work instance does not mask a live
+        question.
       * ``410 QUESTION_PACK_LOST: ...`` — the asker was identified
         (by pack id or by its awaiting-answer handle) but the pack is
         absent from BOTH the in-memory store and the durable
@@ -3583,7 +3605,10 @@ def create_job_tools(
             # ``jobs_management.py:1225`` — surface the work_id the
             # caller used alongside the helper's instance-addressed
             # body). ``answer_target`` is ADDITIVE: it names the
-            # asker the answer actually went to.
+            # asker the answer actually went to, plus the resolver's
+            # scan signals (``reachable_count`` / ``scan_uncapped`` —
+            # the uncapped search happens on the SUCCESS path, so they
+            # must be visible here and not only in the error string).
             return {
                 "work_id": work_id,
                 "answer_target": {
@@ -3591,6 +3616,8 @@ def create_job_tools(
                     "work_instance_id": work_instance_id,
                     "mission_root_id": target.mission_root_id,
                     "route": target.route,
+                    "reachable_count": target.reachable_count,
+                    "scan_uncapped": target.scan_uncapped,
                 },
                 **result,
             }
