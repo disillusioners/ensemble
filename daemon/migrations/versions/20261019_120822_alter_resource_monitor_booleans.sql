@@ -56,7 +56,7 @@
 --     Existing databases receive the three-step conversion
 --     (DROP DEFAULT → TYPE boolean USING (col <> 0) → SET DEFAULT)
 --     from the idempotent ``information_schema.columns``
---     probe-gated block in ``EnsembleManager._ensure_postgres_columns``
+--     probe-gated block in ``InstanceManager._ensure_postgres_columns``
 --     (added 2026-10-19 alongside this file). Conversion is safe on
 --     empty AND non-empty tables (the ``USING (col <> 0)`` cast maps
 --     every NONZERO integer to TRUE, 0 to FALSE), idempotent on
@@ -185,7 +185,7 @@
 -- UP
 --
 -- Informational: the runtime hook in
--- ``EnsembleManager._ensure_postgres_columns`` is the source of
+-- ``InstanceManager._ensure_postgres_columns`` is the source of
 -- truth for PG schema evolution. The runner is a SQLite-only
 -- by-design (runner.py:721-726) and the MANUAL: TRUE flag above
 -- ensures the runner never auto-applies this file. SQLite needs

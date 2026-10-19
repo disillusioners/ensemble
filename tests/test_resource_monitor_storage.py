@@ -41,6 +41,7 @@ from daemon.models.resource_monitor import (
 from daemon.services.resource_monitor import (
     FLUSH_BUFFER_CAP,
     Flusher,
+    FlusherCounters,
     RetentionPolicy,
     TierRing,
     rollup_to_hour,
@@ -1140,6 +1141,13 @@ class TestRelationMissingTolerance:
         f = Flusher.__new__(Flusher)
         f.engine = types.SimpleNamespace(url="sqlite:///:memory:")
         f._missing_table_warned = False
+        # The real ``Flusher.__init__`` ALWAYS sets ``self.counters``
+        # (that dataclass IS the /self-cost metric surface). This
+        # stub bypasses ``__init__``, so it must supply the
+        # attribute itself: the swallowed-failure paths increment
+        # ``counters.errors`` (MUST 1 — a swallowed failure must
+        # reach the metric, not only the log).
+        f.counters = FlusherCounters()
         return f
 
     def test_pg_column_error_amplifier_isolated(self, caplog):
@@ -1170,6 +1178,9 @@ class TestRelationMissingTolerance:
         joined = "\n".join(rec.getMessage() for rec in caplog.records)
         assert "tier write FAILED" in joined
         assert "_nonexistent" in joined
+        # MUST 1: the swallowed failure also reaches the
+        # ``flush.errors`` METRIC (not only the log).
+        assert f.counters.errors == 1
 
     def test_pg_relation_missing_still_tolerated(self):
         f = self._flusher()
@@ -1212,6 +1223,9 @@ class TestRelationMissingTolerance:
         joined = "\n".join(rec.getMessage() for rec in caplog.records)
         assert "sweep FAILED" in joined
         assert "nope" in joined
+        # MUST 1 (sweep half): the metric mirror of the
+        # tier-write contract above.
+        assert f.counters.errors == 1
 
     def test_sweep_relation_missing_returns_zero(self):
         f = self._flusher()
@@ -1478,3 +1492,9 @@ class TestPGTxnAbortWindowSurvival:
         joined = "\n".join(rec.getMessage() for rec in caplog.records)
         assert "sweep FAILED" in joined
         assert "nope" in joined
+        # MUST 1: the swallowed sweep failure ALSO reached the
+        # ``flush.errors`` metric — one forced failure, one
+        # increment, and the window itself still completed
+        # (``batches`` counted the window, not the failure).
+        assert flusher.counters.errors == 1
+        assert flusher.counters.batches == 1

@@ -168,7 +168,7 @@ def _instance_row(
     instance_id: str = "inst-a",
     *,
     bucket_ts: str | None = None,
-    estimated: bool | None = True,
+    estimated: bool = True,
     **over,
 ) -> dict:
     row = {
@@ -474,8 +474,6 @@ class TestAmplifierTierIsolationOnPG:
         SAVEPOINT absorbs the failure and ``run_once`` returns
         cleanly with T1 persisted.
         """
-        import logging
-
         # Build the broken v0.25.0 T2 table shape: estimated INTEGER.
         # The four OTHER tables are kept as-is (created by the
         # module-scoped fixture via SQLModel.create_all). T1 has
@@ -512,10 +510,10 @@ class TestAmplifierTierIsolationOnPG:
 
         instance_ring = TierRing(tier="instance", maxlen=8)
         instance_ring.extend(
-                [
-                    _instance_row("inst-good", estimated=True),
-                ]
-            )
+            [
+                _instance_row("inst-good", estimated=True),
+            ]
+        )
 
         flusher = Flusher(
             engine=scratch_engine,
@@ -540,6 +538,26 @@ class TestAmplifierTierIsolationOnPG:
         # is NOT missing-relation; C-1 narrowing intent preserved).
         joined = "\n".join(rec.getMessage() for rec in caplog.records)
         assert "tier write FAILED" in joined
+
+        # MUST 1 — the failure MUST also reach the ``flush.errors``
+        # METRIC, not only the log. The swallow path keeps the window
+        # alive, so the window's own ``except`` (the only other place
+        # that increments the counter) never fires: without the
+        # increment a dead tier write path would report
+        # ``flush.errors = 0`` while ``flush.batches`` climbs — the
+        # same silent-failure blindness on the METRIC axis that the
+        # savepoint hardening removed from the CONTROL-FLOW axis.
+        # The sibling tier's rows persisted at the same time, so the
+        # error is ISOLATED-and-VISIBLE, not silent.
+        assert flusher.counters.errors == 1, (
+            "the swallowed tier-write failure must increment "
+            f"flush.errors; got {flusher.counters.errors!r} "
+            f"(batches={flusher.counters.batches!r})"
+        )
+        # The window itself completed (the sibling tier's write was
+        # NOT rolled back with the failed tier).
+        assert flusher.counters.batches == 1
+        assert flusher.counters.last_window_rows >= 1
 
         # Belt-and-braces: a SECOND ``run_once`` works cleanly
         # because the outer transaction was never aborted — the
@@ -584,6 +602,89 @@ class TestAmplifierTierIsolationOnPG:
             ).first()
         assert row[0] == "inst-recovery"
         assert row[1] is True
+        # The RECOVERY window added no new error — the counter counts
+        # failures, not windows: one forced failure → exactly 1.
+        assert flusher.counters.errors == 1
+        assert flusher.counters.batches == 2
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# (d) SWEEP swallow path — the same metric contract on the sweep lane
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestSweepFailureCounterOnPG:
+    """MUST 1 (sweep half): the retention sweep's swallow path must
+    reach the ``flush.errors`` metric, not only the log.
+
+    The tier-write amplifier and the sweep amplifier are SEPARATE
+    swallow sites. Both keep the flush window alive, so both leave
+    the window's own ``except`` — the only other place that
+    increments ``FlusherCounters.errors`` — unfired. A sweep that
+    fails on every window would therefore report ``flush.errors =
+    0`` while ``flush.batches`` climbs, and ``/self-cost`` reads
+    the counter directly: the exact silent-failure blindness this
+    commission exists to kill, on the metric axis.
+    """
+
+    def test_sweep_failure_increments_error_counter(self, scratch_engine, caplog):
+        """Force the sweep's NON-tolerated branch and assert the
+        counter moved.
+
+        Fault injection: the stacked-tier table is recreated without
+        its ``interval_s`` column, so the ``interval_s``-scoped
+        sweep raises ``UndefinedColumn`` (SQLSTATE 42703). 42703 is
+        a COLUMN error — :func:`is_missing_relation_error` refuses
+        to classify it as relation-missing, so the sweep takes the
+        non-tolerated branch (log + savepoint rollback + return 0).
+        """
+        with scratch_engine.begin() as c:
+            c.execute(
+                text("DROP TABLE IF EXISTS resource_daemon_bucket CASCADE")
+            )
+            c.execute(
+                text(
+                    """
+                    CREATE TABLE resource_daemon_bucket (
+                        id BIGSERIAL PRIMARY KEY,
+                        bucket_ts TEXT NOT NULL
+                    )
+                    """
+                )
+            )
+
+        flusher = Flusher(
+            engine=scratch_engine,
+            raw_ring=TierRing(tier="raw", maxlen=8),
+            flush_batch_seconds=60,
+            retention=RetentionPolicy(2880, 336, 180),
+        )
+        assert flusher.counters.errors == 0
+
+        with caplog.at_level(
+            logging.ERROR, logger="daemon.services.resource_monitor.flusher"
+        ):
+            with scratch_engine.begin() as conn:
+                swept = flusher._sweep(
+                    conn,
+                    "resource_daemon_bucket",
+                    0,
+                    interval_s=30,
+                )
+
+        # The sweep degraded to 0 rows (no raise escaped).
+        assert swept == 0
+        # MUST 1 — the failure reached the metric.
+        assert flusher.counters.errors == 1, (
+            "the swallowed sweep failure must increment flush.errors; "
+            f"got {flusher.counters.errors!r}"
+        )
+        # ... and it was logged distinctly, not swallowed silently.
+        joined = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "sweep FAILED" in joined
+        # The 42703 is named — the relation-missing tolerance did NOT
+        # swallow it as first-boot noise.
+        assert "42703" in joined
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -701,8 +802,6 @@ class TestRealRuntimeHook:
 
     def test_real_hook_no_default_shape(self, scratch_engine, caplog):
         """Shape (i): INTEGER NOT NULL, NO server default (live prod)."""
-        import logging
-
         self._install_legacy_resource_tables(scratch_engine, with_default=False)
         # Precondition: integer, no default.
         for table, col in (
@@ -739,8 +838,6 @@ class TestRealRuntimeHook:
     def test_real_hook_default_bearing_shape(self, scratch_engine, caplog):
         """Shape (ii): INTEGER NOT NULL DEFAULT 1/0 — the default-bearing
         shape the old combined single-statement form could not convert."""
-        import logging
-
         self._install_legacy_resource_tables(scratch_engine, with_default=True)
         # Precondition: integer WITH a default.
         for table, col in (
@@ -785,19 +882,26 @@ class TestRepairPathFromOldIntegerSchema:
         exist with ``INTEGER`` columns for ``estimated`` / ``enabled`` /
         ``user_gated`` (the wrong type the SQLModel ``Integer``
         override emitted on the original create_all). Apply the
-        runtime hook in ``EnsembleManager._ensure_postgres_columns``
+        runtime hook from ``InstanceManager._ensure_postgres_columns``
         against a manager-like engine, then assert:
           1. information_schema reports ``boolean`` for the three columns
           2. a fresh INSERT with estimated=True AND estimated=False
              succeeds (the original v0.25.0 INSERT was the failure)
 
+        NOTE: this test MIMICS the runtime hook inline — it does NOT
+        invoke the production method. The real hook is covered by
+        ``TestRealRuntimeHook`` (both the no-default and the
+        default-bearing shape).
+
         Uses the shared ``scratch_engine`` fixture. The fixture
         creates the four tables in the post-fix shape; this test
         drops them and recreates them in the v0.25.0 broken
         INTEGER shape, runs the conversion, and verifies the
-        outcome. The four tables are restored to the post-fix
-        shape at the end so the next test's autouse TRUNCATE
-        succeeds.
+        outcome. The four tables are LEFT in the converted (post-fix)
+        shape — there is NO restore step; the next test's autouse
+        TRUNCATE only needs the four tables to EXIST, and the
+        ``scratch_engine`` fixture drops + recreates them at the
+        start of every test.
         """
         # Build an OLD-schema DB: hand-crafted CREATE TABLE with
         # INTEGER columns. This is the exact shape the broken
@@ -930,10 +1034,11 @@ class TestRepairPathFromOldIntegerSchema:
             == "integer"
         )
 
-        # Apply the runtime hook by directly invoking the helper
-        # we just added. We bypass ``EnsembleManager.__init__`` (the
-        # full manager has too many dependencies for a
-        # self-contained test) — we mimic the block byte-for-byte.
+        # Apply the runtime hook's logic inline. We bypass
+        # ``InstanceManager.__init__`` (the full manager has too many
+        # dependencies for a self-contained test), so this MIMICS the
+        # production block rather than INVOKING it — the real hook is
+        # covered by ``TestRealRuntimeHook``.
         #
         # The DEFAULT fix is the small but critical piece: PG refuses
         # to combine ``ALTER COLUMN ... TYPE boolean`` with
@@ -1018,9 +1123,11 @@ class TestRepairPathFromOldIntegerSchema:
         assert by_id["inst-true"] is True
         assert by_id["inst-false"] is False
 
-        # Cleanup: drop the OLD-schema tables so the autouse
-        # TRUNCATE on the next test doesn't see leftover state.
-        
+        # NOTE: there is NO cleanup step here — the four tables are
+        # left in the CONVERTED (post-fix) shape on purpose. The
+        # next test's autouse TRUNCATE only needs the four tables
+        # to EXIST, and the ``scratch_engine`` fixture drops +
+        # recreates them at the start of every test.
 
     def test_ensure_idempotent_under_repeated_boot(self, scratch_engine):
         """Run the conversion TWICE on the same engine — the second

@@ -6762,6 +6762,36 @@ class InstanceManager:
           (MANUAL: TRUE; conceptual-only — SQLite INTEGER is already
           8 bytes via the dynamic-type affinity, so no schema
           migration is needed on the SQLite path).
+        - resource_monitor boolean columns: INTEGER → BOOLEAN
+          conversion (2026-10-19, resource-telemetry fix): three
+          observability-spine columns shipped in v0.25.0 with an
+          ``sa_column=Column(..., Integer, ...)`` override where
+          boolean semantics were intended —
+          ``resource_instance_sample.estimated``,
+          ``resource_limit_policy.enabled`` and
+          ``resource_limit_policy.user_gated``. ``create_all`` then
+          emitted ``INTEGER`` on PostgreSQL, the flusher bound
+          Python ``bool``, and every flush window raised
+          ``DatatypeMismatch`` (SQLSTATE 42804). The SQLModel
+          declarations are now ``Boolean`` (fresh databases get the
+          correct type from ``create_all``); existing databases are
+          repaired here by a probe-gated three-step ALTER per column
+          (``DROP DEFAULT`` → ``TYPE boolean USING (col <> 0)`` →
+          ``SET DEFAULT <true|false>``), gated on
+          ``information_schema.columns.data_type='integer'`` so it
+          is a no-op once the column is boolean (idempotent under
+          repeated boot). The three-step form is REQUIRED: the
+          combined ``TYPE ..., SET DEFAULT ...`` statement fails on
+          a default-bearing column (42804). A column whose type is
+          neither boolean nor integer is reported as
+          ``unrecognised`` (WARNING) and is NOT auto-converted.
+          This is a CORRECTNESS ALTER, so a conversion failure
+          aborts the boot (fail-loud) — the same fail-loud
+          convention as the ``maintenance_runs.expected_bytes``
+          widening above. Audit record (MANUAL: TRUE; the runner
+          never auto-applies it):
+          ``daemon/migrations/versions/
+          20261019_120822_alter_resource_monitor_booleans.sql``.
 
         When a new column needs this treatment: add the IF NOT EXISTS
         ALTER + (optional) CREATE INDEX here. Do NOT add raw
@@ -8266,6 +8296,7 @@ class InstanceManager:
             )
             _bool_repair_applied: list[str] = []
             _bool_repair_already_ok: list[str] = []
+            _bool_repair_unrecognised: list[str] = []
             _bool_repair_missing: list[str] = []
             try:
                 with self._engine.begin() as conn:
@@ -8286,12 +8317,42 @@ class InstanceManager:
                             # convention).
                             _bool_repair_missing.append(f"{tbl}.{col}=missing")
                             continue
-                        if str(probe[0]).lower() != "integer":
-                            # Already boolean (or otherwise non-integer
-                            # — defensive): no-op. This is the
-                            # repeated-boot idempotency surface.
+                        if str(probe[0]).lower() == "boolean":
+                            # Already boolean — the repeated-boot
+                            # idempotency surface.
                             _bool_repair_already_ok.append(
                                 f"{tbl}.{col}={probe[0]}"
+                            )
+                            continue
+                        if str(probe[0]).lower() != "integer":
+                            # UNRECOGNISED type — neither ``boolean``
+                            # nor ``integer`` (e.g. a drifted
+                            # ``bigint``/``smallint``/``text``). This
+                            # is NOT "already OK": the flusher binds
+                            # Python ``bool``, so a non-boolean
+                            # column breaks the write path exactly the
+                            # way the INTEGER defect did. It is
+                            # surfaced distinctly (its own bucket +
+                            # a WARNING naming the type) instead of
+                            # being silently lumped in with the
+                            # boolean no-op. It is NOT auto-converted:
+                            # the repair cast is integer-specific and
+                            # reshaping an unknown column is an
+                            # operator decision, not a boot-time
+                            # side effect.
+                            _bool_repair_unrecognised.append(
+                                f"{tbl}.{col}={probe[0]}"
+                            )
+                            logger.warning(
+                                "_ensure_postgres_columns: resource_monitor "
+                                "column %s.%s has UNRECOGNISED type %r — "
+                                "not boolean and not integer; NOT converted "
+                                "and NOT reported as already-OK (the "
+                                "boolean write path needs a native "
+                                "boolean column)",
+                                tbl,
+                                col,
+                                probe[0],
                             )
                             continue
                         # Three-step per-column conversion (review F1a).
@@ -8340,11 +8401,15 @@ class InstanceManager:
             except Exception as exc:
                 # Fail-loud is DELIBERATE: a failed PG repair leaves
                 # the write path broken (the v0.25.0 defect class).
-                # Match the host function's convention — abort boot,
-                # surface the cause, let the operator fix and retry.
-                # FIX-3 (tuning-only ALTERs never boot-block) does NOT
-                # apply here: this is a correctness ALTER, not tuning,
-                # and silent continuation would mask a regression.
+                # This block follows a THIRD convention — the host
+                # method carries two (additive DDL is best-effort and
+                # logs-and-continues; tuning-only ALTERs never
+                # boot-block per FIX-3). A CORRECTNESS ALTER is
+                # neither: abort the boot, surface the cause, let the
+                # operator fix and retry. FIX-3 (tuning-only ALTERs
+                # never boot-block) does NOT apply here — silent
+                # continuation would mask a regression that leaves
+                # the flusher writing to an INTEGER column.
                 logger.error(
                     "_ensure_postgres_columns: resource_monitor INTEGER→"
                     "BOOLEAN conversion FAILED (%s: %s) — write path "
@@ -8355,9 +8420,11 @@ class InstanceManager:
                 raise
             logger.info(
                 "_ensure_postgres_columns: resource_monitor boolean repair "
-                "complete (applied=%s, already_ok=%s, missing=%s)",
+                "complete (applied=%s, already_ok=%s, unrecognised=%s, "
+                "missing=%s)",
                 _bool_repair_applied,
                 _bool_repair_already_ok,
+                _bool_repair_unrecognised,
                 _bool_repair_missing,
             )
 
