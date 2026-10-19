@@ -79,6 +79,17 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     "/api/skill-bank": frozenset({"pd"}),
     "/api/skills": frozenset({"pd"}),
     "/api/snapshots": frozenset({"pd"}),
+    # resource-cost-control P1 (aa95fc438): the resources_router
+    # mounts /api/resources (8 routes: GET /live, /history,
+    # /self-cost, /traceback, /anomalies, /anomalies/{id}/evidence,
+    # /control-capabilities + POST /profile). No route carries an
+    # explicit class tag (no public probe / module-lane / protected
+    # decoration) — the family classifies protected-default ("pd"),
+    # the D3.7 legacy posture, declared HERE. Unauthenticated
+    # requests get the JSON 401 contract via the middleware's
+    # default-deny dispatch (same as every other untagged /api
+    # family).
+    "/api/resources": frozenset({"pd"}),
     "/api/sources": frozenset({"pd"}),  # + mappings_router
     "/api/tmp_images": frozenset({"pd"}),
     # Phase B / agent-prompt-immutability T6 — the prompts_router
@@ -259,4 +270,7 @@ class TestRouterClassManifest:
         # Phase C / agent-prompt-immutability F1 added the
         # /api/custom-agents family — the api_families count grew
         # from 28 to 29.
-        assert len(api_families) == 29, sorted(api_families)
+        # resource-cost-control P1 (aa95fc438) added the
+        # /api/resources family — the api_families count grew
+        # from 29 to 30.
+        assert len(api_families) == 30, sorted(api_families)
