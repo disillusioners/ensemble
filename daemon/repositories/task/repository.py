@@ -1208,6 +1208,41 @@ class TaskRepository:
         is observable noise without a corresponding user-visible
         surface.
 
+        **Task-axis terminal-COMPLETED exclusion (B1 advisory,
+        2026-10-19):** instances whose LATEST task row is
+        terminal-COMPLETED are ALSO excluded. Without this clause,
+        the sweep matches the **finalize-gap class**: an instance
+        whose turn genuinely COMPLETED but whose paired JobItem
+        finalize did not land before the daemon crashed (the window
+        between ``complete_task`` at ``task_processor.py:1057-1062``
+        and the observer finalize at
+        ``job_feedback_observer.py:4508``). Resuming such an
+        instance would astream from a terminal checkpoint —
+        contradicting the D1 doctrine that this pass never resumes
+        a completed turn. The exclusion predicate uses a correlated
+        NOT-EXISTS on ``MAX(task.id)`` per instance — the canonical
+        latest-per-group shape that is portable across PG and
+        SQLite (integer PK, monotonic insert order, no window
+        functions).
+
+        **Terminal-status adjudication on the task axis:**
+
+        * ``COMPLETED`` — excluded (B1). The turn is done; resuming
+          is a spurious wake.
+        * ``CANCELLED`` — also excluded. A cancelled turn was
+          stopped by the user/operator (or by a pause cascade);
+          resuming it would override that explicit action. The
+          reviewer left this to the implementer; the adjudication
+          here is: CANCELLED is a deliberate stop, NOT a crash
+          rescue case.
+        * ``FAILED`` — NOT excluded (kept resumable). A failed
+          latest task is the crash-rescue case: the turn died
+          mid-flight and the Task axis says "give it another shot"
+          via ``astream(None)`` from the surviving checkpoint. This
+          is the same rescue semantic the companion
+          ``find_auto_continue_candidates`` pass applies to
+          surviving ``status='running'`` task rows.
+
         Returns:
             Ordered list of ``instance_id`` strings (oldest-first by
             ``instances.created_at`` to match the existing
@@ -1236,6 +1271,37 @@ class TaskRepository:
                 select(Instance.instance_id)
                 .where(Instance.status == InstanceStatus.RUNNING.value)
                 .where(col(Instance.instance_id).not_in(active_task_subq))
+                # B1 (2026-10-19 review advisory) — task-axis
+                # terminal-COMPLETED (and terminal-CANCELLED)
+                # exclusion. See the docstring above for the
+                # adjudication rationale. The subquery correlates on
+                # ``Task.instance_id`` and pins the row to the
+                # instance's LATEST task via ``MAX(Task.id)``
+                # (integer PK, monotonic insert order — the
+                # portable latest-per-group shape that this
+                # codebase uses throughout; no window functions).
+                # The ``correlate(Instance)`` pin prevents
+                # SQLAlchemy from auto-correlating the MAX subquery
+                # against the outer EXISTS's ``Task`` reference
+                # (which would drop the FROM task clause and emit
+                # "misuse of aggregate: max()").
+                .where(
+                    ~exists().where(
+                        col(Task.instance_id) == Instance.instance_id
+                    ).where(
+                        col(Task.id) == (
+                            select(func.max(col(Task.id)))
+                            .where(col(Task.instance_id) == Instance.instance_id)
+                            .correlate(Instance)
+                            .scalar_subquery()
+                        )
+                    ).where(
+                        Task.status.in_([
+                            TaskStatus.COMPLETED.value,
+                            TaskStatus.CANCELLED.value,
+                        ])
+                    )
+                )
                 # Active JobItem bound to this instance
                 .where(
                     exists().where(

@@ -525,15 +525,58 @@ async def continue_running_instances_after_restart(
 # Safety narrowing vs. the commission-recommended shape:
 #
 #   * **Status clause: ``running`` only** — NOT
-#     ``running + idle``. An ``idle`` instance has its graph at the
-#     END node (terminal). A silent resume against a terminal
-#     checkpoint either no-ops or re-executes the END node — both can
-#     manufacture spurious side effects (a wake to the user / source
-#     adapter). The parked-parent concern named in the commission
-#     binds to ``WAITING_CHILDREN`` (a distinct status) which is
-#     already excluded by the existing pass. See
-#     ``tests/unit/services/test_boot_orphan_sweep.py`` ::
-#     ``test_parked_parent_waiting_children_not_swept``.
+#     ``running + idle``. The narrowing is DOUBLE-safe:
+#
+#     (1) An ``idle`` instance's ONLY writer is the INSERT at
+#         ``instance_lifecycle.py:5353`` (spawn-time status). An
+#         idle instance has never run → no LangGraph checkpoint →
+#         the pass's ``_get_checkpoint_last_write_naive_utc``
+#         returns None → ``skipped_no_checkpoint`` fires (first
+#         exclusion).
+#
+#     (2) Even in the edge case where an instance reaches ``idle``
+#         with a surviving checkpoint (transient state between
+#         turn-end and the next dispatch), the ``ckpt_ts <
+#         boot_epoch`` natural-immunity clause excludes it (second
+#         exclusion).
+#
+#     The parked-parent concern named in the commission binds to
+#     ``WAITING_CHILDREN`` (a distinct status value, see
+#     ``daemon/repositories/instance/models.py:30-31``), which is
+#     already excluded by the task-axis ``NOT IN`` selector.
+#     Regression tests: ``tests/unit/services/test_boot_orphan_sweep.py``
+#     :: ``test_parked_parent_waiting_children_not_swept`` +
+#     ``test_idle_not_swept``.
+#
+#   * **Cross-clock caveat (A#3 advisory, 2026-10-19):** the
+#     ``boot_epoch`` is captured via DB-side ``now()`` /
+#     ``CURRENT_TIMESTAMP`` (``daemon/services/boot_epoch.py:96-123``,
+#     SQL-side clock), while the checkpoint ``ts`` is a Python-side
+#     UTC string written by LangGraph at checkpoint commit
+#     (``langgraph/checkpoint/base/__init__.py:820,839``). On the
+#     canonical host (daemon + PG same box) the two clocks are
+#     exact; on a split-box install (PG on a different host than
+#     the daemon process) the two clocks may skew in EITHER
+#     direction:
+#
+#       * DB clock runs ahead of the Python clock → a
+#         CURRENT-generation checkpoint's ``ts`` may read as
+#         pre-epoch → the sweep would re-sweep a current-generation
+#         orphan. Not silent-resume-unsafe (the
+#         ``_schedule_explicit_handle_resume`` dedup gate
+#         ``_graph_tasks[instance_id]`` still fires; the resume is
+#         idempotent at the LangGraph level) — the effect is a
+#         wasted resume call, not a corruption.
+#       * DB clock runs BEHIND the Python clock → a
+#         PREVIOUS-generation checkpoint's ``ts`` may read as
+#         at-or-after epoch → the sweep would skip a genuine
+#         prior-generation orphan. Fail-closed — the orphan stays
+#         frozen until StaleTaskRecovery's backstop.
+#
+#     The commission accepted the skew hazard; the task-axis
+#     terminal-COMPLETED exclusion (B1, above) makes the residual
+#     risk strictly smaller than pre-fix (a mis-sweep on the
+#     finalize-gap class was the actual data-loss hazard).
 #
 #   * **Checkpoint last-write < boot_epoch** — natural immunity, NOT a
 #     new column. After a successful resume the LangGraph superstep
@@ -685,6 +728,32 @@ async def sweep_orphaned_live_turns(
         # (5) Per-instance loop with per-instance try/except (Layer 1).
         for instance_id in instance_ids:
             try:
+                # (5-prime) In-loop task re-check (A#2 advisory,
+                #      2026-10-19) — closes the SELECT→schedule TOCTOU
+                #      window. Between the repo selection above and
+                #      this loop iteration, a concurrent boot / sibling
+                #      pass / outbox may have minted a fresh task row
+                #      for this instance. Scheduling against such an
+                #      instance would double-turn (the resume and the
+                #      new task would race for the same checkpoint).
+                #      Mirrors the defense-in-depth shape the existing
+                #      ``claim_pending_task`` guard uses; keeps the
+                #      QUEUED admission arm exactly as the repo
+                #      selection wrote it (the wake-only JobRecovery
+                #      class is still owned by the QUEUED arm — see
+                #      job_processor.py:1249-1296).
+                if await asyncio.to_thread(
+                    task_repo.has_instance_busy, instance_id
+                ):
+                    result.skipped_resume_refused += 1
+                    logger.info(
+                        "[BOOT_CONTINUE] orphan-sweep SKIPPED "
+                        "instance=%s: task re-check found a busy "
+                        "task row (SELECT→schedule TOCTOU; "
+                        "companion pass owns it now)",
+                        instance_id[:8],
+                    )
+                    continue
                 # (5a) Read checkpoint last-write; filter on
                 #      ``last_write < boot_epoch`` (natural immunity).
                 ckpt_ts = await _get_checkpoint_last_write_naive_utc(

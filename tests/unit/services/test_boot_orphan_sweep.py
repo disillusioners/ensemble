@@ -404,16 +404,158 @@ def test_instance_without_active_jobitem_not_swept(
     assert out == []
 
 
-def test_completed_task_does_not_block_selector(
+def test_completed_latest_task_not_swept(
     task_repo: TaskRepository, engine: Engine
 ) -> None:
-    """COMPLETED task history does NOT block the selector — only active tasks do."""
+    """B1 — instance whose LATEST task row is terminal-COMPLETED is EXCLUDED.
+
+    This is the finalize-gap class: the turn genuinely completed, but
+    the paired JobItem finalize did not land before the crash. The
+    sweep must NOT resume such an instance (it would astream from a
+    terminal checkpoint, violating the D1 doctrine).
+
+    FLIPPED from the original ``test_completed_task_does_not_block_selector``
+    (B1 review advisory, 2026-10-19) — the old test pinned the WRONG
+    behavior (COMPLETED history does not block) because the original
+    selector had only the active-task NOT-IN clause; the finalize-gap
+    crash window makes COMPLETED-latest a real orphan-mimicking state
+    that must be excluded.
+
+    MUTATION-VERIFY: without the B1 NOT-EXISTS clause this test
+    FAILS (the instance IS returned); with the clause it PASSES
+    (the instance is excluded). See the pasted RED/GREEN outputs in
+    the report.
+    """
     iid = f"i-{uuid4().hex[:8]}"
     _seed_instance(engine, iid, status="running")
     _seed_jobitem(engine, iid, admission_state=AdmissionState.ACTIVE.value)
     _seed_completed_task(engine, iid)
     out = task_repo.find_orphaned_live_turns(boot_epoch=now_utc_naive())
-    assert out == [iid]
+    assert out == [], (
+        "Latest-task-COMPLETED instance must NOT be swept — the turn "
+        "genuinely completed; resuming would astream from a terminal "
+        "checkpoint (B1 / D1 doctrine)."
+    )
+
+
+def test_cancelled_latest_task_not_swept(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """CANCELLED latest-task instances are EXCLUDED — deliberate stop, not a crash rescue."""
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    _seed_jobitem(engine, iid, admission_state=AdmissionState.ACTIVE.value)
+    # Seed a CANCELLED latest task
+    with Session(engine) as s:
+        s.add(
+            Task(
+                work_id=f"work-cancelled-{uuid4().hex[:12]}",
+                task_type="process_message",
+                instance_id=iid,
+                status=TaskStatus.CANCELLED.value,
+                created_at=now_utc_naive(),
+            )
+        )
+        s.commit()
+    out = task_repo.find_orphaned_live_turns(boot_epoch=now_utc_naive())
+    assert out == [], (
+        "Latest-task-CANCELLED instance must NOT be swept — the "
+        "cancel was a deliberate stop; resuming would override it."
+    )
+
+
+def test_failed_latest_task_still_resumable(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """FAILED latest-task instances REMAIN in the sweep — crash-rescue semantics.
+
+    A failed latest task means the turn died mid-flight; the Task axis
+    says 'give it another shot' via astream(None) from the surviving
+    checkpoint. This is the rescue semantic the companion
+    find_auto_continue_candidates pass applies to surviving running
+    task rows.
+    """
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    _seed_jobitem(engine, iid, admission_state=AdmissionState.ACTIVE.value)
+    # Seed a FAILED latest task
+    with Session(engine) as s:
+        s.add(
+            Task(
+                work_id=f"work-failed-{uuid4().hex[:12]}",
+                task_type="process_message",
+                instance_id=iid,
+                status=TaskStatus.FAILED.value,
+                created_at=now_utc_naive(),
+            )
+        )
+        s.commit()
+    out = task_repo.find_orphaned_live_turns(boot_epoch=now_utc_naive())
+    assert out == [iid], (
+        "Latest-task-FAILED instance must REMAIN swept — failed turn "
+        "is the crash-rescue case; the checkpoint is still alive and "
+        "the resume retry is legitimate."
+    )
+
+
+def test_latest_task_tiebreak_completed_with_older_failed(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """Latest-per-group tiebreak: FAILED (older) + COMPLETED (newer) → COMPLETED wins → excluded."""
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    _seed_jobitem(engine, iid, admission_state=AdmissionState.ACTIVE.value)
+    import time as _time_mod
+    # Older FAILED task
+    with Session(engine) as s:
+        s.add(
+            Task(
+                work_id=f"work-old-{uuid4().hex[:12]}",
+                task_type="process_message",
+                instance_id=iid,
+                status=TaskStatus.FAILED.value,
+                created_at=now_utc_naive(),
+            )
+        )
+        s.commit()
+    _time_mod.sleep(0.01)
+    # Newer COMPLETED task (the LATEST)
+    _seed_completed_task(engine, iid)
+    out = task_repo.find_orphaned_live_turns(boot_epoch=now_utc_naive())
+    assert out == [], (
+        "LATEST task is COMPLETED (the FAILED one is older history) — "
+        "the instance must be excluded by the B1 clause."
+    )
+
+
+def test_latest_task_tiebreak_failed_with_older_completed(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """Latest-per-group tiebreak: COMPLETED (older) + FAILED (newer) → FAILED wins → swept (rescue)."""
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    _seed_jobitem(engine, iid, admission_state=AdmissionState.ACTIVE.value)
+    import time as _time_mod
+    # Older COMPLETED task
+    _seed_completed_task(engine, iid)
+    _time_mod.sleep(0.01)
+    # Newer FAILED task (the LATEST)
+    with Session(engine) as s:
+        s.add(
+            Task(
+                work_id=f"work-new-{uuid4().hex[:12]}",
+                task_type="process_message",
+                instance_id=iid,
+                status=TaskStatus.FAILED.value,
+                created_at=now_utc_naive(),
+            )
+        )
+        s.commit()
+    out = task_repo.find_orphaned_live_turns(boot_epoch=now_utc_naive())
+    assert out == [iid], (
+        "LATEST task is FAILED (the COMPLETED one is older history) — "
+        "the instance REMAINS swept (crash-rescue semantics)."
+    )
 
 
 def test_terminal_status_not_swept(
@@ -663,6 +805,112 @@ async def test_per_instance_exception_isolated(
     assert result.candidates == 2
     assert result.scheduled == 1  # iid_b succeeded
     assert result.errors == 1  # iid_a failed
+
+
+@pytest.mark.asyncio
+async def test_inloop_task_recheck_skips_toctou_winner(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """A#2 (2026-10-19 review advisory) — in-loop task re-check closes the SELECT→schedule TOCTOU.
+
+    The selector initially sees the instance as task-less; a concurrent
+    actor mints a fresh RUNNING task row for the same instance before
+    the pass reaches the scheduling step. The re-check catches this and
+    SKIPS the instance (defense-in-depth; the companion pass owns it).
+    """
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    _seed_jobitem(engine, iid, admission_state=AdmissionState.ACTIVE.value)
+
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    mgr.checkpointer.raw_saver.last_writes[iid] = boot_epoch - timedelta(minutes=5)
+
+    # Simulate the TOCTOU race: between SELECT and schedule, a
+    # concurrent actor mints a RUNNING task row.
+    original_resume = mgr._schedule_explicit_handle_resume
+
+    async def racing_resume(**kwargs):
+        # Mint the racing task row DURING the resume call (simulating
+        # the concurrent actor acting between the SELECT and schedule).
+        with Session(engine) as s:
+            s.add(
+                Task(
+                    work_id=f"work-raced-{uuid4().hex[:12]}",
+                    task_type="process_message",
+                    instance_id=iid,
+                    status=TaskStatus.RUNNING.value,
+                    created_at=now_utc_naive(),
+                )
+            )
+            s.commit()
+        # The re-check in the pass runs BEFORE this resume, so the
+        # racing task is minted too late to be caught by the re-check.
+        # To make this test actually pin the re-check, we instead mint
+        # the task BEFORE the sweep runs — but that would make the
+        # SELECTOR exclude the instance too. So the simulation here is:
+        # mint the task in a hook that fires BEFORE the re-check.
+        return await original_resume(**kwargs)
+
+    # Simpler approach: mint the task AFTER the SELECT (which happens
+    # at sweep_orphaned_live_turns entry) but BEFORE the per-instance
+    # re-check. The re-check runs inside the per-instance loop, so we
+    # monkey-patch the repo's has_instance_busy to mint a task when
+    # called for the first time.
+    _original_has_busy = task_repo.has_instance_busy
+    _minted = {"done": False}
+
+    def minting_has_busy(iid_: str) -> bool:
+        if iid_ == iid and not _minted["done"]:
+            # Mint the racing task row the FIRST time the re-check is
+            # called for this instance — simulates the concurrent actor
+            # acting between SELECT and the re-check.
+            _minted["done"] = True
+            with Session(engine) as s:
+                s.add(
+                    Task(
+                        work_id=f"work-raced-{uuid4().hex[:12]}",
+                        task_type="process_message",
+                        instance_id=iid,
+                        status=TaskStatus.RUNNING.value,
+                        created_at=now_utc_naive(),
+                    )
+                )
+                s.commit()
+        return _original_has_busy(iid_)
+
+    task_repo.has_instance_busy = minting_has_busy  # type: ignore[method-assign]
+    set_boot_epoch(boot_epoch)
+
+    result = await pass_mod.sweep_orphaned_live_turns(mgr, boot_epoch)
+
+    assert result.candidates == 1  # the selector matched before the re-check
+    assert result.scheduled == 0  # the re-check skipped it
+    assert result.skipped_resume_refused == 1  # counted as TOCTOU skip
+    assert len(mgr.resume_calls) == 0  # no resume dispatched
+
+
+@pytest.mark.asyncio
+async def test_inloop_task_recheck_noop_when_still_taskless(
+    task_repo: TaskRepository, engine: Engine
+) -> None:
+    """A#2 re-check is a no-op when the instance is still task-less at schedule time."""
+    iid = f"i-{uuid4().hex[:8]}"
+    _seed_instance(engine, iid, status="running")
+    _seed_jobitem(engine, iid, admission_state=AdmissionState.ACTIVE.value)
+
+    boot_epoch = now_utc_naive()
+    mgr = _MockManager(task_repo)
+    mgr.checkpointer.raw_saver.last_writes[iid] = boot_epoch - timedelta(minutes=5)
+    set_boot_epoch(boot_epoch)
+
+    result = await pass_mod.sweep_orphaned_live_turns(mgr, boot_epoch)
+
+    # No concurrent actor: the re-check passes through, resume proceeds.
+    assert result.candidates == 1
+    assert result.scheduled == 1
+    assert result.skipped_resume_refused == 0
+    assert len(mgr.resume_calls) == 1
 
 
 @pytest.mark.asyncio
