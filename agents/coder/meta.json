@@ -5,6 +5,7 @@
   "icon": "⌨️",
   "color": "accent-blue",
   "version": "0.2.0",
+  "llm_model": "coding",
   "innate_skills": ["todo", "chart", "dynamic-skill"],
   "skill_injection": false,
   "no_force_explore": true,
@@ -15,9 +16,5 @@
   "context_injection": {
     "heuristic_match_shared_md_files": true
   },
-  "llm_models": [
-    {"model": "coding2", "weight":30},
-    {"model": "coding", "weight": 70}
-  ],
   "recursion_limit_multiplier": 7
 }
