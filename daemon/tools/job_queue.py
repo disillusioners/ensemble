@@ -640,6 +640,15 @@ to the asker is WATCHER-INDEPENDENT: the pack lives on the asker and
 the WorkResolver maps any mission receipt (live or already-settled)
 to the owning instance.
 
+The work unit resolves to the MISSION-SCOPED instance (usually the
+mission ROOT), while the question may have been asked by a CHILD
+instance. The asker is therefore resolved from the mission subtree
+before the answer is delivered (pack id first — the strongest key —
+then the authoritative awaiting-answer handle). The resolved asker is
+reported back in the additive ``answer_target`` field
+(``instance_id`` / ``work_instance_id`` / ``mission_root_id`` /
+``route``).
+
 Args:
     work_id: The job / work_id whose instance asked the question
         (matches the ``work_id`` on the ``question requested`` event).
@@ -675,6 +684,11 @@ Returns:
       * ``400 QUESTION_PACK_MISMATCH: ...`` — stale answers for a
         superseded pack (T1″ hijack guard); the agent should re-fetch
         the pending pack id and retry.
+      * ``400 INVALID_REQUEST: ...`` — AMBIGUOUS target: several
+        instances of the mission hold a pending question and no
+        ``question_pack_id`` was supplied to pick one. The message
+        names the candidate instances — re-issue the call with the
+        pack id of the question being answered.
       * ``404 JOB_NOT_FOUND: ...`` — ``work_id`` does not resolve to
         any task or job; the work is unknown to the daemon.
       * ``404 INSTANCE_NOT_FOUND: ...`` — the resolved ``instance_id``
@@ -684,14 +698,17 @@ Returns:
         asker is not; the answer cannot be routed. Hint: re-fetch the
         work_id and confirm the instance still exists.
       * ``404 NO_PENDING_QUESTION: ...`` — the instance exists but has
-        no pending pack. Hint: for completed instances use
-        ``job_continue`` instead.
+        no pending pack, OR no instance of the mission holds a pack
+        (the mission subtree was scanned). Hint: for completed
+        instances use ``job_continue`` instead.
       * ``410 ANSWER_TARGET_TERMINAL: ...`` — asker reached a terminal
         state while the question was pending; the answer cannot be
         delivered (no silent-revive — leader decision 1).
-      * ``410 QUESTION_PACK_LOST: ...`` — durable handle but neither
-        RAM pack nor ``instance_metadata`` payload survived a daemon
-        restart.
+      * ``410 QUESTION_PACK_LOST: ...`` — the asker was identified
+        (by pack id or by its awaiting-answer handle) but the pack is
+        absent from BOTH the in-memory store and the durable
+        ``instance_metadata`` shadow of that instance. The message
+        names the instance and the pack id that was searched.
       * ``503 WRITE_PAUSED: ...`` — daemon migration posture. The
         tool's own pre-check emits the typed ``WRITE_PAUSED`` token;
         a helper-race-window hit (pre-check cleared, then helper
@@ -3363,7 +3380,13 @@ def create_job_tools(
         #   3. project-scoped access via the SAME ``_check_job_access``
         #      helper the four visibility tools (``job_messages`` /
         #      ``job_tree`` / ``job_progress`` / ``job_inject``) use.
-        #   4. ``answer_questions_via_instance(manager, instance_id,
+        #      The check stays on the MISSION-SCOPED record.
+        #   4. ASKER RESOLUTION from the mission subtree (the work unit
+        #      resolves to the mission-scoped instance — usually the
+        #      root — while the pack may live on a CHILD asker). The
+        #      SHARED resolver (``daemon/services/answer_resolver.py``)
+        #      is the same one the HTTP route uses.
+        #   5. ``answer_questions_via_instance(manager, instance_id,
         #      answers, question_pack_id, live_hub, resume_message)``.
         # The helper raises ``HTTPException`` on every guarded failure —
         # we catch and convert to clear agent-readable error STRINGS so
@@ -3456,8 +3479,16 @@ def create_job_tools(
             # MINOR-13 (jobs_management.py:1176-1191): a WorkRecord
             # without an instance_id would AttributeError deep inside
             # the helper; surface a typed 404 instead.
-            instance_id = getattr(record, "instance_id", None)
-            if not instance_id:
+            #
+            # NOTE: this is the MISSION-SCOPED instance (the work
+            # unit's owning instance — usually the mission ROOT). It is
+            # NOT necessarily the ASKING instance: a child instance may
+            # have asked the question, and the pack lives on the
+            # ASKER. The asker is resolved from the mission subtree
+            # below by the SHARED resolver (the same one the HTTP
+            # route uses — ``daemon/services/answer_resolver.py``).
+            work_instance_id = getattr(record, "instance_id", None)
+            if not work_instance_id:
                 return {
                     "error": (
                         f"404 JOB_NOT_FOUND: work unit {work_id!r} has "
@@ -3471,6 +3502,9 @@ def create_job_tools(
             #    applied AFTER work resolution (so the caller pays
             #    the resolve cost first) but BEFORE the helper call
             #    (so a denied caller never reaches the answer flow).
+            #    NOTE: the check stays on the MISSION-SCOPED record —
+            #    permission semantics are unchanged by the asker
+            #    resolution below.
             deny = _check_job_access(manager, current_instance_id, record)
             if deny is not None:
                 return deny
@@ -3494,15 +3528,38 @@ def create_job_tools(
             live_hub = getattr(manager, "_live_hub", None)
 
             from daemon.routers.answer_helper import answer_questions_via_instance
+            from daemon.services.answer_resolver import (
+                raise_unresolved_target,
+                resolve_answer_target,
+            )
 
+            # 3a. Asker resolution (job-scoped — 2026-10-19). The
+            #     work unit resolves to the mission-scoped instance;
+            #     the pack may live on a CHILD asker. The SHARED
+            #     resolver (same module the HTTP route uses) finds the
+            #     asker inside the mission subtree. Ambiguity (400)
+            #     and "no pack-holding asker" (404) surface through
+            #     the same typed envelope as every other failure.
+            asker_instance_id = work_instance_id
             try:
+                target = await asyncio.to_thread(
+                    resolve_answer_target,
+                    manager,
+                    work_instance_id,
+                    question_pack_id,
+                )
+                if target.asker_instance_id is None:
+                    raise_unresolved_target(target)
+                asker_instance_id = target.asker_instance_id
+
                 result = await answer_questions_via_instance(
                     manager=manager,
-                    instance_id=instance_id,
+                    instance_id=asker_instance_id,
                     answers=answers,
                     question_pack_id=question_pack_id,
                     live_hub=live_hub,
                     resume_message=None,
+                    resolution_details=target.detail_fields(),
                 )
             except HTTPException as exc:
                 # Convert the typed HTTPException the helper raised
@@ -3511,13 +3568,23 @@ def create_job_tools(
                 # ...)`` — surface the code verbatim so the agent
                 # can branch on it (the brief calls out 400/404/410/503
                 # as the codes that matter for the answer flow).
-                return _format_answer_http_error(exc, work_id, instance_id)
+                return _format_answer_http_error(exc, work_id, asker_instance_id)
 
             # Job-addressed envelope (mirrors the HTTP route at
             # ``jobs_management.py:1225`` — surface the work_id the
             # caller used alongside the helper's instance-addressed
-            # body).
-            return {"work_id": work_id, **result}
+            # body). ``answer_target`` is ADDITIVE: it names the
+            # asker the answer actually went to.
+            return {
+                "work_id": work_id,
+                "answer_target": {
+                    "instance_id": asker_instance_id,
+                    "work_instance_id": work_instance_id,
+                    "mission_root_id": target.mission_root_id,
+                    "route": target.route,
+                },
+                **result,
+            }
         except Exception as e:  # noqa: BLE001
             # Defensive backstop — never let the tool-call raise into
             # the graph. A tool that raises mid-call bubbles the

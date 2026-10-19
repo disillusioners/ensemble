@@ -1190,8 +1190,14 @@ async def answer_questions_job(
     # MINOR-13: resolve_work's record must carry an instance_id; a
     # None/absent value would otherwise AttributeError deep inside the
     # helper — surface a typed 404 instead.
-    instance_id = getattr(record, "instance_id", None)
-    if not instance_id:
+    #
+    # NOTE: this is the MISSION-SCOPED instance (the work unit's
+    # owning instance — usually the mission ROOT). It is NOT
+    # necessarily the ASKING instance: a child instance may have asked
+    # the question. The asker is resolved from the mission subtree
+    # below (shared resolver — see ``daemon/services/answer_resolver.py``).
+    work_instance_id = getattr(record, "instance_id", None)
+    if not work_instance_id:
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
@@ -1226,17 +1232,54 @@ async def answer_questions_job(
     question_pack_id = body.get("question_pack_id")
     resume_message = body.get("resume_message")
 
+    # ── Asker resolution (job-scoped — 2026-10-19) ───────────────────
+    # The work unit resolves to the MISSION-SCOPED instance (usually
+    # the mission root). The question may have been asked by a CHILD
+    # instance — the pack lives on the ASKER. Resolving the asker from
+    # the mission subtree is what stops the answer from landing on an
+    # instance that never held the pack (the old false
+    # 410 QUESTION_PACK_LOST class).
+    #
+    # Shared with the ``job_answer`` agent tool — ONE resolver, both
+    # surfaces (``daemon/services/answer_resolver.py``).
+    from daemon.services.answer_resolver import (
+        raise_unresolved_target,
+        resolve_answer_target,
+    )
+
+    target = await asyncio.to_thread(
+        resolve_answer_target, manager, work_instance_id, question_pack_id
+    )
+    if target.asker_instance_id is None:
+        # Ambiguous (400) or no pack-holding asker in the subtree (404).
+        raise_unresolved_target(target)
+    asker_instance_id = target.asker_instance_id
+
     result = await answer_questions_via_instance(
         manager=manager,
-        instance_id=instance_id,
+        instance_id=asker_instance_id,
         answers=answers,
         question_pack_id=question_pack_id,
         live_hub=getattr(request.app.state, "live_hub", None),
         resume_message=resume_message,
+        resolution_details=target.detail_fields(),
     )
     # Job-addressed envelope (§5.2): surface the work_id the caller
     # used alongside the helper's instance-addressed body.
-    return {"work_id": work_id, **result}
+    #
+    # ``answer_target`` is ADDITIVE: it names the asker the answer was
+    # actually delivered to (plus how it was resolved) so a watcher
+    # can see that a mission-root work_id routed to a child asker.
+    return {
+        "work_id": work_id,
+        "answer_target": {
+            "instance_id": asker_instance_id,
+            "work_instance_id": work_instance_id,
+            "mission_root_id": target.mission_root_id,
+            "route": target.route,
+        },
+        **result,
+    }
 
 
 __all__ = ["router"]
