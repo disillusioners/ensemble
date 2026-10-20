@@ -1120,7 +1120,7 @@ async def resend_deferred_foreground(
     dependencies=[scope_required("jobs:write")],
     responses={
         200: {"description": "Answer stored and delivered"},
-        400: {"description": "question_pack_id mismatch (QUESTION_PACK_MISMATCH)"},
+        400: {"description": "question_pack_id mismatch (QUESTION_PACK_MISMATCH) or ambiguous answer target (INVALID_REQUEST)"},
         404: {"description": "Unknown work_id (JOB_NOT_FOUND) or no pending question"},
         410: {"description": "Asker terminal (ANSWER_TARGET_TERMINAL) or pack lost (QUESTION_PACK_LOST)"},
         503: {"description": "Writes paused (migration)"},
@@ -1143,15 +1143,68 @@ async def answer_questions_job(
 
     Body:
         ``answers`` (dict, required) — keyed by question id (preferred)
-        or question text; ``question_pack_id`` (str, optional) — echo
-        of the pack id from the question payload for the stale-answers
-        correlation guard; ``resume_message`` (str, optional).
+        or question text; ``question_pack_id`` (str, optional) — the
+        pack id from the question payload; ``resume_message``
+        (str, optional).
+
+    ``question_pack_id`` is not merely "optional": it is THE
+    DISAMBIGUATOR. The ``work_id`` resolves to the MISSION-SCOPED
+    instance (usually the mission root) while the question may have
+    been asked by a CHILD instance, so the asker is resolved from the
+    mission subtree (shared resolver —
+    ``daemon/services/answer_resolver.py``). When several instances of
+    the mission hold a pending question and no ``question_pack_id`` was
+    supplied, the request is REFUSED with ``400 INVALID_REQUEST``
+    (the candidates are named) rather than answered to an arbitrary
+    instance. Supplying the pack id always selects the right asker.
+
+    Errors (job-addressed surface — the SAME contract the ``job_answer``
+    agent tool documents):
+
+        * ``404 JOB_NOT_FOUND`` — the ``work_id`` resolves to no work.
+        * ``400 INVALID_REQUEST`` — the asker could not be resolved to
+          exactly ONE instance of the mission (the resolver refuses to
+          guess; the candidates are named), OR the asker search was
+          TRUNCATED because the mission is wider than the scan cap and
+          no ``question_pack_id`` was supplied (a truncated search is
+          never reported as a completed one), OR a malformed
+          ``answers`` body.
+        * ``400 QUESTION_PACK_MISMATCH`` — the supplied
+          ``question_pack_id`` is not the pack the resolved asker holds.
+        * ``404 NO_PENDING_QUESTION`` — no instance of the mission holds
+          a pack (the mission was searched).
+        * ``410 ANSWER_TARGET_TERMINAL`` — TWO triggers share this code:
+          (a) the WORK instance is COMPLETED/TERMINATED and NO
+          pack-holding asker was found anywhere in the mission (if a
+          live asker exists elsewhere in the mission, the answer is
+          delivered THERE instead of raising); or (b) the RESOLVED
+          ASKER itself is terminal (it reached COMPLETED/TERMINATED
+          while the question was pending — the shared helper's own
+          pre-check fires after the asker has been resolved, so a
+          terminal CHILD asker also produces this code). The error
+          ``details`` carry the terminal status either way
+          (``work_instance_status`` on trigger (a); ``instance_id`` +
+          ``status`` on trigger (b)).
+          Precedence: when NO ``question_pack_id`` is supplied and the
+          mission is wider than the scan cap, the truncated-search
+          ``400 INVALID_REQUEST`` PRE-EMPTS this 410 — the truncation
+          branch returns before the terminal classification.
+        * ``410 QUESTION_PACK_LOST`` — the asker was identified but the
+          pack is gone from both its memory store and its durable
+          metadata shadow.
+        * ``503`` — writes are paused (migration mode).
+
+    Idempotency: re-sending an answer for a pack that was ALREADY
+    delivered returns ``200`` with ``status="already_delivered"``
+    (the exactly-once CAS loser — OQ-3 / §8.5). The holder of an
+    ANSWERED pack is still the holder of that pack id, so the retry
+    reaches it instead of 404-ing.
 
     Resolution is watcher-independent: the pack lives on the ASKER;
     ``WorkResolver.resolve_work(work_id)`` maps the work_id to the
     owning instance via Task.work_id / JobItem.job_id lookups — any
-    mission receipt (live or already-settled) resolves to the asker,
-    so the ``work_id`` on the question line needs no watch row.
+    mission receipt (live or already-settled) resolves into the same
+    mission, so the ``work_id`` on the question line needs no watch row.
     """
     from pydantic import ValidationError
 
@@ -1190,8 +1243,14 @@ async def answer_questions_job(
     # MINOR-13: resolve_work's record must carry an instance_id; a
     # None/absent value would otherwise AttributeError deep inside the
     # helper — surface a typed 404 instead.
-    instance_id = getattr(record, "instance_id", None)
-    if not instance_id:
+    #
+    # NOTE: this is the MISSION-SCOPED instance (the work unit's
+    # owning instance — usually the mission ROOT). It is NOT
+    # necessarily the ASKING instance: a child instance may have asked
+    # the question. The asker is resolved from the mission subtree
+    # below (shared resolver — see ``daemon/services/answer_resolver.py``).
+    work_instance_id = getattr(record, "instance_id", None)
+    if not work_instance_id:
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
@@ -1226,17 +1285,61 @@ async def answer_questions_job(
     question_pack_id = body.get("question_pack_id")
     resume_message = body.get("resume_message")
 
+    # ── Asker resolution (job-scoped — 2026-10-19) ───────────────────
+    # The work unit resolves to the MISSION-SCOPED instance (usually
+    # the mission root). The question may have been asked by a CHILD
+    # instance — the pack lives on the ASKER. Resolving the asker from
+    # the mission subtree is what stops the answer from landing on an
+    # instance that never held the pack (the old false
+    # 410 QUESTION_PACK_LOST class).
+    #
+    # Shared with the ``job_answer`` agent tool — ONE resolver, both
+    # surfaces (``daemon/services/answer_resolver.py``).
+    from daemon.services.answer_resolver import (
+        raise_unresolved_target,
+        resolve_answer_target,
+    )
+
+    target = await asyncio.to_thread(
+        resolve_answer_target, manager, work_instance_id, question_pack_id
+    )
+    if target.asker_instance_id is None:
+        # Ambiguous (400) or no pack-holding asker in the subtree (404).
+        raise_unresolved_target(target)
+    asker_instance_id = target.asker_instance_id
+
     result = await answer_questions_via_instance(
         manager=manager,
-        instance_id=instance_id,
+        instance_id=asker_instance_id,
         answers=answers,
         question_pack_id=question_pack_id,
         live_hub=getattr(request.app.state, "live_hub", None),
         resume_message=resume_message,
+        resolution_details=target.detail_fields(),
     )
     # Job-addressed envelope (§5.2): surface the work_id the caller
     # used alongside the helper's instance-addressed body.
-    return {"work_id": work_id, **result}
+    #
+    # ``answer_target`` is ADDITIVE: it names the asker the answer was
+    # actually delivered to (plus how it was resolved) so a watcher
+    # can see that a mission-root work_id routed to a child asker.
+    # ``reachable_count`` / ``scan_uncapped`` carry the resolver's scan
+    # signals — the uncapped search happens on the SUCCESS path, so
+    # they must be visible here and not only in the error envelope.
+    # ``reachable_count`` is ``int | None``: ``None`` when the fast path
+    # resolved the pack without a scan (``scan_uncapped`` stays False).
+    return {
+        "work_id": work_id,
+        "answer_target": {
+            "instance_id": asker_instance_id,
+            "work_instance_id": work_instance_id,
+            "mission_root_id": target.mission_root_id,
+            "route": target.route,
+            "reachable_count": target.reachable_count,
+            "scan_uncapped": target.scan_uncapped,
+        },
+        **result,
+    }
 
 
 __all__ = ["router"]

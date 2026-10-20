@@ -1,0 +1,793 @@
+bringing up nodes...
+bringing up nodes...
+
+........................................................................ [  3%]
+....F.....F.................F........................................... [  6%]
+........................................................................ [ 10%]
+........................................................................ [ 13%]
+........................................................................ [ 17%]
+..........................ss.s.......sss................................ [ 20%]
+........................................................................ [ 23%]
+..............F......................................................... [ 27%]
+........................................................................ [ 30%]
+........................................................................ [ 34%]
+.....................................................F..........F.F..... [ 37%]
+..................................................F........F.....F...... [ 40%]
+........................................................................ [ 44%]
+........................................................................ [ 47%]
+................................................F...................ss.. [ 51%]
+..............................F.Fss.ss........s.........ss.............. [ 54%]
+..........sss.s......................................................... [ 58%]
+........................................................................ [ 61%]
+........................................................................ [ 64%]
+........................................................................ [ 68%]
+........................................................................ [ 71%]
+........................................................................ [ 75%]
+..............................................................F......... [ 78%]
+........................................................................ [ 81%]
+........ssss.s.......ssss............................................... [ 85%]
+..........................s..s.......................................... [ 88%]
+........................................................................ [ 92%]
+ssssss....................................F..F.................ss....... [ 95%]
+..........................................................F............. [ 99%]
+....F................                                                    [100%]
+=================================== FAILURES ===================================
+_ TestSite1InlineMirrorFinalize.test_hook_fires_settled_and_dual_fire_is_deduped _
+[gw7] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_event_driven_completion.py:287: in test_hook_fires_settled_and_dual_fire_is_deduped
+    await callbacks.on_success(MagicMock(name="ProcessingResult"))
+daemon/services/task_processor.py:1079: in on_success
+    completed_task = await asyncio.to_thread(
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py:26: in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:86: in run
+    result = ctx.run(self.task)
+             ^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:73: in run
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+daemon/repositories/task/repository.py:3531: in complete_task
+    result_json = json.dumps(result)
+                  ^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/__init__.py:235: in dumps
+    return _default_encoder.encode(obj)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:202: in encode
+    chunks = self.iterencode(o, _one_shot=True)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:263: in iterencode
+    return _iterencode(o, 0)
+           ^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:182: in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+E   TypeError: Object of type MagicMock is not JSON serializable
+E   when serializing dict item 'content'
+_ TestSite1InlineMirrorFinalize.test_pre_terminal_task_completes_on_success_fully _
+[gw7] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_event_driven_completion.py:346: in test_pre_terminal_task_completes_on_success_fully
+    await callbacks.on_success(MagicMock(name="ProcessingResult"))
+daemon/services/task_processor.py:1079: in on_success
+    completed_task = await asyncio.to_thread(
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py:26: in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:86: in run
+    result = ctx.run(self.task)
+             ^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:73: in run
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+daemon/repositories/task/repository.py:3531: in complete_task
+    result_json = json.dumps(result)
+                  ^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/__init__.py:235: in dumps
+    return _default_encoder.encode(obj)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:202: in encode
+    chunks = self.iterencode(o, _one_shot=True)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:263: in iterencode
+    return _iterencode(o, 0)
+           ^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:182: in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+E   TypeError: Object of type MagicMock is not JSON serializable
+E   when serializing dict item 'content'
+__ TestSite1InlineMirrorFinalize.test_hook_skips_when_finalize_races_to_none ___
+[gw7] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_event_driven_completion.py:395: in test_hook_skips_when_finalize_races_to_none
+    await callbacks.on_success(MagicMock(name="ProcessingResult"))
+daemon/services/task_processor.py:1079: in on_success
+    completed_task = await asyncio.to_thread(
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py:26: in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:86: in run
+    result = ctx.run(self.task)
+             ^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py:73: in run
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+daemon/repositories/task/repository.py:3531: in complete_task
+    result_json = json.dumps(result)
+                  ^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/__init__.py:235: in dumps
+    return _default_encoder.encode(obj)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:202: in encode
+    chunks = self.iterencode(o, _one_shot=True)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:263: in iterencode
+    return _iterencode(o, 0)
+           ^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/json/encoder.py:182: in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+E   TypeError: Object of type MagicMock is not JSON serializable
+E   when serializing dict item 'content'
+______ TestJobAnswerRegistration.test_create_job_tools_returns_job_answer ______
+[gw3] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_job_answer_tool.py:676: in test_create_job_tools_returns_job_answer
+    assert last.name == "job_answer", (
+E   AssertionError: Last tool in create_job_tools() should be 'job_answer', got 'job_resume'
+E   assert 'job_resume' == 'job_answer'
+E     
+E     - job_answer
+E     + job_resume
+_______________ TestJoberWatchIntegration.test_tool_registration _______________
+[gw3] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_jober_watch_integration.py:686: in test_tool_registration
+    assert len(tools) == 22
+E   assert 24 == 22
+E    +  where 24 = len([StructuredTool(name='job_create', description='Submit a new job to the queue. Use tool_help("job_create") for details...in_core.utils.pydantic.job_delete'>, coroutine=<function create_job_tools.<locals>.job_delete at 0x7bdbe3cc1220>), ...])
+___________ TestJoberWatchIntegration.test_ensure_dev_sh_still_works ___________
+[gw3] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_jober_watch_integration.py:878: in test_ensure_dev_sh_still_works
+    proc = subprocess.Popen(
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/subprocess.py:1039: in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/subprocess.py:1990: in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+E   FileNotFoundError: [Errno 2] No such file or directory: '/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble'
+
+During handling of the above exception, another exception occurred:
+tests/job_queue/test_jober_watch_integration.py:922: in test_ensure_dev_sh_still_works
+    pytest.fail(f"dev.sh failed to run: {e}")
+E   Failed: dev.sh failed to run: [Errno 2] No such file or directory: '/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble'
+____________ TestJobWatcherRepository.test_add_watch_creates_record ____________
+[gw3] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_jober_watch_integration.py:944: in test_add_watch_creates_record
+    assert watch.watch_events == ["completed", "failed", "cancelled", "dead_letter", "in_progress"]
+E   AssertionError: assert ['completed',...rogress', ...] == ['completed',...'in_progress']
+E     
+E     At index 1 diff: 'settled' != 'failed'
+E     Left contains 5 more items, first extra item: 'in_progress'
+E     Use -v to get more diff
+_ TestRecoveryServiceBothStateParity.test_recovery_33p_passes_under_switch_on __
+[gw7] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_f1_killswitch_tz_matrix.py:709: in test_recovery_33p_passes_under_switch_on
+    passes, rc, tail = _run_recovery_33p(monkeypatch, "1")
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/job_queue/test_f1_killswitch_tz_matrix.py:685: in _run_recovery_33p
+    result = subprocess.run(
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/subprocess.py:555: in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/subprocess.py:1039: in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/subprocess.py:1990: in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+E   FileNotFoundError: [Errno 2] No such file or directory: '.venv/bin/pytest'
+_ TestRecoveryServiceBothStateParity.test_recovery_33p_passes_under_switch_off _
+[gw7] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_f1_killswitch_tz_matrix.py:724: in test_recovery_33p_passes_under_switch_off
+    passes, rc, tail = _run_recovery_33p(monkeypatch, "0")
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/job_queue/test_f1_killswitch_tz_matrix.py:685: in _run_recovery_33p
+    result = subprocess.run(
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/subprocess.py:555: in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/subprocess.py:1039: in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/subprocess.py:1990: in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+E   FileNotFoundError: [Errno 2] No such file or directory: '.venv/bin/pytest'
+_ TestRecoveryServiceBothStateParity.test_recovery_33p_pass_count_identical_both_states _
+[gw7] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_f1_killswitch_tz_matrix.py:740: in test_recovery_33p_pass_count_identical_both_states
+    passes_on, rc_on, tail_on = _run_recovery_33p(monkeypatch, "1")
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/job_queue/test_f1_killswitch_tz_matrix.py:685: in _run_recovery_33p
+    result = subprocess.run(
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/subprocess.py:555: in run
+    with Popen(*popenargs, **kwargs) as process:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/subprocess.py:1039: in __init__
+    self._execute_child(args, executable, preexec_fn, close_fds,
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/subprocess.py:1990: in _execute_child
+    raise child_exception_type(errno_num, err_msg, err_filename)
+E   FileNotFoundError: [Errno 2] No such file or directory: '.venv/bin/pytest'
+_ TestN8HotPathPin.test_mirror_work_id_renders_settled_via_primary_event_path __
+[gw5] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_n8_hot_path_pin.py:344: in test_mirror_work_id_renders_settled_via_primary_event_path
+    assert len(notify_calls) >= 1, (
+E   AssertionError: post-commit outbox must fire notify_watchers for the mirror work_id; got zero calls. The event flow (_process_event -> _finalize_job -> post-commit outbox) is the PRIMARY event path; a zero-call here means the flow didn't reach the outbox (mock surface miss).
+E   assert 0 >= 1
+E    +  where 0 = len([])
+------------------------------ Captured log call -------------------------------
+ERROR    daemon.services.job_feedback_observer:job_feedback_observer.py:2584 Failed to finalize job job-n8-m... status=completed: _build_observer_for_hot_path.<locals>._fake_sync() takes 5 positional arguments but 6 were given
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-jaaf-base/daemon/services/job_feedback_observer.py", line 1816, in _finalize_job
+    db_result = await asyncio.to_thread(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+    )
+    ^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py", line 26, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1176, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1180, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1247, in _execute_mock_call
+    result = effect(*args, **kwargs)
+TypeError: _build_observer_for_hot_path.<locals>._fake_sync() takes 5 positional arguments but 6 were given
+_ TestJobFeedbackObserverWaitingForGuard.test_completed_with_no_waiting_runs_normal_path _
+[gw4] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py:965: in assert_called_once
+    raise AssertionError(msg)
+E   AssertionError: Expected 'notify_watchers' to have been called once. Called 0 times.
+
+During handling of the above exception, another exception occurred:
+tests/job_queue/test_in_progress_guard.py:425: in test_completed_with_no_waiting_runs_normal_path
+    mock_jqs.notify_watchers.assert_called_once()
+E   AssertionError: Expected 'notify_watchers' to have been called once. Called 0 times.
+------------------------------ Captured log call -------------------------------
+ERROR    daemon.services.job_feedback_observer:job_feedback_observer.py:2584 Failed to finalize job job-1234... status=completed: make_fake_sync.<locals>.fake_sync() takes 5 positional arguments but 6 were given
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-jaaf-base/daemon/services/job_feedback_observer.py", line 1828, in _finalize_job
+    db_result = await asyncio.to_thread(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+    )
+    ^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py", line 26, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1176, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1180, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1247, in _execute_mock_call
+    result = effect(*args, **kwargs)
+TypeError: make_fake_sync.<locals>.fake_sync() takes 5 positional arguments but 6 were given
+_ TestJobFeedbackObserverWaitingForGuard.test_waiting_for_none_treated_as_zero _
+[gw4] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_in_progress_guard.py:453: in test_waiting_for_none_treated_as_zero
+    assert mock_jqs.notify_watchers.call_args.args[1] == "completed"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'NoneType' object has no attribute 'args'
+------------------------------ Captured log call -------------------------------
+ERROR    daemon.services.job_feedback_observer:job_feedback_observer.py:2584 Failed to finalize job job-1234... status=completed: make_fake_sync.<locals>.fake_sync() takes 5 positional arguments but 6 were given
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src-wt-jaaf-base/daemon/services/job_feedback_observer.py", line 1828, in _finalize_job
+    db_result = await asyncio.to_thread(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+    )
+    ^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/threads.py", line 26, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1176, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1180, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py", line 1247, in _execute_mock_call
+    result = effect(*args, **kwargs)
+TypeError: make_fake_sync.<locals>.fake_sync() takes 5 positional arguments but 6 were given
+_ TestStaleTaskRecoveryWedgeHook.test_wedge_resolver_end_to_end_for_dead_letter_root _
+[gw2] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_round2_council_fixes.py:938: in test_wedge_resolver_end_to_end_for_dead_letter_root
+    asyncio.get_event_loop().run_until_complete(await_run)
+    ^^^^^^^^^^^^^^^^^^^^^^^^
+../.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/events.py:718: in get_event_loop
+    raise RuntimeError('There is no current event loop in thread %r.'
+E   RuntimeError: There is no current event loop in thread 'MainThread'.
+_____ TestTerminalWriteCensus.test_every_terminal_write_site_is_classified _____
+[gw0] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_terminal_write_census.py:626: in test_every_terminal_write_site_is_classified
+    _assert_sites_classified(discover_terminal_write_sites())
+tests/job_queue/test_terminal_write_census.py:554: in _assert_sites_classified
+    assert not missing, (
+E   AssertionError: UNLISTED TERMINAL-WRITE SITE(S) discovered in daemon/ — the notify contract (Shape (b) §3) requires one of:
+E       1. HOOK it: fire `await job_queue_service.notify_watchers(job_id, <canonical token>)` post-commit at the service/processor caller (pattern exemplar: job_recovery_service._fail_orphaned_job);
+E       2. CLASSIFY it hooked: add a TERMINAL_WRITE_CENSUS entry with classification='hooked' and hooked_at=<file>:<line> of the notify call;
+E       3. CLASSIFY it exempt: add an entry with classification='exempt' and the reason as the on-call breadcrumb.
+E       - daemon/manager.py:6544 shape=_process_child_completion_and_notify_parent function=_on_stale_task_permanent_failure
+E       - daemon/repositories/prompt_version/repository.py:1532 shape=atomic_transition function=submit_for_approval
+E       - daemon/repositories/prompt_version/repository.py:1566 shape=atomic_transition function=approve
+E       - daemon/repositories/prompt_version/repository.py:1600 shape=atomic_transition function=reject
+E       - daemon/services/prompt_version_service.py:665 shape=atomic_transition function=retract
+E       - daemon/services/prompt_version_service.py:731 shape=atomic_transition function=atomic_transition
+E       - daemon/services/prompt_version_service.py:651 shape=atomic_transition function=retract
+E   assert not [DiscoveredSite(file='daemon/manager.py', line=6544, shape='_process_child_completion_and_notify_parent', function='_o...e='daemon/services/prompt_version_service.py', line=731, shape='atomic_transition', function='atomic_transition'), ...]
+____ TestTerminalWriteCensus.test_hooked_entries_point_at_live_notify_calls ____
+[gw0] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_terminal_write_census.py:687: in test_hooked_entries_point_at_live_notify_calls
+    assert not stale, (
+E   AssertionError: hooked_at entries no longer point at a notify_watchers call (±5 lines) — the hook moved; update the census fixture: ['daemon/services/task_processor.py:1087', 'daemon/services/task_processor.py:1087', 'daemon/services/child_reports.py:3941', 'daemon/services/child_reports.py:3941', 'daemon/services/child_reports.py:3941', 'daemon/services/child_reports.py:3941', 'daemon/services/job_queue_service.py:1296', 'daemon/services/job_queue_service.py:1296', 'daemon/services/job_queue_service.py:1362', 'daemon/services/job_recovery_service.py:3925', 'daemon/services/job_queue_service.py:3967', 'daemon/services/job_queue_service.py:1175', 'daemon/services/job_feedback_observer.py:2071', 'daemon/services/job_recovery_service.py:4112']
+E   assert not ['daemon/services/task_processor.py:1087', 'daemon/services/task_processor.py:1087', 'daemon/services/child_reports.py...services/child_reports.py:3941', 'daemon/services/child_reports.py:3941', 'daemon/services/child_reports.py:3941', ...]
+________________ TestSequentialAddWatch.test_first_call_inserts ________________
+[gw7] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_watcher_repository_concurrent.py:158: in test_first_call_inserts
+    assert watch.watch_events == [
+E   AssertionError: assert ['completed',...rogress', ...] == ['completed',...'in_progress']
+E     
+E     At index 1 diff: 'settled' != 'failed'
+E     Left contains 5 more items, first extra item: 'in_progress'
+E     Use -v to get more diff
+___ TestConcurrentAddWatch.test_concurrent_threads_default_events_single_row ___
+[gw1] linux -- Python 3.14.7 /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/bin/python
+tests/job_queue/test_watcher_repository_concurrent.py:315: in test_concurrent_threads_default_events_single_row
+    assert watch.watch_events == [
+E   AssertionError: assert ['completed',...rogress', ...] == ['completed',...'in_progress']
+E     
+E     At index 1 diff: 'settled' != 'failed'
+E     Left contains 5 more items, first extra item: 'in_progress'
+E     Use -v to get more diff
+=============================== warnings summary ===============================
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+../ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25
+  /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/langchain_core/_api/deprecation.py:25: UserWarning: Core Pydantic V1 functionality isn't compatible with Python 3.14 or greater.
+    from pydantic.v1.fields import FieldInfo as FieldInfoV1
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryGetByJobId::test_get_by_job_id_existing
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:114: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_project_id_filter
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:148: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_project_id_filter
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:162: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_queue_id_filter
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:187: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_queue_id_filter
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:201: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_reason_filter
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:225: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_reason_filter
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:239: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_multiple_filters
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:263: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_multiple_filters
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:277: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_multiple_filters
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:291: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_a2_autopromote_notify.py: 12 warnings
+tests/job_queue/test_background_queue.py: 18 warnings
+tests/job_queue/test_defer_self_witness_watchdog.py: 32 warnings
+tests/job_queue/test_event_driven_completion.py: 24 warnings
+tests/job_queue/test_chat_pool_starvation_pins.py: 25 warnings
+tests/job_queue/test_f1_killswitch_tz_matrix.py: 15 warnings
+tests/job_queue/test_a3_eligible_pending_sweep.py: 23 warnings
+tests/job_queue/test_idle_gate_deadlock_fix.py: 15 warnings
+tests/job_queue/test_idle_gate_e2e_integration.py: 14 warnings
+tests/job_queue/test_claim_gate_sibling_deadlock_pins.py: 12 warnings
+tests/job_queue/test_defer_gate_post_settle_window.py: 2 warnings
+tests/job_queue/test_midflight_qa.py: 27 warnings
+tests/job_queue/test_mission_live_guard.py: 13 warnings
+tests/job_queue/test_a4_f14_orphan_detection.py: 12 warnings
+tests/job_queue/test_answer_resume_real_chain.py: 1 warning
+tests/job_queue/test_orphan_active_job_recovery.py: 54 warnings
+tests/job_queue/test_pattern_f_mission_live_gate.py: 15 warnings
+tests/job_queue/test_observer_hardening_f13_f14_f15.py: 4 warnings
+tests/job_queue/test_phase2_defensive_idle_gate.py: 1016 warnings
+tests/job_queue/test_question_watch_fanout.py: 15 warnings
+tests/job_queue/test_retry_supersede_watch_recovery.py: 53 warnings
+tests/job_queue/test_report_delivery_bug_family_pins.py: 12 warnings
+tests/job_queue/test_seam_invariants.py: 77 warnings
+tests/job_queue/test_system_default_project_backfill.py: 2 warnings
+tests/job_queue/test_vgap_greens.py: 10 warnings
+tests/job_queue/test_w1_retry_child_lineage_conjunct.py: 9 warnings
+tests/job_queue/test_vgap_wd_resume_renotify.py: 12 warnings
+tests/job_queue/test_watcher_loss_terminal_strand.py: 4 warnings
+tests/job_queue/test_work_notifier_defect1b_pin.py: 4 warnings
+  /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_offset
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_offset
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_offset
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_offset
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_offset
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:322: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_limit
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_limit
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_limit
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_limit
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_limit
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:347: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py: 10 warnings
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:372: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dlq_api.py:151: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryDelete::test_delete_existing_item
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:406: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_with_filters
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dlq_api.py:179: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_with_filters
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dlq_api.py:193: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryDeleteByJobId::test_delete_by_job_id_existing
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:440: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_pagination
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_pagination
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_pagination
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_pagination
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_pagination
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dlq_api.py:236: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCleanupByAge::test_cleanup_by_age_deletes_old_items
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:463: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(hours=25)
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCleanupByAge::test_cleanup_by_age_deletes_old_items
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:482: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCleanupByAge::test_cleanup_by_age_with_reason_filter
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:512: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(hours=25)
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCleanupByAge::test_cleanup_by_age_no_matching_items
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:560: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_no_filters
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_no_filters
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_no_filters
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_no_filters
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_no_filters
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:603: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_with_project_filter
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:625: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_with_project_filter
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:639: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_service.py: 14 warnings
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_service.py:92: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_service.py: 14 warnings
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_service.py:99: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    completed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestReplayDLQItem::test_replay_dlq_item
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dlq_api.py:324: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestReplayDLQItem::test_replay_dlq_item
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dlq_api.py:325: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    moved_to_dlq_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_event_driven_completion.py: 4 warnings
+tests/job_queue/test_instance_termination_job_cleanup.py: 8 warnings
+  /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/sqlmodel/orm/session.py:75: SAWarning: The engine provided as bind produced a connection that is already in a transaction. This is usually caused by a core event, such as 'engine_connect', that has left a transaction open. The effective join transaction mode used by this session is 'create_savepoint'. To silence this warning, do not leave transactions open
+    results = super().execute(
+
+tests/job_queue/test_dlq_api.py::TestCleanupDLQ::test_cleanup_dlq
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dlq_api.py:436: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(days=30)
+
+tests/job_queue/test_dlq_api.py::TestCleanupDLQ::test_cleanup_dlq
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dlq_api.py:456: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = datetime.utcnow() - timedelta(days=1)
+
+tests/job_queue/test_dead_letter_service.py::TestMoveToDLQStandalone::test_move_to_dlq_standalone_wrong_status
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_service.py:307: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestCleanupDLQ::test_cleanup_dlq_with_reason_filter
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dlq_api.py:491: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(days=30)
+
+tests/job_queue/test_dead_letter_service.py: 35 warnings
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_service.py:131: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_service.py: 35 warnings
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_service.py:138: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    completed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_service.py::TestReplayFromDLQ::test_replay_from_dlq_resets_retry_fields
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_service.py:442: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    job_item.failed_at = datetime.utcnow().isoformat()
+
+tests/job_queue/test_dlq_api.py::TestDLQSchemas::test_dlq_replay_response_structure
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dlq_api.py:616: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestDLQSchemas::test_dlq_replay_response_structure
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dlq_api.py:617: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    moved_to_dlq_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_service.py::TestDLQAtomicityEdgeCases::test_cleanup_dlq_removes_old_items
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_service.py:688: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(hours=25)
+
+tests/job_queue/test_dead_letter_service.py::TestDLQAtomicityEdgeCases::test_cleanup_dlq_removes_old_items
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_service.py:709: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_dead_letter_service.py::TestCleanupDLQ::test_cleanup_dlq_respects_project_id
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_service.py:754: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(hours=25)
+
+tests/job_queue/test_dead_letter_service.py::TestCleanupDLQ::test_cleanup_dlq_respects_project_id
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_service.py:775: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(hours=25)
+
+tests/job_queue/test_dead_letter_service.py::TestCleanupDLQ::test_cleanup_dlq_respects_project_id
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_service.py:796: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_dead_letter_service.py::TestCleanupDLQ::test_cleanup_dlq_without_project_id_deletes_all
+tests/job_queue/test_dead_letter_service.py::TestCleanupDLQ::test_cleanup_dlq_without_project_id_deletes_all
+tests/job_queue/test_dead_letter_service.py::TestCleanupDLQ::test_cleanup_dlq_without_project_id_deletes_all
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_service.py:839: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(hours=25)
+
+tests/job_queue/test_dead_letter_service.py::TestSQLStatusGuard::test_move_to_dlq_standalone_no_dlq_item_on_guard_failure
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_service.py:1272: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_instance_termination_job_cleanup.py::TestTerminateInstanceJobCleanup::test_terminate_cancels_processing_task_jobs
+tests/job_queue/test_instance_termination_job_cleanup.py::TestTerminateInstanceJobCleanup::test_terminate_cancels_pending_task_jobs
+tests/job_queue/test_instance_termination_job_cleanup.py::TestTerminateInstanceJobCleanup::test_terminate_cancels_processing_message_jobs
+tests/job_queue/test_instance_termination_job_cleanup.py::TestTerminateInstanceJobCleanup::test_terminate_cancels_pending_message_jobs
+tests/job_queue/test_instance_termination_job_cleanup.py::TestTerminateInstanceJobCleanup::test_terminate_cancels_failed_jobs
+tests/job_queue/test_instance_termination_job_cleanup.py::TestTerminateInstanceJobCleanup::test_terminate_does_not_cancel_cancelled_jobs
+tests/job_queue/test_instance_termination_job_cleanup.py::TestTerminateInstanceJobCleanup::test_terminate_does_not_cancel_dead_letter_jobs
+tests/job_queue/test_instance_termination_job_cleanup.py::TestTerminateInstanceJobCleanup::test_terminate_cleans_up_all_job_types
+  /home/nea/ensemble-src-wt-job-answer-asker-fix/.venv/lib/python3.14/site-packages/sqlmodel/orm/session.py:136: SAWarning: The engine provided as bind produced a connection that is already in a transaction. This is usually caused by a core event, such as 'engine_connect', that has left a transaction open. The effective join transaction mode used by this session is 'create_savepoint'. To silence this warning, do not leave transactions open
+    return super().execute(
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryEnqueue::test_enqueue_creates_dlq_item
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:52: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryGet::test_get_existing_item
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_dead_letter_repository.py:80: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_job_retry_engine.py::TestShouldRetry::test_should_retry_true_when_under_limit
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:325: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_job_retry_engine.py::TestMaybeRetry::test_maybe_retry_success_transitions_to_pending
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:438: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_job_retry_engine.py::TestMaybeRetry::test_maybe_retry_exhausted_moves_to_dlq
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:463: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_job_retry_engine.py::TestMaybeRetry::test_maybe_retry_exhausted_dlq_failure_rolls_back
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:490: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_job_retry_engine.py::TestMaybeRetryAtomicConcurrency::test_atomic_retry_concurrent_calls_only_one_succeeds
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:579: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_job_retry_engine.py::TestMaybeRetryAtomicConcurrency::test_atomic_retry_concurrent_calls_only_one_succeeds
+tests/job_queue/test_job_retry_engine.py::TestMaybeRetryAtomicConcurrency::test_atomic_retry_concurrent_calls_only_one_succeeds
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:593: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    datetime.utcnow() + timedelta(minutes=5)
+
+tests/job_queue/test_job_retry_engine.py::TestMaybeRetryAtomicConcurrency::test_atomic_retry_skips_when_retry_count_at_max
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:643: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_job_retry_engine.py::TestMaybeRetryAtomicConcurrency::test_atomic_retry_skips_when_retry_count_at_max
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:650: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    datetime.utcnow() + timedelta(minutes=5)
+
+tests/job_queue/test_job_retry_engine.py::TestMaybeRetryAtomicConcurrency::test_atomic_retry_skips_when_status_not_failed
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:687: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    datetime.utcnow() + timedelta(minutes=5)
+
+tests/job_queue/test_job_retry_engine.py::TestMaybeRetryAtomicConcurrency::test_maybe_retry_skips_concurrently_cancelled_job
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:717: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_job_retry_engine.py::TestMaybeRetryAtomicConcurrency::test_maybe_retry_skips_concurrently_dead_lettered_job
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:756: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_job_retry_engine.py::TestFindRetryableJobs::test_find_retryable_jobs_past_due
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:787: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    past_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_job_retry_engine.py::TestFindRetryableJobs::test_find_retryable_jobs_excludes_future
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:809: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    future_time = datetime.utcnow() + timedelta(hours=1)
+
+tests/job_queue/test_job_retry_engine.py::TestFindRetryableJobs::test_find_retryable_jobs_with_project_filter
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:830: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    past_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_job_retry_engine.py::TestFindRetryableJobs::test_find_retryable_jobs_excludes_non_failed
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_job_retry_engine.py:868: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    past_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_retry_engine.py::TestMaybeRetry::test_maybe_retry_retry_path
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_retry_engine.py:483: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_retry_engine.py::TestMaybeRetry::test_maybe_retry_dlq_path
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_retry_engine.py:504: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_retry_versioned_agent.py::test_retry_job_preserves_versioned_agent_directory
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_retry_versioned_agent.py:163: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "failed_at": datetime.utcnow().isoformat(),
+
+tests/job_queue/test_retry_engine.py::TestFindRetryableJobs::test_find_retryable_jobs_past_due
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_retry_engine.py:579: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    past_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_retry_engine.py::TestFindRetryableJobs::test_find_retryable_jobs_excludes_future
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_retry_engine.py:596: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    future_time = datetime.utcnow() + timedelta(hours=1)
+
+tests/job_queue/test_retry_engine.py::TestFindRetryableJobs::test_find_retryable_jobs_with_project_filter
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_retry_engine.py:612: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    past_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_retry_engine.py::TestFindRetryableJobs::test_find_retryable_jobs_excludes_non_failed
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_retry_engine.py:642: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    past_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_retry_engine.py::TestFindRetryableJobs::test_find_retryable_jobs_multiple_mixed
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_retry_engine.py:682: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    past_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_retry_engine.py::TestFindRetryableJobs::test_find_retryable_jobs_multiple_mixed
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_retry_engine.py:683: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    future_time = datetime.utcnow() + timedelta(hours=1)
+
+tests/job_queue/test_retry_engine.py::TestRetryEngineIntegration::test_full_retry_cycle
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_retry_engine.py:752: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_retry_engine.py::TestRetryEngineIntegration::test_full_retry_cycle
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_retry_engine.py:777: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    job_update.failed_at = datetime.utcnow().isoformat()
+
+tests/job_queue/test_retry_engine.py::TestRetryEngineIntegration::test_full_retry_cycle
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_retry_engine.py:793: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    job_update.failed_at = datetime.utcnow().isoformat()
+
+tests/job_queue/test_retry_orphan_normalization.py::test_retry_orphan_job_gets_system_project_id
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_retry_orphan_normalization.py:208: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "failed_at": datetime.utcnow().isoformat(),
+
+tests/job_queue/test_soft_delete.py::TestRepositoryRestore::test_restore_returns_job_with_cleared_deleted_at
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_soft_delete.py:208: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    repository.update(job_id, deleted_at=datetime.utcnow().isoformat())
+
+tests/job_queue/test_soft_delete.py::TestRepositorySchedulerSafety::test_find_retryable_jobs_excludes_deleted
+  /home/nea/ensemble-src-wt-jaaf-base/tests/job_queue/test_soft_delete.py:373: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    past_time = datetime.utcnow().isoformat()
+
+tests/job_queue/test_select_next_eligible_job.py::TestSelectNextEligibleJobBasic::test_defer_job_returned_when_project_idle
+  /home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/unittest/mock.py:460: RuntimeWarning: coroutine 'ChildReportsService._process_child_completion_and_notify_parent' was never awaited
+    new = type(cls.__name__, bases, {'__doc__': cls.__doc__})
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/job_queue/test_watcher_loss_terminal_strand.py: 7 warnings
+tests/job_queue/test_watcher_loss_terminal_strand_gap.py: 7 warnings
+  /home/nea/ensemble-src-wt-jaaf-base/daemon/tools/instance.py:2051: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    is_async = asyncio.iscoroutinefunction(original_func)
+
+tests/job_queue/test_watcher_loss_terminal_strand.py: 8 warnings
+tests/job_queue/test_watcher_loss_terminal_strand_gap.py: 8 warnings
+  /home/nea/ensemble-src-wt-jaaf-base/daemon/tools/instance.py:1990: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(wrapped_func):
+
+tests/job_queue/test_watcher_loss_terminal_strand.py::TestSpawnAclBlockedFinalTurn::test_denied_spawn_leaves_zero_residue
+tests/job_queue/test_watcher_loss_terminal_strand_gap.py::TestG1_DenialCompletionConjunct::test_denied_spawn_then_completion_publishes_and_fires
+  /home/nea/ensemble-src-wt-jaaf-base/daemon/tools/instance.py:2124: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    is_async = asyncio.iscoroutinefunction(original_func)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/job_queue/test_event_driven_completion.py::TestSite1InlineMirrorFinalize::test_hook_fires_settled_and_dual_fire_is_deduped
+FAILED tests/job_queue/test_event_driven_completion.py::TestSite1InlineMirrorFinalize::test_pre_terminal_task_completes_on_success_fully
+FAILED tests/job_queue/test_event_driven_completion.py::TestSite1InlineMirrorFinalize::test_hook_skips_when_finalize_races_to_none
+FAILED tests/job_queue/test_job_answer_tool.py::TestJobAnswerRegistration::test_create_job_tools_returns_job_answer
+FAILED tests/job_queue/test_jober_watch_integration.py::TestJoberWatchIntegration::test_tool_registration
+FAILED tests/job_queue/test_jober_watch_integration.py::TestJoberWatchIntegration::test_ensure_dev_sh_still_works
+FAILED tests/job_queue/test_jober_watch_integration.py::TestJobWatcherRepository::test_add_watch_creates_record
+FAILED tests/job_queue/test_f1_killswitch_tz_matrix.py::TestRecoveryServiceBothStateParity::test_recovery_33p_passes_under_switch_on
+FAILED tests/job_queue/test_f1_killswitch_tz_matrix.py::TestRecoveryServiceBothStateParity::test_recovery_33p_passes_under_switch_off
+FAILED tests/job_queue/test_f1_killswitch_tz_matrix.py::TestRecoveryServiceBothStateParity::test_recovery_33p_pass_count_identical_both_states
+FAILED tests/job_queue/test_n8_hot_path_pin.py::TestN8HotPathPin::test_mirror_work_id_renders_settled_via_primary_event_path
+FAILED tests/job_queue/test_in_progress_guard.py::TestJobFeedbackObserverWaitingForGuard::test_completed_with_no_waiting_runs_normal_path
+FAILED tests/job_queue/test_in_progress_guard.py::TestJobFeedbackObserverWaitingForGuard::test_waiting_for_none_treated_as_zero
+FAILED tests/job_queue/test_round2_council_fixes.py::TestStaleTaskRecoveryWedgeHook::test_wedge_resolver_end_to_end_for_dead_letter_root
+FAILED tests/job_queue/test_terminal_write_census.py::TestTerminalWriteCensus::test_every_terminal_write_site_is_classified
+FAILED tests/job_queue/test_terminal_write_census.py::TestTerminalWriteCensus::test_hooked_entries_point_at_live_notify_calls
+FAILED tests/job_queue/test_watcher_repository_concurrent.py::TestSequentialAddWatch::test_first_call_inserts
+FAILED tests/job_queue/test_watcher_repository_concurrent.py::TestConcurrentAddWatch::test_concurrent_threads_default_events_single_row
+18 failed, 2053 passed, 38 skipped, 1794 warnings in 80.96s (0:01:20)
+PYTEST_EXIT=1

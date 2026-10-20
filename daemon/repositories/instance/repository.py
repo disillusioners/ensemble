@@ -48,6 +48,21 @@ TERMINAL_INSTANCE_STATUSES: tuple[str, ...] = (
 # Safety limit for tree traversal — prevents infinite loops from circular references
 _MAX_TRAVERSAL_DEPTH = 256
 
+# Bind-parameter chunk size for the targeted metadata bulk lookup
+# (``find_by_metadata_value``). Keeps the rendered ``IN (...)`` statement
+# inside the bind-parameter limits of both engines (SQLite's
+# ``SQLITE_MAX_VARIABLE_NUMBER``, PostgreSQL's 65535) without making the
+# statement unreadable in the query log.
+_METADATA_LOOKUP_CHUNK = 500
+
+
+def _chunked(items: list[Any], size: int) -> list[list[Any]]:
+    """Split ``items`` into consecutive chunks of at most ``size``."""
+    if size <= 0:
+        return [list(items)]
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
 # Safety cap on descendants loaded per page during root-based pagination.
 # Prevents pathological trees (huge fan-out, accidental cycles) from blowing
 # up response size / DB latency. Triggers a truncation warning when hit.
@@ -2158,6 +2173,86 @@ class SQLModelInstanceRepository:
                 return json.loads(value)
             except (TypeError, ValueError):
                 return value
+
+    def find_by_metadata_value(
+        self,
+        instance_ids: list[str],
+        key: str,
+        value: str,
+    ) -> list[str]:
+        """Find the instances whose durable metadata ``key`` equals ``value``.
+
+        TARGETED bulk lookup — the mission-scoped answer resolver needs
+        "which instance of this mission holds the question pack with id
+        X?" without reading one row per candidate (the per-instance
+        ``get_metadata_value`` loop was the N+1 shape the resolver used
+        on the pack-id path).
+
+        The WHERE is restricted to ``instance_ids`` (the caller's
+        mission-scoped id set) and the metadata extraction is
+        dialect-aware, mirroring :meth:`get_metadata_value`:
+
+        * PostgreSQL: ``metadata ->> :key``
+        * SQLite:     ``json_extract(metadata, :path)``
+
+        There is NO index on ``instances.metadata`` (the column carries
+        no ``index=True`` and the schema has no GIN expression index on
+        it) — but the predicate is anchored on the
+        ``instances.instance_id`` PRIMARY KEY, so the planner narrows to
+        the given rows FIRST and evaluates the JSON extraction on those
+        rows only. No table scan, no new index, no migration.
+
+        The id list is chunked (``_METADATA_LOOKUP_CHUNK``) so the
+        rendered statement stays inside the bind-parameter limits of
+        both engines (SQLite's ``SQLITE_MAX_VARIABLE_NUMBER``, PG's
+        65535).
+
+        Args:
+            instance_ids: The ids to restrict the lookup to (the
+                mission-scoped set). An empty list returns ``[]``
+                without touching the DB.
+            key: The top-level metadata key (e.g.
+                ``"question_pack_id"``).
+            value: The value the key must equal.
+
+        Returns:
+            The matching instance ids (order not guaranteed).
+        """
+        if not instance_ids or not key or not value:
+            return []
+        found: list[str] = []
+        with SQLModelSession(self.engine) as db_session:
+            dialect = (
+                db_session.bind.dialect.name
+                if db_session.bind is not None
+                else "sqlite"
+            )
+            for chunk in _chunked(list(instance_ids), _METADATA_LOOKUP_CHUNK):
+                if dialect == "postgresql":
+                    stmt = text(
+                        "SELECT instance_id FROM instances "
+                        "WHERE instance_id IN :ids "
+                        "AND metadata ->> :key = :value"
+                    ).bindparams(bindparam("ids", expanding=True))
+                    params: dict[str, Any] = {
+                        "ids": chunk,
+                        "key": key,
+                        "value": value,
+                    }
+                else:
+                    stmt = text(
+                        "SELECT instance_id FROM instances "
+                        "WHERE instance_id IN :ids "
+                        "AND json_extract(metadata, :path) = :value"
+                    ).bindparams(bindparam("ids", expanding=True))
+                    params = {
+                        "ids": chunk,
+                        "path": f"$.{key}",
+                        "value": value,
+                    }
+                rows = db_session.execute(stmt, params).fetchall()
+                found.extend(str(row[0]) for row in rows if row and row[0])
+        return found
 
     def delete_metadata_if_present(self, instance_id: str, key: str) -> bool:
         """Conditionally delete one metadata key — no write when absent.

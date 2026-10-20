@@ -53,6 +53,20 @@ from .models import SuspensionReason, Task, TaskStatus, TaskType
 logger = logging.getLogger(__name__)
 
 
+# Bind-parameter chunk size for the bulk answer-handle lookup
+# (``find_instances_with_answer_handle``). Keeps the rendered
+# ``IN (...)`` statement inside the bind-parameter limits of both engines
+# (SQLite's ``SQLITE_MAX_VARIABLE_NUMBER``, PostgreSQL's 65535).
+_ANSWER_HANDLE_LOOKUP_CHUNK = 500
+
+
+def _chunked(items: list[Any], size: int) -> list[list[Any]]:
+    """Split ``items`` into consecutive chunks of at most ``size``."""
+    if size <= 0:
+        return [list(items)]
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
 # F-1 (durability-f1-f2 / phase1, plan §2c, §13c) — operator
 # kill-switch that gates ONLY the arm-3 ``auto_continued_at`` arm of
 # the ``clear_all`` 2-arm disjunction. Default ON; ``=0`` disables arm
@@ -918,6 +932,65 @@ class TaskRepository:
             )
             newer_count = db_session.exec(newer_stmt).one()
             return newer_count == 0
+
+    def find_instances_with_answer_handle(
+        self, instance_ids: list[str]
+    ) -> list[str]:
+        """Return the instance ids that hold an authoritative awaiting-answer handle.
+
+        BULK form of :meth:`find_suspended_turn_for_answer` — ONE query
+        over the given id set instead of one query PER INSTANCE (the
+        N+1 shape the mission-scoped answer resolver used: a 501-node
+        mission cost 501 handle lookups).
+
+        The filter shape is IDENTICAL to the per-instance primitive:
+
+          * ``suspension_reason = 'awaiting_answer'`` (the explicit
+            handle set by ``SuspendTurn``).
+          * ``resume_target_turn_id IS NOT NULL`` (invariant 2).
+          * ``status = 'paused'`` (a terminalised task cannot be the
+            suspended answer gate).
+
+        The "newest row" freshness guard of
+        :meth:`has_open_answer_handle_for_gate` is deliberately NOT
+        applied here: this is the answer-ROUTING lookup, and the
+        per-instance primitive it mirrors does not apply it either (the
+        routing consumer re-reads the handle state when it consumes it).
+
+        The id list is chunked (``_ANSWER_HANDLE_LOOKUP_CHUNK``) so the
+        rendered ``IN (...)`` stays inside the bind-parameter limits of
+        both engines.
+
+        Args:
+            instance_ids: The ids to restrict the lookup to (the
+                mission-scoped set). An empty list returns ``[]``
+                without touching the DB.
+
+        Returns:
+            The instance ids holding at least one such handle. An id
+            appears MORE THAN ONCE when the one-handle-per-instance
+            invariant is violated (duplicate suspended rows) — the
+            caller treats that as the ambiguity marker, exactly like
+            the per-instance primitive's ``ValueError``.
+        """
+        if not instance_ids:
+            return []
+        found: list[str] = []
+        with SQLModelSession(self.engine) as db_session:
+            for chunk in _chunked(list(instance_ids), _ANSWER_HANDLE_LOOKUP_CHUNK):
+                stmt = (
+                    select(Task.instance_id)
+                    .where(Task.instance_id.in_(chunk))
+                    .where(
+                        Task.suspension_reason
+                        == SuspensionReason.AWAITING_ANSWER.value
+                    )
+                    .where(Task.resume_target_turn_id.isnot(None))
+                    .where(Task.status == TaskStatus.PAUSED.value)
+                )
+                rows = db_session.exec(stmt).all()
+                found.extend(str(row) for row in rows if row)
+        return found
 
     def find_paused_or_cancellable_turn(
         self, instance_id: str

@@ -27,10 +27,22 @@ INSTANCE_NOT_FOUND         404    Instance unknown to the manager. (The
                                    ``JOB_NOT_FOUND`` at work_id resolve
                                    time, before delegating here.)
 NO_PENDING_QUESTION        404    Instance exists, no pack pending. Was
-                                   mislabeled ``INSTANCE_NOT_FOUND``.
-QUESTION_PACK_LOST         410    Durable handle but neither RAM pack nor
-                                   ``instance_metadata`` payload survive
-                                   (post-restart loss).
+                                   mislabeled ``INSTANCE_NOT_FOUND``. The
+                                   JOB-addressed surfaces also use it for
+                                   "no pack-holding asker in this mission
+                                   subtree" (the asker resolution ran and
+                                   found nobody) — see
+                                   ``daemon/services/answer_resolver.py``.
+QUESTION_PACK_LOST         410    The asker was identified, but the pack
+                                   is absent from BOTH the in-memory
+                                   store AND the ``instance_metadata``
+                                   shadow OF THAT INSTANCE. The message
+                                   names the instance + the pack id and
+                                   makes NO claim about a daemon restart
+                                   (2026-10-19: the old wording asserted
+                                   a restart that never happened, and
+                                   was also emitted for the
+                                   wrong-instance class).
 QUESTION_PACK_MISMATCH     400    Body ``question_pack_id`` ≠ current pack
                                    id (stale-answers hijack guard, T1″).
 ANSWER_TARGET_TERMINAL     410    Asker is COMPLETED/TERMINATED — answer
@@ -41,6 +53,14 @@ ALREADY_DELIVERED          200    CAS lost — no-op with
                                    ``resume_route:"already_delivered"``.
 WRITE_PAUSED               503    Daemon migration mode.
 ==========================  =====  =======================================
+
+The JOB-addressed surfaces (the route and the agent tool) resolve the
+ASKER from the mission subtree before delegating here — the work unit
+resolves to the MISSION-SCOPED instance (usually the mission root),
+while the pack may live on a CHILD asker. That resolution raises
+``400 INVALID_REQUEST`` when several instances hold a question and the
+caller supplied no ``question_pack_id`` to disambiguate (we never pick
+one by guesswork). See ``daemon/services/answer_resolver.py``.
 """
 
 from __future__ import annotations
@@ -222,10 +242,20 @@ async def _resolve_pack_or_raise(
     manager: "InstanceManager",
     instance_id: str,
     question_pack_id: str | None,
+    resolution_details: dict | None = None,
 ) -> QuestionPack:
     """Banners 3-4: pack resolution + on-the-fly rehydration (§5.4),
     then the T1″ pack correlation guard (pre-CAS;
-    strict-check-when-present)."""
+    strict-check-when-present).
+
+    ``resolution_details`` carries the ADDITIVE diagnostic fields of the
+    job-scoped asker resolution (``resolved_instance_id`` /
+    ``question_pack_id`` / ``subtree_scanned`` / …). It is merged into
+    the error ``details`` so a consumer can assert on the fields
+    instead of pattern-matching the prose. The instance-addressed
+    surface passes ``None`` — its details stay exactly as before plus
+    the additive ``question_pack_id``.
+    """
     from daemon.services.midflight_qa import QUESTION_PACK_PAYLOAD_METADATA_KEY
 
     qm = manager._question_manager
@@ -261,18 +291,41 @@ async def _resolve_pack_or_raise(
                     f"{instance_id[:8]}... (durable shadow status="
                     f"{payload.get('status')!r})."
                 ),
-                details={"instance_id": instance_id},
+                details={
+                    **(resolution_details or {}),
+                    "instance_id": instance_id,
+                    "question_pack_id": question_pack_id,
+                },
             )
         if pack is None:
+            # ACCURATE cause statement (2026-10-19). The old wording
+            # asserted a "daemon restart without a durable shadow" —
+            # a claim that is false whenever the pack was never lost
+            # (the wrong-instance class: the pack was alive and durable
+            # on a CHILD asker while the answer was routed at the
+            # mission root). The neutral, checkable statement is that
+            # the pack is absent from BOTH the in-memory store AND the
+            # durable metadata shadow OF THIS INSTANCE.
             raise _http(
                 410,
                 ErrorCodes.QUESTION_PACK_LOST,
                 (
-                    f"No question pack for instance {instance_id[:8]}... "
-                    f"in memory or in instance_metadata — the pack was "
-                    f"lost (daemon restart without a durable shadow)."
+                    f"No question pack for instance {instance_id} in "
+                    f"memory or in instance_metadata — the pack is "
+                    f"absent from both the in-memory store and the "
+                    f"durable metadata shadow of that instance"
+                    + (
+                        f" (question pack {question_pack_id!r})"
+                        if question_pack_id
+                        else ""
+                    )
+                    + "."
                 ),
-                details={"instance_id": instance_id},
+                details={
+                    **(resolution_details or {}),
+                    "instance_id": instance_id,
+                    "question_pack_id": question_pack_id,
+                },
             )
 
     # NOTE: a RAM pack with status='answered' deliberately FALLS
@@ -291,6 +344,7 @@ async def _resolve_pack_or_raise(
                 f"for a superseded question (the asker re-asked)."
             ),
             details={
+                **(resolution_details or {}),
                 "instance_id": instance_id,
                 "expected_pack_id": pack.id,
                 "got_pack_id": question_pack_id,
@@ -555,6 +609,7 @@ async def answer_questions_via_instance(
     question_pack_id: str | None,
     live_hub: Any,
     resume_message: str | None = None,
+    resolution_details: dict | None = None,
 ) -> dict:
     """Store answers, emit on the push lanes, resume the asker cascade.
 
@@ -564,13 +619,24 @@ async def answer_questions_via_instance(
 
     Args:
         manager: The InstanceManager.
-        instance_id: The ASKER instance id.
+        instance_id: The ASKER instance id. The instance-addressed
+            surface passes the id the caller named; the job-addressed
+            surfaces pass the ASKER resolved from the mission subtree
+            (see ``daemon/services/answer_resolver.py``).
         answers: User-supplied answer dict (flexible shape).
         question_pack_id: Optional pack id echoed by the caller for the
             T1″ correlation guard. ``None`` = today's lenient behavior.
         live_hub: The LiveEventHub (or ``None`` in tests).
         resume_message: Optional extra message text appended by the
             caller (the jobs surface accepts ``resume_message``).
+        resolution_details: Optional ADDITIVE diagnostic fields
+            describing how the asker was resolved (job-addressed
+            surfaces only). Merged into the error ``details`` so
+            consumers can assert on ``resolved_instance_id`` /
+            ``question_pack_id`` / ``subtree_scanned`` instead of
+            pattern-matching the prose. The instance-addressed surface
+            passes ``None`` — its details are unchanged (plus the
+            additive ``question_pack_id``).
     """
     from daemon.services.midflight_qa import clear_question_pack_metadata
 
@@ -582,7 +648,9 @@ async def answer_questions_via_instance(
 
     # ── 3. Pack resolution + on-the-fly rehydration (§5.4) ───────────
     # ── 4. T1″ pack correlation (pre-CAS; strict-check-when-present) ─
-    pack = await _resolve_pack_or_raise(manager, instance_id, question_pack_id)
+    pack = await _resolve_pack_or_raise(
+        manager, instance_id, question_pack_id, resolution_details
+    )
 
     # ── 5. T1 CAS — exactly-once pending → answered ──────────────────
     # MINOR-6 (fix pass) — accepted benign race, pre-check → CAS window:

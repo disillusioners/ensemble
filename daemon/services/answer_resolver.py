@@ -1,0 +1,1043 @@
+"""Job-scoped answer-target resolution (2026-10-19; restructured 2026-10-20).
+
+Shared resolver for the TWO job-addressed answer surfaces:
+
+* ``POST /api/jobs/{work_id}/answer`` (``daemon/routers/jobs_management.py``)
+* the ``job_answer`` agent tool (``daemon/tools/job_queue.py``)
+
+Both surfaces used to route the answer at ``WorkRecord.instance_id`` —
+the work unit's OWNING instance. For a mission-scoped ``work_id`` that
+is the mission ROOT, even when the question was actually asked by a
+CHILD instance. The answer then landed on an instance that never held
+the pack, and the shared helper raised a 410 ``QUESTION_PACK_LOST``
+whose message blamed a "daemon restart without a durable shadow" — a
+claim that is FALSE in the wrong-instance class (the pack was alive and
+durable on the child).
+
+This module resolves the ASKING instance inside the mission subtree.
+It is READ-ONLY (no writes, no migrations, no new tables) and
+watcher-independent (it only uses the work record + the instance/task
+repositories).
+
+Resolution (one shared helper — both surfaces call it)
+-------------------------------------------------------
+
+**TARGETED lookups, not per-instance scans.** The resolver has TWO
+targeted questions available, ONE per lane — never a per-instance loop,
+and never both on the same request when the pack-id lane short-circuits.
+Each is ONE query restricted to the mission-scoped id set:
+
+* the durable-shadow lookup (``SQLModelInstanceRepository.
+  find_by_metadata_value``) — "which instance of this mission holds the
+  question pack with THIS id?" — anchored on the
+  ``instances.instance_id`` PRIMARY KEY (no index on
+  ``instances.metadata`` exists, and none is needed: the planner
+  narrows to the given rows first and evaluates the JSON extraction on
+  those rows only — no table scan, no migration), and
+* the awaiting-answer handle lookup (``TaskRepository.
+  find_instances_with_answer_handle``) — "which instances of this
+  mission are waiting for an answer?" — the SAME filter shape as the
+  per-instance primitive ``find_suspended_turn_for_answer``.
+
+The per-instance N+1 loops (one metadata read + one handle lookup per
+mission member) are gone: a 501-node mission cost ~3N queries before.
+What remains is the mission enumeration plus ONE targeted bulk query
+per lane — the two lanes do NOT both run on every request:
+
+* the pack-id lane asks the durable-shadow question (ONE query) and,
+  when it finds the holder, SHORT-CIRCUITS before the handle lookup
+  runs (ZERO handle queries);
+* the no-pack-id lane asks the handle question (ONE query) and then
+  reads the durable shadow of each handle-holding CANDIDATE — K reads
+  for K candidates, never N.
+
+**Fast path (a pack id IS supplied).** The resolver may return the
+WORK instance immediately — before any lookup runs — when that
+instance's RAM pack carries the supplied id. The pack may be ANSWERED:
+a RAM pack SURVIVES answer consumption, so the holder of an
+already-answered pack IS the holder of that pack id, and the retry of
+an already-delivered answer MUST reach it (the shared helper's CAS
+then loses and returns the documented ``200 already_delivered`` —
+OQ-3 / §8.5). This is safe because a pack id is a uuid4 that
+identifies exactly ONE pack: the holder is unique, so the pack-id
+uniqueness scan the general path performs cannot change the outcome.
+The fast path reads the RAM pack only — no lookup, no repository scan.
+
+A candidate is an instance that either
+
+* **(P)** holds a LIVE PENDING RAM pack — the question is open right
+  now (this also covers the PRE-PAUSE window: ``question_tools.py``
+  stores the pack and stamps the durable shadow BEFORE the
+  ``awaiting_answer`` pause fires, so a child that asked a moment ago
+  has a live pack but no handle yet), or
+* **(H)** holds the AUTHORITATIVE awaiting-answer handle — the task is
+  ``status='paused' AND suspension_reason='awaiting_answer' AND
+  resume_target_turn_id IS NOT NULL`` (the same shape as
+  ``TaskRepository.find_suspended_turn_for_answer``). The handle is the
+  authoritative "still waiting" signal — it is what the v0.25.3 boot
+  rehydrate pass keys on (``daemon/manager.py``
+  ``_rehydrate_question_packs_at_boot``), so the durable-shadow path
+  stays reachable through it.
+
+A durable ``question_pack_payload`` shadow on its own is NOT a
+candidate: the shadow is a FROZEN ask-time snapshot (``status`` is
+whatever it was when the question was asked), so a stale PENDING
+shadow on the mission root would otherwise win the resolution and hide
+the LIVE question of a child. The shadow is used for two things only:
+(1) the pack id of a handle candidate (so the supplied pack id can
+select it), and (2) the per-instance rehydrate source inside
+``answer_helper._resolve_pack_or_raise`` (unchanged, v0.25.3 path).
+
+Arbitration:
+
+* **Pack id supplied** — the STRONGEST key. The HOLDER of that pack id
+  wins — REGARDLESS of the pack's status (a pending pack is answered
+  now; an ANSWERED pack yields the exactly-once CAS loser's ``200
+  already_delivered``). If the supplied id matches NOBODY, the asker
+  candidates are used as the fallback so the per-instance error shape
+  (mismatch / lost / no-pending) is produced by the asker that
+  actually holds a pack — that fallback is what produces the
+  documented ``400 QUESTION_PACK_MISMATCH`` for a stale pack id.
+* **No pack id** — the collected candidates decide. Exactly one → it
+  is the asker. SEVERAL → 400 ``INVALID_REQUEST`` naming them: we
+  never pick one by recency (answering the WRONG question is worse
+  than refusing). NONE → 404 ``NO_PENDING_QUESTION`` (or 410
+  ``ANSWER_TARGET_TERMINAL`` when the work instance itself is
+  terminal — that signal must survive the resolution).
+* **Truncated scan** — the no-pack-id lane is capped at
+  ``MAX_SUBTREE_SCAN`` instances. A TRUNCATED search is NOT a
+  completed search: the resolver refuses with ``400
+  INVALID_REQUEST`` ("supply question_pack_id") instead of reporting a
+  404/answer derived from an incomplete set.
+
+The INSTANCE-addressed surface (``POST /api/instances/{id}/answer``)
+is deliberately NOT routed through here — the caller names the
+instance explicitly, so there is nothing to resolve.
+
+Module hygiene: the resolver never raises for "not found"; it returns
+an :class:`AnswerTarget` whose ``error`` field says what happened, and
+:func:`raise_unresolved_target` turns that into the single typed
+``HTTPException`` both surfaces share.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, NoReturn
+
+from daemon.models.common import ErrorCodes
+from daemon.services.midflight_qa import QUESTION_PACK_ID_METADATA_KEY
+
+if TYPE_CHECKING:
+    from daemon.manager import InstanceManager
+
+logger = logging.getLogger(__name__)
+
+
+# ── Tunables ────────────────────────────────────────────────────────────
+
+# Hard cap on the candidate-collection pass when the caller supplied NO
+# pack id. The pass reads one task row per instance (the handle), so an
+# unbounded scan over a huge mission would be unbounded work. Mission
+# trees are small (a leader plus a handful of children); the cap only
+# bounds a pathological fan-out.
+#
+# The cap is LIFTED when a pack id IS supplied: the pack id is the
+# strongest key, so the caller has told us exactly which pack to
+# deliver — truncating the scan before reaching the holder would
+# produce a false 404 for an asker that sits beyond the cap. The
+# enumeration itself is bounded in DEPTH only — the repository's own
+# ``_MAX_TRAVERSAL_DEPTH`` (256) in ``get_tree_ids_permanent`` caps
+# the BFS DEPTH, NOT the node count (the fan-out at each level is
+# unbounded), so a wide mission can still yield far more than 256
+# reachable instances. The uncapped pass is therefore REPORTED rather
+# than silent: ``scan_uncapped`` / ``reachable_count`` in
+# :meth:`AnswerTarget.detail_fields`.
+MAX_SUBTREE_SCAN = 64
+
+
+# ── Resolution routes (diagnostic — surfaced in the success envelope) ──
+
+ROUTE_DIRECT_RAM_PACK = "direct_ram_pack"
+ROUTE_SUBTREE_PACK_ID = "subtree_pack_id"
+ROUTE_SUBTREE_PENDING_PACK = "subtree_pending_pack"
+ROUTE_SUBTREE_ANSWER_HANDLE = "subtree_answer_handle"
+
+
+# ── Error kinds ─────────────────────────────────────────────────────────
+
+ERROR_AMBIGUOUS = "ambiguous"
+ERROR_NOT_FOUND = "not_found"
+ERROR_TERMINAL = "terminal"
+ERROR_TRUNCATED = "truncated"
+
+
+@dataclass(frozen=True)
+class AnswerTarget:
+    """Resolution outcome for a job-scoped answer request.
+
+    Attributes:
+        asker_instance_id: The instance that HOLDS the question pack —
+            the answer must be delivered here. ``None`` when no asker
+            could be identified (see ``error``).
+        route: How the asker was identified (one of the ``ROUTE_*``
+            constants). ``""`` when unresolved.
+        work_instance_id: The mission-scoped instance the work record
+            resolved to (the old, wrong target in the defect class).
+        mission_root_id: The mission root of ``work_instance_id``
+            (permanent lineage).
+        subtree_scanned: True when the reachable-set enumeration /
+            candidate scan was ATTEMPTED — including a TRUNCATED
+            attempt (a refusal still enumerates the set, so the flag is
+            ``True`` on the ``truncated`` return). It does NOT mean the
+            pass COMPLETED; ``subtree_truncated`` carries the
+            completion/truncation meaning. ``False`` on the fast path,
+            which returns before any enumeration.
+        subtree_truncated: True when the pass hit ``MAX_SUBTREE_SCAN``
+            (only possible without a supplied pack id).
+        reachable_count: The size of the reachable set the candidate
+            pass considered — the FULL set size, counted BEFORE any
+            truncation is applied. ``None`` when no candidate pass ran
+            (the fast path returned before the reachable set was
+            enumerated).
+        scan_uncapped: True when a supplied pack id LIFTED the
+            ``MAX_SUBTREE_SCAN`` cap and the whole reachable set was
+            scanned. The scan completed (nothing was missed) and
+            ``subtree_truncated`` stays ``False`` — the flag marks an
+            unbounded-work scan, not a truncated one.
+        candidate_ids: The candidate instance ids that were considered
+            (populated for the ambiguous case).
+        pack_id_searched: The pack id the caller asked for (may be
+            ``None``).
+        error: ``None`` on success, else ``"ambiguous"`` (several
+            candidates, no pack id to disambiguate), ``"not_found"``
+            (nobody in the mission holds a pack), ``"terminal"``
+            (the work instance itself is terminal) or ``"truncated"``
+            (the candidate scan hit ``MAX_SUBTREE_SCAN`` — a truncated
+            search is never reported as a completed one).
+        work_instance_status: The work instance's status when it was
+            read (diagnostic).
+    """
+
+    asker_instance_id: str | None
+    route: str
+    work_instance_id: str
+    mission_root_id: str
+    subtree_scanned: bool = False
+    subtree_truncated: bool = False
+    reachable_count: int | None = None
+    scan_uncapped: bool = False
+    candidate_ids: tuple[str, ...] = ()
+    pack_id_searched: str | None = None
+    error: str | None = None
+    work_instance_status: str | None = None
+
+    def detail_fields(self) -> dict[str, Any]:
+        """Additive ``details`` payload for the answer error envelope.
+
+        Consumers (and tests) can assert on these fields instead of
+        pattern-matching the human-readable prose.
+        """
+        return {
+            "resolved_instance_id": self.asker_instance_id
+            or self.work_instance_id,
+            "work_instance_id": self.work_instance_id,
+            "mission_root_id": self.mission_root_id,
+            "question_pack_id": self.pack_id_searched,
+            "subtree_scanned": self.subtree_scanned,
+            "subtree_truncated": self.subtree_truncated,
+            "reachable_count": self.reachable_count,
+            "scan_uncapped": self.scan_uncapped,
+            "resolution_route": self.route or None,
+            "candidate_ids": list(self.candidate_ids),
+            "work_instance_status": self.work_instance_status,
+        }
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    """One instance of the mission that may be the asker.
+
+    Attributes:
+        instance_id: The candidate instance.
+        pack_id: The pack id this instance holds (the live RAM pack id,
+            or the durable shadow id for a handle-only candidate).
+        live_pack: A LIVE PENDING RAM pack exists on this instance.
+        has_handle: The authoritative awaiting-answer handle exists.
+    """
+
+    instance_id: str
+    pack_id: str | None
+    live_pack: bool
+    has_handle: bool
+
+
+# ── Small defensive readers ────────────────────────────────────────────
+#
+# The repositories are sometimes reached through a partially-mocked
+# manager (test doubles, partial bootstrap). A ``MagicMock`` attribute
+# would look truthy to a naive ``is not None`` check and could turn
+# into a false "this instance holds a pack" / "this instance has an
+# answer handle" conclusion. The readers below only accept the real
+# shapes (a ``str`` pack id, a task row whose status/reason/target
+# actually match the authoritative filter).
+
+
+def _pack_id_of(pack: Any) -> str | None:
+    """Return the pack id of a RAM pack, or ``None``.
+
+    ``None`` for anything that is not a real pack (missing pack, or a
+    mock object whose ``id`` is not a string).
+    """
+    pack_id = getattr(pack, "id", None)
+    if isinstance(pack_id, str) and pack_id:
+        return pack_id
+    return None
+
+
+def _is_pending_pack(pack: Any) -> bool:
+    """True when ``pack`` is a LIVE PENDING question pack.
+
+    A RAM pack SURVIVES answer consumption (only the durable metadata
+    shadow is cleared at consumption), so an ANSWERED pack can sit on
+    the mission root long after its own question was answered.
+    Short-circuiting on it routes the answer at the wrong instance and
+    the CAS then LOSES — a silent 200 ``already_delivered`` while the
+    LIVE question is never answered.
+    """
+    if pack is None:
+        return False
+    if _pack_id_of(pack) is None:
+        return False
+    return getattr(pack, "status", None) == "pending"
+
+
+def _is_answer_handle(task: Any) -> bool:
+    """True when ``task`` is the authoritative awaiting-answer handle.
+
+    Mirrors ``TaskRepository.find_suspended_turn_for_answer``'s filter
+    shape (status + suspension reason + resume target) so a mock row
+    can never masquerade as a real handle.
+    """
+    if task is None:
+        return False
+    status = getattr(task, "status", None)
+    if not isinstance(status, str):
+        return False
+    reason = getattr(task, "suspension_reason", None)
+    if not isinstance(reason, str):
+        return False
+    if reason != "awaiting_answer":
+        return False
+    if getattr(task, "resume_target_turn_id", None) is None:
+        return False
+    return status == "paused"
+
+
+def _read_shadow_id(instance_repo: Any, instance_id: str) -> str | None:
+    """Read the durable ``question_pack_id`` shadow for ``instance_id``."""
+    if instance_repo is None:
+        return None
+    try:
+        value = instance_repo.get_metadata_value(
+            instance_id, QUESTION_PACK_ID_METADATA_KEY
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort read
+        logger.warning(
+            "answer_resolver: question_pack_id shadow read failed for %s: %s",
+            instance_id[:8],
+            e,
+        )
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _read_answer_handle(task_repo: Any, instance_id: str) -> Any:
+    """Read the authoritative awaiting-answer handle of ``instance_id``.
+
+    Returns the task row, ``None`` when there is none, and ``True`` as
+    the "ambiguous duplicates" marker when the repository refuses
+    because several suspended answer-gate rows exist (an invariant
+    violation — surfaced, never resolved by recency).
+    """
+    if task_repo is None:
+        return None
+    try:
+        return task_repo.find_suspended_turn_for_answer(instance_id)
+    except ValueError:
+        logger.warning(
+            "answer_resolver: duplicate awaiting-answer handles for %s "
+            "— treating as an ambiguous candidate",
+            instance_id[:8],
+        )
+        return True
+    except Exception as e:  # noqa: BLE001 — best-effort read
+        logger.warning(
+            "answer_resolver: answer-handle lookup failed for %s: %s",
+            instance_id[:8],
+            e,
+        )
+        return None
+
+
+def _read_instance_status(instance_repo: Any, instance_id: str) -> str | None:
+    """Read an instance's status (diagnostic + terminal pre-check)."""
+    if instance_repo is None:
+        return None
+    try:
+        row = instance_repo.get(instance_id)
+    except Exception as e:  # noqa: BLE001 — best-effort read
+        logger.warning(
+            "answer_resolver: instance status read failed for %s: %s",
+            instance_id[:8],
+            e,
+        )
+        return None
+    status = getattr(row, "status", None)
+    return status if isinstance(status, str) else None
+
+
+# ── The resolver ────────────────────────────────────────────────────────
+
+
+def _reachable_set(
+    instance_repo: Any,
+    mission_root_id: str,
+    work_instance_id: str,
+) -> list[str]:
+    """The reachable target set — WIDENED, but still mission-scoped.
+
+    The set is the PERMANENT lineage of the mission root (the root plus
+    every descendant, ``instances.parent_id`` — the lineage survives
+    completion / error / terminate / revive), PLUS the work instance
+    itself.
+
+    * The mission ROOT is folded in explicitly: the work unit may
+      resolve to a CHILD (the mission receipt the watcher holds), while
+      the question may have been asked by the root. Keying the direct
+      lanes on the work instance alone made the root's own pending pack
+      unreachable.
+    * ``get_tree_ids_permanent`` is called DIRECTLY (not through
+      ``get_cascade_tree_ids``): the ``ENSEMBLE_CASCADE_LINEAGE``
+      kill-switch selects between the permanent lineage and the
+      TRANSIENT ``instance_hierarchy`` working set, and the transient
+      set silently loses churned descendants. The resolver's lineage
+      semantics must not change with that switch — an answer that was
+      routed to the wrong instance is a data-loss class, not a
+      performance knob.
+    * The set is the PERMANENT LINEAGE of the mission root — the root
+      plus every descendant. It is derived from the lineage only; the
+      resolver does NOT assert anything about the instances' project
+      (spawn_instance exposes ``project_id`` with no cross-project
+      guard, so a lineage MAY span projects and no project filter is
+      applied here).
+    """
+    ids: list[str] = []
+    if instance_repo is not None:
+        try:
+            ids = list(
+                instance_repo.get_tree_ids_permanent(mission_root_id) or []
+            )
+        except Exception as e:  # noqa: BLE001 — degrade to the work id
+            logger.warning(
+                "answer_resolver: permanent-lineage enumeration failed "
+                "for %s: %s",
+                mission_root_id[:8],
+                e,
+            )
+    ordered: list[str] = []
+    for iid in (mission_root_id, work_instance_id):
+        if iid and iid not in ordered:
+            ordered.append(iid)
+    for iid in ids:
+        if iid not in ordered:
+            ordered.append(iid)
+    return ordered
+
+
+def _ram_packs(qm: Any, reachable: list[str]) -> dict[str, Any]:
+    """The RAM question pack of every reachable instance.
+
+    ``QuestionManager._packs`` is keyed by instance id, so this costs
+    ONE dict lookup per instance and ZERO database queries.
+    """
+    if qm is None:
+        return {}
+    packs: dict[str, Any] = {}
+    for iid in reachable:
+        packs[iid] = qm.get_question_pack(iid)
+    return packs
+
+
+def _pack_id_holders(ram_packs: dict[str, Any], question_pack_id: str) -> list[str]:
+    """The instances whose RAM pack carries ``question_pack_id`` — ANY status.
+
+    N-1 (duplicate-answer idempotency): a RAM pack SURVIVES answer
+    consumption (only the durable metadata shadow is cleared at
+    consumption), so the ANSWERED pack of an already-answered question
+    is still on its asker. The retry of an already-delivered answer
+    MUST reach that holder — the shared helper's exactly-once CAS then
+    loses and returns the documented ``200 already_delivered``
+    (``answer_helper.py`` OQ-3 / §8.5). A pack-STATUS filter here would
+    turn that retry into a 404 (and, on a terminal work instance, into
+    a false 410).
+
+    ``question_pack_id`` is a uuid4 — two instances holding ONE pack id
+    is not a reachable state.
+    """
+    holders: list[str] = []
+    for iid, pack in ram_packs.items():
+        if _pack_id_of(pack) == question_pack_id:
+            holders.append(iid)
+    return holders
+
+
+def _shadow_holders(
+    instance_repo: Any,
+    reachable: list[str],
+    question_pack_id: str,
+) -> list[str]:
+    """The instances whose DURABLE ``question_pack_id`` shadow matches.
+
+    ONE targeted query over the mission-scoped id set (the per-instance
+    metadata read is the N+1 shape this replaces). Falls back to the
+    per-instance read when the repository does not expose the bulk
+    accessor (a partially-mocked manager in tests) or when the bulk
+    query fails (a transient DB error must not silently change the
+    resolution).
+    """
+    finder = getattr(instance_repo, "find_by_metadata_value", None)
+    if finder is not None:
+        try:
+            return [
+                str(iid)
+                for iid in (
+                    finder(
+                        reachable,
+                        QUESTION_PACK_ID_METADATA_KEY,
+                        question_pack_id,
+                    )
+                    or []
+                )
+            ]
+        except Exception as e:  # noqa: BLE001 — degrade, never mis-route
+            logger.warning(
+                "answer_resolver: targeted pack-id lookup failed (%s) — "
+                "falling back to the per-instance shadow read",
+                e,
+            )
+    return [
+        iid
+        for iid in reachable
+        if _read_shadow_id(instance_repo, iid) == question_pack_id
+    ]
+
+
+def _handle_holders(task_repo: Any, reachable: list[str]) -> list[str]:
+    """The instances holding an authoritative awaiting-answer handle.
+
+    ONE targeted query over the mission-scoped id set (the per-instance
+    ``find_suspended_turn_for_answer`` loop was the N+1 shape this
+    replaces: a 501-node mission cost 501 handle lookups).
+
+    An id that appears MORE THAN ONCE means the one-handle-per-instance
+    invariant is violated (the per-instance primitive raises
+    ``ValueError`` there) — the instance stays a candidate and the
+    violation is logged; the resolver never resolves it by recency.
+    """
+    finder = getattr(task_repo, "find_instances_with_answer_handle", None)
+    raw: list[str] = []
+    if finder is None:
+        # No bulk accessor on this repository (a partially-mocked
+        # manager) → the per-instance primitive.
+        for iid in reachable:
+            handle = _read_answer_handle(task_repo, iid)
+            if _is_answer_handle(handle) or handle is True:
+                raw.append(iid)
+    else:
+        try:
+            raw = [
+                str(iid) for iid in (finder(reachable) or []) if iid
+            ]
+        except Exception as e:  # noqa: BLE001 — degrade, never mis-route
+            logger.warning(
+                "answer_resolver: targeted answer-handle lookup failed "
+                "(%s) — falling back to the per-instance lookup",
+                e,
+            )
+            for iid in reachable:
+                handle = _read_answer_handle(task_repo, iid)
+                if _is_answer_handle(handle) or handle is True:
+                    raw.append(iid)
+    unique: list[str] = []
+    duplicates: set[str] = set()
+    for iid in raw:
+        if iid in unique:
+            duplicates.add(iid)
+        else:
+            unique.append(iid)
+    if duplicates:
+        logger.warning(
+            "answer_resolver: duplicate awaiting-answer handles for %d "
+            "instance(s) — treating as ambiguous candidates",
+            len(duplicates),
+        )
+    return unique
+
+
+def _asker_candidates(
+    instance_repo: Any,
+    ram_packs: dict[str, Any],
+    handle_ids: list[str],
+    reachable: list[str],
+) -> list[_Candidate]:
+    """The instances that can be the asker for a request WITHOUT a pack id.
+
+    A candidate is an instance that either holds a LIVE PENDING RAM pack
+    (the question is open now — this also covers the PRE-PAUSE window)
+    or holds the authoritative awaiting-answer handle (the asker is
+    waiting; its pack may be missing → the helper reports it as lost).
+    """
+    handle_set = set(handle_ids)
+    candidates: list[_Candidate] = []
+    for iid in reachable:
+        pack = ram_packs.get(iid)
+        if _is_pending_pack(pack):
+            candidates.append(
+                _Candidate(
+                    instance_id=iid,
+                    pack_id=_pack_id_of(pack),
+                    live_pack=True,
+                    has_handle=iid in handle_set,
+                )
+            )
+        elif iid in handle_set:
+            candidates.append(
+                _Candidate(
+                    instance_id=iid,
+                    pack_id=_read_shadow_id(instance_repo, iid),
+                    live_pack=False,
+                    has_handle=True,
+                )
+            )
+    return candidates
+
+
+def _route_for(
+    candidate: _Candidate,
+    work_instance_id: str,
+    matched_by_pack_id: bool,
+) -> str:
+    """Name HOW the winning candidate was identified."""
+    if matched_by_pack_id:
+        return ROUTE_SUBTREE_PACK_ID
+    if candidate.instance_id == work_instance_id and candidate.live_pack:
+        return ROUTE_DIRECT_RAM_PACK
+    if candidate.has_handle:
+        return ROUTE_SUBTREE_ANSWER_HANDLE
+    return ROUTE_SUBTREE_PENDING_PACK
+
+
+def resolve_answer_target(
+    manager: "InstanceManager",
+    work_instance_id: str,
+    question_pack_id: str | None = None,
+) -> AnswerTarget:
+    """Resolve the ASKING instance for a job-scoped answer request.
+
+    The REACHABLE TARGET SET is the permanent lineage of the mission
+    root (the root + every descendant) plus the work instance itself —
+    WIDENED (the root's own pending pack must be reachable even when
+    the work resolves to a child). It is derived from the lineage
+    alone: the resolver does NOT filter by project (spawn_instance
+    exposes ``project_id`` with no cross-project guard). See
+    :func:`_reachable_set`.
+
+    Args:
+        manager: The ``InstanceManager`` (read-only use here).
+        work_instance_id: ``WorkRecord.instance_id`` — the mission-scoped
+            instance the work unit resolved to (usually the mission
+            root).
+        question_pack_id: The pack id the caller supplied (the
+            ``question_pack_id`` echoed from the ``QUESTION_REQUESTED``
+            payload). ``None`` = the caller did not supply one.
+
+    Returns:
+        An :class:`AnswerTarget`. On success ``asker_instance_id`` is
+        set; otherwise ``error`` is ``"ambiguous"``, ``"not_found"`` or
+        ``"terminal"`` and ``candidate_ids`` carries the evidence.
+    """
+    instance_repo = getattr(manager, "_instance_repository", None)
+    qm = getattr(manager, "_question_manager", None)
+    task_repo = getattr(manager, "_task_repo", None)
+
+    # ── Mission root (permanent lineage) ──────────────────────────────
+    mission_root_id = work_instance_id
+    if instance_repo is not None:
+        try:
+            mission_root_id = (
+                instance_repo.get_tree_root_id(work_instance_id)
+                or work_instance_id
+            )
+        except Exception as e:  # noqa: BLE001 — degrade to the work id
+            logger.warning(
+                "answer_resolver: tree root lookup failed for %s: %s",
+                work_instance_id[:8],
+                e,
+            )
+
+    # ── FAST PATH — the work instance holds the requested pack ───────
+    # A supplied pack id is the STRONGEST key: it identifies exactly
+    # one pack, so no ambiguity is possible and the lookups can be
+    # skipped entirely (zero repository reads). The pack id is a
+    # uuid4 — two instances holding ONE pack id is not a reachable
+    # state, so the pack-id uniqueness scan the general path performs
+    # cannot change the outcome here.
+    #
+    # The pack may be ANSWERED: a RAM pack SURVIVES answer
+    # consumption, so the holder of an already-answered pack IS the
+    # holder of that pack id. The retry of an already-delivered answer
+    # must reach it — the shared helper's exactly-once CAS then loses
+    # and returns the documented ``200 already_delivered`` (N-1).
+    if question_pack_id is not None:
+        ram_pack = (
+            qm.get_question_pack(work_instance_id) if qm is not None else None
+        )
+        if _pack_id_of(ram_pack) == question_pack_id:
+            logger.debug(
+                "answer_resolver: fast path — work instance %s holds "
+                "the requested pack %s",
+                work_instance_id[:8],
+                question_pack_id,
+            )
+            return AnswerTarget(
+                asker_instance_id=work_instance_id,
+                route=ROUTE_DIRECT_RAM_PACK,
+                work_instance_id=work_instance_id,
+                mission_root_id=mission_root_id,
+                subtree_scanned=False,
+                pack_id_searched=question_pack_id,
+            )
+
+    # ── REACHABLE SET (widened, mission-scoped) ──────────────────────
+    reachable = _reachable_set(instance_repo, mission_root_id, work_instance_id)
+    # The FULL reachable-set size, counted BEFORE any truncation — the
+    # number the cap decisions below are made against.
+    reachable_count = len(reachable)
+
+    # The cap is lifted when a pack id was supplied — the caller named
+    # the pack, so truncating the search before reaching its holder
+    # would produce a false 404 for an asker that sits beyond the cap.
+    truncated = False
+    scan_uncapped = False
+    if question_pack_id is None and reachable_count > MAX_SUBTREE_SCAN:
+        logger.warning(
+            "answer_resolver: candidate scan capped at %d instances "
+            "(mission %s has %d) — an asker beyond the cap may be missed",
+            MAX_SUBTREE_SCAN,
+            mission_root_id[:8],
+            reachable_count,
+        )
+        reachable = reachable[:MAX_SUBTREE_SCAN]
+        truncated = True
+    elif question_pack_id is not None and reachable_count > MAX_SUBTREE_SCAN:
+        # The pack-id path searches the WHOLE reachable set (no
+        # truncation), and the enumeration is bounded in DEPTH only —
+        # the node count is unbounded. Nothing is MISSED (the search
+        # completed), but the unbounded work is REPORTED rather than
+        # silent: without this signal a wide mission would look
+        # identical to a narrow one.
+        scan_uncapped = True
+        logger.warning(
+            "answer_resolver: uncapped pack-id search over %d reachable "
+            "instances (mission %s, pack %s, cap %d) — the enumeration is "
+            "bounded in depth only, not in node count",
+            reachable_count,
+            mission_root_id[:8],
+            question_pack_id[:8],
+            MAX_SUBTREE_SCAN,
+        )
+
+    # ── N-5: a TRUNCATED search is NOT a completed search ────────────
+    # The no-pack-id lane cannot complete its search over a wide
+    # mission (the cap). Reporting a 404 (or an answer derived from an
+    # incomplete candidate set) would present a partial search as a
+    # complete one — and an incomplete candidate set can MISS the real
+    # asker (or hide a second one). Refuse instead and ask for the
+    # disambiguator.
+    if truncated:
+        logger.warning(
+            "answer_resolver: refusing the no-pack-id answer for mission "
+            "%s — the candidate scan was truncated at %d of %d instances; "
+            "supply question_pack_id",
+            mission_root_id[:8],
+            MAX_SUBTREE_SCAN,
+            reachable_count,
+        )
+        return AnswerTarget(
+            asker_instance_id=None,
+            route="",
+            work_instance_id=work_instance_id,
+            mission_root_id=mission_root_id,
+            subtree_scanned=True,
+            subtree_truncated=True,
+            reachable_count=reachable_count,
+            scan_uncapped=False,
+            pack_id_searched=question_pack_id,
+            error=ERROR_TRUNCATED,
+        )
+
+    # ── THE RAM PACK MAP (in-memory, zero queries) ───────────────────
+    ram_packs = _ram_packs(qm, reachable)
+
+    def _resolved(
+        candidate: _Candidate, matched_by_pack_id: bool
+    ) -> AnswerTarget:
+        return AnswerTarget(
+            asker_instance_id=candidate.instance_id,
+            route=_route_for(candidate, work_instance_id, matched_by_pack_id),
+            work_instance_id=work_instance_id,
+            mission_root_id=mission_root_id,
+            subtree_scanned=True,
+            subtree_truncated=truncated,
+            reachable_count=reachable_count,
+            scan_uncapped=scan_uncapped,
+            pack_id_searched=question_pack_id,
+        )
+
+    def _ambiguous(candidate_ids: list[str]) -> AnswerTarget:
+        logger.warning(
+            "answer_resolver: %d instances of mission %s can be the "
+            "asker (%s) — refusing to guess",
+            len(candidate_ids),
+            mission_root_id[:8],
+            ", ".join(i[:8] for i in candidate_ids),
+        )
+        return AnswerTarget(
+            asker_instance_id=None,
+            route="",
+            work_instance_id=work_instance_id,
+            mission_root_id=mission_root_id,
+            subtree_scanned=True,
+            subtree_truncated=truncated,
+            reachable_count=reachable_count,
+            scan_uncapped=scan_uncapped,
+            candidate_ids=tuple(candidate_ids),
+            pack_id_searched=question_pack_id,
+            error=ERROR_AMBIGUOUS,
+        )
+
+    # ── PACK-ID LANE — the strongest key ─────────────────────────────
+    if question_pack_id is not None:
+        holders: list[str] = []
+        for iid in _pack_id_holders(ram_packs, question_pack_id):
+            if iid not in holders:
+                holders.append(iid)
+        for iid in _shadow_holders(
+            instance_repo, reachable, question_pack_id
+        ):
+            if iid not in holders:
+                holders.append(iid)
+        if len(holders) == 1:
+            # The HOLDER of the supplied pack id — regardless of the
+            # pack's status (N-1: an ANSWERED pack yields the
+            # exactly-once CAS loser's ``200 already_delivered``).
+            return _resolved(
+                _Candidate(
+                    instance_id=holders[0],
+                    pack_id=question_pack_id,
+                    live_pack=False,
+                    has_handle=False,
+                ),
+                matched_by_pack_id=True,
+            )
+        if len(holders) > 1:
+            # A pack id is unique — two holders is a data anomaly. We
+            # refuse to guess (the same "never pick arbitrarily" rule
+            # the awaiting-answer handle path follows).
+            return _ambiguous(holders)
+        # The supplied pack id matches NOBODY in this mission → fall
+        # through to the asker candidates so the per-instance error
+        # shape (mismatch / lost / no-pending) is produced by the asker
+        # that actually holds a pack.
+
+    # ── ASKER CANDIDATES (the fallback + the no-pack-id lane) ────────
+    handle_ids = _handle_holders(task_repo, reachable)
+    candidates = _asker_candidates(
+        instance_repo, ram_packs, handle_ids, reachable
+    )
+
+    if len(candidates) == 1:
+        return _resolved(candidates[0], matched_by_pack_id=False)
+    if len(candidates) > 1:
+        # SEVERAL askers are waiting and the caller supplied no
+        # pack id to disambiguate. Picking one by recency would
+        # answer the WRONG question — refuse instead.
+        return _ambiguous([c.instance_id for c in candidates])
+
+    # ── NO CANDIDATE ─────────────────────────────────────────────────
+    # Nobody in the mission holds a pack. Do NOT invent one and do NOT
+    # claim the pack was lost — the accurate answer is "there is no
+    # pack-holding asker in this mission".
+    #
+    # W-4: the TERMINAL signal must survive the resolution. Before the
+    # asker resolution existed, the route answered the WORK instance
+    # directly, and a terminal work instance raised 410
+    # ANSWER_TARGET_TERMINAL from the helper's pre-check. The
+    # resolution would otherwise swallow that signal behind a 404.
+    work_status = _read_instance_status(instance_repo, work_instance_id)
+    error = ERROR_NOT_FOUND
+    if work_status in _TERMINAL_STATUSES:
+        error = ERROR_TERMINAL
+    return AnswerTarget(
+        asker_instance_id=None,
+        route="",
+        work_instance_id=work_instance_id,
+        mission_root_id=mission_root_id,
+        subtree_scanned=True,
+        subtree_truncated=truncated,
+        reachable_count=reachable_count,
+        scan_uncapped=scan_uncapped,
+        pack_id_searched=question_pack_id,
+        error=error,
+        work_instance_status=work_status,
+    )
+
+
+# ── The one typed error both surfaces share ────────────────────────────
+
+
+def raise_unresolved_target(target: AnswerTarget) -> NoReturn:
+    """Raise the accurate HTTP error for an unresolved job-scoped answer.
+
+    Three shapes, distinguished on purpose (the old code conflated them
+    behind a 410 whose message blamed a daemon restart that may never
+    have happened):
+
+    * ``ambiguous`` → **400** ``INVALID_REQUEST``. The request is
+      under-specified: several instances hold a question and the caller
+      did not supply ``question_pack_id``; OR the supplied
+      ``question_pack_id`` matched SEVERAL instances (a data anomaly —
+      a pack id is unique); OR the supplied pack id matched nobody while
+      several instances hold an awaiting-answer handle. In every shape
+      the resolver refuses to guess. ``INVALID_REQUEST`` is the
+      repo's existing generic 400 token (the answer route already uses
+      it for a malformed body) — reusing it keeps the wire vocabulary
+      closed and avoids a new ``ErrorCodes`` member that no consumer
+      knows how to render. ``QUESTION_PACK_MISMATCH`` would be wrong:
+      that token means "the pack id you gave is NOT the current pack",
+      not "you did not give one".
+    * ``truncated`` → **400** ``INVALID_REQUEST``. The no-pack-id lane
+      hit ``MAX_SUBTREE_SCAN`` — the search was INCOMPLETE, so it is
+      never reported as a completed one (a 404 or an answer derived
+      from a partial candidate set). The caller is asked to supply the
+      disambiguator.
+    * ``terminal`` → **410** ``ANSWER_TARGET_TERMINAL``. The work
+      instance itself is COMPLETED/TERMINATED — the previously
+      observable terminal signal must survive the asker resolution.
+    * ``not_found`` → **404** ``NO_PENDING_QUESTION``. The mission
+      subtree was searched and nobody holds a pack for this work unit.
+
+    Raises:
+        fastapi.HTTPException: always.
+    """
+    from fastapi import HTTPException
+
+    from daemon.models.common import ErrorResponse
+
+    details = target.detail_fields()
+
+    if target.error == ERROR_TRUNCATED:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=(
+                    f"The mission has {target.reachable_count} instances — "
+                    f"the asker search was truncated at "
+                    f"{MAX_SUBTREE_SCAN} and a truncated search cannot "
+                    f"answer the question: supply question_pack_id to "
+                    f"select the asker."
+                ),
+                details=details,
+            ).model_dump(),
+        )
+
+    if target.error == ERROR_AMBIGUOUS:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=(
+                    f"Ambiguous answer target: {len(target.candidate_ids)} "
+                    f"instances in this mission hold a pending question "
+                    f"({', '.join(target.candidate_ids)}) — supply "
+                    f"question_pack_id to select the right one."
+                ),
+                details=details,
+            ).model_dump(),
+        )
+
+    if target.error == ERROR_TERMINAL:
+        raise HTTPException(
+            status_code=410,
+            detail=ErrorResponse(
+                code=ErrorCodes.ANSWER_TARGET_TERMINAL,
+                message=(
+                    f"The work instance {target.work_instance_id} is "
+                    f"{target.work_instance_status!r} — the answer "
+                    f"cannot be delivered (the asker reached a terminal "
+                    f"state while the question was pending)."
+                ),
+                details=details,
+            ).model_dump(),
+        )
+
+    pack_clause = (
+        f"question pack {target.pack_id_searched!r}"
+        if target.pack_id_searched
+        else "a question pack"
+    )
+    raise HTTPException(
+        status_code=404,
+        detail=ErrorResponse(
+            code=ErrorCodes.NO_PENDING_QUESTION,
+            message=(
+                f"No instance in this mission holds {pack_clause} — the "
+                f"mission subtree was scanned and no pack-holding asker "
+                f"was found (work instance {target.work_instance_id}, "
+                f"mission root {target.mission_root_id})."
+            ),
+            details=details,
+        ).model_dump(),
+    )
+
+
+# Terminal statuses that make an answer undeliverable — the same set the
+# shared helper's pre-check uses (``midflight_qa.ANSWER_TERMINAL_STATUSES``).
+# ERROR/FAILED are NOT terminal here: they are revivable, so the
+# "no pending question" shape stays the accurate answer for them.
+def _terminal_statuses() -> frozenset[str]:
+    from daemon.services.midflight_qa import ANSWER_TERMINAL_STATUSES
+
+    return frozenset(ANSWER_TERMINAL_STATUSES)
+
+
+_TERMINAL_STATUSES = _terminal_statuses()
+
+
+__all__ = [
+    "AnswerTarget",
+    "ERROR_AMBIGUOUS",
+    "ERROR_NOT_FOUND",
+    "ERROR_TERMINAL",
+    "ERROR_TRUNCATED",
+    "MAX_SUBTREE_SCAN",
+    "ROUTE_DIRECT_RAM_PACK",
+    "ROUTE_SUBTREE_ANSWER_HANDLE",
+    "ROUTE_SUBTREE_PACK_ID",
+    "ROUTE_SUBTREE_PENDING_PACK",
+    "raise_unresolved_target",
+    "resolve_answer_target",
+]
