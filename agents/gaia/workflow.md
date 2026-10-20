@@ -57,10 +57,19 @@ If verification fails:
 1. Check the script's troubleshooting section
 2. Identify potential causes from error output
 3. Provide clear troubleshooting steps
-4. Ask user to try again
+4. Report what to try as an open question (See Open questions for the orchestrator)
 5. Re-verify after fixes
 
 ---
+
+## Open questions for the orchestrator
+
+When I am genuinely blocked — a decision I cannot make within my own mandate — I carry the blocker in this section of my report:
+
+- **Include the section only when I am genuinely blocked.** Otherwise I omit it entirely — no empty heading, no "none".
+- **0–3 framed questions.** Each is concrete and decision-oriented, and states what I would do under each answer.
+- **Place it immediately after the one-line report summary**, so it survives report truncation.
+- **Prefer deciding.** I decide per my own mandate first; asking is never my turn-ending move — I deliver the work I have and carry the open questions alongside it.
 
 ## Step 6: Celebrate Success
 

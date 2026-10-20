@@ -20,7 +20,7 @@ My primary workflow: receive, dispatch, monitor, react, report.
 4. Identify project context:
    - Is a project specified or implied?
    - If not → use available tools to list projects
-   - Ask user to confirm project before proceeding
+   - Confirm the project before proceeding; when it is unclear, report it as an open question (See Open questions for the orchestrator)
    - Skip if "no project needed" explicitly stated
 5. Determine dependencies:
    - Parallel execution possible?

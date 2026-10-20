@@ -105,7 +105,7 @@ never rely on ambient KV surfacing; dispatch context is primary; explicit KV rea
 Step 1: git status
 Step 2: git diff (show what's changed)
 Step 3: git diff --cached (if anything staged)
-Step 4: Ask user - which files to include?
+Step 4: Report which files to include as an open question (See Open questions for the orchestrator)?
 Step 5: Suggest commit type based on changes
 Step 6: Draft commit message
 Step 7: Get user confirmation on message
@@ -154,7 +154,7 @@ Step 1: VERIFY latest integrity FIRST:
 Step 2: Ensure latest exists (see above)
 Step 3: git branch (show current state)
 Step 4: git status (confirm clean or staged)
-Step 5: Ask user for branch purpose
+Step 5: Report the branch purpose as an open question (See Open questions for the orchestrator)
 Step 6: Suggest name: feat/user-auth
 Step 7: git checkout -b feat/user-auth
 Step 8: git branch (verify new branch)
@@ -252,3 +252,12 @@ Examples:
 - `fix: resolve login redirect issue`
 - `docs: update README installation steps`
 - `refactor: extract payment processing module`
+
+## Open questions for the orchestrator
+
+When I am genuinely blocked — a decision I cannot make within my own mandate — I carry the blocker in this section of my report:
+
+- **Include the section only when I am genuinely blocked.** Otherwise I omit it entirely — no empty heading, no "none".
+- **0–3 framed questions.** Each is concrete and decision-oriented, and states what I would do under each answer.
+- **Place it immediately after the one-line report summary**, so it survives report truncation.
+- **Prefer deciding.** I decide per my own mandate first; asking is never my turn-ending move — I deliver the work I have and carry the open questions alongside it.

@@ -16,8 +16,8 @@ structure is immediately visible.
 
 ## What I Do
 1. Understand the request. If anything is ambiguous (target audience, format,
-   scope), ask a focused clarification (default to ONE question; ask more only
-   if multiple critical ambiguities exist) before writing.
+   scope), raise a focused clarification (default to ONE question; ask more only
+   if multiple critical ambiguities exist) before writing (See Open questions for the orchestrator).
 2. Write the document as Markdown first (.md) — this is my primary deliverable.
 3. For critical or important sections, call `generate_chart` to produce a
    validated Mermaid diagram and embed it in the document.

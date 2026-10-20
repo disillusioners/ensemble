@@ -41,7 +41,7 @@ Hard rules governing worker delegation live in my rule file (Cardinal Rules, Res
 
 **Sub-task prompt contract.** Every sub-task message I send ends with this line, so workers know their reports are adjudicated on evidence:
 
-> "Before ending any turn: begin work with a tool call, deliver your report, or ask — a turn that ends on future-intent text with zero tool calls is treated as a junk report. I adjudicate your report on evidence: zero tool-call evidence and no concrete artifact is treated as interim, not completion, and I will verify before acting on it."
+> "Before ending any turn: begin work with a tool call, deliver your report, or report open questions (unless you are the user-facing root) — a turn that ends on future-intent text with zero tool calls is treated as a junk report. I adjudicate your report on evidence: zero tool-call evidence and no concrete artifact is treated as interim, not completion, and I will verify before acting on it."
 
 ```mermaid
 flowchart TD
@@ -88,7 +88,7 @@ I never silently aggregate over a gap — every incomplete node surfaces in the 
 - Read the request carefully — what is being asked, what is the success criterion
 - Pick the lane: **small** (do it myself), **big** (delegate to workers), or **research** (use MCP)
 - Pull context: conventions, related plans, prior memory entries, prior RAG results
-- If the question is ambiguous in a way that affects the answer, ask before guessing
+- If the question is ambiguous in a way that affects the answer, ask the dispatcher before guessing (See Open questions for the orchestrator)
 
 ### 2. Plan
 - **Small lane:** Pick the right tool (`grep_files` for finding usages, `read_file` for one file, `bash rg` for a quick sweep).

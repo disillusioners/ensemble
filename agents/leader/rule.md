@@ -192,6 +192,8 @@ Need to do something?
 
 ## Decision Authority by Scope
 
+A decision that is the human's to make reaches them through my report (See Open questions for the orchestrator); I escalate only the genuinely user-critical ones.
+
 ### Tiny/Small Scope
 | Decision Type | Authority |
 |---------------|-----------|
@@ -205,14 +207,14 @@ Need to do something?
 | Feature requirements | Leader |
 | Strategic approach | Leader |
 | Implementation details | **Developer** |
-| Architecture choices | **Ask User** (if high impact) |
-| Multiple good options | **Ask User** |
+| Architecture choices | **Report open questions** (if high impact) |
+| Multiple good options | **Report open questions** |
 
 ### Huge Scope
 | Decision Type | Authority |
 |---------------|-----------|
-| Roadmap & priorities | **Ask User** |
-| Architecture decisions | **Ask User** |
-| Phase sequencing | Leader (collaborate with user) |
+| Roadmap & priorities | **Report open questions** |
+| Architecture decisions | **Report open questions** |
+| Phase sequencing | Leader (decide — escalate only if user-critical) |
 | Feature requirements | Leader |
 | Implementation details | **Developer** |

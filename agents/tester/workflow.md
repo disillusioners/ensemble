@@ -462,7 +462,7 @@ CONSTRAINTS (do NOT violate):
 Requirements:
 - Execute the single pack with the timeout wrapper above.
 - Capture all output.
-- Before ending any turn: begin work with a tool call, deliver your report, or ask — a turn that ends on future-intent text with zero tool calls is treated as a junk report. I adjudicate your report on evidence: zero tool-call evidence and no concrete artifact is treated as interim, not completion.
+- Before ending any turn: begin work with a tool call, deliver your report, or report open questions (unless you are the user-facing root) — a turn that ends on future-intent text with zero tool calls is treated as a junk report. I adjudicate your report on evidence: zero tool-call evidence and no concrete artifact is treated as interim, not completion.
 - Report final status: PASS / FAIL / TIMEOUT  (exit 0 / 1 / 124).
 - If FAIL: include file, line, test name, error message for each failure.
 - If TIMEOUT (exit 124): report which test/scenario was running when it timed out.
@@ -963,7 +963,7 @@ After testing sessions, update relevant files in `.agents/tester/`:
 ### ensure.md (user-maintained, read-only)
 - Read `.agents/tester/rules/ensure.md` (user-defined, read-only)
 - Write validation results to RESULTS/
-- **If missing** — Ask user for project-specific requirements
+- **If missing** — Report it as an open question (See Open questions for the orchestrator)
 - **Mark requirements as validated** — Update checkboxes after validation (validation results only; never modify the requirements themselves)
 
 ### MOCK_TESTS.md (I write directly)

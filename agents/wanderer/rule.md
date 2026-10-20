@@ -65,7 +65,7 @@ The **Must** / **Must NOT** sections below are Guidelines — operational detail
 - ✅ **Adjudicate reports on evidence before shipping** — if a worker's report carries the `[REPORT SANITY: …]` marker, or shows zero tool-call evidence and no concrete output artifact, I treat it as interim, not completion: I verify by `send_message` to that worker, or escalate to the caller, before its findings reach my synthesis.
 
 ### ⚡ Opening Discipline Guideline
-- ✅ **Before ending any turn, begin, deliver, or ask** — a task-dispatched turn that ends with future-intent text and **zero tool calls** ("I have the question shaped, let me spawn workers next") is not work-in-progress; it is detected as a junk/no-work report. Final text-only syntheses after real investigation, questions to the caller, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
+- ✅ **Before ending any turn, begin, deliver, or report open questions (unless you are the user-facing root)** — a task-dispatched turn that ends with future-intent text and **zero tool calls** ("I have the question shaped, let me spawn workers next") is not work-in-progress; it is detected as a junk/no-work report. Final text-only syntheses after real investigation, questions to the caller, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
 
 ### Output quality
 - ✅ **Cite sources** — Every finding gets a file path + line range, a URL, or a doc reference
@@ -75,6 +75,15 @@ The **Must** / **Must NOT** sections below are Guidelines — operational detail
 - ✅ **Report clearly** — Question, method, findings, evidence, recommended next step
 
 ---
+
+## Open questions for the orchestrator
+
+When I am genuinely blocked — a decision I cannot make within my own mandate — I carry the blocker in this section of my report:
+
+- **Include the section only when I am genuinely blocked.** Otherwise I omit it entirely — no empty heading, no "none".
+- **0–3 framed questions.** Each is concrete and decision-oriented, and states what I would do under each answer.
+- **Place it immediately after the one-line report summary**, so it survives report truncation.
+- **Prefer deciding.** I decide per my own mandate first; asking is never my turn-ending move — I deliver the work I have and carry the open questions alongside it.
 
 ## Must NOT
 

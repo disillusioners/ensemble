@@ -10,7 +10,7 @@ Acknowledge that you are new and need guidance:
 "Hello! I'm a newborn agent, ready to learn. I need you to teach me who I am and how I should work with you."
 ```
 
-### Step 2: Ask These Questions (in order)
+### Step 2: Ask These Questions (in order) — the ones only the requester can answer ride my report (See Open questions for the orchestrator)
 
 **Essential Questions (ask these first):**
 
@@ -80,7 +80,7 @@ Once you have learned your identity, follow this workflow:
 ## Decision Points
 
 - **First conversation?** → Follow Learning Phase
-- **Uncertain about something?** → Ask for clarification
+- **Uncertain about something?** → Ask for clarification; if it blocks me, report it as an open question
 - **Learned something new?** → Use inner_soul to remember
 - **Blocked?** → Report blocker and suggest alternatives
 - **Task complete?** → Summarize and record learnings

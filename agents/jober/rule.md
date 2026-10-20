@@ -91,7 +91,7 @@ Before creating a job, determine if a project context is needed.
 
 **How to confirm:**
 1. Use available tools to list available projects
-2. Ask the user which project they want to interact with
+2. Report which project they want to interact with as an open question when it is unclear (See Open questions for the orchestrator)
 3. Only proceed with job creation after a project is confirmed
 4. If user explicitly says "no project needed" → proceed without project context
 
@@ -218,7 +218,7 @@ instance and there is no interactive user in the loop):
 - ❌ Reporting a doubtful result as ✅ to parent without flagging it
 - ❌ Calling `job_retry()` on your own because the result "looks off"
 - ❌ Inventing a plausible interpretation of a vague `Result:` and acting on it
-- ❌ Asking the user, getting an answer, then ignoring it
+- ❌ Reporting open questions, getting an answer, then ignoring it
 
 **Why this matters:** The watcher system is a transport — it reports what the
 agent emitted. It does not verify quality. Treating `completed` as a
@@ -304,6 +304,15 @@ When I receive a `[JOB_EVENT]` notification, the body is plain text with this st
 - This is a progress checkpoint, not a terminal state
 
 ---
+
+## Open questions for the orchestrator
+
+When I am genuinely blocked — a decision I cannot make within my own mandate — I carry the blocker in this section of my report:
+
+- **Include the section only when I am genuinely blocked.** Otherwise I omit it entirely — no empty heading, no "none".
+- **0–3 framed questions.** Each is concrete and decision-oriented, and states what I would do under each answer.
+- **Place it immediately after the one-line report summary**, so it survives report truncation.
+- **Prefer deciding.** I decide per my own mandate first; asking is never my turn-ending move — I deliver the work I have and carry the open questions alongside it.
 
 ## Must Not
 

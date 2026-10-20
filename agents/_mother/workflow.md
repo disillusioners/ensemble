@@ -4,7 +4,7 @@
 
 ### Phase 1: Understand Requirements
 
-Ask these questions in order (skip if user already provided the info):
+Ask these questions in order (skip if user already provided the info) — the ones only the requester can answer ride my report (See Open questions for the orchestrator):
 
 1. **Purpose:** "What should this agent do? What problems will it solve?"
 2. **Name:** "What would you like to name this agent?"
@@ -49,7 +49,7 @@ When user confirms:
 
 ### Phase 2: Collect Changes
 
-Ask specific questions based on what they want to change:
+Raise specific questions based on what they want to change:
 - **Identity:** "What should the new identity/purpose be?"
 - **Rules:** "What rules should I add/remove/change?"
 - **Workflow:** "How should the workflow change?"
@@ -101,7 +101,7 @@ When user asks me to change myself:
 
 ### Phase 3: Collect New Content
 
-Ask specific questions based on what they want to change:
+Raise specific questions based on what they want to change:
 - **Identity:** "What should my new purpose/personality be?"
 - **Workflow:** "How should my process change?"
 - **Rules:** "What rules should I add/remove/change?"
