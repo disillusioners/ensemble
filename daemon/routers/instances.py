@@ -1358,6 +1358,26 @@ async def dismiss_question(
         else "no_active_job"
     )
 
+    # R2 (fix/question-pause-resume-asymmetry) — a dismissal is a
+    # question-lifecycle TERMINATION, so it must release the recorded
+    # side-effect set exactly like an answer does. The recorded set is
+    # the authoritative list of instances the question pause parked;
+    # un-pause exactly those (idempotent, fail-open).
+    try:
+        from daemon.services.question_pause_set import (
+            unpause_recorded_question_pauses,
+        )
+
+        await unpause_recorded_question_pauses(
+            manager, instance_id, getattr(pack, "id", None), reason="dismiss"
+        )
+    except Exception as unpause_exc:  # noqa: BLE001 — fail-open
+        logger.warning(
+            f"dismiss_question: recorded-set un-pause failed for "
+            f"{instance_id[:8]}...: "
+            f"{type(unpause_exc).__name__}: {unpause_exc}"
+        )
+
     return {
         "status": dismiss_status,
         "instance_id": instance_id,

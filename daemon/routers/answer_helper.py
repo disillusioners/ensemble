@@ -536,6 +536,42 @@ async def _fallback_enqueue_or_raise(
         )
 
 
+async def _unpause_recorded_side_effects(
+    manager: "InstanceManager",
+    instance_id: str,
+    pack: QuestionPack,
+    *,
+    reason: str = "answer",
+) -> dict:
+    """Un-pause the RECORDED side-effect set of ``pack`` (R2).
+
+    The recorded set (persisted with the question pause — see
+    ``daemon/services/question_pause_set.py``) is the source of truth:
+    the un-pause is derived from the RECORD, never from "was the pack
+    answered". A pack can be in ``answered`` state while its recorded
+    side-effect set is still parked — that IS the stranded state this
+    fixes (historical answer-gate failure mode, 2026-09-10).
+
+    Idempotent, branch-independent, and fail-open (a failure here must
+    never turn a delivered answer into an error).
+    """
+    try:
+        from daemon.services.question_pause_set import (
+            unpause_recorded_question_pauses,
+        )
+
+        return await unpause_recorded_question_pauses(
+            manager, instance_id, getattr(pack, "id", None), reason=reason
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-open
+        logger.warning(
+            f"answer_questions_via_instance: recorded-set un-pause failed "
+            f"for {instance_id[:8]}...: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return {}
+
+
 async def _resume_target_and_tree(
     manager: "InstanceManager",
     instance_id: str,
@@ -674,6 +710,15 @@ async def answer_questions_via_instance(
     if not transitioned:
         # T1′ CAS loser: duplicate answer. No-op — NO SSE, NO events,
         # NO resume, NO Defect-3 (OQ-3).
+        #
+        # R2: the recorded side-effect set is STILL un-paused here. The
+        # CAS loser means "the pack was already answered" — it does NOT
+        # mean "the recorded set was already un-paused". A late/duplicate
+        # answer is the natural moment to release a set that a previous
+        # delivery left parked (the stranded shape). Idempotent.
+        await _unpause_recorded_side_effects(
+            manager, instance_id, pack, reason="answer_already_delivered"
+        )
         return {
             "status": "already_delivered",
             "instance_id": instance_id,
@@ -725,6 +770,15 @@ async def answer_questions_via_instance(
     # ── 9. Cascade-resume the tree (transitions PAUSED→RUNNING /
     #        task PAUSED→PENDING; the scheduled background resume
     #        survives — the cascade does not touch _graph_tasks) ──────
-    return await _resume_target_and_tree(
+    response = await _resume_target_and_tree(
         manager, instance_id, job_result, pack, resume_route
     )
+
+    # ── 10. R2 — symmetric un-pause of the RECORDED side-effect set ──
+    # The question pause parked the WHOLE asker's tree; the cascade
+    # above only reaches what the tree enumeration still sees. The
+    # recorded set (persisted with the pause) is the authoritative list
+    # of instances this question parked — un-pause exactly those, so
+    # their turns complete and their parents leave ``waiting_children``.
+    await _unpause_recorded_side_effects(manager, instance_id, pack)
+    return response
