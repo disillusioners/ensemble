@@ -174,6 +174,7 @@ The claim under test: *the v0.25.7-era binary's code paths never reference `boar
   1. `releases/` contains **no v0.26.1** ⇒ v0.26.0 remains the only *staged* artifact.
   2. A re-stage from the staging worktree would now be **refused by the L1 tip-identity guard** (`HEAD ≠ origin/latest` ⇒ exit 78 `non-tip-tree`); a re-stage would need a fresh tip worktree + rebuild (the L2 sidecar binds `git_head`, so the binary must be rebuilt — a tests-only commit still changes the binary hash).
   3. Promoting v0.26.0 installs a binary reporting `0.26.0` while the repository's newest tag is `0.26.1`.
+4. **POST-VERIFICATION LANDSCAPE CHANGE (observed 20:43Z — OUTSIDE this gate's scope):** a concurrent lane **staged `v0.26.1` at ~20:36Z** (sibling worktree `/home/nea/ensemble-src-wt-stage-v0261` @ `a4f28c26b`; `releases/v0.26.1` now present; install `.env` rewritten 20:43:14Z). That same lane removed the pipeline's transient `releases/rollback.lock.d` mutex directory — a **transient lock artifact, not a payload change** (no version dir, no `current` symlink, no sidecar touched). At this gate's 20:30Z inventory **no `v0.26.1` release dir existed**. ⇒ **`v0.26.1` is now staged but has NOT passed this gate**; this verdict applies to **v0.26.0 only**. Promoting v0.26.1 would ship an artifact this gate never examined.
 - **Not a verification failure:** the stage itself passed L1 tip-identity at `19:52:44Z`; the drift happened *after* staging. The provenance chain inside the artifact is complete and self-consistent.
 
 ## M2 — scope-claim: undisclosed foreign-lane file in the payload (integrity intact)
@@ -198,7 +199,7 @@ The claim under test: *the v0.25.7-era binary's code paths never reference `boar
 
 ## Action needed (for the leader)
 
-- [ ] **Settle M1 before the ceremony: promote v0.26.0 as staged, or re-stage v0.26.1.** Re-staging v0.26.1 requires a fresh tip worktree + rebuild (L2 binds `git_head`; a tests-only commit still changes the binary hash) — the current staging worktree can no longer be re-staged (L1 `non-tip-tree`, exit 78). No promote was performed by this lane.
+- [ ] **Settle M1 before the ceremony.** As of this gate, **v0.26.0 is fully verified** (this report). **`v0.26.1` was staged at ~20:36Z by a concurrent lane and is UNVERIFIED** — it would also require a fresh tip rebuild (L2 binds `git_head`; a tests-only commit still changes the binary hash), and the current staging worktree can no longer be re-staged at all (L1 `non-tip-tree`, exit 78). Options: promote v0.26.0 as verified here, or commission a verification pass against the staged v0.26.1. No promote was performed by this lane.
 - [ ] Note the v0.26.0 binary **omits the question-pause lane** (11 daemon files / 2,761 insertions landed after staging) — decide whether that omission is acceptable for the promote.
 - [ ] M2 disclosure: the payload ships the **developer dev-strategy v1.4.0** rider (via merge first-parent `843b669c5`) — accept, or re-note the composition record.
 - [ ] D1 (LOW, `view_write` percent-encoded path) rides into v0.26.0 as-is — accept or schedule the ~10-line pre-merge-style fix.
