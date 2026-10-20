@@ -3104,8 +3104,8 @@ class LiveViewsConfig(BaseSettings):
         ``architecture-recommendation.md`` D1:27, phase2-plan.md
         T2.2). A configured root whose name is in
         :data:`daemon.services.live_views.RESERVED_ROOT_NAMES`
-        (today: ``"public"``) refuses to boot with a clear
-        actionable error.
+        (today: ``"public"`` and ``"board"``) refuses to boot with
+        a clear actionable error.
 
         Three-layer guard posture (D1:27):
 
@@ -3126,6 +3126,12 @@ class LiveViewsConfig(BaseSettings):
         ``root="public", rel="<root>/<rel>"``). The kebab-case
         regex permits the name today; this guard is what
         rejects it.
+
+        ari-tools Phase 3 (A-39): the message is GENERIC — it no
+        longer claims the reserved set has a single occupant
+        ("the public passcode lane occupies this prefix"), which
+        became inaccurate once ``board`` joined the reserved set.
+        String-only change; no behaviour change.
         """
         # Lazy import — config is a leaf module; the
         # reserved-names set is a single source of truth in the
@@ -3144,9 +3150,11 @@ class LiveViewsConfig(BaseSettings):
                     f"LiveViewsConfig.roots: {name!r} is a "
                     f"reserved root name "
                     f"({sorted(RESERVED_ROOT_NAMES)}); the "
-                    f"public passcode lane occupies this "
-                    f"prefix and the registry MUST NOT name a "
-                    f"root with it. Rename the entry in your "
+                    f"live-views router reserves these "
+                    f"names for its own lanes (the public "
+                    f"passcode lane, the live board). The "
+                    f"registry MUST NOT name a root with one "
+                    f"of them. Rename the entry in your "
                     f"config and restart."
                 )
         return v

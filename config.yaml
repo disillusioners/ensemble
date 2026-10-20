@@ -182,6 +182,18 @@ auth:
 #         allowed_extensions: [html, css, js, md, pdf, png]
 #         description: "Operator-curated HTML docs"
 #
+# ⚠️ DO NOT DECLARE THE ``reports`` ROOT. It is DAEMON-INJECTED at
+# lifespan start (ari-tools Phase 3) and points at
+# ``<data_dir>/reports`` — the directory the ``view_write`` tool
+# publishes agent-written HTML pages into. It is injected ONLY when
+# absent, so an operator-declared ``reports`` entry is honoured
+# verbatim and never overridden. Declaring it yourself is at best
+# redundant and at worst shadowing the tool's storage.
+#
+# ⚠️ The root names ``public`` and ``board`` are RESERVED — the
+# public passcode lane and the live board view own them. A config
+# that declares either refuses to boot.
+#
 # Restart the daemon after editing this section — the registry is
 # read once at lifespan start.
 

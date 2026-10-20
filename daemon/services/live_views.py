@@ -127,18 +127,26 @@ _ROOT_NAME_REGEX = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 
 # Reserved root names — names that MUST NEVER be registered as a
 # view root because they would collide with the live-views
-# router's prefix structure. The single entry today is
-# ``"public"``, the second URL segment of the public passcode
-# lane (see :data:`PUBLIC_NAMESPACE`); a root literally named
-# ``"public"`` would make ``/views/public/<root>/<rel>``
+# router's prefix structure. The FIRST entry is ``"public"``, the
+# second URL segment of the public passcode lane (see
+# :data:`PUBLIC_NAMESPACE`); a root literally named ``"public"``
+# would make ``/views/public/<root>/<rel>``
 # paths unparseable (the parser would see a 4-segment URL and
-# try to resolve ``root=public, rel=<root>/<rel>``). The
-# case-folded check at config validation (:class:`LiveViewsConfig`
+# try to resolve ``root=public, rel=<root>/<rel>``).
+#
+# The SECOND entry is ``"board"`` (ari-tools Phase 3) — the LIVE
+# BOARD view. The board is NOT a filesystem root: it is rendered
+# from the DB on every request by a static route on the ``/views``
+# router. Reserving the name (a) prevents an operator from
+# shadowing the board with a file root of the same name, and (b)
+# keeps the board's passcode row out of the ``view_link`` minting
+# path (the ``board-link`` tool is the ONLY sanctioned minter).
+# The case-folded check at config validation (:class:`LiveViewsConfig`
 # in ``daemon/config.py``) plus the route-side mirror in
 # ``daemon/routers/live_views.py`` enforce the reservation at
 # both layers — three-layer guard per
 # ``architecture-recommendation.md`` D1:27.
-RESERVED_ROOT_NAMES: frozenset[str] = frozenset({"public"})
+RESERVED_ROOT_NAMES: frozenset[str] = frozenset({"public", "board"})
 
 # Public passcode lane namespace — FROZEN module constant per
 # architecture-recommendation.md D11:128 and phase2-plan.md D11.
@@ -877,6 +885,59 @@ class LiveViewsService:
     def is_known_root(self, root_name: str) -> bool:
         """Return True iff ``root_name`` is registered (regardless of enabled)."""
         return root_name in self._config.roots
+
+    def root_path(self, root_name: str) -> Path | None:
+        """Return the ABSOLUTE directory of a registered filesystem root.
+
+        ari-tools Phase 3 — the accessor ``view_write`` uses to find
+        the daemon-managed ``reports`` directory. ``None`` means "no
+        usable directory": the subsystem is DISABLED (mirroring
+        :meth:`resolve_for_instance`'s uniform-404 posture — a
+        disabled ``root_path`` handing out a real directory would let
+        ``view_write`` publish pages that can never be served), the
+        root is unknown / disabled, the root is NOT a ``filesystem``
+        root, or the configured path is missing / RELATIVE (the
+        resolver refuses a non-absolute root, so an unresolved path
+        would publish pages that 404 forever).
+
+        The returned path is the CONFIGURED path, NOT a resolved one —
+        the caller resolves BOTH sides of its containment check (the
+        write path mirrors ``_resolve_under_root``).
+        """
+        if not self._config.enabled:
+            # Subsystem is OFF — no usable directory (A-38: mirror
+            # resolve_for_instance's uniform-404 posture).
+            return None
+        entry = self._config.roots.get(root_name)
+        if entry is None or not entry.enabled:
+            return None
+        if entry.type != "filesystem":
+            # project_scoped / tmp_images roots have no single
+            # absolute directory — they resolve per request.
+            return None
+        if not entry.path:
+            return None
+        candidate = Path(entry.path)
+        if not candidate.is_absolute():
+            # The filesystem resolver refuses a relative root
+            # (RootNotFoundError) — a relative path here would let a
+            # write land somewhere the serve path can never reach.
+            return None
+        return candidate
+
+    def public_base(self) -> str:
+        """Return the resolved public base URL prefix (``''`` when path-relative).
+
+        ari-tools Phase 3 — the accessor ``board_link`` uses to
+        compose the board's public URL. ``board`` is a RESERVED root
+        name, so :meth:`build_public_url` refuses it; the tool
+        therefore composes the URL itself from this base plus the
+        frozen :data:`PUBLIC_NAMESPACE` prefix. The value is exactly
+        what :meth:`build_public_url` uses internally (same
+        :class:`BaseURLResolver` chain) — an empty string means "no
+        trustworthy base yet", i.e. a path-relative URL.
+        """
+        return self._base_url_resolver.resolve() or ""
 
     def resolve_for_instance(
         self,
