@@ -1386,6 +1386,19 @@ class TestInstallerSkillHygiene:
 #   agents/charter/rule.md | canonical home added (SEALED — re-pinned; the pre-work NEEDS MORE INFO
 #                            result is an input-acquisition abort, not a report-time open question)
 # agents/blueprinter/rule.md carries the same canonical home but is NOT sealed — no constant for it.
+# 2026-10-20 hide-question-tool-nonroot FIX ROUND 3 re-pin (3 files, constants-only, recomputed
+# from real file bytes on the feature worktree — approver i3 B3: parent-side open-questions
+# paragraph added to the dispatchers that genuinely receive child completion reports and carry
+# NO existing functional equivalent for the open-questions case; the other 32 entries keep their
+# values). The values are CONTENT-SHA256 hashes of the sealed files (NOT commit shas); the
+# same-commit edit that made each pin stale is described alongside:
+#   agents/coder/soul.md        <- 6263b648cfee8eeb84bb90361687e45728bc8bdae60702e965a84a23a1b46968 (content-sha256) | parent-side paragraph added (dispatcher of `worker` instances; report-sanity verify-by-send_message is NOT an open-questions equivalent)
+#   agents/governor/rule.md     <- 07aaed75b0290d2d857ede82f876b6d55979d2f67ba29b861781531f815b41f2 (content-sha256) | parent-side paragraph added (council-manager; its "revival guidance" is the governor's OWN child-side ask-and-revive contract, not a councilor-answering channel)
+#   agents/maintenancer/rule.md <- adf3e5bf0eba9f43c3921d7482a3f09ca6b4972ecfa056350426732b0861ba66 (content-sha256) | parent-side paragraph added (dispatcher of coder/worker/explorer instances; Fan-In Escape Valve covers STALLED children, not open-question reports)
+# Same-round edited files that are NOT sealed (no constant for them): agents/designer/soul.md,
+# agents/project-manager/rule.md, agents/tester/rule.md, agents/wanderer/rule.md,
+# agents/blueprinter/rule.md. Note agents/wanderer/soul.md IS sealed but was NOT edited in this
+# round (the wanderer canonical home lives in its rule.md) — its pin is unchanged.
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "2a5078f93bd2dcfe427900e85c075ee9671b8aedae17d07c7ef6abb6df4603ab",
@@ -1418,14 +1431,14 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/approver[v2]/rule.md": "c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae",
     "agents/architect/rule.md": "ce96896142f568c480a2f92b9b92fa0775be641d877fa386205d8438d55b21b4",
     "agents/ari/rule.md": "bb784e8c41afc913bccf1873bfd5cb8943e5b1e17daacc6936efa08a31d26b68",
-    "agents/coder/soul.md": "051401b1bcafb56e985794d917bd00255bc0be4f30184e2de01b6a2b5314fb7b",
+    "agents/coder/soul.md": "6263b648cfee8eeb84bb90361687e45728bc8bdae60702e965a84a23a1b46968",
     "agents/developer/rule.md": "9b06c29c811e3636765f8ee09dd1a2b10901554e542723f3de6b851a85a97249",
     "agents/developer[v2]/tools_note.md": "62882063ca109e7829c097201e110a0edb872ade000415372ab7ca016bee5748",
     "agents/devops/rule.md": "100d285927283b0276b8064520d8dfbc52b675d19e5dea78a608ca4cb13f7a1d",
     "agents/doc-writer/rule.md": "350dd33cca327e5a96941633aea6813d18b98b82a2f443cb13b270e03deabdc5",
-    "agents/governor/rule.md": "a779742dcec8d30eb44495afda0c5ada93b9409a4ffac83912f7af2afa22ad37",
+    "agents/governor/rule.md": "07aaed75b0290d2d857ede82f876b6d55979d2f67ba29b861781531f815b41f2",
     "agents/leader/rule.md": "f0bda673c7b112ef7a43f17f1166f99fcb11f1562aabf0d7a5c9879e924a231a",
-    "agents/maintenancer/rule.md": "abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec",
+    "agents/maintenancer/rule.md": "adf3e5bf0eba9f43c3921d7482a3f09ca6b4972ecfa056350426732b0861ba66",
     "agents/planner/rule.md": "4282ce61b58736026b5d2e72b7e2112925e4515bf95ffc88032104b4e4c4b6fb",
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
     "agents/project-manager/workflow.md": "bde479095bbda6a3e3e069afe8a719e0f8b5673f289d2d0d5bf7a15eecb123ad",
