@@ -694,6 +694,23 @@ class TestReportsRootInjection:
         assert "board" in RESERVED_ROOT_NAMES
         assert "public" in RESERVED_ROOT_NAMES
 
+    def test_a10_the_lifespan_calls_the_injection_helper(self) -> None:
+        """The wiring pin — the injection happens in the LIFESPAN,
+        immediately BEFORE the ``LiveViewsService`` construction (the
+        service reads its roots at construction time)."""
+        source = (REPO_ROOT / "daemon" / "api.py").read_text(encoding="utf-8")
+        assert "inject_reports_live_view_root(" in source
+        call = source.index("inject_reports_live_view_root(\n        config,")
+        construction = source.index(
+            "live_views_service = LiveViewsService("
+        )
+        assert call < construction, (call, construction)
+        # Exactly ONE construction site — the injection cannot precede
+        # a different one.
+        assert (
+            source.count("live_views_service = LiveViewsService(") == 1
+        )
+
 
 # ─────────────────────────────────────────────────────────────────
 # The board_link tool's gate set is DIFFERENT (cross-module discipline)
