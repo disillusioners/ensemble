@@ -172,9 +172,16 @@ class _FakeManager:
     async def resume_instance_cascade(
         self, instance_id: str, *, exclude_ids: list[str] | None = None
     ) -> dict:
-        return await self._lifecycle.resume_instance_cascade(
-            instance_id, exclude_ids=exclude_ids
-        )
+        # The harness works against BOTH signatures: the pre-fix
+        # lifecycle service has no ``exclude_ids`` parameter, and the
+        # RED capture must show the SEMANTIC failure (not a TypeError
+        # from the harness itself).
+        try:
+            return await self._lifecycle.resume_instance_cascade(
+                instance_id, exclude_ids=exclude_ids
+            )
+        except TypeError:
+            return await self._lifecycle.resume_instance_cascade(instance_id)
 
     # -- graph driver (stubbed) -------------------------------------------
     async def resume_processing_job(
