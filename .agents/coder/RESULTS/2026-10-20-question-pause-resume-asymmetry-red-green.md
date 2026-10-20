@@ -162,7 +162,7 @@ PYTEST_BIN=/home/nea/ensemble-src/.venv/bin/pytest \
 ```
 
 ```
-28 passed, 20 warnings in 25.95s
+38 passed, 29 warnings in 33.39s
 RESULT: PASS
 ```
 
@@ -176,7 +176,7 @@ The pack is hermetic: file-backed SQLite under pytest's `tmp_path`, no
 network, no daemon, no ports, no DB, and it never resolves a
 HOME-derived install path.
 
-## COVERAGE MAP (28 cases)
+## COVERAGE MAP (38 cases)
 
 | # | case | finding |
 |---|---|---|
@@ -208,6 +208,94 @@ HOME-derived install path.
 | 26 | `test_deliberate_pause_with_paused_task_is_not_swept` | **T1** (R1 discriminator) |
 | 27 | `test_idle_deliberate_pause_without_task_row_is_not_swept` | **T2** (R1 discriminator) |
 | 28 | `test_deliberate_pause_clears_a_stale_question_marker` | R1 marker lifecycle |
+| 29 | `test_n1_marker_work_happens_once_per_affected_node` | N1 (marker op count) |
+| 30 | `test_n1_question_pause_stamps_the_marker_once_per_parked_node` | N1 (question half) |
+| 31 | `test_n5_already_paused_node_loses_a_stale_question_marker` | N5 (already-paused branch) |
+| 32 | `test_n3_later_deliberate_pause_wins_over_the_recorded_release` | N3 (precedence) |
+| 33 | `test_n3_question_stratum_is_still_released` | N3 counter-pin |
+| 34 | `test_c1_concurrent_record_merges_both_complete` | **C1** (no lock across await) |
+| 35 | `test_council_i_deliberate_pause_over_parked_node_is_not_rearmed` | **council (i)** |
+| 36 | `test_council_ii_terminated_asker_stale_shadow_does_not_block_sweep` | **council (ii)** |
+| 37 | `test_w1_lost_status_flip_is_an_error_and_keeps_the_record` | **W1** |
+| 38 | `test_w3_duplicate_answer_does_not_re_flip_or_re_wake` | **W3** |
+
+## HONEST PIN QUALITY (N6) — what the pre-fix reds really are
+
+Measured, not asserted:
+
+- On the pre-fix BASE (`1ebdf469f`) the suite reports **36 failed / 2
+  passed**. The failures are dominated by
+  `ModuleNotFoundError: No module named 'daemon.services.stale_pause_sweep'`
+  (and the same for `question_pause_set`) — the FEATURE did not exist
+  pre-fix, so those are **trivial reds**, NOT symptom reds.
+- The only TRUE symptom-level pre-fix red is the standalone repro
+  (`tests/manual/question_pause_strand_repro.py`, captured above): the
+  base run exits **1** with the strand visible (the side-effect target
+  never re-armed; the late pause parks the tree with no answering
+  counterpart). That is the RED the fix flips.
+- So: of the cases above, the pins that are *symptom* reds against the
+  pre-fix source are the repro's two shapes plus the cases listed in
+  the next section; the rest pin behaviour that did not exist before
+  and therefore fail pre-fix with an import error.
+
+## GATE CYCLE 1 — the new cases and their SEMANTIC pre-fix RED
+
+Command (the pre-fix tip's `daemon/` checked out, the tests kept):
+
+```bash
+cd /home/nea/ensemble-src-wt-qprasym
+git checkout 86fe0e03a -- daemon/
+timeout 400 /home/nea/ensemble-src/.venv/bin/python -m pytest \
+  tests/unit/test_question_pause_resume_asymmetry.py -q -p no:randomly \
+  --timeout=30 -k "council_i or council_ii or w1_lost or w3_duplicate"
+```
+
+Captured output (4 failed, 34 deselected, 3 warnings in 6.23s):
+
+```
+E       AssertionError: a deliberate pause must survive the answer — the tree-scoped resume must not flip it back to running
+E       assert 'running' == 'paused'
+E         - paused
+E         + running
+
+E       AssertionError: a dead asker's stale pack shadow must not protect the tree forever — the stranded instance must be swept
+E       assert 'stranded-2' in []
+
+E       AssertionError: a lost status flip must be reported as an error (got 'wake_scheduled')
+E       assert 'wake_scheduled' == 'error'
+E         - error
+E         + wake_scheduled
+
+E       AssertionError: the record must carry the first pass's outcome for the parent (outcomes={})
+E       assert None in ('wake_scheduled', 'wc_parked', 'unpaused')
+E        +  where None = {}.get
+
+FAILED tests/unit/test_question_pause_resume_asymmetry.py::test_council_i_deliberate_pause_over_parked_node_is_not_rearmed
+FAILED tests/unit/test_question_pause_resume_asymmetry.py::test_council_ii_terminated_asker_stale_shadow_does_not_block_sweep
+FAILED tests/unit/test_question_pause_resume_asymmetry.py::test_w1_lost_status_flip_is_an_error_and_keeps_the_record
+FAILED tests/unit/test_question_pause_resume_asymmetry.py::test_w3_duplicate_answer_does_not_re_flip_or_re_wake
+4 failed, 34 deselected, 3 warnings in 6.23s
+```
+
+The C1 pin is a DEADLOCK on the pre-fix source — the run does not
+finish, it is killed by the per-test timeout. Captured traceback (the
+second contender blocks the event loop inside the lock):
+
+```
+File ".../tests/unit/test_question_pause_resume_asymmetry.py", line 522, in _merge
+    return await record_question_paused_set(
+File ".../daemon/services/question_pause_set.py", line 322, in record_question_paused_set
+    with _MERGE_LOCK:
++++++++++++++++++++++++++++++++++++ Timeout ++++++++++++++++++++++++++++++++++++
+```
+
+(the same command with `-k c1_concurrent` and `--timeout=30`; the
+timeout is what makes the deadlock OBSERVABLE instead of hanging the
+run forever).
+
+The GREEN side of the same cases (at the gate-cycle-1 tip): the pack
+reports **38 passed** and the standalone repro exits **0** with the
+unchanged captured output.
 
 ## THE R1 PAUSE-CAUSE DISCRIMINATOR (review cycle 3)
 
