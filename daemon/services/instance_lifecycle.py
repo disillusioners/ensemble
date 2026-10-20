@@ -2134,7 +2134,19 @@ class InstanceLifecycleService:
         # C1 fix: thread effective_version_tag so _apply_tool_filter resolves
         # the versioned meta (e.g., reviewer v2) instead of falling back to the
         # base/v1 tools.allow list.
-        tools = create_instance_tools(self._manager, instance_id, resolved_agent_id, version_tag=effective_version_tag)
+        # Thread ``parent_id`` / ``source_type`` so the USER-FACING ROOT
+        # predicate can be evaluated at build time: a root bound to a chat
+        # surface keeps the ``ask_questions`` tool, a non-root never gets it.
+        # Both values are already in scope here (``spawn_instance`` parameters
+        # at :1805 / :1811) — no new plumbing, no second metadata writer.
+        tools = create_instance_tools(
+            self._manager,
+            instance_id,
+            resolved_agent_id,
+            version_tag=effective_version_tag,
+            parent_id=parent_id,
+            source_type=source_type,
+        )
 
         # --- Resolve the final model and its source ONCE ---
         # This block runs in spawn_instance() (NOT _build_llm_config) so the
@@ -4687,7 +4699,20 @@ class InstanceLifecycleService:
         # C1 fix: thread resolved_tag (resolved from agent_meta.version_tag after
         # the base-fallback reconciliation above) so _apply_tool_filter resolves
         # the correct versioned meta instead of always using base tools.allow.
-        tools = create_instance_tools(self._manager, instance_id, resolved_agent_id, version_tag=resolved_tag)
+        # Thread ``parent_id`` / ``source_type`` so the USER-FACING ROOT
+        # predicate can be evaluated at build time on the restore path: a root
+        # whose row carries the ``source_type`` stamp keeps the
+        # ``ask_questions`` tool across a daemon restart, a child never gets
+        # it. ``meta.parent_id`` and the row's ``source_type`` are already
+        # resolved above — no row read at registration time, no new writer.
+        tools = create_instance_tools(
+            self._manager,
+            instance_id,
+            resolved_agent_id,
+            version_tag=resolved_tag,
+            parent_id=meta.parent_id,
+            source_type=source_type,
+        )
 
         # Build LLM config — restore spawn-time model override if one was
         # persisted (highest priority over env + meta.json's llm_model).
