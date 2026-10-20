@@ -641,8 +641,12 @@ async def _resume_target_and_tree(
         )
 
     try:
-        resume_result = await manager.resume_instance_cascade(
-            instance_id, exclude_ids=exclude_ids
+        from daemon.services.question_pause_set import (
+            resume_instance_cascade_with_exclusions,
+        )
+
+        resume_result = await resume_instance_cascade_with_exclusions(
+            manager, instance_id, exclude_ids
         )
     except Exception as e:  # noqa: BLE001
         raise _http(

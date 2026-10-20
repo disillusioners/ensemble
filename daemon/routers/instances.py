@@ -825,8 +825,12 @@ async def resume_instance(
         supersede_exclude_ids = await _deliberate_pause_exclusions(
             manager, instance_id, getattr(pending_pack, "id", None)
         )
-        cascade_result = await manager.resume_instance_cascade(
-            instance_id, exclude_ids=supersede_exclude_ids
+        from daemon.services.question_pause_set import (
+            resume_instance_cascade_with_exclusions,
+        )
+
+        cascade_result = await resume_instance_cascade_with_exclusions(
+            manager, instance_id, supersede_exclude_ids
         )
         return {
             "resumed": True,
@@ -1385,8 +1389,12 @@ async def dismiss_question(
 
     try:
         try:
-            resume_result = await manager.resume_instance_cascade(
-                instance_id, exclude_ids=dismiss_exclude_ids
+            from daemon.services.question_pause_set import (
+                resume_instance_cascade_with_exclusions,
+            )
+
+            resume_result = await resume_instance_cascade_with_exclusions(
+                manager, instance_id, dismiss_exclude_ids
             )
         except Exception as e:
             raise HTTPException(

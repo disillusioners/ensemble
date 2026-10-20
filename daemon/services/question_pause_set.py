@@ -725,6 +725,25 @@ async def deliberate_pause_exclusions(
     return excluded
 
 
+async def resume_instance_cascade_with_exclusions(
+    manager: "InstanceManager",
+    instance_id: str,
+    exclude_ids: list[str] | None,
+) -> dict:
+    """Cascade-resume ``instance_id``, excluding the deliberate parks.
+
+    The ``exclude_ids`` keyword is passed ONLY when there is something
+    to exclude — the ordinary call shape (``resume_instance_cascade(id)``)
+    is preserved, so the existing call-shape contracts (and the HTTP
+    suites that assert them) are unaffected.
+    """
+    if exclude_ids:
+        return await manager.resume_instance_cascade(
+            instance_id, exclude_ids=list(exclude_ids)
+        )
+    return await manager.resume_instance_cascade(instance_id)
+
+
 async def clear_question_pause_marker(
     manager: "InstanceManager", instance_id: str
 ) -> bool:
