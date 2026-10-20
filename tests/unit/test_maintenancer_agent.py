@@ -243,14 +243,45 @@ class TestToolAllowDenyContract:
         )
 
     def test_system_restart_resolves_for_maintenancer(self) -> None:
-        """agent-restart (2026-10-19): system_restart is HELD (lifted
-        from tools.deny); maintenancer is the arming agent. Live gate is
-        genuine-user provenance + anti-flap rails, enforced INSIDE the
-        tool — NOT by resolution-level stripping."""
+        """agent-restart (2026-10-19): system_restart is HELD by
+        maintenancer (the arming agent). Live gate is genuine-user
+        provenance + anti-flap rails, enforced INSIDE the tool — NOT by
+        resolution-level stripping.
+
+        Review fix-cycle-1 Finding 2: this codebase's allow semantics are
+        EXCLUSIVE-ALLOW — a tool absent from ``tools.allow`` is withheld
+        even with no deny entry (the factory quartet's ``system_upgrade``
+        category registers EMPTY in the cold registry, so the category
+        allow entry falls through to the literal tool name and never
+        expands). BOTH assertions are therefore load-bearing: the deny
+        lift alone (the build's original shape) left the tool unreachable
+        while this test stayed green. Assert (a) not in deny (belt) AND
+        (b) in allow AND (c) the tool RESOLVES through the real filter
+        under the cold-registry shape (no tool_categories passed —
+        mirroring the production call at instance.py:6331)."""
         meta = _load_meta()
         assert "system_restart" not in meta["tools"]["deny"], (
             "system_restart is held by maintenancer (the arming agent); "
             "the live gate runs inside system_restart, not at resolution."
+        )
+        assert "system_restart" in meta["tools"]["allow"], (
+            "exclusive-allow semantics: system_restart MUST be in "
+            "tools.allow or the arming agent cannot reach it (the "
+            "system_upgrade category allow entry does not expand in the "
+            "cold registry — factory tools register per-instance)"
+        )
+        from daemon.tools.instance import resolve_tool_filter
+
+        resolved = resolve_tool_filter(
+            allow=meta["tools"]["allow"],
+            deny=meta["tools"]["deny"],
+            all_tool_names=set(),
+        )
+        assert resolved is not None
+        assert "system_restart" in resolved, (
+            "system_restart must resolve through the real filter (cold "
+            "registry shape, no tool_categories — the production seam): "
+            f"resolved={sorted(resolved)[:20]}…"
         )
 
 
