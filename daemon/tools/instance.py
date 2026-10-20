@@ -2469,17 +2469,8 @@ class SpawnInstanceInput(BaseModel):
 #   USER_FACING_ROOT := (parent_id IS NULL OR parent_id == "")
 #                        AND (source_type IN CHAT_SOURCE_TYPES_FOR_ROOT)
 #
-# CHAT-SOURCE TAXONOMY — IMPORTED, NOT RE-DECLARED. The flat
-# ``CHAT_SOURCE_TYPES`` re-export of ``daemon/repositories/instance/
-# __init__.py`` is the SAME four-member set as
-# ``SQLModelInstanceRepository.CHAT_SOURCE_TYPES``
-# (``daemon/repositories/instance/repository.py:919``) and as
-# ``USER_ORIGIN_CHAT_SOURCE_TYPES``
-# (``daemon/tools/upgrade_journal.py:3358``). Importing keeps ONE
-# authority instead of adding a third copy of the taxonomy; a three-way
-# equality unit pin
-# (``tests/unit/tools/test_question_tool_root_gate.py::
-# TestChatSourceTaxonomyPins``) makes silent drift impossible.
+# CHAT-SOURCE TAXONOMY — IMPORTED, NOT RE-DECLARED; see the import
+# block above (rationale + drift pin: TestChatSourceTaxonomyPins).
 #
 # ``whatsapp`` is kept for FORWARD-COMPAT: no whatsapp adapter exists yet
 # (see the asymmetry recorded at ``daemon/tools/upgrade_journal.py:3337``),
@@ -2507,7 +2498,19 @@ def _is_user_facing_root(
     """
     if parent_id is not None and parent_id != "":
         return False
-    return (source_type or "") in CHAT_SOURCE_TYPES_FOR_ROOT
+    # M1 — DIAGNOSTICS for the fail-closed hide. A root-candidate that
+    # clears the parent leg but fails the source leg is byte-identical to
+    # a forgotten ``source_type=`` thread (the failure mode this
+    # commission repaired twice), so the debug line names the shape
+    # explicitly. Child spawns short-circuit on the parent leg above, so
+    # the noise stays bounded to root candidates.
+    if not isinstance(source_type, str) or source_type not in CHAT_SOURCE_TYPES_FOR_ROOT:
+        logger.debug(
+            "ask_questions hidden: root-candidate with source_type=%r", source_type
+        )
+    # L13 — fail CLOSED on a non-``str`` ``source_type`` instead of
+    # raising ``TypeError`` at the frozenset membership check.
+    return isinstance(source_type, str) and source_type in CHAT_SOURCE_TYPES_FOR_ROOT
 
 
 def create_instance_tools(
@@ -2518,7 +2521,7 @@ def create_instance_tools(
     *,
     parent_id: str | None = None,
     source_type: str | None = None,
-):
+) -> list[BaseTool]:
     """Create tools with injected manager reference.
     
     Args:

@@ -1348,16 +1348,22 @@ class TestInstallerSkillHygiene:
 #     Evidence pointer: Phase-1 scoped gate run (unit + integration +
 #     targeted seal) in the commission report.
 # 2026-10-20 hide-question-tool-nonroot sweep re-pin (14 files, constants-only; attribution in the commit message) — the other 21 entries keep their values.
-# 2026-10-20 hide-question-tool-nonroot FIX ROUND 1 re-pin (3 files, constants-only, computed from real file bytes):
-#   agents/charter/workflow.md   <- 66512e9dd 2026-10-05 (B5: diagram-type NEEDS MORE INFO self-consistency)
-#   agents/devops/rule.md        <- 617bf69a0 2026-10-05 (B3: non-root question contract + canonical section)
-#   agents/maintenancer/rule.md  <- 74e9168a2 2026-10-19 (W3: escalate-family report-chain contract)
+# 2026-10-20 hide-question-tool-nonroot FIX ROUND 1 re-pin (3 files, constants-only, computed from real file bytes;
+# attribution = the IN-RANGE fix-round-1 commit whose edit made each pin stale):
+#   agents/charter/workflow.md   <- 6711c769e 2026-10-20 (B5: diagram-type NEEDS MORE INFO self-consistency)
+#   agents/devops/rule.md        <- c5bd90146 2026-10-20 (direct-user display verb routed to the report channel)
+#   agents/maintenancer/rule.md  <- 6711c769e 2026-10-20 (W3: escalate-family report-chain contract)
+# Intermediate re-pin 6fa226976 (1 file, constants-only) — the devops/rule.md pin went stale AGAIN on the
+# fix-round-1 residual edit, so it was re-pinned on its own:
+#   agents/devops/rule.md        <- c5bd90146 2026-10-20 (direct-user display verb routed to the report channel)
 # 2026-10-20 hide-question-tool-nonroot FIX ROUND 2 re-pin (3 files, constants-only, recomputed from real
 # file bytes on the fix-round-2 worktree — B3 closure: human-decision instructions routed to the
-# "Open questions for the orchestrator" report channel; the other 32 entries keep their values):
-#   agents/leader/rule.md             <- f0bda673c7b112ef7a43f17f1166f99fcb11f1562aabf0d7a5c9879e924a231a
-#   agents/maintenancer/rule.md       <- abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec
-#   agents/project-manager/workflow.md <- bde479095bbda6a3e3e069afe8a719e0f8b5673f289d2d0d5bf7a15eecb123ad
+# "Open questions for the orchestrator" report channel; the other 32 entries keep their values).
+# The values below are CONTENT-SHA256 hashes of the sealed files (NOT commit shas — the two forms are
+# not interchangeable); the in-range fix-round-2 commit that made each pin stale is named alongside:
+#   agents/leader/rule.md             <- f0bda673c7b112ef7a43f17f1166f99fcb11f1562aabf0d7a5c9879e924a231a (content-sha256) | in-range commit: 4088be633 2026-10-20 (B3 closure: semantic-class sweep -> open-questions report channel)
+#   agents/maintenancer/rule.md       <- abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec (content-sha256) | in-range commit: 4088be633 2026-10-20 (B3 closure: semantic-class sweep -> open-questions report channel)
+#   agents/project-manager/workflow.md <- bde479095bbda6a3e3e069afe8a719e0f8b5673f289d2d0d5bf7a15eecb123ad (content-sha256) | in-range commit: 4088be633 2026-10-20 (B3 closure: semantic-class sweep -> open-questions report channel)
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "2a5078f93bd2dcfe427900e85c075ee9671b8aedae17d07c7ef6abb6df4603ab",

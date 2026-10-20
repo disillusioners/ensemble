@@ -2134,6 +2134,7 @@ class InstanceLifecycleService:
         # C1 fix: thread effective_version_tag so _apply_tool_filter resolves
         # the versioned meta (e.g., reviewer v2) instead of falling back to the
         # base/v1 tools.allow list.
+        #
         # Thread ``parent_id`` / ``source_type`` so the USER-FACING ROOT
         # predicate can be evaluated at build time: a root bound to a chat
         # surface keeps the ``ask_questions`` tool, a non-root never gets it.
@@ -2398,6 +2399,8 @@ class InstanceLifecycleService:
         # Additive JSONB key — no migration. Only consumed by root instances
         # (parent_id is None) whose source_type matches the whitelist in
         # _PLATFORM_INSTRUCTIONS.
+        # SINGLE WRITER — this is the only site that stamps
+        # ``instance_metadata["source_type"]``.
         if source_type:
             instance_metadata["source_type"] = source_type
 
@@ -4699,12 +4702,13 @@ class InstanceLifecycleService:
         # C1 fix: thread resolved_tag (resolved from agent_meta.version_tag after
         # the base-fallback reconciliation above) so _apply_tool_filter resolves
         # the correct versioned meta instead of always using base tools.allow.
+        #
         # Thread ``parent_id`` / ``source_type`` so the USER-FACING ROOT
-        # predicate can be evaluated at build time on the restore path: a root
-        # whose row carries the ``source_type`` stamp keeps the
-        # ``ask_questions`` tool across a daemon restart, a child never gets
-        # it. ``meta.parent_id`` and the row's ``source_type`` are already
-        # resolved above — no row read at registration time, no new writer.
+        # predicate can be evaluated at build time: a root bound to a chat
+        # surface keeps the ``ask_questions`` tool, a non-root never gets it.
+        # ``meta.parent_id`` and the row's ``source_type`` are already
+        # resolved above — no row read at registration time, no new writer;
+        # the stamp survives a daemon restart.
         tools = create_instance_tools(
             self._manager,
             instance_id,

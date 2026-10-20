@@ -39,8 +39,10 @@ Plus supplementary smoke tests:
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -678,9 +680,6 @@ def _stage_agent_without_question_category(tmp_path, agent_id):
     ``watcher`` meta shape (the convention used by
     ``tests/unit/tools/test_question_tool_root_gate.py``).
     """
-    import json
-    from pathlib import Path
-
     repo_root = Path(__file__).resolve().parents[2]
     real_meta = json.loads(
         (repo_root / "agents" / "watcher" / "meta.json").read_text(

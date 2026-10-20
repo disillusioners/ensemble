@@ -112,15 +112,9 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate, 
         # router only needs the instance_id; the validated override is
         # consumed by tool-layer callers that emit a fallback notice.
         #
-        # Thread the source's chat platform type: this lane spawns a
-        # CHAT-BOUND ROOT, and the ``ask_questions`` registration gate
-        # evaluates the USER-FACING ROOT predicate from the threaded
-        # ``source_type``. Without it the predicate would false-negative and
-        # a genuine chat root would lose the tool. The value is carried by
-        # the EXISTING ``spawn_instance`` parameter and is stamped by the
-        # single writer of ``instance_metadata["source_type"]``
-        # (``daemon/services/instance_lifecycle.py``) — this lane adds NO
-        # second writer of that metadata key.
+        # Thread the source's chat platform type: the USER-FACING ROOT gate
+        # evaluates it, so without it a genuine chat root would lose
+        # ``ask_questions``.
         instance_id, _validated_model_override = manager.spawn_instance(
             agent_id=resolved_agent_id,
             instance_id=instance_id,

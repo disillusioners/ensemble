@@ -658,16 +658,14 @@ class TestGateBeforeFilterOrdering:
         """
         source = INSTANCE_TOOLS_SOURCE.read_text(encoding="utf-8")
 
-        registration_line, filter_line = _assert_registration_precedes_filter(source)
+        # The ORDER condition is asserted INSIDE the helper (with the richer
+        # message that names both positions); the redundant outer assert
+        # that merely repeated it is dropped.
+        _assert_registration_precedes_filter(source)
 
         mutant = _mutate_filter_before_registration(source)
         with pytest.raises(AssertionError):
             _assert_registration_precedes_filter(mutant)
-
-        assert registration_line < filter_line, (
-            "gate registration must precede the tool filter "
-            f"(got {registration_line} vs {filter_line})"
-        )
 
 
 # ---------------------------------------------------------------------------
