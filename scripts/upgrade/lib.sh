@@ -727,6 +727,32 @@ EOF
     fi
 }
 
+# require_live_guard_restart <target> — agent-restart (§3.4 C-1/F-3/F-4):
+# the RESTART lane's sibling live guard. Accepts ONLY
+# ENSEMBLE_RESTART_LIVE=1 — minted exclusively by the post-turn drain
+# IFF the arm stamped spec["provenance_ok"]=True post-gate (marker ⇒
+# gate passed; absent ⇒ exit 78 fail-closed). Deliberately DISJOINT from
+# ENSEMBLE_UPGRADE_LIVE (§3.4 — the two vars stay disjoint forever; the
+# restart lane never sets/reads the upgrade var — T0c). On trip it
+# journals a best-effort LOCK-FREE ``live-restart-refused`` event
+# (pre-adoption; the notification rides ``executor_exit`` which the
+# reaper observes — the event itself has NO terminal-set membership).
+require_live_guard_restart() {
+    if [ "$1" = "live" ] && [ "${ENSEMBLE_RESTART_LIVE:-0}" != "1" ]; then
+        journal_history_append live-restart-refused "restart executor refused: ENSEMBLE_RESTART_LIVE absent (the arming turn's provenance gate did not pass / marker lost) — restart NOT executed; pending_op left for the boot sweep" 2>/dev/null || true
+        cat >&2 <<EOF
+${LOG_TAG}: REFUSING to restart live.
+  The restart executor requires ENSEMBLE_RESTART_LIVE=1 — minted ONLY by
+  the post-turn drain when the arming system_restart call passed the
+  genuine-user provenance gate. An arm that never passed the gate (or a
+  manual invocation) never executes against live.
+  This refusal is journaled (live-restart-refused); the armed op, if any,
+  is left for the boot sweep to close as abandoned.
+EOF
+        exit 78
+    fi
+}
+
 # ── Journal (D4: releases/state.json — single durable state) ────────────────
 #
 # Schema (interface contract — the launcher sweep [T7, separate owner] and

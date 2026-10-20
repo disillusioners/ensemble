@@ -8,8 +8,12 @@ Category ``system_upgrade`` per the self-restart/upgrade Phase-2 design
 * ``upgrade_status`` — §2.4: run-scoped pipeline poller (journal + lock
   tail; run_id correlation via the lock dir + the Dispatch-B pending_op /
   in_flight.run_id records).
-* ``system_restart`` — §2.2 + D-FA1.4: arm → return → poll. LIVE refused
-  outright (A2). demo/dev/sandbox free (journaled + lock-protected).
+* ``system_restart`` — agent-restart: arm → return → poll. LIVE is
+  PROVENANCE-GATED (genuine-user turn, direct or inherited — NO nonce;
+  the upgrade 3-factor ceremony stays untouched and disjoint) with
+  live-only anti-flap rails (cooldown / min-uptime / sliding budget);
+  demo/dev/sandbox free (journaled + lock-protected). ``dry_run`` on any
+  env returns the full read-only verdict, zero mutation.
 * ``system_upgrade`` — §2.1 + §4: dry_run-default-true preflight (live:
   issues the action-binding nonce) / armed promote via daemonized
   ``promote.sh``. LIVE armed = 3-factor gate (param + user-origin marker
@@ -54,6 +58,19 @@ module split (reads / actor tools / gate) is fenced to the post-P2.3
 refactor pass (decisions.md "P2.3 Gate Rulings & Fences" item 2); do not
 grow it further without pulling that fence.
 """
+
+# Size rationale (~3931 lines): the upgrade tool surface — the read pair
+# (release_info / upgrade_status incl. the §6.3 restart-audit ledger),
+# the actor pair (system_restart / system_upgrade), the upgrade 3-factor
+# gate, and the agent-restart block (restart-provenance reader + rails +
+# dry-run verdict formatter + override capture, L1257–1620 region).
+# The L8 fence (module split fenced to the post-P2.3 refactor pass —
+# decisions.md "P2.3 Gate Rulings & Fences" item 2) stands. The INTENDED
+# extraction seam for a future split is the agent-restart block: it is
+# self-contained (helpers prefixed `_restart_`/`_capture_`/
+# `_render_`/`_format_restart_`, no shared mutable module state) and
+# would lift to e.g. `daemon/tools/restart_tools.py` behind the same
+# category registration. Do NOT split ad hoc.
 
 from __future__ import annotations
 
@@ -109,9 +126,7 @@ pipeline (P2.1 pipeline, P2.2 tool surface).
 - `upgrade_status` — poll a pipeline run by run_id: in-flight phase,
   journal history tail, terminal outcome (committed / rolled-back /
   halted).
-- `system_restart` — schedule an intentional restart (arm → return →
-  poll; SINGLE-TERM stop + launcher re-exec, never a raw kill). LIVE is
-  refused outright this initiative.
+- `system_restart` — schedule an intentional restart (arm → return → poll; SINGLE-TERM stop + supervision-aware hand-back, never a raw kill). LIVE is provenance-gated (genuine-user turn — direct or inherited; no nonce) with live-only anti-flap rails; demo/dev/sandbox free.
 - `system_upgrade` — arm the promote pipeline (dry_run defaults TRUE;
   live requires the 3-factor confirmation: user_confirmed + user-origin
   turn + nonce echoed by the user).
@@ -1209,6 +1224,17 @@ _OUTCOME_LABELS: dict[str, str] = {
     # every key in the derived ``_TERMINAL_OUTCOME_EVENTS`` tuple
     # has a label here.)
     "boot_sweep_commit_and_continue": "boot sweep committed txn (continued)",
+    # agent-restart (§3.3/N-2) — the restart lane's event classes. The
+    # three RESTART_TERMINAL_EVENTS members + the guard-trip event render
+    # human strings on the sweep formatters + status lane (T5 asserts
+    # LABELS, not raw keys). ``restart_gate`` is a DETAIL event written
+    # alongside the authoritative terminal (never reported as the
+    # outcome by the kind-aware reader); ``live-restart-refused`` rides
+    # ``executor_exit`` for terminal classification.
+    "restart_gate": "restart health-gate record (livez/readyz/version detail)",
+    "restart_abandoned": "restart arm abandoned (never executed)",
+    "stop_forced_kill": "forced SIGKILL escalation (checkpoint write voided)",
+    "live-restart-refused": "live restart refused (provenance guard)",
     # Informational kinds (NOT in ``uj._TERMINAL_EVENTS`` — they do
     # not close a pending_op). Listed here so the consumer's
     # ``_OUTCOME_LABELS.get(event_key, event_key)`` fallback renders
@@ -1241,22 +1267,85 @@ _OUTCOME_LABELS: dict[str, str] = {
 # agent id resolution").
 
 
+# Shared provenance-capture plumbing (hygiene fold): both capture helpers
+# read the SAME two manager stores with the same direct→inherited
+# preference; the lookup helper centralizes the field read, and the
+# empty dict is the single spelling of "no live provenance" (used by the
+# capture helper's failure path AND the 1c narrowing's promote-branch).
+_EMPTY_PROVENANCE: dict[str, Any] = {
+    "provenance_class": "",
+    "root_source": None,
+    "root_message_id": None,
+    "depth": 0,
+    "stamped_at": None,
+    "expires_at": None,
+}
+
+
+def _lookup_provenance_field(
+    manager: "InstanceManager | Any",
+    instance_id: str,
+    direct_key: str,
+    inherited_key: str,
+) -> Any:
+    """Read ``direct_key`` from the instance's DIRECT user-origin window
+    when present, else ``inherited_key`` from the inherited store.
+    Returns ``None`` when neither store has a live-shaped entry for the
+    instance. Defensive — never raises."""
+    try:
+        windows = getattr(manager, "_user_origin_windows", None)
+        if isinstance(windows, dict):
+            entry = windows.get(instance_id)
+            if isinstance(entry, dict) and entry.get(direct_key) is not None:
+                return entry.get(direct_key)
+        inherited = getattr(manager, "_inherited_provenance_windows", None)
+        if isinstance(inherited, dict):
+            ientry = inherited.get(instance_id)
+            if isinstance(ientry, dict) and ientry.get(inherited_key) is not None:
+                return ientry.get(inherited_key)
+        return None
+    except Exception:  # defensive — capture is best-effort
+        return None
+
+
 def _capture_user_source(manager: "InstanceManager | Any", instance_id: str) -> str:
     """Read the recorded ``source`` from the manager's per-instance
     user-origin window. Returns ``""`` on absence (non-user-origin arm;
     Phase 2 falls back to ``"api"`` for routing). Defensive — never raises.
+
+    agent-restart C-2 (§2.4 arm-time capture — extended to BOTH stores):
+    when no DIRECT window is live, the inherited store's ROOT source is
+    captured instead (the wake record + restart_audits render the root
+    provenance; the restart-kind wake never re-stamps from it — A-2).
     """
+    source = _lookup_provenance_field(
+        manager, instance_id, "source", "root_source"
+    )
+    return source if isinstance(source, str) and source else ""
+
+
+def _capture_provenance_class(
+    manager: "InstanceManager | Any", instance_id: str
+) -> dict[str, Any]:  # values: provenance_class is Literal["direct","inherited",""]
+    """agent-restart C-2: capture the provenance class + root fields for
+    the wake record / audit row. Reads BOTH manager stores (direct
+    first). Returns a dict with ``provenance_class`` (``""`` when no
+    live provenance), ``root_source``, ``root_message_id``, ``depth``,
+    ``stamped_at``, ``expires_at``. Defensive — never raises."""
     try:
-        windows = getattr(manager, "_user_origin_windows", None)
-        if not isinstance(windows, dict):
-            return ""
-        entry = windows.get(instance_id)
-        if not isinstance(entry, dict):
-            return ""
-        source = entry.get("source")
-        return str(source) if isinstance(source, str) else ""
+        verdict = _restart_provenance(manager, instance_id)
+        if not verdict.ok:
+            return dict(_EMPTY_PROVENANCE)
+        return {
+            "provenance_class": verdict.pclass,
+            "root_source": verdict.root_source,
+            "root_message_id": verdict.root_message_id,
+            "depth": verdict.depth,
+            "stamped_at": verdict.stamped_at,
+            "expires_at": verdict.expires_at,
+        }
     except Exception:  # defensive — capture is best-effort
-        return ""
+        return dict(_EMPTY_PROVENANCE)
 
 
 def _capture_user_message_id(
@@ -1264,19 +1353,328 @@ def _capture_user_message_id(
 ) -> str | None:
     """Read the recorded ``message_id`` from the manager's per-instance
     user-origin window. Returns ``None`` on absence. Defensive — never
-    raises.
+    raises. agent-restart C-2: falls back to the inherited store's ROOT
+    message id (mirrors :func:`_capture_user_source`).
+    """
+    msg_id = _lookup_provenance_field(
+        manager, instance_id, "message_id", "root_message_id"
+    )
+    return msg_id if isinstance(msg_id, str) and msg_id else None
+
+
+# ═══════════════════════════════════════
+# agent-restart (§2.4/§4): provenance reader + live-only rails
+# ═══════════════════════════════════════
+
+
+@dataclass
+class _ProvenanceVerdict:
+    """agent-restart §2.4 gate predicate result (live lane)."""
+
+    ok: bool
+    pclass: str                 # "direct" | "inherited" | ""
+    root_source: str | None = None
+    root_message_id: str | None = None
+    depth: int = 0
+    stamped_at: str | None = None
+    expires_at: str | None = None
+    detail: str = ""            # refusal diagnostic (W1: names observed source)
+
+
+def _restart_provenance(
+    manager: "InstanceManager | Any", instance_id: str
+) -> _ProvenanceVerdict:
+    """THE restart provenance gate (§2.4, env-scoped LIVE-only).
+
+    Reads BOTH manager stores through this NEW helper — the DIRECT
+    window (``_user_origin_windows``) first, then the INHERITED store
+    (``_inherited_provenance_windows``, mechanism B). The upgrade
+    factor-2 gate keeps its explicit direct-store access
+    (``upgrade_tools.py:2783-2784``) and NEVER calls this helper
+    (§2.6 decision-layer isolation, T0a — directional rule).
+
+    Fail-closed everywhere: absent/expired/unparseable entries never
+    pass; a refusal names the OBSERVED source value (W1 hardening —
+    ``_user_origin_last_stamp`` carries the observation even on clear).
+    """
+    now_dt = datetime.now(tz=timezone.utc)
+    refus_detail = "no live user-origin provenance on this turn"
+    windows = getattr(manager, "_user_origin_windows", None)
+    entry = windows.get(instance_id) if isinstance(windows, dict) else None
+    if isinstance(entry, dict):
+        exp = parse_iso_utc(entry.get("expires_at"))
+        if exp is not None and now_dt <= exp:
+            return _ProvenanceVerdict(
+                ok=True,
+                pclass="direct",
+                root_source=(
+                    str(entry.get("source"))
+                    if isinstance(entry.get("source"), str)
+                    else None
+                ),
+                root_message_id=(
+                    str(entry.get("message_id"))
+                    if isinstance(entry.get("message_id"), str)
+                    else None
+                ),
+                depth=0,
+                stamped_at=(
+                    str(entry.get("stamped_at"))
+                    if isinstance(entry.get("stamped_at"), str)
+                    else None
+                ),
+                expires_at=(
+                    str(entry.get("expires_at"))
+                    if isinstance(entry.get("expires_at"), str)
+                    else None
+                ),
+                detail="direct window live",
+            )
+        refus_detail = (
+            f"direct window expired at {entry.get('expires_at')}"
+        )
+    inherited = getattr(manager, "_inherited_provenance_windows", None)
+    ientry = inherited.get(instance_id) if isinstance(inherited, dict) else None
+    if isinstance(ientry, dict):
+        exp = parse_iso_utc(ientry.get("expires_at"))
+        if exp is not None and now_dt <= exp:
+            return _ProvenanceVerdict(
+                ok=True,
+                pclass="inherited",
+                root_source=(
+                    str(ientry.get("root_source"))
+                    if isinstance(ientry.get("root_source"), str)
+                    else None
+                ),
+                root_message_id=(
+                    str(ientry.get("root_message_id"))
+                    if isinstance(ientry.get("root_message_id"), str)
+                    else None
+                ),
+                depth=int(ientry.get("depth") or 0),
+                stamped_at=(
+                    str(ientry.get("root_stamped_at"))
+                    if isinstance(ientry.get("root_stamped_at"), str)
+                    else None
+                ),
+                expires_at=(
+                    str(ientry.get("expires_at"))
+                    if isinstance(ientry.get("expires_at"), str)
+                    else None
+                ),
+                detail="inherited window live (internal_agent chain)",
+            )
+        refus_detail = (
+            f"inherited window expired at {ientry.get('expires_at')}"
+        )
+    # W1: name the observed source of this turn when known.
+    last_stamps = getattr(manager, "_user_origin_last_stamp", None)
+    observed = (
+        last_stamps.get(instance_id) if isinstance(last_stamps, dict) else None
+    )
+    observed_src = (
+        observed.get("source")
+        if isinstance(observed, dict)
+        else None
+    )
+    if isinstance(observed_src, str) and observed_src:
+        refus_detail += (
+            f" — observed source {observed_src!r} classified "
+            f"{(observed or {}).get('detail', '?')!r}"
+        )
+    return _ProvenanceVerdict(ok=False, pclass="", detail=refus_detail)
+
+
+def _restart_cooldown_state(journal: dict[str, Any] | None) -> tuple[bool, str]:
+    """Rail (b) — live-only cooldown read (§4). Returns ``(active,
+    until_display)``. Fail CLOSED on unparseable (an unparseable
+    cooldown_until counts as ACTIVE — recent-instability refuse).
+    Distinct name from the pre-existing promote-lane ``_cooldown_state``
+    (str renderer, :2027) — no shadowing."""
+    if not isinstance(journal, dict):
+        return False, "none"
+    raw = journal.get("cooldown_until")
+    if raw is None:
+        return False, "none"
+    parsed = parse_iso_utc(raw)
+    if parsed is None:
+        return True, f"unparseable ({raw!r}) — refusing fail-closed"
+    if datetime.now(tz=timezone.utc) < parsed:
+        return True, str(raw)
+    return False, str(raw)
+
+
+def _min_uptime_state() -> tuple[bool, str]:
+    """Rail (c1) — live-only minimum uptime (§4). Returns ``(ok,
+    display)``. ``now − get_boot_epoch() ≥ threshold``; epoch
+    UNAVAILABLE fails CLOSED (post-boot restart burns crash budget;
+    we cannot prove uptime ⇒ refuse)."""
+    from daemon import config as _cfg
+    from daemon.services.boot_epoch import get_boot_epoch
+
+    threshold = _cfg.restart_min_uptime_s()
+    epoch = get_boot_epoch()
+    if epoch is None:
+        return False, "boot epoch unavailable — refusing fail-closed"
+    now_dt = datetime.now(tz=timezone.utc)
+    uptime = (now_dt.replace(tzinfo=None) - epoch).total_seconds()
+    if uptime >= threshold:
+        return True, f"uptime {int(uptime)}s ≥ {threshold}s"
+    return False, f"uptime {int(uptime)}s < {threshold}s min-uptime"
+
+
+def _budget_state(install_dir: Path) -> tuple[bool, int, int]:
+    """Rail (c2) — live-only sliding budget read (§4). Returns
+    ``(ok, count, cap)``; count ≥ cap ⇒ refuse."""
+    from daemon import config as _cfg
+
+    cap = _cfg.restart_budget_24h()
+    count = uj.restart_budget_count(install_dir)
+    return (count < cap, count, cap)
+
+
+# Reason constraint (§4 rail d, all envs; V-11 charset): printable, no
+# newlines, no splice-sentinel class, ≤200 chars, min 3 (schema-mandatory
+# today via positional schema — the constraint here is the persisted form).
+REASON_MAX_LEN = 200
+REASON_MIN_LEN = 3
+
+
+def _reason_ok(reason: str) -> tuple[bool, str]:
+    """Validate the persisted reason form (V-11 charset, all envs)."""
+    if not isinstance(reason, str) or len(reason.strip()) < REASON_MIN_LEN:
+        return False, f"reason must be ≥{REASON_MIN_LEN} non-space characters"
+    if len(reason) > REASON_MAX_LEN:
+        return False, f"reason must be ≤{REASON_MAX_LEN} chars (got {len(reason)})"
+    if any(ch in reason for ch in ("\n", "\r", "\t")):
+        return False, "reason must not contain newlines/tabs"
+    if not all(ch.isprintable() for ch in reason):
+        return False, "reason must be printable characters only"
+    return True, reason.strip()
+
+
+def _capture_pending_overrides(manager: "InstanceManager | Any") -> list[dict[str, Any]]:
+    """agent-restart §5.2 — arm-time pending override set.
+
+    ``requires_restart=True ∧ divergent`` over the managed keys whose DB
+    override tier WINS the SSOT ladder (``resolution["source"] == "db"``
+    and the resolved value ≠ the live running value). Bounded PG read
+    in-lock (accepted per §5.2) through the manager's wired
+    ``_settings_service`` seam. Best-effort: unwired service / any read
+    failure ⇒ empty list (the arm never blocks on the capture).
     """
     try:
-        windows = getattr(manager, "_user_origin_windows", None)
-        if not isinstance(windows, dict):
-            return None
-        entry = windows.get(instance_id)
-        if not isinstance(entry, dict):
-            return None
-        msg_id = entry.get("message_id")
-        return str(msg_id) if isinstance(msg_id, str) else None
-    except Exception:  # defensive
-        return None
+        svc = getattr(manager, "_settings_service", None)
+        if svc is None or not hasattr(svc, "get_overrides"):
+            return []
+        overrides = svc.get_overrides()
+        if not isinstance(overrides, dict) or not overrides:
+            return []
+        from daemon.services.settings_service import (
+            MANAGED_KEYS,
+            _get_config_value,
+            get_settings_resolution_snapshot,
+            resolve,
+        )
+        from daemon.config import get_config
+
+        snapshot = get_settings_resolution_snapshot() or {}
+        config = get_config()
+        out: list[dict[str, Any]] = []
+        for key in sorted(overrides):
+            spec = MANAGED_KEYS.get(key)
+            if spec is None or not spec.requires_restart:
+                continue
+            try:
+                resolution = resolve(key, snapshot, db_overrides=overrides)
+            except Exception as res_exc:  # noqa: BLE001 — per-key fail-open
+                logger.warning(
+                    "system_restart: override capture — resolve FAILED for "
+                    "key=%s (skipped, fail-open): %s",
+                    key, res_exc,
+                )
+                continue
+            if resolution.get("source") != "db":
+                continue  # DB tier not winning — nothing pending
+            try:
+                live = _get_config_value(config, spec.config_path)
+            except Exception as cfg_exc:  # noqa: BLE001
+                # Log-parity fold: a config-read failure is DISTINGUISHED
+                # (sentinel string, logged) from a legitimately-absent
+                # live value (None) — same rendered downstream shape, no
+                # token change; the operator can tell a broken read from
+                # a missing field.
+                logger.warning(
+                    "system_restart: override capture — live-value read "
+                    "FAILED for key=%s (rendered 'unreadable'): %s",
+                    key, cfg_exc,
+                )
+                live = "<unreadable>"
+            if resolution.get("value") == live:
+                continue  # not divergent — already running the DB value
+            out.append(
+                {
+                    "key": key,
+                    "live_before": live,
+                    "db_value": resolution.get("value"),
+                    "status": "pending",
+                }
+            )
+        return out
+    except Exception as exc:  # best-effort — arm never blocks
+        logger.warning(
+            "system_restart: pending-override capture FAILED: %s "
+            "(arming without the override list)", exc,
+        )
+        return []
+
+
+def _render_overrides_line(overrides: list[dict[str, Any]]) -> str:
+    """§5.2 render: ``limits.worker_pool_size: 5→7`` per pending key."""
+    if not overrides:
+        return "overrides_pending: none"
+    frags = [
+        f"{o.get('key')}: {o.get('live_before')}→{o.get('db_value')}"
+        for o in overrides
+    ]
+    return "overrides_pending: " + ", ".join(frags)
+
+
+def _format_restart_dry_verdict(
+    *,
+    self_env: str,
+    reason: str,
+    verdicts: list[tuple[bool, str, str, str]],
+    overrides: list[dict[str, Any]],
+    busy: str,
+    cooldown_display: str,
+) -> str:
+    """agent-restart §7.3 rev-5 — the READ-ONLY dry-run verdict
+    formatter.
+
+    ``dry_run`` verdicts NEVER call :func:`_refusal` (zero journal
+    side-effect; would-refuse renders here with the SAME token
+    vocabulary). Works on ANY env incl. live (this supersedes today's
+    outright refusal — intended change, §1.2). Zero mutation: no lock,
+    no journal write, no marker, no wake.
+    """
+    would_arm = all(ok for ok, _tok, _msg, _detail in verdicts)
+    lines = [
+        f"RESTART VERDICT (dry-run, zero mutation) — env={self_env} mode=graceful-now",
+        f"reason: {reason}",
+        f"would_arm: {'YES — calling with dry_run=false schedules the restart' if would_arm else 'NO — a real call would be REFUSED with the first failing token below'}",
+    ]
+    for ok, token, msg, detail in verdicts:
+        status = "pass" if ok else f"REFUSE reason={token}"
+        line = f"  - {msg}: {status}"
+        if detail:
+            line += f" ({detail})"
+        lines.append(line)
+    lines.append(_render_overrides_line(overrides))
+    lines.append(f"cooldown: {cooldown_display}")
+    lines.append(busy)
+    lines.append("NO mutation happened (dry-run).")
+    return "\n".join(lines)
 
 
 def _resolve_agent_id(
@@ -1321,6 +1719,22 @@ def _arm_pending_wake_for_op(
     absence is the documented degraded mode).
     """
     try:
+        # agent-restart C-2 (§2.4 arm-time capture): the wake record
+        # carries the provenance class + root fields (display-only on the
+        # wake lane — the restart-kind wake delivers reserved-sourced and
+        # never re-stamps a window).
+        #
+        # 1c literal-strict narrowing (review fix-cycle-1): the capture is
+        # RESTART-kind only — `_restart_provenance` (the both-stores
+        # reader) is unreachable from the upgrade arm path at all, not
+        # merely unasserted-by-convention. Promote arms keep the empty
+        # capture ("" class / no root fields), exactly their pre-2026-10-19
+        # shape.
+        prov = (
+            _capture_provenance_class(manager, current_instance_id)
+            if op.kind == "restart"
+            else dict(_EMPTY_PROVENANCE)  # 1c narrowing: promote keeps empty
+        )
         wake = PendingWake(
             run_id=op.run_id,
             kind=op.kind,
@@ -1332,6 +1746,11 @@ def _arm_pending_wake_for_op(
             message_metadata={},
             target_version=op.target if op.kind == "promote" else None,
             mode=op.mode if op.kind == "restart" else None,
+            provenance_class=prov.get("provenance_class", ""),
+            provenance_root_source=prov.get("root_source"),
+            provenance_root_message_id=prov.get("root_message_id"),
+            provenance_depth=int(prov.get("depth") or 0),
+            provenance_stamped_at=prov.get("stamped_at"),
             armed_at=op.armed_at,
             expires_at=op.expires_at,
             abandon_after=iso_plus(op.expires_at, PENDING_WAKE_GRACE_S),
@@ -2079,8 +2498,9 @@ Returns:
         target_env: Literal["dev", "demo", "live", "sandbox"] | None = None,
         run_id: str | None = None,
         tail: int = 20,
+        section: Literal["status", "restarts"] = "status",
     ) -> str:
-        """Poll a pipeline run for THIS daemon's environment: in-flight phase, journal tail, terminal outcome. Use tool_help("upgrade_status") for details."""
+        """Poll a pipeline run for THIS daemon's environment: in-flight phase, journal tail, terminal outcome — or section="restarts" for the restart audit ledger. Use tool_help("upgrade_status") for details."""
         try:
             self_env = _self_env_marker()  # resolved ONCE per invocation
             refusal = _check_target_env("upgrade_status", target_env, self_env)
@@ -2090,6 +2510,67 @@ Returns:
             install_dir = _resolve_install_dir(self_env)
             journal, journal_status = _journal_read(install_dir)
             port = _self_port(manager)
+
+            # agent-restart §6.3 — the restart-audit query surface reuses
+            # this tool (a NEW tool was rejected: privileged-category
+            # registration + duplicated machinery). Read-only; filters
+            # run_id/outcome/since/tail over restart_audits.
+            if section == "restarts":
+                if install_dir is None:
+                    return (
+                        "Error: upgrade_status REUSED — reason=no-staged-install: "
+                        "no staged install dir resolves for this env (no "
+                        "restart audit ledger to read)."
+                    )
+                try:
+                    uj.ensure_extensions(install_dir)
+                    audits = uj.journal_read(install_dir).get("restart_audits")
+                except (JournalTorn, OSError) as exc:
+                    return (
+                        f"Error: upgrade_status failed: journal unavailable "
+                        f"({type(exc).__name__}: {exc})"
+                    )
+                if not isinstance(audits, dict) or not audits:
+                    return (
+                        "RESTART AUDIT — env="
+                        f"{self_env or '?'}  (n=0, showing 0)\n"
+                        "no restart audit rows recorded yet"
+                    )
+                rows = sorted(
+                    (r for r in audits.values() if isinstance(r, dict)),
+                    key=lambda r: str(r.get("armed_at", "")),
+                    reverse=True,
+                )
+                if run_id:
+                    rows = [r for r in rows if r.get("run_id") == run_id]
+                rows = rows[: max(1, min(tail, 100))]
+                lines = [
+                    f"RESTART AUDIT — env={self_env or '?'}  "
+                    f"(n={len(rows)}, showing {len(rows)})",
+                    "when | who | reason | outcome | overrides",
+                ]
+                for r in rows:
+                    ov = r.get("overrides") or []
+                    ov_frag = (
+                        "; ".join(
+                            f"{o.get('key')}: {o.get('live_before')}→"
+                            f"{o.get('db_value')} ({o.get('status', '?')})"
+                            for o in ov
+                            if isinstance(o, dict)
+                        )
+                        or "none"
+                    )
+                    tok = r.get("refusal_token")
+                    outcome = str(r.get("outcome", "unknown"))
+                    if tok:
+                        outcome = f"{outcome} ({tok})"
+                    lines.append(
+                        f"{r.get('armed_at', '?')} | "
+                        f"{r.get('arming_agent_id') or '?'}/"
+                        f"{str(r.get('arming_instance_id', ''))[:8]} | "
+                        f"{r.get('reason', '?')} | {outcome} | {ov_frag}"
+                    )
+                return "\n".join(lines)
             tail = max(1, min(int(tail), 100))
             lock_run_id = journal_lock_run_id(install_dir)
 
@@ -2281,6 +2762,11 @@ Args:
         unknown run_id=..." plus the latest self-env state as fallback.
         Default: latest state for self-env.
     tail: Journal history lines to include (default 20, clamped 1..100).
+    section: "status" (default — the pipeline poller) or "restarts"
+        (agent-restart §6.3 — the restart audit ledger: when | who |
+        reason | outcome | overrides per restart_audits row, newest
+        first; run_id filters, tail caps, refusal rows carry their
+        refusal_token).
 
 Returns:
     Line-oriented, LLM-friendly text. Refusals are
@@ -2312,16 +2798,12 @@ Returns:
             self_env, install_dir, refusal = _actor_env_gate(label, target_env)
             if refusal:
                 return refusal
-            # …then the live outright refusal (A2 — BEFORE any gate logic;
-            # no override, no dry-run exception).
-            if self_env == "live":
-                return (
-                    "Error: RESTART REFUSED — reason=live-restart-refused: live "
-                    "restart is USER-GATED this initiative (A2/§3.1) — the tool "
-                    "refuses outright, no gate, no override. Use the manual "
-                    "procedure: bash scripts/stop-ensemble.sh <install-dir> then "
-                    "start launcher.sh (see the P2.3 runbook)."
-                )
+            # agent-restart §2.4 (supersedes A2): the LIVE outright
+            # refusal is GONE. Live is provenance-gated (genuine-user
+            # turn, direct OR inherited) + env-self-match + live-only
+            # anti-flap rails; demo/dev/sandbox stay FREE (env-scope
+            # column §4 — only rail (a) pipeline interlock and rail (d)
+            # reason apply off-live, exactly as today).
 
             # Pipeline preconditions (armed + dry-run reporting). A torn or
             # absent journal is DISTINCT from no-install-dir (review nit
@@ -2389,10 +2871,6 @@ Returns:
                 return _refusal(
                     label,
                     "restart-under-burst-abort",
-                    # NIT-4 (P2.2 tidy cycle-3, closed P2.3 B3.5): render
-                    # via the curated _launcher_state helper — the same
-                    # display path release_info/restart-preview use —
-                    # instead of a raw single-field dict get.
                     "daemon is in burst-abort hold (launcher exit-1 latch; "
                     f"{_launcher_state(install_dir)}); restart would mask "
                     "the failure. Resolve the burst condition first.",
@@ -2400,24 +2878,121 @@ Returns:
 
             busy = await _busy_advisory(manager, current_instance_id)
 
+            # ── Rail (d): reason required — ALL envs (schema-mandatory
+            # today; the constraint here is the persisted form, V-11).
+            reason_ok, reason_detail = _reason_ok(reason)
+            if not reason_ok:
+                return _refusal(label, "reason-required", reason_detail)
+            reason = reason_detail  # persisted form: stripped
+
+            # ── Env-scoped gate + rails (§2.4 predicate / §4 Env column).
+            provenance = _ProvenanceVerdict(ok=False, pclass="", detail="n/a (non-live)")
+            cooldown_active, cooldown_display = _restart_cooldown_state(journal)
+            uptime_ok, uptime_display = (True, "n/a (non-live)")
+            budget_ok, budget_count, budget_cap = (True, 0, 0)
+            verdicts: list[tuple[bool, str, str, str]] = []
+            if self_env == "live":
+                # Provenance gate (LIVE-ONLY — replaces the nonce).
+                provenance = _restart_provenance(manager, current_instance_id)
+                verdicts.append(
+                    (
+                        provenance.ok,
+                        "no-user-provenance",
+                        "provenance (genuine-user turn, direct or inherited)",
+                        provenance.detail,
+                    )
+                )
+                # Rail (b): cooldown (fail-closed on unparseable).
+                verdicts.append(
+                    (
+                        not cooldown_active,
+                        "cooldown-active",
+                        "cooldown rail",
+                        f"cooldown_until={cooldown_display}",
+                    )
+                )
+                # Rail (c1): minimum uptime (fail-closed when unavailable).
+                uptime_ok, uptime_display = _min_uptime_state()
+                verdicts.append(
+                    (
+                        uptime_ok,
+                        "restart-too-soon",
+                        "min-uptime rail",
+                        uptime_display,
+                    )
+                )
+                # Rail (c2): sliding budget (count read; increment is
+                # FIRST-in-envelope at arm time under the lock, V-1).
+                budget_ok, budget_count, budget_cap = _budget_state(install_dir)
+                verdicts.append(
+                    (
+                        budget_ok,
+                        "restart-budget-exceeded",
+                        "budget rail (sliding 24h window)",
+                        f"restarts_window={budget_count}/{budget_cap}",
+                    )
+                )
+
+            # ── dry_run (ANY env): verdict-only, READ-ONLY formatter —
+            # NEVER _refusal(), zero journal mutation (§7.3 rev-5).
             if dry_run:
-                cur_target, _note = _current_symlink(install_dir)
-                lines = [
-                    f"RESTART PREVIEW (dry-run) — env={self_env} mode=graceful-now",
-                    f"reason: {reason}",
-                    f"current release: {cur_target.rsplit('/', 1)[-1] if cur_target else 'none (dev/unstaged)'}",
-                    _launcher_state(install_dir),
-                    busy,
-                    "PLAN: arm journal pending-op (kind=restart) → this turn "
-                    "completes → daemonized restart.sh (SINGLE-TERM stop via "
-                    "stop-ensemble.sh — NEVER a raw kill) → detached launcher "
-                    "re-exec → /livez gate ≤60s → journal 'restart' event",
-                    "expected downtime 15-90s; in-flight turns freeze at node "
-                    "boundaries and resume (checkpoint resume)",
-                    "NO mutation happened (dry-run). Call again with "
-                    "dry_run=false to schedule the restart.",
-                ]
-                return "\n".join(lines)
+                overrides = _capture_pending_overrides(manager)
+                return _format_restart_dry_verdict(
+                    self_env=self_env,
+                    reason=reason,
+                    verdicts=verdicts,
+                    overrides=overrides,
+                    busy=busy,
+                    cooldown_display=cooldown_display,
+                )
+
+            # ── REAL refusal under the lock (N-5): live gate/rail
+            # failures record a restart_audits row (outcome=refused +
+            # refusal_token) INSIDE a briefly-held lock — race-free
+            # against a concurrent armer — then release and refuse.
+            if self_env == "live":
+                failed = next(
+                    (v for v in verdicts if not v[0]), None
+                )
+                if failed is not None:
+                    _token = failed[1]
+                    _diag = failed[3]
+                    _ref_run = mint_run_id()
+                    acquired, busy_run = journal_lock_acquire(
+                        install_dir, _ref_run
+                    )
+                    if acquired:
+                        try:
+                            uj.ensure_extensions(install_dir)
+                            uj.record_restart_audit(
+                                install_dir,
+                                _ref_run,
+                                {
+                                    "run_id": _ref_run,
+                                    "env": self_env,
+                                    "kind": "restart",
+                                    "reason": reason,
+                                    "arming_instance_id": current_instance_id,
+                                    "provenance_kind": provenance.pclass or None,
+                                    "outcome": "refused",
+                                    "refusal_token": _token,
+                                    "refusal_detail": _diag,
+                                    "armed_at": now_iso(),
+                                },
+                            )
+                        except (JournalTorn, OSError, KeyError) as exc:
+                            logger.warning(
+                                "system_restart: refused-audit write FAILED "
+                                "(refusal proceeds): %s", exc,
+                            )
+                        finally:
+                            journal_lock_release(install_dir)
+                    return _refusal(
+                        label,
+                        _token,
+                        f"{failed[2]} failed: {_diag} "
+                        "(restart NOT scheduled; zero pipeline mutation)",
+                    )
 
             # ARM (§6.3: arm → return → poll; the tool returns BEFORE any
             # stop signal — the executor fires at exact turn-end).
@@ -2438,11 +3013,36 @@ Returns:
                     f"per-env lock held (run_id={busy_run or held_run or '?'}) — "
                     "retry via upgrade_status",
                 )
+            restart_armed_ok = False
             try:
                 uj.journal_init(install_dir)
                 uj.ensure_extensions(install_dir)
+                # ── V-1 budget envelope (LIVE-ONLY): increment FIRST —
+                # inside the lock-holding try, SAME envelope as
+                # in_flight + pending_op + wake; abandoned arms consume
+                # budget, no refund (crash-ordering: over-count = safe).
+                budget_after = None
+                if self_env == "live":
+                    _ok, count, cap = _budget_state(install_dir)
+                    if not _ok:
+                        journal_lock_release(install_dir)
+                        return _refusal(
+                            label,
+                            "restart-budget-exceeded",
+                            f"restarts_window={count}/{cap} (re-checked under "
+                            "the lock — a concurrent arm consumed the budget)",
+                        )
+                    budget_after = uj.restart_budget_increment(install_dir)
                 cur_target, _n2 = _current_symlink(install_dir)
                 cur_ver = cur_target.rsplit("/", 1)[-1] if cur_target else None
+                # ── §5.2 override capture (in-lock, bounded PG read —
+                # accepted): pending set lands in restart_audits.
+                pending_overrides = _capture_pending_overrides(manager)
+                # ── C-2 provenance capture (both stores) for the wake
+                # record + audit row.
+                prov_fields = _capture_provenance_class(
+                    manager, current_instance_id
+                )
                 op = PendingOp(
                     run_id=run_id,
                     kind="restart",
@@ -2472,6 +3072,52 @@ Returns:
                     },
                 )
                 uj.write_pending_op(install_dir, op)
+                # ── §6.2 audit row: static fields + pending override set
+                # (SAME envelope; outcome settles at boot / delivery).
+                uj.record_restart_audit(
+                    install_dir,
+                    run_id,
+                    {
+                        "run_id": run_id,
+                        "env": self_env,
+                        "kind": "restart",
+                        "reason": reason,
+                        "arming_instance_id": current_instance_id,
+                        "arming_agent_id": _resolve_agent_id(
+                            manager, current_instance_id
+                        ),
+                        "provenance_kind": prov_fields.get(
+                            "provenance_class"
+                        )
+                        or None,
+                        "user_source": prov_fields.get("root_source"),
+                        "user_message_id": prov_fields.get("root_message_id"),
+                        "provenance_depth": prov_fields.get("depth", 0),
+                        "provenance_stamped_at": prov_fields.get("stamped_at"),
+                        "provenance_expires_at": prov_fields.get("expires_at"),
+                        "wake_source": uj.RESTART_WAKE_SOURCE,
+                        # N-3: the notify-body re-run path renders the
+                        # ABSOLUTE scripts_dir captured at arm time (the
+                        # live target has no scripts/ under
+                        # ~/agents-ensemble — a relative path would be
+                        # unusable at render time).
+                        "scripts_dir": str(scripts_dir),
+                        "armed_at": op.armed_at,
+                        "executed_at": None,
+                        "outcome": "pending",
+                        "overrides": pending_overrides,
+                        "notify": {
+                            "status": "pending",
+                            "at": None,
+                            "message_id": None,
+                        },
+                        **(
+                            {"budget_after_increment": budget_after}
+                            if budget_after is not None
+                            else {}
+                        ),
+                    },
+                )
                 # Post-Restart Arm-Notify (ADR-039 + ADR-044): ride the SAME
                 # caller-acquired journal lock as ``pending_op`` (the wake is
                 # structurally inseparable from the arm; architecture delta
@@ -2481,6 +3127,7 @@ Returns:
                 _arm_pending_wake_for_op(
                     manager, install_dir, op, current_instance_id
                 )
+                restart_armed_ok = True
             except (JournalTorn, OSError, KeyError) as exc:
                 # NIT-2 (P2.2 tidy cycle-3 carry-over, closed P2.3 B3.5):
                 # unwind BEFORE releasing the lock. Releasing first opened
@@ -2509,7 +3156,23 @@ Returns:
                     "(partial arm unwound best-effort; no restart scheduled — "
                     "inspect release_info(section=journal) if this repeats)"
                 )
+            finally:
+                # Hygiene fold (log-parity): the lock-release BELT — the
+                # tuple above handles the journal-failure classes, but an
+                # UNEXPECTED exception class previously propagated to the
+                # outer handler with the lock STILL HELD (wedges
+                # pipeline-busy until the boot stale-arm closure or a
+                # daemon restart). Success (armed) KEEPS the lock — the
+                # restart executor adopts it at drain; release is
+                # idempotent so the except-path's explicit release is
+                # harmless.
+                if not restart_armed_ok:
+                    journal_lock_release(install_dir)
 
+            # ── C-1/F-3 mint-condition carrier: the marker stamps
+            # ``provenance_ok`` ONLY after the gate passed (live) — the
+            # drain mints ENSEMBLE_RESTART_LIVE=1 IFF present (marker ⇒
+            # gate passed; absent ⇒ restart.sh guard exits 78 fail-closed).
             marker_ok = _set_execution_marker(
                 manager,
                 current_instance_id,
@@ -2522,20 +3185,43 @@ Returns:
                     "install_dir": str(install_dir),
                     "scripts_dir": str(scripts_dir),
                     "port": _self_port(manager),
+                    **(
+                        {"provenance_ok": True}
+                        if self_env == "live" and provenance.ok
+                        else {}
+                    ),
                 },
             )
-            return "\n".join(
-                [
-                    f"RESTART SCHEDULED — run_id={run_id} env={self_env} mode=graceful-now reason=\"{reason}\"",
-                    "executes: after this turn (deferred post-turn trigger; the "
-                    "fallback is restart.sh's bounded waiter / boot sweep)",
-                    "expected downtime 15-90s (SINGLE-TERM + launcher re-exec + boot preflight)",
-                    f"post-restart: the arm is recorded (run_id=\"{run_id}\"); on daemon restart an auto-wake will be delivered to this instance to report the outcome — no user action required; kill-switch: ENSEMBLE_POST_RESTART_ARM_NOTIFY=0 in <install_dir>/.env",
-                    f"journal: releases/state.json pending-op opened (kind=restart, started_at={op.armed_at}, owner=exec-pending)",
-                    f"trigger: {'post-turn-callback armed' if marker_ok else 'post-turn callback unavailable — fallback (bounded waiter/boot sweep)'}",
-                    busy,
-                ]
+            receipt = [
+                f"RESTART SCHEDULED — run_id={run_id} env={self_env} "
+                f"mode=graceful-now reason=\"{reason}\"",
+                "executes_after_turn: yes",
+                "reply_delivery: best-effort (head-start grace 15s; reply may "
+                "be lost — post-restart arm-notify is the durable report)",
+                f"notify: armed (run_id={run_id}) — on daemon restart an auto-wake will be delivered to this instance to report the outcome — no user action required; kill-switch ENSEMBLE_POST_RESTART_ARM_NOTIFY=0 in <install_dir>/.env",
+                _render_overrides_line(pending_overrides),
+                f"journal: releases/state.json pending-op opened (kind=restart) audit=restart_audits/{run_id}",
+            ]
+            if self_env == "live":
+                receipt.append(
+                    f"budget: restarts_24h={budget_after}/{budget_cap} "
+                    f"cooldown={cooldown_display}"
+                )
+                receipt.append(
+                    "provenance: "
+                    f"class={provenance.pclass} "
+                    f"root={provenance.root_source} "
+                    f"msg={provenance.root_message_id} "
+                    f"depth={provenance.depth} "
+                    f"stamped_at={provenance.stamped_at} "
+                    f"expires={provenance.expires_at}"
+                )
+            receipt.append(
+                "trigger: "
+                f"{'post-turn-callback armed' if marker_ok else 'post-turn callback unavailable — fallback (bounded waiter/boot sweep)'}"
             )
+            receipt.append(f"busy-check: {busy}")
+            return "\n".join(receipt)
         except Exception as exc:  # never raise — structured error string
             logger.warning(
                 "system_restart failed for instance=%s: %s", current_instance_id, exc
@@ -2544,40 +3230,65 @@ Returns:
 
     system_restart._full_doc_ = """\
 Schedule an intentional restart of THIS daemon's own environment
-(P2.2). Arm → return → poll: the tool returns "RESTART SCHEDULED
-run_id=..." BEFORE any stop signal; the daemonized restart.sh fires at
-exact turn-end (post-turn callback; bounded-waiter/boot-sweep fallback)
-and performs a SINGLE-TERM stop (stop-ensemble.sh contract — NEVER a raw
-kill) followed by a detached launcher re-exec and a /livez ≤60s gate.
+(agent-restart). Arm → return → poll: the tool returns "RESTART
+SCHEDULED run_id=..." BEFORE any stop signal; the daemonized restart.sh
+fires at exact turn-end (post-turn callback; bounded-waiter/boot-sweep
+fallback) and performs a SINGLE-TERM stop (stop-ensemble.sh contract —
+NEVER a raw kill) followed by the supervision-aware unit hand-back and
+a /livez + /readyz gate (readyz required by default —
+ENSEMBLE_RESTART_GATE_REQUIRE_READY=1).
+
+GATE (LIVE-ONLY — replaces the old outright refusal): a live restart
+arms only when the calling turn carries GENUINE-USER PROVENANCE — a
+direct user-origin window (exact "api" HTTP chat lane or a registered
+chat adapter) or a system-minted INHERITED window (an internal_agent:
+dispatch whose caller held live user provenance; depth-capped 4,
+monotonic TTL). Provenance is authorization-to-act, NOT
+intent-verification — the receipt + notify disclose everything. On top:
+live-only anti-flap rails — cooldown, min-uptime
+(ENSEMBLE_RESTART_MIN_UPTIME_S, default 600s), sliding restart budget
+(ENSEMBLE_RESTART_BUDGET_24H=3 per
+ENSEMBLE_RESTART_BUDGET_WINDOW_S=86400; abandoned arms consume budget).
+demo/dev/sandbox: FREE (pipeline interlock + reason only — exactly as
+before; no provenance gate, no anti-flap rails).
+
+NO nonce — restart is user-triggered by provenance (user directive
+2026-10-19). The upgrade 3-factor ceremony is UNCHANGED and disjoint
+(ENSEMBLE_RESTART_LIVE is minted only by the post-turn drain for
+provenance-passed arms; ENSEMBLE_UPGRADE_LIVE never set by this lane).
 
 Args:
     target_env: MUST equal the daemon's own environment
         (dev|demo|live|sandbox; explicit ENSEMBLE_SELF_ENV marker when
-        staged, otherwise auto-derived from launch evidence —
-        D-FA2.3 supersession, 2026-09-22). Self-env unresolved (no
-        marker, no opt-out via false, no auto-derive signal) →
-        refused env-marker-absent (fail-closed; the read tools still
-        answer). Cross-env → refused env-self-match.
-    reason: Free-text, journaled (audit trail).
-    user_confirmed: Accepted for schema stability; ignored on non-live
-        (no human-confirmation gate per the user directive).
+        staged, otherwise auto-derived from launch evidence). Self-env
+        unresolved → refused env-marker-absent (fail-closed; the read
+        tools still answer). Cross-env → refused env-self-match.
+    reason: REQUIRED (min 3 chars; ≤200; printable, no newlines —
+        journaled audit trail + echoed in the post-restart notify).
+    user_confirmed: Accepted for schema stability; ignored (no
+        human-confirmation gate — provenance + rails decide).
     mode: Must be "graceful-now" (anything else → unknown-mode).
-    nonce: Accepted for schema stability (future live opt-in); ignored.
-    dry_run: DEFAULT TRUE (D-FA2.2) — a hallucinated parameter set must
-        never execute a real restart. dry_run=true returns a preview +
-        plan with ZERO mutation; dry_run=false arms the restart.
+    nonce: Accepted for schema stability (A3); ignored.
+    dry_run: DEFAULT TRUE — a hallucinated parameter set must never
+        execute a real restart. dry_run=true on ANY env (live included)
+        evaluates the env-appropriate predicate + rails and returns the
+        FULL VERDICT (provenance result, every rail, would-be override
+        set) with ZERO mutation — read-only formatter, no lock, no
+        journal write, no marker, no wake. dry_run=false arms.
 
-LIVE: refused outright this initiative (reason=live-restart-refused —
-A2; the refusal points at the manual procedure; no gate, no override,
-no dry-run exception). demo/dev/sandbox: free (env-derivation +
-self-match guard only) but journaled + lock-protected.
-
-Refusal reasons (distinct tokens): unknown-mode, invalid-target-env,
-env-marker-absent, env-self-match, live-restart-refused, pipeline-busy
-(open txn / armed pending-op / lock held — names the active run_id),
-restart-under-burst-abort (launcher exit-1 latch), executor-scripts-
-unavailable, no-staged-install, journal-unavailable (install dir
-resolves but the journal is torn/absent).
+Refusal reasons (distinct tokens — LIVE rail/gate tokens fire on live
+only): unknown-mode, invalid-target-env, env-marker-absent,
+env-self-match, no-user-provenance (live: no genuine-user turn — direct
+or inherited), cooldown-active, restart-too-soon,
+restart-budget-exceeded, reason-required, pipeline-busy (open txn /
+armed pending-op / lock held — names the active run_id; the rail's
+sibling tokens adoption-in-progress and pipeline-not-settled share the
+same vocabulary),
+restart-under-burst-abort (launcher exit-1 latch),
+executor-scripts-unavailable, no-staged-install, journal-unavailable.
+Refused live attempts record a restart_audits row (outcome=refused +
+refusal_token) under the lock; the pipeline journal itself stays
+untouched by refusals.
 
 Never auto-retry a refusal — relay it verbatim to the user (the LLM
 never decides go/rollback).

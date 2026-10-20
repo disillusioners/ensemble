@@ -73,8 +73,12 @@ INSTALL_DIR=~/agents-ensemble bash -c '
         echo "WARNING: current=$CUR — flip already recorded; investigate before re-promote"
         exit 1
     fi
-    # 2. Restart current (per launcher.sh boot_sweep_commit_and_continue path)
-    bash launcher.sh restart_current  # OR: systemctl --user restart ensemble-main.service
+    # 2. Restart current — DERIVED-scope systemd form (agent-restart rev-5:
+    # the launcher takes NO subcommands — 'restart_current' does NOT exist;
+    # running bare launcher.sh would enter the foreground supervision loop
+    # AND create a second supervisor against the systemd-managed unit. The
+    # live host classifies SYSTEM scope: /system.slice/ensemble-main.service)
+    sudo systemctl restart ensemble-main.service  # user-scope host: systemctl --user restart <unit>
 '
 ```
 

@@ -1373,7 +1373,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # to this file still trips the tripwire.
     "daemon/sources/adapters/slack/adapter.py": "476ba0b5a17a297f652125ab9060af125ba3955d4b71e324e3de3bf177e1ef1e",
     "daemon/sources/adapters/telegram.py": "7e08882fc2fcc4291bed994ab992cb5afdc7a232a1444839f42da86fbfae063c",
-    "daemon/constants.py": "9fb1f2c7304e81f92e27b15cbcc3e28a9ec71417ca306e44db0b04a96c520e38",
+    "daemon/constants.py": "df41a67f65428b4d9ef39878602657e60108e541a1f9cacde04c006cd2fc4970",
     # Phase C — 20 agent canonical-home files
     "agents/approver/rule.md": "f8282f54a253540042874c1ed7690758aa2c9391a0568967fa427ef2f90b24f6",
     "agents/approver[v2]/rule.md": "f70d2a0b64332aab40445211437e8e29bb9860cb7996e9e09f28587427dfce3a",
@@ -1386,7 +1386,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/doc-writer/rule.md": "7897c461b8e9a2b748ec03500ac88be942845642bdd1fc3c0fef5444935152c7",
     "agents/governor/rule.md": "84a93586df376ad39dc553af36f86f684977ecfa8d717186f2fe8f16846c8cf5",
     "agents/leader/rule.md": "11affca67d4c5dcaafd3543714fbde5ae469990f8574d826f67705579c1a8d48",
-    "agents/maintenancer/rule.md": "386a63731eef798fcdaf7181c5e275f8d396eee458bbb7009f2406cf060a6737",
+    "agents/maintenancer/rule.md": "66e91a67357d21b9b8ca3c78311ce9becb2b43bf7517eaa3db439efa28fcdbb0",
     "agents/planner/rule.md": "135bc320974a464420ab161bae13979642fc3241596280c6b7d69094eb1bda73",
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
     "agents/project-manager/workflow.md": "b7258c5eb0fcb351ee96235df4888cce8b6ab9bca36477f8cfabc1b99ebf96c6",

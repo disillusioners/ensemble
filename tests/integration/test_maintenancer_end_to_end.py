@@ -308,13 +308,13 @@ class TestToolResolutionCorrectness:
     def test_ens_db_resolves(self) -> None:
         assert (self._resolved() & ENS_DB_TOOLS) == ENS_DB_TOOLS
 
-    def test_system_upgrade_resolves_minus_system_restart(self) -> None:
+    def test_system_upgrade_category_fully_resolves(self) -> None:
+        """agent-restart (2026-10-19): system_restart is LIFTED from
+        tools.deny — maintenancer is the arming agent; the live gate is
+        genuine-user provenance + rails, enforced INSIDE the tool, not by
+        resolution-level stripping. The full category resolves."""
         resolved = self._resolved()
-        assert "system_restart" not in resolved, (
-            "system_restart leaked through resolve_tool_filter despite "
-            "tools.deny entry (D20 enforcement violated)"
-        )
-        for tool in SYSTEM_UPGRADE_TOOLS - {"system_restart"}:
+        for tool in SYSTEM_UPGRADE_TOOLS:
             assert tool in resolved, (
                 f"system_upgrade tool {tool!r} not in resolved set"
             )
@@ -334,7 +334,7 @@ class TestToolResolutionCorrectness:
         even though they would otherwise be reachable via filesystem
         / instance categories — deny wins per resolve_tool_filter."""
         resolved = self._resolved()
-        for forbidden in ("write_file", "edit_file", "git_commit", "system_restart"):
+        for forbidden in ("write_file", "edit_file", "git_commit"):
             assert forbidden not in resolved, (
                 f"{forbidden!r} leaked through resolve_tool_filter "
                 f"despite tools.deny entry"

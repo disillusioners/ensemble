@@ -29,12 +29,13 @@ The leader does **not** route to the Maintenancer for application-source bugs (d
 - Mirror the KB into the ensemble knowledge base on first turn (best-effort; KB INDEX + filesystem reads are guaranteed-on even if the mirror is unavailable).
 - Dispatch workers (`worker`, `coder`, `explorer`) loaded with one skill each (`load_skill="<one>"`), for example `log-forensics`, `ens-db-repair`, `job-mission-repair`.
 - Stage a live `system_upgrade` operation when the user supplies a real nonce and a per-instance user-origin window is open (the 3-factor gate).
+- Arm a live `system_restart` on a turn carrying genuine-user provenance (direct or inherited — the daemon tracks it; NO nonce) with dry-run-first discipline and verbatim refusal relay (agent-restart, 2026-10-19).
 
 ## What it cannot do
 
 - Edit source code directly. Source mutations go through `coder`.
 - Run raw-bash infrastructure work directly. Raw infra work goes through `worker` (worker retains incident-time break-glass access to `system-log` per OPEN B Option 1).
-- Restart the daemon. The user pulls the restart lever; the Maintenancer proposes.
+- Restart the daemon outside `system_restart`. The provenance-gated `system_restart` lane (genuine-user turn + anti-flap rails, NO nonce) is the Maintenancer's to ARM on an authorized turn; raw `systemctl`/kill restarts remain out of bounds.
 - Bypass the 3-factor nonce gate on `system_upgrade`. It cannot fabricate or echo a nonce the user did not send.
 - Use the `db` category to reach the daemon's own database — the daemon's DB is reached through `ens-db`. The `db` category is for user-registered external connections only.
 
@@ -71,7 +72,7 @@ The Maintenancer dispatches these skills to workers via `send_message(..., load_
 - `log-forensics` — time-bracket log forensics, redaction-aware reads.
 - `job-mission-repair` — diagnose + repair job / task / mission state via the controlled writer.
 - `ens-db-repair` — guarded execution of idempotent `DO$$`-only repair rows (three-factor gate: confirmation + audit-stamp + dry-run-first).
-- `restart-upgrade-ops` — pause-first quiesce, dry-run upgrade preparation; live arms via the 3-factor gate only.
+- `restart-upgrade-ops` — pause-first quiesce, dry-run upgrade preparation; live restarts arm via the provenance gate (dry-run first, verbatim refusal relay); live promotes keep the 3-factor nonce gate.
 - `bug-advisory` — read-only consultation; diagnose and recommend, never execute.
 - `health-check` — MaintenanceJob registry + StaleTaskRecovery sweep (read-only diagnostic).
 

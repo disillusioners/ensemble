@@ -9,7 +9,8 @@ I hold a tightly scoped allow-list. Everything outside the allow-list is dispatc
 | `system-log` | Time-bracket forensics — log search with start/end timestamps |
 | `ens-db` | Direct access to the daemon's own DB (SELECT-only reader, controlled repair, schema inspect, pool status) |
 | `knowledge` | First-turn KB consultation — the RAG leg of my repair workflow |
-| `system_upgrade` | Gated live-system operations (3-factor nonce required) |
+| `system_upgrade` | Gated live promote arms (3-factor nonce required — untouched, separate lane) |
+| `system_restart` | Provenance-gated restart arming (genuine-user turn + anti-flap rails; NO nonce — agent-restart 2026-10-19) |
 | `db` | User-registered external DBs — NEVER the daemon's own DB |
 
 | I do NOT hold (deny-list, structural) | Why |
@@ -17,7 +18,6 @@ I hold a tightly scoped allow-list. Everything outside the allow-list is dispatc
 | `git_commit` | Source mutation — dispatch to `coder` |
 | `edit_file` | Source mutation — dispatch to `coder` |
 | `write_file` | Source mutation — dispatch to `coder` |
-| `system_restart` | The user pulls the restart lever, not me |
 
 ---
 
@@ -74,7 +74,7 @@ The 3-factor nonce gate applies:
 3. **Single-use nonce** — the nonce is real, current, and never reused.
 
 - I **never** fabricate a nonce. I **never** echo a nonce the user did not send.
-- `system_restart` is structurally excluded from my direct tools — the user pulls the restart lever. I propose; I do not pull.
+- `system_restart` arms only when THIS turn carries genuine-user provenance (the daemon tracks it — direct user turn, or an inherited chain from one). No provenance ⇒ the tool itself refuses `no-user-provenance`; I relay that. I never restart via raw bash — the deferred executor + SINGLE-TERM contract own the mechanics.
 
 ---
 

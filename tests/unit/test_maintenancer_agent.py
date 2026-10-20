@@ -3,9 +3,11 @@
 Validates the maintenancer agent scaffolding + registration:
 
   1.  meta.json schema & required-field correctness (W1-P1 task 1.2)
-  2.  Tool allow-list / deny-list contract per D20 (resolution-level strip)
-      — system_restart MUST be in tools.deny; the call-time refusal at
-        call time is env-conditional and does NOT fire on dev/demo.
+  2.  Tool allow-list / deny-list contract (agent-restart 2026-10-19):
+      system_restart is LIFTED from tools.deny AND REQUIRED in
+      tools.allow (exclusive-allow semantics — a missing allow entry
+      withholds the tool; the live gate runs INSIDE the tool, not at
+      resolution).
   3.  Auto-discovery via AgentRegistry (W1-P1 task 1.11 EXTENDED per
       architect §4.3 — BASE + VERSIONED metas enumeration guard).
   4.  Convention compliance: prompt-file completeness, cardinal-rule
@@ -229,25 +231,59 @@ class TestToolAllowDenyContract:
     def test_deny_contains_required_tools(self) -> None:
         meta = _load_meta()
         deny = set(meta["tools"]["deny"])
-        missing = REQUIRED_DENY - deny
+        # agent-restart (2026-10-19): system_restart is LIFTED from
+        # tools.deny — maintenancer is the arming agent; the live gate
+        # (genuine-user provenance + anti-flap rails) is enforced INSIDE
+        # the tool, not by resolution-level stripping. Source mutation
+        # tools remain on the deny list (D20 unchanged).
+        REQUIRED_DENY_CURRENT = REQUIRED_DENY - {"system_restart"}
+        missing = REQUIRED_DENY_CURRENT - deny
         assert not missing, (
-            f"tools.deny must include {sorted(REQUIRED_DENY)} per W1-P1 task "
-            f"1.2 / D20 (git_commit, edit_file, write_file, system_restart). "
-            f"Missing: {sorted(missing)}"
+            f"tools.deny must include {sorted(REQUIRED_DENY_CURRENT)} per "
+            f"W1-P1 task 1.2 / D20 (source mutation tools). Missing: "
+            f"{sorted(missing)}"
         )
 
-    def test_system_restart_in_deny_d20(self) -> None:
-        """D20 — system_restart MUST be in tools.deny.
+    def test_system_restart_resolves_for_maintenancer(self) -> None:
+        """agent-restart (2026-10-19): system_restart is HELD by
+        maintenancer (the arming agent). Live gate is genuine-user
+        provenance + anti-flap rails, enforced INSIDE the tool — NOT by
+        resolution-level stripping.
 
-        The call-time refusal at upgrade_tools.py is env-conditional
-        (``if self_env == 'live'``) and does NOT fire on dev/demo. The
-        deny-list entry is the ONLY resolution-level strip that works
-        on every install class (D20 approver-fix correction).
-        """
+        Review fix-cycle-1 Finding 2: this codebase's allow semantics are
+        EXCLUSIVE-ALLOW — a tool absent from ``tools.allow`` is withheld
+        even with no deny entry (the factory quartet's ``system_upgrade``
+        category registers EMPTY in the cold registry, so the category
+        allow entry falls through to the literal tool name and never
+        expands). BOTH assertions are therefore load-bearing: the deny
+        lift alone (the build's original shape) left the tool unreachable
+        while this test stayed green. Assert (a) not in deny (belt) AND
+        (b) in allow AND (c) the tool RESOLVES through the real filter
+        under the cold-registry shape (no tool_categories passed —
+        mirroring the production call at instance.py:6331)."""
         meta = _load_meta()
-        assert "system_restart" in meta["tools"]["deny"], (
-            "D20: tools.deny must contain 'system_restart' — this is the "
-            "only resolution-level mechanism that survives dev/demo AND live."
+        assert "system_restart" not in meta["tools"]["deny"], (
+            "system_restart is held by maintenancer (the arming agent); "
+            "the live gate runs inside system_restart, not at resolution."
+        )
+        assert "system_restart" in meta["tools"]["allow"], (
+            "exclusive-allow semantics: system_restart MUST be in "
+            "tools.allow or the arming agent cannot reach it (the "
+            "system_upgrade category allow entry does not expand in the "
+            "cold registry — factory tools register per-instance)"
+        )
+        from daemon.tools.instance import resolve_tool_filter
+
+        resolved = resolve_tool_filter(
+            allow=meta["tools"]["allow"],
+            deny=meta["tools"]["deny"],
+            all_tool_names=set(),
+        )
+        assert resolved is not None
+        assert "system_restart" in resolved, (
+            "system_restart must resolve through the real filter (cold "
+            "registry shape, no tool_categories — the production seam): "
+            f"resolved={sorted(resolved)[:20]}…"
         )
 
 

@@ -48,8 +48,8 @@ After the merge, verify:
 
 ```bash
 ls agents/maintenancer/{meta.json,soul.md,rule.md,workflow.md,tools_note.md,memory.md,growth.md,skill-set.yaml}
-test "$(jq -r '.tools.allow | join(",")' agents/maintenancer/meta.json)" = "system-log,ens-db,knowledge,system_upgrade,db"
-test "$(jq -r '.tools.deny | join(",")' agents/maintenancer/meta.json)" = "git_commit,edit_file,write_file,system_restart"
+test "$(jq -r '.tools.allow | join(",")' agents/maintenancer/meta.json)" = "system-log,ens-db,knowledge,system_upgrade,system_restart,db"
+test "$(jq -r '.tools.deny | join(",")' agents/maintenancer/meta.json)" = "git_commit,edit_file,write_file"
 test "$(jq -r '.team_members | join(",")' agents/leader/meta.json | tr ',' '\n' | grep -c '^maintenancer$')" = "1"
 ```
 

@@ -43,16 +43,19 @@ Lifecycle mirrors :class:`~daemon.services.job_lock_sweep.JobLockSweepService`:
 (CancelledError is the normal shutdown path — FM-11: never swallow it).
 """
 
-# Size rationale (~1890 lines): the sweep service owns FOUR janitor
-# lanes in one loop by design — periodic reconcile/GC tick, the
-# two-signal (W4) liveness predicate, the wake-record sweep, and the
-# bounded reaper (waitpid + signal attribution). They share the
-# install-dir lock + journal-read conventions; separating them would
-# re-introduce the tick-ordering races the single loop exists to
-# kill. Do NOT split.
+# Size rationale (~2300 lines, refreshed 2026-10-19): the sweep service
+# owns FIVE janitor lanes in one loop by design — periodic reconcile/GC
+# tick, the two-signal (W4) liveness predicate, the wake-record sweep,
+# the bounded reaper (waitpid + signal attribution), and the
+# agent-restart wake lane (kind-partitioned coalescing, reserved-source
+# delivery, §5.3 body render, restart-audit settle, supervision_scope
+# classifier). They share the install-dir lock + journal-read
+# conventions; separating them would re-introduce the tick-ordering
+# races the single loop exists to kill. Do NOT split.
 
 from __future__ import annotations
 
+import glob
 import asyncio
 import concurrent.futures
 import logging
@@ -64,6 +67,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from daemon.tools import upgrade_journal as uj
+from daemon.tools.upgrade_journal import RESTART_WAKE_SOURCE
+
+
+def _outcome_labels() -> dict[str, str]:
+    """Resolve ``upgrade_tools._OUTCOME_LABELS`` once per call, fail-open
+    to an empty mapping (hygiene fold — replaces the two verbatim
+    lazy-import blocks in the wake-body formatters; the sweep must not
+    hard-depend on the tools module at import time)."""
+    try:
+        from daemon.tools.upgrade_tools import _OUTCOME_LABELS
+    except Exception:  # noqa: BLE001 — fail-open render (raw keys)
+        return {}
+    return _OUTCOME_LABELS
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -424,7 +440,14 @@ class UpgradeJournalSweepService:
         out: list[tuple[uj.PendingWake, str]] = []
         for wake in pending:
             try:
-                outcome = uj.wake_terminal_event_after(journal, wake.armed_at)
+                # agent-restart N3: kind-aware reader — restart-kind wakes
+                # match the full WAKE superset; promote-kind wakes match
+                # _TERMINAL_EVENTS + ("restart",) ONLY (a stop_forced_kill
+                # / restart_gate / restart_abandoned event must never
+                # complete a promote wake — T0(b′)).
+                outcome = uj.wake_terminal_event_after(
+                    journal, wake.armed_at, kind=wake.kind
+                )
             except uj.JournalTorn:
                 logger.warning(
                     "UpgradeJournalSweepService: journal torn during "
@@ -520,15 +543,29 @@ class UpgradeJournalSweepService:
         list that the caller journals via ``wake_coalesce_overflow``
         history events.
 
-        Returns a dict keyed by ``arming_instance_id`` — ``{(wakes,
-        outcomes)}``. Preserves input order for stability.
+        agent-restart F-1 (§2.5 row (j) — mixed-kind coalescing BLOCKED):
+        the partition key is the COMPOSITE ``(arming_instance_id, kind)``.
+        A restart-kind wake and a promote-kind wake armed by the SAME
+        instance NEVER coalesce into one body/delivery (T0b mixed-group
+        pin) — the restart wake's reserved-source routing and
+        kind-scoped terminal matching must stay isolated from the
+        promote lane's. Returns a dict keyed by
+        ``(arming_instance_id, kind)`` — ``{(wakes, outcomes)}``.
+        Preserves input order for stability.
         """
-        groups: dict[str, list[tuple[uj.PendingWake, str]]] = {}
+        groups: dict[tuple[str, str], list[tuple[uj.PendingWake, str]]] = {}
         for wake, outcome in terminal_wakes:
-            groups.setdefault(wake.arming_instance_id, []).append((wake, outcome))
-        coalesced: dict[str, tuple[list[uj.PendingWake], list[str]]] = {}
-        for instance_id, items in groups.items():
+            groups.setdefault(
+                (wake.arming_instance_id, wake.kind), []
+            ).append((wake, outcome))
+        coalesced: dict[
+            tuple[str, str], tuple[list[uj.PendingWake], list[str]]
+        ] = {}
+        for group_key, items in groups.items():
             # Newest first by armed_at; secondary key: run_id (stable).
+            # (F-1: ``group_key`` is the composite ``(instance_id, kind)``
+            # tuple — renamed from ``instance_id`` which lied about the
+            # shape after the kind partition.)
             sorted_items = sorted(
                 items,
                 key=lambda pair: (pair[0].armed_at, pair[0].run_id),
@@ -536,7 +573,7 @@ class UpgradeJournalSweepService:
             )
             cap = uj.PENDING_WAKE_COALESCE_MAX
             kept = sorted_items[:cap]
-            coalesced[instance_id] = (
+            coalesced[group_key] = (
                 [w for w, _o in kept],
                 [o for _w, o in kept],
             )
@@ -544,44 +581,176 @@ class UpgradeJournalSweepService:
             # via the per-group diff (Phase 2 T7 step (j)).
         return coalesced
 
+    # ── agent-restart §4(f): DERIVED-scope supervision classifier ────────────
+
+    @staticmethod
+    def supervision_scope(pid: int | None = None) -> dict[str, Any]:
+        """Derive the daemon's supervision scope + unit for the escape-hatch
+        render (agent-restart §4(f) rev-5).
+
+        Discriminators (mirroring lib.sh's classifier INPUT SET exactly —
+        the twins-pinned cgroup-leaf parse; drift is unit-tested against
+        both slice fixtures):
+
+        * cgroup of the daemon process (``/proc/<pid>/cgroup``, default
+          our own pid): a leaf under ``/system.slice/`` ⇒ ``system``
+          scope; under ``/user.slice/`` ⇒ ``user`` scope; a
+          ``*.service`` leaf yields the unit name.
+        * ``SUPERVISION_UNIT_DIR`` override — a directory scanned for
+          unit FILES (lib.sh parity); an ``ensemble-*.service`` file
+          found there corroborates the unit name.
+        * ``SYSTEMCTL_BIN`` override — the binary named in the rendered
+          command (default ``systemctl``).
+
+        NEVER a hardcoded scope, NEVER a default ``--user``: an
+        unresolvable shape returns ``scope="unknown"`` and the caller
+        renders the generic guidance instead of a wrong command. Pure
+        reads (no shell-out at render time); never raises.
+        """
+        out: dict[str, Any] = {
+            "scope": "unknown",
+            "unit": None,
+            "systemctl_bin": os.environ.get("SYSTEMCTL_BIN", "systemctl"),
+        }
+        try:
+            target_pid = pid if pid and pid > 0 else os.getpid()
+            leaf: str | None = None
+            slice_prefix: str | None = None
+            try:
+                with open(f"/proc/{target_pid}/cgroup", "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        parts = line.rstrip("\n").split(":", 2)
+                        path = parts[2] if len(parts) == 3 else ""
+                        if not path:
+                            continue
+                        if "/system.slice/" in path + "/":
+                            slice_prefix = "system"
+                        elif "/user.slice/" in path + "/":
+                            slice_prefix = "user"
+                        base = path.rsplit("/", 1)[-1]
+                        if base.endswith(".service"):
+                            leaf = base
+            except OSError:
+                leaf = None
+            unit = leaf
+            unit_dir = os.environ.get(
+                "SUPERVISION_UNIT_DIR", "/etc/systemd/system"
+            )
+            if unit is None and unit_dir:
+                try:
+                    
+                    for cand in sorted(
+                        glob.glob(os.path.join(unit_dir, "ensemble-*.service"))
+                    ):
+                        unit = os.path.basename(cand)
+                        if slice_prefix is None:
+                            slice_prefix = "system"  # unit-file dir = system units
+                        break
+                except Exception:  # noqa: BLE001 — pure-read, never raises
+                    pass
+            if slice_prefix is not None:
+                out["scope"] = slice_prefix
+            out["unit"] = unit
+            return out
+        except Exception:  # noqa: BLE001 — never raises
+            return out
+
+    @staticmethod
+    def _escape_hatch_line(scope_info: dict[str, Any]) -> str:
+        """§5.3/N-4: the DERIVED-scope escape-hatch line — rendered ONLY on
+        failure outcomes, prefixed with the operator-action warning. The
+        rev-4 launcher alternative is DROPPED (non-existent command); the
+        script re-run is noted arm-intact-only."""
+        unit = scope_info.get("unit")
+        bin_ = scope_info.get("systemctl_bin", "systemctl")
+        scope = scope_info.get("scope", "unknown")
+        if scope == "system" and unit:
+            cmd = f"sudo {bin_} restart {unit}"
+        elif scope == "user" and unit:
+            cmd = f"{bin_} --user restart {unit}"
+        else:
+            cmd = (
+                f"<derive scope first: systemctl restart <unit> per this "
+                "host's supervision shape — cgroup slice could not be "
+                "classified from inside the daemon>"
+            )
+        return (
+            "operator action — do NOT execute from inside the daemon "
+            "(terminates the turn, bypasses anti-flap rails); relay to user: "
+            f"recovery = `{cmd}` (derived scope: {scope}"
+            + (f", unit {unit}" if unit else "")
+            + "). The script re-run "
+            "`ENSEMBLE_RESTART_LIVE=1 bash <abs-scripts>/upgrade/restart.sh "
+            "live --run-id <r-…>` is ARM-INTACT-ONLY (refuses exit 78 once "
+            "the op/lock are gone). No launcher alternative exists."
+        )
+
     def _format_wake_body(
         self,
         wake: uj.PendingWake,
         terminal_outcome: str,
+        journal: dict[str, Any] | None = None,
+        install_dir: "Path | None" = None,
     ) -> str:
-        """Phase 2 T5 — single-wake body (D-FA3.2 + D-FA5.2).
+        """agent-restart §5.3 — single-wake body (contract contents).
 
-        Self-describing pointer: the wake says "call
-        ``upgrade_status(run_id=...)`` and report back to the user". The
-        LLM in the agent's first turn does the work; no LLM in the
-        critical path (invariant 9).
+        Outcome (label-rendered) + ``restart_gate`` per-gate detail from
+        the journal detail channel · version now live (identity) ·
+        applied-override list (V-8: ``None`` boot-resolution ≠ zero-dict)
+        · reason echo · provenance class + root source + authorization
+        age · in-flight-work disclosure (three-signal JobItem boundary) ·
+        escape-hatch line (DERIVED scope ONLY — launcher alternative
+        DROPPED; rendered ONLY on failure outcomes, N-4) · run_id. The
+        re-run note renders an ABSOLUTE-path TEMPLATE (``<abs-scripts>``
+        placeholder) — the concrete ``scripts_dir`` is carried by the
+        ``restart_audits[run_id].scripts_dir`` field (N-3; NOT a
+        PendingWake field — the wake record carries provenance fields
+        only; audit-row consumers read it via ``_audit_row``).
+        Fail-open: every sub-read is defensive.
         """
+        label = _outcome_labels().get(terminal_outcome, terminal_outcome)
+        audit = self._audit_row(journal, wake.run_id)
+        gate_detail = self._restart_gate_detail(journal, wake.run_id)
+        overrides_frag = self._render_applied_overrides(wake, audit)
+        hatch = ""
+        if terminal_outcome in ("halt", "restart_gate", "stop_forced_kill"):
+            try:
+                hatch = self._escape_hatch_line(self.supervision_scope())
+            except Exception:  # noqa: BLE001
+                hatch = ""
+        version_frag = self._live_version_frag(journal, install_dir)
+        prov_frag = self._provenance_frag(wake)
+        reason = str(audit.get("reason") or "<none recorded>")
         return (
             f"Post-restart arm-notify. Your armed `{wake.kind}` "
             f"`{wake.run_id}` completed during the daemon downtime. "
-            f"Outcome: `{terminal_outcome}`. "
-            f"Target: `{wake.target_version or 'n/a'}`. "
-            f"Armed at: `{wake.armed_at}`. "
-            f"Wake at: `{uj.now_iso()}`. "
-            "This is an auto-wake — the daemon restarted, the pipeline "
-            "is terminal, and you (the arming instance) are being "
-            "notified so you can call "
-            f"`upgrade_status(run_id=\"{wake.run_id}\")` and report back "
-            "to the user. The report will route to the same channel "
-            "where the arm was confirmed."
+            f"Outcome: `{label}` ({terminal_outcome}). "
+            + (f"Gate detail: {gate_detail}. " if gate_detail else "")
+            + f"Version now live: {version_frag} (identity — same binary, no version swap). "
+            + f"{overrides_frag} "
+            + f"Reason (echo): \"{reason}\". "
+            + f"{prov_frag} "
+            + "In-flight work at stop: turns resume from checkpoints; a "
+            "bare send_message turn is NOT re-dispatched (three-signal "
+            "JobItem boundary); mid-tool side effects / bash orphans / "
+            "non-checkpointed state are NOT protected. "
+            + (hatch + " " if hatch else "")
+            + "This is an auto-wake — call "
+            f"`upgrade_status(run_id=\"{wake.run_id}\", section='restarts')` "
+            "for the audit row and report back to the user. The report "
+            "routes to the same channel where the arm was confirmed."
         )
 
     def _format_coalesced_wake_body(
         self,
         wakes: list[uj.PendingWake],
         outcomes: list[str],
+        journal: dict[str, Any] | None = None,
+        install_dir: "Path | None" = None,
     ) -> str:
-        """Phase 2 T5 — coalesced-wake body (D-FA5.2).
-
-        Newest-first run list; one body for up to
-        ``PENDING_WAKE_COALESCE_MAX`` entries (~80 chars per entry ≈
-        1.3KB at the cap — well under the 64KB MessageQueue cap).
-        """
+        """agent-restart §5.3 — coalesced-wake body (newest-first run
+        list; per-run labels; the HEAD run carries the full §5.3
+        detail block)."""
         head = wakes[0]
         n = len(wakes)
         lines = [
@@ -590,13 +759,207 @@ class UpgradeJournalSweepService:
             f"`{head.run_id}` completed during the daemon downtime.",
             "Outcomes (newest first):",
         ]
+        labels = _outcome_labels()
         for w, o in zip(wakes, outcomes):
-            lines.append(f"  - `{w.run_id}`: `{o}` at `{w.armed_at}`")
+            lines.append(
+                f"  - `{w.run_id}`: `{labels.get(o, o)}` "
+                f"(`{o}`) at `{w.armed_at}`"
+            )
+        lines.append(self._format_wake_body(head, outcomes[0], journal, install_dir))
         lines.append(
-            "This is an auto-wake — call `upgrade_status(run_id=...)` on "
-            "each, or `upgrade_status()` with no args to enumerate all."
+            "This is an auto-wake — call `upgrade_status(run_id=..., "
+            "section='restarts')` on each, or `upgrade_status(section="
+            "'restarts')` to enumerate all."
         )
         return "\n".join(lines)
+
+    # ── §5.3 formatter sub-helpers (all defensive / fail-open) ────────────
+
+    @staticmethod
+    def _audit_row(journal: dict[str, Any] | None, run_id: str) -> dict[str, Any]:
+        try:
+            audits = (journal or {}).get("restart_audits")
+            row = audits.get(run_id) if isinstance(audits, dict) else None
+            return row if isinstance(row, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    @staticmethod
+    def _restart_gate_detail(journal: dict[str, Any] | None, run_id: str) -> str:
+        """Per-gate /livez+/readyz results from the journal detail channel
+        (§5.3 — the ``restart_gate`` event written alongside the
+        terminal carries the per-gate record)."""
+        try:
+            history = (journal or {}).get("history")
+            if not isinstance(history, list):
+                return ""
+            for entry in reversed(history):
+                if not isinstance(entry, dict):
+                    continue
+                if str(entry.get("event", "")) != "restart_gate":
+                    continue
+                detail = str(entry.get("detail", ""))
+                if run_id in detail:
+                    return detail
+            return ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @staticmethod
+    def _live_version_frag(
+        journal: dict[str, Any] | None, install_dir: "Path | None"
+    ) -> str:
+        """Identity check render: the CURRENT release target from the
+        journal (`current` key), degraded to the symlink, else '?'."""
+        try:
+            cur = (journal or {}).get("current")
+            if isinstance(cur, str) and cur:
+                return str(cur)
+            if install_dir is not None:
+                link = install_dir / "current"
+                if link.is_symlink():
+                    return os.readlink(link).rsplit("/", 1)[-1]
+        except Exception:  # noqa: BLE001
+            pass
+        return "?"
+
+    @staticmethod
+    def _render_applied_overrides(
+        wake: uj.PendingWake, audit: dict[str, Any]
+    ) -> str:
+        """§5.2 render — ``key: before→after (applied|not-applied…)``.
+        V-8: a ``None`` boot-resolution record renders UNAVAILABLE
+        (never a zero-dict claim); per-key status compares the arm-time
+        pending set against ``get_last_applied_resolution()``."""
+        pending = audit.get("overrides")
+        if not isinstance(pending, list) or not pending:
+            return "Applied overrides: none were pending at arm time."
+        try:
+            from daemon.services.settings_service import (
+                get_last_applied_resolution,
+            )
+
+            resolution = get_last_applied_resolution()
+        except Exception:  # noqa: BLE001
+            resolution = None
+        frags = []
+        for o in pending:
+            if not isinstance(o, dict):
+                continue
+            key = str(o.get("key", "?"))
+            db_value = o.get("db_value")
+            if resolution is None:
+                status = "unavailable — boot resolution record absent"
+            else:
+                rec = resolution.get(key)
+                if not isinstance(rec, dict):
+                    status = "not-applied (no resolution record)"
+                elif rec.get("source") != "db":
+                    status = f"not-applied — resolved tier={rec.get('source')}"
+                elif rec.get("value") == db_value:
+                    status = "applied"
+                else:
+                    status = "late-write (db value changed after arm)"
+            frags.append(
+                f"{key}: {o.get('live_before')}→{db_value} ({status})"
+            )
+        return "Applied overrides: " + "; ".join(frags) + "."
+
+    @staticmethod
+    def _provenance_frag(wake: uj.PendingWake) -> str:
+        """§5.3: provenance class + root source + authorization age."""
+        pclass = getattr(wake, "provenance_class", "") or "none-recorded"
+        root = getattr(wake, "provenance_root_source", None) or "?"
+        stamped = getattr(wake, "provenance_stamped_at", None) or "?"
+        depth = getattr(wake, "provenance_depth", 0) or 0
+        return (
+            f"Provenance: class={pclass} root={root} depth={depth} "
+            f"authorization window stamped_at={stamped} (an accepted arm "
+            "can rest on a window up to ~60 min old — the age is the "
+            "operator's visibility, not a freshness guarantee)."
+        )
+
+    @staticmethod
+    def _settle_restart_audit(
+        install_dir: "Path",
+        wake: uj.PendingWake,
+        terminal_outcome: str,
+        message_id: str | None,
+    ) -> None:
+        """agent-restart §6.2 boot-settle: patch the ``restart_audits``
+        row in place at wake-delivery time — ``executed_at``/``outcome``
+        (terminal mapping: restart⇒applied, halt⇒halted,
+        stop_forced_kill⇒applied-forced, restart_abandoned⇒abandoned),
+        ``overrides[].status`` (via ``get_last_applied_resolution`` —
+        V-8 semantics), and ``notify`` {delivered, at, message_id}.
+        Best-effort, restart-kind wakes only; never raises."""
+        if wake.kind != "restart":
+            return
+        try:
+            outcome_map = {
+                "restart": "applied",
+                "halt": "halted",
+                "stop_forced_kill": "applied (forced-kill during stop)",
+                "restart_abandoned": "abandoned",
+            }
+            settled = outcome_map.get(terminal_outcome, "unknown")
+            fields: dict[str, Any] = {
+                "executed_at": uj.now_iso(),
+                "outcome": settled,
+                "notify": {
+                    "status": "delivered" if message_id else "pending",
+                    "at": uj.now_iso(),
+                    "message_id": message_id,
+                },
+            }
+            # overrides[].status — same comparison as the render.
+            try:
+                data = uj.journal_read(install_dir)
+                audits = data.get("restart_audits")
+                row = (
+                    audits.get(wake.run_id)
+                    if isinstance(audits, dict)
+                    else None
+                )
+                if isinstance(row, dict) and isinstance(
+                    row.get("overrides"), list
+                ):
+                    from daemon.services.settings_service import (
+                        get_last_applied_resolution,
+                    )
+
+                    resolution = get_last_applied_resolution()
+                    for o in row["overrides"]:
+                        if not isinstance(o, dict):
+                            continue
+                        key = str(o.get("key", "?"))
+                        if resolution is None:
+                            o["status"] = "not-applied (resolution record absent)"
+                            continue
+                        rec = resolution.get(key)
+                        if not isinstance(rec, dict):
+                            o["status"] = "not-applied (no resolution record)"
+                        elif rec.get("source") != "db":
+                            o["status"] = f"not-applied — resolved tier={rec.get('source')}"
+                        elif rec.get("value") == o.get("db_value"):
+                            o["status"] = "applied"
+                        else:
+                            o["status"] = "late-write"
+                    fields["overrides"] = row["overrides"]
+            except Exception as ov_exc:  # noqa: BLE001 — best-effort
+                logger.debug(
+                    "UpgradeJournalSweepService: restart-audit overrides "
+                    "settle skipped for run_id=%s: %s (outcome/notify "
+                    "fields still settle)",
+                    wake.run_id, ov_exc,
+                )
+            uj.record_restart_audit(install_dir, wake.run_id, fields)
+        except Exception as exc:  # noqa: BLE001 — never raises
+            logger.warning(
+                "UpgradeJournalSweepService: restart-audit settle FAILED "
+                "for run_id=%s: %s",
+                wake.run_id, exc,
+            )
 
     def _resolve_fallback_target(
         self,
@@ -837,7 +1200,14 @@ class UpgradeJournalSweepService:
             result = await self._manager.enqueue_message(
                 instance_id=ari_instance_id,
                 message=annotated_body,
-                source=wake.source or "api",
+                # agent-restart C-2: same reserved-lane rule as the direct
+                # deliver path — restart-kind wakes NEVER ride a user
+                # source, even on the ari fall-back.
+                source=(
+                    RESTART_WAKE_SOURCE
+                    if wake.kind == "restart"
+                    else (wake.source or "api")
+                ),
                 priority=2,
                 metadata=metadata,
             )
@@ -1012,7 +1382,7 @@ class UpgradeJournalSweepService:
             try:
                 deliverable = (
                     uj.wake_terminal_event_after(
-                        grace_journal, wake.armed_at
+                        grace_journal, wake.armed_at, kind=wake.kind
                     )
                     is not None
                 )
@@ -1232,13 +1602,21 @@ class UpgradeJournalSweepService:
             # ``PENDING_WAKE_COALESCE_MAX``).
             overflow_total = 0
             try:
-                groups_input: dict[str, list[tuple[uj.PendingWake, str]]] = {}
+                # agent-restart A-1: the overflow accounting mirrors the
+                # F-1 composite partition key ``(arming_instance_id,
+                # kind)`` EXACTLY — a restart/promote pair for one
+                # instance forms TWO groups, never one (T0b: 17 restart +
+                # 0 promote ⇒ 1 group; 17+17 ⇒ 2; mixed kinds ⇒ 0
+                # overflow where same-kind would have dropped one).
+                groups_input: dict[
+                    tuple[str, str], list[tuple[uj.PendingWake, str]]
+                ] = {}
                 for w, o in terminal_wakes:
                     groups_input.setdefault(
-                        w.arming_instance_id, []
+                        (w.arming_instance_id, w.kind), []
                     ).append((w, o))
-                for instance_id, items in groups_input.items():
-                    kept = len(coalesced.get(instance_id, ([], []))[0])
+                for group_key, items in groups_input.items():
+                    kept = len(coalesced.get(group_key, ([], []))[0])
                     overflow_total += max(0, len(items) - kept)
                 if overflow_total > 0:
                     try:
@@ -1271,7 +1649,7 @@ class UpgradeJournalSweepService:
             )
             # (h) per-group delivery.
             delivered_count = 0
-            for instance_id, (wakes, outcomes) in coalesced.items():
+            for (instance_id, _group_kind), (wakes, outcomes) in coalesced.items():
                 # Per-group try-block.
                 try:
                     if not wakes:
@@ -1284,9 +1662,13 @@ class UpgradeJournalSweepService:
                         continue
                     # Deliver via the manager (the actual enqueue).
                     body = (
-                        self._format_coalesced_wake_body(wakes, outcomes)
+                        self._format_coalesced_wake_body(
+                            wakes, outcomes, journal, install_dir
+                        )
                         if len(wakes) > 1
-                        else self._format_wake_body(head, outcomes[0])
+                        else self._format_wake_body(
+                            head, outcomes[0], journal, install_dir
+                        )
                     )
                     # Coalesced delivery path: we directly call
                     # enqueue_message because the coalesced body
@@ -1301,19 +1683,30 @@ class UpgradeJournalSweepService:
                                 instance_id,
                             )
                             continue
-                        # Re-stamp window if any wake in the group has a
-                        # recorded source (defensive/redundant per ADR-041).
-                        for w in wakes:
-                            if w.source:
-                                try:
-                                    self._manager.stamp_user_origin_window(
-                                        w.arming_instance_id,
-                                        source=w.source,
-                                        message_id=w.message_id,
-                                    )
-                                except Exception:  # noqa: BLE001
-                                    pass
-                                break
+                        # agent-restart A-2 (§2.5 row (i)): the re-stamp
+                        # is KIND-GATED — restart-kind wakes NEVER re-stamp
+                        # a user-origin window (the wake turn must carry
+                        # NO direct provenance; the restart gate reads
+                        # class=direct only from a REAL user turn). The
+                        # gate is on ``wake.kind``, NEVER on a source
+                        # sentinel. Promote-kind wakes keep the ADR-041
+                        # re-stamp (defensive/redundant, unchanged).
+                        # (Kind gate = ``head.kind`` — the group is
+                        # kind-homogeneous BY CONSTRUCTION via the F-1
+                        # composite partition key, so gating on the head
+                        # gates the whole group.)
+                        if head.kind != "restart":
+                            for w in wakes:
+                                if w.source:
+                                    try:
+                                        self._manager.stamp_user_origin_window(
+                                            w.arming_instance_id,
+                                            source=w.source,
+                                            message_id=w.message_id,
+                                        )
+                                    except Exception:  # noqa: BLE001
+                                        pass
+                                    break
                         metadata = {
                             "system_context": {
                                 "kind": "post_restart_arm_notify",
@@ -1330,7 +1723,16 @@ class UpgradeJournalSweepService:
                         result_msg = await self._manager.enqueue_message(
                             instance_id=head.arming_instance_id,
                             message=body,
-                            source=head.source or "api",
+                            # agent-restart C-2: restart-kind wakes deliver
+                            # on the RESERVED internal lane (never a user
+                            # source, never "api") — the wake turn can
+                            # never re-mint direct provenance (§2.5 row
+                            # (i)); promote-kind keeps today's routing.
+                            source=(
+                                RESTART_WAKE_SOURCE
+                                if head.kind == "restart"
+                                else (head.source or "api")
+                            ),
                             priority=2,
                             metadata=metadata,
                         )
@@ -1350,6 +1752,11 @@ class UpgradeJournalSweepService:
                                         "run_id=%s: %s",
                                         w.run_id, del_exc,
                                     )
+                                # agent-restart §6.2: settle the audit row
+                                # (outcome/overrides/notify) at delivery.
+                                self._settle_restart_audit(
+                                    install_dir, w, outcomes[0], message_id
+                                )
                             delivered_count += len(wakes)
                         else:
                             # No message_id — F1 review round: the wake

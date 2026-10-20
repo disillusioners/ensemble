@@ -863,10 +863,27 @@ class TestWakeTerminalEventAfter:
         _TERMINAL_EVENTS / set-equality / new-kind in both) are
         preserved; only the cardinality pin changes (8 → 9).
         """
+        # agent-restart F-2 rewrite (§7.5): the wake superset is now
+        # ``_TERMINAL_EVENTS + ("restart",) + RESTART_TERMINAL_EVENTS`` —
+        # asserted via the RESTART_TERMINAL_EVENTS constant (NOT by
+        # re-listing its members: adding a 4th restart terminal then
+        # must NOT trip this guard, while adding any of the 3 names to
+        # ``_TERMINAL_EVENTS`` (the C-3 trap — restart events closing
+        # promote ops) trips it LOUDLY).
         assert "restart" in WAKE_TERMINAL_EVENTS
         assert "restart" not in uj._TERMINAL_EVENTS
         assert len(uj._TERMINAL_EVENTS) == 9
-        assert set(WAKE_TERMINAL_EVENTS) == set(uj._TERMINAL_EVENTS) | {"restart"}
+        assert set(WAKE_TERMINAL_EVENTS) == (
+            set(uj._TERMINAL_EVENTS)
+            | {"restart"}
+            | set(uj.RESTART_TERMINAL_EVENTS)
+        )
+        # Absence pins, verbatim (F-2): the three restart terminals are
+        # wake-superset members ONLY — never members of the shared
+        # promote-reconcile set (C-3 trap).
+        for _evt in uj.RESTART_TERMINAL_EVENTS:
+            assert _evt in WAKE_TERMINAL_EVENTS
+            assert _evt not in uj._TERMINAL_EVENTS
         # Cause ① invariant: refusal and executor_exit are terminal
         # (paired pre-mutation exit IS terminal evidence).
         assert "refusal" in uj._TERMINAL_EVENTS

@@ -744,8 +744,10 @@ class TestArmSideLiveRefusal:
     def test_system_restart_on_live_writes_no_wake(
         self, install: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """T5.12: ``system_restart`` with ``self_env=live`` returns the
-        live-outright-refusal AND writes no ``pending_wakes`` record."""
+        """agent-restart restatement of T5.12: ``system_restart`` on live
+        WITHOUT user provenance refuses (``no-user-provenance`` — the A2
+        outright refusal is superseded) AND writes no ``pending_wakes``
+        record (a refused arm never wakes)."""
         from daemon.tools import upgrade_tools as ut
         from daemon.tools.upgrade_tools import create_upgrade_tools
 
@@ -756,11 +758,13 @@ class TestArmSideLiveRefusal:
         manager._task_repo = None
         manager._queue_repository = None
         manager._user_origin_windows = {}
+        manager._inherited_provenance_windows = {}
+        manager._user_origin_last_stamp = {}
         tools = {t.name: t for t in create_upgrade_tools(manager, "i-test", agent_id="ari")}
         out = tools["system_restart"].ainvoke(
             {
                 "target_env": "live",
-                "reason": "x",
+                "reason": "apply worker_pool_size 5→7",
                 "dry_run": False,
                 "user_confirmed": True,
             }
@@ -768,12 +772,13 @@ class TestArmSideLiveRefusal:
         import asyncio
 
         result = asyncio.run(out)
-        # Refused.
-        assert "live-restart-refused" in result.lower(), result
-        # No journal mutation.
+        # Refused on provenance (agent-initiated turn).
+        assert "no-user-provenance" in result, result
+        # No pipeline mutation; no wake record (refused arms never wake).
         data = journal_read(install)
         assert data.get("pending_op") is None
         assert "pending_wakes" not in data or not data["pending_wakes"]
+        assert data.get("in_flight") is None
 
 
 # ── Group 7 — ensure_extensions default (r4 fold C1 + ADR-039) ────────────────

@@ -87,8 +87,12 @@ def _make_wake(
     arming_instance_id: str = "i-arm-1",
     arming_agent_id: str | None = "ari",
     source: str = "discord:user123",
+    # agent-restart: default kind=promote — the routing/source pins here
+    # are ADR-041 promote-lane behavior; restart-kind wakes deliver on the
+    # reserved system:post_restart_arm_notify lane (pinned in the
+    # agent-restart suite + drills).
     message_id: str | None = "m-original-1",
-    kind: str = "restart",
+    kind: str = "promote",
     armed_at: str = "2026-10-04T00:00:00Z",
     expires_at: str = "2026-10-04T00:10:00Z",
     status: str = "pending",

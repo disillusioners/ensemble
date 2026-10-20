@@ -126,6 +126,16 @@ class TestReservedSourcePrefixesConstant:
             "admin-endpoint",
             "auto-scan",
             "scheduler",
+            # agent-restart §2.5 row (h) (T0a′): the R18 auto-dispatch
+            # first-turn fallback previously minted bare ``"api"`` — an
+            # AGENT-path dispatch stamped with the HTTP-chat-lane
+            # literal, inside the provenance arm set. The fallback
+            # (daemon/tools/instance.py) now mints this reserved
+            # literal (never user-origin — fail-closed), removing an
+            # agent-path-minted direct-window input from BOTH the
+            # upgrade factor-2 classifier surface (strictly
+            # strengthening) and the restart provenance gate.
+            "auto_dispatch_fallback",
         })
 
     def test_helper_function_is_reserved_source(self):

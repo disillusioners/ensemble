@@ -62,7 +62,12 @@ def _make_wake(
     source: str = "discord:user123",
     message_id: str | None = "m-original-1",
     arming_instance_id: str = "i-arm-1",
-    kind: str = "restart",
+    # agent-restart: the ADR-041 routing/re-stamp pins are the PROMOTE-lane
+    # contract (restart-kind wakes deliver reserved-sourced and never
+    # re-stamp — pinned in tests/unit/tools/test_agent_restart.py + the
+    # wake drills). Default kind=promote so these routing pins keep
+    # testing what they were written to test.
+    kind: str = "promote",
 ) -> PendingWake:
     """Build + arm a PendingWake with the given source."""
     wake = PendingWake(
@@ -136,7 +141,7 @@ class TestWakeSourceRouting:
         ``pending_wakes.source="discord:user123"``; the wake's
         ``enqueue_message`` is called with the SAME source. AC3 routing."""
         _make_wake(install, run_id="r-aaa", source="discord:user123")
-        _append_history(install, "restart")
+        _append_history(install, "commit")
         manager, _windows = _mock_manager_with_windows()
         service = UpgradeJournalSweepService(install, manager=manager)
         await service.sweep_wake_records()
@@ -153,7 +158,7 @@ class TestWakeSourceRouting:
         value (the report-delivery path inherits from the triggering
         message's source, by construction)."""
         _make_wake(install, run_id="r-aaa", source="telegram:chat42")
-        _append_history(install, "restart")
+        _append_history(install, "commit")
         manager, _windows = _mock_manager_with_windows()
         service = UpgradeJournalSweepService(install, manager=manager)
         await service.sweep_wake_records()
@@ -179,7 +184,7 @@ class TestWakeSourceRouting:
             source="discord:user123",
             message_id="m-original-1",
         )
-        _append_history(install, "restart")
+        _append_history(install, "commit")
         manager, windows = _mock_manager_with_windows()
         service = UpgradeJournalSweepService(install, manager=manager)
         await service.sweep_wake_records()
@@ -205,7 +210,7 @@ class TestWakeSourceRouting:
         best-effort routing fall-back). The user still receives the
         report via the default chat."""
         _make_wake(install, run_id="r-aaa", source="")
-        _append_history(install, "restart")
+        _append_history(install, "commit")
         manager, _windows = _mock_manager_with_windows()
         service = UpgradeJournalSweepService(install, manager=manager)
         await service.sweep_wake_records()

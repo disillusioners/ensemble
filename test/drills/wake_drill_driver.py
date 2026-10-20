@@ -300,8 +300,8 @@ def scenario_d1() -> bool:
             "wake routed to the arming instance",
         )
         ok &= check(
-            call["source"] == "api",
-            "non-user-origin arm → api sentinel fallback (ADR-041)",
+            call["source"] == "system:post_restart_arm_notify",
+            "restart-kind wake → RESERVED lane (agent-restart C-2; was api)",
         )
         sc = call.get("metadata", {}).get("system_context", {})
         ok &= check(
@@ -382,8 +382,8 @@ def scenario_d3() -> bool:
     ok &= check(res.delivered == 1, f"sweep delivered=1 (got {res.delivered})")
     if mgr.enqueue_calls:
         ok &= check(
-            mgr.enqueue_calls[0]["source"] == "discord:user123",
-            "MessageQueue row source=discord:user123 (routing preserved)",
+            mgr.enqueue_calls[0]["source"] == "system:post_restart_arm_notify",
+            "restart-kind wake rides the RESERVED lane even WITH a captured user source (C-2)",
         )
         ok &= check(
             mgr.enqueue_calls[0].get("message_id") is None
@@ -391,11 +391,8 @@ def scenario_d3() -> bool:
             "enqueue returned a message_id",
         )
     ok &= check(
-        any(
-            iid == "inst-drill-3" and src == "discord:user123" and mid == "m-drill-3"
-            for iid, src, mid in mgr.stamp_calls
-        ),
-        "user-origin window re-stamped (ADR-041 defensive re-stamp)",
+        not mgr.stamp_calls,
+        "restart-kind wake performs NO window re-stamp (A-2 kind-gated)",
     )
     return ok
 
@@ -423,17 +420,25 @@ def scenario_d4() -> bool:
     uj.lock_release(_inst())
 
     res = run_sweep(mgr)
+    # agent-restart F-1: kind-partitioned coalescing — a restart + a
+    # promote armed by the SAME instance NEVER share one body; two
+    # enqueues (one per kind), each self-describing.
     ok &= check(
-        len(mgr.enqueue_calls) == 1,
-        f"ONE coalesced enqueue (got {len(mgr.enqueue_calls)})",
+        len(mgr.enqueue_calls) == 2,
+        f"TWO kind-partitioned enqueues (got {len(mgr.enqueue_calls)})",
     )
     ok &= check(res.delivered == 2, f"both records delivered (got {res.delivered})")
-    if mgr.enqueue_calls:
-        body = mgr.enqueue_calls[0].get("message", "")
-        sc = mgr.enqueue_calls[0].get("metadata", {}).get("system_context", {})
-        ok &= check(run_a in body and run_b in body, "coalesced body lists both run_ids")
+    if len(mgr.enqueue_calls) == 2:
+        bodies = [c.get("message", "") for c in mgr.enqueue_calls]
         ok &= check(
-            sc.get("coalesced_count") == 2, "coalesced_count=2 in the wake context"
+            any(run_a in b for b in bodies) and any(run_b in b for b in bodies),
+            "each kind's body lists its own run_id",
+        )
+        sources = {c.get("source") for c in mgr.enqueue_calls}
+        ok &= check(
+            "system:post_restart_arm_notify" in sources
+            and "discord:user123" in sources,
+            f"kind-scoped sources (restart=reserved, promote=captured user): {sorted(map(str, sources))}",
         )
     ok &= check(
         uj.list_pending_wakes(inst) == [], "group structural removal (both gone)"
@@ -496,8 +501,10 @@ def scenario_d5() -> bool:
 
 
 def scenario_d6() -> bool:
-    """live-outright-refusal (FAKE-live marker — NEVER the real live
-    install): RESTART REFUSED before ANY journal write (invariant 8)."""
+    """agent-restart restatement: live restart WITHOUT user provenance
+    (FAKE-live marker — NEVER the real live install) refuses
+    ``no-user-provenance`` BEFORE any pipeline write (invariant 8,
+    provenance-gated form; A2 superseded 2026-10-19)."""
     ok = True
     fake_home = Path(os.environ["HOME"])  # contains the FAKE live tree
     inst = make_fake_install(fake_home, "live")
@@ -505,22 +512,28 @@ def scenario_d6() -> bool:
     state = inst / "releases" / "state.json"
     before = state.read_bytes()
     mgr = DrillManager("inst-drill-live", {})
+    mgr._inherited_provenance_windows = {}
+    mgr._user_origin_last_stamp = {}
     tools = create_upgrade_tools(mgr, mgr.instance_id)
 
     banner = asyncio.run(
         _tool_fn(tools, "system_restart")(
             target_env="live",
-            reason="wake-drill",
+            reason="wake-drill provenance refusal",
             mode="graceful-now",
             dry_run=False,
         )
     )
     ok &= check(
-        "REFUSED" in banner and "live-restart-refused" in banner,
-        "live restart outright-refused (A2 token intact)",
+        "REFUSED" in banner and "no-user-provenance" in banner,
+        "live restart provenance-refused (no-user-provenance token; A2 superseded)",
     )
-    ok &= check(state.read_bytes() == before, "state.json byte-identical (NO journal write)")
-    ok &= check(uj.list_pending_wakes(inst) == [], "no wake record (live never records)")
+    # Pipeline untouched: no pending_op / in_flight / wake (the refused
+    # audit row under restart_audits is the additive N-5 record).
+    data = uj.journal_read(inst)
+    ok &= check(data.get("pending_op") is None, "no pending_op (refused arm)")
+    ok &= check(data.get("in_flight") is None, "no in_flight (refused arm)")
+    ok &= check(uj.list_pending_wakes(inst) == [], "no wake record (refused arms never wake)")
     ok &= check(len(mgr.enqueue_calls) == 0, "no wake delivery for a refused arm")
     return ok
 
