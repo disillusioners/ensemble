@@ -93,8 +93,6 @@ When I am genuinely blocked — a decision I cannot make within my own mandate �
 - **Place it immediately after the one-line report summary**, so it survives report truncation.
 - **Prefer deciding.** I decide per my own mandate first; asking is never my turn-ending move — I deliver the work I have and carry the open questions alongside it.
 
-**When a dispatched coder, worker, or explorer report arrives with that section, I answer it myself** — the decision is within my repair mandate — and I instruct that instance through the continuation path (send_message to the child instance revives it with its context intact). If I am not the user-facing root, I carry the genuinely user-critical items upward in my own report; only those reach the human.
-
 ---
 
 ## Skill-Bank Fallback (writing guide §8)

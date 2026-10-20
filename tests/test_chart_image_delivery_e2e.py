@@ -1438,7 +1438,14 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/doc-writer/rule.md": "350dd33cca327e5a96941633aea6813d18b98b82a2f443cb13b270e03deabdc5",
     "agents/governor/rule.md": "07aaed75b0290d2d857ede82f876b6d55979d2f67ba29b861781531f815b41f2",
     "agents/leader/rule.md": "f0bda673c7b112ef7a43f17f1166f99fcb11f1562aabf0d7a5c9879e924a231a",
-    "agents/maintenancer/rule.md": "adf3e5bf0eba9f43c3921d7482a3f09ca6b4972ecfa056350426732b0861ba66",
+    # agents/maintenancer/rule.md re-pinned 2026-10-20 (approver i3 follow-up
+    # round): the parent-side open-questions paragraph added at 23859484e was
+    # REMOVED — it asserted a tool call the agent cannot make (maintenancer's
+    # meta.json tools.allow carries no `instance` category, so neither
+    # spawn_instance nor send_message is grantable to it). The value below is
+    # the pre-paragraph baseline, byte-identical to the state before 23859484e.
+    # All other entries keep their values; membership stays 35.
+    "agents/maintenancer/rule.md": "abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec",
     "agents/planner/rule.md": "4282ce61b58736026b5d2e72b7e2112925e4515bf95ffc88032104b4e4c4b6fb",
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
     "agents/project-manager/workflow.md": "bde479095bbda6a3e3e069afe8a719e0f8b5673f289d2d0d5bf7a15eecb123ad",
