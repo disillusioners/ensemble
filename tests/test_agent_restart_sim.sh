@@ -61,12 +61,27 @@ assert_absent() {
 
 # ── ⛔ FAKE_HOME fence ───────────────────────────────────────────────────────
 FAKE_HOME="$(mktemp -d /tmp/ens-restart-sim.XXXXXX)"
+# SF-2 (tester micro-fix cycle): mktemp failure left FAKE_HOME empty and
+# degenerated the guard's "$FAKE_HOME"/* pattern to "/*" — accepting ANY
+# absolute path. Two hardenings: (a) fail-closed validation BEFORE any
+# guard evaluation; (b) the guard's own first branch requires the
+# LITERAL expected mktemp shape — an empty/garbage FAKE_HOME matches NO
+# allow branch, so degenerate acceptance is structurally impossible.
+if [ -z "$FAKE_HOME" ] || [ ! -d "$FAKE_HOME" ]; then
+    printf 'FATAL: FAKE_HOME invalid (%q) — mktemp failure must refuse, never degrade the fence\n' "$FAKE_HOME" >&2
+    exit 99
+fi
+case "$FAKE_HOME" in
+    /tmp/ens-restart-sim.??????) : ;;   # the literal mktemp -d shape
+    *) printf 'FATAL: FAKE_HOME %q does not match the expected mktemp shape — refusing (guard non-degeneracy)\n' "$FAKE_HOME" >&2; exit 99 ;;
+esac
 trap 'KEEP=$?; if [ "$KEEP" = "0" ]; then rm -rf "$FAKE_HOME"; else echo "FAKE_HOME kept: $FAKE_HOME" >&2; fi' EXIT
 export HOME="$FAKE_HOME"
 
 SIM_PORT="${SIM_PORT:-39713}"
+# SF-3: 8088 (ensemble self-system lane) joins the refusal set.
 case "$SIM_PORT" in
-    9797|7979|8079) printf 'FATAL: SIM_PORT=%s collides with a real daemon lane (live/demo/dev) — refuse\n' "$SIM_PORT" >&2; exit 99 ;;
+    9797|7979|8079|8088) printf 'FATAL: SIM_PORT=%s collides with a real daemon lane (live/demo/dev/self-system) — refuse\n' "$SIM_PORT" >&2; exit 99 ;;
 esac
 
 _escape_guard() {
@@ -75,15 +90,31 @@ _escape_guard() {
     # structurally impossible; this guard makes them LOUD if a future
     # edit introduces one. (Review fix-cycle-1 (b)/(c): the old guard
     # only ever saw FAKE_HOME itself and the HOME re-check was
-    # structurally inert — HOME was already re-exported above, so
-    # `[ "$HOME" = "/home/nea" ]` could never fire.)
+    # structurally inert.) SF-2: the allow branches use the LITERAL
+    # validated shape — an empty FAKE_HOME cannot degenerate the pattern
+    # (it is rejected before the guard ever runs, and would match no
+    # branch regardless).
     case "$1" in
-        "$FAKE_HOME"/*) return 0 ;;
-        "$FAKE_HOME") return 0 ;;
+        /tmp/ens-restart-sim.??????/*) return 0 ;;
+        /tmp/ens-restart-sim.??????) return 0 ;;
         /tmp/*) return 0 ;;
         *) printf 'FATAL: live-path escape blocked: %s\n' "$1" >&2; exit 99 ;;
     esac
 }
+
+# SF-2 NEGATIVE FIXTURE: prove degeneracy refuses, not accepts. Run the
+# guard body with a poisoned-empty FAKE_HOME shape in a subshell and
+# assert the loud exit (99), never a silent accept.
+_sf2_neg_rc=0
+( FAKE_HOME=""; _escape_guard "/etc/passwd" ) >/dev/null 2>&1 || _sf2_neg_rc=$?
+if [ "$_sf2_neg_rc" = "99" ]; then
+    _pass "SF-2 negative fixture: empty-FAKE_HOME guard refuses /etc/passwd (exit 99)"
+else
+    _fail "SF-2 negative fixture: expected refusal rc=99, got $_sf2_neg_rc"
+fi
+_sf2_neg2_rc=0
+( FAKE_HOME=""; _escape_guard "/etc/systemd/system/ensemble-main.service" ) >/dev/null 2>&1 || _sf2_neg2_rc=$?
+[ "$_sf2_neg2_rc" = "99" ] && _pass "SF-2 negative fixture: unit-file path refused" || _fail "SF-2 negative fixture 2 rc=$_sf2_neg2_rc"
 
 INSTALL="$FAKE_HOME/agents-ensemble"
 SCRIPTS_BUNDLE="$INSTALL/scripts/upgrade"
@@ -148,6 +179,15 @@ async def main() -> int:
     }}
     mgr._inherited_provenance_windows = {}
     mgr._user_origin_last_stamp = {}
+    # SF-5 (tester micro-fix cycle): a bare MagicMock short-circuits
+    # _capture_pending_overrides to [] (auto-attr get_overrides() returns a
+    # MagicMock, not a dict). Wire a REAL-shaped settings stub: one pending
+    # DB override (worker_pool_size 7 vs live 5) flows through the REAL
+    # resolver (source=db wins; divergent) into the receipt + audit row.
+    from types import SimpleNamespace
+    mgr._settings_service = SimpleNamespace(
+        get_overrides=lambda: {"limits.worker_pool_size": 7}
+    )
     markers = []
     mgr.set_pending_system_execution = lambda iid, spec: markers.append(dict(spec))
     ut._resolve_install_dir = lambda self_env: INSTALL
@@ -159,6 +199,11 @@ async def main() -> int:
     })
     if "RESTART SCHEDULED" not in out:
         print("ARM-FAILED:", out[:400]); return 1
+    # SF-5: surface the receipt for shell-side assertions (the first arm's
+    # overrides_pending render is a captured-flow assertion target).
+    print("RECEIPT-BEGIN")
+    print(out)
+    print("RECEIPT-END")
     spec = markers[-1]
     print("ARM-OK run_id=%s provenance_ok=%s" % (spec["run_id"], spec.get("provenance_ok")))
     json.dump(spec, sys.stdout)
@@ -177,6 +222,31 @@ assert_contains "C-1 provenance_ok carrier stamped" "provenance_ok=True" "$ARM_O
 SPEC_JSON="$(printf '%s\n' "$ARM_OUT" | tail -n 1)"
 RUN_ID="$(printf '%s' "$SPEC_JSON" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["run_id"])' 2>/dev/null || true)"
 [ -n "$RUN_ID" ] && _pass "run_id extracted: $RUN_ID" || _fail "run_id extraction"
+
+# SF-5 (tester micro-fix cycle): the REAL resolver flow (settings stub →
+# source=db wins → divergent vs live 5) must surface in BOTH the receipt
+# and the journaled audit row.
+assert_contains "SF-5: receipt renders the captured pending override" "overrides_pending: limits.worker_pool_size: 5→7" "$ARM_OUT"
+J1="$(cat "$INSTALL/releases/state.json" 2>/dev/null || echo '{}')"
+if printf '%s' "$J1" | "$PY" -c '
+import json, sys
+d = json.load(sys.stdin)
+rows = [
+    r for r in (d.get("restart_audits") or {}).values()
+    if isinstance(r, dict)
+    and any(
+        isinstance(o, dict)
+        and o.get("key") == "limits.worker_pool_size"
+        and o.get("db_value") == 7
+        and o.get("live_before") == 5
+        and o.get("status") == "pending"
+        for o in (r.get("overrides") or [])
+    )
+]' 2>/dev/null; then
+    _pass "SF-5: audit row carries the pending override {key, live_before:5, db_value:7, status:pending}"
+else
+    _fail "SF-5: audit row override capture missing"
+fi
 
 section "2. drain mints ENSEMBLE_RESTART_LIVE (real executor env path)"
 DRAIN_OUT="$(INSTALL_DIR="$INSTALL" HOME="$FAKE_HOME" ENSEMBLE_SELF_ENV=live \
@@ -204,8 +274,23 @@ cp "$UPGRADE_DIR"/*.sh "$INSTALL/scripts/upgrade/" 2>/dev/null || true
 cp "$UPGRADE_DIR"/*.py "$INSTALL/scripts/upgrade/" 2>/dev/null || true
 cat > "$INSTALL/scripts/stop-ensemble.sh" <<'STUB'
 #!/bin/bash
-# stub SINGLE-TERM stop — records the TERM and exits 0
-echo "stub-stop: SIGTERM $*" >> "$INSTALL/stub-stop.log"
+# stub SINGLE-TERM stop — records the TERM and exits 0.
+# SF-1 (tester micro-fix cycle): the OLD body referenced $INSTALL from the
+# environment, which never reaches this shell (the caller passes the
+# install dir as argv, and the env var name differs) — the append
+# degenerated to /stub-stop.log, a WRITE AT THE FILESYSTEM ROOT (EACCES
+# as nea; would SUCCEED as root). The stub now derives its root from its
+# OWN script location — argv/env-free, contained by construction — and
+# records the resolved ABSOLUTE path it writes into a manifest the sim
+# audits (no write path may escape the temp root).
+STUB_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+STUB_LOG="$STUB_ROOT/stub-stop.log"
+printf '%s\n' "stub-stop: SIGTERM $*" >> "$STUB_LOG"
+printf '%s\n' "stub-stop wrote: $STUB_LOG" >> "$STUB_ROOT/stub-write-paths.txt"
+# TERM the serving launcher when its pid file exists (PASS-direction leg)
+if [ -f "$STUB_ROOT/launcher.pid" ]; then
+    kill "$(cat "$STUB_ROOT/launcher.pid")" 2>/dev/null || true
+fi
 exit 0
 STUB
 chmod +x "$INSTALL/scripts/stop-ensemble.sh"
@@ -266,7 +351,140 @@ else
     _fail "restart_gate/halt order (gate=$GATE_IDX term=$TERM_IDX)"
 fi
 assert_contains "gate detail carries per-gate results" "livez=FAIL" "$J"
-assert_contains "readyz recorded for the lane" "readyz=" "$J"
+# SF-7 (tester micro-fix cycle): the old presence-only `readyz=` check
+# could not distinguish a REAL probe-green from the boot-grace-SUPPRESSED
+# one-shot pass (lib.sh _probe_once returns 0 for boot-grace-suppressed —
+# nothing is listening in this leg; that "pass" is suppression, not a
+# probe). The honest pin: the suppressed form is asserted EXPLICITLY by
+# name, and a REAL green (`readyz=pass latency=`) must be ABSENT on this
+# dead-stub leg. The FAIL direction stays truthful; the PASS direction is
+# exercised for real in section 4b below.
+assert_contains "readyz one-shot recorded (boot-grace-SUPPRESSED — named, not green-washed)" "readyz=pass(one-shot" "$J"
+assert_absent "no REAL readyz green claimed on the dead-stub leg" "readyz=pass latency=" "$J"
+
+section "4b. SF-1 write-path containment audit"
+# The stop stub records every path it wrote into a manifest; each must be
+# under the temp root, and the root must NOT carry the old degenerate
+# artifact. Belt: scan the manifest + the FAKE_HOME tree.
+WP="$INSTALL/stub-write-paths.txt"
+if [ -f "$WP" ]; then
+    # each manifest line is `stub-stop wrote: <abs-path>` — check the PATH
+    # FIELD, not the line prefix.
+    ESCAPES="$(awk '{print $3}' "$WP" | grep -v "^$FAKE_HOME/" || true)"
+    if [ -z "$ESCAPES" ] && [ -s "$WP" ]; then
+        _pass "SF-1: all stub write paths contained under FAKE_HOME ($(wc -l < "$WP") path(s))"
+    else
+        _fail "SF-1: stub write escaped temp: $ESCAPES"
+    fi
+else
+    _fail "SF-1: stub write-path manifest absent (stop stub never ran?)"
+fi
+if [ -f "/stub-stop.log" ]; then
+    _fail "SF-1: ROOT-LEVEL /stub-stop.log exists — out-of-temp write SUCCEEDED"
+else
+    _pass "SF-1: no root-level /stub-stop.log (the old degenerate target stayed untouched)"
+fi
+if [ -f "$INSTALL/stub-stop.log" ]; then
+    _pass "SF-1: TERM record landed INSIDE the fixture (stub-stop.log present)"
+else
+    _fail "SF-1: stub-stop.log missing under INSTALL (TERM-record leg degraded)"
+fi
+
+section "4b2. G-4.2 pin — budget survives a process (daemon-restart) boundary"
+# A FRESH interpreter = fresh module state = the in-memory daemon is
+# "restarted"; the sliding window must survive via the journal FILE.
+# ONE live arm has run so far (section 1; the second arm is the PASS leg
+# below) — the fresh interpreter must read that persisted count from the
+# journal FILE (the restart-boundary proof).
+BUDGET_FRESH="$(INSTALL_DIR="$INSTALL" HOME="$FAKE_HOME" "$PY" - <<'BUDGETPY'
+import os
+from pathlib import Path
+import daemon.tools.upgrade_journal as uj
+print(uj.restart_budget_count(Path(os.environ["INSTALL_DIR"])))
+BUDGETPY
+)" || BUDGET_FRESH="ERR"
+case "$BUDGET_FRESH" in
+    1) _pass "G-4.2: budget count=1 read by a FRESH interpreter (survives the restart boundary)" ;;
+    ERR|*) _fail "G-4.2: fresh-interpreter budget read gave '$BUDGET_FRESH' (want 1)" ;;
+esac
+
+section "4c. SF-7 PASS direction — real green via serving launcher (new arm + restart.sh)"
+# Second arm against the SAME fixture (the first op is closed by the halt
+# finalize); a SERVING launcher stub answers /livez + /readyz with the
+# manifest version — the gate then greens FOR REAL (probe-green, not
+# boot-grace suppression), and the terminal is `restart` with restart_gate
+# BEFORE it (N-1 pinned in BOTH directions).
+cat > "$INSTALL/launcher.sh" <<'LSTUB'
+#!/bin/bash
+# serving stub: answers /livez + /readyz 200 with the manifest version,
+# runs ~30s (longer than the gate budgets), contained under the fixture.
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+printf '%s\n' "$$" > "$ROOT/launcher.pid"
+exec "$SIM_PY" - "${PORT:?PORT must be exported to the serving stub}" <<'PSRV'
+import http.server, json, socketserver, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"status": "ok", "version": "0.25.4-sim"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+socketserver.TCPServer.allow_reuse_address = True
+with socketserver.TCPServer(("127.0.0.1", int(sys.argv[1])), H) as srv:
+    srv.timeout = 30
+    for _ in range(8):
+        srv.handle_request()
+PSRV
+LSTUB
+chmod +x "$INSTALL/launcher.sh"
+
+# Fresh journal for the PASS leg: the negative leg's live-restart-refused
+# prose contains the literal token `pending_op`, and lib.sh's textual
+# _json_sub extracts the FIRST occurrence — pre-existing extractor
+# fragility, avoided harness-side (all FAIL-direction assertions have
+# already run; section 5's wake assertion reads the pre-reset $J string).
+INSTALL_DIR="$INSTALL" HOME="$FAKE_HOME" "$PY" - <<'RESETPY'
+import os
+from pathlib import Path
+import daemon.tools.upgrade_journal as uj
+inst = Path(os.environ["INSTALL_DIR"])
+uj.journal_write(inst, dict(uj.JOURNAL_EMPTY))
+uj.ensure_extensions(inst)
+RESETPY
+ARM2_OUT="$(run_py)" || { printf '%s\n' "$ARM2_OUT"; _fail "PASS-direction arm leg"; }
+RUN_ID2="$(printf '%s\n' "$ARM2_OUT" | tail -n 1 | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["run_id"])' 2>/dev/null || true)"
+[ -n "$RUN_ID2" ] && _pass "PASS-direction arm run_id: $RUN_ID2" || _fail "PASS-direction run_id"
+LOCK_DIR2="$INSTALL/releases/rollback.lock.d"
+if [ -d "$LOCK_DIR2" ]; then printf '%s\n' "$$" > "$LOCK_DIR2/owner"; fi
+RC2=0
+ENSEMBLE_RESTART_LIVE=1 INSTALL_DIR="$INSTALL" PORT="$SIM_PORT" \
+LIVEZ_BUDGET_S=8 READYZ_BUDGET_S=8 SIM_PY="$PY" \
+    bash "$INSTALL/scripts/upgrade/restart.sh" live --run-id "$RUN_ID2" --grace-s 1 > "$INSTALL/restart-run2.log" 2>&1 || RC2=$?
+LOG2="$(cat "$INSTALL/restart-run2.log" 2>/dev/null)"
+J2="$(cat "$INSTALL/releases/state.json" 2>/dev/null || echo '{}')"
+if printf '%s' "$J2" | "$PY" -c '
+import json, sys
+d = json.load(sys.stdin)
+ev = [e["event"] for e in d["history"]]
+ok = "restart" in ev and "restart_gate" in ev
+gi = ev.index("restart_gate") if "restart_gate" in ev else -1
+# the LATEST restart_gate + restart pair belong to run 2 — check the last occurrences
+ri = len(ev) - 1 - ev[::-1].index("restart") if "restart" in ev else -1
+gi_last = len(ev) - 1 - ev[::-1].index("restart_gate") if "restart_gate" in ev else -1
+sys.exit(0 if (ok and gi_last < ri) else 1)
+' 2>/dev/null; then
+    _pass "PASS direction: gate PASSED — restart terminal, restart_gate BEFORE it (N-1 both directions)"
+else
+    _fail "PASS direction: gate/terminal order (rc=$RC2; see restart-run2.log)"
+fi
+assert_contains "SF-7: REAL readyz green rendered (latency form, not suppression)" "readyz=pass latency=" "$J2"
+assert_contains "SF-7: REAL livez green rendered" "livez=pass latency=" "$J2"
+assert_contains "PASS-direction gate detail: version identity ok" "version=identity-ok" "$J2"
+# serving launcher cleanup (it self-exits after 4 requests; belt):
+[ -f "$INSTALL/launcher.pid" ] && kill "$(cat "$INSTALL/launcher.pid")" 2>/dev/null || true
 
 section "5. wake + audit settle shape"
 assert_contains "pending wake armed for the run" '"kind":"restart"' "$J"

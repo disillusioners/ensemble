@@ -807,6 +807,58 @@ class TestCase5NotifyContents:
         assert "systemctl" in body_halt
         assert "restart_current" not in body_halt
 
+    def test_g51_none_vs_zero_dict_distinct(self, tmp_path: Path):
+        """G-5.1 coverage pin (tester micro-fix cycle): the V-8 None ≠
+        zero-dict discriminator is asserted DISTINCTLY — boot-resolution
+        record ABSENT (None) renders the named unavailable form and NOT
+        an applied claim; a populated winning-db resolution renders
+        (applied) and NOT unavailable. (The pre-existing pin was a
+        disjunction — `"unavailable" in body or "applied" in body` —
+        which cannot distinguish the two.)"""
+        from daemon.services import settings_service as ss
+        from daemon.services.upgrade_journal_sweep import (
+            UpgradeJournalSweepService,
+        )
+
+        svc = UpgradeJournalSweepService(tmp_path, manager=_manager())
+        wake = uj.PendingWake(
+            run_id="r-g51", kind="restart", env="live",
+            arming_instance_id=INSTANCE_ID,
+        )
+        audit = {
+            "overrides": [
+                {"key": "limits.worker_pool_size", "live_before": 5,
+                 "db_value": 7, "status": "pending"}
+            ]
+        }
+        # (a) None — unavailable, NAMED; no applied claim
+        ss.set_last_applied_resolution(None)
+        body = svc._render_applied_overrides(wake, audit)
+        assert "unavailable — boot resolution record absent" in body, body
+        assert "(applied)" not in body, body
+        assert "not-applied" not in body, body
+        # (b) populated + db wins + value matches → applied
+        ss.set_last_applied_resolution(
+            {"limits.worker_pool_size": {
+                "source": "db", "value": 7, "default": 5,
+                "env_value": None, "yaml_value": None, "db_override": 7,
+            }}
+        )
+        body = svc._render_applied_overrides(wake, audit)
+        assert "limits.worker_pool_size: 5→7 (applied)" in body, body
+        assert "unavailable" not in body, body
+        # (c) populated but a NON-db tier wins → not-applied with the tier
+        ss.set_last_applied_resolution(
+            {"limits.worker_pool_size": {
+                "source": "env", "value": 5, "default": 5,
+                "env_value": 5, "yaml_value": None, "db_override": 7,
+            }}
+        )
+        body = svc._render_applied_overrides(wake, audit)
+        assert "not-applied — resolved tier=env" in body, body
+        # restore the module-global (other tests read it)
+        ss.set_last_applied_resolution(None)
+
     def test_outcome_labels_x4(self) -> None:
         for key in (
             "restart_gate", "restart_abandoned", "stop_forced_kill",
