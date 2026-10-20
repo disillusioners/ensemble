@@ -1379,10 +1379,17 @@ class TestInstallerSkillHygiene:
 #   agents/devops/rule.md                                    | :133 get-confirmation -> report channel (B3 addendum)
 # developer[v2]/rule.md + planner[v2]/rule.md carry the SAME byte-identical sections but are NOT
 # sealed (only their tools_note.md files are) — no constant for them.
+# 2026-10-20 hide-question-tool-nonroot UNAUDITED-DIRS round re-pin (1 file, constants-only,
+# recomputed from real file bytes on the feature worktree — the "## Open questions for the
+# orchestrator" canonical home (byte-exact worker/rule.md core) added to the 2 of 13 unaudited dirs
+# that carry it; the other 34 entries keep their values):
+#   agents/charter/rule.md | canonical home added (SEALED — re-pinned; the pre-work NEEDS MORE INFO
+#                            result is an input-acquisition abort, not a report-time open question)
+# agents/blueprinter/rule.md carries the same canonical home but is NOT sealed — no constant for it.
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "2a5078f93bd2dcfe427900e85c075ee9671b8aedae17d07c7ef6abb6df4603ab",
-    "agents/charter/rule.md": "2ee5d27d5bbc09474dbcb78de49d6cbcfc8074f98b3ec358cfecc4c5aae26701",
+    "agents/charter/rule.md": "2cb6e01b3bdfd07865aed967d524b98d7bcd965f60ffd741e52a7ee71c44573c",
     "agents/charter/soul.md": "458f65a608b495df0cac8c565a83663595ea85c3d13a200295dc611189387aad",
     "agents/charter/meta.json": "e1034e1d92e7bb30f2d39ab0a625a661287251cf5ca961cbeba3e1893dcfd492",
     "agents/charter/skills-template/install-mermaid-cli.md": "4082a47f9662da283746a6f7719e38d82b473dacc61d52bc8e021a362322dbe4",
