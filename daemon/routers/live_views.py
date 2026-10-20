@@ -1142,27 +1142,29 @@ def _render_board_body(request: Request, csp_nonce: str) -> str:
             limit=DEFAULT_RENDER_LIMIT,
         )
         filter_options = fetch_filter_options(board_service)
+        counts = _board_status_counts(items)
+        generated_at = _now_iso_utc()
+        # A2 (council): the RENDER is inside the guard too — a render
+        # exception degrades to the "board backend unavailable" notice,
+        # never a public 500.
+        return render_board(
+            csp_nonce=csp_nonce,
+            items=items,
+            filter_options=filter_options,
+            active_filters={
+                "status": status,
+                "project": project,
+                "tag": tag,
+            },
+            counts=counts,
+            generated_at=generated_at,
+            shown=len(items),
+            total=total,
+            truncated=truncated,
+        )
     except Exception as exc:  # noqa: BLE001 — degrade, never 500
         logger.warning("[LiveViews] board render failed: %s", exc)
         return render_unavailable(csp_nonce=csp_nonce)
-
-    counts = _board_status_counts(items)
-    generated_at = _now_iso_utc()
-    return render_board(
-        csp_nonce=csp_nonce,
-        items=items,
-        filter_options=filter_options,
-        active_filters={
-            "status": status,
-            "project": project,
-            "tag": tag,
-        },
-        counts=counts,
-        generated_at=generated_at,
-        shown=len(items),
-        total=total,
-        truncated=truncated,
-    )
 
 
 def _board_filter_status(value: str | None) -> str | None:

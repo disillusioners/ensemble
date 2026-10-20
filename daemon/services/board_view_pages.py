@@ -42,10 +42,12 @@ Security posture
 
 Bounds
 ------
-The rendered body is capped at 2 MiB. The cap is enforced DURING
-assembly (a post-hoc slice would cut mid-tag): the row builder stops
-adding rows when the next one would exceed the ceiling and appends a
-VISIBLE notice. Never a 500, never a silent cut.
+The rendered body is capped at 2 MiB — counted in BYTES (the UTF-8
+encoding length of every part, INCLUDING the shell/wrapper), never in
+characters. The cap is enforced DURING assembly (a post-hoc slice
+would cut mid-tag): the row builder stops adding rows when the next
+one would exceed the ceiling and appends a VISIBLE notice. Never a
+500, never a silent cut.
 """
 
 from __future__ import annotations
@@ -329,6 +331,46 @@ def _item_row(item: BoardItemView) -> str:
     )
 
 
+#: The page's footer note — the D11 "filters are a VIEW concern, not
+#: access control" disclosure. A module constant so the render budget
+#: can RESERVE its bytes up-front: the FINAL document must never
+#: exceed the ceiling, and the footer is part of that document.
+_FOOTER_NOTE = (
+    '<p class="note">Filters are a VIEW concern, not access control — a '
+    "passcode holder sees the whole board; a filter only narrows what is "
+    "displayed.</p>\n"
+)
+
+
+def _format_bytes(value: int) -> str:
+    """Render a byte count for the ceiling disclosure.
+
+    ``2 * 1024 * 1024`` → ``2 MiB`` (byte-identical to the historical
+    wording); any other ceiling names ITSELF, so the notice never
+    claims a cap the render did not enforce.
+    """
+    if value >= 1024 * 1024 and value % (1024 * 1024) == 0:
+        return str(value // (1024 * 1024)) + " MiB"
+    if value >= 1024 and value % 1024 == 0:
+        return str(value // 1024) + " KiB"
+    return str(value) + " bytes"
+
+
+def _truncation_notice(budget: int) -> str:
+    """The VISIBLE truncation notice — it names the ACTUAL ceiling.
+
+    The notice is assembled BEFORE the rows are added (its bytes are
+    RESERVED from the budget), so the ceiling it quotes is the one the
+    render really enforced.
+    """
+    return (
+        '<p class="warn">Output truncated at the '
+        + _format_bytes(budget)
+        + " render ceiling — narrow the filters to see the remaining "
+        "items.</p>\n"
+    )
+
+
 def render_board(
     *,
     csp_nonce: str,
@@ -410,13 +452,18 @@ def render_board(
     parts.append('<p class="counts">' + disclosure + "</p>\n")
 
     # The status-count row.
+    #
+    # A1 (council): the chips describe the RENDERED set — the rows
+    # that survived the byte ceiling — NOT the fetched set. The
+    # ``rendered:`` label says so; without it the chips read as a
+    # board-wide total.
     status_counts = counts.get("statuses", {}) or {}
     if status_counts:
         chips = " · ".join(
             _esc(key) + ": " + _esc(value)
             for key, value in sorted(status_counts.items())
         )
-        parts.append('<p class="counts">' + chips + "</p>\n")
+        parts.append('<p class="counts">rendered: ' + chips + "</p>\n")
     if filter_options.get("truncated"):
         parts.append(
             '<p class="warn">The filter-option set is capped at '
@@ -436,6 +483,14 @@ def render_board(
         )
 
     # The table — assembled under the byte ceiling.
+    #
+    # W1 (council): the ceiling is counted in BYTES, not CHARACTERS.
+    # The old counter summed ``len(part)`` — characters — so a CJK
+    # board measured 2,071,261 characters was actually ~6.1 MB: 2.9x
+    # the claimed 2 MiB cap. Every part is counted by its UTF-8
+    # encoding length, and the SHELL (the wrapper + the CSS + the
+    # nonce) is SEEDED into the budget — the shell now counts toward
+    # the cap (this also closes the ~2 KB wrapper overshoot).
     table: list[str] = []
     table.append("<table>\n")
     table.append(
@@ -448,38 +503,45 @@ def render_board(
     rendered = 0
     truncated_by_bytes = False
     budget = max(0, int(max_bytes))
-    # The ceiling covers the WHOLE rendered body, not just the table —
-    # the running counter starts at the bytes already committed.
-    used = sum(len(part) for part in parts)
-    used += len(table[0]) + len(table[1]) + len(table[2])
+    # The SHELL overhead — the wrapper rendered with an EMPTY body:
+    # the exact bytes the final document spends on everything but the
+    # body itself.
+    shell_bytes = len(
+        _shell(
+            title="Work board", body_inner="", csp_nonce=csp_nonce
+        ).encode("utf-8")
+    )
+    used = shell_bytes + sum(len(part.encode("utf-8")) for part in parts)
+    used += sum(len(part.encode("utf-8")) for part in table)
+    # The bytes that come AFTER the rows — the closing table tags, the
+    # truncation notice and the footer note — are RESERVED up-front, so
+    # the FINAL document can never exceed the ceiling.
+    reserve = sum(
+        len(part.encode("utf-8"))
+        for part in (
+            "</tbody>\n",
+            "</table>\n",
+            _truncation_notice(budget),
+            _FOOTER_NOTE,
+        )
+    )
     for item in items:
         row = _item_row(item)
-        if used + len(row) > budget:
+        row_bytes = len(row.encode("utf-8"))
+        if used + row_bytes + reserve > budget:
             truncated_by_bytes = True
             break
         table.append(row)
-        used += len(row)
+        used += row_bytes
         rendered += 1
     table.append("</tbody>\n")
     table.append("</table>\n")
     parts.extend(table)
 
     if truncated_by_bytes:
-        parts.append(
-            '<p class="warn">Output truncated at the 2 MiB render ceiling — '
-            "narrow the filters to see the remaining items.</p>\n"
-        )
-    elif rendered < len(items):
-        parts.append(
-            '<p class="warn">Output truncated at the 2 MiB render ceiling — '
-            "narrow the filters to see the remaining items.</p>\n"
-        )
+        parts.append(_truncation_notice(budget))
 
-    parts.append(
-        '<p class="note">Filters are a VIEW concern, not access control — a '
-        "passcode holder sees the whole board; a filter only narrows what is "
-        "displayed.</p>\n"
-    )
+    parts.append(_FOOTER_NOTE)
 
     return _shell(
         title="Work board",

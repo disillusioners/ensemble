@@ -539,3 +539,19 @@ counts were **re-confirmed at this commit**.
 | **P2-PIN-1** | (1) `ENSEMBLE_SELF_ENV=dev POSTGRES_DB=ensemble_dev DAEMON_PORT=8079 .venv/bin/python -m pytest tests/integration/test_service_tool_flag_off_byte_identical.py -m integration -q` · (2) `ENSEMBLE_SELF_ENV=dev POSTGRES_DB=ensemble_dev DAEMON_PORT=8079 .venv/bin/python -m pytest tests/integration/test_maintenancer_spawn_resolves_tools.py -q` | (1) **9 passed, 1 warning in 8.02s** — every case in that file is `@pytest.mark.integration` ⇒ **deselected** by the repo's default `addopts` (`-m 'not integration and not postgres and not slow'`) ⇒ `-m integration` is **REQUIRED** there. · (2) **13 passed, 1 warning in 2.03s** — that file carries **NO** integration marker ⇒ it runs in the **DEFAULT** selection; forcing `-m integration` would **DESELECT** it. | 2026-10-20 | `258aee4d58fb59c9bbce0c7fd70320c3716fefa0` |
 
 Both runs are **green** — the W1 artifact gap is closed by this row.
+
+
+## C10 — Phase 3 (`live views`) IMPLEMENTATION rows (2026-10-20)
+
+Phase 3 landed on `feature/ari-tools` (worktree `/home/nea/ensemble-src-wt-ari-tools`, base
+`39cce206a`). The reviewer council's pre-merge gate (W1 + W2 + W3, advisories A1–A4) and the
+leader's promotion of W3 to a must-fix are folded into **ONE** remediation commit on top of the
+phase-3 stack. Every deviation from the binding plan ([phase3-plan.md](phase3-plan.md)) is listed
+here with its EVIDENCE — the "implement intent, record evidence" path. **ONE** deviation row is
+logged here (**P3-DEV-1**); the §C10.1 heading carries the same count.
+
+### C10.1 — Deviation rows (each with evidence + disposition) — ONE row (P3-DEV-1)
+
+| ID | Plan clause | Deviation | Evidence | Disposition |
+|----|-------------|-----------|----------|-------------|
+| **P3-DEV-1** | §4.4 Filters — "Query params (zero-JS form, `method="get"`, action = the board URL): `?status=todo\|in_progress\|blocked\|done` · `?project=<project_id>` · `?tag=<tag>`" | The board page ALSO exposes a FIFTH status filter value — **`?status=open`**. The filter form's `<select>` offers it (`STATUS_OPTIONS`, `daemon/services/board_view_pages.py:65-72`) and the router accepts it (`_board_filter_status`, `daemon/routers/live_views.py:1170-1184`). | §4.4 enumerates a **SUBSET** of the values the FROZEN phase-1 seam already supports: `list_items(status="open")` is native — `daemon/services/board_service.py:371-374` maps it to `BOARD_OPEN_STATUSES` (`todo\|in_progress\|blocked`; `done` is the only terminal status), which phase 1 established as the **documented magic value** (phase1-plan.md:312, 339) and on which the agent's session-open procedure depends (plan-overview.md:426). Exposing the same value on the human-facing board is a **SUPERSET** of the plan's filter set, not a contradiction — and it cannot widen access: filters are VIEW concerns, never access control (D11 — a passcode holder still sees the whole board; a filter only narrows the display). | **RECORDED — the code stays as-is.** This row is a record, NOT a behaviour change: the plan file is not amended by it, and the value is inherited from the frozen seam (removing it would require a phase-1 change — outside phase 3's scope). |

@@ -27,10 +27,21 @@ Shape tolerance
 Phase 1 returns plain ``dict`` rows, but the adapter is tolerant of
 BOTH shapes (``obj["x"]`` and ``getattr(obj, "x", None)``) — the
 in-tree precedent is ``_row_locked`` / ``_row_generation`` in
-``daemon/routers/live_views.py``. The adapter also tolerates a list
-that carries NO ``notes`` key (a ``with_notes=False`` shape): it falls
-back to a bounded per-row ``get_item`` and degrades a row to "notes
-unavailable" rather than failing the render.
+``daemon/routers/live_views.py``. A row that carries NO ``notes`` key
+means **ZERO notes** — Phase 1's projection OMITS the key for a row
+with no notes (``notes=notes_by_item.get(row.id)`` → ``None`` → the
+key is never added) — so the adapter projects such a row DIRECTLY. It
+never re-hydrates per row: the per-row ``get_item`` fallback was an
+N+1 on the DEFAULT board state (a 50-row zero-note board = 153
+queries, each taking the process ``_write_lock`` — every public
+render contended with the writer).
+
+The ROW ORDER is the SEAM's order (``ORDER BY updated_at DESC``) BY
+CONSTRUCTION: the projection is re-assembled by WALKING the fetched
+rows, never by concatenating passes. A concatenation reordered the
+board (a seam order of A, B, C rendered B, A, C) and — because the
+reorder preceded the 50-row cap — DROPPED the newest rows of a
+55-row board.
 
 Bounded by construction
 -----------------------
@@ -56,7 +67,6 @@ re-splits the snapshot the page renders from).
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 import re
 from dataclasses import dataclass, field
@@ -341,72 +351,45 @@ def fetch_board_items(
     # WAS hit the true match count is LARGER, and the page's
     # disclosure says so ("N of M+ items — fetch bound").
     total = len(raw_items)
-    projected: list[BoardItemView] = []
-    needs_per_row: list[Any] = []
+    # The PROJECTION pass — every row is projected DIRECTLY.
+    #
+    # W2 (council): a MISSING ``notes`` key means ZERO notes, NOT
+    # "needs re-hydration". Phase 1's ``_row_to_item`` OMITS the key
+    # for a row with no notes (``notes=notes_by_item.get(row.id)`` →
+    # ``None`` → the key is never added) ⇒ on the DEFAULT board state
+    # (zero-note rows) the old per-row ``get_item`` fallback fired for
+    # EVERY row: a 50-row board = 153 queries, each taking the process
+    # ``_write_lock``.
+    views_by_id: dict[str, BoardItemView] = {}
     for raw in raw_items:
         notes = _get(raw, "notes")
-        if notes is None:
-            # Shape-tolerant fallback: this row carries NO notes ⇒ the
-            # per-row ``get_item`` seam.
-            needs_per_row.append(raw)
+        view = _project_item(raw, notes=notes if notes is not None else [])
+        if view is None:
+            # A non-conforming id is DROPPED (it is echoed into the
+            # markup) — never rendered.
             continue
-        view = _project_item(raw, notes=notes)
+        views_by_id[view.id] = view
+
+    # The ROW ORDER is the SEAM's order (``ORDER BY updated_at DESC``)
+    # BY CONSTRUCTION (W3, council): the projection is re-assembled by
+    # WALKING ``raw_items`` — the fetched order — never by
+    # concatenating passes. The old shape appended the per-row
+    # hydrated rows AFTER the batch rows, so a seam order of A, B, C
+    # rendered B, A, C and — because the reorder preceded the 50-row
+    # cap — a 55-row board DROPPED its 5 NEWEST rows.
+    projected: list[BoardItemView] = []
+    for raw in raw_items:
+        item_id = _as_text(_get(raw, "id"))
+        view = views_by_id.get(item_id)
         if view is not None:
             projected.append(view)
 
-    if needs_per_row:
-        # Bounded at the RENDER limit (the rows that are actually
-        # rendered), and a failing row degrades to "notes unavailable"
-        # — never a 500.
-        projected.extend(
-            _hydrate_rows_per_row(
-                board_service, needs_per_row, limit=limit
-            )
-        )
-
     # The rows actually rendered are the first ``limit`` of the
-    # projection; the disclosure compares the rendered count against
-    # the number that matched — the EXACT count when the bound was
-    # NOT hit, a lower bound when it was.
+    # projection — the seam's NEWEST rows; the disclosure compares
+    # the rendered count against the number that matched — the EXACT
+    # count when the bound was NOT hit, a lower bound when it was.
     rendered = projected[: max(0, int(limit))]
     return rendered, total, has_more
-
-
-def _hydrate_rows_per_row(
-    board_service: Any,
-    raw_items: list[Any],
-    *,
-    limit: int,
-) -> list[BoardItemView]:
-    """Per-row ``get_item`` fallback for a notes-less list shape.
-
-    Bounded at the render limit (the default 50) — the N+1 is the
-    FALLBACK, not the normal path (Phase 1 hydrates notes in batch).
-    A failing row degrades to "notes unavailable"; it never fails the
-    render.
-    """
-    projected: list[BoardItemView] = []
-    for raw in list(raw_items)[: max(0, int(limit))]:
-        item_id = _as_text(_get(raw, "id"))
-        notes: list[Any] = []
-        unavailable = False
-        try:
-            single = board_service.get_item(item_id=item_id)
-            notes = _get(single, "notes", []) or []
-        except Exception as exc:  # noqa: BLE001 — degrade, never 500
-            logger.warning(
-                "[board_view] notes unavailable for item %s: %s",
-                item_id[:32],
-                exc,
-            )
-            unavailable = True
-        view = _project_item(raw, notes=notes)
-        if view is None:
-            continue
-        if unavailable:
-            view = dataclasses.replace(view, notes_unavailable=True)
-        projected.append(view)
-    return projected
 
 
 def fetch_filter_options(

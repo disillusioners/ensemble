@@ -48,15 +48,16 @@ HOME-derived or live-shaped path is resolved anywhere in this file.
 from __future__ import annotations
 
 import pathlib
+import re
 from typing import Iterator
 
 import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.pool import NullPool, StaticPool
-from sqlmodel import SQLModel
+from sqlmodel import Session, SQLModel
 
 from daemon.config import LiveViewsConfig, LiveViewsRootConfig
 from daemon.routers.live_views import build_router
@@ -530,8 +531,32 @@ class TestShadowingGuard:
             REPO_ROOT / "daemon" / "routers" / "live_views.py"
         ).read_text(encoding="utf-8")
         start = source.index("    async def _public_post(")
-        end = source.index("    @router.get(\"/public/board/index.html\")")
+        # The FUNCTION SCOPE anchor — the next same-indent
+        # definition. It is ALWAYS after the start ⇒ the slice
+        # can never be inverted.
+        scope = re.search(
+            r"^    (?:async )?def ", source[start + 1:], re.MULTILINE
+        )
+        assert scope is not None, (
+            "no function-scope anchor after _public_post"
+        )
+        end = start + 1 + scope.start()
+        # The board-route decorator — a WIDER end anchor when it
+        # also sits after the start (it widens the guarded span,
+        # never inverts it).
+        route = source.find(
+            '    @router.get("/public/board/index.html")'
+        )
+        if route > start:
+            end = max(end, route)
         body = source[start:end]
+        assert start < end, (
+            "the _public_post slice is inverted (vacuous pin)"
+        )
+        assert len(body) > 1000, (
+            "the _public_post slice is too small (%d bytes) — the pin "
+            "would be vacuous" % len(body)
+        )
         assert "is_reserved_root_name" not in body
         assert "has_root" not in body
 
@@ -1047,6 +1072,347 @@ class TestBackendUnavailable:
                 raise AttributeError("not wired")
 
         client.app.state.manager = _BrokenManager()
+        passcode_service.mint(BOARD_ROOT, BOARD_REL, "inst-1")
+        _grant(client, cipher)
+        resp = client.get(BOARD_PATH)
+        assert resp.status_code == 200
+        assert "unavailable" in resp.text.lower()
+        # No stack trace / internal detail.
+        assert "RuntimeError" not in resp.text
+        assert "Traceback" not in resp.text
+
+
+# ─────────────────────────────────────────────────────────────────
+# The council REMEDIATION pins (2026-10-20) — W1 (the render ceiling
+# is a BYTE ceiling), W2 (the default path is not an N+1), W3 (the
+# rendered row order IS the seam's order).
+# ─────────────────────────────────────────────────────────────────
+
+
+def _rendered_ids(body: str) -> list[str]:
+    """The board item ids in RENDER order — the row order."""
+    return re.findall(r"wi-[0-9a-f]{8}", body)
+
+
+def _pin_updated_at(engine, item_id: str, instant: str) -> None:
+    """Pin one row's ``updated_at`` — a DETERMINISTIC ordering.
+
+    The subject under test is the SEAM's ``ORDER BY updated_at DESC``
+    as the adapter and the renderer carry it through. Pinning the
+    instants removes the clock from the assertion; the board service
+    itself is untouched (this only sets up state).
+    """
+    with Session(engine) as session:
+        session.connection().execute(
+            text(
+                "UPDATE board_items SET updated_at = :instant "
+                "WHERE id = :item_id"
+            ),
+            {"instant": instant, "item_id": item_id},
+        )
+        session.commit()
+
+
+class TestByteTrueRenderCeiling:
+    """W1 — the ceiling is counted in BYTES, not characters."""
+
+    def test_the_render_ceiling_is_counted_in_bytes_not_characters(
+        self,
+    ) -> None:
+        """The final document is provably <= 2 MiB of UTF-8 BYTES.
+
+        The old counter summed ``len(part)`` — CHARACTERS. A CJK board
+        measured 2,071,261 characters was actually ~6.1 MB: 2.9x the
+        claimed cap. The render is capped in BYTES now.
+        """
+        from daemon.services.board_view_pages import (
+            MAX_RENDERED_BYTES,
+            render_board,
+        )
+        from daemon.services.board_view_service import BoardItemView
+
+        # CJK — 3 UTF-8 bytes per character.
+        cjk = "これはテスト用のボード行です。" * 1500
+        body_bytes_per_row = len(cjk.encode("utf-8"))
+        items = [
+            BoardItemView(
+                id="wi-%08x" % index,
+                title="row %d" % index,
+                body_md=cjk,
+                status="todo",
+                tags=["alpha"],
+            )
+            for index in range(50)
+        ]
+        body = render_board(
+            csp_nonce="n",
+            items=items,
+            filter_options={},
+            active_filters={},
+            counts={},
+            generated_at="now",
+            shown=len(items),
+            total=len(items),
+        )
+        encoded = len(body.encode("utf-8"))
+        assert encoded <= MAX_RENDERED_BYTES, (
+            "the rendered body is %d bytes — over the %d byte cap"
+            % (encoded, MAX_RENDERED_BYTES)
+        )
+        # NOT a vacuous pass — the budget really engaged ...
+        assert "truncated" in body.lower()
+        # ... and the fixture is one the OLD character-counter would
+        # have blown: it fits every row under the CHARACTER budget
+        # (each row is 3x its character count in bytes).
+        rows_the_old_counter_would_have_rendered = (
+            MAX_RENDERED_BYTES // len(cjk)
+        )
+        assert rows_the_old_counter_would_have_rendered >= len(items)
+        assert (
+            rows_the_old_counter_would_have_rendered * body_bytes_per_row
+            > MAX_RENDERED_BYTES
+        )
+
+
+class TestNoNPlusOneOnTheDefaultPath:
+    """W2 — a zero-note board (the DEFAULT state) is not an N+1."""
+
+    def test_a_50_row_zero_note_board_costs_at_most_4_queries(
+        self, board_engine, board_service
+    ) -> None:
+        """The adapter's default path is ONE batched read, not 153.
+
+        Phase 1's projection OMITS the ``notes`` key for a row with no
+        notes ⇒ the old adapter read that absence as "needs per-row
+        hydration" and called ``get_item`` for EVERY row: a 50-row
+        board = 153 queries, each taking the process ``_write_lock``.
+
+        Counted over the REAL service on REAL SQLite with a SQLAlchemy
+        ``before_cursor_execute`` listener — a mock's return value can
+        never prove a query count.
+        """
+        from daemon.services.board_view_service import fetch_board_items
+
+        for index in range(50):
+            board_service.create_item(
+                title="row %d" % index,
+                body_md="body text",
+                tags=["alpha"],
+                created_by_instance="inst-1",
+            )
+        statements: list[str] = []
+
+        def _record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        event.listen(board_engine, "before_cursor_execute", _record)
+        try:
+            items, total, truncated = fetch_board_items(board_service)
+        finally:
+            event.remove(board_engine, "before_cursor_execute", _record)
+
+        assert len(items) == 50
+        assert total == 50
+        assert truncated is False
+        assert len(statements) <= 4, statements
+        # Decisive: exactly ONE items query (the batch) — never one
+        # per row.
+        item_queries = [s for s in statements if "FROM board_items" in s]
+        assert len(item_queries) == 1, item_queries
+
+    def test_the_public_board_render_stays_inside_the_query_budget(
+        self,
+        client,
+        board_engine,
+        passcode_service,
+        board_service,
+        cipher,
+    ) -> None:
+        """The PUBLIC render does not grow with the row count either.
+
+        The page render is ``fetch_board_items`` (3 queries: items +
+        batched tags + batched notes) + ``fetch_filter_options``
+        (2: items + batched tags). It must NOT scale with the rows.
+        """
+        for index in range(50):
+            board_service.create_item(
+                title="row %d" % index,
+                body_md="body text",
+                tags=["alpha"],
+                created_by_instance="inst-1",
+            )
+        passcode_service.mint(BOARD_ROOT, BOARD_REL, "inst-1")
+        _grant(client, cipher)
+        statements: list[str] = []
+
+        def _record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        event.listen(board_engine, "before_cursor_execute", _record)
+        try:
+            resp = client.get(BOARD_PATH)
+        finally:
+            event.remove(board_engine, "before_cursor_execute", _record)
+
+        assert resp.status_code == 200
+        assert len(statements) <= 8, statements
+        # One items query per list_items call (two calls) — never one
+        # per row.
+        item_queries = [s for s in statements if "FROM board_items" in s]
+        assert len(item_queries) == 2, item_queries
+
+
+class TestRowOrderIsTheSeamOrder:
+    """W3 — the rendered row order IS the seam's order."""
+
+    def test_a_mixed_notes_board_renders_updated_at_desc_exactly(
+        self,
+        client,
+        board_engine,
+        passcode_service,
+        board_service,
+        cipher,
+    ) -> None:
+        """The rendered order is ``updated_at DESC`` — EXACTLY.
+
+        The old adapter concatenated the batch-projected rows BEFORE
+        the per-row-hydrated ones, so a seam order of A, B, C rendered
+        B, A, C. The re-assembly now walks the fetched rows.
+        """
+        names = ["alpha", "bravo", "charlie", "delta", "echo"]
+        ids: list[str] = []
+        for name in names:
+            item = board_service.create_item(
+                title=name,
+                body_md="body text",
+                tags=["alpha"],
+                created_by_instance="inst-1",
+            )
+            ids.append(item["id"])
+        # NOTES on a SUBSET — the mixed-notes board.
+        board_service.update_item(
+            item_id=ids[1], note="note on bravo", author_instance="inst-1"
+        )
+        board_service.update_item(
+            item_id=ids[3], note="note on delta", author_instance="inst-1"
+        )
+        # Pin the instants (ascending with the names) — deterministic.
+        for index, item_id in enumerate(ids):
+            _pin_updated_at(
+                board_engine,
+                item_id,
+                "2026-01-%02dT00:00:00.000000+00:00" % (index + 1),
+            )
+        passcode_service.mint(BOARD_ROOT, BOARD_REL, "inst-1")
+        _grant(client, cipher)
+        body = client.get(BOARD_PATH).text
+        # The seam's order: updated_at DESC ⇒ newest first.
+        assert _rendered_ids(body) == [
+            ids[4],
+            ids[3],
+            ids[2],
+            ids[1],
+            ids[0],
+        ]
+        # The board really is mixed (the notes rendered).
+        assert "note on bravo" in body
+        assert "note on delta" in body
+
+    def test_a_55_row_board_renders_the_50_newest_rows(
+        self,
+        client,
+        board_engine,
+        passcode_service,
+        board_service,
+        cipher,
+    ) -> None:
+        """The 50-row cap takes the NEWEST rows, never the oldest.
+
+        The old shape reordered BEFORE the cap (the notes-less rows
+        were appended at the END of the batch-projected ones), so the
+        NEWEST notes-less rows fell off the END of the 50-row window
+        and were never rendered — while the disclosure still said
+        "Showing 50 of 55 items".
+
+        The board is MIXED on purpose: the 50 OLDER rows carry notes
+        (so the old adapter's batch pass claimed them) and the 5
+        NEWEST rows carry none (so the old adapter's per-row pass
+        pushed them to the tail — past the cap).
+        """
+        ids: list[str] = []
+        for index in range(55):
+            item = board_service.create_item(
+                title="row %d" % index,
+                body_md="body text",
+                tags=["alpha"],
+                created_by_instance="inst-1",
+            )
+            ids.append(item["id"])
+        # Notes on the 50 OLDER rows only.
+        for item_id in ids[:50]:
+            board_service.update_item(
+                item_id=item_id,
+                note="a note",
+                author_instance="inst-1",
+            )
+        for index, item_id in enumerate(ids):
+            _pin_updated_at(
+                board_engine,
+                item_id,
+                "2026-02-01T00:00:%02d.000000+00:00" % index,
+            )
+        passcode_service.mint(BOARD_ROOT, BOARD_REL, "inst-1")
+        _grant(client, cipher)
+        body = client.get(BOARD_PATH).text
+        rendered = _rendered_ids(body)
+        assert len(rendered) == 50
+        # The 50 NEWEST (ids[54] … ids[5]) — the OLDEST 5 are dropped.
+        assert rendered == list(reversed(ids[5:]))
+        # The disclosure stays count-truthful.
+        assert "Showing 50 of 55 items" in body
+
+
+class TestTruthfulBoardChrome:
+    """A1 / A2 — the chrome says what it means, and never 500s."""
+
+    def test_the_status_chips_are_labelled_as_the_rendered_set(
+        self, client, passcode_service, board_service, cipher
+    ) -> None:
+        """A1 — the chips describe the RENDERED set, and say so.
+
+        Without the label the chips read as a board-wide total; they
+        are the counts of the rows that survived the byte ceiling.
+        """
+        board_service.create_item(
+            title="A row",
+            body_md="body text",
+            tags=["alpha"],
+            created_by_instance="inst-1",
+        )
+        passcode_service.mint(BOARD_ROOT, BOARD_REL, "inst-1")
+        _grant(client, cipher)
+        body = client.get(BOARD_PATH).text
+        assert "rendered: todo: 1" in body
+
+    def test_a_render_failure_degrades_to_the_notice_never_a_500(
+        self,
+        client,
+        passcode_service,
+        board_service,
+        cipher,
+        monkeypatch,
+    ) -> None:
+        """A2 — a render exception is a NOTICE, never a public 500.
+
+        The render call now sits INSIDE the board's try/except, so a
+        failing render degrades exactly like a failing fetch does.
+        """
+        import daemon.services.board_view_pages as pages
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("render exploded")
+
+        monkeypatch.setattr(pages, "render_board", _boom)
         passcode_service.mint(BOARD_ROOT, BOARD_REL, "inst-1")
         _grant(client, cipher)
         resp = client.get(BOARD_PATH)
