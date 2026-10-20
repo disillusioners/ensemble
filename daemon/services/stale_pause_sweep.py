@@ -5,8 +5,9 @@ Feature: ``fix/question-pause-resume-asymmetry``.
 THE GAP THIS FILLS
 ------------------
 ``ask_questions`` parks the asker's whole tree. The answer path
-un-pauses the asker (and, since this commission, the RECORDED
-side-effect set). But there are holes the symmetric path cannot close:
+releases the asker (and, since this commission, the RECORDED
+side-effect set). But there are holes the symmetric release cannot
+close:
 
 * the answer was delivered BEFORE the deferred pause landed (the pause
   then has no answering counterpart);
@@ -26,18 +27,24 @@ Periodic + boot pass over instances that are:
   * parked longer than the age bound (default 2h — comfortably longer
     than any legitimate "waiting for the user's answer" window, and
     longer than the question wedge-guard's own escalation horizon);
-  * with NO live task row (no ``pending`` / ``running`` / ``paused``
-    turn — nothing owns the instance);
+  * with NO LIVE TURN — the selector admits an instance whose task row
+    is ``pending``/``running``/``paused`` ONLY when the task is
+    ``paused``: a PAUSED task is EXACTLY the shape of a question-pause
+    side-effect target (the cascade suspends the child's RUNNING turn),
+    and a PAUSED task is NOT claimable by the worker pool, so such an
+    instance can never complete on its own. A ``pending``/``running``
+    task means the worker pool owns the turn — those instances are NOT
+    candidates;
   * with NO outstanding question anywhere in their permanent-lineage
     tree (D1 — see below).
 
-Candidates are un-paused and given a natural resume (a silent
-checkpoint resume) so their turn can complete and their parent can
-leave ``waiting_children``. The sweeper NEVER finalizes an instance
-(never writes a terminal status): finalizing is irreversible and
-user-visible, and "the report was already delivered" is not reliably
-determinable for a parked instance (a parked ``waiting_children``
-instance has no claimable task by construction).
+Candidates are released (un-paused + a natural resume) so their turn
+can complete and their parent can leave ``waiting_children``. The
+sweeper NEVER finalizes an instance (never writes a terminal status):
+finalizing is irreversible and user-visible, and "the report was
+already delivered" is not reliably determinable for a parked instance
+(a parked ``waiting_children`` instance has no claimable task by
+construction).
 
 D1 — PREDICATE SCOPE (asker-scoped vs tree-scoped)
 --------------------------------------------------
@@ -54,6 +61,11 @@ question") would release a side-effect target while its asker still
 holds a pending question — the tree would be torn apart mid-question.
 The 2h age bound is the second line of defence for both readings.
 
+The probe is FAIL-CLOSED: when the lineage tree is too large to probe
+completely (see ``_MAX_TREE_PROBE_SIZE``), the candidate is treated as
+PROTECTED (skipped) rather than released — a missed release is
+recoverable (the next cycle), a wrong release is not.
+
 This choice is PINNED by a test
 (``tests/unit/test_question_pause_resume_asymmetry.py``).
 
@@ -69,6 +81,13 @@ coroutine onto the manager's loop (``run_coroutine_threadsafe``) —
 the RDRS pattern. The BOOT pass is awaited DIRECTLY on the lifespan's
 loop (no bridge at all), so no pass ever bridges a coroutine onto the
 loop thread it is running on (the self-block class).
+
+EVENT-LOOP DISCIPLINE
+---------------------
+Every blocking repository call in this module is wrapped in
+``asyncio.to_thread`` — the project convention for DB calls on the
+event-loop thread. Without it, a batch of 100 candidates × a 256-member
+tree probe would stall the loop for seconds.
 """
 
 from __future__ import annotations
@@ -95,40 +114,67 @@ DEFAULT_STALE_PAUSE_INTERVAL_SECONDS: int = 300
 DEFAULT_STALE_PAUSE_BATCH_CAP: int = 100
 
 #: Upper bound on the tree size inspected by the D1 pending-question
-#: probe (a runaway tree must not turn the sweep into an unbounded
-#: metadata scan).
+#: probe. A tree larger than this is NOT probed completely → the
+#: candidate is treated as PROTECTED (fail-closed).
 _MAX_TREE_PROBE_SIZE: int = 256
 
+#: Instance statuses that mean "this instance is still doing something"
+#: — a live DESCENDANT is the signal that the candidate is a
+#: ``waiting_children`` parent (its turn completed; it is parked
+#: waiting for its children, and the dependency bus owns its wake).
+_LIVE_STATUSES: frozenset[str] = frozenset(
+    {"running", "waiting_children", "queued", "waiting"}
+)
 
-def _pending_question_in_tree(
+
+async def _pending_question_in_tree(
     manager: "InstanceManager", instance_id: str
-) -> bool:
-    """True when ANY member of the lineage tree holds a pending question.
+) -> tuple[bool, bool]:
+    """Probe the lineage tree for an outstanding question.
 
-    D1 (tree-scoped predicate). RAM packs are probed in ONE call; the
-    durable ``question_pack_payload`` shadows are probed per member
-    (the shadow survives a restart, the RAM pack does not).
+    Returns ``(has_pending_question, probe_truncated)``.
+
+    The probe covers the candidate's own LINEAGE CHAIN (the instance +
+    its ancestors — exact and cheap) and then the bounded permanent
+    tree scan (which is what finds a SIBLING asker). When the tree is
+    larger than ``_MAX_TREE_PROBE_SIZE`` the scan is INCOMPLETE →
+    ``probe_truncated`` is True and the caller treats the candidate as
+    protected (fail-closed).
     """
     repo = getattr(manager, "_instance_repository", None)
     if repo is None:
-        return False
+        return False, False
     try:
-        root_id = repo.get_tree_root_id(instance_id) or instance_id
-        tree_ids = repo.get_cascade_tree_ids(root_id) or [instance_id]
+        root_id = await asyncio.to_thread(
+            repo.get_tree_root_id, instance_id
+        ) or instance_id
+        tree_ids = await asyncio.to_thread(
+            repo.get_cascade_tree_ids, root_id
+        ) or [instance_id]
+        ancestors = await asyncio.to_thread(
+            repo.get_ancestor_ids, instance_id
+        ) or []
     except Exception as exc:  # noqa: BLE001 — fail-open to "not protected"
         logger.warning(
             "stale-pause sweep: tree enumeration failed for %s: %s",
             instance_id[:8],
             exc,
         )
-        return False
-    tree_ids = tree_ids[:_MAX_TREE_PROBE_SIZE]
+        return False, False
+
+    truncated = len(tree_ids) > _MAX_TREE_PROBE_SIZE
+    probe_ids = list(dict.fromkeys([instance_id, *ancestors, *tree_ids]))
+    if truncated:
+        probe_ids = probe_ids[:_MAX_TREE_PROBE_SIZE]
 
     qm = getattr(manager, "_question_manager", None)
     if qm is not None:
         try:
-            if qm.get_pending_packs_for_instances(tree_ids):
-                return True
+            pending = await asyncio.to_thread(
+                qm.get_pending_packs_for_instances, probe_ids
+            )
+            if pending:
+                return True, truncated
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "stale-pause sweep: RAM pending-pack probe failed for %s: %s",
@@ -141,12 +187,14 @@ def _pending_question_in_tree(
             QUESTION_PACK_PAYLOAD_METADATA_KEY,
         )
     except Exception:  # noqa: BLE001 — defensive
-        return False
+        return False, truncated
 
-    for member_id in tree_ids:
+    for member_id in probe_ids:
         try:
-            payload = repo.get_metadata_value(
-                member_id, QUESTION_PACK_PAYLOAD_METADATA_KEY
+            payload = await asyncio.to_thread(
+                repo.get_metadata_value,
+                member_id,
+                QUESTION_PACK_PAYLOAD_METADATA_KEY,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -156,8 +204,63 @@ def _pending_question_in_tree(
             )
             continue
         if isinstance(payload, dict) and payload.get("status") == "pending":
-            return True
-    return False
+            return True, truncated
+    return False, truncated
+
+
+async def _has_live_descendant(
+    manager: "InstanceManager", instance_id: str
+) -> bool:
+    """True when a DESCENDANT of ``instance_id`` is still live.
+
+    That is the ``waiting_children`` signature: the parent parked with
+    a completed turn, waiting for its children. Such a parent must go
+    back to ``waiting_children`` (NOT ``running``) and its wake belongs
+    to the dependency bus.
+
+    The probe walks the candidate's OWN permanent subtree
+    (``instances.parent_id``) — NOT the mission tree, which would
+    include SIBLINGS (a live sibling does not make the candidate a
+    waiting-children parent).
+    """
+    repo = getattr(manager, "_instance_repository", None)
+    if repo is None:
+        return False
+    subtree: list[str] = []
+    frontier = [instance_id]
+    try:
+        for _ in range(_MAX_TREE_PROBE_SIZE):
+            if not frontier:
+                break
+            next_frontier: list[str] = []
+            for node_id in frontier:
+                children = await asyncio.to_thread(
+                    repo.list_child_ids_permanent, node_id
+                )
+                for child_id in children or []:
+                    if child_id not in subtree:
+                        subtree.append(child_id)
+                        next_frontier.append(child_id)
+            frontier = next_frontier
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "stale-pause sweep: descendant probe failed for %s: %s",
+            instance_id[:8],
+            exc,
+        )
+        return False
+    if not subtree:
+        return False
+    try:
+        statuses = await asyncio.to_thread(repo.get_statuses, subtree)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "stale-pause sweep: descendant status read failed for %s: %s",
+            instance_id[:8],
+            exc,
+        )
+        return False
+    return any(status in _LIVE_STATUSES for status in statuses.values())
 
 
 async def sweep_stale_pauses(
@@ -201,7 +304,8 @@ async def sweep_stale_pauses(
         return summary
 
     cutoff = (
-        datetime.now(timezone.utc) - timedelta(seconds=max(0, int(age_bound_seconds)))
+        datetime.now(timezone.utc)
+        - timedelta(seconds=max(0, int(age_bound_seconds)))
     ).isoformat()
 
     try:
@@ -234,8 +338,12 @@ async def sweep_stale_pauses(
         if not instance_id:
             continue
         try:
-            # D1 — tree-scoped pending-question protection.
-            if _pending_question_in_tree(manager, instance_id):
+            # D1 — tree-scoped pending-question protection (fail-closed
+            # on an incomplete probe).
+            has_pending, truncated = await _pending_question_in_tree(
+                manager, instance_id
+            )
+            if has_pending:
                 summary["skipped_protected"] += 1
                 logger.info(
                     "stale-pause sweep: SKIP instance=%s — an outstanding "
@@ -243,9 +351,28 @@ async def sweep_stale_pauses(
                     instance_id[:8],
                 )
                 continue
+            if truncated:
+                summary["skipped_protected"] += 1
+                logger.info(
+                    "stale-pause sweep: SKIP instance=%s — the lineage "
+                    "tree exceeds the probe bound; the pending-question "
+                    "probe is incomplete (fail-closed)",
+                    instance_id[:8],
+                )
+                continue
+
+            # A parked parent with live descendants is a
+            # ``waiting_children`` parent: it returns to that parked
+            # state and the dependency bus owns its wake.
+            pre_status = None
+            if await _has_live_descendant(manager, instance_id):
+                pre_status = "waiting_children"
 
             outcome = await unpause_instance_after_question_pause(
-                manager, instance_id, reason="stale_pause_sweep"
+                manager,
+                instance_id,
+                reason="stale_pause_sweep",
+                pre_status=pre_status,
             )
             if outcome in (OUTCOME_UNPAUSED, OUTCOME_WAKE_SCHEDULED):
                 summary["resumed"] += 1

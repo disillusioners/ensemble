@@ -1308,75 +1308,83 @@ async def dismiss_question(
         )
         job_result = {"status": "no_active_job"}
 
-    try:
-        resume_result = await manager.resume_instance_cascade(instance_id)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=ErrorResponse(
-                code=ErrorCodes.INTERNAL_ERROR,
-                message=f"Failed to resume instance: {e}",
-            ).model_dump(),
-        )
-
-    target_id = resume_result.get("target_id", instance_id)
-
-    # Children resume silently from their checkpoint — they were paused
-    # as a side effect of the parent's question. The target's resume was
-    # already scheduled above; here we only handle non-target children.
-    resume_results: dict = {instance_id: job_result}
-    for resumed_id in resume_result["resumed_ids"]:
-        if resumed_id == target_id:
-            continue  # already handled above
-        try:
-            child_result = await manager.resume_processing_job(
-                resumed_id,
-                message="resume",
-                silent=True,
-            )
-        except Exception as e:
-            logger.warning(
-                f"Failed to resume processing for "
-                f"{resumed_id[:8]}...: {e}"
-            )
-            child_result = {"status": "error", "error": str(e)}
-        if child_result is None:
-            logger.debug(
-                f"No active PROCESSING job for instance "
-                f"{resumed_id[:8]}... (was IDLE/WAITING_CHILDREN)"
-            )
-            child_result = {"status": "no_active_job"}
-        resume_results[resumed_id] = child_result
-
-    # W1: Surface a degraded status when the dismissal couldn't be routed.
-    # The cascade still ran (children unblocked), but the target's
-    # dismissal message was lost — return a distinct status so the
-    # caller knows.
-    dismiss_status = (
-        "dismissed"
-        if job_result.get("status") != "no_active_job"
-        else "no_active_job"
-    )
-
     # R2 (fix/question-pause-resume-asymmetry) — a dismissal is a
     # question-lifecycle TERMINATION, so it must release the recorded
     # side-effect set exactly like an answer does. The recorded set is
-    # the authoritative list of instances the question pause parked;
-    # un-pause exactly those (idempotent, fail-open).
+    # the authoritative list of instances the question pause parked.
+    #
+    # The release runs in a ``finally`` around the cascade: the pack is
+    # already consumed at this point, so a raising cascade must not skip
+    # the release (a skipped release after a consumed pack IS the
+    # stranded state).
     try:
-        from daemon.services.question_pause_set import (
-            unpause_recorded_question_pauses,
-        )
+        try:
+            resume_result = await manager.resume_instance_cascade(instance_id)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INTERNAL_ERROR,
+                    message=f"Failed to resume instance: {e}",
+                ).model_dump(),
+            )
 
-        await unpause_recorded_question_pauses(
-            manager, instance_id, getattr(pack, "id", None), reason="dismiss"
+        target_id = resume_result.get("target_id", instance_id)
+
+        # Children resume silently from their checkpoint — they were paused
+        # as a side effect of the parent's question. The target's resume was
+        # already scheduled above; here we only handle non-target children.
+        resume_results: dict = {instance_id: job_result}
+        for resumed_id in resume_result["resumed_ids"]:
+            if resumed_id == target_id:
+                continue  # already handled above
+            try:
+                child_result = await manager.resume_processing_job(
+                    resumed_id,
+                    message="resume",
+                    silent=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to resume processing for "
+                    f"{resumed_id[:8]}...: {e}"
+                )
+                child_result = {"status": "error", "error": str(e)}
+            if child_result is None:
+                logger.debug(
+                    f"No active PROCESSING job for instance "
+                    f"{resumed_id[:8]}... (was IDLE/WAITING_CHILDREN)"
+                )
+                child_result = {"status": "no_active_job"}
+            resume_results[resumed_id] = child_result
+
+        # W1: Surface a degraded status when the dismissal couldn't be routed.
+        # The cascade still ran (children unblocked), but the target's
+        # dismissal message was lost — return a distinct status so the
+        # caller knows.
+        dismiss_status = (
+            "dismissed"
+            if job_result.get("status") != "no_active_job"
+            else "no_active_job"
         )
-    except Exception as unpause_exc:  # noqa: BLE001 — fail-open
-        logger.warning(
-            f"dismiss_question: recorded-set un-pause failed for "
-            f"{instance_id[:8]}...: "
-            f"{type(unpause_exc).__name__}: {unpause_exc}"
-        )
+    finally:
+        try:
+            from daemon.services.question_pause_set import (
+                release_question_paused_set,
+            )
+
+            await release_question_paused_set(
+                manager,
+                instance_id,
+                getattr(pack, "id", None),
+                reason="dismiss",
+            )
+        except Exception as unpause_exc:  # noqa: BLE001 — fail-open
+            logger.warning(
+                f"dismiss_question: recorded-set release failed for "
+                f"{instance_id[:8]}...: "
+                f"{type(unpause_exc).__name__}: {unpause_exc}"
+            )
 
     return {
         "status": dismiss_status,

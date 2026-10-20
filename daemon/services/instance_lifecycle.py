@@ -3616,6 +3616,11 @@ class InstanceLifecycleService:
         # and the helper writes all eligible nodes in ONE batched
         # UPDATE.
         paused_instances_data: list[tuple[str, str | None, int]] = []
+        # The pre-pause status per parked node (see the capture site in
+        # the classification loop) — recorded with the paused set so
+        # the release can restore a ``waiting_children`` parent to its
+        # parked state.
+        pre_pause_status: dict[str, str] = {}
         skipped_ids: list[str] = []
         # Phase 2 / Task 8: capture cleared-injection entries per node so the
         # ``injection_consumed`` SSE event can fire POST-DB-COMMIT alongside
@@ -3715,6 +3720,11 @@ class InstanceLifecycleService:
                 paused_instances_data.append(
                     (node_id, meta.agent_id)
                 )
+                # The status the node held BEFORE the cascade parked it.
+                # Load-bearing for the release: a ``waiting_children``
+                # parent must return to ``waiting_children`` (the
+                # dependency bus owns its wake), not to ``running``.
+                pre_pause_status[node_id] = meta.status
 
                 logger.info(f"Pausing instance {node_id[:8]}...")
 
@@ -3855,6 +3865,7 @@ class InstanceLifecycleService:
                     instance_id,
                     question_pack_id,
                     list(paused_ids),
+                    pre_status=pre_pause_status,
                 )
             except Exception as record_exc:  # noqa: BLE001 — fail-open
                 logger.warning(

@@ -792,6 +792,31 @@ class SQLModelInstanceRepository:
             rows = db_session.exec(stmt).all()
         return set(rows)
 
+    def get_statuses(self, instance_ids: list[str]) -> dict[str, str]:
+        """Return ``{instance_id: status}`` for ``instance_ids``.
+
+        One query for the whole set — used by the stale-pause sweep to
+        decide whether a parked candidate is a ``waiting_children``
+        parent (a live descendant) without an N+1 read pattern.
+
+        Args:
+            instance_ids: The ids to read. An empty list returns ``{}``
+            without touching the DB.
+
+        Returns:
+            The status of every id that exists. Unknown ids are absent
+            from the mapping.
+        """
+        if not instance_ids:
+            return {}
+        chunk = list(dict.fromkeys(instance_ids))
+        stmt = select(Instance.instance_id, Instance.status).where(
+            Instance.instance_id.in_(chunk)
+        )
+        with SQLModelSession(self.engine) as db_session:
+            rows = db_session.exec(stmt).all()
+        return {row[0]: row[1] for row in rows}
+
     def find_stale_paused_instances(
         self,
         *,
@@ -810,12 +835,15 @@ class SQLModelInstanceRepository:
             (``datetime.now(timezone.utc).isoformat()``), so the
             lexicographic comparison against a cutoff produced the same
             way is a correct chronological comparison.
-          * NO live ``task`` row for the instance (``status IN
-            ('pending', 'running', 'paused')``) — an instance with a live
-            turn is owned by the worker pool / the answer path, not by
-            the sweeper. ``NOT EXISTS`` is used instead of ``NOT IN`` so
-            a NULL ``instance_id`` in ``task`` cannot poison the
-            predicate.
+          * NO LIVE TURN that the worker pool can drive: the instance
+            must not own a ``pending``/``running`` task (the worker pool
+            re-claims those naturally). A ``paused`` task is ADMITTED:
+            a paused task is EXACTLY the shape of a question-pause
+            side-effect target (the cascade suspends the child's RUNNING
+            turn) and a paused task is NOT claimable by the worker pool,
+            so such an instance can never complete on its own.
+            ``NOT EXISTS`` is used instead of ``NOT IN`` so a NULL
+            ``instance_id`` in ``task`` cannot poison the predicate.
 
         The caller applies the SECOND half of the predicate (no pending
         question anywhere in the permanent-lineage tree) because that
@@ -836,7 +864,7 @@ class SQLModelInstanceRepository:
         live_task = exists(
             select(Task.id).where(
                 Task.instance_id == Instance.instance_id,
-                Task.status.in_(("pending", "running", "paused")),
+                Task.status.in_(("pending", "running")),
             )
         )
         stmt = (

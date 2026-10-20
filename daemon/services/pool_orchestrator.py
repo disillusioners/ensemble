@@ -759,6 +759,11 @@ class PoolOrchestrator:
             manager._report_recovery = None
             logger.info("Report delivery recovery stopped")
 
+        if getattr(manager, "_stale_pause_sweep", None) is not None:
+            manager._stale_pause_sweep.stop()
+            manager._stale_pause_sweep = None
+            logger.info("Stale-pause sweep stopped")
+
     # ── notify_all ────────────────────────────────────────────────
 
     def notify_all(self) -> None:
