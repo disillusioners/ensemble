@@ -1387,3 +1387,329 @@ async def test_d1_resolved_question_releases_the_tree(engine, manager):
 
     assert "side-3" in result["instances"]
     assert _status(engine, "side-3") == InstanceStatus.RUNNING.value
+
+
+# ---------------------------------------------------------------------------
+# N1 — the pause-cause marker block is O(N+M), not O(N x (N+M))
+# ---------------------------------------------------------------------------
+
+
+def _seed_park_tree(engine: Engine) -> dict[str, str]:
+    """root-1 (WAITING_CHILDREN) + kid-1/kid-2 (RUNNING) + kid-3 (PAUSED).
+
+    A DELIBERATE cascade on kid-1 parks 3 nodes (root-1, kid-1, kid-2)
+    and finds 1 node ALREADY parked (kid-3) -> the pause-cause marker
+    block touches 3 + 1 = 4 nodes.
+    """
+    with Session(engine) as s:
+        s.add(
+            _mk_instance(
+                "root-1",
+                status=InstanceStatus.WAITING_CHILDREN.value,
+                version=3,
+            )
+        )
+        s.add(_mk_instance("kid-1", parent_id="root-1"))
+        s.add(_mk_instance("kid-2", parent_id="root-1"))
+        s.add(
+            _mk_instance(
+                "kid-3",
+                parent_id="root-1",
+                status=InstanceStatus.PAUSED.value,
+                paused_at=NOW_ISO,
+            )
+        )
+        s.commit()
+    return {
+        "root": "root-1",
+        "kid1": "kid-1",
+        "kid2": "kid-2",
+        "parked": "kid-3",
+    }
+
+
+@pytest.mark.asyncio
+async def test_n1_marker_work_happens_once_per_affected_node(
+    engine, manager, monkeypatch
+):
+    """N1 — the marker block touches EXACTLY ONE node per marker operation.
+
+    The non-question branch of the pause-cause marker block was nested
+    INSIDE the ``for node_id in paused_ids`` loop (and its own
+    ``node_id`` shadowed the outer one), so the whole clear list
+    (``paused_ids + already_paused_ids``) was re-cleared once per
+    parked node: N x (N+M) ``delete_metadata`` transactions — each its
+    own session + commit — on the user-facing SYNCHRONOUS ``/pause``
+    path (inside the cascade, before the response). ~900 deletes for a
+    30-node tree.
+
+    The pause cascade is deliberately batched (ONE UPDATE for all
+    nodes) to avoid an N+1 transaction storm; the marker block must not
+    regress that by ~N x.
+
+    3 parked nodes + 1 already-paused node -> EXACTLY 4 marker
+    operations (not 3 x 4 = 12).
+    """
+    from daemon.services import question_pause_set as qps
+
+    tree = _seed_park_tree(engine)
+
+    calls: list[tuple[str, str]] = []
+    real_clear = qps.clear_question_pause_marker
+    real_stamp = qps.stamp_question_pause_marker
+
+    async def _spy_clear(mgr, instance_id):
+        calls.append(("clear", instance_id))
+        return await real_clear(mgr, instance_id)
+
+    async def _spy_stamp(mgr, instance_id, pack_id, paused_at=None):
+        calls.append(("stamp", instance_id))
+        return await real_stamp(mgr, instance_id, pack_id, paused_at)
+
+    monkeypatch.setattr(qps, "clear_question_pause_marker", _spy_clear)
+    monkeypatch.setattr(qps, "stamp_question_pause_marker", _spy_stamp)
+
+    await manager.pause_instance_cascade(tree["kid1"])
+
+    cleared = sorted(i for kind, i in calls if kind == "clear")
+    assert cleared == sorted(
+        [tree["root"], tree["kid1"], tree["kid2"], tree["parked"]]
+    ), (
+        "the non-question branch must clear the marker on every parked "
+        "node AND every already-paused node — exactly once each"
+    )
+    assert len(calls) == 4, (
+        f"expected exactly 4 marker operations (3 parked + 1 already "
+        f"paused), got {len(calls)}: the clear branch is nested inside "
+        f"the per-node loop and re-runs N x (N+M) times"
+    )
+    assert not [c for c in calls if c[0] == "stamp"], (
+        "a DELIBERATE pause must never stamp the question marker"
+    )
+
+
+@pytest.mark.asyncio
+async def test_n1_question_pause_stamps_the_marker_once_per_parked_node(
+    engine, manager, monkeypatch
+):
+    """N1 (question half) — one stamp per parked node, no clears.
+
+    The question cascade stamps the pause-cause marker on every node it
+    parks (the asker AND the side-effect targets). An ALREADY-parked
+    node is NOT stamped (it was not parked by this question) and the
+    question branch never clears.
+    """
+    from daemon.services import question_pause_set as qps
+
+    tree = _seed_park_tree(engine)
+
+    calls: list[tuple[str, str]] = []
+    real_clear = qps.clear_question_pause_marker
+    real_stamp = qps.stamp_question_pause_marker
+
+    async def _spy_clear(mgr, instance_id):
+        calls.append(("clear", instance_id))
+        return await real_clear(mgr, instance_id)
+
+    async def _spy_stamp(mgr, instance_id, pack_id, paused_at=None):
+        calls.append(("stamp", instance_id))
+        return await real_stamp(mgr, instance_id, pack_id, paused_at)
+
+    monkeypatch.setattr(qps, "clear_question_pause_marker", _spy_clear)
+    monkeypatch.setattr(qps, "stamp_question_pause_marker", _spy_stamp)
+
+    _ask(manager, tree["kid1"])
+    await manager.pause_instance_cascade(
+        tree["kid1"], suspension_reason="awaiting_answer"
+    )
+
+    stamped = sorted(i for kind, i in calls if kind == "stamp")
+    assert stamped == sorted([tree["root"], tree["kid1"], tree["kid2"]]), (
+        "the question cascade stamps the marker on EXACTLY the nodes it "
+        "parks — once each"
+    )
+    assert len(calls) == 3, (
+        f"expected exactly 3 marker operations, got {len(calls)}"
+    )
+    assert not [c for c in calls if c[0] == "clear"], (
+        "a QUESTION pause must never clear the pause-cause marker"
+    )
+
+
+@pytest.mark.asyncio
+async def test_n5_already_paused_node_loses_a_stale_question_marker(
+    engine, manager
+):
+    """N5 — a DELIBERATE cascade clears a stale marker on an ALREADY-parked node.
+
+    The ``already_paused_ids`` branch of the marker block was
+    implemented but unpinned: an instance that was ALREADY parked when a
+    DELIBERATE cascade ran must lose its (possibly stale) question
+    marker — otherwise the backstop could later revert a pause the
+    operator intended.
+    """
+    from daemon.services.question_pause_set import (
+        QUESTION_PAUSED_MARKER_METADATA_KEY,
+    )
+
+    with Session(engine) as s:
+        s.add(
+            _mk_instance(
+                "parked-1",
+                status=InstanceStatus.PAUSED.value,
+                paused_at=NOW_ISO,
+            )
+        )
+        s.commit()
+    await _mark_question_paused(manager, "parked-1", paused_at=NOW_ISO)
+    assert manager._instance_repository.get_metadata_value(
+        "parked-1", QUESTION_PAUSED_MARKER_METADATA_KEY
+    )
+
+    # A DELIBERATE (non-question) cascade over an ALREADY-parked node.
+    await manager.pause_instance_cascade("parked-1")
+
+    assert manager._instance_repository.get_metadata_value(
+        "parked-1", QUESTION_PAUSED_MARKER_METADATA_KEY
+    ) is None, (
+        "a deliberate pause must clear the stale question marker of a "
+        "node that was ALREADY parked when the cascade ran"
+    )
+
+
+# ---------------------------------------------------------------------------
+# N3 — precedence: a LATER DELIBERATE pause wins on the release path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_n3_later_deliberate_pause_wins_over_the_recorded_release(
+    engine, manager
+):
+    """N3 — the release path defers to a LATER DELIBERATE pause.
+
+    The sweeper already defers to a later deliberate pause (a
+    non-question pause CLEARS the pause-cause marker, so the instance is
+    not a candidate). The release-from-record path did NOT: the
+    instance is still in the asker's recorded set, so when the answer
+    arrived the release un-paused it AND re-armed its deliberately
+    stopped turn. The two paths of the same feature disagreed on
+    precedence.
+
+    The release must leave the instance PARKED and must NOT re-arm its
+    stopped turn.
+    """
+    from daemon.services.question_pause_set import (
+        OUTCOME_DELIBERATE_PAUSE,
+        release_question_paused_set,
+    )
+
+    _seed_tree(engine)
+    # side-1 owns a turn — the question cascade suspends it (a cascade
+    # artifact carries ``paused_by_parent``). The task type is the
+    # PRODUCTION spelling: the release path's paused-turn probe
+    # (``find_paused_or_cancellable_turn``) only matches
+    # ``process_message`` / ``process_report``.
+    with Session(engine) as s:
+        s.add(
+            Task(
+                instance_id="side-1",
+                work_id="work-side-1",
+                task_type="process_message",
+                status=TaskStatus.RUNNING.value,
+            )
+        )
+        s.commit()
+
+    pack = _ask(manager)
+    await manager.pause_instance_cascade(
+        "asker-1", suspension_reason="awaiting_answer"
+    )
+    assert _status(engine, "side-1") == InstanceStatus.PAUSED.value
+
+    # The operator parks side-1 DELIBERATELY: the question cascade
+    # already parked it, so the deliberate pause lands on the
+    # already-paused branch and clears its pause-cause marker.
+    await manager.pause_instance_cascade("side-1")
+    # The deliberate park owns the turn. (A deliberate pause of an
+    # ALREADY-parked node does not re-suspend the turn — the cascade
+    # only suspends RUNNING turns — so the deliberate reason is written
+    # onto the turn explicitly: the same shape the sweep-side pin
+    # uses.)
+    with Session(engine) as s:
+        from sqlmodel import select
+
+        turn = s.exec(select(Task).where(Task.instance_id == "side-1")).one()
+        turn.suspension_reason = "paused_external"
+        s.commit()
+
+    summary = await release_question_paused_set(
+        manager, "asker-1", pack.id, reason="answer"
+    )
+
+    assert summary["outcomes"]["side-1"] == OUTCOME_DELIBERATE_PAUSE, (
+        "the release path must defer to a later deliberate pause"
+    )
+    assert _status(engine, "side-1") == InstanceStatus.PAUSED.value, (
+        "a deliberately parked instance must stay parked when the "
+        "answer arrives"
+    )
+    assert "side-1" not in _woken_ids(manager), (
+        "the deliberately stopped turn of a deliberately parked instance "
+        "must NOT be re-armed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_n3_question_stratum_is_still_released(engine, manager):
+    """N3 (counter-pin) — the QUESTION stratum is released exactly as before.
+
+    The N3 guard must fire for a DELIBERATE pause only. A turn the
+    question cascade suspended carries ``awaiting_answer`` (the
+    originator) or ``paused_by_parent`` (the cascade artifacts) — those
+    instances are released exactly as before.
+    """
+    from daemon.services.question_pause_set import (
+        OUTCOME_UNPAUSED,
+        OUTCOME_WAKE_SCHEDULED,
+        unpause_instance_after_question_pause,
+    )
+
+    _seed_tree(engine)
+    # The production task-type spelling — the release path's paused-turn
+    # probe (``find_paused_or_cancellable_turn``) only matches
+    # ``process_message`` / ``process_report``.
+    with Session(engine) as s:
+        s.add(
+            Task(
+                instance_id="side-1",
+                work_id="work-side-1",
+                task_type="process_message",
+                status=TaskStatus.RUNNING.value,
+            )
+        )
+        s.commit()
+
+    _ask(manager)
+    await manager.pause_instance_cascade(
+        "asker-1", suspension_reason="awaiting_answer"
+    )
+
+    # The cascade suspended side-1's turn as a cascade artifact.
+    with Session(engine) as s:
+        from sqlmodel import select
+
+        turn = s.exec(select(Task).where(Task.instance_id == "side-1")).one()
+        assert turn.suspension_reason == "paused_by_parent"
+
+    outcome = await unpause_instance_after_question_pause(
+        manager, "side-1", reason="answer"
+    )
+
+    assert outcome in (OUTCOME_UNPAUSED, OUTCOME_WAKE_SCHEDULED), (
+        f"the question stratum must still be released (got {outcome!r})"
+    )
+    assert _status(engine, "side-1") == InstanceStatus.RUNNING.value
+    assert "side-1" in _woken_ids(manager), (
+        "the question stratum's interrupted turn must still be re-armed"
+    )

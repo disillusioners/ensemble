@@ -138,6 +138,31 @@ OUTCOME_WAKE_SCHEDULED = "wake_scheduled"
 OUTCOME_WAKE_REFUSED = "wake_refused"
 OUTCOME_WC_PARKED = "wc_parked"
 OUTCOME_ERROR = "error"
+#: The instance is still parked, but the park is a LATER DELIBERATE
+#: pause (user ``/pause``, ``/stop``, the agent pause tools, watchover
+#: activation) — NOT the question pause. A deliberate pause always
+#: wins: the release leaves the instance parked and does NOT re-arm
+#: its stopped turn. The sweeper already defers to a later deliberate
+#: pause (the pause-cause MARKER is cleared by it); this outcome makes
+#: the RELEASE path agree.
+OUTCOME_DELIBERATE_PAUSE = "deliberate_pause"
+
+#: Suspension reasons that mean "a DELIBERATE pause owns this turn".
+#: These are the two reasons a deliberate pause writes onto the turn it
+#: suspends (``paused_external`` — the default for a user pause /
+#: stop / agent pause tool, and ``watchover_setup`` — the watchover
+#: activation). A turn suspended by the QUESTION cascade carries
+#: ``awaiting_answer`` (the originator) or ``paused_by_parent`` (the
+#: cascade artifacts) instead.
+#:
+#: Only these two are treated as deliberate. A NULL / legacy /
+#: unknown reason is NOT evidence of a deliberate pause — the release
+#: stays fail-open for it (a missed release is recoverable through the
+#: backstop sweeper; a wrong park is not).
+_DELIBERATE_SUSPENSION_REASONS = frozenset(
+    {"paused_external", "watchover_setup"}
+)
+
 
 #: Resume-result statuses that mean a REAL turn / wake was scheduled.
 #: Everything else (``silent_resume`` = the internal-child no-op,
@@ -625,7 +650,12 @@ async def unpause_instance_after_question_pause(
         # Terminal / idle / waiting_children — not a parked instance.
         return OUTCOME_SKIPPED_STATUS
 
-    def _finish(outcome: str, restored_status: str | None = None) -> str:
+    def _finish(
+        outcome: str,
+        restored_status: str | None = None,
+        *,
+        cause: str = "question_pause",
+    ) -> str:
         """Log the per-candidate disposition (A-3).
 
         The line states the RESTORED STATUS and the PAUSE CAUSE so an
@@ -633,12 +663,19 @@ async def unpause_instance_after_question_pause(
         matters precisely because the backstop is allowed to revert a
         pause (and the R1 discriminator is what keeps it to the
         question stratum only).
+
+        ``cause`` is the cause of the pause the disposition applies to:
+        ``question_pause`` for the normal release path, and
+        ``deliberate_pause`` when a LATER deliberate pause won and the
+        instance was left parked (the A-3 line must distinguish the
+        two dispositions, not report a deliberate park as a release).
         """
         logger.info(
             "question_pause_set: release instance=%s reason=%s "
-            "cause=question_pause restored_status=%s outcome=%s",
+            "cause=%s restored_status=%s outcome=%s",
             instance_id[:8],
             reason,
+            cause,
             restored_status or "<unchanged>",
             outcome,
         )
@@ -667,6 +704,44 @@ async def unpause_instance_after_question_pause(
                 reason,
                 type(exc).__name__,
                 exc,
+            )
+
+    # N3 — PRECEDENCE: a LATER DELIBERATE pause wins.
+    #
+    # The sweeper already defers to a later deliberate pause (a
+    # non-question pause CLEARS the pause-cause marker, so the instance
+    # is not a candidate). The release-from-record path did NOT: the
+    # instance is still in the asker's recorded set, so when the answer
+    # arrived the release un-paused it AND re-armed its deliberately
+    # stopped turn. The two paths of the same feature disagreed on
+    # precedence.
+    #
+    # The discriminator is the SUSPENDED TURN's own reason — already
+    # probed above (``find_paused_or_cancellable_turn``), so no extra
+    # query is needed. A deliberate pause writes ``paused_external``
+    # (the default for a user ``/pause`` / ``/stop`` / agent pause
+    # tool) or ``watchover_setup`` (the watchover activation) onto the
+    # turn it suspends; the QUESTION cascade writes ``awaiting_answer``
+    # (the originator) or ``paused_by_parent`` (the cascade artifacts).
+    #
+    # The instance is left PARKED and its turn is NOT re-armed: the
+    # operator's park stands. The question stratum is released exactly
+    # as before (a turn carrying a question reason never reaches this
+    # branch).
+    if current == "paused":
+        turn_reason = getattr(paused_turn, "suspension_reason", None)
+        if turn_reason in _DELIBERATE_SUSPENSION_REASONS:
+            logger.info(
+                "question_pause_set: LEAVING instance=%s parked — a later "
+                "DELIBERATE pause (reason=%s) owns this turn; the question "
+                "release does not revert it",
+                instance_id[:8],
+                turn_reason,
+            )
+            return _finish(
+                OUTCOME_DELIBERATE_PAUSE,
+                current,
+                cause="deliberate_pause",
             )
 
     has_live_turn = bool(
@@ -952,18 +1027,30 @@ async def release_question_paused_set(
         elif outcome in (OUTCOME_MISSING, OUTCOME_SKIPPED_STATUS):
             # The instance is gone / terminal — nothing left to release.
             summary["skipped"] += 1
+        elif outcome == OUTCOME_DELIBERATE_PAUSE:
+            # A LATER DELIBERATE pause owns the instance — it stays
+            # parked on purpose and its turn is NOT re-armed. Nothing was
+            # released and nothing must be retried: the operator's park
+            # stands (and the sweeper never sees it — a deliberate pause
+            # clears the pause-cause marker).
+            summary["skipped"] += 1
         else:
             summary["skipped"] += 1
 
         # The question-pause marker is cleared ONLY on a clean outcome:
         # a refused / errored release keeps it, so the backstop can pick
         # the instance up again (the sweeper is the retry path — A-2).
+        #
+        # A DELIBERATE park is clean in the same sense: the instance is
+        # not waiting for the answer any more, and a question marker on
+        # it would let the backstop revert the operator's park.
         if outcome in (
             OUTCOME_UNPAUSED,
             OUTCOME_WAKE_SCHEDULED,
             OUTCOME_WC_PARKED,
             OUTCOME_MISSING,
             OUTCOME_SKIPPED_STATUS,
+            OUTCOME_DELIBERATE_PAUSE,
         ):
             await clear_question_pause_marker(manager, instance_id)
 

@@ -3909,19 +3909,33 @@ class InstanceLifecycleService:
             is_question_pause = (
                 suspension_reason == SuspensionReason.AWAITING_ANSWER.value
             )
-            for node_id in paused_ids:
-                if is_question_pause:
+            # N1 — the question / non-question branch is HOISTED out of
+            # the per-node loop. Before the hoist the ``else`` branch
+            # was nested INSIDE ``for node_id in paused_ids:`` (and its
+            # own ``node_id`` shadowed the outer one), so the whole
+            # clear list was re-cleared once per parked node: N x (N+M)
+            # ``delete_metadata`` transactions (each its own session +
+            # commit) on the user-facing synchronous ``/pause`` path —
+            # ~900 deletes for a 30-node tree. The cascade was
+            # deliberately batched (ONE UPDATE for all nodes) to avoid
+            # an N+1 transaction storm; the marker block must not
+            # regress that by ~N x.
+            #
+            # Hoisted, each affected node is touched EXACTLY ONCE:
+            # a question pause stamps the marker on every parked node;
+            # a non-question pause clears it on every parked node AND
+            # every already-paused node (O(N+M) transactions).
+            if is_question_pause:
+                for node_id in paused_ids:
                     await stamp_question_pause_marker(
                         self._manager,
                         node_id,
                         question_pack_id,
                         paused_at_iso,
                     )
-                else:
-                    for node_id in list(paused_ids) + list(already_paused_ids):
-                        await clear_question_pause_marker(
-                            self._manager, node_id
-                        )
+            else:
+                for node_id in list(paused_ids) + list(already_paused_ids):
+                    await clear_question_pause_marker(self._manager, node_id)
         except Exception as marker_exc:  # noqa: BLE001 — fail-safe
             # The marker is the sweeper's ELIGIBILITY filter only — a
             # failure here can never release anything by itself; the
