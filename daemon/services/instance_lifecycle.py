@@ -3902,7 +3902,7 @@ class InstanceLifecycleService:
         # already used by this feature.
         try:
             from daemon.services.question_pause_set import (
-                clear_question_pause_marker,
+                mark_deliberate_pause_override,
                 stamp_question_pause_marker,
             )
 
@@ -3934,8 +3934,19 @@ class InstanceLifecycleService:
                         paused_at_iso,
                     )
             else:
+                # C2 — a DELIBERATE pause writes an explicit TOMBSTONE
+                # over the pause-cause marker instead of merely deleting
+                # it. The tombstone is what the release path defers on:
+                # "a deliberate pause owns this instance" is a POSITIVE
+                # statement, while an ABSENT marker only means "the
+                # marker write failed" (the release stays fail-open
+                # there). The tombstone also carries no ``pack_id``, so
+                # the backstop's "positive question marker" predicate
+                # excludes it automatically.
                 for node_id in list(paused_ids) + list(already_paused_ids):
-                    await clear_question_pause_marker(self._manager, node_id)
+                    await mark_deliberate_pause_override(
+                        self._manager, node_id
+                    )
         except Exception as marker_exc:  # noqa: BLE001 — fail-safe
             # The marker is the sweeper's ELIGIBILITY filter only — a
             # failure here can never release anything by itself; the
@@ -4166,7 +4177,9 @@ class InstanceLifecycleService:
             )
             return None
 
-    async def resume_instance_cascade(self, instance_id: str) -> dict:
+    async def resume_instance_cascade(
+        self, instance_id: str, *, exclude_ids: list[str] | None = None
+    ) -> dict:
         """Resume an instance and cascade to all children.
 
         Uses tree traversal helpers to find and resume the entire tree.
@@ -4182,6 +4195,13 @@ class InstanceLifecycleService:
 
         Args:
             instance_id: The ID of the instance to resume.
+            exclude_ids: Optional instance ids that must NOT be resumed
+                (C2 — the deliberate-pause override). An excluded node
+                keeps its parked status AND its suspended turn: the
+                tree-scoped resume must not undo an operator's park. The
+                exclusion covers BOTH the instance status flip and the
+                task transition (the excluded ids never reach the
+                batched UPDATE nor the task selection).
 
         Returns dict with:
           - resumed_ids: list of all instance IDs that were resumed
@@ -4225,8 +4245,20 @@ class InstanceLifecycleService:
         skipped_ids: list[str] = []
         agent_ids_by_instance: dict[str, str | None] = {}
 
+        excluded = set(exclude_ids or ())
         for node_id in tree_ids:
             try:
+                if node_id in excluded:
+                    # C2 — a deliberate pause owns this node: it stays
+                    # parked and its suspended turn is NOT re-armed.
+                    logger.info(
+                        f"resume_instance_cascade: instance "
+                        f"{node_id[:8]}... is EXCLUDED from the resume "
+                        f"(a deliberate pause owns it) — left parked"
+                    )
+                    skipped_ids.append(node_id)
+                    continue
+
                 meta = repo.get(node_id)
 
                 if meta is None:

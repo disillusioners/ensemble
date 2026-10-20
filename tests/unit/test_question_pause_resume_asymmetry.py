@@ -169,8 +169,12 @@ class _FakeManager:
     async def pause_instance_cascade(self, instance_id: str, **kwargs) -> dict:
         return await self._lifecycle.pause_instance_cascade(instance_id, **kwargs)
 
-    async def resume_instance_cascade(self, instance_id: str) -> dict:
-        return await self._lifecycle.resume_instance_cascade(instance_id)
+    async def resume_instance_cascade(
+        self, instance_id: str, *, exclude_ids: list[str] | None = None
+    ) -> dict:
+        return await self._lifecycle.resume_instance_cascade(
+            instance_id, exclude_ids=exclude_ids
+        )
 
     # -- graph driver (stubbed) -------------------------------------------
     async def resume_processing_job(
@@ -469,15 +473,291 @@ async def test_deliberate_pause_clears_a_stale_question_marker(engine, manager):
         row.paused_at = None
         s.commit()
     await manager.pause_instance_cascade("reparked-1")
-    assert manager._instance_repository.get_metadata_value(
+    marker = manager._instance_repository.get_metadata_value(
         "reparked-1", QUESTION_PAUSED_MARKER_METADATA_KEY
-    ) is None, (
-        "a deliberate pause must clear the stale question marker"
+    )
+    assert not (marker or {}).get("pack_id"), (
+        "a deliberate pause must replace the stale POSITIVE question "
+        f"marker (marker={marker!r})"
+    )
+    assert (marker or {}).get("deliberate") is True, (
+        "a deliberate pause must write the explicit tombstone "
+        f"(marker={marker!r})"
     )
 
     result = await sweep_stale_pauses(manager, age_bound_seconds=7200)
     assert "reparked-1" not in result["instances"]
     assert _status(engine, "reparked-1") == InstanceStatus.PAUSED.value
+
+
+# ---------------------------------------------------------------------------
+# GATE CYCLE 1 — C1 concurrency pin, council test (i), council test (ii),
+#                 W1 pin, W3 pin
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_c1_concurrent_record_merges_both_complete(engine, manager):
+    """C1 — two concurrent contenders on the merge path both COMPLETE.
+
+    The merge used to hold a ``threading.Lock`` across an ``await``:
+    a contender acquiring it on the event-loop thread would block the
+    loop while the holder's await could never complete — a permanent
+    whole-daemon deadlock. The merge is now serialized by a dedicated
+    single-worker executor (no lock spans an await).
+
+    The pin runs the two contenders concurrently and asserts that BOTH
+    complete within a bounded time (a deadlock would hang the test).
+    """
+    import asyncio as _asyncio
+
+    from daemon.services.question_pause_set import (
+        read_question_paused_set,
+        record_question_paused_set,
+    )
+
+    _seed_tree(engine)
+
+    async def _merge(pack_id: str) -> list[str]:
+        return await record_question_paused_set(
+            manager, "asker-1", pack_id, ["side-1"]
+        )
+
+    results = await _asyncio.wait_for(
+        _asyncio.gather(_merge("pack-a"), _merge("pack-b")),
+        timeout=20.0,
+    )
+
+    assert results == [["side-1"], ["side-1"]], (
+        f"both contenders must complete: {results!r}"
+    )
+    for pack_id in ("pack-a", "pack-b"):
+        assert await read_question_paused_set(manager, "asker-1", pack_id) == [
+            "side-1"
+        ], (
+            "the serialized merge must not lose a concurrent write "
+            f"(pack={pack_id})"
+        )
+
+
+@pytest.mark.asyncio
+async def test_council_i_deliberate_pause_over_parked_node_is_not_rearmed(
+    engine, manager
+):
+    """Council test (i) — the PRODUCTION path, no forged reason.
+
+    Shape: the question cascade parks the tree → a DELIBERATE pause
+    lands on the already-parked side-effect target → the answer
+    arrives.
+
+    Expected: the deliberate pause WINS end-to-end — the target stays
+    parked and its interrupted turn is NOT re-armed (no wake).
+
+    No ``suspension_reason`` is forged anywhere: the deliberate pause
+    is the real cascade, and the discriminator is the pause-cause
+    TOMBSTONE it writes.
+    """
+    _seed_tree(engine)
+    _ask(manager)
+    await manager.pause_instance_cascade(
+        "asker-1", suspension_reason="awaiting_answer"
+    )
+    assert _status(engine, "side-1") == InstanceStatus.PAUSED.value
+
+    # A DELIBERATE pause lands on the already-parked side-effect
+    # target (the user /pause path — no awaiting_answer reason).
+    await manager.pause_instance_cascade("side-1")
+
+    # The answer arrives.
+    await _answer(manager)
+
+    assert _status(engine, "side-1") == InstanceStatus.PAUSED.value, (
+        "a deliberate pause must survive the answer — the tree-scoped "
+        "resume must not flip it back to running"
+    )
+    assert "side-1" not in _woken_ids(manager), (
+        "the deliberately stopped turn was re-armed — the agent would "
+        "resume working"
+    )
+
+
+@pytest.mark.asyncio
+async def test_council_ii_terminated_asker_stale_shadow_does_not_block_sweep(
+    engine, manager
+):
+    """Council test (ii) — a DEAD asker's stale shadow must not block.
+
+    The durable ``question_pack_payload`` shadow is cleared ONLY at
+    answer consumption, so a TERMINATED asker keeps a stale
+    ``status='pending'`` shadow forever. Treating it as an outstanding
+    question made the D1 predicate protect the tree FOREVER — the
+    backstop could never release the exact strand it exists for.
+
+    Expected: the paused target IS swept (the asker is dead, so its
+    pack is stale, not outstanding).
+    """
+    from daemon.services.stale_pause_sweep import sweep_stale_pauses
+
+    _seed_tree(engine)
+    old = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    with Session(engine) as s:
+        s.add(
+            _mk_instance(
+                "stranded-2",
+                parent_id="root-1",
+                status=InstanceStatus.PAUSED.value,
+                paused_at=old,
+            )
+        )
+        s.commit()
+    await _mark_question_paused(manager, "stranded-2", paused_at=old)
+
+    # The asker is DEAD and its durable shadow still says "pending".
+    _ask(manager, "asker-1")
+    with Session(engine) as s:
+        row = s.get(Instance, "asker-1")
+        row.status = InstanceStatus.TERMINATED.value
+        s.commit()
+    from daemon.services.midflight_qa import (
+        QUESTION_PACK_PAYLOAD_METADATA_KEY,
+    )
+
+    shadow = manager._instance_repository.get_metadata_value(
+        "asker-1", QUESTION_PACK_PAYLOAD_METADATA_KEY
+    )
+    assert shadow is not None and shadow.get("status") == "pending", (
+        "the stale shadow must still be present for this case to be "
+        f"meaningful (shadow={shadow!r})"
+    )
+
+    result = await sweep_stale_pauses(manager, age_bound_seconds=7200)
+
+    assert "stranded-2" in result["instances"], (
+        "a dead asker's stale pack shadow must not protect the tree "
+        "forever — the stranded instance must be swept"
+    )
+    assert _status(engine, "stranded-2") == InstanceStatus.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_w1_lost_status_flip_is_an_error_and_keeps_the_record(
+    engine, manager
+):
+    """W1 — a LOST status flip is an error, not a successful apply.
+
+    ``transition_status_if`` returns ``None`` when its guard does not
+    hold (the row is gone, or the status changed under a concurrent
+    writer). Reporting that as a successful apply cleared the marker
+    and deleted the record for an instance that is STILL parked — a
+    permanent strand.
+    """
+    from daemon.services.question_pause_set import (
+        read_question_paused_set,
+        unpause_instance_after_question_pause,
+    )
+
+    _seed_tree(engine)
+    pack = _ask(manager)
+    await manager.pause_instance_cascade(
+        "asker-1", suspension_reason="awaiting_answer"
+    )
+
+    # The guarded flip does NOT apply — the lost race (the status
+    # changed under a concurrent writer between the read and the
+    # UPDATE). ``transition_status_if`` returns None for that.
+    original_transition = manager._instance_repository.transition_status_if
+
+    def _lost_race(instance_id, new_status, allowed_from):
+        return None
+
+    manager._instance_repository.transition_status_if = _lost_race
+    try:
+        outcome = await unpause_instance_after_question_pause(
+            manager, "side-1", reason="w1_pin", pre_status="running"
+        )
+    finally:
+        manager._instance_repository.transition_status_if = (
+            original_transition
+        )
+    assert outcome == "error", (
+        f"a lost status flip must be reported as an error (got {outcome!r})"
+    )
+    # The record is untouched — a later pass can retry.
+    assert "side-1" in await read_question_paused_set(
+        manager, "asker-1", pack.id
+    ), "a lost status flip must NOT delete the record"
+    _unused_outcome = None
+
+
+@pytest.mark.asyncio
+async def test_w3_duplicate_answer_does_not_re_flip_or_re_wake(engine, manager):
+    """W3 — a DUPLICATE answer must not flip or wake a released parent.
+
+    After a release that was refused for ONE instance, the record is
+    kept (the retry path). The next (duplicate) answer runs the release
+    again — and must NOT flip the already-released parent back to
+    ``waiting_children`` nor enqueue a SECOND real wake.
+
+    The record's per-instance outcomes are the idempotency ledger.
+    """
+    from daemon.services.question_pause_set import (
+        read_question_pause_record,
+    )
+
+    _seed_tree(engine)
+    pack = _ask(manager)
+    await manager.pause_instance_cascade(
+        "asker-1", suspension_reason="awaiting_answer"
+    )
+
+    # The wake of ONE instance is refused (a transient failure) so the
+    # record is KEPT — that is the state a duplicate answer finds.
+    original_schedule = manager._schedule_explicit_handle_resume
+
+    async def _refusing_schedule(**kwargs):
+        if kwargs.get("instance_id") == "side-1":
+            return None
+        return await original_schedule(**kwargs)
+
+    manager._schedule_explicit_handle_resume = _refusing_schedule
+    try:
+        # The first answer: the parent is released and woken; side-1's
+        # release is refused.
+        await _answer(manager)
+    finally:
+        manager._schedule_explicit_handle_resume = original_schedule
+
+    parent_wakes = [
+        w for w in manager.wakes if w.get("instance_id") == "root-1"
+    ]
+    assert parent_wakes, "the WC parent must be woken on the first answer"
+
+    # The record survives (the refused instance keeps it) and carries
+    # the FIRST pass's per-instance outcomes.
+    from daemon.services.question_pause_set import read_question_pause_record
+
+    record = await read_question_pause_record(manager, "asker-1", pack.id)
+    outcomes = record.get("outcomes") or {}
+    assert outcomes.get("root-1") in (
+        "wake_scheduled",
+        "wc_parked",
+        "unpaused",
+    ), (
+        "the record must carry the first pass's outcome for the parent "
+        f"(outcomes={outcomes})"
+    )
+    assert outcomes.get("side-1") == "wake_refused", (
+        f"the refused instance must be recorded as refused ({outcomes})"
+    )
+
+    # The DUPLICATE answer: the parent is already released → it must
+    # NOT be flipped again and must NOT be woken again.
+    manager.wakes.clear()
+    second = await _answer(manager)
+    assert second["status"] == "already_delivered"
+    assert not [
+        w for w in manager.wakes if w.get("instance_id") == "root-1"
+    ], "a duplicate answer must not enqueue a second WC wake"
 
 
 # ---------------------------------------------------------------------------
@@ -1455,7 +1735,9 @@ async def test_n1_marker_work_happens_once_per_affected_node(
     tree = _seed_park_tree(engine)
 
     calls: list[tuple[str, str]] = []
-    real_clear = qps.clear_question_pause_marker
+    # C2: the deliberate branch now writes the TOMBSTONE (one marker
+    # operation per node — the N1 count is unchanged).
+    real_clear = qps.mark_deliberate_pause_override
     real_stamp = qps.stamp_question_pause_marker
 
     async def _spy_clear(mgr, instance_id):
@@ -1466,7 +1748,7 @@ async def test_n1_marker_work_happens_once_per_affected_node(
         calls.append(("stamp", instance_id))
         return await real_stamp(mgr, instance_id, pack_id, paused_at)
 
-    monkeypatch.setattr(qps, "clear_question_pause_marker", _spy_clear)
+    monkeypatch.setattr(qps, "mark_deliberate_pause_override", _spy_clear)
     monkeypatch.setattr(qps, "stamp_question_pause_marker", _spy_stamp)
 
     await manager.pause_instance_cascade(tree["kid1"])
@@ -1569,11 +1851,19 @@ async def test_n5_already_paused_node_loses_a_stale_question_marker(
     # A DELIBERATE (non-question) cascade over an ALREADY-parked node.
     await manager.pause_instance_cascade("parked-1")
 
-    assert manager._instance_repository.get_metadata_value(
+    # C2: the deliberate pause REPLACES the stale positive marker with
+    # an explicit TOMBSTONE (the positive marker is what the backstop
+    # keys on — a tombstone carries no pack_id, so the backstop can
+    # never revert the operator's park).
+    marker = manager._instance_repository.get_metadata_value(
         "parked-1", QUESTION_PAUSED_MARKER_METADATA_KEY
-    ) is None, (
-        "a deliberate pause must clear the stale question marker of a "
-        "node that was ALREADY parked when the cascade ran"
+    )
+    assert not (marker or {}).get("pack_id"), (
+        "a deliberate pause must clear the stale POSITIVE question "
+        f"marker of a node that was ALREADY parked (marker={marker!r})"
+    )
+    assert (marker or {}).get("deliberate") is True, (
+        f"a deliberate pause must write the tombstone (marker={marker!r})"
     )
 
 

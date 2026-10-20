@@ -902,16 +902,22 @@ class SQLModelInstanceRepository:
                 if db_session.bind is not None
                 else "sqlite"
             )
+            # The marker must be a POSITIVE QUESTION marker — i.e. it
+            # must carry a ``pack_id``. A DELIBERATE-pause tombstone
+            # ({"deliberate": true, "cleared_at": ...}) carries no
+            # pack_id, so the backstop can never revert an operator's
+            # park (C2).
             if dialect == "postgresql":
                 marker_present = text(
-                    "metadata -> 'question_paused' IS NOT NULL"
+                    "metadata -> 'question_paused' ->> 'pack_id' IS NOT NULL"
                 )
                 marker_paused_at = text(
                     "(metadata -> 'question_paused' ->> 'paused_at') < :cutoff"
                 ).bindparams(cutoff=cutoff_iso)
             else:
                 marker_present = text(
-                    "json_extract(metadata, '$.question_paused') IS NOT NULL"
+                    "json_extract(metadata, '$.question_paused.pack_id') "
+                    "IS NOT NULL"
                 )
                 marker_paused_at = text(
                     "json_extract(metadata, '$.question_paused.paused_at') "

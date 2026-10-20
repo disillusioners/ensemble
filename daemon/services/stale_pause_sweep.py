@@ -101,6 +101,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
 
+from daemon.repositories.instance.repository import (
+    TERMINAL_INSTANCE_STATUSES,
+)
+
 logger = logging.getLogger(__name__)
 
 #: Default age bound (seconds) — a parked instance must be older than
@@ -171,14 +175,40 @@ async def _pending_question_in_tree(
     if truncated:
         probe_ids = probe_ids[:_MAX_TREE_PROBE_SIZE]
 
+    # C3 — LIVENESS. A pack owned by a DEAD asker is not outstanding.
+    #
+    # The durable ``question_pack_payload`` shadow is cleared ONLY at
+    # answer consumption, so a TERMINATED asker keeps its stale shadow
+    # forever. Treating that shadow as an outstanding question made D1
+    # protect the tree FOREVER — the backstop could never release the
+    # exact strand it exists for.
+    #
+    # The liveness check is the instance's own status: a pack whose
+    # owner is in a terminal state (completed / error / terminated /
+    # failed) is stale, not outstanding.
+    statuses: dict[str, str] = {}
+    try:
+        statuses = await asyncio.to_thread(repo.get_statuses, probe_ids)
+    except Exception as exc:  # noqa: BLE001 — fail-open (protect)
+        logger.warning(
+            "stale-pause sweep: status read failed for %s: %s",
+            instance_id[:8],
+            exc,
+        )
+        return False, truncated
+
+    def _owner_is_alive(owner_id: str) -> bool:
+        return statuses.get(owner_id) not in TERMINAL_INSTANCE_STATUSES
+
     qm = getattr(manager, "_question_manager", None)
     if qm is not None:
         try:
             pending = await asyncio.to_thread(
                 qm.get_pending_packs_for_instances, probe_ids
             )
-            if pending:
-                return True, truncated
+            for owner_id in pending or {}:
+                if _owner_is_alive(owner_id):
+                    return True, truncated
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "stale-pause sweep: RAM pending-pack probe failed for %s: %s",
@@ -207,7 +237,11 @@ async def _pending_question_in_tree(
                 exc,
             )
             continue
-        if isinstance(payload, dict) and payload.get("status") == "pending":
+        if (
+            isinstance(payload, dict)
+            and payload.get("status") == "pending"
+            and _owner_is_alive(member_id)
+        ):
             return True, truncated
     return False, truncated
 

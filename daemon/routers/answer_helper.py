@@ -618,8 +618,32 @@ async def _resume_target_and_tree(
     task PAUSED→PENDING; the scheduled background resume survives — the
     cascade does not touch _graph_tasks) and assemble the final
     response."""
+    # C2 — the DELIBERATE-pause override must be applied to the
+    # TREE-SCOPED resume, not only to the recorded-set release below:
+    # the cascade flips every parked node to RUNNING (and re-claims its
+    # suspended turn) BEFORE the release runs, so a release-side guard
+    # could never fire. The excluded nodes keep their parked status AND
+    # their suspended turn — the operator's park stands end-to-end.
+    exclude_ids: list[str] = []
     try:
-        resume_result = await manager.resume_instance_cascade(instance_id)
+        from daemon.services.question_pause_set import (
+            deliberate_pause_exclusions,
+        )
+
+        exclude_ids = await deliberate_pause_exclusions(
+            manager, instance_id, getattr(pack, "id", None)
+        )
+    except Exception as excl_exc:  # noqa: BLE001 — fail-open
+        logger.warning(
+            f"answer_questions_via_instance: deliberate-pause exclusion "
+            f"probe failed for {instance_id[:8]}...: "
+            f"{type(excl_exc).__name__}: {excl_exc}"
+        )
+
+    try:
+        resume_result = await manager.resume_instance_cascade(
+            instance_id, exclude_ids=exclude_ids
+        )
     except Exception as e:  # noqa: BLE001
         raise _http(
             500,

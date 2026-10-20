@@ -90,8 +90,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -117,9 +117,19 @@ QUESTION_PAUSED_SET_METADATA_KEY = "question_paused_set"
 #: Schema-free: ``instances.metadata`` is an existing JSON column.
 QUESTION_PAUSED_MARKER_METADATA_KEY = "question_paused"
 
-#: Process-local guard for the read-modify-write merge of the metadata
-#: key. The critical section is one metadata read + one write.
-_MERGE_LOCK = threading.Lock()
+#: C1 — the read-modify-write merge of the metadata key is SERIALIZED
+#: through a dedicated single-worker executor.
+#:
+#: It must NOT be a ``threading.Lock`` held across an ``await``: a
+#: contender acquiring the lock ON the event-loop thread would block the
+#: loop, and the holder's ``await`` could never complete — a permanent
+#: whole-daemon deadlock. The executor removes the lock entirely: the
+#: merge runs as ONE synchronous function inside a single worker thread,
+#: so the read-modify-write is serialized WITHOUT any lock spanning an
+#: await, and the event loop is never blocked by a lock acquisition.
+_MERGE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="qpause-merge"
+)
 
 #: Maximum number of recorded paused sets kept per asker row. The map
 #: is pruned by the oldest ``paused_at`` when the bound is exceeded, so
@@ -163,6 +173,18 @@ _DELIBERATE_SUSPENSION_REASONS = frozenset(
     {"paused_external", "watchover_setup"}
 )
 
+
+#: Outcomes that mean the instance was RELEASED (or deliberately left
+#: parked). A recorded outcome in this set makes a later pass a no-op
+#: for that instance (W3 — idempotency across duplicate answers).
+_RELEASED_OUTCOMES = frozenset(
+    {
+        OUTCOME_UNPAUSED,
+        OUTCOME_WAKE_SCHEDULED,
+        OUTCOME_WC_PARKED,
+        OUTCOME_DELIBERATE_PAUSE,
+    }
+)
 
 #: Resume-result statuses that mean a REAL turn / wake was scheduled.
 #: Everything else (``silent_resume`` = the internal-child no-op,
@@ -248,6 +270,111 @@ async def question_pack_state(
 
 
 # ---------------------------------------------------------------------------
+# C1 — the serialized merge (no lock across an await)
+# ---------------------------------------------------------------------------
+
+
+async def _run_in_merge_executor(func, *args) -> Any:
+    """Run ``func`` in the dedicated single-worker merge executor.
+
+    The call is awaited on the event loop, but the WORK (and any
+    serialization it needs) happens in the executor's single worker
+    thread — so two contenders can never hold a lock across an await
+    and the loop is never blocked by a lock acquisition.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_MERGE_EXECUTOR, func, *args)
+
+
+def _merge_record_sync(
+    repo,
+    asker_id: str,
+    pack_id: str,
+    entry: dict[str, Any],
+) -> None:
+    """Merge one paused-set entry into the asker's metadata (sync).
+
+    Runs inside the single-worker merge executor: the read-modify-write
+    is serialized by the executor, not by a lock.
+    """
+    current = repo.get_metadata_value(
+        asker_id, QUESTION_PAUSED_SET_METADATA_KEY
+    )
+    merged: dict[str, Any] = {}
+    if isinstance(current, dict):
+        merged = {
+            str(k): v for k, v in current.items() if isinstance(v, dict)
+        }
+    merged[pack_id] = entry
+    if len(merged) > _MAX_RECORDED_SETS:
+        # Prune the OLDEST entries (by ``paused_at``) so the metadata
+        # column stays bounded. The dropped record is covered by the
+        # backstop sweeper.
+        ordered = sorted(
+            merged.items(),
+            key=lambda kv: str((kv[1] or {}).get("paused_at", "")),
+        )
+        for stale_key, _stale_value in ordered[
+            : len(merged) - _MAX_RECORDED_SETS
+        ]:
+            merged.pop(stale_key, None)
+    repo.set_metadata(asker_id, QUESTION_PAUSED_SET_METADATA_KEY, merged)
+
+
+def _update_record_outcomes_sync(
+    repo,
+    asker_id: str,
+    pack_id: str,
+    outcomes: dict[str, str],
+) -> None:
+    """Persist the per-instance release outcomes into the record.
+
+    W3 — the record is the idempotency ledger of the release: a
+    DUPLICATE answer (the CAS loser) must not re-flip a released
+    instance nor enqueue a second wake. The outcomes are stored on the
+    record entry, so the next pass knows what already succeeded.
+    """
+    current = repo.get_metadata_value(
+        asker_id, QUESTION_PAUSED_SET_METADATA_KEY
+    )
+    if not isinstance(current, dict):
+        return
+    entry = current.get(pack_id)
+    if not isinstance(entry, dict):
+        return
+    merged_outcomes = entry.get("outcomes")
+    if not isinstance(merged_outcomes, dict):
+        merged_outcomes = {}
+    merged_outcomes.update(outcomes)
+    entry["outcomes"] = merged_outcomes
+    merged = dict(current)
+    merged[pack_id] = entry
+    repo.set_metadata(asker_id, QUESTION_PAUSED_SET_METADATA_KEY, merged)
+
+
+def _delete_record_sync(repo, asker_id: str, pack_id: str) -> None:
+    """Drop one paused-set entry from the asker's metadata (sync)."""
+    current = repo.get_metadata_value(
+        asker_id, QUESTION_PAUSED_SET_METADATA_KEY
+    )
+    if not isinstance(current, dict):
+        return
+    if pack_id not in current:
+        return
+    merged = {
+        str(k): v
+        for k, v in current.items()
+        if isinstance(v, dict) and str(k) != pack_id
+    }
+    if merged:
+        repo.set_metadata(
+            asker_id, QUESTION_PAUSED_SET_METADATA_KEY, merged
+        )
+    else:
+        repo.delete_metadata(asker_id, QUESTION_PAUSED_SET_METADATA_KEY)
+
+
+# ---------------------------------------------------------------------------
 # R1 — durable record
 # ---------------------------------------------------------------------------
 
@@ -319,36 +446,13 @@ async def record_question_paused_set(
         }
 
     try:
-        with _MERGE_LOCK:
-            current = await asyncio.to_thread(
-                repo.get_metadata_value,
-                asker_id,
-                QUESTION_PAUSED_SET_METADATA_KEY,
-            )
-            merged: dict[str, Any] = {}
-            if isinstance(current, dict):
-                merged = {
-                    str(k): v for k, v in current.items() if isinstance(v, dict)
-                }
-            merged[str(pack_id)] = entry
-            if len(merged) > _MAX_RECORDED_SETS:
-                # Prune the OLDEST entries (by ``paused_at``) so the
-                # metadata column stays bounded. The dropped record is
-                # covered by the backstop sweeper.
-                ordered = sorted(
-                    merged.items(),
-                    key=lambda kv: str((kv[1] or {}).get("paused_at", "")),
-                )
-                for stale_key, _stale_value in ordered[
-                    : len(merged) - _MAX_RECORDED_SETS
-                ]:
-                    merged.pop(stale_key, None)
-            await asyncio.to_thread(
-                repo.set_metadata,
-                asker_id,
-                QUESTION_PAUSED_SET_METADATA_KEY,
-                merged,
-            )
+        await _run_in_merge_executor(
+            _merge_record_sync,
+            repo,
+            asker_id,
+            str(pack_id),
+            entry,
+        )
     except Exception as exc:  # noqa: BLE001 — durability is best-effort
         logger.error(
             "question_pause_set: record FAILED for asker %s pack %s: %s "
@@ -427,34 +531,12 @@ async def delete_question_pause_record(
     if repo is None:
         return
     try:
-        with _MERGE_LOCK:
-            current = await asyncio.to_thread(
-                repo.get_metadata_value,
-                asker_id,
-                QUESTION_PAUSED_SET_METADATA_KEY,
-            )
-            if not isinstance(current, dict):
-                return
-            if str(pack_id) not in current:
-                return
-            merged = {
-                str(k): v
-                for k, v in current.items()
-                if isinstance(v, dict) and str(k) != str(pack_id)
-            }
-            if merged:
-                await asyncio.to_thread(
-                    repo.set_metadata,
-                    asker_id,
-                    QUESTION_PAUSED_SET_METADATA_KEY,
-                    merged,
-                )
-            else:
-                await asyncio.to_thread(
-                    repo.delete_metadata,
-                    asker_id,
-                    QUESTION_PAUSED_SET_METADATA_KEY,
-                )
+        await _run_in_merge_executor(
+            _delete_record_sync,
+            repo,
+            asker_id,
+            str(pack_id),
+        )
     except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
         logger.warning(
             "question_pause_set: delete failed for asker %s pack %s: %s",
@@ -511,13 +593,134 @@ async def stamp_question_pause_marker(
     return True
 
 
+async def mark_deliberate_pause_override(
+    manager: "InstanceManager", instance_id: str
+) -> bool:
+    """Mark ``instance_id`` as DELIBERATELY parked (C2 tombstone).
+
+    A DELIBERATE pause (user ``/pause``, ``/stop``, the agent pause
+    tools, watchover activation) writes an explicit TOMBSTONE into the
+    pause-cause marker key:
+
+        instances.metadata["question_paused"] =
+            {"deliberate": true, "cleared_at": "<iso>"}
+
+    The tombstone (not the absence of the marker) is what the release
+    path defers on. That distinction is load-bearing:
+
+    * a TOMBSTONE means "a deliberate pause owns this instance" → the
+      release leaves it parked and does NOT re-arm its turn;
+    * an ABSENT marker means "the marker write failed" → the release
+      stays FAIL-OPEN (it is the primary recovery path — a failed
+      marker write must not strand the instance on BOTH paths).
+
+    Writing the tombstone (instead of deleting the key) also keeps the
+    deliberate intent visible to every later reader.
+    """
+    repo = getattr(manager, "_instance_repository", None)
+    if repo is None:
+        return False
+    payload = {
+        "deliberate": True,
+        "cleared_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        await asyncio.to_thread(
+            repo.set_metadata,
+            instance_id,
+            QUESTION_PAUSED_MARKER_METADATA_KEY,
+            payload,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-safe
+        logger.warning(
+            "question_pause_set: deliberate-pause tombstone failed for "
+            "%s: %s: %s",
+            instance_id[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    return True
+
+
+async def read_pause_override(
+    manager: "InstanceManager", instance_id: str
+) -> dict | None:
+    """Read the pause-cause marker of ``instance_id`` (C2).
+
+    Returns the marker payload (``{"pack_id":..., "paused_at":...}`` for
+    a question pause, ``{"deliberate": true, ...}`` for a deliberate
+    one) or ``None`` when there is no marker at all (a failed write).
+    """
+    repo = getattr(manager, "_instance_repository", None)
+    if repo is None:
+        return None
+    try:
+        payload = await asyncio.to_thread(
+            repo.get_metadata_value,
+            instance_id,
+            QUESTION_PAUSED_MARKER_METADATA_KEY,
+        )
+    except Exception as exc:  # noqa: BLE001 — read-only probe
+        logger.warning(
+            "question_pause_set: override read failed for %s: %s: %s",
+            instance_id[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def is_deliberate_pause_override(marker: dict | None) -> bool:
+    """True when the marker is an explicit DELIBERATE-pause tombstone."""
+    return bool(marker) and marker.get("deliberate") is True
+
+
+async def deliberate_pause_exclusions(
+    manager: "InstanceManager", asker_id: str, pack_id: str | None
+) -> list[str]:
+    """The recorded instances that carry a DELIBERATE-pause tombstone.
+
+    The answer path passes these to the tree-scoped resume cascade as
+    EXCLUSIONS: the cascade must not flip them to ``running`` and must
+    not re-claim their suspended turns — the operator's park stands
+    (C2, end-to-end). Without the exclusion the tree resume undid the
+    deliberate park BEFORE the recorded-set release could defer to it.
+    """
+    record = await read_question_pause_record(manager, asker_id, pack_id)
+    recorded = [
+        i
+        for i in (record.get("instance_ids") or [])
+        if isinstance(i, str) and i
+    ]
+    if not recorded:
+        return []
+    excluded: list[str] = []
+    for instance_id in recorded:
+        marker = await read_pause_override(manager, instance_id)
+        if is_deliberate_pause_override(marker):
+            excluded.append(instance_id)
+    if excluded:
+        logger.info(
+            "question_pause_set: %d deliberate-pause exclusion(s) for "
+            "asker %s pack %s: %s",
+            len(excluded),
+            asker_id[:8],
+            str(pack_id)[:8] if pack_id else "<none>",
+            ",".join(i[:8] for i in excluded),
+        )
+    return excluded
+
+
 async def clear_question_pause_marker(
     manager: "InstanceManager", instance_id: str
 ) -> bool:
     """Clear the question-pause marker from ``instance_id``.
 
-    Called by every NON-question pause (a deliberate pause must not
-    inherit a stale question marker) and by a clean release.
+    Called by a clean release of the QUESTION stratum. A DELIBERATE
+    tombstone is NOT cleared here — it must survive so a duplicate
+    answer also defers to the operator's park.
     """
     repo = getattr(manager, "_instance_repository", None)
     if repo is None:
@@ -578,12 +781,27 @@ async def _set_instance_status(
     """
     repo = manager._instance_repository
     try:
-        await asyncio.to_thread(
+        applied = await asyncio.to_thread(
             repo.transition_status_if,
             instance_id,
             target_status,
             allowed_from,
         )
+        if applied is None:
+            # W1 — the guarded transition did NOT apply (the row is
+            # gone, or its status is not in ``allowed_from`` any more —
+            # a lost race). Reporting this as a successful apply would
+            # clear the marker and delete the record for an instance
+            # that is still parked: a PERMANENT strand.
+            logger.warning(
+                "question_pause_set: status flip for %s did NOT apply "
+                "(target=%s, allowed_from=%s) — treated as an error so "
+                "the marker and the record are kept for a retry",
+                instance_id[:8],
+                target_status,
+                ",".join(allowed_from),
+            )
+            return False
         await asyncio.to_thread(repo.update, instance_id, paused_at=None)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -705,6 +923,30 @@ async def unpause_instance_after_question_pause(
                 type(exc).__name__,
                 exc,
             )
+
+    # C2 — the DELIBERATE-pause override. It is consulted FIRST (before
+    # any status flip and before any wake) and it wins over the
+    # recorded set: a later deliberate pause owns the instance, so the
+    # release leaves it parked and does NOT re-arm its turn.
+    #
+    # Only an explicit TOMBSTONE defers. An ABSENT marker (the marker
+    # write failed) stays FAIL-OPEN: the release is the primary recovery
+    # path, and a failed marker write must not strand the instance on
+    # both the release path AND the backstop path.
+    override = await read_pause_override(manager, instance_id)
+    if is_deliberate_pause_override(override):
+        logger.info(
+            "question_pause_set: LEAVING instance=%s parked — a LATER "
+            "DELIBERATE pause owns this instance (tombstone at %s); the "
+            "question release does not revert it",
+            instance_id[:8],
+            (override or {}).get("cleared_at"),
+        )
+        return _finish(
+            OUTCOME_DELIBERATE_PAUSE,
+            current,
+            cause="deliberate_pause",
+        )
 
     # N3 — PRECEDENCE: a LATER DELIBERATE pause wins.
     #
@@ -995,6 +1237,13 @@ async def release_question_paused_set(
     pre_status = record.get("pre_status") or {}
     if not isinstance(pre_status, dict):
         pre_status = {}
+    # W3 — the recorded outcomes of a PREVIOUS pass. An instance whose
+    # recorded outcome is a SUCCESS is already released: a duplicate
+    # answer must not flip it again nor enqueue a second wake. A
+    # refused / errored instance is retried (the retry path).
+    previous_outcomes = record.get("outcomes") or {}
+    if not isinstance(previous_outcomes, dict):
+        previous_outcomes = {}
 
     summary: dict[str, Any] = {
         "recorded": recorded,
@@ -1009,6 +1258,15 @@ async def release_question_paused_set(
         return summary
 
     for instance_id in recorded:
+        previous = previous_outcomes.get(instance_id)
+        if previous in _RELEASED_OUTCOMES:
+            # Already released by an earlier pass (a duplicate answer,
+            # the dismiss path, …) — idempotent: no flip, no second
+            # wake. The deliberate-pause outcome is included: the
+            # operator's park stands.
+            summary["outcomes"][instance_id] = previous
+            summary["skipped"] += 1
+            continue
         outcome = await unpause_instance_after_question_pause(
             manager,
             instance_id,
@@ -1044,15 +1302,40 @@ async def release_question_paused_set(
         # A DELIBERATE park is clean in the same sense: the instance is
         # not waiting for the answer any more, and a question marker on
         # it would let the backstop revert the operator's park.
+        #
+        # C2: OUTCOME_DELIBERATE_PAUSE is DELIBERATELY NOT in this list —
+        # the tombstone must SURVIVE the release so a duplicate answer
+        # also defers to the operator's park.
         if outcome in (
             OUTCOME_UNPAUSED,
             OUTCOME_WAKE_SCHEDULED,
             OUTCOME_WC_PARKED,
             OUTCOME_MISSING,
             OUTCOME_SKIPPED_STATUS,
-            OUTCOME_DELIBERATE_PAUSE,
         ):
             await clear_question_pause_marker(manager, instance_id)
+
+    # W3 — persist the per-instance outcomes FIRST: they are the
+    # idempotency ledger a duplicate answer reads.
+    repo = getattr(manager, "_instance_repository", None)
+    if summary["outcomes"] and repo is not None:
+        try:
+            await _run_in_merge_executor(
+                _update_record_outcomes_sync,
+                repo,
+                asker_id,
+                str(pack_id),
+                dict(summary["outcomes"]),
+            )
+        except Exception as outcome_exc:  # noqa: BLE001 — best-effort
+            logger.warning(
+                "question_pause_set: outcome persist failed for asker %s "
+                "pack %s: %s: %s",
+                asker_id[:8],
+                str(pack_id)[:8],
+                type(outcome_exc).__name__,
+                outcome_exc,
+            )
 
     # The record is deleted only after a CLEAN release. A refused /
     # errored release KEEPS it so a later attempt (a duplicate answer,
