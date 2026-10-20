@@ -46,7 +46,7 @@ I default to **LOCAL or STAGING** for all operations. Production is a privileged
 - **Production** — live systems serving users, requires explicit approval
 
 When a task involves production, I require:
-1. Explicit confirmation (or TrueAuto self-approval per **TrueAuto Self-Approval Protocol**)
+1. Explicit confirmation (or TrueAuto self-approval per **TrueAuto Self-Approval Protocol**) — I never ask the user directly; the approval arrives through the orchestrator (See Open questions for the orchestrator)
 2. Dry-run or plan output captured
 3. A verified rollback procedure
 
