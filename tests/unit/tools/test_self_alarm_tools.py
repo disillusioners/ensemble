@@ -364,6 +364,68 @@ class TestFloorBoundary:
         assert repo.rows == []
 
     @pytest.mark.asyncio
+    async def test_29_minutes_59_seconds_is_rejected_with_no_engine_call(
+        self, tool_env
+    ) -> None:
+        """The knife-edge ONE SECOND below the floor (1799 s < 1800 s).
+
+        ``in 29m59s`` is the tightest possible below-floor request, and
+        it is the boundary a regression would slip through: 29 m is
+        comfortably under the floor, 30 m is exactly on it, so only the
+        29m59s case proves the comparison is ``>= 1800`` and not
+        ``> 1740`` / ``>= 1740``.
+
+        The request is expressed in the RELATIVE grammar on purpose. The
+        floor compares the wrapper's own ``now`` against the computed
+        first fire, and ``daemon/tools/self_alarm.py`` captures ``now``
+        ONCE (``:695``) and passes that SAME instant to both
+        ``resolve_fire_plan`` and ``enforce_min_horizon`` ⇒ the delta is
+        exactly 1799.0 s and the verdict is deterministic. An ABSOLUTE
+        instant would be offset by probe→tool clock skew and could drift
+        across the boundary between two runs.
+
+        The refusal must be total: no engine call, no row, and — the
+        part that matters operationally — the label is NOT burnt, so the
+        same label is still creatable afterwards. The follow-up call at
+        the accepted 30 m boundary proves both in one step.
+        """
+        tools, service, repo, _instance_repo = tool_env
+        result = await _call(
+            tools,
+            label="deploy-check",
+            when_or_every="in 29m59s",
+            message_to_self="Do the thing.",
+        )
+        assert isinstance(result, str)
+        assert result.startswith("ERROR: ")
+        assert "minimum horizon of 30 minutes" in result
+        # The one-shot family wording carries the bash-sleep hint.
+        assert "use bash with `sleep <seconds>`" in result
+        # ZERO engine calls — the floor runs BEFORE any engine write.
+        assert service.create_calls == []
+        assert service.update_calls == []
+        # No row was written for the label.
+        assert repo.rows == []
+        # The label is NOT burnt: the SAME label is still creatable, and
+        # the accepted 30 m boundary still passes (it is exactly on the
+        # floor: 1800.0 s >= 1800 s). A burnt label would have created
+        # "self-alarm:deploy-check-2" instead.
+        accepted = await _call(
+            tools,
+            label="deploy-check",
+            when_or_every="in 30m",
+            message_to_self="Do the thing.",
+        )
+        assert isinstance(accepted, dict), accepted
+        assert accepted["ok"] is True
+        assert accepted["label"] == EFFECTIVE
+        assert accepted["reused"] is False
+        assert len(service.create_calls) == 1
+        assert service.update_calls == []
+        assert len(repo.rows) == 1
+        assert repo.rows[0].name == EFFECTIVE
+
+    @pytest.mark.asyncio
     async def test_30_minutes_is_accepted(self, tool_env) -> None:
         tools, service, _repo, _instance_repo = tool_env
         result = await _call(
