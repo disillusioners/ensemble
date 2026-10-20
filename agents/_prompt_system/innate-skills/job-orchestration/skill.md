@@ -161,6 +161,10 @@ When a job reaches a terminal status, I must decide how to react:
 Non-terminal notifications arrive on the SAME `[JOB_EVENT]` header; the
 watch registration survives them (the terminal event still fires later).
 
+**Scope note:** QUESTION_REQUESTED relay events are emitted only by user-facing roots —
+the daemon gate hides the asking tool from non-root instances, so a non-root watcher
+never sees QUESTION_REQUESTED on a job it watches.
+
 | Status | Meaning | Action |
 |--------|---------|--------|
 | **QUESTION_REQUESTED** ❓ | The watched instance paused and asked the human a structured question | Extract the question pack from the `Result:` line. Relay the questions (text + options) to the human via the chat source. When the human replies, call `POST /api/jobs/{work_id}/answer` with body `{"answers": {<question_id>: <answer>}, "question_pack_id": "<pack_id>"}` — echo the `question_pack_id` from the pack so stale answers are rejected (400 QUESTION_PACK_MISMATCH). Do NOT call job_continue / job_inject on a question-paused instance. |

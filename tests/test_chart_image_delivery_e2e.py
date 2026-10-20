@@ -1364,6 +1364,21 @@ class TestInstallerSkillHygiene:
 #   agents/leader/rule.md             <- f0bda673c7b112ef7a43f17f1166f99fcb11f1562aabf0d7a5c9879e924a231a (content-sha256) | in-range commit: 4088be633 2026-10-20 (B3 closure: semantic-class sweep -> open-questions report channel)
 #   agents/maintenancer/rule.md       <- abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec (content-sha256) | in-range commit: 4088be633 2026-10-20 (B3 closure: semantic-class sweep -> open-questions report channel)
 #   agents/project-manager/workflow.md <- bde479095bbda6a3e3e069afe8a719e0f8b5673f289d2d0d5bf7a15eecb123ad (content-sha256) | in-range commit: 4088be633 2026-10-20 (B3 closure: semantic-class sweep -> open-questions report channel)
+# 2026-10-20 hide-question-tool-nonroot CONTRACT-COMPLETION round re-pin (10 files, constants-only,
+# recomputed from real file bytes on the feature worktree — canonical homes added for the 11 unserved
+# dirs: "## Open questions for the orchestrator" section (byte-exact worker/rule.md core) + parent-side
+# paragraph in each dispatcher home; devops/rule.md additionally qualified its :133 get-confirmation
+# shorthand to the open-questions channel (approver i2 B3 addendum, flat never-ask form preserved);
+# the other 25 entries keep their values):
+#   agents/approver/rule.md + agents/approver[v2]/rule.md    | canonical home + parent-side added
+#   agents/architect/rule.md                                 | canonical home + parent-side added
+#   agents/developer/rule.md                                 | canonical home + parent-side added
+#   agents/planner/rule.md                                   | canonical home + parent-side added
+#   agents/reviewer/rule.md + agents/reviewer[v2]/rule.md    | canonical home + parent-side added
+#   agents/tidier/rule.md + agents/tidier[v2]/rule.md        | canonical home + parent-side added
+#   agents/devops/rule.md                                    | :133 get-confirmation -> report channel (B3 addendum)
+# developer[v2]/rule.md + planner[v2]/rule.md carry the SAME byte-identical sections but are NOT
+# sealed (only their tools_note.md files are) — no constant for them.
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "2a5078f93bd2dcfe427900e85c075ee9671b8aedae17d07c7ef6abb6df4603ab",
@@ -1392,25 +1407,25 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "daemon/sources/adapters/telegram.py": "7e08882fc2fcc4291bed994ab992cb5afdc7a232a1444839f42da86fbfae063c",
     "daemon/constants.py": "df41a67f65428b4d9ef39878602657e60108e541a1f9cacde04c006cd2fc4970",
     # Phase C — 20 agent canonical-home files
-    "agents/approver/rule.md": "412cbce10d8673a72bd7c32b2725606d434a11e2809fa5d64c90ded75cc572a1",
-    "agents/approver[v2]/rule.md": "412cbce10d8673a72bd7c32b2725606d434a11e2809fa5d64c90ded75cc572a1",
-    "agents/architect/rule.md": "ddd6d9d169776133faabf46230e1030528c9544420378aaa863f9707f4f94543",
+    "agents/approver/rule.md": "c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae",
+    "agents/approver[v2]/rule.md": "c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae",
+    "agents/architect/rule.md": "ce96896142f568c480a2f92b9b92fa0775be641d877fa386205d8438d55b21b4",
     "agents/ari/rule.md": "bb784e8c41afc913bccf1873bfd5cb8943e5b1e17daacc6936efa08a31d26b68",
     "agents/coder/soul.md": "051401b1bcafb56e985794d917bd00255bc0be4f30184e2de01b6a2b5314fb7b",
-    "agents/developer/rule.md": "0a0f1d8f076f78c3f7aea77bfe157b7fc8282f4184ba3352b88e0d831d47285f",
+    "agents/developer/rule.md": "9b06c29c811e3636765f8ee09dd1a2b10901554e542723f3de6b851a85a97249",
     "agents/developer[v2]/tools_note.md": "62882063ca109e7829c097201e110a0edb872ade000415372ab7ca016bee5748",
-    "agents/devops/rule.md": "febf0e8981fadc5eca0331e261757711bf4229efe4a0a365b174d2e991a75c87",
+    "agents/devops/rule.md": "100d285927283b0276b8064520d8dfbc52b675d19e5dea78a608ca4cb13f7a1d",
     "agents/doc-writer/rule.md": "350dd33cca327e5a96941633aea6813d18b98b82a2f443cb13b270e03deabdc5",
     "agents/governor/rule.md": "a779742dcec8d30eb44495afda0c5ada93b9409a4ffac83912f7af2afa22ad37",
     "agents/leader/rule.md": "f0bda673c7b112ef7a43f17f1166f99fcb11f1562aabf0d7a5c9879e924a231a",
     "agents/maintenancer/rule.md": "abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec",
-    "agents/planner/rule.md": "a245335ded89d0818318f40bfed9b05edf6e08d8fbe0fcfe4b320ef9013d88c4",
+    "agents/planner/rule.md": "4282ce61b58736026b5d2e72b7e2112925e4515bf95ffc88032104b4e4c4b6fb",
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
     "agents/project-manager/workflow.md": "bde479095bbda6a3e3e069afe8a719e0f8b5673f289d2d0d5bf7a15eecb123ad",
-    "agents/reviewer/rule.md": "dfe50cd1b3e6e4d0df4d9289b09bf626e3723cce5513b1f8bc53911894eabc65",
-    "agents/reviewer[v2]/rule.md": "dfe50cd1b3e6e4d0df4d9289b09bf626e3723cce5513b1f8bc53911894eabc65",
-    "agents/tidier/rule.md": "d4c9b59c2be863b1ac2f51624ef39ab5bbbb0683374862f0c1dcf770bfc71524",
-    "agents/tidier[v2]/rule.md": "d4c9b59c2be863b1ac2f51624ef39ab5bbbb0683374862f0c1dcf770bfc71524",
+    "agents/reviewer/rule.md": "77c75b6dd1f17431ab0e4a7927863cdfd5cc5975658686e2adb9fd293230200b",
+    "agents/reviewer[v2]/rule.md": "77c75b6dd1f17431ab0e4a7927863cdfd5cc5975658686e2adb9fd293230200b",
+    "agents/tidier/rule.md": "73624de075b1f599a4d39ab703e278050066dc8d850d14d30f3c49aff6cf604c",
+    "agents/tidier[v2]/rule.md": "73624de075b1f599a4d39ab703e278050066dc8d850d14d30f3c49aff6cf604c",
     "agents/wanderer/soul.md": "98a1f4b4de7657d37c3367fffcfbd3d08b3b66aacafcfa3a362a25a5be126dc2",
 }
 

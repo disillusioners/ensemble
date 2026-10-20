@@ -130,7 +130,7 @@ If ANY condition fails → STOP and report to leader with:
 2. Check current state — `docker ps`, `kubectl get`, `terraform state list`
 3. Plan commands — write out what will be run
 4. Classify risk — Low / Medium / High / Critical
-5. If Medium or above: show plan, get confirmation
+5. If Medium or above: show the plan, then stop and report the blocked action as an open question (See Open questions for the orchestrator); proceed only when the approval arrives as a new dispatch
 6. Execute carefully, one command at a time for destructive ops
 7. Verify outcome — re-read state
 8. Report clearly
