@@ -886,7 +886,7 @@ class TestCompatibilityGate:
     ) -> None:
         tools, service, repo, _instance_repo = tool_env
         stored = FakeRow(
-            config={"recurrence": "once", "timezone": TZ_NAME, "run_at": "2026-10-20T02:00:00+00:00"}
+            config={"agent": "ari", "recurrence": "once", "timezone": TZ_NAME, "run_at": "2026-10-20T02:00:00+00:00"}
         )
         repo.rows.append(stored)
         result = await _call(
@@ -900,7 +900,7 @@ class TestCompatibilityGate:
         assert result["label"] == "self-alarm:deploy-check-2"
         # The stored row is NEVER mutated.
         assert service.update_calls == []
-        assert stored.config == {"recurrence": "once", "timezone": TZ_NAME, "run_at": "2026-10-20T02:00:00+00:00"}
+        assert stored.config == {"agent": "ari", "recurrence": "once", "timezone": TZ_NAME, "run_at": "2026-10-20T02:00:00+00:00"}
         # …and it is DISCLOSED (it is still armed with its own schedule).
         assert result["untouched_existing"]["source_id"] == "src-1"
 
@@ -910,6 +910,7 @@ class TestCompatibilityGate:
         repo.rows.append(
             FakeRow(
                 config={
+                    "agent": "ari",
                     "recurrence": "weekly",
                     "schedule": "30 6 * * 1",  # stored DOW = 1 (Monday)
                     "timezone": TZ_NAME,
@@ -932,6 +933,7 @@ class TestCompatibilityGate:
         repo.rows.append(
             FakeRow(
                 config={
+                    "agent": "ari",
                     "recurrence": "cron",
                     "schedule": "0 9 * * *",
                     "timezone": TZ_NAME,
@@ -954,6 +956,7 @@ class TestCompatibilityGate:
         repo.rows.append(
             FakeRow(
                 config={
+                    "agent": "ari",
                     "recurrence": "weekly",
                     "schedule": "30 6 * * 3",  # stored DOW = 3 (Wednesday)
                     "timezone": TZ_NAME,
@@ -972,6 +975,94 @@ class TestCompatibilityGate:
         # The update rewrote only the minute/hour — the stored DOW
         # survived.
         assert repo.get_source_config("src-1").config["schedule"] == "50 23 * * 3"
+
+    # ── The stored TARGET AGENT (review A1 / decisions P2-DEV-12) ──────
+    # The three rows below are otherwise IDENTICAL and otherwise
+    # COMPATIBLE (same `once` family, no weekly/cron branch) — only the
+    # ``agent`` key differs, so a routing difference can ONLY come from
+    # the ownership check.
+
+    @pytest.mark.asyncio
+    async def test_a_label_owned_by_another_agent_is_never_reused(
+        self, tool_env
+    ) -> None:
+        """A FOREIGN row squatting the namespaced label routes to a
+        fresh-label create — Ari's alarm message must never fire into
+        another agent's instance tree (review A1 / I2-B1)."""
+        tools, service, repo, _instance_repo = tool_env
+        stored_config = {
+            "agent": "leader",
+            "recurrence": "once",
+            "timezone": TZ_NAME,
+        }
+        stored = FakeRow(config=dict(stored_config))
+        repo.rows.append(stored)
+        result = await _call(
+            tools,
+            label="deploy-check",
+            when_or_every="in 45m",
+            message_to_self="Do the thing.",
+        )
+        assert isinstance(result, dict)
+        assert result["fallback_reason"] == "label_owned_by_other_agent"
+        assert "leader" in result["fallback_detail"]
+        # A FRESH label was created, never the foreign row's update.
+        assert result["label"] == "self-alarm:deploy-check-2"
+        assert result["reused"] is False
+        assert service.update_calls == []
+        assert service.create_calls[0][0]["label"] == "self-alarm:deploy-check-2"
+        # …and the untouched pre-existing row is DISCLOSED, exactly like
+        # the other fresh-label reasons.
+        assert result["untouched_existing"]["source_id"] == "src-1"
+        assert stored.config == stored_config
+
+    @pytest.mark.asyncio
+    async def test_a_row_with_a_missing_agent_fails_closed(self, tool_env) -> None:
+        """A stored row with NO ``agent`` key (unknown provenance) takes
+        the SAME fail-closed route — only an exact ``"ari"`` reuses."""
+        tools, service, repo, _instance_repo = tool_env
+        stored_config = {"recurrence": "once", "timezone": TZ_NAME}
+        stored = FakeRow(config=dict(stored_config))
+        repo.rows.append(stored)
+        result = await _call(
+            tools,
+            label="deploy-check",
+            when_or_every="in 45m",
+            message_to_self="Do the thing.",
+        )
+        assert isinstance(result, dict)
+        assert result["fallback_reason"] == "label_owned_by_other_agent"
+        assert result["label"] == "self-alarm:deploy-check-2"
+        assert service.update_calls == []
+        assert result["untouched_existing"]["source_id"] == "src-1"
+        assert stored.config == stored_config
+
+    @pytest.mark.asyncio
+    async def test_an_ari_owned_compatible_row_still_reuses(self, tool_env) -> None:
+        """The ownership check must not OVER-block: an ari-owned,
+        otherwise-compatible row still takes the normal reuse path
+        (``agent == "ari"`` — the row every legit create produces)."""
+        tools, service, repo, _instance_repo = tool_env
+        repo.rows.append(
+            FakeRow(
+                config={
+                    "agent": "ari",
+                    "recurrence": "once",
+                    "timezone": TZ_NAME,
+                }
+            )
+        )
+        result = await _call(
+            tools,
+            label="deploy-check",
+            when_or_every="in 45m",
+            message_to_self="Do the thing.",
+        )
+        assert isinstance(result, dict)
+        assert result["reused"] is True
+        assert len(service.update_calls) == 1
+        source_id, _payload = service.update_calls[0]
+        assert source_id == "src-1"
 
 
 # ---------------------------------------------------------------------------
@@ -1058,6 +1149,7 @@ class TestRearmAndFallback:
                 status="stopped",
                 enabled=False,
                 config={
+                    "agent": "ari",
                     "recurrence": "once",
                     "timezone": TZ_NAME,
                     "run_at": stored_fire,
@@ -1084,6 +1176,7 @@ class TestRearmAndFallback:
                 status="stopped",
                 enabled=False,
                 config={
+                    "agent": "ari",
                     "recurrence": "once",
                     "timezone": TZ_NAME,
                     "run_at": stored_fire,

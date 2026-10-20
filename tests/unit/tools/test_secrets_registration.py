@@ -216,7 +216,7 @@ class TestStaticRegistrationChecklist:
         D18/A14).
         """
         assert SECRETS_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
-        # The full set is exactly nine entries — the
+        # The full set is exactly ten entries — the
         # same-PR pin (the FIVE-file rule; the fifth
         # exact-set pin was added by the iteration-002
         # council B2 correction). The 3+1

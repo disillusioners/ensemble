@@ -120,6 +120,11 @@ class _StoredRow:
     status: str | None
     enabled: bool | None
     source_type: str | None
+    #: The stored TARGET agent (``config["agent"]``). The engine REQUIRES
+    #: ``payload.agent`` at create and never rewrites it on update, so
+    #: every legit row carries one — ``None`` (missing) means unknown
+    #: provenance and is treated as FOREIGN by the gate (fail-closed).
+    agent: str | None
     recurrence: str | None
     cron_expression: str | None
     timezone: str | None
@@ -146,6 +151,7 @@ def _read_stored_row(row: Any) -> _StoredRow | None:
         status=getattr(row, "status", None),
         enabled=getattr(row, "enabled", None),
         source_type=getattr(row, "source_type", None),
+        agent=config.get("agent"),
         recurrence=config.get("recurrence"),
         cron_expression=config.get("schedule"),
         timezone=config.get("timezone"),
@@ -183,6 +189,11 @@ def _compatibility_gate(parsed: Any, stored: _StoredRow | None) -> _Gate:
     ``when`` (``scheduling_service.py:983-986``). A shape mismatch
     therefore never reaches the engine: the original row is never
     mutated, so a duplicate-armed state is impossible by construction.
+
+    The stored row's TARGET AGENT is part of the label's ownership: the
+    wrapper arms alarms that fire INTO ari (I2-B1), so a row targeting
+    another agent — or one whose agent is missing (unknown provenance) —
+    is never updated from here (review advisory A1; fail-closed).
     """
     if stored is None:
         return _Gate(mode="create")
@@ -197,6 +208,23 @@ def _compatibility_gate(parsed: Any, stored: _StoredRow | None) -> _Gate:
             detail=(
                 f"the name is already used by a {stored.source_type!r} source "
                 f"({stored.source_id})"
+            ),
+        )
+
+    # A stored row whose TARGET AGENT is not exactly ari is another
+    # agent's alarm squatting our namespaced label — updating it would
+    # deliver Ari's message text into a foreign instance tree. MISSING
+    # agent (``None``) is unknown provenance and FAILS CLOSED the same
+    # way (review advisory A1 — I2-B1: the alarm fires INTO ari on
+    # every path).
+    if stored.agent != SELF_ALARM_TARGET_AGENT:
+        return _Gate(
+            mode="fresh_label",
+            reason="label_owned_by_other_agent",
+            detail=(
+                f"the stored schedule targets agent {stored.agent!r}, not "
+                f"{SELF_ALARM_TARGET_AGENT!r} — an alarm label fires INTO ari, "
+                f"so a foreign (or agent-less) row is never updated from here"
             ),
         )
 
