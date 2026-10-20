@@ -1,6 +1,6 @@
 """db-backed-settings Phase 4 (t6) — migration-runner smoke (adopted O1).
 
-Applies JUST ``20261018_000001_create_app_settings.sql`` to a temp
+Applies JUST ``20261018_000002_create_app_settings.sql`` to a temp
 SQLite DB through the REAL migration runner
 (``daemon.migrations.MigrationRunner``), then asserts the
 ``app_settings`` table exists with the EXACT model column set
@@ -29,8 +29,8 @@ import daemon
 from daemon.migrations import MigrationRunner
 from daemon.models.app_settings import AppSetting
 
-MIGRATION_FILENAME = "20261018_000001_create_app_settings.sql"
-MIGRATION_VERSION = "20261018_000001"
+MIGRATION_FILENAME = "20261018_000002_create_app_settings.sql"
+MIGRATION_VERSION = "20261018_000002"
 SOURCE_SQL = Path(daemon.__file__).parent / "migrations" / "versions" / MIGRATION_FILENAME
 
 

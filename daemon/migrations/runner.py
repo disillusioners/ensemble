@@ -26,6 +26,26 @@ class MigrationError(Exception):
     pass
 
 
+class DuplicateMigrationVersionError(MigrationError):
+    """Raised when two migration files claim the same version prefix.
+
+    The ``schema_migrations`` ledger keys on ``version`` (PRIMARY KEY),
+    so two files sharing one version prefix contend for the same ledger
+    row. The loser fails with a cryptic
+    ``UNIQUE constraint failed: schema_migrations.version`` that names
+    neither file. This error replaces that with a message that names
+    BOTH offending files, raised BEFORE any migration is applied (the
+    check runs inside ``discover_migrations``, i.e. before the apply
+    loop) so a broken tree can never leave a half-applied schema.
+
+    Precedent (2026-10-20): two files shipped under
+    ``20261018_000001`` (``create_app_settings`` + ``secrets_audit_add_context``)
+    and two under ``20260628_000002`` — each pair deadlocking a fresh
+    SQLite boot on the ledger's PRIMARY KEY.
+    """
+    pass
+
+
 class MigrationFile:
     """Represents a parsed migration file.
     
@@ -287,6 +307,14 @@ class MigrationRunner:
         
         Returns:
             List of MigrationFile objects sorted by version.
+        
+        Raises:
+            DuplicateMigrationVersionError: If two migration files claim
+                the same version prefix. Raised BEFORE any migration is
+                applied (this method runs ahead of the apply loop), so
+                the failure is loud and total rather than a cryptic
+                ``UNIQUE constraint failed: schema_migrations.version``
+                half-way through the apply sequence.
         """
         if not self.migrations_dir.exists():
             logger.info(f"Creating migrations directory: {self.migrations_dir}")
@@ -301,7 +329,95 @@ class MigrationRunner:
             except ValueError as e:
                 logger.warning(f"Skipping invalid migration file {path.name}: {e}")
         
+        # Duplicate-version guard. Deliberately AFTER the parse loop and
+        # OUTSIDE its ``except ValueError`` handler: an unparseable file
+        # is skipped (and never claims a ledger row), but two PARSEABLE
+        # files claiming one version prefix WILL contend for the same
+        # ``schema_migrations`` PRIMARY KEY row. Failing here — ahead of
+        # the apply loop — means no migration has run when the error
+        # fires, so the tree is never left half-applied.
+        #
+        # KNOWN LEGACY-LEDGER SHADOW (2026-10-20, reviewer W1): a SQLite
+        # DB whose ledger already records ``20261018_000001`` — the
+        # pre-mark workaround used verbatim in
+        # .agents/tester/RESULTS/2026-10-19-resource-telemetry-fix-verification.md
+        # — shadows ``20261018_000001_secrets_audit_add_context.sql``.
+        # The pending filter is version-only (``get_pending_migrations``:
+        # ``m.version not in applied``), so that file is never pending
+        # and never runs; ``secrets_audit`` then carries NO ``context``
+        # column, and the audit emit
+        # (``daemon/services/secret_service.py::_append_audit_in_conn`` —
+        # no tolerance for a missing column) raises OperationalError.
+        # Remediation is one manual statement, byte-identical to the UP
+        # section of
+        # daemon/migrations/versions/20261018_000001_secrets_audit_add_context.sql:66:
+        #
+        #     ALTER TABLE secrets_audit ADD COLUMN context TEXT;
+        #
+        # The shadow is SILENT (the boot does not crash on it) and is
+        # pinned as current behaviour by
+        # tests/migration/test_migration_legacy_ledger_shadow.py.
+        self._assert_no_duplicate_versions(migrations)
+        
         return sorted(migrations, key=lambda m: m.version)
+    
+    def _assert_no_duplicate_versions(self, migrations: list[MigrationFile]) -> None:
+        """Fail closed when two migration files share one version prefix.
+        
+        The ledger table ``schema_migrations`` keys on ``version``:
+        
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY, ...
+        
+        so the SECOND file of a duplicate pair dies mid-apply with
+        ``UNIQUE constraint failed: schema_migrations.version`` — an
+        error that names neither file and lands AFTER earlier
+        migrations have already been applied and committed. This check
+        turns that into a single loud, actionable error naming BOTH
+        files, raised before anything is applied.
+        
+        Args:
+            migrations: The parsed migrations discovered in
+                ``self.migrations_dir``.
+        
+        Raises:
+            DuplicateMigrationVersionError: If any version prefix is
+                claimed by more than one file.
+        """
+        by_version: dict[str, list[str]] = {}
+        for migration in migrations:
+            by_version.setdefault(migration.version, []).append(
+                migration.path.name
+            )
+        
+        duplicates = {
+            version: sorted(names)
+            for version, names in by_version.items()
+            if len(names) > 1
+        }
+        if not duplicates:
+            return
+        
+        details = "; ".join(
+            f"version {version} is claimed by {len(names)} files: "
+            f"{', '.join(names)}"
+            for version, names in sorted(duplicates.items())
+        )
+        message = (
+            f"Duplicate migration version prefix detected in "
+            f"{self.migrations_dir}: {details}. The schema_migrations "
+            f"ledger keys on version (PRIMARY KEY), so the second file "
+            f"of each pair would fail with a cryptic 'UNIQUE constraint "
+            f"failed: schema_migrations.version' AFTER earlier "
+            f"migrations had already been applied. Rename one file per "
+            f"pair to a unique version prefix (git mv — the version "
+            f"prefix is the filename's leading YYYYMMDD_HHMMSS token, "
+            f"parsed at runner.py:MigrationFile.parse) and re-run. No "
+            f"migration was applied: this check runs before the apply "
+            f"loop."
+        )
+        logger.error(message)
+        raise DuplicateMigrationVersionError(message)
     
     def get_pending_migrations(self) -> list[MigrationFile]:
         """Get migrations that haven't been applied yet.
@@ -725,6 +841,13 @@ class MigrationRunner:
             )
             return []
         
+        # ORDERING INVARIANT (2026-10-20): the PG early-return above
+        # MUST stay AHEAD of the duplicate-version guard, which lives in
+        # ``discover_migrations`` (reached below via
+        # ``get_pending_migrations``). PostgreSQL boots never enumerate
+        # the .sql directory through this path, so the filesystem-level
+        # duplicate-prefix guard cannot affect a PG boot — PG schema
+        # evolution rides ``_ensure_postgres_columns`` exclusively.
         self.ensure_migrations_table()
         pending = self.get_pending_migrations()
 
