@@ -9,11 +9,23 @@
 # coexistence. Mirrors tests/test_promote_cgroup_survivorship.sh's
 # fixture strategy: temp dirs, stub daemon, no network, no real install.
 #
+# HONEST SPLIT (review fix-cycle-1): this SHELL leg pins the SCRIPT side
+# (restart.sh guard/gate/journal ceremony against stubs). The DRAIN-side
+# legs (unit_prefix threading, ENSEMBLE_RESTART_LIVE mint conditioning,
+# spawn refusal guards) are covered by
+# tests/unit/tools/test_agent_restart.py::TestT8Extras::
+# test_restart_kind_argv_lock_adoption_and_unit_prefix (:738) — not here.
+#
 # ⛔ LIVE-PATH FENCE (project critical note — 2 live-install deletions
-# happened before this rule): every path in this script resolves under a
-# mktemp FAKE_HOME; an escape guard ABORTS if any resolved path touches
-# a live-shaped location ($HOME/agents-ensemble, /home/*/agents-ensemble*,
-# ports 9797/7979, or the real /etc/systemd).
+# happened before this rule): every path this script CREATES or WRITES
+# resolves under a mktemp FAKE_HOME; the escape guard runs on EVERY
+# resolved fixture path (FAKE_HOME, INSTALL, scripts bundle, releases)
+# and aborts on any non-/tmp, non-FAKE_HOME target. The stub port is a
+# DRILL-ONLY default (SIM_PORT below, default 39713 — deliberately NOT
+# 9797/7979 (live/demo) and NOT 8079 (this project's standard dev daemon
+# port — the original drill's hardcoded 8079 could collide with a real
+# dev daemon on this host); nothing LISTENS on it in any green path —
+# the gate leg EXPECTS /livez to stay down).
 # ============================================================================
 
 set -u
@@ -52,22 +64,43 @@ FAKE_HOME="$(mktemp -d /tmp/ens-restart-sim.XXXXXX)"
 trap 'KEEP=$?; if [ "$KEEP" = "0" ]; then rm -rf "$FAKE_HOME"; else echo "FAKE_HOME kept: $FAKE_HOME" >&2; fi' EXIT
 export HOME="$FAKE_HOME"
 
+SIM_PORT="${SIM_PORT:-39713}"
+case "$SIM_PORT" in
+    9797|7979|8079) printf 'FATAL: SIM_PORT=%s collides with a real daemon lane (live/demo/dev) — refuse\n' "$SIM_PORT" >&2; exit 99 ;;
+esac
+
 _escape_guard() {
+    # REAL guard: every fixture path must resolve under FAKE_HOME (or a
+    # bare /tmp scratch). The mktemp+HOME scoping makes escapes
+    # structurally impossible; this guard makes them LOUD if a future
+    # edit introduces one. (Review fix-cycle-1 (b)/(c): the old guard
+    # only ever saw FAKE_HOME itself and the HOME re-check was
+    # structurally inert — HOME was already re-exported above, so
+    # `[ "$HOME" = "/home/nea" ]` could never fire.)
     case "$1" in
         "$FAKE_HOME"/*) return 0 ;;
+        "$FAKE_HOME") return 0 ;;
         /tmp/*) return 0 ;;
         *) printf 'FATAL: live-path escape blocked: %s\n' "$1" >&2; exit 99 ;;
     esac
 }
-for p in "$FAKE_HOME"; do _escape_guard "$p"; done
-if [ -d "$FAKE_HOME/agents-ensemble" ] || [ -d "/home/nea/agents-ensemble" ] && [ "$HOME" = "/home/nea" ]; then
-    printf 'FATAL: fence violated\n' >&2; exit 99
-fi
 
 INSTALL="$FAKE_HOME/agents-ensemble"
+SCRIPTS_BUNDLE="$INSTALL/scripts/upgrade"
+RELEASES_DIR="$INSTALL/releases"
+_escape_guard "$FAKE_HOME"
+_escape_guard "$INSTALL"
+_escape_guard "$SCRIPTS_BUNDLE"
+_escape_guard "$RELEASES_DIR"
+# Belt: the repo paths we READ (never write) must be the worktree's own.
+case "$REPO_ROOT" in
+    */ensemble-src-wt-agent-restart) ;;
+    *) printf 'FATAL: unexpected REPO_ROOT (read side): %s\n' "$REPO_ROOT" >&2; exit 99 ;;
+esac
+
 mkdir -p "$INSTALL/releases"
 # live-shaped .env so resolve_env live resolves (fail-closed without PORT)
-printf 'PORT=8079\nPOSTGRES_DB=ensemble_prod\n' > "$INSTALL/.env"
+printf 'PORT=%s\nPOSTGRES_DB=ensemble_prod\n' "$SIM_PORT" > "$INSTALL/.env"
 
 # ── Python driver (in-process arm + REAL drain env path) ────────────────────
 
@@ -208,7 +241,7 @@ assert_absent "restart.sh never set ENSEMBLE_UPGRADE_LIVE (T0c shell side)" "ENS
 # positive: with the minted env the acceptance passes the guard and runs the
 # full ceremony against the stubs (grace shortened; stop stub records TERM).
 RC=0
-ENSEMBLE_RESTART_LIVE=1 INSTALL_DIR="$INSTALL" PORT=8079 \
+ENSEMBLE_RESTART_LIVE=1 INSTALL_DIR="$INSTALL" PORT="$SIM_PORT" \
 LIVEZ_BUDGET_S=5 READYZ_BUDGET_S=5 \
     bash "$INSTALL/scripts/upgrade/restart.sh" live --run-id "$RUN_ID" --grace-s 1 > "$INSTALL/restart-run.log" 2>&1 || RC=$?
 LOG="$(cat "$INSTALL/restart-run.log" 2>/dev/null)"

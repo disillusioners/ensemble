@@ -546,8 +546,11 @@ class UpgradeJournalSweepService:
         coalesced: dict[
             tuple[str, str], tuple[list[uj.PendingWake], list[str]]
         ] = {}
-        for instance_id, items in groups.items():
+        for group_key, items in groups.items():
             # Newest first by armed_at; secondary key: run_id (stable).
+            # (F-1: ``group_key`` is the composite ``(instance_id, kind)``
+            # tuple — renamed from ``instance_id`` which lied about the
+            # shape after the kind partition.)
             sorted_items = sorted(
                 items,
                 key=lambda pair: (pair[0].armed_at, pair[0].run_id),
@@ -555,7 +558,7 @@ class UpgradeJournalSweepService:
             )
             cap = uj.PENDING_WAKE_COALESCE_MAX
             kept = sorted_items[:cap]
-            coalesced[instance_id] = (
+            coalesced[group_key] = (
                 [w for w, _o in kept],
                 [o for _w, o in kept],
             )
@@ -684,8 +687,12 @@ class UpgradeJournalSweepService:
         age · in-flight-work disclosure (three-signal JobItem boundary) ·
         escape-hatch line (DERIVED scope ONLY — launcher alternative
         DROPPED; rendered ONLY on failure outcomes, N-4) · run_id. The
-        re-run path renders the ABSOLUTE scripts_dir captured at arm
-        time (N-3). Fail-open: every sub-read is defensive.
+        re-run note renders an ABSOLUTE-path TEMPLATE (``<abs-scripts>``
+        placeholder) — the concrete ``scripts_dir`` is carried by the
+        ``restart_audits[run_id].scripts_dir`` field (N-3; NOT a
+        PendingWake field — the wake record carries provenance fields
+        only; audit-row consumers read it via ``_audit_row``).
+        Fail-open: every sub-read is defensive.
         """
         # Lazy import — sweep must not hard-depend on the tools module.
         try:
@@ -1673,6 +1680,10 @@ class UpgradeJournalSweepService:
                         # gate is on ``wake.kind``, NEVER on a source
                         # sentinel. Promote-kind wakes keep the ADR-041
                         # re-stamp (defensive/redundant, unchanged).
+                        # (Kind gate = ``head.kind`` — the group is
+                        # kind-homogeneous BY CONSTRUCTION via the F-1
+                        # composite partition key, so gating on the head
+                        # gates the whole group.)
                         if head.kind != "restart":
                             for w in wakes:
                                 if w.source:

@@ -1690,7 +1690,25 @@ def _arm_pending_wake_for_op(
         # carries the provenance class + root fields (display-only on the
         # wake lane — the restart-kind wake delivers reserved-sourced and
         # never re-stamps a window).
-        prov = _capture_provenance_class(manager, current_instance_id)
+        #
+        # 1c literal-strict narrowing (review fix-cycle-1): the capture is
+        # RESTART-kind only — `_restart_provenance` (the both-stores
+        # reader) is unreachable from the upgrade arm path at all, not
+        # merely unasserted-by-convention. Promote arms keep the empty
+        # capture ("" class / no root fields), exactly their pre-2026-10-19
+        # shape.
+        prov = (
+            _capture_provenance_class(manager, current_instance_id)
+            if op.kind == "restart"
+            else {
+                "provenance_class": "",
+                "root_source": None,
+                "root_message_id": None,
+                "depth": 0,
+                "stamped_at": None,
+                "expires_at": None,
+            }
+        )
         wake = PendingWake(
             run_id=op.run_id,
             kind=op.kind,
