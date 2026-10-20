@@ -11985,7 +11985,9 @@ class InstanceManager:
             cascade_to_root=cascade_to_root,
         )
 
-    async def resume_instance_cascade(self, instance_id: str) -> dict:
+    async def resume_instance_cascade(
+        self, instance_id: str, *, exclude_ids: list[str] | None = None
+    ) -> dict:
         """Resume an instance and cascade to all children.
 
         Recursively resumes the target instance and all its descendants.
@@ -11994,13 +11996,18 @@ class InstanceManager:
 
         Args:
             instance_id: The ID of the instance to resume.
+            exclude_ids: Optional instance ids that must NOT be resumed
+                (C2 — the deliberate-pause override): an excluded node
+                keeps its parked status and its suspended turn.
 
         Returns:
             Dict with:
               - resumed_ids: list of all instance IDs that were resumed
               - skipped_ids: list of instance IDs that were skipped (not paused)
         """
-        return await self._lifecycle_service.resume_instance_cascade(instance_id)
+        return await self._lifecycle_service.resume_instance_cascade(
+            instance_id, exclude_ids=exclude_ids
+        )
 
     async def resume_processing_job(
         self,

@@ -792,6 +792,152 @@ class SQLModelInstanceRepository:
             rows = db_session.exec(stmt).all()
         return set(rows)
 
+    def get_statuses(self, instance_ids: list[str]) -> dict[str, str]:
+        """Return ``{instance_id: status}`` for ``instance_ids``.
+
+        One query for the whole set — used by the stale-pause sweep to
+        decide whether a parked candidate is a ``waiting_children``
+        parent (a live descendant) without an N+1 read pattern.
+
+        Args:
+            instance_ids: The ids to read. An empty list returns ``{}``
+            without touching the DB.
+
+        Returns:
+            The status of every id that exists. Unknown ids are absent
+            from the mapping.
+        """
+        if not instance_ids:
+            return {}
+        chunk = list(dict.fromkeys(instance_ids))
+        stmt = select(Instance.instance_id, Instance.status).where(
+            Instance.instance_id.in_(chunk)
+        )
+        with SQLModelSession(self.engine) as db_session:
+            rows = db_session.exec(stmt).all()
+        return {row[0]: row[1] for row in rows}
+
+    def find_stale_paused_instances(
+        self,
+        *,
+        cutoff_iso: str,
+        limit: int = 100,
+    ) -> list[Instance]:
+        """Return QUESTION-paused instances stranded past ``cutoff_iso``.
+
+        Feature: stale-pause backstop (``fix/question-pause-resume-
+        asymmetry``, R3 + the R1 pause-cause discriminator of review
+        cycle 3).
+
+        Selection predicate — the backstop may ONLY revert a pause that
+        was caused by a QUESTION:
+
+          * **The pause-cause marker** — ``instances.metadata ->
+            'question_paused'`` must be present. The marker is stamped
+            by the QUESTION pause cascade on every node it parks and
+            CLEARED by every other pause reason (user ``/pause``,
+            ``/stop``, the agent pause tools, watchover activation, the
+            compaction executor). Without it the backstop would resume
+            an agent the operator deliberately stopped (the W4 delta
+            widened the blast radius from "a status flip on an idle
+            instance" to "a stopped agent resumes working").
+          * **The age bound** — the MARKER's ``paused_at`` (the moment
+            the question pause parked the instance) must be older than
+            the cutoff. The marker carries the pause moment, so the
+            bound is unaffected by a later status flip.
+          * **No PENDING/RUNNING task** — the worker pool owns those
+            turns; they are not candidates.
+          * **The parked stratum** — ``instances.status = 'paused'``.
+          * **The wake-less stratum** — the instance is NOT paused but
+            still owns a PAUSED task (the release flipped the status
+            but the wake was refused). This is the retry path for a
+            refused release (A-2); it is only reachable under the
+            marker + task-reason discriminator, so the widening cannot
+            touch a deliberate pause.
+          * **The task-reason discriminator** — when the candidate owns
+            a PAUSED task, that task's ``suspension_reason`` must be a
+            question-cascade reason (``awaiting_answer`` for the
+            asker, ``paused_by_parent`` for the cascade artifacts —
+            the two values ``_pause_cascade_db_sync`` writes for a
+            question pause). A deliberate pause's task carries
+            ``paused_external`` / ``watchover_setup`` and is therefore
+            NEVER a candidate.
+
+        Read-only. No row mutation.
+
+        Args:
+            cutoff_iso: ISO-8601 UTC cutoff; instances parked BEFORE it
+                are candidates.
+            limit: Maximum rows returned (batch cap).
+
+        Returns:
+            The candidate rows, oldest pause first.
+        """
+        if not cutoff_iso:
+            return []
+        pending_or_running = exists(
+            select(Task.id).where(
+                Task.instance_id == Instance.instance_id,
+                Task.status.in_(("pending", "running")),
+            )
+        )
+        paused_task = exists(
+            select(Task.id).where(
+                Task.instance_id == Instance.instance_id,
+                Task.status == "paused",
+            )
+        )
+        question_paused_task = exists(
+            select(Task.id).where(
+                Task.instance_id == Instance.instance_id,
+                Task.status == "paused",
+                Task.suspension_reason.in_(
+                    ("awaiting_answer", "paused_by_parent")
+                ),
+            )
+        )
+        with SQLModelSession(self.engine) as db_session:
+            dialect = (
+                db_session.bind.dialect.name
+                if db_session.bind is not None
+                else "sqlite"
+            )
+            # The marker must be a POSITIVE QUESTION marker — i.e. it
+            # must carry a ``pack_id``. A DELIBERATE-pause tombstone
+            # ({"deliberate": true, "cleared_at": ...}) carries no
+            # pack_id, so the backstop can never revert an operator's
+            # park (C2).
+            if dialect == "postgresql":
+                marker_present = text(
+                    "metadata -> 'question_paused' ->> 'pack_id' IS NOT NULL"
+                )
+                marker_paused_at = text(
+                    "(metadata -> 'question_paused' ->> 'paused_at') < :cutoff"
+                ).bindparams(cutoff=cutoff_iso)
+            else:
+                marker_present = text(
+                    "json_extract(metadata, '$.question_paused.pack_id') "
+                    "IS NOT NULL"
+                )
+                marker_paused_at = text(
+                    "json_extract(metadata, '$.question_paused.paused_at') "
+                    "< :cutoff"
+                ).bindparams(cutoff=cutoff_iso)
+            stmt = (
+                select(Instance)
+                .where(marker_present)
+                .where(marker_paused_at)
+                .where(~pending_or_running)
+                .where(
+                    (Instance.status == InstanceStatus.PAUSED.value)
+                    | paused_task
+                )
+                .where(~paused_task | question_paused_task)
+                .order_by(col(Instance.paused_at).asc())
+                .limit(max(1, int(limit)))
+            )
+            return list(db_session.exec(stmt).all())
+
     def get_ancestor_ids(self, instance_id: str) -> list[str]:
         """Get all ancestor instance IDs (parent, grandparent, ..., up to root).
         

@@ -2603,6 +2603,41 @@ async def lifespan(app: FastAPI):
                 "backstop will catch orphans at boot+10min): %s",
                 cont_boot_exc,
             )
+        # Stale-pause backstop boot pass (feature/fix/question-pause-
+        # resume-asymmetry, R3). Placement: AFTER ``setup_worker_pool``
+        # (the task repo / instance repository are live) and next to
+        # the boot-orphan sweep above.
+        #
+        # The pass is awaited DIRECTLY on the lifespan loop — it never
+        # bridges a coroutine onto the loop it is running on (the
+        # sync/async self-block class; see
+        # ``daemon/services/stale_pause_sweep.py``). It never raises:
+        # a failure here leaves the parked instances to the periodic
+        # tick.
+        try:
+            if not config.services.stale_pause_sweep_enabled:
+                logger.info(
+                    "Stale-pause boot sweep: disabled by config — skipped"
+                )
+            else:
+                from daemon.services.stale_pause_sweep import sweep_stale_pauses
+
+                stale_pause_result = await sweep_stale_pauses(
+                    manager,
+                    age_bound_seconds=(
+                        config.services.stale_pause_sweep_age_bound_seconds
+                    ),
+                    batch_cap=config.services.stale_pause_sweep_batch_cap,
+                )
+                logger.info(
+                    "Stale-pause boot sweep: %s", stale_pause_result
+                )
+        except Exception as stale_pause_exc:  # noqa: BLE001
+            logger.warning(
+                "Stale-pause boot sweep failed (the periodic tick will "
+                "retry): %s",
+                stale_pause_exc,
+            )
     except Exception as boot_exc:  # best-effort — never aborts boot
         logger.warning(
             "UpgradeJournalSweepService boot reconcile failed (the "

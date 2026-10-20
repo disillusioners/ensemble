@@ -212,6 +212,16 @@ async def _load_asker(
         # latent data-loss hazard). FE impact: the wizard's existing
         # error handler surfaces the message; no FE code relies on
         # silent-revive (MAJOR-3 grep finding).
+        #
+        # R2 (#9): the asker is GONE — nothing will ever answer its
+        # outstanding question, so the recorded side-effect set (the
+        # instances the question pause parked) must be released here.
+        # Without this the set stays parked forever: the D1 predicate
+        # keeps protecting the tree (the pack is still pending) while
+        # the asker can never answer it.
+        await _unpause_recorded_side_effects(
+            manager, instance_id, None, reason="answer_terminal_asker"
+        )
         raise _http(
             410,
             ErrorCodes.ANSWER_TARGET_TERMINAL,
@@ -335,6 +345,14 @@ async def _resolve_pack_or_raise(
 
     # ── 4. T1″ pack correlation (pre-CAS; strict-check-when-present) ─
     if question_pack_id is not None and question_pack_id != pack.id:
+        # R2 (#9) ADJUDICATION — NO release on this branch. The
+        # caller's pack id does not match the asker's CURRENT pack, so
+        # the outstanding question is a DIFFERENT one and still owns
+        # the park: the recorded side-effect set of that pack must stay
+        # parked (releasing it would tear the tree apart while the
+        # question is still live, and the D1 predicate would keep
+        # re-protecting it anyway). The mismatched pack's own recorded
+        # set is released when THAT pack is answered / dismissed.
         raise _http(
             400,
             ErrorCodes.QUESTION_PACK_MISMATCH,
@@ -536,6 +554,59 @@ async def _fallback_enqueue_or_raise(
         )
 
 
+async def _unpause_recorded_side_effects(
+    manager: "InstanceManager",
+    instance_id: str,
+    pack: QuestionPack | None,
+    *,
+    reason: str = "answer",
+) -> dict:
+    """Release the RECORDED side-effect set of ``pack`` (R2).
+
+    The recorded set (persisted with the question pause — see
+    ``daemon/services/question_pause_set.py``) is the source of truth:
+    the release is derived from the RECORD, never from "was the pack
+    answered". A pack can be in ``answered`` state while its recorded
+    side-effect set is still parked — that IS the stranded state this
+    fixes (historical answer-gate failure mode, 2026-09-10).
+
+    Idempotent, branch-independent, and fail-open (a failure here must
+    never turn a delivered answer into an error).
+    """
+    pack_id = getattr(pack, "id", None)
+    if pack_id is None:
+        # No pack object (e.g. the terminal-target branch) — resolve the
+        # CURRENT pack id of the asker so the recorded set can still be
+        # found.
+        try:
+            from daemon.services.question_pause_set import question_pack_state
+
+            _state, pack_id = await question_pack_state(
+                manager, instance_id
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            logger.warning(
+                f"answer_questions_via_instance: pack-id resolution failed "
+                f"for {instance_id[:8]}...: {type(exc).__name__}: {exc}"
+            )
+            pack_id = None
+    try:
+        from daemon.services.question_pause_set import (
+            release_question_paused_set,
+        )
+
+        return await release_question_paused_set(
+            manager, instance_id, pack_id, reason=reason
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-open
+        logger.warning(
+            f"answer_questions_via_instance: recorded-set release failed "
+            f"for {instance_id[:8]}...: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return {}
+
+
 async def _resume_target_and_tree(
     manager: "InstanceManager",
     instance_id: str,
@@ -547,8 +618,36 @@ async def _resume_target_and_tree(
     task PAUSED→PENDING; the scheduled background resume survives — the
     cascade does not touch _graph_tasks) and assemble the final
     response."""
+    # C2 — the DELIBERATE-pause override must be applied to the
+    # TREE-SCOPED resume, not only to the recorded-set release below:
+    # the cascade flips every parked node to RUNNING (and re-claims its
+    # suspended turn) BEFORE the release runs, so a release-side guard
+    # could never fire. The excluded nodes keep their parked status AND
+    # their suspended turn — the operator's park stands end-to-end.
+    exclude_ids: list[str] = []
     try:
-        resume_result = await manager.resume_instance_cascade(instance_id)
+        from daemon.services.question_pause_set import (
+            deliberate_pause_exclusions,
+        )
+
+        exclude_ids = await deliberate_pause_exclusions(
+            manager, instance_id, getattr(pack, "id", None)
+        )
+    except Exception as excl_exc:  # noqa: BLE001 — fail-open
+        logger.warning(
+            f"answer_questions_via_instance: deliberate-pause exclusion "
+            f"probe failed for {instance_id[:8]}...: "
+            f"{type(excl_exc).__name__}: {excl_exc}"
+        )
+
+    try:
+        from daemon.services.question_pause_set import (
+            resume_instance_cascade_with_exclusions,
+        )
+
+        resume_result = await resume_instance_cascade_with_exclusions(
+            manager, instance_id, exclude_ids
+        )
     except Exception as e:  # noqa: BLE001
         raise _http(
             500,
@@ -674,6 +773,15 @@ async def answer_questions_via_instance(
     if not transitioned:
         # T1′ CAS loser: duplicate answer. No-op — NO SSE, NO events,
         # NO resume, NO Defect-3 (OQ-3).
+        #
+        # R2: the recorded side-effect set is STILL un-paused here. The
+        # CAS loser means "the pack was already answered" — it does NOT
+        # mean "the recorded set was already un-paused". A late/duplicate
+        # answer is the natural moment to release a set that a previous
+        # delivery left parked (the stranded shape). Idempotent.
+        await _unpause_recorded_side_effects(
+            manager, instance_id, pack, reason="answer_already_delivered"
+        )
         return {
             "status": "already_delivered",
             "instance_id": instance_id,
@@ -683,48 +791,66 @@ async def answer_questions_via_instance(
 
     delivery_ms = int((time.monotonic() - started) * 1000)
 
-    # ── 6. SSE (best-effort) — answered pack + answer banner ─────────
-    await _emit_answer_sse(live_hub, instance_id, pack)
-
-    # ── 7. QUESTION_ANSWERED event + watcher fan-out ─────────────────
-    answer_msg = _format_answer_message(pack)
-    if resume_message:
-        answer_msg = f"{answer_msg}\n{resume_message}"
-
-    resume_route = "answer_gate_existing_turn"
-    await _emit_answer_events(
-        manager, instance_id, pack, answers, delivery_ms, resume_route
-    )
-
-    # ── 8. Resume: handle-first, then cascade (unchanged ordering) ───
+    # ── 6-9. SSE + events + resume + cascade-resume ───────────────────
+    #
+    # R2 (CRITICAL): the pack is CONSUMED from here on (the CAS won and
+    # the durable shadow is cleared). The recorded side-effect set MUST
+    # be released on EVERY exit path from here — including the raising
+    # ones (the Defect-3 fallback's 410/500, the cascade's 500). A
+    # skipped release after a consumed pack IS the stranded state this
+    # commission exists to fix, so the release lives in a ``finally``.
     try:
-        job_result = await manager.resume_processing_job(
-            instance_id,
-            message=answer_msg,
-            silent=False,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            f"answer_questions_via_instance: resume_processing_job failed "
-            f"for {instance_id[:8]}...: {e}"
-        )
-        job_result = {"status": "error", "error": str(e)}
+        # ── 6. SSE (best-effort) — answered pack + answer banner ─────
+        await _emit_answer_sse(live_hub, instance_id, pack)
 
-    if reviving_error_target:
-        resume_route = "revived_error_target"
+        # ── 7. QUESTION_ANSWERED event + watcher fan-out ─────────────
+        answer_msg = _format_answer_message(pack)
+        if resume_message:
+            answer_msg = f"{answer_msg}\n{resume_message}"
 
-    if job_result is None:
-        # Defect-3 fallback (answer-gate resume chain, 2026-09-10):
-        # NEVER 200-mask an undeliverable answer — enqueue the Q↔A
-        # payload as a fresh user message. For a revived ERROR/FAILED
-        # target this is the expected route (the handle is gone).
-        job_result, resume_route = await _fallback_enqueue_or_raise(
-            manager, instance_id, answer_msg, reviving_error_target
+        resume_route = "answer_gate_existing_turn"
+        await _emit_answer_events(
+            manager, instance_id, pack, answers, delivery_ms, resume_route
         )
 
-    # ── 9. Cascade-resume the tree (transitions PAUSED→RUNNING /
-    #        task PAUSED→PENDING; the scheduled background resume
-    #        survives — the cascade does not touch _graph_tasks) ──────
-    return await _resume_target_and_tree(
-        manager, instance_id, job_result, pack, resume_route
-    )
+        # ── 8. Resume: handle-first, then cascade (unchanged ordering) ─
+        try:
+            job_result = await manager.resume_processing_job(
+                instance_id,
+                message=answer_msg,
+                silent=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"answer_questions_via_instance: resume_processing_job failed "
+                f"for {instance_id[:8]}...: {e}"
+            )
+            job_result = {"status": "error", "error": str(e)}
+
+        if reviving_error_target:
+            resume_route = "revived_error_target"
+
+        if job_result is None:
+            # Defect-3 fallback (answer-gate resume chain, 2026-09-10):
+            # NEVER 200-mask an undeliverable answer — enqueue the Q↔A
+            # payload as a fresh user message. For a revived ERROR/FAILED
+            # target this is the expected route (the handle is gone).
+            job_result, resume_route = await _fallback_enqueue_or_raise(
+                manager, instance_id, answer_msg, reviving_error_target
+            )
+
+        # ── 9. Cascade-resume the tree (transitions PAUSED→RUNNING /
+        #        task PAUSED→PENDING; the scheduled background resume
+        #        survives — the cascade does not touch _graph_tasks) ──
+        return await _resume_target_and_tree(
+            manager, instance_id, job_result, pack, resume_route
+        )
+    finally:
+        # ── 10. R2 — release the RECORDED side-effect set ─────────────
+        # The question pause parked the WHOLE asker's tree; the cascade
+        # above only reaches what the tree enumeration still sees. The
+        # recorded set (persisted with the pause) is the authoritative
+        # list of instances this question parked — release exactly those,
+        # so their turns complete and their parents leave
+        # ``waiting_children``.
+        await _unpause_recorded_side_effects(manager, instance_id, pack)
