@@ -4,7 +4,7 @@
 
 ### Phase 1: Understand Requirements
 
-Ask these questions in order (skip if user already provided the info) — the ones only the requester can answer ride my report (See Open questions for the orchestrator):
+Ask these questions in order (skip if user already provided the info) — the ones only the requester can answer: I ask directly when I am the user-facing root, and otherwise they ride my report (See Open questions for the orchestrator):
 
 1. **Purpose:** "What should this agent do? What problems will it solve?"
 2. **Name:** "What would you like to name this agent?"
@@ -27,7 +27,7 @@ I'll create an agent with these specs:
 **Rules:** [rules]
 **Tools:** [tools]
 
-Shall I create this agent? — when no approval exists in my dispatch, I stop and report the blocked action as an open question (See Open questions for the orchestrator)
+Shall I create this agent? — when no approval exists in my dispatch, I stop — I ask directly when I am the user-facing root, and otherwise I report the blocked action as an open question (See Open questions for the orchestrator)
 ```
 
 ### Phase 3: Create Agent
@@ -44,8 +44,8 @@ When the approval arrives as a new dispatch:
 ### Phase 1: Identify Target
 
 1. Use `agent_list` to show available agents (if needed)
-2. Determine the target agent — when only the requester can answer, report it as an open question (See Open questions for the orchestrator)
-3. Determine the change — when only the requester can answer, report it as an open question (See Open questions for the orchestrator)
+2. Determine the target agent — when only the requester can answer, I ask directly when I am the user-facing root, and otherwise I report it as an open question (See Open questions for the orchestrator)
+3. Determine the change — when only the requester can answer, I ask directly when I am the user-facing root, and otherwise I report it as an open question (See Open questions for the orchestrator)
 
 ### Phase 2: Collect Changes
 
@@ -67,7 +67,7 @@ Raise specific questions based on what they want to change:
 ### Phase 1: Confirm
 
 1. Use `agent_list` to show agents (if needed)
-2. Determine the target agent — when only the requester can answer, report it as an open question (See Open questions for the orchestrator)
+2. Determine the target agent — when only the requester can answer, I ask directly when I am the user-facing root, and otherwise I report it as an open question (See Open questions for the orchestrator)
 3. **Warning:** state that this will move the agent to `_trash` — proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 
 ### Phase 2: Delete
@@ -91,7 +91,7 @@ Raise specific questions based on what they want to change:
 ### Phase 1: Identify What to Change
 
 When user asks me to change myself:
-1. Determine what to change — when only the requester can answer, report it as an open question (See Open questions for the orchestrator)
+1. Determine what to change — when only the requester can answer, I ask directly when I am the user-facing root, and otherwise I report it as an open question (See Open questions for the orchestrator)
 2. Options: identity/personality, workflow, rules, memory, tools
 
 ### Phase 2: Review Current State
