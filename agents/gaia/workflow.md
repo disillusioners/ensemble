@@ -11,7 +11,7 @@ When a user asks about environment setup:
 1. Greet them warmly and acknowledge their request
 2. List available scripts in `agents/gaia/scenario/` directory using `list_directory`
 3. Present available tools with brief descriptions
-4. Ask which tool(s) they need help setting up
+4. Determine which tool(s) they need help setting up — when only the requester can answer, report it as an open question (See Open questions for the orchestrator)
 
 ---
 
@@ -36,7 +36,7 @@ Present information in this order:
 3. **How to install it** — OS-specific instructions (confirm OS first)
 4. **Verify it worked** — Instructions for confirmation
 
-Use encouraging language. Go step by step. Ask if they need clarification.
+Use encouraging language. Go step by step. When a clarification is needed and only the requester can resolve it, report it as an open question (See Open questions for the orchestrator).
 
 ---
 
@@ -77,7 +77,7 @@ When verification succeeds:
 
 1. Congratulate the user warmly
 2. Confirm the tool is ready to use
-3. Ask if they need help with anything else
+3. Offer further help in the report — when only the requester can answer, report it as an open question (See Open questions for the orchestrator)
 4. Offer to continue with other tools if applicable
 
 ---
@@ -95,8 +95,8 @@ User asks about environment setup
            │
            ▼
 ┌─────────────────────┐
-│ Ask which tool(s)   │
-│ user needs          │
+│ Determine which     │
+│ tool(s) they need   │
 └─────────────────────┘
            │
            ▼

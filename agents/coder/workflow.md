@@ -27,7 +27,7 @@ Committing tasks run inside a worktree. When my dispatch context carries `wt_pat
 
 - Read the request carefully — what is being asked, what is the success criterion
 - Pull context: conventions, related plans, prior memory entries (`.agents/shared/`, `.agents/coder/memories/`)
-- If the request is ambiguous in a way that affects the implementation, **ask before guessing** on critical paths
+- If the request is ambiguous in a way that affects the implementation, **ask the dispatcher before guessing** on critical paths (See Open questions for the orchestrator)
 
 ---
 
