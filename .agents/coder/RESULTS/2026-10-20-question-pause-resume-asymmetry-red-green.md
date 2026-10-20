@@ -162,9 +162,13 @@ PYTEST_BIN=/home/nea/ensemble-src/.venv/bin/pytest \
 ```
 
 ```
-38 passed, 29 warnings in 33.39s
+39 passed, 31 warnings in 37.11s
 RESULT: PASS
 ```
+
+(The pack now carries ``--timeout=60`` — the C1 stratum is a DEADLOCK,
+not an assertion failure; without a hard per-test bound a regression
+deadlock would hang the pack instead of failing it.)
 
 (cycle 3 added three discriminator cases — see the coverage map below;
 the RED and GREEN repro outputs are UNCHANGED by cycle 3: the base run
@@ -176,7 +180,7 @@ The pack is hermetic: file-backed SQLite under pytest's `tmp_path`, no
 network, no daemon, no ports, no DB, and it never resolves a
 HOME-derived install path.
 
-## COVERAGE MAP (38 cases)
+## COVERAGE MAP (39 cases)
 
 | # | case | finding |
 |---|---|---|
@@ -218,6 +222,7 @@ HOME-derived install path.
 | 36 | `test_council_ii_terminated_asker_stale_shadow_does_not_block_sweep` | **council (ii)** |
 | 37 | `test_w1_lost_status_flip_is_an_error_and_keeps_the_record` | **W1** |
 | 38 | `test_w3_duplicate_answer_does_not_re_flip_or_re_wake` | **W3** |
+| 39 | `test_dismiss_path_deliberate_pause_survives_the_release` | **rider** (dismiss exclusion) |
 
 ## HONEST PIN QUALITY (N6) — what the pre-fix reds really are
 
@@ -296,6 +301,32 @@ run forever).
 The GREEN side of the same cases (at the gate-cycle-1 tip): the pack
 reports **38 passed** and the standalone repro exits **0** with the
 unchanged captured output.
+
+### The rider's dismiss-path pin — its RED
+
+Command (the pre-rider tip's `daemon/` checked out, the tests kept):
+
+```bash
+cd /home/nea/ensemble-src-wt-qprasym
+git checkout 9f8618546 -- daemon/
+timeout 300 /home/nea/ensemble-src/.venv/bin/python -m pytest \
+  tests/unit/test_question_pause_resume_asymmetry.py -q -p no:randomly \
+  --timeout=60 -k "dismiss_path_deliberate"
+```
+
+Captured output (1 failed, 38 deselected, 2 warnings in 3.51s):
+
+```
+E       AssertionError: the dismiss path flipped a deliberately parked instance back to running — the exclusion hole
+E       assert 'running' == 'paused'
+E         - paused
+E         + running
+FAILED tests/unit/test_question_pause_resume_asymmetry.py::test_dismiss_path_deliberate_pause_survives_the_release
+1 failed, 38 deselected, 2 warnings in 3.51s
+```
+
+At the rider tip the pack reports **39 passed** (38 + this pin) and the
+standalone repro exits **0** with the unchanged captured output.
 
 ## THE R1 PAUSE-CAUSE DISCRIMINATOR (review cycle 3)
 
