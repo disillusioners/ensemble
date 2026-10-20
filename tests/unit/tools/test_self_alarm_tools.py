@@ -39,6 +39,7 @@ touched.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone as _stdlib_timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -55,6 +56,78 @@ TZ_NAME = "Asia/Ho_Chi_Minh"
 TZ = ZoneInfo(TZ_NAME)
 PROJECT_ID = "proj-1"
 EFFECTIVE = "self-alarm:deploy-check"
+
+
+# ---------------------------------------------------------------------------
+# The FROZEN clock (tester F1 — the 23:20-23:50 ICT wall-clock landmine)
+# ---------------------------------------------------------------------------
+# The phase-3 tester verdict carried F1: this pack scheduled
+# ``daily 23:50`` / ``weekly 3 23:50`` while building its timestamps
+# from the REAL wall clock. Between 23:20 and 23:50 ICT the next
+# occurrence of a 23:50 schedule is LESS than the 30-minute horizon
+# away, so the wrapper's floor refused the request and this pack went
+# RED for half an hour EVERY DAY. The phase-2 "146/146" was a
+# favourable-hour artifact — the single most dangerous kind of green.
+#
+# TWO changes kill the class:
+#
+#   1. the pack runs against a FROZEN clock (see
+#      :func:`_frozen_datetime_class` + the ``frozen_clock`` fixture) —
+#      the wrapper, the engine and the pack itself all read ONE
+#      instant, so the relative-time fixtures can never drift;
+#   2. the daily/weekly ANCHOR is DERIVED from that frozen reference
+#      instead of being hard-coded, so the next occurrence of the
+#      anchor is always far beyond the 30-minute floor — whatever
+#      instant the suite runs at.
+#
+# The instant is overridable through the environment ONLY, so the
+# proof runs can pin it INSIDE the historic red window and OUTSIDE it:
+#
+#     SELF_ALARM_TEST_FROZEN_NOW=2026-10-20T23:35:00+07:00 pytest ...
+#
+FROZEN_NOW = datetime.fromisoformat(
+    os.environ.get(
+        "SELF_ALARM_TEST_FROZEN_NOW", "2026-10-20T12:00:00+07:00"
+    )
+)
+
+#: The daily/weekly fixture anchor — DERIVED from :data:`FROZEN_NOW`,
+#: NEVER from the wall clock. Two hours ahead ⇒ the next occurrence of
+#: the anchor is always ~2 h away, i.e. far beyond the 30-minute floor.
+FIXTURE_HHMM = (FROZEN_NOW + timedelta(hours=2)).strftime("%H:%M")
+# "HH:MM" ⇒ hour FIRST, minute second (the wrapper's ``_split_hhmm``
+# reads it the same way).
+_FIXTURE_HOUR, _FIXTURE_MINUTE = (
+    int(part) for part in FIXTURE_HHMM.split(":")
+)
+#: The cron the ENGINE builds for the fixture anchor (daily / weekly).
+#: The engine's own construction is ``f"{minute} {hour} * * *"`` —
+#: minute FIRST (``scheduling_service.py:722-729``).
+FIXTURE_DAILY_CRON = f"{_FIXTURE_MINUTE} {_FIXTURE_HOUR} * * *"
+FIXTURE_WEEKLY_CRON = f"{_FIXTURE_MINUTE} {_FIXTURE_HOUR} * * 3"
+
+
+def _frozen_datetime_class(instant: datetime):
+    """Build a ``datetime`` subclass whose ``now()`` is pinned to ``instant``.
+
+    The product code reads its clock through a module-global
+    ``datetime`` binding (``from datetime import datetime``), so
+    patching that binding redirects EVERY wall-clock read in the module
+    — NO product source is touched.
+    """
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return instant.replace(tzinfo=None)
+            return instant.astimezone(tz)
+
+    return _Frozen
+
+
+#: The frozen ``datetime`` used by the autouse ``frozen_clock`` fixture.
+FrozenDateTime = _frozen_datetime_class(FROZEN_NOW)
 
 
 # ---------------------------------------------------------------------------
@@ -287,8 +360,47 @@ class SpyService:
 
 
 def _future_iso(hours: float = 2.0) -> str:
-    """An absolute instant ``hours`` from now (offset-aware)."""
-    return (datetime.now(TZ) + timedelta(hours=hours)).isoformat()
+    """An absolute instant ``hours`` from the FROZEN now (offset-aware).
+
+    NEVER ``datetime.now()``: the anchor is derived from the pack's
+    frozen reference so the fixture timestamps and the engine's
+    "is this in the future?" probe can never disagree (tester F1).
+    """
+    return (FROZEN_NOW + timedelta(hours=hours)).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# The frozen clock — EVERY seam the pack's subject reads
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin every clock the wrapper, the engine and the pack read.
+
+    Three module-global ``datetime`` bindings, all patched AT RUNTIME
+    (NO product source is modified):
+
+    * ``daemon.tools.self_alarm`` — the wrapper's ``now``
+      (``self_alarm.py:695``); the floor is measured against it;
+    * ``daemon.services.scheduling_service`` — the engine's own
+      next-run computation (``scheduling_service.py:451``); the engine
+      MUST agree with the wrapper, or the echoed ``next_run_at_utc``
+      disagrees with the armed instant and the reuse assertion falls
+      back to a fresh label;
+    * ``daemon.services.self_alarm_service`` — the cron validation
+      probe (``self_alarm_service.py:391``).
+
+    The pack's own timestamps come from :data:`FROZEN_NOW` directly
+    (see :func:`_future_iso`), so all FOUR clocks read one instant.
+    """
+    monkeypatch.setattr("daemon.tools.self_alarm.datetime", FrozenDateTime)
+    monkeypatch.setattr(
+        "daemon.services.scheduling_service.datetime", FrozenDateTime
+    )
+    monkeypatch.setattr(
+        "daemon.services.self_alarm_service.datetime", FrozenDateTime
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +641,7 @@ class TestFloorBoundary:
     @pytest.mark.asyncio
     async def test_a_past_due_absolute_is_rejected(self, tool_env) -> None:
         tools, service, _repo, _instance_repo = tool_env
-        past = (datetime.now(TZ) - timedelta(hours=1)).isoformat()
+        past = (FROZEN_NOW - timedelta(hours=1)).isoformat()
         result = await _call(
             tools,
             label="deploy-check",
@@ -785,15 +897,15 @@ class TestCreateBranch:
         await _call(
             tools,
             label="daily-check",
-            when_or_every="daily 23:50",
+            when_or_every=f"daily {FIXTURE_HHMM}",
             message_to_self="Do the thing.",
         )
         payload = service.create_calls[0][0]
         assert payload["recurrence"] == "daily"
-        assert payload["when"] == "23:50"
+        assert payload["when"] == FIXTURE_HHMM
         assert payload["weekday"] is None
         # The ENGINE built the same cron the wrapper computed.
-        assert repo.rows[0].config["schedule"] == "50 23 * * *"
+        assert repo.rows[0].config["schedule"] == FIXTURE_DAILY_CRON
 
     @pytest.mark.asyncio
     async def test_a_weekly_request_sends_the_weekday(self, tool_env) -> None:
@@ -801,14 +913,14 @@ class TestCreateBranch:
         await _call(
             tools,
             label="weekly-check",
-            when_or_every="weekly 3 23:50",
+            when_or_every=f"weekly 3 {FIXTURE_HHMM}",
             message_to_self="Do the thing.",
         )
         payload = service.create_calls[0][0]
         assert payload["recurrence"] == "weekly"
-        assert payload["when"] == "23:50"
+        assert payload["when"] == FIXTURE_HHMM
         assert payload["weekday"] == 3
-        assert repo.rows[0].config["schedule"] == "50 23 * * 3"
+        assert repo.rows[0].config["schedule"] == FIXTURE_WEEKLY_CRON
 
     @pytest.mark.asyncio
     async def test_a_cron_request_sends_the_expression(self, tool_env) -> None:
@@ -992,7 +1104,7 @@ class TestCompatibilityGate:
         result = await _call(
             tools,
             label="deploy-check",
-            when_or_every="daily 23:50",
+            when_or_every=f"daily {FIXTURE_HHMM}",
             message_to_self="Do the thing.",
         )
         assert isinstance(result, dict)
@@ -1020,7 +1132,7 @@ class TestCompatibilityGate:
         result = await _call(
             tools,
             label="deploy-check",
-            when_or_every="weekly 3 23:50",
+            when_or_every=f"weekly 3 {FIXTURE_HHMM}",
             message_to_self="Do the thing.",
         )
         assert isinstance(result, dict)
@@ -1066,7 +1178,7 @@ class TestCompatibilityGate:
         result = await _call(
             tools,
             label="deploy-check",
-            when_or_every="weekly 3 23:50",
+            when_or_every=f"weekly 3 {FIXTURE_HHMM}",
             message_to_self="Do the thing.",
         )
         assert isinstance(result, dict)
@@ -1074,7 +1186,10 @@ class TestCompatibilityGate:
         assert len(service.update_calls) == 1
         # The update rewrote only the minute/hour — the stored DOW
         # survived.
-        assert repo.get_source_config("src-1").config["schedule"] == "50 23 * * 3"
+        assert (
+            repo.get_source_config("src-1").config["schedule"]
+            == FIXTURE_WEEKLY_CRON
+        )
 
     # ── The stored TARGET AGENT (review A1 / decisions P2-DEV-12) ──────
     # The three rows below are otherwise IDENTICAL and otherwise
@@ -1522,10 +1637,82 @@ class TestRealServiceContract:
         real_service.configure(source_repo=repo, source_registry=FakeRegistry(repo))
         response = await real_service.update_schedule(
             "src-1",
-            {"when": "23:50", "message": "m", "timezone": TZ_NAME, "paused": False},
+            {"when": FIXTURE_HHMM, "message": "m", "timezone": TZ_NAME, "paused": False},
         )
         expected_local, expected_utc, _warning = real_service._compute_next_run(
             repo.get_source_config("src-1").config
         )
         assert response.next_run_at_local == expected_local
         assert response.next_run_at_utc == expected_utc
+
+
+# ---------------------------------------------------------------------------
+# Tester F1 — the 23:20-23:50 ICT wall-clock landmine (the regression pins)
+# ---------------------------------------------------------------------------
+
+
+class TestWallClockLandmine:
+    """The pack must NEVER depend on the wall clock.
+
+    Before the fix, the pack scheduled ``daily 23:50`` while building
+    its timestamps from ``datetime.now()``. Between 23:20 and 23:50
+    ICT the next occurrence of a 23:50 schedule is LESS than the
+    30-minute horizon away, so the wrapper's floor refused the request
+    and five nodes went RED for half an hour EVERY DAY. The phase-2
+    "146/146" was a favourable-hour artifact.
+    """
+
+    def test_the_fixture_anchor_is_always_beyond_the_floor(self) -> None:
+        """STRUCTURAL: the anchor can never land inside the floor window.
+
+        The anchor is DERIVED from :data:`FROZEN_NOW` (two hours ahead),
+        so the next occurrence of the anchor is always far beyond the
+        30-minute horizon — whatever instant the suite runs at.
+        """
+        from daemon.services.self_alarm_service import MIN_HORIZON_SECONDS
+        from daemon.util.tz import compute_next_cron_fire
+
+        next_fire = compute_next_cron_fire(
+            FIXTURE_DAILY_CRON, FROZEN_NOW.astimezone(TZ), TZ
+        )
+        assert next_fire is not None
+        delta = (next_fire.astimezone(_stdlib_timezone.utc) - FROZEN_NOW.astimezone(_stdlib_timezone.utc)).total_seconds()
+        assert delta >= MIN_HORIZON_SECONDS, (
+            f"the fixture anchor {FIXTURE_HHMM!r} is only {delta}s away "
+            f"from the frozen now — it would trip the "
+            f"{MIN_HORIZON_SECONDS}s floor"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_daily_anchor_is_accepted_at_the_historic_red_instant(
+        self, tool_env, monkeypatch
+    ) -> None:
+        """The OLD failure, reproduced and pinned.
+
+        23:35 ICT sits in the middle of the historic red window: the
+        next occurrence of the OLD hard-coded ``daily 23:50`` anchor was
+        only 15 minutes away, the floor refused it, and this pack went
+        red. Re-pin the clock to that exact instant and the SAME
+        request must now be ACCEPTED.
+        """
+        red_instant = datetime.fromisoformat("2026-10-20T23:35:00+07:00")
+        red_clock = _frozen_datetime_class(red_instant)
+        monkeypatch.setattr("daemon.tools.self_alarm.datetime", red_clock)
+        monkeypatch.setattr(
+            "daemon.services.scheduling_service.datetime", red_clock
+        )
+
+        tools, service, repo, _instance_repo = tool_env
+        result = await _call(
+            tools,
+            label="daily-check",
+            when_or_every=f"daily {FIXTURE_HHMM}",
+            message_to_self="Do the thing.",
+        )
+        assert isinstance(result, dict), result
+        assert result["ok"] is True
+        assert len(service.create_calls) == 1
+        payload = service.create_calls[0][0]
+        assert payload["when"] == FIXTURE_HHMM
+        assert payload["recurrence"] == "daily"
+        assert repo.rows[0].config["schedule"] == FIXTURE_DAILY_CRON
