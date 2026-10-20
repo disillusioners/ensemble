@@ -5,7 +5,7 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.25.5] — 2026-10-19
 
 - Fix answers to a job-scoped question reaching the wrong instance — the job-addressed surfaces (`POST /api/jobs/{work_id}/answer` and the `job_answer` agent tool) routed the answer at the work unit's owning instance (the mission root), so a question asked by a CHILD instance was answered at the root and refused with a false `410 QUESTION_PACK_LOST`; the asker is now resolved from the mission subtree by one shared resolver, and several waiting askers without a `question_pack_id` are refused with `400 INVALID_REQUEST` instead of answered arbitrarily
 - Fix the `410 QUESTION_PACK_LOST` message (user-visible) — it no longer claims a "daemon restart without a durable shadow"; it now states that the pack is absent from both the in-memory store and the durable metadata shadow of that instance, and names the instance and the pack id that was searched
