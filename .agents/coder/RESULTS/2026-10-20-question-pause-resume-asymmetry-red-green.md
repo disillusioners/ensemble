@@ -4,7 +4,11 @@ Feature: `fix/question-pause-resume-asymmetry` (side-effect-paused
 instances stranded after a sibling's `ask_questions`).
 
 - BASE (pre-fix): `1ebdf469f` — "chore(release): bump version to 0.25.7"
-- HEAD (post-fix): `02a6385c5` — "fix(question-pause): address review findings …"
+- HEAD (post-fix): `2d30a53ce` — "fix(question-pause): H1 — the dismiss route
+  must bind to dismiss_question (merge blocker) + the route-table guard"
+  (the tip moves with each cycle — the pin count below is the CURRENT
+  one: **40 cases**, of which **40 are pins** in this pack; the earlier
+  "23 pins" figure was stale and is superseded)
 - Worktree: `/home/nea/ensemble-src-wt-qprasym` (branch
   `fix/question-pause-resume-asymmetry`)
 - Live cases the fix addresses: `f86c4015` / `756d37ba` (2026-10-19) —
@@ -162,7 +166,7 @@ PYTEST_BIN=/home/nea/ensemble-src/.venv/bin/pytest \
 ```
 
 ```
-39 passed, 31 warnings in 37.11s
+40 passed, 31 warnings in 40.33s
 RESULT: PASS
 ```
 
@@ -180,7 +184,7 @@ The pack is hermetic: file-backed SQLite under pytest's `tmp_path`, no
 network, no daemon, no ports, no DB, and it never resolves a
 HOME-derived install path.
 
-## COVERAGE MAP (39 cases)
+## COVERAGE MAP (40 cases)
 
 | # | case | finding |
 |---|---|---|
@@ -223,6 +227,79 @@ HOME-derived install path.
 | 37 | `test_w1_lost_status_flip_is_an_error_and_keeps_the_record` | **W1** |
 | 38 | `test_w3_duplicate_answer_does_not_re_flip_or_re_wake` | **W3** |
 | 39 | `test_dismiss_path_deliberate_pause_survives_the_release` | **rider** (dismiss exclusion) |
+| 40 | `test_route_table_binds_the_dismiss_endpoint` | **H1-GUARD** (route table) |
+
+## H1 — the merge blocker (the route-table RED)
+
+The rider commit `6cea8de0b` inserted `_deliberate_pause_exclusions`
+BETWEEN the dismiss route's decorator and its handler, so the DECORATOR
+BOUND TO THE HELPER: the module still imported (FastAPI's
+`eval_type_lenient` swallowed the NameError from the un-imported
+`InstanceManager` annotation), the real handler was never registered,
+and the endpoint answered **422** (the helper's parameters were read as
+query params). The frontend calls the dismiss route and 22 HTTP call
+sites depend on it.
+
+Route-table readback on the BROKEN tip (`8c1b19357`):
+
+```
+TIP 8c1b19357 route-table readback:
+  path='/instances/{instance_id}/question/dismiss' endpoint.__name__='_deliberate_pause_exclusions'
+  dismiss_question registered anywhere: False
+  underscore-prefixed endpoints: ['_deliberate_pause_exclusions']
+```
+
+HTTP-level RED at the broken tip (`tests/test_question_dismiss.py`):
+
+```
+E       AssertionError: {"detail":[{"type":"missing","loc":["query","manager"],"msg":"Field required","input":null},{"type":"missing","loc":["query","pack_id"],"msg":"Field required","input":null}]}
+E       assert 422 == 200
+15 failed in 2.79s
+```
+
+After the fix (pure code motion — the helper moved above the route's
+decorator block):
+
+```
+  path='/instances/{instance_id}/question/dismiss' endpoint.__name__='dismiss_question'
+  dismiss_question registered anywhere: True
+  underscore-prefixed endpoints: []
+```
+
+The validation pack carries the dismiss suite, so it is sensitive to
+H1 as well. At the broken tip (`8c1b19357`):
+
+```
+>>> FAIL: tests/test_question_dismiss.py (exit 1)
+>>> FAIL: tests/test_question_untested_paths.py (exit 1)
+--- pack tally: 2 of 10 file(s) failed ---
+RESULT: FAIL
+```
+
+At the fixed tip the same pack reports:
+
+```
+>>> PASS: tests/test_question_dismiss.py
+--- pack tally: 0 of 10 file(s) failed ---
+RESULT: PASS
+```
+
+and the HTTP-level dismiss suite on its own: **15 passed** (it was
+**15 failed** at the broken tip).
+
+The permanent guard is the route-table pin
+(`test_route_table_binds_the_dismiss_endpoint`) — it walks
+`router.routes` and asserts `endpoint.__name__`. A handler called as a
+plain function is NOT evidence of route registration, which is exactly
+why the 39-case pack stayed green while the endpoint was broken. Its
+RED on the broken tip:
+
+```
+E           AssertionError: the dismiss route binds to '_deliberate_pause_exclusions', not 'dismiss_question' — a helper was inserted between the decorator and the handler (the endpoint would 422)
+E           assert '_deliberate_pause_exclusions' == 'dismiss_question'
+FAILED tests/unit/test_question_pause_resume_asymmetry.py::test_route_table_binds_the_dismiss_endpoint
+1 failed, 39 deselected in 2.96s
+```
 
 ## HONEST PIN QUALITY (N6) — what the pre-fix reds really are
 
