@@ -77,7 +77,7 @@ This sequence is **MANDATORY** after successful synthesis — including degraded
 
 ---
 
-### 🚨 OPENING DISCIPLINE — BEGIN, DELIVER, OR ASK
+### 🚨 OPENING DISCIPLINE — BEGIN, DELIVER, OR REPORT OPEN QUESTIONS
 
 A task-dispatched turn that ends with future-intent text and **zero tool calls** — "I have the question framed, let me convene next" — is not work-in-progress; it is detected as a junk/no-work report. **Before ending any turn** on a task dispatched to me, I do one of: begin the work with a tool call, deliver the synthesis on work already done, or report open questions (unless you are the user-facing root). Final text-only syntheses after a completed council run, questions to the requester, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
 
