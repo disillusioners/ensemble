@@ -59,6 +59,19 @@ refactor pass (decisions.md "P2.3 Gate Rulings & Fences" item 2); do not
 grow it further without pulling that fence.
 """
 
+# Size rationale (~3931 lines): the upgrade tool surface — the read pair
+# (release_info / upgrade_status incl. the §6.3 restart-audit ledger),
+# the actor pair (system_restart / system_upgrade), the upgrade 3-factor
+# gate, and the agent-restart block (restart-provenance reader + rails +
+# dry-run verdict formatter + override capture, L1257–1620 region).
+# The L8 fence (module split fenced to the post-P2.3 refactor pass —
+# decisions.md "P2.3 Gate Rulings & Fences" item 2) stands. The INTENDED
+# extraction seam for a future split is the agent-restart block: it is
+# self-contained (helpers prefixed `_restart_`/`_capture_`/
+# `_render_`/`_format_restart_`, no shared mutable module state) and
+# would lift to e.g. `daemon/tools/restart_tools.py` behind the same
+# category registration. Do NOT split ad hoc.
+
 from __future__ import annotations
 
 import asyncio
@@ -1254,6 +1267,47 @@ _OUTCOME_LABELS: dict[str, str] = {
 # agent id resolution").
 
 
+# Shared provenance-capture plumbing (hygiene fold): both capture helpers
+# read the SAME two manager stores with the same direct→inherited
+# preference; the lookup helper centralizes the field read, and the
+# empty dict is the single spelling of "no live provenance" (used by the
+# capture helper's failure path AND the 1c narrowing's promote-branch).
+_EMPTY_PROVENANCE: dict[str, Any] = {
+    "provenance_class": "",
+    "root_source": None,
+    "root_message_id": None,
+    "depth": 0,
+    "stamped_at": None,
+    "expires_at": None,
+}
+
+
+def _lookup_provenance_field(
+    manager: "InstanceManager | Any",
+    instance_id: str,
+    direct_key: str,
+    inherited_key: str,
+) -> Any:
+    """Read ``direct_key`` from the instance's DIRECT user-origin window
+    when present, else ``inherited_key`` from the inherited store.
+    Returns ``None`` when neither store has a live-shaped entry for the
+    instance. Defensive — never raises."""
+    try:
+        windows = getattr(manager, "_user_origin_windows", None)
+        if isinstance(windows, dict):
+            entry = windows.get(instance_id)
+            if isinstance(entry, dict) and entry.get(direct_key) is not None:
+                return entry.get(direct_key)
+        inherited = getattr(manager, "_inherited_provenance_windows", None)
+        if isinstance(inherited, dict):
+            ientry = inherited.get(instance_id)
+            if isinstance(ientry, dict) and ientry.get(inherited_key) is not None:
+                return ientry.get(inherited_key)
+        return None
+    except Exception:  # defensive — capture is best-effort
+        return None
+
+
 def _capture_user_source(manager: "InstanceManager | Any", instance_id: str) -> str:
     """Read the recorded ``source`` from the manager's per-instance
     user-origin window. Returns ``""`` on absence (non-user-origin arm;
@@ -1264,46 +1318,24 @@ def _capture_user_source(manager: "InstanceManager | Any", instance_id: str) -> 
     captured instead (the wake record + restart_audits render the root
     provenance; the restart-kind wake never re-stamps from it — A-2).
     """
-    try:
-        windows = getattr(manager, "_user_origin_windows", None)
-        if isinstance(windows, dict):
-            entry = windows.get(instance_id)
-            if isinstance(entry, dict):
-                source = entry.get("source")
-                if isinstance(source, str) and source:
-                    return source
-        inherited = getattr(manager, "_inherited_provenance_windows", None)
-        if isinstance(inherited, dict):
-            ientry = inherited.get(instance_id)
-            if isinstance(ientry, dict):
-                root = ientry.get("root_source")
-                if isinstance(root, str) and root:
-                    return root
-        return ""
-    except Exception:  # defensive — capture is best-effort
-        return ""
+    source = _lookup_provenance_field(
+        manager, instance_id, "source", "root_source"
+    )
+    return source if isinstance(source, str) and source else ""
 
 
 def _capture_provenance_class(
     manager: "InstanceManager | Any", instance_id: str
-) -> dict[str, Any]:
+) -> dict[str, Any]:  # values: provenance_class is Literal["direct","inherited",""]
     """agent-restart C-2: capture the provenance class + root fields for
     the wake record / audit row. Reads BOTH manager stores (direct
     first). Returns a dict with ``provenance_class`` (``""`` when no
     live provenance), ``root_source``, ``root_message_id``, ``depth``,
     ``stamped_at``, ``expires_at``. Defensive — never raises."""
-    empty = {
-        "provenance_class": "",
-        "root_source": None,
-        "root_message_id": None,
-        "depth": 0,
-        "stamped_at": None,
-        "expires_at": None,
-    }
     try:
         verdict = _restart_provenance(manager, instance_id)
         if not verdict.ok:
-            return dict(empty)
+            return dict(_EMPTY_PROVENANCE)
         return {
             "provenance_class": verdict.pclass,
             "root_source": verdict.root_source,
@@ -1313,7 +1345,7 @@ def _capture_provenance_class(
             "expires_at": verdict.expires_at,
         }
     except Exception:  # defensive — capture is best-effort
-        return dict(empty)
+        return dict(_EMPTY_PROVENANCE)
 
 
 def _capture_user_message_id(
@@ -1324,24 +1356,10 @@ def _capture_user_message_id(
     raises. agent-restart C-2: falls back to the inherited store's ROOT
     message id (mirrors :func:`_capture_user_source`).
     """
-    try:
-        windows = getattr(manager, "_user_origin_windows", None)
-        if isinstance(windows, dict):
-            entry = windows.get(instance_id)
-            if isinstance(entry, dict):
-                msg_id = entry.get("message_id")
-                if isinstance(msg_id, str) and msg_id:
-                    return msg_id
-        inherited = getattr(manager, "_inherited_provenance_windows", None)
-        if isinstance(inherited, dict):
-            ientry = inherited.get(instance_id)
-            if isinstance(ientry, dict):
-                root = ientry.get("root_message_id")
-                if isinstance(root, str) and root:
-                    return root
-        return None
-    except Exception:  # defensive
-        return None
+    msg_id = _lookup_provenance_field(
+        manager, instance_id, "message_id", "root_message_id"
+    )
+    return msg_id if isinstance(msg_id, str) and msg_id else None
 
 
 # ═══════════════════════════════════════
@@ -1472,7 +1490,7 @@ def _restart_cooldown_state(journal: dict[str, Any] | None) -> tuple[bool, str]:
     until_display)``. Fail CLOSED on unparseable (an unparseable
     cooldown_until counts as ACTIVE — recent-instability refuse).
     Distinct name from the pre-existing promote-lane ``_cooldown_state``
-    (str renderer, :1994) — no shadowing."""
+    (str renderer, :2027) — no shadowing."""
     if not isinstance(journal, dict):
         return False, "none"
     raw = journal.get("cooldown_until")
@@ -1569,14 +1587,29 @@ def _capture_pending_overrides(manager: "InstanceManager | Any") -> list[dict[st
                 continue
             try:
                 resolution = resolve(key, snapshot, db_overrides=overrides)
-            except Exception:  # noqa: BLE001 — per-key fail-open
+            except Exception as res_exc:  # noqa: BLE001 — per-key fail-open
+                logger.warning(
+                    "system_restart: override capture — resolve FAILED for "
+                    "key=%s (skipped, fail-open): %s",
+                    key, res_exc,
+                )
                 continue
             if resolution.get("source") != "db":
                 continue  # DB tier not winning — nothing pending
             try:
                 live = _get_config_value(config, spec.config_path)
-            except Exception:  # noqa: BLE001
-                live = None
+            except Exception as cfg_exc:  # noqa: BLE001
+                # Log-parity fold: a config-read failure is DISTINGUISHED
+                # (sentinel string, logged) from a legitimately-absent
+                # live value (None) — same rendered downstream shape, no
+                # token change; the operator can tell a broken read from
+                # a missing field.
+                logger.warning(
+                    "system_restart: override capture — live-value read "
+                    "FAILED for key=%s (rendered 'unreadable'): %s",
+                    key, cfg_exc,
+                )
+                live = "<unreadable>"
             if resolution.get("value") == live:
                 continue  # not divergent — already running the DB value
             out.append(
@@ -1700,14 +1733,7 @@ def _arm_pending_wake_for_op(
         prov = (
             _capture_provenance_class(manager, current_instance_id)
             if op.kind == "restart"
-            else {
-                "provenance_class": "",
-                "root_source": None,
-                "root_message_id": None,
-                "depth": 0,
-                "stamped_at": None,
-                "expires_at": None,
-            }
+            else dict(_EMPTY_PROVENANCE)  # 1c narrowing: promote keeps empty
         )
         wake = PendingWake(
             run_id=op.run_id,
@@ -2987,6 +3013,7 @@ Returns:
                     f"per-env lock held (run_id={busy_run or held_run or '?'}) — "
                     "retry via upgrade_status",
                 )
+            restart_armed_ok = False
             try:
                 uj.journal_init(install_dir)
                 uj.ensure_extensions(install_dir)
@@ -3100,6 +3127,7 @@ Returns:
                 _arm_pending_wake_for_op(
                     manager, install_dir, op, current_instance_id
                 )
+                restart_armed_ok = True
             except (JournalTorn, OSError, KeyError) as exc:
                 # NIT-2 (P2.2 tidy cycle-3 carry-over, closed P2.3 B3.5):
                 # unwind BEFORE releasing the lock. Releasing first opened
@@ -3128,6 +3156,18 @@ Returns:
                     "(partial arm unwound best-effort; no restart scheduled — "
                     "inspect release_info(section=journal) if this repeats)"
                 )
+            finally:
+                # Hygiene fold (log-parity): the lock-release BELT — the
+                # tuple above handles the journal-failure classes, but an
+                # UNEXPECTED exception class previously propagated to the
+                # outer handler with the lock STILL HELD (wedges
+                # pipeline-busy until the boot stale-arm closure or a
+                # daemon restart). Success (armed) KEEPS the lock — the
+                # restart executor adopts it at drain; release is
+                # idempotent so the except-path's explicit release is
+                # harmless.
+                if not restart_armed_ok:
+                    journal_lock_release(install_dir)
 
             # ── C-1/F-3 mint-condition carrier: the marker stamps
             # ``provenance_ok`` ONLY after the gate passed (live) — the
@@ -3153,7 +3193,8 @@ Returns:
                 },
             )
             receipt = [
-                f"RESTART SCHEDULED — run_id={run_id} env={self_env} mode=graceful-now reason=\"{reason}\"",
+                f"RESTART SCHEDULED — run_id={run_id} env={self_env} "
+                f"mode=graceful-now reason=\"{reason}\"",
                 "executes_after_turn: yes",
                 "reply_delivery: best-effort (head-start grace 15s; reply may "
                 "be lost — post-restart arm-notify is the durable report)",
@@ -3176,7 +3217,8 @@ Returns:
                     f"expires={provenance.expires_at}"
                 )
             receipt.append(
-                f"trigger: {'post-turn-callback armed' if marker_ok else 'post-turn callback unavailable — fallback (bounded waiter/boot sweep)'}"
+                "trigger: "
+                f"{'post-turn-callback armed' if marker_ok else 'post-turn callback unavailable — fallback (bounded waiter/boot sweep)'}"
             )
             receipt.append(f"busy-check: {busy}")
             return "\n".join(receipt)

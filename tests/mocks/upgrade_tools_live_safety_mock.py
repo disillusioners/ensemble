@@ -497,7 +497,7 @@ async def s1_parity(tools: dict) -> None:
                "artifacts/current symlink/lock/history/livez-degrade)")
 
 
-async def s2_live_restart_refusal(tools: dict, mgr: _ManagerFacade) -> None:
+async def s2_live_restart_provenance_gate(tools: dict, mgr: _ManagerFacade) -> None:
     # agent-restart (2026-10-19): the A2 outright refusal is superseded by
     # the genuine-user provenance gate. Two pins:
     #   (a) AGENT-initiated (no window) -> REAL refusal no-user-provenance;
@@ -506,7 +506,6 @@ async def s2_live_restart_refusal(tools: dict, mgr: _ManagerFacade) -> None:
     #       NOT refused on provenance: the arm SCHEDULES (receipt), the
     #       marker arms, the executor spec carries provenance_ok.
     set_self_env("live")
-    before = journal_bytes(FAKE_LIVE)
     # (a) no user-origin window on the turn
     out = await call(tools, "system_restart", target_env="live",
                      reason="agent-initiated should refuse",
@@ -515,7 +514,6 @@ async def s2_live_restart_refusal(tools: dict, mgr: _ManagerFacade) -> None:
     r1 = reason_of(out)
     out_dry = await call(tools, "system_restart", target_env="live",
                          reason="agent-initiated dry verdict", dry_run=True)
-    r2 = reason_of(out_dry)
     # N-5: the refused attempt records an ADDITIVE restart_audits row
     # (outcome=refused) — so byte-identity no longer holds; the PIPELINE
     # fields must stay untouched instead.
@@ -523,7 +521,6 @@ async def s2_live_restart_refusal(tools: dict, mgr: _ManagerFacade) -> None:
     pipeline_untouched = (
         refused_data.get("pending_op") is None
         and refused_data.get("in_flight") is None
-        and refused_data.get("in_flight") is not False
         and any(
             (r or {}).get("outcome") == "refused"
             and (r or {}).get("refusal_token") == "no-user-provenance"
@@ -1004,7 +1001,7 @@ async def main() -> int:
                               "system_restart", "system_upgrade"}, names
 
         await s1_parity(tools)
-        await s2_live_restart_refusal(tools, mgr)
+        await s2_live_restart_provenance_gate(tools, mgr)
         await s3_taxonomy(tools, mgr)
         await s4_three_factor(tools, mgr)
         run_id = await s5_spawn_proof(tools, mgr)

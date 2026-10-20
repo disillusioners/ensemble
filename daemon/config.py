@@ -6655,8 +6655,8 @@ def probe_critical_notes_boot_state(*, engine: Any) -> None:
 # LIVE-ONLY anti-flap rails (demo/dev/sandbox stay FREE — §1.2/§4 Env
 # column). Read per call (NOT cached at boot) so an operator flip takes
 # effect on the next system_restart without a daemon restart. The
-# journal-side budget helpers (daemon/tools/upgrade_journal.py) honor the
-# SAME env names — one knob surface, two readers.
+# journal-side budget helpers (daemon/tools/upgrade_journal.py) DELEGATE
+# to these accessors (hygiene fold H1) — one knob surface, ONE parser.
 #
 #   ENSEMBLE_RESTART_MIN_UPTIME_S      default 600 (launcher horizon,
 #                                      launcher.sh:59) — rail c1
@@ -6670,17 +6670,27 @@ RESTART_MIN_UPTIME_S: int = 600
 RESTART_BUDGET_24H: int = 3
 RESTART_BUDGET_WINDOW_S: int = 86400
 
+# Knob env names as named constants (hygiene fold): restart.sh reads the
+# READY var textually (``${…:-1}``) — the string literals here are the
+# single in-repo Python-side spelling of the same names.
+RESTART_MIN_UPTIME_S_ENV = "ENSEMBLE_RESTART_MIN_UPTIME_S"
+RESTART_BUDGET_24H_ENV = "ENSEMBLE_RESTART_BUDGET_24H"
+RESTART_BUDGET_WINDOW_S_ENV = "ENSEMBLE_RESTART_BUDGET_WINDOW_S"
+RESTART_GATE_REQUIRE_READY_ENV = "ENSEMBLE_RESTART_GATE_REQUIRE_READY"
+
 
 def _restart_int_knob(env_name: str, default: int) -> int:
     """Best-effort int knob (agent-restart §4). Unset/empty → default;
     garbage → default (logged by the caller's structured refusal — the
     rails fail CLOSED on their own unavailable signals, but a knob typo
-    degrades to the documented default rather than wedging the tool)."""
-    raw = os.environ.get(env_name)
-    if raw is None or not raw.strip():
+    degrades to the documented default rather than wedging the tool).
+    Trimming rides the shared ``_clean_env_value`` helper (hygiene
+    fold)."""
+    raw = _clean_env_value(os.environ.get(env_name))
+    if raw is None:
         return default
     try:
-        val = int(raw.strip())
+        val = int(raw)
     except (TypeError, ValueError):
         return default
     return val if val > 0 else default
@@ -6689,30 +6699,41 @@ def _restart_int_knob(env_name: str, default: int) -> int:
 def restart_min_uptime_s() -> int:
     """Rail c1 threshold (seconds) — live-only minimum uptime before a
     restart may arm (``now − boot_epoch ≥ threshold``)."""
-    return _restart_int_knob("ENSEMBLE_RESTART_MIN_UPTIME_S", RESTART_MIN_UPTIME_S)
+    return _restart_int_knob(RESTART_MIN_UPTIME_S_ENV, RESTART_MIN_UPTIME_S)
 
 
 def restart_budget_24h() -> int:
     """Rail c2 cap — live-only sliding-window restart budget."""
-    return _restart_int_knob("ENSEMBLE_RESTART_BUDGET_24H", RESTART_BUDGET_24H)
+    return _restart_int_knob(RESTART_BUDGET_24H_ENV, RESTART_BUDGET_24H)
 
 
 def restart_budget_window_s() -> int:
-    """Rail c2 window (seconds) for the sliding budget."""
+    """Rail c2 window (seconds) for the sliding budget. Called by the
+    journal-side sliding helpers (H1 delegation)."""
     return _restart_int_knob(
-        "ENSEMBLE_RESTART_BUDGET_WINDOW_S", RESTART_BUDGET_WINDOW_S
+        RESTART_BUDGET_WINDOW_S_ENV, RESTART_BUDGET_WINDOW_S
     )
 
 
 def restart_gate_require_ready() -> bool:
     """§4f: is /readyz REQUIRED in the restart.sh gate? Default true;
     ``ENSEMBLE_RESTART_GATE_REQUIRE_READY=0`` makes the probe
-    report-only. Mirrors the shell-side default
-    (``${ENSEMBLE_RESTART_GATE_REQUIRE_READY:-1}`` in restart.sh)."""
-    raw = os.environ.get("ENSEMBLE_RESTART_GATE_REQUIRE_READY")
-    if raw is None or not raw.strip():
+    report-only.
+
+    SHELL-MIRROR ACCESSOR (hygiene fold H1): the LIVE reader of this knob
+    is restart.sh (``${ENSEMBLE_RESTART_GATE_REQUIRE_READY:-1}``) — this
+    Python accessor currently has no in-repo caller; it is kept as the
+    documented Python-side mirror of the shell default (test seam +
+    future tool-side rendering), not a second enforcement point."""
+    # NOTE (hygiene fold): deliberately NOT routed through
+    # ``_parse_bool_switch`` — that helper RAISES on garbage (the
+    # boot-fails-loud convention); this knob's contract is permissive
+    # (unknown value → required=true default). Routing it through would
+    # be a semantic change (prohibited by the fold's DO-NOT list).
+    raw = _clean_env_value(os.environ.get(RESTART_GATE_REQUIRE_READY_ENV))
+    if raw is None:
         return True
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
+    return raw.lower() not in {"0", "false", "no", "off"}
 
 
 # Convenience function for getting the config

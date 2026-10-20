@@ -108,6 +108,13 @@ PY=python3
 VENV_PY="$REPO_ROOT/.venv/bin/python"
 [ -x "$VENV_PY" ] || VENV_PY="$(command -v python3)"
 PY="$VENV_PY"
+# Reviewer's-5 fail-fast: the drill needs the daemon package importable
+# (langchain_core et al.). A bare python3 without deps would surface as a
+# confusing per-leg ImportError — refuse LOUDLY (exit 98) instead.
+if ! "$PY" -c "import langchain_core" >/dev/null 2>&1; then
+    printf 'FATAL: chosen interpreter %s cannot import langchain_core — point the worktree .venv at a deps-complete venv (exit 98)\n' "$PY" >&2
+    exit 98
+fi
 
 run_py() {  # heredoc driver with the fixture paths in env
     INSTALL_DIR="$INSTALL" HOME="$FAKE_HOME" ENSEMBLE_SELF_ENV=live \

@@ -43,16 +43,19 @@ Lifecycle mirrors :class:`~daemon.services.job_lock_sweep.JobLockSweepService`:
 (CancelledError is the normal shutdown path — FM-11: never swallow it).
 """
 
-# Size rationale (~1890 lines): the sweep service owns FOUR janitor
-# lanes in one loop by design — periodic reconcile/GC tick, the
-# two-signal (W4) liveness predicate, the wake-record sweep, and the
-# bounded reaper (waitpid + signal attribution). They share the
-# install-dir lock + journal-read conventions; separating them would
-# re-introduce the tick-ordering races the single loop exists to
-# kill. Do NOT split.
+# Size rationale (~2300 lines, refreshed 2026-10-19): the sweep service
+# owns FIVE janitor lanes in one loop by design — periodic reconcile/GC
+# tick, the two-signal (W4) liveness predicate, the wake-record sweep,
+# the bounded reaper (waitpid + signal attribution), and the
+# agent-restart wake lane (kind-partitioned coalescing, reserved-source
+# delivery, §5.3 body render, restart-audit settle, supervision_scope
+# classifier). They share the install-dir lock + journal-read
+# conventions; separating them would re-introduce the tick-ordering
+# races the single loop exists to kill. Do NOT split.
 
 from __future__ import annotations
 
+import glob
 import asyncio
 import concurrent.futures
 import logging
@@ -65,6 +68,18 @@ from typing import TYPE_CHECKING, Any
 
 from daemon.tools import upgrade_journal as uj
 from daemon.tools.upgrade_journal import RESTART_WAKE_SOURCE
+
+
+def _outcome_labels() -> dict[str, str]:
+    """Resolve ``upgrade_tools._OUTCOME_LABELS`` once per call, fail-open
+    to an empty mapping (hygiene fold — replaces the two verbatim
+    lazy-import blocks in the wake-body formatters; the sweep must not
+    hard-depend on the tools module at import time)."""
+    try:
+        from daemon.tools.upgrade_tools import _OUTCOME_LABELS
+    except Exception:  # noqa: BLE001 — fail-open render (raw keys)
+        return {}
+    return _OUTCOME_LABELS
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -623,10 +638,9 @@ class UpgradeJournalSweepService:
             )
             if unit is None and unit_dir:
                 try:
-                    import glob as _glob
-
+                    
                     for cand in sorted(
-                        _glob.glob(os.path.join(unit_dir, "ensemble-*.service"))
+                        glob.glob(os.path.join(unit_dir, "ensemble-*.service"))
                     ):
                         unit = os.path.basename(cand)
                         if slice_prefix is None:
@@ -694,12 +708,7 @@ class UpgradeJournalSweepService:
         only; audit-row consumers read it via ``_audit_row``).
         Fail-open: every sub-read is defensive.
         """
-        # Lazy import — sweep must not hard-depend on the tools module.
-        try:
-            from daemon.tools.upgrade_tools import _OUTCOME_LABELS
-        except Exception:  # noqa: BLE001
-            _OUTCOME_LABELS = {}
-        label = _OUTCOME_LABELS.get(terminal_outcome, terminal_outcome)
+        label = _outcome_labels().get(terminal_outcome, terminal_outcome)
         audit = self._audit_row(journal, wake.run_id)
         gate_detail = self._restart_gate_detail(journal, wake.run_id)
         overrides_frag = self._render_applied_overrides(wake, audit)
@@ -742,10 +751,6 @@ class UpgradeJournalSweepService:
         """agent-restart §5.3 — coalesced-wake body (newest-first run
         list; per-run labels; the HEAD run carries the full §5.3
         detail block)."""
-        try:
-            from daemon.tools.upgrade_tools import _OUTCOME_LABELS
-        except Exception:  # noqa: BLE001
-            _OUTCOME_LABELS = {}
         head = wakes[0]
         n = len(wakes)
         lines = [
@@ -754,9 +759,10 @@ class UpgradeJournalSweepService:
             f"`{head.run_id}` completed during the daemon downtime.",
             "Outcomes (newest first):",
         ]
+        labels = _outcome_labels()
         for w, o in zip(wakes, outcomes):
             lines.append(
-                f"  - `{w.run_id}`: `{_OUTCOME_LABELS.get(o, o)}` "
+                f"  - `{w.run_id}`: `{labels.get(o, o)}` "
                 f"(`{o}`) at `{w.armed_at}`"
             )
         lines.append(self._format_wake_body(head, outcomes[0], journal, install_dir))
@@ -940,8 +946,13 @@ class UpgradeJournalSweepService:
                         else:
                             o["status"] = "late-write"
                     fields["overrides"] = row["overrides"]
-            except Exception:  # noqa: BLE001 — overrides settle is best-effort
-                pass
+            except Exception as ov_exc:  # noqa: BLE001 — best-effort
+                logger.debug(
+                    "UpgradeJournalSweepService: restart-audit overrides "
+                    "settle skipped for run_id=%s: %s (outcome/notify "
+                    "fields still settle)",
+                    wake.run_id, ov_exc,
+                )
             uj.record_restart_audit(install_dir, wake.run_id, fields)
         except Exception as exc:  # noqa: BLE001 — never raises
             logger.warning(

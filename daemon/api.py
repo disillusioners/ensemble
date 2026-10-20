@@ -2783,10 +2783,11 @@ async def lifespan(app: FastAPI):
     set_settings_service(_boot_settings_service)
     set_settings_resolution_snapshot(settings_snapshot)
     # agent-restart §5.2 (access seam): the SAME service instance is wired
-    # onto the manager so the restart arm path can read the pending
-    # managed-setting override set (``requires_restart ∧ divergent``)
-    # inside its lock-holding try — no second engine, no second service.
-    manager._settings_service = _boot_settings_service
+    # onto the manager (via the setter seam — hygiene fold) so the
+    # restart arm path can read the pending managed-setting override set
+    # (``requires_restart ∧ divergent``) inside its lock-holding try —
+    # no second engine, no second service.
+    manager.set_settings_service(_boot_settings_service)
 
     # Also set project repository for queues router (has its own dependency injection)
     from daemon.routers.queues import set_project_repository as set_queues_project_repository

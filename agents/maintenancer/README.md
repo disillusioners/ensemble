@@ -29,6 +29,7 @@ The leader does **not** route to the Maintenancer for application-source bugs (d
 - Mirror the KB into the ensemble knowledge base on first turn (best-effort; KB INDEX + filesystem reads are guaranteed-on even if the mirror is unavailable).
 - Dispatch workers (`worker`, `coder`, `explorer`) loaded with one skill each (`load_skill="<one>"`), for example `log-forensics`, `ens-db-repair`, `job-mission-repair`.
 - Stage a live `system_upgrade` operation when the user supplies a real nonce and a per-instance user-origin window is open (the 3-factor gate).
+- Arm a live `system_restart` on a turn carrying genuine-user provenance (direct or inherited — the daemon tracks it; NO nonce) with dry-run-first discipline and verbatim refusal relay (agent-restart, 2026-10-19).
 
 ## What it cannot do
 

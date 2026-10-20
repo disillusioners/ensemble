@@ -187,6 +187,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Size rationale (~13990 lines): the InstanceManager facade is the
+# daemon's single coordination point by design — lifecycle, repositories,
+# message/job queues, source adapters, tool construction, and the
+# deferred-execution + provenance seams. It is a DEFERRED-DECOMPOSITION
+# LEDGER (not an aspiration): every subsystem that grew a service
+# (job_state_machine, instance_lifecycle, watchover_service,
+# upgrade_journal_sweep, settings_service …) was EXTRACTED from here
+# behind a facade method; the pattern continues. The agent-restart
+# additions (inherited-provenance store + funnel lane + drain env mint +
+# settings seam) follow the same shape — small additive blocks, each a
+# future extraction candidate. Do NOT split ad hoc; extract behind a
+# facade method when a block outgrows its seam.
+
+def fmt_iso(dt) -> str:
+    """datetime → journal ISO literal (``%Y-%m-%dT%H:%M:%SZ``, UTC). Tiny
+    shared helper (hygiene fold 2026-10-19) so the inherited-provenance
+    mint and any future writer agree with ``upgrade_journal.now_iso``'s
+    format byte-for-byte."""
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ── agent-restart §2.4: inherited-provenance knobs ──────────────────────────
+# The inherited-window TTL aliases the provenance-window TTL SSOT
+# (``upgrade_journal.NONCE_TTL_S`` — 60min, ADR-036); named here so the
+# inherit lane reads intent-first (hygiene fold; same value, one source).
+PROVENANCE_TTL_S = 60 * 60  # = upgrade_journal.NONCE_TTL_S
+
 # ── agent-restart §2.4: inherited-provenance depth cap ──────────────────────
 # Mechanism-B inherited windows deepen at most 4 levels
 # (user → ari → maintenancer → grandchild); a dispatch whose claim would
@@ -1536,7 +1563,7 @@ class InstanceManager:
         # ``expires_at = min(parent_expiry, now + 60min)`` (monotonic decay),
         # cleared on every non-inheriting dispatch, wiped by daemon restart
         # (fail-closed), revive = fresh dispatch. In-memory only.
-        self._inherited_provenance_windows: dict[str, dict] = {}
+        self._inherited_provenance_windows: dict[str, dict[str, dict]] = {}
 
         # Runtime SettingsService seam (agent-restart §5.2): the api
         # lifespan wires the router-module service onto the manager so the
@@ -4909,7 +4936,7 @@ class InstanceManager:
             if now_dt is None:  # pragma: no cover — now_iso is always parseable
                 self._inherited_provenance_windows.pop(instance_id, None)
                 return
-            ttl_expiry = _uj.parse_iso_utc(_uj.iso_plus(now, _uj.NONCE_TTL_S))
+            ttl_expiry = _uj.parse_iso_utc(_uj.iso_plus(now, PROVENANCE_TTL_S))
             # Claim: the caller's DIRECT window (live at claim time) …
             direct = self._user_origin_windows.get(caller_iid)
             inherited = self._inherited_provenance_windows.get(caller_iid)
@@ -4949,7 +4976,7 @@ class InstanceManager:
                 "root_message_id": parent.get("root_message_id"),
                 "root_stamped_at": parent.get("root_stamped_at"),
                 "depth": depth,
-                "expires_at": final_exp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "expires_at": fmt_iso(final_exp),
             }
         except Exception as exc:  # never break message dispatch
             logger.warning(
@@ -4960,7 +4987,22 @@ class InstanceManager:
             try:
                 self._inherited_provenance_windows.pop(instance_id, None)
             except Exception:  # pragma: no cover — defensive
-                pass
+                logger.debug(
+                    "_inherit_provenance_window: fail-closed pop also "
+                    "failed for %s (entry left as-is; fail-closed "
+                    "consumers treat unknown-shape entries as invalid)",
+                    instance_id[:8] if isinstance(instance_id, str) else instance_id,
+                )
+
+    def set_settings_service(self, service: Any) -> None:
+        """Wire the runtime ``SettingsService`` onto the manager
+        (agent-restart §5.2 access seam; hygiene fold — a real setter
+        instead of the api lifespan reaching into the attribute). Called
+        once at lifespan wiring with the SAME single-engine service the
+        settings router holds; the restart arm path reads it via the
+        attribute (``manager._settings_service``) — degrade-to-empty on
+        unwired seams."""
+        self._settings_service = service
 
     def set_pending_system_execution(self, instance_id: str, spec: dict) -> None:
         """Arm the post-turn executor trigger marker (D-FA1.4). Called by the

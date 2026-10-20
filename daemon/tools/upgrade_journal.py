@@ -87,13 +87,18 @@ the single journal protocol home. Splitting the protocol twin from the
 tool surface would force every contract change to touch two modules.
 """
 
-# Size rationale (~3050 lines, crossed >3000 during the P2 journal
-# hardening): single-source-of-truth for the upgrade journal — schema
-# (JOURNAL_EMPTY + PendingOp), atomic I/O, reconcile/expiry, F2 nonce
-# state, owner-heartbeat accessor (journal_owner_heartbeat_fresh, the
-# W4/C8 two-signal sweep input) and the R1 sweep-refusal rulings'
-# journal-side state. The growth is the audit surface consolidating;
-# splitting would spread the schema across importers. Do NOT split.
+# Size rationale (~3433 lines, refreshed 2026-10-19 — was ~3050 at the
+# P2 journal hardening): single-source-of-truth for the upgrade journal —
+# schema (JOURNAL_EMPTY + PendingOp + PendingWake), atomic I/O,
+# reconcile/expiry + the agent-restart additive surface (restart_audits /
+# restart_window / close_stale_restart_arm / the terminal-event
+# constants), F2 nonce state, owner-heartbeat accessor
+# (journal_owner_heartbeat_fresh, the W4/C8 two-signal sweep input) and
+# the R1 sweep-refusal rulings' journal-side state. The growth is the
+# audit surface consolidating; splitting would spread the schema across
+# importers. The L8 module-split fence stands — do NOT grow it further
+# without pulling that fence; the restart lane rides the same protocol
+# home by design (§6.1 decision A — one locked envelope). Do NOT split.
 
 from __future__ import annotations
 
@@ -121,7 +126,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, NamedTuple, NoReturn
+from typing import Any, Callable, NamedTuple, NoReturn, Literal
 
 from daemon.constants import is_reserved_source
 
@@ -453,30 +458,21 @@ RESTART_AUDITS_CAP: int = 50
 """Drop-oldest cap on the ``restart_audits`` dict (journal RMW growth,
 §10 risk 10)."""
 
-RESTART_BUDGET_DEFAULT_24H: int = 3
-RESTART_BUDGET_DEFAULT_WINDOW_S: int = 24 * 60 * 60
-RESTART_MIN_UPTIME_DEFAULT_S: int = 600
 
+def _restart_window_s() -> int:
+    """Sliding-budget window seconds (§4 rail c2 read side) — DELEGATED
+    to the config SSOT accessors (hygiene fold H1, 2026-10-19): the
+    journal-side helpers no longer carry their own env parser; the knob
+    surface lives once in ``daemon/config.py``
+    (``restart_budget_24h`` / ``restart_budget_window_s``). Function-local
+    import — no import cycle (config does not import the tools package).
+    NOTE: delegation widens this parser's effective catch tuple to
+    config's ``except (TypeError, ValueError)`` (was ValueError-only);
+    unreachable in practice (``os.environ`` values are always str) —
+    hygiene-class edge-behavior change, disclosed."""
+    from daemon import config as _cfg
 
-def _restart_budget_caps() -> tuple[int, int]:
-    """Env-overridable budget caps (§4 rails c1/c2; config knobs land in
-    daemon/config.py — this reader honors the same env names for the
-    journal-side helpers so the shell lane and the tool lane agree).
-    Fail-closed parsing: garbage → defaults."""
-    def _int_env(name: str, default: int) -> int:
-        raw = os.environ.get(name)
-        if raw is None or not raw.strip():
-            return default
-        try:
-            val = int(raw.strip())
-        except ValueError:
-            return default
-        return val if val > 0 else default
-
-    return (
-        _int_env("ENSEMBLE_RESTART_BUDGET_24H", RESTART_BUDGET_DEFAULT_24H),
-        _int_env("ENSEMBLE_RESTART_BUDGET_WINDOW_S", RESTART_BUDGET_DEFAULT_WINDOW_S),
-    )
+    return _cfg.restart_budget_window_s()
 
 
 def restart_budget_count(install_dir: Path) -> int:
@@ -489,13 +485,22 @@ def restart_budget_count(install_dir: Path) -> int:
     """
     try:
         data = journal_read(install_dir)
-    except (JournalTorn, OSError):
+    except (JournalTorn, OSError) as exc:
+        # Log-parity fold: match the sibling WARN convention (the sweep's
+        # readers log + degrade) — a torn/unreadable budget window reads
+        # as 0 (fail-open count; the arm-side re-check re-reads under the
+        # lock) but no longer SILENTLY.
+        logger.warning(
+            "upgrade_journal: restart_budget_count — journal unreadable "
+            "(%s: %s); counting 0 (arm-side re-check re-reads under the lock)",
+            type(exc).__name__, exc,
+        )
         return 0
     return _count_window_events(data.get("restart_window"))
 
 
 def _count_window_events(window: Any) -> int:
-    _cap_n, window_s = _restart_budget_caps()
+    window_s = _restart_window_s()
     now_dt = datetime.now(tz=timezone.utc)
     if not isinstance(window, dict):
         return 0
@@ -504,6 +509,9 @@ def _count_window_events(window: Any) -> int:
         return 0
     kept = 0
     for ts in events:
+        if not isinstance(ts, str):
+            continue  # invalid entry — counts nowhere (aligned with the
+            # increment-side prune, which DROPS non-str/unparseable)
         parsed = parse_iso_utc(ts)
         if parsed is not None and (now_dt - parsed).total_seconds() <= window_s:
             kept += 1
@@ -529,7 +537,7 @@ def restart_budget_increment(install_dir: Path) -> int:
     events = window.get("events")
     if not isinstance(events, list):
         events = []
-    _cap_n, window_s = _restart_budget_caps()
+    window_s = _restart_window_s()
     now = now_iso()
     now_dt = parse_iso_utc(now)
     events.append(now)
@@ -1122,7 +1130,7 @@ class PendingWake:
     target_version: str | None = None
     mode: str | None = None      # restart-only
     # agent-restart C-2 provenance capture (display-only on the wake lane)
-    provenance_class: str = ""   # "direct" | "inherited" | ""
+    provenance_class: Literal["direct", "inherited", ""] = ""
     provenance_root_source: str | None = None
     provenance_root_message_id: str | None = None
     provenance_depth: int = 0
@@ -1838,7 +1846,15 @@ RESTART_TERMINAL_EVENTS: tuple[str, ...] = (
     "restart_abandoned",
     "stop_forced_kill",
 )
-WAKE_TERMINAL_EVENTS: tuple[str, ...] = _TERMINAL_EVENTS + ("restart",) + RESTART_TERMINAL_EVENTS
+# The promote-kind wake reader's event set, NAMED (hygiene fold): the
+# kind-aware reader (``wake_terminal_event_after(kind=...)``) matches
+# promote-kind wakes against exactly this tuple; the restart-kind full
+# superset derives from it.
+PROMOTE_WAKE_TERMINAL_EVENTS: tuple[str, ...] = _TERMINAL_EVENTS + ("restart",)
+
+WAKE_TERMINAL_EVENTS: tuple[str, ...] = (
+    PROMOTE_WAKE_TERMINAL_EVENTS + RESTART_TERMINAL_EVENTS
+)
 
 
 def wake_terminal_event_after(
@@ -1885,7 +1901,7 @@ def wake_terminal_event_after(
     if kind == "restart":
         events = WAKE_TERMINAL_EVENTS
     else:
-        events = _TERMINAL_EVENTS + ("restart",)
+        events = PROMOTE_WAKE_TERMINAL_EVENTS
     return latest_matching_event(
         journal,
         run_id="<wake-reader-lane-agnostic>",  # accepted, NOT used
@@ -2088,7 +2104,10 @@ def close_stale_restart_arm(install_dir: Path) -> str | None:
     # logged no-op (never free another run's lock).
     try:
         lock_release_run_id(install_dir, op.run_id)
-    except Exception as exc:  # noqa: BLE001 — never wedge boot
+    except OSError as exc:  # narrowed (hygiene fold): the release path is
+        # file I/O only (read run_id + rmtree ignore_errors) — OSError is
+        # the real failure class; anything else SHOULD surface loudly.
+
         logger.warning(
             "upgrade_journal: close_stale_restart_arm lock release "
             "FAILED for run_id=%s: %s",

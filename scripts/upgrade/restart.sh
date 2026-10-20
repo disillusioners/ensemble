@@ -251,7 +251,11 @@ fi
 # the kind-aware wake reader reports the terminal, not the detail event).
 GATE_FAIL=""
 GATE_DETAIL=""
-_gate_latency() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.1f", (b-a)}'; }
+_gate_latency() {
+    # awk guarded (hygiene fold): a missing/failed awk renders 'n/a'
+    # instead of an empty latency fragment.
+    awk -v a="$1" -v b="$2" 'BEGIN{printf "%.1f", (b-a)}' 2>/dev/null || printf 'n/a'
+}
 
 LZ_T0="$(_now_epoch)"
 if LIVEZ_JSON="$(gate_livez)"; then
@@ -279,7 +283,7 @@ else
     # livez already failed — the daemon is down; a budgeted readyz probe
     # would burn its window for a foregone conclusion. ONE-SHOT probe so
     # the detail channel still records the per-gate result (§5.3).
-    if READYZ_ONCE="$(_probe_once "/readyz" "$PORT")"; then
+    if READYZ_ONCE="$(_probe_once "/readyz" "$PORT" >/dev/null)"; then
         GATE_DETAIL="$GATE_DETAIL readyz=pass(one-shot)"
     else
         GATE_DETAIL="$GATE_DETAIL readyz=FAIL(one-shot; livez failed first)"

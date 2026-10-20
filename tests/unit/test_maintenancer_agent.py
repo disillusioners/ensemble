@@ -3,9 +3,11 @@
 Validates the maintenancer agent scaffolding + registration:
 
   1.  meta.json schema & required-field correctness (W1-P1 task 1.2)
-  2.  Tool allow-list / deny-list contract per D20 (resolution-level strip)
-      — system_restart MUST be in tools.deny; the call-time refusal at
-        call time is env-conditional and does NOT fire on dev/demo.
+  2.  Tool allow-list / deny-list contract (agent-restart 2026-10-19):
+      system_restart is LIFTED from tools.deny AND REQUIRED in
+      tools.allow (exclusive-allow semantics — a missing allow entry
+      withholds the tool; the live gate runs INSIDE the tool, not at
+      resolution).
   3.  Auto-discovery via AgentRegistry (W1-P1 task 1.11 EXTENDED per
       architect §4.3 — BASE + VERSIONED metas enumeration guard).
   4.  Convention compliance: prompt-file completeness, cardinal-rule
