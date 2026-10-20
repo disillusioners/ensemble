@@ -68,6 +68,17 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "get_mission",
     "await_mission",
     "list_missions",
+    # ari-tools Phase 1 (the Workbook) — the board tools are created
+    # by the create_board_tools() factory
+    # (daemon/tools/board_tools.py). The ``board`` category is
+    # PRIVILEGED (entry #9 of PRIVILEGED_TOOL_CATEGORIES): the
+    # empty-allow inherit universe must NOT auto-grant write
+    # authority over the global board. Explicit
+    # ``tools.allow: ["board"]`` is the only access path.
+    "board_create",
+    "board_update",
+    "board_list",
+    "board_get",
     # system_upgrade tools — created by create_upgrade_tools() factory
     # (daemon/tools/upgrade_tools.py, P2.2 Dispatch A read pair + Dispatch B
     # actor pair).
@@ -336,6 +347,28 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # SAME-PR pin updates at the FIVE files listed in the
     # SAME-PR RULE comment above are mandatory.
     "settings",
+    # ari-tools Phase 1 (the Workbook, 2026-10-20): ``board`` is the
+    # global work-board tool category (#9 in
+    # PRIVILEGED_TOOL_CATEGORIES — octet → nonet; ``settings``
+    # joined 2026-10-18 making the count 8 before this entry). The
+    # category owns four factory-built tools (``board_create`` /
+    # ``board_update`` / ``board_list`` / ``board_get``) over the three
+    # ``board_items`` / ``board_notes`` / ``board_item_tags`` tables.
+    # Why privileged: the board is ONE GLOBAL namespace — every Ari
+    # instance and the leader read and write the SAME rows — so a
+    # default-granted board would hand write authority over the
+    # user's shared work surface to the empty-allow inherit universe
+    # (the in-tree ``watcher`` agent plus every tools-less custom
+    # agent). NEVER default-granted — opt-in-only; the ari + leader
+    # meta.json ``tools.allow`` entries are the only access path.
+    # Defence in depth: a LITERAL TOOL NAME in an allow list bypasses
+    # the category gate entirely, so the tool bodies carry their own
+    # ``agent_id in {"ari", "leader"}`` gate as well. Both gates are
+    # required; neither substitutes for the other. SAME-PR pin updates
+    # at the FIVE files listed in the SAME-PR RULE comment above are
+    # mandatory (this entry ships in the SAME commit as those five
+    # insertions — the set must never be red between two commits).
+    "board",
 })
 
 
@@ -703,6 +736,12 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # PRIVILEGED_TOOL_CATEGORIES untouched). Placed near "job" —
     # scheduling is job-adjacent (the adapter fires JobItems).
     "scheduling": "daemon.tools.scheduling",
+    # ari-tools Phase 1 (the Workbook) — the global, DB-backed work
+    # board. PRIVILEGED category (entry #9 of
+    # PRIVILEGED_TOOL_CATEGORIES): the board is global and shared, so
+    # the empty-allow inherit universe must NOT auto-grant it. Placed
+    # near "job" — the board is work-adjacent (it links job ids).
+    "board": "daemon.tools.board_tools",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -917,6 +956,16 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "attest_completion",
     "await_mission",
     "bash",
+    # ari-tools Phase 1 (the Workbook): board tools — created by the
+    # create_board_tools() factory (daemon/tools/board_tools.py).
+    # Factory-built (not import-time registered), so they belong in
+    # DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is
+    # PRIVILEGED (entry #9 of PRIVILEGED_TOOL_CATEGORIES) — opt-in
+    # only, never default-granted.
+    "board_create",
+    "board_get",
+    "board_list",
+    "board_update",
     "blueprint_acknowledge_pending",
     "blueprint_claim_pending",
     "blueprint_create",

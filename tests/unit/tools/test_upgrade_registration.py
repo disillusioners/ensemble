@@ -99,11 +99,11 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_eight_entries(self) -> None:
-        """The default-deny set is exactly eight entries —
+    def test_privileged_categories_is_exactly_nine_entries(self) -> None:
+        """The default-deny set is exactly nine entries —
         ``system_upgrade``, ``system-log``, ``ens-db``,
-        ``ens-env``, ``view-views``, ``cu``, ``secrets``, and
-        ``settings``.
+        ``ens-env``, ``view-views``, ``cu``, ``secrets``,
+        ``settings``, and ``board``.
 
         ``service`` was REMOVED from this set by user override
         2026-09-16 (D4 reversed; see
@@ -131,7 +131,12 @@ class TestStaticRegistrationChecklist:
         is the ONLY access boundary. settings-worker-slots P2
         (2026-10-18) adds ``settings`` (the daemon-runtime-settings
         category; opt-in-only; ari + leader allow entries landed
-        2026-10-18, P3). Adding a category here is a
+        2026-10-18, P3). ari-tools Phase 1 (2026-10-20) adds
+        ``board`` (the global work-board category; opt-in-only; the
+        board is ONE GLOBAL namespace, so the empty-allow inherit
+        universe must never auto-grant write authority over it —
+        ari + leader allow entries are the only access path). Adding
+        a category here is a
         deliberate trust decision, and this pin makes silent
         additions visible (D18/A14 —
         same-PR pin updates; this is pin file 1 of 5; the
@@ -163,6 +168,13 @@ class TestStaticRegistrationChecklist:
             # mutates daemon-global runtime state — NEVER
             # default-granted (R-SR16).
             "settings",
+            # ari-tools Phase 1 (2026-10-20): the global work-board
+            # category (board_create / board_update / board_list /
+            # board_get). opt-in-only; the board is ONE GLOBAL
+            # namespace, so the empty-allow inherit universe must
+            # never auto-grant write authority over it. ari + leader
+            # allow entries are the only access path.
+            "board",
         })
 
     def test_checklist_comment_block_present_in_module(self) -> None:
