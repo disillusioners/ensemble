@@ -161,7 +161,7 @@ If ANY condition fails → STOP and report to leader with:
 3. `terraform -chdir=infra validate` — syntax check
 4. `terraform -chdir=infra plan -out=tfplan` — capture plan
 5. Read plan: count `+`, `~`, `-` changes
-6. Show user the plan summary
+6. Show the plan summary in your report
 7. Stop and report the blocked apply as an open question; proceed only when approval arrives as a new dispatch (Critical if prod)
 8. `terraform -chdir=infra apply tfplan`
 9. `terraform -chdir=infra output` — capture outputs
