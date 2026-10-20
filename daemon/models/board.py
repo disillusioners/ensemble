@@ -320,7 +320,7 @@ class BoardNote(SQLModel, table=True):
         primary_key=True,
         sa_column_kwargs={"autoincrement": True},
         description=(
-            "BIGSERIAL PK on PG (INTEGER PRIMARY KEY AUTOINCREMENT on "
+            "SERIAL PK on PG (INTEGER PRIMARY KEY AUTOINCREMENT on "
             "SQLite). The dialect incantation is handled by SQLAlchemy."
         ),
     )
