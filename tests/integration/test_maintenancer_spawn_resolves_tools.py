@@ -285,15 +285,16 @@ class TestWorkerResolvesSystemLogOnly:
 
 
 class TestPrivilegedCategoryRegistryShape:
-    """PRIVILEGED_TOOL_CATEGORIES must be exactly nine categories
+    """PRIVILEGED_TOOL_CATEGORIES must be exactly ten categories
     (the daemon-internal authority trio ``system_upgrade``,
     ``system-log``, ``ens-db`` plus ``ens-env`` per the W4 leader
     decision 2026-10-02, ``view-views`` per the REWORK 2026-10-07
     M1 user refinement, ``cu`` per the cu-mcp task 2026-10-16,
     ``secrets`` per the agent-secrets P1 commission 2026-10-17,
     ``settings`` per the settings-worker-slots P2 commission
-    2026-10-18, and ``board`` per the ari-tools Phase 1 commission
-    2026-10-20). The ``service`` category was REMOVED from
+    2026-10-18, ``board`` per the ari-tools Phase 1 commission
+    2026-10-20, and ``self-alarm`` per the ari-tools Phase 2
+    commission 2026-10-20). The ``service`` category was REMOVED from
     this set by user override 2026-09-16 (D4 reversed; see
     ``.agents/shared/planning/service-tool/decisions.md`` §D4
     override note) — R-SR16 silent additions are visible by pin;
@@ -354,6 +355,12 @@ class TestPrivilegedCategoryRegistryShape:
             # never auto-grant write authority over it. ari + leader
             # allow entries are the only access path.
             "board",
+            # ari-tools Phase 2 (2026-10-20): the self-alarm wrapper
+            # category (self_alarm). opt-in-only; arming an alarm makes
+            # a FRESH Ari instance execute the message text VERBATIM, so
+            # the empty-allow inherit universe must never auto-grant it.
+            # The ari tools.allow entry is the only access path.
+            "self-alarm",
         })
 
     def test_ens_db_registered_in_category_modules(self) -> None:

@@ -34,7 +34,8 @@
       "cu",
       "secrets",
       "settings",
-      "board"
+      "board",
+      "self-alarm"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },

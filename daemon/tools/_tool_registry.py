@@ -79,6 +79,15 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "board_update",
     "board_list",
     "board_get",
+    # ari-tools Phase 2 (the self-alarm wrapper) — the self_alarm tool is
+    # created by the create_self_alarm_tools() factory
+    # (daemon/tools/self_alarm.py). The ``self-alarm`` category is
+    # PRIVILEGED (entry #10 of PRIVILEGED_TOOL_CATEGORIES): the
+    # empty-allow inherit universe must NOT auto-grant the power to arm
+    # an alarm whose text a fresh Ari instance executes verbatim. An
+    # explicit ``tools.allow: ["self-alarm"]`` entry (ari only) is the
+    # only access path.
+    "self_alarm",
     # system_upgrade tools — created by create_upgrade_tools() factory
     # (daemon/tools/upgrade_tools.py, P2.2 Dispatch A read pair + Dispatch B
     # actor pair).
@@ -369,6 +378,28 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # mandatory (this entry ships in the SAME commit as those five
     # insertions — the set must never be red between two commits).
     "board",
+    # ari-tools Phase 2 (the self-alarm wrapper, 2026-10-20): ``self-alarm``
+    # is the alarm/timer category (#10 in PRIVILEGED_TOOL_CATEGORIES —
+    # nonet → decet; ``board`` joined 2026-10-20 making the count 9 before
+    # this entry). The category owns ONE factory-built tool
+    # (``self_alarm``) that arms a reminder to ari at least 30 minutes
+    # out, delivered into a FRESH ari instance that then executes the
+    # message text VERBATIM. Why privileged: an alarm armed by the
+    # empty-allow inherit universe (``watcher`` and every tools-less
+    # custom agent) means a fresh Ari instance — with Ari's FULL allow
+    # list (bash, system_upgrade, secrets, …) — executing
+    # caller-influenced text. That is a privilege-escalation chain, not
+    # a visibility leak, so the category is opt-in-only and NEVER
+    # default-granted. Defence in depth: a LITERAL TOOL NAME in an allow
+    # list bypasses the category gate, so the tool body ALSO carries an
+    # ``agent_id == "ari"`` runtime gate. Both gates are required;
+    # neither substitutes for the other. The ari ``tools.allow`` entry is
+    # the only access path (ari-for-ari — the leader pre-ruling).
+    # SAME-PR pin updates at the FIVE files listed in the SAME-PR RULE
+    # comment above are mandatory (this entry ships in the SAME commit as
+    # those five insertions — the set must never be red between two
+    # commits).
+    "self-alarm",
 })
 
 
@@ -742,6 +773,20 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # the empty-allow inherit universe must NOT auto-grant it. Placed
     # near "job" — the board is work-adjacent (it links job ids).
     "board": "daemon.tools.board_tools",
+    # ari-tools Phase 2 (the self-alarm wrapper) — the alarm/timer
+    # category. PRIVILEGED category (entry #10 of
+    # PRIVILEGED_TOOL_CATEGORIES): the empty-allow inherit universe must
+    # NOT auto-grant the power to arm an alarm whose text a fresh Ari
+    # instance executes verbatim.
+    #
+    # The value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``
+    # (``_tool_registry.py:504-506``); a ``daemon.services.*`` value is
+    # NEVER discovered and the exact-equality drift pin fails at boot.
+    # The PURE helpers live in ``daemon/services/self_alarm_service.py``
+    # and are imported BY this module — the category points at the tool
+    # module, the service module is a library, never a category target.
+    "self-alarm": "daemon.tools.self_alarm",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -966,6 +1011,14 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "board_get",
     "board_list",
     "board_update",
+    # ari-tools Phase 2 (the self-alarm wrapper): the self_alarm tool —
+    # created by the create_self_alarm_tools() factory
+    # (daemon/tools/self_alarm.py). Factory-built (not import-time
+    # registered), so it belongs in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is PRIVILEGED (entry #10 of
+    # PRIVILEGED_TOOL_CATEGORIES) — opt-in only, never default-granted;
+    # the ari-only runtime gate lives in the tool body.
+    "self_alarm",
     "blueprint_acknowledge_pending",
     "blueprint_claim_pending",
     "blueprint_create",

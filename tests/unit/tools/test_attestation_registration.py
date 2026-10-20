@@ -140,7 +140,7 @@ class TestStaticRegistrationChecklist:
         )
 
     def test_attestation_not_in_privileged_categories(self) -> None:
-        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly nine entries
+        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly ten entries
         (the daemon-internal authority trio ``system_upgrade``,
         ``system-log``, ``ens-db`` plus ``ens-env`` per the W4
         leader decision 2026-10-02, ``view-views`` per the
@@ -148,8 +148,9 @@ class TestStaticRegistrationChecklist:
         the cu-mcp task 2026-10-16, ``secrets`` per the
         agent-secrets P1 commission 2026-10-17, ``settings``
         per the settings-worker-slots P2 commission 2026-10-18,
-        and ``board`` per the ari-tools Phase 1 commission
-        2026-10-20).
+        ``board`` per the ari-tools Phase 1 commission
+        2026-10-20, and ``self-alarm`` per the ari-tools Phase 2
+        commission 2026-10-20).
         The attestation category is opt-in-only by convention (fail-closed authz),
         NOT because it is privileged — D7 sub-question RESOLVED-
         by-leader: NOT privileged. Adding ``attestation`` to
@@ -214,6 +215,12 @@ class TestStaticRegistrationChecklist:
             # never auto-grant write authority over it. ari + leader
             # allow entries are the only access path.
             "board",
+            # ari-tools Phase 2 (2026-10-20): the self-alarm wrapper
+            # category (self_alarm). opt-in-only; arming an alarm makes
+            # a FRESH Ari instance execute the message text VERBATIM, so
+            # the empty-allow inherit universe must never auto-grant it.
+            # The ari tools.allow entry is the only access path.
+            "self-alarm",
         })
 
 

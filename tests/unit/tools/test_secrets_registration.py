@@ -21,11 +21,12 @@ category:
    fallback also carries the 6 names (drift equality is
    owned by ``test_frozen_tool_name_discovery``).
 
-Plus the privileged-category pin (septet → octet → nonet):
+Plus the privileged-category pin (septet → octet → nonet → decet):
 
-* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly nine entries
+* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly ten entries
   (``system_upgrade``, ``system-log``, ``ens-db``, ``ens-env``,
-  ``view-views``, ``cu``, ``secrets``, ``settings``, ``board``) — NEVER default-granted
+  ``view-views``, ``cu``, ``secrets``, ``settings``, ``board``,
+  ``self-alarm``) — NEVER default-granted
   (R-SR16: opt-in-only via per-agent ``tools.allow``).
 * The default-deny seam applies: an EMPTY-allow agent
   (watcher-like) gets ZERO ``secrets`` tools (R-SR16).
@@ -197,15 +198,18 @@ class TestStaticRegistrationChecklist:
         per the settings-worker-slots P2 commission 2026-10-18
         promoted ``settings`` to #8, and the octet→nonet step per
         the ari-tools Phase 1 commission 2026-10-20 promoted
-        ``board`` to #9). It is NEVER
+        ``board`` to #9, and the nonet→decet step per the ari-tools
+        Phase 2 commission 2026-10-20 promoted ``self-alarm`` to #10).
+        It is NEVER
         default-granted (R-SR16: opt-in-only via
         per-agent ``tools.allow``).
 
-        The full set is exactly nine entries:
+        The full set is exactly ten entries:
         ``system_upgrade``, ``system-log``, ``ens-db``,
         ``ens-env``, ``view-views``, ``cu``,
         ``secrets``, ``settings`` (settings-worker-slots
-        P2, 2026-10-18), and ``board`` (ari-tools Phase 1,
+        P2, 2026-10-18), ``board`` (ari-tools Phase 1,
+        2026-10-20) and ``self-alarm`` (ari-tools Phase 2,
         2026-10-20). Adding another category without
         bumping this pin is a deliberate trust
         decision (the same-PR pin update rule per
@@ -239,6 +243,12 @@ class TestStaticRegistrationChecklist:
             # never auto-grant write authority over it. ari + leader
             # allow entries are the only access path.
             "board",
+            # ari-tools Phase 2 (2026-10-20): the self-alarm wrapper
+            # category (self_alarm). opt-in-only; arming an alarm makes
+            # a FRESH Ari instance execute the message text VERBATIM, so
+            # the empty-allow inherit universe must never auto-grant it.
+            # The ari tools.allow entry is the only access path.
+            "self-alarm",
         })
 
 

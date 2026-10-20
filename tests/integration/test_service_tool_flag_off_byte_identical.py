@@ -859,10 +859,17 @@ def test_privileged_category_set_is_pinned() -> None:
             # never auto-grant write authority over it. ari + leader
             # allow entries are the only access path.
             "board",
+            # ari-tools Phase 2 (2026-10-20): the self-alarm wrapper
+            # category (self_alarm). opt-in-only; arming an alarm makes
+            # a FRESH Ari instance execute the message text VERBATIM, so
+            # the empty-allow inherit universe must never auto-grant it.
+            # The ari tools.allow entry is the only access path.
+            "self-alarm",
         }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "
         f"trio + W4 ens-env + REWORK view-views + cu-mcp 'cu' + "
         f"agent-secrets-P1 'secrets' + settings-worker-slots-P2 "
-        f"'settings' + ari-tools-P1 'board'; got {PRIVILEGED_TOOL_CATEGORIES}"
+        f"'settings' + ari-tools-P1 'board' + ari-tools-P2 'self-alarm'; "
+        f"got {PRIVILEGED_TOOL_CATEGORIES}"
     )

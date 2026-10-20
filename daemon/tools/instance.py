@@ -259,6 +259,7 @@ from .project_history import create_project_history_tools
 from .context_tools import create_context_tools
 from .shared_meta_kv_tools import create_shared_meta_kv_tools
 from .board_tools import create_board_tools
+from .self_alarm import create_self_alarm_tools
 from .db_tools import create_db_tools
 from .infra import create_infra_tools, create_kms_tools, create_mcp_env_tools
 from .system import create_system_tools
@@ -2330,6 +2331,46 @@ def create_board_tools_if_available(manager, current_instance_id: str, agent_id:
         return []
     return create_board_tools(
         board_service,
+        current_instance_id=current_instance_id,
+        agent_id=agent_id,
+        agent_tag=agent_tag,
+    )
+
+
+def create_self_alarm_tools_if_available(manager, current_instance_id: str, agent_id: str, agent_tag: str | None = None) -> list:
+    """Create the self-alarm tool when the scheduling service is mounted on
+    the manager.
+
+    ari-tools Phase 2 (the self-alarm wrapper) — the tool wraps the SAME
+    ``daemon.services.scheduling_service`` module the ``scheduling``
+    category uses (the manager mounts it lazily via the
+    ``scheduling_service`` property), plus the pure helpers in
+    ``daemon.services.self_alarm_service``. Same wiring-check posture as
+    the sibling ``*_if_available`` factories: when the manager is a test
+    double without the property, this returns an EMPTY tool list instead
+    of raising.
+
+    Per-agent visibility is scoped afterwards by ``_apply_tool_filter``
+    via the ``self-alarm`` PRIVILEGED category (entry #10) — granted via
+    the explicit ``tools.allow: ["self-alarm"]`` entry in
+    ``agents/ari/meta.json`` and NOWHERE else (ari-for-ari). The
+    privileged category is NOT sufficient on its own — a literal tool name
+    in an allow list bypasses the category gate — so the tool body ALSO
+    carries its own ``agent_id == "ari"`` gate. Both gates are required.
+
+    Decorator-only registration is SILENTLY INVISIBLE — the extend of
+    this factory's return list inside ``create_instance_tools`` is the
+    third step of the three-step registration seam (decorator + registry
+    entry + construction).
+    """
+    scheduling_service = getattr(manager, "scheduling_service", None)
+    if scheduling_service is None:
+        return []
+    return create_self_alarm_tools(
+        scheduling_service,
+        source_repo=getattr(manager, "_source_repository", None),
+        instance_repository=getattr(manager, "_instance_repository", None),
+        project_repository=getattr(manager, "_project_repository", None),
         current_instance_id=current_instance_id,
         agent_id=agent_id,
         agent_tag=agent_tag,
@@ -5832,6 +5873,28 @@ Returns:
         manager, current_instance_id, agent_id, agent_tag=version_tag
     )
     tools.extend(board_tool_list)
+
+    # ── Self-alarm tools (ari-tools Phase 2 — the alarm/timer wrapper) ──
+    # Same critical list-append pattern as job_tools / scheduling_tool_list
+    # / board_tool_list above: decorator-only registration is SILENTLY
+    # INVISIBLE — this extend is the third step of the three-step
+    # registration seam (decorator + CATEGORY_MODULES entry +
+    # construction).
+    #
+    # PLACEMENT: this extend MUST precede ``create_help_tool`` (which
+    # snapshots the tool list into its index), ``scan_tools_for_full_docs``
+    # and ``_apply_tool_filter`` (which applies the per-agent allow list
+    # and the privileged-category default-deny strip). A later extend is
+    # either invisible to the help tool or BYPASSES the privileged strip.
+    #
+    # The category is PRIVILEGED (entry #10): the empty-allow inherit
+    # universe must never auto-grant the power to arm an alarm whose text
+    # a fresh Ari instance executes verbatim. The tool body carries a
+    # second, independent agent_id gate.
+    self_alarm_tool_list = create_self_alarm_tools_if_available(
+        manager, current_instance_id, agent_id, agent_tag=version_tag
+    )
+    tools.extend(self_alarm_tool_list)
 
     # Mission tools (M2 of mission-class, 2026-09-02,
     # ``feature/mission-class``) — additive READ-ONLY tools that

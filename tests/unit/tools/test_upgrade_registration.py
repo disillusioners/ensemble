@@ -100,10 +100,10 @@ class TestStaticRegistrationChecklist:
         assert "create_upgrade_tools(" in source
 
     def test_privileged_categories_is_exactly_nine_entries(self) -> None:
-        """The default-deny set is exactly nine entries —
+        """The default-deny set is exactly ten entries —
         ``system_upgrade``, ``system-log``, ``ens-db``,
         ``ens-env``, ``view-views``, ``cu``, ``secrets``,
-        ``settings``, and ``board``.
+        ``settings``, ``board`` and ``self-alarm``.
 
         ``service`` was REMOVED from this set by user override
         2026-09-16 (D4 reversed; see
@@ -135,7 +135,12 @@ class TestStaticRegistrationChecklist:
         ``board`` (the global work-board category; opt-in-only; the
         board is ONE GLOBAL namespace, so the empty-allow inherit
         universe must never auto-grant write authority over it —
-        ari + leader allow entries are the only access path). Adding
+        ari + leader allow entries are the only access path).
+        ari-tools Phase 2 (2026-10-20) adds ``self-alarm`` (the
+        self-alarm wrapper category; opt-in-only; arming an alarm makes
+        a FRESH Ari instance execute the message text VERBATIM, so the
+        empty-allow inherit universe must never auto-grant it — the
+        ari tools.allow entry is the only access path). Adding
         a category here is a
         deliberate trust decision, and this pin makes silent
         additions visible (D18/A14 —
@@ -175,6 +180,12 @@ class TestStaticRegistrationChecklist:
             # never auto-grant write authority over it. ari + leader
             # allow entries are the only access path.
             "board",
+            # ari-tools Phase 2 (2026-10-20): the self-alarm wrapper
+            # category (self_alarm). opt-in-only; arming an alarm makes
+            # a FRESH Ari instance execute the message text VERBATIM, so
+            # the empty-allow inherit universe must never auto-grant it.
+            # The ari tools.allow entry is the only access path.
+            "self-alarm",
         })
 
     def test_checklist_comment_block_present_in_module(self) -> None:

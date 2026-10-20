@@ -62,7 +62,8 @@ BOARD_TOOL_NAMES: frozenset[str] = frozenset({
 })
 
 #: The NINTH entry of the privileged set (the set held exactly eight
-#: before this phase).
+#: before phase 1). Phase 2 (the self-alarm wrapper) added the TENTH
+#: entry, ``self-alarm`` — the same-PR exact-set pin moves with it.
 EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
@@ -73,6 +74,7 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "secrets",
     "settings",
     "board",
+    "self-alarm",
 })
 
 #: The ONLY agents allowed to hold the board category.
@@ -160,18 +162,27 @@ class TestPrivilegedCategory:
         assert BOARD_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
     def test_the_set_is_exactly_the_nine_entries(self) -> None:
+        """The set is exact — the phase-2 commit moved this pin with the
+        tenth entry (``self-alarm``) so the set never goes red between
+        two commits (the SAME-PR rule)."""
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
     def test_board_is_the_ninth_entry(self) -> None:
-        """``board`` is entry #9 — the set went 8 -> 9 in this phase."""
-        # The registry constant is a frozenset (unordered), so the
-        # "ninth entry" is a property of the SET SIZE, and the
-        # comment block in the registry records the ordinal.
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 9
+        """``board`` was entry #9 — the set went 8 -> 9 in phase 1 and
+        9 -> 10 in phase 2 (``self-alarm``).
+
+        The registry constant is a frozenset (unordered), so the
+        "ninth entry" is a property of the SET SIZE at the time of the
+        phase-1 commit and of the registry's literal order afterwards;
+        the comment block in the registry records the ordinal."""
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 10
         source = (
             REPO_ROOT / "daemon" / "tools" / "_tool_registry.py"
         ).read_text(encoding="utf-8")
         assert '"board",' in source
+        # The board is still the ninth entry of the registry's literal
+        # order — the tenth (``self-alarm``) was appended after it.
+        assert source.index('"board",') < source.index('"self-alarm",')
 
 
 # ── the allow-lists ──────────────────────────────────────────────────────
@@ -191,12 +202,25 @@ class TestAllowLists:
         assert BOARD_CATEGORY in self._allow(agent_id)
 
     def test_board_is_the_last_entry_of_both_allow_arrays(self) -> None:
-        """``board`` is appended at the END of both arrays (D15)."""
+        """``board`` was appended at the END of both arrays (D15).
+
+        Phase 2 (the self-alarm wrapper) appended its own category to
+        ari's array, so the board is no longer the LAST entry there —
+        the phase-1 convention holds for leader, and for ari the board
+        is followed ONLY by the phase-2 category."""
         for agent_id in BOARD_ALLOW_AGENTS:
             allow = self._allow(agent_id)
-            assert allow[-1] == BOARD_CATEGORY, (
-                f"{agent_id}: board must be appended at the END, got {allow}"
-            )
+            assert BOARD_CATEGORY in allow
+            trailing = allow[allow.index(BOARD_CATEGORY) + 1 :]
+            if agent_id == "ari":
+                assert trailing == ["self-alarm"], (
+                    f"{agent_id}: only the phase-2 category may follow the "
+                    f"board, got {allow}"
+                )
+            else:
+                assert trailing == [], (
+                    f"{agent_id}: board must be appended at the END, got {allow}"
+                )
 
     def test_no_other_agent_holds_the_board_category(self) -> None:
         """Leader ruling L1 — the board category goes to ari + leader,
