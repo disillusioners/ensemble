@@ -1,5 +1,15 @@
 # Tidier Review Notes — agents-ensemble
 
+## 2026-10-19 — resource-telemetry PG bool write-path tidy pass (worktree feature/resource-telemetry-estimated-bool @ cab8eceee, range 333b2c225..cab8eceee, 7 files +1755/−45), Iteration 001
+- Commission: craftsmanship-only pass after Reviewer MERGE-CLEAR; correctness/architecture excluded. Caller offered cosmetic-commit authority — DECLINED per read-only dispatcher contract (write scope .agents/tidier/ only); all fixes shipped as instructions.
+- Scope correction: caller said 8 file-touches incl. tests/postgres/_pg.py; range has 7 files, no _pg.py change (verified name-only + per-commit stats).
+- Dispatch: 3 parallel read-only workers (readable 13f8a600, hygiene 5db615f1, robustness ad64b95e); all reported fully, no gaps. 8 dedupe merges (cleanup/stale-restoration ×4→1, dup logging ×3→1, mimicry Low absorbed into read Medium, indent ×2→1, tier-identity ×2→1).
+- Verdict: NEEDS WORK, non-blocking. 29 findings: 1 High (pre-existing manager.py 13,735L >3000; decomposition commission, not merge-blocking), 5 Medium, 23 Low. Zero diff-introduced High.
+- Headline Mediums: flusher counters.errors never incremented on the two new swallow paths (flusher.py:838/:641) → operator metric reads 0 while write path fails (same blind-spot class as the incident); _sweep docstring contradiction :591 vs :601-607; PG-test comments claim runtime hook invoked but code re-implements inline (:787-789/:933-936); new manager block missing "Currently:" docstring bullet; PG-test copy-paste 3-step ALTER ×3 + broken DDL ×2.
+- Q1 verdict: model_fields derivation is clean/low-risk — derive from the Pydantic side (model_fields[...].default), NOT __table__.c (hand-rolled sa_column has no default); cheap follow-up, not blocker. Q2: leave savepoint duplication as-is (divergent policies dominate; _extract_sqlstate is the right split). Q6: new third disposition (ERROR + bare raise) deliberate and sound; wording nit :8343.
+- Deferred: COMMIT-outside-try behavioral question; boot probe+ALTER non-atomic concurrency; out-of-range test_report_deferred_migration_pg.py:321 arg mismatch; pre-existing _ensure_postgres_drop_admission_legacy 25P02 swallow.
+- Notable positives: zero Any/cast/type-ignore in +1755 lines; accurate runner.py line citations; fail-closed tripwire before first DDL; savepoint commit/rollback on every path.
+
 ## 2026-10-17 — agent-secrets P1 tidy pass (worktree agent-secrets-p1 @ 6cccf8211, range fae1af3fb..6cccf8211, 21 files +6079/−25), Iteration 001
 - Commission: craftsmanship-only quality pass; security already 0-critical after fix round — not re-reviewed per dispatch contract; known dev fast-follows (_now_iso dup, migration prose anchor, 107-line atomicity test) passed as assess-only, not re-discovered.
 - Dispatch: 3 parallel read-only workers (readable 19828c96, hygiene 01c68f22, robustness 94266381); all reported fully, no gaps; 5 cross-worker merges (A7≡B3 dead port methods, A3+C1 validation boilerplate+check-order, A8≡B10 _now_iso, A9≡B7 TYPE_CHECKING block, B8+B9 Any overuse).
