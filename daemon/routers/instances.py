@@ -1178,25 +1178,6 @@ async def get_pending_question(instance_id: str, request: Request) -> dict:
     }
 
 
-# 6d. POST /instances/{instance_id}/question/dismiss - Dismiss a pending
-#     question pack without answering; resume the instance cascade.
-#
-# Mirrors ``answer_questions`` (6b) end-to-end but does NOT store answers
-# — instead it drops the question state and unwinds the pause. The user
-# intent is "I don't want to answer this; keep going without me". Like
-# the answer endpoint, this route:
-#   1. Validates the instance exists (uniform 404 contract).
-#   2. Returns 404 if no question pack exists for the instance.
-#   3. Emits a ``question_pack`` SSE event with ``status="dismissed"``
-#      BEFORE the resume cascade — same F3 timing invariant.
-#   4. Cascades resume to target + all paused children.
-#
-# The state unwinding sequence (clear pack → clear pause flag → discard
-# deferred-pause marker) mirrors ``_cleanup_instance_state`` exactly
-# (manager.py:2238-2245). The only difference is that we do NOT touch
-# ``_graph_tasks`` / ``_pending_injections`` / ``_request_registry`` —
-# the instance keeps running, just past the pause barrier.
-@router.post("/{instance_id}/question/dismiss", dependencies=[scope_required("instances:write")])
 async def _deliberate_pause_exclusions(
     manager: "InstanceManager",
     instance_id: str,
@@ -1232,6 +1213,25 @@ async def _deliberate_pause_exclusions(
         return []
 
 
+# 6d. POST /instances/{instance_id}/question/dismiss - Dismiss a pending
+#     question pack without answering; resume the instance cascade.
+#
+# Mirrors ``answer_questions`` (6b) end-to-end but does NOT store answers
+# — instead it drops the question state and unwinds the pause. The user
+# intent is "I don't want to answer this; keep going without me". Like
+# the answer endpoint, this route:
+#   1. Validates the instance exists (uniform 404 contract).
+#   2. Returns 404 if no question pack exists for the instance.
+#   3. Emits a ``question_pack`` SSE event with ``status="dismissed"``
+#      BEFORE the resume cascade — same F3 timing invariant.
+#   4. Cascades resume to target + all paused children.
+#
+# The state unwinding sequence (clear pack → clear pause flag → discard
+# deferred-pause marker) mirrors ``_cleanup_instance_state`` exactly
+# (manager.py:2238-2245). The only difference is that we do NOT touch
+# ``_graph_tasks`` / ``_pending_injections`` / ``_request_registry`` —
+# the instance keeps running, just past the pause barrier.
+@router.post("/{instance_id}/question/dismiss", dependencies=[scope_required("instances:write")])
 async def dismiss_question(
     instance_id: str,
     request: Request,

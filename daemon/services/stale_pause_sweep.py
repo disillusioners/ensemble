@@ -61,10 +61,22 @@ question") would release a side-effect target while its asker still
 holds a pending question — the tree would be torn apart mid-question.
 The 2h age bound is the second line of defence for both readings.
 
-The probe is FAIL-CLOSED: when the lineage tree is too large to probe
-completely (see ``_MAX_TREE_PROBE_SIZE``), the candidate is treated as
-PROTECTED (skipped) rather than released — a missed release is
-recoverable (the next cycle), a wrong release is not.
+The TRUNCATION case is FAIL-CLOSED: when the lineage tree is too
+large to probe completely (see ``_MAX_TREE_PROBE_SIZE``), the
+candidate is treated as PROTECTED (skipped) rather than released — a
+missed release is recoverable (the next cycle), a wrong release is
+not.
+
+PROBE FAILURES, HOWEVER, FAIL **OPEN**: every probe error (the tree
+enumeration, the status read, the RAM pending-pack probe, the durable
+shadow probe) returns the PERMISSIVE verdict — "no outstanding
+question" — so a transient DB error can cause the sweep to RELEASE a
+candidate it could not actually evaluate. That is the trade-off the
+implementation makes: the probe is a best-effort liveness check, and
+the release path (R2) plus the operator are the safety net for a
+wrong release. The change of that posture (probe failures fail
+CLOSED) is a NAMED FOLLOW-UP (W-B / W2) — this cycle changes the
+DOCUMENTATION only, not the behaviour.
 
 This choice is PINNED by a test
 (``tests/unit/test_question_pause_resume_asymmetry.py``).
@@ -72,7 +84,9 @@ This choice is PINNED by a test
 FAIL-OPEN
 ---------
 A sweep failure never blocks boot and never raises into the caller:
-per-candidate errors are counted and retried on the next cycle.
+per-candidate errors are counted and retried on the next cycle. NOTE:
+probe failures are NOT counted in ``summary["errors"]`` — they return
+the permissive verdict instead (see the PROBE FAILURES note above).
 
 BRIDGE SAFETY (A1)
 ------------------
@@ -158,7 +172,10 @@ async def _pending_question_in_tree(
         ancestors = await asyncio.to_thread(
             repo.get_ancestor_ids, instance_id
         ) or []
-    except Exception as exc:  # noqa: BLE001 — fail-open to "not protected"
+    except Exception as exc:  # noqa: BLE001 — fail OPEN (release)
+        # The tree could not be enumerated → the probe cannot see an
+        # outstanding question → the permissive verdict is returned
+        # (fail OPEN — a named follow-up would make this fail CLOSED).
         logger.warning(
             "stale-pause sweep: tree enumeration failed for %s: %s",
             instance_id[:8],
@@ -189,7 +206,12 @@ async def _pending_question_in_tree(
     statuses: dict[str, str] = {}
     try:
         statuses = await asyncio.to_thread(repo.get_statuses, probe_ids)
-    except Exception as exc:  # noqa: BLE001 — fail-open (protect)
+    except Exception as exc:  # noqa: BLE001 — fail OPEN (release)
+        # The status read failed → the liveness of the pack owners is
+        # UNKNOWN → the permissive verdict ("no outstanding question")
+        # is returned, so a transient DB error can release a candidate
+        # this probe could not evaluate. (Fail-CLOSED for this case is
+        # a named follow-up — W-B / W2.)
         logger.warning(
             "stale-pause sweep: status read failed for %s: %s",
             instance_id[:8],

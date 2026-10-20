@@ -67,14 +67,21 @@ completes without error.
 
 CONCURRENCY NOTE
 ----------------
-The merge is read-modify-write on one metadata key. It is guarded by a
-process-local lock, and the lost-update window is bounded by a single
-metadata read + write. A lost update can only ever *hide* a paused
-set — it can never strand an instance that the sweep would otherwise
-miss, because the backstop sweeper
-(``daemon/services/stale_pause_sweep.py``) is predicate-based (parked
-+ no live turn + no pending question) and does not depend on the
-recorded set at all.
+The merge is read-modify-write on one metadata key. It is SERIALIZED
+by the dedicated single-worker executor (``_MERGE_EXECUTOR`` — a
+``ThreadPoolExecutor(max_workers=1)``): the whole read-modify-write
+runs as one synchronous function inside that worker, so two contenders
+are ordered without ANY lock. There is deliberately NO lock here: a
+``threading.Lock`` held across an ``await`` would let a contender
+block the event loop while the holder's await could never complete —
+a permanent whole-daemon deadlock (the C1 defect).
+
+The lost-update window is bounded by a single metadata read + write.
+A lost update can only ever *hide* a paused set — it can never strand
+an instance that the sweep would otherwise miss, because the backstop
+sweeper (``daemon/services/stale_pause_sweep.py``) is predicate-based
+(parked + no live turn + no pending question) and does not depend on
+the recorded set at all.
 
 EVENT-LOOP DISCIPLINE
 ---------------------
@@ -210,7 +217,12 @@ async def question_pack_state(
     * ``"answered"``  — the pack was consumed (RAM pack ``answered``);
     * ``"absent"``    — no pack in RAM and no durable shadow;
     * ``"unknown"``   — the question store is not wired, so the state
-      cannot be determined (fail-open: the caller proceeds).
+      cannot be determined. The caller REFUSES the question pause in
+      this state (fail-CLOSED, leader adjudication): a pause issued
+      without a recordable paused-set is exactly the strand this
+      commission exists to prevent, so the pause is skipped instead of
+      parking a tree that nothing can release. (Advisory for the
+      follow-up ledger: should ``"unknown"`` be fail-open instead?)
 
     The durable shadow is consulted as well because the RAM store is
     lost on restart while the shadow survives (the v0.25.2 boot

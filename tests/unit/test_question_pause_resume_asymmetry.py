@@ -852,6 +852,95 @@ async def test_dismiss_path_deliberate_pause_survives_the_release(
 
 
 # ---------------------------------------------------------------------------
+# H1-GUARD — the ROUTE TABLE is the evidence (a handler called as a
+#             plain function is NOT)
+# ---------------------------------------------------------------------------
+
+
+def test_route_table_binds_the_dismiss_endpoint():
+    """H1-GUARD — the dismiss route must bind to ``dismiss_question``.
+
+    THE FAILURE MODE THIS GUARDS: a helper inserted BETWEEN a route's
+    decorator and its handler binds the DECORATOR TO THE HELPER. The
+    module still imports (FastAPI's ``eval_type_lenient`` swallows the
+    NameError raised by the un-imported ``InstanceManager`` annotation),
+    the real handler is never registered, and the endpoint answers 422
+    (the HELPER's parameters are read as query params — ``manager`` /
+    ``pack_id``). It is user-facing: the frontend calls the dismiss
+    route, and 22 HTTP call sites depend on it.
+
+    A FUNCTION-LEVEL test cannot see this: it calls the handler as a
+    plain function and never consults the route table — which is
+    exactly why the 39-case pack stayed green while the endpoint was
+    broken. So the guard reads the ROUTE TABLE and asserts the binding.
+
+    Asserts:
+      (a) the dismiss route binds to ``dismiss_question`` (both in the
+          instances router and in the mounted app);
+      (b) NO route of the touched routers has an underscore-prefixed
+          ``endpoint.__name__`` (the shape of the defect).
+    """
+    from daemon.api import app
+    from daemon.routers import instances as instances_router
+
+    # ── (a) the dismiss route binds to dismiss_question ──
+    router_dismiss = [
+        route
+        for route in instances_router.router.routes
+        if getattr(route, "path", "").endswith(
+            "/{instance_id}/question/dismiss"
+        )
+    ]
+    assert router_dismiss, (
+        "the dismiss route must be registered on the instances router"
+    )
+    for route in router_dismiss:
+        endpoint_name = getattr(route.endpoint, "__name__", None)
+        assert endpoint_name == "dismiss_question", (
+            f"the dismiss route binds to {endpoint_name!r}, not "
+            f"'dismiss_question' — a helper was inserted between the "
+            f"decorator and the handler (the endpoint would 422)"
+        )
+
+    app_dismiss = [
+        route
+        for route in app.routes
+        if getattr(route, "path", "").endswith(
+            "/{instance_id}/question/dismiss"
+        )
+    ]
+    assert app_dismiss, (
+        "the dismiss route must be registered on the mounted app"
+    )
+    for route in app_dismiss:
+        endpoint_name = getattr(route.endpoint, "__name__", None)
+        assert endpoint_name == "dismiss_question", (
+            f"the mounted dismiss route binds to {endpoint_name!r} — the "
+            "handler is not registered (the endpoint would 422)"
+        )
+
+    # ── (b) no underscore-prefixed endpoint in the touched routers ──
+    for label, routes in (
+        ("daemon/routers/instances.py", instances_router.router.routes),
+        ("daemon/api.py", app.routes),
+    ):
+        offenders = sorted(
+            {
+                getattr(getattr(route, "endpoint", None), "__name__", "")
+                for route in routes
+                if getattr(
+                    getattr(route, "endpoint", None), "__name__", ""
+                ).startswith("_")
+            }
+        )
+        assert not offenders, (
+            f"{label} registers underscore-prefixed endpoint(s) {offenders} "
+            "— a private helper must never be route-shaped (the decorator "
+            "would bind to the helper instead of the handler)"
+        )
+
+
+# ---------------------------------------------------------------------------
 # SYMPTOM REPRO — the RED the fix must flip
 # ---------------------------------------------------------------------------
 

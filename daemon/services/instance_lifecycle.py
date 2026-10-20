@@ -3524,7 +3524,7 @@ class InstanceLifecycleService:
                     f"pause_instance_cascade: question-pause guard probe "
                     f"failed for {instance_id[:8]}... "
                     f"({type(guard_exc).__name__}: {guard_exc}) — "
-                    f"proceeding with the pause"
+                    f"pack state unknown"
                 )
                 pack_state = "unknown"
             if pack_state != "pending":

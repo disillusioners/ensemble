@@ -1979,11 +1979,17 @@ class ServicesConfig(BaseSettings):
         description=(
             "Minimum age (seconds) a PAUSED instance must reach before "
             "the stale-pause sweep considers it stranded. The bound is "
-            "measured on ``instances.paused_at`` (frozen while parked). "
-            "Default 7200s = 2h — comfortably longer than any "
-            "legitimate 'waiting for the user's answer' window, and "
-            "longer than the question wedge-guard's own escalation "
-            "horizon."
+            "measured on the PAUSE-CAUSE MARKER's ``paused_at`` — the "
+            "moment the QUESTION pause parked the instance "
+            "(``instances.metadata['question_paused']['paused_at']``; "
+            "the selector filters on that value and uses the "
+            "``instances.paused_at`` column only for ORDER BY). This "
+            "knob decides 'stranded vs deliberately parked': a "
+            "deliberate pause carries a tombstone instead of a "
+            "question marker and is never swept. Default 7200s = 2h — "
+            "comfortably longer than any legitimate 'waiting for the "
+            "user's answer' window, and longer than the question "
+            "wedge-guard's own escalation horizon."
         ),
     )
     stale_pause_sweep_batch_cap: int = Field(
