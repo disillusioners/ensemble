@@ -146,7 +146,11 @@ class BoardItemView:
     #: a visible notice).
     body_truncated: bool = False
     notes_truncated: bool = False
-    notes_unavailable: bool = False
+    # NOTE: there is deliberately NO "notes unavailable" field — after
+    #: the W2 root fix a MISSING ``notes`` key means ZERO notes (a
+    #: zero-note row is NOT an error), so the "notes are unavailable"
+    #: state CANNOT occur.  A field that describes an impossible state
+    #: is a lie the next reader must re-derive.
 
 
 # ─────────────────────────────────────────────────────────────────

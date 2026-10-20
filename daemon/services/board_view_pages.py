@@ -253,9 +253,12 @@ def _filter_form(
 
 
 def _notes_block(item: BoardItemView) -> str:
-    """Render one item's notes timeline (oldest-first, pure HTML)."""
-    if item.notes_unavailable:
-        return '<p class="warn">Notes are unavailable for this item.</p>\n'
+    """Render one item's notes timeline (oldest-first, pure HTML).
+
+    There is NO "notes unavailable" branch: after the W2 root fix a
+    MISSING ``notes`` key means ZERO notes (a zero-note row is NOT an
+    error), so the state this branch used to describe CANNOT occur.
+    """
     if not item.notes:
         return ""
     parts = ['<ul class="notes">\n']

@@ -526,6 +526,17 @@ class TestShadowingGuard:
         ``has_root`` — adding either would silently break the board's
         verify path. The guard is verified ABSENT today; this pin
         keeps it absent.
+
+        The slice is the TRUE function scope: ``_public_post`` up to
+        the NEXT same-indent ``def`` / ``async def`` and NOTHING
+        wider. The pin used to ALSO widen the end anchor to the
+        board-route decorator, which swept ``_board_gate`` — a
+        DIFFERENT function — into the guarded span (the remediation
+        commit claimed the pin was "anchored to the FUNCTION SCOPE";
+        the code did not do that). Truth beats a flattering span: the
+        true scope is 12 749 characters — comfortably over the
+        1000-character non-vacuity floor — and ``_board_gate`` now
+        carries its OWN scoped assertion (``test_b7iiia_...`` below).
         """
         source = (
             REPO_ROOT / "daemon" / "routers" / "live_views.py"
@@ -541,21 +552,55 @@ class TestShadowingGuard:
             "no function-scope anchor after _public_post"
         )
         end = start + 1 + scope.start()
-        # The board-route decorator — a WIDER end anchor when it
-        # also sits after the start (it widens the guarded span,
-        # never inverts it).
-        route = source.find(
-            '    @router.get("/public/board/index.html")'
-        )
-        if route > start:
-            end = max(end, route)
         body = source[start:end]
         assert start < end, (
             "the _public_post slice is inverted (vacuous pin)"
         )
         assert len(body) > 1000, (
-            "the _public_post slice is too small (%d bytes) — the pin "
-            "would be vacuous" % len(body)
+            "the _public_post slice is too small (%d characters) — the "
+            "pin would be vacuous" % len(body)
+        )
+        assert "is_reserved_root_name" not in body
+        assert "has_root" not in body
+
+    def test_b7iiia_the_board_gate_source_has_no_reserved_name_guard(
+        self,
+    ) -> None:
+        """The COVERAGE SPLIT for the narrowed T-B7 pin.
+
+        The old (widened) source-scan slice ran from ``_public_post``
+        to the board-route decorator, so it covered ``_board_gate``
+        as a side effect. The narrowed pin guards the TRUE
+        ``_public_post`` scope only — so ``_board_gate`` gets its OWN
+        scoped assertion here, or the guard would lose its teeth.
+
+        The substance is the same: ``_board_gate`` OWNS the reserved
+        name ``board`` (the reserved-name check is deliberately NOT
+        applied there — see the comment above the definition) and
+        ``board`` is NOT a registered root, so it must consult
+        NEITHER ``is_reserved_root_name`` NOR ``has_root``.
+        """
+        source = (
+            REPO_ROOT / "daemon" / "routers" / "live_views.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("    async def _board_gate(")
+        # The FUNCTION SCOPE anchor — the next same-indent
+        # definition. It is ALWAYS after the start ⇒ the slice
+        # can never be inverted.
+        scope = re.search(
+            r"^    (?:async )?def ", source[start + 1:], re.MULTILINE
+        )
+        assert scope is not None, (
+            "no function-scope anchor after _board_gate"
+        )
+        end = start + 1 + scope.start()
+        body = source[start:end]
+        assert start < end, (
+            "the _board_gate slice is inverted (vacuous pin)"
+        )
+        assert len(body) > 1000, (
+            "the _board_gate slice is too small (%d characters) — the "
+            "pin would be vacuous" % len(body)
         )
         assert "is_reserved_root_name" not in body
         assert "has_root" not in body
