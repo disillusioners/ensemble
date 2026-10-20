@@ -446,6 +446,11 @@ operators already have FE mission chips. Tools-first retires the actual pain fir
 
 #### Question/stuck emission fan-out (QA events — events-filter-exempt, non-claiming; 2026-10-05)
 
+> **2026-10-20 scope note:** the question tool is registered only for user-facing
+> root instances (a root bound to a chat source). A non-root instance raises a
+> blocker through its completion report instead — the QA emission and transport
+> contract described below is unchanged.
+>
 > From `feature/question-watch-fanout` (merged `ac399874`); design record:
 > `.agents/shared/planning/midflight-qa-channel/design.md` ("Superseded scope
 > note", §2). Only the QA lane was widened; everything below leaves terminal

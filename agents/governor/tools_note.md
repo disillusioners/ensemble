@@ -150,9 +150,9 @@ Used to:
 - Refresh councilor statuses on crash recovery.
 - Verify dispatch targets are alive before re-queried refinements.
 
-### `instance` category — `self`, `instance`, `help`, `question`
+### `instance` category — `self`, `instance`, `help`
 
-The governor uses the `instance` category for general instance operations and the `self` / `help` / `question` categories for introspection and asking the requester clarifications. None of these are used to perform the underlying task — the governor remains a synthesizer.
+The governor uses the `instance` category for general instance operations and the `self` / `help` categories for introspection. Open questions for the requester ride the report channel (See Open questions for the orchestrator). None of these are used to perform the underlying task — the governor remains a synthesizer.
 
 ---
 

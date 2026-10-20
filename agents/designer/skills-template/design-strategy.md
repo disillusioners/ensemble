@@ -28,7 +28,7 @@ Validate the brief BEFORE designing — a spec built on a soft brief fails at co
 | `conventions` | Project conventions that apply |
 | `escalation_path` | Where diffs go when the conformance budget exhausts |
 
-- **Missing field on `new`** → ask before guessing. Never invent silent defaults.
+- **Missing field on `new`** → ask the orchestrator before guessing (See Open questions for the orchestrator). Never invent silent defaults.
 - **`re-conformance`** adds `pinned_spec_sha`, sent verbatim from the parent's frozen reference — treat it as ground truth, never re-derive it. The brief is the spec + parent diff.
 - **`amend`** → confirm what changed and whether it warrants a new spec SHA or an amendment file.
 - **Vague or unverifiable ACs** → return `NEEDS MORE INFO` listing each gap concretely. Every accepted AC is observable, testable, and mapped to a `Validation:` block (`Validation: pack <name>; static: grep <pattern>`) so developer and tester can pick it up directly.

@@ -25,7 +25,7 @@ This tells us:
 1. git status → See current state
 2. git diff → Show unstaged changes
 3. git diff --cached → Show staged changes
-4. Discuss scope with user
+4. Report which files to include as an open question (See Open questions for the orchestrator)
 5. Suggest commit type (feat/fix/docs/etc)
 6. Write message (first line <72 chars)
 7. Execute: git commit -m "type: description"
@@ -50,7 +50,7 @@ This tells us:
 2. git status → Check for changes
 3. git log HEAD..origin/latest → See unpulled commits
 4. If merge needed: git merge origin/latest
-5. If conflicts: STOP, report, resolve with user
+5. If conflicts: STOP, report, and resolve per the strategy that arrives as a new dispatch (See Open questions for the orchestrator)
 6. If push needed: git push
 7. Verify: git status (should be clean)
 ```
@@ -68,7 +68,7 @@ This tells us:
       - Accept ours (keep local)
       - Accept theirs (use remote)
       - Manual merge
-   e. User chooses strategy
+   e. The strategy arrives as a new dispatch (See Open questions for the orchestrator)
    f. Edit files to resolve
    g. git add <resolved-files>
    h. git commit → Complete merge
@@ -105,10 +105,10 @@ never rely on ambient KV surfacing; dispatch context is primary; explicit KV rea
 Step 1: git status
 Step 2: git diff (show what's changed)
 Step 3: git diff --cached (if anything staged)
-Step 4: Ask user - which files to include?
+Step 4: Report which files to include as an open question (See Open questions for the orchestrator)?
 Step 5: Suggest commit type based on changes
 Step 6: Draft commit message
-Step 7: Get user confirmation on message
+Step 7: Require approval through the open-questions report; proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 Step 8: git add <files>
 Step 9: git commit -m "message"
 Step 10: Show git log -1 to confirm
@@ -141,7 +141,7 @@ Step 4: Inform user latest is ready (or blocked with issues)
 - Check if 'latest' is truly the newest branch by commit date
 - Check divergence: `git status` shows if ahead/behind
 - Compare with main: `git log origin/main..origin/latest` and vice versa
-- If ANY issue found → STOP immediately, report to user
+- If ANY issue found → STOP immediately and report the blocked action as an open question (See Open questions for the orchestrator)
 
 #### Scenario: "Create a feature branch from latest"
 
@@ -150,11 +150,11 @@ Step 1: VERIFY latest integrity FIRST:
    - git fetch origin
    - git status (check if latest diverged from main)
    - git log origin/main..origin/latest (should be empty or minimal)
-   - If divergence or issues → STOP, report to user
+   - If divergence or issues → STOP and report the blocked action as an open question (See Open questions for the orchestrator)
 Step 2: Ensure latest exists (see above)
 Step 3: git branch (show current state)
 Step 4: git status (confirm clean or staged)
-Step 5: Ask user for branch purpose
+Step 5: Report the branch purpose as an open question (See Open questions for the orchestrator)
 Step 6: Suggest name: feat/user-auth
 Step 7: git checkout -b feat/user-auth
 Step 8: git branch (verify new branch)
@@ -225,7 +225,7 @@ Solution:
   2. git status (show conflicted files)
   3. Open file, show conflict markers
   4. Explain: <<<<<< HEAD ... ======= ... >>>>>>> branch
-  5. User chooses resolution
+  5. The resolution strategy arrives as a new dispatch (See Open questions for the orchestrator)
   6. Edit file, remove markers
   7. git add file
   8. Continue or commit
@@ -252,3 +252,12 @@ Examples:
 - `fix: resolve login redirect issue`
 - `docs: update README installation steps`
 - `refactor: extract payment processing module`
+
+## Open questions for the orchestrator
+
+When I am genuinely blocked — a decision I cannot make within my own mandate — I carry the blocker in this section of my report:
+
+- **Include the section only when I am genuinely blocked.** Otherwise I omit it entirely — no empty heading, no "none".
+- **0–3 framed questions.** Each is concrete and decision-oriented, and states what I would do under each answer.
+- **Place it immediately after the one-line report summary**, so it survives report truncation.
+- **Prefer deciding.** I decide per my own mandate first; asking is never my turn-ending move — I deliver the work I have and carry the open questions alongside it.

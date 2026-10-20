@@ -41,6 +41,19 @@ from daemon.constants import INJECTION_ELIGIBLE_STATUSES, TERMINAL_INSTANCE_STAT
 # The Pydantic field default at daemon/config.py:425 and the doc
 # block at :~2340 both cross-reference this single source.
 from daemon.config import _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT
+# Chat-source taxonomy for the USER-FACING ROOT predicate
+# (``_is_user_facing_root`` below). IMPORTED from the instance
+# repository — the flat re-export at
+# ``daemon/repositories/instance/__init__.py`` — so the tool layer does
+# not add a THIRD copy of the set (the two existing authorities are
+# ``SQLModelInstanceRepository.CHAT_SOURCE_TYPES`` and
+# ``USER_ORIGIN_CHAT_SOURCE_TYPES``; the three-way equality unit pin
+# keeps them from drifting). Import direction tools -> repositories is
+# already established in this package
+# (``daemon/tools/snapshot_tools.py`` imports from
+# ``daemon.repositories.instance.repository``); the reverse direction
+# does not exist, so there is no circular-import risk.
+from daemon.repositories.instance import CHAT_SOURCE_TYPES
 
 # Phase-3 ``set_instance_tunable`` was moved to
 # ``daemon/tools/tunables.py`` (2026-09-13, H2 + M6). The
@@ -2526,7 +2539,68 @@ class SpawnInstanceInput(BaseModel):
         return self
 
 
-def create_instance_tools(manager: "InstanceManager", current_instance_id: str, agent_id: str = "", version_tag: str | None = None):
+# ── User-facing root predicate (gates the ``ask_questions`` registration) ──
+#
+# A "user-facing root" is an instance that is BOTH a ROOT (no parent) AND
+# bound to a real chat surface — i.e. an instance a human can actually
+# answer a question:
+#
+#   USER_FACING_ROOT := (parent_id IS NULL OR parent_id == "")
+#                        AND (source_type IN CHAT_SOURCE_TYPES_FOR_ROOT)
+#
+# CHAT-SOURCE TAXONOMY — IMPORTED, NOT RE-DECLARED; see the import
+# block above (rationale + drift pin: TestChatSourceTaxonomyPins).
+#
+# ``whatsapp`` is kept for FORWARD-COMPAT: no whatsapp adapter exists yet
+# (see the asymmetry recorded at ``daemon/tools/upgrade_journal.py:3337``),
+# so a whatsapp root passes this predicate and receives the tool, but it
+# gets no platform prompt section (no adapter to render one).
+CHAT_SOURCE_TYPES_FOR_ROOT: frozenset[str] = frozenset(CHAT_SOURCE_TYPES)
+
+
+def _is_user_facing_root(
+    *, parent_id: str | None, source_type: str | None
+) -> bool:
+    """True only for a user-facing root instance.
+
+    Fail-closed on BOTH halves:
+
+    * a non-root (any non-empty ``parent_id``) is never a user-facing root,
+      even if it carries a chat ``source_type``;
+    * a missing or unknown ``source_type`` is never a user-facing root.
+
+    Both values are THREADED IN by the caller and are never read from the
+    DB at registration time: at spawn time the instance row has not been
+    INSERTed yet, so a row read here would return ``None`` and would strip
+    the tool from every freshly spawned chat root. Same reasoning as
+    ``append_platform_context`` (``daemon/services/instance_lifecycle.py``).
+    """
+    if parent_id is not None and parent_id != "":
+        return False
+    # M1 — DIAGNOSTICS for the fail-closed hide. A root-candidate that
+    # clears the parent leg but fails the source leg is byte-identical to
+    # a forgotten ``source_type=`` thread (the failure mode this
+    # commission repaired twice), so the debug line names the shape
+    # explicitly. Child spawns short-circuit on the parent leg above, so
+    # the noise stays bounded to root candidates.
+    if not isinstance(source_type, str) or source_type not in CHAT_SOURCE_TYPES_FOR_ROOT:
+        logger.debug(
+            "ask_questions hidden: root-candidate with source_type=%r", source_type
+        )
+    # L13 — fail CLOSED on a non-``str`` ``source_type`` instead of
+    # raising ``TypeError`` at the frozenset membership check.
+    return isinstance(source_type, str) and source_type in CHAT_SOURCE_TYPES_FOR_ROOT
+
+
+def create_instance_tools(
+    manager: "InstanceManager",
+    current_instance_id: str,
+    agent_id: str = "",
+    version_tag: str | None = None,
+    *,
+    parent_id: str | None = None,
+    source_type: str | None = None,
+) -> list[BaseTool]:
     """Create tools with injected manager reference.
     
     Args:
@@ -2539,6 +2613,16 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             ``spawn_instance`` / ``_restore_instance`` so versioned agents see
             the correct allow/deny list (C1 fix — base/v1 was being applied to
             v2 instances).
+        parent_id: Keyword-only. The parent instance ID of THIS instance
+            (``None`` / ``""`` for a root). Threaded in by the caller.
+        source_type: Keyword-only. The chat platform this instance is bound
+            to (``"discord"`` / ``"slack"`` / ``"telegram"`` / ``"whatsapp"``),
+            or ``None``. Threaded in by the caller.
+
+            Both values feed the USER-FACING ROOT predicate that gates the
+            ``ask_questions`` tool registration (see ``_is_user_facing_root``).
+            They are KEYWORD-ONLY so that no existing caller can pass them
+            positionally and every existing call site stays valid.
     
     Returns:
         List of tool functions
@@ -6048,7 +6132,7 @@ Returns:
     )
     tools.extend(todo_tool_list)
 
-    # ── Question tools (per-instance user-pause-and-answer flow, always available) ──
+    # ── Question tools (per-instance user-pause-and-answer flow) ──
     # Mirrors the todo wiring above. The single ``ask_questions`` tool stores a
     # QuestionPack, emits a ``question_pack`` SSE event, sets the pause flag,
     # and the conditional post-tools edge in ``daemon.graph`` routes the
@@ -6056,12 +6140,29 @@ Returns:
     # marker — the actual ``pause_instance_cascade`` runs from the post-
     # graph completion path; see C2 fix). The user answers via the Phase 2
     # answer API (``POST /api/instances/{id}/answer``).
-    question_tool_list = create_question_tools(
-        manager,
-        current_instance_id,
-        getattr(manager, "_live_hub", None),
-    )
-    tools.extend(question_tool_list)
+    #
+    # Registered ONLY for USER-FACING ROOT instances:
+    #   (parent_id IS NULL OR parent_id == "")
+    #       AND (source_type IN CHAT_SOURCE_TYPES_FOR_ROOT)
+    # A non-root gets NO question-category tool — the tool is never ADDED to
+    # the toolset (not a runtime refusal). A non-root surfaces its blockers
+    # in its completion report under "Open questions for the orchestrator".
+    #
+    # ``parent_id`` / ``source_type`` are THREADED IN by the caller: the
+    # instance row does not exist yet at spawn time, so a row read here would
+    # strip the tool from every freshly spawned chat root.
+    #
+    # PLACEMENT IS LOAD-BEARING: this gate runs BEFORE
+    # ``_apply_tool_filter`` (further down), so an agent's ``tools.allow``
+    # entry can never re-admit a gated tool — the gate is NECESSARY
+    # (hiding), the allow-list is SUFFICIENT (capability).
+    if _is_user_facing_root(parent_id=parent_id, source_type=source_type):
+        question_tool_list = create_question_tools(
+            manager,
+            current_instance_id,
+            getattr(manager, "_live_hub", None),
+        )
+        tools.extend(question_tool_list)
 
     # ── Mid-flight report tools (non-blocking progress to watchers) ──
     # Mid-flight QA channel (2026-09-21): the single ``mid_flight_report``

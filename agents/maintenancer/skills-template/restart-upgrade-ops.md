@@ -21,7 +21,7 @@ On dispatch I receive an operation class + target; I return a prep report.
 - **Live restart arms via provenance gate.** No nonce; refusal `no-user-provenance` is relayed verbatim, never worked around.
 - **Live upgrade arms via 3-factor gate only.** User-confirm + per-instance user-origin window + single-use nonce.
 - **Nonce relay.** User nonce is relayed verbatim. I never construct one.
-- **Refusal relay.** Every typed refusal (`cooldown-active`, `restart-too-soon`, `restart-budget-exceeded`, `reason-required`, `pipeline-busy`, …) is relayed verbatim — never auto-retried without a fresh user instruction.
+- **Refusal relay.** Every typed refusal (`cooldown-active`, `restart-too-soon`, `restart-budget-exceeded`, `reason-required`, `pipeline-busy`, …) is relayed verbatim — never auto-retried without fresh user authorization delivered to me as a new dispatch (See Open questions for the orchestrator).
 - **Kill-switch / env-flip awareness.** Env-flip kill-switches that disable the live arm are honored.
 
 ## Focus areas

@@ -43,7 +43,7 @@ Before doing anything else, validate the inputs.
 
 If any validation fails, STOP. Do not proceed to Step 0.5. Do not persist a manifest.
 
-**Clarifying questions — complete-to-ask (NEVER pause):** The governor has no direct human channel — its parent is another agent (reviewer/developer/etc.), and there is no `ask_questions` tool. When a validation input is invalid or ambiguous, do NOT attempt to pause or wait. Instead **END YOUR TURN / complete** with a self-contained clarifying question addressed to the requester in your final message. Your final message is what the system wraps into a completion report and delivers to the parent, which then revives you with the answer.
+**Clarifying questions — complete-to-ask (NEVER pause):** The governor has no direct human channel — its parent is another agent (reviewer/developer/etc.). When a validation input is invalid or ambiguous, do NOT attempt to pause or wait. Instead **END YOUR TURN / complete** with a self-contained clarifying question addressed to the requester in your final message (See Open questions for the orchestrator). Your final message is what the system wraps into a completion report and delivers to the parent, which then revives you with the answer.
 
 Constraints on the complete-to-ask flow:
 - **Self-contained echo (compaction-safe):** the final message must include the failing field, the constraint it violated, and the list of valid options. After you revive on the requester's reply, your prior turn's AIMessage may have been compacted away — the echo lets you self-justify re-validation from the reply context alone.
@@ -192,8 +192,9 @@ For each councilor in manifest (status = SPAWNED):
   1. composed_message = <read_only_directive> + "\n\n" + <the request> + "\n\n" + <report_discipline_line>
 
      # <report_discipline_line> (append to EVERY councilor dispatch, initial and refinement):
-     # "Before ending any turn: begin work with a tool call, deliver your report, or ask —
-     #  a turn that ends on future-intent text with zero tool calls is treated as a junk report.
+     # "Before ending any turn: begin work with a tool call, deliver your report, or report open
+     #  questions (unless you are the user-facing root) — a turn that ends on future-intent text
+     #  with zero tool calls is treated as a junk report.
      #  I adjudicate your report on evidence: zero tool-call evidence and no concrete artifact
      #  is treated as interim, not completion, and I will verify before acting on it."
   2. Dispatch (skill-aware):

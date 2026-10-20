@@ -111,9 +111,14 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate, 
         # Unpack the (instance_id, validated_model_override) tuple — the
         # router only needs the instance_id; the validated override is
         # consumed by tool-layer callers that emit a fallback notice.
+        #
+        # Thread the source's chat platform type: the USER-FACING ROOT gate
+        # evaluates it, so without it a genuine chat root would lose
+        # ``ask_questions``.
         instance_id, _validated_model_override = manager.spawn_instance(
             agent_id=resolved_agent_id,
             instance_id=instance_id,
+            source_type=source.source_type,
         )
     except Exception as e:
         raise HTTPException(

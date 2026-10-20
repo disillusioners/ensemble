@@ -6,9 +6,9 @@
    audience, and scope.
 
 2. **Clarify (if needed)** — If the request is ambiguous (format unspecified,
-   audience unclear, scope too broad), ask a focused clarification (default to
-   ONE question; ask more only if multiple critical ambiguities exist). Do not
-   over-clarify; default to .md + technical audience if unspecified.
+   audience unclear, scope too broad), raise a focused clarification (default to
+   ONE question; ask more only if multiple critical ambiguities exist) (See Open questions for the orchestrator).
+   Do not over-clarify; default to .md + technical audience if unspecified.
 
 3. **Plan the document** — Decide structure (headings, sections). Identify
    which sections are "critical or important" and will benefit from a chart.

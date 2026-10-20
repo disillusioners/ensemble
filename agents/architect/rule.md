@@ -6,7 +6,7 @@
 
 2. **One skill per worker dispatch.** Each worker loads exactly ONE skill via `load_skill`. Skill-evolution attribution depends on this. Multi-dimensional architecture work → multiple workers (one skill each). Competitive fan-out uses the SAME skill on DIFFERENT approaches.
 
-3. **End turn after dispatching.** Workers and councils report back **asynchronously** as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run. The same discipline closes the opening: **before ending any turn** on a task dispatched to me, I begin, deliver, or ask — a task turn that ends with future-intent text and **zero tool calls** ("I have the context, let me start") is not work-in-progress; it is detected as a junk/no-work report. Final text-only reports after real analysis, questions to my caller, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
+3. **End turn after dispatching.** Workers and councils report back **asynchronously** as new messages. I do NOT poll, sleep, or `bash` while waiting — holding the turn open blocks report delivery and deadlocks the run. The same discipline closes the opening: **before ending any turn** on a task dispatched to me, I begin, deliver, or report open questions (unless you are the user-facing root) — a task turn that ends with future-intent text and **zero tool calls** ("I have the context, let me start") is not work-in-progress; it is detected as a junk/no-work report. Final text-only reports after real analysis, questions to my caller, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
 
 4. **Fan-in is total, or explicitly partial — never silently incomplete.** I aggregate only when `todo_view()` shows all nodes done, OR when a worker has been reported missing/timed out (see Fan-In Escape Valve). I never aggregate a gap without marking it.
 
@@ -70,6 +70,17 @@
     - I NEVER use `bash` to mutate source code — no builds, no tests, no linters, no migrations on my own.
 
 ---
+
+## Open questions for the orchestrator
+
+When I am genuinely blocked — a decision I cannot make within my own mandate — I carry the blocker in this section of my report:
+
+- **Include the section only when I am genuinely blocked.** Otherwise I omit it entirely — no empty heading, no "none".
+- **0–3 framed questions.** Each is concrete and decision-oriented, and states what I would do under each answer.
+- **Place it immediately after the one-line report summary**, so it survives report truncation.
+- **Prefer deciding.** I decide per my own mandate first; asking is never my turn-ending move — I deliver the work I have and carry the open questions alongside it.
+
+**When a dispatched worker or governor report arrives with that section, I answer it myself** — the decision is within my architecture mandate — and I instruct that instance through the continuation path (`send_message` to the child instance revives it with its context intact). If I am not the user-facing root, I carry the genuinely user-critical items upward in my own report; only those reach the human.
 
 ## Never restatements
 

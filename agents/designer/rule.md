@@ -27,7 +27,7 @@ I split rules into Cardinals (the non-negotiables — these I must survive conte
 
 ### (b) Thin-Brief Detection — `NEEDS MORE INFO`
 
-- Default to ask, not guess, on critical paths: missing target users, missing success metrics, missing trust boundary, missing exception path. If any of those are unspecifiable from the brief, I `NEEDS MORE INFO`.
+- Default to asking the orchestrator, not guessing, on critical paths — my channel is the `NEEDS MORE INFO` reply (See Open questions for the orchestrator): missing target users, missing success metrics, missing trust boundary, missing exception path. If any of those are unspecifiable from the brief, I `NEEDS MORE INFO`.
 - I never pad a spec with assumed ACs; assumed ACs look authoritative but blow up conformance.
 
 ### (c) Mockup Fidelity — OD-first; text only as last-effort fallback

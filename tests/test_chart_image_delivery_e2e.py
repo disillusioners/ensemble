@@ -1347,10 +1347,62 @@ class TestInstallerSkillHygiene:
 #     (install-mermaid-cli.md, ari/workflow.md, 5 rule.md) untouched.
 #     Evidence pointer: Phase-1 scoped gate run (unit + integration +
 #     targeted seal) in the commission report.
+# 2026-10-20 hide-question-tool-nonroot sweep re-pin (14 files, constants-only; attribution in the commit message) — the other 21 entries keep their values.
+# 2026-10-20 hide-question-tool-nonroot FIX ROUND 1 re-pin (3 files, constants-only, computed from real file bytes;
+# attribution = the IN-RANGE fix-round-1 commit whose edit made each pin stale):
+#   agents/charter/workflow.md   <- 6711c769e 2026-10-20 (B5: diagram-type NEEDS MORE INFO self-consistency)
+#   agents/devops/rule.md        <- c5bd90146 2026-10-20 (direct-user display verb routed to the report channel)
+#   agents/maintenancer/rule.md  <- 6711c769e 2026-10-20 (W3: escalate-family report-chain contract)
+# Intermediate re-pin 6fa226976 (1 file, constants-only) — the devops/rule.md pin went stale AGAIN on the
+# fix-round-1 residual edit, so it was re-pinned on its own:
+#   agents/devops/rule.md        <- c5bd90146 2026-10-20 (direct-user display verb routed to the report channel)
+# 2026-10-20 hide-question-tool-nonroot FIX ROUND 2 re-pin (3 files, constants-only, recomputed from real
+# file bytes on the fix-round-2 worktree — B3 closure: human-decision instructions routed to the
+# "Open questions for the orchestrator" report channel; the other 32 entries keep their values).
+# The values below are CONTENT-SHA256 hashes of the sealed files (NOT commit shas — the two forms are
+# not interchangeable); the in-range fix-round-2 commit that made each pin stale is named alongside:
+#   agents/leader/rule.md             <- f0bda673c7b112ef7a43f17f1166f99fcb11f1562aabf0d7a5c9879e924a231a (content-sha256) | in-range commit: 4088be633 2026-10-20 (B3 closure: semantic-class sweep -> open-questions report channel)
+#   agents/maintenancer/rule.md       <- abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec (content-sha256) | in-range commit: 4088be633 2026-10-20 (B3 closure: semantic-class sweep -> open-questions report channel)
+#   agents/project-manager/workflow.md <- bde479095bbda6a3e3e069afe8a719e0f8b5673f289d2d0d5bf7a15eecb123ad (content-sha256) | in-range commit: 4088be633 2026-10-20 (B3 closure: semantic-class sweep -> open-questions report channel)
+# 2026-10-20 hide-question-tool-nonroot CONTRACT-COMPLETION round re-pin (10 files, constants-only,
+# recomputed from real file bytes on the feature worktree — canonical homes added for the 11 unserved
+# dirs: "## Open questions for the orchestrator" section (byte-exact worker/rule.md core) + parent-side
+# paragraph in each dispatcher home; devops/rule.md additionally qualified its :133 get-confirmation
+# shorthand to the open-questions channel (approver i2 B3 addendum, flat never-ask form preserved);
+# the other 25 entries keep their values):
+#   agents/approver/rule.md + agents/approver[v2]/rule.md    | canonical home + parent-side added
+#   agents/architect/rule.md                                 | canonical home + parent-side added
+#   agents/developer/rule.md                                 | canonical home + parent-side added
+#   agents/planner/rule.md                                   | canonical home + parent-side added
+#   agents/reviewer/rule.md + agents/reviewer[v2]/rule.md    | canonical home + parent-side added
+#   agents/tidier/rule.md + agents/tidier[v2]/rule.md        | canonical home + parent-side added
+#   agents/devops/rule.md                                    | :133 get-confirmation -> report channel (B3 addendum)
+# developer[v2]/rule.md + planner[v2]/rule.md carry the SAME byte-identical sections but are NOT
+# sealed (only their tools_note.md files are) — no constant for them.
+# 2026-10-20 hide-question-tool-nonroot UNAUDITED-DIRS round re-pin (1 file, constants-only,
+# recomputed from real file bytes on the feature worktree — the "## Open questions for the
+# orchestrator" canonical home (byte-exact worker/rule.md core) added to the 2 of 13 unaudited dirs
+# that carry it; the other 34 entries keep their values):
+#   agents/charter/rule.md | canonical home added (SEALED — re-pinned; the pre-work NEEDS MORE INFO
+#                            result is an input-acquisition abort, not a report-time open question)
+# agents/blueprinter/rule.md carries the same canonical home but is NOT sealed — no constant for it.
+# 2026-10-20 hide-question-tool-nonroot FIX ROUND 3 re-pin (3 files, constants-only, recomputed
+# from real file bytes on the feature worktree — approver i3 B3: parent-side open-questions
+# paragraph added to the dispatchers that genuinely receive child completion reports and carry
+# NO existing functional equivalent for the open-questions case; the other 32 entries keep their
+# values). The values are CONTENT-SHA256 hashes of the sealed files (NOT commit shas); the
+# same-commit edit that made each pin stale is described alongside:
+#   agents/coder/soul.md        <- 6263b648cfee8eeb84bb90361687e45728bc8bdae60702e965a84a23a1b46968 (content-sha256) | parent-side paragraph added (dispatcher of `worker` instances; report-sanity verify-by-send_message is NOT an open-questions equivalent)
+#   agents/governor/rule.md     <- 07aaed75b0290d2d857ede82f876b6d55979d2f67ba29b861781531f815b41f2 (content-sha256) | parent-side paragraph added (council-manager; its "revival guidance" is the governor's OWN child-side ask-and-revive contract, not a councilor-answering channel)
+#   agents/maintenancer/rule.md <- adf3e5bf0eba9f43c3921d7482a3f09ca6b4972ecfa056350426732b0861ba66 (content-sha256) | parent-side paragraph added (dispatcher of coder/worker/explorer instances; Fan-In Escape Valve covers STALLED children, not open-question reports)
+# Same-round edited files that are NOT sealed (no constant for them): agents/designer/soul.md,
+# agents/project-manager/rule.md, agents/tester/rule.md, agents/wanderer/rule.md,
+# agents/blueprinter/rule.md. Note agents/wanderer/soul.md IS sealed but was NOT edited in this
+# round (the wanderer canonical home lives in its rule.md) — its pin is unchanged.
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
-    "agents/charter/workflow.md": "870ec32faf071cc1478c0540690381ef46c0bd1ae6667163215845ad39992581",
-    "agents/charter/rule.md": "2ee5d27d5bbc09474dbcb78de49d6cbcfc8074f98b3ec358cfecc4c5aae26701",
+    "agents/charter/workflow.md": "2a5078f93bd2dcfe427900e85c075ee9671b8aedae17d07c7ef6abb6df4603ab",
+    "agents/charter/rule.md": "2cb6e01b3bdfd07865aed967d524b98d7bcd965f60ffd741e52a7ee71c44573c",
     "agents/charter/soul.md": "458f65a608b495df0cac8c565a83663595ea85c3d13a200295dc611189387aad",
     "agents/charter/meta.json": "e1034e1d92e7bb30f2d39ab0a625a661287251cf5ca961cbeba3e1893dcfd492",
     "agents/charter/skills-template/install-mermaid-cli.md": "4082a47f9662da283746a6f7719e38d82b473dacc61d52bc8e021a362322dbe4",
@@ -1375,25 +1427,32 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "daemon/sources/adapters/telegram.py": "7e08882fc2fcc4291bed994ab992cb5afdc7a232a1444839f42da86fbfae063c",
     "daemon/constants.py": "df41a67f65428b4d9ef39878602657e60108e541a1f9cacde04c006cd2fc4970",
     # Phase C — 20 agent canonical-home files
-    "agents/approver/rule.md": "f70d2a0b64332aab40445211437e8e29bb9860cb7996e9e09f28587427dfce3a",
-    "agents/approver[v2]/rule.md": "f70d2a0b64332aab40445211437e8e29bb9860cb7996e9e09f28587427dfce3a",
-    "agents/architect/rule.md": "ebabdd952b136eae155b27f412a989e7d9c6e548c6a821e52865e5830ed0c306",
+    "agents/approver/rule.md": "c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae",
+    "agents/approver[v2]/rule.md": "c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae",
+    "agents/architect/rule.md": "ce96896142f568c480a2f92b9b92fa0775be641d877fa386205d8438d55b21b4",
     "agents/ari/rule.md": "bb784e8c41afc913bccf1873bfd5cb8943e5b1e17daacc6936efa08a31d26b68",
-    "agents/coder/soul.md": "0fa7fb9e875203ff9d2b8a14bdd3cdcabce24a44f8a89a0031a6a33123196201",
-    "agents/developer/rule.md": "3cf7141f6d9f1e937c7f80001176c00b3179b803331e95da95511526f4278cf9",
+    "agents/coder/soul.md": "6263b648cfee8eeb84bb90361687e45728bc8bdae60702e965a84a23a1b46968",
+    "agents/developer/rule.md": "9b06c29c811e3636765f8ee09dd1a2b10901554e542723f3de6b851a85a97249",
     "agents/developer[v2]/tools_note.md": "62882063ca109e7829c097201e110a0edb872ade000415372ab7ca016bee5748",
-    "agents/devops/rule.md": "889e52842c0d4c562ad18d27364f9a7ea0223453df4a6659c11995d631996b78",
-    "agents/doc-writer/rule.md": "7897c461b8e9a2b748ec03500ac88be942845642bdd1fc3c0fef5444935152c7",
-    "agents/governor/rule.md": "84a93586df376ad39dc553af36f86f684977ecfa8d717186f2fe8f16846c8cf5",
-    "agents/leader/rule.md": "11affca67d4c5dcaafd3543714fbde5ae469990f8574d826f67705579c1a8d48",
-    "agents/maintenancer/rule.md": "66e91a67357d21b9b8ca3c78311ce9becb2b43bf7517eaa3db439efa28fcdbb0",
-    "agents/planner/rule.md": "40c21f9ba9b4745fca6de15521a90d9e89db71b61cdd97d5eaab7f57723d1778",
+    "agents/devops/rule.md": "100d285927283b0276b8064520d8dfbc52b675d19e5dea78a608ca4cb13f7a1d",
+    "agents/doc-writer/rule.md": "350dd33cca327e5a96941633aea6813d18b98b82a2f443cb13b270e03deabdc5",
+    "agents/governor/rule.md": "07aaed75b0290d2d857ede82f876b6d55979d2f67ba29b861781531f815b41f2",
+    "agents/leader/rule.md": "f0bda673c7b112ef7a43f17f1166f99fcb11f1562aabf0d7a5c9879e924a231a",
+    # agents/maintenancer/rule.md re-pinned 2026-10-20 (approver i3 follow-up
+    # round): the parent-side open-questions paragraph added at 23859484e was
+    # REMOVED — it asserted a tool call the agent cannot make (maintenancer's
+    # meta.json tools.allow carries no `instance` category, so neither
+    # spawn_instance nor send_message is grantable to it). The value below is
+    # the pre-paragraph baseline, byte-identical to the state before 23859484e.
+    # All other entries keep their values; membership stays 35.
+    "agents/maintenancer/rule.md": "abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec",
+    "agents/planner/rule.md": "4282ce61b58736026b5d2e72b7e2112925e4515bf95ffc88032104b4e4c4b6fb",
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
-    "agents/project-manager/workflow.md": "b7258c5eb0fcb351ee96235df4888cce8b6ab9bca36477f8cfabc1b99ebf96c6",
-    "agents/reviewer/rule.md": "a99910521897a4f45f50a23bbb725187820a93b1d94ee887d600e1f4f0129d72",
-    "agents/reviewer[v2]/rule.md": "a99910521897a4f45f50a23bbb725187820a93b1d94ee887d600e1f4f0129d72",
-    "agents/tidier/rule.md": "ebe7410dcb26e1465825ad297f39be06d898cf55e7a6f20d7c70b8a694229148",
-    "agents/tidier[v2]/rule.md": "ebe7410dcb26e1465825ad297f39be06d898cf55e7a6f20d7c70b8a694229148",
+    "agents/project-manager/workflow.md": "bde479095bbda6a3e3e069afe8a719e0f8b5673f289d2d0d5bf7a15eecb123ad",
+    "agents/reviewer/rule.md": "77c75b6dd1f17431ab0e4a7927863cdfd5cc5975658686e2adb9fd293230200b",
+    "agents/reviewer[v2]/rule.md": "77c75b6dd1f17431ab0e4a7927863cdfd5cc5975658686e2adb9fd293230200b",
+    "agents/tidier/rule.md": "73624de075b1f599a4d39ab703e278050066dc8d850d14d30f3c49aff6cf604c",
+    "agents/tidier[v2]/rule.md": "73624de075b1f599a4d39ab703e278050066dc8d850d14d30f3c49aff6cf604c",
     "agents/wanderer/soul.md": "98a1f4b4de7657d37c3367fffcfbd3d08b3b66aacafcfa3a362a25a5be126dc2",
 }
 

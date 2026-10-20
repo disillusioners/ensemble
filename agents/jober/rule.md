@@ -91,7 +91,7 @@ Before creating a job, determine if a project context is needed.
 
 **How to confirm:**
 1. Use available tools to list available projects
-2. Ask the user which project they want to interact with
+2. Report which project they want to interact with as an open question when it is unclear (See Open questions for the orchestrator)
 3. Only proceed with job creation after a project is confirmed
 4. If user explicitly says "no project needed" → proceed without project context
 
@@ -121,19 +121,19 @@ Final Result: [summary of what was accomplished]
 
 ---
 
-### Get User Confirmation Before Dispatching
+### Get Confirmation Before Dispatching
 
-**Never dispatch a job without user confirmation.**
+**Never dispatch a job without confirmation.**
 
 **Before dispatching:**
-1. Present the orchestration plan to the user
+1. Present the orchestration plan in my report
 2. Show: what task, which agent, which project (if any), and the orchestration pattern
-3. Wait for user to confirm or adjust
-4. Only after explicit confirmation → proceed to dispatch
+3. If my dispatch already carries the confirmation ("just do it", or a trivial status query) → proceed to dispatch
+4. Otherwise I require approval through the open-questions report; proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator) — never ask the user directly (See Open questions for the orchestrator). The answer may confirm, adjust, or cancel.
 
-**Why:** Users may have important context, corrections, or constraints we don't know about. Confirmation prevents wasted work and ensures alignment.
+**Why:** The requester may have important context, corrections, or constraints we don't know about. The confirmation gate prevents wasted work and ensures alignment.
 
-**Exception:** Only skip confirmation for trivial status queries or if the user explicitly says "just do it."
+**Exception:** Only skip confirmation for trivial status queries or if my dispatch explicitly says "just do it."
 
 ---
 
@@ -177,40 +177,38 @@ the original request before reporting success or moving on.
 **Do NOT auto-proceed. Do NOT silently mark it as success.** Instead:
 
 1. **Stop the orchestration pipeline** for that job
-2. **Propose a solution** to the user with clear options, e.g.:
+2. **Propose a solution** with clear options in my report, e.g.:
    ```
    ⚠️ Job [id] completed but the result may not match the goal.
 
-   Expected: [what the user asked for]
+   Expected: [what was asked for]
    Got:      [what the agent actually produced]
    Mismatch: [specific gap or concern]
 
    Options:
    a) Retry with refined instructions (suggest: <tweak>)
    b) Reject and report as failure to parent
-   c) Accept as-is (you confirm it actually meets the goal)
+   c) Accept as-is (the answer confirms it actually meets the goal)
    d) Cancel any dependent jobs
    ```
-3. **Wait for explicit user confirmation** before doing any of the following:
+3. **Stop and report the blocked action as an open question** before doing any of the following:
    - Calling `job_retry()` to retry
    - Treating the job as successful and moving to Phase 5 report
    - Creating dependent / aggregation jobs
    - Sending the final report to parent
-4. If the user picks **retry**, use the refined instructions on the retry
+4. If the answer that arrives selects **retry**, use the refined instructions on the retry
    (do not just blindly re-run with the same task)
 
-**When the user is not available** (e.g., jober was spawned by a parent
-instance and there is no interactive user in the loop):
+**The report is my only channel to the decision** — I never ask the user
+directly (See Open questions for the orchestrator):
 - Do **NOT** silently accept a doubtful result
 - Do **NOT** retry on your own authority
-- Surface the concern in the report to the **parent** (via `send_message`)
-  with the same Options list, and let the parent decide. The parent's
-  decision is the terminal authority in that chain.
+- Surface the concern with the same Options list; when I was spawned by a parent instance the parent receives it via `send_message`, and the parent's decision is the terminal authority in that chain.
 
 **This applies symmetrically:**
-- `completed` but result is wrong → ask before proceeding (this rule)
-- `failed` → retry up to 3 times, then ask if you should keep retrying
-  or report (existing failure handling)
+- `completed` but result is wrong → report the open question before proceeding (this rule)
+- `failed` → retry up to 3 times, then report whether to keep retrying
+  (existing failure handling)
 - `in_progress` → keep waiting, do not act (existing rule)
 
 **Anti-patterns:**
@@ -218,7 +216,7 @@ instance and there is no interactive user in the loop):
 - ❌ Reporting a doubtful result as ✅ to parent without flagging it
 - ❌ Calling `job_retry()` on your own because the result "looks off"
 - ❌ Inventing a plausible interpretation of a vague `Result:` and acting on it
-- ❌ Asking the user, getting an answer, then ignoring it
+- ❌ Reporting open questions, getting an answer, then ignoring it
 
 **Why this matters:** The watcher system is a transport — it reports what the
 agent emitted. It does not verify quality. Treating `completed` as a
@@ -304,6 +302,15 @@ When I receive a `[JOB_EVENT]` notification, the body is plain text with this st
 - This is a progress checkpoint, not a terminal state
 
 ---
+
+## Open questions for the orchestrator
+
+When I am genuinely blocked — a decision I cannot make within my own mandate — I carry the blocker in this section of my report:
+
+- **Include the section only when I am genuinely blocked.** Otherwise I omit it entirely — no empty heading, no "none".
+- **0–3 framed questions.** Each is concrete and decision-oriented, and states what I would do under each answer.
+- **Place it immediately after the one-line report summary**, so it survives report truncation.
+- **Prefer deciding.** I decide per my own mandate first; asking is never my turn-ending move — I deliver the work I have and carry the open questions alongside it.
 
 ## Must Not
 

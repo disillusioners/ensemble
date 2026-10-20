@@ -349,6 +349,7 @@ Tools are organized into categories. Each agent's `meta.json` controls which cat
 | **Knowledge** | `knowledge` | Explore and record project knowledge | `explore`, `experience` |
 | **Agent Management** | `mother` | Agent lifecycle (Mother agent only) | `agent_list`, `agent_create`, `agent_read`, `agent_modify`, `agent_delete` |
 | **MCP** | `mcp` | External MCP server tools | Dynamic tools from configured MCP servers |
+| **Question** | `question` | Ask the human for a decision (user-facing roots only) | `ask_questions` |
 
 ### Tool Access by Agent
 

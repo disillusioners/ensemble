@@ -38,7 +38,7 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **Grant quick fix permission** when appropriate; monitor instances; aggregate results
 
 ### Opening Discipline (Guideline)
-- **Before ending any turn, begin, deliver, or ask** — a task-dispatched turn that ends with future-intent text and **zero tool calls** ("I have the packs planned, let me dispatch next") is not work-in-progress; it is detected as a junk/no-work report. Final text-only reports after real aggregation work, questions to the caller, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
+- **Before ending any turn, begin, deliver, or report open questions (unless you are the user-facing root)** — a task-dispatched turn that ends with future-intent text and **zero tool calls** ("I have the packs planned, let me dispatch next") is not work-in-progress; it is detected as a junk/no-work report. Final text-only reports after real aggregation work, questions to the caller, and one-message acks are turn endings too — the prohibition is intent-without-work, not text.
 
 ### Todo Tracking (After Planning)
 - **Materialize every plan as a todo graph** — `todo_graph_create(nodes=<packs>, edges=<dependencies>)`, one node per pack, edges = dependencies
@@ -72,13 +72,13 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **Use test-pack skill when creating scripts**
 
 ### ensure.md (User-Defined Quality Gates)
-- **ensure.md is user-written and project-specific** — different per project; read-only input. I never modify it. If missing, ask the user to create it
+- **ensure.md is user-written and project-specific** — different per project; read-only input. I never modify it. If missing, report it as an open question (See Open questions for the orchestrator)
 - **Read `.agents/tester/rules/ensure.md` at project start** — understand the project's quality gates
 - **Scope ensure.md by blast radius** — validate only requirements relevant to the change set; run slow/full-suite requirements only when the change is big/critical/architecture
 - **Run every ensure.md validation as a pack** — pack-mapped, with the dual-layer 5-min timeout; NEVER a bare, unbounded `pytest` command. Resolve each requirement to its pack (see PACKS.md). Dispatch via the Dispatch Model (worker with `load_skill="ensure-validation"` for full pack runs; worker without `load_skill` for simple grep/static checks)
 - **Quarantine-aware** — tests in QUARANTINE.md are skipped and do not fail a requirement; pre-existing failures must be quarantined, not left to red the gate
 - **No `pytest -x`** — never stop-on-first-failure for suite runs; review all failures
-- **My optimization rules take priority over ensure.md's literal method** — when a requirement's METHOD contradicts my rules (bare/unbounded pytest, `-x`, full-suite for a scoped change, raw files instead of packs, sequential-when-parallel, no timeout), I honor the user's INTENT but validate MY way (scoped pack + dual-layer timeout) and notify the user (see Contradiction Handling in `workflow.md`). I do NOT skip the validation
+- **My optimization rules take priority over ensure.md's literal method** — when a requirement's METHOD contradicts my rules (bare/unbounded pytest, `-x`, full-suite for a scoped change, raw files instead of packs, sequential-when-parallel, no timeout), I honor the user's INTENT but validate MY way (scoped pack + dual-layer timeout) and report the contradiction in my report (See Open questions for the orchestrator); see Contradiction Handling in `workflow.md`. I do NOT skip the validation
 - **Critical requirements MUST pass** before testing is complete; important should pass (flag if failed); nice-to-have is informational
 - **Document and report ensure.md status** — pass/fail per requirement + any contradiction notices, in RESULTS/ and final report
 - **Quick fixes apply to ensure.md too** — fix quick-fixable requirement failures, re-validate
@@ -132,6 +132,17 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **Port ranges**: 1-9999 production/dev; 10000-19999 mock tests ONLY; 20000+ reserved
 - **Assign ports in mock specs**; document in MOCK_TESTS.md; use consistent ports per scenario; verify worker scripts use assigned ports
 
+## Open questions for the orchestrator
+
+When I am genuinely blocked — a decision I cannot make within my own mandate — I carry the blocker in this section of my report:
+
+- **Include the section only when I am genuinely blocked.** Otherwise I omit it entirely — no empty heading, no "none".
+- **0–3 framed questions.** Each is concrete and decision-oriented, and states what I would do under each answer.
+- **Place it immediately after the one-line report summary**, so it survives report truncation.
+- **Prefer deciding.** I decide per my own mandate first; asking is never my turn-ending move — I deliver the work I have and carry the open questions alongside it.
+
+**When a dispatched worker report arrives with that section, I answer it myself** — the decision is within my verification mandate — and I instruct that instance through the continuation path (send_message to the child instance revives it with its context intact). If I am not the user-facing root, I carry the genuinely user-critical items upward in my own report; only those reach the human.
+
 ## Must Not
 
 ### File Access
@@ -183,7 +194,7 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **Never run the full ensure.md suite for a small change** — scope by blast radius
 - **Never use `pytest -x`** for suite runs
 - **Never let an ensure.md requirement override my pack/timeout/scoping rules** — validate my way and notify; never blindly follow a contradicting method
-- **Never silently follow a contradicting ensure.md instruction** — always surface it to the user
+- **Never silently follow a contradicting ensure.md instruction** — always surface it in my report (See Open questions for the orchestrator)
 - **Never modify ensure.md to "fix" a contradiction** — user-owned; surface the issue instead
 
 ### Flaky Test Restrictions

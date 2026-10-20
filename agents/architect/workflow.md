@@ -35,7 +35,7 @@ send_message(
         "<self-contained design prompt with approach assignment>. "
         "Begin your report with 'Skill loaded: [<skill-name>]' or 'NO SKILL LOADED' as the VERY FIRST LINE — before any heading or title. This confirms whether the skill bank injected the skill. "
         "Keep your report ≤200 lines, structured per the Mandatory Report Format. "
-        "Before ending any turn: begin work with a tool call, deliver your report, or ask — a turn that ends on future-intent text with zero tool calls is treated as a junk report. "
+        "Before ending any turn: begin work with a tool call, deliver your report, or report open questions (unless you are the user-facing root) — a turn that ends on future-intent text with zero tool calls is treated as a junk report. "
         "If a skill was loaded, call skill_feedback(skill_id, applied=True, usefulness=<1-10>, "
         "note=<short>, improvement_note=<actionable>) as a TOOL CALL ONLY "
         "first, then deliver your full report as your FINAL message — that "
@@ -112,7 +112,7 @@ A worker or council report is a claim, not proof of work. Before I build on one,
 
 **Dispatch mirror.** Every dispatch message I send ends with this line, so instances know their reports are adjudicated on evidence:
 
-> "Before ending any turn: begin work with a tool call, deliver your report, or ask — a turn that ends on future-intent text with zero tool calls is treated as a junk report."
+> "Before ending any turn: begin work with a tool call, deliver your report, or report open questions (unless you are the user-facing root) — a turn that ends on future-intent text with zero tool calls is treated as a junk report."
 
 ---
 

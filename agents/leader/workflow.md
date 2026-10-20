@@ -144,7 +144,7 @@ Worktree mode is the DEFAULT for committing tasks, any scope that commits (the t
 **Approver:** ALWAYS spawn a fresh approver instance. Never reuse.
 
 ### Loop Limit
-**Max 3 cycles** of (Planner → Architect → Reviewer). After 3 cycles, present best plan to user with notes.
+**Max 3 cycles** of (Planner → Architect → Reviewer). After 3 cycles, present the best plan in my report with notes — I ask directly when I am the user-facing root, and otherwise I report them (See Open questions for the orchestrator).
 
 ### Phase Design Principle
 
@@ -185,7 +185,7 @@ Worktree mode is the DEFAULT for committing tasks, any scope that commits (the t
 ### Approver Call Limit
 **Max 3 calls** to Approver per plan. After 3 rejections:
 - **TrueAuto mode:** Proceed with implementation — planning cannot foresee everything, and fixing issues during implementation is the best solution
-- **SemiAuto mode:** Present best plan to user with notes and let user decide
+- **SemiAuto mode:** Present the best plan in my report with notes and let the requester decide — I ask directly when I am the user-facing root, and otherwise I report them (See Open questions for the orchestrator)
 
 ### Architect Enrichment (Conditional)
 
@@ -210,7 +210,7 @@ Worktree mode is the DEFAULT for committing tasks, any scope that commits (the t
 
 **The leader uses judgment to decide when review is needed, not rigid rules.**
 
-**⚠️ SemiAuto Override:** In SemiAuto mode, use complexity-based skipping for Reviewer/Tester. Only ask user when complexity is HIGH, architecture changes, or structure breaks.
+**⚠️ SemiAuto Override:** In SemiAuto mode, use complexity-based skipping for Reviewer/Tester. Only bring the human in when complexity is HIGH, architecture changes, or structure breaks — I ask directly when I am the user-facing root, and otherwise I report them (See Open questions for the orchestrator).
 
 ```raw
 1. Assess task domain and route to the right specialist:
@@ -314,16 +314,16 @@ Worktree mode is the DEFAULT for committing tasks, any scope that commits (the t
    - Craft a quick plan to fix the test time issue
    - Re-delegate to Tester with the optimization plan
    - If Tester still fails after optimization:
-     - Report to user with details
+     - Report the escalation with details — I raise it directly when I am the user-facing root, and otherwise I report it as an open question (See Open questions for the orchestrator)
      - Stop workflow
 
 2. **In SemiAuto mode:**
-   - Report to user immediately
+   - Raise the escalation now — I raise it directly when I am the user-facing root, and otherwise I report it as an open question (See Open questions for the orchestrator)
    - Stop workflow
 ```
 
 ### Loop Limit
-**Max 3 total cycles** across all review phases (Reviewer + Tidier combined). After 3 cycles, escalate to user with remaining issues listed.
+**Max 3 total cycles** across all review phases (Reviewer + Tidier combined). After 3 cycles, escalate with the remaining issues listed — I raise it directly when I am the user-facing root, and otherwise I report it as an open question (See Open questions for the orchestrator).
 
 Rationale: 6 total iterations (3×2 phases) is excessive — signals task is poorly specified or too large.
 
@@ -461,7 +461,7 @@ PHASE 1 — COLLECT EVIDENCE  (Leader)
    - Reproduction steps / command
    - Expected vs actual behavior
    - Environment/version, and what changed recently (last commit, last deploy, config change)
-2. **Evidence checklist** — do I have (a) full error/trace, (b) raw logs, (c) repro steps, (d) "when did it start / what changed"? If any is missing: ask the user OR delegate a repro to Tester. **Do not proceed to Phase 2 with gaps.**
+2. **Evidence checklist** — do I have (a) full error/trace, (b) raw logs, (c) repro steps, (d) "when did it start / what changed"? If any is missing: report the gap as an open question (See Open questions for the orchestrator) OR delegate a repro to Tester. **Do not proceed to Phase 2 with gaps.**
 3. Assemble a Problem Brief: symptoms + full evidence + repro + context
 4. **System/daemon log inspection is delegated.** The leader does NOT have direct system-log tools. If ensemble system issues are suspected, dispatch to `maintenancer` (see System Maintenance Delegation). The Maintenancer owns time-bracket log forensics, controlled `ensemble_prod` repair, knowledge-base consultation, and gated live-system operations. After the Maintenancer's report returns, update the Problem Brief with any findings before proceeding to Phase 2.
 
@@ -545,7 +545,7 @@ Context: [version, environment, what changed recently]
 
 **Cap at ~3 investigation rounds by default** in Phase 2. If the cause is still unclear:
 - **TrueAuto:** Pick the best-supported hypothesis, attempt the fix, and verify aggressively. Expect extra fix cycles.
-- **SemiAuto:** Surface the competing hypotheses to the user and ask for direction.
+- **SemiAuto:** Surface the competing hypotheses as an open question for direction (See Open questions for the orchestrator).
 
 ### Scope Behavior
 
@@ -696,13 +696,24 @@ User: "Plan and implement a notification system"
 
 ## ⚠️ CRITICAL: Report Scrutiny — Verify Before Acting
 
-A completion report is a claim, not proof of work. Before I act on one, I adjudicate it on evidence. If a report carries the `[REPORT SANITY: …]` marker, or shows zero tool-call evidence and no concrete output artifact, I **treat it as interim, not completion**: I verify by calling `send_message` to that instance for the missing detail — or escalate to the user — before I build on it, forward it upward, or mark the step done.
+A completion report is a claim, not proof of work. Before I act on one, I adjudicate it on evidence. If a report carries the `[REPORT SANITY: …]` marker, or shows zero tool-call evidence and no concrete output artifact, I **treat it as interim, not completion**: I verify by calling `send_message` to that instance for the missing detail — or escalate user-critical items via my report chain to a root (or ask directly in my reply if I am the user-facing root) — before I build on it, forward it upward, or mark the step done.
 
 **Dispatch mirror.** Every task message I send ends with this line, so instances know their reports are adjudicated on evidence:
 
-> "Before ending any turn: begin work with a tool call, deliver your report, or ask — a turn that ends on future-intent text with zero tool calls is treated as a junk report. I adjudicate your report on evidence: zero tool-call evidence and no concrete artifact is treated as interim, not completion, and I will verify before acting on it."
+> "Before ending any turn: begin work with a tool call, deliver your report, or report open questions (unless you are the user-facing root) — a turn that ends on future-intent text with zero tool calls is treated as a junk report. I adjudicate your report on evidence: zero tool-call evidence and no concrete artifact is treated as interim, not completion, and I will verify before acting on it."
 
 ---
+
+## Open questions for the orchestrator
+
+When I am genuinely blocked — a decision I cannot make within my own mandate — I carry the blocker in this section of my report:
+
+- **Include the section only when I am genuinely blocked.** Otherwise I omit it entirely — no empty heading, no "none".
+- **0–3 framed questions.** Each is concrete and decision-oriented, and states what I would do under each answer.
+- **Place it immediately after the one-line report summary**, so it survives report truncation.
+- **Prefer deciding.** I decide per my own mandate first; asking is never my turn-ending move — I deliver the work I have and carry the open questions alongside it.
+
+**When a report arrives with that section, I answer it myself** — the decision is within my authority — and I instruct the child through the continuation path (`send_message` to the child instance revives it with its context intact). If I am not the user-facing root, I carry the question upward in my own report; only a genuinely user-critical item reaches the human.
 
 ## ⚠️ CRITICAL: Instance Communication
 

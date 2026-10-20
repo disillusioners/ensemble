@@ -71,6 +71,17 @@ turns and runs; they are not load-bearing for safety.
    ambiguous, surface the assumption rather than inventing a
    clean-looking but wrong diagram.
 
+---
+
+## Open questions for the orchestrator
+
+When I am genuinely blocked — a decision I cannot make within my own mandate — I carry the blocker in this section of my report:
+
+- **Include the section only when I am genuinely blocked.** Otherwise I omit it entirely — no empty heading, no "none".
+- **0–3 framed questions.** Each is concrete and decision-oriented, and states what I would do under each answer.
+- **Place it immediately after the one-line report summary**, so it survives report truncation.
+- **Prefer deciding.** I decide per my own mandate first; asking is never my turn-ending move — I deliver the work I have and carry the open questions alongside it.
+
 ## Never
 
 - **Never include HTML inside Mermaid labels** — it causes

@@ -39,10 +39,12 @@ Plus supplementary smoke tests:
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -635,6 +637,272 @@ class TestJobAnswerAccessDenied:
 
         assert "error" not in result
         assert result["status"] == "answered"
+
+
+# =============================================================================
+# PROOF (b) — the job_answer TOOL WRAPPER answers a LEGACY (pre-gate)
+#             pack for a root that holds NO ask_questions tool
+# =============================================================================
+#
+# Commission: **hide ask_questions from non-root instances**
+# (branch ``feature/hide-question-tool-nonroot``). The plan assigns THIS
+# extension to this file: the sibling flow suite
+# (``tests/unit/services/test_child_report_open_questions_flow.py``) drives
+# the SHARED ANSWER HELPER directly, and explicitly leaves the
+# ``job_answer`` WRAPPER (work-id → asker resolution + job access check)
+# to this file.
+#
+# The shape proved here:
+#
+#   * a USER-FACING ROOT whose agent does NOT grant the "question"
+#     category holds NO ``ask_questions`` tool at all — the toolset is
+#     built with the REAL factory (``create_instance_tools``), so the
+#     premise is not asserted, it is DERIVED;
+#   * a CHILD (a non-root) holds a LEGACY question pack — created BEFORE
+#     the gate, shadowed durably, with the RAM copy GONE (the restart
+#     shape). The work unit is MISSION-SCOPED (it belongs to the root),
+#     so the answer has to be ROUTED to the child;
+#   * the answer is delivered through the REAL ``job_answer`` TOOL (the
+#     agent-facing surface exposed by ``create_job_tools``), NOT through
+#     the internal helper — the wrapper's own seam (work-id resolution →
+#     access check → asker resolution) is exercised.
+#
+# Why it matters: the answer path must be INDEPENDENT of the question
+# tool. A root that cannot ASK must still be able to ANSWER.
+
+
+def _stage_agent_without_question_category(tmp_path, agent_id):
+    """Stage a synthetic agent whose allow-list does NOT grant the
+    "question" category (so its instances hold no ``ask_questions`` tool).
+
+    Same recipe as the sibling flow suite's
+    ``_stage_agent_without_question_category`` — based on the real
+    ``watcher`` meta shape (the convention used by
+    ``tests/unit/tools/test_question_tool_root_gate.py``).
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    real_meta = json.loads(
+        (repo_root / "agents" / "watcher" / "meta.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    real_meta.pop("watchover", None)
+    real_meta["id"] = agent_id
+    real_meta["name"] = agent_id.title()
+    real_meta["team_members"] = []
+    real_meta["innate_skills"] = []
+    real_meta["tools"] = {"allow": ["read_file"], "deny": []}
+    agents_dir = tmp_path / "agents"
+    agent_dir = agents_dir / agent_id
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "meta.json").write_text(
+        json.dumps(real_meta), encoding="utf-8"
+    )
+    return agents_dir
+
+
+class TestJobAnswerWrapperForRootWithoutQuestionTool:
+    """PROOF (b) — the ``job_answer`` TOOL wrapper answers a legacy pack
+    for a root that holds no ``ask_questions`` tool."""
+
+    @pytest.mark.asyncio
+    async def test_root_without_the_question_tool_answers_a_legacy_pack(
+        self, harness, tmp_path, monkeypatch
+    ):
+        """The full wrapper path: work-id resolution → access check →
+        asker resolution (the CHILD holds the pack) → the shared answer
+        helper → the CAS → the resume cascade.
+
+        The answering root's toolset is built with the REAL instance-tool
+        factory and is asserted to hold NO ``ask_questions`` tool — so
+        the success below cannot have gone through the question tool."""
+        import daemon.registry as dr
+        from daemon.registry import AgentRegistry
+        from daemon.services.midflight_qa import (
+            QUESTION_PACK_PAYLOAD_METADATA_KEY,
+            stamp_question_pack_metadata,
+        )
+        from daemon.tools.instance import create_instance_tools
+
+        # ── 1. the ROOT's toolset (REAL factory) holds NO ask_questions ─
+        agent_id = "syn-root-no-question"
+        agents_dir = _stage_agent_without_question_category(tmp_path, agent_id)
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+        monkeypatch.setattr(dr, "_registry", registry)
+
+        tool_manager = MagicMock(name="InstanceManager")
+        tool_manager.config.daemon.port = 0
+        tool_manager.config.llm.allowed_models = []
+        root_tools = create_instance_tools(
+            tool_manager,
+            "inst-root-1",
+            agent_id,
+            parent_id=None,
+            source_type="discord",
+        )
+        root_tool_names = {getattr(t, "name", "?") for t in root_tools}
+        assert "ask_questions" not in root_tool_names, (
+            "a root whose agent does not grant the 'question' category "
+            "must hold no ask_questions tool — otherwise this proof's "
+            "premise (a root WITHOUT the tool answers) is vacuous"
+        )
+
+        # ── 2. the mission: a ROOT and a CHILD asker with a LEGACY pack ─
+        root_id = _seed_instance(
+            harness.engine,
+            instance_id="root-1",
+            status=InstanceStatus.RUNNING.value,
+            project_id="proj-legacy",
+            agent_id=agent_id,
+        )
+        asker_id = _seed_instance(
+            harness.engine,
+            instance_id="asker-1",
+            status=InstanceStatus.PAUSED.value,
+            project_id="proj-legacy",
+            parent_id=root_id,
+            agent_id="worker",
+        )
+
+        # The pre-gate ask: the pack is created and shadowed durably.
+        pack = harness.qm.set_question_pack(
+            asker_id, [{"id": "q1", "text": "Which environment should I use?"}]
+        )
+        assert pack is not None
+        stamp_question_pack_metadata(harness.manager, asker_id, pack)
+
+        # The durable shadow is what survives the gate / a restart.
+        shadow = harness.instance_repo.get_metadata_value(
+            asker_id, QUESTION_PACK_PAYLOAD_METADATA_KEY
+        )
+        assert isinstance(shadow, dict) and shadow.get("status") == "pending"
+
+        # The RAM copy is GONE (restart shape) — only the shadow is left.
+        harness.qm.clear_question_pack(asker_id)
+        assert harness.qm.get_question_pack(asker_id) is None
+
+        # The work unit is MISSION-SCOPED: it belongs to the ROOT, while
+        # the pack lives on the CHILD — the wrapper must route the answer
+        # down to the asker.
+        work_id = _seed_task(
+            harness.engine,
+            root_id,
+            status=TaskStatus.PAUSED.value,
+        )
+
+        # ── 3. the REAL job_answer TOOL answers the child's pack ────────
+        tool = _make_job_answer_tool(harness, current_instance_id=root_id)
+
+        result = await tool.ainvoke(
+            {
+                "work_id": work_id,
+                "answers": {"q1": "staging"},
+                "question_pack_id": pack.id,
+            }
+        )
+
+        assert "error" not in result, f"the wrapper failed: {result!r}"
+        assert result["status"] == "answered", (
+            f"the legacy pack was not answered through the tool; "
+            f"result={result!r}"
+        )
+        assert result["resume_route"] == "answer_gate_existing_turn"
+
+        # The answer was ROUTED to the CHILD asker (not the work
+        # instance) — the wrapper's own resolution seam.
+        target = result["answer_target"]
+        assert target["instance_id"] == asker_id, (
+            f"the answer must reach the CHILD asker; got {target!r}"
+        )
+        assert target["work_instance_id"] == root_id
+        assert target["mission_root_id"] == root_id
+        assert target["route"] == "subtree_pack_id", (
+            f"the pack-id lane must resolve the asker; got {target!r}"
+        )
+
+        # The CHILD's pack is answered (the rehydrated one, same id).
+        answered_pack = harness.qm.get_question_pack(asker_id)
+        assert answered_pack is not None
+        assert answered_pack.status == "answered"
+        assert answered_pack.answers == {"q1": "staging"}
+        assert answered_pack.id == pack.id, (
+            "the rehydrated pack must keep the ORIGINAL pack id"
+        )
+
+        # The durable shadow is cleared at answer consumption.
+        assert (
+            harness.instance_repo.get_metadata_value(
+                asker_id, QUESTION_PACK_PAYLOAD_METADATA_KEY
+            )
+            is None
+        )
+
+        # The resume cascade was driven for the ASKER (the child).
+        harness.manager.resume_instance_cascade.assert_awaited_once_with(
+            asker_id
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_wrapper_never_consults_the_tool_registry(
+        self, harness
+    ):
+        """STATIC-ish half of the separation proof: the answer path (the
+        wrapper's whole chain) must not consult the TOOL REGISTRY.
+
+        The registry's read surfaces are patched to EXPLODE if the answer
+        path ever asks it — the answer must not depend on the question
+        tool being registered for the answering instance."""
+        from daemon.tools import _tool_registry
+
+        calls: list[str] = []
+
+        def _make(name: str):
+            def _boom(*args, **kwargs):
+                calls.append(name)
+                raise AssertionError(
+                    f"the answer path consulted the tool registry via "
+                    f"{name!r} — it must not depend on the question tool "
+                    f"being registered"
+                )
+
+            return _boom
+
+        patched = [
+            "list_tools",
+            "list_tools_by_category",
+            "get_tool_categories",
+            "discover_all_tool_names",
+        ]
+        patches = [
+            patch.object(_tool_registry, name, side_effect=_make(name))
+            for name in patched
+        ]
+        for p in patches:
+            p.start()
+        try:
+            asker, work_id, pack = _seed_paused_asker_with_pending_pack(
+                harness
+            )
+
+            tool = _make_job_answer_tool(harness)
+
+            result = await tool.ainvoke(
+                {
+                    "work_id": work_id,
+                    "answers": {"q1": "staging"},
+                    "question_pack_id": pack.id,
+                }
+            )
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+        assert "error" not in result, f"the wrapper failed: {result!r}"
+        assert result["status"] == "answered"
+        assert calls == [], (
+            f"the answer path consulted the tool registry: {calls!r}"
+        )
 
 
 # =============================================================================

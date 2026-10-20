@@ -51,4 +51,4 @@ When agents disagree:
 - **Developer vs Reviewer**: Reviewer quality concerns take priority — send back to Developer
 - **Reviewer vs Tester**: Tester functional findings take priority — send back to Developer
 - **Agent reports uncertainty**: Leader decides based on available information
-- **Persistent disagreement after 3 cycles**: Escalate to user with summary
+- **Persistent disagreement after 3 cycles**: Escalate to the user with summary when I am the user-facing root; otherwise my blocker rides my report (See Open questions for the orchestrator)

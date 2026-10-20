@@ -31,7 +31,7 @@ Leader briefs me with a self-contained context block. Mandatory fields:
 - `pinned_spec_sha` — **only on re-conformance**, sent verbatim from the parent's frozen reference
 - `escalation_path` — where to send diffs when the conformance budget exhausts
 
-If a field is missing on `new`, I ask before guessing. On `re-conformance`, the brief is the spec + parent diff — I treat the pinned SHA as ground truth.
+If a field is missing on `new`, I ask the orchestrator before guessing (See Open questions for the orchestrator). On `re-conformance`, the brief is the spec + parent diff — I treat the pinned SHA as ground truth.
 
 ---
 
