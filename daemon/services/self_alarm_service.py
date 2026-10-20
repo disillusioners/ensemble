@@ -36,7 +36,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as _stdlib_timezone
-from typing import Any
 from zoneinfo import ZoneInfo
 
 __all__ = [
@@ -721,7 +720,3 @@ def summarize_message(message: str, *, max_chars: int = 280) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "…"
-
-
-def _unused(*_args: Any) -> None:  # pragma: no cover — typing helper
-    return None

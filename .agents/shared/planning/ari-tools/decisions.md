@@ -484,6 +484,9 @@ Phase 2 landed on `feature/ari-tools` (worktree `/home/nea/ensemble-src-wt-ari-t
 here with its EVIDENCE — the "implement intent, record evidence" path. **Nothing in this list is an
 engine change**: `daemon/services/scheduling_service.py` and
 `daemon/sources/adapters/scheduler.py` were consumed VERBATIM (`git diff` on both is EMPTY).
+**TWELVE** deviation rows are logged here (**P2-DEV-1 … P2-DEV-12**) — the count was **ELEVEN**
+until the review advisory **A1** fix added **P2-DEV-12** (the stored-agent ownership row) in
+`5782434f5`; the §C9.2 heading carries the same count.
 
 ### C9.1 — T1 engine invariants, re-verified in THIS checkout
 
@@ -493,7 +496,7 @@ engine change**: `daemon/services/scheduling_service.py` and
 | (b) | A cancelled label is permanently burned | `daemon/repositories/source/repository.py:212-216` — the name lookup filters ONLY on `name` and returns the first match (no status filter, no hard-delete seam on the scheduling surface); `daemon/services/scheduling_service.py:923-926` — `update_schedule` refuses a cancelled row | CONFIRMED (with the precision in **P2-DEV-11**) |
 | (c) | `project_id` gates the job-queue route | `daemon/sources/adapters/scheduler.py:998` — `if trigger_type == "scheduled" and self._project_id:` ⇒ the fire takes `_execute_immediate` otherwise (no JobItem, no idempotency key, no retry) | CONFIRMED |
 
-### C9.2 — Deviation rows (each with evidence + disposition)
+### C9.2 — Deviation rows (each with evidence + disposition) — TWELVE rows (P2-DEV-1 … P2-DEV-12)
 
 | ID | Plan clause | Deviation | Evidence | Disposition |
 |----|-------------|-----------|----------|-------------|
@@ -520,3 +523,19 @@ engine change**: `daemon/services/scheduling_service.py` and
 | **P2-OK-4** | D4 namespace | Every stored label is `self-alarm:<label>`; the input is capped at **115** chars (the engine's 128 cap minus the 11-char prefix minus the `-5` suffix); a user-supplied `self-alarm:` prefix is rejected with the "added automatically" hint. |
 | **P2-OK-5** | D13 | Phase 2 edited **NO** prompt artefact and carries **NO** re-stamp task: `agents/ari/meta.json` has **zero** rows in the committed 161-entry manifest `agents/.prompt-artifacts.sha256` and is absent from the 35-entry `SEALED_SHA_BASELINES` tripwire ⇒ the allow-list edit carries no seal obligation. The `## Self-Alarm` section of `agents/ari/tools_note.md` stays with the conventions step. |
 | **P2-OK-6** | Engine files | `daemon/services/scheduling_service.py` and `daemon/sources/adapters/scheduler.py` are **byte-unchanged** (`git diff` empty for both). Every perceived engine defect became a REPORTED row above, never an edit. |
+| **P2-OK-7** | D10 — the five exact-set pins in the SAME commit as the registration | The **exact-set pins were never red between commits**: the frozensets (the literal `"self-alarm"` entry + the size assertion) landed **same-commit** with the registration in `25b38387e`; only the **cosmetic** "nine entries" prose (stale docstring / method names in the pin files) trailed in `5782434f5` and `258aee4d5` — **1–3 commits AFTER** D10's same-commit mandate. No frozenset member and no size assertion moved in that gap ⇒ the pins stayed green throughout. The reviewer adjudicated the sequence legitimate. **RECORDED** (advisory A1) — the mandate was met on the load-bearing half (the exact-set pins); the cosmetic naming half trailed and is closed by this commit. |
+
+### C9.4 — Post-review pin runs (the W1 evidence — 2026-10-20)
+
+The reviewer council's pre-merge warning **W1** was that the integration-marker pin runs executed
+during implementation left **no recorded artifact**. The row below is the **fresh re-run evidence**
+— both commands verbatim, with their result counts. The marker nuance is load-bearing and
+**differs per file**: one file is marker-gated, the other is not. The re-runs were executed at the
+reviewed pre-fold HEAD (`258aee4d5`); this fold commit touches **NEITHER** pin file, and the same
+counts were **re-confirmed at this commit**.
+
+| ID | Command (verbatim) | Result | Date | HEAD |
+|----|--------------------|--------|------|------|
+| **P2-PIN-1** | (1) `ENSEMBLE_SELF_ENV=dev POSTGRES_DB=ensemble_dev DAEMON_PORT=8079 .venv/bin/python -m pytest tests/integration/test_service_tool_flag_off_byte_identical.py -m integration -q` · (2) `ENSEMBLE_SELF_ENV=dev POSTGRES_DB=ensemble_dev DAEMON_PORT=8079 .venv/bin/python -m pytest tests/integration/test_maintenancer_spawn_resolves_tools.py -q` | (1) **9 passed, 1 warning in 8.02s** — every case in that file is `@pytest.mark.integration` ⇒ **deselected** by the repo's default `addopts` (`-m 'not integration and not postgres and not slow'`) ⇒ `-m integration` is **REQUIRED** there. · (2) **13 passed, 1 warning in 2.03s** — that file carries **NO** integration marker ⇒ it runs in the **DEFAULT** selection; forcing `-m integration` would **DESELECT** it. | 2026-10-20 | `258aee4d58fb59c9bbce0c7fd70320c3716fefa0` |
+
+Both runs are **green** — the W1 artifact gap is closed by this row.

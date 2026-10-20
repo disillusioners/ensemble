@@ -586,6 +586,44 @@ class TestAccessAndOrdering:
         assert service.create_calls == []
         assert repo.rows == []
 
+    @pytest.mark.parametrize("bad_agent", ["", None])
+    @pytest.mark.asyncio
+    async def test_an_empty_or_missing_caller_agent_is_refused_fail_closed(
+        self, real_service, bad_agent
+    ) -> None:
+        """The ari-only gate is FAIL-CLOSED on an UNRESOLVED caller.
+
+        An empty / missing agent id must not slip past the runtime gate
+        as "somebody else" — it is refused with the SAME typed error as
+        any other non-ari caller, BEFORE the project resolve, BEFORE the
+        label probe and before every engine call.
+        """
+        repo = FakeRepo()
+        real_service.configure(source_repo=repo, source_registry=FakeRegistry(repo))
+        service = SpyService(real_service, repo)
+        instance_repo = MagicMock()
+        tools = create_self_alarm_tools(
+            service,
+            source_repo=repo,
+            instance_repository=instance_repo,
+            current_instance_id=CALLER_INSTANCE,
+            agent_id=bad_agent,
+        )
+        result = await _call(
+            {t.name: t for t in tools},
+            label="deploy-check",
+            when_or_every="in 45m",
+            message_to_self="Do the thing.",
+        )
+        assert isinstance(result, str)
+        assert result.startswith("ERROR: ")
+        assert "ari" in result
+        # NO label lookup, NO engine write, NO burned label.
+        assert repo._probes == 0
+        assert service.create_calls == []
+        assert service.update_calls == []
+        assert repo.rows == []
+
     @pytest.mark.asyncio
     async def test_project_id_resolution_failure_is_refused_before_any_label_lookup(
         self, tool_env
