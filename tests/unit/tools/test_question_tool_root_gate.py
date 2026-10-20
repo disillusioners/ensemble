@@ -65,8 +65,10 @@ loudly.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -464,6 +466,92 @@ class TestThreadingSignature:
                 f"{name!r} must default to None (fail-closed: an unthreaded "
                 "call is NOT a user-facing root)"
             )
+
+
+# ---------------------------------------------------------------------------
+# Mappings lane — the chat-bound root must keep the tool (AC6)
+# ---------------------------------------------------------------------------
+
+
+class TestMappingsLaneThreading:
+    """AC6 — ``daemon/routers/mappings.py`` spawns a CHAT-BOUND ROOT.
+
+    Before the fix that lane spawned with NO ``source_type``, so the
+    USER-FACING ROOT predicate would false-negative and a genuine chat
+    root would silently lose the ``ask_questions`` tool.
+
+    The lane is exercised with a mocked manager (no DB, no daemon) and
+    the assertion is that the chat platform type of the SOURCE row
+    reaches the spawn — the exact value the tool build then evaluates.
+    The final link to the BUILT TOOLSET is asserted too: that value, fed
+    into the tool build as a root, registers the tool.
+    """
+
+    async def test_mappings_lane_threads_the_sources_chat_type(self, monkeypatch) -> None:
+        """The mappings lane hands the source's chat platform type to the
+        spawn that feeds the tool build."""
+        import daemon.routers.mappings as mappings_router
+        from daemon.models import InstanceMappingCreate
+
+        source = SimpleNamespace(source_type="discord")
+        saved = SimpleNamespace(
+            mapping_id="src-1:user-1",
+            source_id="src-1",
+            external_user_id="user-1",
+            agent_instance_id="inst-123",
+            agent_id="leader",
+            agent_dir="/agents/leader",
+            mapping_metadata=None,
+            last_message_at=None,
+            created_at=datetime(2026, 10, 20, tzinfo=timezone.utc),
+        )
+
+        manager = MagicMock()
+        manager.is_write_paused = False
+        manager.ensure_mcp_preloaded = AsyncMock()
+        manager.spawn_instance = MagicMock(return_value=("inst-123", None))
+        manager._source_repository = MagicMock()
+        manager._source_repository.get_source_config = MagicMock(return_value=source)
+        # First call = "does a mapping already exist?" (None), second = fetch saved.
+        manager._source_repository.get_instance_mapping = MagicMock(
+            side_effect=[None, saved]
+        )
+        manager._source_repository.create_instance_mapping = MagicMock()
+
+        monkeypatch.setattr(
+            mappings_router, "_get_manager", lambda request: manager
+        )
+        monkeypatch.setattr(
+            mappings_router,
+            "validate_agent_id",
+            lambda agent_id: ("leader", Path("/agents/leader")),
+        )
+
+        await mappings_router.create_mapping(
+            "src-1",
+            InstanceMappingCreate(external_user_id="user-1", agent_id="leader"),
+            MagicMock(),
+        )
+
+        assert manager.spawn_instance.call_count == 1
+        spawn_kwargs = manager.spawn_instance.call_args.kwargs
+        assert spawn_kwargs.get("source_type") == "discord", (
+            "the mappings lane must hand the source's chat platform type to "
+            "the spawn — otherwise a chat-bound root false-negatives the "
+            "user-facing-root predicate and loses ask_questions"
+        )
+
+        # Link to the BUILT TOOLSET: the threaded value, fed into the tool
+        # build as a ROOT, registers the question tool.
+        tools = _build_instance_tools(
+            "leader",
+            parent_id=None,
+            source_type=spawn_kwargs["source_type"],
+        )
+        assert QUESTION_TOOL_NAME in tools, (
+            "a chat-bound root spawned through the mappings lane must be "
+            "registered with ask_questions"
+        )
 
 
 # ---------------------------------------------------------------------------
