@@ -29,10 +29,16 @@ a frozen interface, not a refactor. The two signatures, verbatim::
 
     get_item(*, item_id: str) -> dict
 
-``list_items`` returns ``{"items": [...], "count": N}`` — each item
-carries the canonical item shape (see ``_row_to_item``) and NO
+``list_items`` returns ``{"items": [...], "count": N}`` PLUS two
+ADDITIVE pagination keys — ``has_more`` (True iff more items match
+the filters beyond this page; probed by fetching ``limit + 1`` rows
+in the SAME query, never a ``COUNT(*)``) and ``applied_limit`` (the
+post-clamp page size, so a clamp is visible to the caller). Each
+item carries the canonical item shape (see ``_row_to_item``) and NO
 ``notes`` key. ``get_item`` returns the same item shape PLUS a
-``notes`` list, oldest-first.
+``notes`` list, oldest-first. The SIGNATURE restated above is the
+frozen contract; the additive result keys extend the payload without
+touching it.
 
 The item shape (canonical, all four tools)::
 
@@ -337,12 +343,22 @@ class BoardService:
                 STRICTLY before it are returned. Normalised to UTC
                 before the comparison — a raw string never reaches the
                 query.
-            limit: Max items to return (clamped to 1..200).
+            limit: Max items to return (clamped to 1..200); the
+                applied value is reported back as ``applied_limit``.
             with_notes: When True, each item ALSO carries a ``notes``
                 list (oldest-first).
 
         Returns:
-            ``{"items": [...], "count": N}``.
+            ``{"items": [...], "count": N, "has_more": bool,
+            "applied_limit": int}`` — the two keys beyond ``count``
+            are ADDITIVE pagination metadata. ``has_more`` is True iff
+            at least one MORE item matches the filters beyond this
+            page, probed by fetching ``bounded_limit + 1`` rows in the
+            SAME query (zero extra queries, no ``COUNT(*)``);
+            ``applied_limit`` is the page size actually applied after
+            the 1..200 clamp, so a caller that asked for more can SEE
+            the clamp instead of silently receiving a smaller page
+            (review F1).
 
         Raises:
             BoardValidationError: an unknown status value or a naive
@@ -375,13 +391,20 @@ class BoardService:
             statement = statement.where(
                 BoardItem.due_at < self._normalize_due(due_before, "due_before")
             )
+        # The +1 probe (review F1): fetch ONE row beyond the page in
+        # the SAME query. ``has_more`` is therefore exact for the
+        # FILTERED set and costs zero extra queries — no ``COUNT(*)``
+        # — so the page budget stays at three queries (items + batched
+        # tags + batched notes).
         statement = statement.order_by(BoardItem.updated_at.desc()).limit(
-            bounded_limit
+            bounded_limit + 1
         )
 
         with self._write_lock:
             with Session(self._engine) as session:
                 rows = list(session.exec(statement).all())
+                has_more = len(rows) > bounded_limit
+                rows = rows[:bounded_limit]
                 item_ids = [row.id for row in rows]
                 tags_by_item = self._load_tags_bulk(session, item_ids)
                 notes_by_item = (
@@ -395,7 +418,12 @@ class BoardService:
                     )
                     for row in rows
                 ]
-        return {"items": items, "count": len(items)}
+        return {
+            "items": items,
+            "count": len(items),
+            "has_more": has_more,
+            "applied_limit": bounded_limit,
+        }
 
     def get_item(self, *, item_id: str) -> dict:
         """Fetch one board item with its append-only note timeline.
@@ -475,6 +503,12 @@ class BoardService:
         path AND the ``due_before`` filter path (R11). A naive input is
         rejected; a non-UTC offset is converted, never compared as a
         raw string.
+
+        An EMPTY-STRING ``due_at`` is rejected fail-closed
+        INTENTIONALLY (plan Q2): ``due_at`` is replaceable-not-
+        clearable in v1 — ``None`` means "no change" and no clearing
+        input exists, so ``""`` would be ambiguous; it is a validation
+        error, never a silent clear.
         """
         if value is None:
             return None

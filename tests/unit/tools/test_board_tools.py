@@ -16,6 +16,11 @@ Pinned contract (phase1-plan §7):
   * ``board_list(status="open")`` passes through
   * ``board_list`` still returns NO ``notes[]`` — the tool item shape
     is unchanged by the service's batched hydration
+  * ``board_list`` composes a TRUTHFUL always-present ``_pagination``
+    from the service's additive pagination keys — and a ``limit``
+    beyond the 200 ceiling leaves a VISIBLE ``clamped`` marker, with
+    NO ``offset=`` hint (review F1; the REAL-service regressions live
+    in ``tests/unit/test_board_service.py``)
   * ``board_update`` appends a note and bumps ``updated_at``
   * ``board_update`` has NO tag parameter — asserted as a SCHEMA
     property of ``BoardUpdateInput`` (not merely as a runtime outcome)
@@ -94,7 +99,14 @@ def tool_env():
     service.update_item = MagicMock(
         return_value=_item(status="in_progress", note_appended=True)
     )
-    service.list_items = MagicMock(return_value={"items": [_item()], "count": 1})
+    service.list_items = MagicMock(
+        return_value={
+            "items": [_item()],
+            "count": 1,
+            "has_more": False,
+            "applied_limit": 50,
+        }
+    )
     service.get_item = MagicMock(return_value=_item())
     tools = create_board_tools(
         service,
@@ -307,7 +319,12 @@ class TestBoardList:
     def test_returns_items_and_count_without_notes(self, tool_env):
         by_name, service = tool_env
         service.list_items = MagicMock(
-            return_value={"items": [_item()], "count": 1}
+            return_value={
+                "items": [_item()],
+                "count": 1,
+                "has_more": False,
+                "applied_limit": 50,
+            }
         )
         result = by_name["board_list"].invoke({})
         assert result["count"] == 1
@@ -322,6 +339,75 @@ class TestBoardList:
         )
         result = by_name["board_list"].invoke({"status": "bogus"})
         assert result == "ERROR: status must be one of: ..."
+
+
+class TestBoardListPagination:
+    """``_pagination`` is composed TRUTHFULLY from the service result.
+
+    Review F1: the service page is ALREADY SQL-limited, so the old
+    generic truncation pass could never fire. The tool now shapes the
+    service's additive pagination keys into an always-present,
+    truthful ``_pagination`` — and a limit beyond the 200 ceiling
+    leaves a VISIBLE clamp marker in the payload instead of silently
+    shrunken pages.
+    """
+
+    def test_pagination_is_always_present_and_truthful(self, tool_env):
+        by_name, service = tool_env
+        service.list_items = MagicMock(
+            return_value={
+                "items": [_item(), _item(id="wi-11111111")],
+                "count": 2,
+                "has_more": True,
+                "applied_limit": 2,
+            }
+        )
+        result = by_name["board_list"].invoke({"limit": 2})
+        pagination = result["_pagination"]
+        assert pagination["has_more"] is True
+        assert pagination["returned"] == 2
+        assert pagination["applied_limit"] == 2
+        assert result["count"] == 2
+
+    def test_a_clamped_limit_leaves_a_visible_marker(self, tool_env):
+        by_name, service = tool_env
+        service.list_items = MagicMock(
+            return_value={
+                "items": [],
+                "count": 0,
+                "has_more": False,
+                "applied_limit": 200,
+            }
+        )
+        result = by_name["board_list"].invoke({"limit": 500})
+        pagination = result["_pagination"]
+        assert pagination["applied_limit"] == 200
+        assert pagination["clamped"] is True
+        assert pagination["requested_limit"] == 500
+
+    def test_an_in_bounds_limit_carries_no_clamp_marker(self, tool_env):
+        by_name, _service = tool_env
+        result = by_name["board_list"].invoke({"limit": 50})
+        pagination = result["_pagination"]
+        assert pagination["applied_limit"] == 50
+        assert "clamped" not in pagination
+        assert "requested_limit" not in pagination
+
+    def test_no_offset_hint_is_ever_emitted(self, tool_env):
+        """board_list has no offset cursor — the hint must not lie."""
+        import json as _json
+
+        by_name, service = tool_env
+        service.list_items = MagicMock(
+            return_value={
+                "items": [_item()],
+                "count": 1,
+                "has_more": True,
+                "applied_limit": 1,
+            }
+        )
+        result = by_name["board_list"].invoke({"limit": 1})
+        assert "offset" not in _json.dumps(result["_pagination"]).lower()
 
 
 # ── board_get ────────────────────────────────────────────────────────────
@@ -392,7 +478,14 @@ class TestBodyGate:
 
     def test_leader_is_authorized(self):
         service = MagicMock()
-        service.list_items = MagicMock(return_value={"items": [], "count": 0})
+        service.list_items = MagicMock(
+            return_value={
+                "items": [],
+                "count": 0,
+                "has_more": False,
+                "applied_limit": 50,
+            }
+        )
         tools = {
             t.name: t
             for t in create_board_tools(
@@ -400,7 +493,15 @@ class TestBodyGate:
             )
         }
         result = tools["board_list"].invoke({})
-        assert result == {"items": [], "count": 0}
+        assert result == {
+            "items": [],
+            "count": 0,
+            "_pagination": {
+                "has_more": False,
+                "returned": 0,
+                "applied_limit": 50,
+            },
+        }
         service.list_items.assert_called_once()
 
 

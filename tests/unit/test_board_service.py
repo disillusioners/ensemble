@@ -19,6 +19,10 @@ Covers the phase1-plan §8 N5 matrix:
   explicitly; a bare ``create_engine("sqlite://")`` has it OFF)
 * batched hydration — ``list_items(with_notes=True)`` is at most THREE
   queries (items + one batched tags + one batched notes)
+* list pagination metadata (review F1) — ``has_more`` is derived from
+  a ``limit + 1`` probe in the SAME query (zero extra queries), the
+  boundary cases (``limit == total`` / ``total - 1``), the VISIBLE
+  200-ceiling clamp, and the REAL-tool end-to-end payload
 * an update of a missing id raises ``BoardItemNotFound``
 * validation errors — naive ``due_at`` / ``due_before``, an
   out-of-range priority, an unknown status
@@ -33,6 +37,7 @@ every fixture path comes from pytest's ``tmp_path``.
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 from pathlib import Path
@@ -632,6 +637,167 @@ class TestBatchedHydration:
 
         service.list_items()
         assert len(captured) == 2
+
+
+# ── list pagination metadata (review F1 regression) ──────────────────────
+
+
+class TestListPaginationMetadata:
+    """F1 regression — ``has_more`` must be REACHABLE, not structural.
+
+    The first cut applied the SQL ``LIMIT`` and THEN asked whether the
+    page overflowed — the answer was always no, the pagination
+    metadata never fired, and a ``limit`` beyond the 200 ceiling
+    clamped silently. The fix probes ONE row beyond the page in the
+    SAME query and reports the truth additively. Every scenario here
+    runs against the REAL ``BoardService`` on the in-memory engine —
+    exactly the gap the reviewer flagged (a mocked service would have
+    re-pinned the fiction).
+    """
+
+    def _seed(self, service: BoardService, n: int) -> None:
+        for i in range(n):
+            service.create_item(title=f"t{i}", created_by_instance="i")
+
+    # ── (a) limit < total ─────────────────────────────────────────────
+
+    def test_limit_below_total_has_more_true_with_truthful_counts(
+        self, service
+    ):
+        self._seed(service, 5)
+        result = service.list_items(limit=2)
+        assert result["count"] == 2
+        assert len(result["items"]) == 2
+        assert result["has_more"] is True
+        assert result["applied_limit"] == 2
+
+    # ── (b) limit > total ─────────────────────────────────────────────
+
+    def test_limit_above_total_has_more_false(self, service):
+        self._seed(service, 3)
+        result = service.list_items(limit=50)
+        assert result["count"] == 3
+        assert result["has_more"] is False
+        assert result["applied_limit"] == 50
+
+    # ── (c) limit > 200 → the clamp is visible ────────────────────────
+
+    def test_limit_above_ceiling_is_clamped_and_the_clamp_is_visible(
+        self, service
+    ):
+        self._seed(service, 3)
+        result = service.list_items(limit=500)
+        assert result["applied_limit"] == 200
+        assert result["count"] == 3
+        assert result["has_more"] is False
+
+    # ── (d) exact boundaries ──────────────────────────────────────────
+
+    def test_boundary_limit_equals_total_has_more_false(self, service):
+        self._seed(service, 4)
+        result = service.list_items(limit=4)
+        assert result["count"] == 4
+        assert result["has_more"] is False
+
+    def test_boundary_limit_is_total_minus_one_has_more_true(self, service):
+        self._seed(service, 4)
+        result = service.list_items(limit=3)
+        assert result["count"] == 3
+        assert result["has_more"] is True
+
+    # ── the probe is exact for the FILTERED set ───────────────────────
+
+    def test_has_more_respects_the_active_filter_not_the_whole_table(
+        self, service
+    ):
+        service.create_item(title="open-a", created_by_instance="i")
+        service.create_item(title="open-b", created_by_instance="i")
+        done_c = service.create_item(title="done-c", created_by_instance="i")
+        done_d = service.create_item(title="done-d", created_by_instance="i")
+        for item in (done_c, done_d):
+            service.update_item(
+                item_id=item["id"], status="done", author_instance="i"
+            )
+        # 2 done match; a page of 2 is complete → has_more False even
+        # though the TABLE holds 4 rows.
+        done_page = service.list_items(status="done", limit=2)
+        assert done_page["count"] == 2
+        assert done_page["has_more"] is False
+        # 2 open match; a page of 1 overflows → has_more True.
+        open_page = service.list_items(status="open", limit=1)
+        assert open_page["count"] == 1
+        assert open_page["has_more"] is True
+
+    # ── the +1 probe adds ZERO queries (the ≤3 page budget holds) ─────
+
+    def test_the_plus_one_probe_adds_zero_queries(self, engine, service):
+        self._seed(service, 5)
+        captured: list[str] = []
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _capture(_conn, _cursor, statement, _params, _ctx, _many):
+            captured.append(statement)
+
+        result = service.list_items(limit=2)
+        assert result["has_more"] is True
+        # items + ONE batched tags query — the probe lives INSIDE the
+        # items LIMIT, so the page budget (≤3) is untouched.
+        assert len(captured) == 2
+
+    # ── end-to-end: the REAL tool payload over the REAL service ───────
+
+    def _real_tools(self, service: BoardService) -> dict:
+        # The REAL tool closures over the REAL service — no mocks. The
+        # in-memory engine keeps this inside the unit fence: no daemon
+        # boot, no DB file, no HOME-derived path.
+        from daemon.tools.board_tools import create_board_tools
+
+        return {
+            t.name: t
+            for t in create_board_tools(
+                service, current_instance_id="inst", agent_id="ari"
+            )
+        }
+
+    def test_tool_payload_makes_the_clamp_visible_end_to_end(
+        self, engine, service
+    ):
+        self._seed(service, 3)
+        tools = self._real_tools(service)
+        result = tools["board_list"].invoke({"limit": 500})
+        pagination = result["_pagination"]
+        assert pagination["applied_limit"] == 200
+        assert pagination["clamped"] is True
+        assert pagination["requested_limit"] == 500
+        assert result["count"] == 3
+        assert pagination["has_more"] is False
+
+    def test_tool_payload_pagination_is_truthful_when_more_match(
+        self, engine, service
+    ):
+        self._seed(service, 5)
+        tools = self._real_tools(service)
+        result = tools["board_list"].invoke({"limit": 2})
+        pagination = result["_pagination"]
+        assert pagination["has_more"] is True
+        assert pagination["returned"] == 2
+        assert pagination["applied_limit"] == 2
+        assert result["count"] == 2
+        # NO offset hint — board_list has no offset cursor in v1.
+        assert "offset" not in json.dumps(pagination).lower()
+
+    def test_tool_payload_carries_no_clamp_marker_within_bounds(
+        self, engine, service
+    ):
+        self._seed(service, 2)
+        tools = self._real_tools(service)
+        result = tools["board_list"].invoke({"limit": 50})
+        pagination = result["_pagination"]
+        assert pagination["has_more"] is False
+        assert pagination["returned"] == 2
+        assert pagination["applied_limit"] == 50
+        assert "clamped" not in pagination
+        assert "requested_limit" not in pagination
 
 
 # ── restart survival + create_all idempotency ────────────────────────────

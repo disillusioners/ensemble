@@ -52,7 +52,6 @@ from ..services.board_service import (
     BoardValidationError,
 )
 from ._tool_registry import register_tool_category
-from ._truncate import truncate_dict_result
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +139,51 @@ def _format_board_error(exc: Exception) -> str:
         return _error(str(exc))
     logger.exception("board tool failed")
     return _error("board operation failed")
+
+
+def _compose_list_payload(result: dict, *, requested_limit: int) -> dict:
+    """Compose the truthful ``board_list`` payload from the service result.
+
+    Review F1: the service page is ALREADY SQL-limited, so a generic
+    list-truncation pass could never fire — the pagination metadata
+    was structurally unreachable and a page could look complete while
+    being silently partial. The service now reports the truth
+    additively (``has_more`` probed via a ``limit + 1`` fetch in the
+    same query; ``applied_limit`` post-clamp), and THIS helper is the
+    only place that shapes it for the agent:
+
+    * ``_pagination`` is ALWAYS present and truthful — ``has_more``,
+      ``returned`` (items in THIS payload) and ``applied_limit``.
+    * a clamp is VISIBLE: ``requested_limit != applied_limit`` adds
+      ``clamped: true`` + ``requested_limit`` (e.g. ``limit: 500`` →
+      ``applied_limit: 200``) — never a silent shrunken page.
+    * there is NO ``offset=`` hint — ``board_list`` has no offset
+      cursor in v1 (phase1-plan §12-Q3); the truthful way to reach the
+      rest is to narrow the filters.
+    """
+    items = result.get("items", [])
+    applied_limit = int(result.get("applied_limit", requested_limit))
+    pagination: dict[str, Any] = {
+        "has_more": bool(result.get("has_more", False)),
+        "returned": len(items),
+        "applied_limit": applied_limit,
+    }
+    if requested_limit != applied_limit:
+        # The clamp must never be silent: an agent that asked for 500
+        # must be able to SEE that it got 200.
+        pagination["clamped"] = True
+        pagination["requested_limit"] = requested_limit
+    if pagination["has_more"]:
+        pagination["note"] = (
+            "More items match these filters. board_list has no cursor "
+            "in v1 — narrow with status/tag/project_id/due_before to "
+            "reach the rest."
+        )
+    return {
+        "items": items,
+        "count": result.get("count", len(items)),
+        "_pagination": pagination,
+    }
 
 
 def create_board_tools(
@@ -348,7 +392,7 @@ Examples:
                 due_before=due_before,
                 limit=limit,
             )
-            return truncate_dict_result(result, "items", limit=limit)
+            return _compose_list_payload(result, requested_limit=limit)
         except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
             return _format_board_error(exc)
 
@@ -367,12 +411,26 @@ Args:
         a TIMEZONE-AWARE ISO-8601 string. Any UTC offset is accepted
         and is normalised to UTC before the comparison. A naive
         (tz-less) value is rejected.
-    limit: Max items to return (1-200, default 50).
+    limit: Max items to return (1-200, default 50). A request beyond
+        the clamp is VISIBLE in `_pagination` (`clamped: true` +
+        `requested_limit`) — the page is never silently shrunken.
 
 Returns:
-    dict — `{"items": [...], "count": N}`. Each item carries the
-    canonical item shape and NO notes timeline (use `board_get` for
-    the notes). Items are ordered by `updated_at` DESC.
+    dict — `{"items": [...], "count": N, "_pagination": {...}}`. Each
+    item carries the canonical item shape and NO notes timeline (use
+    `board_get` for the notes). Items are ordered by `updated_at` DESC.
+
+    `_pagination` is ALWAYS present and truthful:
+    - `has_more` — more items match the current filters than this
+      page shows.
+    - `returned` — how many items THIS payload carries.
+    - `applied_limit` — the page size actually applied after the
+      1-200 clamp.
+    - when the requested `limit` was clamped (e.g. `limit: 500`),
+      also `clamped: true` + `requested_limit`.
+
+    There is NO offset cursor in v1. When `has_more` is true, narrow
+    with status/tag/project_id/due_before to reach the rest.
 
 Examples:
     board_list(status="open", limit=20)
