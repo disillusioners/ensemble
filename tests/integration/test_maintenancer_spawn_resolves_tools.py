@@ -329,8 +329,16 @@ class TestPrivilegedCategoryRegistryShape:
         # over it — ari + leader allow entries are the only access
         # path). Method
         # name kept for grep-stability; the count moved
-        # 3 → 4 → 5 → 6 → 7 → 8 with the same-PR pin updates
-        # (D18/A14).
+        # 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 with the same-PR pin
+        # updates (D18/A14) — 4 = ens-env (2026-10-02), 5 =
+        # view-views (2026-10-07), 6 = cu (2026-10-16), 7 =
+        # secrets (2026-10-17), 8 = settings (2026-10-18), 9 =
+        # board (2026-10-20), 10 = self-alarm (2026-10-20). Every
+        # step landed its pin update in the SAME COMMIT as the
+        # category addition EXCEPT 7 = secrets: that registration
+        # (152a9c93b) carried no pin update, and the pins were
+        # closed in the immediately-following same-PR commit
+        # 72fbd6126 ("update SAME-PR triple-pin tests").
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
