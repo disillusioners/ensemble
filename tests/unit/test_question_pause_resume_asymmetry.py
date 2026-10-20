@@ -308,6 +308,178 @@ def _woken_ids(manager: _FakeManager) -> list[str]:
     return [w.get("instance_id") for w in manager.wakes]
 
 
+async def _mark_question_paused(
+    manager: _FakeManager,
+    instance_id: str,
+    *,
+    pack_id: str = "pack-question-1",
+    paused_at: str | None = None,
+) -> None:
+    """Stamp the pause-cause marker exactly as the question cascade does.
+
+    The sweeper's eligibility filter is the marker (R1, review cycle 3):
+    only an instance parked BY A QUESTION may be reverted by the
+    backstop. A deliberate pause never carries it.
+    """
+    from daemon.services.question_pause_set import stamp_question_pause_marker
+
+    stamped = await stamp_question_pause_marker(
+        manager, instance_id, pack_id, paused_at
+    )
+    assert stamped is True
+
+
+# ---------------------------------------------------------------------------
+# R1 (review cycle 3) — the pause-cause discriminator
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_deliberate_pause_with_paused_task_is_not_swept(engine, manager):
+    """T1 — a DELIBERATE pause is never undone by the backstop.
+
+    A user ``POST /instances/{id}/pause`` (or the agent pause tools, or
+    the watchover activation) parks the instance and suspends its
+    RUNNING turn with ``suspension_reason='paused_external'`` /
+    ``'watchover_setup'``. The backstop must NOT release it: undoing a
+    deliberate pause resumes an agent the operator deliberately stopped
+    (it spends tokens and takes actions).
+
+    The question stratum is protected by TWO independent discriminators:
+    the pause-cause MARKER (absent on a deliberate pause) and the
+    task's ``suspension_reason`` (never a question-cascade reason).
+    """
+    from daemon.services.stale_pause_sweep import sweep_stale_pauses
+
+    _seed_tree(engine)
+    old = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    with Session(engine) as s:
+        s.add(
+            _mk_instance(
+                "deliberate-1",
+                parent_id="root-1",
+                status=InstanceStatus.PAUSED.value,
+                paused_at=old,
+            )
+        )
+        s.add(
+            Task(
+                instance_id="deliberate-1",
+                work_id="work-deliberate-1",
+                task_type="PROCESS_MESSAGE",
+                status=TaskStatus.PAUSED.value,
+                suspension_reason="paused_external",
+                resume_target_turn_id="work-deliberate-1",
+            )
+        )
+        s.commit()
+
+    result = await sweep_stale_pauses(manager, age_bound_seconds=7200)
+
+    assert "deliberate-1" not in result["instances"], (
+        "a DELIBERATE pause (paused_external) was reverted by the "
+        "backstop — the operator's park must stand"
+    )
+    assert _status(engine, "deliberate-1") == InstanceStatus.PAUSED.value
+    assert "deliberate-1" not in _woken_ids(manager), (
+        "the interrupted turn of a deliberately paused instance was "
+        "re-armed — the agent would resume working"
+    )
+    # The watchover variant is protected by the same discriminator.
+    with Session(engine) as s:
+        row = s.get(Task, 1)
+        row.suspension_reason = "watchover_setup"
+        s.commit()
+    result2 = await sweep_stale_pauses(manager, age_bound_seconds=7200)
+    assert "deliberate-1" not in result2["instances"]
+    assert _status(engine, "deliberate-1") == InstanceStatus.PAUSED.value
+
+
+@pytest.mark.asyncio
+async def test_idle_deliberate_pause_without_task_row_is_not_swept(
+    engine, manager
+):
+    """T2 — the task-less DELIBERATE pause is protected too.
+
+    An idle instance that was deliberately paused (no task row at all)
+    is exposed by the sweep even before the W4 delta — Option A (the
+    task reason) alone cannot protect it. The pause-cause MARKER is
+    what protects it: a deliberate pause never carries the marker.
+    """
+    from daemon.services.stale_pause_sweep import sweep_stale_pauses
+
+    _seed_tree(engine)
+    old = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    with Session(engine) as s:
+        s.add(
+            _mk_instance(
+                "deliberate-idle-1",
+                parent_id="root-1",
+                status=InstanceStatus.PAUSED.value,
+                paused_at=old,
+            )
+        )
+        s.commit()
+
+    result = await sweep_stale_pauses(manager, age_bound_seconds=7200)
+
+    assert "deliberate-idle-1" not in result["instances"], (
+        "a DELIBERATE (task-less) pause was reverted by the backstop"
+    )
+    assert _status(engine, "deliberate-idle-1") == InstanceStatus.PAUSED.value
+    assert "deliberate-idle-1" not in _woken_ids(manager)
+
+
+@pytest.mark.asyncio
+async def test_deliberate_pause_clears_a_stale_question_marker(engine, manager):
+    """A deliberate pause must not inherit a stale question marker.
+
+    The instance was question-paused (marker stamped) and then paused
+    DELIBERATELY (a non-question cascade). The deliberate pause clears
+    the marker, so the backstop can never revert it — even though the
+    instance still carries the question-pause history.
+    """
+    from daemon.services.stale_pause_sweep import sweep_stale_pauses
+    from daemon.services.question_pause_set import (
+        QUESTION_PAUSED_MARKER_METADATA_KEY,
+    )
+
+    _seed_tree(engine)
+    old = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    with Session(engine) as s:
+        s.add(
+            _mk_instance(
+                "reparked-1",
+                parent_id="root-1",
+                status=InstanceStatus.PAUSED.value,
+                paused_at=old,
+            )
+        )
+        s.commit()
+    # The question pause stamps the marker.
+    await _mark_question_paused(manager, "reparked-1", paused_at=old)
+    assert manager._instance_repository.get_metadata_value(
+        "reparked-1", QUESTION_PAUSED_MARKER_METADATA_KEY
+    )
+
+    # A DELIBERATE pause (no awaiting_answer reason) clears it.
+    with Session(engine) as s:
+        row = s.get(Instance, "reparked-1")
+        row.status = InstanceStatus.RUNNING.value
+        row.paused_at = None
+        s.commit()
+    await manager.pause_instance_cascade("reparked-1")
+    assert manager._instance_repository.get_metadata_value(
+        "reparked-1", QUESTION_PAUSED_MARKER_METADATA_KEY
+    ) is None, (
+        "a deliberate pause must clear the stale question marker"
+    )
+
+    result = await sweep_stale_pauses(manager, age_bound_seconds=7200)
+    assert "reparked-1" not in result["instances"]
+    assert _status(engine, "reparked-1") == InstanceStatus.PAUSED.value
+
+
 # ---------------------------------------------------------------------------
 # SYMPTOM REPRO — the RED the fix must flip
 # ---------------------------------------------------------------------------
@@ -482,7 +654,7 @@ async def test_recorded_paused_set_is_durable_and_scoped(engine, manager):
         "asker-1", suspension_reason="awaiting_answer"
     )
 
-    recorded = read_question_paused_set(manager, "asker-1", pack.id)
+    recorded = await read_question_paused_set(manager, "asker-1", pack.id)
     assert "side-1" in recorded
     # The originator is NOT a side-effect target (it owns the
     # awaiting_answer handle and is resumed by the answer gate).
@@ -491,7 +663,9 @@ async def test_recorded_paused_set_is_durable_and_scoped(engine, manager):
     # Durable: the record lives in the DB (a fresh manager over the
     # same engine sees it — a restart does not lose it).
     fresh = _FakeManager(engine)
-    assert "side-1" in read_question_paused_set(fresh, "asker-1", pack.id)
+    assert "side-1" in await read_question_paused_set(
+        fresh, "asker-1", pack.id
+    )
 
     # The metadata key is namespaced so it never collides with the
     # pack-payload shadow.
@@ -543,7 +717,7 @@ async def test_cas_loser_branch_also_releases_recorded_set(engine, manager):
     )
     from daemon.services.question_pause_set import read_question_paused_set
 
-    assert "side-1" in read_question_paused_set(manager, "asker-1", pack.id), (
+    assert "side-1" in await read_question_paused_set(manager, "asker-1", pack.id), (
         "a failed release must KEEP the record so a later attempt can "
         "retry it"
     )
@@ -555,7 +729,7 @@ async def test_cas_loser_branch_also_releases_recorded_set(engine, manager):
     assert _status(engine, "side-1") != InstanceStatus.PAUSED.value
     assert "side-1" in _woken_ids(manager)
     # The record is deleted after the clean release.
-    assert read_question_paused_set(manager, "asker-1", pack.id) == []
+    assert await read_question_paused_set(manager, "asker-1", pack.id) == []
 
 
 @pytest.mark.asyncio
@@ -572,12 +746,12 @@ async def test_recorded_set_is_deleted_after_a_clean_release(engine, manager):
         "asker-1", suspension_reason="awaiting_answer"
     )
     assert set(
-        read_question_paused_set(manager, "asker-1", pack.id)
+        await read_question_paused_set(manager, "asker-1", pack.id)
     ) == {"side-1", "root-1"}
 
     await _answer(manager)
 
-    assert read_question_paused_set(manager, "asker-1", pack.id) == []
+    assert await read_question_paused_set(manager, "asker-1", pack.id) == []
     raw = manager._instance_repository.get_metadata_value(
         "asker-1", QUESTION_PAUSED_SET_METADATA_KEY
     )
@@ -605,7 +779,7 @@ async def test_durable_shadow_pack_id_is_resolved(engine, manager):
     # durable shadow survives.
     manager._question_manager.clear_question_pack("asker-1")
 
-    state, resolved_pack_id = question_pack_state(manager, "asker-1")
+    state, resolved_pack_id = await question_pack_state(manager, "asker-1")
     assert state == "pending"
     assert resolved_pack_id == pack.id, (
         "the durable shadow's pack id must resolve to the pack id "
@@ -613,13 +787,13 @@ async def test_durable_shadow_pack_id_is_resolved(engine, manager):
     )
 
     # The record is written and readable back on that path.
-    recorded = record_question_paused_set(
+    recorded = await record_question_paused_set(
         manager, "asker-1", resolved_pack_id, ["side-1"]
     )
     assert recorded == ["side-1"]
-    assert read_question_paused_set(manager, "asker-1", resolved_pack_id) == [
-        "side-1"
-    ]
+    assert await read_question_paused_set(
+        manager, "asker-1", resolved_pack_id
+    ) == ["side-1"]
 
 
 @pytest.mark.asyncio
@@ -629,7 +803,7 @@ async def test_record_drop_is_loud(engine, manager, caplog):
 
     _seed_tree(engine)
     with caplog.at_level("ERROR"):
-        recorded = record_question_paused_set(
+        recorded = await record_question_paused_set(
             manager, "asker-1", None, ["side-1"]
         )
     assert recorded == []
@@ -698,7 +872,7 @@ async def test_terminal_asker_releases_the_recorded_set(engine, manager):
 
     assert _status(engine, "side-1") != InstanceStatus.PAUSED.value
     assert "side-1" in _woken_ids(manager)
-    assert read_question_paused_set(manager, "asker-1", pack.id) == []
+    assert await read_question_paused_set(manager, "asker-1", pack.id) == []
 
 
 @pytest.mark.asyncio
@@ -795,6 +969,7 @@ async def test_sweeper_admits_instances_with_a_paused_task(engine, manager):
             )
         )
         s.commit()
+    await _mark_question_paused(manager, "paused-task-1", paused_at=old)
 
     result = await sweep_stale_pauses(manager, age_bound_seconds=7200)
 
@@ -829,6 +1004,7 @@ async def test_sweeper_skips_instances_with_a_live_task(engine, manager):
             )
         )
         s.commit()
+    await _mark_question_paused(manager, "live-task-1", paused_at=old)
 
     result = await sweep_stale_pauses(manager, age_bound_seconds=7200)
 
@@ -979,6 +1155,7 @@ async def test_scenario_b_boot_sweep_recovers_stranded_instance(engine, manager)
             )
         )
         s.commit()
+    await _mark_question_paused(manager, "stranded-1", paused_at=old)
 
     result = await sweep_stale_pauses(manager, age_bound_seconds=7200)
 
@@ -1053,6 +1230,8 @@ async def test_scenario_c_sweep_respects_the_age_bound(engine, manager):
             )
         )
         s.commit()
+    await _mark_question_paused(manager, "stale-1", paused_at=old)
+    await _mark_question_paused(manager, "young-1", paused_at=fresh)
 
     result = await sweep_stale_pauses(manager, age_bound_seconds=7200)
 
@@ -1087,6 +1266,7 @@ async def test_sweep_never_finalizes_an_instance(engine, manager):
             )
         )
         s.commit()
+    await _mark_question_paused(manager, "stale-2", paused_at=old)
 
     await sweep_stale_pauses(manager, age_bound_seconds=7200)
 
@@ -1121,7 +1301,10 @@ async def test_scenario_d_pending_question_protects_the_asker(engine, manager):
             )
         )
         s.commit()
-    # A live question on asker-2.
+    # A live question on asker-2 — a question-paused asker DOES carry
+    # the pause-cause marker (it is the question stratum), and the D1
+    # predicate is what protects it.
+    await _mark_question_paused(manager, "asker-2", paused_at=old)
     _ask(manager, "asker-2")
 
     result = await sweep_stale_pauses(manager, age_bound_seconds=7200)
@@ -1157,6 +1340,7 @@ async def test_d1_tree_scoped_protection_pins_the_predicate(engine, manager):
         s.commit()
     # The question lives on the ASKER (a different instance in the
     # same permanent-lineage tree) — side-2 itself has no pack.
+    await _mark_question_paused(manager, "side-2", paused_at=old)
     _ask(manager, "asker-1")
     assert manager._question_manager.get_question_pack("side-2") is None
 
@@ -1190,6 +1374,7 @@ async def test_d1_resolved_question_releases_the_tree(engine, manager):
             )
         )
         s.commit()
+    await _mark_question_paused(manager, "side-3", paused_at=old)
     _ask(manager, "asker-1")
     # The question is consumed — the pack is no longer pending (the
     # answer path clears the durable shadow at answer consumption).

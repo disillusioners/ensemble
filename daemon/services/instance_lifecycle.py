@@ -3516,7 +3516,7 @@ class InstanceLifecycleService:
             from daemon.services.question_pause_set import question_pack_state
 
             try:
-                pack_state, question_pack_id = question_pack_state(
+                pack_state, question_pack_id = await question_pack_state(
                     self._manager, instance_id
                 )
             except Exception as guard_exc:  # noqa: BLE001 — fail-open
@@ -3621,6 +3621,10 @@ class InstanceLifecycleService:
         # the release can restore a ``waiting_children`` parent to its
         # parked state.
         pre_pause_status: dict[str, str] = {}
+        # Nodes that were ALREADY parked when the cascade ran (skipped
+        # by the classification) — the pause-cause marker is cleared on
+        # them by a non-question pause.
+        already_paused_ids: list[str] = []
         skipped_ids: list[str] = []
         # Phase 2 / Task 8: capture cleared-injection entries per node so the
         # ``injection_consumed`` SSE event can fire POST-DB-COMMIT alongside
@@ -3654,6 +3658,12 @@ class InstanceLifecycleService:
                         f"({meta.status}), skipping"
                     )
                     skipped_ids.append(node_id)
+                    if meta.status == InstanceStatus.PAUSED.value:
+                        # Already parked — a DELIBERATE pause must clear
+                        # its (possibly stale) question marker, otherwise
+                        # the backstop could later revert a pause the
+                        # operator intended.
+                        already_paused_ids.append(node_id)
                     continue
 
                 # DEFECT B: never-dispatched ghost child — nothing to
@@ -3860,7 +3870,7 @@ class InstanceLifecycleService:
                     record_question_paused_set,
                 )
 
-                record_question_paused_set(
+                await record_question_paused_set(
                     self._manager,
                     instance_id,
                     question_pack_id,
@@ -3873,6 +3883,54 @@ class InstanceLifecycleService:
                     f"{instance_id[:8]}...: "
                     f"{type(record_exc).__name__}: {record_exc}"
                 )
+
+        # R1 (review cycle 3) — the PAUSE-CAUSE MARKER.
+        #
+        # The sweeper's backstop may only revert a pause that was caused
+        # by a QUESTION. The marker (on each parked instance's own
+        # ``instances.metadata`` row) records exactly that:
+        #
+        #   * a QUESTION pause stamps it on every node it parks (the
+        #     asker AND the side-effect targets);
+        #   * every OTHER pause reason (user /pause, /stop, the agent
+        #     pause tools, watchover activation, the compaction
+        #     executor) CLEARS it — a deliberate pause must never
+        #     inherit a stale question marker, or the backstop would
+        #     resume an agent the operator deliberately stopped.
+        #
+        # Schema-free: ``instances.metadata`` is an existing JSON column
+        # already used by this feature.
+        try:
+            from daemon.services.question_pause_set import (
+                clear_question_pause_marker,
+                stamp_question_pause_marker,
+            )
+
+            is_question_pause = (
+                suspension_reason == SuspensionReason.AWAITING_ANSWER.value
+            )
+            for node_id in paused_ids:
+                if is_question_pause:
+                    await stamp_question_pause_marker(
+                        self._manager,
+                        node_id,
+                        question_pack_id,
+                        paused_at_iso,
+                    )
+                else:
+                    for node_id in list(paused_ids) + list(already_paused_ids):
+                        await clear_question_pause_marker(
+                            self._manager, node_id
+                        )
+        except Exception as marker_exc:  # noqa: BLE001 — fail-safe
+            # The marker is the sweeper's ELIGIBILITY filter only — a
+            # failure here can never release anything by itself; the
+            # sweeper simply will not consider the affected instance.
+            logger.warning(
+                f"pause_instance_cascade: pause-cause marker update failed "
+                f"for {len(paused_ids)} node(s): "
+                f"{type(marker_exc).__name__}: {marker_exc}"
+            )
 
         # Combine the helper's updated_ids (== nodes we wrote to) with the
         # skipped_ids the caller collected above (already-paused / not-found).

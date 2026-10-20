@@ -581,7 +581,9 @@ async def _unpause_recorded_side_effects(
         try:
             from daemon.services.question_pause_set import question_pack_state
 
-            _state, pack_id = question_pack_state(manager, instance_id)
+            _state, pack_id = await question_pack_state(
+                manager, instance_id
+            )
         except Exception as exc:  # noqa: BLE001 — fail-open
             logger.warning(
                 f"answer_questions_via_instance: pack-id resolution failed "

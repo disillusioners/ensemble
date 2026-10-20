@@ -104,6 +104,19 @@ logger = logging.getLogger(__name__)
 #: the durable paused-set map. See the module docstring for the shape.
 QUESTION_PAUSED_SET_METADATA_KEY = "question_paused_set"
 
+#: Metadata key (on EACH PARKED INSTANCE's own row) that marks the
+#: instance as parked BY A QUESTION. This is the sweeper's pause-cause
+#: discriminator (R1, review cycle 3): the sweeper only considers
+#: instances that carry this marker, so a DELIBERATE pause (user
+#: ``/pause``, ``/stop``, the agent pause tools, watchover activation,
+#: the compaction executor) is never undone by the backstop.
+#:
+#: The marker is stamped by the QUESTION pause cascade on every node it
+#: parks, and CLEARED by every other pause reason (a deliberate pause
+#: must not inherit a stale question marker) and by a clean release.
+#: Schema-free: ``instances.metadata`` is an existing JSON column.
+QUESTION_PAUSED_MARKER_METADATA_KEY = "question_paused"
+
 #: Process-local guard for the read-modify-write merge of the metadata
 #: key. The critical section is one metadata read + one write.
 _MERGE_LOCK = threading.Lock()
@@ -138,7 +151,7 @@ _WAKE_STATUSES = frozenset({"resuming", "wake_enqueued", "resumed", "queued"})
 # ---------------------------------------------------------------------------
 
 
-def question_pack_state(
+async def question_pack_state(
     manager: "InstanceManager", instance_id: str
 ) -> tuple[str, str | None]:
     """Return ``(state, pack_id)`` for ``instance_id``'s question pack.
@@ -186,8 +199,10 @@ def question_pack_state(
             QUESTION_PACK_PAYLOAD_METADATA_KEY,
         )
 
-        payload = repo.get_metadata_value(
-            instance_id, QUESTION_PACK_PAYLOAD_METADATA_KEY
+        payload = await asyncio.to_thread(
+            repo.get_metadata_value,
+            instance_id,
+            QUESTION_PACK_PAYLOAD_METADATA_KEY,
         )
     except Exception as exc:  # noqa: BLE001 — read-only probe
         logger.warning(
@@ -212,7 +227,7 @@ def question_pack_state(
 # ---------------------------------------------------------------------------
 
 
-def record_question_paused_set(
+async def record_question_paused_set(
     manager: "InstanceManager",
     asker_id: str,
     pack_id: str | None,
@@ -280,8 +295,10 @@ def record_question_paused_set(
 
     try:
         with _MERGE_LOCK:
-            current = repo.get_metadata_value(
-                asker_id, QUESTION_PAUSED_SET_METADATA_KEY
+            current = await asyncio.to_thread(
+                repo.get_metadata_value,
+                asker_id,
+                QUESTION_PAUSED_SET_METADATA_KEY,
             )
             merged: dict[str, Any] = {}
             if isinstance(current, dict):
@@ -301,8 +318,11 @@ def record_question_paused_set(
                     : len(merged) - _MAX_RECORDED_SETS
                 ]:
                     merged.pop(stale_key, None)
-            repo.set_metadata(
-                asker_id, QUESTION_PAUSED_SET_METADATA_KEY, merged
+            await asyncio.to_thread(
+                repo.set_metadata,
+                asker_id,
+                QUESTION_PAUSED_SET_METADATA_KEY,
+                merged,
             )
     except Exception as exc:  # noqa: BLE001 — durability is best-effort
         logger.error(
@@ -325,7 +345,7 @@ def record_question_paused_set(
     return ids
 
 
-def read_question_pause_record(
+async def read_question_pause_record(
     manager: "InstanceManager", asker_id: str, pack_id: str | None
 ) -> dict:
     """Read the FULL recorded pause entry for ``pack_id`` (R1/R2).
@@ -340,8 +360,10 @@ def read_question_pause_record(
     if repo is None:
         return {}
     try:
-        current = repo.get_metadata_value(
-            asker_id, QUESTION_PAUSED_SET_METADATA_KEY
+        current = await asyncio.to_thread(
+            repo.get_metadata_value,
+            asker_id,
+            QUESTION_PAUSED_SET_METADATA_KEY,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -359,18 +381,18 @@ def read_question_pause_record(
     return entry
 
 
-def read_question_paused_set(
+async def read_question_paused_set(
     manager: "InstanceManager", asker_id: str, pack_id: str | None
 ) -> list[str]:
     """Read the recorded side-effect paused set for ``pack_id`` (R1/R2)."""
-    entry = read_question_pause_record(manager, asker_id, pack_id)
+    entry = await read_question_pause_record(manager, asker_id, pack_id)
     ids = entry.get("instance_ids")
     if not isinstance(ids, list):
         return []
     return [i for i in ids if isinstance(i, str) and i]
 
 
-def delete_question_pause_record(
+async def delete_question_pause_record(
     manager: "InstanceManager", asker_id: str, pack_id: str | None
 ) -> None:
     """Drop the recorded entry for ``pack_id`` (after a clean release)."""
@@ -381,8 +403,10 @@ def delete_question_pause_record(
         return
     try:
         with _MERGE_LOCK:
-            current = repo.get_metadata_value(
-                asker_id, QUESTION_PAUSED_SET_METADATA_KEY
+            current = await asyncio.to_thread(
+                repo.get_metadata_value,
+                asker_id,
+                QUESTION_PAUSED_SET_METADATA_KEY,
             )
             if not isinstance(current, dict):
                 return
@@ -394,12 +418,17 @@ def delete_question_pause_record(
                 if isinstance(v, dict) and str(k) != str(pack_id)
             }
             if merged:
-                repo.set_metadata(
-                    asker_id, QUESTION_PAUSED_SET_METADATA_KEY, merged
+                await asyncio.to_thread(
+                    repo.set_metadata,
+                    asker_id,
+                    QUESTION_PAUSED_SET_METADATA_KEY,
+                    merged,
                 )
             else:
-                repo.delete_metadata(
-                    asker_id, QUESTION_PAUSED_SET_METADATA_KEY
+                await asyncio.to_thread(
+                    repo.delete_metadata,
+                    asker_id,
+                    QUESTION_PAUSED_SET_METADATA_KEY,
                 )
     except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
         logger.warning(
@@ -408,6 +437,81 @@ def delete_question_pause_record(
             str(pack_id)[:8],
             exc,
         )
+
+
+# ---------------------------------------------------------------------------
+# R1 (review cycle 3) — the pause-cause marker
+# ---------------------------------------------------------------------------
+
+
+async def stamp_question_pause_marker(
+    manager: "InstanceManager",
+    instance_id: str,
+    pack_id: str | None,
+    paused_at: str | None = None,
+) -> bool:
+    """Mark ``instance_id`` as parked BY A QUESTION (R1 discriminator).
+
+    The marker lives on the parked instance's OWN ``instances.metadata``
+    row (an existing JSON column — no migration). It is the sweeper's
+    pause-cause filter: the backstop only considers instances that carry
+    it, so a DELIBERATE pause is never undone by the sweeper.
+
+    Returns True when the marker was written.
+    """
+    repo = getattr(manager, "_instance_repository", None)
+    if repo is None:
+        return False
+    payload = {
+        "pack_id": pack_id,
+        "paused_at": paused_at
+        or datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        await asyncio.to_thread(
+            repo.set_metadata,
+            instance_id,
+            QUESTION_PAUSED_MARKER_METADATA_KEY,
+            payload,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-safe (the sweeper
+        # simply will not consider this instance)
+        logger.warning(
+            "question_pause_set: marker stamp failed for %s: %s: %s",
+            instance_id[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    return True
+
+
+async def clear_question_pause_marker(
+    manager: "InstanceManager", instance_id: str
+) -> bool:
+    """Clear the question-pause marker from ``instance_id``.
+
+    Called by every NON-question pause (a deliberate pause must not
+    inherit a stale question marker) and by a clean release.
+    """
+    repo = getattr(manager, "_instance_repository", None)
+    if repo is None:
+        return False
+    try:
+        await asyncio.to_thread(
+            repo.delete_metadata,
+            instance_id,
+            QUESTION_PAUSED_MARKER_METADATA_KEY,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.warning(
+            "question_pause_set: marker clear failed for %s: %s: %s",
+            instance_id[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +625,25 @@ async def unpause_instance_after_question_pause(
         # Terminal / idle / waiting_children — not a parked instance.
         return OUTCOME_SKIPPED_STATUS
 
+    def _finish(outcome: str, restored_status: str | None = None) -> str:
+        """Log the per-candidate disposition (A-3).
+
+        The line states the RESTORED STATUS and the PAUSE CAUSE so an
+        operator can tell from the log that a pause was reverted — this
+        matters precisely because the backstop is allowed to revert a
+        pause (and the R1 discriminator is what keeps it to the
+        question stratum only).
+        """
+        logger.info(
+            "question_pause_set: release instance=%s reason=%s "
+            "cause=question_pause restored_status=%s outcome=%s",
+            instance_id[:8],
+            reason,
+            restored_status or "<unchanged>",
+            outcome,
+        )
+        return outcome
+
     task_repo = getattr(manager, "_task_repo", None)
     paused_turn = None
     probe_failed = False
@@ -570,10 +693,12 @@ async def unpause_instance_after_question_pause(
         target_status = "running"
 
     outcome = OUTCOME_ALREADY_RUNNING
+    restored_status = current
     if current == "paused":
         if not await _set_instance_status(manager, instance_id, target_status):
-            return OUTCOME_ERROR
+            return _finish(OUTCOME_ERROR)
         outcome = OUTCOME_UNPAUSED
+        restored_status = target_status
     elif (
         current == "running"
         and target_status == "waiting_children"
@@ -586,14 +711,15 @@ async def unpause_instance_after_question_pause(
         if not await _set_instance_status(
             manager, instance_id, "waiting_children", allowed_from=("running",)
         ):
-            return OUTCOME_ERROR
+            return _finish(OUTCOME_ERROR)
         outcome = OUTCOME_UNPAUSED
+        restored_status = "waiting_children"
 
     # ── WC parent: the dependency bus owns the wake ──────────────────
     if target_status == "waiting_children":
         resume_processing_job = getattr(manager, "resume_processing_job", None)
         if resume_processing_job is None:
-            return outcome
+            return _finish(outcome, restored_status)
         try:
             result = await resume_processing_job(
                 instance_id, message="resume", silent=True
@@ -607,7 +733,7 @@ async def unpause_instance_after_question_pause(
                 type(exc).__name__,
                 exc,
             )
-            return OUTCOME_WAKE_REFUSED
+            return _finish(OUTCOME_WAKE_REFUSED, restored_status)
         wake_outcome, detail = _classify_wake(result)
         if wake_outcome == OUTCOME_WAKE_SCHEDULED:
             logger.info(
@@ -617,7 +743,7 @@ async def unpause_instance_after_question_pause(
                 reason,
                 detail,
             )
-            return OUTCOME_WAKE_SCHEDULED
+            return _finish(OUTCOME_WAKE_SCHEDULED, restored_status)
         logger.warning(
             "question_pause_set: WC wake REFUSED for %s (reason=%s): %s "
             "— the parent stays parked; the dependency bus owns the wake",
@@ -625,11 +751,11 @@ async def unpause_instance_after_question_pause(
             reason,
             detail,
         )
-        return OUTCOME_WC_PARKED
+        return _finish(OUTCOME_WC_PARKED, restored_status)
 
     # ── a target with no live turn owns nothing to complete ──────────
     if target_status == "idle":
-        return outcome
+        return _finish(outcome, restored_status)
 
     if probe_failed or (
         paused_turn is not None
@@ -637,7 +763,7 @@ async def unpause_instance_after_question_pause(
     ):
         resume_processing_job = getattr(manager, "resume_processing_job", None)
         if resume_processing_job is None:
-            return outcome
+            return _finish(outcome, restored_status)
         try:
             result = await resume_processing_job(
                 instance_id, message="resume", silent=True
@@ -651,7 +777,7 @@ async def unpause_instance_after_question_pause(
                 type(exc).__name__,
                 exc,
             )
-            return OUTCOME_WAKE_REFUSED
+            return _finish(OUTCOME_WAKE_REFUSED, restored_status)
         wake_outcome, detail = _classify_wake(result)
         if wake_outcome == OUTCOME_WAKE_SCHEDULED:
             logger.info(
@@ -661,7 +787,7 @@ async def unpause_instance_after_question_pause(
                 reason,
                 detail,
             )
-            return OUTCOME_WAKE_SCHEDULED
+            return _finish(OUTCOME_WAKE_SCHEDULED, restored_status)
         logger.warning(
             "question_pause_set: turn resume REFUSED for %s (reason=%s): "
             "%s",
@@ -669,12 +795,12 @@ async def unpause_instance_after_question_pause(
             reason,
             detail,
         )
-        return OUTCOME_WAKE_REFUSED
+        return _finish(OUTCOME_WAKE_REFUSED, restored_status)
 
     if has_live_turn:
         # A PENDING/RUNNING task owns the turn — the worker pool
         # re-claims it (the cascade flipped PAUSED → PENDING).
-        return outcome
+        return _finish(outcome, restored_status)
 
     # No live turn → a silent checkpoint resume is the only way to
     # re-arm the interrupted graph. Guard it on a real checkpoint: with
@@ -707,7 +833,7 @@ async def unpause_instance_after_question_pause(
                 )
             except Exception:  # noqa: BLE001 — best-effort
                 pass
-            return OUTCOME_WAKE_REFUSED
+            return _finish(OUTCOME_WAKE_REFUSED, restored_status)
 
     schedule = getattr(manager, "_schedule_explicit_handle_resume", None)
     if schedule is None:
@@ -717,7 +843,7 @@ async def unpause_instance_after_question_pause(
             instance_id[:8],
             reason,
         )
-        return outcome
+        return _finish(outcome, restored_status)
 
     synthetic_wid = (
         f"question-pause-unpause-{instance_id[:8]}-"
@@ -753,14 +879,14 @@ async def unpause_instance_after_question_pause(
             reason,
             detail,
         )
-        return OUTCOME_WAKE_REFUSED
+        return _finish(OUTCOME_WAKE_REFUSED, restored_status)
     logger.info(
         "question_pause_set: wake scheduled for %s (reason=%s, status=%s)",
         instance_id[:8],
         reason,
         detail,
     )
-    return OUTCOME_WAKE_SCHEDULED
+    return _finish(OUTCOME_WAKE_SCHEDULED, restored_status)
 
 
 async def release_question_paused_set(
@@ -785,7 +911,7 @@ async def release_question_paused_set(
     ``{"recorded": [...], "outcomes": {id: outcome}, "released": n,
     "woken": n, "refused": n, "errors": n}``.
     """
-    record = read_question_pause_record(manager, asker_id, pack_id)
+    record = await read_question_pause_record(manager, asker_id, pack_id)
     recorded = [
         i
         for i in (record.get("instance_ids") or [])
@@ -801,6 +927,7 @@ async def release_question_paused_set(
         "released": 0,
         "woken": 0,
         "refused": 0,
+        "skipped": 0,
         "errors": 0,
     }
     if not recorded:
@@ -822,9 +949,29 @@ async def release_question_paused_set(
             summary["refused"] += 1
         elif outcome == OUTCOME_ERROR:
             summary["errors"] += 1
+        elif outcome in (OUTCOME_MISSING, OUTCOME_SKIPPED_STATUS):
+            # The instance is gone / terminal — nothing left to release.
+            summary["skipped"] += 1
+        else:
+            summary["skipped"] += 1
 
-    if summary["errors"] == 0:
-        delete_question_pause_record(manager, asker_id, pack_id)
+        # The question-pause marker is cleared ONLY on a clean outcome:
+        # a refused / errored release keeps it, so the backstop can pick
+        # the instance up again (the sweeper is the retry path — A-2).
+        if outcome in (
+            OUTCOME_UNPAUSED,
+            OUTCOME_WAKE_SCHEDULED,
+            OUTCOME_WC_PARKED,
+            OUTCOME_MISSING,
+            OUTCOME_SKIPPED_STATUS,
+        ):
+            await clear_question_pause_marker(manager, instance_id)
+
+    # The record is deleted only after a CLEAN release. A refused /
+    # errored release KEEPS it so a later attempt (a duplicate answer,
+    # the dismiss path, the backstop) can retry it.
+    if summary["errors"] == 0 and summary["refused"] == 0:
+        await delete_question_pause_record(manager, asker_id, pack_id)
 
     logger.info(
         "question_pause_set: release pass (reason=%s) asker=%s pack=%s "

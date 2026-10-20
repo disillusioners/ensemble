@@ -162,8 +162,12 @@ async def _pending_question_in_tree(
         )
         return False, False
 
-    truncated = len(tree_ids) > _MAX_TREE_PROBE_SIZE
+    # A-4: the fail-closed flag and the cut are derived from the SAME
+    # merged set — the lineage chain can push ``probe_ids`` over the
+    # bound even when ``tree_ids`` fits, and the two must never
+    # disagree.
     probe_ids = list(dict.fromkeys([instance_id, *ancestors, *tree_ids]))
+    truncated = len(probe_ids) > _MAX_TREE_PROBE_SIZE
     if truncated:
         probe_ids = probe_ids[:_MAX_TREE_PROBE_SIZE]
 
