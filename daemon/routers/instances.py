@@ -817,7 +817,17 @@ async def resume_instance(
         # must NOT go through ``resume_processing_job`` — that path would
         # route as answer_gate_existing_turn and re-create the defect.
         # The enqueue above is intentionally before this DB-only transition.
-        cascade_result = await manager.resume_instance_cascade(instance_id)
+        #
+        # C2/rider — the DELIBERATE-pause override: the cascade must not
+        # flip a side-effect target that a LATER deliberate pause parked.
+        # Mirrors the answer path (the exclusions are computed BEFORE the
+        # cascade call).
+        supersede_exclude_ids = await _deliberate_pause_exclusions(
+            manager, instance_id, getattr(pending_pack, "id", None)
+        )
+        cascade_result = await manager.resume_instance_cascade(
+            instance_id, exclude_ids=supersede_exclude_ids
+        )
         return {
             "resumed": True,
             "resumed_ids": cascade_result["resumed_ids"],
@@ -866,6 +876,17 @@ async def resume_instance(
     # Cascade resume (sets PAUSED→RUNNING for target + children). The
     # background resume task scheduled above survives this — the cascade
     # does NOT touch _graph_tasks or cancel in-flight tasks.
+    #
+    # DISPOSITION (C2/rider — the call-site audit): this is the PLAIN
+    # resume endpoint — an explicit, unconditioned user instruction to
+    # resume THIS instance. It carries NO question-lifecycle semantics
+    # (no pack is resolved, no recorded set is released here), so the
+    # deliberate-pause exclusion does NOT apply: the user asked for the
+    # resume, and the later user action wins. The two question-
+    # lifecycle paths in this file — the gate supersession and the
+    # dismiss — DO thread the exclusions, because their cascade-resume
+    # is a CONSEQUENCE of a question lifecycle rather than an explicit
+    # resume command.
     result = await manager.resume_instance_cascade(instance_id)
     target_id = result.get("target_id", instance_id)
 
@@ -1176,6 +1197,41 @@ async def get_pending_question(instance_id: str, request: Request) -> dict:
 # ``_graph_tasks`` / ``_pending_injections`` / ``_request_registry`` —
 # the instance keeps running, just past the pause barrier.
 @router.post("/{instance_id}/question/dismiss", dependencies=[scope_required("instances:write")])
+async def _deliberate_pause_exclusions(
+    manager: "InstanceManager",
+    instance_id: str,
+    pack_id: str | None,
+) -> list[str]:
+    """The recorded instances a LATER DELIBERATE pause owns (C2/rider).
+
+    The question-lifecycle paths (answer / dismiss / gate supersession)
+    cascade-resume the asker's tree. The cascade flips every parked node
+    to RUNNING and re-claims its suspended turn — so a side-effect
+    target that a deliberate pause parked AFTER the question pause would
+    be resumed by the cascade, before the recorded-set release could
+    defer to the operator's park.
+
+    This helper returns the ids the cascade must EXCLUDE. It is the
+    same computation the answer path uses
+    (``daemon/routers/answer_helper.py``) — fail-open: a probe failure
+    yields an empty exclusion list (the pre-fix behaviour).
+    """
+    try:
+        from daemon.services.question_pause_set import (
+            deliberate_pause_exclusions,
+        )
+
+        return await deliberate_pause_exclusions(
+            manager, instance_id, pack_id
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-open
+        logger.warning(
+            f"deliberate-pause exclusion probe failed for "
+            f"{instance_id[:8]}...: {type(exc).__name__}: {exc}"
+        )
+        return []
+
+
 async def dismiss_question(
     instance_id: str,
     request: Request,
@@ -1317,9 +1373,21 @@ async def dismiss_question(
     # already consumed at this point, so a raising cascade must not skip
     # the release (a skipped release after a consumed pack IS the
     # stranded state).
+    # C2/rider — the DELIBERATE-pause override. The dismiss path's own
+    # comment says it must "release exactly like an answer" — so it must
+    # apply the SAME exclusion as the answer path: the cascade must not
+    # flip (and re-claim the suspended turn of) a side-effect target that
+    # a LATER deliberate pause parked. The exclusions are computed BEFORE
+    # the cascade call, exactly as in ``answer_helper.py``.
+    dismiss_exclude_ids = await _deliberate_pause_exclusions(
+        manager, instance_id, getattr(pack, "id", None)
+    )
+
     try:
         try:
-            resume_result = await manager.resume_instance_cascade(instance_id)
+            resume_result = await manager.resume_instance_cascade(
+                instance_id, exclude_ids=dismiss_exclude_ids
+            )
         except Exception as e:
             raise HTTPException(
                 status_code=500,

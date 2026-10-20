@@ -159,11 +159,20 @@ class _FakeManager:
         self.enqueued: list[dict] = []
         self.release_context_usage_cache = MagicMock(return_value=None)
         self.clear_injection = MagicMock(return_value=None)
+        # The dismiss / supersession paths clear the question-pause flag.
+        self.clear_question_pause_requested = MagicMock(return_value=None)
 
         self._lifecycle = InstanceLifecycleService.__new__(
             InstanceLifecycleService
         )
         self._lifecycle._manager = self
+
+    async def get_instance(self, instance_id: str):
+        """The instance-existence probe the router endpoints use."""
+        row = self._instance_repository.get(instance_id)
+        if row is None:
+            raise KeyError(instance_id)
+        return row
 
     # -- lifecycle facade (real implementation) --------------------------
     async def pause_instance_cascade(self, instance_id: str, **kwargs) -> dict:
@@ -513,8 +522,19 @@ async def test_c1_concurrent_record_merges_both_complete(engine, manager):
     whole-daemon deadlock. The merge is now serialized by a dedicated
     single-worker executor (no lock spans an await).
 
-    The pin runs the two contenders concurrently and asserts that BOTH
-    complete within a bounded time (a deadlock would hang the test).
+    THE REAL GUARD — read this before reading the assertions: the
+    pre-fix failure mode of this case is NOT an assertion failure. It
+    is a HANG: the second contender blocks the event loop inside
+    ``with _MERGE_LOCK:`` and the first contender's ``await`` can never
+    complete, so the test never finishes on its own. The bound that
+    makes the regression OBSERVABLE is the PER-TEST TIMEOUT — the
+    timeout kills the deadlocked run and pytest reports it as a
+    FAILED (timeout-killed) case, not as a passing one. That is why the
+    pack carries ``--timeout=60``: without it a regression deadlock
+    hangs the pack instead of failing it.
+
+    The assertions below (both contenders complete, neither write is
+    lost) are the SEMANTIC part; the timeout is the deadlock guard.
     """
     import asyncio as _asyncio
 
@@ -765,6 +785,70 @@ async def test_w3_duplicate_answer_does_not_re_flip_or_re_wake(engine, manager):
     assert not [
         w for w in manager.wakes if w.get("instance_id") == "root-1"
     ], "a duplicate answer must not enqueue a second WC wake"
+
+
+@pytest.mark.asyncio
+async def test_dismiss_path_deliberate_pause_survives_the_release(
+    engine, manager
+):
+    """Rider — the DISMISS path honours the deliberate-pause exclusion.
+
+    Shape (the same shape as council test (i), on the dismiss path):
+    the question cascade parks the tree → a DELIBERATE pause lands on
+    one side-effect target → the DISMISS path runs.
+
+    Expected:
+      * the deliberately parked target SURVIVES the dismiss (it stays
+        parked and its interrupted turn is NOT re-armed — no wake);
+      * the NON-deliberate member of the recorded set IS still released
+        (the dismiss must not turn into a no-op for the rest).
+
+    No ``suspension_reason`` is forged: the deliberate pause is the real
+    cascade and the discriminator is the pause-cause TOMBSTONE.
+    """
+    from daemon.routers.instances import dismiss_question
+
+    _seed_tree(engine)
+    # A second, ordinary side-effect target (released by the dismiss).
+    with Session(engine) as s:
+        s.add(_mk_instance("side-2", parent_id="root-1"))
+        s.commit()
+
+    _ask(manager)
+    await manager.pause_instance_cascade(
+        "asker-1", suspension_reason="awaiting_answer"
+    )
+    assert _status(engine, "side-1") == InstanceStatus.PAUSED.value
+    assert _status(engine, "side-2") == InstanceStatus.PAUSED.value
+
+    # A DELIBERATE pause lands on side-1 only. The subtree-scoped form
+    # (``cascade_to_root=False``) is the PRODUCTION /stop semantics —
+    # the whole-tree form (the user /pause default) would park the
+    # entire tree, and then EVERY recorded member would be deliberately
+    # parked (and the dismiss would correctly release none of them).
+    await manager.pause_instance_cascade("side-1", cascade_to_root=False)
+
+    # The DISMISS path runs (the real endpoint function).
+    fake_request = MagicMock()
+    fake_request.app.state.manager = manager
+    fake_request.app.state.live_hub = None
+    result = await dismiss_question("asker-1", fake_request)
+    assert result["status"] in ("dismissed", "no_active_job")
+
+    # The deliberate park SURVIVES: still parked, NOT re-armed.
+    assert _status(engine, "side-1") == InstanceStatus.PAUSED.value, (
+        "the dismiss path flipped a deliberately parked instance back to "
+        "running — the exclusion hole"
+    )
+    assert "side-1" not in _woken_ids(manager), (
+        "the dismiss path re-armed a deliberately stopped turn"
+    )
+
+    # The NON-deliberate member of the recorded set is still released.
+    assert _status(engine, "side-2") != InstanceStatus.PAUSED.value, (
+        "the dismiss path must still release the non-deliberate members "
+        "of the recorded set"
+    )
 
 
 # ---------------------------------------------------------------------------
