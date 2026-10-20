@@ -76,7 +76,7 @@ schedule that fires exactly once at the stated instant, into an instance that ca
 | The scheduler source is **one-way**: `SchedulerAdapter.send` only LOGS the reply | `scheduler.py:435-457` |
 | **Lateness cap** default = `None` (unlimited) ⇒ a past-due one-shot fires immediately (late). With the cap set, a boot later than the cap ⇒ `schedule_executions` row `status='skipped'`, **no dispatch**, schedule **stays armed** (re-checks every 5 s, once-per-`run_at` guard) | `daemon/config.py:2617-2623`, `scheduler.py:497-560`, `:690-733`, `:737-796` |
 | Idempotency dedup: a **terminal** prior job does NOT block a fresh submit (key gets a `#<hex>` suffix); only a **non-terminal** prior job within TTL (24 h) collapses | `daemon/services/job_queue_service.py:1424-1481` |
-| Registration = **six** surfaces (decorator **above** `@tool`; `CATEGORY_MODULES`; `KNOWN_TOOL_NAMES`; `DYNAMIC_TOOL_NAMES`; `PRIVILEGED_TOOL_CATEGORIES` + its five exact-set pins; `tools.extend(...)` **before** `create_help_tool`/`scan_tools_for_full_docs`/`_apply_tool_filter`) — "three steps" is a lower bound; decorator-only is silently invisible | `daemon/tools/instance.py:2286-2289`, `:5698-6240`, `:6230-6238`; `daemon/tools/_tool_registry.py:342-367`, `:690+`, `:239-338` |
+| Registration = **six** surfaces (decorator **above** `@tool`; `CATEGORY_MODULES`; `KNOWN_TOOL_NAMES`; `DYNAMIC_TOOL_NAMES`; `PRIVILEGED_TOOL_CATEGORIES` + its five exact-set pins; `tools.extend(...)` **before** `create_help_tool`/`scan_tools_for_full_docs`/`_apply_tool_filter`) — "three steps" is a lower bound; decorator-only is silently invisible | `daemon/tools/instance.py:2286-2289`, `:5698-6240`, `:6230-6238`; `daemon/tools/_tool_registry.py:342-367`, `:690+`, `:259-403` |
 | `resolve_tool_filter`: empty allow **and** deny ⇒ everything allowed ⇒ an allow-list is not a hard boundary; runtime agent-gate precedent | `daemon/tools/instance.py:373-434`; `daemon/tools/blueprint.py:71-72` (`_is_writer_authorized`) |
 | **`update_schedule` preserves the stored `enabled` flag when `paused` is omitted** ⇒ reusing a fired row (`enabled=False`) without `paused=False` leaves it disarmed and the rebuild is skipped | `scheduling_service.py:1005`, `:1019-1023`, `:1046-1047`; `sources/registry.py:515-526` |
 | Default list is **not** status-filtered and the repository page caps at **100** rows (`created_at DESC`) | `scheduling_service.py:858-874`; `daemon/repositories/source/repository.py:217-224` |
@@ -468,7 +468,7 @@ Both texts carry the **computed next fire** (local, with offset) and are selecte
 absolute one-shot for the next occurrence remains a valid escape hatch for the recurring case.
 
 **D10 — `self-alarm` is PRIVILEGED, and ARI-only is enforced a second and third time.** Architect ruling **R1b** (§1.4) is
-binding: the category joins `PRIVILEGED_TOOL_CATEGORIES` (`daemon/tools/_tool_registry.py:239-338`) — **entry #10**. The three
+binding: the category joins `PRIVILEGED_TOOL_CATEGORIES` (`daemon/tools/_tool_registry.py:259-403`) — **entry #10**. The three
 layers, each independent:
 
 1. **Privileged category.** Both default-allow paths skip it: the empty-allow branch of `resolve_tool_filter` (`instance.py:464-470`)
@@ -486,7 +486,7 @@ layers, each independent:
 
 | Pin | Line |
 |---|---|
-| `tests/unit/tools/test_upgrade_registration.py` | `:142-166` |
+| `tests/unit/tools/test_upgrade_registration.py` | `:152-189` |
 | `tests/unit/tools/test_attestation_registration.py` | `:186-208` |
 | `tests/integration/test_maintenancer_spawn_resolves_tools.py` | `:324-341` |
 | `tests/integration/test_service_tool_flag_off_byte_identical.py` | `:823-858` |
