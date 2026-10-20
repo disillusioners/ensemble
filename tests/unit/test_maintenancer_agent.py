@@ -229,25 +229,28 @@ class TestToolAllowDenyContract:
     def test_deny_contains_required_tools(self) -> None:
         meta = _load_meta()
         deny = set(meta["tools"]["deny"])
-        missing = REQUIRED_DENY - deny
+        # agent-restart (2026-10-19): system_restart is LIFTED from
+        # tools.deny — maintenancer is the arming agent; the live gate
+        # (genuine-user provenance + anti-flap rails) is enforced INSIDE
+        # the tool, not by resolution-level stripping. Source mutation
+        # tools remain on the deny list (D20 unchanged).
+        REQUIRED_DENY_CURRENT = REQUIRED_DENY - {"system_restart"}
+        missing = REQUIRED_DENY_CURRENT - deny
         assert not missing, (
-            f"tools.deny must include {sorted(REQUIRED_DENY)} per W1-P1 task "
-            f"1.2 / D20 (git_commit, edit_file, write_file, system_restart). "
-            f"Missing: {sorted(missing)}"
+            f"tools.deny must include {sorted(REQUIRED_DENY_CURRENT)} per "
+            f"W1-P1 task 1.2 / D20 (source mutation tools). Missing: "
+            f"{sorted(missing)}"
         )
 
-    def test_system_restart_in_deny_d20(self) -> None:
-        """D20 — system_restart MUST be in tools.deny.
-
-        The call-time refusal at upgrade_tools.py is env-conditional
-        (``if self_env == 'live'``) and does NOT fire on dev/demo. The
-        deny-list entry is the ONLY resolution-level strip that works
-        on every install class (D20 approver-fix correction).
-        """
+    def test_system_restart_resolves_for_maintenancer(self) -> None:
+        """agent-restart (2026-10-19): system_restart is HELD (lifted
+        from tools.deny); maintenancer is the arming agent. Live gate is
+        genuine-user provenance + anti-flap rails, enforced INSIDE the
+        tool — NOT by resolution-level stripping."""
         meta = _load_meta()
-        assert "system_restart" in meta["tools"]["deny"], (
-            "D20: tools.deny must contain 'system_restart' — this is the "
-            "only resolution-level mechanism that survives dev/demo AND live."
+        assert "system_restart" not in meta["tools"]["deny"], (
+            "system_restart is held by maintenancer (the arming agent); "
+            "the live gate runs inside system_restart, not at resolution."
         )
 
 
