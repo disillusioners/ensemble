@@ -336,6 +336,27 @@ class MigrationRunner:
         # ``schema_migrations`` PRIMARY KEY row. Failing here — ahead of
         # the apply loop — means no migration has run when the error
         # fires, so the tree is never left half-applied.
+        #
+        # KNOWN LEGACY-LEDGER SHADOW (2026-10-20, reviewer W1): a SQLite
+        # DB whose ledger already records ``20261018_000001`` — the
+        # pre-mark workaround used verbatim in
+        # .agents/tester/RESULTS/2026-10-19-resource-telemetry-fix-verification.md
+        # — shadows ``20261018_000001_secrets_audit_add_context.sql``.
+        # The pending filter is version-only (``get_pending_migrations``:
+        # ``m.version not in applied``), so that file is never pending
+        # and never runs; ``secrets_audit`` then carries NO ``context``
+        # column, and the audit emit
+        # (``daemon/services/secret_service.py::_append_audit_in_conn`` —
+        # no tolerance for a missing column) raises OperationalError.
+        # Remediation is one manual statement, byte-identical to the UP
+        # section of
+        # daemon/migrations/versions/20261018_000001_secrets_audit_add_context.sql:66:
+        #
+        #     ALTER TABLE secrets_audit ADD COLUMN context TEXT;
+        #
+        # The shadow is SILENT (the boot does not crash on it) and is
+        # pinned as current behaviour by
+        # tests/migration/test_migration_legacy_ledger_shadow.py.
         self._assert_no_duplicate_versions(migrations)
         
         return sorted(migrations, key=lambda m: m.version)
