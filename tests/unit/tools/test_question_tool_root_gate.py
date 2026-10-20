@@ -38,7 +38,10 @@ at a built toolset.
 RED-pre-change (GATE PROOF — must fail before the implementation):
     T1  non-root child (parent_id set)                      -> no tool
     T3  job root (parent_id None, source_type absent)       -> no tool
-    T4b plain HTTP-API root (parent_id None, no source_type)-> no tool
+    T4b legacy root (parent_id "", source_type "")          -> no tool
+    T6  root with a REAL non-chat source_type               -> no tool
+        (webhook / scheduler — production source types that
+        name NO human chat surface)
     T5  child that carries a chat source_type               -> no tool
     (T5 covers the fail-closed child-with-chat-source branch)
     plus the capability-E2E child half and the signature pin.
@@ -252,27 +255,48 @@ class TestGateProofRedPreChange:
         )
         assert _question_category_tools(tools) == set()
 
-    def test_t4b_plain_http_api_root_has_no_question_tool(
+    def test_t4b_legacy_empty_parent_and_empty_source_type_has_no_question_tool(
         self, tmp_path: Path, registry_for
     ) -> None:
-        """RED-pre-change (gate proof) — T4b.
+        """RED-pre-change (gate proof) — T4b (legacy empty-string shape).
 
-        A root created through the plain HTTP API (parent_id None, no chat
-        source_type) is not user-facing. Fails pre-change.
+        The LEGACY shape: BOTH threaded values are the empty string —
+        ``parent_id == ""`` (legacy rows store "" instead of NULL) AND
+        ``source_type == ""`` (an empty / absent source stamp).
+
+        An empty-string ``source_type`` names NO chat surface, so the
+        instance is not a user-facing root and must NOT get the question
+        tool — even though its PARENT leg passes ("" is root-eligible; see
+        the T4a preservation guard, which keeps the tool for
+        ``("", "discord")``).
+
+        HONEST SCOPE (approver i3 B1): this case USED to be
+        ``(parent_id=None, source_type=None)``, which DUPLICATED T3 (job
+        root without a source_type) and therefore added no distinct
+        coverage — the plain-HTTP-API root IS the ``(None, None)`` shape
+        T3 already pins. The distinct legacy shape ``("", "")`` is pinned
+        here instead, because it is the only case where the parent leg
+        PASSES while the source leg carries the EMPTY STRING — i.e. the
+        case a mutation that treats ``""`` as a chat source would wrongly
+        admit.
+
+        Fails pre-change: the tool is registered unconditionally.
         """
         agents_dir = _stage_synthetic_agent(
             tmp_path,
-            "syn-question-http-root",
+            "syn-question-legacy-empty-root",
             {"allow": [QUESTION_CATEGORY], "deny": []},
         )
         registry_for(agents_dir)
 
         tools = _build_instance_tools(
-            "syn-question-http-root", parent_id=None, source_type=None
+            "syn-question-legacy-empty-root", parent_id="", source_type=""
         )
 
         assert QUESTION_TOOL_NAME not in tools, (
-            "a plain HTTP-API root must not be registered with ask_questions"
+            "a legacy root whose source_type is the empty string must not be "
+            "registered with ask_questions — an empty source_type names no "
+            "chat surface"
         )
         assert _question_category_tools(tools) == set()
 
@@ -301,6 +325,58 @@ class TestGateProofRedPreChange:
             "carries a chat source_type (fail closed)"
         )
         assert _question_category_tools(tools) == set()
+
+    def test_t6_root_with_non_chat_source_type_has_no_question_tool(
+        self, tmp_path: Path, registry_for
+    ) -> None:
+        """RED-pre-change (gate proof) — T6 (REAL non-chat ``source_type``).
+
+        A ROOT-shaped instance whose ``source_type`` names a REAL non-chat
+        production surface is not a user-facing root: nobody can answer a
+        question through a webhook or a scheduler trigger.
+
+        REAL production values (NOT invented strings):
+          * ``"webhook"``   — ``daemon/models/source.py:27``
+            (``SourceType.webhook``), also accepted by the source-creation
+            validator at ``daemon/routers/sources.py:155``.
+          * ``"scheduler"`` — ``daemon/models/source.py:30``
+            (``SourceType.scheduler``), also accepted at
+            ``daemon/routers/sources.py:155`` and pinned as a userless,
+            daemon-minted identity in ``daemon/constants.py:924``
+            (``RESERVED_SOURCE_PREFIXES``).
+
+        Neither value is a member of the pinned chat set
+        (``daemon/repositories/instance/repository.py:919`` —
+        ``CHAT_SOURCE_TYPES = ("telegram", "slack", "discord", "whatsapp")``),
+        so neither may be admitted by the root gate.
+
+        BOTH parent shapes are exercised (NULL and the legacy "") because
+        the parent leg must not rescue a non-chat source: it is the SOURCE
+        leg that has to reject these.
+
+        Fails pre-change: the tool is registered unconditionally.
+        """
+        agents_dir = _stage_synthetic_agent(
+            tmp_path,
+            "syn-question-non-chat-root",
+            {"allow": [QUESTION_CATEGORY], "deny": []},
+        )
+        registry_for(agents_dir)
+
+        for parent_id in (None, ""):
+            for source_type in ("webhook", "scheduler"):
+                tools = _build_instance_tools(
+                    "syn-question-non-chat-root",
+                    parent_id=parent_id,
+                    source_type=source_type,
+                )
+
+                assert QUESTION_TOOL_NAME not in tools, (
+                    f"a root bound to the non-chat source_type "
+                    f"{source_type!r} (parent_id={parent_id!r}) must not be "
+                    f"registered with ask_questions"
+                )
+                assert _question_category_tools(tools) == set()
 
 
 # ---------------------------------------------------------------------------
