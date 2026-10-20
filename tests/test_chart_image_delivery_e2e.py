@@ -1387,7 +1387,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/coder/soul.md": "051401b1bcafb56e985794d917bd00255bc0be4f30184e2de01b6a2b5314fb7b",
     "agents/developer/rule.md": "0a0f1d8f076f78c3f7aea77bfe157b7fc8282f4184ba3352b88e0d831d47285f",
     "agents/developer[v2]/tools_note.md": "62882063ca109e7829c097201e110a0edb872ade000415372ab7ca016bee5748",
-    "agents/devops/rule.md": "7eebf2831e8bd57610fe616774d492ccbd3b9b72c980455c3a6cfdb838840b23",
+    "agents/devops/rule.md": "febf0e8981fadc5eca0331e261757711bf4229efe4a0a365b174d2e991a75c87",
     "agents/doc-writer/rule.md": "350dd33cca327e5a96941633aea6813d18b98b82a2f443cb13b270e03deabdc5",
     "agents/governor/rule.md": "a779742dcec8d30eb44495afda0c5ada93b9409a4ffac83912f7af2afa22ad37",
     "agents/leader/rule.md": "261ab3af792a7667677f6c622308eff8688d9b3e146e2349b87b1c3d6a3a9f56",
