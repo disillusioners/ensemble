@@ -1373,7 +1373,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # to this file still trips the tripwire.
     "daemon/sources/adapters/slack/adapter.py": "476ba0b5a17a297f652125ab9060af125ba3955d4b71e324e3de3bf177e1ef1e",
     "daemon/sources/adapters/telegram.py": "7e08882fc2fcc4291bed994ab992cb5afdc7a232a1444839f42da86fbfae063c",
-    "daemon/constants.py": "9fb1f2c7304e81f92e27b15cbcc3e28a9ec71417ca306e44db0b04a96c520e38",
+    "daemon/constants.py": "df41a67f65428b4d9ef39878602657e60108e541a1f9cacde04c006cd2fc4970",
     # Phase C — 20 agent canonical-home files
     "agents/approver/rule.md": "f8282f54a253540042874c1ed7690758aa2c9391a0568967fa427ef2f90b24f6",
     "agents/approver[v2]/rule.md": "f70d2a0b64332aab40445211437e8e29bb9860cb7996e9e09f28587427dfce3a",
