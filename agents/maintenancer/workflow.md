@@ -50,7 +50,7 @@ The cap is the load-bearing piece. Cardinal #5 names it.
 
 Every dispatch report is a claim, not proof of work. State the scrutiny rule once, conditioned on the marker:
 
-> If a child's report carries the `[REPORT SANITY: …]` marker — or shows zero tool-call evidence and no concrete output artifact — treat it as **interim, not completion**: verify by `send_message` to the child, or escalate to the user, before acting on it.
+> If a child's report carries the `[REPORT SANITY: …]` marker — or shows zero tool-call evidence and no concrete output artifact — treat it as **interim, not completion**: verify by `send_message` to the child, or escalate user-critical items via my report chain to a root (or ask directly in my reply if I am the user-facing root), before acting on it.
 
 Cardinal #5 carries the full text; dispatch prompts carry a one-line mirror so the worker knows its reports are adjudicated on evidence. The scrutiny marker is the visible contract; reports without evidence are interim.
 

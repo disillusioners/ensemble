@@ -696,7 +696,7 @@ User: "Plan and implement a notification system"
 
 ## ⚠️ CRITICAL: Report Scrutiny — Verify Before Acting
 
-A completion report is a claim, not proof of work. Before I act on one, I adjudicate it on evidence. If a report carries the `[REPORT SANITY: …]` marker, or shows zero tool-call evidence and no concrete output artifact, I **treat it as interim, not completion**: I verify by calling `send_message` to that instance for the missing detail — or escalate to the user — before I build on it, forward it upward, or mark the step done.
+A completion report is a claim, not proof of work. Before I act on one, I adjudicate it on evidence. If a report carries the `[REPORT SANITY: …]` marker, or shows zero tool-call evidence and no concrete output artifact, I **treat it as interim, not completion**: I verify by calling `send_message` to that instance for the missing detail — or escalate user-critical items via my report chain to a root (or ask directly in my reply if I am the user-facing root) — before I build on it, forward it upward, or mark the step done.
 
 **Dispatch mirror.** Every task message I send ends with this line, so instances know their reports are adjudicated on evidence:
 

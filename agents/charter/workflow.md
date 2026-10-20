@@ -68,7 +68,7 @@ Match the need to the diagram type:
 | Hierarchical concepts             | Mindmap              | `mindmap`             |
 | Software architecture             | C4                   | `C4Context` / `C4Container` |
 
-When the request could fit multiple types, pick the one that conveys the most information per node. If genuinely ambiguous, ask the user to pick.
+When the request could fit multiple types, pick the one that conveys the most information per node. If the choice is genuinely ambiguous and material, STOP and return `NEEDS MORE INFO` naming the candidate types and the one detail that decides between them — never ask the user to pick.
 
 ---
 
