@@ -102,6 +102,7 @@ substrate.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -123,6 +124,51 @@ _HARDENING_HEADERS: dict[str, str] = {
     "X-Content-Type-Options": "nosniff",
     "Cache-Control": "private, max-age=60",
 }
+
+
+# The daemon-managed ``reports`` root (ari-tools Phase 3) — the only
+# root the sandbox CSP applies to.
+_REPORTS_ROOT = "reports"
+
+# The sandbox directive. It declares NO fetch restriction (no
+# ``script-src`` / ``default-src``), so CDN scripts keep loading; what
+# it changes is the document's ORIGIN (opaque ⇒ no host cookies, no
+# ``localStorage``, no same-origin reads). ``allow-scripts`` keeps
+# script execution ON.
+_SANDBOX_CSP = "sandbox allow-scripts"
+
+
+def _raw_lane_csp_headers(root_name: str) -> dict[str, str]:
+    """Per-root CSP for the RAW lane (the ``reports`` root only).
+
+    ``sandbox allow-scripts`` puts the document in an OPAQUE ORIGIN
+    (HTML §7.1.5: the "sandboxed origin browsing context flag" is
+    set, because ``allow-same-origin`` is absent) while leaving SCRIPT
+    EXECUTION enabled (``allow-scripts`` ⇒ the "sandboxed scripts
+    browsing context flag" is NOT set) and imposing NO CSP fetch
+    restrictions (the header declares no ``script-src`` / ``default-src``
+    ⇒ CDN chart.js / mermaid still load and run — CSP3 §6.3.2).
+
+    THE RESIDUAL — what the directive still takes away, stated in full:
+    SCRIPT EXECUTION stays ON (``allow-scripts`` ⇒ the "sandboxed
+    scripts browsing context flag" is NOT set); the ORIGIN is OPAQUE
+    (no ``allow-same-origin`` ⇒ the "sandboxed origin browsing
+    context flag" IS set ⇒ no host cookies, no ``localStorage``, no
+    same-origin reads); FORM SUBMISSION is BLOCKED (no
+    ``allow-forms`` ⇒ the "sandboxed forms browsing context flag");
+    and POPUPS are BLOCKED (no ``allow-popups`` ⇒ the "sandboxed
+    auxiliary navigation browsing context flag" ⇒ ``window.open`` /
+    ``target="_blank"`` are inert). The directive list is exactly
+    ``sandbox allow-scripts`` — no other sandbox keyword is present.
+
+    Scope: the ``reports`` root ONLY. Every other registered root keeps
+    a byte-identical response (designer mockups, the markdown wrapper
+    lane, …). The zero-JS board page is unaffected — it is not a raw
+    file and keeps its strict CSP unchanged.
+    """
+    if root_name != _REPORTS_ROOT:
+        return {}
+    return {"Content-Security-Policy": _SANDBOX_CSP}
 
 
 # Asset-endpoint response headers: the shared hardening set plus
@@ -959,6 +1005,7 @@ def _serve_resolved_target(
     rel_path: str,
     *,
     public: bool = False,
+    root_name: str = "",
 ) -> Response:
     """Serve a ``ResolvedTarget`` for either lane.
 
@@ -1038,9 +1085,132 @@ def _serve_resolved_target(
         status_code=200,
         headers={
             **_HARDENING_HEADERS,
+            **_raw_lane_csp_headers(root_name),
             "Content-Length": str(len(file_bytes)),
         },
     )
+
+
+def _render_board_body(request: Request, csp_nonce: str) -> str:
+    """Render the live board body (fetch + assembly, ONE thread hop).
+
+    ari-tools Phase 3. This function is the body of the SINGLE
+    ``asyncio.to_thread`` the board route uses: the board service is
+    SYNCHRONOUS (a sync SQLAlchemy engine), so the whole fetch +
+    assembly runs off the event loop — one crossing, not one per
+    service call (each crossing is a thread hop AND re-splits the
+    snapshot the page renders from).
+
+    A broken / unavailable board backend degrades to the explicit
+    "board backend unavailable" notice (HTTP 200, zero-JS) — NEVER a
+    500, never a stack trace.
+    """
+    from daemon.services.board_view_pages import (
+        render_board,
+        render_unavailable,
+    )
+    from daemon.services.board_view_service import (
+        DEFAULT_RENDER_LIMIT,
+        fetch_board_items,
+        fetch_filter_options,
+    )
+
+    # The filters — query params, pushed DOWN to the board service.
+    # Filters are a VIEW concern, never access control: a passcode
+    # holder sees the whole board.
+    params = request.query_params
+    status = _board_filter_status(params.get("status"))
+    project = _board_filter_text(params.get("project"))
+    tag = _board_filter_text(params.get("tag"))
+
+    manager = getattr(request.app.state, "manager", None)
+    try:
+        board_service = getattr(manager, "board_service", None)
+    except Exception:  # noqa: BLE001 — a broken manager is "unavailable"
+        board_service = None
+    if board_service is None:
+        # The board backend is not reachable — the explicit notice,
+        # never a 500.
+        return render_unavailable(csp_nonce=csp_nonce)
+
+    try:
+        items, total, truncated = fetch_board_items(
+            board_service,
+            status=status,
+            project_id=project,
+            tag=tag,
+            limit=DEFAULT_RENDER_LIMIT,
+        )
+        filter_options = fetch_filter_options(board_service)
+        counts = _board_status_counts(items)
+        generated_at = _now_iso_utc()
+        # A2 (council): the RENDER is inside the guard too — a render
+        # exception degrades to the "board backend unavailable" notice,
+        # never a public 500.
+        return render_board(
+            csp_nonce=csp_nonce,
+            items=items,
+            filter_options=filter_options,
+            active_filters={
+                "status": status,
+                "project": project,
+                "tag": tag,
+            },
+            counts=counts,
+            generated_at=generated_at,
+            shown=len(items),
+            total=total,
+            truncated=truncated,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade, never 500
+        logger.warning("[LiveViews] board render failed: %s", exc)
+        return render_unavailable(csp_nonce=csp_nonce)
+
+
+def _board_filter_status(value: str | None) -> str | None:
+    """Return the status filter, or ``None`` when it is unknown.
+
+    An unknown status is IGNORED (never a 500): the board service
+    raises ``BoardValidationError`` on an unknown status, and a
+    customer typing ``?status=bogus`` must get the unfiltered board,
+    not an error page.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if text in ("todo", "in_progress", "blocked", "done", "open"):
+        return text
+    return None
+
+
+def _board_filter_text(value: str | None) -> str | None:
+    """Return a text filter value, bounded in length.
+
+    An empty / over-long value is ignored (no filter). The bound
+    keeps a pathological query string out of the rendered echo.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if not text or len(text) > 200:
+        return None
+    return text
+
+
+def _board_status_counts(items) -> dict:
+    """Count the rendered rows by status."""
+    counts: dict[str, int] = {}
+    for item in items:
+        key = getattr(item, "status", "") or ""
+        counts[key] = counts.get(key, 0) + 1
+    return {"statuses": counts}
+
+
+def _now_iso_utc() -> str:
+    """Return the current UTC instant as an ISO-8601 string."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 def build_router() -> APIRouter:
@@ -1424,7 +1594,7 @@ def build_router() -> APIRouter:
         # public asset URL emitted for the mermaid wrappers
         # (T2.10).
         return _serve_resolved_target(
-            request, resolved, rel_path, public=True
+            request, resolved, rel_path, public=True, root_name=root_name
         )
 
     async def _public_head(
@@ -1741,6 +1911,130 @@ def build_router() -> APIRouter:
             request, root_name, rel_path
         )
 
+    # ─────────────────────────────────────────────────────────────
+    # ari-tools Phase 3 — the LIVE BOARD view.
+    #
+    # 🔴 MOUNT ORDER IS LOAD-BEARING. Starlette matches routes in
+    # DECLARATION order (first match wins), so this route MUST be
+    # declared BEFORE the public catch-all GET below. Declared after
+    # it, the catch-all would swallow ``/views/public/board/index.html``
+    # and the board would never render.
+    #
+    # The failure mechanism if the order is wrong is NOT "the
+    # catch-all resolves board as a file": ``_public_resolve`` rejects
+    # the RESERVED root name ``board`` at its mirror FIRST (uniform
+    # 404) — same 404, different mechanism.
+    #
+    # The gate mirrors ``_public_resolve`` MINUS the file resolution,
+    # PLUS the board render. The reserved-name check is deliberately
+    # NOT applied here: ``board`` IS the reserved name this route
+    # owns. The verify POST rides the EXISTING catch-all POST
+    # unchanged — the catch-all consults neither the reserved-name
+    # list nor the registered-root list, which is exactly what lets
+    # the reserved ``board`` name verify.
+    # ─────────────────────────────────────────────────────────────
+
+    async def _board_gate(request: Request) -> Response | None:
+        """Return a Response when the board may NOT be served, else None.
+
+        ``None`` means "granted — render the board". Every early
+        return is a uniform 404 (no row minted / subsystem off /
+        service not wired) or the locked / interstitial page.
+        """
+        service = _resolve_service(request)
+        if service is None or not service.enabled():
+            return _uniform_404()
+        passcode_service = _resolve_passcode_service(request)
+        if passcode_service is None:
+            return _uniform_404()
+        row = passcode_service.get_row("board", "index.html")
+        if row is None:
+            # GET NEVER mints (the write-amplification pin) — an
+            # unminted board is indistinguishable from any other
+            # miss: the uniform 404, byte-identical.
+            return _uniform_404()
+        # Grant cookie — a valid grant short-circuits to the render;
+        # an absent / invalid / stale-generation cookie falls through
+        # to the locked / interstitial branch (log-only, no audit row).
+        cipher = getattr(request.app.state, "view_passcode_cipher", None)
+        if cipher is not None:
+            cookie_token = request.cookies.get("view_grant")
+            if cookie_token:
+                from daemon.services.view_passcode_service import (
+                    parse_grant_cookie,
+                )
+
+                try:
+                    parse_grant_cookie(
+                        cipher=cipher,
+                        token=cookie_token,
+                        expected_root="board",
+                        expected_rel="index.html",
+                        expected_generation=_row_generation(row),
+                    )
+                    return None
+                except Exception:
+                    # Cookie failure (decrypt / claims / exp /
+                    # generation mismatch) — fall through to the
+                    # locked check + the interstitial. LOG-ONLY (no
+                    # audit row) — the same posture as
+                    # ``_public_resolve``.
+                    pass
+        if _row_locked(row):
+            return _render_locked_page(request)
+        return _render_interstitial_page(request, "board", "index.html")
+
+    @router.get("/public/board/index.html")
+    async def get_public_board(request: Request) -> Response:
+        """GET the LIVE board — server-rendered from the DB, always fresh.
+
+        The board is NOT a file: it is rendered from the board service
+        on EVERY request, so a reader always sees the current rows
+        (statuses, tags, due dates, the notes timeline). The response
+        carries the STRICT CSP set (no script, nonce'd style) and
+        ``Cache-Control: no-store``.
+        """
+        blocked = await _board_gate(request)
+        if blocked is not None:
+            return blocked
+        nonce = _public_csp_nonce()
+        body = await asyncio.to_thread(
+            _render_board_body,
+            request,
+            nonce,
+        )
+        from daemon.services.view_passcode_pages import page_headers
+
+        return Response(
+            content=body,
+            status_code=200,
+            # The page headers ALONE — NEVER merged with
+            # ``_HARDENING_HEADERS`` (the merge-order trap would let
+            # ``private, max-age=60`` beat ``no-store``).
+            headers=page_headers(csp_nonce=nonce),
+        )
+
+    @router.head("/public/board/index.html")
+    async def head_public_board(request: Request) -> Response:
+        """HEAD the LIVE board — the board's own route, headers only.
+
+        FastAPI adds NO implicit HEAD for a GET route: a missing
+        board HEAD would fall through to the public HEAD catch-all
+        and return a JSON-ish response. This route shares the GET
+        handler's gate and returns the board's headers with no body.
+        """
+        blocked = await _board_gate(request)
+        if blocked is not None:
+            return blocked
+        from daemon.services.view_passcode_pages import page_headers
+
+        nonce = _public_csp_nonce()
+        return Response(
+            content=b"",
+            status_code=200,
+            headers=page_headers(csp_nonce=nonce),
+        )
+
     @router.get("/public/{root_name}/{rel_path:path}")
     async def get_public_view(
         root_name: str, rel_path: str, request: Request
@@ -1984,6 +2278,7 @@ def build_router() -> APIRouter:
             status_code=200,
             headers={
                 **_HARDENING_HEADERS,
+                **_raw_lane_csp_headers(root_name),
                 "Content-Length": str(len(file_bytes)),
             },
         )

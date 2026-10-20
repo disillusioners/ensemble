@@ -285,19 +285,26 @@ class TestWorkerResolvesSystemLogOnly:
 
 
 class TestPrivilegedCategoryRegistryShape:
-    """PRIVILEGED_TOOL_CATEGORIES must be exactly eight categories
+    """PRIVILEGED_TOOL_CATEGORIES must be exactly twelve categories
     (the daemon-internal authority trio ``system_upgrade``,
     ``system-log``, ``ens-db`` plus ``ens-env`` per the W4 leader
-    decision 2026-10-02 and ``view-views`` per the REWORK 2026-10-07
-    M1 user refinement). The ``service`` category was REMOVED from
-    this set by user override 2026-09-16 (D4 reversed; see
+    decision 2026-10-02, ``view-views`` per the REWORK 2026-10-07
+    M1 user refinement, ``cu`` per the cu-mcp task 2026-10-16,
+    ``secrets`` per the agent-secrets P1 commission 2026-10-17,
+    ``settings`` per the settings-worker-slots P2 commission
+    2026-10-18, ``board`` per the ari-tools Phase 1 commission
+    2026-10-20, ``self-alarm`` per the ari-tools Phase 2
+    commission 2026-10-20, and ``view-write`` + ``board-link`` per
+    the ari-tools Phase 3 commission 2026-10-20). The ``service``
+    category was REMOVED from this set by user override 2026-09-16
+    (D4 reversed; see
     ``.agents/shared/planning/service-tool/decisions.md`` §D4
     override note) — R-SR16 silent additions are visible by pin;
-    this is pin file 3 of 5 per the A14/D18 same-PR pin rule
+    this is pin file 3 of 7 per the A14/D18 same-PR pin rule
     (the fifth exact-set pin added by the iteration-002 council B2
     correction)."""
 
-    def test_privileged_categories_contains_eight_entries(self) -> None:
+    def test_privileged_categories_contains_twelve_entries(self) -> None:
         # W4 (leader decision 2026-10-02): the set was a quartet —
         # ``ens-env`` joined (key-returning tool, explicit opt-in
         # only). REWORK 2026-10-07 (M1) added ``view-views`` (the
@@ -317,10 +324,23 @@ class TestPrivilegedCategoryRegistryShape:
         # settings-worker-slots P2 (2026-10-18) added
         # ``settings`` (the daemon-runtime-settings category;
         # opt-in-only; ari + leader allow entries landed
-        # 2026-10-18, P3). Method
+        # 2026-10-18, P3). ari-tools Phase 1 (2026-10-20) added
+        # ``board`` (the global work-board category; opt-in-only;
+        # the board is ONE GLOBAL namespace, so the empty-allow
+        # inherit universe must never auto-grant write authority
+        # over it — ari + leader allow entries are the only access
+        # path). Method
         # name kept for grep-stability; the count moved
-        # 3 → 4 → 5 → 6 → 7 → 8 with the same-PR pin updates
-        # (D18/A14).
+        # 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 with the same-PR pin
+        # updates (D18/A14) — 4 = ens-env (2026-10-02), 5 =
+        # view-views (2026-10-07), 6 = cu (2026-10-16), 7 =
+        # secrets (2026-10-17), 8 = settings (2026-10-18), 9 =
+        # board (2026-10-20), 10 = self-alarm (2026-10-20). Every
+        # step landed its pin update in the SAME COMMIT as the
+        # category addition EXCEPT 7 = secrets: that registration
+        # (152a9c93b) carried no pin update, and the pins were
+        # closed in the immediately-following same-PR commit
+        # 72fbd6126 ("update SAME-PR triple-pin tests").
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
             "system_upgrade",
             "system-log",
@@ -338,6 +358,33 @@ class TestPrivilegedCategoryRegistryShape:
             # mutates daemon-global runtime state — NEVER
             # default-granted (R-SR16).
             "settings",
+            # ari-tools Phase 1 (2026-10-20): the global work-board
+            # category (board_create / board_update / board_list /
+            # board_get). opt-in-only; the board is ONE GLOBAL
+            # namespace, so the empty-allow inherit universe must
+            # never auto-grant write authority over it. ari + leader
+            # allow entries are the only access path.
+            "board",
+            # ari-tools Phase 2 (2026-10-20): the self-alarm wrapper
+            # category (self_alarm). opt-in-only; arming an alarm makes
+            # a FRESH Ari instance execute the message text VERBATIM, so
+            # the empty-allow inherit universe must never auto-grant it.
+            # The ari tools.allow entry is the only access path.
+            "self-alarm",
+            # ari-tools Phase 3 (2026-10-20): the report-page writer
+            # category (view_write). opt-in-only; the ``reports`` live-
+            # view root is shared and customer-facing, so the empty-allow
+            # inherit universe must never auto-grant write authority over
+            # it. The ari-only tools.allow entry is the only access path;
+            # the tool body ALSO carries the runtime agent_id gate.
+            "view-write",
+            # ari-tools Phase 3 (2026-10-20): the live board's link-
+            # minter category (board_link). opt-in-only; minting the
+            # board's passcode authorises reading the user's whole work
+            # board. The ari + leader tools.allow entries are the only
+            # access path; the tool body ALSO carries the runtime
+            # agent_id gate.
+            "board-link",
         })
 
     def test_ens_db_registered_in_category_modules(self) -> None:

@@ -852,10 +852,39 @@ def test_privileged_category_set_is_pinned() -> None:
             # default-granted (R-SR16); ari + leader allow
             # entries landed 2026-10-18 (P3).
             "settings",
+            # ari-tools Phase 1 (2026-10-20): the global work-board
+            # category (board_create / board_update / board_list /
+            # board_get). opt-in-only; the board is ONE GLOBAL
+            # namespace, so the empty-allow inherit universe must
+            # never auto-grant write authority over it. ari + leader
+            # allow entries are the only access path.
+            "board",
+            # ari-tools Phase 2 (2026-10-20): the self-alarm wrapper
+            # category (self_alarm). opt-in-only; arming an alarm makes
+            # a FRESH Ari instance execute the message text VERBATIM, so
+            # the empty-allow inherit universe must never auto-grant it.
+            # The ari tools.allow entry is the only access path.
+            "self-alarm",
+            # ari-tools Phase 3 (2026-10-20): the report-page writer
+            # category (view_write). opt-in-only; the ``reports`` live-
+            # view root is shared and customer-facing, so the empty-allow
+            # inherit universe must never auto-grant write authority over
+            # it. The ari-only tools.allow entry is the only access path;
+            # the tool body ALSO carries the runtime agent_id gate.
+            "view-write",
+            # ari-tools Phase 3 (2026-10-20): the live board's link-
+            # minter category (board_link). opt-in-only; minting the
+            # board's passcode authorises reading the user's whole work
+            # board. The ari + leader tools.allow entries are the only
+            # access path; the tool body ALSO carries the runtime
+            # agent_id gate.
+            "board-link",
         }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "
         f"trio + W4 ens-env + REWORK view-views + cu-mcp 'cu' + "
         f"agent-secrets-P1 'secrets' + settings-worker-slots-P2 "
-        f"'settings'; got {PRIVILEGED_TOOL_CATEGORIES}"
+        f"'settings' + ari-tools-P1 'board' + ari-tools-P2 'self-alarm' + "
+        f"ari-tools-P3 'view-write' + ari-tools-P3 'board-link'; "
+        f"got {PRIVILEGED_TOOL_CATEGORIES}"
     )

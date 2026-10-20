@@ -34,7 +34,11 @@
       "view-views",
       "cu",
       "secrets",
-      "settings"
+      "settings",
+      "board",
+      "self-alarm",
+      "view-write",
+      "board-link"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },
