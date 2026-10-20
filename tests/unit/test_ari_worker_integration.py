@@ -341,7 +341,7 @@ class TestPromptCompositionBoth:
             meta = json.load(f)
 
         # Ari's documented innate_skills
-        expected_skills = {"job-orchestration", "chart", "todo"}
+        expected_skills = {"job-orchestration", "chart", "todo", "question"}
         assert set(meta.get("innate_skills", [])) == expected_skills, (
             f"Precondition failed: Ari innate_skills should be {expected_skills}, "
             f"got {set(meta.get('innate_skills', []))}"

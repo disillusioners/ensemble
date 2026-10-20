@@ -150,20 +150,20 @@ class TestDevopsMetaJsonValidation:
         assert "tools" in meta, "tools field should be present"
 
     def test_innate_skills_is_dynamic_skill_and_todo(self) -> None:
-        """DevOps should have innate_skills == ['dynamic-skill', 'todo'].
+        """DevOps should have innate_skills == ['dynamic-skill', 'chart', 'todo'].
 
         DevOps is an infra/shell-ops specialist that executes operations
         directly via bash. It declares 'dynamic-skill' (for skill search /
-        injection) and 'todo' (for in-flight task tracking) — no opencode
-        delegation.
+        injection), 'chart' and 'todo' (for in-flight task tracking) — no
+        opencode delegation.
         """
         meta_path = DEVOPS_AGENT_DIR / "meta.json"
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
         innate_skills = meta.get("innate_skills", [])
-        assert innate_skills == ["dynamic-skill", "todo"], (
-            f"DevOps should have innate_skills == ['dynamic-skill', 'todo'], got: {innate_skills}"
+        assert innate_skills == ["dynamic-skill", "chart", "todo"], (
+            f"DevOps should have innate_skills == ['dynamic-skill', 'chart', 'todo'], got: {innate_skills}"
         )
 
     def test_skill_injection_enabled(self) -> None:
