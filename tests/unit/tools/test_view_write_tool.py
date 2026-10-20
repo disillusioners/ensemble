@@ -364,6 +364,75 @@ class TestPathRules:
         assert list(reports_dir.rglob("*")) == []
         assert _passcode_row_count(passcode_service) == 0
 
+    @pytest.mark.parametrize(
+        "encoded_path",
+        [
+            "%2e%2e%2fx.html",  # the tester's literal repro
+            "%2e%2e%2fboard.html",
+            "a%20b.html",  # a benign-looking percent escape
+            "page%2Ehtml",  # an encoded DOT (no literal extension)
+            "100%25.html",  # an encoded PERCENT
+        ],
+    )
+    def test_a3_percent_encoded_paths_are_refused_and_write_nothing(
+        self, manager, reports_dir: Path, passcode_service, encoded_path: str
+    ) -> None:
+        """Tester D1 — an ENCODED path is REFUSED outright (fail-closed).
+
+        The shared validator (``is_well_formed_rel_path``) checks the
+        POST-decode form BY DESIGN — the URL framework decodes
+        percent-escapes before the token is compared. The WRITE path
+        used to hand it the UN-decoded token, so ``%2e%2e%2fx.html``
+        was ACCEPTED and landed on disk under its LITERAL name.
+
+        Containment HELD (the file stayed inside the reports root), but
+        the page was UNSERVABLE, the passcode row was ORPHANED, and the
+        success envelope advertised a public URL that 404s — a LYING
+        envelope. This pin proves the refusal is now TOTAL: a typed
+        error naming the reason, NO file under the reports root (not
+        even under the literal encoded name), and NO passcode row.
+        """
+        tool = create_view_write_tools(
+            manager, current_instance_id="inst-1", agent_id="ari"
+        )[0]
+        out = _call(tool, path=encoded_path, html="<p>x</p>", title="T")
+        assert out.startswith("Error:"), out
+        # The reason is NAMED — the agent can act on it.
+        assert "percent-encoded" in out
+        # ZERO side effects — no file (NOT even the literal encoded
+        # name), no passcode row.
+        assert list(reports_dir.rglob("*")) == []
+        assert _passcode_row_count(passcode_service) == 0
+
+    def test_a3_the_shared_validator_semantics_are_untouched(
+        self, manager, reports_dir: Path, passcode_service
+    ) -> None:
+        """The refusal lives in the TOOL, not in the shared validator.
+
+        ``is_well_formed_rel_path`` is the SERVE path's validator for
+        OTHER roots; changing its semantics could break existing
+        suites. The tool therefore refuses '%' ITSELF, before the
+        shared validator runs — and the shared validator still accepts
+        the post-decode form it was designed for.
+        """
+        from daemon.services.live_views import is_well_formed_rel_path
+
+        # The shared validator's own contract is unchanged: it judges
+        # the DECODED form.
+        assert is_well_formed_rel_path("..") is False
+        assert is_well_formed_rel_path("a/b.html") is True
+        # The tool refuses the ENCODED form regardless.
+        tool = create_view_write_tools(
+            manager, current_instance_id="inst-1", agent_id="ari"
+        )[0]
+        out = _call(
+            tool, path="a%2fb.html", html="<p>x</p>", title="T"
+        )
+        assert out.startswith("Error:"), out
+        assert "percent-encoded" in out
+        assert list(reports_dir.rglob("*")) == []
+        assert _passcode_row_count(passcode_service) == 0
+
     def test_a4_extension_gate(self, manager, reports_dir: Path) -> None:
         tool = create_view_write_tools(
             manager, current_instance_id="inst-1", agent_id="ari"
@@ -376,6 +445,107 @@ class TestPathRules:
         out = _call(tool, path="page", html="<p>x</p>", title="T")
         assert not out.startswith("Error:"), out
         assert (reports_dir / "page.html").is_file()
+
+
+# ─────────────────────────────────────────────────────────────────
+# T-A11 — the ORDERING INVARIANT: the passcode row is minted ONLY
+# AFTER a successful write (tester D1 — the leader's ruling).
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestWriteThenMintOrdering:
+    def test_a_failed_write_mints_NO_passcode_row(
+        self, manager, reports_dir: Path, passcode_service
+    ) -> None:
+        """A write failure must leave NO passcode row behind.
+
+        The ORDERING INVARIANT: the write runs FIRST (step 7) and the
+        mint SECOND (step 8), so the mint is only reachable once the
+        write returned successfully. No write-failure mode can orphan
+        a row.
+
+        The failure is forced WITHOUT touching a shared module: the
+        target's parent is a FILE, so ``parent.mkdir()`` raises (an
+        OSError) — root-proof, unlike a chmod-based fixture.
+        """
+        tool = create_view_write_tools(
+            manager, current_instance_id="inst-1", agent_id="ari"
+        )[0]
+        # A FILE where the parent directory should be ⇒ mkdir raises.
+        (reports_dir / "blocked").write_text("not a directory")
+        out = _call(
+            tool,
+            path="blocked/page.html",
+            html="<p>x</p>",
+            title="T",
+        )
+        assert out.startswith("Error:"), out
+        assert "could not write" in out
+        # NO passcode row — the mint NEVER ran.
+        assert _passcode_row_count(passcode_service) == 0
+        # And no page was left behind.
+        assert not (reports_dir / "blocked" / "page.html").exists()
+
+    def test_a_mint_failure_after_a_successful_write_removes_the_new_page(
+        self, manager, reports_dir: Path, passcode_service, monkeypatch
+    ) -> None:
+        """The RESIDUAL the ordering invariant cannot cover alone: the
+        mint fails AFTER the write already succeeded.
+
+        The page and its row are ONE pair: a page with no row can
+        never be served, and a row with no page points at a 404. A
+        page THIS call CREATED is therefore removed — the pair stays
+        atomic from the caller's point of view.
+        """
+        tool = create_view_write_tools(
+            manager, current_instance_id="inst-1", agent_id="ari"
+        )[0]
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("mint refused")
+
+        monkeypatch.setattr(passcode_service, "mint", _boom)
+        out = _call(tool, path="new.html", html="<p>x</p>", title="T")
+        assert out.startswith("Error:"), out
+        assert "passcode service rejected" in out
+        # The page THIS call created is gone — no orphan page.
+        assert not (reports_dir / "new.html").exists()
+        # And no row was minted.
+        assert _passcode_row_count(passcode_service) == 0
+
+    def test_a_mint_failure_leaves_an_overwritten_pre_existing_page(
+        self, manager, reports_dir: Path, passcode_service, monkeypatch
+    ) -> None:
+        """An OVERWRITE of a PRE-EXISTING page is NOT removed.
+
+        Those bytes were already reachable under the pre-existing row,
+        and deleting them would destroy a page this call did not
+        author. The pre-existing row remains exactly as it was.
+        """
+        tool = create_view_write_tools(
+            manager, current_instance_id="inst-1", agent_id="ari"
+        )[0]
+        # A first, successful publish — one row, one page.
+        out = _call(tool, path="old.html", html="<p>first</p>", title="T")
+        assert not out.startswith("Error:"), out
+        assert _passcode_row_count(passcode_service) == 1
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("mint refused")
+
+        monkeypatch.setattr(passcode_service, "mint", _boom)
+        out = _call(
+            tool,
+            path="old.html",
+            html="<p>second</p>",
+            title="T",
+            overwrite=True,
+        )
+        assert out.startswith("Error:"), out
+        # The pre-existing page is LEFT ALONE.
+        assert (reports_dir / "old.html").is_file()
+        # The pre-existing row remains — exactly ONE row, unchanged.
+        assert _passcode_row_count(passcode_service) == 1
 
 
 # ─────────────────────────────────────────────────────────────────

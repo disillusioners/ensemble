@@ -82,6 +82,10 @@ Rules that matter:
 * ``path`` is RELATIVE to the ``reports`` root; ``.html`` is appended
   when the path carries no extension. Only ``.html`` pages are
   accepted.
+* ``path`` must be PLAIN — a percent-encoded path (``%2e``, ``%20``)
+  is REFUSED, because the write path stores the token literally while
+  the serve path decodes it: an encoded path would land on disk under
+  a name nobody can fetch.
 * A page larger than the 32 MiB served-page cap is REFUSED before
   anything is written — a page that cannot be served is never written.
 * An existing path is REFUSED unless ``overwrite=True``. An overwrite
@@ -134,6 +138,33 @@ def _resolve_passcode_service(manager: "InstanceManager"):
     if service is None:
         service = getattr(manager, "view_passcode_service", None)
     return service
+
+
+def _remove_unpublished_page(target, *, existed: bool) -> None:
+    """Best-effort removal of a page THIS call created but never published.
+
+    The page and its passcode row are ONE pair: a page with no row can
+    never be served, and a row with no page points at a 404. The mint
+    runs AFTER the write (the tool's ORDERING INVARIANT — see the
+    step-7/step-8 comments), so a mint failure can leave a page
+    behind; that page was created by THIS call, so this call removes
+    it and the pair stays atomic from the caller's point of view.
+
+    An OVERWRITE of a pre-existing page is NEVER removed: those bytes
+    were already reachable under the pre-existing row, and deleting
+    them would destroy a page the caller did not author here. The
+    pre-existing row stays exactly as it was.
+    """
+    if existed:
+        return
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning(
+            "[view_write] could not remove the unpublished page %s", target
+        )
 
 
 def create_view_write_tools(
@@ -346,6 +377,28 @@ def create_view_write_tools(
         # segments, no backslashes, no control chars (C0 + DEL + C1),
         # no null bytes.
         rel = path.strip()
+        # ── Percent-encoding is REFUSED outright (fail-closed) ──
+        # The shared validator checks the POST-decode form BY DESIGN
+        # (the URL framework decodes percent-escapes before the token
+        # is compared), but the WRITE path receives the token
+        # UN-decoded — so an encoded token passed it and landed on
+        # disk under its LITERAL name ("%2e%2e%2fx.html"). The file
+        # stayed INSIDE the reports root (containment held), but the
+        # page was unservable, the passcode row was orphaned and the
+        # success envelope advertised a public URL that 404s — a
+        # LYING envelope (tester D1).
+        #
+        # Rejecting '%' outright kills the WHOLE class instead of
+        # trying to decode-then-revalidate: no decoded form can be
+        # confused with a literal one, and the shared validator's
+        # semantics (the serve path's validator for OTHER roots) are
+        # left untouched.
+        if "%" in rel:
+            return _error(
+                f"percent-encoded path {rel!r} is not writable — the "
+                f"reports root stores plain paths, so '%' escapes are "
+                f"refused (nothing was written and no passcode was minted)"
+            )
         if not is_well_formed_rel_path(rel):
             return _error(
                 f"malformed path {rel!r} (relative only — no leading '/', "
@@ -396,6 +449,17 @@ def create_view_write_tools(
             )
 
         # ── 7. atomic + durable write ────────────────────────────
+        # ── THE ORDERING INVARIANT ──────────────────────────────
+        # The write happens FIRST and the passcode mint happens
+        # SECOND (step 8). That order is the guarantee that a FAILED
+        # write can never orphan a passcode row: the mint is only
+        # reachable once the write returned successfully, so a write
+        # failure leaves NO row behind (pinned by the ordering test
+        # in the phase-3 suite). The residual — a mint that fails
+        # AFTER a successful write — is handled below: a page THIS
+        # call created is removed, an OVERWRITE of a pre-existing page
+        # is left alone (its pre-existing row remains).
+        #
         # Same-directory temp file (a /tmp temp ⇒ EXDEV on replace),
         # flush + fsync BEFORE the rename (os.replace is atomic w.r.t.
         # the NAMESPACE, not durability), temp unlinked in a finally.
@@ -433,8 +497,18 @@ def create_view_write_tools(
         # async body the call MUST be wrapped in ``to_thread`` —
         # exactly ONE crossing around the single sync call, never one
         # per field.
+        #
+        # The mint runs AFTER the write (the ORDERING INVARIANT
+        # documented at step 7): a failed write never reaches this
+        # point, so it can never orphan a row. Every failure HERE is
+        # a mint failure on an ALREADY-written page — the residual
+        # the invariant cannot cover on its own — so the page this
+        # call CREATED is removed here (an overwrite of a
+        # pre-existing page is left alone; its pre-existing row
+        # remains).
         passcode_service = _resolve_passcode_service(manager)
         if passcode_service is None:
+            _remove_unpublished_page(target, existed=existed)
             return _error(
                 "view-passcode service not initialized "
                 "(missing SYSTEM_ENCRYPTION_KEY or lifespan did not wire "
@@ -467,6 +541,7 @@ def create_view_write_tools(
                 )
         except Exception as exc:
             if isinstance(exc, ViewPasscodeRotationRequired):
+                _remove_unpublished_page(target, existed=existed)
                 return _error(
                     "stored passcode ciphertext cannot be decrypted — the "
                     "SYSTEM_ENCRYPTION_KEY may have been rotated without "
@@ -474,6 +549,7 @@ def create_view_write_tools(
                     "should regenerate the passcode."
                 )
             logger.warning("[view_write] passcode mint failed: %s", exc)
+            _remove_unpublished_page(target, existed=existed)
             return _error(
                 f"passcode service rejected the call: "
                 f"{type(exc).__name__}"
