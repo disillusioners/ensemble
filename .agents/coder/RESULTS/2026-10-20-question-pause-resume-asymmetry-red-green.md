@@ -162,15 +162,21 @@ PYTEST_BIN=/home/nea/ensemble-src/.venv/bin/pytest \
 ```
 
 ```
-25 passed, 19 warnings in 23.53s
+28 passed, 20 warnings in 25.95s
 RESULT: PASS
 ```
+
+(cycle 3 added three discriminator cases — see the coverage map below;
+the RED and GREEN repro outputs are UNCHANGED by cycle 3: the base run
+still exits 1 with the identical captured text, and the HEAD run still
+exits 0 with the identical captured text — re-verified after the
+discriminator landed.)
 
 The pack is hermetic: file-backed SQLite under pytest's `tmp_path`, no
 network, no daemon, no ports, no DB, and it never resolves a
 HOME-derived install path.
 
-## COVERAGE MAP (25 cases)
+## COVERAGE MAP (28 cases)
 
 | # | case | finding |
 |---|---|---|
@@ -199,6 +205,32 @@ HOME-derived install path.
 | 23 | `test_sweeper_skips_instances_with_a_live_task` | #4 |
 | 24 | `test_sweep_service_refuses_to_bridge_onto_its_own_loop` | A1 pin |
 | 25 | `test_sweep_service_respects_the_kill_switch` | kill-switch |
+| 26 | `test_deliberate_pause_with_paused_task_is_not_swept` | **T1** (R1 discriminator) |
+| 27 | `test_idle_deliberate_pause_without_task_row_is_not_swept` | **T2** (R1 discriminator) |
+| 28 | `test_deliberate_pause_clears_a_stale_question_marker` | R1 marker lifecycle |
+
+## THE R1 PAUSE-CAUSE DISCRIMINATOR (review cycle 3)
+
+The backstop may only revert a pause that was caused by a QUESTION.
+Two independent, schema-free discriminators:
+
+- **B (primary, both strata)** — a pause-cause MARKER on each parked
+  instance's OWN row: `instances.metadata['question_paused'] =
+  {pack_id, paused_at}`. The question pause cascade stamps it on every
+  node it parks; every OTHER pause reason CLEARS it (a deliberate
+  pause must never inherit a stale question marker — including on nodes
+  that were already parked when the cascade ran).
+- **A (independent second guard, task-bearing stratum)** — the
+  candidate's PAUSED task must carry a question-cascade
+  `suspension_reason` (`awaiting_answer` for the asker,
+  `paused_by_parent` for the cascade artifacts). A deliberate pause's
+  task carries `paused_external` / `watchover_setup`.
+
+Why both: A alone cannot protect the task-less stratum (an idle
+instance deliberately paused with no task row); B alone rests on a
+metadata write. Together, a marker-write failure still cannot expose a
+deliberate pause, and a stale marker still cannot expose a deliberate
+pause with a non-question task reason.
 
 ## REGRESSION (bounded, touched areas)
 
@@ -224,6 +256,12 @@ HOME-derived install path.
 
 ```
 355 passed, 28 skipped, 115 warnings in 36.21s
+```
+
+Re-verified after cycle 3 (the bounded pause/resume/question subset):
+
+```
+122 passed, 17 skipped, 32 warnings in 13.05s
 ```
 
 `tests/services/` + `tests/api/`: 13 failures — the PRE-EXISTING set
