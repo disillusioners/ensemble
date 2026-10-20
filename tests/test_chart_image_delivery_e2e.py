@@ -1347,6 +1347,7 @@ class TestInstallerSkillHygiene:
 #     (install-mermaid-cli.md, ari/workflow.md, 5 rule.md) untouched.
 #     Evidence pointer: Phase-1 scoped gate run (unit + integration +
 #     targeted seal) in the commission report.
+# 2026-10-20 hide-question-tool-nonroot sweep re-pin (14 files, constants-only; attribution in the commit message) — the other 21 entries keep their values.
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "870ec32faf071cc1478c0540690381ef46c0bd1ae6667163215845ad39992581",
@@ -1375,25 +1376,25 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "daemon/sources/adapters/telegram.py": "7e08882fc2fcc4291bed994ab992cb5afdc7a232a1444839f42da86fbfae063c",
     "daemon/constants.py": "df41a67f65428b4d9ef39878602657e60108e541a1f9cacde04c006cd2fc4970",
     # Phase C — 20 agent canonical-home files
-    "agents/approver/rule.md": "f70d2a0b64332aab40445211437e8e29bb9860cb7996e9e09f28587427dfce3a",
-    "agents/approver[v2]/rule.md": "f70d2a0b64332aab40445211437e8e29bb9860cb7996e9e09f28587427dfce3a",
-    "agents/architect/rule.md": "ebabdd952b136eae155b27f412a989e7d9c6e548c6a821e52865e5830ed0c306",
+    "agents/approver/rule.md": "412cbce10d8673a72bd7c32b2725606d434a11e2809fa5d64c90ded75cc572a1",
+    "agents/approver[v2]/rule.md": "412cbce10d8673a72bd7c32b2725606d434a11e2809fa5d64c90ded75cc572a1",
+    "agents/architect/rule.md": "ddd6d9d169776133faabf46230e1030528c9544420378aaa863f9707f4f94543",
     "agents/ari/rule.md": "bb784e8c41afc913bccf1873bfd5cb8943e5b1e17daacc6936efa08a31d26b68",
-    "agents/coder/soul.md": "0fa7fb9e875203ff9d2b8a14bdd3cdcabce24a44f8a89a0031a6a33123196201",
-    "agents/developer/rule.md": "3cf7141f6d9f1e937c7f80001176c00b3179b803331e95da95511526f4278cf9",
+    "agents/coder/soul.md": "051401b1bcafb56e985794d917bd00255bc0be4f30184e2de01b6a2b5314fb7b",
+    "agents/developer/rule.md": "0a0f1d8f076f78c3f7aea77bfe157b7fc8282f4184ba3352b88e0d831d47285f",
     "agents/developer[v2]/tools_note.md": "62882063ca109e7829c097201e110a0edb872ade000415372ab7ca016bee5748",
     "agents/devops/rule.md": "889e52842c0d4c562ad18d27364f9a7ea0223453df4a6659c11995d631996b78",
-    "agents/doc-writer/rule.md": "7897c461b8e9a2b748ec03500ac88be942845642bdd1fc3c0fef5444935152c7",
-    "agents/governor/rule.md": "84a93586df376ad39dc553af36f86f684977ecfa8d717186f2fe8f16846c8cf5",
-    "agents/leader/rule.md": "11affca67d4c5dcaafd3543714fbde5ae469990f8574d826f67705579c1a8d48",
+    "agents/doc-writer/rule.md": "350dd33cca327e5a96941633aea6813d18b98b82a2f443cb13b270e03deabdc5",
+    "agents/governor/rule.md": "a779742dcec8d30eb44495afda0c5ada93b9409a4ffac83912f7af2afa22ad37",
+    "agents/leader/rule.md": "261ab3af792a7667677f6c622308eff8688d9b3e146e2349b87b1c3d6a3a9f56",
     "agents/maintenancer/rule.md": "66e91a67357d21b9b8ca3c78311ce9becb2b43bf7517eaa3db439efa28fcdbb0",
-    "agents/planner/rule.md": "40c21f9ba9b4745fca6de15521a90d9e89db71b61cdd97d5eaab7f57723d1778",
+    "agents/planner/rule.md": "a245335ded89d0818318f40bfed9b05edf6e08d8fbe0fcfe4b320ef9013d88c4",
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
-    "agents/project-manager/workflow.md": "b7258c5eb0fcb351ee96235df4888cce8b6ab9bca36477f8cfabc1b99ebf96c6",
-    "agents/reviewer/rule.md": "a99910521897a4f45f50a23bbb725187820a93b1d94ee887d600e1f4f0129d72",
-    "agents/reviewer[v2]/rule.md": "a99910521897a4f45f50a23bbb725187820a93b1d94ee887d600e1f4f0129d72",
-    "agents/tidier/rule.md": "ebe7410dcb26e1465825ad297f39be06d898cf55e7a6f20d7c70b8a694229148",
-    "agents/tidier[v2]/rule.md": "ebe7410dcb26e1465825ad297f39be06d898cf55e7a6f20d7c70b8a694229148",
+    "agents/project-manager/workflow.md": "a8b889a03d7eabdfc62a860928c9bed941aeed6d5d2676a27ec859d846615d6c",
+    "agents/reviewer/rule.md": "dfe50cd1b3e6e4d0df4d9289b09bf626e3723cce5513b1f8bc53911894eabc65",
+    "agents/reviewer[v2]/rule.md": "dfe50cd1b3e6e4d0df4d9289b09bf626e3723cce5513b1f8bc53911894eabc65",
+    "agents/tidier/rule.md": "d4c9b59c2be863b1ac2f51624ef39ab5bbbb0683374862f0c1dcf770bfc71524",
+    "agents/tidier[v2]/rule.md": "d4c9b59c2be863b1ac2f51624ef39ab5bbbb0683374862f0c1dcf770bfc71524",
     "agents/wanderer/soul.md": "98a1f4b4de7657d37c3367fffcfbd3d08b3b66aacafcfa3a362a25a5be126dc2",
 }
 
