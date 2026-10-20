@@ -28,6 +28,13 @@ Every test below builds the REAL toolset through
 toolset only (tool names + resolved tool categories) — never on private
 internals, never on line numbers.
 
+ONE EXCEPTION (W3, fix round 2): ``TestGateBeforeFilterOrdering`` does NOT
+build a toolset. It reads the SOURCE of ``daemon/tools/instance.py`` and pins
+the RELATIVE ORDER of two call sites (the question-tool registration vs the
+agent tool-filter application). It asserts an ORDER — never an absolute line
+number — and it is the only test in this pack that looks at source instead of
+at a built toolset.
+
 RED-pre-change (GATE PROOF — must fail before the implementation):
     T1  non-root child (parent_id set)                      -> no tool
     T3  job root (parent_id None, source_type absent)       -> no tool
@@ -38,7 +45,8 @@ RED-pre-change (GATE PROOF — must fail before the implementation):
 
 GREEN-pre-change (PRESERVATION GUARDS — must pass before AND after):
     T2  user-facing root (parent_id None, source_type=discord) -> tool
-    T4a restore-path root with a stamped row (source_type=slack) -> tool
+    T4a legacy empty-string parent (parent_id "", source_type=discord) -> tool
+    plus the root whose THREADED chat source_type reaches the build -> tool
     plus the capability-E2E root half.
 
 HARNESS NOTE (why the harness is signature-adaptive)
@@ -64,6 +72,7 @@ loudly.
 """
 from __future__ import annotations
 
+import ast
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -327,30 +336,45 @@ class TestPreservationGuardsGreenPreChange:
         )
         assert _question_category_tools(tools) == {QUESTION_TOOL_NAME}
 
-    def test_t4a_restore_path_root_with_stamped_row_has_question_tool(
+    def test_root_with_threaded_chat_source_type_has_question_tool(
         self, tmp_path: Path, registry_for
     ) -> None:
-        """GREEN-pre-change (preservation guard) — T4a.
+        """GREEN-pre-change (preservation guard) — threaded chat source.
 
-        The restore path reads the chat source from the instance row's
+        HONEST SCOPE (fix round 2, W1 — renamed from the over-claiming
+        ``test_t4a_restore_path_root_with_stamped_row_has_question_tool``):
+
+        This test asserts ONE thing: when a ROOT's chat ``source_type``
+        reaches the tool build, the ``ask_questions`` tool IS registered.
+
+        It does NOT exercise the RESTORE path. The restore path reads the
+        chat source off the instance row's
         ``instance_metadata["source_type"]`` stamp and threads it into the
-        tool build. A root restored from a row that carries the stamp
-        (source_type="slack") MUST keep the tool — otherwise a daemon
-        restart would silently strip a legitimate root's capability.
+        build (``daemon/services/instance_lifecycle.py``, restore branch);
+        that row-read seam is NOT covered by this pack — this pack builds
+        the toolset directly and never touches a repository. The name and
+        the docstring previously claimed restore-path coverage that no
+        assertion in this file could deliver; the name now states exactly
+        what is asserted, and the restore seam stays where it belongs (the
+        restore lane's own coverage).
+
+        The value threaded here is the same shape the restore lane reads
+        (``"slack"`` — one of the four pinned chat sources), so the
+        predicate it exercises is the real one.
         """
         agents_dir = _stage_synthetic_agent(
             tmp_path,
-            "syn-question-restored-root",
+            "syn-question-threaded-source-root",
             {"allow": [QUESTION_CATEGORY], "deny": []},
         )
         registry_for(agents_dir)
 
         tools = _build_instance_tools(
-            "syn-question-restored-root", parent_id=None, source_type="slack"
+            "syn-question-threaded-source-root", parent_id=None, source_type="slack"
         )
 
         assert QUESTION_TOOL_NAME in tools, (
-            "a root restored from a source_type-stamped row must keep "
+            "a root whose chat source_type reaches the build must keep "
             "ask_questions"
         )
         assert _question_category_tools(tools) == {QUESTION_TOOL_NAME}
@@ -466,6 +490,184 @@ class TestThreadingSignature:
                 f"{name!r} must default to None (fail-closed: an unthreaded "
                 "call is NOT a user-facing root)"
             )
+
+
+# ---------------------------------------------------------------------------
+# Structural pin — the gate is applied BEFORE the agent's tool filter
+# ---------------------------------------------------------------------------
+
+
+INSTANCE_TOOLS_SOURCE = REPO_ROOT / "daemon" / "tools" / "instance.py"
+
+
+def _question_registration_and_filter_lines(source: str) -> tuple[int, int]:
+    """Locate the two LOAD-BEARING call sites inside ``create_instance_tools``.
+
+    Returns ``(registration_lineno, filter_lineno)`` — the positions of the
+    ``create_question_tools(...)`` call and of the ``_apply_tool_filter(...)``
+    call, both scoped to the ``create_instance_tools`` body.
+
+    The search is AST-based, never a text grep, for two reasons:
+
+    * COMMENTS mention both symbols (the load-bearing placement note names
+      ``_apply_tool_filter``) — a text grep would pick the comment up as a
+      "call site" and the pin would compare a comment against a call;
+    * the module-level ``def _apply_tool_filter`` lives OUTSIDE the builder
+      — scoping to the function body keeps it out of the result.
+
+    Only ABSOLUTE positions are returned. The ORDER between the two is what
+    the pin asserts; no line number is hardcoded anywhere.
+    """
+    tree = ast.parse(source)
+    builder = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "create_instance_tools"
+        ),
+        None,
+    )
+    assert builder is not None, (
+        "daemon/tools/instance.py no longer defines create_instance_tools — "
+        "the gate-before-filter ordering pin has lost its anchor"
+    )
+
+    registration: list[int] = []
+    filter_lines: list[int] = []
+    for node in ast.walk(builder):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if name == "create_question_tools":
+            registration.append(node.lineno)
+        elif name == "_apply_tool_filter":
+            filter_lines.append(node.lineno)
+
+    assert registration, (
+        "no create_question_tools(...) call site found inside "
+        "create_instance_tools — the question-tool registration is gone"
+    )
+    assert filter_lines, (
+        "no _apply_tool_filter(...) call site found inside "
+        "create_instance_tools — the agent tool filter is gone"
+    )
+    return min(registration), min(filter_lines)
+
+
+def _assert_registration_precedes_filter(source: str) -> tuple[int, int]:
+    """Assert the question-tool registration precedes the tool filter."""
+    registration_line, filter_line = _question_registration_and_filter_lines(source)
+    assert registration_line < filter_line, (
+        "the ask_questions GATE must be applied BEFORE the agent's tool "
+        "filter: an agent's tools.allow entry can never re-admit a gated "
+        "tool for a non-root because the gate runs first "
+        f"(registration at line {registration_line}, filter at line "
+        f"{filter_line})"
+    )
+    return registration_line, filter_line
+
+
+def _mutate_filter_before_registration(source: str) -> str:
+    """Return a MUTANT of *source* with the tool-filter application moved
+    BEFORE the question-tool registration.
+
+    Used as the pin's own self-check: the mutant is a faithful "someone
+    reordered the two call sites" edit, so the pin must FAIL on it. The
+    mutant is built in memory — the repository file is never touched.
+    """
+    tree = ast.parse(source)
+    builder = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "create_instance_tools"
+        ),
+        None,
+    )
+    assert builder is not None, "create_instance_tools not found"
+
+    gate_block = None
+    filter_stmt = None
+    for node in ast.walk(builder):
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Call):
+            if getattr(node.test.func, "id", None) == "_is_user_facing_root":
+                gate_block = node
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and getattr(node.value.func, "id", None) == "_apply_tool_filter"
+        ):
+            filter_stmt = node
+    assert gate_block is not None, "the root-gate block was not found"
+    assert filter_stmt is not None, "the tool-filter call was not found"
+
+    lines = source.splitlines(keepends=True)
+    gate_start = gate_block.lineno
+    filter_start, filter_end = filter_stmt.lineno, filter_stmt.end_lineno
+    assert gate_start < filter_start, (
+        "the mutant builder expects the gate to come first in the real source"
+    )
+    filter_lines = lines[filter_start - 1 : filter_end]
+    mutant = "".join(
+        lines[: gate_start - 1]
+        + filter_lines
+        + lines[gate_start - 1 : filter_start - 1]
+        + lines[filter_end:]
+    )
+    ast.parse(mutant)  # the mutant must remain syntactically valid
+    return mutant
+
+
+class TestGateBeforeFilterOrdering:
+    """W3 — the root gate is applied BEFORE the agent's tool filter."""
+
+    def test_gate_registration_precedes_tool_filter_in_build_path(self) -> None:
+        """W3 structural pin — gate BEFORE filter in the build path.
+
+        WHAT structural property it pins: inside
+        ``daemon/tools/instance.py::create_instance_tools``, the
+        ``create_question_tools(...)`` REGISTRATION happens BEFORE the
+        ``_apply_tool_filter(...)`` APPLICATION.
+
+        WHY it matters: the two mechanisms have OPPOSITE jobs. The gate is
+        NECESSARY — it HIDES ``ask_questions`` from a non-root; the agent's
+        ``tools.allow`` list is SUFFICIENT — it GRANTS the capability to an
+        agent. If the filter ran FIRST, an agent whose ``tools.allow``
+        contains the ``question`` category could re-admit the tool into a
+        non-root's toolset (the filter would keep it because the agent
+        grants the category) — the gate would then only ever remove the
+        tool, never guarantee its absence. Running the gate FIRST makes the
+        allow-list unable to re-admit a gated tool: a non-root's toolset can
+        never contain a question-category tool, whatever the agent allows.
+
+        HOW it fails if the property breaks: the pin reads the SOURCE of
+        ``daemon/tools/instance.py``, resolves BOTH call sites with the AST
+        (never a text grep, never a hardcoded line number — comments that
+        name the symbols and the module-level ``def _apply_tool_filter``
+        are both out of scope), and asserts the registration position is
+        strictly smaller than the filter position. Reordering the two call
+        sites makes the assertion fail with both positions in the message.
+
+        SELF-CHECK: the pin also builds an in-memory MUTANT of the real
+        source in which the filter call is moved BEFORE the gate, and
+        asserts the same check FAILS on it — so the pin cannot silently
+        degrade into a no-op that passes on an inverted file.
+        """
+        source = INSTANCE_TOOLS_SOURCE.read_text(encoding="utf-8")
+
+        registration_line, filter_line = _assert_registration_precedes_filter(source)
+
+        mutant = _mutate_filter_before_registration(source)
+        with pytest.raises(AssertionError):
+            _assert_registration_precedes_filter(mutant)
+
+        assert registration_line < filter_line, (
+            "gate registration must precede the tool filter "
+            f"(got {registration_line} vs {filter_line})"
+        )
 
 
 # ---------------------------------------------------------------------------

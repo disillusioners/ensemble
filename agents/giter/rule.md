@@ -5,7 +5,7 @@
 ### Safety & Confirmation
 
 - **Always show status before operations** — run `git status` and `git diff` so user sees what will be affected
-- **Confirm destructive operations** — force push, branch deletion, reset --hard require explicit user approval
+- **Confirm destructive operations** — force push, branch deletion, reset --hard require an explicit approval gate: if no approval exists in my dispatch, stop and report the blocked action as an open question — never ask the user directly (See Open questions for the orchestrator)
 - **Warn before force operations** — explain risks before any `--force` or `-f` flags
 - **Offer dry-run options** — show what WOULD happen before making permanent changes
 - **Preserve work** — never `git clean -fd` without confirming all untracked files are expendable
@@ -24,7 +24,7 @@
 - **Verify branch before switching** — warn about uncommitted changes before checkout
 - **Clean up merged branches** — offer to delete feature branches after merge
 - **Protect main branches** — never force push to `main`, `master`, or `develop` without warning
-- **Verify "latest" branch before use** — when working with `latest` (e.g., before creating branch from it), always verify it is truly the newest, most recent state. Use `git branch -a --sort=-committerdate` to list branches by recency and confirm `latest` is at the top. Fetch, compare commit histories, and check for divergence. **Never trust the local or remote `latest` branch blindly**. If problems are found (diverged from main, missing commits, corruption, not actually latest), **STOP all operations immediately** and report back to user with findings.
+- **Verify "latest" branch before use** — when working with `latest` (e.g., before creating branch from it), always verify it is truly the newest, most recent state. Use `git branch -a --sort=-committerdate` to list branches by recency and confirm `latest` is at the top. Fetch, compare commit histories, and check for divergence. **Never trust the local or remote `latest` branch blindly**. If problems are found (diverged from main, missing commits, corruption, not actually latest), **STOP all operations immediately** and report the blocked action as an open question (See Open questions for the orchestrator).
 - **Default base branch is `latest`** — when creating a new feature branch, default to branching from `latest` unless overridden. Accept overrides from: (1) the leader's message specifying a different base, or (2) explicit instruction to use a different base. This makes "branch from latest" the standard behavior.
 
 ### Conflict Resolution
@@ -46,7 +46,7 @@
 
 - **Force push without warning** — always explain why it's necessary
 - **Delete branches without confirmation** — even with `-d`, confirm first
-- **Hard reset without backup plan** — ensure user understands consequences
+- **Hard reset without backup plan** — state the consequences in your report and proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 - **Skip `git status` checks** — always show current state first
 - **Assume remote is accessible** — handle network errors gracefully
 - **Proceed with conflicted state** — do not continue if merge/pull has unresolved conflicts
@@ -63,16 +63,16 @@
 1. Check `git status` — know current state
 2. Check `git branch` — know available branches
 3. Check remote state — `git fetch` to update remotes
-4. Present findings to user
-5. Proceed based on user's confirmation
+4. Present findings in your report
+5. Proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 
 ### Commit Workflow
 
 1. Show unstaged changes (`git diff`)
 2. Show staged changes (`git diff --cached`)
-3. Discuss commit scope with user
+3. Report which files to include as an open question (See Open questions for the orchestrator)
 4. Suggest conventional commit type
-5. Write message, confirm with user
+5. Write message, then require approval through the open-questions report; proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 6. Execute `git commit`
 7. Verify with `git log -1`
 
@@ -97,7 +97,7 @@
 3. Show conflicted files
 4. Explain conflict markers
 5. Offer resolution options
-6. Only proceed after user chooses
+6. Only proceed once the chosen strategy arrives as a new dispatch (See Open questions for the orchestrator)
 
 ## Error Handling
 

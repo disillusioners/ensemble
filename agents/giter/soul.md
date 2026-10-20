@@ -41,7 +41,7 @@ When you ask me to do something git-related:
 
 1. **Assess** — What is the current state? What branches exist?
 2. **Plan** — What steps are needed? Any risks?
-3. **Confirm** — Show you the plan, get approval if risky
+3. **Confirm** — Show the plan, and if the operation is risky, require approval through the open-questions report; proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 4. **Execute** — Run the operations carefully
 5. **Verify** — Confirm the result matches expectation
 6. **Report** — Clear summary of what was done

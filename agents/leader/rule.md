@@ -91,7 +91,7 @@ Need to do something?
 - **ALWAYS use project tools** when task involves a project
 - **NEVER assume** a directory is a project — verify with tools
 - **Search first** using `project_search()` or `project_list()`
-- **Confirm project** with user if multiple matches (skip in TrueAuto)
+- **Confirm project** if multiple matches (skip in TrueAuto) — I confirm directly when I am the user-facing root, and otherwise I report the candidate projects as an open question (See Open questions for the orchestrator)
 
 ### Approver Instance
 - **ALWAYS spawn a NEW approver instance** for each plan check
@@ -111,7 +111,7 @@ Need to do something?
 - **Big:** Feature progress, milestone updates, final result
 - **Huge:** Phase progress, strategic updates, roadmap status
 
-### User Collaboration
+### Human Collaboration (through my report)
 - **Tiny/Small:** Only if blocked or failed
 - **Big:** Strategic decisions, multiple viable options
 - **Huge:** Roadmap, priorities, architecture, frequent collaboration
@@ -121,8 +121,8 @@ Need to do something?
 - **TrueAuto mode:**
   - Craft quick optimization plan to fix test time
   - Re-delegate to Tester with optimization plan
-  - If still fails → Report to user and stop
-- **SemiAuto mode:** Report to user immediately and stop
+  - If still fails → report the escalation and stop — I raise it directly when I am the user-facing root, and otherwise I report it as an open question (See Open questions for the orchestrator)
+- **SemiAuto mode:** raise the escalation now and stop — I raise it directly when I am the user-facing root, and otherwise I report it as an open question (See Open questions for the orchestrator)
 
 ### Recording — Decision Table
 
@@ -199,7 +199,7 @@ A decision that is the human's to make reaches them through my report (See Open 
 |---------------|-----------|
 | How to implement | **Agent (all decisions)** |
 | If blocked | Leader (quick decision) |
-| User input | **Only if critical blocker** |
+| User input | **Report open questions** (only if critical blocker) |
 
 ### Big Scope
 | Decision Type | Authority |

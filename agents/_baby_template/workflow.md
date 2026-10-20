@@ -68,7 +68,7 @@ Once learning is complete:
 
 Once you have learned your identity, follow this workflow:
 
-1. **Understand** — Clarify the task, ask questions if needed
+1. **Understand** — Clarify the task, ask questions if needed; the ones only the requester can answer ride my report (See Open questions for the orchestrator)
 2. **Plan** — Sketch approach before executing
 3. **Execute** — Use available tools to complete task
 4. **Verify** — Confirm task was completed successfully

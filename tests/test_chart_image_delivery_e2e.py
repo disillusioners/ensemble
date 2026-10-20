@@ -1352,6 +1352,12 @@ class TestInstallerSkillHygiene:
 #   agents/charter/workflow.md   <- 66512e9dd 2026-10-05 (B5: diagram-type NEEDS MORE INFO self-consistency)
 #   agents/devops/rule.md        <- 617bf69a0 2026-10-05 (B3: non-root question contract + canonical section)
 #   agents/maintenancer/rule.md  <- 74e9168a2 2026-10-19 (W3: escalate-family report-chain contract)
+# 2026-10-20 hide-question-tool-nonroot FIX ROUND 2 re-pin (3 files, constants-only, recomputed from real
+# file bytes on the fix-round-2 worktree — B3 closure: human-decision instructions routed to the
+# "Open questions for the orchestrator" report channel; the other 32 entries keep their values):
+#   agents/leader/rule.md             <- f0bda673c7b112ef7a43f17f1166f99fcb11f1562aabf0d7a5c9879e924a231a
+#   agents/maintenancer/rule.md       <- abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec
+#   agents/project-manager/workflow.md <- bde479095bbda6a3e3e069afe8a719e0f8b5673f289d2d0d5bf7a15eecb123ad
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "2a5078f93bd2dcfe427900e85c075ee9671b8aedae17d07c7ef6abb6df4603ab",
@@ -1390,11 +1396,11 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/devops/rule.md": "febf0e8981fadc5eca0331e261757711bf4229efe4a0a365b174d2e991a75c87",
     "agents/doc-writer/rule.md": "350dd33cca327e5a96941633aea6813d18b98b82a2f443cb13b270e03deabdc5",
     "agents/governor/rule.md": "a779742dcec8d30eb44495afda0c5ada93b9409a4ffac83912f7af2afa22ad37",
-    "agents/leader/rule.md": "261ab3af792a7667677f6c622308eff8688d9b3e146e2349b87b1c3d6a3a9f56",
-    "agents/maintenancer/rule.md": "d6e448a6dbbbbd96f09b35822b6e376c2d0814fc4d2e6723d64b8ae233c4520e",
+    "agents/leader/rule.md": "f0bda673c7b112ef7a43f17f1166f99fcb11f1562aabf0d7a5c9879e924a231a",
+    "agents/maintenancer/rule.md": "abe43bae715c62a341788fbe5d610138936b7b4e83df87c8bbfd3611bf446aec",
     "agents/planner/rule.md": "a245335ded89d0818318f40bfed9b05edf6e08d8fbe0fcfe4b320ef9013d88c4",
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
-    "agents/project-manager/workflow.md": "a8b889a03d7eabdfc62a860928c9bed941aeed6d5d2676a27ec859d846615d6c",
+    "agents/project-manager/workflow.md": "bde479095bbda6a3e3e069afe8a719e0f8b5673f289d2d0d5bf7a15eecb123ad",
     "agents/reviewer/rule.md": "dfe50cd1b3e6e4d0df4d9289b09bf626e3723cce5513b1f8bc53911894eabc65",
     "agents/reviewer[v2]/rule.md": "dfe50cd1b3e6e4d0df4d9289b09bf626e3723cce5513b1f8bc53911894eabc65",
     "agents/tidier/rule.md": "d4c9b59c2be863b1ac2f51624ef39ab5bbbb0683374862f0c1dcf770bfc71524",

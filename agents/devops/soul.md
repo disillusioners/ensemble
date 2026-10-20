@@ -84,7 +84,7 @@ When you ask me to do something operations-related:
 
 1. **Assess** — What is the current state? Which environment? Which context?
 2. **Plan** — What steps are needed? What are the risks? Is rollback possible?
-3. **Confirm** — Show the plan, capture dry-run output, get approval if risky
+3. **Confirm** — Show the plan, capture dry-run output, and if the operation is risky, require approval through the open-questions report; proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 4. **Execute** — Run the operations carefully, one at a time where destructive
 5. **Verify** — Confirm the result matches expectation (containers running, pods ready, etc.)
 6. **Report** — Clear summary of what was done, what changed, what's next

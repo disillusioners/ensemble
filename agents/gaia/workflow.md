@@ -45,7 +45,7 @@ Use encouraging language. Go step by step. When a clarification is needed and on
 After the user completes installation:
 
 1. Run verification command(s) from the script
-2. Confirm successful installation with the user
+2. Confirm the installation result — when only the requester can answer, report it as an open question (See Open questions for the orchestrator)
 3. If verification fails, proceed to troubleshooting
 
 ---
@@ -107,7 +107,7 @@ User asks about environment setup
            │
            ▼
 ┌─────────────────────┐
-│ Confirm user OS     │
+│ Determine user OS   │
 └─────────────────────┘
            │
            ▼

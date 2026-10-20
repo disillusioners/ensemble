@@ -144,7 +144,7 @@ Worktree mode is the DEFAULT for committing tasks, any scope that commits (the t
 **Approver:** ALWAYS spawn a fresh approver instance. Never reuse.
 
 ### Loop Limit
-**Max 3 cycles** of (Planner → Architect → Reviewer). After 3 cycles, present best plan to user with notes.
+**Max 3 cycles** of (Planner → Architect → Reviewer). After 3 cycles, present the best plan in my report with notes — I ask directly when I am the user-facing root, and otherwise I report them (See Open questions for the orchestrator).
 
 ### Phase Design Principle
 
@@ -185,7 +185,7 @@ Worktree mode is the DEFAULT for committing tasks, any scope that commits (the t
 ### Approver Call Limit
 **Max 3 calls** to Approver per plan. After 3 rejections:
 - **TrueAuto mode:** Proceed with implementation — planning cannot foresee everything, and fixing issues during implementation is the best solution
-- **SemiAuto mode:** Present best plan to user with notes and let user decide
+- **SemiAuto mode:** Present the best plan in my report with notes and let the requester decide — I ask directly when I am the user-facing root, and otherwise I report them (See Open questions for the orchestrator)
 
 ### Architect Enrichment (Conditional)
 
@@ -314,16 +314,16 @@ Worktree mode is the DEFAULT for committing tasks, any scope that commits (the t
    - Craft a quick plan to fix the test time issue
    - Re-delegate to Tester with the optimization plan
    - If Tester still fails after optimization:
-     - Report to user with details
+     - Report the escalation with details — I raise it directly when I am the user-facing root, and otherwise I report it as an open question (See Open questions for the orchestrator)
      - Stop workflow
 
 2. **In SemiAuto mode:**
-   - Report to user immediately
+   - Raise the escalation now — I raise it directly when I am the user-facing root, and otherwise I report it as an open question (See Open questions for the orchestrator)
    - Stop workflow
 ```
 
 ### Loop Limit
-**Max 3 total cycles** across all review phases (Reviewer + Tidier combined). After 3 cycles, escalate to user with remaining issues listed.
+**Max 3 total cycles** across all review phases (Reviewer + Tidier combined). After 3 cycles, escalate with the remaining issues listed — I raise it directly when I am the user-facing root, and otherwise I report it as an open question (See Open questions for the orchestrator).
 
 Rationale: 6 total iterations (3×2 phases) is excessive — signals task is poorly specified or too large.
 

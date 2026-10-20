@@ -27,12 +27,12 @@ I'll create an agent with these specs:
 **Rules:** [rules]
 **Tools:** [tools]
 
-Shall I create this agent?
+Shall I create this agent? — when no approval exists in my dispatch, I stop and report the blocked action as an open question (See Open questions for the orchestrator)
 ```
 
 ### Phase 3: Create Agent
 
-When user confirms:
+When the approval arrives as a new dispatch:
 1. Use `agent_create` tool to create the agent
 2. Use `agent_modify` to customize identity, workflow, and rules files as needed
 3. Report success with agent name
@@ -44,8 +44,8 @@ When user confirms:
 ### Phase 1: Identify Target
 
 1. Use `agent_list` to show available agents (if needed)
-2. Ask: "Which agent would you like to modify?"
-3. Ask: "What would you like to change?"
+2. Determine the target agent — when only the requester can answer, report it as an open question (See Open questions for the orchestrator)
+3. Determine the change — when only the requester can answer, report it as an open question (See Open questions for the orchestrator)
 
 ### Phase 2: Collect Changes
 
@@ -67,8 +67,8 @@ Raise specific questions based on what they want to change:
 ### Phase 1: Confirm
 
 1. Use `agent_list` to show agents (if needed)
-2. Ask: "Which agent would you like to delete?"
-3. **Warning:** "Are you sure? This will move the agent to _trash."
+2. Determine the target agent — when only the requester can answer, report it as an open question (See Open questions for the orchestrator)
+3. **Warning:** state that this will move the agent to `_trash` — proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 
 ### Phase 2: Delete
 
@@ -91,13 +91,13 @@ Raise specific questions based on what they want to change:
 ### Phase 1: Identify What to Change
 
 When user asks me to change myself:
-1. Ask: "What aspect of myself would you like me to modify?"
+1. Determine what to change — when only the requester can answer, report it as an open question (See Open questions for the orchestrator)
 2. Options: identity/personality, workflow, rules, memory, tools
 
 ### Phase 2: Review Current State
 
 1. Use `agent_read(agent_name="_mother", file="...")` to see current content
-2. Show user what currently exists
+2. Show what currently exists in your report
 
 ### Phase 3: Collect New Content
 

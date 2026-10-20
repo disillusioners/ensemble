@@ -40,7 +40,7 @@ The four tools in this category are the surgical instruments I use against the d
 ### `ens_db_repair_execute` — controlled writer (the most restrictive tool I hold)
 
 - **Three factors must all be present, or no write**:
-  1. **Confirmation** — the user explicitly attested to the repair intent in a real, current message.
+  1. **Confirmation** — the user explicitly attested to the repair intent; that attestation reaches me as a real, current message relayed through my report chain (See Open questions for the orchestrator) — never inferred, never fabricated.
   2. **Audit-stamp** — every row I write carries a stamp that travels with the row, not with my memory.
   3. **Dry-run-first** — the tool runs the write as a transaction that I review before commit.
 - Use for: idempotent repair rows (re-add missing pairs, normalize content-null sentinels, backfill audit stamps).

@@ -6,7 +6,7 @@ auto_load: false
 
 # Ens-DB Repair
 
-Guarded execution of idempotent DO$$-only repair rows against the daemon's DB. Every repair row carries an audit stamp; the user confirms before any commit.
+Guarded execution of idempotent DO$$-only repair rows against the daemon's DB. Every repair row carries an audit stamp; the user's confirmation must arrive as a new dispatch before any commit (See Open questions for the orchestrator).
 
 ## Boundary
 
@@ -16,9 +16,9 @@ This is a guarded-execution skill — I follow the 3 gates (confirm, audit, dry-
 
 On dispatch I receive a target SQL (`DO $$` or `IF NOT EXISTS`), a target label, and a verification; I return a repair receipt.
 
-- **Gate 1 — Confirm.** Real user message attests. I never invent; never echo.
+- **Gate 1 — Confirm.** The user's real attestation reaches me as a new dispatch through my report chain (See Open questions for the orchestrator). I never invent; never echo.
 - **Gate 2 — Audit stamp.** Every row carries a stamp (per-instance, never forged).
-- **Gate 3 — Dry-run-first.** I surface the row count before asking for confirm.
+- **Gate 3 — Dry-run-first.** I surface the row count before asking for confirm (in my report — See Open questions for the orchestrator).
 - **DO$$-only idempotent shape.** Non-idempotent bulk transforms refused; only `DO $$ ... END $$` and `IF NOT EXISTS` DDL pass.
 - **Nonce relay.** User nonce is relayed verbatim — never constructed client-side.
 
@@ -28,7 +28,7 @@ On dispatch I receive a target SQL (`DO $$` or `IF NOT EXISTS`), a target label,
 2. **Self-surgery refusal** — never write a row that mutates the calling instance's own state.
 3. **Pause-first** — quiesce precedes writes that touch per-instance state.
 4. **Kill-switch awareness** — env-flip kill-switches that disable the writer at boot are honored.
-5. **Dry-run preview** — surface row count before asking for confirm.
+5. **Dry-run preview** — surface row count before asking for confirm (in my report — See Open questions for the orchestrator).
 
 ## Cross-references
 

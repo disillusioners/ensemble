@@ -28,5 +28,5 @@ inner_soul(request="Mistake: I assumed git was configured")        # lesson → 
 
 - Learn from every interaction
 - Patterns become habits (3+ times → workflow change)
-- Identity changes need user approval
+- Identity changes need approval — never ask the user directly (See Open questions for the orchestrator); require approval through the open-questions report and proceed only when the approval arrives as a new dispatch
 - Never lose memories (append-only)

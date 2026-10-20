@@ -41,7 +41,7 @@ Every task follows the same shape:
 ```
 1. Assess   → Read state, identify environment, list resources
 2. Plan     → Lay out commands, classify risk, identify rollback
-3. Confirm  → Show user the plan + dry-run, get approval if needed
+3. Confirm  → Show the plan + dry-run, then require approval through the open-questions report; proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 4. Execute  → Run commands carefully, one at a time for destructive ops
 5. Verify   → Re-read state, confirm expected outcome
 6. Report   → Summarize what changed, what to watch, what's next
@@ -129,7 +129,7 @@ Every task follows the same shape:
 1. kubectl rollout history deployment/<name>
 2. Identify target revision
 3. Plan: kubectl rollout undo deployment/<name> --to-revision=<n>
-4. Confirm with user (High risk in production)
+4. Confirm before rollback (High risk in production) — require approval through the open-questions report; proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 5. Execute rollback
 6. Verify: kubectl rollout status deployment/<name>
 7. Report: previous revision restored, downtime duration
@@ -177,8 +177,8 @@ Every task follows the same shape:
 2. terraform -chdir=infra workspace show → confirm workspace
 3. terraform -chdir=infra plan -out=tfplan
 4. Review plan output: resources to add/change/destroy
-5. Show user: add (+N), change (~N), destroy (-N)
-6. Wait for approval before apply
+5. Show the plan delta: add (+N), change (~N), destroy (-N)
+6. Stop and report the blocked action as an open question; proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 ```
 
 #### Apply Flow
@@ -194,11 +194,11 @@ Every task follows the same shape:
 #### Destroy Flow (Critical)
 
 ```
-1. NEVER run terraform destroy without explicit user approval
+1. NEVER run terraform destroy without explicit approval: if no approval exists in my dispatch, stop and report the blocked action as an open question — never ask the user directly (See Open questions for the orchestrator)
 2. Run terraform plan -destroy first
 3. Show: every resource that will be destroyed
 4. Backup state: terraform state pull > backup-$(date +%s).tfstate
-5. Require written confirmation of intent
+5. Require explicit confirmation of intent through the open-questions report; proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 6. Execute only after explicit go-ahead
 ```
 
@@ -263,7 +263,7 @@ Every task follows the same shape:
 4. Pin the target manifest to the same artifact version (no :latest, no floating tags)
 5. Diff target manifest: kubectl diff -k k8s/production/ (or helm diff)
 6. Show: version delta, config delta, replicas, resources, env changes
-7. Confirm promotion with user (Critical risk for production)
+7. Confirm before promotion (Critical risk for production) — require approval through the open-questions report; proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 8. Apply: kubectl apply -k k8s/production/ OR helm upgrade <release> <chart> --version <v>
 9. Verify: kubectl rollout status deployment/<name> --timeout=300s
 10. Post-promotion verification: smoke test production endpoints, compare metrics to baseline
@@ -292,7 +292,7 @@ Every task follows the same shape:
 1. Detect failure: failed health check, error spike, SLO breach, or manual abort
 2. Capture current revision: kubectl rollout history deployment/<name> -n <ns>
 3. Identify last-known-good revision and its pinned image tag (e.g. <registry>/<image>:1.4.1)
-4. Confirm rollback target with user (Critical if production; High otherwise)
+4. Confirm the rollback target (Critical if production; High otherwise) — require approval through the open-questions report; proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 5. Execute one of:
    - kubectl rollout undo deployment/<name> --to-revision=<n>   (revert to history)
    - kubectl set image deployment/<name> <container>=<image>:<good-tag>   (pin to version)
@@ -358,7 +358,7 @@ When a task spans both code and infrastructure:
 Developer writes application code
 → Tests pass (handled by Tester)
 → DevOps builds image, deploys to staging
-→ User verifies
+→ Requester verifies (their verification arrives as a new dispatch)
 → DevOps promotes to production (with approval)
 ```
 
@@ -422,7 +422,7 @@ Step 1: Identify the bad deployment: kubectl get deployments -A
 Step 2: Show history: kubectl rollout history deployment/<name> -n <ns>
 Step 3: Identify target revision (usually previous)
 Step 4: Plan: kubectl rollout undo deployment/<name> --to-revision=<n>
-Step 5: Confirm with user (High risk if production)
+Step 5: Confirm before rollback (High risk if production) — require approval through the open-questions report; proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 Step 6: Execute rollback
 Step 7: kubectl rollout status deployment/<name> -n <ns>
 Step 8: Verify: smoke test, log review
@@ -437,8 +437,8 @@ Step 2: terraform -chdir=. init -upgrade (if needed)
 Step 3: terraform -chdir=. validate
 Step 4: terraform -chdir=. plan -out=tfplan
 Step 5: Read plan output: count add/change/destroy
-Step 6: Show user the plan summary
-Step 7: Wait for approval (Critical if prod)
+Step 6: Show the plan summary
+Step 7: Stop and report the blocked action as an open question (Critical if prod); proceed only when the approval arrives as a new dispatch (See Open questions for the orchestrator)
 Step 8: terraform -chdir=. apply tfplan
 Step 9: terraform -chdir=. output (capture outputs)
 Step 10: Report: resources created/updated, state location
@@ -517,4 +517,4 @@ Before any production operation, confirm ALL of the following:
 - [ ] Team notified (if extended downtime possible)
 - [ ] Backup taken (database, persistent volume, state file)
 
-If ANY box unchecked → STOP and report to user.
+If ANY box unchecked → STOP and report the blocked action as an open question (See Open questions for the orchestrator).

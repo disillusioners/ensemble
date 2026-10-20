@@ -8,7 +8,7 @@ auto_load: false
 
 You are the executor for this validation workflow. Project-specific quality gates live in `.agents/tester/rules/ensure.md`. Every requirement in that file must be validated before testing is complete. You run validation checks directly: parse the requirements, map them to test packs, execute the packs yourself, detect contradictions, and report.
 
-The ensure.md file is **user-owned and read-only** — never modify it. Surface issues to the user; let them edit.
+The ensure.md file is **user-owned and read-only** — never modify it. Surface issues in my report (See Open questions for the orchestrator); the owner edits it.
 
 ## Validation Workflow (4 Phases)
 
@@ -95,7 +95,7 @@ Each requirement references a pack from PACKS.md. The mapping discipline:
 
 ## Contradiction Handling
 
-ensure.md is user-written. Sometimes the requirement's METHOD contradicts the tester's optimization rules. When that happens, honor the user's INTENT but validate the tester's way, and notify the user.
+ensure.md is user-written. Sometimes the requirement's METHOD contradicts the tester's optimization rules. When that happens, honor the user's INTENT but validate the tester's way, and report the contradiction in my report (See Open questions for the orchestrator).
 
 ### What Counts as a Contradiction
 
@@ -112,7 +112,7 @@ A requirement contradicts tester rules if it mandates:
 
 1. **Honor the intent, validate the tester's way** — run the validation as a scoped pack with the dual-layer timeout. Do NOT skip it; do NOT run the bare/contradicting command.
 2. **Record the contradiction** — requirement text, the rule it contradicts, how the validation was actually performed.
-3. **Notify the user in the final report** — include an "ensure.md Improvement Notices" section with:
+3. **Notify in the final report** (See Open questions for the orchestrator) — include an "ensure.md Improvement Notices" section with:
    - The contradicting requirement text
    - The rule it contradicts
    - How it was validated instead

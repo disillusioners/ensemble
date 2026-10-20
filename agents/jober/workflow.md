@@ -61,10 +61,10 @@ My primary workflow: receive, dispatch, monitor, react, report.
 
 ---
 
-## Phase 2.5: Confirm Plan with User
+## Phase 2.5: Confirm the Plan
 
 ```raw
-1. Present the orchestration plan to the user:
+1. Present the orchestration plan in my report:
    - What task will be done
    - Which agent will handle it (default: leader if unspecified)
    - Which project (if applicable)
@@ -82,19 +82,20 @@ My primary workflow: receive, dispatch, monitor, react, report.
    Confirm to proceed? (yes/adjust/cancel)
    """
 
-3. Wait for user response:
-   - CONFIRM / "just do it" / trivial query → Proceed to Phase 3
+3. If my dispatch already carries the confirmation ("just do it", or a trivial
+   status query) → Proceed to Phase 3. Otherwise report the plan as an open
+   question and STOP — I never ask the user directly (See Open questions for
+   the orchestrator). The decision arrives as a new dispatch:
+   - CONFIRM → Proceed to Phase 3
    - ADJUST → Incorporate feedback, update plan, present again
-   - CANCEL → Stop orchestration:
-     - If interacting directly with user → inform the user
-     - If spawned by parent instance → report cancellation to parent via send_message
+   - CANCEL → Stop orchestration and report the cancellation to the parent via send_message
 
-4. Only after explicit confirmation → proceed to Phase 3
+4. Only after the confirmation arrives as a new dispatch → proceed to Phase 3
 
 5. ADJUST loop limit:
-   - After 3 ADJUST cycles, prompt: "Ready to proceed? (confirm/cancel)"
-   - Stop accepting further adjustments
-   - User must either confirm or cancel at that point
+   - After 3 ADJUST cycles, report "Ready to proceed? (confirm/cancel)" as an
+     open question and stop accepting further adjustments
+   - The requester must either confirm or cancel at that point
 ```
 
 ---
@@ -220,12 +221,13 @@ goal before letting it flow into Phase 5.
       jobs, do not report to parent)
    b. Build an Options block (See Verify Completed Jobs Match the Goal
       for the template)
-   c. Present to the user and wait for explicit confirmation
-   d. If the user is not in the loop (jober was spawned by a parent):
-      surface the concern to the parent via `send_message` with the Options
-      block; do NOT auto-proceed
+   c. Stop and report the blocked action as an open question — I never ask the
+      user directly (See Open questions for the orchestrator); the decision
+      arrives as a new dispatch
+   d. When I was spawned by a parent instance, the parent receives the Options
+      block via `send_message`; do NOT auto-proceed
 
-4. Apply the user's choice:
+4. Apply the choice that arrives as a new dispatch:
    - Retry with refined instructions → job_retry() with the new task,
      watch the new job_id, go back to Phase 4
    - Accept as-is → proceed to Phase 5 but include a "⚠️ accepted with
@@ -243,7 +245,8 @@ goal before letting it flow into Phase 5.
 ## Phase 5: Report & Cleanup
 
 **Pre-condition:** Every job has passed the Phase 4.5 result-quality gate
-(doubtful results are resolved with the user/parent before this phase runs).
+(doubtful results are resolved through the open-questions report before this
+phase runs).
 
 ```raw
 1. Aggregate results from all jobs:
@@ -281,10 +284,11 @@ When handling multiple requests that can be batched:
 2. Analyze each:
    - Independent? → Can batch
    - Related? → Consider sequential pipeline
-2.5. Present batch plan to user for confirmation:
+2.5. Report the batch plan as an open question for confirmation (See Open
+    questions for the orchestrator):
    - Show all tasks and their groupings
    - Show orchestration pattern per group
-   - Wait for explicit confirmation before creating jobs
+   - Proceed only when the confirmation arrives as a new dispatch
 3. For confirmed batch:
    a. Group independent tasks
    b. For each group:
@@ -499,6 +503,6 @@ RIGHT: Maintain list, verify with list_watched_jobs(), handle each outcome
 
 ### ❌ Dispatching Without Confirmation
 ```
-WRONG: User asks → Parse → Create job immediately
-RIGHT: User asks → Parse → Present plan → Confirm → Create job
+WRONG: Request arrives → Parse → Create job immediately
+RIGHT: Request arrives → Parse → Present plan → Confirmation gate (report the open question, wait for the answer) → Create job
 ```

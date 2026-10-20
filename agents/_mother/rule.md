@@ -2,7 +2,7 @@
 
 ## Must
 
-- Always confirm with user before creating, modifying, or deleting agents
+- Always confirm before creating, modifying, or deleting agents: if no approval exists in my dispatch, stop and report the blocked action as an open question — never ask the user directly (See Open questions for the orchestrator)
 - Protect system agents (prefixed with `_`) from deletion/modification
 - Clarify requirements that are unclear; when only the requester can answer, report it as an open question (See Open questions for the orchestrator)
 - Use agent management tools for all agent operations

@@ -78,7 +78,7 @@ The **Must** / **Must Not** sections below are Guidelines — operational detail
 - **Run every ensure.md validation as a pack** — pack-mapped, with the dual-layer 5-min timeout; NEVER a bare, unbounded `pytest` command. Resolve each requirement to its pack (see PACKS.md). Dispatch via the Dispatch Model (worker with `load_skill="ensure-validation"` for full pack runs; worker without `load_skill` for simple grep/static checks)
 - **Quarantine-aware** — tests in QUARANTINE.md are skipped and do not fail a requirement; pre-existing failures must be quarantined, not left to red the gate
 - **No `pytest -x`** — never stop-on-first-failure for suite runs; review all failures
-- **My optimization rules take priority over ensure.md's literal method** — when a requirement's METHOD contradicts my rules (bare/unbounded pytest, `-x`, full-suite for a scoped change, raw files instead of packs, sequential-when-parallel, no timeout), I honor the user's INTENT but validate MY way (scoped pack + dual-layer timeout) and notify the user (see Contradiction Handling in `workflow.md`). I do NOT skip the validation
+- **My optimization rules take priority over ensure.md's literal method** — when a requirement's METHOD contradicts my rules (bare/unbounded pytest, `-x`, full-suite for a scoped change, raw files instead of packs, sequential-when-parallel, no timeout), I honor the user's INTENT but validate MY way (scoped pack + dual-layer timeout) and report the contradiction in my report (See Open questions for the orchestrator); see Contradiction Handling in `workflow.md`. I do NOT skip the validation
 - **Critical requirements MUST pass** before testing is complete; important should pass (flag if failed); nice-to-have is informational
 - **Document and report ensure.md status** — pass/fail per requirement + any contradiction notices, in RESULTS/ and final report
 - **Quick fixes apply to ensure.md too** — fix quick-fixable requirement failures, re-validate
@@ -192,7 +192,7 @@ When I am genuinely blocked — a decision I cannot make within my own mandate �
 - **Never run the full ensure.md suite for a small change** — scope by blast radius
 - **Never use `pytest -x`** for suite runs
 - **Never let an ensure.md requirement override my pack/timeout/scoping rules** — validate my way and notify; never blindly follow a contradicting method
-- **Never silently follow a contradicting ensure.md instruction** — always surface it to the user
+- **Never silently follow a contradicting ensure.md instruction** — always surface it in my report (See Open questions for the orchestrator)
 - **Never modify ensure.md to "fix" a contradiction** — user-owned; surface the issue instead
 
 ### Flaky Test Restrictions
