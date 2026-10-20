@@ -30,7 +30,32 @@
 
 set -u
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# ── REPO_ROOT: CONTENT-BASED discovery (F-r2-1, post-release follow-up) ────
+# The old belt pinned the repo by a BUILD-WORKTREE PATH GLOB — after that
+# worktree's teardown the pack exited 99 with ZERO coverage from any
+# merged-tree path (the r2 verification needed a symlink alias).
+# The pin is now CONTENT-BASED: walk up from this script's location until the
+# structural markers of the repo root are all present — pyproject.toml +
+# daemon/__init__.py + daemon/tools/upgrade_tools.py — fail-closed (exit 99)
+# if none of the ancestors qualifies. NO path-name assumptions: any checkout
+# (main, post-release worktree, a fresh clone, a CI path) resolves or refuses
+# loudly.
+_sim_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT=""
+_probe_dir="$_sim_self"
+while [ "$_probe_dir" != "/" ]; do
+    if [ -f "$_probe_dir/pyproject.toml" ] \
+        && [ -f "$_probe_dir/daemon/__init__.py" ] \
+        && [ -f "$_probe_dir/daemon/tools/upgrade_tools.py" ]; then
+        REPO_ROOT="$_probe_dir"
+        break
+    fi
+    _probe_dir="$(dirname "$_probe_dir")"
+done
+if [ -z "$REPO_ROOT" ]; then
+    printf 'FATAL: repo root not found — no ancestor of %s carries the structural markers (pyproject.toml + daemon/__init__.py + daemon/tools/upgrade_tools.py); refusing (exit 99)\n' "$_sim_self" >&2
+    exit 99
+fi
 UPGRADE_DIR="$REPO_ROOT/scripts/upgrade"
 
 PASS=0
@@ -123,11 +148,10 @@ _escape_guard "$FAKE_HOME"
 _escape_guard "$INSTALL"
 _escape_guard "$SCRIPTS_BUNDLE"
 _escape_guard "$RELEASES_DIR"
-# Belt: the repo paths we READ (never write) must be the worktree's own.
-case "$REPO_ROOT" in
-    */ensemble-src-wt-agent-restart) ;;
-    *) printf 'FATAL: unexpected REPO_ROOT (read side): %s\n' "$REPO_ROOT" >&2; exit 99 ;;
-esac
+# Belt (F-r2-1): the content-based walk-up above already proved
+# REPO_ROOT carries the structural markers — no path-name assumption
+# remains (any merged-tree path runs; a non-repo location refused loudly
+# before reaching here).
 
 mkdir -p "$INSTALL/releases"
 # live-shaped .env so resolve_env live resolves (fail-closed without PORT)
