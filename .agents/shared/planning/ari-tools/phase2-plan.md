@@ -2,7 +2,8 @@
 
 Date: 2026-10-19
 Author: planner via plan-creation worker
-Status: **AMENDED** — architect amendments A-18…A-29 folded against `2b297db7d`; ready for reviewer
+Status: **AMENDED** — architect amendments A-18…A-29 folded against `2b297db7d`; **iteration-002** amendments (approver blocking
+#2 + notes B1/B2/B8 + the cron-example note) folded in on 2026-10-20 — ready for reviewer
 Worktree: `/home/nea/ensemble-src-wt-ari-tools` (branch `feature/ari-tools`, base `latest@630cefebb`)
 Predecessor: Phase 1 (board) — phase 2 touches **NO** phase-1 code; only the pinned `wi-<uuid8>` id format is consumed.
 
@@ -62,6 +63,8 @@ schedule that fires exactly once at the stated instant, into an instance that ca
 |---|---|
 | Engine = module functions; never dispatches; the adapter fires | `daemon/services/scheduling_service.py:3-7`, `:80-83` |
 | `create_schedule` payload/recurrence set (`once\|daily\|weekly\|cron`), dup-label rejection | `scheduling_service.py:645`, `:668-670`, `:679-731` |
+| **`create_schedule` REQUIRES `payload.agent`** — the *invoked* agent comes from the **payload**, not from the caller (`caller_agent_id` is audit-only, `scheduling_service.py:645-651`); the field is **required** (`ScheduleCreatePayload.agent`, `scheduling_service.py:132`) and the create path **fail-fasts on an unknown agent** (`get_registry().exists(payload.agent)` ⇒ `agent_id {…} does not exist`, `:673-676`) ⇒ the wrapper **MUST** set `agent="ari"` on **every** create: the alarm fires **into ari** (the receiving instance is a scheduler-owned ari instance), never under the caller's identity | `scheduling_service.py:132`, `:673-676` |
+| **`ScheduleUpdatePayload` carries only `label`/`message`/`when`/`timezone`/`paused`/`priority`** — **no `weekday`, no `recurrence`, no `cron_expression`** ⇒ an update can move `when` but can **never** change the recurrence family or the stored DOW | `scheduling_service.py:208-214`, `:941-986` |
 | `when` for `once` = ISO 8601 (naive → anchored in resolved tz); daily/weekly = `HH:MM`; cron = expr | `scheduling_service.py:696-731` |
 | tz chain: explicit → user setting → `ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE` → host-local → UTC + loud warning | `scheduling_service.py:362-397`, `daemon/util/tz.py:283` |
 | Label lookup does **not** filter status → a cancelled label stays burned; no hard delete for scheduler rows; recurrence is **immutable** via update; cancelled rows are 409 on update | `daemon/repositories/source/repository.py:212-216`, `:263`; `scheduling_service.py:923-926` |
@@ -78,6 +81,10 @@ schedule that fires exactly once at the stated instant, into an instance that ca
 | Default list is **not** status-filtered and the repository page caps at **100** rows (`created_at DESC`) | `scheduling_service.py:858-874`; `daemon/repositories/source/repository.py:217-224` |
 | Duplicate-label races are **accepted** (no unique constraint on `name`) — two same-label rows can both fire | `scheduling_service.py:34-39` |
 | `update_schedule` branches on the **stored** recurrence: `once` re-anchors, `daily`/`weekly` edit the cron in place, **`cron` raises** | `scheduling_service.py:941-986` |
+| The **weekly** update branch rewrites **only the minute/hour fields** of the stored cron (`parts[0]`/`parts[1]`) ⇒ the **stored DOW (5th field) is preserved** — an update can never retarget the weekday | `scheduling_service.py:973-982` (`:980-981`) |
+| `update_schedule` refreshes the stored zone **only when `payload.timezone` is set** (and differs from the stored value) ⇒ an update that omits `timezone` leaves a **stale** stored zone (the `when` re-anchor and every later cron evaluation then use the old zone) | `scheduling_service.py:931-936` |
+| The engine stores **no** `weekday` key — the stored cron's DOW field is authoritative (`get_schedule` echoes `weekday=None`, "weekday echo is create-time only") ⇒ a wrapper that needs the DOW must **derive it from the stored cron expression** | `scheduling_service.py:627` |
+| `update_schedule` **mutates before it answers**: it drains the adapter (`:1011`), writes the config (`:1026-1034`) and **rebuilds/starts** it (`:1046-1047`) ⇒ a failure of the post-call assertion means the stored row is **already mutated and armed** — the assertion is a *detector*, not a *guard* | `scheduling_service.py:1011`, `:1026-1034`, `:1046-1047` |
 | One-shot idempotency key = `scheduler:{source_id}:{run_at}` (one-time only); a non-terminal prior job within 24 h collapses the submit | `scheduler.py:1090-1094`; `job_queue_service.py:1424-1481` |
 | Lateness cap is **daemon-global** — never a payload field; the adapter reads it at fire time and the wrapper cannot override it | `daemon/config.py:2617-2623`; `scheduler.py:705-728` |
 | Public tz/cron helpers reusable without duplicating engine logic | `daemon/util/tz.py:283` `resolve_timezone`, `:353` `anchor_local_to_utc`, `:529` `compute_next_cron_fire`; `daemon/services/user_timezone_utils.py:31` |
@@ -125,8 +132,8 @@ Failure → `"ERROR: {msg}"` (house rule; the tool never raises — `daemon/tool
 | Relative one-shot | `45m`, `in 45m`, `2h`, `1d30m`, `90s` | `recurrence=once`, `when=<now+Δ as aware ISO>` | Regex `^(?:in\s+)?(\d+(?:\.\d+)?)\s*(s|sec|m|min|h|hr|d|day)s?$` (case-insensitive) |
 | Recurring | `daily 06:30` | `recurrence=daily`, `when="06:30"` | Engine builds cron `M H * * *` |
 | Recurring | `weekly 1 06:30` | `recurrence=weekly`, `weekday=1`, `when="06:30"` | DOW canonical: 0=Sunday..6=Saturday (engine convention) |
-| Recurring | `cron */30 * * * *` | `recurrence=cron`, `cron_expression=…` | Raw 5-field expr |
-| **Rejected** | `every 1h`, `every day at 6` | — | The engine has no interval recurrence in `create_schedule` ⇒ reject with the hint *"use `cron */60 * * * *`"* |
+| Recurring | `cron 0 9 * * *` | `recurrence=cron`, `cron_expression="0 9 * * *"` | Raw 5-field expr — the documented **armable** cron example (daily-at-09:00, 24-h period). **Period rule (the D9 floor applies to the FIRST fire):** a raw cron whose period is **≤ 30 min** (e.g. `*/30 * * * *`) is **structurally unarmable** — the longest possible wait to its first fire is one period, so the first fire is always `< 30 min` away and the floor rejects it *every* time. A 60-min period (`0 * * * *`) is rejected whenever the arm lands inside the 30 min before the top of the hour. The documented example clears the floor except in the 30 min before 09:00 |
+| **Rejected** | `every 1h`, `every day at 6` | — | The engine has no interval recurrence in `create_schedule` ⇒ reject with the hint *"use a raw cron expression instead — e.g. `cron 0 */2 * * *` (every two hours)"*. The hint must **not** point at a ≤ 30-min period (`*/30 * * * *`): such a cron can never satisfy the floor on its first fire |
 | **Rejected** | anything else | — | Typed error listing the accepted forms (keep the surface small) |
 
 **Timezone defaulting.** The wrapper resolves the tz **once**, server-side, via the *same public primitives* the engine uses —
@@ -176,8 +183,8 @@ checklist (§8.6), because the section does not exist during phase 2.
 ## Design decisions made in this phase plan
 
 **Refinements vs the pre-rulings (explicit, no pre-ruling is re-litigated):** (i) the ≥30-min floor is checked
-**pre-create** on the wrapper-computed first fire, so a rejected alarm burns no label — the pre-ruling fixed the
-threshold, not the check point; (ii) the ari-only rule is enforced **three times** — a **privileged category**,
+**pre-create *and* pre-update** — always on the wrapper-computed first fire and on **both** branches (create and reuse), so a
+rejected alarm burns no label **and mutates no stored row** — the pre-ruling fixed the threshold, not the check point; (ii) the ari-only rule is enforced **three times** — a **privileged category**,
 the ari allow entry, and a runtime gate — because an allow-list is not a hard boundary and a literal tool-name
 entry bypasses the category gate (D10) — a strengthening, not a change; (iii) the one-shot post-fire action is
 **mark-done (engine-native)**, not auto-cancel — the pre-ruling allowed either, and cancel is terminal + label-burning
@@ -207,9 +214,17 @@ a `daemon.services.*` value is never discovered and the exact-equality drift pin
 
 **D3 — Small, prefix-disambiguated grammar (§tool contract).** No free-form natural language, no "tomorrow at 9" (the LLM computes
 the absolute ISO with its `time` tool when it wants that). `every <duration>` is rejected (no engine interval variant) rather than
-silently mistranslated.
+silently mistranslated. **The cron family is documented with an armable example only.** The engine's cron support is real — the
+create path validates the expression with `croniter` (`scheduling_service.py:684-694`) and stores it raw — so a raw 5-field
+expression is *accepted*; but the **≥30-min floor applies to the first fire** (D9) and a raw cron's longest possible wait to its
+first fire is **one period** ⇒ a cron with a **≤ 30-min period** (`*/30 * * * *`) is **structurally unarmable** — its first fire
+is always < 30 min away and the floor rejects it every time. The grammar therefore documents **`cron 0 9 * * *`** (24-h period)
+as the cron example, and the `every 1h` rejection hint points at a raw-cron form with a period comfortably above the floor
+(`cron 0 */2 * * *`) rather than at `*/60` — `*/60` is a non-portable step (60 is outside the 0-59 minute field range) and a
+60-minute period lands inside the floor window about half the time.
 
-**D4 — Dedupe/reuse by label: namespaced, reuse-in-place with an explicit resume, never cancel-to-free.**
+**D4 — Dedupe/reuse by label: namespaced, reuse-in-place with an explicit resume, never cancel-to-free — and never leave a
+duplicate armed.**
 
 *Namespace rule (A-27).* The human-supplied `label` is always stored as **`self-alarm:<label>`** (the **effective** label). Input is
 validated at **1-115 chars**: the engine caps `label` at 128 (`ScheduleCreatePayload.label`, `scheduling_service.py:131`) and the
@@ -226,38 +241,132 @@ status; cancel is terminal and `update` refuses cancelled rows (`:923-926`); no 
 cancelled label is burned forever**. The table has **no unique constraint on `name`**: two racing creates with the same label both
 survive and **both fire** (`scheduling_service.py:34-39`).
 
-Policy, in order (after the D11 `project_id` resolution — which must succeed before anything below runs):
+**Update-surface limits (load-bearing for the steps below).** `ScheduleUpdatePayload` carries **no `weekday` / `recurrence` /
+`cron_expression`** (`:208-214`) ⇒ an update can move the *time* but never the *shape*; the **weekly** branch rewrites only the
+minute/hour of the stored cron and **preserves the stored DOW** (`:973-982`); the **`cron`** branch **raises** on a `when`
+(`:983-986`); the stored zone is refreshed **only** when `payload.timezone` is set (`:931-936`); and the service **mutates before
+it answers** (adapter drained `:1011`, config written `:1026-1034`, adapter rebuilt/started `:1046-1047`) ⇒ a failed
+post-call assertion means the row is **already mutated and armed**.
 
-1. **Look the effective label up first** (`asyncio.to_thread(source_repo.get_source_config_by_name, effective_label)` — the seam
-   `task_schedule_cancel` uses, `daemon/tools/scheduling.py:206-216`).
-2. **No row ⇒ create.**
-3. **Row `running` (or `starting`) ⇒ reuse in place**: `update_schedule(source_id, {when, message, paused=False})`. `paused=False` is
-   mandatory, not cosmetic — it is the *resume* branch (`scheduling_service.py:1005-1012`) and it forces `enabled=True` before
-   the rebuild. **Assert the response**: `paused is False`, `status != "stopped"` (accept `running`/`starting`), and
-   `next_run_at_utc` equal to the requested instant (±1 s). If the assertion fails, do **not** report success — fall back to a
-   fresh label (the step-5 candidate naming).
-4. **Row `stopped` (a fired one-shot) ⇒ re-arm via `update_schedule(..., paused=False)`, asserted exactly as above.** The
-   `paused` omission is a **MUST-FIX defect**: without `paused=False` the update takes the "keep the previous enabled flag" branch
-   (`:1019-1023`), a fired row is `enabled=False` (`daemon/sources/registry.py:523`), the rebuild is skipped (`:1046-1047`), the
-   row stays `status='stopped'` and the boot filter skips it (`registry.py:291-310`) ⇒ **a silently disarmed alarm that never
-   fires**. Also **refuse a message-only re-arm of a fired label**: a `stopped` row must be re-armed with a **strictly later
-   instant**. Under the ≥30-min floor an identical-instant re-arm is already impossible (the stored instant is past), and a
-   message-only edit keeps the stored `run_at` ⇒ the rebuilt adapter re-enqueues under the same
-   `scheduler:{source_id}:{run_at}` key (`scheduler.py:1090-1094`) ⇒ a still non-terminal prior job within 24 h collapses the
-   submit (`job_queue_service.py:1424-1481`) ⇒ **silently never delivered**. The typed error names the fix ("a fired alarm must
-   be re-armed with a new, later time").
-5. **Row `cancelled` ⇒ label burned** ⇒ candidate `"<effective>-2"` (then `-3`, cap 5). **Collision-check every candidate** with
-   the same name lookup before creating (the lookup cannot be trusted alone — the create itself races), and after a successful
-   create **re-read by name and report duplicates** if more than one row matches: the engine cannot guarantee uniqueness, and the
-   lookup returns only the first match. **Never cancel the duplicate loser** — cancel burns the name and hides evidence; report
-   the duplicate id(s) in the response instead. Always echo the effective label actually created.
-6. **Recurrence-family mismatch ⇒ typed, per-family error.** `update_schedule` branches on the **stored** recurrence: `once`
-   re-anchors, `daily`/`weekly` edit the cron in place, **`cron` raises** (`scheduling_service.py:941-986`). Emit the family-
-   specific text (e.g. *"this alarm is `cron`; a cron alarm cannot be re-timed — cancel and use a new label"*), never one generic
-   "recurrence cannot be changed" string.
+Policy, in order (after the D11 `project_id` resolution — which must succeed before anything below runs). The sequence is
+**strictly ordered — verify-compatibility → floor → update + assert → fallback + neutralization**: **steps 1-3 never mutate the
+stored row**, step 4 is the only mutation, and step 6 is what makes the fallback path safe.
+
+1. **Step 1 — Resolve the label (read-only probe).** Look the effective label up
+   (`asyncio.to_thread(source_repo.get_source_config_by_name, effective_label)` — the seam `task_schedule_cancel` uses,
+   `daemon/tools/scheduling.py:206-216`). Read the stored row's `recurrence`, `schedule` (the raw cron), `timezone`, `run_at`,
+   `enabled` and `status` from the row / `row.config`. **This read is the compatibility probe — no engine write has happened yet,
+   and none may happen before step 4.** No row ⇒ the create path (step 4a).
+2. **Step 2 — Compatibility gate (BEFORE any mutation).** Compare the **requested** recurrence family with the **stored** one
+   and — for a weekly row — the **requested weekday** with the **stored DOW** (derived from the stored cron's 5th field; the
+   engine stores no `weekday` key — `scheduling_service.py:627`). Five outcomes:
+
+   | Stored row | Requested | Verdict | Action |
+   |---|---|---|---|
+   | `cancelled` | anything | **burned label** | ⇒ **step 4a** (fresh-label candidate; `update` refuses cancelled rows, `:923-926`) |
+   | `running` / `starting` / `stopped` | **same family**, same DOW (weekly), same expression (cron) | **compatible** | ⇒ **step 3** (floor) → **step 4b** (update) |
+   | `running` / `starting` / `stopped` | **different family** | **mismatch** | ⇒ **step 4a** (fresh-label candidate) — **`update_schedule` is never called** |
+   | `running` / `starting` / `stopped` | same family `weekly`, **different DOW** | **mismatch** | ⇒ **step 4a** — **`update_schedule` is never called** |
+   | `running` / `starting` / `stopped` | same family `cron`, **different expression** | **mismatch** | ⇒ **step 4a** — **`update_schedule` is never called** |
+
+   *Why the gate is mandatory (it is not an optimisation).* `ScheduleUpdatePayload` has **no `weekday` / `recurrence` /
+   `cron_expression` field** (`scheduling_service.py:208-214`); the weekly branch rewrites **only the minute/hour** of the stored
+   cron and **preserves the stored DOW** (`:973-982`); the `cron` branch **raises** on `when` (`:983-986`). An update can
+   therefore only ever move the *time*, never the *shape*: a weekly alarm asked to move to another weekday would **keep firing
+   on the old weekday**, and a `once` row handed a recurring request would be silently downgraded to a **one-shot** at the next
+   occurrence. Mismatches consequently **never reach the engine**: the original row is **never mutated**, so a duplicate-armed
+   state is impossible by construction. The per-family diagnostic text survives as the **fallback reason** in the response
+   (`fallback_reason: "recurrence_family_mismatch" | "weekly_dow_mismatch" | "cron_expression_mismatch"`, carrying the stored vs
+   the requested family/DOW/expression) — never one generic "recurrence cannot be changed" string, and never a bare failure that
+   leaves the agent unable to arm its alarm.
+3. **Step 3 — Floor on the wrapper-computed first fire (BOTH branches).** `_enforce_floor` runs on the **wrapper-computed first
+   fire** — **on the reuse path exactly as on the create path** (D9; worker note B2). The check is `first_fire - now >= 1800 s`
+   against the absolute instant and it runs **before any engine call** ⇒ a below-floor request **never mutates the stored row**
+   and never burns a label. The first-fire instant is computed per the **target row's own semantics**: `once` ⇒ the requested
+   absolute instant; `daily`/`weekly`/`cron` ⇒ `compute_next_cron_fire(<the cron the row will carry>, now, resolved_tz)` — for a
+   weekly row that cron is `(requested HH:MM, **stored DOW**)`, because the update preserves the stored DOW
+   (`daemon/util/tz.py:529` — the same helper the engine's `_compute_next_run` uses, `scheduling_service.py:469-478`). The
+   rejection text is family-aware and prints the computed next fire (D9).
+4. **Step 4 — Mutate exactly one row.**
+   - **4a — No row (or a burned/fresh candidate) ⇒ CREATE.** `create_schedule` with the **full** payload: `label` = the
+     effective label (or the candidate), **`agent="ari"`** — **required** by `ScheduleCreatePayload.agent`
+     (`scheduling_service.py:132`; the create path fail-fasts on an unknown agent, `:673-676`) and semantically correct: the
+     alarm fires **into ari** (worker note B1) — `message`, the family-shaped `when`/`weekday`/`cron_expression`,
+     `timezone=<resolved IANA name>`, `project_id` (D11), `instance_mode="new_instance"` (D6). **Duplicate-label handling:**
+     duplicate label ⇒ `ValueError("label already exists: …")` (`scheduling_service.py:668-670`); the name lookup ignores status
+     and the table has **no unique constraint on `name`** ⇒ two racing creates with the same label both survive and **both
+     fire** (`scheduling_service.py:34-39`). Therefore: **collision-check every candidate** with the same name lookup before
+     creating (the lookup cannot be trusted alone — the create itself races), and after a successful create **re-read by name
+     and report duplicates** if more than one row matches (the lookup returns only the first match). **Never cancel the
+     duplicate loser** — cancel burns the name and hides evidence; report the duplicate id(s) in the response instead. Always
+     echo the effective label actually created. **Burned-label naming:** a `cancelled` row ⇒ candidate `"<effective>-2"` (then
+     `-3`, cap 5).
+   - **4b — Compatible row ⇒ UPDATE in place, then ASSERT.** `update_schedule(source_id, {...})` with a **family-shaped
+     payload**:
+
+     | Stored family | Reuse payload | Notes |
+     |---|---|---|
+     | `once` | `{when: <requested ISO instant>, message: …, timezone: <resolved IANA>, paused: False}` | the `once` branch re-anchors the ISO to the **stored** zone (`scheduling_service.py:941-972`) |
+     | `daily` | `{when: "HH:MM", message: …, timezone: <resolved IANA>, paused: False}` | the branch rewrites the cron's minute/hour in place |
+     | `weekly` | `{when: "HH:MM", message: …, timezone: <resolved IANA>, paused: False}` | same — and the stored DOW is preserved (step 2 guarantees it is the requested one) |
+     | `cron` | `{message: …, timezone: <resolved IANA>, paused: False}` — **no `when` key at all** | the `cron` branch **raises** on a `when` (`:983-986`); the stored expression stays authoritative and unchanged |
+
+     - **`timezone` is MANDATORY in the reuse payload** — not cosmetic (amendment (a)). `update_schedule` refreshes the stored
+       zone **only when `payload.timezone` is set** and differs (`scheduling_service.py:931-936`) ⇒ omitting it leaves the stored
+       zone **stale**, and the re-anchored `when` plus every later cron evaluation then use the **old** zone ⇒ the alarm fires at
+       the wrong instant. The wrapper therefore always sends its **resolved IANA name** — the same value it hands the create path
+       — so the stored zone **cannot drift stale on reuse**. `timezone=None` is never sent on the update path.
+     - **`paused=False` is mandatory** — it is the *resume* branch (`scheduling_service.py:1005-1007`, `:1015-1017`) and it forces
+       `enabled=True` before the rebuild. Without it the update takes the "keep the previous enabled flag" branch
+       (`:1018-1023`), a fired row is `enabled=False` (`daemon/sources/registry.py:514-526`), the rebuild is skipped
+       (`:1046-1047`), the row stays `status='stopped'` and the boot filter skips it (`registry.py:291-310`) ⇒ **a silently
+       disarmed alarm that never fires**.
+     - **Assert the response**: `paused is False`, `status != "stopped"` (accept `running`/`starting`), and `next_run_at_utc`
+       equal to the **wrapper-computed first fire for the target row's semantics** (±1 s) — the requested absolute instant for
+       `once`, the computed next occurrence for `daily`/`weekly`/`cron`. A recurring row's response echo is a **next occurrence**,
+       never the requested wall-clock time ⇒ comparing it to the raw request would fail every recurring reuse.
+     - **A `stopped` row (fired one-shot, or paused) must be re-armed with a strictly later instant** (for a recurring row: the
+       requested time/expression must yield a next occurrence later than the stored one). Under the ≥30-min floor an
+       identical-instant re-arm of a **fired** row is already impossible (the stored instant is past), and a message-only edit
+       keeps the stored `run_at` ⇒ the rebuilt adapter re-enqueues under the same `scheduler:{source_id}:{run_at}` key
+       (`scheduler.py:1090-1094`) ⇒ a still non-terminal prior job within 24 h collapses the submit
+       (`job_queue_service.py:1424-1481`) ⇒ **silently never delivered**. The typed error names the fix ("a fired alarm must be
+       re-armed with a new, later time").
+5. **Step 5 — Fallback: fresh-label CREATE.** If the step-4b assertion fails, the tool **does not report success**. The wrapper
+   mints a **fresh label** (the step-4a candidate naming: `"<effective>-2"`, then `-3`, cap 5), **collision-checks** it with the
+   same name lookup, and creates it through the **same create path as step 4a** (full payload, `agent="ari"`, the
+   collision-check + post-create duplicate report). **But the step-4b update has already mutated and re-armed the original row**
+   (`update_schedule` writes the config at `:1026-1034` and rebuilds/starts the adapter at `:1046-1047` **before** it returns)
+   ⇒ the original is now a **second armed row** for the same request ⇒ **step 6 is mandatory**.
+6. **Step 6 — Neutralize the mutated original (mandatory on the fallback path).** The mutated original MUST be disarmed by
+   explicit design. **The plan mandates a PAUSE: `update_schedule(source_id, {paused: True})`** — the engine's own
+   "disarm-without-destroying" primitive (`paused=True` ⇒ `config_enabled=False` + `status='stopped'`, `:1013-1014`; the adapter
+   is drained at `:1011` and **not** rebuilt at `:1046-1047` ⇒ the row cannot fire, while the row, its history **and its label
+   survive**).
+   - *Why pause — and not the two alternatives.* (a) **Not "push its next fire beyond the new alarm's"**: a moved `when` leaves the
+     original **armed**, so it still fires (later) ⇒ a *delayed second alarm* — the same "fires twice" defect with a different
+     trigger; and `update` can move `when` but **not the recurrence family** (`scheduling_service.py:208-214`, `:941-986`), so for
+     a recurring original there is no `when` that expresses "skip the next occurrence" at all. (b) **Not "cancel with a note"**:
+     cancel is **terminal** and **burns the label forever** (`:923-926`; no hard delete exists for scheduler rows) ⇒ every
+     assertion failure would burn the agent's own `self-alarm:<label>` name and push it down the `-2` chain for good.
+     (c) **Pause** is reversible, does **not** burn the label (the next request finds the row `stopped` and re-arms it under
+     step 4b), needs **no** `when` — so the "cannot change the recurrence family" gap does not bite — and it **preserves the
+     evidence** of the failed reuse. The "never cancel the duplicate loser" rule (step 4a) is therefore **extended, not
+     contradicted**: the create-race loser is **never cancelled** (it is reported), and the mutated original is **paused**
+     (also never cancelled, and not destroyed).
+   - *Mandatory shape.* The pause is issued **unconditionally** on the fallback path (idempotent for an already-disarmed row) and
+     carries **no `when`** — the row's `run_at` stays as the failed update left it (the row is disarmed, not re-timed). The
+     wrapper **asserts** the pause response (`paused is True`, `status == 'stopped'`).
+   - *If the pause itself fails* ⇒ the tool returns a typed `ERROR` naming **both** rows (the mutated original and the fresh
+     label) and their ids, and **never** claims success — a still-armed original beside a fresh label is exactly the
+     duplicate-armed state this step exists to prevent.
+7. **Step 7 — Report.** The response echoes the **effective label actually created/armed** and, on the fallback path, the
+   **neutralized original** (its `source_id` + `paused` state) so the agent can see that the old label is disarmed and which
+   label is live. A mismatch fallback (step 2) additionally discloses the **untouched pre-existing row** (label + `source_id` +
+   state): it is still armed with its **own** schedule — the honest consequence of not mutating it.
 
 **D5 — One-shot post-fire: "mark-done" is ENGINE-NATIVE; the wrapper does not cancel.** After a one-shot fires the adapter's
-`on_complete_callback` sets `status='stopped'` + `enabled=False` (`registry.py:515-526`); the row persists (history preserved) and
+`on_complete_callback` sets `status='stopped'` + `enabled=False` (`registry.py:514-526`); the row persists (history preserved) and
 is **not** cancelled. Cancelling would be worse on every axis: terminal, burns the label, hides the row from the default list,
 destroys the "it fired" evidence. Clutter control = **status filter** (`running` = armed; `task_schedule_list` already supports it).
 **Two list facts the tool doc must carry (A-21):** the default `list_schedules(status=None)` is **not** status-filtered — it returns
@@ -314,13 +423,20 @@ board's `due_at` stays the **source of truth for the deadline**; the alarm is th
 transition stays Ari-driven. The wrapper embeds the board id **verbatim** (validated `^wi-[0-9a-f]{8}$`) and instructs the fresh
 instance to `board_get` it ⇒ phase 2 depends on phase 1 only through the pinned id format, never its internals.
 
-**D9 — ≥30-minute floor lives in the wrapper, PRE-create.** `_enforce_floor` runs on the wrapper-computed first-fire instant
-**before** any engine call ⇒ a rejected alarm creates **no row and burns no label** (create → validate → cancel would burn the
-label, D4). The floor is stated in **minutes** (the user-facing policy) but compared in **seconds** against the absolute instant
+**D9 — ≥30-minute floor lives in the wrapper, PRE-create *and* PRE-update (both branches).** `_enforce_floor` runs on the
+wrapper-computed first-fire instant **before any engine call** ⇒ a rejected alarm creates **no row and burns no label**
+(create → validate → cancel would burn the label, D4). **The same floor is re-enforced on the REUSE path** (worker note B2):
+the check runs on the wrapper-computed first fire for **both** the create branch **and** the reuse/re-arm branch (D4 step 3),
+**before** `update_schedule` is called ⇒ a below-floor reuse **never mutates the stored row** (the update mutates before it
+answers — `scheduling_service.py:1011`, `:1026-1034`, `:1046-1047` — so the floor must run *before* it, not after it).
+The floor is stated in **minutes** (the user-facing policy) but compared in **seconds** against the absolute instant
 (`first_fire - now >= 1800 s`), and applies to the **first-fire offset only**: a recurring alarm whose first fire is ≥30 min away is
-accepted; later fires are unconstrained (≥ one recurrence period away). The recurring-arm-now-imminent case (`daily 06:30` armed at
-06:15 ⇒ first fire in 15 min) is **rejected**, not auto-skipped to tomorrow — silently moving the user's stated schedule is worse
-than an explicit error; the escape hatch is an absolute ISO for the next occurrence (OQ-2). **The rejection text is
+accepted; later fires are unconstrained (≥ one recurrence period away). **A recurring arm whose first fire is < 30 min away is
+rejected, not auto-skipped** (`daily 06:30` armed at 06:15 ⇒ first fire in 15 min ⇒ reject) — silently moving the user's stated
+schedule is worse than an explicit error; the escape hatch is an absolute ISO for the next occurrence (OQ-2). **The same rule
+makes a short-period raw cron unarmable**: a cron whose period is ≤ 30 min (e.g. `*/30 * * * *`) has a first fire **always**
+< 30 min away (the longest possible wait is one period) ⇒ it can never satisfy the floor ⇒ the grammar table documents
+`cron 0 9 * * *` (24-h period) as the armable cron example. **The rejection text is
 family-aware and always prints the computed next fire (A-22)** — bash-sleep is *wrong advice* for a recurring schedule:
 
 ```
@@ -416,11 +532,11 @@ home for the grammar only by reference — the tool doc stays canonical. **Write
 | 2 | Create `daemon/services/self_alarm_service.py` — pure helpers: `parse_when_or_every`, `resolve_fire_plan` (tz + cron/anchor), `enforce_min_horizon`, `compose_alarm_message`, `validate_board_id` | 1 | Pure module: no tool imports, no engine calls, no DB; 100% unit-testable |
 | 3 | Create `daemon/tools/self_alarm.py` — closure factory `create_self_alarm_tools(service, *, source_repo, current_instance_id, agent_id, agent_tag)`, `SelfAlarmInput` BaseModel, `@register_tool_category("self-alarm")` **above** `@tool(args_schema=…)`, `self_alarm._full_doc_` carrying the five **Tool-doc obligations** | 2 | Tool returns a dict on success and `"ERROR: …"` on every failure; never raises; `_full_doc_` doc-pin test green |
 | 4 | Register **six surfaces**: `PRIVILEGED_TOOL_CATEGORIES` + `DYNAMIC_TOOL_NAMES` + `KNOWN_TOOL_NAMES` + `CATEGORY_MODULES["self-alarm"] = "daemon.tools.self_alarm"` in `daemon/tools/_tool_registry.py`; the **five exact-set pins** (one line each); `create_self_alarm_tools_if_available(manager, …)` + `tools.extend(…)` in `daemon/tools/instance.py` **before** `create_help_tool`/`scan_tools_for_full_docs`/`_apply_tool_filter` (next to the scheduling extend, `:5773-5775`) | 3 | Tool visible in a real instance tool list; all five pins exact-set green; a decorator-only variant is proven insufficient (comment mirrors `:2286-2289`); `CATEGORY_MODULES` value is a `daemon.tools.*` path |
-| 5 | Dedupe/reuse implementation (D4): `self-alarm:` namespace → `project_id` resolve-first → label lookup → create / reuse-via-`update_schedule(paused=False)` + response assertion / `stopped`-label strictly-later re-arm (message-only REFUSED) / burned-label `-2` candidate collision-check + post-create duplicate report (never cancel the loser) / per-family recurrence-mismatch error | 3, 4 | Each branch covered by a unit test; `paused=False` and the `paused/status/next_run_at` assertion proven; the effective label is always echoed |
+| 5 | Dedupe/reuse implementation (D4) — the **strictly ordered** sequence **verify-compatibility → floor → update+assert → fallback+neutralization**: `self-alarm:` namespace → `project_id` resolve-first (D11) → **step 1** label lookup (read-only) → **step 2** compatibility gate (family + weekly-DOW + cron-expression; a mismatch ⇒ fresh-label create with **no `update_schedule` call**) → **step 3** floor on the wrapper-computed first fire (**both** branches, before any engine call) → **step 4a** create (`agent="ari"`, `timezone=<resolved IANA name>`, candidate collision-check + post-create duplicate report, never cancel the loser) / **step 4b** reuse-via-`update_schedule({when?, message, timezone: <resolved IANA name>, paused=False})` + the response assertion (`paused is False`, `status != 'stopped'`, `next_run_at_utc` == the **wrapper-computed first fire** ±1 s) + `stopped`-label strictly-later re-arm (message-only REFUSED) → **step 5** fallback create → **step 6** **neutralize the mutated original by pausing it** (`update_schedule(source_id, {paused: True})`, asserted) → **step 7** report (echo the armed label; disclose the neutralized original / the untouched pre-existing row) | 3, 4 | Each branch covered by a unit test; **a forced assertion failure leaves exactly ONE armed row** (the fresh label) and the mutated original **paused**; a compatibility mismatch and a below-floor reuse issue **zero** `update_schedule` calls; the reuse payload always carries `timezone=<resolved IANA name>`; the effective label is always echoed |
 | 6 | **Three-layer** ARI-only: privileged category + runtime gate (`agent_id != "ari"` ⇒ error) + `"self-alarm"` added to **`agents/ari/meta.json`** only | 3 | `grep -rl "self-alarm" agents/*/meta.json` → exactly one file; an **empty-allow** non-ari agent resolves **no** `self_alarm` (`resolve_tool_filter`) |
 | 7 | **Prompt surface — DEFERRED to the conventions step** ([plan-overview.md §8](plan-overview.md), step 4). Phase 2 ships **only** the tool + `_full_doc_` + the error hints; the `## Self-Alarm` section of `agents/ari/tools_note.md` is authored in step 4, where its manifest row is re-stamped **in the same commit**. | 3 | Phase 2 edits **no** prompt artefact and carries **no** re-stamp task (`tools_note.md` **IS** manifest-covered — the 161-entry committed manifest `agents/.prompt-artifacts.sha256`, row `:28`; the C1① consolidation ruling forbids a second re-stamp pass). The **prompt-content assertions** that used to live here move to the conventions step's checklist (guide forbidden-token + cross-ref closure). |
-| 8 | Tests: `tests/unit/test_self_alarm_service.py` (grammar, floor boundary, tz parity, message composition, board-id regex) | 2 | Boundary: 29 m ⇒ reject, 30 m ⇒ accept, 30 m + 1 s ⇒ accept; **family-aware rejection text** with the computed next fire (one-shot vs recurring); parity vs `_resolve_schedule_timezone` matrix |
-| 9 | Tests: `tests/unit/tools/test_self_alarm_tools.py` (mocked service; `await tool.coroutine(...)`) | 3, 5 | Covers create / reuse (`paused=False` + response assertion) / stopped-label strictly-later re-arm / **message-only re-arm refusal** / burned-label `-2` collision-check + duplicate report / per-family recurrence-mismatch / non-ari gate / non-ari **empty-allow** gate / `project_id`-resolve-first (no row, no label burn) / family-aware floor text with computed next fire / `lateness_cap_seconds` + `tz_warning` + actual `status` echo / engine-error paths |
+| 8 | Tests: `tests/unit/test_self_alarm_service.py` (grammar, floor boundary, tz parity, message composition, board-id regex) | 2 | Boundary: 29 m ⇒ reject, 30 m ⇒ accept, 30 m + 1 s ⇒ accept — **on both branches** (the floor is branch-independent: create **and** reuse); **family-aware rejection text** with the computed next fire (one-shot vs recurring); the ≤ 30-min-period cron is rejected by the floor (`*/30 * * * *` ⇒ its first fire is always < 30 min away) while the documented example `cron 0 9 * * *` is accepted; parity vs `_resolve_schedule_timezone` matrix |
+| 9 | Tests: `tests/unit/tools/test_self_alarm_tools.py` (mocked service; `await tool.coroutine(...)`) | 3, 5 | Covers create / reuse (`paused=False` + response assertion) / **reuse payload shape: `timezone` == the resolved IANA name; no `when` key for a stored `cron` row** / **step-2 compatibility gate: a family mismatch and a weekly-DOW mismatch ⇒ zero `update_schedule` calls + a fresh-label create; the stored row is untouched** / **step-3 reuse-path floor: 29 m ⇒ `ERROR` + zero `update_schedule` calls; 30 m and 30 m + 1 s ⇒ accepted** / **steps 5-6 fallback: a forced assertion failure ⇒ a fresh-label create AND the mutated original paused (`{paused: True}` issued, `paused is True` asserted) ⇒ exactly one armed row** / **a failed pause ⇒ typed `ERROR` naming both rows, never a success claim** / stopped-label strictly-later re-arm / **message-only re-arm refusal** / burned-label `-2` collision-check + duplicate report / the mismatch fallback's `fallback_reason` + the disclosure of the untouched pre-existing row / non-ari gate / non-ari **empty-allow** gate / `project_id`-resolve-first (no row, no label burn) / family-aware floor text with computed next fire / `lateness_cap_seconds` + `tz_warning` + actual `status` echo / engine-error paths |
 | 10 | Tests: `tests/unit/test_self_alarm_registration.py` (mirror `tests/unit/test_scheduling_registration.py`): allow ⊆ registry universe, category resolution, name in `DYNAMIC_TOOL_NAMES` + `KNOWN_TOOL_NAMES`, **`"self-alarm"` in `PRIVILEGED_TOOL_CATEGORIES`**, **ari-only** allow, the five tool-doc obligation pins | 4, 6, 7 | Green; asserts NO other agent grants the category; `resolve_tool_filter` for an empty-allow non-ari agent yields no `self_alarm`. The **tools_note forbidden-token + cross-ref assertions** are NOT in this phase — the section is authored in the conventions step, so they move to that step's checklist ([plan-overview.md §8.6](plan-overview.md)) |
 | 11 | Regression run: the new tests + `tests/unit/test_scheduling_registration.py` + `tests/unit/tools/test_frozen_tool_name_discovery.py` + `tests/unit/tools/test_tool_config_validation_boot.py` + **the five privileged-set pin files** + the seal test | 8-10 | Zero NEW failures; all five exact-set pins green with **ten** entries; the seal-test mismatch count **before == after** (the measured baseline at this HEAD is **7** — the tripwire is **already red** on 7 pre-existing stale pins, which are **NOT ours to fix**; the acceptance is "no NEW stale pins beyond the baseline", NOT "green") — phase 2 edits **no** prompt artefact |
 | 12 | Record the deviations/notes into the phase-2 decisions feed (`decisions.md` in this planning dir) | 1-11 | Each of D1-D13 has an anchor; deviations from pre-rulings flagged explicitly |
@@ -454,21 +570,36 @@ home for the grammar only by reference — the tool doc stays canonical. **Write
   (frozen-universe membership).
 - **Floor**: 29 min ⇒ `ERROR` + the **family-appropriate** hint + **no** engine call; 30 min ⇒ accept; 30 min + 1 s ⇒ accept;
   past-due absolute ⇒ reject; 90 s relative ⇒ reject; a recurring `daily 06:30` armed 15 min before the fire ⇒ the recurring-family
-  text naming the **computed next fire** (never the bash-sleep hint).
+  text naming the **computed next fire** (never the bash-sleep hint). **The same boundary on the REUSE path** (D4 step 3 — the
+  floor is **branch-independent**): 29 min ⇒ `ERROR` + **zero `update_schedule` calls** (the stored row is **not** mutated);
+  30 min ⇒ accepted; 30 min + 1 s ⇒ accepted. A raw cron with a ≤ 30-min period (`*/30 * * * *`) ⇒ rejected (its first fire is
+  always < 30 min away); the documented example `cron 0 9 * * *` ⇒ accepted.
 - **Grammar**: relative (`45m`, `in 2h`, `1d30m`), absolute aware/naive, `daily 06:30`, `weekly 1 06:30`,
-  `cron */30 * * * *`, `every 1h` ⇒ rejected with the cron hint, garbage ⇒ typed error listing the forms; a label already
+  `cron 0 9 * * *`, `every 1h` ⇒ rejected with the raw-cron hint, garbage ⇒ typed error listing the forms; a label already
   prefixed `self-alarm:` ⇒ typed "prefix is added automatically" error; a **116-char** label ⇒ typed length error (115 is the max).
+  The accepted cron example is the **armable** `cron 0 9 * * *` (24-h period) — `*/30 * * * *` is **not** offered as an example,
+  because under the floor its first fire is always < 30 min away.
 - **Recurring parity**: the wrapper's first fire == the engine's `next_run_at_utc` echo (≤1 s) for `daily`,
   `weekly`, `cron` — a tz/first-fire parity test pins the wrapper against the engine.
 - **Tz parity**: the wrapper's resolved zone == `scheduling_service._resolve_schedule_timezone` for the matrix
   {explicit tz, user setting set/unset, env default set/unset} — guards against chain drift; the echoed `tz_warning`
   is the **wrapper's own** (the engine's chain is short-circuited by an explicit zone).
 - **Dedupe / re-arm**: no row ⇒ create; `running`/`starting` ⇒ `update_schedule(..., paused=False)` (no create) with the response
-  asserted (`paused is False`, status not `stopped`, `next_run_at_utc` == requested ±1 s); `stopped` ⇒ re-arm via update
+  asserted (`paused is False`, status not `stopped`, `next_run_at_utc` == the **wrapper-computed first fire** ±1 s — the requested
+  instant for `once`, the computed **next occurrence** for `daily`/`weekly`/`cron`); `stopped` ⇒ re-arm via update
   **with `paused=False` + the same assertion**, and a **message-only re-arm is REFUSED** (typed error: a fired alarm needs a
   new, later time); `cancelled` ⇒ create with `"<effective>-2"` (**candidate collision-checked**) and the effective label echoed;
-  two rows sharing a name ⇒ the duplicate is **reported**, never cancelled; per-family recurrence-mismatch ⇒ typed error
-  (`cron` raises, `once` re-anchors, `daily`/`weekly` edit the cron).
+  two rows sharing a name ⇒ the duplicate is **reported**, never cancelled.
+- **Compatibility gate (D4 step 2 — before any mutation)**: a stored `once` row + a `daily` request, a stored `daily` row + a
+  `once` request, a stored `weekly` row + a **different weekday**, and a stored `cron` row + a **different expression** ⇒
+  **zero `update_schedule` calls** (the stored row is **not** mutated) + a fresh-label create carrying `fallback_reason`; the
+  stored row's **DOW is derived from the stored cron's 5th field** (the engine stores no `weekday` key —
+  `scheduling_service.py:627`), not from a `weekday` field.
+- **Fallback + neutralization (D4 steps 5-6)**: a forced assertion failure (the mocked update returns a wrong `next_run_at_utc`)
+  ⇒ a fresh-label create proceeds **and** the mutated original is **paused** (`update_schedule(source_id, {paused: True})` issued
+  and asserted: `paused is True`, `status == 'stopped'`) ⇒ **exactly one armed row** survives (the fresh label) ⇒ "fires exactly
+  once" holds; the response discloses the neutralized original's `source_id`. A **failed pause** ⇒ typed `ERROR` naming **both**
+  rows — never a success claim.
 - **Gate**: a non-`ari` caller ⇒ `ERROR` and no engine call; an **empty-allow** non-ari agent (watcher-shaped) ⇒
   `resolve_tool_filter` yields no `self_alarm` (privileged-category proof).
 - **Ordering / echo**: unresolvable `project_id` ⇒ `ERROR` **before** any label lookup (assert zero repository writes);
@@ -505,6 +636,9 @@ home for the grammar only by reference — the tool doc stays canonical. **Write
 | 15 (= **R43**) | **The default schedule list hides armed alarms** — not status-filtered, repository page capped at 100 rows `created_at DESC`; `stopped` means *dispatched*, not *acted upon* (architect §4.4 P2-2/P2-3) | 🟡 Medium | High | Tool doc: use `status='running'` to list armed alarms; state that stopped rows push armed ones out of the default page |
 | 16 (= **R44**) | **Label namespace is shared with non-scheduler sources** — `get_source_config_by_name` has no `source_type` filter, so an unprefixed label can collide with an MCP/Slack source name invisible in the list (architect §3.2 d) | 🟡 Medium | Medium | `self-alarm:` prefix on every wrapper-minted label (D4) |
 | 17 (= **R46**) | **`tz_warning` erasure** — passing an explicit zone short-circuits the engine's tz chain, so the engine's UTC-fallback warning is suppressed (architect §4.4 P2-4) | 🟡 Low | Medium | Echo the **wrapper's own** warning in `tz_warning` |
+| 18 (= **R47**) | **Duplicate-armed alarm on the reuse path** — `update_schedule` **mutates the stored row** (`when`/`message`/`timezone`/`enabled=True`) and **drains + rebuilds/starts the adapter before it returns** (`scheduling_service.py:1011`, `:1026-1034`, `:1046-1047`); if the ±1 s assertion *then* fails and the fallback mints a fresh label, the ALREADY-MUTATED original stays **armed** (wrong weekday / stale tz) ⇒ **two** alarms fire for one request ⇒ violates the plan's own "fires exactly once" goal (Objective, `phase2-plan.md:18`) | 🔴 High | Low | **CLOSED by this amendment** — D4 is now a strictly ordered sequence (**verify-compatibility → floor → update+assert → fallback+neutralization**): (b) the step-2 compatibility gate rejects a family / weekly-DOW / cron-expression mismatch **before any mutation** (fresh label, **zero** engine writes) ⇒ a mutated-original state cannot arise there; (a) the reuse payload always carries `timezone=<resolved IANA name>` ⇒ the stored zone cannot go stale on reuse; (c) the fallback path **MUST** neutralize the mutated original by **pausing** it (`update_schedule(source_id, {paused: True})` — reversible, does **not** burn the label, needs no `when`, so the "cannot change the recurrence family" gap does not bite) ⇒ exactly **one** armed row survives; the pause is asserted and a failed pause is reported as a typed error naming both rows |
+| 19 (= **R48**) | **A cron example that is structurally unarmable** — a raw cron with a ≤ 30-min period (e.g. `*/30 * * * *`) has a first fire **always** < 30 min away (the longest possible wait is one period) ⇒ the D9 floor rejects it every time ⇒ the documented example would have been unusable; the `every 1h` hint also pointed at the non-portable `*/60` step (60 is outside the 0-59 minute field range) | 🟡 Medium | — | **CLOSED** — the grammar table now documents `cron 0 9 * * *` (24-h period) as the **armable** cron example and states the period rule explicitly; `*/30 * * * *` is removed from the grammar table, the test list and the D3 rejection hint (now `cron 0 */2 * * *`) |
+| 20 (= **R49**) | **A family/DOW mismatch now creates a second row instead of erroring** — the approver-mandated fresh-label route (D4 step 2) leaves the pre-existing row **untouched and still armed with its own schedule** ⇒ two reminders can coexist under one agent label | 🟡 Medium | Low | The response **discloses** the untouched pre-existing row (label + `source_id` + state) beside the newly created one and carries `fallback_reason`; no schedule is destroyed (the original is never mutated, never cancelled). Recorded for approver adjudication |
 
 ---
 
@@ -524,6 +658,7 @@ home for the grammar only by reference — the tool doc stays canonical. **Write
 | 10 | A fired label re-arms **armed** | re-arm unit tests | `paused=False` passed and asserted; a message-only re-arm is refused |
 | 11 | Lateness exposure is visible | response field + doc pins | `lateness_cap_seconds` echoed; both cap states + the skip signature documented |
 | 12 | The user-visible surface is named | doc pins | The board is promised; a chat ping is explicitly **not** promised |
+| 13 | **The reuse path cannot leave a duplicate armed** | the step-2 / step-3 / fallback tests + engine-call counters | A compatibility mismatch and a below-floor reuse each issue **zero** `update_schedule` calls (the stored row is untouched); a forced assertion failure leaves **exactly one armed row** (the fresh label) with the mutated original **paused** (`paused is True` in the pause response); the reuse payload always carries `timezone=<resolved IANA name>` |
 
 ---
 
@@ -535,8 +670,11 @@ home for the grammar only by reference — the tool doc stays canonical. **Write
    not bridge.
 2. **Recurring arm-now-imminent.** → **RESOLVED: confirm reject**, with a **family-aware** error text that always prints
    the computed next fire (D9).
-3. **Interval recurrence.** → **DEFERRED-to-v2.** Keep rejecting `every 1h` with the `cron */60 * * * *` hint; a real
-   engine change is a separate commission.
+3. **Interval recurrence.** → **DEFERRED-to-v2.** Keep rejecting `every 1h` with the raw-cron hint (`cron 0 */2 * * *`);
+   a real engine change is a separate commission. (The hint was re-pointed off `cron */60 * * * *`: `*/60` is a
+   non-portable step — 60 is outside the 0-59 minute field range — and a 60-minute period lands inside the ≥30-min
+   first-fire floor window about half the time. The documented cron example is `cron 0 9 * * *` — a 24-h period,
+   armable.)
 4. **Lateness-cap policy.** → **RESOLVED: default `None`, no cap in v1.** Document both cap states **and** the skip-loop
    signature, and echo `lateness_cap_seconds` in the response (Tool-doc obligation #1). The deployment question is an
    operator decision, recorded as Risk 1.
@@ -555,8 +693,8 @@ Leader accepted all verdicts as binding; the amendments below are folded into th
 | ID | Pri | Folded into |
 |---|---|---|
 | **A-18** | P0 | Scope line 23, D10 (privileged category + five exact-set pins + empty-allow test + 8→9→10→12 trajectory), file map, tests, risks, success criteria |
-| **A-19** | P0 | D4 step 3/4 — `paused=False` on reuse, response assertion, fresh-label fallback, message-only re-arm REFUSED |
-| **A-20** | P0 | D4 step 5 — `-2` candidate collision-check, post-create duplicate report, never cancel the loser |
+| **A-19** | P0 | D4 steps **4b/5** (numbered 3/4 before the iteration-002 renumber) — `paused=False` on reuse, response assertion, fresh-label fallback, message-only re-arm REFUSED |
+| **A-20** | P0 | D4 steps **4a/5** (numbered 5 before the iteration-002 renumber) — `-2` candidate collision-check, post-create duplicate report, never cancel the loser |
 | **A-21** | P0 | D5 — default list not status-filtered, 100-row cap, `status='running'` = armed, `stopped` = dispatched |
 | **A-22** | P0 | D9 — family-aware rejection text with the computed next fire |
 | **A-23** | P0 | Tool-doc obligation #1 + success return (`lateness_cap_seconds`), engine facts, risks 1/17 |
@@ -566,3 +704,19 @@ Leader accepted all verdicts as binding; the amendments below are folded into th
 | **A-27** | P1 | D4 namespace rule — `self-alarm:` prefix on all wrapper labels, collisions invisible in the list |
 | **A-28** | P1 | D2 registry contract + task 4 + file map — `CATEGORY_MODULES` value MUST be a `daemon.tools.*` path; six surfaces |
 | **A-29** | P1 | Risks 12–17 (= R33, R34, R35, R43, R44, R46) |
+
+---
+
+## Amendment log (iteration 002 — approver blocking fixes, 2026-10-20)
+
+Approver tracking: `/home/nea/ensemble-src/.agents/approver/ari-tools-tracking.md` — Iteration 001 (**REJECTED**, 2 blocking / 10 notes).
+The body above already reads as-if-designed-so; this table records where each iteration-002 amendment was folded in.
+
+| ID | Source | Folded into |
+|---|---|---|
+| **I2-BLOCK2** | Approver blocking #2 — D4 reuse path double-arm | D4 rewritten as a **strictly ordered sequence — verify-compatibility → floor → update+assert → fallback+neutralization** (steps 1-7): step-2 compatibility gate (family / weekly-DOW / cron-expression ⇒ fresh label, **the original row is never mutated**), step-3 floor on **both** branches, step-4b reuse payload with the **mandatory `timezone=<resolved IANA name>`**, step-5 fallback create, step-6 **neutralization of the mutated original by pause** (with its own justification + test), step-7 report/disclosure; the engine-facts rows (update-payload shape, tz-refresh-only-if-set, weekly-DOW preservation, mutate-before-answer); D9; task 5 / 8 / 9; Tests bullets; Risks 18-20; Success criterion 13 |
+| **I2-B1** | Approver note B1 — engine facts / payload shape | Engine-facts table: `create_schedule` **requires** `payload.agent` (`ScheduleCreatePayload.agent`, `scheduling_service.py:132`; fail-fast on an unknown agent, `:673-676`) ⇒ the wrapper sets **`agent="ari"`** on every create (the alarm fires *into* ari); D4 step 4a (the create payload) |
+| **I2-B2** | Approver note B2 — floor re-enforcement on the reuse path | D4 step 3 + D9 (the floor runs on the wrapper-computed first fire for **both** the create and the reuse branch, **before** any engine call, so a below-floor reuse never mutates the stored row); task 8 boundary test; Tests bullet (reuse path 29 m / 30 m / 30 m + 1 s) |
+| **I2-B8** | Approver note B8 (merged into blocking #2(a)) | Engine-facts row (`update_schedule` refreshes the stored zone **only** when `payload.timezone` is set, `:931-936`) + D4 step 4b (the reuse payload **must** carry `timezone=<resolved IANA name>` ⇒ the stored zone cannot drift stale) |
+| **I2-BLOCK2b** | Approver blocking #2 (b) — the family/DOW mismatch rule | D4 step 2 — a family / weekly-DOW / cron-expression mismatch routes **directly to a fresh-label create without calling `update_schedule` at all**; the per-family diagnostic survives as `fallback_reason` (superseding the former "typed per-family error" rule, which would have left the agent unable to arm); D4 step 7 (the untouched pre-existing row is disclosed); Risk 20 |
+| **I2-CR** | Approver note — the cron example is unarmable | Grammar table (the cron family documents the **armable** `cron 0 9 * * *` + the period rule: a ≤ 30-min period is structurally unarmable); D3 `every 1h` hint (`cron 0 */2 * * *` — the non-portable `*/60` step is gone); D9; Tests bullet; Resolved question 3; Risk 19 |
