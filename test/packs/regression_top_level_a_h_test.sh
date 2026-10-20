@@ -34,6 +34,7 @@ cd "$PROJECT_DIR"
 # RESULT-echo: `|| EXIT_CODE=$?` list-context capture — under `set -e`, a bare
 # `EXIT_CODE=$?` after a failing command never executes (silent exit, no RESULT).
 EXIT_CODE=0
+# performance/ split out 2026-10-20 (uninterruptible 1x10k hang cell + 30s/cell producers blew the 280s cap — see RESULTS/2026-10-20-question-pause-resume-asymmetry-functional-verification.md §5)
 timeout 280s uv run pytest \
   $(ls tests/test_[a-h]*.py 2>/dev/null) \
   tests/api/ \
@@ -41,7 +42,6 @@ timeout 280s uv run pytest \
   tests/property/ \
   tests/migration/ \
   tests/static/ \
-  tests/performance/ \
   tests/lint/ \
   -n auto --tb=short -q -rf \
   --deselect "tests/test_dependency_bus.py::TestGenerationCounterBump::test_per_parent_lock_serializes_db_insert" \
