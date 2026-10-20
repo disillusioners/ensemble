@@ -152,7 +152,7 @@ P3-D13 keeps `board-link` in its own category for three reasons; the second ("ph
 
 **Ruling: batch in Phase 1.** Add `list_items(..., with_notes: bool = False)` + internal batch loaders for notes **and tags** (`WHERE item_id IN (…)` then group in Python; ≈15–20 lines). The **tool's item shape is unchanged** (no `notes[]` in `board_list`), so the payload and truncation behaviour are untouched.
 
-Cost: ≤3 queries per board render, versus 1+50 = 51 (worst case 201 at the tool's own ceiling). Phase 3 keeps its tolerant "notes unavailable" fallback so it works against **both** shapes. Do **not** copy the `project` repository's per-row tag hydration (`repository.py:87-89`).
+Cost: ≤3 queries per board render, versus 1+50 = 51 (worst case 201 at the tool's own ceiling). Phase 3 reads the **one** `list_items(..., with_notes=True)` call — a row with a MISSING `notes` key means **ZERO notes**; there is **no** per-row `get_item` fallback and **no** "notes unavailable" state (deviation **P3-DEV-2**). Do **not** copy the `project` repository's per-row tag hydration (`repository.py:87-89`).
 
 ### 2.5 Append-only notes — strengthen the proof
 
@@ -383,7 +383,7 @@ Escaping contract — every site below is escaped; **URL-context values are `quo
 | 9 | Lateness-cap deployment policy | P2-OQ-4 | ✅ **RESOLVED** | Default `None`; no cap in v1; document both behaviours + the skip state's signature; echo `lateness_cap_seconds` (§4.1) |
 | 10 | Auto-arm v2 confirmation | P2-OQ-5 | ✅ **RESOLVED** | Confirm the deferral (five blockers stand); v1 = prompt convention |
 | 11 | Alarm scope semantics | P2-OQ-6 | ✅ **RESOLVED** | Ari-for-ari only. "Arm for others" is a different tool. |
-| 12 | Notes hydration N+1 / list projection | P3-OQ-1 | ✅ **RESOLVED** | Batch in Phase 1 (`with_notes=True`); item shape unchanged; Phase 3 keeps the fallback (§2.4) |
+| 12 | Notes hydration N+1 / list projection | P3-OQ-1 | ✅ **RESOLVED** | Batch in Phase 1 (`with_notes=True`); item shape unchanged; Phase 3 reads the ONE `with_notes=True` call — the per-row `get_item` fallback is GONE (deviation **P3-DEV-2**; §2.4) |
 | 13 | Interstitial copy | P3-OQ-3 | ✅ **RESOLVED** | Accept the shared interstitial; **no** board-specific template (gate-contract risk for zero gain) |
 | 14 | Board layout | P3-OQ-4 | ✅ **RESOLVED** | Flat filtered table with `<details>` per row; rendering-only, no schema/service impact |
 | 15 | Headline link — public vs direct lane | P3-OQ-6 | ✅ **RESOLVED** | Public URL is the headline; the direct lane 404s **by design** and is labelled informational |
@@ -410,7 +410,7 @@ Escaping contract — every site below is escaped; **URL-context values are `quo
 | **R19** | "SQLite ignores FKs" | The daemon sets `PRAGMA foreign_keys=ON` on every connection (`factory.py:170-177`) ⇒ FK behaviour holds on **both** drivers at runtime; inert only on a bare unit-test engine. |
 | **R11 / R12** | Mixed severity model | R12's mitigation ("allow-list **and** runtime gate") is now backed by a **privileged category** — three layers, not two. |
 | **R15** | "three privileged categories, one pin pass" | Now **four categories across three phases ⇒ three pin passes**. |
-| **R28** | N+1 render | Resolved by batched hydration; keep only as the fallback path's cost. |
+| **R28** | N+1 render | Resolved by batched hydration — the per-row fallback path is **GONE** (deviation **P3-DEV-2**), so no fallback-path cost remains. |
 
 ### 7.3 Missing risks (add to the consolidated table)
 

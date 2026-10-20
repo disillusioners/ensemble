@@ -589,7 +589,7 @@ Each criterion is observable; the threshold column is what passes.
 | 8 | The board gate leaks nothing | GET the board URL with no minted row | the uniform 404 envelope — byte-identical (body + headers) to any other miss (T-B2) |
 | 9 | The shared gate is unregressed | the existing live-views suites | `test_live_views_public_lane.py` + `test_live_views_router.py` + `test_live_views_tool.py` + `test_view_passcode_service.py` green, unchanged |
 | 10 | No seal, proxy or migration impact | diff the tree | zero files from `agents/.prompt-artifacts.sha256` / `SEALED_SHA_BASELINES` (phase 3 edits only `meta.json`, which is in neither baseline ⇒ no re-stamp obligation); zero proxy/infra files; zero new migration files |
-| 11 | The board page stays bounded | time a board render at the 50-row ceiling | ≤ 50 rows, notes hydrated in batch (≤ 3 queries/render), < 2 s locally (R11; the per-row `get_item` fallback stays bounded at ≤ 50 reads) |
+| 11 | The board page stays bounded | time a board render at the 50-row ceiling | ≤ 50 rows, notes hydrated in batch (≤ 3 queries/render), < 2 s locally (R11; ≤ 3 queries per render — the per-row `get_item` fallback is GONE, deviation P3-DEV-2) |
 
 ---
 
