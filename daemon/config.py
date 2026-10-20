@@ -1950,6 +1950,50 @@ class ServicesConfig(BaseSettings):
             "is the heal frontier for the captured wedge shape)."
         ),
     )
+    # Stale-pause backstop (feature/fix/question-pause-resume-asymmetry,
+    # R3). The question pause parks the asker's whole tree; a parked
+    # instance with no live turn and no outstanding question holds its
+    # parent in ``waiting_children`` forever. This sweep releases the
+    # stranded ones (un-pause + natural resume) — the safety net under
+    # the symmetric un-pause (R2).
+    stale_pause_sweep_enabled: bool = Field(
+        default=True,
+        description=(
+            "Master kill-switch for the stale-pause backstop sweep "
+            "(StalePauseSweepService). When False the service is not "
+            "constructed and the boot pass is skipped. Defaults to True."
+        ),
+    )
+    stale_pause_sweep_interval_seconds: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "Periodic sweep interval (seconds) for the stale-pause "
+            "backstop. Default 300s (5min) — mirrors the "
+            "report-delivery-recovery cadence."
+        ),
+    )
+    stale_pause_sweep_age_bound_seconds: int = Field(
+        default=7200,
+        ge=0,
+        description=(
+            "Minimum age (seconds) a PAUSED instance must reach before "
+            "the stale-pause sweep considers it stranded. The bound is "
+            "measured on ``instances.paused_at`` (frozen while parked). "
+            "Default 7200s = 2h — comfortably longer than any "
+            "legitimate 'waiting for the user's answer' window, and "
+            "longer than the question wedge-guard's own escalation "
+            "horizon."
+        ),
+    )
+    stale_pause_sweep_batch_cap: int = Field(
+        default=100,
+        ge=1,
+        description=(
+            "Maximum candidates per sweep run (batch cap). Remainder is "
+            "picked up on the next cycle."
+        ),
+    )
     drift_reconcile_min_pending_age_seconds: int = Field(
         default=300,
         description=(

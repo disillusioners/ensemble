@@ -792,6 +792,65 @@ class SQLModelInstanceRepository:
             rows = db_session.exec(stmt).all()
         return set(rows)
 
+    def find_stale_paused_instances(
+        self,
+        *,
+        cutoff_iso: str,
+        limit: int = 100,
+    ) -> list[Instance]:
+        """Return PAUSED instances parked longer than ``cutoff_iso``.
+
+        Feature: stale-pause backstop (``fix/question-pause-resume-
+        asymmetry``, R3). Selection predicate:
+
+          * ``instances.status = 'paused'`` — the parked shape.
+          * ``instances.paused_at IS NOT NULL`` AND
+            ``instances.paused_at < :cutoff_iso`` — the age bound. The
+            column is written ONLY by the pause cascade
+            (``datetime.now(timezone.utc).isoformat()``), so the
+            lexicographic comparison against a cutoff produced the same
+            way is a correct chronological comparison.
+          * NO live ``task`` row for the instance (``status IN
+            ('pending', 'running', 'paused')``) — an instance with a live
+            turn is owned by the worker pool / the answer path, not by
+            the sweeper. ``NOT EXISTS`` is used instead of ``NOT IN`` so
+            a NULL ``instance_id`` in ``task`` cannot poison the
+            predicate.
+
+        The caller applies the SECOND half of the predicate (no pending
+        question anywhere in the permanent-lineage tree) because that
+        half needs the question store, not the instance table.
+
+        Read-only. No row mutation.
+
+        Args:
+            cutoff_iso: ISO-8601 UTC cutoff; instances paused BEFORE it
+                are candidates.
+            limit: Maximum rows returned (batch cap).
+
+        Returns:
+            The candidate rows, oldest pause first.
+        """
+        if not cutoff_iso:
+            return []
+        live_task = exists(
+            select(Task.id).where(
+                Task.instance_id == Instance.instance_id,
+                Task.status.in_(("pending", "running", "paused")),
+            )
+        )
+        stmt = (
+            select(Instance)
+            .where(Instance.status == InstanceStatus.PAUSED.value)
+            .where(Instance.paused_at.is_not(None))
+            .where(Instance.paused_at < cutoff_iso)
+            .where(~live_task)
+            .order_by(col(Instance.paused_at).asc())
+            .limit(max(1, int(limit)))
+        )
+        with SQLModelSession(self.engine) as db_session:
+            return list(db_session.exec(stmt).all())
+
     def get_ancestor_ids(self, instance_id: str) -> list[str]:
         """Get all ancestor instance IDs (parent, grandparent, ..., up to root).
         

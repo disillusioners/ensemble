@@ -3494,6 +3494,52 @@ class InstanceLifecycleService:
         """
         repo = self._manager._instance_repository
 
+        # ── Question-pause guard (fix/question-pause-resume-asymmetry) ──
+        # The deferred question pause runs OUTSIDE the graph task (the
+        # post-graph completion path — ``daemon/services/
+        # instance_messaging.py``). It can therefore land AFTER the
+        # answer was already delivered: the user answered while the
+        # asker's turn was still winding down, the answer path consumed
+        # the pack, and the late pause then parked the WHOLE tree with
+        # no outstanding question — a strand with no answering
+        # counterpart (live cases 2026-10-19: f86c4015 / 756d37ba).
+        #
+        # The guard refuses a question pause whose question is no longer
+        # outstanding. A pause that has no answer to wait for must not
+        # happen at all — there is nothing to un-pause it later.
+        #
+        # Only the QUESTION pause is guarded (``suspension_reason ==
+        # 'awaiting_answer'``). Every other pause reason (watchover,
+        # user /pause, /stop, messaging) is unaffected.
+        question_pack_id: str | None = None
+        if suspension_reason == SuspensionReason.AWAITING_ANSWER.value:
+            from daemon.services.question_pause_set import question_pack_state
+
+            try:
+                pack_state, question_pack_id = question_pack_state(
+                    self._manager, instance_id
+                )
+            except Exception as guard_exc:  # noqa: BLE001 — fail-open
+                logger.warning(
+                    f"pause_instance_cascade: question-pause guard probe "
+                    f"failed for {instance_id[:8]}... "
+                    f"({type(guard_exc).__name__}: {guard_exc}) — "
+                    f"proceeding with the pause"
+                )
+                pack_state = "unknown"
+            if pack_state != "pending":
+                logger.warning(
+                    f"pause_instance_cascade: REFUSING question pause for "
+                    f"{instance_id[:8]}... — pack state={pack_state!r} "
+                    f"(no outstanding question to wait for; a late pause "
+                    f"would strand the tree with no answer counterpart)"
+                )
+                return {
+                    "paused_ids": [],
+                    "skipped_ids": [instance_id],
+                    "question_pause_refused": True,
+                }
+
         # 1. Resolve the cascade root. ``cascade_to_root=True`` (default
         # — /pause and the 5 internal callers) walks up to the tree
         # root so the WHOLE tree pauses; ``cascade_to_root=False``
@@ -3790,6 +3836,32 @@ class InstanceLifecycleService:
         # - Release project locks (job continues)
         # - Mark jobs as cancelled
         # - Clean up live hub connections
+
+        # R1 (fix/question-pause-resume-asymmetry): record the paused set
+        # DURABLY, keyed by the question pack id, so the answer path can
+        # un-pause EXACTLY the instances this question pause parked —
+        # including any the tree-scoped resume does not reach. The
+        # record lives on the ASKER's ``instances.metadata`` row (the
+        # same durable-shadow mechanism the pack payload uses) and
+        # survives a restart.
+        if suspension_reason == SuspensionReason.AWAITING_ANSWER.value:
+            try:
+                from daemon.services.question_pause_set import (
+                    record_question_paused_set,
+                )
+
+                record_question_paused_set(
+                    self._manager,
+                    instance_id,
+                    question_pack_id,
+                    list(paused_ids),
+                )
+            except Exception as record_exc:  # noqa: BLE001 — fail-open
+                logger.warning(
+                    f"pause_instance_cascade: paused-set record failed for "
+                    f"{instance_id[:8]}...: "
+                    f"{type(record_exc).__name__}: {record_exc}"
+                )
 
         # Combine the helper's updated_ids (== nodes we wrote to) with the
         # skipped_ids the caller collected above (already-paused / not-found).
