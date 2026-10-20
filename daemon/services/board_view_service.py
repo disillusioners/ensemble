@@ -36,10 +36,12 @@ Bounded by construction
 -----------------------
 * rows rendered: :data:`DEFAULT_RENDER_LIMIT` (50);
 * rows fetched (and therefore notes hydrated): :data:`MAX_FETCH_LIMIT`
-  (200 — Phase 1's own ``MAX_LIMIT`` clamp). The extra headroom is
-  what makes the "showing N of M" disclosure TRUTHFUL: Phase 1's
-  ``count`` is the PAGE size, not the number of matching rows, so the
-  adapter needs the wider page to know M;
+  (200 — Phase 1's own ``MAX_LIMIT`` clamp). Phase 1's ``count`` is
+  the PAGE size, not the number of matching rows, so the adapter
+  fetches the wider page: when the match count fits INSIDE the page
+  it IS the exact count, and when the bound is hit the count is only
+  a LOWER BOUND — the page's disclosure then says so ("N of M+ items
+  — fetch bound");
 * notes per item: 20; note text: 4 KiB; ``body_md``: 64 KiB — the
   per-field caps, enforced DURING assembly with a VISIBLE notice
   (never a silent cut);
@@ -82,8 +84,10 @@ BOARD_ITEM_ID_RE = re.compile(r"^wi-[0-9a-f]{8}$")
 DEFAULT_RENDER_LIMIT = 50
 
 #: How many rows the adapter FETCHES (Phase 1's own clamp is 200).
-#: The headroom over :data:`DEFAULT_RENDER_LIMIT` is what makes the
-#: "showing N of M" disclosure truthful.
+#: The headroom over :data:`DEFAULT_RENDER_LIMIT` is what keeps the
+#: "showing N of M" disclosure truthful: below the bound the fetched
+#: count IS the exact match count, above it the count is a lower
+#: bound and the page says so.
 MAX_FETCH_LIMIT = 200
 
 #: How many values the filter-option set may carry.
@@ -302,9 +306,11 @@ def fetch_board_items(
         tag: Optional single-tag filter.
         limit: How many rows the caller RENDERS.
         fetch_limit: How many rows the adapter FETCHES. The headroom
-            over ``limit`` is what makes the "showing N of M"
-            disclosure truthful (Phase 1's ``count`` is the page size,
-            not the number of matching rows).
+            over ``limit`` keeps the "showing N of M" disclosure
+            truthful (Phase 1's ``count`` is the page size, not the
+            number of matching rows): below the bound the fetched
+            count IS the exact match count; above it the count is a
+            lower bound and ``has_more`` says so.
 
     Returns:
         ``(items, total, truncated)`` — the projected rows (at most
@@ -329,6 +335,11 @@ def fetch_board_items(
     raw_items = _get(result, "items", []) or []
     has_more = bool(_get(result, "has_more", False))
 
+    # The FETCH PAGE SIZE — Phase 1's ``count`` is the page size, NOT
+    # the number of matching rows. It IS the exact match count only
+    # when the bound was NOT hit (``has_more`` False); when the bound
+    # WAS hit the true match count is LARGER, and the page's
+    # disclosure says so ("N of M+ items — fetch bound").
     total = len(raw_items)
     projected: list[BoardItemView] = []
     needs_per_row: list[Any] = []
@@ -355,7 +366,8 @@ def fetch_board_items(
 
     # The rows actually rendered are the first ``limit`` of the
     # projection; the disclosure compares the rendered count against
-    # the number that matched.
+    # the number that matched — the EXACT count when the bound was
+    # NOT hit, a lower bound when it was.
     rendered = projected[: max(0, int(limit))]
     return rendered, total, has_more
 

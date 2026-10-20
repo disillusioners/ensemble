@@ -30,8 +30,12 @@ Security posture
 * The page carries NO external subresource — no ``https://``, no CDN,
   no font, no image. The board is a table.
 * EVERY user-derived string passes through the ONE module-level
-  escaper :func:`_esc`. URL-context values are ``quote()``-d FIRST
-  and then escaped, so a filter echo round-trips to the same filter.
+  escaper :func:`_esc` (the ``<pre>`` blocks go through
+  :func:`_esc_multiline`, which delegates to it). NO user-derived
+  value ever lands in a URL context: the ONLY URL context in the
+  markup is the filter form's ``action=`` attribute, which carries
+  the module CONSTANT :data:`BOARD_PUBLIC_PATH` — never a
+  user-derived value — and is escaped with :func:`_esc`.
 * The CSP nonce is minted PER REQUEST by the caller and lands in BOTH
   the response header and the ``<style nonce="…">`` attribute — the
   two must never drift (a mismatch ⇒ a silently unstyled board).
@@ -48,7 +52,6 @@ from __future__ import annotations
 
 import html
 from typing import Any, Iterable
-from urllib.parse import quote
 
 from .board_view_service import BoardItemView
 
@@ -81,19 +84,6 @@ def _esc(value: Any) -> str:
     if value is None:
         return ""
     return html.escape(str(value), quote=True)
-
-
-def _esc_url(value: Any) -> str:
-    """Escape a value that lands in a URL context.
-
-    ``quote()`` FIRST (so the value means what the user typed), then
-    ``_esc()`` (so it is safe in the markup). HTML-escaping alone
-    would turn ``&`` into ``&amp;`` — the browser would then send a
-    DIFFERENT filter value than the one displayed.
-    """
-    if value is None:
-        return ""
-    return _esc(quote(str(value), safe=""))
 
 
 def _esc_multiline(value: Any) -> str:
@@ -366,7 +356,10 @@ def render_board(
         counts: ``{"total": N, "shown": N, …}`` — the status counts.
         generated_at: The render timestamp.
         shown: How many rows are rendered.
-        total: How many rows match the filters.
+        total: How many rows match the filters. When ``truncated`` is
+            True this is the FETCH PAGE SIZE — a LOWER BOUND on the
+            match count, not the match count itself — and the
+            disclosure says so.
         truncated: True when more rows match beyond the fetch bound.
         max_bytes: The rendered-body ceiling.
 
@@ -394,11 +387,26 @@ def render_board(
     )
 
     # The truncation disclosure — VISIBLE, never silent (A-41 / R47).
-    disclosure = "Showing " + _esc(shown) + " of " + _esc(total) + " items"
+    #
+    # TRUTHFUL IN BOTH CASES. When the fetch bound was NOT hit,
+    # ``total`` IS the exact match count and the wording is the
+    # historical one (byte-identical). When the bound WAS hit,
+    # ``total`` is the FETCH PAGE SIZE — Phase 1's ``count`` is the
+    # page size, NOT the number of matching rows — so the count is
+    # marked with a ``+`` and the caveat names the bound. Without the
+    # ``+``, "Showing 50 of 200 items" reads as a TOTAL while the true
+    # match count is larger.
     if truncated:
-        disclosure += (
-            " (more items match these filters — narrow them to see the rest)"
+        disclosure = (
+            "Showing "
+            + _esc(shown)
+            + " of "
+            + _esc(total)
+            + "+ items (fetch bound — more items match these filters"
+            " — narrow them to see the rest)"
         )
+    else:
+        disclosure = "Showing " + _esc(shown) + " of " + _esc(total) + " items"
     parts.append('<p class="counts">' + disclosure + "</p>\n")
 
     # The status-count row.

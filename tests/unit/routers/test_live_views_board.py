@@ -970,6 +970,33 @@ class TestDisclosure:
         body = client.get(BOARD_PATH).text
         assert "Showing 3 of 3 items" in body
 
+    def test_the_fetch_bound_disclosure_is_unambiguous(
+        self, client, passcode_service, board_service, cipher
+    ) -> None:
+        """The fetch bound was hit — the count on the page is a LOWER
+        BOUND, not the TOTAL, and the disclosure must say so.
+
+        Phase 1's ``count`` is the PAGE size (200), NOT the number of
+        matching rows, so the old "Showing 50 of 200 items" read as a
+        total while 201 rows actually match.
+        """
+        for index in range(201):
+            board_service.create_item(
+                title=f"Row {index}",
+                body_md="body text",
+                tags=["alpha"],
+                created_by_instance="inst-1",
+            )
+        passcode_service.mint(BOARD_ROOT, BOARD_REL, "inst-1")
+        _grant(client, cipher)
+        body = client.get(BOARD_PATH).text
+        assert (
+            "Showing 50 of 200+ items (fetch bound — more items match "
+            "these filters — narrow them to see the rest)"
+        ) in body
+        # The un-marked form must NOT appear — it reads as a total.
+        assert "Showing 50 of 200 items" not in body
+
     def test_a_truncated_render_carries_a_visible_notice(
         self, client, passcode_service, board_service, cipher
     ) -> None:

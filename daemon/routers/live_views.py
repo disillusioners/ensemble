@@ -149,6 +149,18 @@ def _raw_lane_csp_headers(root_name: str) -> dict[str, str]:
     restrictions (the header declares no ``script-src`` / ``default-src``
     ⇒ CDN chart.js / mermaid still load and run — CSP3 §6.3.2).
 
+    THE RESIDUAL — what the directive still takes away, stated in full:
+    SCRIPT EXECUTION stays ON (``allow-scripts`` ⇒ the "sandboxed
+    scripts browsing context flag" is NOT set); the ORIGIN is OPAQUE
+    (no ``allow-same-origin`` ⇒ the "sandboxed origin browsing
+    context flag" IS set ⇒ no host cookies, no ``localStorage``, no
+    same-origin reads); FORM SUBMISSION is BLOCKED (no
+    ``allow-forms`` ⇒ the "sandboxed forms browsing context flag");
+    and POPUPS are BLOCKED (no ``allow-popups`` ⇒ the "sandboxed
+    auxiliary navigation browsing context flag" ⇒ ``window.open`` /
+    ``target="_blank"`` are inert). The directive list is exactly
+    ``sandbox allow-scripts`` — no other sandbox keyword is present.
+
     Scope: the ``reports`` root ONLY. Every other registered root keeps
     a byte-identical response (designer mockups, the markdown wrapper
     lane, …). The zero-JS board page is unaffected — it is not a raw
