@@ -12,7 +12,12 @@ Example:
 """
 
 # Import runner components directly to avoid circular imports
-from .runner import MigrationError, MigrationFile, MigrationRunner
+from .runner import (
+    DuplicateMigrationVersionError,
+    MigrationError,
+    MigrationFile,
+    MigrationRunner,
+)
 
 
 class MigrationCancelledError(MigrationError):
@@ -33,6 +38,7 @@ __all__ = [
     "MigrationRunner",
     "MigrationFile",
     "MigrationError",
+    "DuplicateMigrationVersionError",
     "MigrationCancelledError",
     "SchemaMigration",
     "CheckpointMigrator",

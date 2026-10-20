@@ -12,7 +12,7 @@ DUAL-DRIVER POSTURE (the ``custom_agent_configs`` /
 
 * SQLite — this table's canonical persistent record is the
   companion migration
-  ``daemon/migrations/versions/20261018_000001_create_app_settings.sql``
+  ``daemon/migrations/versions/20261018_000002_create_app_settings.sql``
   (idempotent ``CREATE TABLE IF NOT EXISTS``, applied by the .sql
   migration runner on every startup). The runner is a NO-OP on
   PostgreSQL.
