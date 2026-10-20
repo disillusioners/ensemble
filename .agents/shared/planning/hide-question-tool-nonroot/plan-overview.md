@@ -13,9 +13,9 @@
 | **Goal** | The `ask_questions` tool is **hidden** (never registered in an instance's toolset — NOT a runtime refusal) from every non-root instance. Only user-facing root instances keep it. Non-root children surface blockers in their completion report under the canonical section **"Open questions for the orchestrator"**; the parent answers per its own authority and instructs the child through the existing continuation path, or forwards upward, or (if the parent is the root) asks the user through its own tool. |
 | **Capability model (two layers)** | **Effective capability = {user-facing root} ∩ {agent grants the category}.** The **GATE** (§2) is the authoritative **hiding** control — *necessary*: a non-root NEVER gets the tool registered, even if its agent still lists `"question"`. The **ALLOW-LIST** (`meta.json`) is the **capability** grant — *sufficient*: a user-facing root only actually receives the tool if its agent grants the category. Neither layer alone is the whole truth. |
 | **Non-goals** | (a) No change to the mid-flight channel. (b) No change to the question-pack machinery (create/CAS/rehydrate/shadow). (c) No DB/migration change. (d) No promote. (e) No new runtime refusal, no "deny" semantics — absence at registration only. (f) No rewrite of historical docs / CHANGELOG / planning records. (g) **Scoping limitation (RULING-1, disclosed — risk F3):** a user-facing root whose agent does **NOT** grant the `"question"` category cannot ask. The mappings API can bind ANY agent to a chat source; today no non-ari agent is known chat-bound ⇒ the gap is **LATENT, not active**. |
-| **Commission status** | **Design PINNED** (P1..P11 authoritative; the plan review returned **APPROVE-WITH-NOTES** and its 7 text-level blockers are folded in — §0.1). **Implementation GATED** on sibling commission `ffeb7190` (pause/resume asymmetry) landing in `latest`: its commit `e2899f8bd` is **ALREADY merged INTO THIS BRANCH** (merge `0e7500a1b`) but **NOT yet in `latest`** (`git merge-base --is-ancestor e2899f8bd latest` → false) ⇒ Phase 0 is now *"merge `latest` INTO this branch"* (BLK-6, §12). |
-| **Scope tier** | **Full-stack behavioral change** — daemon tool-build gate + mappings-lane fix + 3 `meta.json` grants + shared innate-skill rewrite + **59 sweep rows** (54 files actually edited = 3 `meta.json` + 51 prompt/doc; **55** with `agents/governor/rule.md` — machine-derived manifest §10.10) + **14** adjudicated seal re-pins (of a **35**-file sealed baseline) + staged (not promoted) release. |
-| **Why this tier** | The user-visible outcome ("roots still ask") needs BOTH halves: the daemon gate (authoritative hiding) **and** the `ari` grant (otherwise "roots still ask" is vacuous — ari holds neither `question` in `tools.allow` nor in `innate_skills` today). The prompt sweep breadth is forced by the "or ask" clause family living in 35 prompt files; **14** of those are sealed-SHA-pinned and therefore force adjudicated re-pins. |
+| **Commission status** | **Design PINNED** (P1..P11 authoritative; the plan review returned **APPROVE-WITH-NOTES** and its 7 text-level blockers are folded in — §0.1). **IMPLEMENTATION LANDED through fix round 1** @ branch tip **`12291f2a4`** (`21bccf157` → `2f28cb969` → `12291f2a4`; the approver-iteration-002 genuine gaps **B3/B4/B5** + **W3** closed, flow proofs **T6/T7/T8 landed** — §10.4-§10.7, §11). STILL OWED: the **second base-sync re-entry** (§12.4 — merge `latest` INTO this branch once the sibling `ffeb7190` lane lands in `latest`; the sibling's `e2899f8bd` is merged INTO THIS BRANCH at `0e7500a1b` but not yet in `latest`) and **staging** (§13 — gated on the new §13 push step; `origin/latest` is BEHIND). |
+| **Scope tier** | **Full-stack behavioral change** — daemon tool-build gate + mappings-lane fix + 3 `meta.json` grants + shared innate-skill rewrite + the prompt/doc sweep — **66 files edited** (final edit-set; machine-derived manifest §10.10, branch-diff cross-check **70 = 1 baseline + 3 `meta.json` + 66 prompt/doc**) + **18** adjudicated seal re-pin constant updates (**17** sealed files, of a **35**-file sealed baseline) + staged (not promoted) release. |
+| **Why this tier** | The user-visible outcome ("roots still ask") needs BOTH halves: the daemon gate (authoritative hiding) **and** the `ari` grant (otherwise "roots still ask" is vacuous — ari holds neither `question` in `tools.allow` nor in `innate_skills` today). The prompt sweep breadth is forced by the "or ask" clause family living in 35 prompt files; **17** of the sealed-SHA-pinned files are edited and force adjudicated re-pins (**18** constant updates after fix round 1 — §11.3). |
 | **Branch (existing)** | `feature/hide-question-tool-nonroot` — **already created**; the worktree `/home/nea/ensemble-src-wt-hidenonroot` **locks** the branch. HEAD `0e7500a1b` (merge of the sibling `e2899f8bd`). **REUSE** it; after the sibling lands in `latest`, run `git merge latest` **INTO** this branch — **MERGE, never rebase** (BLK-6, §12.2). |
 | **Plan artifacts** | `.agents/shared/planning/hide-question-tool-nonroot/plan-overview.md` (this file) + `decisions.md` (sibling worker — NOT written here). |
 
@@ -28,10 +28,11 @@ The plan review confirmed the **design** sound and reopened **no** pinned decisi
 | **BLK-1** | Two-layer model: gate = hiding (necessary), allow-list = capability (sufficient). leader/devops **KEEP** `"question"` in `tools.allow`, **REMOVE** it from `innate_skills`; ari **ADDS** both. Scoping limitation disclosed. Discriminating **T9** added. | §0, §4, §10.3, §10.5, §11.1, §14 (R7/F3/F6), §17 |
 | **BLK-2** | `agents/governor/rule.md:82` joins the clause-family sweep (14th re-pin); `agents/governor/workflow.md:46` becomes a **section-name pointer** (RULING-2 — the governor's contract lives once, in `rule.md`). | §10.5, §10.6, §11.3 |
 | **BLK-3** | The three **semantic** pins the SHA seal does NOT cover are named (attestation contract · mission-watch vocabulary · "Chat Delivery") — **NO EDIT expected — verify**. | §11.2, §11.4, §17 |
-| **BLK-4** | §17 final-report contract **replaced** by the commission's 7 items **verbatim** + the 3 existing extras (10 total). | §13 (step 9), §17 |
+| **BLK-4** | §17 final-report contract **replaced** by the commission's 7 items **verbatim** + the 3 existing extras (10 total). | §13 (step 10), §17 |
 | **BLK-5** | **Phase 7 = reviewer council** (0-critical bar, owner: **reviewer**); **Phase 8 = independent tester** (owner: **tester**); staging shifts to **Phase 9**. | §16, §17 |
 | **BLK-6** | This commission's **own** branch + worktree already exist ⇒ **reuse**; `git merge latest` INTO the branch, **never rebase**; both KV rows **exist** ⇒ Phase 0 KV work is verify/merge, not create. | §12.1, §12.2, §12.3 |
 | **BLK-7** | §11.1 gains a **"Red pre-change?"** column; T4 splits into **T4a** (preservation) / **T4b** (gate proof); proof set named so a green preservation run is never reported as gate proof. | §11.1, §11.4, §17 |
+| **Fix round 1** (approver iteration 002 — AMENDMENT #3, landed `21bccf157`→`2f28cb969`→`12291f2a4`) | The iteration-001 genuine gaps closed on branch: **B3** devops non-root contract + 14th canonical home (§10.4) · **B4** sweep completion gaia/designer/coder — 6 EDIT + 2 NO-EDIT + 2 disclosed scope additions (§10.4) · **B5** charter `:71` self-contradiction (§10.7) · **W3** escalate-family ×4 conditionalized (§10.6) · seal re-pins → **18** constants / **17** files (§11.3) · **T6/T7/T8 landed** + **T2/T4a reclassified** via the signature-adaptive harness (§11.1) · mappings-lane registry row — the grep substitute is obsolete (§11.1/§11.2) · sibling facts + **second base-sync re-entry** (§12.1, §12.4) · **§13 push step** · Phase-8/9 split · counts regenerated 66/41/14/18. | §10.4-§10.7, §10.10, §11, §12.1, §12.4, §13, §14, §16, §17 |
 | N-series | N1 (unpinned `tool_count` −1; no `ask_questions` membership assertion today) · N3 (`daemon/sources/*` = **6**) · N4 (machine-derived sweep manifest) · N5 (R3 mechanism) · N6/F1 (root-only fan-out) · N7 (one chat-source taxonomy + three-way pin) · N8 (legacy unstamped rows — no backfill) · N10 (skill = **53** lines) · N12 (`job_answer` def at **:3403**) · N13 (keep `whatsapp`) · N14 (D-snippet verify clause). | see each section |
 | F-series | **F1..F8** added to the risk register with mitigation + verification action. | §14 |
 
@@ -69,7 +70,7 @@ The predicate **must** be evaluated from values **threaded into the tool build**
 
 ⇒ The gate is a **build-time conditional on threaded values** (§2). Both threaded values exist at both call sites (§2.3).
 
-**Legacy rows without the `source_type` stamp — PRE-EXISTING, NO BACKFILL (N8).** The single writer (`instance_lifecycle.py:2390`) has existed since **2026-08-12**; rows created before it carry no `source_type` in `instance_metadata`. Such a row is **not** a user-facing root for predicate purposes ⇒ on restore it receives **no** question tool. ⇒ The §2.3 note *"a root restored from DB keeps the tool"* holds **ONLY** for a root whose row carries the stamp. **No backfill** is planned: a backfill would make the migration delta non-empty and break the P11 EMPTY-delta premise (§13 step 6, §15). Risk **F8** — out of scope by decision.
+**Legacy rows without the `source_type` stamp — PRE-EXISTING, NO BACKFILL (N8).** The single writer (`instance_lifecycle.py:2390`) has existed since **2026-08-12**; rows created before it carry no `source_type` in `instance_metadata`. Such a row is **not** a user-facing root for predicate purposes ⇒ on restore it receives **no** question tool. ⇒ The §2.3 note *"a root restored from DB keeps the tool"* holds **ONLY** for a root whose row carries the stamp. **No backfill** is planned: a backfill would make the migration delta non-empty and break the P11 EMPTY-delta premise (§13 step 7, §15). Risk **F8** — out of scope by decision.
 
 ### 1.4 Recorded asymmetry (NOT a re-litigation — pinned set is the 4-member set)
 
@@ -234,7 +235,7 @@ Defense-in-depth + prompt hygiene. **The authoritative control is the P2 gate** 
 |---|---|---|---|---|
 | `agents/leader/meta.json` | `:8` | `"innate_skills": ["coordination", "chart", "todo", "question"]` | **REMOVE `"question"`** ⇒ `["coordination","chart","todo"]` | The Question Skill **text** stops landing in leader prompts; drops the innate→category grant (`INNATE_SKILL_TOOL_CATEGORIES["question"] → ["question"]`, `daemon/tools/instance.py:158-164`). The leader **RETAINS the capability** (it keeps `"question"` in `tools.allow`) — this is a **teaching gap, not a capability gap** (risk **F6**). Side effect: the already-red pin `tests/test_innate_skills_refactoring.py:67` turns **GREEN**. |
 | `agents/leader/meta.json` | `:15` | `tools.allow` contains `"question"` | **KEEP** | RULING-1: the allow-list is the **capability** grant. Removing it would collapse effective capability to `{ari}` only — a leader bound to a chat source (mappings API) would pass the gate and then be stripped by `_apply_tool_filter` ⇒ it could not ask, contradicting the policy. |
-| `agents/devops/meta.json` | `:8` | `"innate_skills": ["dynamic-skill", "chart", "question", "todo"]` | **REMOVE `"question"`** ⇒ `["dynamic-skill","chart","todo"]` | Same split as the leader: skill **text** gone, **capability** retained. `tests/unit/test_devops_agent.py:165` must be edited to this exact list (it is currently RED for a different reason). |
+| `agents/devops/meta.json` | `:8` | `"innate_skills": ["dynamic-skill", "chart", "question", "todo"]` | **REMOVE `"question"`** ⇒ `["dynamic-skill","chart","todo"]` | Same split as the leader: skill **text** gone, **capability** retained — **devops's prompt treatment now matches the leader's honestly** (fix round 1 / B3: `devops/rule.md` + `devops/soul.md` carry the non-root contract + the 14th canonical home, §10.4). `tests/unit/test_devops_agent.py:165` was edited to this exact list (LANDED). |
 | `agents/devops/meta.json` | `:12` | `tools.allow` contains `"question"` | **KEEP** | RULING-1 — capability grant stays. |
 | `agents/ari/meta.json` | `:9` | `"innate_skills": ["job-orchestration", "chart", "todo"]` | **ADD `"question"`** | ari is the default chat-facing root; grants the tool + the (rewritten) Question Skill prompt (root teaching) |
 | `agents/ari/meta.json` | `:11-38` (`tools.allow` list) | no `"question"` | **ADD `"question"`** | without this, "roots still ask" is vacuous — ari is the live Discord root |
@@ -378,7 +379,7 @@ Defense-in-depth + prompt hygiene. **The authoritative control is the P2 gate** 
 
 ### 10.4 Class B — ask-guidance → open-questions contract
 
-Canonical-home column = **the file that owns the contract for that agent**; every other file of the same agent carries `See Open questions for the orchestrator` (or `See <agent>'s Open questions for the orchestrator` cross-agent) and **no filename token**.
+Canonical-home column = **the file that owns the contract for that agent**; every other file of the same agent carries `See Open questions for the orchestrator` (or `See <agent>'s Open questions for the orchestrator` cross-agent) and **no filename token**. **Canonical homes = 14** after fix round 1 (devops/rule.md joined as the 14th; was 13).
 
 | File | Anchors (verified content) | Change | Canonical home for this agent | Seal pin |
 |---|---|---|---|---|
@@ -396,7 +397,7 @@ Canonical-home column = **the file that owns the contract for that agent**; ever
 | `agents/doc-writer/rule.md` | `:8` "**Clarify ambiguities** with a focused clarification (default to ONE question…" | clarify with the dispatcher / report | **canonical home (doc-writer)** | not sealed |
 | `agents/doc-writer/soul.md` | `:19` "ask a focused clarification (default to ONE question…" | pointer → doc-writer's rule.md section | pointer | not sealed |
 | `agents/doc-writer/workflow.md` | `:10` "ONE question; ask more only if multiple critical ambiguities exist" | pointer | pointer | not sealed |
-| `agents/gaia/workflow.md` | `:60` "4. Ask user to try again" | redirect → report | **canonical home (gaia)** | not sealed |
+| `agents/gaia/workflow.md` | `:60` "4. Ask user to try again" · **fix round 1 (`8589d9be5`)**: `:14`, `:39` EDIT · `:71` **NO-EDIT adjudicated** (it IS the contract text itself) · `:89` **NO-EDIT adjudicated** (inbound-user voice) · `:80` + flowchart `:98` **disclosed scope additions** (preventing a fresh self-contradiction after the `:71`/`:89` adjudications) | redirect → report | **canonical home (gaia)** | not sealed |
 | `agents/wanderer/workflow.md` | `:91` "If the question is ambiguous in a way that affects the answer, ask before guessing" | "ask the dispatcher" (already-correct form) | **canonical home (wanderer)** — E_HOME `rule.md` | not sealed |
 | `agents/wanderer/rule.md` | `:68` clause family | see §10.5 | rule.md | not sealed |
 | `agents/wanderer/skills-template/code-investigation.md` | `:128` "clarify with the dispatcher before tracing"; `:33` "clarify scope with the dispatcher" | **VERIFY-ONLY** — already the non-root-correct form; change only if it says "ask the user" | skill template → pointer | not sealed |
@@ -409,12 +410,21 @@ Canonical-home column = **the file that owns the contract for that agent**; ever
 | `agents/_mother/workflow.md` | `:7` "Ask these questions in order"; `:52`, `:104` "Ask specific questions based on what they want to change" | pointer → _mother's rule.md section | pointer | not sealed |
 | `agents/designer/soul.md` | `:68` "every turn ends on a tool call, a deliverable, or a question to the leader" | "…or an open question for my orchestrator" (paraphrase form) | **canonical home (designer)** | not sealed |
 | `agents/coder/soul.md` | `:149` clause family | see §10.5 | **canonical home (coder)** — E_HOME `soul.md` | **SEALED** (`:1382`) |
+| `agents/devops/rule.md` | **B3 (fix round 1, `f332e83e0` + residual `c5bd90146`)** — the ask-family was adjudicated **BY CONSTRUCT after the briefed line numbers proved STALE (anchor drift recorded)**: **`:9`, `:32`, `:91`, `:92`, `:110`, `:114`, `:156`, `:164`, `:203`** rewritten to the non-root form + the canonical section **"Open questions for the orchestrator"** added VERBATIM from the tester/rule.md home | ask-family → non-root contract + canonical section | **canonical home (devops) — the 14th canonical home** (canonical homes = **14**, was 13) | **SEALED** — re-pinned ×2: `617bf69a0`-attribution, superseded by the residual → current `febf0e89…` (`tests/test_chart_image_delivery_e2e.py:1390`) |
+| `agents/devops/soul.md` | **B3**: `:46`, `:49`, `:77` — production-approval framing reconciled | pointer → devops's rule.md section | pointer | not sealed |
+| `agents/gaia/rule.md` | **B4 (fix round 1)**: `:9` | redirect → report (non-root form) | gaia's home stays `workflow.md`; this row carries the `rule.md` site | not sealed |
+| `agents/designer/rule.md` | **B4**: `:30` "Default to asking the orchestrator, not guessing… my channel is the `NEEDS MORE INFO` reply" | section pointer added (already orchestrator-form) | designer's home stays `soul.md` | not sealed |
+| `agents/designer/workflow.md` | **B4**: `:34` | pointer | pointer | not sealed |
+| `agents/designer/skills-template/design-strategy.md` | **B4**: `:31` | pointer (skill template) | pointer | not sealed |
+| `agents/coder/workflow.md` | **B4**: `:30` "ask the dispatcher before guessing" — rendered in the **wanderer:91 precedent form verbatim** | EDIT (clause-family completion) | coder's home stays `soul.md` | not sealed |
 
 ### 10.5 Clause family — "begin, deliver, or ask" / "or ask"
 
 **Edit rule (light, uniform):** replace the terminal `or ask` / `or ask — a question to my dispatcher` with the open-questions reporting semantics: `or report open questions`. Keep every other token of the paragraph — especially `"before ending any turn"` and `"zero tool calls"` (`E_REQUIRED_SNIPPETS`, `tests/unit/test_report_integrity_prompts.py:115-118`).
 
 **Conditional clause (RULING-1 / risk R7):** the rewrite applies **unless you are the user-facing root**. A root's own ask wording must NOT be degraded — a root bound to a chat source keeps "ask the user" as its move (the tool is the root's ask channel). Where the sentence is agent-agnostic, render it as `…or report open questions (unless you are the user-facing root)`. Mitigation: the rewritten shared skill (`agents/_prompt_system/innate-skills/question/skill.md`) teaches the **root half**, so the sweep only removes the *non-root* default and never removes the root's capability.
+
+**Site count (W4-counts, fix round 1):** **41** clause-family sites (was **34** = 15 short + 19 long; **+7 fix-round sites**: `gaia/rule.md:9`, `gaia/workflow.md:14`, `:39`, `designer/rule.md:30`, `designer/workflow.md:34`, `designer/skills-template/design-strategy.md:31`, `coder/workflow.md:30`).
 
 **Short form (15 files)**
 
@@ -434,7 +444,7 @@ Canonical-home column = **the file that owns the contract for that agent**; ever
 | `agents/tidier/rule.md` | `:18` | **SEALED** (`:1395`) |
 | `agents/tidier[v2]/rule.md` | `:18` | **SEALED** (`:1396`) |
 | `agents/wanderer/rule.md` | `:68` | not sealed |
-| `agents/governor/rule.md` | `:82` — "**Before ending any turn** on a task dispatched to me, I do one of: begin the work with a tool call, deliver the synthesis on work already done, **or ask the question that blocks me**." | **SEALED** (sha `84a93586df376ad39dc553af36f86f684977ecfa8d717186f2fe8f16846c8cf5`, `tests/test_chart_image_delivery_e2e.py:1387`) — **the 14th re-pin**. The line ALSO carries the junk-report clause ("…is not work-in-progress; it is detected as a junk/no-work report…") and **1 × "Chat Delivery"** — **both must survive verbatim**. Also a **D_HOME + E_HOME** carrier for the governor (`tests/unit/test_report_integrity_prompts.py:92,:106`) ⇒ the D and E snippets must survive too. |
+| `agents/governor/rule.md` | `:82` — "**Before ending any turn** on a task dispatched to me, I do one of: begin the work with a tool call, deliver the synthesis on work already done, **or ask the question that blocks me**." | **SEALED** (sha `84a93586df376ad39dc553af36f86f684977ecfa8d717186f2fe8f16846c8cf5` at re-pin time; pin now at `tests/test_chart_image_delivery_e2e.py:1392` — current constant `a779742d…`) — **the 14th re-pin**. The line ALSO carries the junk-report clause ("…is not work-in-progress; it is detected as a junk/no-work report…") and **1 × "Chat Delivery"** — **both must survive verbatim**. Also a **D_HOME + E_HOME** carrier for the governor (`tests/unit/test_report_integrity_prompts.py:92,:106`) ⇒ the D and E snippets must survive too. |
 
 **Long form (19 files)** — same light edit
 
@@ -454,6 +464,10 @@ Canonical-home column = **the file that owns the contract for that agent**; ever
 | `agents/reviewer[v2]/workflow.md` | `:208`, `:211` | mirror of reviewer (parity) | not sealed |
 | `agents/governor/workflow.md` | `:46` "**Clarifying questions — complete-to-ask (NEVER pause):** The governor has no direct human channel … there is no `ask_questions` tool … END YOUR TURN / complete with a self-contained clarifying question addressed to the requester"; `:51` the revival re-validation line | **RULING-2 — SECTION-NAME POINTER ONLY.** The governor's open-questions contract lives **ONCE**, in `agents/governor/rule.md` (the governor's D_HOME and E_HOME are both `rule.md` — `tests/unit/test_report_integrity_prompts.py:92,:106`). Replace the block's restated contract with the pointer **"See Open questions for the orchestrator"** — no filename token, no second statement of the same contract (guide R-e "stated once" trap / R-f). KEEP the semantics (`complete-to-ask`, NEVER pause) and the `:51` revival re-validation line verbatim. | not sealed |
 | `agents/leader/workflow.md` | `:712-717` "Agent instance asks: 'Shall I proceed?' … ✅ RIGHT: send_message(instance_id, "Proceed")" | **KEEP** — this IS the continuation channel (P7) | not sealed |
+| `agents/leader/workflow.md` | `:699` "escalate to the user" (FLAGGED by the implementer, leader-ratified #3) | **W3 — conditionalized to the report chain** (`6711c769e`): a non-root leader escalates user-critical items via its OWN report chain to a root — never "ask the user" wording (D4) | not sealed |
+| `agents/maintenancer/rule.md` | `:9` | **W3** — same escalate-family conditionalization to the report chain | **SEALED** — re-pinned `d6e448a6…` (`tests/test_chart_image_delivery_e2e.py:1394`) |
+| `agents/maintenancer/workflow.md` | `:53` | **W3** — same | not sealed |
+| `agents/project-manager/rule.md` | `:45` | **W3** — same | not sealed |
 
 ### 10.7 Class D — adopt naming/semantics, NO change
 
@@ -467,8 +481,11 @@ Canonical-home column = **the file that owns the contract for that agent**; ever
 | `agents/project-manager/soul.md` | `:58-59`, `:78-79`, `:93-94` "### Decisions Pending / `<0–3 framed questions>`" | NO EDIT (heading rename optional — see §10.5 note) |
 | `agents/project-manager/workflow.md` | `:203-204` | clause-family edit only |
 | `agents/critic/tools_note.md` | `:25` | NO EDIT |
-| `agents/charter/workflow.md` | `:52`, `:16` | NO EDIT |
+| `agents/charter/workflow.md` | `:52`, `:16` — original sweep: keep-as-is · `:71` — **EDITED (fix round 1, B5, `6711c769e`)**: "ask the user to pick" → the NEEDS MORE INFO report form, self-consistent with `:52` | keep-as-is → **EDITED + re-pinned** (`2a5078f9…`, `tests/test_chart_image_delivery_e2e.py:1357`) |
 | `agents/designer/tools_note.md` | `:79` | NO EDIT |
+| `agents/_baby_template/rule.md` — identity ritual | `:12` "Perform tasks before learning your identity", learning-phase discipline | **NO EDIT (adjudicated — approver iteration-002 note)**: identity-phase discipline, not an ask channel; the ask-family sites `:6` / `:15` / `:40` WERE edited in the original sweep (`564ed0d2f`) |
+| `agents/_baby_template/rule.md` — `:15` polarity | `:15` "Rush through questions" | **EDITED (already in the original sweep)** — now reads "Rush through questions, and never end a turn on a question instead of on the work" (a question is never the turn-ending move) |
+| `agents/jober/rule.md` — `:211-212` polarity | `:211-212` "ask before proceeding" | **NO EDIT (adjudicated — approver iteration-002 note)**: the block is explicitly parent-bound ("Surface the concern in the report to the **parent** (via `send_message`)" two lines above) — orchestrator-directed continuation polarity (P7), not a user-ask |
 
 ### 10.8 Docs (optional scope notes)
 
@@ -476,7 +493,7 @@ Canonical-home column = **the file that owns the contract for that agent**; ever
 |---|---|---|
 | `docs/job-task-system.md` | `:447-482` (the "Question/stuck emission fan-out (QA events…)" section) | annotate: emitters are roots-only; the transport contract is unchanged |
 | `docs/setup.md` | `:1336-1339` (the answer-gate / `user_answer_pending` runbook note) | scope the answer-gate handle to roots |
-| `docs/agents.md` | `:336-352` (the tool-category table — **already stale**, no `question` row today) | optional new row; **do not inherit the existing drift** (leave the rest of the stale table alone) |
+| `docs/agents.md` | `:336-352` (the tool-category table — **already stale**, no `question` row today) | **new row ADDED (landed `b2615416c` — the scope note was taken)**; do not inherit the existing drift (leave the rest of the stale table alone) |
 
 ### 10.9 DO NOT REWRITE (historical / awareness)
 
@@ -484,28 +501,29 @@ Canonical-home column = **the file that owns the contract for that agent**; ever
 
 ### 10.10 SWEEP MANIFEST — machine-derived (N4)
 
-**Unit of account = one distinct file in the sweep set.** A file may appear in two sweep tables (e.g. `agents/leader/workflow.md` appears in §10.4, §10.5-long and §10.6) ⇒ the table rows collapse to distinct files. The numbers below are **generated** by enumerating §10.3–§10.6 — never hand-counted — and the derivation command is embedded so any reviewer can regenerate them.
+**Unit of account = one distinct file in the sweep set.** A file may appear in two sweep tables (e.g. `agents/leader/workflow.md` appears in §10.4, §10.5-long and §10.6) ⇒ the table rows collapse to distinct files. The numbers below are **generated** by enumerating §10.3–§10.7 plus §10.8 docs — never hand-counted — with the **branch diff as the machine cross-check** (below).
 
 | Class | Sweep table | Table rows | Distinct files contributed | Actually edited |
 |---|---|---|---|---|
 | **A** — tool grant | §10.3 | 3 | 3 | 3 |
-| **B** — ask → open-questions | §10.4 | 27 | 27 | 22 |
+| **B** — ask → open-questions (incl. B3/B4 fix-round rows) | §10.4 | 34 | 34 | 29 |
 | **5-short** — clause family | §10.5 | 15 | 12 | 12 |
 | **5-long** — clause family | §10.5 | 19 | 16 | 16 |
-| **C** — parent-side | §10.6 | 4 | 2 | 2 |
-| | **TOTAL — as amended (with `agents/governor/rule.md`)** | **68** | **60** | **55** |
-| | *TOTAL — before the governor addition (the canonical "59 sweep rows" state)* | *67* | *59* | *54* |
+| **C** — parent-side + W3 escalate-family | §10.6 | 8 | 5 | 5 |
+| **D** — Class-D NO-EDIT rows + B5 charter flip + adjudications | §10.7 | 13 | 9 | 1 |
+| **Docs** — scope notes (landed `b2615416c`) | §10.8 | 3 | 3 | 3 |
+| | **TOTAL — FINAL (fix round 1 included)** | **95** | **82** | **69** |
 
 | Canonical figure | Value | Derivation |
 |---|---|---|
-| **Sweep rows** | **59** (+1 ⇒ **60** with `agents/governor/rule.md`) | distinct files enumerated from §10.3–§10.6 |
-| **Files actually edited** | **3 `meta.json` + 51 prompt/doc = 54** | 59 − 5 not-edited |
-| **— with `agents/governor/rule.md`** | **3 `meta.json` + 52 prompt/doc = 55** | 54 + 1 |
-| **Not edited (5)** | `agents/leader/tools_note.md` (**OPTIONAL**) · `agents/wanderer/skills-template/{code-investigation,codebase-mapping,library-research,root-cause-analysis}.md` (**4 × VERIFY-ONLY**) | §10.4 |
+| **Files actually edited (final)** | **69 = 3 `meta.json` + 66 prompt/doc** | 82 distinct − 13 not-edited (5 original + 8 §10.7 Class-D rows) |
+| **Not edited (13)** | `agents/leader/tools_note.md` (**OPTIONAL — not taken**) · `agents/wanderer/skills-template/{code-investigation,codebase-mapping,library-research,root-cause-analysis}.md` (**4 × VERIFY-ONLY**) · the 8 §10.7 Class-D rows (5 maintenancer skill templates, `project-manager/soul.md`, `critic/tools_note.md`, `designer/tools_note.md`) | §10.4, §10.7 |
 
-⇒ **The number the final report quotes is 55** (55 files actually edited, of which 3 are `meta.json`).
+**MACHINE CROSS-CHECK (the authoritative reconciliation).** `git diff --name-only 0e7500a1b..HEAD -- agents/ docs/` = **70 files** = **1** regenerated baseline (`agents/.prompt-artifacts.sha256`) + **3** `meta.json` (leader/devops/ari) + **66 prompt/doc** (the pinned **66**). The 66 = the pre-fix-round edit-set **55** (52 sweep-table files + 3 docs) **+ 11 new edit-set members** = 10 files never in any sweep table (`devops/rule.md`, `devops/soul.md`, `gaia/rule.md`, `designer/rule.md`, `designer/workflow.md`, `designer/skills-template/design-strategy.md`, `coder/workflow.md`, `maintenancer/rule.md`, `maintenancer/workflow.md`, `project-manager/rule.md`) + `agents/charter/workflow.md` promoted from a Class-D NO-EDIT row. Fix-round commit map: `f332e83e0` (B3 devops) · `8589d9be5` (B4 gaia/designer/coder) · `6711c769e` (B5 charter + W3 escalate) · `c5bd90146` (devops residual) · `78469d671` + `6fa226976` (seal re-pins).
 
-**Derivation command** (read-only; run from the repo root — it re-reads THIS file):
+⇒ **The number the final report quotes is 66** (66 prompt/doc files edited; 69 files edited including the 3 `meta.json`).
+
+**Derivation command** (read-only; run from the repo root — it re-reads THIS file; §10.7 NO-EDIT adjudication rows are skipped by their two-cell shape + the `no edit` filter):
 
 ```bash
 python3 - <<'PY'
@@ -523,14 +541,15 @@ def rows(s):
             if c and re.fullmatch(r'`[^`]+`',c[0]): out.append((c[0].strip('`'),' | '.join(c).lower()))
     return out
 allrows = rows(sec('### 10.3','### 10.4')) + rows(sec('### 10.4','### 10.5')) \
-        + rows(sec('### 10.5','### 10.6')) + rows(sec('### 10.6','### 10.7'))
+        + rows(sec('### 10.5','### 10.6')) + rows(sec('### 10.6','### 10.7')) \
+        + rows(sec('### 10.7','### 10.8')) + rows(sec('### 10.8','### 10.9'))
 longline=[l for l in sec('### 10.5','### 10.6') if 'approval-strategy.md' in l][0]
 allrows += [(f,'edit') for f in re.findall(r'`([^`]+)`',longline) if f.startswith('agents/')]
 seen=set(); edited=0
 for f,txt in allrows:
     if f in seen: continue
     seen.add(f)
-    if 'verify-only' not in txt and 'optional' not in txt: edited+=1
+    if 'verify-only' not in txt and 'optional' not in txt and 'no edit' not in txt: edited+=1
 print('sweep rows',len(seen),'| edited',edited)
 PY
 ```
@@ -541,25 +560,27 @@ PY
 
 ### 11.1 New tests T1–T9
 
-**Red pre-change? (BLK-7).** The column states whether the test is expected to **FAIL** before this commission lands.
+**Red pre-change? (BLK-7, RECLASSIFIED by fix round 1 — A1).** THREE evidence classes now:
 
-- **Gate proof — RED pre-change: T1, T3, T4b, T5, T9.**
-- **Preservation / regression guards — GREEN pre-change: T2, T4a, T6, T7, T8.**
+- **GATE PROOF — RED pre-change: T1, T3, T4b, T5, T9.**
+- **PRESERVATION — red-signature / behavioural-preservation via the SIGNATURE-ADAPTIVE HARNESS: T2, T4a.** The old "`TypeError` pre-change" prediction is **STALE**: the landed harness passes the `parent_id=` / `source_type=` kwargs ONLY when the function signature already supports them, and otherwise builds the toolset the pre-change way — so pre-change these guards fail with a **clean behavioural assertion failure** (the stronger red), not a `TypeError`. A dedicated signature pin (`inspect.signature`, keyword-only kind assert) closes the adaptivity loophole.
+- **FLOW PROOFS — LANDED: T6, T7, T8** in `tests/unit/services/test_child_report_open_questions_flow.py` (42,584 bytes; 13 `def test_` + parametrization = **16 cases**: T6×5, T7×7, T8×4; **mutation-verified 5/5**). No longer "planned" — authored and green on the branch at `12291f2a4`.
 
-> **Non-obvious failure mode — state it explicitly.** Pre-change, `create_instance_tools` does **not** accept the `parent_id=` / `source_type=` kwargs ⇒ the gate-proof tests do **not** fail with a clean assertion error, they fail with **`TypeError: create_instance_tools() got an unexpected keyword argument 'parent_id'`** (or `… 'source_type'`). A `TypeError` in the red run is the **expected** red signature; a clean "expected absent, got present" assertion failure means the kwargs landed without the gate ⇒ treat that as a **different** (worse) defect. A **green preservation run is never reported as gate proof** (proof-set naming: §11.4, §17).
+> **Non-obvious failure mode — HISTORICAL NOTE (superseded by the signature-adaptive harness).** Pre-change, `create_instance_tools` did **not** accept the `parent_id=` / `source_type=` kwargs, so a naive harness would have failed with **`TypeError: create_instance_tools() got an unexpected keyword argument 'parent_id'`** (or `… 'source_type'`). The harness converts that into the clean behavioural assertion failure above. A **green preservation run is never reported as gate proof** (proof-set naming: §11.4, §17).
 
 | ID | Proposed test file | Setup | Assertion | Red pre-change? | Notes |
 |---|---|---|---|---|---|
-| **T1** | `tests/unit/tools/test_question_tool_root_registration.py` (NEW) | Drive the **REAL** `create_instance_tools` factory — copy the harness at `tests/unit/tools/test_secrets_registration.py:311-322` (`MagicMock` manager + `create_instance_tools(manager, f"inst-{agent}", agent)`); synthetic agent meta whose `tools.allow` **includes** `"question"` so the allow-filter cannot be the cause; call with `parent_id="parent-x"` | `ask_questions` **not** in the built tool names **and** no tool whose category is `question` | **RED — gate proof** | Must be an **absence at registration**, not a runtime refusal. The synthetic meta MUST allow `question` — otherwise the test proves nothing. |
-| **T2** | same file | `parent_id=None`, `source_type` ∈ {`discord`,`slack`,`telegram`,`whatsapp`} (parametrize) | `ask_questions` **IS** in the built tool names | GREEN — preservation | root shows |
+| **T1** | `tests/unit/tools/test_question_tool_root_gate.py` (**LANDED** — the gate pack, 23,329 bytes / 12 tests) | Drive the **REAL** `create_instance_tools` factory — copy the harness at `tests/unit/tools/test_secrets_registration.py:311-322` (`MagicMock` manager + `create_instance_tools(manager, f"inst-{agent}", agent)`); synthetic agent meta whose `tools.allow` **includes** `"question"` so the allow-filter cannot be the cause; call with `parent_id="parent-x"` | `ask_questions` **not** in the built tool names **and** no tool whose category is `question` | **RED — gate proof** | Must be an **absence at registration**, not a runtime refusal. The synthetic meta MUST allow `question` — otherwise the test proves nothing. |
+| **T2** | same file | `parent_id=None`, `source_type` ∈ {`discord`,`slack`,`telegram`,`whatsapp`} (parametrize) | `ask_questions` **IS** in the built tool names | signature-adaptive **preservation** — clean behavioural assertion failure pre-change (A1) | root shows |
 | **T3** | same file | `parent_id=None`, `source_type=None` | **not** present | **RED — gate proof** | a job root is not a user-facing root |
-| **T4a** | same file | `parent_id=""` (legacy empty-string root) + `source_type="discord"` | `ask_questions` **IS** present | GREEN — preservation | **PRESERVATION half** of the old T4: the legacy empty-string parent idiom (`repository.py:1109`) must keep the tool. |
+| **T4a** | same file | `parent_id=""` (legacy empty-string root) + `source_type="discord"` | `ask_questions` **IS** present | signature-adaptive **preservation** — clean behavioural assertion failure pre-change (A1) | **PRESERVATION half** of the old T4: the legacy empty-string parent idiom (`repository.py:1109`) must keep the tool. |
 | **T4b** | same file | `parent_id=""` + `source_type=""` (empty source) | **not** present | **RED — gate proof** | **GATE half** of the old T4: an empty-string parent with no chat source is not a user-facing root (fail-closed). |
 | **T5** | same file | `parent_id="p"`, `source_type="discord"` | **not** present | **RED — gate proof** | defense: a child that somehow carries a chat source type is not a root (fail-closed) |
-| **T6** | `tests/unit/services/test_child_report_open_questions_flow.py` (NEW) | A child instance completes with a report containing the section "Open questions for the orchestrator"; drive the real path | report row (`type=COMPLETION_REPORT`, `source=internal_report:<child>:<msg_id>`) → `PROCESS_REPORT` task → `ReportInjection` row → drained into the parent's turn as a `HumanMessage` | GREEN — preservation | Reuse the harness shape from `tests/e2e/test_full_chain_turn_reconciler.py` / `tests/job_queue/test_job_wait_for_children.py` |
-| **T7** | `tests/tools/test_send_message_status_guard.py` (EXTEND) | Parent calls `send_message(child_id, "<answer>")` while the child is `COMPLETED` | routing returns the `enqueue-revive` branch (`daemon/tools/instance.py:1418-1424`) and the child's status flips to `RUNNING` (`instance_messaging.py:2365-2381`); the instruction is delivered into the child's next turn | GREEN — preservation | Existing file already covers the status guard |
-| **T8** | `tests/test_question_pack_boot_rehydrate.py` + `tests/job_queue/test_midflight_qa.py` + `tests/test_question_manager.py` + `tests/job_queue/test_job_answer_tool.py` (EXTEND) | A legacy pack created **before** the gate (by a now-tool-less instance) is still answerable: RAM pack + durable shadow + rehydration + CAS; a root **without** the tool answers via `job_answer` | `set_answers` CAS returns `(pack, True)` exactly once; shadow cleared at both unwind sites; `rehydrate_from_payloads` restores the original `pack_id`; `job_answer` resolves the pack with no `ask_questions` tool in play | GREEN — preservation | Proves P9 + the migration story (§15). `job_answer` **def** at `daemon/tools/job_queue.py:3403`, docstring at `:620`. |
-| **T9** | `tests/unit/tools/test_question_tool_root_registration.py` (NEW, same file) | **END-TO-END capability (BLK-1 discriminator):** (a) a **chat-root** instance whose agent **DOES** grant the category (`leader` meta — `"question"` in `tools.allow`) ⇒ (b) the **SAME agent** (`leader`) spawned as a **CHILD** (`parent_id="parent-x"`) | (a) `ask_questions` **IS** registered (gate admits **AND** allow admits) · (b) `ask_questions` is **NOT** registered | **RED — gate proof** | **The discriminating test for the two-layer model.** T2 alone only proves the gate **admits**; T9 proves gate-admits **AND** allow-admits ⇒ effective capability = {user-facing root} ∩ {agent grants the category}. Without T9, a regression that stripped `"question"` from leader's allow-list would still pass T1–T8. |
+| **T6** | `tests/unit/services/test_child_report_open_questions_flow.py` (**LANDED** — T6×5 cases) | A child instance completes with a report containing the section "Open questions for the orchestrator"; drive the real path | report row (`type=COMPLETION_REPORT`, `source=internal_report:<child>:<msg_id>`) → `PROCESS_REPORT` task → `ReportInjection` row → drained into the parent's turn as a `HumanMessage` | **LANDED — preservation (flow proof)** | Harness borrowed from `tests/e2e/test_full_chain_turn_reconciler.py` / `tests/job_queue/test_job_wait_for_children.py` |
+| **T7** | `tests/unit/services/test_child_report_open_questions_flow.py` (**LANDED** — T7×7 cases, incl. the real tool-routing revive via `tests/helpers/send_message_fixtures.py`; the status-guard EXTEND was superseded by the one-file flow pack) | Parent calls `send_message(child_id, "<answer>")` while the child is `COMPLETED` | routing returns the `enqueue-revive` branch (`daemon/tools/instance.py:1418-1424`) and the child's status flips to `RUNNING` (`instance_messaging.py:2365-2381`); the instruction is delivered into the child's next turn | **LANDED — preservation (flow proof)** | Deviation disclosed: plan spread T7/T8 across other files; landed one-file per the brief constraint |
+| **T8** | `tests/unit/services/test_child_report_open_questions_flow.py` (**LANDED** — T8×4 cases: shadow rehydrate, original pack id + CAS, duplicate-answer CAS loser, AST static no-tool-registry proof over answer_helper/question_manager/midflight_qa, real `create_instance_tools` root-without-category holds no `ask_questions`; `job_answer` proven at the shared-helper level) | A legacy pack created **before** the gate (by a now-tool-less instance) is still answerable: RAM pack + durable shadow + rehydration + CAS; a root **without** the tool answers via `job_answer` | `set_answers` CAS returns `(pack, True)` exactly once; shadow cleared at both unwind sites; `rehydrate_from_payloads` restores the original `pack_id`; `job_answer` resolves the pack with no `ask_questions` tool in play | **LANDED — preservation (flow proof)** | Proves P9 + the migration story (§15). `job_answer` **def** at `daemon/tools/job_queue.py:3403`, docstring at `:620`. |
+| **T9** | `tests/unit/tools/test_question_tool_root_gate.py` (**LANDED**, same file) | **END-TO-END capability (BLK-1 discriminator):** (a) a **chat-root** instance whose agent **DOES** grant the category (`leader` meta — `"question"` in `tools.allow`) ⇒ (b) the **SAME agent** (`leader`) spawned as a **CHILD** (`parent_id="parent-x"`) | (a) `ask_questions` **IS** registered (gate admits **AND** allow admits) · (b) `ask_questions` is **NOT** registered | **RED — gate proof** | **The discriminating test for the two-layer model.** T2 alone only proves the gate **admits**; T9 proves gate-admits **AND** allow-admits ⇒ effective capability = {user-facing root} ∩ {agent grants the category}. Without T9, a regression that stripped `"question"` from leader's allow-list would still pass T1–T8. |
+| **Mappings-lane proof (A2)** | `tests/unit/tools/test_question_tool_root_gate.py` — **AC6** (`:477-522`), commit `925f9aced` | `daemon/routers/mappings.py` spawns a CHAT-BOUND ROOT; the lane hands the source's chat platform type to the SAME single writer (§3) | a mappings-lane root resolves `ask_questions` | **LANDED** | The §3 fix has a registry row — the mappings-lane test EXISTS; the old grep-substitute DoD is **OBSOLETE** (§11.2). |
 
 ### 11.2 Existing tests that may break — and the required action
 
@@ -568,22 +589,22 @@ PY
 | `tests/unit/tools/test_frozen_tool_name_discovery.py:223` | `KNOWN_TOOL_NAMES` must equal the source-discovered set **exactly** | **NO EDIT** — the tool source `daemon/tools/question_tools.py` stays (only its registration is gated) ⇒ source-discovery is unchanged ⇒ pin stays green. Re-run to confirm. Breaks **only** if the question tool source is deleted/renamed (forbidden — §2.5). |
 | `tests/test_innate_skills_refactoring.py:67` | expects `leader` `innate_skills == ["coordination","chart","todo"]` | **NO EDIT** — currently RED (leader still lists `question`), turns **GREEN** after P4 (RULING-1: the list becomes exactly `["coordination","chart","todo"]`). Re-run to confirm. |
 | `tests/unit/test_devops_agent.py:165` | expects `devops` `innate_skills == ["dynamic-skill","todo"]` | **MUST EDIT** → `["dynamic-skill","chart","todo"]` (RULING-1: the list becomes exactly that). Currently RED (devops has `chart`+`question`); after P4 it stays RED unless the expectation is updated (`chart` stays — dropping it is out of scope). |
-| `tests/test_chart_image_delivery_e2e.py:1418` (tripwire) | SHA-pins **35** files; **14** of them are edited by this sweep (see §11.3) | **ADJUDICATED SEAL RE-PIN** per edited file (14 constants-only updates): git-log last-touch attribution → **constants-only** update of `SEALED_SHA_BASELINES` → targeted test run → provenance-labelled commit. Do **not** edit the sealed prompt files' semantics beyond the contract. |
+| `tests/test_chart_image_delivery_e2e.py:1418` (tripwire) | SHA-pins **35** files; **17** of them are now edited (14 sweep + 3 fix-round — see §11.3) | **ADJUDICATED SEAL RE-PIN** per edited file (**18 constants-only updates** landed — devops re-pinned twice): git-log last-touch attribution → **constants-only** update of `SEALED_SHA_BASELINES` → targeted test run → provenance-labelled commit. Do **not** edit the sealed prompt files' semantics beyond the contract. |
 | `tests/unit/test_report_integrity_prompts.py` | `E_REQUIRED_SNIPPETS` (`"before ending any turn"`, `"zero tool calls"`) must survive in the canonical homes; `D_REQUIRED_SNIPPETS` (`"[REPORT SANITY:"`, `"interim, not completion"`, `"send_message"`) in `D_HOME_FILES` (leader→`workflow.md`, project-manager→`rule.md`+`workflow.md`, governor→`rule.md`, …) | **NO EDIT expected** — but the clause-family rewrite MUST preserve **both** families verbatim in each affected canonical home: the **E** snippets `"before ending any turn"` + `"zero tool calls"` **and** the **D** snippets `"[REPORT SANITY:"` + `"interim, not completion"` + `"send_message"` (N14 — the D snippets were previously named only in the *why* column; the per-file verify clause now names them explicitly). Verify per file, per agent, per family. |
 | `tests/unit/tools/test_prompt_section_reference_integrity.py` | closure sweep: no bare `.md` / bare `agents/` cross-reference tokens; no empty/glued captures | **NO EDIT** — the sweep's cross-references must be `See Open questions for the orchestrator` / `See <agent>'s Open questions for the orchestrator` (section names only). |
 | `tests/test_prompt_artifact_baseline.py` | `agents/.prompt-artifacts.sha256` pins the depth-2 prompt artifacts | **REGENERATE** after the sweep: `python3 scripts/protection/generate_prompt_artifact_baseline.py` (writes the baseline; `--check --tree <dir>` verifies). Depth-2 only ⇒ `agents/<agent>/<file>.md` are covered; `agents/_prompt_system/**` and `agents/<agent>/skills-template/**` (depth 3) are **not**. |
 | `tests/test_tool_filter.py:34` | frozen category→tool map contains `"question": ["ask_questions"]` | **NO EDIT** — the tool still exists in source. |
-| `tests/unit/test_ari_agent.py`, `tests/unit/test_ari_worker_integration.py` | assert ari allow-list **membership** (`"job" in allow`, `"instance" not in allow`), not exact sets | **NO EDIT** — adding `"question"` to ari's allow does not break membership asserts. |
-| any test asserting `ask_questions` for leader/devops | — | Re-run `grep -rn "ask_questions" tests/ --include=*.py` at implementation time (read-only grep today: hits are in `tests/e2e/test_*`, `tests/test_question_tools*.py`, `tests/job_queue/test_midflight_qa.py`, `tests/unit/test_*pause*/answer*`, `tests/test_tool_filter.py` — none assert leader/devops toolset membership). |
+| `tests/unit/test_ari_agent.py`, `tests/unit/test_ari_worker_integration.py` | `test_ari_agent.py` asserts membership only ⇒ **NO EDIT**. **`tests/unit/test_ari_worker_integration.py:345` asserts an EXACT SET on ari's `innate_skills`** — the plan's original "membership-only / NO EDIT" claim was a **plan error** | **MUST EDIT (B6 — LANDED, leader-ratified #1):** `:345` updated constants-only to `{"job-orchestration","chart","todo","question"}`. The grant legitimately breaks an exact-set assert ⇒ the constants-only edit is required and correct. |
+| any test asserting `ask_questions` for leader/devops | — | **SUPERSEDED (A2)** — the gate pack (`tests/unit/tools/test_question_tool_root_gate.py`, 12 tests incl. the AC6 mappings-lane proof) is the registry; this grep was the pre-test substitute and is **OBSOLETE as a DoD**. Kept only as an optional Phase-8 hygiene re-run (read-only census: hits are in `tests/e2e/test_*`, `tests/test_question_tools*.py`, `tests/job_queue/test_midflight_qa.py`, `tests/unit/test_*pause*/answer*`, `tests/test_tool_filter.py` — none assert leader/devops toolset membership). |
 | `tools/dev/verify_service_default_open.py:87` (the `create_instance_tools` call; `tool_count` written at `:102`) | The script records `len(by_name)` as `tool_count`. After the gate the built toolset is **one tool smaller** for the agents it exercises ⇒ `tool_count` shifts by **−1**. **No assertion depends on it** — it is a reported number, not a pinned constant. | **NO EDIT** — but **record the −1 shift** in the Phase 6 notes so a reviewer does not read it as an unexplained regression. (N1) |
 | *(N1)* the whole test corpus | **NO test asserts `ask_questions` membership in a built toolset today** — which is exactly why the new T1–T5/T9 must be **genuinely discriminating** (a synthetic meta that ALLOWS `"question"` in the `tools.allow` category), and why T9 is needed to cover the allow-list half. | **NO EDIT** — record as the rationale for the T1/T9 "the synthetic meta MUST allow `question`" requirement. |
 | `tests/unit/tools/test_attestation_prompt_contract.py:48-49` — **semantic pin (BLK-3a)**: `agents/leader/rule.md` **AND** `agents/leader/workflow.md` must **KEEP** `"Wrong Attestation Order"`, `"PURE TOOLCALL TURN"`, `"c5d9a38a shape"`, `"report-first-then-attest"`, `"attest-first, report-second"`, `"subsequent standalone AI message"`, `"non-delegating turns"` and must **NOT** gain `"CONDITIONAL on delegation"`, `"Deliver the full detailed final report"`, `"as its own message FIRST"`, `"call \`attest_completion\` ALONE"` | The SHA seal does **not** cover the attestation **contract strings** — only the file bytes. The leader's two files are both edited by the sweep (leader/rule.md §10.4 + §10.5, leader/workflow.md §10.4 + §10.5) ⇒ the semantic contract must survive even though the SHA changes. | **NO EDIT expected — verify.** Do **not** add the forbidden fragments; do **not** drop the required ones. Re-run the file after the leader sweep. |
 | `tests/unit/tools/test_mission_watch_prompts.py` — **semantic pin (BLK-3b)**: `agents/jober/rule.md` + `agents/jober/workflow.md` (and the rest of the 9-file mission-watch set) keep the `watch_mission` vocabulary and **ZERO `watch_job` tokens** | The SHA seal does **not** cover this vocabulary. `agents/jober/rule.md` and `agents/jober/workflow.md` are edited by the sweep (§10.4). | **NO EDIT expected — verify.** The sweep must not reintroduce `watch_job`/`watch_jobs` (word-boundary match) nor drop the decision-rule text. |
 | `tests/test_chart_image_delivery_audit.py:58,467-480` — **semantic pin (BLK-3c)**: the literal **"Chat Delivery"** must survive verbatim in **EVERY** chart-capable file the sweep edits (**20** agents, `CHART_CAPABLE_AGENTS`) | The SHA seal covers file bytes but **not** this literal per agent; `agents/governor/rule.md` (the new 14th re-pin) carries **1 × "Chat Delivery"**, and the sweep edits several other chart-capable files. | **NO EDIT expected — verify.** Pin #17 (`test_pin_17_chat_delivery_references`) is parametrized over the 20 chart-capable agents; every edited one must still match. |
 
-### 11.3 SEALED-SHA overlap (verified) — **14** files trip the tripwire
+### 11.3 SEALED-SHA overlap (verified) — **17** files trip the tripwire (fix round 1 included)
 
-The commission's brief names 5 sealed files; **reading `tests/test_chart_image_delivery_e2e.py:1350-1398` shows 35 sealed files, and 14 of them are edited by this sweep** (13 + `agents/governor/rule.md`, added by BLK-2):
+The commission's brief names 5 sealed files; **reading `tests/test_chart_image_delivery_e2e.py` shows 35 sealed files, and 17 of them are edited** (14 sweep incl. `agents/governor/rule.md` + 3 fix-round: `agents/charter/workflow.md` (B5), `agents/devops/rule.md` (B3), `agents/maintenancer/rule.md` (W3)). Seal-pin line numbers SHIFTED with the fix-round attribution comment block (e.g. governor/rule.md `:1387`→`:1392`, leader/rule.md `:1388`→`:1393`, devops/rule.md now `:1390`, charter/workflow.md `:1357`) — **the SHA constants are the identity; grep, don't trust line numbers**:
 
 | # | Sealed file | Sweep row |
 |---|---|---|
@@ -600,33 +621,38 @@ The commission's brief names 5 sealed files; **reading `tests/test_chart_image_d
 | 11 | `agents/reviewer[v2]/rule.md` (`:1394`) | §10.5 short |
 | 12 | `agents/tidier/rule.md` (`:1395`) | §10.5 short |
 | 13 | `agents/tidier[v2]/rule.md` (`:1396`) | §10.5 short |
-| **14** | **`agents/governor/rule.md` (`:1387`)** — sha `84a93586df376ad39dc553af36f86f684977ecfa8d717186f2fe8f16846c8cf5`, carries **1 × "Chat Delivery"** | §10.5 short (`:82`) — the OPENING-DISCIPLINE clause; also the governor's D_HOME **and** E_HOME ⇒ the D **and** E snippets must survive |
+| **14** | **`agents/governor/rule.md` (now `:1392`)** — sha `84a93586df376ad39dc553af36f86f684977ecfa8d717186f2fe8f16846c8cf5` at re-pin time, carries **1 × "Chat Delivery"** | §10.5 short (`:82`) — the OPENING-DISCIPLINE clause; also the governor's D_HOME **and** E_HOME ⇒ the D **and** E snippets must survive |
+| **15** | **`agents/charter/workflow.md`** — current sha **`2a5078f9…`** (`tests/test_chart_image_delivery_e2e.py:1357`) | §10.7 flip (B5, `6711c769e`) — re-pin `78469d671`, attribution `<-66512e9dd` |
+| **16** | **`agents/devops/rule.md`** — current sha **`febf0e89…`** (`:1390`) | §10.4 (B3, `f332e83e0` + residual `c5bd90146`) — **RE-PINNED TWICE** (`78469d671` with `617bf69a0` attribution, superseded by `6fa226976`) |
+| **17** | **`agents/maintenancer/rule.md`** — current sha **`d6e448a6…`** (`:1394`) | §10.6 (W3, `6711c769e`) — re-pin `78469d671`, attribution `<-74e9168a2` |
 
-**All 35 pins are currently GREEN** (verified by hashing every entry at authoring time; the governor's baseline sha re-verified against the working tree at `0e7500a1b`) ⇒ every one of the **14** needs a re-pin; there are **no** pre-existing reds to absorb.
+**All 35 constants re-verified from real bytes post-fix-round (35/35 GREEN; no pattern-fill — the pre-edit mismatch count was exactly the edit targets).** Re-pin arithmetic on branch: **14** (`b05ac37d4`, sweep) + **3** (`78469d671`: charter, devops, maintenancer) + **1** (`6fa226976`: devops residual) = **18 constant updates** across **17 distinct files**; there were **no** pre-existing reds to absorb. Current constants: charter/workflow.md `2a5078f9…` (`:1357`) · devops/rule.md `febf0e89…` (`:1390`) · governor/rule.md `a779742d…` (`:1392`) · leader/rule.md `261ab3af…` (`:1393`) · maintenancer/rule.md `d6e448a6…` (`:1394`).
 
-**Sealed files NOT in the sweep (safe):** `agents/ari/rule.md`, `agents/ari/workflow.md`, `agents/charter/*` (4 + 2 install-skill files), `agents/devops/rule.md`, `agents/maintenancer/rule.md`, `agents/developer[v2]/tools_note.md`, `agents/planner[v2]/tools_note.md`, `agents/wanderer/soul.md`, `agents/_prompt_system/innate-skills/chart/skill.md`, `daemon/constants.py`, `daemon/sources/*` (**6** daemon files — `base.py`, `registry.py`, `dispatcher.py`, `adapters/discord/adapter.py`, `adapters/slack/adapter.py`, `adapters/telegram.py`; **N3**: the plan previously said 5).
+**Sealed files NOT in the sweep (safe, 18):** `agents/ari/rule.md`, `agents/ari/workflow.md`, `agents/charter/rule.md` + `agents/charter/soul.md` + `agents/charter/meta.json` + 2 charter install-skill files (5 of charter's 6 — `charter/workflow.md` LEFT the safe set in fix round 1), `agents/developer[v2]/tools_note.md`, `agents/planner[v2]/tools_note.md`, `agents/wanderer/soul.md`, `agents/_prompt_system/innate-skills/chart/skill.md`, `daemon/constants.py`, `daemon/sources/*` (**6** daemon files — `base.py`, `registry.py`, `dispatcher.py`, `adapters/discord/adapter.py`, `adapters/slack/adapter.py`, `adapters/telegram.py`; **N3**: the plan previously said 5).
 
 | Split of the 35-file sealed baseline | Count |
 |---|---|
-| Edited by the sweep ⇒ **re-pin** | **14** (13 + `agents/governor/rule.md`) |
-| Not edited ⇒ safe | **21** (22 with `daemon/sources/*` = 6, **minus** `agents/governor/rule.md` which moved into the sweep) |
-| **Total** | **35** ✓ (14 + 21) |
+| Edited ⇒ **re-pin** | **17** (14 sweep + 3 fix-round: charter/workflow.md, devops/rule.md, maintenancer/rule.md) — **18 constant updates** (devops ×2) |
+| Not edited ⇒ safe | **18** |
+| **Total** | **35** ✓ (17 + 18) |
 
 ### 11.4 Exact commands
 
 Canonical invocation (per `.agents/tester/PACKS.md` house idiom; `pytest` config in `pyproject.toml:86-97` — `testpaths=["tests"]`, `addopts="-m 'not integration and not postgres and not slow'"`, `asyncio_mode=auto`, `timeout=30`):
 
 ```bash
-cd /home/nea/ensemble-src
+# C3: use the WORKTREE's own venv/environment — the main checkout's .venv resolves to `latest`, NEVER use it; this worktree has its own .venv
+cd /home/nea/ensemble-src-wt-hidenonroot
 FENCE="env -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_USER -u POSTGRES_PASSWORD -u DATABASE_URL"
 
-# ── NEW tests (Phase 2) ─────────────────────────────────────────────
+# ── LANDED tests (both REAL files — C3) ─────────────────────────────
+# gate pack (12 tests incl. the AC6 mappings-lane proof) + flow proofs (16 cases)
 timeout 300 $FENCE .venv/bin/pytest \
-  tests/unit/tools/test_question_tool_root_registration.py \
+  tests/unit/tools/test_question_tool_root_gate.py \
   tests/unit/services/test_child_report_open_questions_flow.py \
   -q --tb=short -p no:randomly
 
-# ── T7 / T8 extensions ──────────────────────────────────────────────
+# ── T7/T8 neighbour regression files (the flows themselves LANDED in the flow pack) ──
 timeout 300 $FENCE .venv/bin/pytest \
   tests/tools/test_send_message_status_guard.py \
   tests/test_question_manager.py \
@@ -682,8 +708,9 @@ House idioms to keep: `timeout` wrapper (outer) + `--tb=short` + `-p no:randomly
 
 | Proof set | Tests | Pre-change state | What it proves |
 |---|---|---|---|
-| **GATE PROOF** (RED pre-change) | **T1, T3, T4b, T5, T9** | **RED** — fails with `TypeError: create_instance_tools() got an unexpected keyword argument 'parent_id'` (the kwargs do not exist yet) | the gate actually hides the tool from non-roots, and the two-layer capability model holds |
-| **PRESERVATION** (GREEN pre-change) | **T2, T4a, T6, T7, T8** | **GREEN** | nothing regressed — roots still get the tool, the legacy `""`-parent idiom still works, the report→continuation flow still works, legacy packs stay answerable |
+| **GATE PROOF** (RED pre-change) | **T1, T3, T4b, T5, T9** | **RED** pre-change (via the signature-adaptive harness: a clean behavioural assertion failure — the historical `TypeError` prediction is superseded, §11.1) | the gate actually hides the tool from non-roots, and the two-layer capability model holds |
+| **PRESERVATION — signature-adaptive** (red-signature / behavioural) | **T2, T4a** | clean behavioural assertion failure pre-change (A1) | roots still get the tool; the legacy `""`-parent idiom still works |
+| **FLOW PROOFS — LANDED** | **T6, T7, T8** | green on the branch (`12291f2a4`; 16 cases, mutation-verified 5/5) | the report→continuation flow works; legacy packs stay answerable |
 
 ⇒ A **green preservation run is NEVER reported as gate proof**, and a **green gate-proof set** is a defect (the gate did not bite). Report both sets separately, by name.
 
@@ -699,9 +726,10 @@ House idioms to keep: `timeout` wrapper (outer) + `--tb=short` + `-p no:randomly
 | Sibling worktree | `/home/nea/ensemble-src-wt-qprasym` — **MUST NOT be touched** |
 | **Already merged INTO THIS BRANCH** | ✅ merge commit **`0e7500a1b`** (this branch's HEAD) contains `e2899f8bd` |
 | **NOT yet in `latest`** | ❌ `git merge-base --is-ancestor e2899f8bd latest` → **false** |
-| Their scope | `daemon/services/question_manager.py`, `daemon/routers/answer_helper.py`, `daemon/services/instance_messaging.py`, `daemon/services/instance_lifecycle.py` (+ `api.py`, `config.py`, `routers/instances.py`, `services/pool_orchestrator.py`) |
-| **Overlap with us** | `daemon/services/instance_lifecycle.py` param threading at `:2137` (spawn) / `:4690` (restore) — keep **additive + minimal** (two keyword arguments, no restructuring) |
-| **Disjoint** | `daemon/tools/instance.py:5895` (the gate), `_tool_registry`, `question_manager`, `instance_messaging` — no file-level conflict |
+| Their scope (CORRECTED — KV `overlap_CORRECTED`) | `answer_helper.py` (+139/−41), `instance_lifecycle.py` (insert-only), `api.py`, `config.py`, `repositories/instance/repository.py`, `routers/instances.py`, `pool_orchestrator.py` + NEW `question_pause_set.py`, `stale_pause_sweep.py` — **`question_manager` NOT touched; `instance_messaging.py` NO LONGER in their diff** |
+| **Overlap with us** | `daemon/services/instance_lifecycle.py` ONLY — hunks confined to `pause_instance_cascade`, >1300 lines from our call sites; on THEIR branch the restore call shifts to **~`:4759`** and `CHAT_SOURCE_TYPES` def shifts `repository.py:919`→`:1000` ⇒ **RE-GREP after the merge** (§12.4 step 3), never reuse pre-merge line numbers |
+| **Disjoint (verified on their tip)** | `daemon/tools/instance.py:5895` (the gate), `_tool_registry`, `question_manager`, `instance_messaging`, `mappings.py`, **ALL `agents/**`** (zero prompt-surface collision) — no file-level conflict |
+| **Sibling facts — fix-round update (C1)** | their branch now **7 commits ahead, tip `86fe0e03a`, 13 files** (planner-verified). **`latest` has ALSO moved: `latest` = `843b669c5`** (dev-strategy v1.4.0 — developer-docs only) while **`origin/latest` = `1ebdf469f`** ⇒ origin is BEHIND and the **§13 push step is REAL**, not hypothetical |
 | **Anchor drift caused by the merge** | restore call `:4618` → **`:4690`**; `source_type` row read `:4595-4597` → **`:4667-4668`**; `meta.parent_id` `:4603` → **`:4675`**. Spawn `:2137`, `source_type` writer `:2390`, `append_platform_context` `:1039`, `_PLATFORM_INSTRUCTIONS` `:1006`, and `instance.py:5895` / `:6238` / `:2450` / `:163` are **unchanged**. |
 
 ⇒ **Phase 0 is still a wait — but on the OTHER side**: the sibling's work is already *in* this branch, so what remains is **`git merge latest` INTO this branch** once the sibling has landed in `latest` (their own merge to `latest` is still awaited). Re-verify every anchor in §1–§3 against the post-merge tree before implementing — the table above is the verified post-merge reality at `0e7500a1b`.
@@ -729,6 +757,15 @@ House idioms to keep: `timeout` wrapper (outer) + `--tb=short` + `-p no:randomly
 
 ⇒ **Phase 0's KV work is VERIFY/MERGE, not create.**
 
+### 12.4 SECOND BASE-SYNC RE-ENTRY (C2 — explicit numbered operation)
+
+When the sibling lane (`fix/question-pause-resume-asymmetry`) merges into `latest`:
+
+1. **`git merge latest` INTO this branch** — **never rebase** (preserve the `8fa3319f7` planning-artifact provenance; §12.2).
+2. **Expect the dev-strategy merge from `843b669c5`** (`latest` moved — dev-strategy v1.4.0, developer-docs only). A read-only `git merge-file` simulation run by the review council was **CLEAN**: the clause survives, no "or ask" residue, twin parity — **still re-verify on the real merge**.
+3. **RE-GREP every anchor after the merge** — their branch shifts `CHAT_SOURCE_TYPES` (`daemon/repositories/instance/repository.py` def `:919`→`:1000`) and the restore call (→ ~`:4759`); do not reuse pre-merge line numbers anywhere in §1–§3.
+4. **Re-run the targeted suites** (gate pack `tests/unit/tools/test_question_tool_root_gate.py` + flow proofs `tests/unit/services/test_child_report_open_questions_flow.py` + the pins — §11.4, from the worktree venv) before any merge to `latest`.
+
 ---
 
 ## 13. Staging (P11)
@@ -741,13 +778,14 @@ House idioms to keep: `timeout` wrapper (outer) + `--tb=short` + `-p no:randomly
 |---|---|---|
 | 1 | Merge the feature branch into `latest` (`--no-ff`, audit-trail branch pushed) | `git log --oneline` shows the merge |
 | 2 | Version bump via the project convention: `python3 scripts/bump_version.py` (`scripts/bump_version.py:1-30`) | **If it dies at an off-PATH `uv-sync`, complete manually with EXACT semantics — 4 files: `pyproject.toml`, `daemon/__init__.py`, `tests/test_api.py`, `uv.lock`** |
-| 3 | Regenerate `agents/.prompt-artifacts.sha256` (if any `agents/**` file changed) | `python3 scripts/protection/generate_prompt_artifact_baseline.py` |
-| 4 | Stage: `bash scripts/upgrade/stage.sh <version>` (Makefile target `upgrade-stage` → `Makefile:369-370`) | provenance sidecars written; **tip-identity freshness guard** (L1: `HEAD == refs/remotes/origin/latest`; L2 sidecar re-hash) must pass — a non-tip tree exits **78** `non-tip-tree` |
-| 5 | **Keep the staging worktree** (both provenance sidecars intact) for the promote ceremony | avoids the v0.25.2 provenance-evidence gap |
-| 6 | **Migration delta = EMPTY** — no file under `daemon/migrations/versions/` changes (this commission touches no schema) | `git diff <base>..<head> -- daemon/migrations/versions/` → empty |
-| 7 | **Rollback-safe adjudication (STANDING RULE — explicit semantic reasoning, not a reflex `=0`)** | `ENSEMBLE_ROLLBACK_SAFE=1` is legitimate: (1) zero migration files added/changed ⇒ no schema mutation to reverse; (2) the daemon change is a **build-time tool-registration conditional** — reversible by the next release; (3) the `meta.json` grants are additive prompt/tool config, no data state; ⇒ `rollback_safe=true`, `source=explicit=true`. Record the reasoning in the stage log line (`rollback_safe=true source=explicit=true`). |
-| 8 | Do **not** flip `current`; do **not** restart the daemon | the live symlink and the live epoch must be unchanged by this commission |
-| 9 | **Emit the final report** — the 7 commission items **verbatim** + the 3 extras (contract in §17), including the **flow proof** (child open-question → parent instruction) and the explicit **in-flight child question-pack statement** | the report is the commission's deliverable; §17 is the contract |
+| 3 | Regenerate `agents/.prompt-artifacts.sha256` (if any `agents/**` file changed) + **re-check as a NO-OP before staging** (else the guard reads the tree as dirty-build) | `python3 scripts/protection/generate_prompt_artifact_baseline.py` then `--check` → clean |
+| 4 | **PUSH `latest` to origin BEFORE staging (NEW — §13 push step)**: the stage tip-identity guard prefers `refs/remotes/origin/latest` and exits **78** `non-tip-tree` otherwise; `origin/latest` (`1ebdf469f`) is currently BEHIND local `latest` (`843b669c5`) ⇒ this step is REAL, not hypothetical | `git ls-remote origin latest` == local `latest` sha |
+| 5 | Stage: `bash scripts/upgrade/stage.sh <version>` (Makefile target `upgrade-stage` → `Makefile:369-370`) | provenance sidecars written; **tip-identity freshness guard** (L1: `HEAD == refs/remotes/origin/latest`; L2 sidecar re-hash) must pass — a non-tip tree exits **78** `non-tip-tree` |
+| 6 | **Keep the staging worktree** (both provenance sidecars intact) for the promote ceremony | avoids the v0.25.2 provenance-evidence gap |
+| 7 | **Migration delta = EMPTY** — no file under `daemon/migrations/versions/` changes (this commission touches no schema) | `git diff <base>..<head> -- daemon/migrations/versions/` → empty |
+| 8 | **Rollback-safe adjudication (STANDING RULE — explicit semantic reasoning, not a reflex `=0`)** | `ENSEMBLE_ROLLBACK_SAFE=1` is legitimate: (1) zero migration files added/changed ⇒ no schema mutation to reverse; (2) the daemon change is a **build-time tool-registration conditional** — reversible by the next release; (3) the `meta.json` grants are additive prompt/tool config, no data state; ⇒ `rollback_safe=true`, `source=explicit=true`. Record the reasoning in the stage log line (`rollback_safe=true source=explicit=true`). |
+| 9 | Do **not** flip `current`; do **not** restart the daemon | the live symlink and the live epoch must be unchanged by this commission |
+| 10 | **Emit the final report** — the 7 commission items **verbatim** + the 3 extras + the fix-round disclosures (contract in §17.1 = **17** items), including the **flow proof** (child open-question → parent instruction) and the explicit **in-flight child question-pack statement** | the report is the commission's deliverable; §17 is the contract |
 
 ---
 
@@ -760,7 +798,7 @@ House idioms to keep: `timeout` wrapper (outer) + `--tb=short` + `-p no:randomly
 | **R3** | Stale `_tool_metadata` residue leaves `"question"` **advertised on the help surface for EVERY instance of a granted agent — including non-roots** | low (cosmetic) | The help surface is computed from the **AGENT META**, not from the instance: `daemon/tools/help.py:105-115` → `expand_allow_for_innate_skills` → `resolve_tool_filter` ⇒ every instance of an agent that grants `"question"` (leader, devops, ari) sees it listed, **even when the gate stripped the tool from that instance**. `_tool_metadata` is a **module-level global** (`daemon/tools/_tool_registry.py:18`) cleared **only** by `clear_registry()` (`:625-628`) and appended to by `scan_tools_for_full_docs` (`:660-665`) ⇒ **cross-instance residue** (one instance's scan can leave the category listed for another instance's help). The gate is a *registration* gate and must not touch this surface. | Verify the help listing after the change; state the **precise mechanism** (agent-meta computation + module-level global + cross-instance residue) in the final report — **do not** chase it |
 | **R4** | Legacy in-flight packs at deploy time | medium | Migration story (§15): packs live in RAM **and** are shadowed into `instance_metadata['question_pack_payload']` ⇒ the answer path resolves them (CAS + shadow clear + boot rehydration). **No pack is orphaned by the gate** | T8 |
 | **R5** | The sibling commission merges into `latest` while we implement | medium | Implement **only after** the merge (Phase 0 gate); never touch their worktree; keep `instance_lifecycle.py` edits additive + minimal | Re-read `latest` after the merge; re-verify §1-§3 anchors (line numbers shift) |
-| **R6** | Prompt sweep breadth (**59 sweep rows / 54 files edited, 55 with `agents/governor/rule.md`**) risks prompt-integrity test failures and seal/hash pins | medium | §11.2 pin list + §11.3 the **14**-file seal overlap; **require targeted test runs per phase**; re-pin constants-only, provenance-labelled | Run §11.4's prompt-integrity + seal-tripwire commands after each sweep phase, not once at the end |
+| **R6** | Prompt sweep breadth (**66 prompt/doc files edited** — final edit-set, §10.10) risks prompt-integrity test failures and seal/hash pins | medium | §11.2 pin list + §11.3 the **17**-file seal overlap (**18** re-pin constant updates); **require targeted test runs per phase**; re-pin constants-only, provenance-labelled | Run §11.4's prompt-integrity + seal-tripwire commands after each sweep phase, not once at the end |
 | **R7** | The clause-family rewrite could **degrade a root's own ask wording** — a root bound to a chat source must keep the ability to ask | medium | The edit rule is **conditional**: "…or report open questions **(unless you are the user-facing root)**" (§10.5); the rewritten shared skill teaches the **root** half; the root's **capability** is untouched (gate still admits it, allow-list still grants it) | Grep the swept files for the conditional form; confirm every clause-family sentence carries it; confirm `agents/_prompt_system/innate-skills/question/skill.md` still teaches the root ask |
 | **F1** | The mid-flight QA / answer-event fan-out becomes **ROOT-ONLY** (only roots mint packs — the sole production writer is `daemon/tools/question_tools.py:502`) | medium | Deliberate consequence of the gate; the non-root path becomes the report section (§6); the fan-out itself is unchanged | State it in the **deploy paragraph** of the final report (§13) + confirm no non-root can mint a pack (T1/T3/T5) |
 | **F2** | `agents/watcher/meta.json` has `allow: []` ⇒ **default-open universe** ⇒ it HOLDS `ask_questions` today; the gate strips it | low | The gate (not the allow-list) is the hiding control ⇒ the tool is gone for watcher either way; pinning watcher's allow list is optional hygiene | Confirm `ask_questions` is absent from a watcher's built toolset; optionally pin the allow list (§4) |
@@ -769,7 +807,7 @@ House idioms to keep: `timeout` wrapper (outer) + `--tb=short` + `-p no:randomly
 | **F5** | The **53 test files** that call `create_instance_tools` now build toolsets **without** the question tool (re-derived: `grep -rl create_instance_tools tests/ --include=*.py` → 53 files; the plan's earlier "~73–109 callers" was a stale estimate) | low | Benign today — **no test asserts `ask_questions` membership in a built toolset** (N1) ⇒ nothing breaks; but a future test that asserts its presence would fail for a confusing reason | Record the census row (53 files) in the final report; `tools/dev/verify_service_default_open.py`'s unpinned `tool_count` shifts by **−1** (no assertion depends on it) |
 | **F6** | The **leader loses the question-SKILL text** (`innate_skills` loses `"question"`) while still needing to answer a root's pack | low | A **teaching gap, not a capability gap**: under RULING-1 the leader **KEEPS** `"question"` in `tools.allow` ⇒ it retains the **capability**; only the skill **text** is gone | Confirm the leader's toolset still contains `ask_questions` (T9 case (a) uses the leader meta); the shared skill teaches the root half for whoever holds it |
 | **F7** | The **governor** carries its open-questions contract in **two** files (`rule.md` + `workflow.md`) ⇒ two vocabularies for one contract (the "stated once" trap, guide R-e) | medium | RULING-2: the contract lives **ONCE** in `agents/governor/rule.md` (the governor's D_HOME **and** E_HOME are both `rule.md` — `tests/unit/test_report_integrity_prompts.py:92,:106`); `workflow.md:46` becomes a **section-name pointer** | Confirm `workflow.md:46` carries only the pointer; confirm `rule.md` carries the contract + the D/E snippets; re-pin `governor/rule.md` (14th) |
-| **F8** | **Legacy rows without the `source_type` stamp** (written before 2026-08-12) are not user-facing roots ⇒ they lose the tool on restore | low | **PRE-EXISTING and OUT OF SCOPE — NO BACKFILL** (a backfill would make the migration delta non-empty and break the P11 EMPTY-delta premise, §13 step 6 / §15) | State it in §1.3 + §15; confirm `daemon/migrations/versions/` is untouched |
+| **F8** | **Legacy rows without the `source_type` stamp** (written before 2026-08-12) are not user-facing roots ⇒ they lose the tool on restore | low | **PRE-EXISTING and OUT OF SCOPE — NO BACKFILL** (a backfill would make the migration delta non-empty and break the P11 EMPTY-delta premise, §13 step 7 / §15) | State it in §1.3 + §15; confirm `daemon/migrations/versions/` is untouched |
 
 ---
 
@@ -792,7 +830,7 @@ Any pack that already exists for a non-root **stays routable**:
 
 **Root-only fan-out (N6 / F1).** After the gate, only roots mint question packs (the sole production writer is `daemon/tools/question_tools.py:502`) ⇒ the mid-flight QA relay lane and the answer-event surface are **ROOT-ONLY**. The pack machinery itself is unchanged; only *who can create a pack* narrows.
 
-**Legacy unstamped rows — NO BACKFILL (N8 / F8).** Rows created before the `source_type` writer existed (**2026-08-12**) carry no stamp ⇒ they are not user-facing roots ⇒ a restored such instance gets no question tool. **No backfill** is performed: it would add a migration file and make the delta non-empty, breaking the P11 EMPTY-delta premise and the `rollback_safe` adjudication in §13 step 7. The behaviour delta is disclosed (F8), not repaired.
+**Legacy unstamped rows — NO BACKFILL (N8 / F8).** Rows created before the `source_type` writer existed (**2026-08-12**) carry no stamp ⇒ they are not user-facing roots ⇒ a restored such instance gets no question tool. **No backfill** is performed: it would add a migration file and make the delta non-empty, breaking the P11 EMPTY-delta premise and the `rollback_safe` adjudication in §13 step 8. The behaviour delta is disclosed (F8), not repaired.
 
 ---
 
@@ -804,11 +842,11 @@ Any pack that already exists for a non-root **stays routable**:
 |---|---|---|---|
 | 0 | *(no file edits)* — branch / worktree / KV verification | Phase 9 | medium |
 | 1 | `daemon/tools/instance.py`, `daemon/services/instance_lifecycle.py`, `daemon/routers/mappings.py` | §2 gate ↔ §3 lane (both thread `source_type`) | **strong** — the lane fix is worthless unless the gate reads the threaded value |
-| 2 | `tests/unit/tools/test_question_tool_root_registration.py` (NEW), `tests/unit/services/test_child_report_open_questions_flow.py` (NEW) | Phase 1 (asserts the gate); §6/§7 (report + continuation) | strong |
+| 2 | `tests/unit/tools/test_question_tool_root_gate.py` (**LANDED**), `tests/unit/services/test_child_report_open_questions_flow.py` (**LANDED** — T6/T7/T8) | Phase 1 (asserts the gate); §6/§7 (report + continuation) | strong |
 | 3 | `agents/{leader,devops,ari}/meta.json` + `tests/unit/test_devops_agent.py` | Phase 1 (defense-in-depth); the `ari` grant needs the gate to let it through | strong |
 | 4 | `agents/_prompt_system/innate-skills/question/skill.md` | Phase 3 (only `ari` receives it afterwards) | medium |
-| 5 | the sweep — **59 sweep rows**, **54 files actually edited** (3 `meta.json` + 51 prompt/doc), **55** with `agents/governor/rule.md` (manifest §10.10) | Phase 4 (vocabulary); the guide's canonical-home rule (§10.1); **14** seal re-pins | **strong** (breadth) |
-| 6 | **14** seal constants + targeted tests | Phase 5 | strong |
+| 5 | the sweep — **66 prompt/doc files edited** (final edit-set; manifest §10.10, machine cross-check 70 = 1 baseline + 3 `meta.json` + 66 prompt/doc) | Phase 4 (vocabulary); the guide's canonical-home rule (§10.1); **18** seal re-pin constant updates | **strong** (breadth) |
+| 6 | **18** seal constants (17 files) + targeted tests | Phase 5 | strong |
 | 7 | *(review artifacts only)* — reviewer council | Phases 1-6 | strong |
 | 8 | *(test artifacts only)* — independent tester verification | Phase 7 | strong |
 | 9 | `scripts/upgrade/*`, `scripts/bump_version.py` | Phases 1-8 | medium |
@@ -819,14 +857,14 @@ Any pack that already exists for a non-root **stays routable**:
 |---|---|---|---|
 | **0** | **Wait for the sibling to land in `latest`, then merge `latest` INTO this branch.** The sibling `e2899f8bd` is **already merged into this branch** (`0e7500a1b`) but **not into `latest`** ⇒ run `git merge latest` (**MERGE, never rebase** — §12.2), then re-read the tree and re-verify every §1-§3 anchor (the sibling merge shifted the restore anchors). **KV work = VERIFY/MERGE, not create** (§12.3). | — | P10 hard gate; R5; BLK-6 |
 | **1** | **Daemon gate + mappings lane.** `daemon/tools/instance.py` (predicate helper + conditional + keyword-only signature), `daemon/services/instance_lifecycle.py:2137` & `:4690` (threading), `daemon/routers/mappings.py:114-117` (`source_type=source.source_type`). | Phase 0 | The gate is the authoritative control; both call sites must be threaded **in the same change** or the restore path silently loses the tool for roots |
-| **2** | **New tests T1–T5, T9** (registration + capability) in `tests/unit/tools/test_question_tool_root_registration.py`. | Phase 1 | Proves the gate before any prompt work; the **GATE PROOF** set (T1, T3, T4b, T5, T9) turning green is the go/no-go for Phase 3's grants. **Test-first**: capture the red pre-change evidence (expect `TypeError` — §11.1) |
+| **2** | **Gate tests T1–T5, T9** (registration + capability) in `tests/unit/tools/test_question_tool_root_gate.py` — **LANDED**. | Phase 1 | Proves the gate before any prompt work; the **GATE PROOF** set (T1, T3, T4b, T5, T9) turning green is the go/no-go for Phase 3's grants. **Test-first red evidence**: captured via the signature-adaptive harness — a clean behavioural assertion failure pre-change (A1; the `TypeError` prediction is superseded — §11.1) |
 | **3** | **`meta.json` grants** — leader/devops **remove `"question"` from `innate_skills` and KEEP it in `tools.allow`**; ari **adds** both (§4, §10.3). Plus the `tests/unit/test_devops_agent.py:165` expectation fix. | Phase 2 green | Defense-in-depth only after the authoritative gate is proven; the ari grant is what makes "roots still ask" real; the two-layer model (BLK-1) is what keeps a leader-as-chat-root able to ask |
 | **4** | **Root-scoped skill rewrite** (§5.1) of `agents/_prompt_system/innate-skills/question/skill.md`. | Phase 3 | The skill must teach root behavior **after** only ari holds it |
-| **5** | **Prompt & doc sweep** (§10.4-§10.8, §10.10 manifest) — **59 sweep rows / 54 files edited (55 with `agents/governor/rule.md`)**, intra-agent canonical homes (§10.1), guide rules R-a..R-k (§10.2). | Phase 4 | The sweep uses the final vocabulary; doing it before the skill rewrite risks two vocabularies |
-| **6** | **Targeted test runs + seal re-pin adjudication** (§11.2-§11.4): **14** constants-only re-pins (git-log last-touch attribution → constants-only update → targeted test → provenance-labelled commit) + the prompt-artifact baseline regeneration + `tests/unit/test_devops_agent.py` expectation. | Phase 5 | The tripwire only fails **after** the edits; re-pin is a discrete, auditable act |
+| **5** | **Prompt & doc sweep** (§10.4-§10.8, §10.10 manifest) — **66 prompt/doc files edited** (final edit-set incl. fix round 1), **14** intra-agent canonical homes (§10.1), guide rules R-a..R-k (§10.2). | Phase 4 | The sweep uses the final vocabulary; doing it before the skill rewrite risks two vocabularies |
+| **6** | **Targeted test runs + seal re-pin adjudication** (§11.2-§11.4): **18** constants-only re-pin updates across **17** files (git-log last-touch attribution → constants-only update → targeted test → provenance-labelled commit; devops re-pinned twice) + the prompt-artifact baseline regeneration ×3 (44 + 12 + 1 files) + `tests/unit/test_devops_agent.py` + `tests/unit/test_ari_worker_integration.py:345` expectations. — **LANDED.** | Phase 5 | The tripwire only fails **after** the edits; re-pin is a discrete, auditable act |
 | **7** | **Reviewer council** — owner: the **reviewer** agent (council, **0-critical bar**). | Phases 1-6 | The council's 7 blocking findings are text-level and were folded into this plan; a second council confirms the fold. **0 critical** is the bar. |
-| **8** | **Independent tester functional verification** — owner: the **tester** agent: registration-level (**GATE PROOF** T1/T3/T4b/T5/T9 vs **PRESERVATION** T2/T4a/T6/T7/T8 — reported separately, never conflated), the **flow proof** (child open-question → parent instruction), and the staged smoke on the merged tree. | Phase 7 | Independent verification on the **merged** tree, not on the developer's branch — the council approves the code, the tester proves the behaviour. |
-| **9** | **Merge + version bump + stage (no promote)** (§13) + emit the final report (§17). | Phases 1-8 | Staging consumes the merged tree; the EMPTY migration delta ⇒ `rollback_safe=true` (explicit reasoning) |
+| **8** | **Independent tester FUNCTIONAL verification** — owner: the **tester** agent: registration-level (**GATE PROOF** T1/T3/T4b/T5/T9 vs the signature-adaptive **PRESERVATION** T2/T4a — reported separately, never conflated) + the **flow proofs** (T6/T7/T8, LANDED — child open-question → parent instruction). **Phase 8 owns the functional pass** (round 1 of the project's two-round tester convention); **staged verification happens AFTER staging, in Phase 9** (W4-phase8/9). | Phase 7 | Independent verification on the **merged** tree, not on the developer's branch — the council approves the code, the tester proves the behaviour. |
+| **9** | **Merge + version bump + PUSH latest to origin (§13 step 4) + stage (no promote)** (§13) + **independent staged verification AFTER staging** (round 2 of the two-round tester convention) + emit the final report (§17). | Phases 1-8 | Staging consumes the merged tree; the EMPTY migration delta ⇒ `rollback_safe=true` (explicit reasoning); the push makes the tip-identity guard pass |
 
 ---
 
@@ -841,31 +879,38 @@ Any pack that already exists for a non-root **stays routable**:
 - [ ] The Question Skill teaches **root** behavior + the chat-lane preference + the non-root half, in first person, with **no forbidden-layer tokens** (guide R-b).
 - [ ] Every non-root agent's contract is stated **once per agent** in its canonical home; same-agent cross-references use section names only (guide R-f); no false "stated once" claim (guide R-e).
 - [ ] `tests/unit/test_devops_agent.py:165` updated; `tests/test_innate_skills_refactoring.py:67` verified GREEN; `tests/unit/tools/test_frozen_tool_name_discovery.py:223` verified GREEN (source unchanged).
-- [ ] All **14** edited sealed files re-pinned with **constants-only** updates, git-log attribution, targeted test run, and a provenance-labelled commit; the tripwire `tests/test_chart_image_delivery_e2e.py::TestPhaseDDoesNotModifySealedArtifacts` is GREEN. (`agents/governor/rule.md` is the 14th — sha `84a93586…`; its **1 × "Chat Delivery"** and the junk-report clause on the same line survive.)
+- [ ] All **18** seal re-pin constant updates across **17** edited sealed files landed with constants-only updates, git-log attribution, targeted test runs, and provenance-labelled commits; the tripwire `tests/test_chart_image_delivery_e2e.py::TestPhaseDDoesNotModifySealedArtifacts` is GREEN and all **35** constants re-verified from real bytes. (`agents/governor/rule.md` sha `84a93586…` — its **1 × "Chat Delivery"** and the junk-report clause survive; fix-round re-pins: charter/workflow.md `2a5078f9…`, devops/rule.md `febf0e89…` ×2, maintenancer/rule.md `d6e448a6…`.)
 - [ ] **Semantic pins (BLK-3) — "NO EDIT expected — verify" — all GREEN:** `tests/unit/tools/test_attestation_prompt_contract.py` (attestation contract strings kept / forbidden strings absent in `agents/leader/rule.md` + `agents/leader/workflow.md`) · `tests/unit/tools/test_mission_watch_prompts.py` (`watch_mission` vocabulary kept, **zero** `watch_job` tokens) · `tests/test_chart_image_delivery_audit.py` ("Chat Delivery" survives verbatim in all **20** chart-capable agents).
 - [ ] `agents/.prompt-artifacts.sha256` regenerated; `tests/test_prompt_artifact_baseline.py` GREEN.
 - [ ] `tests/unit/test_report_integrity_prompts.py` and `tests/unit/tools/test_prompt_section_reference_integrity.py` GREEN.
-- [ ] **T1–T9** all pass under the fenced invocation of §11.4.
-- [ ] **Proof sets reported separately, by name (BLK-7):** the **GATE PROOF** set (**T1, T3, T4b, T5, T9**) is GREEN and was RED before the change; the **PRESERVATION** set (**T2, T4a, T6, T7, T8**) is GREEN and was GREEN before the change. **A green preservation run is never reported as gate proof.** The red pre-change evidence (the `TypeError` on the not-yet-existing kwargs) is captured in the Phase 2 report.
+- [ ] **T1–T9** all pass under the fenced invocation of §11.4 (worktree venv): gate pack `tests/unit/tools/test_question_tool_root_gate.py` + flow pack `tests/unit/services/test_child_report_open_questions_flow.py`.
+- [ ] **Proof sets reported separately, by name (BLK-7 + A1):** the **GATE PROOF** set (**T1, T3, T4b, T5, T9**) is GREEN and was RED before the change; the **PRESERVATION** guards (**T2, T4a**) are signature-adaptive — red-signature / behavioural-preservation (clean assertion failure pre-change, NOT a `TypeError`); the **FLOW PROOFS** (**T6, T7, T8**) are LANDED in the flow pack (16 cases, mutation-verified 5/5). **A green preservation run is never reported as gate proof.**
 - [ ] **Phase 7 — reviewer council APPROVED with 0 critical** (owner: the **reviewer** agent).
-- [ ] **Phase 8 — independent tester verification PASSED on the merged tree** (owner: the **tester** agent): registration-level + flow proof + staged smoke.
+- [ ] **Phase 8 — independent tester FUNCTIONAL verification PASSED on the merged tree** (owner: the **tester** agent): registration-level (gate pack) + flow proofs (T6/T7/T8). **Phase 9 — staged verification AFTER staging** (two-round tester convention).
 - [ ] Nothing under `daemon/migrations/versions/` changed (EMPTY delta); `rollback_safe=true` recorded with the explicit semantic reasoning.
 - [ ] Staged (no promote): `releases/<ver>/` exists with provenance sidecars; the staging worktree is **kept**; `current` symlink and live daemon epoch unchanged.
-### 17.1 Final-report contract (BLK-4 — 7 commission items **verbatim** + 3 extras = 10)
+### 17.1 Final-report contract (BLK-4 — 7 commission items **verbatim** + 3 extras + 7 fix-round disclosures = **17** items)
 
-The final report **must** contain the following **10** items. Items **1–7** are the commission's required items, **verbatim**; items **8–10** are the retained extras.
+The final report **must** contain the following **17** items. Items **1–7** are the commission's required items, **verbatim**; items **8–10** are the retained extras; items **11–17** are the fix-round (AMENDMENT #3) disclosures.
 
 | # | Item | Source / requirement |
 |---|---|---|
 | **1** | **The pinned predicate** — the exact P1 expression and why `source_type` (never `original_source`) | §1 (P1, PINNED) |
 | **2** | **The registration gate** — the build-time conditional, the two call sites, and the fact that the tool is **never registered** for a non-root (absence, not refusal) | §2 (P2, PINNED) |
-| **3** | **List of agent files touched** — the sweep manifest: **55 files actually edited** (3 `meta.json` + 52 prompt/doc) of **60 sweep rows**, machine-derived (§10.10) | §10.10 |
+| **3** | **List of agent files touched** — the sweep manifest: **66 prompt/doc files edited** (+3 `meta.json` = 69 files), machine-derived (§10.10); branch-diff cross-check **70 = 1 baseline + 3 `meta.json` + 66 prompt/doc** | §10.10 |
 | **4** | **Flow proof** — a child surfaces an open question in its report ⇒ the parent receives it and answers via `send_message` ⇒ the child resumes and continues | §7, T6, T7, T9 |
-| **5** | **Tests** — the **GATE PROOF** set (T1, T3, T4b, T5, T9) and the **PRESERVATION** set (T2, T4a, T6, T7, T8) reported **separately, by name**; the red pre-change evidence | §11.1, §11.4 |
+| **5** | **Tests** — the **GATE PROOF** set (T1, T3, T4b, T5, T9), the signature-adaptive **PRESERVATION** guards (T2, T4a), and the LANDED **FLOW PROOFS** (T6/T7/T8 — 16 cases, mutation-verified 5/5) reported **separately, by name**; the red pre-change evidence | §11.1, §11.4 |
 | **6** | **Staging plan** — the staged path, version, binary sha256, the EMPTY migration delta, the `rollback_safe=true` adjudication, and **no promote** | §13 |
 | **7** | **Explicit in-flight child question-pack statement** — what happens to any pack already in flight for a child at deploy time (RAM + durable shadow + rehydration + CAS ⇒ no pack is orphaned) | §15, T8 |
-| **8** | The **14** adjudicated seal re-pins (with their provenance) and the **35**-file sealed baseline split (14 re-pinned / 21 safe) | §11.3 |
+| **8** | The **18** adjudicated seal re-pin constant updates / **17** files (with their provenance) and the **35**-file sealed baseline split (17 re-pinned / 18 safe) | §11.3 |
 | **9** | The **ari-grant live-behavior flag** (R1) and the **precise `_tool_metadata` / help-surface mechanism** (R3 / N5) | §5.1, §14 |
 | **10** | The **deploy paragraph**: the mid-flight QA / answer-event fan-out is now **ROOT-ONLY** (N6 / F1) — and that **no promote** was performed | §13, §15 |
+| **11** | The **census**: exactly **3 agents held the tool before this change — `leader`, `devops`, `watcher`** (watcher via its default-open empty allow list) | §4, F2 |
+| **12** | The **fail-closed default-kwargs invariant**: an unstamped/absent `source_type` ⇒ NOT a user-facing root ⇒ no tool (the gate default is denial) | §1, §2 |
+| **13** | The **legacy unstamped-row silent delta**: rows created before the 2026-08-12 writer carry no stamp ⇒ no tool on restore — disclosed, NO BACKFILL (N8/F8) | §1.3, §15 |
+| **14** | **T2's anti-vacuity precondition**: the synthetic meta **allows `"question"`** — otherwise T2 proves nothing (the allow-filter could be the cause) | §11.1 |
+| **15** | **T9's coupling to the real leader meta**: T9 reads `agents/leader/meta.json` — a future failure there is an **alarm, not flakiness** (it means the leader allow-grant moved) | §11.1 |
+| **16** | The **dead / test-only source_type-less spawn lanes**: `daemon/sources/slack/thread_manager.py:217` (dead) and `daemon/sources/mapper.py:452` (test-only) spawn without `source_type` — **thread or delete when revived** | §3, P3 review note |
+| **17** | The **maintainer knowledge-file `ask_user` reference** — a pre-existing audit-trail item, not a regression of this commission | §10.9, fix-round census |
 
 > Items **3**, **5** and **10** also carry the disclosures the council required: the RULING-1 scoping limitation (F3), the job-root/API-root behaviour delta (F4), the 53-file test-census shift (F5), and the leader's teaching-gap note (F6).
