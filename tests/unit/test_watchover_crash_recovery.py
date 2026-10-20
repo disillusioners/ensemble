@@ -203,7 +203,23 @@ async def test_lifecycle_pause_threads_reason_to_db_boundary():
         )
 
     assert result["paused_ids"] == ["iid"]
-    assert to_thread.await_args.kwargs["suspension_reason"] == "watchover_setup"
+    # The patch replaces the GLOBAL ``asyncio.to_thread``, so the LAST
+    # await is not necessarily the DB-boundary call: the pause-cause
+    # marker write (``set_metadata``) runs AFTER it. Pin the db-sync
+    # call by identity, not by position.
+    db_sync_calls = [
+        call
+        for call in to_thread.await_args_list
+        if call.args
+        and getattr(call.args[0], "__name__", "") == "_pause_cascade_db_sync"
+    ]
+    assert db_sync_calls, (
+        "expected an asyncio.to_thread call to _pause_cascade_db_sync "
+        "(the DB boundary) — the suspension reason must reach it."
+    )
+    assert (
+        db_sync_calls[-1].kwargs["suspension_reason"] == "watchover_setup"
+    )
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,5 @@
 ---
-version: 1.3.0
+version: 1.4.0
 category: planning
 auto_load: true
 ---
@@ -50,8 +50,8 @@ Choose the dispatch tier based on task shape. This decision is made BEFORE skill
 | Task shape | Tier | Skill load |
 |---|---|---|
 | Multi-file / architectural / new feature / unclear spec | Coder | No `load_skill` (coder plans its own approach) |
-| Single-file / clear fix / small refactor / commit / quick review | Worker | One `load_skill="<skill>"` |
-| Ambiguous / "just do it fast" / no matching skill | Worker | No `load_skill` (detailed request in message) |
+| Single-file / clear fix / small refactor / commit | Worker | One `load_skill="<skill>"` |
+| Ambiguous / "just do it fast" / no matching skill / quick review (no `code-review` skill exists) | Worker | No `load_skill` (detailed request in message) |
 | Parallel work across disjoint modules | Multiple instances | Coder or worker per module, depending on per-module complexity |
 
 **Rules of thumb:**
@@ -67,14 +67,18 @@ Choose the dispatch tier based on task shape. This decision is made BEFORE skill
 
 When dispatching a worker, pick the skill that matches the task shape. Exactly ONE skill per worker.
 
-| Task Type | Skill | `load_skill` |
-|-----------|-------|------------|
-| Feature implementation (single-file) | `code-implementation` | `load_skill="code-implementation"` |
-| Bug fix (single-file, clear root cause) | `code-fix` | `load_skill="code-fix"` |
-| Code refactor (single-file, behavior-preserving) | `code-refactor` | `load_skill="code-refactor"` |
-| Git commit (stage + conventional message) | `git-commit` | `load_skill="git-commit"` |
-| Quick code review (one file / small change) | `code-review` | `load_skill="code-review"` |
-| Unknown / general / multi-skill | (no skill) | Omit `load_skill` (provide detailed request in message) |
+| Task Type | Skill (the `load_skill` value) | Bank status (verified 2026-10-20) | Fallback if absent at dispatch time |
+|-----------|--------------------------------|----------------------------------|------------------------------------|
+| Feature implementation (single-file) | `code-implementation` | ✅ present | — |
+| Bug fix (single-file, clear root cause) | `code-fix` | ✅ present (A/B variant — still servable) | — |
+| Code refactor (single-file, behavior-preserving) | `code-refactor` | ✅ present | — |
+| Git commit (stage + conventional message) | `git-commit` | ✅ present | — |
+| Quick code review (one file / small change) | `code-review` — **DOES NOT EXIST in the skill bank** | ❌ absent | **Guideline #19 – Skill-bank fallback:** dispatch a worker/coder with NO `load_skill` and a manual-review checklist prompt; flag `DEGRADED — skill bank miss (code-review)` |
+| Unknown / general / multi-skill | (none) | n/a | — |
+
+**The bank is live — verify before you rely on it.** The "Bank status" column is a snapshot, not a promise: skills get captured, A/B-tested, and deactivated. Before dispatching with a `load_skill` value, confirm the skill actually exists (`skill_search` / `skill_list`). If it is missing, use the fallback column — within-tier manual review plus a `DEGRADED — skill bank miss (<name>)` flag (Guideline #19) — never dispatch a skill-less worker silently.
+
+**`load_skill` rides on `send_message`, NOT on `spawn_instance`.** `spawn_instance` has no `load_skill` parameter, and `spawn_instance(..., task=...)` auto-dispatch CANNOT carry a skill. To attach a skill to a fresh worker, use the spawn→send ritual: `spawn_instance(agent="worker")` (no `task`), then `send_message(..., load_skill="<skill>")`. A send bearing `load_skill` always routes through the enqueue pipeline, requires the target instance to be idle, and is never flattened into a live turn.
 
 **Guidance:** if the task is well-bounded and fits one skill, use that skill — skill evolution data depends on clean one-skill-per-worker attribution. If the task would need multiple skills, split into multiple workers (one skill each). If no skill matches, omit `load_skill` and write a detailed request in the message body.
 
@@ -91,7 +95,7 @@ Before dispatching any worker or coder:
 3. **Select skill** — if worker tier, pick exactly one `load_skill` from the Skill Selection Guide.
 4. **Materialize the Dev Plan** as the first response (use the **Mandatory Output Format** below).
 5. **Set up `todo_graph`** if 2+ instances will run in parallel (fan-in tracking, W3).
-6. **Plan verification** — minimal & scoped (Cardinal #6): one targeted test or smoke for the touched code (≤2-min cap), or a `code-review` diff pass. Full/regression testing is DEFERRED to the tester agent — note it in the plan's Verification line.
+6. **Plan verification** — minimal & scoped (Cardinal #6): one targeted test or smoke for the touched code (≤2-min cap), or a manual-review diff pass — there is no `code-review` skill in the bank, so use the Guideline #19 within-tier fallback. Full/regression testing is DEFERRED to the tester agent — note it in the plan's Verification line.
 
 ---
 
@@ -106,11 +110,11 @@ From `git diff --stat` (read-only, #14) and the worker/coder report, name the ex
 
 | Change type | Verification | Cap |
 |---|---|---|
-| Complex coder work (LARGE/HUGE) | Spawn a SEPARATE instance to **review the diff** (`code-review` skill) + the one targeted test below | review + 1 targeted test |
-| Quick worker work (SMALL/MEDIUM) | `git diff` directly, OR spawn a review worker with `code-review` | diff / review |
+| Complex coder work (LARGE/HUGE) | Spawn a SEPARATE instance to **review the diff** (manual-review prompt — no `code-review` skill exists; Guideline #19 fallback) + the one targeted test below | review + 1 targeted test |
+| Quick worker work (SMALL/MEDIUM) | `git diff` directly, OR spawn a review worker with a manual-review prompt (no `load_skill`; Guideline #19 fallback) | diff / review |
 | Commit only (no code change) | `git log -p -1` to inspect the resulting commit | — |
 
-The "one targeted test" = a single test for the changed unit, e.g. `pytest path/to/test_changed.py::test_name -q`. **Bounded.** Fallbacks when no targeted test fits: a fast smoke (`python -c "import …"`, `cd frontend && tsc --noEmit`, `ruff check <file>`) or a `code-review` pass with **no execution**.
+The "one targeted test" = a single test for the changed unit, e.g. `pytest path/to/test_changed.py::test_name -q`. **Bounded.** Fallbacks when no targeted test fits: a fast smoke (`python -c "import …"`, `cd frontend && tsc --noEmit`, `ruff check <file>`) or a manual-review diff pass with **no execution** (Guideline #19 fallback).
 
 ### Step 3 — Timeout cap every run
 Unit ≤2 min; smoke ≤1 min. A verify worker never "discovers and run" extra tests. If the targeted test won't finish in cap → it's the wrong (too big) check: narrow further, or record `DEFERRED → tester` (the caller escalates — I do not spawn it; `tester` is not in my `team_members`).
@@ -156,7 +160,7 @@ send_message(
 # END TURN — worker reports back asynchronously
 ```
 
-The `load_skill` parameter is parsed by the worker runtime so the worker loads only the skill needed for its task. My own skill stack is untouched.
+The `load_skill` parameter is parsed by the worker runtime so the worker loads only the skill needed for its task. My own skill stack is untouched. **The spawn→send sequence above is the only way to attach a skill to a fresh worker** — `spawn_instance` has no `load_skill` parameter, and its `task=...` auto-dispatch cannot carry one. A `load_skill` send enqueues (the target must be idle) and is never flattened into a live turn.
 
 For coder dispatch, the same pattern applies but `load_skill` is OMITTED:
 
@@ -198,12 +202,13 @@ send_message(
 Before every `send_message`, in addition to the skill's own Pre-Execution Self-Check:
 
 - [ ] **Tier selected** — coder vs worker (matches scope matrix)
-- [ ] **Worker skill selected** — exactly one `load_skill="..."` from the Skill Selection Guide (or omitted for coder / no-skill worker)
+- [ ] **Worker skill selected** — exactly one `load_skill="..."` from the Skill Selection Guide, bank-present values only (or omitted for coder / no-skill worker)
 - [ ] **`dev-strategy` NOT embedded** in the worker message (developer-only planning skill)
 - [ ] **One skill per worker** — no bundling multiple skills into one dispatch
+- [ ] **Skill attached via `send_message`** — `load_skill` never rides on `spawn_instance`; use the spawn→send ritual (the target must be idle)
 - [ ] **Worker message includes target, constraints, expected output** — no vague "do the thing" prompts
 - [ ] **Context attached when useful** — file paths / findings / plan refs passed via `context={...}` when they'd save the child exploration time; omitted when the message already carries everything
-- [ ] **Verification planned & scoped** — one targeted test/smoke (≤2-min cap) or `code-review` diff pass over the touched code; full/regression testing noted as DEFERRED → tester (Cardinal #6)
+- [ ] **Verification planned & scoped** — one targeted test/smoke (≤2-min cap) or a manual-review diff pass over the touched code (Guideline #19 fallback — no `code-review` skill in the bank); full/regression testing noted as DEFERRED → tester (Cardinal #6)
 - [ ] **`todo_graph` node updated** to `in_progress` before the dispatch lands (for multi-instance dispatches)
 
 ---
@@ -252,7 +257,7 @@ My first response MUST be a Dev Plan. Use this exact template:
 | dev-worker-<task> | worker | <skill> | <file> | P1 |
 
 ### Verification
-[How results will be verified — minimal & scoped: one targeted test/smoke (≤2-min cap) or code-review of the diff for the touched code. Full/regression testing DEFERRED to tester]
+[How results will be verified — minimal & scoped: one targeted test/smoke (≤2-min cap) or a manual-review diff pass for the touched code (no `code-review` skill in the bank — Guideline #19 fallback). Full/regression testing DEFERRED to tester]
 
 ### Approach
 [How coder/worker will run; fan-in tracking via todo_graph if 2+ instances]

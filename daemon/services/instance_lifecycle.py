@@ -3531,15 +3531,15 @@ class InstanceLifecycleService:
             from daemon.services.question_pause_set import question_pack_state
 
             try:
-                pack_state, question_pack_id = question_pack_state(
+                pack_state, question_pack_id = await question_pack_state(
                     self._manager, instance_id
                 )
-            except Exception as guard_exc:  # noqa: BLE001 — fail-open
+            except Exception as guard_exc:  # noqa: BLE001 — fail-CLOSED (the pause is refused below)
                 logger.warning(
                     f"pause_instance_cascade: question-pause guard probe "
                     f"failed for {instance_id[:8]}... "
                     f"({type(guard_exc).__name__}: {guard_exc}) — "
-                    f"proceeding with the pause"
+                    f"pack state unknown"
                 )
                 pack_state = "unknown"
             if pack_state != "pending":
@@ -3631,6 +3631,15 @@ class InstanceLifecycleService:
         # and the helper writes all eligible nodes in ONE batched
         # UPDATE.
         paused_instances_data: list[tuple[str, str | None, int]] = []
+        # The pre-pause status per parked node (see the capture site in
+        # the classification loop) — recorded with the paused set so
+        # the release can restore a ``waiting_children`` parent to its
+        # parked state.
+        pre_pause_status: dict[str, str] = {}
+        # Nodes that were ALREADY parked when the cascade ran (skipped
+        # by the classification) — the pause-cause marker is cleared on
+        # them by a non-question pause.
+        already_paused_ids: list[str] = []
         skipped_ids: list[str] = []
         # Phase 2 / Task 8: capture cleared-injection entries per node so the
         # ``injection_consumed`` SSE event can fire POST-DB-COMMIT alongside
@@ -3664,6 +3673,12 @@ class InstanceLifecycleService:
                         f"({meta.status}), skipping"
                     )
                     skipped_ids.append(node_id)
+                    if meta.status == InstanceStatus.PAUSED.value:
+                        # Already parked — a DELIBERATE pause must clear
+                        # its (possibly stale) question marker, otherwise
+                        # the backstop could later revert a pause the
+                        # operator intended.
+                        already_paused_ids.append(node_id)
                     continue
 
                 # DEFECT B: never-dispatched ghost child — nothing to
@@ -3730,6 +3745,11 @@ class InstanceLifecycleService:
                 paused_instances_data.append(
                     (node_id, meta.agent_id)
                 )
+                # The status the node held BEFORE the cascade parked it.
+                # Load-bearing for the release: a ``waiting_children``
+                # parent must return to ``waiting_children`` (the
+                # dependency bus owns its wake), not to ``running``.
+                pre_pause_status[node_id] = meta.status
 
                 logger.info(f"Pausing instance {node_id[:8]}...")
 
@@ -3865,11 +3885,12 @@ class InstanceLifecycleService:
                     record_question_paused_set,
                 )
 
-                record_question_paused_set(
+                await record_question_paused_set(
                     self._manager,
                     instance_id,
                     question_pack_id,
                     list(paused_ids),
+                    pre_status=pre_pause_status,
                 )
             except Exception as record_exc:  # noqa: BLE001 — fail-open
                 logger.warning(
@@ -3877,6 +3898,79 @@ class InstanceLifecycleService:
                     f"{instance_id[:8]}...: "
                     f"{type(record_exc).__name__}: {record_exc}"
                 )
+
+        # R1 (review cycle 3) — the PAUSE-CAUSE MARKER.
+        #
+        # The sweeper's backstop may only revert a pause that was caused
+        # by a QUESTION. The marker (on each parked instance's own
+        # ``instances.metadata`` row) records exactly that:
+        #
+        #   * a QUESTION pause stamps it on every node it parks (the
+        #     asker AND the side-effect targets);
+        #   * every OTHER pause reason (user /pause, /stop, the agent
+        #     pause tools, watchover activation, the compaction
+        #     executor) CLEARS it — a deliberate pause must never
+        #     inherit a stale question marker, or the backstop would
+        #     resume an agent the operator deliberately stopped.
+        #
+        # Schema-free: ``instances.metadata`` is an existing JSON column
+        # already used by this feature.
+        try:
+            from daemon.services.question_pause_set import (
+                mark_deliberate_pause_override,
+                stamp_question_pause_marker,
+            )
+
+            is_question_pause = (
+                suspension_reason == SuspensionReason.AWAITING_ANSWER.value
+            )
+            # N1 — the question / non-question branch is HOISTED out of
+            # the per-node loop. Before the hoist the ``else`` branch
+            # was nested INSIDE ``for node_id in paused_ids:`` (and its
+            # own ``node_id`` shadowed the outer one), so the whole
+            # clear list was re-cleared once per parked node: N x (N+M)
+            # ``delete_metadata`` transactions (each its own session +
+            # commit) on the user-facing synchronous ``/pause`` path —
+            # ~900 deletes for a 30-node tree. The cascade was
+            # deliberately batched (ONE UPDATE for all nodes) to avoid
+            # an N+1 transaction storm; the marker block must not
+            # regress that by ~N x.
+            #
+            # Hoisted, each affected node is touched EXACTLY ONCE:
+            # a question pause stamps the marker on every parked node;
+            # a non-question pause clears it on every parked node AND
+            # every already-paused node (O(N+M) transactions).
+            if is_question_pause:
+                for node_id in paused_ids:
+                    await stamp_question_pause_marker(
+                        self._manager,
+                        node_id,
+                        question_pack_id,
+                        paused_at_iso,
+                    )
+            else:
+                # C2 — a DELIBERATE pause writes an explicit TOMBSTONE
+                # over the pause-cause marker instead of merely deleting
+                # it. The tombstone is what the release path defers on:
+                # "a deliberate pause owns this instance" is a POSITIVE
+                # statement, while an ABSENT marker only means "the
+                # marker write failed" (the release stays fail-open
+                # there). The tombstone also carries no ``pack_id``, so
+                # the backstop's "positive question marker" predicate
+                # excludes it automatically.
+                for node_id in list(paused_ids) + list(already_paused_ids):
+                    await mark_deliberate_pause_override(
+                        self._manager, node_id
+                    )
+        except Exception as marker_exc:  # noqa: BLE001 — fail-safe
+            # The marker is the sweeper's ELIGIBILITY filter only — a
+            # failure here can never release anything by itself; the
+            # sweeper simply will not consider the affected instance.
+            logger.warning(
+                f"pause_instance_cascade: pause-cause marker update failed "
+                f"for {len(paused_ids)} node(s): "
+                f"{type(marker_exc).__name__}: {marker_exc}"
+            )
 
         # Combine the helper's updated_ids (== nodes we wrote to) with the
         # skipped_ids the caller collected above (already-paused / not-found).
@@ -4098,7 +4192,9 @@ class InstanceLifecycleService:
             )
             return None
 
-    async def resume_instance_cascade(self, instance_id: str) -> dict:
+    async def resume_instance_cascade(
+        self, instance_id: str, *, exclude_ids: list[str] | None = None
+    ) -> dict:
         """Resume an instance and cascade to all children.
 
         Uses tree traversal helpers to find and resume the entire tree.
@@ -4114,6 +4210,13 @@ class InstanceLifecycleService:
 
         Args:
             instance_id: The ID of the instance to resume.
+            exclude_ids: Optional instance ids that must NOT be resumed
+                (C2 — the deliberate-pause override). An excluded node
+                keeps its parked status AND its suspended turn: the
+                tree-scoped resume must not undo an operator's park. The
+                exclusion covers BOTH the instance status flip and the
+                task transition (the excluded ids never reach the
+                batched UPDATE nor the task selection).
 
         Returns dict with:
           - resumed_ids: list of all instance IDs that were resumed
@@ -4157,8 +4260,20 @@ class InstanceLifecycleService:
         skipped_ids: list[str] = []
         agent_ids_by_instance: dict[str, str | None] = {}
 
+        excluded = set(exclude_ids or ())
         for node_id in tree_ids:
             try:
+                if node_id in excluded:
+                    # C2 — a deliberate pause owns this node: it stays
+                    # parked and its suspended turn is NOT re-armed.
+                    logger.info(
+                        f"resume_instance_cascade: instance "
+                        f"{node_id[:8]}... is EXCLUDED from the resume "
+                        f"(a deliberate pause owns it) — left parked"
+                    )
+                    skipped_ids.append(node_id)
+                    continue
+
                 meta = repo.get(node_id)
 
                 if meta is None:

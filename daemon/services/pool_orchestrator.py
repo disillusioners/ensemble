@@ -323,6 +323,40 @@ class PoolOrchestrator:
         # ``StaleTaskRecovery`` thread is already running when the
         # sweep's busy-check consults
         # ``task_repo.has_instance_busy``).
+        # Stale-pause backstop (feature/fix/question-pause-resume-
+        # asymmetry, R3). Wired BEFORE the report-delivery recovery
+        # block: the stale-pause service only READS the instance + task
+        # tables and un-pauses stranded instances (it never finalizes
+        # them), so it has no binding-order dependency on the
+        # report-delivery wiring; keeping it first preserves the
+        # report-delivery block as the LAST ``try:``/``except`` pair of
+        # this method, which the source-structure pin in
+        # ``tests/unit/test_recovery_wiring_failure.py`` extracts.
+        #
+        # The boot pass lives in the lifespan (``daemon/api.py``) right
+        # after the boot-orphan sweep — it is awaited DIRECTLY on the
+        # lifespan loop (no coroutine bridge), so it can never self-
+        # block the loop.
+        try:
+            from .stale_pause_sweep import StalePauseSweepService
+
+            manager._stale_pause_sweep = StalePauseSweepService(
+                manager,
+                enabled=svc.stale_pause_sweep_enabled,
+                interval_seconds=svc.stale_pause_sweep_interval_seconds,
+                age_bound_seconds=svc.stale_pause_sweep_age_bound_seconds,
+                batch_cap=svc.stale_pause_sweep_batch_cap,
+            )
+            manager._stale_pause_sweep.start()
+        except Exception as exc:
+            # Per the MVP growth rule — a wiring failure must be logged
+            # but NEVER crash startup.
+            logger.error(
+                f"StalePauseSweepService wiring failed (non-fatal): "
+                f"{type(exc).__name__}: {exc}"
+            )
+            manager._stale_pause_sweep = None
+
         from .report_delivery_recovery import ReportDeliveryRecoveryService
 
         try:
@@ -479,37 +513,6 @@ class PoolOrchestrator:
                 f"(non-fatal): {type(exc).__name__}: {exc}"
             )
             manager._report_recovery = None
-
-        # Stale-pause backstop (feature/fix/question-pause-resume-
-        # asymmetry, R3). Wired AFTER the report-delivery recovery so
-        # the worker pool / task repo are live before the sweeper can
-        # look at live task rows. The service only READS the instance +
-        # task tables and un-pauses stranded instances; it never
-        # finalizes them.
-        #
-        # The boot pass lives in the lifespan (``daemon/api.py``) right
-        # after the boot-orphan sweep — it is awaited DIRECTLY on the
-        # lifespan loop (no coroutine bridge), so it can never self-
-        # block the loop.
-        try:
-            from .stale_pause_sweep import StalePauseSweepService
-
-            manager._stale_pause_sweep = StalePauseSweepService(
-                manager,
-                enabled=svc.stale_pause_sweep_enabled,
-                interval_seconds=svc.stale_pause_sweep_interval_seconds,
-                age_bound_seconds=svc.stale_pause_sweep_age_bound_seconds,
-                batch_cap=svc.stale_pause_sweep_batch_cap,
-            )
-            manager._stale_pause_sweep.start()
-        except Exception as exc:
-            # Per the MVP growth rule — a wiring failure must be logged
-            # but NEVER crash startup.
-            logger.error(
-                f"StalePauseSweepService wiring failed (non-fatal): "
-                f"{type(exc).__name__}: {exc}"
-            )
-            manager._stale_pause_sweep = None
 
         # Execution Gate: stale-lease recovery is performed by the
         # async lifespan in ``daemon/api.py`` BEFORE this method
@@ -755,6 +758,11 @@ class PoolOrchestrator:
             manager._report_recovery.stop()
             manager._report_recovery = None
             logger.info("Report delivery recovery stopped")
+
+        if getattr(manager, "_stale_pause_sweep", None) is not None:
+            manager._stale_pause_sweep.stop()
+            manager._stale_pause_sweep = None
+            logger.info("Stale-pause sweep stopped")
 
     # ── notify_all ────────────────────────────────────────────────
 

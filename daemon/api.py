@@ -446,6 +446,61 @@ def _readyz_still_green(readiness_composite) -> bool:
         return False
 
 
+def inject_reports_live_view_root(config, data_dir) -> bool:
+    """Inject the daemon-managed ``reports`` live-view root (D1).
+
+    ari-tools Phase 3. The ``reports`` root is DAEMON-INJECTED, not
+    operator-declared, for two reasons:
+
+    1. its path derives from the RUNTIME ``data_dir``
+       (``ENSEMBLE_DATA_DIR > DATA_DIR > ./data``) — a static
+       ``config.yaml`` cannot express it; and
+    2. an operator ``live_views.roots:`` block REPLACES the seed
+       dict, so a config-declared root would silently vanish.
+
+    Injection is IDEMPOTENT and NEVER overrides an operator-declared
+    ``reports`` entry.
+
+    🔴 The ``.resolve()`` is LOAD-BEARING (A-30 / architect §5.6 G1).
+    ``data_dir``'s default chain ends at the RELATIVE ``"./data"`` ⇒
+    an unresolved path yields ``"data/reports"`` ⇒ the filesystem
+    resolver REFUSES a non-absolute root ⇒ every published page 404s
+    behind a misleading "not configured" error.
+
+    Fail-soft: a ``None`` ``data_dir`` leaves the root ABSENT (never a
+    boot failure) — ``view_write`` then returns the typed "reports
+    storage is not configured" envelope.
+
+    Args:
+        config: The loaded daemon config (its ``live_views.roots``
+            mapping is mutated in place).
+        data_dir: The runtime data dir — absolute or relative.
+
+    Returns:
+        True iff the root was injected by this call.
+    """
+    from daemon.config import LiveViewsRootConfig
+
+    roots = getattr(getattr(config, "live_views", None), "roots", None)
+    if not isinstance(roots, dict):
+        return False
+    if "reports" in roots:
+        # An operator-declared entry is honoured verbatim.
+        return False
+    if data_dir is None:
+        return False
+    roots["reports"] = LiveViewsRootConfig(
+        type="filesystem",
+        path=str((Path(data_dir) / "reports").resolve()),
+        allowed_extensions=["html"],
+        description=(
+            "Agent-written report pages (view_write). "
+            "Daemon-injected — do not declare it in config.yaml."
+        ),
+    )
+    return True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan context manager.
@@ -454,7 +509,12 @@ async def lifespan(app: FastAPI):
     """
     # Import services here to avoid circular imports
     from daemon.manager import InstanceManager
-    from daemon.config import load_config, warn_default_allowed_models_applied, warn_deprecated_allowed_models_env, warn_deprecated_reasoning_echo_env
+    from daemon.config import (
+        load_config,
+        warn_default_allowed_models_applied,
+        warn_deprecated_allowed_models_env,
+        warn_deprecated_reasoning_echo_env,
+    )
     from daemon.services.job_queue_service import JobQueueService
     from daemon.services.job_lock_manager import JobLockManager
     from daemon.services.job_processor import JobProcessor
@@ -1681,6 +1741,34 @@ async def lifespan(app: FastAPI):
         if project is None or not project.main_directory:
             return None
         return project.main_directory
+
+    # ─────────────────────────────────────────────────────────────
+    # PHASE 3 (ari-tools): the ``reports`` root is DAEMON-INJECTED,
+    # NOT operator-declared (D1). Two reasons:
+    #
+    #   (1) its path derives from the RUNTIME ``data_dir``
+    #       (``ENSEMBLE_DATA_DIR > DATA_DIR > ./data``) — a static
+    #       ``config.yaml`` cannot express it; and
+    #   (2) an operator ``live_views.roots:`` block REPLACES the
+    #       seed dict (``daemon/config.py``), so a config-declared
+    #       root would silently vanish.
+    #
+    # Injection is IDEMPOTENT and NEVER overrides an operator-declared
+    # ``reports`` entry.
+    #
+    # 🔴 The ``.resolve()`` inside the helper is LOAD-BEARING
+    # (A-30 / architect §5.6 G1): ``data_dir``'s default chain ends
+    # at the RELATIVE ``"./data"`` ⇒ an unresolved path yields
+    # ``"data/reports"`` ⇒ the filesystem resolver REFUSES a
+    # non-absolute root (``daemon/services/live_views.py``) ⇒ every
+    # published page 404s behind a misleading "not configured" error.
+    #
+    # Fail-soft: a missing ``app.state.data_dir`` leaves the root
+    # ABSENT (never a boot failure) — ``view_write`` then returns the
+    # typed "reports storage is not configured" envelope.
+    inject_reports_live_view_root(
+        config, getattr(app.state, "data_dir", None)
+    )
 
     live_views_service = LiveViewsService(
         config=config.live_views,

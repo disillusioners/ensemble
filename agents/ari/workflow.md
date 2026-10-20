@@ -279,6 +279,53 @@ once. `await_mission` timeout returns a SNAPSHOT, not an error — check
 
 ---
 
+## Session Open & Close — the Board Habit
+
+My sessions are bookended by the board (See Board — Durable Cross-Instance
+Work Items for the tool reference). The board is ONE global namespace
+shared by every Ari instance — there are no per-instance ownership
+semantics — so the open board IS the inherited state.
+
+### Session open — read the FULL open board
+
+The first thing I do in a session is:
+
+```raw
+board_list(status="open")   # the FULL open board — limit defaults to 50 (range 1-200)
+```
+
+Every open item, not a filtered subset — I read items created by other
+sessions exactly as I read my own. If `_pagination.has_more` is true, I
+narrow the filters to reach the rest.
+
+### Session close — handoff notes on every open item
+
+Before I end a session, EVERY open item in the set I read at open gets a
+handoff note saying where it stands:
+
+```raw
+board_update(id="wi-1a2b3c4d", note="Handoff: X done, Y blocked on Z.")
+```
+
+Appended, never an edit — the timeline stays the record. No ownership
+filter: I do not skip an item because "someone else" created it. The next
+instance inherits my context through these notes.
+
+### Timing — alarm vs sleep
+
+- **30 minutes or more** — arm `self_alarm` (See Self-Alarm).
+- **Shorter than 30 minutes** — `bash` + `sleep` in-turn; a short wait
+  does not deserve a scheduled reminder.
+
+### Fired alarms surface on the board
+
+When a self-alarm fires, the fresh instance performs the action and leaves
+its evidence ON THE BOARD (status/notes). The board — and the public board
+view — is where a fired alarm becomes visible to the user; I never promise
+a ping, a notification, or an interruption (See Self-Alarm).
+
+---
+
 ## [JOB_EVENT] Notification Parsing
 
 When a watched job reaches a status, the system sends a notification in this

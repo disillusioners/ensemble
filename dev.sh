@@ -15,31 +15,44 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Change to script directory
 cd "$SCRIPT_DIR"
 
-# Cleanup function: kill the code-server process spawned by this daemon.
-# In --reload mode, uvicorn restarts on code changes but does NOT kill the
-# child code-server it spawned — each reload orphans the previous one
-# (PPID becomes 1). This trap ensures stale code-server processes are
-# cleaned up on script exit (normal, interrupt, or terminate).
+# Cleanup function: kill the code-server recorded for THIS boot, by exact
+# PID only. In --reload mode, uvicorn restarts on code changes but does NOT
+# kill the child code-server the daemon's VSCodeServerManager spawned — each
+# reload can orphan the previous one (PPID becomes 1). The manager records
+# the code-server it started in $DATA_DIR/vscode-server.pid (JSON:
+# {"pid": N, "pgid": N, "port": N, "started_at": "..."}), and this trap
+# kills THAT pid (if alive) on script exit (normal, interrupt, terminate).
 #
-# Strategy: prefer killing the specific PID from the PID file (written by
-# VSCodeServerManager) to avoid killing unrelated code-server instances.
-# Fall back to pkill only if the PID file is missing or the PID is stale.
+# Scope invariant (2026-10-20 live-collateral incident): this trap must
+# NEVER match processes this boot did not create. dev.sh itself never
+# spawns a code-server — the daemon does, and the pid file is the only
+# artifact identifying what this boot created. If the pid file is absent,
+# unparseable, or its pid is stale, this trap does NOTHING: no pattern
+# kill, no sweep. The previous `pkill -f "code-server.*--bind-addr"`
+# fallback fired on every boot whose pid-file branch missed and SIGTERMed
+# the LIVE install's code-server (pid 2021281, ~2s outage, 2026-10-20).
+# Why the fallback fired so often: the old trap cat-ed the JSON pid file
+# and kill -0 -ed the raw JSON string, so the precise branch never matched
+# a real manager-written pid file. Live-pattern safety is absolute — no
+# pkill pattern that can match a live-install process, ever.
+# A bare-integer pid file (legacy format / test sentinel) is also accepted.
+# Regression guard: tests/test_dev_sh_exit_trap_scope.sh
 CLEANUP_DONE=0
 cleanup() {
     [ "$CLEANUP_DONE" -eq 1 ] && return
     CLEANUP_DONE=1
-    # Try PID file first (precise — targets only this daemon's code-server)
     local pid_file="${DATA_DIR:-./data_dev}/vscode-server.pid"
-    if [ -f "$pid_file" ]; then
-        local pid
-        pid=$(cat "$pid_file" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-            return
-        fi
+    [ -f "$pid_file" ] || return 0
+    local pid
+    # Manager format: JSON — extract the "pid" field's integer value.
+    pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$pid_file" 2>/dev/null | head -n 1)
+    if [ -z "$pid" ]; then
+        # Legacy / test-sentinel format: a bare integer pid line.
+        pid=$(sed -n 's/^\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$pid_file" 2>/dev/null | head -n 1)
     fi
-    # Fallback: kill code-server processes by launch pattern
-    pkill -f "code-server.*--bind-addr" 2>/dev/null || true
+    [ -n "$pid" ] || return 0
+    kill -0 "$pid" 2>/dev/null || return 0
+    kill "$pid" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 

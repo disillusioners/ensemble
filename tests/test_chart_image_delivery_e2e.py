@@ -1408,7 +1408,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/charter/skills-template/install-mermaid-cli.md": "4082a47f9662da283746a6f7719e38d82b473dacc61d52bc8e021a362322dbe4",
     "agents/charter/skills-template/install-mermaid-cli.lib.sh": "fcd6f4612d6077a81fe521341e6e2332d1f5da31880d3fc710decbc0579fedbf",
     "agents/_prompt_system/innate-skills/chart/skill.md": "fa29084d7dc0f86c87d667ef46dcfc060fa11e20e0b647295cdd75ff43353515",
-    "agents/ari/workflow.md": "4ffa5beed7958cbad32587de9b43dcdc2612b0655d644cb963d86f071da635aa",
+    "agents/ari/workflow.md": "f31f5bc4fc38e2cb14cdf3925e24234b0ca4678184202d25c048da05133a5fcd",
     # Phase B — 7 daemon files
     "daemon/sources/base.py": "ca2762ac8840bd8f7050955744af25f16325ed6806d09ba1fe3d020383581f3a",
     # registry.py re-pinned 2026-10-18 (resource-cost-control O4): the

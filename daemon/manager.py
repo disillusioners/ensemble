@@ -131,6 +131,7 @@ from .services.blueprint_write_service import BlueprintWriteService
 from .services.skill_injection_service import SkillInjectionService
 from .services.prompt_version_service import PromptVersionService
 from .services.secret_service import SecretService
+from .services.board_service import BoardService
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
 from .services.skill_job_dispatcher import SkillJobDispatcher
@@ -780,6 +781,19 @@ class InstanceManager:
             ResourcePidMap,
             ResourceLimitPolicy,
         )
+        # ari-tools Phase 1 (the Workbook): register the 3 board tables
+        # BEFORE create_all so the PG boot path lands them on existing PG
+        # databases (SQLModel.metadata.create_all is the PG
+        # source-of-truth per the app_settings / resource_monitor
+        # precedent). Brand-new tables need no
+        # ``_ensure_postgres_columns`` mirror. The SQLite path is the
+        # migration runner below
+        # (20261020_060000_create_board_tables.sql).
+        from .models.board import (  # noqa: F401  # ari-tools P1: register before create_all
+            BoardItem,
+            BoardNote,
+            BoardItemTag,
+        )
 
         SQLModel.metadata.create_all(self._engine)
 
@@ -1412,6 +1426,12 @@ class InstanceManager:
         # PromptVersion / CustomAgentConfig precedent — model
         # modules are imported only at lifespan time).
         self._secret_service = SecretService(engine=self._engine)
+        # ari-tools Phase 1 (the Workbook): the DB-backed global work
+        # board. Engine-bound, one dependency, mirrors the SecretService
+        # pattern. Constructed here (not in the api.py lifespan) so
+        # direct constructors and ad-hoc tests get a working service
+        # without the lifespan having run.
+        self._board_service = BoardService(engine=self._engine)
         # Phase A T6 / T7: register the repo with the loader so the
         # ``load_and_cache_prompt`` hook can lazily look it up. The
         # loader MUST NOT import the repository class at module load
@@ -11965,7 +11985,9 @@ class InstanceManager:
             cascade_to_root=cascade_to_root,
         )
 
-    async def resume_instance_cascade(self, instance_id: str) -> dict:
+    async def resume_instance_cascade(
+        self, instance_id: str, *, exclude_ids: list[str] | None = None
+    ) -> dict:
         """Resume an instance and cascade to all children.
 
         Recursively resumes the target instance and all its descendants.
@@ -11974,13 +11996,18 @@ class InstanceManager:
 
         Args:
             instance_id: The ID of the instance to resume.
+            exclude_ids: Optional instance ids that must NOT be resumed
+                (C2 — the deliberate-pause override): an excluded node
+                keeps its parked status and its suspended turn.
 
         Returns:
             Dict with:
               - resumed_ids: list of all instance IDs that were resumed
               - skipped_ids: list of instance IDs that were skipped (not paused)
         """
-        return await self._lifecycle_service.resume_instance_cascade(instance_id)
+        return await self._lifecycle_service.resume_instance_cascade(
+            instance_id, exclude_ids=exclude_ids
+        )
 
     async def resume_processing_job(
         self,
@@ -13754,6 +13781,22 @@ class InstanceManager:
             )
             self._scheduling_service = _scheduling_service_module
         return self._scheduling_service
+
+    @property
+    def board_service(self) -> BoardService:
+        """The global work-board service (ari-tools Phase 1 — the Workbook).
+
+        One instance per process, constructed next to the SecretService
+        at manager init. Agent tools (via
+        ``create_board_tools_if_available``) and the phase-3 live board
+        view share this one seam — the board is a SINGLE global
+        namespace, so there is exactly one service instance behind
+        every reader and writer.
+
+        Read-only property: the service is constructed once and never
+        replaced.
+        """
+        return self._board_service
 
     def find_near_instance(self, instance_id: str, max_distance: int = DEFAULT_FUZZY_MATCH_DISTANCE) -> list[str]:
         """Find all near-matching instance IDs from recent instances.

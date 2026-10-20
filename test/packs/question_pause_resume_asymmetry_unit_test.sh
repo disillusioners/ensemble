@@ -64,6 +64,12 @@ for f in "${FILES[@]}"; do
 done
 
 # Layer-2 timeout: 280s wraps pytest (innate test-pack invariant).
+# --timeout=60 (rider): the C1 concurrency pin guards a DEADLOCK
+# stratum — the pre-fix failure mode is a HANG (a threading.Lock held
+# across an await blocks the event loop), not an assertion failure.
+# Without a hard per-test bound a regression deadlock would hang the
+# pack instead of failing it: the timeout turns the deadlock into a
+# KILLED RUN (a reported failure) rather than an indefinite hang.
 timeout 280 "$PYTEST_BIN" \
   -p no:randomly \
   -p no:xdist \
@@ -71,6 +77,7 @@ timeout 280 "$PYTEST_BIN" \
   --tb=short \
   --color=no \
   --override-ini="addopts=" \
+  --timeout=60 \
   "${FILES[@]}"
 PYTEST_EXIT=$?
 

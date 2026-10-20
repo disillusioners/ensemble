@@ -266,10 +266,19 @@ def create_live_view_tools(manager: "InstanceManager", current_instance_id: str)
             # router already 404s this at request time, but
             # the tool surfaces the typed rejection so the
             # agent knows which name collided.
+            #
+            # ari-tools Phase 3: the reserved set now holds
+            # ``public`` AND ``board`` — the message names the
+            # SET instead of claiming a single occupant (the
+            # "the public passcode lane occupies this name"
+            # wording became inaccurate once ``board`` joined).
+            from daemon.services.live_views import RESERVED_ROOT_NAMES
+
             return (
                 f"Error: root_name {root_name!r} is reserved "
-                "(the public passcode lane occupies this "
-                "name); rename the root in config and restart."
+                f"({sorted(RESERVED_ROOT_NAMES)}) — the live-views "
+                f"router reserves these names for its own lanes; "
+                f"rename the root in config and restart."
             )
         if not is_well_formed_rel_path(path):
             return (
