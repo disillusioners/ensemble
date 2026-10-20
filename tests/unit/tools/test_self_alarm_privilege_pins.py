@@ -17,6 +17,12 @@ change cannot silently break either property:
   the tool RESOLVES for a non-ari agent (the bypass is real), and the
   runtime gate REFUSES the call.
 
+  The refusal half is wired so the engine is REACHABLE (the SpyService IS
+  the tool's service, the source repository IS the in-memory repo, the
+  caller's project_id resolves) and a NEGATIVE CONTROL proves that
+  reachability — so the zero-side-effect assertions are load-bearing
+  rather than vacuously true.
+
 * **P2 — the reuse path echoes ``lateness_cap_seconds``.**
   ``daemon/tools/self_alarm.py`` puts ``lateness_cap_seconds`` in BOTH
   response shapes: the create branch (``:938``) and the reuse branch
@@ -41,6 +47,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import daemon.registry as dr
+import daemon.tools.self_alarm as sa
 from daemon.registry import AgentRegistry
 from daemon.services import scheduling_service
 from daemon.tools.instance import create_instance_tools
@@ -88,6 +95,98 @@ def _manager():
     return manager
 
 
+def _engine_reachable_manager(repo: FakeRepo, service: SpyService) -> MagicMock:
+    """A manager wired so the tool can actually REACH the engine.
+
+    ``_manager()`` (the sibling helper) leaves three attributes unset, and
+    a MagicMock AUTO-CREATES them — so the omissions are silent, not loud:
+
+    * ``_source_repository`` becomes a truthy mock, so the tool's read-only
+      label probe sees a non-empty world and every candidate label looks
+      "taken";
+    * ``_instance_repository`` becomes a truthy mock, so the D11
+      ``project_id`` resolve yields a mock instead of a real id;
+    * ``scheduling_service`` is the raw MODULE, so the tool binds the
+      module and a ``SpyService`` passed anywhere else observes nothing.
+
+    This helper wires all three explicitly, so the zero-side-effect
+    assertions are LOAD-BEARING: with the gate removed the engine really
+    creates a row (see the negative control below).
+    """
+    manager = MagicMock(name="InstanceManager")
+    manager.config.daemon.port = 0
+    manager.config.llm.allowed_models = []
+    manager._secret_service = None
+    manager._project_repository = None
+    manager._source_repository = repo
+    instance_repository = MagicMock()
+    instance_repository.get = MagicMock(
+        return_value=SimpleNamespace(project_id=PROJECT_ID)
+    )
+    manager._instance_repository = instance_repository
+    # The SPY is the tool's service — the tool's closure must hold the spy,
+    # not the raw module, or its call counters observe nothing.
+    manager.scheduling_service = service
+    return manager
+
+
+def _stage_ari_agent(agents_dir: Path) -> None:
+    """Stage the real ``ari`` agent next to the synthetic non-ari one.
+
+    The engine validates the alarm's TARGET agent ("ari") against the
+    registry BEFORE it writes a row. Without it the create is rejected for
+    the wrong reason and the row assertion would stay vacuous.
+    """
+    ari_meta = json.loads(
+        (REPO_ROOT / "agents" / "ari" / "meta.json").read_text(encoding="utf-8")
+    )
+    ari_dir = agents_dir / "ari"
+    ari_dir.mkdir(parents=True, exist_ok=True)
+    (ari_dir / "meta.json").write_text(json.dumps(ari_meta), encoding="utf-8")
+
+
+@pytest.fixture
+def literal_allow_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The literal-allow tool, wired so the ENGINE IS REACHABLE.
+
+    Yields ``(tool, service, repo)``: the resolved tool, the SpyService
+    that IS the tool's service, and the in-memory repository.
+    """
+    monkeypatch.setenv("ENSEMBLE_SCHEDULING_DEFAULT_TIMEZONE", TZ_NAME)
+    agents_dir = _stage_synthetic_agent(
+        tmp_path, "syn-literal-selfalarm-call", [LITERAL_TOOL_NAME]
+    )
+    _stage_ari_agent(agents_dir)
+    registry = AgentRegistry(agents_dir)
+    registry.discover()
+    monkeypatch.setattr(dr, "_registry", registry)
+
+    repo = FakeRepo()
+    previous = (
+        scheduling_service._deps.source_repo,
+        scheduling_service._deps.source_registry,
+        scheduling_service._deps.project_repository,
+    )
+    scheduling_service.configure(
+        source_repo=repo, source_registry=FakeRegistry(repo)
+    )
+    try:
+        service = SpyService(scheduling_service, repo)
+        tools = create_instance_tools(
+            _engine_reachable_manager(repo, service),
+            "inst-syn",
+            "syn-literal-selfalarm-call",
+        )
+        by_name = {getattr(t, "name", "?"): t for t in tools}
+        yield by_name[LITERAL_TOOL_NAME], service, repo
+    finally:
+        (
+            scheduling_service._deps.source_repo,
+            scheduling_service._deps.source_registry,
+            scheduling_service._deps.project_repository,
+        ) = previous
+
+
 def test_a_literal_tool_name_allow_RESOLVES_the_tool_for_a_non_ari_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -118,55 +217,79 @@ def test_a_literal_tool_name_allow_RESOLVES_the_tool_for_a_non_ari_agent(
 
 @pytest.mark.asyncio
 async def test_the_runtime_gate_REFUSES_a_literal_allow_non_ari_caller(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    literal_allow_env,
 ) -> None:
     """D10 layer 3 — the runtime gate is the ONLY thing that refuses.
 
     The tool is resolved (see the test above), the caller is NOT ari, so
     the call MUST be refused with the typed error and must not reach the
     engine (no create, no update, no row).
+
+    The three side-effect assertions below are LOAD-BEARING: the fixture
+    wires the SpyService as the tool's service, the source repository as
+    the in-memory repo, and the caller's ``project_id`` — so the engine is
+    genuinely reachable and a missing gate really would create a row. The
+    negative control below proves that reachability, so this pin cannot
+    silently degrade into a tautology.
     """
-    agents_dir = _stage_synthetic_agent(
-        tmp_path, "syn-literal-selfalarm-call", [LITERAL_TOOL_NAME]
-    )
-    registry = AgentRegistry(agents_dir)
-    registry.discover()
-    monkeypatch.setattr(dr, "_registry", registry)
+    tool, service, repo = literal_allow_env
 
-    tools = create_instance_tools(
-        _manager(), "inst-syn", "syn-literal-selfalarm-call"
+    result = await tool.coroutine(
+        label="probe", when_or_every="in 45m", message_to_self="Do the thing."
     )
-    by_name = {getattr(t, "name", "?"): t for t in tools}
-    tool = by_name[LITERAL_TOOL_NAME]
 
-    repo = FakeRepo()
-    previous = (
-        scheduling_service._deps.source_repo,
-        scheduling_service._deps.source_registry,
-        scheduling_service._deps.project_repository,
-    )
-    scheduling_service.configure(
-        source_repo=repo, source_registry=FakeRegistry(repo)
-    )
-    try:
-        service = SpyService(scheduling_service, repo)
-        result = await tool.coroutine(
-            label="probe", when_or_every="in 45m", message_to_self="Do the thing."
-        )
-    finally:
-        (
-            scheduling_service._deps.source_repo,
-            scheduling_service._deps.source_registry,
-            scheduling_service._deps.project_repository,
-        ) = previous
+    # ZERO SIDE EFFECTS FIRST — this is the safety-critical invariant, so it
+    # is asserted BEFORE the refusal shape: a regression must report the
+    # engine call / the written row, not a message difference.
+    assert service.create_calls == [], f"the engine create was called: {service.create_calls}"
+    assert service.update_calls == [], f"the engine update was called: {service.update_calls}"
+    assert repo.rows == [], f"a schedule row was written: {repo.rows}"
 
+    # The refusal came from the GATE, not from some later check: the gate's
+    # message names the authorized agent and the caller, and a later
+    # refusal (e.g. the D11 project resolve) is explicitly excluded.
     assert isinstance(result, str), f"the call was NOT refused: {result!r}"
     assert result.startswith("ERROR: ")
     assert "ari" in result
-    # No engine write, no row, no burned label.
-    assert service.create_calls == []
-    assert service.update_calls == []
-    assert repo.rows == []
+    assert "only" in result
+    assert "syn-literal-selfalarm-call" in result
+    assert "cannot resolve project_id" not in result, (
+        "the refusal came from the project resolve, not from the ari-only gate"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_wiring_reaches_the_engine_so_the_pin_above_can_go_red(
+    literal_allow_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NEGATIVE CONTROL — the zero-side-effect assertions above are live.
+
+    Neutralising the runtime gate in memory (monkeypatch — restored
+    automatically) must let the call reach the engine: ONE create call and
+    ONE written row. If this test ever fails, the wiring regressed and the
+    pin above has silently become a tautology again.
+    """
+    tool, service, repo = literal_allow_env
+
+    monkeypatch.setattr(
+        sa, "SELF_ALARM_AUTHORIZED_AGENT", "syn-literal-selfalarm-call"
+    )
+
+    result = await tool.coroutine(
+        label="probe", when_or_every="in 45m", message_to_self="Do the thing."
+    )
+
+    assert not (isinstance(result, str) and result.startswith("ERROR: ")), (
+        f"the engine call was still refused: {result!r}"
+    )
+    assert len(service.create_calls) == 1, (
+        f"the engine create was not reached — the wiring is not engine-reachable: "
+        f"{service.create_calls}"
+    )
+    assert len(repo.rows) == 1, (
+        f"no schedule row was written — the wiring cannot observe a row write: "
+        f"{repo.rows}"
+    )
 
 
 # ── P2 — the reuse path echoes lateness_cap_seconds ────────────────────────
