@@ -3,7 +3,8 @@
 Date: 2026-10-19
 Author: planner via plan-creation worker
 Status: **AMENDED** — architect amendments A-18…A-29 folded against `2b297db7d`; **iteration-002** amendments (approver blocking
-#2 + notes B1/B2/B8 + the cron-example note) folded in on 2026-10-20 — ready for reviewer
+#2 + notes B1/B2/B8 + the cron-example note) folded in on 2026-10-20; **iteration-003** amendment (the pause-branch assertion
+corrected to engine reality — `paused is True` only) folded in on 2026-10-20 — ready for reviewer
 Worktree: `/home/nea/ensemble-src-wt-ari-tools` (branch `feature/ari-tools`, base `latest@630cefebb`)
 Predecessor: Phase 1 (board) — phase 2 touches **NO** phase-1 code; only the pinned `wi-<uuid8>` id format is consumed.
 
@@ -113,9 +114,16 @@ Success return (mirrors the engine echo + wrapper extras — **never** a bare st
 ```
 
 - `label` echoes the **effective** full label (the `self-alarm:`-prefixed name actually stored; see D4).
-- `status` is the **actual** row status after create/update. The create-response status races
-  `'stopped'` → `'starting'` → `'running'` (`repository.py:82` / `registry.py:611`, `:785`); `'starting'`
-  **counts as armed** and is reported as such.
+- `status` — **scoped to the CREATE branch: the actual post-create row status.** The create branch re-reads the row
+  (`scheduling_service.py:767-770`) when the adapter start succeeded, so its status races `'stopped'` → `'starting'` →
+  `'running'` (`repository.py:82` / `registry.py:611`, `:785`); `'starting'` **counts as armed** and is reported as such.
+  **UPDATE branch — NOT the post-update status:** `status = updated.status` (`:1049`) is the **pre-update** row status carried
+  by the `update_source_config` return object; the row is re-read (`:1051-1052`) **only** when `started` is True. A pause sets
+  `config_enabled=False` ⇒ `started=False` (`:1045-1047`) ⇒ **no re-read** ⇒ a pause response echoes the **stale pre-pause**
+  status (on the fallback path that is `'running'` — the very state step 4b just armed), **never** `'stopped'`. The row's
+  `stopped` state is a **repo-side fact** proven by the explicit status write (`:1043`), not a response field ⇒ **never assert
+  `status == 'stopped'` on a pause response** (in-tree precedent: `tests/unit/services/test_scheduling_service.py:394-397`
+  asserts `paused.paused is True` + the repo row/status write, never the response status).
 - `lateness_cap_seconds` echoes the daemon-global `one_shot_max_lateness_seconds`: `null` = unlimited lateness
   (a missed alarm fires late), an integer = a missed alarm beyond the cap is skipped permanently (see
   "Tool-doc obligations"). The wrapper cannot set it, so it must disclose it.
@@ -356,10 +364,15 @@ stored row**, step 4 is the only mutation, and step 6 is what makes the fallback
      (also never cancelled, and not destroyed).
    - *Mandatory shape.* The pause is issued **unconditionally** on the fallback path (idempotent for an already-disarmed row) and
      carries **no `when`** — the row's `run_at` stays as the failed update left it (the row is disarmed, not re-timed). The
-     wrapper **asserts** the pause response (`paused is True`, `status == 'stopped'`).
+     wrapper **asserts `paused is True` ONLY** on the pause response. **Engine reality (do NOT assert `status == 'stopped'`):** the
+     pause response's `status` is the **stale pre-pause** value — the pause sets `config_enabled=False` ⇒ `started=False` ⇒ the
+     engine never re-reads the row (`scheduling_service.py:1045-1052`), so `status = updated.status` (`:1049`) carries the
+     pre-pause status (on this fallback path `'running'` — the very state step 4b just armed). The row's `stopped` state is a
+     **repo-side fact** proven by the explicit status write (`:1043`), **not** a response field.
    - *If the pause itself fails* ⇒ the tool returns a typed `ERROR` naming **both** rows (the mutated original and the fresh
      label) and their ids, and **never** claims success — a still-armed original beside a fresh label is exactly the
-     duplicate-armed state this step exists to prevent.
+     duplicate-armed state this step exists to prevent. The error text carries the retry hint: **"original may still be armed —
+     use a fresh label on retry"**.
 7. **Step 7 — Report.** The response echoes the **effective label actually created/armed** and, on the fallback path, the
    **neutralized original** (its `source_id` + `paused` state) so the agent can see that the old label is disarmed and which
    label is live. A mismatch fallback (step 2) additionally discloses the **untouched pre-existing row** (label + `source_id` +
@@ -536,7 +549,7 @@ home for the grammar only by reference — the tool doc stays canonical. **Write
 | 6 | **Three-layer** ARI-only: privileged category + runtime gate (`agent_id != "ari"` ⇒ error) + `"self-alarm"` added to **`agents/ari/meta.json`** only | 3 | `grep -rl "self-alarm" agents/*/meta.json` → exactly one file; an **empty-allow** non-ari agent resolves **no** `self_alarm` (`resolve_tool_filter`) |
 | 7 | **Prompt surface — DEFERRED to the conventions step** ([plan-overview.md §8](plan-overview.md), step 4). Phase 2 ships **only** the tool + `_full_doc_` + the error hints; the `## Self-Alarm` section of `agents/ari/tools_note.md` is authored in step 4, where its manifest row is re-stamped **in the same commit**. | 3 | Phase 2 edits **no** prompt artefact and carries **no** re-stamp task (`tools_note.md` **IS** manifest-covered — the 161-entry committed manifest `agents/.prompt-artifacts.sha256`, row `:28`; the C1① consolidation ruling forbids a second re-stamp pass). The **prompt-content assertions** that used to live here move to the conventions step's checklist (guide forbidden-token + cross-ref closure). |
 | 8 | Tests: `tests/unit/test_self_alarm_service.py` (grammar, floor boundary, tz parity, message composition, board-id regex) | 2 | Boundary: 29 m ⇒ reject, 30 m ⇒ accept, 30 m + 1 s ⇒ accept — **on both branches** (the floor is branch-independent: create **and** reuse); **family-aware rejection text** with the computed next fire (one-shot vs recurring); the ≤ 30-min-period cron is rejected by the floor (`*/30 * * * *` ⇒ its first fire is always < 30 min away) while the documented example `cron 0 9 * * *` is accepted; parity vs `_resolve_schedule_timezone` matrix |
-| 9 | Tests: `tests/unit/tools/test_self_alarm_tools.py` (mocked service; `await tool.coroutine(...)`) | 3, 5 | Covers create / reuse (`paused=False` + response assertion) / **reuse payload shape: `timezone` == the resolved IANA name; no `when` key for a stored `cron` row** / **step-2 compatibility gate: a family mismatch and a weekly-DOW mismatch ⇒ zero `update_schedule` calls + a fresh-label create; the stored row is untouched** / **step-3 reuse-path floor: 29 m ⇒ `ERROR` + zero `update_schedule` calls; 30 m and 30 m + 1 s ⇒ accepted** / **steps 5-6 fallback: a forced assertion failure ⇒ a fresh-label create AND the mutated original paused (`{paused: True}` issued, `paused is True` asserted) ⇒ exactly one armed row** / **a failed pause ⇒ typed `ERROR` naming both rows, never a success claim** / stopped-label strictly-later re-arm / **message-only re-arm refusal** / burned-label `-2` collision-check + duplicate report / the mismatch fallback's `fallback_reason` + the disclosure of the untouched pre-existing row / non-ari gate / non-ari **empty-allow** gate / `project_id`-resolve-first (no row, no label burn) / family-aware floor text with computed next fire / `lateness_cap_seconds` + `tz_warning` + actual `status` echo / engine-error paths |
+| 9 | Tests: `tests/unit/tools/test_self_alarm_tools.py` (mocked service; `await tool.coroutine(...)`) | 3, 5 | Covers create / reuse (`paused=False` + response assertion) / **reuse payload shape: `timezone` == the resolved IANA name; no `when` key for a stored `cron` row** / **step-2 compatibility gate: a family mismatch and a weekly-DOW mismatch ⇒ zero `update_schedule` calls + a fresh-label create; the stored row is untouched** / **step-3 reuse-path floor: 29 m ⇒ `ERROR` + zero `update_schedule` calls; 30 m and 30 m + 1 s ⇒ accepted** / **steps 5-6 fallback: a forced assertion failure ⇒ a fresh-label create AND the mutated original paused (`{paused: True}` issued, `paused is True` asserted) ⇒ exactly one armed row** / **a failed pause ⇒ typed `ERROR` naming both rows, never a success claim** / stopped-label strictly-later re-arm / **message-only re-arm refusal** / burned-label `-2` collision-check + duplicate report / the mismatch fallback's `fallback_reason` + the disclosure of the untouched pre-existing row / non-ari gate / non-ari **empty-allow** gate / `project_id`-resolve-first (no row, no label burn) / family-aware floor text with computed next fire / `lateness_cap_seconds` + `tz_warning` + the **branch-scoped** `status` echo (create: post-create status, `'starting'` = armed; update: the engine-returned pre-update status unless a successful start triggered the re-read — see the :116-118 contract) / engine-error paths |
 | 10 | Tests: `tests/unit/test_self_alarm_registration.py` (mirror `tests/unit/test_scheduling_registration.py`): allow ⊆ registry universe, category resolution, name in `DYNAMIC_TOOL_NAMES` + `KNOWN_TOOL_NAMES`, **`"self-alarm"` in `PRIVILEGED_TOOL_CATEGORIES`**, **ari-only** allow, the five tool-doc obligation pins | 4, 6, 7 | Green; asserts NO other agent grants the category; `resolve_tool_filter` for an empty-allow non-ari agent yields no `self_alarm`. The **tools_note forbidden-token + cross-ref assertions** are NOT in this phase — the section is authored in the conventions step, so they move to that step's checklist ([plan-overview.md §8.6](plan-overview.md)) |
 | 11 | Regression run: the new tests + `tests/unit/test_scheduling_registration.py` + `tests/unit/tools/test_frozen_tool_name_discovery.py` + `tests/unit/tools/test_tool_config_validation_boot.py` + **the five privileged-set pin files** + the seal test | 8-10 | Zero NEW failures; all five exact-set pins green with **ten** entries; the seal-test mismatch count **before == after** (the measured baseline at this HEAD is **7** — the tripwire is **already red** on 7 pre-existing stale pins, which are **NOT ours to fix**; the acceptance is "no NEW stale pins beyond the baseline", NOT "green") — phase 2 edits **no** prompt artefact |
 | 12 | Record the deviations/notes into the phase-2 decisions feed (`decisions.md` in this planning dir) | 1-11 | Each of D1-D13 has an anchor; deviations from pre-rulings flagged explicitly |
@@ -597,14 +610,19 @@ home for the grammar only by reference — the tool doc stays canonical. **Write
   `scheduling_service.py:627`), not from a `weekday` field.
 - **Fallback + neutralization (D4 steps 5-6)**: a forced assertion failure (the mocked update returns a wrong `next_run_at_utc`)
   ⇒ a fresh-label create proceeds **and** the mutated original is **paused** (`update_schedule(source_id, {paused: True})` issued
-  and asserted: `paused is True`, `status == 'stopped'`) ⇒ **exactly one armed row** survives (the fresh label) ⇒ "fires exactly
-  once" holds; the response discloses the neutralized original's `source_id`. A **failed pause** ⇒ typed `ERROR` naming **both**
+  and asserted as **`paused is True` ONLY** — **never** `response.status == 'stopped'`, see D4 step 6 / the :116-118 status
+  contract) ⇒ **exactly one armed row** survives (the fresh label) ⇒ "fires exactly
+  once" holds; the row's disarmed state is a **separate row-state fact**, verified by **re-reading the row after the pause write**
+  (a follow-up `repo.get_source_config` / repo-row check in the test — `status == 'stopped'` **and** `enabled is False`), never
+  from the pause response; the response discloses the neutralized original's `source_id`. A **failed pause** ⇒ typed `ERROR` naming **both**
   rows — never a success claim.
 - **Gate**: a non-`ari` caller ⇒ `ERROR` and no engine call; an **empty-allow** non-ari agent (watcher-shaped) ⇒
   `resolve_tool_filter` yields no `self_alarm` (privileged-category proof).
 - **Ordering / echo**: unresolvable `project_id` ⇒ `ERROR` **before** any label lookup (assert zero repository writes);
-  `lateness_cap_seconds` echoed as `None` and as an integer; `status` echoed as the actual row status with `'starting'`
-  treated as armed.
+  `lateness_cap_seconds` echoed as `None` and as an integer; `status` echoed **verbatim from the engine response**, whose meaning is
+  **branch-scoped** (the :116-118 contract): on **create** it is the post-create row status with `'starting'` treated as armed; on
+  **update** it is the **pre-update** status unless a successful adapter start triggered the engine's re-read — so a test that wants
+  the **row's** state re-reads the row, it does not infer it from the echoed status.
 - **Doc obligations**: `_full_doc_` and the tools_note section contain all five Tool-doc obligations (both cap states +
   the skip signature, board-promise/never-a-ping, unobservable fire, list semantics, `self-alarm:` namespace).
 - **Message**: contains `"[self-alarm]"`, the effective label, the scheduled instant (local **and** UTC), the board id + the
@@ -720,3 +738,21 @@ The body above already reads as-if-designed-so; this table records where each it
 | **I2-B8** | Approver note B8 (merged into blocking #2(a)) | Engine-facts row (`update_schedule` refreshes the stored zone **only** when `payload.timezone` is set, `:931-936`) + D4 step 4b (the reuse payload **must** carry `timezone=<resolved IANA name>` ⇒ the stored zone cannot drift stale) |
 | **I2-BLOCK2b** | Approver blocking #2 (b) — the family/DOW mismatch rule | D4 step 2 — a family / weekly-DOW / cron-expression mismatch routes **directly to a fresh-label create without calling `update_schedule` at all**; the per-family diagnostic survives as `fallback_reason` (superseding the former "typed per-family error" rule, which would have left the agent unable to arm); D4 step 7 (the untouched pre-existing row is disclosed); Risk 20 |
 | **I2-CR** | Approver note — the cron example is unarmable | Grammar table (the cron family documents the **armable** `cron 0 9 * * *` + the period rule: a ≤ 30-min period is structurally unarmable); D3 `every 1h` hint (`cron 0 */2 * * *` — the non-portable `*/60` step is gone); D9; Tests bullet; Resolved question 3; Risk 19 |
+
+---
+
+## Amendment log (iteration 003 — approver blocking fix, 2026-10-20)
+
+Approver iteration 002 verdict: **REJECTED** — one mechanical blocker (the iteration-001 fix introduced a fresh defect: the pause
+assertion demanded a response field the engine cannot produce). The body above reads as-if-designed-so; this table records the
+iteration-003 fold. Engine facts were re-verified in this worktree before editing (`daemon/services/scheduling_service.py`
+`:1013-1014`, `:1026-1033`, `:1043`, `:1045-1052`).
+
+| ID | Source | Folded into |
+|---|---|---|
+| **I3-BLOCK1a** | Approver iteration-003 blocking — D4 step 6 asserted a status the engine never returns on a pause response | D4 step 6 (*Mandatory shape*): the wrapper now asserts **`paused is True` ONLY**; `status == 'stopped'` is **dropped** and replaced by the engine-reality justification (pause ⇒ `config_enabled=False` ⇒ `started=False` ⇒ no re-read at `:1045-1052` ⇒ `status = updated.status` at `:1049` is the **stale pre-pause** value; the row's `stopped` state is a repo-side fact from the explicit write at `:1043`). Tests bullet "Fallback + neutralization" aligned: the row-state is a **separate fact verified by re-reading the row after the pause write** (`repo.get_source_config` / repo-row check: `status == 'stopped'` **and** `enabled is False`), never the pause response |
+| **I3-BLOCK1b** | Approver iteration-003 blocking — the over-generalized status contract made the pause assertion look plausible | Result-contract bullet (**`:116-118`**, now the scoped status contract): the "**actual** row status after create/update" claim is **narrowed to the CREATE branch** (which re-reads at `:767-770`); the UPDATE branch is stated as the **pre-update** row status carried by the `update_source_config` return object, re-read only when `started` is True ⇒ a pause response echoes `'running'`, never `'stopped'`; the emit-test bullet (**`Ordering / echo`**) reworded to the same branch-scoped contract (no "actual row status" claim for updates; a row-state test re-reads the row) |
+| **I3-HARDEN** | Optional hardening (approver-accepted, recorded not over-engineered) | D4 step 6 pause-failure ERROR text now carries the retry hint **"original may still be armed — use a fresh label on retry"** |
+
+Unchanged and re-confirmed consistent: task 5 row (`step 6 … asserted` — already status-free), task 9 tests row (`paused is True`
+asserted, no response-status claim), success criterion 13 (`paused is True` in the pause response).
