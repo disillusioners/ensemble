@@ -1348,9 +1348,13 @@ class TestInstallerSkillHygiene:
 #     Evidence pointer: Phase-1 scoped gate run (unit + integration +
 #     targeted seal) in the commission report.
 # 2026-10-20 hide-question-tool-nonroot sweep re-pin (14 files, constants-only; attribution in the commit message) — the other 21 entries keep their values.
+# 2026-10-20 hide-question-tool-nonroot FIX ROUND 1 re-pin (3 files, constants-only, computed from real file bytes):
+#   agents/charter/workflow.md   <- 66512e9dd 2026-10-05 (B5: diagram-type NEEDS MORE INFO self-consistency)
+#   agents/devops/rule.md        <- 617bf69a0 2026-10-05 (B3: non-root question contract + canonical section)
+#   agents/maintenancer/rule.md  <- 74e9168a2 2026-10-19 (W3: escalate-family report-chain contract)
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
-    "agents/charter/workflow.md": "870ec32faf071cc1478c0540690381ef46c0bd1ae6667163215845ad39992581",
+    "agents/charter/workflow.md": "2a5078f93bd2dcfe427900e85c075ee9671b8aedae17d07c7ef6abb6df4603ab",
     "agents/charter/rule.md": "2ee5d27d5bbc09474dbcb78de49d6cbcfc8074f98b3ec358cfecc4c5aae26701",
     "agents/charter/soul.md": "458f65a608b495df0cac8c565a83663595ea85c3d13a200295dc611189387aad",
     "agents/charter/meta.json": "e1034e1d92e7bb30f2d39ab0a625a661287251cf5ca961cbeba3e1893dcfd492",
@@ -1383,11 +1387,11 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/coder/soul.md": "051401b1bcafb56e985794d917bd00255bc0be4f30184e2de01b6a2b5314fb7b",
     "agents/developer/rule.md": "0a0f1d8f076f78c3f7aea77bfe157b7fc8282f4184ba3352b88e0d831d47285f",
     "agents/developer[v2]/tools_note.md": "62882063ca109e7829c097201e110a0edb872ade000415372ab7ca016bee5748",
-    "agents/devops/rule.md": "889e52842c0d4c562ad18d27364f9a7ea0223453df4a6659c11995d631996b78",
+    "agents/devops/rule.md": "7eebf2831e8bd57610fe616774d492ccbd3b9b72c980455c3a6cfdb838840b23",
     "agents/doc-writer/rule.md": "350dd33cca327e5a96941633aea6813d18b98b82a2f443cb13b270e03deabdc5",
     "agents/governor/rule.md": "a779742dcec8d30eb44495afda0c5ada93b9409a4ffac83912f7af2afa22ad37",
     "agents/leader/rule.md": "261ab3af792a7667677f6c622308eff8688d9b3e146e2349b87b1c3d6a3a9f56",
-    "agents/maintenancer/rule.md": "66e91a67357d21b9b8ca3c78311ce9becb2b43bf7517eaa3db439efa28fcdbb0",
+    "agents/maintenancer/rule.md": "d6e448a6dbbbbd96f09b35822b6e376c2d0814fc4d2e6723d64b8ae233c4520e",
     "agents/planner/rule.md": "a245335ded89d0818318f40bfed9b05edf6e08d8fbe0fcfe4b320ef9013d88c4",
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
     "agents/project-manager/workflow.md": "a8b889a03d7eabdfc62a860928c9bed941aeed6d5d2676a27ec859d846615d6c",
