@@ -3519,7 +3519,7 @@ class InstanceLifecycleService:
                 pack_state, question_pack_id = await question_pack_state(
                     self._manager, instance_id
                 )
-            except Exception as guard_exc:  # noqa: BLE001 — fail-open
+            except Exception as guard_exc:  # noqa: BLE001 — fail-CLOSED (the pause is refused below)
                 logger.warning(
                     f"pause_instance_cascade: question-pause guard probe "
                     f"failed for {instance_id[:8]}... "

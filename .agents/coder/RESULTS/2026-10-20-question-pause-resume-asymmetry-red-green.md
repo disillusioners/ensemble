@@ -4,11 +4,19 @@ Feature: `fix/question-pause-resume-asymmetry` (side-effect-paused
 instances stranded after a sibling's `ask_questions`).
 
 - BASE (pre-fix): `1ebdf469f` — "chore(release): bump version to 0.25.7"
-- HEAD (post-fix): `2d30a53ce` — "fix(question-pause): H1 — the dismiss route
-  must bind to dismiss_question (merge blocker) + the route-table guard"
+- HEAD (post-fix): `e7634c39d` — "docs(question-pause): the artifact carries
+  the H1 RED (the route-table readback + the validation-pack 2-of-10 failure
+  at the broken tip)"
   (the tip moves with each cycle — the pin count below is the CURRENT
   one: **40 cases**, of which **40 are pins** in this pack; the earlier
   "23 pins" figure was stale and is superseded)
+- ARTIFACT TAIL: the commit that carries THIS file is DOCS-ONLY (the W1 +
+  W2 hygiene pass — no code, no test, no signature, no refactor). A
+  commit cannot contain its own sha, so the HEAD line above pins
+  `e7634c39d` — the code-frozen tip — and anything AFTER it is
+  documentation tail.
+- GREEN captured at: `e7634c39d` — the reviewer independently reproduced
+  **140 passed** at that tip.
 - Worktree: `/home/nea/ensemble-src-wt-qprasym` (branch
   `fix/question-pause-resume-asymmetry`)
 - Live cases the fix addresses: `f86c4015` / `756d37ba` (2026-10-19) —
@@ -228,6 +236,31 @@ HOME-derived install path.
 | 38 | `test_w3_duplicate_answer_does_not_re_flip_or_re_wake` | **W3** |
 | 39 | `test_dismiss_path_deliberate_pause_survives_the_release` | **rider** (dismiss exclusion) |
 | 40 | `test_route_table_binds_the_dismiss_endpoint` | **H1-GUARD** (route table) |
+
+## THE CALL-SHAPE CHANGE (commit `01a6c620b`)
+
+`exclude_ids` is now passed to the cascade ONLY when it is NON-EMPTY,
+via the shared helper
+`daemon/services/question_pause_set.py::resume_instance_cascade_with_exclusions`
+(line 728) — used by all THREE question-lifecycle sites (the answer
+path, the gate supersession and the dismiss path). On the cascade side
+`set(exclude_ids or ())`
+(`daemon/services/instance_lifecycle.py:4248`) makes an EMPTY exclusion
+list equivalent to an ABSENT one, so `exclude_ids=[]` and "no
+exclusions" are the same behaviour.
+
+WHY: passing the keyword unconditionally changed the call shape of
+`resume_instance_cascade` even when nothing was excluded, which broke
+the existing HTTP-level call-shape assertions.
+
+BLAST RADIUS (corrected): the break was **5 broken assertions**, NOT 3
+— **3 in `tests/test_question_dismiss.py`** and **2 in
+`tests/test_question_untested_paths.py`**. The reviewer also found that
+the ANSWER-path break was **LATENT since the cycle-1 commit
+`f65883634`** (it was invisible there because no test asserted the
+answer path's cascade call shape). `01a6c620b` therefore fixed all
+THREE question-lifecycle sites (answer, dismiss, supersede) — the fix
+is more complete than its commit message claims.
 
 ## H1 — the merge blocker (the route-table RED)
 
