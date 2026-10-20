@@ -140,7 +140,7 @@ class TestStaticRegistrationChecklist:
         )
 
     def test_attestation_not_in_privileged_categories(self) -> None:
-        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly ten entries
+        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly twelve entries
         (the daemon-internal authority trio ``system_upgrade``,
         ``system-log``, ``ens-db`` plus ``ens-env`` per the W4
         leader decision 2026-10-02, ``view-views`` per the
@@ -221,6 +221,20 @@ class TestStaticRegistrationChecklist:
             # the empty-allow inherit universe must never auto-grant it.
             # The ari tools.allow entry is the only access path.
             "self-alarm",
+            # ari-tools Phase 3 (2026-10-20): the report-page writer
+            # category (view_write). opt-in-only; the ``reports`` live-
+            # view root is shared and customer-facing, so the empty-allow
+            # inherit universe must never auto-grant write authority over
+            # it. The ari-only tools.allow entry is the only access path;
+            # the tool body ALSO carries the runtime agent_id gate.
+            "view-write",
+            # ari-tools Phase 3 (2026-10-20): the live board's link-
+            # minter category (board_link). opt-in-only; minting the
+            # board's passcode authorises reading the user's whole work
+            # board. The ari + leader tools.allow entries are the only
+            # access path; the tool body ALSO carries the runtime
+            # agent_id gate.
+            "board-link",
         })
 
 

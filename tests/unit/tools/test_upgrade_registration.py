@@ -99,8 +99,8 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_ten_entries(self) -> None:
-        """The default-deny set is exactly ten entries —
+    def test_privileged_categories_is_exactly_twelve_entries(self) -> None:
+        """The default-deny set is exactly twelve entries —
         ``system_upgrade``, ``system-log``, ``ens-db``,
         ``ens-env``, ``view-views``, ``cu``, ``secrets``,
         ``settings``, ``board`` and ``self-alarm``.
@@ -144,7 +144,7 @@ class TestStaticRegistrationChecklist:
         a category here is a
         deliberate trust decision, and this pin makes silent
         additions visible (D18/A14 —
-        same-PR pin updates; this is pin file 1 of 5; the
+        same-PR pin updates; this is pin file 1 of 7; the
         integration sanity pin lives at
         ``tests/integration/test_service_tool_flag_off_byte_identical.py``
         and the fifth exact-set pin at
@@ -186,6 +186,20 @@ class TestStaticRegistrationChecklist:
             # the empty-allow inherit universe must never auto-grant it.
             # The ari tools.allow entry is the only access path.
             "self-alarm",
+            # ari-tools Phase 3 (2026-10-20): the report-page writer
+            # category (view_write). opt-in-only; the ``reports`` live-
+            # view root is shared and customer-facing, so the empty-allow
+            # inherit universe must never auto-grant write authority over
+            # it. The ari-only tools.allow entry is the only access path;
+            # the tool body ALSO carries the runtime agent_id gate.
+            "view-write",
+            # ari-tools Phase 3 (2026-10-20): the live board's link-
+            # minter category (board_link). opt-in-only; minting the
+            # board's passcode authorises reading the user's whole work
+            # board. The ari + leader tools.allow entries are the only
+            # access path; the tool body ALSO carries the runtime
+            # agent_id gate.
+            "board-link",
         })
 
     def test_checklist_comment_block_present_in_module(self) -> None:

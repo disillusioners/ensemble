@@ -88,6 +88,24 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # explicit ``tools.allow: ["self-alarm"]`` entry (ari only) is the
     # only access path.
     "self_alarm",
+    # ari-tools Phase 3 (the live-views surface) — the view_write tool is
+    # created by the create_view_write_tools() factory
+    # (daemon/tools/view_write.py). The ``view-write`` category is
+    # PRIVILEGED (entry #11 of PRIVILEGED_TOOL_CATEGORIES): the
+    # empty-allow inherit universe must NOT auto-grant write authority
+    # over the shared, customer-facing ``reports`` root. Explicit
+    # ``tools.allow: ["view-write"]`` on ari is the only access path
+    # (ARI-ONLY pre-ruling); the tool body ALSO carries the runtime
+    # agent_id gate.
+    "view_write",
+    # ari-tools Phase 3 (the live board view) — the board_link tool is
+    # created by the create_board_link_tools() factory
+    # (daemon/tools/board_link.py). The ``board-link`` category is
+    # PRIVILEGED (entry #12 of PRIVILEGED_TOOL_CATEGORIES): minting the
+    # board's passcode authorises reading the user's whole work board.
+    # Explicit ``tools.allow: ["board-link"]`` on ari + leader is the only
+    # access path; the tool body ALSO carries the runtime agent_id gate.
+    "board_link",
     # system_upgrade tools — created by create_upgrade_tools() factory
     # (daemon/tools/upgrade_tools.py, P2.2 Dispatch A read pair + Dispatch B
     # actor pair).
@@ -243,19 +261,31 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # is still exact-pinned below (now a quartet: ``ens-env`` joined per
 # the W4 leader decision, reviewer council 2026-10-02).
 #
-# SAME-PR RULE (D18/A14): the set is FIVE-pin pinned by exact-equality
-# asserts. Adding or removing a category REQUIRES updating ALL FIVE
-# pins in the same commit:
+# SAME-PR RULE (D18/A14): the set is SEVEN-pin pinned by exact-equality
+# asserts (five inline ``frozenset({...})`` literals + two
+# ``EXPECTED_PRIVILEGED_SET`` constants). Adding or removing a category
+# REQUIRES updating ALL SEVEN pins in the same commit:
 # ``tests/unit/tools/test_upgrade_registration.py``,
 # ``tests/unit/tools/test_attestation_registration.py``,
 # ``tests/integration/test_maintenancer_spawn_resolves_tools.py``,
 # the integration sanity pin in
 # ``tests/integration/test_service_tool_flag_off_byte_identical.py``
-# (``test_privileged_category_set_is_pinned``), and
-# ``tests/unit/tools/test_secrets_registration.py:218`` (the
+# (``test_privileged_category_set_is_pinned``),
+# ``tests/unit/tools/test_secrets_registration.py`` (the
 # fifth exact-set pin — the originally-omitted one, added by the
-# iteration-002 council B2 correction). Silent additions and
-# silent removals (fail-open regressions) both trip the pins.
+# iteration-002 council B2 correction),
+# ``tests/unit/test_board_registration.py`` (the ari-tools Phase 1
+# pin — added 2026-10-20) and
+# ``tests/unit/test_self_alarm_registration.py`` (the ari-tools Phase 2
+# pin — added 2026-10-20). The two phase-local pins ALSO carry a
+# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion. Silent
+# additions and silent removals (fail-open regressions) both trip the
+# pins.
+#
+# Derive the authoritative pin set by GREPPING THE TREE — do NOT trust
+# a plan's count:
+#   grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/
+#   grep -rn "len(PRIVILEGED_TOOL_CATEGORIES)" tests/
 PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
@@ -400,6 +430,48 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # those five insertions — the set must never be red between two
     # commits).
     "self-alarm",
+    # ari-tools Phase 3 (the live-views surface, 2026-10-20): ``view-write``
+    # is the report-page WRITER category (#11 in
+    # PRIVILEGED_TOOL_CATEGORIES — decet → undecet; ``self-alarm`` joined
+    # 2026-10-20 making the count 10 before this entry). The category owns
+    # ONE factory-built tool (``view_write``) that writes an HTML page under
+    # the daemon-global ``reports`` live-view root and returns the
+    # passcode-gated public URL in a single call. Why privileged: the
+    # ``reports`` root is a SHARED, CUSTOMER-FACING surface — a
+    # default-granted writer would let the empty-allow inherit universe
+    # (the in-tree ``watcher`` agent plus every tools-less custom agent)
+    # publish pages that reach customers under the daemon's own passcode
+    # lane. NEVER default-granted — opt-in-only; the ari meta.json
+    # ``tools.allow`` entry is the only access path (ARI-ONLY pre-ruling).
+    # Defence in depth: a LITERAL TOOL NAME in an allow list bypasses the
+    # category gate entirely, so the tool body ALSO carries an
+    # ``agent_id == "ari"`` runtime gate (the shared
+    # ``daemon/tools/views_auth.py`` helper). Both gates are required;
+    # neither substitutes for the other. SAME-PR pin updates at the SEVEN
+    # files listed in the SAME-PR RULE comment above are mandatory (this
+    # entry ships in the SAME commit as those insertions — the set must
+    # never be red between two commits).
+    "view-write",
+    # ari-tools Phase 3 (the live board view, 2026-10-20): ``board-link`` is
+    # the LIVE BOARD's link-minter category (#12 in
+    # PRIVILEGED_TOOL_CATEGORIES — undecet → duodecet; ``view-write`` joined
+    # 2026-10-20 making the count 11 before this entry). The category owns
+    # ONE factory-built tool (``board_link``) that mints the passcode row
+    # for the server-rendered board at ``/views/public/board/index.html``.
+    # Why privileged: the board's passcode authorises reading the user's
+    # whole work board — a default-granted minter would hand that authority
+    # to the empty-allow inherit universe. NEVER default-granted —
+    # opt-in-only; the ari + leader meta.json ``tools.allow`` entries are
+    # the only access path (audience separation: mint ≠ read). Defence in
+    # depth: a LITERAL TOOL NAME in an allow list bypasses the category
+    # gate, so the tool body ALSO carries an ``agent_id in {"ari",
+    # "leader"}`` runtime gate (the shared ``daemon/tools/views_auth.py``
+    # helper — the SAME helper ``view_write`` uses, with a DIFFERENT gate
+    # set). Both gates are required; neither substitutes for the other.
+    # SAME-PR pin updates at the SEVEN files listed in the SAME-PR RULE
+    # comment above are mandatory (this entry ships in the SAME commit as
+    # those insertions — the set must never be red between two commits).
+    "board-link",
 })
 
 
@@ -787,6 +859,31 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # and are imported BY this module — the category points at the tool
     # module, the service module is a library, never a category target.
     "self-alarm": "daemon.tools.self_alarm",
+    # ari-tools Phase 3 (the live-views surface) — the report-page WRITER
+    # category. PRIVILEGED category (entry #11 of
+    # PRIVILEGED_TOOL_CATEGORIES): the empty-allow inherit universe must
+    # NOT auto-grant write authority over the shared, customer-facing
+    # ``reports`` live-view root. Placed next to "view-views" — the
+    # read-only URL minter is the sibling surface.
+    #
+    # The value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``
+    # (``_tool_registry.py:504-506``); a ``daemon.services.*`` value is
+    # NEVER discovered and the exact-equality drift pin fails at boot.
+    # The SHARED layer-3 gate helper lives in
+    # ``daemon/tools/views_auth.py`` — a LIBRARY imported BY both phase-3
+    # tool modules, never a category target.
+    "view-write": "daemon.tools.view_write",
+    # ari-tools Phase 3 (the live board view) — the board's link-minter
+    # category. PRIVILEGED category (entry #12 of
+    # PRIVILEGED_TOOL_CATEGORIES): minting the board's passcode
+    # authorises reading the user's whole work board, so the empty-allow
+    # inherit universe must never auto-grant it.
+    #
+    # Deliberately a SEPARATE category from phase 1's ``board`` (the data
+    # tools): audience separation (mint ≠ read) and zero coupling to the
+    # phase-1 module (D13).
+    "board-link": "daemon.tools.board_link",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -1019,6 +1116,24 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # PRIVILEGED_TOOL_CATEGORIES) — opt-in only, never default-granted;
     # the ari-only runtime gate lives in the tool body.
     "self_alarm",
+    # ari-tools Phase 3 (the live-views surface): view_write — writes an
+    # HTML page under the daemon-global ``reports`` live-view root and
+    # returns the passcode-gated public URL in ONE call. Created by the
+    # create_view_write_tools() factory (daemon/tools/view_write.py).
+    # Factory-built (not import-time registered), so it belongs in
+    # DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is PRIVILEGED
+    # (entry #11 of PRIVILEGED_TOOL_CATEGORIES) — opt-in only, never
+    # default-granted; the ari-only runtime gate lives in the tool body.
+    "view_write",
+    # ari-tools Phase 3 (the live board view): board_link — mints the
+    # passcode-gated public link for the server-rendered board at
+    # /views/public/board/index.html. Created by the
+    # create_board_link_tools() factory (daemon/tools/board_link.py).
+    # Factory-built (not import-time registered), so it belongs in
+    # DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is PRIVILEGED
+    # (entry #12 of PRIVILEGED_TOOL_CATEGORIES) — opt-in only, never
+    # default-granted; the ari+leader runtime gate lives in the tool body.
+    "board_link",
     "blueprint_acknowledge_pending",
     "blueprint_claim_pending",
     "blueprint_create",

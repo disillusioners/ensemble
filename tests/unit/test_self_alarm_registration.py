@@ -68,7 +68,9 @@ SELF_ALARM_MODULE = "daemon.tools.self_alarm"
 SELF_ALARM_TOOL_NAME = "self_alarm"
 
 #: The TENTH entry of the privileged set (the set held exactly nine
-#: before this phase).
+#: before this phase). Phase 3 (the live-views surface) added the
+#: ELEVENTH + TWELFTH (``view-write`` / ``board-link``) — the same-PR
+#: exact-set pin moves with them.
 EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
@@ -80,6 +82,8 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "settings",
     "board",
     "self-alarm",
+    "view-write",
+    "board-link",
 })
 
 #: The ONLY agent allowed to hold the self-alarm category.
@@ -176,11 +180,11 @@ class TestPrivilegedCategory:
     def test_self_alarm_is_in_the_privileged_set(self) -> None:
         assert SELF_ALARM_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_ten_entries(self) -> None:
+    def test_the_set_is_exactly_the_twelve_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_ten_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 10
+    def test_the_set_has_twelve_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 12
 
 
 # ── the allow-lists ──────────────────────────────────────────────────────

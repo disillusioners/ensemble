@@ -23,7 +23,7 @@ category:
 
 Plus the privileged-category pin (septet → octet → nonet → decet):
 
-* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly ten entries
+* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly twelve entries
   (``system_upgrade``, ``system-log``, ``ens-db``, ``ens-env``,
   ``view-views``, ``cu``, ``secrets``, ``settings``, ``board``,
   ``self-alarm``) — NEVER default-granted
@@ -204,7 +204,7 @@ class TestStaticRegistrationChecklist:
         default-granted (R-SR16: opt-in-only via
         per-agent ``tools.allow``).
 
-        The full set is exactly ten entries:
+        The full set is exactly twelve entries:
         ``system_upgrade``, ``system-log``, ``ens-db``,
         ``ens-env``, ``view-views``, ``cu``,
         ``secrets``, ``settings`` (settings-worker-slots
@@ -216,10 +216,11 @@ class TestStaticRegistrationChecklist:
         D18/A14).
         """
         assert SECRETS_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
-        # The full set is exactly ten entries — the
-        # same-PR pin (the FIVE-file rule; the fifth
+        # The full set is exactly twelve entries — the
+        # same-PR pin (the SEVEN-file rule; the fifth
         # exact-set pin was added by the iteration-002
-        # council B2 correction). The 3+1
+        # council B2 correction, the sixth + seventh by
+        # ari-tools phases 1 + 2). The 3+1
         # integration sanity pin lives at
         # ``tests/integration/test_service_tool_flag_off_byte_identical.py``.
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
@@ -249,6 +250,20 @@ class TestStaticRegistrationChecklist:
             # the empty-allow inherit universe must never auto-grant it.
             # The ari tools.allow entry is the only access path.
             "self-alarm",
+            # ari-tools Phase 3 (2026-10-20): the report-page writer
+            # category (view_write). opt-in-only; the ``reports`` live-
+            # view root is shared and customer-facing, so the empty-allow
+            # inherit universe must never auto-grant write authority over
+            # it. The ari-only tools.allow entry is the only access path;
+            # the tool body ALSO carries the runtime agent_id gate.
+            "view-write",
+            # ari-tools Phase 3 (2026-10-20): the live board's link-
+            # minter category (board_link). opt-in-only; minting the
+            # board's passcode authorises reading the user's whole work
+            # board. The ari + leader tools.allow entries are the only
+            # access path; the tool body ALSO carries the runtime
+            # agent_id gate.
+            "board-link",
         })
 
 

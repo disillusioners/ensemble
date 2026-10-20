@@ -260,6 +260,8 @@ from .context_tools import create_context_tools
 from .shared_meta_kv_tools import create_shared_meta_kv_tools
 from .board_tools import create_board_tools
 from .self_alarm import create_self_alarm_tools
+from .view_write import create_view_write_tools
+from .board_link import create_board_link_tools
 from .db_tools import create_db_tools
 from .infra import create_infra_tools, create_kms_tools, create_mcp_env_tools
 from .system import create_system_tools
@@ -5895,6 +5897,48 @@ Returns:
         manager, current_instance_id, agent_id, agent_tag=version_tag
     )
     tools.extend(self_alarm_tool_list)
+
+    # ── Live-view writer + board linker (ari-tools Phase 3) ──────────
+    # Same critical list-append pattern as job_tools / scheduling_tool_list
+    # / board_tool_list above: decorator-only registration is SILENTLY
+    # INVISIBLE — this extend is the third step of the three-step
+    # registration seam (decorator + registry entries + construction).
+    #
+    # PLACEMENT: this extend MUST precede ``create_help_tool`` (which
+    # snapshots the tool list into its index), ``scan_tools_for_full_docs``
+    # and ``_apply_tool_filter`` (which applies the per-agent allow list
+    # and the privileged-category default-deny strip). A later extend is
+    # either invisible to the help tool or BYPASSES the privileged strip.
+    #
+    # BOTH categories are PRIVILEGED (entries #11 / #12):
+    #   * ``view-write``  — writes an HTML page under the shared,
+    #     customer-facing ``reports`` live-view root (ARI-only).
+    #   * ``board-link``  — mints the passcode-gated public link for the
+    #     server-rendered live board (ari + leader).
+    # The tool bodies carry a SECOND, independent agent_id gate (the
+    # shared ``daemon/tools/views_auth.py`` helper) — a LITERAL tool name
+    # in an allow list bypasses the category gate, so the category alone
+    # cannot spell the audience.
+    #
+    # ``agent_id`` is the layer-3 gate's input; it is a parameter of THIS
+    # function already (``create_instance_tools(..., agent_id="", ...)``),
+    # so it is in scope here. A construction that omitted it would fall
+    # back to ``""`` ⇒ the body gate denies every call (fail-closed, but a
+    # dead tool).
+    tools.extend(
+        create_view_write_tools(
+            manager,
+            current_instance_id=current_instance_id,
+            agent_id=agent_id,
+        )
+    )
+    tools.extend(
+        create_board_link_tools(
+            manager,
+            current_instance_id=current_instance_id,
+            agent_id=agent_id,
+        )
+    )
 
     # Mission tools (M2 of mission-class, 2026-09-02,
     # ``feature/mission-class``) — additive READ-ONLY tools that
