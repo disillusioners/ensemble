@@ -2,13 +2,24 @@
 
 Commission "running-zombie instances" (2026-10-21). Live shape
 (instance 432988b8, 2026-10-19/20): a MISSION ROOT whose instance row
-is stuck in ``running`` while every descendant is terminal and the
-root's own latest task row is terminal-COMPLETED — the completion
-EVENT was lost, so nothing ever terminalized the instance row. The f2
-drift finalizer heals only the JobItem (the mission-live guard's
-all-terminal short-circuit at ``mission_live_guard.py:509-524``
-releases the held row); the INSTANCE row is a different table and
-stays ``running`` forever (25h in the live incident).
+is stuck in ``running`` while the root's own latest task row is
+terminal-COMPLETED and the tree holds a non-terminal member.
+
+**PREMISE (corrected 2026-10-21, cycle 2).** The cycle-1 text said
+"the completion EVENT was lost" — that is REFUTED by the live logs.
+The stamp was **REFUSED**: the PRE-STAMP recursive-liveness hold
+(``child_reports.py:2700-2766``) fired and skipped the COMPLETED stamp
+entirely, 19 times on 2026-10-19 and 455 hold lines across ~40 roots
+in total. The hold fired because the guard's freshness anchor
+INCLUDED the root's own ``last_activity_at`` — which is refreshed on
+every message enqueue, so the "freshest tree" signal was 22s old on a
+root whose mission had been dead for hours. Nothing re-armed the hold
+on a stranded tree (no future message-completed signal exists), so the
+instance row stayed ``running`` forever (25h in the live incident).
+
+The direct children were ALL terminal; the real blocker was a
+DEPTH-3 ``idle`` member (reproduced by the synthetic incident fixture
+below — the specimen snapshot itself is READ-ONLY and never committed).
 
 The heal is HOME in ``daemon/services/mission_strand_healer.py`` (new
 running-zombie strand shape) and drives the PRODUCTION completion
@@ -23,8 +34,11 @@ PREDICATE (all legs must hold; every failure mode errs toward MISS):
      stamp, and NO non-terminal task row exists
   3. the age bound (default 7200s) applies to ``task.completed_at``
      — NOT ``instances.last_activity_at`` (frozen-by-design)
-  4. the whole permanent tree is terminal, and the enumeration is
-     neither breadth- nor depth-truncated
+  4. **WIDENED (cycle 2)** — the canonical mission-live guard says
+     ``live=False``: the all-terminal short-circuit OR the 6h
+     STALENESS EXPIRY on a non-terminal member (reachable only
+     because the anchor is computed over the NON-ROOT members), and
+     the enumeration is neither breadth- nor depth-truncated
   5. NO pending question anywhere in the tree
   6. dependency-bus pending 0 AND the root's own queue is empty
 
@@ -1178,7 +1192,7 @@ class TestRunningZombieObservability:
 class TestRunningZombieSkipRootPin:
     """Sibling #4 pin: the drive DEPENDS on the child_reports
     PRE-STAMP recursive liveness eval semantics
-    (``child_reports.py:2600-2645``, ``skip_root=True``).
+    (``child_reports.py:2700-2766``, ``skip_root=True``).
 
     If that eval's ``skip_root`` semantics change, the pre-stamp eval
     would report ``live=True`` for a running root with terminal
@@ -1261,7 +1275,7 @@ class TestRunningZombieSkipRepairOptOut:
     nobody will read (the repair exists to fix a TRUNCATED report for
     a human reader; this lane only needs the content as the completion
     payload). The flag is forwarded to the content fetch by the drive
-    (``child_reports.py:2554``)."""
+    (``child_reports.py:2654``)."""
 
     @pytest.mark.asyncio
     async def test_heal_drive_passes_skip_repair_true(
@@ -1600,22 +1614,48 @@ class TestRunningZombieReArmWiring:
     async def test_n_holds_coalesce_to_one_schedule(self, zombie_harness):
         """COALESCING — N holds on the same root produce ONE scheduled
         heal, not N (the live 2026-10-19 repro logged 455 hold lines
-        across ~40 roots; a hold storm must not become a heal storm)."""
+        across ~40 roots; a hold storm must not become a heal storm).
+
+        The N holds are fired THROUGH THE HOLD SITE (the real drive),
+        not by calling the scheduler directly: the in-flight marker is
+        taken synchronously at schedule time, so the second..Nth hold
+        are dropped while the first hand-off is still running."""
+        release = asyncio.Event()
+
+        async def _slow_heal(instance_id):
+            # The hand-off stays in flight until the test releases it
+            # — the marker is held for the task's whole lifetime.
+            await release.wait()
+            return {"healed": False, "reason": "unit-mock"}
+
         healer = MagicMock()
-        healer.heal_running_zombie = AsyncMock(
-            return_value={"healed": False, "reason": "unit-mock"}
-        )
+        healer.heal_running_zombie = AsyncMock(side_effect=_slow_heal)
         healer.heal_instance = AsyncMock(
             return_value={"healed": False, "reason": "unit-mock"}
         )
         zombie_harness.manager._mission_strand_healer = healer
-        service = zombie_harness.service
-        for _ in range(5):
-            service._schedule_strand_heal(ROOT, posture="running")
+        # A recently-active member ⇒ the guard holds the mission ⇒
+        # every drive fires the pre-stamp hold.
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_activity_age=timedelta(minutes=30),
+        )
+        with _patch_drive_seams():
+            for index in range(5):
+                await zombie_harness.service\
+                    ._process_child_completion_and_notify_parent(
+                        ROOT, f"msg-hold-{index}",
+                    )
+                await asyncio.sleep(0)
+        # ONE scheduled heal for the five holds.
+        assert healer.heal_running_zombie.await_count == 1, (
+            "N holds on the same root must coalesce into ONE scheduled "
+            f"heal — got {healer.heal_running_zombie.await_count}"
+        )
+        assert healer.heal_instance.await_count == 0
+        release.set()
         for _ in range(3):
             await asyncio.sleep(0)
-        healer.heal_running_zombie.assert_awaited_once_with(ROOT)
-        assert healer.heal_instance.await_count == 0
 
     @pytest.mark.asyncio
     async def test_no_schedule_when_the_tree_is_not_live(
