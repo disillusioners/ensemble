@@ -1,7 +1,8 @@
 """Running-zombie strand — the THIRD member of the strand family.
 
 Commission "running-zombie instances" (2026-10-21). Live shape
-(instance 432988b8, 2026-10-19/20): a MISSION ROOT whose instance row
+(the 2026-10-19/20 mission-root incident): a MISSION ROOT whose
+instance row
 is stuck in ``running`` while the root's own latest task row is
 terminal-COMPLETED and the tree holds a non-terminal member.
 
@@ -76,7 +77,7 @@ from daemon.services.timestamps import now_utc_naive
 
 # ── Fixtures / identities ──────────────────────────────────────────
 
-ROOT = "root-zombie-432988b8"
+ROOT = "root-zombie"
 CHILD = "child-zombie-terminal"
 RECEIPT_JOB = "job-zombie-receipt-1"
 
@@ -286,7 +287,9 @@ def _seed_zombie_tree(
 #
 # SYNTHETIC fixture, rebuilt from the read-only specimen snapshot
 # (``/home/nea/ensemble-src/.agents/shared/planning/running-zombie-fix/
-# specimen-432988b8-snapshot.md`` — READ ONLY, never committed here).
+# specimen-<live-root>-snapshot.md`` — READ ONLY, never committed here;
+# the live id is NOT reproduced in this file — the fixture ids below are
+# descriptive only).
 # The specimen's shape:
 #
 #   * the ROOT: ``running``, no parent, its own ``last_activity_at``
@@ -304,10 +307,10 @@ def _seed_zombie_tree(
 # exclude it from liveness (the strand-exclusion interaction, pinned
 # separately).
 
-INCIDENT_MEMBER = "depth3-explorer-173ace6e"
-INCIDENT_D1 = "depth1-mid-95651a31"
-INCIDENT_D2 = "depth2-mid-88f320b6"
-INCIDENT_GHOST = "never-dispatched-ghost-e6e13b54"
+INCIDENT_MEMBER = "depth3-explorer"
+INCIDENT_D1 = "depth1-mid"
+INCIDENT_D2 = "depth2-mid"
+INCIDENT_GHOST = "never-dispatched-ghost"
 
 #: The incident's member quiet-time: the member had been idle for far
 #: longer than the guard's 6h window when the root was stranded.
@@ -320,6 +323,7 @@ def _seed_incident_tree(
     member_status: str = InstanceStatus.IDLE.value,
     member_activity_age: timedelta = INCIDENT_MEMBER_STALE,
     member_task_status: str | None = "completed",
+    member_task_created_at: datetime | None = None,
     chain_activity_age: timedelta = timedelta(hours=26),
     with_ghost: bool = False,
     root_activity_age: timedelta = timedelta(hours=25),
@@ -378,6 +382,7 @@ def _seed_incident_tree(
                 if member_task_status == "completed" else None
             ),
             work_id="work-incident-member",
+            created_at=member_task_created_at,
         )
     if with_ghost:
         # The never-dispatched ghost: idle, version 1, zero messages,
@@ -1445,6 +1450,57 @@ class TestRunningZombieAnchorFix:
             f"open — got: {verdict}"
         )
 
+    @pytest.mark.asyncio
+    async def test_member_scoped_anchor_gap_disarms_the_backstop(
+        self, zombie_harness,
+    ):
+        """D4 (the load-bearing disarm) — a tree whose NON-ROOT members
+        all carry a NULL ``last_activity_at`` while the ROOT has one is
+        a DATA GAP, not zombie evidence: the backstop is DISARMED
+        (``live=True``, ``timed_out=False``).
+
+        The root's own stamp MUST NOT flip the member-scoped
+        ``anchor_missing`` flag (the cycle-2 anchor fix): the guard
+        HOLDS the mission rather than terminalizing it on a data gap —
+        the conservative direction (it can only delay a wrong
+        finalize, never cause one).
+        """
+        from daemon.services.mission_live_guard import (
+            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            evaluate_mission_live,
+        )
+
+        _insert_instance(
+            zombie_harness.engine, ROOT,
+            status=InstanceStatus.RUNNING.value,
+            parent_id=None,
+            agent_id="leader",
+            last_activity_at=now_utc_naive() - timedelta(hours=30),
+        )
+        # The member: non-terminal, and its activity stamp is NULL.
+        _insert_instance(
+            zombie_harness.engine, CHILD,
+            status=InstanceStatus.IDLE.value,
+            parent_id=ROOT,
+            agent_id="worker",
+            last_activity_at=None,
+        )
+        verdict = await evaluate_mission_live(
+            instance_repository=zombie_harness.instance_repo,
+            instance_id=ROOT,
+            bus_pending_count=None,
+            timeout_seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            skip_root=True,
+        )
+        assert verdict.live is True, (
+            "a member-scoped anchor gap must DISARM the backstop — the "
+            f"live leg holds by default. Got: {verdict}"
+        )
+        assert verdict.timed_out is False, (
+            "the backstop must NOT fire on an anchor data gap (the "
+            "root's own stamp is not a member anchor)"
+        )
+
 
 class TestRunningZombieCycle2TreeLeg:
     """The widened tree leg (the guard) — positives and negatives."""
@@ -1752,8 +1808,9 @@ class TestRunningZombieReArmWiring:
         assert outcome.get("drove") is True, outcome
 
 
-class TestRunningZombieMemberTaskLiveness:
-    """CYCLE 3 (leader ruling 1) — the MEMBER-TASK liveness leg.
+class TestRunningZombieMemberAliveCompanionLeg:
+    """CYCLE 4 (council F1 + RULING-1b, 2026-10-21) — the MEMBER-ALIVE
+    companion leg.
 
     ``instances.last_activity_at`` is written on the enqueue /
     child-report / observer paths — NOT on turn progress. So a member
@@ -1761,14 +1818,31 @@ class TestRunningZombieMemberTaskLiveness:
     backstop, and the backstop would break the tree (finalize the
     root) while that member is still working.
 
-    THE RULING: fail-MISS over false-completion — a non-terminal
-    member that owns a LIVE (pending/running/processing) task row
+    THE RULING (cycle 3): fail-MISS over false-completion — a
+    non-terminal member that owns a LIVE (non-terminal) task row
     counts as ALIVE, not stale; the root is NOT finalized.
 
-    ROUTE 1 (the guard carries the leg): the healer's tree leg AND
-    the pre-stamp gate inherit it. The leg is OPT-IN — a consumer
-    that supplies no task handle (f2, f1, the boot sweeps) keeps its
-    EXACT previous behaviour (pinned below).
+    THE REWORK (council F1 — the cycle-3 opt-in shape is REJECTED):
+    the leg is UNCONDITIONAL and lives IN THE GUARD (the shared
+    chokepoint), so EVERY consumer inherits it (the pre-stamp gate,
+    the emission gate, the healer's tree leg, f1, f2, the boot sweep,
+    the orphan release, the work notifier). There is NO opt-in
+    parameter any more — the leg is never inert.
+
+    THE TIME BOUND (RULING-1b): a member's live work counts as alive
+    ONLY IF its task row is YOUNGER than the guard's staleness horizon
+    (``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` — the SAME constant, one
+    source of truth, no new knob). An OLDER task row (a crash / kill
+    mid-turn) does NOT hold the tree — the member stays stale-eligible
+    and the root CAN heal. Without that bound the leg would trade one
+    permanent strand for another.
+
+    TWO PINNED INVARIANTS (council):
+
+    * **ADDITIVE** — a member with stale activity AND no live task row
+      REMAINS a zombie candidate (the OBSERVED shape);
+    * **FAIL-MISS** — a member with a live (YOUNG) task row ⇒ the root
+      is NOT finalized.
     """
 
     @pytest.mark.parametrize(
@@ -1780,7 +1854,14 @@ class TestRunningZombieMemberTaskLiveness:
     ):
         """(i) NEGATIVE — a member with a LIVE task row is WORKING:
         the root is NOT healed, the drive is NOT invoked, and the
-        root's status is untouched."""
+        root's status is untouched.
+
+        The three non-terminal task statuses are exercised: the SSOT
+        set (``daemon.constants.NON_TERMINAL_TASK_STATUSES``) carries
+        ``processing`` as LEGACY task vocabulary (it is NOT a
+        ``TaskStatus`` member) and the leg reads the set — so a legacy
+        in-flight turn is recognised too.
+        """
         _seed_incident_tree(
             zombie_harness.engine,
             member_task_status=task_status,
@@ -1809,7 +1890,8 @@ class TestRunningZombieMemberTaskLiveness:
     ):
         """(ii) POSITIVE — the OBSERVED zombie shape is untouched: an
         idle member with NO task row is stale-eligible and still
-        heals."""
+        heals. This is the ADDITIVE invariant: the companion leg is
+        never a REPLACEMENT for the staleness expiry."""
         _seed_incident_tree(
             zombie_harness.engine,
             member_task_status=None,
@@ -1846,8 +1928,8 @@ class TestRunningZombieMemberTaskLiveness:
     async def test_guard_holds_the_tree_when_a_member_has_a_live_task(
         self, zombie_harness,
     ):
-        """The GUARD-level pin — with a task handle the stale tree is
-        HELD (``member_task_hold``), and the backstop did NOT fire."""
+        """The GUARD-level pin — the stale tree is HELD
+        (``member_task_hold``), and the backstop did NOT fire."""
         from daemon.services.mission_live_guard import evaluate_mission_live
 
         _seed_incident_tree(
@@ -1859,21 +1941,30 @@ class TestRunningZombieMemberTaskLiveness:
             instance_id=ROOT,
             bus_pending_count=None,
             skip_root=True,
-            task_engine=zombie_harness.engine,
         )
         assert verdict.live is True, verdict
         assert verdict.member_task_hold is True, verdict
         assert verdict.timed_out is False, verdict
 
     @pytest.mark.asyncio
-    async def test_the_leg_is_inert_without_a_task_handle(
-        self, zombie_harness,
-    ):
-        """The leg is OPT-IN — a consumer that supplies NO task handle
-        (f2, f1, the boot sweeps) keeps its EXACT previous behaviour:
-        the stale member does NOT hold the tree."""
+    async def test_the_leg_is_unconditional(self, zombie_harness):
+        """F1 — the cycle-3 OPT-IN shape is GONE.
+
+        The guard's signature carries NO ``task_engine`` parameter, and
+        a consumer that passes NOTHING extra (the f2 / f1 / boot-sweep
+        call shape) still gets the hold. The leg is never inert.
+        """
+        import inspect
+
         from daemon.services.mission_live_guard import evaluate_mission_live
 
+        params = inspect.signature(evaluate_mission_live).parameters
+        assert "task_engine" not in params, (
+            "the member-alive companion leg is UNCONDITIONAL (council "
+            "F1) — an opt-in parameter would leave the consumers that "
+            "do not opt in unprotected against the same false "
+            f"completion. Got: {sorted(params)}"
+        )
         _seed_incident_tree(
             zombie_harness.engine,
             member_task_status="running",
@@ -1884,9 +1975,102 @@ class TestRunningZombieMemberTaskLiveness:
             bus_pending_count=None,
             skip_root=True,
         )
+        assert verdict.live is True, verdict
+        assert verdict.member_task_hold is True, verdict
+        assert verdict.timed_out is False, verdict
+
+    @pytest.mark.asyncio
+    async def test_member_task_younger_than_the_horizon_holds_the_tree(
+        self, zombie_harness,
+    ):
+        """RULING-1b (YOUNGER side) — a member whose live task row is
+        YOUNGER than the guard's staleness horizon is WORKING: the tree
+        is held and the backstop does NOT fire."""
+        from daemon.services.mission_live_guard import (
+            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            evaluate_mission_live,
+        )
+
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_task_status="running",
+            member_task_created_at=(
+                now_utc_naive() - timedelta(hours=1)
+            ),
+        )
+        verdict = await evaluate_mission_live(
+            instance_repository=zombie_harness.instance_repo,
+            instance_id=ROOT,
+            bus_pending_count=None,
+            timeout_seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            skip_root=True,
+        )
+        assert verdict.live is True, verdict
+        assert verdict.member_task_hold is True, verdict
+        assert verdict.timed_out is False, verdict
+
+    @pytest.mark.asyncio
+    async def test_member_task_older_than_the_horizon_does_not_hold(
+        self, zombie_harness,
+    ):
+        """RULING-1b (OLDER side) — a member whose live task row is
+        OLDER than the horizon (a crash / kill mid-turn leaves exactly
+        that row behind) does NOT hold the tree: the member is
+        stale-eligible and the backstop fires.
+
+        Without this bound the leg would trade one permanent strand
+        for another (the exact class this lane closes).
+        """
+        from daemon.services.mission_live_guard import (
+            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            evaluate_mission_live,
+        )
+
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_task_status="running",
+            member_task_created_at=(
+                now_utc_naive()
+                - timedelta(seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 60)
+            ),
+        )
+        verdict = await evaluate_mission_live(
+            instance_repository=zombie_harness.instance_repo,
+            instance_id=ROOT,
+            bus_pending_count=None,
+            timeout_seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            skip_root=True,
+        )
         assert verdict.live is False, verdict
         assert verdict.member_task_hold is False, verdict
         assert verdict.timed_out is True, verdict
+
+    @pytest.mark.asyncio
+    async def test_member_with_an_old_task_row_is_still_healed(
+        self, zombie_harness,
+    ):
+        """The HEALER-level mirror of the RULING-1b older side: the
+        root heals (the stuck member's crashed task row does not hold
+        the mission open forever)."""
+        from daemon.services.mission_live_guard import (
+            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+        )
+
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_task_status="running",
+            member_task_created_at=(
+                now_utc_naive()
+                - timedelta(seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS + 60)
+            ),
+        )
+        healer = _make_healer(zombie_harness)
+        with _patch_drive_seams():
+            outcome = await healer.heal_running_zombie(ROOT)
+        assert outcome["healed"] is True, outcome
+        assert _get_instance_row(
+            zombie_harness.engine, ROOT
+        ).status == InstanceStatus.COMPLETED.value
 
     @pytest.mark.asyncio
     async def test_pre_stamp_gate_holds_when_a_member_has_a_live_task(
@@ -1933,6 +2117,138 @@ class TestRunningZombieMemberTaskLiveness:
         assert _get_instance_row(
             zombie_harness.engine, ROOT
         ).status == InstanceStatus.COMPLETED.value
+
+
+class TestRunningZombieHealPayloadIsRawAssistantMessage:
+    """Point 5 hardening (D12b, council 2026-10-21) — the heal lanes'
+    published completion PAYLOAD is the RAW assistant message.
+
+    The wc-strand ``skip_repair=True`` widening (cycle 2) is a
+    DELIBERATE behaviour change: the heal lanes opt out of the LLM
+    report-repair (the lane's transcript can be 25h stale; the repair
+    exists to fix a TRUNCATED report for a human reader).
+
+    The existing pin covers only the FLAG-FORWARD (``skip_repair=True``
+    reaches the drive) — it cannot see what the drive then PUBLISHES,
+    and it cannot see whether the 30s repair call was actually spent.
+    This class pins the PAYLOAD CONTENT and the SPENT CALL:
+
+    * the published completion payload carries the RAW assistant
+      message (the repair never ran);
+    * the repair LLM is NEVER called by the heal lane.
+
+    A control drives the same shape WITHOUT the flag and shows the
+    REPAIRED payload — so the pin is sensitive to the behaviour it
+    claims to pin (a green pin means something).
+    """
+
+    @staticmethod
+    def _truncation_shaped_history() -> list[dict]:
+        """A history the truncation heuristic FIRES on: the
+        penultimate assistant message is far larger than the last one
+        (``wc(n-1) > ratio * wc(n)``)."""
+        return [
+            {
+                "role": "user",
+                "content": "run the mission",
+                "created_at": "2026-10-20T08:00:00+00:00",
+            },
+            {
+                "role": "assistant",
+                "content": "long report " * 200,
+                "created_at": "2026-10-20T08:30:00+00:00",
+            },
+            {
+                "role": "assistant",
+                "content": "mission complete",
+                "created_at": T_FRESH_ASSISTANT,
+            },
+        ]
+
+    @staticmethod
+    def _enable_repair(harness) -> None:
+        harness.manager.config.report_repair.enabled = True
+        harness.manager.config.report_repair.size_ratio_threshold = 5.0
+        harness.manager.config.report_repair.lookback_messages = 3
+        harness.manager.config.report_repair.repair_excluded_agents = []
+
+    @pytest.mark.asyncio
+    async def test_the_heal_lane_publishes_the_raw_assistant_message(
+        self, zombie_harness,
+    ):
+        """THE PIN — the heal lane's published completion payload is
+        the RAW assistant message, and the repair call is NOT spent."""
+        self._enable_repair(zombie_harness)
+        _seed_incident_tree(
+            zombie_harness.engine, member_task_status=None,
+        )
+        healer = _make_healer(zombie_harness)
+        repair_mock = AsyncMock(return_value="REPAIRED-PAYLOAD")
+        with patch.object(
+            zombie_harness.service,
+            "_repair_report_with_llm",
+            new=repair_mock,
+        ):
+            with _patch_drive_seams(self._truncation_shaped_history()):
+                outcome = await healer.heal_running_zombie(ROOT)
+        assert outcome["healed"] is True, outcome
+        assert repair_mock.await_count == 0, (
+            "the heal lane must NOT spend the 30s LLM repair call — the "
+            "lane's transcript can be 25h stale"
+        )
+        publish = zombie_harness.events_service\
+            ._publish_instance_lifecycle_event
+        assert publish.await_count, (
+            "the root lane must publish its lifecycle event — the pin "
+            "is meaningless if the publish never happened"
+        )
+        payload = publish.await_args.kwargs.get("result_summary") or ""
+        assert "mission complete" in payload, (
+            "the published completion payload must carry the RAW "
+            f"assistant message — got: {payload!r}"
+        )
+        assert "REPAIRED-PAYLOAD" not in payload, (
+            "the published completion payload must NOT carry the "
+            f"repaired text — got: {payload!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_control_without_the_flag_publishes_the_repaired_text(
+        self, zombie_harness,
+    ):
+        """THE CONTROL — the same shape driven WITHOUT the flag
+        publishes the REPAIRED text and spends the repair call. This is
+        what makes the pin above meaningful: without the flag the
+        payload would differ."""
+        self._enable_repair(zombie_harness)
+        _seed_incident_tree(
+            zombie_harness.engine, member_task_status=None,
+        )
+        repair_mock = AsyncMock(return_value="REPAIRED-PAYLOAD")
+        with patch.object(
+            zombie_harness.service,
+            "_repair_report_with_llm",
+            new=repair_mock,
+        ):
+            with _patch_drive_seams(self._truncation_shaped_history()):
+                await zombie_harness.service\
+                    ._process_child_completion_and_notify_parent(
+                        ROOT, "msg-payload-control",
+                    )
+                for _ in range(3):
+                    await asyncio.sleep(0)
+        assert repair_mock.await_count == 1, (
+            "the CONTROL must spend the repair call — otherwise the "
+            "pin above would be vacuous"
+        )
+        publish = zombie_harness.events_service\
+            ._publish_instance_lifecycle_event
+        assert publish.await_count
+        payload = publish.await_args.kwargs.get("result_summary") or ""
+        assert "REPAIRED-PAYLOAD" in payload, (
+            "the CONTROL must publish the repaired text — got: "
+            f"{payload!r}"
+        )
 
 
 class TestRunningZombieKillSwitchSurface:

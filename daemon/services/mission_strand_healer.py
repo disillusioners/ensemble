@@ -1173,14 +1173,6 @@ class MissionStrandHealer:
                 # gate this decision (same mode as the pre-stamp
                 # gate).
                 skip_root=True,
-                # MEMBER-TASK liveness leg (cycle 3): a non-terminal
-                # member that owns a LIVE task row is WORKING, not
-                # stuck (``last_activity_at`` is not written on turn
-                # progress, so a member inside a >6h turn reads
-                # stale). The leg holds the tree ⇒ this lane does NOT
-                # finalize the root. ONE batched query per tree, and
-                # only on the guard's staleness branch.
-                task_engine=self._manager.engine,
             )
         except Exception as exc:  # noqa: BLE001 — fail-closed
             return self._rz_skip(

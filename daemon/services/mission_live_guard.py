@@ -94,7 +94,7 @@ no instance has ever recorded ``last_activity_at`` cannot fire the
 backstop (data gap, not evidence of a zombie); the leg verdict — all
 terminal + bus quiet — decides the row (terminal, finalize).
 
-**MEMBER-TASK liveness leg (2026-10-21, running-zombie cycle 3).**
+**MEMBER-ALIVE companion leg (2026-10-21, council F1 + RULING-1b).**
 ``instances.last_activity_at`` is written on the enqueue / child-report
 / observer paths — NOT on turn progress. So a member inside a long
 (>6h) turn reads STALE to the backstop even though it is working right
@@ -103,20 +103,51 @@ that member is mid-turn. The ruling (leader, cycle 3) is fail-MISS over
 false-completion: **a non-terminal member that holds a LIVE task row
 counts as ALIVE, not stale.**
 
-The leg is OPT-IN (``task_engine``): with no task handle the guard is
-byte-for-byte its previous self, so every existing consumer (f2, f1,
-the boot sweeps, the emission gate) is UNCHANGED. The two consumers
-that opt in are the running-zombie healer's tree leg and the
-pre-stamp recursive-liveness gate — the two paths that can TERMINALIZE
-a mission root.
+Cycle 3 shipped the leg OPT-IN (a ``task_engine`` parameter). The
+council REJECTED that shape (F1): the guard is the shared chokepoint,
+so an opt-in leg leaves every OTHER consumer (f2, f1, the boot sweeps,
+the emission gate, the orphan release, the work notifier) unprotected
+against the same false completion. The leg is now **UNCONDITIONAL and
+guard-side** — every consumer inherits it — with **ZERO new plumbing**:
+the leg asks the instance repository the guard ALREADY holds
+(``SQLModelInstanceRepository.has_live_work``) and reads the member's
+task rows through that same repository.
 
-Cost: ONE batched query per tree (not per member) — the member ids
-come from the walk the guard already does. The query runs ONLY on the
-staleness branch (the rare path), so a live tree pays nothing.
+**TIME-BOUNDED (RULING-1b).** An unbounded "any live task row ⇒ alive"
+leg trades one permanent strand for another: a member whose task row
+never completes (a crash / kill mid-turn) would hold its mission open
+forever — the exact class this lane closes. So a member's live work
+counts as ALIVE **ONLY IF** its task row is YOUNGER than the guard's
+own staleness horizon (``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` — the
+SAME constant, one source of truth, no new knob). An OLDER task row
+(a crashed or killed turn) does NOT hold the tree: the member is
+stale-eligible and the root CAN heal.
+
+**TWO PINNED INVARIANTS (council).**
+
+* **ADDITIVE, never a replacement** — a member with stale activity AND
+  no live task row REMAINS a zombie candidate (the OBSERVED family: an
+  idle member with no task row).
+* **FAIL-MISS** — a member with a live (young) task row ⇒ the root is
+  NOT finalized.
+
+Cost: PER-MEMBER probes (the repository's ``has_live_work`` + one task
+read per candidate member), and they run ONLY on the staleness branch —
+the rare path — so a live tree pays nothing.
 
 Failure posture: a probe that cannot be evaluated HOLDS the tree
-(``live=True``) — the leg cannot prove the tree is stale, and this
-lane's invariant is "prefer a miss over a wrong transition".
+(``live=True``, ``error=True``) — the leg cannot prove the tree is
+stale, and this lane's invariant is "prefer a miss over a wrong
+transition".
+
+RESIDUALS (named, not hidden): a member inside a LEGITIMATE >6h turn
+is still indistinguishable from stale (the horizon is the system's own)
+— "heartbeat on turn progress" is a named follow-up. A member whose
+only live work is a JOBITEM row (no task row) is NOT held either: the
+task row is the only DATEABLE evidence class, and the repository's
+probe also counts a member's own non-terminal CHILD as "live work" — a
+``waiting_children`` parent would otherwise hold the tree forever
+through its own stuck child.
 
 Age math uses ``now_utc_naive()`` per the naive-UTC binding
 convention — no schema changes, no new env flags (repo policy:
@@ -136,7 +167,6 @@ from daemon.constants import (
     TERMINAL_INSTANCE_STATUSES,
 )
 from daemon.services.timestamps import coerce_to_aware_utc, now_utc_naive
-from sqlalchemy.engine import Engine
 
 if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
     from daemon.repositories.instance.repository import (
@@ -197,11 +227,13 @@ class MissionLiveVerdict:
         timed_out: True when the zombie backstop fired (anchor older
             than the timeout) — the mission looked live but the
             at-least-once guarantee takes precedence.
-        member_task_hold: True when the MEMBER-TASK liveness leg (cycle
-            3) held the tree: a non-terminal member owns a LIVE task
-            row, so the tree is WORKING, not stale. The backstop did
-            NOT fire in that case. Set only by the opt-in consumers
-            (``task_engine`` supplied); always False otherwise.
+        member_task_hold: True when the MEMBER-ALIVE companion leg
+            (council F1 + RULING-1b, 2026-10-21) held the tree: a
+            non-terminal member owns a LIVE task row that is YOUNGER
+            than the guard's staleness horizon, so the tree is
+            WORKING, not stale. The backstop did NOT fire in that
+            case. The leg is UNCONDITIONAL (every consumer inherits
+            it); always False when no member qualifies.
     """
 
     live: bool
@@ -283,7 +315,6 @@ async def evaluate_mission_live(
     bus_pending_count: int | None = None,
     timeout_seconds: int = MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
     skip_root: bool = False,
-    task_engine: "Engine | None" = None,
 ) -> MissionLiveVerdict:
     """Evaluate the three-leg mission-live guard (+ zombie backstop).
 
@@ -304,14 +335,16 @@ async def evaluate_mission_live(
     hours). A tree with NO members (a childless root) falls back to
     the root's own stamp — there the root IS the whole tree.
 
-    2026-10-21 (running-zombie cycle 3): the MEMBER-TASK liveness leg.
-    ``last_activity_at`` is NOT written on turn progress, so a member
-    inside a long turn reads stale and the backstop would break a
-    tree that is still working. When ``task_engine`` is supplied, a
-    non-terminal member that owns a LIVE task row HOLDS the tree (the
-    backstop does not fire). The leg is OPT-IN: without a task handle
-    the guard is exactly its previous self (f2, f1, the boot sweeps
-    and the emission gate are untouched).
+    2026-10-21 (council F1 + RULING-1b): the MEMBER-ALIVE companion
+    leg. ``last_activity_at`` is NOT written on turn progress, so a
+    member inside a long turn reads stale and the backstop would break
+    a tree that is still working. A non-terminal member that owns a
+    LIVE task row YOUNGER than the staleness horizon HOLDS the tree
+    (the backstop does not fire). The leg is UNCONDITIONAL — every
+    consumer inherits it (f2, f1, the boot sweeps, the emission gate,
+    the orphan release, the work notifier, the pre-stamp gate, the
+    running-zombie healer's tree leg) — and it needs NO new plumbing:
+    it asks the instance repository the guard already holds.
 
     The anchor is collected during the same legs (b)/(c) tree walk;
     no extra DB round-trip.
@@ -342,13 +375,6 @@ async def evaluate_mission_live(
             pre-stamp decision. Leg (c) stays active for all other
             consumers (f2, sweeps, the emission gate — where the
             root is already terminal when the gate runs).
-        task_engine: OPT-IN read handle on the ``task`` table — the
-            member-task liveness leg is INERT without it. Supply one
-            ONLY from a consumer that may TERMINALIZE a mission root
-            (the running-zombie healer's tree leg, the pre-stamp
-            recursive-liveness gate). A non-``Engine`` value (a test
-            double, an unwired manager) leaves the leg INERT rather
-            than guessing.
 
     Returns:
         :class:`MissionLiveVerdict`. NEVER raises — internal errors
@@ -362,7 +388,6 @@ async def evaluate_mission_live(
             bus_pending_count=bus_pending_count,
             timeout_seconds=timeout_seconds,
             skip_root=skip_root,
-            task_engine=task_engine,
         )
     except Exception as exc:  # noqa: BLE001 — fail-open is the contract
         logger.warning(
@@ -383,105 +408,201 @@ async def evaluate_mission_live(
         )
 
 
-def _members_with_live_tasks(
-    engine: "Engine", instance_ids: list[str],
-) -> set[str]:
-    """ONE batched query — which of these instances own a LIVE task row.
+def _member_live_task_attempt_at(
+    instance_repository: "SQLModelInstanceRepository",
+    instance_id: str,
+) -> datetime | None:
+    """The newest ATTEMPT stamp among ``instance_id``'s non-terminal
+    task rows — ``None`` when the instance owns NO non-terminal task
+    row.
 
-    ``NON_TERMINAL_TASK_STATUSES`` (``daemon/constants.py``) is the
-    canonical non-terminal task set: a task row in one of those
-    statuses means "a turn is IN FLIGHT on this instance". The set is
-    a SUPERSET of the cycle-3 ruling's enumeration
-    (``pending``/``running``/``processing``) — it also carries
-    ``paused`` (a suspended turn awaiting an answer is WORKING, not
-    stuck), which is strictly more conservative: it can only turn a
-    wrong-completion into a miss, never the other way round.
+    The stamp is the row's ``started_at`` (when the worker claimed the
+    turn), falling back to ``created_at`` (the row was minted but not
+    yet claimed). Naive-UTC digits per the naive-UTC binding
+    convention — :func:`parse_completed_at_naive` normalises an aware
+    or a naive input, and an unparseable stamp is DROPPED (never
+    guessed).
 
-    The model import is DEFERRED (module-level import would create a
+    The status set is ``daemon.constants.NON_TERMINAL_TASK_STATUSES``
+    — the canonical non-terminal task set (the SSOT; the same set the
+    running-zombie strand's root-level leg uses). ``processing`` is
+    LEGACY task vocabulary — it is NOT a ``TaskStatus`` member (the
+    enum carries PENDING/RUNNING/PAUSED/COMPLETED/FAILED/CANCELLED) —
+    and the constant keeps it DELIBERATELY for legacy rows, so a
+    legacy in-flight turn still counts as live work.
+
+    The read goes through the instance repository the guard ALREADY
+    holds (``instance_repository.engine``) — no new parameter, no new
+    repository method, no ``Engine`` import in this module. The model
+    import is DEFERRED (a module-level import would create a
     ``daemon.services`` package-init cycle — the same guard the task
     repository's own deferred imports use).
     """
     from daemon.repositories.task.models import Task
     from sqlmodel import Session, select
 
-    if not instance_ids:
-        return set()
+    engine = getattr(instance_repository, "engine", None)
+    if engine is None:
+        raise RuntimeError(
+            "mission_live_guard: the instance repository exposes no "
+            "engine — the member-task age read cannot be evaluated"
+        )
     with Session(engine) as session:
         rows = session.exec(
-            select(Task.instance_id).where(
-                Task.instance_id.in_(list(instance_ids)),
+            select(Task.started_at, Task.created_at).where(
+                Task.instance_id == instance_id,
                 Task.status.in_(sorted(NON_TERMINAL_TASK_STATUSES)),
             )
         ).all()
-    return {str(row) for row in rows if row}
+    stamps: list[datetime] = []
+    for row in rows:
+        started_at, created_at = row[0], row[1]
+        parsed = parse_completed_at_naive(
+            started_at if started_at is not None else created_at
+        )
+        if parsed is not None:
+            stamps.append(parsed)
+    return max(stamps) if stamps else None
 
 
-async def _member_task_hold_verdict(
+async def _member_alive_companion_verdict(
     *,
-    task_engine: "Engine | None",
+    instance_repository: "SQLModelInstanceRepository",
     instance_id: str | None,
     member_status: dict[str, str | None],
     stranded_excluded: list[str],
+    timeout_seconds: int,
 ) -> MissionLiveVerdict | None:
-    """The MEMBER-TASK liveness leg — ``None`` means "no hold".
+    """The MEMBER-ALIVE companion leg — ``None`` means "no hold".
 
-    Returns a HOLDING verdict (``live=True``) when a non-terminal
-    member owns a LIVE task row: the tree is WORKING, not stale, and
-    the zombie backstop must not break it.
+    **UNCONDITIONAL** (council F1, 2026-10-21): the leg lives HERE, in
+    the guard — the shared chokepoint — so EVERY consumer inherits it
+    (the pre-stamp gate, the emission gate, the running-zombie
+    healer's tree leg, f1, f2, the boot sweep, the orphan release, the
+    work notifier). The cycle-3 opt-in shape (a ``task_engine``
+    parameter) was rejected: it left the other consumers unprotected
+    against the same false completion.
 
-    * **Inert without a task handle** — the leg is opt-in. A
-      non-``Engine`` handle (a test double, an unwired manager)
-      leaves the leg INERT (the historical behaviour) rather than
-      guessing at a half-wired read.
+    It runs on the STALENESS branch only (the tree already looks
+    quiet) and asks, per NON-ROOT non-terminal member, the one
+    question that decides a member's real state: **does the member own
+    a live task row, and is that row YOUNG?**
+
+    * **A live task row YOUNGER than the horizon ⇒ ALIVE** — the tree
+      is WORKING, not stale; the backstop holds it (fail-MISS over a
+      false completion).
+    * **A live task row OLDER than the horizon ⇒ NOT alive** — a
+      crash / kill mid-turn leaves exactly that row behind, and it
+      must not hold the mission open forever (RULING-1b). The member
+      stays stale-eligible and the root CAN heal.
+    * **NO live task row ⇒ NOT held** — the ADDITIVE invariant: a
+      stale-activity member with no live task row REMAINS a zombie
+      candidate (the OBSERVED family).
+
+    The coarse liveness probe is the instance repository's own
+    ``has_live_work`` (the council's API — ZERO new plumbing). The
+    HOLD itself is decided on the DATEABLE task evidence, because the
+    probe also counts a member's own non-terminal CHILD as "live
+    work": a ``waiting_children`` parent would then hold the tree
+    forever through its own stuck child. A member whose only live work
+    is a JOBITEM row (no task row) is deliberately NOT held for the
+    same reason.
+
     * **Fail-MISS on a probe error** — a probe that cannot be
       evaluated cannot PROVE the tree is stale, and the lanes that
-      opt in TERMINALIZE a root: the leg holds instead of breaking
-      the tree. ``error=True`` marks it for the healer's skip class.
+      TERMINALIZE a root must not break a tree they cannot see: the
+      leg HOLDS instead (``live=True``, ``error=True``).
     """
-    if task_engine is None or not isinstance(task_engine, Engine):
-        return None
     excluded = set(stranded_excluded)
-    candidates = [
+    candidates = sorted(
         tid for tid, status in member_status.items()
         if tid != instance_id
         and status is not None
         and status not in TERMINAL_INSTANCE_STATUSES
         and tid not in excluded
-    ]
+    )
     if not candidates:
         return None
-    try:
-        live_task_members = await asyncio.to_thread(
-            _members_with_live_tasks, task_engine, candidates,
-        )
-    except Exception as exc:  # noqa: BLE001 — fail-MISS on probe error
-        logger.warning(
-            "mission_live_guard: member-task liveness probe failed "
-            "for %s... (%s: %s) — HOLDING the tree (fail-miss: the "
-            "leg cannot prove the tree is stale)",
-            (instance_id or "?")[:8], type(exc).__name__, exc,
-        )
-        return MissionLiveVerdict(
-            live=True,
-            reason=(
-                "member-task liveness probe failed "
-                f"({type(exc).__name__}: {exc}) — the tree cannot be "
-                "proven stale, so the backstop holds it (fail-miss)"
-            ),
-            error=True,
-        )
-    if live_task_members:
-        held = ", ".join(
-            sorted(mid[:8] for mid in live_task_members)
-        )
-        return MissionLiveVerdict(
-            live=True,
-            reason=(
-                f"non-terminal member(s) {held} own a LIVE task row — "
-                "the tree is working, not stale; the backstop holds it "
-                "(fail-miss over a false completion)"
-            ),
-            member_task_hold=True,
+    now = now_utc_naive()
+    for member_id in candidates:
+        try:
+            live_work = await asyncio.to_thread(
+                instance_repository.has_live_work, member_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-MISS on probe error
+            logger.warning(
+                "mission_live_guard: member-alive live-work probe "
+                "failed for %s... (%s: %s) — HOLDING the tree (fail-miss: "
+                "the leg cannot prove the tree is stale)",
+                (instance_id or "?")[:8], type(exc).__name__, exc,
+            )
+            return MissionLiveVerdict(
+                live=True,
+                reason=(
+                    "member-alive live-work probe failed "
+                    f"({type(exc).__name__}: {exc}) — the tree cannot be "
+                    "proven stale, so the backstop holds it (fail-miss)"
+                ),
+                error=True,
+            )
+        try:
+            attempt_at = await asyncio.to_thread(
+                _member_live_task_attempt_at,
+                instance_repository, member_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-MISS on probe error
+            logger.warning(
+                "mission_live_guard: member-alive task-age probe failed "
+                "for %s... (%s: %s) — HOLDING the tree (fail-miss: the "
+                "leg cannot prove the tree is stale)",
+                (instance_id or "?")[:8], type(exc).__name__, exc,
+            )
+            return MissionLiveVerdict(
+                live=True,
+                reason=(
+                    "member-alive task-age probe failed "
+                    f"({type(exc).__name__}: {exc}) — the tree cannot be "
+                    "proven stale, so the backstop holds it (fail-miss)"
+                ),
+                error=True,
+            )
+        if attempt_at is None:
+            # No live task row ⇒ no dateable evidence of an in-flight
+            # turn. The member stays stale-eligible (the ADDITIVE
+            # invariant). The canonical probe's verdict is logged for
+            # the operator: ``live_work=True`` here means the member
+            # owns live work that is NOT dateable by a task row (a
+            # queued JobItem, or its own non-terminal child) — the leg
+            # does not hold on that evidence (see the docstring).
+            logger.debug(
+                "mission_live_guard: member-alive probe for %s... — "
+                "member=%s... live_work=%s no live task row ⇒ "
+                "stale-eligible",
+                (instance_id or "?")[:8], member_id[:8], live_work,
+            )
+            continue
+        age_seconds = (now - attempt_at).total_seconds()
+        if age_seconds < timeout_seconds:
+            return MissionLiveVerdict(
+                live=True,
+                reason=(
+                    f"non-terminal member {member_id[:8]} owns a LIVE "
+                    f"task row younger than the {timeout_seconds}s "
+                    f"staleness horizon ({int(age_seconds)}s old) — "
+                    "the tree is working, not stale; the backstop holds "
+                    "it (fail-miss over a false completion)"
+                ),
+                member_task_hold=True,
+            )
+        # The task row is OLDER than the horizon — a crash / kill
+        # mid-turn leaves exactly that row behind. It does NOT hold the
+        # tree (RULING-1b): the member stays stale-eligible.
+        logger.debug(
+            "mission_live_guard: member-alive probe for %s... — "
+            "member=%s... live_work=%s task row %ds old "
+            "(>= %ds horizon) ⇒ stale-eligible",
+            (instance_id or "?")[:8], member_id[:8], live_work,
+            int(age_seconds), timeout_seconds,
         )
     return None
 
@@ -493,7 +614,6 @@ async def _evaluate_legs(
     bus_pending_count: int | None,
     timeout_seconds: int,
     skip_root: bool = False,
-    task_engine: "Engine | None" = None,
 ) -> MissionLiveVerdict:
     """Leg evaluation (async — blocking repo reads go through
     ``asyncio.to_thread`` per the repo's standard pattern). Raises on
@@ -773,11 +893,12 @@ async def _evaluate_legs(
         now_utc_naive() - freshest_activity
     ).total_seconds()
     if age_seconds >= timeout_seconds:
-        # ── MEMBER-TASK liveness leg (2026-10-21, cycle 3) ──────
-        # The tree LOOKS stale (no member activity for >= the
-        # backstop window). Before breaking it, ask the ONE
-        # question that decides a member's real state: does a
-        # non-terminal member own a LIVE task row?
+        # ── MEMBER-ALIVE companion leg (2026-10-21, council F1 +
+        # RULING-1b) ─────────────────────────────────────────────────
+        # The tree LOOKS stale (no member activity for >= the backstop
+        # window). Before breaking it, ask the ONE question that
+        # decides a member's real state: does a non-terminal member
+        # own a LIVE task row — and is that row YOUNG?
         #
         # ``instances.last_activity_at`` is written on the enqueue /
         # child-report / observer paths — NOT on turn progress — so a
@@ -788,15 +909,24 @@ async def _evaluate_legs(
         # false-completion: a member with a live task row counts as
         # ALIVE, not stale.
         #
-        # COST: ONE batched query per tree (the member ids come from
-        # the walk this guard already did — NOT one query per
-        # member), and it runs ONLY on this staleness branch, so a
-        # live tree pays nothing.
-        _hold_verdict = await _member_task_hold_verdict(
-            task_engine=task_engine,
+        # TIME-BOUND (RULING-1b): only a task row YOUNGER than the
+        # horizon holds the tree. An OLDER row (a crash / kill
+        # mid-turn) does NOT — otherwise the leg would trade one
+        # permanent strand for another.
+        #
+        # UNCONDITIONAL (council F1): the leg lives in the guard, so
+        # EVERY consumer inherits it — no opt-in parameter, no new
+        # plumbing.
+        #
+        # COST: PER-MEMBER probes (the repository's ``has_live_work``
+        # + one task read per candidate member), and they run ONLY on
+        # this staleness branch, so a live tree pays nothing.
+        _hold_verdict = await _member_alive_companion_verdict(
+            instance_repository=instance_repository,
             instance_id=instance_id,
             member_status=member_status,
             stranded_excluded=stranded_excluded,
+            timeout_seconds=timeout_seconds,
         )
         if _hold_verdict is not None:
             return _hold_verdict

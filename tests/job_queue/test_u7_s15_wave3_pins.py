@@ -1110,9 +1110,17 @@ class TestW6NegativeControls:
         """Pre-U7 missing-anchor disarm contract: a tree where no
         member has any ``last_activity_at`` cannot fire the
         backstop (data gap, not evidence of a zombie). U7
-        preserves this contract — the missing-anchor branch in
-        ``_evaluate_legs`` now explicitly returns
-        ``live=False`` with a disarm reason in the description."""
+        preserves this contract.
+
+        TWO CORRECTIONS (2026-10-21, cycle-4 review F5 — DOCSTRING
+        ONLY, zero behaviour): the missing-anchor branch in
+        ``_evaluate_legs`` returns ``live=True`` — the backstop is
+        DISARMED and the live leg holds by default — and the tree
+        seeded below is ALL-TERMINAL (the root's status is
+        ``completed``), so the verdict is decided by the all-terminal
+        short-circuit (``live=False``, ``timed_out=False``), NOT by
+        the anchor branch. The assertions below pin the CONTRACT this
+        test is about: the backstop does not fire."""
         engine = components["engine"]
         repo = components["instance_repo"]
 
