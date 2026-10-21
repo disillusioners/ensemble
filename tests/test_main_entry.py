@@ -11,8 +11,9 @@ Auto-Restart Phase 1:
 * Local preflight engine (review M1): the probe builds its own engine
   via ``sqlalchemy.create_engine`` with
   ``connect_args={"connect_timeout": BOOT_DB_TIMEOUT_S}`` — it does NOT
-  use ``create_postgres_engine`` (the shared factory sets no driver
-  timeout and would hang ~75-130s on a firewall-DROP host). These
+  use ``create_postgres_engine`` (the shared factory carries the SAME
+  bound, but on its URL query; the preflight pins it through
+  ``connect_args`` on its own engine). These
   tests patch ``sqlalchemy.create_engine`` accordingly (the implementation
   imports it inside the preflight function — the mock must own the
   ``sqlalchemy`` module symbol, not ``daemon.__main__``'s local).
@@ -123,7 +124,12 @@ def test_boot_preflight_pg_unreachable_exits_75(uvicorn_run_patch, tmp_path):
 def test_boot_preflight_uses_local_engine_not_shared_factory(
     uvicorn_run_patch, tmp_path, monkeypatch
 ):
-    """M1: the preflight must NOT call create_postgres_engine (no timeout)."""
+    """M1: the preflight must NOT call create_postgres_engine.
+
+    It builds its own probe engine and pins the bound via
+    ``connect_args`` (the shared factory carries the SAME bound on its
+    URL query).
+    """
     import daemon.__main__ as entry
 
     engine = MagicMock()

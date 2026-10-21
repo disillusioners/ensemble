@@ -102,12 +102,27 @@ def _preflight_pg_url(ensemble_config) -> str:
     ``daemon/repositories/factory.py::create_postgres_engine``
     (``POSTGRES_*`` env overrides over ``ensemble.json`` values) so
     the probe targets EXACTLY the database the daemon would use.
-    Duplicated here because the preflight engine needs a
-    ``connect_timeout`` the shared factory deliberately does not
-    set — keep the two in sync if the factory's URL construction
-    changes.
+    Duplicated here because the preflight builds its OWN probe engine.
+    Both engines now carry the SAME ``BOOT_DB_TIMEOUT_S`` bound, but
+    by DIFFERENT mechanisms: the shared factory rides it on the URL
+    query (``?connect_timeout=…``), while the preflight passes it via
+    ``connect_args`` on its locally-built engine — the factory's
+    ``connect_args`` slot is reserved for the B2/B3 UTC-session
+    contract and must not change. Keep this URL construction in sync
+    with the factory's if the factory's URL construction changes.
+
+    The CONSTRUCTION is now the same ``URL.create(...)`` the factory
+    uses (S1 close, 2026-10-21): the f-string form put the RAW
+    password into the URL, so a password containing ``@`` re-parsed
+    into a DIFFERENT (unresolvable) host and boot-blocked the daemon
+    with exit 75. The BOUND still rides ``connect_args`` here (not on
+    the URL query) — that mechanism difference is deliberate and
+    unchanged, so the rendered URL stays byte-for-byte identical to the
+    pre-change string form in the normal case.
     """
     import os
+
+    from sqlalchemy.engine import URL
 
     pg = ensemble_config.postgres
     host = os.environ.get("POSTGRES_HOST", pg.host)
@@ -115,7 +130,25 @@ def _preflight_pg_url(ensemble_config) -> str:
     db = os.environ.get("POSTGRES_DB", pg.db)
     user = os.environ.get("POSTGRES_USER", pg.user)
     password = os.environ.get("POSTGRES_PASSWORD", pg.password)
-    return f"postgresql+psycopg://{user}:{password}@{host}:{port}/{db}"
+    # URL.create(...) — NOT an f-string (same construction as
+    # daemon/repositories/factory.py::create_postgres_engine). The
+    # string form put the RAW password into the URL: a password
+    # containing '@' re-parsed into a DIFFERENT host (unresolvable ->
+    # exit 75, fail-closed) and the DATABASE name was never the
+    # corrupted part. URL.create escapes the password, so the host,
+    # port and database stay the intended ones. The libpq
+    # connect_timeout is deliberately NOT repeated on the URL query:
+    # the preflight engine carries it via connect_args (the mechanism
+    # the factory does not use), and the factory's connect_args slot
+    # is reserved for the B2/B3 UTC-session contract.
+    return URL.create(
+        drivername="postgresql+psycopg",
+        username=user,
+        password=password,
+        host=host,
+        port=port,
+        database=db,
+    ).render_as_string(hide_password=False)
 
 
 def _pg_sqlstate(exc: BaseException) -> "str | None":
@@ -149,8 +182,9 @@ def _boot_db_preflight() -> None:
     uvicorn starts. When the resolved backend is PostgreSQL, runs
     ``SELECT 1`` on a LOCALLY constructed engine whose libpq
     ``connect_timeout`` is pinned to ``BOOT_DB_TIMEOUT_S`` — the
-    shared factory engine carries no driver timeout and would hang
-    ~75-130s on a firewall-DROP host:
+    probe pins it through ``connect_args`` (the shared factory rides
+    the SAME bound on its URL query), so a firewall-DROP host fails
+    inside the budget instead of hanging ~75-130s:
 
     * Auth refusal (SQLSTATE 28P01/28000/28P02) → log an
       operator-facing credential hint and ``sys.exit(78)``:
@@ -192,6 +226,9 @@ def _boot_db_preflight() -> None:
         # reason: it carries a libpq ``connect_timeout`` so a
         # firewall-DROP host fails inside the BOOT_DB_TIMEOUT_S
         # budget instead of at the OS TCP timeout (~75-130s). The
+        # shared factory carries the SAME bound, but on its URL query
+        # — the preflight's ``connect_args`` slot is its own (the
+        # factory's slot is the B2/B3 UTC-session contract). The
         # driver bound is the real enforcement — an asyncio.wait_for
         # wrapper CANNOT bound a sync connect (measured on Py3.13:
         # the executor shutdown joins the hung worker thread, so the

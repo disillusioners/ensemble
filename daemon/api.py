@@ -735,6 +735,19 @@ async def lifespan(app: FastAPI):
 
     capture_boot_epoch(manager.engine)
 
+    # ── Hard-reboot recovery (G2): reset message_queue rows stranded in
+    # 'processing' by the pre-reboot process. Placement: AFTER
+    # capture_boot_epoch (the predicate is boot-epoch-relative, so the
+    # epoch must exist first) and BEFORE setup_worker_pool (no claimer
+    # may start against the stranded rows). Reset-only — never
+    # re-dispatches. Three-layer never-wedge: per-row + per-pass inside
+    # the service, lifespan-level here.
+    try:
+        from daemon.services.message_queue_boot_recovery import recover_stuck_messages_on_startup
+        recover_stuck_messages_on_startup(manager._queue_repository, get_boot_epoch())
+    except Exception as mq_boot_exc:  # noqa: BLE001
+        logger.warning("Message-queue boot recovery failed (never wedges boot): %s", mq_boot_exc)
+
     # Phase-2 critical-notes boot-state probe (B2 fix): the probe needs
     # the LIVE engine, which only exists after manager.initialize().
     # Injected here rather than inside load_config — config load runs
