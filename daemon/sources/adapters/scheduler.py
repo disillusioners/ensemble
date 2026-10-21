@@ -176,8 +176,10 @@ class SchedulerAdapter(MessageSourceAdapter):
         # The DEFAULT is unchanged: a one-time row that says nothing (or
         # says new_instance) still fires into a fresh instance. Measured
         # blast radius at the ruling: 0 live schedule rows carry
-        # ``reuse_instance`` (14 rows total, 10 one-shot, all
-        # ``new_instance``) — so no existing schedule changes behaviour.
+        # ``reuse_instance`` — 11 scheduler rows (10 stopped + 1
+        # cancelled), all ``new_instance``; the 14 total source_configs
+        # also include 3 chat-source rows — so no existing schedule
+        # changes behaviour.
         if (
             scheduler_config.get("run_at")
             and instance_mode_str != "reuse_instance"

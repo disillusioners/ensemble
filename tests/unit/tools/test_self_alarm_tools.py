@@ -1792,3 +1792,129 @@ class TestWallClockLandmine:
         assert payload["when"] == FIXTURE_HHMM
         assert payload["recurrence"] == "daily"
         assert repo.rows[0].config["schedule"] == FIXTURE_DAILY_CRON
+
+
+# ---------------------------------------------------------------------------
+# D-V2 — the agent-visible doc surface must teach WAKE-THE-CALLER
+# ---------------------------------------------------------------------------
+
+
+class TestDocSurfaceWakeTheCaller:
+    """The D-V2 regression pin — the retracted framing must not come back.
+
+    The user ruling of 2026-10-20 (Discord, direct) RETRACTS the "the
+    fired instance is a FRESH instance with no memory of this request"
+    framing: a ``self_alarm`` wakes the CALLING instance — the same
+    instance, with its session context intact.
+
+    The ruling fixed the module docstring, the category doc and the
+    tool docstrings, but THREE agent-visible strings survived it (the
+    D-V2 defect): the ``link_board_item`` Field description in the
+    args schema, the SAME Field description in the tool signature, and
+    the first block of the tool's ``_full_doc_``. Together they taught
+    the agent the OPPOSITE doctrine from the one the ruling fixed —
+    and they drifted silently because NO test asserted anything about
+    the doc surface. This pack is that missing pin.
+
+    SCOPE — the ASSEMBLED doc surface, not a loose source grep:
+
+    * the agent reads the BUILT schema (``args_schema``) and the
+      built tool doc (``_full_doc_``) through ``tool_help`` /
+      ``args_schema`` — those are what this pack pins;
+    * the MODULE docstring legitimately keeps the phrase "does NOT
+      spawn a fresh instance" (the ruling's own negation) and the
+      fallback path mints a "fresh label" (a different label, not an
+      instance) — a source-wide grep for "fresh" would false-positive
+      on both, so the needles below are the EXACT pre-fix STRINGS,
+      asserted against the assembled surface only;
+    * the pre-fix ``link_board_item`` description was split across two
+      string literals in the source, so a source-level scan alone
+      would MISS it — another reason the assembled surface is the
+      pinned artifact.
+
+    The needles are verbatim substrings of the pre-fix text, so this
+    pack is provably RED against the pre-fix tree and GREEN after the
+    fix (mutation-verified: plant one stale string → RED → restore).
+    """
+
+    #: The RETRACTED framings — each is a verbatim substring of the
+    #: PRE-FIX agent-visible text (the D-V2 defect, byte for byte).
+    RETRACTED = (
+        # the args_schema + signature Field description (2 occurrences)
+        "the fresh instance is told to board_get it",
+        # the _full_doc_ opening block
+        "a SELF-CONTAINED message to a FRESH Ari instance",
+        "an instance with no memory of this request",
+    )
+
+    @staticmethod
+    def _doc_surface(tool_env) -> str:
+        """The agent-visible doc surface, ASSEMBLED.
+
+        The tool's ``_full_doc_`` plus every field description of the
+        built pydantic args schema — exactly what ``tool_help`` and
+        ``args_schema`` hand the agent.
+        """
+        tools, _service, _repo, _instance_repo = tool_env
+        tool = tools["self_alarm"]
+        chunks = [getattr(tool, "_full_doc_", "") or ""]
+        fields = getattr(tool.args_schema, "model_fields", None) or {}
+        for name, field in fields.items():
+            chunks.append(f"{name}: {getattr(field, 'description', '') or ''}")
+        return "\n".join(chunks)
+
+    @pytest.mark.parametrize("needle", RETRACTED)
+    def test_the_doc_surface_carries_no_retracted_fresh_instance_framing(
+        self, tool_env, needle: str
+    ) -> None:
+        surface = self._doc_surface(tool_env)
+        assert needle.lower() not in surface.lower(), (
+            f"the retracted framing {needle!r} is back in the agent-visible "
+            f"doc surface — the alarm wakes the CALLING instance"
+        )
+
+    def test_the_link_board_item_description_teaches_this_session(
+        self, tool_env
+    ) -> None:
+        """The Field description must name the wake, not a fresh instance."""
+        tools, _service, _repo, _instance_repo = tool_env
+        fields = tools["self_alarm"].args_schema.model_fields
+        description = fields["link_board_item"].description or ""
+        assert "THIS session" in description
+        assert "fresh" not in description.lower()
+
+    def test_the_full_doc_hands_the_alarm_intent_to_this_session(
+        self, tool_env
+    ) -> None:
+        """The tool doc must state the wake-the-caller doctrine."""
+        tools, _service, _repo, _instance_repo = tool_env
+        full_doc = tools["self_alarm"]._full_doc_ or ""
+        assert "ALARM INTENT" in full_doc
+        assert "THIS session" in full_doc
+        assert "context intact" in full_doc
+
+    def test_the_module_source_carries_no_retracted_full_doc_block(
+        self,
+    ) -> None:
+        """Source-level belt for the two unambiguous pre-fix strings.
+
+        The ``_full_doc_`` block is one contiguous literal in the
+        source, so these two needles CAN be checked on the raw module
+        source. The ``link_board_item`` description deliberately is
+        NOT checked here — it is split across two literals and is
+        pinned on the assembled surface above.
+        """
+        import pathlib
+
+        import daemon.tools.self_alarm as self_alarm_module
+
+        source = pathlib.Path(self_alarm_module.__file__).read_text(
+            encoding="utf-8"
+        )
+        for needle in (
+            "SELF-CONTAINED message",
+            "FRESH Ari instance",
+        ):
+            assert needle.lower() not in source.lower(), (
+                f"the retracted framing {needle!r} is back in the module source"
+            )
