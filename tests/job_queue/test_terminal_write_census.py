@@ -519,6 +519,26 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
                "(anchor matches the pre- and post-lock-wrapper "
                "enclosing names heal_instance/_heal_instance_locked)",
     ),
+    # ── Running-zombie strand — healer drive (2026-10-21) ──
+    # The THIRD strand-family member: a mission root stuck in
+    # ``running`` whose completion event was lost. Same drive
+    # primitive, same notify seam as the waiting_children strand
+    # above — the anchor distinguishes the two enclosing functions
+    # (``_heal_running_zombie_locked`` vs ``_heal_instance_locked``).
+    CensusEntry(
+        file="daemon/services/mission_strand_healer.py",
+        site="_process_child_completion_and_notify_parent",
+        anchor="_heal_running_zombie_locked", classification="hooked",
+        hooked_at="daemon/services/child_reports.py:5173",
+        reason="running-zombie strand's drive IS the sanctioned "
+               "emission machinery: the notify rides inside "
+               "_process_child_completion_db_sync (child_reports "
+               ":5173/:5189) on the drive path; the heal serializes "
+               "per root behind the SAME per-root asyncio.Lock map "
+               "as the waiting_children strand (shared "
+               "_acquire_root_lock/_release_root_lock), and NEVER "
+               "writes a terminal status directly",
+    ),
 ]
 
 
