@@ -510,14 +510,16 @@ call, and the re-arm is a scheduler hand-off.
    COMPLETE tree view has no way to act on that WARN. This strand adds a
    Python-side closure check (`_tree_is_closed`); the repo helper itself could
    grow a `truncated: bool` out-param instead — a named follow-up.
-2. **Three live-status sets now exist** —
-   `stale_pause_sweep._LIVE_STATUSES`,
-   `daemon.constants.ALIVE_INSTANCE_STATUSES` and
-   `mission_strand_healer._RUNNING_ZOMBIE_LIVE_STATUSES`. The `daemon/constants.py`
+2. **Live-status sets — now TWO, not three** —
+   `stale_pause_sweep._LIVE_STATUSES` and
+   `daemon.constants.ALIVE_INSTANCE_STATUSES`. The `daemon/constants.py`
    comment explicitly warns that duplicated status sets are "a silent-divergence
-   risk". The strand's set is a CLASSIFICATION set (see the code comment), not a
-   liveness authority — but consolidation into `daemon/constants.py` is the right
-   end-state. Named follow-up.
+   risk". The strand's own set
+   (`mission_strand_healer._RUNNING_ZOMBIE_LIVE_STATUSES`) was **removed in
+   cycle 2** — the widened tree leg delegates the liveness verdict to the
+   canonical `mission_live_guard`, so the classification set had no consumer
+   left (dead code). Consolidation of the remaining TWO into
+   `daemon/constants.py` is still the right end-state. Named follow-up.
 3. **The `stale_pause_sweep` pending-question probe FAILS OPEN** (its own
    docstring names this as follow-up W-B/W2). That posture is correct for a
    RELEASER and wrong for a TERMINALIZER — this strand re-implements the probe
