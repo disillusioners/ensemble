@@ -286,9 +286,30 @@ untouched, and its guard CALL shape (no `skip_root` — for f2 the root's own
 status IS a live leg) and its OUTCOME (hold on a live member, finalize on a
 quiet tree) are identical before and after the move. The pin lives in
 `tests/job_queue/test_pattern_f_mission_live_gate.py`
-(`TestF2GuardAnchorNeutralityPin`). The shape that deliberately CHANGES
-(fresh root + stale member: hold → finalize) is the defect the fix closes
-and is deliberately NOT pinned.
+(`TestF1LaneGuardAnchorNeutralityPin` — renamed in the cycle-2 post-review
+touch-up: the class exercises the **f1/E1 lane**
+(`orphan_active_skipped_mission_live_f1`, `job_recovery_service.py:2674`);
+f2's own lane (`orphan_active_skipped_mission_live`, `:2975`) is
+behaviorally unasserted there and is covered by a STATIC source-text pin
+instead). The shape that deliberately CHANGES (fresh root + stale member:
+hold → finalize) is the defect the fix closes and is deliberately NOT pinned.
+
+**Side effect the fix introduces — `anchor_missing` is now MEMBER-SCOPED**
+(cycle-2 review, C4). The missing-anchor disarm
+(`daemon/services/mission_live_guard.py:458`, `:602-613`) starts at
+`anchor_missing=True` and is flipped to `False` by any parsed
+`last_activity_at` seen during the walk. **Before** the fix the walk covered
+the whole tree INCLUDING the root, so the root's own stamp flipped
+`anchor_missing=False` for the whole tree. **Now** the root is `continue`d
+before that line (`:505-507`), so only NON-ROOT members can flip it; the
+root's stamp is used solely as the fallback for a tree with NO members
+(`:512-516`). Consequence: a tree **WITH members whose members all carry a
+NULL `last_activity_at` (while the root has one)** now reads as a data gap ⇒
+`anchor_missing` stays `True` ⇒ the guard returns **`live=True`** (backstop
+disarmed — "data gap, not zombie evidence; the live leg holds by default").
+The direction is **CONSERVATIVE**: the guard HOLDS the mission live rather
+than terminalizing it, so a stale-activity data gap can never cause a wrong
+finalize — it can only delay one.
 
 **MUST NOT regress (all pinned):** childless roots, the all-terminal
 short-circuit (`daemon/services/mission_live_guard.py:572-591`), f2's 6h
@@ -638,5 +659,14 @@ wants to pause, never for a zombie.
    ships this train** — the anchor fix + the tree-leg widening already
    close the observed shapes, and member retirement would be a
    TERMINALIZING write over a member the heal cannot prove is dead.
+4. **C1 (cycle-2 review) — stale root-inclusive anchor PROSE survives in
+   two sibling files — ROUTED to the leader for a separate micro-lane.**
+   The comment blocks at `daemon/services/job_queue_service.py:589-592`
+   and `daemon/services/job_recovery_service.py:2947-2951` still describe
+   the freshness anchor as the max over the whole tree (the root
+   INCLUDED) — prose only, both introduced before the cycle-2 anchor fix;
+   the CODE at those sites is unaffected. Both files are OUTSIDE this
+   branch's fence (f2 / `job_queue_service` deliberately untouchable
+   here), so the comment refresh is routed, not applied.
 
 

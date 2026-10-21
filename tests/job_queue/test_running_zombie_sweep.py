@@ -1486,7 +1486,17 @@ class TestRunningZombieCycle2TreeLeg:
     ):
         """NEGATIVE — a member with a LIVE (in-flight) task row is
         working, not stuck: it is recently active, so the guard holds
-        the mission open ⇒ SKIP."""
+        the mission open ⇒ SKIP.
+
+        NAMING HONESTY (cycle-2 review, C3): this negative is enforced
+        by the guard's FRESHNESS leg, not by a task-row probe — the
+        seed sets ``member_activity_age=10min``, so the member's
+        activity sits well inside the 6h window and the guard's
+        freshness leg holds the mission open. Nothing here asserts
+        that the task ROW itself was consulted. See the design doc
+        §2.8.2 reviewer note: a separate member-task probe would be a
+        5-line addition, deliberately not taken — it would strand a
+        zombie whose stuck member still owns a lingering task row."""
         _seed_incident_tree(
             zombie_harness.engine,
             member_activity_age=timedelta(minutes=10),

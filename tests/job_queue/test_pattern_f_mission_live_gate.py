@@ -696,13 +696,13 @@ class TestE1MissionLiveFinalizeGate:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# f2 GUARD-ANCHOR NEUTRALITY PIN (running-zombie cycle 2, 2026-10-21)
+# f1/E1 LANE GUARD-ANCHOR NEUTRALITY PIN (running-zombie cycle 2, 2026-10-21)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class _FakeVerdict:
     """Minimal stand-in for ``MissionLiveVerdict`` (the call-shape pin
-    only asserts HOW f2 calls the guard, not the verdict)."""
+    only asserts HOW the lane calls the guard, not the verdict)."""
 
     def __init__(self, live: bool, reason: str = "pinned"):
         self.live = live
@@ -711,8 +711,31 @@ class _FakeVerdict:
         self.timed_out = False
 
 
-class TestF2GuardAnchorNeutralityPin:
-    """f2 is NEUTRAL to the running-zombie anchor fix.
+class TestF1LaneGuardAnchorNeutralityPin:
+    """The f1/E1 lane is NEUTRAL to the running-zombie anchor fix.
+
+    LANE HONESTY (cycle-2 review, C2 — this class was previously
+    mislabeled ``TestF2GuardAnchorNeutralityPin``): the seeded shape
+    short-circuits at the **f1/E1 lane**
+    (``job_recovery_service.py:2674``, detail pattern
+    ``orphan_active_skipped_mission_live_f1``) — f2's own lane
+    (``orphan_active_skipped_mission_live``, ``:2975``) is NEVER
+    REACHED by these tests. Consequences, stated plainly:
+
+    * f2's own lane is **behaviorally unasserted** here. Neither
+      behavioral pin below can fail on an anchor REVERT — by
+      construction: in both, the MEMBER's stamp is the tree max on
+      both sides of the fix, so the verdict is identical whichever
+      way the anchor is scoped. These pins prove f1-lane
+      *neutrality*, not anchor protection.
+    * The **mutation-grade anchor protection** lives in
+      ``tests/job_queue/test_running_zombie_sweep.py::
+      test_fresh_root_cannot_hold_a_stale_member_open`` — that test
+      is M1-proven RED when the anchor reverts to root-inclusive.
+    * f2's CALL SHAPE is covered by the static source pin
+      (``test_f2_lane_source_call_shape_is_pinned``, below), which
+      anchors on the ``job_recovery_service.py`` source text
+      (READ-ONLY on this branch — the file itself is not touched).
 
     The anchor fix (2026-10-21, ``daemon/services/mission_live_guard.py``)
     moves the zombie-backstop freshness anchor OFF the ROOT's own
@@ -721,19 +744,18 @@ class TestF2GuardAnchorNeutralityPin:
     (``daemon/services/instance_messaging.py:2455``), so it can never
     prove a tree is quiet — that is the defect the fix closes.
 
-    f2 (``daemon/services/job_recovery_service.py``) calls the SAME
-    guard and MUST keep its behaviour. This class is the PIN-FIRST
-    proof (leader instruction, cycle 2):
+    This class is the PIN-FIRST proof (leader instruction, cycle 2):
 
-    * ``test_f2_guard_call_shape_is_pinned`` — f2's CALL shape is
-      unchanged (no ``skip_root``: for f2 the root's own status IS a
-      live leg; the anchor fix must not change the call).
+    * ``test_f2_guard_call_shape_is_pinned`` — the FIRST guard call
+      the reconciler makes (the f1/E1 lane) keeps its shape (no
+      ``skip_root``: for this lane the root's own status IS a live
+      leg; the anchor fix must not change the call).
     * ``test_live_member_keeps_f2_holding`` — a tree whose MEMBER
-      carries a RECENT stamp holds f2 (no finalize). The member's
+      carries a RECENT stamp holds (no finalize). The member's
       stamp is the tree max both before and after the fix ⇒ the
       verdict is identical on both sides.
     * ``test_quiet_tree_lets_f2_finalize`` — a tree whose member
-      carries a STALE stamp (>6h) fires the backstop and f2
+      carries a STALE stamp (>6h) fires the backstop and the lane
       finalizes. Identical before and after the fix.
 
     DELIBERATELY NOT PINNED: the shape where the ROOT's stamp is
@@ -796,6 +818,49 @@ class TestF2GuardAnchorNeutralityPin:
         assert kwargs.get("skip_root", False) is False, (
             "f2 must not opt into the pre-stamp skip_root mode — the "
             f"anchor fix must not change the CALL shape. Got: {kwargs}"
+        )
+
+    def test_f2_lane_source_call_shape_is_pinned(self):
+        """STATIC source pin for f2's OWN lane.
+
+        The behavioral tests in this class exercise the f1/E1 lane —
+        the seeded shape short-circuits there, so f2 is never reached
+        and cannot be asserted behaviorally from this module. f2's
+        CALL SHAPE is therefore pinned from the SOURCE TEXT instead
+        (the census suite's source-text anchoring style; the file
+        itself stays READ-ONLY on this branch):
+
+        * the f2 lane passes the Gate-1 bus pending count
+          (``bus_pending_count=bus_pending_count``) — the guard's bus
+          leg must AGREE with the gate seam (unlike f1, which has no
+          bus seam and passes ``None``);
+        * the f2 lane must NOT opt into the pre-stamp ``skip_root``
+          mode — for f2 the root's own status IS a live leg.
+        """
+        import re
+        from pathlib import Path
+
+        from daemon.services import job_recovery_service as jrs
+
+        source = Path(jrs.__file__).read_text()
+        f2_pattern = '"orphan_active_skipped_mission_live"'
+        assert f2_pattern in source, (
+            "f2's detail pattern vanished from job_recovery_service.py "
+            "— the lane was renamed or removed and this pin must be "
+            "re-homed"
+        )
+        # The f2 guard call sits ~218 chars above its detail pattern;
+        # a 2.5k-char look-back window covers the call without
+        # reaching the f1 lane's own call (~16.5k chars earlier).
+        idx = source.index(f2_pattern)
+        window = source[max(0, idx - 2500):idx]
+        assert "bus_pending_count=bus_pending_count" in window, (
+            "f2's guard call must pass the Gate-1 bus pending count — "
+            "the guard's bus leg must agree with the gate seam"
+        )
+        assert not re.search(r"\bskip_root\s*=", window), (
+            "f2 must NOT opt into the pre-stamp skip_root mode: for "
+            "f2 the root's own status IS a live leg"
         )
 
     @pytest.mark.asyncio
