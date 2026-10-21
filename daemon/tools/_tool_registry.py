@@ -305,8 +305,8 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # Derive the authoritative pin set by GREPPING THE TREE — do NOT trust
 # this count:
 #   grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/ --include=*.py
-#   grep -rn "len(PRIVILEGED_TOOL_CATEGORIES)" tests/ --include=*.py Silent
-# additions and silent removals (fail-open regressions) both trip the
+#   grep -rn "len(PRIVILEGED_TOOL_CATEGORIES)" tests/ --include=*.py
+# Silent additions and silent removals (fail-open regressions) both trip the
 # pins.
 #
 # Derive the authoritative pin set by GREPPING THE TREE — do NOT trust

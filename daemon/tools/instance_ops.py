@@ -13,8 +13,11 @@ over an EXISTING daemon primitive (D-3 — no new daemon subsystem):
 EVERY ACT IS AUDITED
 --------------------
 Every act writes a row to ``instance_ops_audit`` — the preview, the
-refusal, the write-ahead intent and the committed outcome. A
-destructive act that cannot be audited DOES NOT HAPPEN.
+write-ahead intent and the committed outcome. Refusals from the
+protected-target gate, the budget, and the act itself are ledgered;
+input-validation and early-gate refusals (reason-required,
+self-surgery, not-found, target-too-young) are NOT. A destructive act
+that cannot be audited DOES NOT HAPPEN.
 
 The audit boundary is a TWO-TIER property (D-15), stated per tool:
 
@@ -1451,6 +1454,7 @@ Examples:
     ) -> str:
         """Answer a pending question pack and resume the cascade (audited)."""
         label = "INSTANCE_ANSWER"
+        # D-6 deliberate exemption: no self-surgery gate — the asker IS the caller (self-answer is the normal flow).
         if not _is_instance_ops_authorized(caller_agent_id):
             return _error("instance_ops operation not permitted for this agent")
         if not _resolve_instance_ops_enabled():
@@ -1600,6 +1604,7 @@ Examples:
     ) -> str:
         """Dismiss a pending question pack without answering (audited)."""
         label = "INSTANCE_DISMISS"
+        # D-6 deliberate exemption: no self-surgery gate — the asker IS the caller (self-dismiss is the normal flow).
         if not _is_instance_ops_authorized(caller_agent_id):
             return _error("instance_ops operation not permitted for this agent")
         if not _resolve_instance_ops_enabled():
@@ -1614,6 +1619,7 @@ Examples:
 
         try:
             from ..services.instance_ops_service import (
+                DismissCascadeFailed,
                 DismissInstanceNotFound,
                 DismissNoPendingQuestion,
                 DismissPackNotPending,
@@ -1660,13 +1666,51 @@ Examples:
         try:
             result = await dismiss_question_pack(manager, target_id, live_hub=live_hub)
         except DismissWritePaused as exc:
-            return _settle_or_refuse(audit, row_id, label, "instance-ops-write-paused", str(exc), "instance_dismiss", target_id, reason, caller_instance_id, caller_agent_id)
+            return _settle_or_refuse(
+                audit, row_id,
+                label=label, token="instance-ops-write-paused", message=str(exc),
+                action="instance_dismiss", target=target_id, reason=reason,
+                actor_instance_id=caller_instance_id,
+                actor_agent_id=caller_agent_id,
+            )
         except DismissInstanceNotFound as exc:
-            return _settle_or_refuse(audit, row_id, label, "instance-not-found", str(exc), "instance_dismiss", target_id, reason, caller_instance_id, caller_agent_id)
+            return _settle_or_refuse(
+                audit, row_id,
+                label=label, token="instance-not-found", message=str(exc),
+                action="instance_dismiss", target=target_id, reason=reason,
+                actor_instance_id=caller_instance_id,
+                actor_agent_id=caller_agent_id,
+            )
         except DismissNoPendingQuestion as exc:
-            return _settle_or_refuse(audit, row_id, label, "no-pending-question", str(exc), "instance_dismiss", target_id, reason, caller_instance_id, caller_agent_id)
+            return _settle_or_refuse(
+                audit, row_id,
+                label=label, token="no-pending-question", message=str(exc),
+                action="instance_dismiss", target=target_id, reason=reason,
+                actor_instance_id=caller_instance_id,
+                actor_agent_id=caller_agent_id,
+            )
         except DismissPackNotPending as exc:
-            return _settle_or_refuse(audit, row_id, label, "stale-question-pack", str(exc), "instance_dismiss", target_id, reason, caller_instance_id, caller_agent_id)
+            return _settle_or_refuse(
+                audit, row_id,
+                label=label, token="stale-question-pack", message=str(exc),
+                action="instance_dismiss", target=target_id, reason=reason,
+                actor_instance_id=caller_instance_id,
+                actor_agent_id=caller_agent_id,
+            )
+        except DismissCascadeFailed as exc:
+            # M5: a KNOWN outcome, not an AC-9b unknown — the pack is
+            # CONSUMED and the resume cascade failed. Settle the Tier-2
+            # row to "error" (never rest at "pending") and refuse with
+            # the typed token.
+            _msg = (
+                "the question pack was consumed (dismissed) but the resume "
+                f"cascade failed: {exc}. The pack is GONE — the resume must "
+                "be retried (there is no pack left to dismiss again)"
+            )
+            refusal = _refusal(label, "dismiss-cascade-failed", _msg)
+            if audit is not None and row_id:
+                audit.settle_audit(row_id, "error", error_message=refusal)
+            return refusal
         except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
             # AC-9b: left at "pending" — unknown outcome (see reclaim).
             logger.exception("instance_dismiss act failed (audit row left pending)")
@@ -1695,7 +1739,10 @@ every exit path.
 ERROR PARITY with the route: 503 write-paused →
 `instance-ops-write-paused`; 404 unknown instance →
 `instance-not-found`; 404 no question pack → `no-pending-question`;
-409 pack not pending → `stale-question-pack`.
+409 pack not pending → `stale-question-pack`; cascade failure AFTER
+dismissal → `dismiss-cascade-failed` (the pack is consumed and the
+resume must be retried — the audit row settles to `error`, it never
+rests at `pending`).
 
 Args:
     id: The ASKER instance id. Required.
@@ -1770,6 +1817,7 @@ def _map_answer_error(label: str, exc: Exception) -> str:
 def _settle_or_refuse(
     audit,
     row_id: str | None,
+    *,
     label: str,
     token: str,
     message: str,

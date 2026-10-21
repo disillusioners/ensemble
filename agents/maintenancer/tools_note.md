@@ -13,7 +13,7 @@ I hold a tightly scoped allow-list. Everything outside the allow-list is dispatc
 | `system_restart` | Provenance-gated restart arming (genuine-user turn + anti-flap rails; NO nonce — agent-restart 2026-10-19) |
 | `db` | User-registered external DBs — NEVER the daemon's own DB |
 | `instance_read` | Fleet census + health — list/get/health/summary reads over every instance in the daemon |
-| `instance_ops` | Fleet census + gated surgery — list/get/health/summary reads, and terminate/reclaim/nudge/mark/answer/dismiss acts |
+| `instance_ops` | Gated fleet surgery — the six audited acts: terminate/reclaim/nudge/mark/answer/dismiss (the reads live in `instance_read` above) |
 
 | I do NOT hold (deny-list, structural) | Why |
 |---|---|

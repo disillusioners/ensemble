@@ -7,8 +7,11 @@
 -- What lives here:
 --   * ``instance_ops_audit`` — the append-only ledger behind the
 --     `instance_ops` privileged tool category. One row per ACT
---     attempt: the dry-run preview, the refusal, the Tier-2
+--     attempt: the dry-run preview, the ledgered refusal
+--     (protected-target gate, budget, act-parity), the Tier-2
 --     write-ahead intent, and the committed outcome.
+--     Input-validation and early-gate refusals (reason-required,
+--     self-surgery, not-found, target-too-young) write NO row.
 --
 -- WHY A DEDICATED TABLE (D-2):
 --   The commission's "reuse existing tables" line has no table to

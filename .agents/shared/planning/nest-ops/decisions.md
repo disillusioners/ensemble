@@ -247,6 +247,11 @@ no heuristic surface.
 
 **Forecloses.** "The agent may repair its own row if it is careful." Any self-targeted act.
 
+**Deliberate exemption (review M4, 2026-10-21).** `instance_answer` /
+`instance_dismiss` carry NO self-surgery gate: the asker IS the caller —
+self-answering / self-dismissing one's own pending pack is the normal flow,
+and gating it would break the legitimate path.
+
 ---
 
 ## D-7 — A kill-switch: `ENSEMBLE_INSTANCE_OPS_ENABLED` (default ON)

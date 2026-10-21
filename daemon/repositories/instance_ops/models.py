@@ -50,8 +50,10 @@ def _utc_now_iso() -> str:
 class InstanceOpsAudit(SQLModel, table=True):
     """Append-only audit log for the ``instance_ops`` act tools.
 
-    Every preview, every refusal, every write-ahead intent and every
-    committed act writes a row here.
+    Every preview, every write-ahead intent and every committed act
+    writes a row here. Refusals from the protected-target gate, the
+    budget, and the act itself are ledgered; input-validation and
+    early-gate refusals are not.
 
     Attributes:
         id: Primary key (UUID4).

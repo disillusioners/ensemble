@@ -92,6 +92,11 @@ class FakeRepo:
     def get(self, iid):
         return self.rows.get(iid)
 
+    def set_metadata(self, iid, key, value, session=None):
+        # Test-side stand-in for the repo's dotted-key metadata write
+        # (the real one joins `session`; the fake fleet is in-memory).
+        self.rows[iid].metadata[key] = value
+
     def list_child_ids_permanent(self, iid):
         return [k for k, v in self.rows.items() if v.parent_id == iid]
 
@@ -690,3 +695,114 @@ class TestReadTools:
         tools = ir.create_instance_read_tools(fleet, agent_id="leader")
         out = await _by_name(tools, "instance_list").ainvoke({})
         assert "not permitted" in out
+
+
+# ── Review fixes (2026-10-21): H1 / M2 / M5 / M8 pins ─────────────────────
+
+
+class TestGetHonestyReviewFixes:
+    """H1: spawned_by must attribute the PARENT, never the target.
+    M2: the dotted marker keys must round-trip through instance_get.
+    M5: DismissCascadeFailed settles `error`, never rests `pending`.
+    M8: both fleet scans surface `scan_truncated`."""
+
+    def _read(self, fleet):
+        import daemon.tools.instance_read as ir
+
+        return ir.create_instance_read_tools(
+            fleet, current_instance_id="m", agent_id="maintenancer"
+        )
+
+    async def test_spawned_by_is_the_parents_agent_not_the_targets(self, fleet):
+        import json as _json
+
+        fleet.rows["parent-1"] = FakeRow("parent-1", agent_id="leader")
+        fleet.rows["kid-1"] = FakeRow(
+            "kid-1", agent_id="worker", parent_id="parent-1"
+        )
+        out = await _by_name(self._read(fleet), "instance_get").ainvoke(
+            {"id": "kid-1"}
+        )
+        payload = _json.loads(out)
+        assert payload["spawned_by"]["parent_id"] == "parent-1"
+        # H1: the PARENT's agent id — the old code returned the target's own.
+        assert payload["spawned_by"]["agent_id"] == "leader"
+        assert payload["spawned_by"]["agent_id"] != payload["agent_id"]
+
+    async def test_spawned_by_root_is_null_with_explicit_marker(self, fleet):
+        import json as _json
+
+        out = await _by_name(self._read(fleet), "instance_get").ainvoke(
+            {"id": "target-1"}
+        )
+        payload = _json.loads(out)
+        assert payload["spawned_by"]["agent_id"] is None
+        assert payload["spawned_by"]["note"] == "no-parent"
+        # NEVER the target's own agent, even when unknown.
+        assert payload["spawned_by"]["agent_id"] != payload["agent_id"]
+
+    async def test_marker_write_then_get_round_trips_both_markers(self, fleet):
+        import json as _json
+
+        tools = _act_tools(fleet)
+        for marker in ("protect", "suspect"):
+            out = await _by_name(tools, "instance_mark").ainvoke(
+                {
+                    "id": "old-worker",
+                    "marker": marker,
+                    "note": "round-trip",
+                    "reason": "M2 round-trip verification",
+                    "dry_run": False,
+                }
+            )
+            assert "ERROR" not in out, out
+            got = _json.loads(
+                await _by_name(self._read(fleet), "instance_get").ainvoke(
+                    {"id": "old-worker"}
+                )
+            )
+            md = got["instance_metadata"]
+            # M2: the DOTTED keys survive the allowlist (the dead
+            # top-level "instance_ops" entry never matched them).
+            assert f"instance_ops.{marker}" in md, md
+            expected_flag = "protected" if marker == "protect" else "suspected"
+            assert md[f"instance_ops.{marker}"].get(expected_flag) is True
+
+    async def test_dismiss_cascade_failure_settles_error_not_pending(
+        self, fleet, monkeypatch
+    ):
+        import daemon.services.instance_ops_service as svc
+
+        async def _boom(manager, target_id, live_hub=None):
+            raise svc.DismissCascadeFailed("resume cascade exploded")
+
+        monkeypatch.setattr(svc, "dismiss_question_pack", _boom)
+        tools = _act_tools(fleet)
+        out = await _by_name(tools, "instance_dismiss").ainvoke(
+            {"id": "target-1", "reason": "cascade retry demo", "dry_run": False}
+        )
+        assert "dismiss-cascade-failed" in out
+        assert "ERROR" not in out  # typed refusal, not a generic error
+        with Session(fleet.engine) as s:
+            rows = [
+                r
+                for r in s.exec(select(InstanceOpsAudit)).all()
+                if r.action == "instance_dismiss"
+            ]
+        assert rows, "the write-ahead row must exist"
+        row = rows[-1]
+        assert row.outcome == "error"
+        assert row.outcome != "pending"
+        assert "dismiss-cascade-failed" in (row.error_message or "")
+
+    async def test_health_and_capacity_surface_scan_truncated(self, fleet):
+        import json as _json
+
+        health = _json.loads(
+            await _by_name(self._read(fleet), "instance_health").ainvoke({})
+        )
+        assert health["scan_truncated"] is False
+        cap = _json.loads(
+            await _by_name(self._read(fleet), "fleet_capacity_summary").ainvoke({})
+        )
+        assert cap["scan_truncated"] is False

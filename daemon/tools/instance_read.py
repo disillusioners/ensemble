@@ -118,13 +118,19 @@ INSTANCE_READ_AUTHORIZED_AGENTS: frozenset[str] = frozenset({"maintenancer"})
 MAX_LIST_LIMIT = 200
 #: The default census page size.
 DEFAULT_LIST_LIMIT = 50
-#: The default staleness threshold, in seconds (30 minutes — the same
-#: default as ``instance_health``).
-DEFAULT_STALE_SECONDS = 1800
 #: The default ``instance_health`` threshold, in minutes.
 DEFAULT_STALE_MINUTES = 30
+#: The default staleness threshold, in seconds — DERIVED from the one
+#: minute constant so the two tools can never disagree (L3 fix).
+DEFAULT_STALE_SECONDS = DEFAULT_STALE_MINUTES * 60
 #: The maximum number of checkpoint messages ``instance_get`` returns.
 MAX_LAST_MESSAGES = 20
+
+#: The fleet scan ceiling for ``instance_health`` and
+#: ``fleet_capacity_summary`` (M8): past this many instances the
+#: OLDEST rows are invisible to the scan — both payloads surface
+#: ``scan_truncated`` so the blind spot is VISIBLE, never silent.
+FLEET_SCAN_LIMIT = 1000
 
 #: The metadata keys that ``instance_get`` is allowed to surface. The
 #: raw metadata blob is NEVER returned — the existing
@@ -138,7 +144,11 @@ _INSTANCE_GET_METADATA_KEYS: tuple[str, ...] = (
     "source_type",
     "watchover_enabled",
     "question_paused",
-    "instance_ops",
+    # The act tools write DOTTED marker keys (instance_ops.py:151-152);
+    # the old dead top-level "instance_ops" entry never matched them
+    # (M2 fix) — the maintenancer could not read back its own marker.
+    "instance_ops.protect",
+    "instance_ops.suspect",
 )
 
 
@@ -656,6 +666,7 @@ Examples:
 
         # Ancestors: walk the permanent parent chain (bounded).
         ancestors: list[str] = []
+        direct_parent_agent_id: str | None = None
         cursor = info.get("parent_id")
         seen: set[str] = set()
         while cursor and cursor not in seen and len(ancestors) < 64:
@@ -667,8 +678,27 @@ Examples:
                 break
             if parent_row is None:
                 break
+            if direct_parent_agent_id is None:
+                # H1: the DIRECT parent's agent — the SPAWNER. NEVER
+                # fall back to the target's own agent id here.
+                direct_parent_agent_id = getattr(parent_row, "agent_id", None)
             cursor = parent_row.parent_id
         ancestors.reverse()  # root -> parent
+        if direct_parent_agent_id is None and info.get("parent_id"):
+            # The walk broke before the direct parent resolved — ONE
+            # bounded fallback fetch (still never the target's own agent).
+            try:
+                _prow = await asyncio.to_thread(repo.get, info["parent_id"])
+            except Exception:  # noqa: BLE001 — read-only probe
+                _prow = None
+            if _prow is not None:
+                direct_parent_agent_id = getattr(_prow, "agent_id", None)
+        if not info.get("parent_id"):
+            spawned_by_note = "no-parent"  # a root instance — no spawner
+        elif direct_parent_agent_id is None:
+            spawned_by_note = "parent-agent-unresolved"
+        else:
+            spawned_by_note = None
 
         # Hydration 1: the task-table row (the census never pays for this).
         current_task = None
@@ -739,25 +769,9 @@ Examples:
             now=now,
         )
 
-        # Mission reference — a projection when the resolver exposes one.
-        mission_ref = None
-        resolver = getattr(manager, "_mission_resolver", None)
-        if resolver is not None:
-            for attr in ("get_mission_for_instance", "mission_for_instance"):
-                fn = getattr(resolver, attr, None)
-                if fn is None:
-                    continue
-                try:
-                    mission = fn(instance_id)
-                    if mission is not None:
-                        mission_ref = {
-                            "mission_id": getattr(mission, "mission_id", None)
-                            or getattr(mission, "id", None),
-                            "liveness": getattr(mission, "liveness", None),
-                        }
-                    break
-                except Exception:  # noqa: BLE001 — read-only probe
-                    break
+        # M1: the old mission_ref probe getattr'd two resolver methods
+        # that exist nowhere in the tree — a permanently-null field.
+        # Deleted rather than wired (the smaller fix, review 2026-10-21).
 
         payload = {
             "instance_id": info.get("instance_id"),
@@ -788,9 +802,14 @@ Examples:
             "last_messages": last_messages,
             "spawned_by": {
                 "parent_id": info.get("parent_id") or None,
-                "agent_id": info.get("agent_id"),
+                # H1: the SPAWNER's (direct parent's) agent id — NEVER
+                # the target's own. `note` states why it may be null.
+                "agent_id": direct_parent_agent_id,
+                "note": spawned_by_note,
             },
-            "mission_ref": mission_ref,
+            # M1: no canonical per-instance mission projection exists —
+            # the permanently-null probe was deleted; key kept for shape.
+            "mission_ref": None,
         }
         return json.dumps(payload, default=str)
 
@@ -814,7 +833,8 @@ Returns:
     `updated_at`, `last_activity_at`, `age_seconds`, `idle_seconds`,
     `stale`, `paused_at`, `pause_marker`, `pending_question_pack` (the
     pack OBJECT, not just a bool), `current_task`, `last_messages`,
-    `spawned_by`, `mission_ref`.
+    `spawned_by` (the PARENT's agent id — never the target's own;
+    `note` states why the agent id may be null).
 
     `pending_question_pack` is `null` after a daemon restart — question
     packs live in memory only, and the honest rendering of that is a
@@ -863,7 +883,7 @@ Examples:
 
         threshold_seconds = stale_minutes * 60
         try:
-            report = await asyncio.to_thread(
+            report, scan_truncated = await asyncio.to_thread(
                 _build_health_report, manager, threshold_seconds
             )
         except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
@@ -874,6 +894,9 @@ Examples:
             "stale_minutes": stale_minutes,
             "detectors": report,
             "total_flagged": sum(d["count"] for d in report),
+            # M8: a VISIBLE blind spot — past FLEET_SCAN_LIMIT the
+            # oldest long-wedged instances are invisible to this scan.
+            "scan_truncated": bool(scan_truncated),
         }
         return json.dumps(payload, default=str)
 
@@ -1029,12 +1052,20 @@ def _has_live_task(task_repo: Any, instance_id: str) -> bool:
     return any(getattr(t, "status", None) not in terminal for t in tasks)
 
 
-def _build_health_report(manager: Any, threshold_seconds: int) -> list[dict[str, Any]]:
-    """Build the six detector rows. NEVER repairs anything."""
+def _build_health_report(
+    manager: Any, threshold_seconds: int
+) -> tuple[list[dict[str, Any]], bool]:
+    """Build the six detector rows + the scan-truncated flag.
+
+    NEVER repairs anything. The flag (M8) tells the caller the scan hit
+    ``FLEET_SCAN_LIMIT`` — the OLDEST instances are invisible and the
+    payload must say so instead of failing silently."""
     from ..constants import ALIVE_INSTANCE_STATUSES, TERMINAL_INSTANCE_STATUSES
 
     now = datetime.now(timezone.utc)
-    rows, _total, _truncated = manager.list_instances(limit=1000, offset=0)
+    rows, _total, truncated = manager.list_instances(
+        limit=FLEET_SCAN_LIMIT, offset=0
+    )
     by_id = {r.get("instance_id"): r for r in rows if r.get("instance_id")}
     repo = getattr(manager, "_instance_repository", None)
     task_repo = getattr(manager, "_task_repo", None)
@@ -1266,12 +1297,14 @@ def _build_health_report(manager: Any, threshold_seconds: int) -> list[dict[str,
         }
     )
 
-    return detectors
+    return detectors, bool(truncated)
 
 
 def _build_capacity_summary(manager: Any) -> dict[str, Any]:
     """Build the capacity payload — counts, queue depth, pool, DLQ."""
-    rows, _total, _truncated = manager.list_instances(limit=1000, offset=0)
+    rows, _total, truncated = manager.list_instances(
+        limit=FLEET_SCAN_LIMIT, offset=0
+    )
 
     counts_by_agent: dict[str, int] = {}
     counts_by_status: dict[str, int] = {}
@@ -1377,4 +1410,6 @@ def _build_capacity_summary(manager: Any) -> dict[str, Any]:
         "dlq_depth": dlq_depth,
         "audit_pending": audit_pending,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        # M8: the census ceiling is visible, never silent.
+        "scan_truncated": bool(truncated),
     }
