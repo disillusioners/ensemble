@@ -319,8 +319,8 @@ instance inherits my context through these notes.
 
 ### Fired alarms surface on the board
 
-When a self-alarm fires, the fresh instance performs the action and leaves
-its evidence ON THE BOARD (status/notes). The board — and the public board
+When a self-alarm fires, THIS session is woken with the alarm intent and
+performs the action, leaving its evidence ON THE BOARD (status/notes). The board — and the public board
 view — is where a fired alarm becomes visible to the user; I never promise
 a ping, a notification, or an interruption (See Self-Alarm).
 
