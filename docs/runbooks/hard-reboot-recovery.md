@@ -4,8 +4,7 @@ Operator entry point for the hard-reboot recovery feature: after a hard machine/
 power-loss reboot (the kernel SIGKILLs every process), the daemon comes back and
 transparently continues the work that was in flight. Binding design contract:
 `.agents/shared/planning/hard-reboot-recovery/` — `plan-overview.md`, `decisions.md`
-(D1-D18), `phase1-plan.md`, `technical-analysis.md`, `architecture-recommendation.md`
-(A1-A11).
+(D1-D18), `phase1-plan.md`, `technical-analysis.md`, `architecture-recommendation.md` (A1-A11).
 
 ## 1. What happens automatically
 
@@ -16,12 +15,12 @@ transparently continues the work that was in flight. Binding design contract:
 | Stranded queue rows | message-queue boot recovery (new) | `daemon/services/message_queue_boot_recovery.py` |
 | Stale-task backstop | StaleTaskRecovery, `boot+10min` clamp (existing) | `daemon/services/stale_task_recovery.py` |
 
-The MQ boot pass resets message-queue rows stranded in `'processing'` back to `'ready'`. It
-is **reset-only**: it never re-dispatches a message. Two skip-guards protect the reset — a
-row whose instance is TERMINAL is left alone (revive hazard: a later revive would deliver
-a stale row), and a row backed by a RUNNING/PAUSED task is left alone (AutoContinue owns
-those). Kill-switch `ENSEMBLE_HARD_REBOOT_BOOT_PASS=0` disables the pass (default ON —
-the deliverable is zero-user-action).
+The MQ boot pass resets message-queue rows stranded in `'processing'` back to `'ready'`. It is
+**reset-only** — it never re-dispatches a message. Two skip-guards protect the reset: a row
+whose instance is TERMINAL is left alone (revive hazard — a later revive would deliver a
+stale row), and a row backed by a RUNNING/PAUSED task is left alone (AutoContinue owns
+those). Kill-switch `ENSEMBLE_HARD_REBOOT_BOOT_PASS=0` disables the pass (default ON — the
+deliverable is zero-user-action).
 
 ## 2. Per-state RTO after the reboot
 
@@ -32,15 +31,14 @@ the deliverable is zero-user-action).
 | WAITING_CHILDREN | DependencyBus (durable, re-armed at boot) | bus-driven |
 | PAUSED | stays PAUSED — never auto-resumed | never (by design) |
 
-The StaleTaskRecovery `boot+10min` clamp is an **upper-bound backstop**, NOT the target
-RTO — recovery landing at ~10min means the auto-continue path did not fire.
+The StaleTaskRecovery `boot+10min` clamp is an **upper-bound backstop**, NOT the target RTO — recovery landing at ~10min means the auto-continue path did not fire.
 
 ## 3. PG ordering for an EXISTING install (D15)
 
 `scripts/upgrade/adopt-unit.sh` refuses to clobber an existing unit file, so editing the
 repo template does NOT reach an installed host. The template ships the
-`After=postgresql.service` line for NEW installs; existing installs need the drop-in —
-the ONLY delivery mechanism that reaches them. One stanza, ordering only (no `Wants=` /
+`After=postgresql.service` line for NEW installs; existing installs need the drop-in — the
+ONLY delivery mechanism that reaches them. One stanza, ordering only (no `Wants=` /
 `Requires=`):
 
 ```bash
@@ -57,8 +55,8 @@ sudo systemctl daemon-reload && sudo systemctl restart ensemble-main
 **Task-less RUNNING instances (D13 — tracked follow-up, not fixed here).** Invisible to
 every boot sweep (auto-continue roots on `task`; STR, the RDRS lanes, the bus sweeps and
 JobRecovery all root elsewhere), so they survive a reboot as silent ghosts. MANDATORY
-tracked follow-up commission (both 2026-10-19 RCAs were instances of it); the boot pass
-does not touch them.
+tracked follow-up commission (both 2026-10-19 RCAs were instances of it); the boot pass does
+not touch them.
 
 ```sql
 SELECT instance_id, status, agent_id, created_at FROM instances i WHERE i.status = 'running'
@@ -94,11 +92,10 @@ start; check PG reachability first.
 - **KMS_LANE-1 handles (G7.C).** If you used KMS handles, re-attach them after a hard
   reboot, or migrate to LANE-2 / Secrets. LANE-1 deprecation is a post-promote follow-up.
 - **QUEUE_DISCARD_ON_STARTUP interplay.** Shipped default is `false` (`config.yaml` →
-  `queue.discard_on_startup`), so the MQ boot pass clears stranded rows and the wedge
-  becomes a visible `pending` row. On an install overriding it to `true`, the deferred
-  discard wipe removes the doomed rows instead and `processing_count` reaches 0 post-boot.
-  On `false` the pass leaves the row visible at `ready` — accounting is honest, but the
-  row is still queued.
+  `queue.discard_on_startup`): the MQ boot pass clears stranded rows and the wedge becomes
+  a visible `ready` row — accounting is honest, but the row is still queued. On an install
+  overriding it to `true`, the deferred discard wipe removes the doomed rows instead and
+  `processing_count` reaches 0 post-boot.
 - **Known gaps (tracked, not fixed here).** D13 task-less RUNNING instances (MANDATORY
   follow-up, §4) · G1 JobRecovery alive-row (deferred) · G3 scheduler duplicate fire
   (parked, §5) · G7 KMS_LANE-1 deprecation (post-promote, §5) · G5 Task↔JobItem PAUSED
