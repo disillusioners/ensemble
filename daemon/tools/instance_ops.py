@@ -1,0 +1,1844 @@
+"""Instance ACT tools — the ``instance_ops`` privileged category (6 tools).
+
+Six ACTS over the instance fleet, each one an audited, gated wrapper
+over an EXISTING daemon primitive (D-3 — no new daemon subsystem):
+
+``instance_terminate``  — the destructive act (cascade, dry-run default)
+``instance_reclaim``    — terminal-only revive-by-documented-message
+``instance_nudge``      — inject a message into any instance
+``instance_mark``       — park / protect / suspect markers
+``instance_answer``     — answer a pending question pack
+``instance_dismiss``    — dismiss a pending question pack
+
+EVERY ACT IS AUDITED
+--------------------
+Every act writes a row to ``instance_ops_audit`` — the preview, the
+write-ahead intent and the committed outcome. Refusals from the
+protected-target gate, the budget, and the act itself are ledgered;
+input-validation and early-gate refusals (reason-required,
+self-surgery, not-found, target-too-young) are NOT. A destructive act
+that cannot be audited DOES NOT HAPPEN.
+
+The audit boundary is a TWO-TIER property (D-15), stated per tool:
+
+* **Tier 1 — true same-transaction.** ``instance_terminate`` (via the
+  additive ``audit_sink`` hook inside the lifecycle service's own
+  ``WriteGuardSession``) and ``instance_mark(protect|suspect)`` (via the
+  optional ``session=`` on ``repo.set_metadata``). The act and its
+  audit row commit TOGETHER or NEITHER commits.
+* **Tier 2 — write-ahead.** ``instance_nudge`` / ``instance_answer`` /
+  ``instance_dismiss`` / ``instance_reclaim`` / ``instance_mark(park)``
+  INSERT the audit row FIRST with ``outcome="pending"``, run the act,
+  then UPDATE the row. A crash mid-act leaves a durable ``pending``
+  row — the ledger always contains the intent, and the true outcome is
+  read from INSTANCE STATE, not from the ledger.
+
+``instance_mark(park)`` is deliberately Tier-2 (leader decision W3):
+the deliberate-pause machinery is a live subsystem fixed in v0.26.1,
+its writer is fail-open by design, and threading a session into it is
+explicitly NOT this category's business.
+
+THE GATES, IN ORDER (terminate)
+-------------------------------
+reason-required → instance-not-found → self-surgery-refused →
+target-too-young → [protected: protected-target-confirmation-required →
+confirmed-target-mismatch → no-user-provenance →
+direct-provenance-insufficient] → terminate-budget-exceeded →
+cascade-false-would-orphan-descendants → dry-run preview | apply.
+
+THE PROVENANCE GATE IS A SPEED BUMP, NOT A PROOF (D-18)
+-------------------------------------------------------
+Requiring ``pclass == "inherited"`` on a protected target CLOSES the
+direct-window-on-the-acting-instance forgery class (a trivial API POST
+straight at this instance mints a DIRECT window ⇒ refused). It does
+NOT close the DELEGATED forge: the inherited mint never inspects the
+root's own provenance, so a forged direct window on a spawner can
+still arm an inherited window here. That residual is DOCUMENTED
+(critical note ``f4cf9c4f`` / DF-4 owns the root fix) and is caught by
+the D-16 budget plus the post-hoc audit — never by this gate.
+
+THE KILL-SWITCH (D-7)
+---------------------
+``ENSEMBLE_INSTANCE_OPS_ENABLED=0`` disables every ACT (byte-identical
+no-op refusal). The READ category stays available — you diagnose with
+the reads while the acts are off.
+
+Access posture — TWO layers, BOTH required
+------------------------------------------
+1. The ``instance_ops`` category is PRIVILEGED, so it never joins the
+   empty-allow default-grant universe.
+2. A privileged category alone is NOT sufficient — a **literal tool
+   name** in an allow list bypasses the category gate entirely. So
+   every tool body ALSO calls the one shared module-level helper
+   :func:`_is_instance_ops_authorized`.
+
+Tools NEVER raise — every failure returns a typed refusal string in
+the house envelope:
+``Error: {label} REFUSED — reason={token}: {message}``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Annotated, Any
+
+from langchain_core.tools import tool
+from pydantic import BaseModel, Field
+
+from .provenance import ProvenanceVerdict, restart_provenance
+from ._tool_registry import register_tool_category
+
+logger = logging.getLogger(__name__)
+
+CATEGORY_NAME = "Instance Ops"
+CATEGORY_DOC = """\
+Gated, audited ACTS over the instance fleet — terminate, reclaim,
+nudge, mark, answer, dismiss.
+
+Tools in this category:
+- ``instance_terminate`` — terminate an instance (cascade by default)
+- ``instance_reclaim``   — revive a TERMINAL instance with a message
+- ``instance_nudge``     — inject a message into any instance
+- ``instance_mark``      — park / protect / suspect markers
+- ``instance_answer``    — answer a pending question pack
+- ``instance_dismiss``   — dismiss a pending question pack without answering
+
+Every act is AUDITED: it writes a row to the audit ledger, and a
+destructive act that cannot be audited does not happen. Every act
+requires a `reason` (free text, stored verbatim). Every destructive
+act defaults to `dry_run=True` — the preview shows exactly what would
+happen and mutates nothing.
+
+A PROTECTED target — a user-facing chat session, the leader, or an
+instance marked protected — additionally requires a named confirmation
+(`confirmed_target_id`, the exact instance id) AND a live user-origin
+provenance window that was INHERITED through a delegation chain. A
+window minted directly on THIS instance is refused on purpose: route
+the request through the leader instead.
+
+You never act on your own session. There is a kill switch: when the
+act surface is switched off, every act here refuses and the read
+surface keeps working.
+"""
+
+#: The agents allowed to operate the act surface. The privileged
+#: category gates VISIBILITY; this set gates AUTHORITY. Both are
+#: required (a literal-tool-name allow entry bypasses the category
+#: gate). MAINTENANCER-ONLY (D-13 — one owner for both categories).
+INSTANCE_OPS_AUTHORIZED_AGENTS: frozenset[str] = frozenset({"maintenancer"})
+
+#: The kill-switch environment variable (D-7). Default ON.
+KILL_SWITCH_ENV = "ENSEMBLE_INSTANCE_OPS_ENABLED"
+
+#: The exact byte-identical no-op every ACT returns when the kill
+#: switch is OFF (D-7). The shape is the contract — pinned by test.
+KILL_SWITCH_REFUSAL = (
+    "Error: INSTANCE_OPS DISABLED — reason=instance-ops-disabled: "
+    "the instance_ops act tools are disabled by configuration "
+    "(ENSEMBLE_INSTANCE_OPS_ENABLED=0). No mutation happened."
+)
+
+#: The terminate budget (D-16): N committed terminates per 24h,
+#: fleet-wide.
+TERMINATE_BUDGET_24H = 3
+#: The PROTECTED-target terminate budget (D-16): N per 24h.
+PROTECTED_TERMINATE_BUDGET_24H = 1
+#: The target min-age rail (D-16): a target younger than this refuses.
+TARGET_MIN_AGE_SECONDS = 600
+
+#: The metadata key namespace for the dynamic markers (D-11).
+PROTECT_MARKER_KEY = "instance_ops.protect"
+SUSPECT_MARKER_KEY = "instance_ops.suspect"
+
+#: Valid marker values for ``instance_mark``.
+VALID_MARKERS = ("park", "protect", "suspect")
+
+
+def _is_instance_ops_authorized(agent_id: str) -> bool:
+    """Is this agent allowed to operate the act surface?
+
+    ONE shared helper, called by ALL SIX tool bodies — the set lives in
+    exactly one place and the six bodies share it (the
+    ``daemon/tools/views_auth.py`` / ``daemon/tools/board_tools.py``
+    precedent).
+
+    Fail-closed: a blank or non-``str`` ``agent_id`` is NEVER
+    authorized.
+    """
+    if not isinstance(agent_id, str) or not agent_id:
+        return False
+    return agent_id in INSTANCE_OPS_AUTHORIZED_AGENTS
+
+
+def _resolve_instance_ops_enabled() -> bool:
+    """Resolve the kill-switch. Default ON; explicit off-spellings off.
+
+    Mirrors the ens-db lane's ``_resolve_repair_enabled`` resolution
+    order: env → default ON.
+    """
+    raw = os.environ.get(KILL_SWITCH_ENV)
+    if raw is None:
+        return True
+    return str(raw).strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+def _refusal(label: str, token: str, message: str) -> str:
+    """The house refusal envelope (identical shape in both categories)."""
+    return f"Error: {label} REFUSED — reason={token}: {message}"
+
+
+def _error(msg: str) -> str:
+    """House error envelope — tools never raise."""
+    return f"ERROR: {msg}"
+
+
+def _reason_missing(reason: Any) -> bool:
+    """The reason gate (D5) — required, free text, non-empty."""
+    return not isinstance(reason, str) or not reason.strip()
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _age_seconds(created_at: Any) -> int | None:
+    parsed = _parse_iso(created_at)
+    if parsed is None:
+        return None
+    return max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+
+
+def _is_user_facing_root_target(*, parent_id: Any, source_type: Any) -> bool:
+    """The STATIC user-facing-root predicate (D-4, leg 1).
+
+    Delegates to the EXISTING fail-closed predicate in
+    ``daemon/tools/instance.py`` — deferred import (that module imports
+    this one's factory; a module-level import would be circular).
+    """
+    try:
+        from .instance import _is_user_facing_root
+
+        return bool(
+            _is_user_facing_root(
+                parent_id=parent_id, source_type=source_type
+            )
+        )
+    except Exception:  # noqa: BLE001 — fail-closed on any resolution failure
+        return False
+
+
+def _provenance_for(manager: Any, instance_id: str) -> ProvenanceVerdict:
+    """The canonical provenance verdict — the SINGLE neutral helper.
+
+    AC-10a: this resolves to ``daemon.tools.provenance.restart_provenance``
+    (imported at module top). There is NO local re-implementation; a
+    source pin asserts the import.
+    """
+    try:
+        return restart_provenance(manager, instance_id)
+    except Exception as exc:  # noqa: BLE001 — fail-closed on any failure
+        logger.warning(
+            "instance_ops: provenance read failed for %s: %s: %s",
+            instance_id,
+            type(exc).__name__,
+            exc,
+        )
+        return ProvenanceVerdict(ok=False, pclass="", detail=f"provenance read failed: {type(exc).__name__}")
+
+
+def _user_origin_sources_hint() -> str:
+    """The refusal-path disclosure of what counts as user-origin."""
+    try:
+        from .upgrade_journal import user_origin_sources_display
+
+        return user_origin_sources_display()
+    except Exception:  # noqa: BLE001 — disclosure is best-effort
+        return ""
+
+
+def _target_state(manager: Any, instance_id: str) -> dict[str, Any] | None:
+    """The target's row as a dict (None when the row is gone)."""
+    repo = getattr(manager, "_instance_repository", None)
+    if repo is None:
+        return None
+    try:
+        row = repo.get(instance_id)
+    except Exception:  # noqa: BLE001 — read-only probe
+        return None
+    if row is None:
+        return None
+    info = row.to_dict()
+    info["children"] = repo.list_child_ids_permanent(instance_id)
+    return info
+
+
+def _is_protected_target(manager: Any, info: dict[str, Any]) -> bool:
+    """The protected determination — an OR of three layers (D-4).
+
+    1. STATIC: a user-facing chat root (``_is_user_facing_root``,
+       fail-closed on both legs) — OR ``agent_id == "leader"``.
+    2. DYNAMIC: an ``instance_ops.protect`` marker in the metadata.
+
+    A protect marker can only ADD protection; nothing in this category
+    can un-protect a statically protected target.
+    """
+    if (info.get("agent_id") or "") == "leader":
+        return True
+    metadata = info.get("metadata") or {}
+    source_type = (
+        metadata.get("source_type")
+        if isinstance(metadata, dict)
+        else None
+    )
+    if _is_user_facing_root_target(
+        parent_id=info.get("parent_id"), source_type=source_type
+    ):
+        return True
+    if isinstance(metadata, dict):
+        marker = metadata.get(PROTECT_MARKER_KEY)
+        if isinstance(marker, dict) and marker.get("protected") is True:
+            return True
+    return False
+
+
+def _audit_repo_for(manager: Any):
+    """The audit ledger for this manager's engine (defensive)."""
+    engine = getattr(manager, "engine", None)
+    if engine is None:
+        return None
+    from ..repositories.instance_ops.repository import InstanceOpsAuditRepository
+
+    return InstanceOpsAuditRepository(engine)
+
+
+def _protected_gate(
+    *,
+    target_id: str,
+    confirmed_target_id: str | None,
+    verdict: ProvenanceVerdict,
+    label: str,
+) -> str | None:
+    """The THREE-condition protected-target gate (D-17 / D-18).
+
+    Returns ``None`` when the gate PASSES, or the refusal string.
+    """
+    if confirmed_target_id is None:
+        return _refusal(
+            label,
+            "protected-target-confirmation-required",
+            (
+                f"{target_id!r} is a protected target. Pass "
+                f"confirmed_target_id='{target_id}' — the confirmation "
+                "NAMES the target it authorizes."
+            ),
+        )
+    if confirmed_target_id != target_id:
+        return _refusal(
+            label,
+            "confirmed-target-mismatch",
+            (
+                f"confirmed_target_id={confirmed_target_id!r} does not "
+                f"name the target {target_id!r}. The confirmation must "
+                "name the target the user consented to, verbatim."
+            ),
+        )
+    if not verdict.ok:
+        hint = _user_origin_sources_hint()
+        extra = f" What counts as user-origin: {hint}." if hint else ""
+        return _refusal(
+            label,
+            "no-user-provenance",
+            (
+                "no live user-origin provenance window on this turn. "
+                "The windows are in-memory and are wiped on a daemon "
+                f"restart.{extra}"
+            ),
+        )
+    if verdict.pclass != "inherited":
+        return _refusal(
+            label,
+            "direct-provenance-insufficient",
+            (
+                f"the provenance window on this turn is "
+                f"{verdict.pclass!r}; a protected target requires an "
+                "INHERITED window (a delegation chain from a "
+                "user-facing turn). A DIRECT window — genuine or "
+                "forged — is refused ON PURPOSE: route the request "
+                "through the leader. Note that any dispatch that is "
+                "not an internal_agent: delegation CLEARS the "
+                "inherited window, so a delegated turn arriving on "
+                "another lane also refuses, fail-closed."
+            ),
+        )
+    return None
+
+
+async def _resolve_target(manager: Any, instance_id: str) -> str:
+    """Fuzzy-resolve an instance id (deferred import — see module doc)."""
+    from .instance import _resolve_instance_id
+
+    return await _resolve_instance_id(manager, instance_id)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# The factory — six act tools
+# ═════════════════════════════════════════════════════════════════════
+def create_instance_ops_tools(
+    manager: Any,
+    *,
+    current_instance_id: str = "",
+    agent_id: str = "",
+    agent_tag: str | None = None,
+) -> list:
+    """Build the six ``instance_ops`` tools for one instance/agent.
+
+    Args:
+        manager: The ``InstanceManager`` — every act wraps an existing
+            daemon primitive through it.
+        current_instance_id: The caller's instance id. The
+            self-surgery refusal compares against it.
+        agent_id: The caller's agent id — the layer-3 gate's input.
+        agent_tag: The caller's version tag (unused; signature parity).
+
+    Returns:
+        A list of the six ``@tool``-decorated callables.
+    """
+    caller_instance_id = current_instance_id or ""
+    caller_agent_id = agent_id or ""
+
+    # ── instance_terminate ───────────────────────────────────────────
+    class InstanceTerminateInput(BaseModel):
+        """Input schema for instance_terminate."""
+
+        id: Annotated[
+            str,
+            Field(
+                description=(
+                    "Target instance id (short form accepted). Required. "
+                    "Acting on your own session is refused."
+                )
+            ),
+        ]
+        cascade: Annotated[
+            bool,
+            Field(
+                default=True,
+                description=(
+                    "True (default) terminates the target AND its whole "
+                    "cascade tree (the underlying service is total). "
+                    "False means 'the target only, descendants stay "
+                    "running' — that CREATES orphans, so it REFUSES with "
+                    "reason=cascade-false-would-orphan-descendants unless "
+                    "allow_orphan_descendants=True acknowledges it."
+                ),
+            ),
+        ]
+        reason: Annotated[
+            str,
+            Field(
+                description=(
+                    "REQUIRED, free text, stored verbatim in the audit "
+                    "ledger. The health report's evidence feeds this."
+                )
+            ),
+        ]
+        dry_run: Annotated[
+            bool,
+            Field(
+                default=True,
+                description=(
+                    "True (default) — the preview lists the target, the "
+                    "full cascade tree, the protected determination, the "
+                    "confirmation requirement, the budget state and the "
+                    "orphan list, and mutates NOTHING. False applies the "
+                    "terminate (audited, Tier-1 same-transaction)."
+                ),
+            ),
+        ]
+        confirmed_target_id: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "The named-target confirmation for a PROTECTED target "
+                    "(D-17): must equal `id` VERBATIM. Anything else is "
+                    "refused. Attributable and audited — the ledger "
+                    "records it next to the provenance fields."
+                ),
+            ),
+        ]
+        allow_orphan_descendants: Annotated[
+            bool,
+            Field(
+                default=False,
+                description=(
+                    "Explicit acknowledgement for cascade=False on a "
+                    "target with live descendants. When True the preview "
+                    "AND the audit row NAME the descendants that will be "
+                    "orphaned."
+                ),
+            ),
+        ]
+
+    @register_tool_category("instance_ops")
+    @tool(args_schema=InstanceTerminateInput)
+    async def instance_terminate(
+        id: str,
+        cascade: bool = True,
+        reason: str = "",
+        dry_run: bool = True,
+        confirmed_target_id: str | None = None,
+        allow_orphan_descendants: bool = False,
+    ) -> str:
+        """Terminate an instance (audited, gated, dry-run default)."""
+        label = "INSTANCE_TERMINATE"
+        if not _is_instance_ops_authorized(caller_agent_id):
+            return _error("instance_ops operation not permitted for this agent")
+        if not _resolve_instance_ops_enabled():
+            return KILL_SWITCH_REFUSAL
+        audit = _audit_repo_for(manager)
+
+        if _reason_missing(reason):
+            return _refusal(
+                label, "reason-required", "the `reason` argument is required"
+            )
+        try:
+            target_id = await _resolve_target(manager, id)
+        except ValueError as exc:
+            if audit is not None:
+                audit.write_refusal(
+                    action="instance_terminate",
+                    target=str(id),
+                    reason=reason,
+                    error_message=_refusal(label, "instance-not-found", str(exc)),
+                    actor_instance_id=caller_instance_id,
+                    actor_agent_id=caller_agent_id,
+                    confirmed_target_id=confirmed_target_id,
+                )
+            return _refusal(label, "instance-not-found", str(exc))
+        if target_id == caller_instance_id:
+            return _refusal(
+                label,
+                "self-surgery-refused",
+                "an act tool never operates on its own session",
+            )
+
+        info = await asyncio.to_thread(_target_state, manager, target_id)
+        if info is None:
+            return _refusal(
+                label, "instance-not-found", f"no instance row for {target_id!r}"
+            )
+
+        # ── the min-age rail (D-16) ─────────────────────────────────
+        age = _age_seconds(info.get("created_at"))
+        if age is not None and age < TARGET_MIN_AGE_SECONDS:
+            return _refusal(
+                label,
+                "target-too-young",
+                (
+                    f"the target is {age}s old (min "
+                    f"{TARGET_MIN_AGE_SECONDS}s). Terminate-the-thing-that-"
+                    "just-started is the footgun this rail exists to kill."
+                ),
+            )
+
+        # ── the protected determination + the three-condition gate ──
+        protected = _is_protected_target(manager, info)
+        verdict = _provenance_for(manager, caller_instance_id)
+        gate_refusal = None
+        if protected:
+            gate_refusal = _protected_gate(
+                target_id=target_id,
+                confirmed_target_id=confirmed_target_id,
+                verdict=verdict,
+                label=label,
+            )
+            if gate_refusal is not None and audit is not None:
+                audit.write_refusal(
+                    action="instance_terminate",
+                    target=target_id,
+                    reason=reason,
+                    error_message=gate_refusal,
+                    actor_instance_id=caller_instance_id,
+                    actor_agent_id=caller_agent_id,
+                    confirmed_target_id=confirmed_target_id,
+                    provenance_class=verdict.pclass or None,
+                    provenance_depth=verdict.depth or None,
+                    root_source=verdict.root_source,
+                    root_message_id=verdict.root_message_id,
+                )
+            if gate_refusal is not None:
+                return gate_refusal
+
+        # ── the budget rails (D-16) ─────────────────────────────────
+        budget_state = {
+            "committed_terminates_24h": 0,
+            "protected_terminates_24h": 0,
+            "fleet_budget": TERMINATE_BUDGET_24H,
+            "protected_budget": PROTECTED_TERMINATE_BUDGET_24H,
+            "remaining": TERMINATE_BUDGET_24H,
+        }
+        budget_refusal = None
+        if audit is not None:
+            protected_count = audit.count_committed_protected_terminates(hours=24)
+            fleet_count = audit.count_committed_terminates(hours=24)
+            budget_state.update(
+                {
+                    "committed_terminates_24h": fleet_count,
+                    "protected_terminates_24h": protected_count,
+                    "remaining": max(
+                        0, TERMINATE_BUDGET_24H - fleet_count
+                    ),
+                }
+            )
+            if protected and protected_count >= PROTECTED_TERMINATE_BUDGET_24H:
+                budget_refusal = _refusal(
+                    label,
+                    "terminate-budget-exceeded",
+                    (
+                        f"the protected-target budget is "
+                        f"{PROTECTED_TERMINATE_BUDGET_24H}/24h and "
+                        f"{protected_count} protected terminate(s) are "
+                        "already committed."
+                    ),
+                )
+            elif fleet_count >= TERMINATE_BUDGET_24H:
+                budget_refusal = _refusal(
+                    label,
+                    "terminate-budget-exceeded",
+                    (
+                        f"the terminate budget is "
+                        f"{TERMINATE_BUDGET_24H}/24h fleet-wide and "
+                        f"{fleet_count} are already committed."
+                    ),
+                )
+        if budget_refusal is not None:
+            if audit is not None:
+                audit.write_refusal(
+                    action="instance_terminate",
+                    target=target_id,
+                    reason=reason,
+                    error_message=budget_refusal,
+                    actor_instance_id=caller_instance_id,
+                    actor_agent_id=caller_agent_id,
+                    confirmed_target_id=confirmed_target_id,
+                    provenance_class=verdict.pclass or None,
+                    provenance_depth=verdict.depth or None,
+                    root_source=verdict.root_source,
+                    root_message_id=verdict.root_message_id,
+                )
+            return budget_refusal
+
+        # ── the cascade / orphan determination (D-5) ────────────────
+        children = info.get("children") or []
+        live_descendants = [
+            child_id
+            for child_id in children
+            if _descendant_is_live(manager, child_id)
+        ]
+        orphans: list[str] = []
+        if not cascade and live_descendants:
+            if not allow_orphan_descendants:
+                refusal = _refusal(
+                    label,
+                    "cascade-false-would-orphan-descendants",
+                    (
+                        f"cascade=False would orphan "
+                        f"{len(live_descendants)} live descendant(s): "
+                        f"{', '.join(live_descendants[:10])}"
+                        + (
+                            " …" if len(live_descendants) > 10 else ""
+                        )
+                        + ". Pass allow_orphan_descendants=True to "
+                        "acknowledge, or cascade=True to take the tree."
+                    ),
+                )
+                if audit is not None:
+                    audit.write_refusal(
+                        action="instance_terminate",
+                        target=target_id,
+                        reason=reason,
+                        error_message=refusal,
+                        actor_instance_id=caller_instance_id,
+                        actor_agent_id=caller_agent_id,
+                        before={"status": info.get("status"), "protected": protected},
+                    )
+                return refusal
+            orphans = list(live_descendants)
+
+        before_snapshot = {
+            "status": info.get("status"),
+            "agent_id": info.get("agent_id"),
+            "protected": protected,
+            "cascade": cascade,
+            "orphans": orphans,
+        }
+        prov_fields = {
+            "confirmed_target_id": confirmed_target_id,
+            "provenance_class": verdict.pclass or None,
+            "provenance_depth": verdict.depth or None,
+            "root_source": verdict.root_source,
+            "root_message_id": verdict.root_message_id,
+        }
+
+        if dry_run:
+            preview_row_id = None
+            if audit is not None:
+                preview_row_id = audit.write_preview(
+                    action="instance_terminate",
+                    target=target_id,
+                    reason=reason,
+                    before=before_snapshot,
+                    actor_instance_id=caller_instance_id,
+                    actor_agent_id=caller_agent_id,
+                    **prov_fields,
+                )
+            payload = {
+                "dry_run": True,
+                "action": "instance_terminate",
+                "target": target_id,
+                "agent_id": info.get("agent_id"),
+                "cascade": cascade,
+                "cascade_tree": children,
+                "protected": protected,
+                "protected_confirmation_required": protected,
+                "confirmation": (
+                    "provided"
+                    if protected and confirmed_target_id == target_id
+                    else ("required" if protected else "not-required")
+                ),
+                "provenance": {
+                    "ok": verdict.ok,
+                    "pclass": verdict.pclass,
+                    "depth": verdict.depth,
+                    "root_source": verdict.root_source,
+                    "root_message_id": verdict.root_message_id,
+                    "detail": verdict.detail,
+                },
+                "budget": budget_state,
+                "orphans_would_be_created": orphans,
+                "orphan_list": orphans,
+                "target_age_seconds": age,
+                "audit_preview_row": preview_row_id,
+                "note": "NO mutation happened (dry-run)",
+            }
+            return json.dumps(payload, default=str) + "\nNO mutation happened (dry-run)"
+
+        # ── apply (Tier-1: act + audit row in ONE transaction) ─────
+        sink_error: list[str] = []
+
+        def _audit_sink(session) -> None:
+            if audit is None:
+                sink_error.append("audit ledger unavailable")
+                raise RuntimeError("instance_ops audit ledger unavailable")
+            audit.write_audit_and_act(
+                session,
+                action="instance_terminate",
+                target=target_id,
+                reason=reason,
+                before=before_snapshot,
+                outcome="committed",
+                actor_instance_id=caller_instance_id,
+                actor_agent_id=caller_agent_id,
+                **prov_fields,
+            )
+
+        try:
+            result = await manager.terminate_instance(
+                target_id,
+                audit_sink=_audit_sink,
+            )
+        except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
+            logger.exception("instance_terminate act failed")
+            return _error(
+                f"instance_terminate failed and was rolled back with its "
+                f"audit row: {type(exc).__name__}"
+            )
+        if sink_error:
+            return _error("instance_terminate refused: " + sink_error[0])
+        if not result:
+            if audit is not None:
+                audit.write_refusal(
+                    action="instance_terminate",
+                    target=target_id,
+                    reason=reason,
+                    error_message="service reported not-terminated (missing or already terminal)",
+                    actor_instance_id=caller_instance_id,
+                    actor_agent_id=caller_agent_id,
+                    **prov_fields,
+                )
+            return _error(
+                "instance_terminate: the service reported the target was "
+                "not terminated (missing or already terminal)"
+            )
+        return json.dumps(
+            {
+                "terminated": True,
+                "action": "instance_terminate",
+                "target": target_id,
+                "cascade": cascade,
+                "orphans_created": orphans,
+                "audit": "committed (Tier-1, same transaction as the act)",
+            },
+            default=str,
+        )
+
+    instance_terminate._full_doc_ = """Terminate an instance — the DESTRUCTIVE act (audited, gated).
+
+`dry_run` defaults to TRUE: the default call is a preview that mutates
+nothing and lists exactly what would happen.
+
+The gates, in order:
+1. `reason` is required (free text, stored verbatim in the ledger).
+2. The target must exist (short form accepted; fuzzy-matched).
+3. Never your own session (`self-surgery-refused`).
+4. A target younger than 600s refuses (`target-too-young`).
+5. A PROTECTED target — a user-facing chat session, the leader, or an
+   instance marked protected — additionally requires ALL of:
+   `confirmed_target_id == id` (verbatim), a live user-origin provenance
+   window, and that window to be INHERITED (`pclass == "inherited"`).
+   A DIRECT window on this session is refused ON PURPOSE — route
+   through the leader. Note the inherited window is CLEARED by any
+   non-internal_agent dispatch, so a delegated turn on another lane
+   also refuses, fail-closed.
+6. The budget: at most 3 committed terminates per 24h fleet-wide, and
+   at most 1 per 24h for protected targets (`terminate-budget-exceeded`).
+7. `cascade=False` on a target with live descendants refuses
+   (`cascade-false-would-orphan-descendants`) unless
+   `allow_orphan_descendants=True` — and then the preview AND the audit
+   row both NAME the orphans.
+
+The audit row is written in the SAME transaction as the terminate
+(Tier-1): if the audit write fails, the terminate rolls back. A
+destructive act that cannot be audited never happens.
+
+Kill switch: `ENSEMBLE_INSTANCE_OPS_ENABLED=0` disables this act (the
+reads stay available).
+
+Args:
+    id: Target instance id. Required.
+    cascade: True (default) takes the whole cascade tree. False means
+        "target only" — and refuses when that would orphan live
+        descendants.
+    reason: REQUIRED free text; stored verbatim.
+    dry_run: True (default) = preview, no mutation.
+    confirmed_target_id: The named-target confirmation for a protected
+        target — must equal `id` verbatim.
+    allow_orphan_descendants: Explicit acknowledgement for
+        `cascade=False` with live descendants.
+
+Returns:
+    dry_run=True: the verdict block (target, cascade tree, protected
+    determination, confirmation requirement, budget state, orphan list)
+    ending with `NO mutation happened (dry-run)`.
+    dry_run=False: the committed result.
+
+Examples:
+    instance_terminate(id="abc123", reason="wedged 6h, health report #4")
+    instance_terminate(id="abc123", reason="...", dry_run=False)
+    instance_terminate(id="root1", reason="...", cascade=False,
+                       allow_orphan_descendants=True)
+"""
+
+    def _descendant_is_live(manager_ref: Any, child_id: str) -> bool:
+        """A descendant is LIVE when its status is non-terminal."""
+        child_info = _target_state(manager_ref, child_id)
+        if child_info is None:
+            return False
+        terminal = {"completed", "terminated", "error", "failed"}
+        return child_info.get("status") not in terminal
+
+    # ── instance_reclaim ─────────────────────────────────────────────
+    class InstanceReclaimInput(BaseModel):
+        """Input schema for instance_reclaim."""
+
+        id: Annotated[str, Field(description="Target instance id (short form accepted). Required.")]
+        message: Annotated[
+            str,
+            Field(
+                description=(
+                    "REQUIRED — the revival message delivered to the "
+                    "revived instance. The message itself IS the revival "
+                    "record: it lands in the revived instance's checkpoint "
+                    "and is the durable evidence of what was revived and why."
+                )
+            ),
+        ]
+        reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
+        dry_run: Annotated[
+            bool,
+            Field(
+                default=True,
+                description=(
+                    "True (default) — the preview shows the target's "
+                    "terminal status and the message; no mutation. False "
+                    "revives the target by documented message (audited, "
+                    "Tier-2 write-ahead)."
+                )
+            ),
+        ]
+
+    @register_tool_category("instance_ops")
+    @tool(args_schema=InstanceReclaimInput)
+    async def instance_reclaim(
+        id: str, message: str = "", reason: str = "", dry_run: bool = True
+    ) -> str:
+        """Revive a TERMINAL instance with a documented message (audited)."""
+        label = "INSTANCE_RECLAIM"
+        if not _is_instance_ops_authorized(caller_agent_id):
+            return _error("instance_ops operation not permitted for this agent")
+        if not _resolve_instance_ops_enabled():
+            return KILL_SWITCH_REFUSAL
+        audit = _audit_repo_for(manager)
+        if _reason_missing(reason):
+            return _refusal(label, "reason-required", "the `reason` argument is required")
+        if not isinstance(message, str) or not message.strip():
+            return _refusal(label, "message-required", "the `message` argument is required")
+        try:
+            target_id = await _resolve_target(manager, id)
+        except ValueError as exc:
+            return _refusal(label, "instance-not-found", str(exc))
+        if target_id == caller_instance_id:
+            return _refusal(label, "self-surgery-refused", "an act tool never operates on its own session")
+        info = await asyncio.to_thread(_target_state, manager, target_id)
+        if info is None:
+            return _refusal(label, "instance-not-found", f"no instance row for {target_id!r}")
+        terminal = {"completed", "terminated", "error", "failed"}
+        if info.get("status") not in terminal:
+            return _refusal(
+                label,
+                "target-not-terminal",
+                (
+                    f"{target_id!r} is {info.get('status')!r}, not terminal. "
+                    "Reclaim revives a DEAD instance only — use "
+                    "instance_nudge to deliver to a live one."
+                ),
+            )
+        if dry_run:
+            preview_row = None
+            if audit is not None:
+                preview_row = audit.write_preview(
+                    action="instance_reclaim",
+                    target=target_id,
+                    reason=reason,
+                    before={"status": info.get("status")},
+                    actor_instance_id=caller_instance_id,
+                    actor_agent_id=caller_agent_id,
+                )
+            return (
+                json.dumps(
+                    {
+                        "dry_run": True,
+                        "action": "instance_reclaim",
+                        "target": target_id,
+                        "status": info.get("status"),
+                        "message": message,
+                        "audit_preview_row": preview_row,
+                        "note": "NO mutation happened (dry-run)",
+                    },
+                    default=str,
+                )
+                + "\nNO mutation happened (dry-run)"
+            )
+        # Tier-2 write-ahead: the intent row FIRST, the act, then settle.
+        row_id = None
+        if audit is not None:
+            row_id = audit.write_audit_ahead(
+                action="instance_reclaim",
+                target=target_id,
+                reason=reason,
+                before={"status": info.get("status")},
+                actor_instance_id=caller_instance_id,
+                actor_agent_id=caller_agent_id,
+            )
+        try:
+            result = await manager.enqueue_message(
+                target_id, message, source=f"instance_ops:{caller_instance_id or 'unknown'}"
+            )
+            ok = bool(getattr(result, "ok", True)) if not isinstance(result, dict) else bool(result.get("ok", True))
+        except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
+            # AC-9b: the row is deliberately LEFT at "pending" — an
+            # unexpected mid-act failure has an UNKNOWN outcome (the act
+            # may have partially happened), and "pending" is the honest
+            # unknown-outcome state the reconciliation surface surfaces.
+            logger.exception("instance_reclaim act failed (audit row left pending)")
+            return _error(f"instance_reclaim failed: {type(exc).__name__}")
+        if audit is not None and row_id:
+            audit.settle_audit(row_id, "committed", after={"revived": bool(ok)})
+        return json.dumps(
+            {
+                "revived": bool(ok),
+                "action": "instance_reclaim",
+                "target": target_id,
+                "message_delivered": message,
+                "audit": "committed (Tier-2 write-ahead)",
+            },
+            default=str,
+        )
+
+    instance_reclaim._full_doc_ = """Revive a TERMINAL instance — terminal-only, reason-required,
+revive-by-documented-message.
+
+A message to a COMPLETED / TERMINATED / ERROR / FAILED instance flips
+it to RUNNING and reuses its checkpoint (the daemon's revive-on-send
+primitive). The message IS the revival record: it lands in the revived
+instance's checkpoint, which is the durable evidence of what was
+revived and why — independent of the audit row.
+
+NON-terminal targets refuse with `target-not-terminal` (that is what
+distinguishes reclaim from `instance_nudge`, which delivers to any
+target). Your own session refuses (`self-surgery-refused`).
+
+Audit tier: 2 (write-ahead) — the intent row is written FIRST with
+`outcome="pending"`, the act runs, the row is settled. A crash mid-act
+leaves a durable `pending` row.
+
+Args:
+    id: Target instance id. Required.
+    message: REQUIRED — the revival message delivered to the target.
+    reason: REQUIRED free text; stored verbatim.
+    dry_run: True (default) = preview, no mutation.
+
+Examples:
+    instance_reclaim(id="abc123", message="Resume: the wedge is cleared, report.", reason="recovery after fix")
+"""
+
+    # ── instance_nudge ───────────────────────────────────────────────
+    class InstanceNudgeInput(BaseModel):
+        """Input schema for instance_nudge."""
+
+        id: Annotated[str, Field(description="Target instance id (short form accepted). Required.")]
+        message: Annotated[
+            str,
+            Field(
+                description=(
+                    "REQUIRED — the message to inject. Delivered into the "
+                    "target's live turn when one is running, otherwise "
+                    "durably enqueued."
+                )
+            ),
+        ]
+        reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
+        dry_run: Annotated[
+            bool,
+            Field(
+                default=True,
+                description=(
+                    "True (default) — preview only. Note: a nudge to a "
+                    "TERMINAL instance REVIVES it (revive-on-send); the "
+                    "preview names that when the target is terminal."
+                )
+            ),
+        ]
+
+    @register_tool_category("instance_ops")
+    @tool(args_schema=InstanceNudgeInput)
+    async def instance_nudge(
+        id: str, message: str = "", reason: str = "", dry_run: bool = True
+    ) -> str:
+        """Inject a message into any instance (audited)."""
+        label = "INSTANCE_NUDGE"
+        if not _is_instance_ops_authorized(caller_agent_id):
+            return _error("instance_ops operation not permitted for this agent")
+        if not _resolve_instance_ops_enabled():
+            return KILL_SWITCH_REFUSAL
+        audit = _audit_repo_for(manager)
+        if _reason_missing(reason):
+            return _refusal(label, "reason-required", "the `reason` argument is required")
+        if not isinstance(message, str) or not message.strip():
+            return _refusal(label, "message-required", "the `message` argument is required")
+        try:
+            target_id = await _resolve_target(manager, id)
+        except ValueError as exc:
+            return _refusal(label, "instance-not-found", str(exc))
+        info = await asyncio.to_thread(_target_state, manager, target_id)
+        if info is None:
+            return _refusal(label, "instance-not-found", f"no instance row for {target_id!r}")
+        terminal = {"completed", "terminated", "error", "failed"}
+        would_revive = info.get("status") in terminal
+        if dry_run:
+            preview_row = None
+            if audit is not None:
+                preview_row = audit.write_preview(
+                    action="instance_nudge",
+                    target=target_id,
+                    reason=reason,
+                    before={"status": info.get("status")},
+                    actor_instance_id=caller_instance_id,
+                    actor_agent_id=caller_agent_id,
+                )
+            return (
+                json.dumps(
+                    {
+                        "dry_run": True,
+                        "action": "instance_nudge",
+                        "target": target_id,
+                        "status": info.get("status"),
+                        "message": message,
+                        "would_revive": would_revive,
+                        "audit_preview_row": preview_row,
+                        "note": "NO mutation happened (dry-run)",
+                    },
+                    default=str,
+                )
+                + "\nNO mutation happened (dry-run)"
+            )
+        row_id = None
+        if audit is not None:
+            row_id = audit.write_audit_ahead(
+                action="instance_nudge",
+                target=target_id,
+                reason=reason,
+                before={"status": info.get("status")},
+                actor_instance_id=caller_instance_id,
+                actor_agent_id=caller_agent_id,
+            )
+        try:
+            injected = False
+            graph_task = getattr(manager, "_graph_tasks", {}).get(target_id) \
+                if isinstance(getattr(manager, "_graph_tasks", None), dict) else None
+            if graph_task is not None and not graph_task.done():
+                manager.set_injection(
+                    target_id, message, source=f"instance_ops:{caller_instance_id or 'unknown'}"
+                )
+                injected = True
+            else:
+                await manager.enqueue_message(
+                    target_id, message, source=f"instance_ops:{caller_instance_id or 'unknown'}"
+                )
+        except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
+            # AC-9b: left at "pending" — unknown outcome (see reclaim).
+            logger.exception("instance_nudge act failed (audit row left pending)")
+            return _error(f"instance_nudge failed: {type(exc).__name__}")
+        if audit is not None and row_id:
+            audit.settle_audit(row_id, "committed", after={"lane": "injection" if injected else "enqueue"})
+        return json.dumps(
+            {
+                "delivered": True,
+                "action": "instance_nudge",
+                "target": target_id,
+                "lane": "injection" if injected else "enqueue",
+                "revived": would_revive,
+                "audit": "committed (Tier-2 write-ahead)",
+            },
+            default=str,
+        )
+
+    instance_nudge._full_doc_ = """Inject a message into ANY instance (not just a job root).
+
+Wraps the daemon's existing message-delivery primitives: a LIVE target
+(a running turn) receives a RAM injection that lands in its current
+turn; anything else gets a durable enqueue. A send to a TERMINAL
+instance REVIVES it (revive-on-send) — the preview names that when the
+target is terminal.
+
+Args:
+    id: Target instance id. Required.
+    message: REQUIRED — the message to inject.
+    reason: REQUIRED free text; stored verbatim.
+    dry_run: True (default) = preview, no mutation.
+
+Audit tier: 2 (write-ahead).
+
+Examples:
+    instance_nudge(id="abc123", message="Status check — report your state.", reason="wedge probe")
+"""
+
+    # ── instance_mark ────────────────────────────────────────────────
+    class InstanceMarkInput(BaseModel):
+        """Input schema for instance_mark."""
+
+        id: Annotated[str, Field(description="Target instance id (short form accepted). Required.")]
+        marker: Annotated[
+            str,
+            Field(
+                description=(
+                    "One of 'park' | 'protect' | 'suspect'. park writes the "
+                    "deliberate-pause tombstone (the release path defers to "
+                    "it); protect adds the dynamic protection layer "
+                    "(idempotent refusal on a repeat); suspect is a "
+                    "non-blocking annotation. Anything else is refused with "
+                    "reason=invalid-marker. There is NO unprotect."
+                )
+            ),
+        ]
+        note: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description="Optional free-text annotation stored with the marker."
+            ),
+        ]
+        reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
+        dry_run: Annotated[
+            bool,
+            Field(
+                default=True,
+                description=(
+                    "True (default) — preview only. False writes the marker "
+                    "(audited: protect/suspect are Tier-1 same-transaction; "
+                    "park is Tier-2 write-ahead)."
+                )
+            ),
+        ]
+
+    @register_tool_category("instance_ops")
+    @tool(args_schema=InstanceMarkInput)
+    async def instance_mark(
+        id: str,
+        marker: str = "",
+        note: str | None = None,
+        reason: str = "",
+        dry_run: bool = True,
+    ) -> str:
+        """Write a park / protect / suspect marker (audited)."""
+        label = "INSTANCE_MARK"
+        if not _is_instance_ops_authorized(caller_agent_id):
+            return _error("instance_ops operation not permitted for this agent")
+        if not _resolve_instance_ops_enabled():
+            return KILL_SWITCH_REFUSAL
+        audit = _audit_repo_for(manager)
+        if _reason_missing(reason):
+            return _refusal(label, "reason-required", "the `reason` argument is required")
+        if marker not in VALID_MARKERS:
+            return _refusal(
+                label,
+                "invalid-marker",
+                f"marker must be one of {', '.join(VALID_MARKERS)} (got {marker!r})",
+            )
+        try:
+            target_id = await _resolve_target(manager, id)
+        except ValueError as exc:
+            return _refusal(label, "instance-not-found", str(exc))
+        if target_id == caller_instance_id:
+            return _refusal(label, "self-surgery-refused", "an act tool never operates on its own session")
+        info = await asyncio.to_thread(_target_state, manager, target_id)
+        if info is None:
+            return _refusal(label, "instance-not-found", f"no instance row for {target_id!r}")
+
+        metadata = info.get("metadata") or {}
+        already_protected = (
+            isinstance(metadata.get(PROTECT_MARKER_KEY), dict)
+            and metadata[PROTECT_MARKER_KEY].get("protected") is True
+        )
+        if marker == "protect" and already_protected:
+            return _refusal(
+                label,
+                "marker-already-set",
+                f"{target_id!r} already carries a protect marker",
+            )
+
+        before_snapshot = {"status": info.get("status"), "marker": marker}
+        if dry_run:
+            preview_row = None
+            if audit is not None:
+                preview_row = audit.write_preview(
+                    action="instance_mark",
+                    target=target_id,
+                    reason=reason,
+                    before=before_snapshot,
+                    actor_instance_id=caller_instance_id,
+                    actor_agent_id=caller_agent_id,
+                )
+            return (
+                json.dumps(
+                    {
+                        "dry_run": True,
+                        "action": "instance_mark",
+                        "target": target_id,
+                        "marker": marker,
+                        "note": note,
+                        "already_protected": already_protected,
+                        "audit_preview_row": preview_row,
+                        "note_line": "NO mutation happened (dry-run)",
+                    },
+                    default=str,
+                )
+                + "\nNO mutation happened (dry-run)"
+            )
+
+        if marker == "park":
+            # Tier-2 (leader decision W3): the deliberate-pause machinery
+            # is a live subsystem fixed in v0.26.1; its writer is
+            # fail-open by design and takes NO session. Do NOT thread a
+            # session into it.
+            from ..services.question_pause_set import mark_deliberate_pause_override
+
+            row_id = None
+            if audit is not None:
+                row_id = audit.write_audit_ahead(
+                    action="instance_mark",
+                    target=target_id,
+                    reason=reason,
+                    before=before_snapshot,
+                    actor_instance_id=caller_instance_id,
+                    actor_agent_id=caller_agent_id,
+                )
+            try:
+                wrote = await mark_deliberate_pause_override(manager, target_id)
+            except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
+                # AC-9b: left at "pending" — unknown outcome (see reclaim).
+                logger.exception("instance_mark(park) act failed (audit row left pending)")
+                return _error(f"instance_mark(park) failed: {type(exc).__name__}")
+            if audit is not None and row_id:
+                audit.settle_audit(
+                    row_id, "committed" if wrote else "error",
+                    error_message=None if wrote else "deliberate-pause writer returned False",
+                )
+            if not wrote:
+                return _error(
+                    "instance_mark(park): the deliberate-pause writer "
+                    "declined (the target may not be pausable in its "
+                    "current state)"
+                )
+            return json.dumps(
+                {
+                    "marked": True,
+                    "action": "instance_mark",
+                    "target": target_id,
+                    "marker": "park",
+                    "audit": "committed (Tier-2 write-ahead)",
+                },
+                default=str,
+            )
+
+        # protect / suspect — Tier-1: the marker write and the audit row
+        # commit TOGETHER in ONE transaction.
+        key = PROTECT_MARKER_KEY if marker == "protect" else SUSPECT_MARKER_KEY
+        value = {
+            ("protected" if marker == "protect" else "suspected"): True,
+            "note": note,
+            "marked_by": caller_instance_id or None,
+            "marked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        repo = getattr(manager, "_instance_repository", None)
+        if repo is None:
+            return _error("instance_ops: instance repository unavailable")
+        from sqlmodel import Session as _Session
+
+        try:
+            with _Session(manager.engine) as session:
+                if audit is None:
+                    raise RuntimeError("instance_ops audit ledger unavailable")
+
+                def _act(s):
+                    repo.set_metadata(target_id, key, value, session=s)
+
+                audit.write_audit_and_act(
+                    session,
+                    action="instance_mark",
+                    target=target_id,
+                    reason=reason,
+                    before=before_snapshot,
+                    after={"marker": marker, "key": key},
+                    outcome="committed",
+                    actor_instance_id=caller_instance_id,
+                    actor_agent_id=caller_agent_id,
+                    act=_act,
+                )
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 — Tier-1 rolls BOTH back
+            logger.exception("instance_mark act failed (rolled back with its audit row)")
+            return _error(
+                f"instance_mark failed and was rolled back with its audit row: {type(exc).__name__}"
+            )
+        return json.dumps(
+            {
+                "marked": True,
+                "action": "instance_mark",
+                "target": target_id,
+                "marker": marker,
+                "audit": "committed (Tier-1, same transaction as the act)",
+            },
+            default=str,
+        )
+
+    instance_mark._full_doc_ = """Write a marker on an instance — park / protect / suspect.
+
+* `park` writes the DELIBERATE-PAUSE tombstone via the existing
+  deliberate-pause machinery: the question answer/dismiss release path
+  DEFERS to it and does NOT re-claim the instance's suspended turn.
+  This is the "operator parked this on purpose" record — the health
+  report reads it so a parked instance never reads as wedged.
+* `protect` adds the DYNAMIC protection layer: the target becomes
+  protected for the terminate gate. A repeat protect on an
+  already-protected target refuses with `marker-already-set` (an
+  idempotent refusal, not a silent no-op).
+* `suspect` is a non-blocking operator annotation.
+
+There is NO `unprotect` marker. A protect marker can only be cleared
+by a separately-specified act — deferring it keeps a marker tool from
+un-protecting a statically protected target.
+
+Audit tiers: `protect` / `suspect` are TIER-1 (the marker write and
+the audit row commit together — a failure rolls both back). `park` is
+TIER-2 (write-ahead) by leader decision: the deliberate-pause
+machinery is a live subsystem whose writer owns its own thread and is
+fail-open by design; threading a session into it is out of scope.
+
+Args:
+    id: Target instance id. Required.
+    marker: 'park' | 'protect' | 'suspect'. Required.
+    note: Optional annotation stored with the marker.
+    reason: REQUIRED free text; stored verbatim.
+    dry_run: True (default) = preview, no mutation.
+
+Examples:
+    instance_mark(id="abc123", marker="park", reason="operator parked until Monday")
+    instance_mark(id="root1", marker="protect", reason="user-facing session")
+"""
+
+    # ── instance_answer ──────────────────────────────────────────────
+    class InstanceAnswerInput(BaseModel):
+        """Input schema for instance_answer."""
+
+        id: Annotated[str, Field(description="The ASKER instance id (short form accepted). Required.")]
+        answers: Annotated[
+            dict,
+            Field(
+                description=(
+                    "The answer payload as a DICT (the route schema is "
+                    "answers: dict — NOT a list). Passed verbatim to the "
+                    "same implementation the HTTP route uses."
+                )
+            ),
+        ]
+        question_pack_id: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Optional pack id echo for correlation; a mismatch "
+                    "refuses with reason=stale-question-pack."
+                )
+            ),
+        ]
+        resume_message: Annotated[
+            str | None,
+            Field(default=None, description="Optional extra resume message text.")
+        ]
+        reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
+        dry_run: Annotated[
+            bool,
+            Field(
+                default=True,
+                description=(
+                    "True (default) — preview only. False submits the "
+                    "answer and resumes the cascade (audited, Tier-2 "
+                    "write-ahead)."
+                )
+            ),
+        ]
+
+    @register_tool_category("instance_ops")
+    @tool(args_schema=InstanceAnswerInput)
+    async def instance_answer(
+        id: str,
+        answers: dict | None = None,
+        question_pack_id: str | None = None,
+        resume_message: str | None = None,
+        reason: str = "",
+        dry_run: bool = True,
+    ) -> str:
+        """Answer a pending question pack and resume the cascade (audited)."""
+        label = "INSTANCE_ANSWER"
+        # D-6 deliberate exemption: no self-surgery gate — the asker IS the caller (self-answer is the normal flow).
+        if not _is_instance_ops_authorized(caller_agent_id):
+            return _error("instance_ops operation not permitted for this agent")
+        if not _resolve_instance_ops_enabled():
+            return KILL_SWITCH_REFUSAL
+        audit = _audit_repo_for(manager)
+        if _reason_missing(reason):
+            return _refusal(label, "reason-required", "the `reason` argument is required")
+        if not isinstance(answers, dict):
+            return _refusal(
+                label,
+                "invalid-answers",
+                "the `answers` argument must be a dict (the route schema is answers: dict)",
+            )
+        try:
+            target_id = await _resolve_target(manager, id)
+        except ValueError as exc:
+            return _refusal(label, "instance-not-found", str(exc))
+
+        from ..routers.answer_helper import answer_questions_via_instance
+
+        live_hub = getattr(manager, "_live_hub", None)
+        if dry_run:
+            preview_row = None
+            if audit is not None:
+                preview_row = audit.write_preview(
+                    action="instance_answer",
+                    target=target_id,
+                    reason=reason,
+                    before={"answers": answers},
+                    actor_instance_id=caller_instance_id,
+                    actor_agent_id=caller_agent_id,
+                )
+            return (
+                json.dumps(
+                    {
+                        "dry_run": True,
+                        "action": "instance_answer",
+                        "target": target_id,
+                        "answers": answers,
+                        "question_pack_id": question_pack_id,
+                        "audit_preview_row": preview_row,
+                        "note_line": "NO mutation happened (dry-run)",
+                    },
+                    default=str,
+                )
+                + "\nNO mutation happened (dry-run)"
+            )
+        row_id = None
+        if audit is not None:
+            row_id = audit.write_audit_ahead(
+                action="instance_answer",
+                target=target_id,
+                reason=reason,
+                before={"answers": answers},
+                actor_instance_id=caller_instance_id,
+                actor_agent_id=caller_agent_id,
+            )
+        try:
+            result = await answer_questions_via_instance(
+                manager,
+                target_id,
+                answers,
+                question_pack_id,
+                live_hub,
+                resume_message=resume_message,
+            )
+        except Exception as exc:  # noqa: BLE001 — map HTTP parity below
+            refusal = _map_answer_error(label, exc)
+            if audit is not None:
+                if row_id:
+                    audit.settle_audit(row_id, "refused", error_message=refusal)
+                else:
+                    audit.write_refusal(
+                        action="instance_answer",
+                        target=target_id,
+                        reason=reason,
+                        error_message=refusal,
+                        actor_instance_id=caller_instance_id,
+                        actor_agent_id=caller_agent_id,
+                    )
+            return refusal
+        if audit is not None and row_id:
+            audit.settle_audit(row_id, "committed", after={"resume_route": result.get("resume_route")})
+        return json.dumps(
+            {
+                "submitted": True,
+                "action": "instance_answer",
+                "target": target_id,
+                "resume_route": result.get("resume_route"),
+                "audit": "committed (Tier-2 write-ahead)",
+            },
+            default=str,
+        )
+
+    instance_answer._full_doc_ = """Answer a pending question pack and resume the cascade.
+
+Calls the SAME implementation the HTTP route uses
+(`answer_questions_via_instance`), so the two surfaces cannot diverge.
+
+ERROR PARITY with the route (each maps to a typed refusal token):
+* 404 NO_PENDING_QUESTION → `no-pending-question`
+* 410 QUESTION_PACK_LOST → `question-pack-lost` (the pack lives in
+  memory and does not survive a daemon restart — the honest rendering
+  is this refusal, never a fabricated answer)
+* 400 QUESTION_PACK_MISMATCH → `stale-question-pack`
+* 410 ANSWER_TARGET_TERMINAL → `target-not-terminal`
+* 200 already_delivered → an idempotent SUCCESS (the duplicate answer
+  is a no-op, exactly like the route)
+* 503 write-paused → `instance-ops-write-paused`
+
+Args:
+    id: The ASKER instance id. Required.
+    answers: The answer payload as a DICT (not a list). Required.
+    question_pack_id: Optional pack id echo.
+    resume_message: Optional extra resume message text.
+    reason: REQUIRED free text; stored verbatim.
+    dry_run: True (default) = preview, no mutation.
+
+Audit tier: 2 (write-ahead).
+
+Examples:
+    instance_answer(id="abc123", answers={"q1": "yes"}, reason="user replied via leader")
+"""
+
+    # ── instance_dismiss ─────────────────────────────────────────────
+    class InstanceDismissInput(BaseModel):
+        """Input schema for instance_dismiss."""
+
+        id: Annotated[str, Field(description="The ASKER instance id (short form accepted). Required.")]
+        reason: Annotated[str, Field(description="REQUIRED free text; stored verbatim in the ledger.")]
+        dry_run: Annotated[
+            bool,
+            Field(
+                default=True,
+                description=(
+                    "True (default) — preview only. False dismisses the "
+                    "pack and resumes the cascade (audited, Tier-2 "
+                    "write-ahead)."
+                )
+            ),
+        ]
+
+    @register_tool_category("instance_ops")
+    @tool(args_schema=InstanceDismissInput)
+    async def instance_dismiss(
+        id: str, reason: str = "", dry_run: bool = True
+    ) -> str:
+        """Dismiss a pending question pack without answering (audited)."""
+        label = "INSTANCE_DISMISS"
+        # D-6 deliberate exemption: no self-surgery gate — the asker IS the caller (self-dismiss is the normal flow).
+        if not _is_instance_ops_authorized(caller_agent_id):
+            return _error("instance_ops operation not permitted for this agent")
+        if not _resolve_instance_ops_enabled():
+            return KILL_SWITCH_REFUSAL
+        audit = _audit_repo_for(manager)
+        if _reason_missing(reason):
+            return _refusal(label, "reason-required", "the `reason` argument is required")
+        try:
+            target_id = await _resolve_target(manager, id)
+        except ValueError as exc:
+            return _refusal(label, "instance-not-found", str(exc))
+
+        try:
+            from ..services.instance_ops_service import (
+                DismissCascadeFailed,
+                DismissInstanceNotFound,
+                DismissNoPendingQuestion,
+                DismissPackNotPending,
+                DismissWritePaused,
+                dismiss_question_pack,
+            )
+        except Exception as exc:  # noqa: BLE001 — the extraction must exist
+            logger.exception("instance_dismiss: service import failed")
+            return _error(f"instance_dismiss service unavailable: {type(exc).__name__}")
+
+        live_hub = getattr(manager, "_live_hub", None)
+        if dry_run:
+            preview_row = None
+            if audit is not None:
+                preview_row = audit.write_preview(
+                    action="instance_dismiss",
+                    target=target_id,
+                    reason=reason,
+                    actor_instance_id=caller_instance_id,
+                    actor_agent_id=caller_agent_id,
+                )
+            return (
+                json.dumps(
+                    {
+                        "dry_run": True,
+                        "action": "instance_dismiss",
+                        "target": target_id,
+                        "audit_preview_row": preview_row,
+                        "note_line": "NO mutation happened (dry-run)",
+                    },
+                    default=str,
+                )
+                + "\nNO mutation happened (dry-run)"
+            )
+        row_id = None
+        if audit is not None:
+            row_id = audit.write_audit_ahead(
+                action="instance_dismiss",
+                target=target_id,
+                reason=reason,
+                actor_instance_id=caller_instance_id,
+                actor_agent_id=caller_agent_id,
+            )
+        try:
+            result = await dismiss_question_pack(manager, target_id, live_hub=live_hub)
+        except DismissWritePaused as exc:
+            return _settle_or_refuse(
+                audit, row_id,
+                label=label, token="instance-ops-write-paused", message=str(exc),
+                action="instance_dismiss", target=target_id, reason=reason,
+                actor_instance_id=caller_instance_id,
+                actor_agent_id=caller_agent_id,
+            )
+        except DismissInstanceNotFound as exc:
+            return _settle_or_refuse(
+                audit, row_id,
+                label=label, token="instance-not-found", message=str(exc),
+                action="instance_dismiss", target=target_id, reason=reason,
+                actor_instance_id=caller_instance_id,
+                actor_agent_id=caller_agent_id,
+            )
+        except DismissNoPendingQuestion as exc:
+            return _settle_or_refuse(
+                audit, row_id,
+                label=label, token="no-pending-question", message=str(exc),
+                action="instance_dismiss", target=target_id, reason=reason,
+                actor_instance_id=caller_instance_id,
+                actor_agent_id=caller_agent_id,
+            )
+        except DismissPackNotPending as exc:
+            return _settle_or_refuse(
+                audit, row_id,
+                label=label, token="stale-question-pack", message=str(exc),
+                action="instance_dismiss", target=target_id, reason=reason,
+                actor_instance_id=caller_instance_id,
+                actor_agent_id=caller_agent_id,
+            )
+        except DismissCascadeFailed as exc:
+            # M5: a KNOWN outcome, not an AC-9b unknown — the pack is
+            # CONSUMED and the resume cascade failed. Settle the Tier-2
+            # row to "error" (never rest at "pending") and refuse with
+            # the typed token.
+            _msg = (
+                "the question pack was consumed (dismissed) but the resume "
+                f"cascade failed: {exc}. The pack is GONE — the resume must "
+                "be retried (there is no pack left to dismiss again)"
+            )
+            refusal = _refusal(label, "dismiss-cascade-failed", _msg)
+            if audit is not None and row_id:
+                audit.settle_audit(row_id, "error", error_message=refusal)
+            return refusal
+        except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
+            # AC-9b: left at "pending" — unknown outcome (see reclaim).
+            logger.exception("instance_dismiss act failed (audit row left pending)")
+            return _error(f"instance_dismiss failed: {type(exc).__name__}")
+        if audit is not None and row_id:
+            audit.settle_audit(row_id, "committed", after={"dismissed": True})
+        return json.dumps(
+            {
+                "dismissed": True,
+                "action": "instance_dismiss",
+                "target": target_id,
+                "result": result,
+                "audit": "committed (Tier-2 write-ahead)",
+            },
+            default=str,
+        )
+
+    instance_dismiss._full_doc_ = """Dismiss a pending question pack WITHOUT answering; resume the cascade.
+
+Calls the SAME extracted service the HTTP route uses, so the two
+surfaces cannot diverge. The SSE `question_pack` event
+(status="dismissed") still fires BEFORE the resume cascade (the F3
+ordering contract), and the recorded side-effect set is released on
+every exit path.
+
+ERROR PARITY with the route: 503 write-paused →
+`instance-ops-write-paused`; 404 unknown instance →
+`instance-not-found`; 404 no question pack → `no-pending-question`;
+409 pack not pending → `stale-question-pack`; cascade failure AFTER
+dismissal → `dismiss-cascade-failed` (the pack is consumed and the
+resume must be retried — the audit row settles to `error`, it never
+rests at `pending`).
+
+Args:
+    id: The ASKER instance id. Required.
+    reason: REQUIRED free text; stored verbatim.
+    dry_run: True (default) = preview, no mutation.
+
+Audit tier: 2 (write-ahead).
+
+Examples:
+    instance_dismiss(id="abc123", reason="question is moot — the parent finished")
+"""
+
+    return [
+        instance_terminate,
+        instance_reclaim,
+        instance_nudge,
+        instance_mark,
+        instance_answer,
+        instance_dismiss,
+    ]
+
+
+def _map_answer_error(label: str, exc: Exception) -> str:
+    """Map an ``answer_questions_via_instance`` failure onto a refusal.
+
+    Error parity with the route's documented contract — the HTTP status
+    code and the ErrorResponse code travel in the message so the
+    parity is auditable.
+    """
+    status = getattr(exc, "status_code", None)
+    detail = getattr(exc, "detail", None)
+
+    def _code() -> str:
+        if isinstance(detail, dict):
+            return str(detail.get("code") or "")
+        return ""
+
+    if status == 503:
+        return _refusal(label, "instance-ops-write-paused", "writes are paused (migration)")
+    if status == 404 and _code() == "NO_PENDING_QUESTION":
+        return _refusal(
+            label,
+            "no-pending-question",
+            "instance exists but no question pack is pending",
+        )
+    if status == 410 and _code() == "QUESTION_PACK_LOST":
+        return _refusal(
+            label,
+            "question-pack-lost",
+            (
+                "the pack does not survive a daemon restart (in-memory "
+                "store); the question must be re-asked"
+            ),
+        )
+    if status == 400 and _code() == "QUESTION_PACK_MISMATCH":
+        return _refusal(
+            label,
+            "stale-question-pack",
+            f"question_pack_id mismatch ({str(exc)[:200]})",
+        )
+    if status == 410 and _code() == "ANSWER_TARGET_TERMINAL":
+        return _refusal(
+            label,
+            "target-not-terminal",
+            "the asker is terminal (ANSWER_TARGET_TERMINAL)",
+        )
+    if status == 404:
+        return _refusal(label, "instance-not-found", str(exc)[:300])
+    return _error(f"instance_answer failed: {type(exc).__name__}: {str(exc)[:200]}")
+
+
+def _settle_or_refuse(
+    audit,
+    row_id: str | None,
+    *,
+    label: str,
+    token: str,
+    message: str,
+    action: str,
+    target: str,
+    reason: str,
+    actor_instance_id: str | None,
+    actor_agent_id: str | None,
+) -> str:
+    """Settle a Tier-2 row as REFUSED and return the refusal string."""
+    refusal = _refusal(label, token, message)
+    if audit is not None:
+        if row_id:
+            audit.settle_audit(row_id, "refused", error_message=refusal)
+        else:
+            audit.write_refusal(
+                action=action,
+                target=target,
+                reason=reason,
+                error_message=refusal,
+                actor_instance_id=actor_instance_id,
+                actor_agent_id=actor_agent_id,
+            )
+    return refusal

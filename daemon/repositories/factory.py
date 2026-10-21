@@ -67,6 +67,15 @@ from .custom_agent_configs import (
     CustomAgentConfigRepository,
 )
 
+# Instance-ops audit ledger (nest-ops, 2026-10-21). Imported here so
+# ``SQLModel.metadata.create_all()`` (called from daemon/manager.py)
+# registers the ``instance_ops_audit`` table on fresh PostgreSQL
+# databases. Fresh SQLite databases pick the table up from the
+# MigrationRunner via the 20261021_120000 migration. Brand-new table —
+# no _ensure_postgres_columns needed (same secrets_audit / prompt_
+# versions precedent).
+from .instance_ops.models import InstanceOpsAudit
+
 if TYPE_CHECKING:
     from daemon.ensemble_config import EnsembleConfig
 
