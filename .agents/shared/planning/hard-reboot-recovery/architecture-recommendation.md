@@ -175,16 +175,18 @@ Bus starts at `api.py:2043`, AutoContinue at `:2365` — bus first, materially. 
 
 ## 7. Consolidated Amended LOC Estimate
 
-| Phase | Plan (py/test/ops) | Amended (py/test/ops) | Delta drivers |
-|---|---|---|---|
-| 0 Worktree gate | 0 / ≤10 / 0 | 0 / ≤10 / 0 | unchanged |
-| 1 PG ordering + wait | ≤30 / ≤50 / 5 | **≈4 / ≤15 / 8** | −30 helper deleted (preflight reuse); +1 `connect_timeout`; +2 template comments, −1 `Wants=` dropped; +drop-in example |
-| 2 MQ boot recovery | ≤40 / ≤20 / 0 | **≤40 / ≤30 / 0** | +6 guarded reset; +4..8 boot-epoch predicate variant; +3 doc fence; +3 skip-guards; placement move 0; tests +fresh-dead fixture +busy-guard assertion |
-| 3 Runbook | 0 / ≤10 / ≤80 | 0 / ≤10 / **≤105** | +NG-4 disclosure, pause-durability window, D13 triage query, bus-start check, PG-shape/drop-in, discard-on-startup interplay |
-| 4 Demo E2E | 0 / ≤80 / 0 | 0 / ≤90 / 0 | +fresh-dead fixture, `processing_count` assertion |
-| **Total** | **≤70 / ≤160 / ≤85** | **≈44 / ≤155 / ≤113** | **Net Python −26**; total code surface shrinks while coverage grows |
+| Phase | Plan (py/test/ops) | Amended — budget (py/test/ops) | **Measured (FIX round 2, 2026-10-21)** | Delta drivers |
+|---|---|---|---|---|
+| 0 Worktree gate | 0 / ≤10 / 0 | 0 / ≤10 / 0 | **0 SHIPPED** — the gate was DEV-LANE-ONLY and was DROPPED from the tree (module + `pytest_plugins` registration in the shared `tests/conftest.py` + its pins, atomically). Dev-lane cost **+134** plugin + **+59** claim receipt = **+193, explained, not shipped** | unchanged (now 0 shipped) |
+| 1 PG ordering + wait | ≤30 / ≤50 / 5 | **≈4 / ≤15 / 8** | **2 / 243 physical / +4 template physical** — 2 shipped Python statements (the two imports; the URL-construction statement is 1-for-1); `__main__.py` comment-only (0 statements) | −30 helper deleted (preflight reuse); +1 `connect_timeout`; +2 template comments, −1 `Wants=` dropped; +drop-in example |
+| 2 MQ boot recovery | ≤40 / ≤20 / 0 | **≤40 / ≤30 / 0** | **40 / 336 physical / 0** — 26 service + 10 repository + 4 `api.py` statements | +6 guarded reset; +4..8 boot-epoch predicate variant; +3 doc fence; +3 skip-guards; placement move 0; tests +fresh-dead fixture +busy-guard assertion |
+| 3 Runbook | 0 / ≤10 / ≤80 | 0 / ≤10 / **≤105** | **0 / not built / 124 non-blank (146 physical)** — **OVER the phase budget by 19** | +NG-4 disclosure, pause-durability window, D13 triage query, bus-start check, PG-shape/drop-in, discard-on-startup interplay |
+| 4 Demo E2E | 0 / ≤80 / 0 | 0 / ≤90 / 0 | **0 / not built / 0** — Phase 4 is the tester E2E lane's | +fresh-dead fixture, `processing_count` assertion |
+| **Total** | **≤70 / ≤160 / ≤85** | **≈44 / ≤155 / ≤113** | **42 / 759 physical (606 non-blank, 568 non-blank-non-comment) / 124 non-blank** — Python ceiling **MET** (42 ≤ ≈44); **test and ops ceilings OVER** (test surface is docstring + shared-harness weight; the runbook grew by 3 disclosures + the RTO qualifier) | **Net Python −26**; total code surface shrinks while coverage grows |
 
-All amendments fit the plan's ≤315 total ceiling; the ≤70 Python ceiling is *tightened* to ≈44. No migrations, no schema change, no agent-prompt files (no seal re-pin), one kill-switch (down from two).
+All amendments fit the plan's ≤315 total ceiling; the ≤70 Python ceiling is *tightened* to ≈44 (measured: 42 shipped Python statements). No migrations, no schema change, no agent-prompt files (no seal re-pin), one kill-switch (down from two).
+
+**Measurement method (re-verifiable).** *Shipped Python* = AST statement count (`ast.walk` over `ast.stmt`), base `4c888fbbb` → head: 1974 → 2016 (+42; P1 +2, P2 +40). *Test surface* = physical lines (non-blank and non-blank-non-comment given in plan-overview §6). *Runbook* = physical / non-blank. *P2 service* = 103 physical / 84 non-blank / 79 non-blank-non-comment / 25 executable statements (AST statement count; 23 with every docstring excluded, 26 counting every `ast.stmt`).
 
 ---
 
