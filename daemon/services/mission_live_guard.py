@@ -37,10 +37,17 @@ still live?** The mission is LIVE when ANY of:
   spawn-then-message ritual) keep holding liveness;
 * (c) the root instance itself is non-terminal (same status set).
 
-Fail-open contract (binding): any exception inside the guard returns
-``live=False`` with ``error=True`` so the caller proceeds with
-finalize + notify. A missing terminal report is WORSE than an extra
+Fail-open contract (binding): any exception inside the guard's TREE
+WALK returns ``live=False`` with ``error=True`` so the caller proceeds
+with finalize + notify. A missing terminal report is WORSE than an extra
 premature one — at-least-once terminal delivery is preserved.
+
+**OPPOSITE POLARITY (W-2, scoped):** the MEMBER-ALIVE companion leg is
+the exception — a member probe that cannot be evaluated HOLDS the tree
+(``live=True``, ``error=True``), because "member liveness unknown" must
+never mean "the tree is stale". Only the guard's TREE-WALK errors
+fail open. See :func:`_member_alive_companion_verdict` and the
+fail-MISS invariant in the design doc §2.10.3.
 
 **Zombie backstop — anchored to TREE ACTIVITY (U7 fix,
 2026-09-28).** The pre-U7 anchor was the work row's
@@ -223,7 +230,11 @@ class MissionLiveVerdict:
             records and INFO logs.
         error: True when an internal exception forced the fail-open
             path (``live=False`` because the guard could not evaluate,
-            NOT because the mission is dead).
+            NOT because the mission is dead). NOTE the OPPOSITE
+            polarity (W-2): a MEMBER-ALIVE probe error yields
+            ``live=True`` + ``error=True`` — the leg HOLDS, because
+            "member liveness unknown" must never mean "the tree is
+            stale". Only TREE-WALK errors fail open.
         timed_out: True when the zombie backstop fired (anchor older
             than the timeout) — the mission looked live but the
             at-least-once guarantee takes precedence.
@@ -377,9 +388,11 @@ async def evaluate_mission_live(
             root is already terminal when the gate runs).
 
     Returns:
-        :class:`MissionLiveVerdict`. NEVER raises — internal errors
-        collapse to ``live=False, error=True`` (fail-open; the caller
-        finalizes).
+        :class:`MissionLiveVerdict`. NEVER raises — internal TREE-WALK
+        errors collapse to ``live=False, error=True`` (fail-open; the
+        caller finalizes). A MEMBER-ALIVE probe error does NOT fail
+        open: it HOLDS (``live=True``, ``error=True``) — see the
+        fail-MISS invariant in the design doc §2.10.3.
     """
     try:
         return await _evaluate_legs(
@@ -423,17 +436,27 @@ def _member_live_task_attempt_at(
     or a naive input, and an unparseable stamp is DROPPED (never
     guessed).
 
-    **UNDATEABLE ROW ⇒ YOUNG (fail-MISS, review C1).** ``None`` is
+    **UNDATEABLE ROW ⇒ fail-MISS (review C1 + W-3b).** ``None`` is
     returned ONLY when the member owns **NO** non-terminal task row at
     all (the ADDITIVE invariant: a stale member with no live task row
     remains a zombie candidate). A member that DOES own a non-terminal
-    task row but whose stamp cannot be dated (both ``started_at`` and
-    ``created_at`` NULL/unparseable) gets the CURRENT time instead:
-    the ROW EXISTS — the member may be mid-turn — so the member counts
-    as ALIVE and the tree is NOT finalized. Returning ``None`` there
-    made "undatable row" indistinguishable from "no row" and let the
-    backstop fire under a possibly-live member — fail-STALE against
-    this lane's declared fail-MISS posture.
+    task row whose stamp cannot be dated is NOT treated as "no row" —
+    the backstop must not fire under a possibly-live member (that was
+    fail-STALE against this lane's declared fail-MISS posture).
+
+    **REACHABILITY (W-3, stated honestly):** the branch is NOT
+    reachable through the ORM read TODAY — ``task.created_at`` is NOT
+    NULL (the migration + the model), and an unparseable stamp RAISES
+    inside the ORM's DATETIME read (``ValueError: Invalid isoformat
+    string``), so the probe-error path is taken instead (and that path
+    also HOLDS — fail-MISS). The branch is a HARDENING for a state a
+    future schema/read change could expose.
+
+    **BOUNDED (W-3b):** an undateable CHOSEN stamp falls back to the
+    row's own ``created_at`` (the row's AGE), so a hold can never last
+    forever. Only a row with NO dateable stamp at all (neither
+    ``started_at`` nor ``created_at``) takes the CURRENT time — the
+    fail-MISS floor — and that state is unreachable today.
 
     The status set is ``daemon.constants.NON_TERMINAL_TASK_STATUSES``
     — the canonical non-terminal task set (the SSOT; the same set the
@@ -472,6 +495,11 @@ def _member_live_task_attempt_at(
         parsed = parse_completed_at_naive(
             started_at if started_at is not None else created_at
         )
+        if parsed is None:
+            # The CHOSEN stamp is undateable — bound the row by its
+            # own ``created_at`` (the row's AGE) so a hold can never
+            # last forever (W-3b).
+            parsed = parse_completed_at_naive(created_at)
         if parsed is not None:
             stamps.append(parsed)
     if stamps:
@@ -480,14 +508,11 @@ def _member_live_task_attempt_at(
         # NO non-terminal task row at all ⇒ no dateable evidence of an
         # in-flight turn ⇒ NOT held (the ADDITIVE invariant).
         return None
-    # The member OWNS a non-terminal task row, but NO parseable stamp
-    # (both ``started_at`` and ``created_at`` NULL/unparseable). The
-    # ROW EXISTS — the member may be mid-turn — but its age cannot be
-    # read. Fail-MISS (the lane's declared posture): treat the row as
-    # YOUNG so the member counts as ALIVE and the tree is NOT
-    # finalized. Returning None here would make "undatable row"
-    # indistinguishable from "no row" and let the backstop fire under
-    # a possibly-live member (review C1).
+    # The member OWNS a non-terminal task row, but NOT ONE dateable
+    # stamp (neither ``started_at`` nor ``created_at``) — unreachable
+    # today (see the docstring), kept as the fail-MISS floor: the ROW
+    # EXISTS, so the member may be mid-turn and the tree must NOT be
+    # finalized (review C1).
     return now_utc_naive()
 
 
@@ -550,6 +575,7 @@ async def _member_alive_companion_verdict(
     if not candidates:
         return None
     now = now_utc_naive()
+    undatable_live_work = 0
     for member_id in candidates:
         try:
             live_work = await asyncio.to_thread(
@@ -604,11 +630,13 @@ async def _member_alive_companion_verdict(
                 # H2 (review C2): the probe and the dateable evidence
                 # DISAGREE — the probe says "live work", the evidence
                 # says "nothing dateable" — and the leg does NOT hold
-                # on it. That is a non-error anomaly an operator must
-                # be able to SEE, so it is emitted at INFO (house style
-                # for non-error anomalies); the routine no-live-work
-                # case stays at DEBUG.
-                logger.info(
+                # on it. A-3: the per-member detail stays at DEBUG and
+                # the OPERATOR-VISIBLE signal is ONE aggregated line
+                # per evaluation (the old shape emitted one INFO per
+                # member — N=50 ⇒ 50 lines, ≈400 lines/300s across
+                # ~8 consumers).
+                undatable_live_work += 1
+                logger.debug(
                     "mission_live_guard: member-alive probe for %s... — "
                     "member=%s... live work detected but NOT dateable "
                     "(no live task row) ⇒ NOT held (stale-eligible)",
@@ -624,6 +652,11 @@ async def _member_alive_companion_verdict(
             continue
         age_seconds = (now - attempt_at).total_seconds()
         if age_seconds < timeout_seconds:
+            # The member id in this reason is a CANDIDATE — the
+            # terminal-candidacy filter above (status NOT in
+            # TERMINAL_INSTANCE_STATUSES) is what makes "non-terminal
+            # member" accurate; drop that filter and the wording would
+            # mislabel a terminal member (A-6).
             return MissionLiveVerdict(
                 live=True,
                 reason=(
@@ -644,6 +677,17 @@ async def _member_alive_companion_verdict(
             "(>= %ds horizon) ⇒ stale-eligible",
             (instance_id or "?")[:8], member_id[:8], live_work,
             int(age_seconds), timeout_seconds,
+        )
+    if undatable_live_work:
+        # A-3: ONE aggregated operator-visible line per evaluation
+        # (the per-member detail is at DEBUG). The old shape emitted
+        # one INFO per member — N=50 ⇒ 50 lines, ≈400 lines/300s
+        # across ~8 consumers.
+        logger.info(
+            "mission_live_guard: member-alive probe for %s... — "
+            "members_with_undatable_live_work=%d ⇒ NOT held "
+            "(stale-eligible; per-member detail at DEBUG)",
+            (instance_id or "?")[:8], undatable_live_work,
         )
     return None
 

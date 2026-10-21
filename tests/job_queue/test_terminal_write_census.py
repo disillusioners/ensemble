@@ -469,7 +469,7 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
     CensusEntry(
         file="daemon/services/job_recovery_service.py", site="atomic_transition",
         anchor="_pattern_f_finalize_failed_terminal", classification="hooked",
-        hooked_at="daemon/services/job_recovery_service.py:4255",
+        hooked_at="daemon/services/job_recovery_service.py:4261",
         reason="f-failed-terminal finalize; notify wired in-function",
     ),
     # ── Non-terminal transitions (shape-matched, not terminal writes) ──
@@ -510,11 +510,11 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
         file="daemon/services/mission_strand_healer.py",
         site="_process_child_completion_and_notify_parent",
         anchor="heal_instance", classification="hooked",
-        hooked_at="daemon/services/child_reports.py:5173",
+        hooked_at="daemon/services/child_reports.py:5321",
         reason="strand healer's drive IS the sanctioned emission "
                "machinery: the notify rides inside "
                "_process_child_completion_db_sync (child_reports "
-               ":5173/:5189) on the drive path; the heal itself "
+               ":5321/:5337) on the drive path; the heal itself "
                "serializes per root behind the per-root asyncio.Lock "
                "(anchor matches the pre- and post-lock-wrapper "
                "enclosing names heal_instance/_heal_instance_locked)",
@@ -529,11 +529,11 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
         file="daemon/services/mission_strand_healer.py",
         site="_process_child_completion_and_notify_parent",
         anchor="_heal_running_zombie_locked", classification="hooked",
-        hooked_at="daemon/services/child_reports.py:5173",
+        hooked_at="daemon/services/child_reports.py:5321",
         reason="running-zombie strand's drive IS the sanctioned "
                "emission machinery: the notify rides inside "
                "_process_child_completion_db_sync (child_reports "
-               ":5173/:5189) on the drive path; the heal serializes "
+               ":5321/:5337) on the drive path; the heal serializes "
                "per root behind the SAME per-root asyncio.Lock map "
                "as the waiting_children strand (shared "
                "_acquire_root_lock/_release_root_lock), and NEVER "

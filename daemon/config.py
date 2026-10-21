@@ -2419,7 +2419,7 @@ class ServicesConfig(BaseSettings):
     # instance row is stuck in ``running`` while every descendant is
     # terminal and the root's own latest task row is terminal-
     # COMPLETED (the completion EVENT was lost — live incident
-    # 2026-10-19/20, instance 432988b8 stuck 25h). The f2 drift
+    # 2026-10-19/20 live incident — stuck 25h). The f2 drift
     # finalizer heals only the JobItem; the INSTANCE row is a
     # different table and stays ``running`` forever.
     #

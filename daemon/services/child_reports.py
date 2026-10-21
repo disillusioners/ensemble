@@ -2569,11 +2569,19 @@ Provide a concise summary:"""
             # plausibly alive — children may still be running even
             # if no bus row exists). ``live=False`` (all-terminal
             # tree OR timeout-elapsed zombie) ⇒ PROCEED. The
-            # guard's internal error path returns ``live=False,
+            # guard's TREE-WALK error path returns ``live=False,
             # error=True`` — fail-OPEN for the at-least-once
             # guarantee (mirrors the U7 contract). On any guard
             # call failure we proceed; a missing terminal is worse
             # than an extra premature one.
+            #
+            # W-2 — the OPPOSITE polarity, stated honestly: a
+            # MEMBER-ALIVE probe error yields ``live=True`` +
+            # ``error=True`` ⇒ THIS GATE HOLDS the publish. That
+            # hold is NOT a permanent strand: the observer / the
+            # next pass re-drives the completion, so the
+            # at-least-once guarantee still holds (a held publish
+            # is retried; a lost one is not).
             try:
                 from .mission_live_guard import (
                     evaluate_mission_live,

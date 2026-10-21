@@ -690,6 +690,21 @@ async def notify_work_watchers(
                     bus_pending_count=None,
                 )
                 mission_live = _guard_verdict.live
+                if _guard_verdict.error:
+                    # A-2: the guard's MEMBER-ALIVE probe error HOLDS
+                    # the tree (``live=True`` + ``error=True``) — a
+                    # fail-MISS hold, NOT a liveness proof. The old
+                    # shape read only ``.live``, so the operator never
+                    # saw the probe failure. The hold itself is
+                    # UNCHANGED.
+                    logger.warning(
+                        "notify_work_watchers: mission-live guard HELD "
+                        "work_id=%s on a fail-miss probe error (the tree "
+                        "cannot be proven stale — the watcher is "
+                        "retained, not released): %s",
+                        work_id[:8],
+                        _guard_verdict.reason,
+                    )
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         "notify_work_watchers: mission-live guard "

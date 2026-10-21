@@ -70,7 +70,7 @@ RUNNING-ZOMBIE STRAND (2026-10-21) — third strand-family member
 The two shapes above heal a root parked in ``waiting_children``. This
 one heals a root parked in ``running``: the completion EVENT was lost,
 so nothing ever terminalized the instance row. Live shape
-(2026-10-19/20, instance 432988b8): mission root ``running``, every
+(the 2026-10-19/20 live incident): mission root ``running``, every
 descendant terminal, the root's own latest task row terminal-COMPLETED
 — and the row stuck for 25h. The f2 drift finalizer heals only the
 JobItem (the mission-live guard's all-terminal short-circuit at
@@ -787,7 +787,7 @@ class MissionStrandHealer:
     # Third member of the strand family. The two shapes above heal a
     # root parked in ``waiting_children``; this one heals a root parked
     # in ``running`` whose completion EVENT was lost (live incident
-    # 2026-10-19/20, instance 432988b8 — the root's own latest task
+    # 2026-10-19/20 live incident — the root's own latest task
     # row is terminal-COMPLETED and every descendant is terminal, yet
     # the instance row stayed ``running`` for 25h).
     #

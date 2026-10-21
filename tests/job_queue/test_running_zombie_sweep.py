@@ -165,14 +165,19 @@ def _insert_task(
     suspension_reason: str | None = None,
     resume_target_turn_id: str | None = None,
     created_at: datetime | None = None,
+    started_at: datetime | None = None,
 ) -> None:
     """Insert a ``task`` row (raw SQL — the ``task`` table has several
-    non-nullable columns the ORM default would otherwise fill)."""
+    non-nullable columns the ORM default would otherwise fill).
+
+    ``started_at`` is written only when given (the column is nullable
+    and defaults to NULL — the "minted but not yet claimed" shape)."""
     created = created_at or datetime.now(timezone.utc)
     created_iso = created.isoformat()
     completed_iso = (
         completed_at.isoformat() if completed_at is not None else None
     )
+    started_iso = started_at.isoformat() if started_at is not None else None
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -181,11 +186,13 @@ def _insert_task(
                     (task_type, instance_id, status, retry_count,
                      created_at, cancel_requested, retry_scheduled,
                      work_id, is_deferred, is_background, completed_at,
-                     suspension_reason, resume_target_turn_id)
+                     suspension_reason, resume_target_turn_id,
+                     started_at)
                 VALUES
                     (:task_type, :instance_id, :status, 0,
                      :created_at, 0, 0, :work_id, 0, 0, :completed_at,
-                     :suspension_reason, :resume_target_turn_id)
+                     :suspension_reason, :resume_target_turn_id,
+                     :started_at)
                 """
             ),
             {
@@ -197,6 +204,7 @@ def _insert_task(
                 "completed_at": completed_iso,
                 "suspension_reason": suspension_reason,
                 "resume_target_turn_id": resume_target_turn_id,
+                "started_at": started_iso,
             },
         )
 
@@ -324,6 +332,7 @@ def _seed_incident_tree(
     member_activity_age: timedelta = INCIDENT_MEMBER_STALE,
     member_task_status: str | None = "completed",
     member_task_created_at: datetime | None = None,
+    member_task_started_at: datetime | None = None,
     chain_activity_age: timedelta = timedelta(hours=26),
     with_ghost: bool = False,
     root_activity_age: timedelta = timedelta(hours=25),
@@ -383,6 +392,7 @@ def _seed_incident_tree(
             ),
             work_id="work-incident-member",
             created_at=member_task_created_at,
+            started_at=member_task_started_at,
         )
     if with_ghost:
         # The never-dispatched ghost: idle, version 1, zero messages,
@@ -1959,6 +1969,162 @@ class TestRunningZombieMemberAliveCompanionLeg:
         assert _get_instance_row(
             zombie_harness.engine, ROOT
         ).status == InstanceStatus.RUNNING.value
+
+    @pytest.mark.asyncio
+    async def test_all_terminal_tree_with_a_lingering_task_row_still_heals(
+        self, zombie_harness,
+    ):
+        """A-1(a) — an ALL-TERMINAL tree heals even when one of its
+        terminal members still owns a non-terminal task row.
+
+        Pins the all-terminal short-circuit: the member is TERMINAL,
+        so it is not a live leg and the tree finalizes immediately.
+        (The companion leg never runs on an all-terminal tree — see
+        A-1(b) for the MIXED-tree shape, where the terminal-candidacy
+        filter IS load-bearing.)"""
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_status=InstanceStatus.COMPLETED.value,
+            member_task_status="running",
+            member_task_created_at=(
+                datetime.now(timezone.utc) - timedelta(minutes=5)
+            ),
+        )
+        healer = _make_healer(zombie_harness)
+        with _patch_drive_seams():
+            outcome = await healer.heal_running_zombie(ROOT)
+        assert outcome["healed"] is True, outcome
+        assert _get_instance_row(
+            zombie_harness.engine, ROOT
+        ).status == InstanceStatus.COMPLETED.value
+
+    @pytest.mark.parametrize(
+        "task_status", ["pending", "running", "paused", "processing"],
+    )
+    @pytest.mark.asyncio
+    async def test_a_terminal_members_task_row_does_not_hold_a_mixed_tree(
+        self, zombie_harness, task_status,
+    ):
+        """A-1(b) — the TERMINAL-CANDIDACY filter is load-bearing on a
+        MIXED tree: a TERMINAL sibling's fresh non-terminal task row
+        must NOT hold the mission live.
+
+        With the filter dropped, the terminal sibling becomes a
+        candidate, its FRESH task row reads as live work, and the leg
+        HOLDS the tree (``member_task_hold=True``) — a SILENT
+        behaviour change (the council measured: 89 passed, 0 failed
+        with ONLY that filter dropped). This pin makes it RED.
+
+        The SSOT status set is exercised (``processing`` is legacy
+        vocabulary kept in ``NON_TERMINAL_TASK_STATUSES``)."""
+        from daemon.services.mission_live_guard import (
+            evaluate_mission_live,
+            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+        )
+
+        # The IDLE member (NO task row) keeps the tree MIXED, so the
+        # guard's staleness branch is reached (not the all-terminal
+        # short-circuit).
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_status=InstanceStatus.IDLE.value,
+            member_task_status=None,
+        )
+        # A TERMINAL sibling carrying a FRESH non-terminal task row.
+        _insert_instance(
+            zombie_harness.engine,
+            "terminal-sibling",
+            status=InstanceStatus.COMPLETED.value,
+            parent_id=INCIDENT_D2,
+            agent_id="worker",
+            last_activity_at=now_utc_naive() - timedelta(hours=26),
+        )
+        _insert_task(
+            zombie_harness.engine,
+            instance_id="terminal-sibling",
+            status=task_status,
+            completed_at=None,
+            work_id="work-terminal-sibling",
+            created_at=(
+                datetime.now(timezone.utc) - timedelta(minutes=5)
+            ),
+        )
+        verdict = await evaluate_mission_live(
+            instance_repository=zombie_harness.instance_repo,
+            instance_id=ROOT,
+            bus_pending_count=None,
+            timeout_seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            skip_root=True,
+        )
+        assert verdict.live is False, verdict
+        assert verdict.member_task_hold is False, verdict
+
+    @pytest.mark.asyncio
+    async def test_an_undatable_started_at_is_bounded_by_the_row_age(
+        self, zombie_harness, monkeypatch,
+    ):
+        """W-3b — an undateable CHOSEN stamp is BOUNDED by the row's
+        own ``created_at`` (the row's age), so a hold can never last
+        forever.
+
+        The row's ``started_at`` is present but undatable and its
+        ``created_at`` is 26h old (past the 6h horizon) ⇒ the row is
+        OLD ⇒ the member is NOT alive ⇒ the tree is NOT held ⇒ the
+        root heals. Without the bound the probe would fall back to
+        "now" (recomputed on EVERY evaluation) and the member would
+        hold the tree FOREVER.
+
+        Seeding note: an unparseable ``started_at`` RAISES inside the
+        ORM's DATETIME read, so the state is reached by a fault
+        injection at the parse seam — scoped to that ONE stamp (the
+        anchor leg reads the instances' ``last_activity_at``, which is
+        untouched)."""
+        from daemon.services import mission_live_guard as mlg
+
+        def _same_instant(value: datetime, target: datetime) -> bool:
+            def naive(d: datetime) -> datetime:
+                if d.tzinfo is not None:
+                    d = d.astimezone(timezone.utc)
+                return d.replace(tzinfo=None)
+            return naive(value) == naive(target)
+
+        # TWO distinct stamps: ``started_at`` is the one the probe
+        # CHOOSES (and the one made undatable); ``created_at`` is the
+        # FALLBACK the bound uses (so it must not be the same value).
+        started = datetime.now(timezone.utc) - timedelta(hours=26)
+        created = datetime.now(timezone.utc) - timedelta(
+            hours=26, minutes=17,
+        )
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_status=InstanceStatus.IDLE.value,
+            member_task_status="running",
+            member_task_created_at=created,
+            member_task_started_at=started,
+        )
+
+        real_parse = mlg.parse_completed_at_naive
+
+        def _parse_undatable(value):
+            if isinstance(value, datetime) and _same_instant(
+                value, started,
+            ):
+                return None
+            return real_parse(value)
+
+        monkeypatch.setattr(
+            mlg, "parse_completed_at_naive", _parse_undatable,
+        )
+
+        healer = _make_healer(zombie_harness)
+        with _patch_drive_seams():
+            outcome = await healer.heal_running_zombie(ROOT)
+        # The row is OLD (bounded by its own created_at) ⇒ the member
+        # does NOT hold the tree ⇒ the heal proceeds.
+        assert outcome["healed"] is True, outcome
+        assert _get_instance_row(
+            zombie_harness.engine, ROOT
+        ).status == InstanceStatus.COMPLETED.value
 
     @pytest.mark.asyncio
     async def test_member_without_task_row_is_still_healed(

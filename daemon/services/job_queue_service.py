@@ -638,6 +638,19 @@ class JobQueueService:
             bus_pending_count=bus_pending_count,
         )
         if verdict.live:
+            if verdict.error:
+                # A-2: the guard's MEMBER-ALIVE probe error HOLDS the
+                # tree (``live=True`` + ``error=True``) — a fail-MISS
+                # hold, NOT a liveness proof. Log it inside the live
+                # branch (the old order made this warning unreachable
+                # for exactly that verdict, so the operator never saw
+                # the probe failure).
+                logger.warning(
+                    "mission-live guard HELD the terminal door at the "
+                    "boot sweep (fail-miss: a member-alive probe failed, "
+                    "so the tree cannot be proven stale): %s",
+                    verdict.reason,
+                )
             return True
         if verdict.error or verdict.timed_out:
             logger.warning(
@@ -994,6 +1007,24 @@ class JobQueueService:
                         instance_id=_pre_guard_work_root,
                         bus_pending_count=None,
                     )
+                    if _pre_verdict.error:
+                        # A-2: the guard's MEMBER-ALIVE probe error
+                        # HOLDS the tree (``live=True`` + ``error=True``)
+                        # — a fail-MISS hold, not a liveness proof. The
+                        # ORPHAN_RELEASED token below is gated on
+                        # ``timed_out`` only, so without this the
+                        # operator never saw the probe failure. The
+                        # RELEASE itself still fires (the token is
+                        # diagnostic-only).
+                        logger.warning(
+                            "reconcile_held_watches_for_instance: guard "
+                            "member-alive probe FAILED for work_id=%s "
+                            "(fail-miss hold — the tree cannot be proven "
+                            "stale, so the ORPHAN_RELEASED token is "
+                            "suppressed; the release still fires): %s",
+                            work_id[:8],
+                            _pre_verdict.reason,
+                        )
                     if _pre_verdict.timed_out:
                         orphan_released += 1
                         logger.warning(
@@ -1206,6 +1237,28 @@ class JobQueueService:
                         instance_id=row.mission_instance_id,
                         bus_pending_count=None,
                     )
+                    if verdict.live:
+                        if verdict.error:
+                            # A-2: the guard's MEMBER-ALIVE probe
+                            # error HOLDS the tree (``live=True`` +
+                            # ``error=True``) — a fail-MISS hold, NOT a
+                            # liveness proof. The old order tested
+                            # ``verdict.live`` first, so this case fell
+                            # through to the loss-case leg with no
+                            # operator signal. NOTE: the fall-through
+                            # is UNCHANGED (the hold does not skip the
+                            # loss case) — only the log is added.
+                            logger.warning(
+                                "reconcile_stored_watches: guard HELD "
+                                "the stored watch %s (orig=%s retry=%s) "
+                                "on a fail-miss probe error — the tree "
+                                "cannot be proven stale, so the watch is "
+                                "NOT released: %s",
+                                row.stored_watch_id[:8],
+                                row.original_work_id[:8],
+                                row.retry_work_id[:8],
+                                verdict.reason,
+                            )
                     if not verdict.live:
                         if verdict.error:
                             logger.warning(
