@@ -520,19 +520,30 @@ class TestRunningZombiePredicate:
         assert outcome["healed"] is False
         assert outcome["skip_class"] == "latest-task-not-completed"
 
+    @pytest.mark.parametrize(
+        "live_status", ["pending", "processing"],
+    )
     @pytest.mark.asyncio
-    async def test_live_turn_task_row_is_skipped(self, zombie_harness):
+    async def test_live_turn_task_row_is_skipped(
+        self, zombie_harness, live_status,
+    ):
         """Leg 2: a NON-TERMINAL task row (a live turn owns the
         instance) ⇒ NOT a zombie.
 
         The live turn is seeded OLDER than the completed turn so the
         ``latest task`` leg still sees the COMPLETED row and the
-        ``non-terminal task row`` leg is the one that fires."""
+        ``non-terminal task row`` leg is the one that fires.
+
+        ``pending`` AND ``processing`` are both covered — the
+        commission's negative is the LIVE PROCESSING task row, and
+        ``processing`` is the legacy task vocabulary (it is in
+        ``_RUNNING_ZOMBIE_NON_TERMINAL_TASK_STATUSES``).
+        """
         _seed_zombie_tree(zombie_harness.engine)
         _insert_task(
             zombie_harness.engine,
             instance_id=ROOT,
-            status="pending",
+            status=live_status,
             completed_at=None,
             work_id="work-zombie-live",
             created_at=datetime.now(timezone.utc) - timedelta(hours=26),
@@ -806,6 +817,63 @@ class TestRunningZombiePredicate:
         assert _get_instance_row(
             zombie_harness.engine, ROOT
         ).status == InstanceStatus.COMPLETED.value
+
+    @pytest.mark.asyncio
+    async def test_batch_cap_does_not_starve_a_real_zombie(
+        self, zombie_harness,
+    ):
+        """F1 — the batch cap must not PERMANENTLY starve a real zombie.
+
+        The cap bounds the candidates EXAMINED per tick, and a
+        candidate that is examined and SKIPPED keeps its sort key — so
+        it is examined again on the next tick, forever. Under the
+        pre-F1 selection (raw ``status='running'`` ordered by
+        ``updated_at``) the head of the batch was therefore occupied
+        PERMANENTLY by roots that can never satisfy the completion
+        proof (here: no task row at all). With more such roots than
+        the cap, the real zombie sat past position ``cap`` and was
+        NEVER examined — a permanent starvation.
+
+        The ANCHORED selection (F1) never selects a root without the
+        completion proof, so the un-healable population cannot occupy
+        the batch and the later zombie is healed on the SAME pass.
+        """
+        # 4 un-healable roots (NO task row ⇒ no completion proof).
+        # Their ``updated_at`` is OLDER than the zombie's, so under
+        # the pre-F1 ordering they occupy the whole batch.
+        for i in range(4):
+            _insert_instance(
+                zombie_harness.engine,
+                f"head-root-{i}",
+                status=InstanceStatus.RUNNING.value,
+                parent_id=None,
+                agent_id="leader",
+                updated_at=(
+                    datetime.now(timezone.utc) - timedelta(hours=48 + i)
+                ),
+            )
+        # The real zombie — the NEWEST ``updated_at``, so position 5
+        # under the pre-F1 ordering (past the cap of 3).
+        _seed_zombie_tree(zombie_harness.engine)
+
+        healer = _make_healer(
+            zombie_harness, running_zombie_batch_cap=3,
+        )
+        with _patch_drive_seams():
+            stats = await healer.sweep_running_zombies_once()
+        # The un-healable roots are not candidates at all — they do
+        # not consume the batch, so the zombie behind them is served.
+        assert stats["scanned"] == 1
+        assert stats["healed"] == 1
+        assert _get_instance_row(
+            zombie_harness.engine, ROOT
+        ).status == InstanceStatus.COMPLETED.value
+        # The un-healable roots are untouched (no completion proof ⇒
+        # no write).
+        for i in range(4):
+            assert _get_instance_row(
+                zombie_harness.engine, f"head-root-{i}"
+            ).status == InstanceStatus.RUNNING.value
 
     @pytest.mark.asyncio
     async def test_sweep_once_keeps_the_waiting_children_keys(

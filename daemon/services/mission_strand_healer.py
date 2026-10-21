@@ -836,27 +836,85 @@ class MissionStrandHealer:
         return stats
 
     def _find_running_root_ids(self) -> list[str]:
-        """RUNNING mission roots (the running-zombie candidate set).
+        """RUNNING mission roots — the ANCHORED running-zombie candidate
+        set.
 
-        Selection is deliberately WIDE (``status == running`` AND
-        ``parent_id IS NULL``): the predicate legs — not the
-        selection — decide what is a zombie. Narrowing the selection
-        here would hide the shape from the logs (the sweep would be
-        silent about a stranded root). The batch cap bounds the
-        per-tick work; the rows are ordered OLDEST-``updated_at``
-        first so the most-stranded roots are served first and no
-        candidate starves (a healed root leaves the candidate set, so
-        the next tick picks up the next batch).
+        The POSTURE stays deliberately WIDE (``status == running`` AND
+        ``parent_id IS NULL``): the predicate legs — not the selection
+        — decide what is a zombie. Narrowing the posture here would
+        hide the shape from the logs (the sweep would be silent about
+        a stranded root).
+
+        The ANCHOR is the completion proof: only a running root whose
+        LATEST task row is terminal-COMPLETED (with a ``completed_at``
+        stamp) is a candidate. The anchor is what keeps the
+        un-healable population out of the batch.
+
+        WHY THE ANCHOR (F1 — the starvation fix): the batch cap bounds
+        the candidates EXAMINED per tick, and a candidate that is
+        examined and SKIPPED keeps its sort key — so it is examined
+        again on the next tick, forever. Under the previous raw-
+        ``status='running'`` selection the head of the batch was
+        therefore occupied PERMANENTLY by roots that can never satisfy
+        the completion proof (no task row at all, a latest task row
+        that is not COMPLETED, a live turn in flight): with more such
+        roots than the cap, a real zombie past position ``cap`` was
+        NEVER examined. The old "no candidate starves" claim was
+        FALSE.
+
+        FAIRNESS / LIVENESS (the TRUE property — do not overstate):
+        the cap bounds EXAMINATION of the ANCHORED set per tick,
+        ordered OLDEST-``task.completed_at`` first (the most-stranded
+        roots are served first). An anchored candidate that is SKIPPED
+        keeps its anchor, so it is re-examined on the next tick — it
+        re-surfaces as the candidates ahead of it drain, and every skip
+        cause that CAN clear clears (a live descendant that resolves, a
+        pending question that is answered, a young turn that ages, a
+        busy queue that empties). Only the STRUCTURAL skip causes — a
+        permanent tree over the probe bound and a permanently live
+        descendant — hold a slot indefinitely; each consumes one slot,
+        so a backlog of such roots larger than the cap is the only case
+        where the cap, not the strand, bounds progress.
+
+        The age bound is applied HERE (in Python), NOT in SQL: the
+        completion stamp is a naive-UTC ``timestamp without time zone``
+        column and the SQLite dialect stores it as TEXT, so a SQL
+        comparison against a bound datetime is a STRING comparison
+        there and is NOT chronologically sound. The filter uses the
+        SAME ``_age_seconds`` helper the predicate uses, so the two
+        can never disagree. It can only ever DROP a candidate from the
+        window (the window holds the OLDEST anchors, and the aged ones
+        ARE the oldest ones), so it can never hide an aged zombie.
         """
+        latest_task_id = (
+            select(Task.id)
+            .where(Task.instance_id == Instance.instance_id)
+            .order_by(Task.created_at.desc(), Task.id.desc())
+            .limit(1)
+            .correlate(Instance)
+            .scalar_subquery()
+        )
         with Session(self._manager.engine) as session:
             rows = session.exec(
-                select(Instance.instance_id)
+                select(Instance.instance_id, Task.completed_at)
+                .join(Task, Task.id == latest_task_id)
                 .where(Instance.status == InstanceStatus.RUNNING.value)
                 .where(Instance.parent_id.is_(None))
-                .order_by(Instance.updated_at)
+                .where(Task.status == TaskStatus.COMPLETED.value)
+                .where(Task.completed_at.isnot(None))
+                .order_by(Task.completed_at.asc())
                 .limit(self._running_zombie_batch_cap)
             ).all()
-        return list(rows)
+        now_naive = self._now_naive()
+        aged: list[tuple[float, str]] = []
+        for instance_id, completed_at in rows:
+            age = self._age_seconds(completed_at, now_naive)
+            if age is None or age < self._running_zombie_age_bound_seconds:
+                continue
+            aged.append((age, instance_id))
+        # OLDEST completion first — ``age`` DESCENDING.
+        aged.sort(key=lambda item: (-item[0], item[1]))
+        return [instance_id for _, instance_id in aged]
 
     async def heal_running_zombie(self, root_id: str) -> dict[str, Any]:
         """Serialize per-root, then attempt ONE running-zombie heal.

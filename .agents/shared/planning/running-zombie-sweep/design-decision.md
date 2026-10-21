@@ -148,6 +148,36 @@ sweep's 100: terminalizing writes justify a tighter per-tick bound so the blast
 radius of a mis-predicate stays small. A root beyond the cap is picked up on the
 next tick (300s cadence).
 
+**The cap bounds EXAMINATION of the ANCHORED candidate set (F1).** Selection is
+anchored on the completion proof — a running root whose LATEST task row is
+terminal-`COMPLETED` (with a `completed_at` stamp) — ordered oldest
+`task.completed_at` first. Roots that can never satisfy the proof (no task row
+at all, a latest task row that is not `COMPLETED`, a live turn in flight) are
+NEVER selected, so they cannot occupy the head of the batch.
+
+*Why the anchor (the F1 fix).* The cap bounds the candidates EXAMINED per tick,
+and a candidate that is examined and SKIPPED keeps its sort key — so it is
+examined again on the next tick, forever. Under the previous raw-
+`status='running'` selection the head of the batch was therefore occupied
+PERMANENTLY by roots that can never satisfy the proof. With more such roots than
+the cap, a real zombie past position `cap` was NEVER examined — a permanent
+starvation, and the old "no candidate starves" claim was false.
+
+*The TRUE fairness property.* An anchored candidate that is skipped keeps its
+anchor and is re-examined on the next tick — it re-surfaces as the candidates
+ahead of it drain, and every skip cause that CAN clear clears (a live descendant
+that resolves, a pending question that is answered, a young turn that ages, a
+busy queue that empties). Only the STRUCTURAL skip causes — a permanent tree
+over the probe bound and a permanently live descendant — hold a slot
+indefinitely; each consumes one slot, so a backlog of such roots larger than
+the cap is the only case where the cap, not the strand, bounds progress.
+
+*Implementation note.* The age bound is applied in PYTHON, not in SQL: the
+completion stamp is a naive-UTC `timestamp without time zone` column and the
+SQLite dialect stores it as TEXT, so a SQL comparison against a bound datetime
+is a STRING comparison there and is not chronologically sound. The filter uses
+the same `_age_seconds` helper the predicate uses, so the two cannot disagree.
+
 ## 3. Known residuals (documented, not closed)
 
 ### 3.0 Idempotency of the drive against an already-finalized JobItem
@@ -157,14 +187,15 @@ drive chain handles that without harm:
 
 * the child_reports DB stamp is an atomic
   `UPDATE … WHERE status NOT IN (paused, completed, error, waiting_children)`
-  (`child_reports.py:3462-3495`) — a second run against an already-terminal row
+  (`child_reports.py:3463-3495`) — a second run against an already-terminal row
   matches 0 rows and returns `idempotency_skip` (no duplicate publish);
-* the observer's Step 1 (`job_feedback_observer.py`) is guarded by
-  `WHERE admission_state = 'active'` — an already-`done` JobItem matches 0 rows
-  and raises `InvalidTransitionError`, which the async caller absorbs at DEBUG
-  (documented idempotency, `job_feedback_observer.py:3726-3735`). The INSTANCE
-  row is already terminal by then (the child_reports stamp wrote it), so
-  nothing is lost;
+* for a PARENTLESS root the drive never reaches the observer's `_finalize_job`
+  at all — `child_reports.py` has no `_finalize_job` call site — so the
+  already-`done` `JobItem` is simply NEVER re-transitioned: there is nothing to
+  absorb and nothing to undo. The `InvalidTransitionError` → DEBUG absorb
+  (`job_feedback_observer.py:3728-3733`) is real, but it belongs to the
+  bus-callback / `PROCESS_REPORT` path (a CHILD's `JobItem`), not to the
+  parentless-root drive this strand exercises;
 * the strand is re-entrant: a root flipped back to `running` by a watcher
   (`instance_messaging.py:2375-2379`) simply becomes a candidate again — the
   post-drive status read is the verdict, and the drive is safe to repeat.
@@ -201,7 +232,7 @@ STOP and report — none was.)
 
 ## 5. Evidence
 
-* New suite: `tests/job_queue/test_running_zombie_sweep.py` — 24 tests.
+* New suite: `tests/job_queue/test_running_zombie_sweep.py` — 26 tests.
 * Sibling suites unchanged and green:
   `test_watcher_loss_terminal_strand.py`, `test_watcher_loss_terminal_strand_gap.py`,
   `test_mission_live_guard.py` (87 passed together with the new suite).
