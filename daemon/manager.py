@@ -11886,7 +11886,10 @@ class InstanceManager:
         return True
 
     async def terminate_instance(
-        self, instance_id: str, terminal_reason: str = "aborted"
+        self,
+        instance_id: str,
+        terminal_reason: str = "aborted",
+        audit_sink=None,
     ) -> bool:
         """Terminate an instance.
 
@@ -11910,7 +11913,7 @@ class InstanceManager:
             True if termination was successful, False if instance was not found.
         """
         return await self._lifecycle_service.terminate_instance(
-            instance_id, terminal_reason=terminal_reason
+            instance_id, terminal_reason=terminal_reason, audit_sink=audit_sink
         )
 
     async def hard_delete_instance(self, instance_id: str) -> dict[str, Any]:
@@ -13519,6 +13522,7 @@ class InstanceManager:
         search: str | None = None,
         order: str = "pinned",
         source: str | None = None,
+        status: str | None = None,
     ) -> tuple[list[dict], int, bool]:
         """List instances with pagination.
 
@@ -13550,6 +13554,12 @@ class InstanceManager:
                 ``USER_ORIGIN_CHAT_SOURCE_TYPES``). Any other string matches
                 a single ``source_type`` value. ``None`` (default) applies
                 no source filter.
+            status: Optional exact ``InstanceStatus`` filter, applied
+                **in SQL** by the repository. Added for the nest-ops
+                ``instance_read`` category (GT-3 / AC-21): a status filter
+                applied in Python over a fetched page silently returns an
+                arbitrary pinned-ordered subset past the first page.
+                ``None`` (default) applies no status filter.
 
         Returns:
             Tuple of (list of instance info dicts, total count, truncated flag).
@@ -13567,6 +13577,7 @@ class InstanceManager:
             search=search,
             order=order,
             source=source,
+            status=status,
         )
 
     def get_instance_info(self, instance_id: str) -> dict:

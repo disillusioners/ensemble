@@ -119,26 +119,39 @@ class TestRealMaintenancerMetaShape:
     granted or denied must fail here first."""
 
     def test_real_meta_allow_is_exact_category_set(self) -> None:
-        """tools.allow = exactly the 5 categories: the privileged pair
-        (system-log, ens-db), system_upgrade, knowledge, and db
-        (D19 — external user-registered connections only)."""
+        """tools.allow = exactly the 8 categories: the privileged pair
+        (system-log, ens-db), system_upgrade, system_restart, knowledge,
+        db (D19 — external user-registered connections only), and the two
+        nest-ops fleet categories (instance_read / instance_ops).
+
+        nest-ops (2026-10-21): the inherited 3-red fold. ``system_restart``
+        was added to the allow list by ``ff27305c4`` (which updated only
+        ``tests/unit/test_maintenancer_agent.py`` and left THIS integration
+        pin stale), and this commission appends the two fleet categories.
+        The literal is stated in full so the fold lands at 0 in ONE shot —
+        otherwise the new assertions carry no usable green/red signal."""
         assert MAINTAINER_META_ALLOW == [
             "system-log",
             "ens-db",
             "knowledge",
             "system_upgrade",
+            "system_restart",
             "db",
+            "instance_read",
+            "instance_ops",
         ]
 
-    def test_real_meta_denies_system_restart_per_d20(self) -> None:
-        """tools.deny strips system_restart (D20) — the deny-list is
-        the only resolution-level mechanism that survives
-        system_upgrade category expansion (upgrade_tools.py:1435)."""
+    def test_real_meta_deny_is_exact_category_set(self) -> None:
+        """tools.deny = exactly the 3 live entries.
+
+        nest-ops (2026-10-21): the inherited 3-red fold, second hunk.
+        ``system_restart`` is ALLOWED (not denied) since ``ff27305c4`` —
+        this assertion was stale and is corrected to the live shape. The
+        deny list is unchanged by this commission."""
         assert MAINTAINER_META_DENY == [
             "git_commit",
             "edit_file",
             "write_file",
-            "system_restart",
         ]
 
 
@@ -205,23 +218,21 @@ class TestMaintenancerResolves:
         # db category's tool set, but we assert it explicitly).
         assert "ensemble_prod" not in resolved
 
-    def test_maintenancer_gets_system_upgrade_excluding_system_restart(self) -> None:
-        """D20: ``system_upgrade`` category expansion includes
-        ``system_restart``, but the deny-list strips it at the
-        resolution level. The rest of the category is reachable."""
+    def test_maintenancer_gets_the_whole_system_upgrade_category(self) -> None:
+        """``system_upgrade`` category expansion includes
+        ``system_restart``, and since ``ff27305c4`` ``system_restart``
+        is ALLOWED (not denied) — so the whole category is reachable.
+
+        nest-ops (2026-10-21): the inherited 3-red fold, third hunk —
+        the old deny-strip assertion is replaced by the ALLOW-side
+        assertion, because the deny-strip no longer applies."""
         resolved = resolve_tool_filter(
             allow=MAINTAINER_META_ALLOW,
             deny=MAINTAINER_META_DENY,
             tool_categories=_make_categories(),
         )
         assert resolved is not None
-        # system_restart MUST be denied — the resolution-level strip.
-        assert "system_restart" not in resolved, (
-            f"system_restart leaked through resolve_tool_filter despite "
-            f"tools.deny entry (D20 enforcement violated)"
-        )
-        # The rest of the system_upgrade category is reachable.
-        for tool_name in SYSTEM_UPGRADE_TOOLS - {"system_restart"}:
+        for tool_name in SYSTEM_UPGRADE_TOOLS:
             assert tool_name in resolved, (
                 f"system_upgrade tool {tool_name!r} not in resolved set"
             )
@@ -384,6 +395,10 @@ class TestPrivilegedCategoryRegistryShape:
             # board. The ari + leader tools.allow entries are the only
             # access path; the tool body ALSO carries the runtime
             # agent_id gate.
+            # nest-ops (2026-10-21): the two maintenancer fleet categories
+            # (read #13 / act #14) — opt-in-only, never default-granted.
+            "instance_read",
+            "instance_ops",
             "board-link",
         })
 

@@ -966,6 +966,15 @@ async def lifespan(app: FastAPI):
     Secret.metadata.create_all(manager.engine)
     SecretAuditEvent.metadata.create_all(manager.engine)
 
+    # nest-ops (2026-10-21) — ``instance_ops_audit`` is the single new
+    # table that backs the ``instance_ops`` privileged tool category
+    # (the audit ledger for the 6 act tools). Brand-new table — the
+    # same create_all precedent as the secrets pair above; the .sql
+    # migration handles SQLite and the model handles PG. No
+    # ``_ensure_postgres_columns`` mirror needed.
+    from daemon.repositories.instance_ops.models import InstanceOpsAudit
+    InstanceOpsAudit.metadata.create_all(manager.engine)
+
     # agent-secrets P1 — ``SecretService`` is constructed in
     # ``InstanceManager.__init__`` alongside
     # ``_prompt_version_service`` /
