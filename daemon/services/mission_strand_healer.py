@@ -213,7 +213,7 @@ _RUNNING_ZOMBIE_MAX_TREE_PROBE_SIZE: int = 256
 #: of ANY such row for the root means the root is NOT a zombie (the
 #: turn owns the instance). The canonical home is
 #: ``daemon.constants.NON_TERMINAL_TASK_STATUSES`` — the SAME set the
-#: mission-live guard's MEMBER-TASK liveness leg uses (one canonical
+#: mission-live guard's MEMBER-ALIVE companion leg uses (one canonical
 #: set, so the two cannot drift; ``processing`` is legacy task
 #: vocabulary kept defensively).
 _RUNNING_ZOMBIE_NON_TERMINAL_TASK_STATUSES: frozenset[str] = (
@@ -1187,7 +1187,7 @@ class MissionStrandHealer:
                 f"terminalizes; an unevaluatable leg must not proceed)",
             )
         if tree_verdict.live:
-            # MEMBER-TASK liveness (cycle 3): a non-terminal member
+            # MEMBER-ALIVE companion leg: a non-terminal member
             # owns a LIVE task row ⇒ the tree is WORKING, not stale.
             # Its own skip class, so the operator can tell this hold
             # apart from an ordinary "the tree is alive" hold.

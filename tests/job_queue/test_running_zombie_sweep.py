@@ -1885,6 +1885,82 @@ class TestRunningZombieMemberAliveCompanionLeg:
         ).status == InstanceStatus.RUNNING.value
 
     @pytest.mark.asyncio
+    async def test_member_with_undatable_task_stamp_is_not_healed(
+        self, zombie_harness, monkeypatch,
+    ):
+        """(iii) NEGATIVE — a member that owns a non-terminal task row
+        whose stamp CANNOT be dated counts as ALIVE (fail-MISS): the
+        root is NOT healed, the drive is NOT invoked, and the root's
+        status is untouched (review C1).
+
+        The ROW EXISTS, so the member may be mid-turn; only its AGE is
+        unreadable. Before the fix an undatable row was
+        indistinguishable from "no row" (the probe returned ``None``
+        for both) and the backstop fired under a possibly-live member
+        — fail-STALE against the lane's declared fail-MISS posture.
+
+        SEEDING NOTE (schema reality, verified): ``task.created_at`` is
+        NOT NULL (ORM model + the migration), so a literally NULL
+        stamp cannot be written; and a GARBAGE stamp raises inside
+        the ORM read — which the leg already treats as a fail-MISS
+        probe ERROR. The "row exists but is undatable" state is
+        therefore reached here by a fault injection at the PARSE seam,
+        scoped to the member's OWN task stamp, so the anchor leg
+        (which reads the instances' ``last_activity_at``) is untouched.
+        """
+        from daemon.services import mission_live_guard as mlg
+
+        def _same_instant(value: datetime, target: datetime) -> bool:
+            def naive(d: datetime) -> datetime:
+                if d.tzinfo is not None:
+                    d = d.astimezone(timezone.utc)
+                return d.replace(tzinfo=None)
+            return naive(value) == naive(target)
+
+        # The member's task row is OLD (26h17m) so the NORMAL path
+        # would NOT hold the tree — the fail-MISS hardening is the
+        # only thing that can hold it.
+        member_stamp = datetime.now(timezone.utc) - timedelta(
+            hours=26, minutes=17,
+        )
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_task_status="running",
+            member_task_created_at=member_stamp,
+        )
+
+        real_parse = mlg.parse_completed_at_naive
+
+        def _parse_undatable(value):
+            if isinstance(value, datetime) and _same_instant(
+                value, member_stamp,
+            ):
+                return None
+            return real_parse(value)
+
+        monkeypatch.setattr(
+            mlg, "parse_completed_at_naive", _parse_undatable,
+        )
+
+        healer = _make_healer(zombie_harness)
+        drive = AsyncMock()
+        with patch.object(
+            zombie_harness.service,
+            "_process_child_completion_and_notify_parent",
+            new=drive,
+        ):
+            outcome = await healer.heal_running_zombie(ROOT)
+        assert outcome["healed"] is False, outcome
+        assert outcome["skip_class"] == "member-live-task", outcome
+        assert drive.await_count == 0, (
+            "the completion drive must NOT be invoked while a member "
+            "owns a live task row whose stamp cannot be dated"
+        )
+        assert _get_instance_row(
+            zombie_harness.engine, ROOT
+        ).status == InstanceStatus.RUNNING.value
+
+    @pytest.mark.asyncio
     async def test_member_without_task_row_is_still_healed(
         self, zombie_harness,
     ):

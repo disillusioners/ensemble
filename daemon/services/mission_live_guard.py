@@ -423,6 +423,18 @@ def _member_live_task_attempt_at(
     or a naive input, and an unparseable stamp is DROPPED (never
     guessed).
 
+    **UNDATEABLE ROW ⇒ YOUNG (fail-MISS, review C1).** ``None`` is
+    returned ONLY when the member owns **NO** non-terminal task row at
+    all (the ADDITIVE invariant: a stale member with no live task row
+    remains a zombie candidate). A member that DOES own a non-terminal
+    task row but whose stamp cannot be dated (both ``started_at`` and
+    ``created_at`` NULL/unparseable) gets the CURRENT time instead:
+    the ROW EXISTS — the member may be mid-turn — so the member counts
+    as ALIVE and the tree is NOT finalized. Returning ``None`` there
+    made "undatable row" indistinguishable from "no row" and let the
+    backstop fire under a possibly-live member — fail-STALE against
+    this lane's declared fail-MISS posture.
+
     The status set is ``daemon.constants.NON_TERMINAL_TASK_STATUSES``
     — the canonical non-terminal task set (the SSOT; the same set the
     running-zombie strand's root-level leg uses). ``processing`` is
@@ -462,7 +474,21 @@ def _member_live_task_attempt_at(
         )
         if parsed is not None:
             stamps.append(parsed)
-    return max(stamps) if stamps else None
+    if stamps:
+        return max(stamps)
+    if not rows:
+        # NO non-terminal task row at all ⇒ no dateable evidence of an
+        # in-flight turn ⇒ NOT held (the ADDITIVE invariant).
+        return None
+    # The member OWNS a non-terminal task row, but NO parseable stamp
+    # (both ``started_at`` and ``created_at`` NULL/unparseable). The
+    # ROW EXISTS — the member may be mid-turn — but its age cannot be
+    # read. Fail-MISS (the lane's declared posture): treat the row as
+    # YOUNG so the member counts as ALIVE and the tree is NOT
+    # finalized. Returning None here would make "undatable row"
+    # indistinguishable from "no row" and let the backstop fire under
+    # a possibly-live member (review C1).
+    return now_utc_naive()
 
 
 async def _member_alive_companion_verdict(
@@ -574,12 +600,27 @@ async def _member_alive_companion_verdict(
             # owns live work that is NOT dateable by a task row (a
             # queued JobItem, or its own non-terminal child) — the leg
             # does not hold on that evidence (see the docstring).
-            logger.debug(
-                "mission_live_guard: member-alive probe for %s... — "
-                "member=%s... live_work=%s no live task row ⇒ "
-                "stale-eligible",
-                (instance_id or "?")[:8], member_id[:8], live_work,
-            )
+            if live_work:
+                # H2 (review C2): the probe and the dateable evidence
+                # DISAGREE — the probe says "live work", the evidence
+                # says "nothing dateable" — and the leg does NOT hold
+                # on it. That is a non-error anomaly an operator must
+                # be able to SEE, so it is emitted at INFO (house style
+                # for non-error anomalies); the routine no-live-work
+                # case stays at DEBUG.
+                logger.info(
+                    "mission_live_guard: member-alive probe for %s... — "
+                    "member=%s... live work detected but NOT dateable "
+                    "(no live task row) ⇒ NOT held (stale-eligible)",
+                    (instance_id or "?")[:8], member_id[:8],
+                )
+            else:
+                logger.debug(
+                    "mission_live_guard: member-alive probe for %s... — "
+                    "member=%s... live_work=%s no live task row ⇒ "
+                    "stale-eligible",
+                    (instance_id or "?")[:8], member_id[:8], live_work,
+                )
             continue
         age_seconds = (now - attempt_at).total_seconds()
         if age_seconds < timeout_seconds:

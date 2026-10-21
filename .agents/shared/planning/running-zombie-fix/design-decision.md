@@ -278,6 +278,18 @@ stamp, emission gate, publish, observer finalize) is a multi-query path that the
 static per-candidate count understates. Neither figure was re-measured in
 review cycle 1 (re-measuring was optional).
 
+**The shared guard's companion leg adds a PER-MEMBER cost — on the
+staleness branch only.** The member-alive companion leg
+(`daemon/services/mission_live_guard.py`, §2.10) runs per candidate member
+and costs **≈2 queries each**: the repository's `has_live_work` probe + one
+task read (the newest attempt stamp). It runs **ONLY on the staleness
+branch** (the tree already looks quiet), so a **live tree pays nothing**;
+the RZ sweep's per-tick cost therefore grows only with the number of
+NON-ROOT, NON-TERMINAL members on trees that have been quiet for the 6h
+horizon. (The `has_live_work` verdict is **not** load-bearing for the
+guard's verdict — it feeds the operator log only; a probe/EVIDENCE
+disagreement is surfaced at INFO, review C2.)
+
 ## 2.8 Cycle-2 changes (2026-10-21) — the three defects, closed
 
 Cycle 1 shipped the strand SHAPE. Cycle 2 closed the three defects the
@@ -367,12 +379,12 @@ difference between them is what they DO with the verdict.
 | # | consumer | call site | `skip_root` | reaches the 6h backstop (fresh root + stale member)? | what the companion leg (§2.10) now does for it |
 |---|---|---|---|---|---|
 | 1 | **pre-stamp gate** | `child_reports.py:2744` | **yes** | yes | a member with a live (YOUNG) task row ⇒ the COMPLETED stamp is **REFUSED** (no wrong completion) and the re-arm hands the root to the healer |
-| 2 | **emission gate** | `child_reports.py:2582` | no | yes | ⇒ the publish is **BLOCKED** (the stamp is downgraded to `waiting_children` — a legitimate miss, not a wrong completion) |
+| 2 | **emission gate** | `child_reports.py:2582` | no | yes | ⇒ the gate's guard call returns `live=True` and the gate returns **False** ⇒ the publish is **BLOCKED** (a legitimate miss, not a wrong completion). The traced step is the gate's `False` return (`child_reports.py:2582-2592`) — NOT a stamp downgrade (that downstream step is not in this diff, so it is not claimed here) |
 | 3 | **healer tree leg 4** | `mission_strand_healer.py:1163` | **yes** | yes | ⇒ the lane **SKIPS** with its own skip class `member-live-task` (the operator can tell this hold apart from an ordinary `live-tree` hold) |
 | 4 | **f1** (drift reconciler) | `job_recovery_service.py:2666` | no | yes | ⇒ f1 **HOLDS** the `JobItem` (no force-finalize) — detail pattern `orphan_active_skipped_mission_live_f1` |
 | 5 | **f2** (drift reconciler) | `job_recovery_service.py:2970` | no | yes | ⇒ f2 **HOLDS** the `JobItem` — detail pattern `orphan_active_skipped_mission_live`. **CODE untouched; BEHAVIOUR widened (material disclosure, above)** |
 | 6 | **boot sweep** (`reconcile_terminal_watches`) | `job_queue_service.py:635` | no | yes | ⇒ the sweep does **NOT** fire the terminal for that watch (the watch survives to the next tick) |
-| 7 | **zombie-GC held-watch reconcile** | `job_queue_service.py:861` | n/a — `instance_id=None` | **no** (the guard fail-opens on the unwired id) | unchanged — the leg never runs (there is no tree to walk) |
+| 7 | **zombie-GC held-watch reconcile** | `job_queue_service.py:861` | n/a — `instance_id=None` | **no** (the guard returns `live=False, error=True` on the unwired id — the fail-OPEN contract; the caller finalizes) | unchanged — the leg never runs (there is no tree to walk) |
 | 8 | **orphan release** | `job_queue_service.py:992` | no | yes | ⇒ the orphan release does **NOT** fire (the `ORPHAN_RELEASED` line is not emitted) |
 | 9 | **stored-watch reconcile** | `job_queue_service.py:1200` | no | yes | ⇒ the stored watch is **NOT released** |
 | 10 | **work notifier** | `work_notifier.py:687` | no | yes | ⇒ the watcher is **not notified** (the mission-liveness hold keeps the work row) |
@@ -668,14 +680,16 @@ sides:
 |---|---|---|
 | **younger** than the horizon | the member is ALIVE → the leg HOLDS the tree (`live=True`, `member_task_hold=True`, `timed_out=False`) | **NOT** finalized |
 | **older** than the horizon (crash / kill mid-turn) | the member is NOT alive → stale-eligible → the backstop fires (`live=False`, `timed_out=True`) | **CAN** heal |
+| **present** but **undatable** (both `started_at` and `created_at` NULL/unparseable) | the ROW EXISTS ⇒ the member is ALIVE — the row is treated as **YOUNG** (fail-MISS, review C1) → the leg HOLDS the tree | **NOT** finalized |
 | **no** live task row | the member is stale-eligible (the ADDITIVE invariant) | **CAN** heal |
 
 **Where the age is read:** the leg reads the member's non-terminal task
 rows (the canonical set, `daemon.constants.NON_TERMINAL_TASK_STATUSES`)
 and takes the **newest attempt stamp** — the row's `started_at` (when the
 worker claimed the turn), falling back to `created_at` (minted but not yet
-claimed). Naive-UTC digits per the repo's naive-UTC binding convention;
-an unparseable stamp is DROPPED, never guessed.
+claimed). Naive-UTC digits per the repo's naive-UTC binding convention; an
+unparseable stamp is DROPPED from the AGE comparison (never guessed) — but
+the ROW's existence still HOLDS the tree (fail-MISS, review C1).
 
 ### 2.10.3 The two PINNED invariants (council)
 
@@ -702,6 +716,15 @@ branch is the rare one (a tree that has been quiet for 6h).
 
 ### 2.10.5 What the leg does NOT do (named residuals)
 
+* **A live task row with NO parseable stamp HOLDS the tree (fail-MISS).**
+  The age of an undatable row cannot be read, so the row is treated as
+  **YOUNG**: the member counts as ALIVE and the root is NOT finalized.
+  The posture in one line — **rows exist ⇒ alive, unless the row is
+  dateable AND older than the horizon; no dateable stamp ⇒ alive.**
+  (Review C1: before this, an undatable row was indistinguishable from
+  "no row" — the probe returned `None` for both — so the backstop could
+  fire under a possibly-live member. That was fail-STALE against this
+  lane's declared fail-MISS posture, and it was not stated in the doc.)
 * **A member inside a LEGITIMATE >6h turn is still indistinguishable
   from stale** — the horizon is the system's own. The fix is a
   **heartbeat on turn progress** (the task rows already carry
