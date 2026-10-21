@@ -758,8 +758,8 @@ class TestPrivilege:
         assert _is_views_authorized(123, VIEW_WRITE_AGENTS) is False
         assert _is_views_authorized("ari", VIEW_WRITE_AGENTS) is True
         assert _is_views_authorized("leader", VIEW_WRITE_AGENTS) is False
-        assert _is_views_authorized("leader", BOARD_LINK_AGENTS) is True
-        assert VIEW_WRITE_AGENTS != BOARD_LINK_AGENTS
+        assert _is_views_authorized("leader", BOARD_LINK_AGENTS) is False
+        assert VIEW_WRITE_AGENTS == BOARD_LINK_AGENTS == frozenset({"ari"})
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -883,14 +883,21 @@ class TestReportsRootInjection:
 
 
 # ─────────────────────────────────────────────────────────────────
-# The board_link tool's gate set is DIFFERENT (cross-module discipline)
+# The board_link tool's gate set is the SAME audience (cross-module discipline)
 # ─────────────────────────────────────────────────────────────────
 
 
-def test_the_two_gate_sets_are_different() -> None:
+def test_both_gate_sets_are_ari_only() -> None:
+    """ARI-ONLY (user ruling 2026-10-20).
+
+    The earlier pin asserted the two sets DIFFER (the "mint ≠ read"
+    audience split). That split is RETRACTED — both are now exactly
+    ``{"ari"}``. The replacement pins the EXACT audience of each set
+    (not their difference) and pins that leader is denied both.
+    """
     assert VIEW_WRITE_AGENTS == frozenset({"ari"})
-    assert BOARD_LINK_AGENTS == frozenset({"ari", "leader"})
-    assert VIEW_WRITE_AGENTS != BOARD_LINK_AGENTS
+    assert BOARD_LINK_AGENTS == frozenset({"ari"})
+    assert VIEW_WRITE_AGENTS == BOARD_LINK_AGENTS
 
 
 def test_the_board_link_factory_is_keyword_only_after_manager() -> None:

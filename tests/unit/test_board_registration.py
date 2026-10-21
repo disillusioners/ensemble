@@ -3,10 +3,9 @@
 
 Covers the phase1-plan §8 N8 matrix:
 
-* ``"board"`` is in the ``tools.allow`` of BOTH ``agents/ari/meta.json``
-  and ``agents/leader/meta.json`` — and in NO other agent's allow list
-  (leader ruling L1: the board category goes to ari + leader, to nobody
-  else);
+* ``"board"`` is in the ``tools.allow`` of ``agents/ari/meta.json``
+  — and in NO other agent's allow list (ARI-ONLY — the user ruling of
+  2026-10-20 RETRACTS the earlier "ari + leader" audience);
 * the four tool names are in ``DYNAMIC_TOOL_NAMES`` AND
   ``KNOWN_TOOL_NAMES`` AND the source-discovered universe (the
   three-step registration seam — decorator-only is SILENTLY INVISIBLE);
@@ -81,8 +80,11 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "board-link",
 })
 
-#: The ONLY agents allowed to hold the board category.
-BOARD_ALLOW_AGENTS = ("ari", "leader")
+#: The ONLY agent allowed to hold the board category.
+#:
+#: ARI-ONLY (user ruling 2026-10-20, Discord, direct) — the earlier
+#: "ari + leader" audience is RETRACTED.
+BOARD_ALLOW_AGENTS = ("ari",)
 
 
 # ── the static registration points ───────────────────────────────────────
@@ -208,8 +210,13 @@ class TestAllowLists:
         return meta["tools"]["allow"]
 
     @pytest.mark.parametrize("agent_id", BOARD_ALLOW_AGENTS)
-    def test_ari_and_leader_allow_the_board_category(self, agent_id: str) -> None:
+    def test_only_ari_allows_the_board_category(self, agent_id: str) -> None:
         assert BOARD_CATEGORY in self._allow(agent_id)
+
+    def test_leader_does_not_hold_the_board_category(self) -> None:
+        """ARI-ONLY (user ruling 2026-10-20) — leader's allow list lost
+        the ``board`` entry; the leader's OTHER entries are untouched."""
+        assert BOARD_CATEGORY not in self._allow("leader")
 
     def test_board_is_the_last_entry_of_both_allow_arrays(self) -> None:
         """``board`` was appended at the END of both arrays (D15).
@@ -220,13 +227,16 @@ class TestAllowLists:
         is followed ONLY by the phase-2 category.
 
         Phase 3 (the live-views surface) appended ``view-write`` +
-        ``board-link`` at the END of ari's array and ``board-link`` at
-        the END of leader's array (the D15 discipline: every phase
-        appends, never inserts) — so the trailing set is now the
-        phase-2 + phase-3 categories."""
+        ``board-link`` at the END of ari's array — so the trailing set
+        is now the phase-2 + phase-3 categories.
+
+        NOTE (user ruling 2026-10-20): the board categories are
+        ARI-ONLY, so leader's array no longer carries ``board`` (nor
+        ``board-link``) at all — the trailing discipline is asserted
+        for ari alone.
+        """
         trailing_by_agent = {
             "ari": ["self-alarm", "view-write", "board-link"],
-            "leader": ["board-link"],
         }
         for agent_id in BOARD_ALLOW_AGENTS:
             allow = self._allow(agent_id)
@@ -238,9 +248,9 @@ class TestAllowLists:
             )
 
     def test_no_other_agent_holds_the_board_category(self) -> None:
-        """Leader ruling L1 — the board category goes to ari + leader,
-        to NOBODY else. The in-tree population is every agent dir
-        under ``agents/``."""
+        """ARI-ONLY (user ruling 2026-10-20) — the board category goes to
+        ari alone, to NOBODY else. The in-tree population is every
+        agent dir under ``agents/``."""
         offenders = []
         for meta_path in sorted((REPO_ROOT / "agents").glob("*/meta.json")):
             meta = json.loads(meta_path.read_text(encoding="utf-8"))

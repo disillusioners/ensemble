@@ -103,8 +103,9 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # (daemon/tools/board_link.py). The ``board-link`` category is
     # PRIVILEGED (entry #12 of PRIVILEGED_TOOL_CATEGORIES): minting the
     # board's passcode authorises reading the user's whole work board.
-    # Explicit ``tools.allow: ["board-link"]`` on ari + leader is the only
-    # access path; the tool body ALSO carries the runtime agent_id gate.
+    # Explicit ``tools.allow: ["board-link"]`` on ari is the only
+    # access path (ARI-ONLY — user ruling 2026-10-20); the tool body
+    # ALSO carries the runtime agent_id gate.
     "board_link",
     # system_upgrade tools — created by create_upgrade_tools() factory
     # (daemon/tools/upgrade_tools.py, P2.2 Dispatch A read pair + Dispatch B
@@ -394,15 +395,16 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # ``board_update`` / ``board_list`` / ``board_get``) over the three
     # ``board_items`` / ``board_notes`` / ``board_item_tags`` tables.
     # Why privileged: the board is ONE GLOBAL namespace — every Ari
-    # instance and the leader read and write the SAME rows — so a
+    # instance reads and writes the SAME rows — so a
     # default-granted board would hand write authority over the
     # user's shared work surface to the empty-allow inherit universe
     # (the in-tree ``watcher`` agent plus every tools-less custom
-    # agent). NEVER default-granted — opt-in-only; the ari + leader
-    # meta.json ``tools.allow`` entries are the only access path.
+    # agent). NEVER default-granted — opt-in-only; the ari
+    # meta.json ``tools.allow`` entry is the only access path
+    # (ARI-ONLY — user ruling 2026-10-20).
     # Defence in depth: a LITERAL TOOL NAME in an allow list bypasses
     # the category gate entirely, so the tool bodies carry their own
-    # ``agent_id in {"ari", "leader"}`` gate as well. Both gates are
+    # ``agent_id in {"ari"}`` gate as well. Both gates are
     # required; neither substitutes for the other. SAME-PR pin updates
     # at the FIVE files listed in the SAME-PR RULE comment above are
     # mandatory (this entry ships in the SAME commit as those five
@@ -461,11 +463,11 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # Why privileged: the board's passcode authorises reading the user's
     # whole work board — a default-granted minter would hand that authority
     # to the empty-allow inherit universe. NEVER default-granted —
-    # opt-in-only; the ari + leader meta.json ``tools.allow`` entries are
-    # the only access path (audience separation: mint ≠ read). Defence in
+    # opt-in-only; the ari meta.json ``tools.allow`` entry is
+    # the only access path (ARI-ONLY — user ruling 2026-10-20). Defence in
     # depth: a LITERAL TOOL NAME in an allow list bypasses the category
-    # gate, so the tool body ALSO carries an ``agent_id in {"ari",
-    # "leader"}`` runtime gate (the shared ``daemon/tools/views_auth.py``
+    # gate, so the tool body ALSO carries an ``agent_id in {"ari"}``
+    # runtime gate (the shared ``daemon/tools/views_auth.py``
     # helper — the SAME helper ``view_write`` uses, with a DIFFERENT gate
     # set). Both gates are required; neither substitutes for the other.
     # SAME-PR pin updates at the SEVEN files listed in the SAME-PR RULE

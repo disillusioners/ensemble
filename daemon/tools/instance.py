@@ -2333,7 +2333,7 @@ def create_board_tools_if_available(manager, current_instance_id: str, agent_id:
     ``tools.allow: ["board"]`` entry). The privileged category is NOT
     sufficient on its own — a literal tool name in an allow list
     bypasses the category gate — so the tool bodies ALSO carry their
-    own ``agent_id in {"ari", "leader"}`` gate. Both gates are
+    own ``agent_id in {"ari"}`` gate. Both gates are
     required.
 
     Decorator-only registration is SILENTLY INVISIBLE — the extend of
@@ -5998,7 +5998,7 @@ Returns:
     #   * ``view-write``  — writes an HTML page under the shared,
     #     customer-facing ``reports`` live-view root (ARI-only).
     #   * ``board-link``  — mints the passcode-gated public link for the
-    #     server-rendered live board (ari + leader).
+    #     server-rendered live board (ari-only).
     # The tool bodies carry a SECOND, independent agent_id gate (the
     # shared ``daemon/tools/views_auth.py`` helper) — a LITERAL tool name
     # in an allow list bypasses the category gate, so the category alone

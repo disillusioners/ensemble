@@ -315,10 +315,11 @@ class TestPrivilege:
         )
         assert "board_link" not in by_name
 
-    def test_bl4ii_the_allow_list_is_ari_and_leader_only(self) -> None:
+    def test_bl4ii_the_allow_list_is_ari_only(self) -> None:
+        """ARI-ONLY (user ruling 2026-10-20)."""
         for agent_id, expected in (
             ("ari", True),
-            ("leader", True),
+            ("leader", False),
             ("designer", False),
             ("worker", False),
             ("tester", False),
@@ -333,7 +334,7 @@ class TestPrivilege:
             assert (BOARD_LINK_CATEGORY in allowed) is expected, agent_id
 
     @pytest.mark.parametrize(
-        "agent_id", ["", "designer", "worker", "tester", "watcher"]
+        "agent_id", ["", "designer", "worker", "tester", "watcher", "leader"]
     )
     def test_bl4iii_the_body_gate_denies_with_zero_side_effects(
         self, manager, passcode_service, agent_id: str
@@ -343,12 +344,12 @@ class TestPrivilege:
         )[0]
         out = _call(tool)
         assert out.startswith("Error:"), out
-        assert "restricted to the 'ari' and 'leader' agents" in out
+        assert "restricted to the 'ari' agent" in out
         # ZERO side effects — no passcode row was minted.
         assert _passcode_row_count(passcode_service) == 0
 
-    @pytest.mark.parametrize("agent_id", ["ari", "leader"])
-    def test_bl4iii_ari_and_leader_both_mint(
+    @pytest.mark.parametrize("agent_id", ["ari"])
+    def test_bl4iii_ari_mints(
         self, manager, passcode_service, agent_id: str
     ) -> None:
         tool = create_board_link_tools(
@@ -358,12 +359,19 @@ class TestPrivilege:
         assert not out.startswith("Error:"), out
         assert _passcode_row_count(passcode_service) == 1
 
-    def test_bl4_the_gate_set_is_not_the_view_write_set(self) -> None:
-        """The pin must FAIL if ``view_write``'s set leaks in."""
-        assert BOARD_LINK_AGENTS == frozenset({"ari", "leader"})
+    def test_bl4_the_gate_set_is_ari_only(self) -> None:
+        """ARI-ONLY (user ruling 2026-10-20).
+
+        The earlier pin asserted the board_link set DIFFERS from the
+        view_write set (the "mint ≠ read" audience split). That split
+        is RETRACTED — both sets are now exactly ``{"ari"}``. The
+        replacement pins the EXACT audience of each set (not their
+        difference), and pins that leader is DENIED both.
+        """
+        assert BOARD_LINK_AGENTS == frozenset({"ari"})
         assert VIEW_WRITE_AGENTS == frozenset({"ari"})
-        assert BOARD_LINK_AGENTS != VIEW_WRITE_AGENTS
-        assert _is_views_authorized("leader", BOARD_LINK_AGENTS) is True
+        assert _is_views_authorized("ari", BOARD_LINK_AGENTS) is True
+        assert _is_views_authorized("leader", BOARD_LINK_AGENTS) is False
         assert _is_views_authorized("leader", VIEW_WRITE_AGENTS) is False
 
 

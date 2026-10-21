@@ -4,7 +4,7 @@ ari-tools Phase 3 (the live-views surface). This module owns:
 
 * :func:`_is_views_authorized` — the shared gate helper;
 * :data:`VIEW_WRITE_AGENTS` — the ``view_write`` gate set (ARI-ONLY);
-* :data:`BOARD_LINK_AGENTS` — the ``board_link`` gate set (ari + leader).
+* :data:`BOARD_LINK_AGENTS` — the ``board_link`` gate set (ari-only).
 
 Why the helper lives in its OWN module
 --------------------------------------
@@ -16,10 +16,16 @@ A separate module means:
 
 * ONE helper, TWO call sites (the phase-1 "one shared helper, not
   four copies" discipline — ``daemon/tools/board_tools.py``);
-* both gate sets are visible SIDE BY SIDE, so the difference between
-  them is a one-glance fact, not a cross-file lookup;
+* both gate sets are visible SIDE BY SIDE, so the audience of each is a
+  one-glance fact, not a cross-file lookup;
 * Phase 3 imports NO phase-1 file (D13) — this module is phase-3
   owned and touches nothing else.
+
+NOTE (2026-10-20 user ruling, Discord, direct): the two sets now carry
+the SAME audience — ``ari`` alone. The separation survives as
+STRUCTURE (each tool keeps its own named set), not as an audience
+split: the earlier "mint ≠ read" (ari + leader) audience is RETRACTED
+— see ``.agents/shared/planning/ari-tools/decisions.md``.
 
 Why layer 3 is LOAD-BEARING (and not belt-and-suspenders)
 -----------------------------------------------------------
@@ -63,12 +69,12 @@ VIEW_WRITE_AGENTS: frozenset[str] = frozenset({"ari"})
 #: The agents allowed to MINT the live board's public link
 #: (``board_link``).
 #:
-#: ``{ari, leader}`` — audience separation (mint ≠ read): the ari
-#: instance and the leader own the board's customer-facing link.
-#: This set is DELIBERATELY different from
-#: :data:`VIEW_WRITE_AGENTS`; the two must never leak into each
-#: other, and the phase-3 test suite pins that they differ.
-BOARD_LINK_AGENTS: frozenset[str] = frozenset({"ari", "leader"})
+#: ARI-ONLY — the user ruling of 2026-10-20 (Discord, direct) is
+#: BINDING and RETRACTS the earlier ``{ari, leader}`` audience: the
+#: board categories belong to ``ari`` alone. The set stays a SEPARATE
+#: named constant (one tool owns its own policy) even though it now
+#: carries the same audience as :data:`VIEW_WRITE_AGENTS`.
+BOARD_LINK_AGENTS: frozenset[str] = frozenset({"ari"})
 
 
 def _is_views_authorized(agent_id: str, allowed_agents: frozenset[str]) -> bool:

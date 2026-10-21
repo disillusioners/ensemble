@@ -1,7 +1,7 @@
 """The board service — the DB-backed work board (ari-tools Phase 1).
 
 One global namespace, no per-chat / per-project / per-tree
-partitioning (D1): every Ari instance and the leader read and write the
+partitioning (D1): every Ari instance reads and writes the
 SAME rows. Project and channel are attributes of an ITEM (a nullable
 ``project_id`` FK, the channel as a plain tag string) — never separate
 boards.
@@ -115,7 +115,7 @@ class BoardService:
     tools (see :mod:`daemon.tools.board_tools`). The service
     implements NO per-call access check — the access boundary is the
     per-agent ``tools.allow`` category gate (the ``board`` privileged
-    category + the day-one allow-list on the ari / leader meta.json)
+    category + the day-one allow-list on the ari meta.json)
     AND the tool body's own ``agent_id`` gate.
     """
 
