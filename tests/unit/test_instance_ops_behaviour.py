@@ -370,6 +370,79 @@ class TestBudgetRails:
         assert "reason=terminate-budget-exceeded" in out
         assert "t-3" not in fleet.terminated
 
+    async def test_protected_budget_refuses_second_committed_terminate(self, fleet):
+        """D-16 PROTECTED rail (N=1/24h) — the containment behind the
+        admitted DELEGATED-FORGE residual (DF-4 / critical note
+        ``f4cf9c4f``). A protected target needs the confirmation plus an
+        inherited window (the AC-23b fixture) to be terminated at all.
+
+        Counting rule: only ``outcome="committed"`` rows consume the
+        budget — a pending or refused row consumes NOTHING.
+        """
+        # Two PROTECTED targets (the same shape as the ladder fixture).
+        fleet.rows["user-chat"] = FakeRow(
+            "user-chat", agent_id="leader", parent_id=None,
+            metadata={"source_type": "telegram"},
+        )
+        fleet.rows["user-chat-2"] = FakeRow(
+            "user-chat-2", agent_id="leader", parent_id=None,
+            metadata={"source_type": "telegram"},
+        )
+        # Non-committed rows must consume NOTHING: a PENDING
+        # protected-flagged row and a REFUSED row.
+        repo = InstanceOpsAuditRepository(fleet.engine)
+        repo.write_audit_ahead(
+            action="instance_terminate",
+            target="user-chat-2",
+            reason="pre-existing pending",
+            before={"protected": True},
+        )
+        repo.write_refusal(
+            action="instance_terminate",
+            target="user-chat-2",
+            reason="pre-existing refusal",
+            error_message="reason=some-previous-refusal",
+            before={"protected": True},
+        )
+
+        def _arm_windows():
+            fleet._user_origin_windows = _stamp_direct("ari-iid", source="api")
+            fleet._inherited_provenance_windows = _stamp_inherited(
+                "maint-iid", depth=1, root_source="api"
+            )
+
+        tools = _act_tools(fleet)
+        term = _by_name(tools, "instance_terminate")
+
+        # 1st protected terminate: ADMITTED — the pending/refused rows
+        # consumed nothing — and it CONSUMES the N=1 protected budget.
+        _arm_windows()
+        out = await term.ainvoke(
+            {
+                "id": "user-chat",
+                "reason": "r",
+                "confirmed_target_id": "user-chat",
+                "dry_run": False,
+            }
+        )
+        import json as _json
+        assert _json.loads(out)["terminated"] is True
+        assert "user-chat" in fleet.terminated
+
+        # 2nd protected terminate: REFUSED by the protected budget.
+        _arm_windows()
+        out2 = await term.ainvoke(
+            {
+                "id": "user-chat-2",
+                "reason": "r",
+                "confirmed_target_id": "user-chat-2",
+                "dry_run": False,
+            }
+        )
+        assert "reason=terminate-budget-exceeded" in out2
+        assert "protected-target budget" in out2
+        assert "user-chat-2" not in fleet.terminated
+
 
 # ── AC-13: cascade orphans ────────────────────────────────────────────────
 
