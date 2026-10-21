@@ -480,8 +480,9 @@ def create_self_alarm_tools(
             Field(
                 default=None,
                 description=(
-                    "Optional board item id ('wi-1a2b3c4d') to link — the fresh "
-                    "instance is told to board_get it before acting."
+                    "Optional board item id ('wi-1a2b3c4d') to link — when the "
+                    "alarm fires into THIS session you are told to board_get it "
+                    "before acting."
                 ),
             ),
         ]
@@ -525,8 +526,9 @@ def create_self_alarm_tools(
             Field(
                 default=None,
                 description=(
-                    "Optional board item id ('wi-1a2b3c4d') to link — the fresh "
-                    "instance is told to board_get it before acting."
+                    "Optional board item id ('wi-1a2b3c4d') to link — when the "
+                    "alarm fires into THIS session you are told to board_get it "
+                    "before acting."
                 ),
             ),
         ] = None,
@@ -556,9 +558,10 @@ def create_self_alarm_tools(
     self_alarm._full_doc_ = """Arm a reminder to yourself, at least 30 minutes out.
 
 The alarm is a durable schedule that fires at the stated instant and hands
-a SELF-CONTAINED message to a FRESH Ari instance — an instance with no
-memory of this request, so the message must name the action explicitly.
-`message_to_self` is appended VERBATIM as the message's Action line.
+the ALARM INTENT to THIS session — the same instance that armed it, with
+its context intact. The wake reason rides in the message, so
+`message_to_self` is appended VERBATIM as the message's Action line and
+must name the action explicitly.
 
 The board is the user-visible surface — there is NO ping
 --------------------------------------------------------------------
