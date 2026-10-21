@@ -1246,8 +1246,18 @@ class MissionStrandHealer:
             #     AFTER the stamp has already COMMITTED.
             # The ``or ""`` below is load-bearing — do not "simplify"
             # it to ``None``.
+            #
+            # ``skip_repair=True`` — the heal lane's transcript can be
+            # 25h stale, and the LLM report-repair would spend a 30s
+            # call on a transcript nobody will read (the repair exists
+            # to fix a TRUNCATED report for a human reader; this lane
+            # only needs the content as the completion payload). The
+            # flag is forwarded to the content fetch by the drive
+            # (``child_reports.py:2554``). Precedent for the flag:
+            # the interim in-progress path
+            # (``job_feedback_observer.py:1346-1355``).
             await child_reports._process_child_completion_and_notify_parent(
-                root_id, latest_msg_id or "",
+                root_id, latest_msg_id or "", skip_repair=True,
             )
         except Exception as exc:  # noqa: BLE001 — fail-closed
             # The stamp COMMITS before some post-commit side effects

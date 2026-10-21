@@ -2514,7 +2514,7 @@ Provide a concise summary:"""
             if owns_session:
                 session.close()
 
-    async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:
+    async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str, *, skip_repair: bool = False) -> None:
         """Check if child instance is done and send completion report to parent.
         
         CRITICAL FIX C3: Content is fetched BEFORE the transaction to avoid
@@ -2535,6 +2535,13 @@ Provide a concise summary:"""
         Args:
             instance_id: The child instance that completed.
             completed_message_id: The message ID that just completed (for idempotency).
+            skip_repair: When True, propagate to the content fetch so the
+                truncation check + LLM repair + combine fallback are all
+                skipped. Used by the running-zombie heal lane, whose
+                transcript can be 25h stale — repairing it would spend a
+                30s LLM call on a transcript nobody will read. Additive
+                keyword-only flag with a False default: every existing
+                caller keeps the current behaviour.
         """
         logger.info(f"_process_child_completion_and_notify_parent called: instance={instance_id[:8]}..., message_id={completed_message_id[:8] if completed_message_id else None}")
         
@@ -2544,7 +2551,9 @@ Provide a concise summary:"""
             self._instance_repository.get, instance_id
         )
         agent_id = instance_meta.agent_id if instance_meta else "agent"
-        last_content = await self._get_last_assistant_message(instance_id, agent_id)
+        last_content = await self._get_last_assistant_message(
+            instance_id, agent_id, skip_repair=skip_repair,
+        )
         if last_content is None:
             logger.warning(f"No assistant content found for instance {instance_id[:8]}..., using empty content for completion check")
             last_content = "[No response content]"  # Proceed with empty content — state transition must still happen

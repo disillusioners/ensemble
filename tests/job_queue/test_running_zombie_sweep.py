@@ -1092,3 +1092,46 @@ class TestRunningZombieSkipRootPin:
             skip_root=False,
         )
         assert without_skip.live is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# skip_repair opt-out — the heal lane must not spend a 30s LLM repair
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRunningZombieSkipRepairOptOut:
+    """The heal drive must invoke the completion chain with
+    ``skip_repair=True``: the heal lane's transcript can be 25h stale
+    and the LLM report-repair would spend a 30s call on a transcript
+    nobody will read (the repair exists to fix a TRUNCATED report for
+    a human reader; this lane only needs the content as the completion
+    payload). The flag is forwarded to the content fetch by the drive
+    (``child_reports.py:2554``)."""
+
+    @pytest.mark.asyncio
+    async def test_heal_drive_passes_skip_repair_true(
+        self, zombie_harness,
+    ):
+        captured: dict = {}
+        service = zombie_harness.service
+        original = service._process_child_completion_and_notify_parent
+
+        async def spy(instance_id, completed_message_id, **kwargs):
+            captured["instance_id"] = instance_id
+            captured["completed_message_id"] = completed_message_id
+            captured.update(kwargs)
+            return await original(
+                instance_id, completed_message_id, **kwargs
+            )
+
+        service._process_child_completion_and_notify_parent = spy
+        _seed_zombie_tree(zombie_harness.engine)
+        healer = _make_healer(zombie_harness)
+        with _patch_drive_seams():
+            outcome = await healer.heal_running_zombie(ROOT)
+        assert outcome["healed"] is True, outcome
+        # The heal lane opts out of the LLM report-repair.
+        assert captured.get("skip_repair") is True
+        # C5 (unchanged by this lane): the message id stays the EMPTY
+        # STRING, never None.
+        assert captured.get("completed_message_id") == ""

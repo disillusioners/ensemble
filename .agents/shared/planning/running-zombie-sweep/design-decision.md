@@ -255,22 +255,40 @@ test.
 Nothing in this change needs one. (Had one been needed, the commission says
 STOP and report — none was.)
 
-### 3.4 The drive can still trigger the LLM report-repair (OPEN — one-file follow-up)
+### 3.4 The drive could trigger the LLM report-repair (APPLIED — closed in this follow-up)
 
-The drive's content fetch (`child_reports.py:2547`) calls
-`_get_last_assistant_message` WITHOUT `skip_repair`, so the 30s LLM
-report-repair can fire on a 25h-stale transcript before the gates run. The
-reviewer's remedy — pass `skip_repair=True` on the drive — is **NOT applied**:
-`_process_child_completion_and_notify_parent(instance_id, completed_message_id)`
-(`child_reports.py:2517`) has NO `skip_repair` parameter, and the wrapper
-`_get_last_assistant_message` (`child_reports.py:1317-1322`) only forwards the
-flag when it is GIVEN. Threading it through needs a three-line change in
-`daemon/services/child_reports.py` (add the keyword-only parameter to the
-drive, forward it at `:2547`, and — for the manager seam — to
-`manager.py:9733`), which is OUTSIDE the review-cycle-1 file fence. The
-precedent for the flag is the interim in-progress path
+The drive's content fetch (`child_reports.py:2554`) reaches
+`_get_last_assistant_message`; WITHOUT `skip_repair` the 30s LLM report-repair
+can fire on a 25h-stale transcript before the gates run.
+
+**APPLIED** — commit `fix(child-reports): thread skip_repair through the
+completion drive; heal lane opts out` on `fix/running-zombie-sweep` (a commit
+cannot cite its own sha — resolve it with `git log --grep 'thread
+skip_repair'`). The change:
+
+* `daemon/services/child_reports.py:2517` — the drive takes an ADDITIVE
+  keyword-only `skip_repair: bool = False`. Default False ⇒ every existing
+  caller keeps its current behaviour. All 6 production call sites
+  (`manager.py:6757`, `:9745`, `:9891`, `:13101`; `mission_strand_healer.py:772`,
+  `:1249`) pass two POSITIONAL args, and NO caller uses `**kwargs` passthrough
+  — the flag cannot conflict with any of them.
+* `daemon/services/child_reports.py:2554` — the flag is forwarded into
+  `_get_last_assistant_message`, which already accepts and propagates it
+  (`:1317-1322` → the raw call at `:1350-1354` → `_get_last_assistant_message_raw`
+  at `:1566`).
+* `daemon/services/mission_strand_healer.py:1260` — the heal lane drives with
+  `skip_repair=True`: the transcript can be 25h stale, and the repair exists
+  to fix a TRUNCATED report for a human reader, while this lane only needs
+  the content as the completion payload.
+
+`daemon/manager.py:9731` was READ and deliberately NOT edited: it is a plain
+forward of the drive call and is NOT on the heal path (the heal lane calls the
+`ChildReportsService` directly), so exposing the flag there would add a
+parameter no caller could use.
+
+The flag precedent is the interim in-progress path
 (`job_feedback_observer.py:1346-1355` → `manager._get_last_assistant_message_raw(
-instance_id, skip_repair=True)`). A one-file follow-up closes it.
+instance_id, skip_repair=True)`).
 
 ## 4. Files touched
 
@@ -284,7 +302,7 @@ instance_id, skip_repair=True)`). A one-file follow-up closes it.
 
 ## 5. Evidence
 
-* New suite: `tests/job_queue/test_running_zombie_sweep.py` — 33 tests.
+* New suite: `tests/job_queue/test_running_zombie_sweep.py` — 34 tests.
 * Review cycle 1 (2026-10-21) — the suite grew to 33: 24 base + the F1
   starvation regression + the `processing` parametrization (F3) + the W-B
   constructor floor (4 rejected cases + the admissible minimum) + the
