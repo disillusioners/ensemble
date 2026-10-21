@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 from sqlalchemy import Engine, create_engine, event
 from sqlmodel import Session, SQLModel
 
+from daemon.constants import BOOT_DB_TIMEOUT_S
+
 from .project.repository import SQLModelProjectRepository
 from .instance.repository import SQLModelInstanceRepository
 from .message_queue.repository import SQLModelMessageQueueRepository
@@ -260,6 +262,19 @@ def create_postgres_engine(config: "EnsembleConfig") -> Engine:
     password = os.environ.get("POSTGRES_PASSWORD", pg.password)
 
     url = f"postgresql+psycopg://{user}:{password}@{host}:{port}/{db}"
+
+    # G6: bound the libpq connect phase so a firewall-DROP host fails
+    # inside BOOT_DB_TIMEOUT_S instead of hanging on the OS TCP timeout
+    # (~75-130s). libpq takes ``connect_timeout`` as a conninfo
+    # parameter, so it rides the URL query — NOT a top-level
+    # ``create_engine(connect_timeout=...)`` kwarg (the psycopg dialect
+    # rejects unknown engine kwargs) and NOT ``connect_args`` (that
+    # dict is the B2/B3 UTC-session contract, pinned byte-for-byte by
+    # tests/unit/repositories/test_pg_engine_utc_session.py). Same
+    # bound + same mechanism the boot preflight uses on its own probe
+    # engine (daemon/__main__.py::_boot_db_preflight); the two timeouts
+    # are complementary, not duplicated.
+    url += f"?connect_timeout={BOOT_DB_TIMEOUT_S}"
 
     logger.info(
         f"Creating PostgreSQL engine: {host}:{port}/{db}"
