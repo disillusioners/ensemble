@@ -1,4 +1,20 @@
 # Test Packs
+## Commission VERIFIED — STAGED RELEASE v0.27.0 (hard-reboot recovery) @ staged tree `1d5fdfe0f` (2026-10-21) — 🟢 VERDICT: **STAGED-VERIFY PASS** (7/7 items; 2 ceremony notes) — full evidence: RESULTS/2026-10-21-v0270-staged-verification.md
+
+Staged artifact `/home/nea/agents-ensemble/releases/v0.27.0` (staged 21:00:35Z; binary sha 3-way `6c6bfd58…6402` disk==manifest==sidecar; FE `a017dd21…85af1`; fe_index byte-identical → **daemon-only** release; `known_schema_gen` `20261020_060000_create_board_tables.sql`; `rollback_safe=true` **substantiated**). 5 independent lanes, 0 re-dispatches, 0 promote, 0 writes to the live surface.
+
+| Item | Verdict | Evidence (abridged) |
+|---|---|---|
+| 1 sha 3-way | ✅ PASS | binary + FE legs each disk==manifest==sidecar; config/launcher sha spot-checks MATCH |
+| 2 provenance | ✅ PASS | HEAD=tag=`v0.27.0`, tree clean, both sidecars `git_dirty=false`; ADR-009 D3 guard (`stage.sh:146-150`) quoted + satisfied; bump commit = exactly the 4-file house set |
+| 3 version | ✅ PASS | `--version` → `Ensemble v0.27.0` (exit 0, `run_app.py:57-60` pre-preflight early-exit) + banner `Starting Ensemble v0.27.0` + PYZ `co_consts ['0.27.0']` (strings CANNOT see it — PYZ is zlib) |
+| 4 boot smoke | ✅ PASS | isolated transient unit, cgroup asserted, scratch PG, own port → `/livez` 200 `version=0.27.0`, `/readyz` 200 all components true; **staged binary's own journal** shows `[HardReboot] MQ boot pass: reset=0` + AutoContinue line → feature code provably shipped; 11→7 ERROR census via one-variable differential control boot; zero residue |
+| 5 **migration delta (NOT slimmed)** | ✅ PASS | 106==106==106 (v0.27.0 / v0.26.4 / source @`1d5fdfe0f`); 0 differing sha; `uniq -d` empty on all three sides; tail == `known_schema_gen`; every entry extracted TWICE by independent methods (0 divergences); **pathspec control** proves the empty diff is substantive; PYZ daemon-pool 530 vs 529 → code moved, schema did not |
+| 6 payload hygiene | ✅ PASS | source-less; **zero** build sidecars in payload; 339/92/4930 counts; **5361/5361 per-file shas re-hashed 0 mismatches**; all 3 tree hashes RECOMPUTED with the house algorithm (`lib.sh:1954`+`lib.sh:1970`) → match |
+| 7 fences | ✅ PASS | `current -> releases/v0.26.3` (mtime unchanged 10:38:09Z); live :9797 pid 529346 livez 0.26.3; demo :7979 untouched; `state.json` sha unchanged; 5 release dirs vs keep-3 (**report only, no eviction**); staged payload immutability `find -newermt` → EMPTY |
+
+**Ceremony notes (action required, not artifact defects):** 🔴 **both live nonces target `v0.26.4`, NOT `v0.27.0`** — a nonce is bound to (target, kind, env, instance), so neither authorizes a v0.27.0 promote; a **fresh nonce for v0.27.0 is required**. 🟠 **tip drift is code-bearing** — `origin/latest` → `60d7daaf` (nest-ops `instance_ops`, 45 files, +10898/−499, incl. NEW migration `20261021_120000_create_instance_ops_audit.sql`) landed AFTER the stage → **promote AS-IS** (a re-stage is refused, exit 78 `non-tip-tree`); the v0.27.1 stage will carry the first non-empty migration delta since live v0.26.3 → standing rule (explicit heuristic-vs-semantic adjudication, not a reflex `=0`) applies. 🟠 over-retention 5-vs-3. 🟢 `previous=v0.26.2` resolves on disk (no dangling pointer). 🟢 fresh-SQLite `20260714_000001` defect still present (PG unaffected).
+
 ## Commission VERIFIED — HARD-REBOOT RECOVERY P4 DRILL HARNESS (hrr-20261021) @ worktree `feature/hard-reboot-recovery` — ✅ HARNESS COMPLETE + INDEPENDENTLY VERIFIED (final acceptance verdicts deliberately NOT issued — that is the acceptance lane's job)
 
 > **ACCEPTANCE LANDED 2026-10-21 — VERDICT: ACCEPT-WITH-QUALIFICATIONS.** Full record: `.agents/tester/RESULTS/2026-10-21-hrr-p4-acceptance.md` (tip `186768717`, base `4c888fbbb` A/B). P4-1..6 PASS (shipped default) · P4-7 PASS-CLEARED (override lane) · AC6 PASS 15 s ≤ 30 s (daemon-path basis) · regression **net-new = 0 across 17 partitions / ≈29,264 nodes per leg, whole-tree** · ensure.md 4 packs + 4 static gates green · live surface UNCHANGED (MainPID 528942 / NRestarts 0 throughout). 10 qualifications + 8 routed follow-up commissions in the record.
