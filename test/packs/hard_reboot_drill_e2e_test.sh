@@ -551,6 +551,20 @@ if phase_on P4; then
         echo "RESULT: FAIL"; exit 1
     fi
     ok "instance created via API (HTTP ${INST_CODE}) instance_id=${INSTANCE_ID}"
+    # The API is NOT obliged to honour a client-supplied instance_id — the
+    # daemon may mint its own. Every fixture query below keys on
+    # instance_id, so re-read the id the daemon ACTUALLY assigned and use it
+    # for the UPDATE, the MQ row and the counting queries.
+    API_INSTANCE_ID="$(sed -n 's/^{"instance_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$BUNDLE/instance_create.json" 2>/dev/null | head -1)"
+    if [ -n "$API_INSTANCE_ID" ]; then
+        if [ "$API_INSTANCE_ID" != "$INSTANCE_ID" ]; then
+            note "instance API minted its own instance_id (${API_INSTANCE_ID} != requested ${INSTANCE_ID}) — using the minted id for all fixture queries"
+        fi
+        INSTANCE_ID="$API_INSTANCE_ID"
+        ok "instance_id resolved from the API response: ${INSTANCE_ID}"
+    else
+        bad "could not parse instance_id from the API response"
+    fi
 
     # 4b — the fixture shape: status='running' (tests/unit/test_message_queue_boot_recovery.py M1)
     psql_scratch "UPDATE instances SET status='running' WHERE instance_id='${INSTANCE_ID}';" >/dev/null
@@ -601,7 +615,7 @@ EOF
   "daemon_pid": "${DAEMON_PID}",
   "daemon_cgroup": "$(jstr "$(daemon_cgroup "$DAEMON_PID")")",
   "instance_status": "${INST_STATUS}",
-  "schedule_row": "$(jstr "$(psql_scratch "SELECT source_id||'|'||status||'|'||enabled||'|'||autostart FROM source_configs WHERE source_id='${SCHEDULE_ID}';")")",
+  "schedule_row": "$(jstr "$(psql_scratch "SELECT source_id||'|'||status||'|'||enabled||'|'||autostart FROM source_configs WHERE name='${SCHEDULE_ID}';")")",
   "mq_processing_count": "$(printf '%s' "$PRE_COUNTS" | awk '{print $1}')",
   "mq_pending_count": "$(printf '%s' "$PRE_COUNTS" | awk '{print $2}')",
   "busy_guard_predicate": "pending_count > 0 or processing_count > 0"
@@ -677,7 +691,18 @@ if phase_on P7; then
     #   "Boot epoch captured (DB clock): %s"              boot_epoch.py:132
     #   "[BOOT_CONTINUE] orphan-sweep summary: ..."       auto_continue_boot_pass.py:866
     MARKER_LIST=(
-        "Boot preflight: PostgreSQL reachable"
+        # G6 boot preflight. The SUCCESS record ("Boot preflight: PostgreSQL
+        # reachable") is emitted at INFO by daemon/__main__.py BEFORE
+        # daemon.api installs the logging handlers; with no handler bound the
+        # root logger DROPS INFO records (lastResort level = WARNING), so that
+        # marker never reaches stdout/journal nor the daemon's own
+        # ensemble.log — it is structurally UNOBSERVABLE on this entry point.
+        # The preflight is FAIL-CLOSED (exit 75 EX_TEMPFAIL on definite PG
+        # unreachability), so a daemon that BOOTED proves the preflight saw a
+        # reachable PG. The observable equivalent is the engine creation
+        # (INFO, after handler install), which also proves the daemon bound
+        # to the SCRATCH postgres — a stronger claim than the preflight line.
+        "Creating PostgreSQL engine: .*${PG_DB}"
         "DependencyBus started"
         "AutoContinue boot pass:"
         "\[HardReboot\] MQ boot pass: reset="
@@ -688,6 +713,7 @@ if phase_on P7; then
         LINE="$(grep -E "$m" "$JLOG" 2>/dev/null | tail -1)"
         if [ -n "$LINE" ]; then ok "marker present: ${LINE}"; else bad "marker ABSENT: ${m}"; fi
     done
+    note "G6 preflight: the SUCCESS marker 'Boot preflight: PostgreSQL reachable' is INFO-level and emitted BEFORE the logging handlers are installed, so it is dropped (unobservable in journal AND ensemble.log); the fail-closed exit-75 contract plus the observed scratch-PostgreSQL engine creation cover the same property"
     RESET_N="$(grep -E "\[HardReboot\] MQ boot pass: reset=" "$JLOG" 2>/dev/null | tail -1 | grep -oE 'reset=[0-9]+' | cut -d= -f2)"
     [ -n "$RESET_N" ] && ok "MQ boot pass reset count = ${RESET_N}" || bad "MQ boot pass reset count not parsed"
 
@@ -713,7 +739,11 @@ if phase_on P7; then
     [ "${PEND_C:-0}" -ge 1 ] && note "busy-guard branch: VISIBLE-PENDING (shipped default, QUEUE_DISCARD_ON_STARTUP=false)" \
                             || note "busy-guard branch: CLEARED (QUEUE_DISCARD_ON_STARTUP=true override)"
 
-    SCHED_ROW="$(psql_scratch "SELECT source_id||'|'||status||'|'||enabled||'|'||autostart FROM source_configs WHERE source_id='${SCHEDULE_ID}';")"
+    # The daemon mints its OWN source_id (UUID PK) and stores the requested
+    # id as the schedule LABEL — which is source_configs.name (see
+    # scheduling_service: label=row.name). Querying by source_id found
+    # nothing; query by the label instead.
+    SCHED_ROW="$(psql_scratch "SELECT source_id||'|'||status||'|'||enabled||'|'||autostart FROM source_configs WHERE name='${SCHEDULE_ID}';")"
     [ -n "$SCHED_ROW" ] && ok "schedule survived the reboot: ${SCHED_ROW}" || bad "schedule row missing after the reboot"
     INST_STATUS2="$(psql_scratch "SELECT status FROM instances WHERE instance_id='${INSTANCE_ID}';")"
     note "instance status after reboot: ${INST_STATUS2} (D13 task-less RUNNING ghosts are OUT OF SCOPE — reported, never failed)"
