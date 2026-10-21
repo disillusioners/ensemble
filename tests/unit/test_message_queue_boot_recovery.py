@@ -16,8 +16,10 @@ and its two repository primitives on
        AutoContinue owns them).
   M4 — the reset is a guarded CAS: the row flips to 'ready', a second
        pass is a no-op (reboot-loop idempotency).
-  M5 — post-pass ``get_stats()["processing_count"] == 0`` and the
-       busy-guard's 'pending/processing counts no longer wedge' shape.
+  M5 — the post-pass accounting: the REAL pre/post ``get_stats()``
+       counts, and the busy-guard's literal predicate
+       (``pending_count > 0 or processing_count > 0``) evaluated on
+       those REAL post-pass values.
   M6 — the kill-switch (``ENSEMBLE_HARD_REBOOT_BOOT_PASS=0``) skips
        the pass entirely.
   M7 — never-wedge: a raising repository does not propagate out of the
@@ -148,6 +150,9 @@ def test_live_task_row_is_untouched(repo, engine, task_status):
 
     assert reset == 0
     assert message_status(engine, "m_task") == MessageStatus.PROCESSING.value
+    # The accounting counterpart: the row is still in the 'processing'
+    # bucket, so the busy-guard's processing term still fires on it.
+    assert repo.get_stats("i1")["processing_count"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -185,14 +190,28 @@ def test_second_pass_is_a_noop(repo, engine):
     assert recover_stuck_messages_on_startup(repo, BOOT_EPOCH) == 0
 
 
-def test_post_pass_processing_count_is_zero_and_guard_does_not_wedge(repo, engine):
-    """M5 — the stranded row leaves the 'processing' bucket.
+def test_post_pass_accounting_moves_the_stranded_row_from_processing_to_pending(
+    repo, engine
+):
+    """M5 — the post-pass accounting, measured on the REAL ``get_stats`` output.
 
-    The busy-guard (daemon/tools/instance.py) trips on
-    ``pending_count > 0 or processing_count > 0``; a stranded
-    'processing' row is what wedges it. After the pass the row rests at
-    'ready' (a normal, deliverable resting state), so the processing
-    count is zero.
+    ``get_stats`` (``daemon/repositories/message_queue/repository.py``)
+    reports two counts per instance:
+
+      * ``processing_count`` — rows in ``status='processing'``;
+      * ``pending_count``   — rows in ``status='ready'`` (plus
+        ``retrying`` rows whose ``next_retry_at`` is due).
+
+    The busy-guard's predicate (``daemon/tools/instance.py``) is the
+    disjunction ``pending_count > 0 or processing_count > 0``.
+
+    This test pins the REAL pre-pass counts, the REAL post-pass counts,
+    and the guard's literal predicate evaluated on those REAL post-pass
+    values. It asserts what the shipped code actually produces — the
+    reset MOVES the row from the 'processing' bucket into the 'ready'
+    bucket, and 'ready' rows are counted into ``pending_count`` — so
+    both counts are stated as observed and the predicate is evaluated on
+    them, rather than a desired outcome being asserted in their place.
     """
     seed_instance(engine, "i1", InstanceStatus.RUNNING.value)
     seed_message(
@@ -202,12 +221,51 @@ def test_post_pass_processing_count_is_zero_and_guard_does_not_wedge(repo, engin
         last_activity_at=BOOT_EPOCH - timedelta(minutes=2),
     )
 
-    recover_stuck_messages_on_startup(repo, BOOT_EPOCH)
-    stats = repo.get_stats("i1")
+    pre = repo.get_stats("i1")
+
+    reset = recover_stuck_messages_on_startup(repo, BOOT_EPOCH)
+    post = repo.get_stats("i1")
+
+    # PRE-PASS — the stranded row sits in the 'processing' bucket.
+    assert pre["processing_count"] == 1
+    assert pre["pending_count"] == 0
+
+    assert reset == 1
+    assert message_status(engine, "m_fresh") == MessageStatus.READY.value
+
+    # POST-PASS — the row left 'processing' and landed in 'ready'.
+    assert post["processing_count"] == 0
+    assert post["pending_count"] == 1
+    # ... it MOVED between the two buckets; it was not dropped.
+    assert (
+        pre["processing_count"] + pre["pending_count"]
+    ) == (
+        post["processing_count"] + post["pending_count"]
+    ) == 1
+
+    # The busy-guard's literal predicate, evaluated on the REAL post-pass
+    # values.
+    processing_term = post["processing_count"] > 0
+    pending_term = post["pending_count"] > 0
+    assert processing_term is False  # the stranded row left 'processing'
+    assert pending_term is True  # ... and landed in 'ready'
+    assert (pending_term or processing_term) is True
+
+
+def test_busy_guard_predicate_on_an_instance_with_no_queued_rows(repo, engine):
+    """M5 — control: the guard's predicate is sensitive to the queue rows.
+
+    The control for the assertion above: with NO queued rows both counts
+    are zero and the guard's predicate evaluates to False, so the True
+    in the previous test is a fact ABOUT THE ROW, not a constant.
+    """
+    seed_instance(engine, "i_empty", InstanceStatus.RUNNING.value)
+
+    stats = repo.get_stats("i_empty")
 
     assert stats["processing_count"] == 0
-    # The guard's 'in progress' term is what the stranded row fed.
-    assert not (stats["processing_count"] > 0)
+    assert stats["pending_count"] == 0
+    assert (stats["pending_count"] > 0 or stats["processing_count"] > 0) is False
 
 
 # ---------------------------------------------------------------------------
