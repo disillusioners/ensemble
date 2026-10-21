@@ -88,9 +88,9 @@ is not):
                                                               completion]
   AND NO non-terminal task row exists for the root (no
       PENDING/RUNNING/PAUSED/PROCESSING)                      [no live turn]
-  AND the latest task's ``completed_at`` is older than the age
-      bound (default 7200s)                                  [not a fresh
-                                                              turn]
+  AND the latest task's ``completed_at`` is aged AT LEAST the age
+      bound (default 7200s) — INCLUSIVE: a task aged exactly the
+      bound qualifies                              [not a fresh turn]
   AND every DESCENDANT of the root is terminal                [the tree is
                                                               closed]
   AND the permanent-tree enumeration is neither breadth- nor
@@ -110,10 +110,16 @@ and_notify_parent(root, …)`` — NEVER a raw status UPDATE and NEVER
 authoritatively under TOCTOU: bus-pending (same transaction),
 pending-task, live-children cross-check, pending messages, the
 emission-time ``_root_completion_gate`` and — on a pass — the
-``JobFeedbackObserver._finalize_job`` cascade that transitions the
-JobItem, writes the instance terminal row and releases the locks.
+lifecycle-event publish (``child_reports.py:5021-5027``) that the
+observer consumes (``job_feedback_observer.py:1017``) to run the
+``_finalize_job`` cascade. The INSTANCE terminal row is written by
+the chain's own DB stamp, NOT by the observer.
 An emission-gate downgrade (stamp → ``waiting_children``) is a
-LEGITIMATE MISS: log it and retry the next tick, never force.
+LEGITIMATE MISS: log it, never force. The downgrade MOVES the root
+out of the running posture, so it EXITS this lane's candidate set
+(the anchor requires ``status == running``) and the WAITING_CHILDREN
+strand owns the root from then on — this lane does NOT retry it on
+the next tick.
 
 TWO PREDICATE CORRECTIONS vs the original commission draft (both
 adjudicated):
@@ -259,9 +265,12 @@ class MissionStrandHealer:
             strand (default True). When False the strand is a COMPLETE
             no-op — no candidate selection, no probe, no drive.
         running_zombie_age_bound_seconds: Age bound on the latest
-            task row's ``completed_at``.
+            task row's ``completed_at``. INCLUSIVE — a task aged
+            exactly the bound qualifies. MUST be >= 1 (a lower value
+            is an operator error and raises ``ValueError``).
         running_zombie_batch_cap: Maximum candidates examined per
-            sweep pass.
+            sweep pass. MUST be >= 1 (a lower value is an operator
+            error and raises ``ValueError``).
     """
 
     def __init__(
@@ -294,6 +303,32 @@ class MissionStrandHealer:
             running_zombie_batch_cap,
             DEFAULT_RUNNING_ZOMBIE_BATCH_CAP,
         )
+        # W-B FLOOR (review cycle 1): both knobs bound the BLAST
+        # RADIUS of a TERMINALIZING lane, so a value below 1 is an
+        # operator error, not a posture. ``batch_cap=0`` makes the
+        # selection a silent LIMIT-0 no-op and ``batch_cap=-1``
+        # UNLIMITS the batch (a negative LIMIT renders as "no
+        # limit" — the blast-radius bound is gone); ``age_bound
+        # _seconds<=0`` makes EVERY turn instantly zombie-shaped.
+        # A silent clamp would HIDE that error, so the lane fails
+        # LOUDLY at construction — the same family style as the
+        # ``interval_seconds`` check above. Production cannot reach
+        # these values: both config fields carry ``ge=1``.
+        if self._running_zombie_batch_cap < 1:
+            raise ValueError(
+                f"running_zombie_batch_cap must be >= 1; got "
+                f"{running_zombie_batch_cap!r}"
+            )
+        if self._running_zombie_age_bound_seconds < 1:
+            raise ValueError(
+                f"running_zombie_age_bound_seconds must be >= 1; got "
+                f"{running_zombie_age_bound_seconds!r}"
+            )
+        # W-B / advisory 4: the kill-switch-disabled WARN is emitted
+        # ONCE per healer instance (a fresh instance per boot), then
+        # demoted to DEBUG — the old shape repeated the same WARN
+        # every 300s tick forever.
+        self._running_zombie_kill_switch_warned = False
         self._task: asyncio.Task | None = None
         self._stopping = False
         # Per-root heal serialization (final hardening 2026-10-14):
@@ -784,11 +819,27 @@ class MissionStrandHealer:
             "skipped_roots": [],
         }
         if not self._running_zombie_enabled:
-            logger.warning(
-                "mission_strand_healer|running-zombie: SKIP "
-                "class=kill-switch detail=disabled by config "
-                "(SERVICES_MISSION_STRAND_HEAL_RUNNING_ZOMBIE_ENABLED=false)"
-            )
+            # Advisory 4: the WARN is emitted ONCE per healer instance
+            # (a fresh instance per boot) and demoted to DEBUG on the
+            # following ticks — the old shape repeated the same WARN
+            # every 300s forever. The lane stays observable: the first
+            # WARN names the switch, the DEBUG lines keep the tick
+            # visible in the debug log.
+            if not self._running_zombie_kill_switch_warned:
+                self._running_zombie_kill_switch_warned = True
+                logger.warning(
+                    "mission_strand_healer|running-zombie: SKIP "
+                    "class=kill-switch detail=disabled by config "
+                    "(SERVICES_MISSION_STRAND_HEAL_RUNNING_ZOMBIE_ENABLED=false) "
+                    "[warned once per healer instance]"
+                )
+            else:
+                logger.debug(
+                    "mission_strand_healer|running-zombie: SKIP "
+                    "class=kill-switch detail=disabled by config "
+                    "(repeat tick — the WARN was already emitted once "
+                    "for this healer instance)"
+                )
             return stats
         repo = self._manager._instance_repository
         if repo is None:
@@ -839,16 +890,13 @@ class MissionStrandHealer:
         """RUNNING mission roots — the ANCHORED running-zombie candidate
         set.
 
-        The POSTURE stays deliberately WIDE (``status == running`` AND
-        ``parent_id IS NULL``): the predicate legs — not the selection
-        — decide what is a zombie. Narrowing the posture here would
-        hide the shape from the logs (the sweep would be silent about
-        a stranded root).
-
-        The ANCHOR is the completion proof: only a running root whose
-        LATEST task row is terminal-COMPLETED (with a ``completed_at``
-        stamp) is a candidate. The anchor is what keeps the
-        un-healable population out of the batch.
+        The selection IS the ANCHOR — the completion proof: only a
+        running root whose LATEST task row is terminal-COMPLETED (with
+        a ``completed_at`` stamp) is a candidate. A root that can
+        never satisfy the proof (no task row at all, a latest task row
+        that is not COMPLETED, a live turn in flight) is NOT a
+        candidate: it is INVISIBLE to this lane, because it can never
+        be healed and surfacing it would only burn the batch.
 
         WHY THE ANCHOR (F1 — the starvation fix): the batch cap bounds
         the candidates EXAMINED per tick, and a candidate that is
@@ -1185,13 +1233,33 @@ class MissionStrandHealer:
             self._latest_completed_message_id, root_id
         )
         try:
+            # C5 PIN — ``completed_message_id`` MUST stay the EMPTY
+            # STRING ``""``, NEVER ``None``. Two traced failure sites
+            # if it ever became ``None``:
+            #   * ``child_reports.py:3252`` — the pending-messages
+            #     gate filters ``message_id != completed_message_id``;
+            #     in SQL ``!= NULL`` is never true, so the gate is
+            #     SILENTLY disabled.
+            #   * ``child_reports.py:5247`` →
+            #     ``_trigger_title_generation`` → ``:702``
+            #     ``completed_message_id[:8]`` — a TypeError raised
+            #     AFTER the stamp has already COMMITTED.
+            # The ``or ""`` below is load-bearing — do not "simplify"
+            # it to ``None``.
             await child_reports._process_child_completion_and_notify_parent(
                 root_id, latest_msg_id or "",
             )
         except Exception as exc:  # noqa: BLE001 — fail-closed
+            # The stamp COMMITS before some post-commit side effects
+            # (the title generation at child_reports.py:5247), so an
+            # exception here can be POST-COMMIT — the instance may
+            # already be terminal. The label says so; the next tick
+            # re-reads the status (the status read is the verdict).
             return self._rz_skip(
                 root_id, "drive-error",
-                f"drive raised {type(exc).__name__}: {exc}",
+                f"drive raised {type(exc).__name__}: {exc} "
+                f"(may be POST-COMMIT — the stamp may already have "
+                f"landed; the next tick re-reads the status)",
             )
         drove_row = await asyncio.to_thread(repo.get, root_id)
         drove_status = drove_row.status if drove_row is not None else None
@@ -1214,8 +1282,12 @@ class MissionStrandHealer:
                 "status": drove_status,
             }
         # The emission gate downgraded the stamp (COMPLETED →
-        # waiting_children) — a LEGITIMATE MISS. Log it and retry the
-        # next tick; NEVER force the transition.
+        # waiting_children) — a LEGITIMATE MISS. NEVER force the
+        # transition. The downgrade MOVES the root out of the running
+        # posture, so it EXITS this lane's candidate set (the anchor
+        # requires ``status == running``) and the WAITING_CHILDREN
+        # strand owns the root from then on — this lane does NOT
+        # retry it on the next tick.
         return self._rz_skip(
             root_id, "gate-block",
             f"post-drive status={drove_status!r} — the emission gate "

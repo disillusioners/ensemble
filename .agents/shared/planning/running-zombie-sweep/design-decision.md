@@ -50,17 +50,25 @@ The chain, in order:
 
 1. **Pre-stamp recursive liveness** (`child_reports.py:2600-2645`, `skip_root=True`)
    — all-terminal tree ⇒ `live=False` ⇒ falls through to the stamp.
-2. **DB stamp** (`child_reports.py:3462-3495`) — the atomic
+2. **DB stamp** (`child_reports.py:3463-3495`) — the atomic
    `UPDATE … WHERE status NOT IN (paused, completed, error, waiting_children)`
    (TOCTOU guard) flips `running → completed`.
 3. **Emission-time gate** (`child_reports.py:2363-2510`) — re-verifies bus
    pending, tree liveness, pending messages and freshness. On a block the stamp
    is **downgraded** to `waiting_children` (`child_reports.py:4826-4850`) and the
-   publish is suppressed — a **legitimate miss**: log it, retry next tick, never
-   force.
-4. **Observer finalize** (`job_feedback_observer.py:1620/:3664`) — transitions the
-   `JobItem` (atomic, `job_queue/repository.py:1692`), writes the instance
-   terminal row, releases the job locks.
+   publish is suppressed — a **legitimate miss**: log it, never force. The
+   downgrade MOVES the root out of the `running` posture, so it **exits this
+   lane's candidate set** (the selection is anchored on `status == running`) and
+   the `waiting_children` strand owns the root from then on — this lane does
+   **not** retry it on the next tick.
+4. **Lifecycle-event publish → observer finalize** (`child_reports.py:5021-5027`
+   → `job_feedback_observer.py:1017` → `:1307`) — the chain publishes the
+   `instance_lifecycle` event and the observer consumes it to run
+   `_finalize_job`. The INSTANCE terminal row is written by the chain's own DB
+   stamp (step 2), **not** by the observer. On the `job_id=None` context
+   (post-D13 MESSAGE path) the observer skips Step 1 (no `JobItem` UPDATE) and
+   Step 3 (lock release) is a job-scoped no-op — the virtual job holds no lock
+   of its own (`job_feedback_observer.py:786-800`, `:1300-1306`).
 
 Mission liveness is derived READ-TIME from `Instance.status`
 (`mission_resolver.py:980-1006`) — there is no persisted epoch row. "Epoch ends,
@@ -73,7 +81,7 @@ chain provides.
 |---|---|---|
 | 1 | `status == 'running'` AND `parent_id IS NULL` (mission root only) | `_heal_running_zombie_locked` |
 | 2 | latest task row terminal-`COMPLETED` with `completed_at`; NO non-terminal task row (no PENDING/RUNNING/PAUSED/PROCESSING) | `_probe_task_rows` |
-| 3 | age bound on `task.completed_at` (default 7200s) | `_age_seconds` |
+| 3 | age bound on `task.completed_at` (default 7200s) — INCLUSIVE: age ≥ bound qualifies | `_age_seconds` |
 | 4 | whole permanent tree terminal + enumeration neither breadth- nor depth-truncated | `_tree_is_closed` + `get_tree_ids_permanent` |
 | 5 | NO pending question anywhere in the tree | `_pending_question_in_tree` |
 | 6 | dependency-bus pending 0 AND the root's own queue empty | `_count_pending_messages` + `bus.count_pending_for_target_sync` |
@@ -178,6 +186,28 @@ SQLite dialect stores it as TEXT, so a SQL comparison against a bound datetime
 is a STRING comparison there and is not chronologically sound. The filter uses
 the same `_age_seconds` helper the predicate uses, so the two cannot disagree.
 
+**W-B floor (review cycle 1).** Both knobs are bounded at the CONSTRUCTOR: a
+value below 1 raises `ValueError` at construction — the same family style as
+the class's `interval_seconds` check. The reviewer's MEASURED cases:
+`batch_cap=-1` made the batch UNLIMITED (a negative LIMIT renders as "no
+limit" — 5/5 healed at cap=-1 vs 3/3 at cap=3) and `age_bound_seconds=0` made
+every turn instantly zombie-shaped. A silent clamp would HIDE that operator
+error on the blast-radius bound of a TERMINALIZING lane, so the lane fails
+LOUDLY instead. Production cannot reach these values — both config fields carry
+`ge=1` (`daemon/config.py`).
+
+### 2.7 Cost per sweep tick
+
+**≈19.4k (derived) to ~45k (measured) queries per sweep tick.** The earlier
+"≤6.4k queries/tick" figure is WITHDRAWN — it was a counting-method artifact.
+Counting method: the DERIVED figure is a static count of the strand's own SQL
+(probe + tree enumeration + closure check + the probes) multiplied by the batch
+cap, while the MEASURED figure observes the DB layer during a live sweep — the
+drive's production completion chain (content fetch, pre-stamp liveness eval,
+stamp, emission gate, publish, observer finalize) is a multi-query path that the
+static per-candidate count understates. Neither figure was re-measured in
+review cycle 1 (re-measuring was optional).
+
 ## 3. Known residuals (documented, not closed)
 
 ### 3.0 Idempotency of the drive against an already-finalized JobItem
@@ -189,10 +219,15 @@ drive chain handles that without harm:
   `UPDATE … WHERE status NOT IN (paused, completed, error, waiting_children)`
   (`child_reports.py:3463-3495`) — a second run against an already-terminal row
   matches 0 rows and returns `idempotency_skip` (no duplicate publish);
-* for a PARENTLESS root the drive never reaches the observer's `_finalize_job`
-  at all — `child_reports.py` has no `_finalize_job` call site — so the
-  already-`done` `JobItem` is simply NEVER re-transitioned: there is nothing to
-  absorb and nothing to undo. The `InvalidTransitionError` → DEBUG absorb
+* the drive **DOES** reach the observer's `_finalize_job` — via the
+  lifecycle-event publish (`child_reports.py:5021-5027` → the observer's
+  `_process_event` at `job_feedback_observer.py:1017` → `_finalize_job` at
+  `:1307`). The already-`done` `JobItem` is handled by the **stale-job defense**
+  (`job_feedback_observer.py:799-812`): the freshest row is a non-PROCESSING
+  terminal status, so the re-query finds no active row and the context resolves
+  to `job_id=None` — Step 1 (the `JobItem` UPDATE) is **skipped**, so there is
+  **no `InvalidTransitionError` and no raise**; Step 3 (lock release) is a
+  job-scoped no-op on that path. The `InvalidTransitionError` → DEBUG absorb
   (`job_feedback_observer.py:3728-3733`) is real, but it belongs to the
   bus-callback / `PROCESS_REPORT` path (a CHILD's `JobItem`), not to the
   parentless-root drive this strand exercises;
@@ -220,6 +255,23 @@ test.
 Nothing in this change needs one. (Had one been needed, the commission says
 STOP and report — none was.)
 
+### 3.4 The drive can still trigger the LLM report-repair (OPEN — one-file follow-up)
+
+The drive's content fetch (`child_reports.py:2547`) calls
+`_get_last_assistant_message` WITHOUT `skip_repair`, so the 30s LLM
+report-repair can fire on a 25h-stale transcript before the gates run. The
+reviewer's remedy — pass `skip_repair=True` on the drive — is **NOT applied**:
+`_process_child_completion_and_notify_parent(instance_id, completed_message_id)`
+(`child_reports.py:2517`) has NO `skip_repair` parameter, and the wrapper
+`_get_last_assistant_message` (`child_reports.py:1317-1322`) only forwards the
+flag when it is GIVEN. Threading it through needs a three-line change in
+`daemon/services/child_reports.py` (add the keyword-only parameter to the
+drive, forward it at `:2547`, and — for the manager seam — to
+`manager.py:9733`), which is OUTSIDE the review-cycle-1 file fence. The
+precedent for the flag is the interim in-progress path
+(`job_feedback_observer.py:1346-1355` → `manager._get_last_assistant_message_raw(
+instance_id, skip_repair=True)`). A one-file follow-up closes it.
+
 ## 4. Files touched
 
 | file | why |
@@ -232,7 +284,13 @@ STOP and report — none was.)
 
 ## 5. Evidence
 
-* New suite: `tests/job_queue/test_running_zombie_sweep.py` — 26 tests.
+* New suite: `tests/job_queue/test_running_zombie_sweep.py` — 33 tests.
+* Review cycle 1 (2026-10-21) — the suite grew to 33: 24 base + the F1
+  starvation regression + the `processing` parametrization (F3) + the W-B
+  constructor floor (4 rejected cases + the admissible minimum) + the
+  kill-switch log-once + the `skip_root=True` pin (sibling #4). The gap suite
+  (`test_watcher_loss_terminal_strand_gap.py`) was re-run after the mechanical
+  citation refresh (the healer's line numbers moved with the new edits).
 * Sibling suites unchanged and green:
   `test_watcher_loss_terminal_strand.py`, `test_watcher_loss_terminal_strand_gap.py`,
   `test_mission_live_guard.py` (87 passed together with the new suite).
@@ -268,14 +326,30 @@ STOP and report — none was.)
    all-terminal descendants it returns `live=False` — which is exactly WHY the
    running-zombie drive can stamp. A future change to that eval's `skip_root`
    semantics would silently stop the running-zombie strand from stamping (the
-   heal would report `gate-block` every tick). Worth a pin.
-5. **The observer's Step 1 raises `InvalidTransitionError` for an already-`done`
-   JobItem**, which aborts the 3-step transaction — including the lock release
-   (Step 3). In the running-zombie shape nothing is lost (the instance row is
-   already terminal; f2 released the locks when it finalized the JobItem). A
-   variant where the JobItem is `done` but a lock is still held would leak that
-   lock to the `JobLockSweepService`. Observed, not fixed.
-6. **`daemon/services/mission_strand_healer.py` is now ~1.4k lines** and carries
+   heal would report `gate-block` every tick). **PINNED (review cycle 1,
+   sibling #4):**
+   `tests/job_queue/test_running_zombie_sweep.py::TestRunningZombieSkipRootPin`
+   asserts the semantics the lane depends on — `skip_root=True` ⇒ `live=False`
+   for a running root with terminal descendants, and `skip_root=False` ⇒
+   `live=True` (the root's OWN status IS a live leg), so a semantic change
+   cannot silently disarm the lane.
+5. **The lock lifecycle on the already-`done` `JobItem` path is NOT f2's.**
+   (Corrected in review cycle 1 — the earlier text here claimed "f2 released
+   the locks when it finalized the JobItem"; it does not.) f2 explicitly does
+   NOT release locks in its already-transitioned branch
+   (`job_recovery_service.py:828-831`: "the actor that transitioned the job
+   already released its lock" — re-releasing would be a no-op or, with the
+   buggy `release_by_instance`, a sibling-lock wipe), and f2's blanket
+   instance-scoped `release_by_instance` was REMOVED (the C1 fix — it was the
+   sibling-lock-deletion bug). The lock is JOB-SCOPED: it is released by the
+   actor that TRANSITIONED the `JobItem` — the job-queue service's
+   `_finalize_terminal` (`job_recovery_service.py:838-845`). On the observer's
+   `job_id=None` path the Step-3 release is a no-op (the virtual job holds no
+   lock of its own; locks keyed to OTHER jobs' `job_id` MUST survive —
+   `job_feedback_observer.py:1300-1306`). A variant where the `JobItem` is
+   `done` but a lock is still held would leak that lock to the
+   `JobLockSweepService`. Observed, not fixed.
+6. **`daemon/services/mission_strand_healer.py` is now ~1.6k lines** and carries
    two strands with different postures. A decomposition (predicate module +
    per-strand modules) is a legitimate follow-up, but it is NOT in this
    commission's scope (the commission's home decision is explicit).

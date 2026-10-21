@@ -410,6 +410,64 @@ def _patch_drive_seams(history: list[dict] | None = None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class TestRunningZombieConstructorFloor:
+    """W-B floor — the constructor rejects out-of-range blast-radius
+    knobs LOUDLY (review cycle 1).
+
+    Both knobs bound the blast radius of a TERMINALIZING lane, so a
+    value below 1 is an operator error, not a posture. The reviewer's
+    MEASURED cases: ``batch_cap=-1`` made the batch UNLIMITED (5/5
+    healed at cap=-1 vs 3/3 at cap=3 — the bound was gone) and
+    ``age_bound_seconds=0`` made every turn instantly
+    zombie-shaped. A silent clamp would hide both; the family style
+    (same precedent as the ``interval_seconds`` check) is a loud
+    ``ValueError`` at construction. Production cannot reach these
+    values — both config fields carry ``ge=1``.
+    """
+
+    @pytest.mark.parametrize(
+        "kwargs, expected_fragment",
+        [
+            ({"running_zombie_batch_cap": 0}, "running_zombie_batch_cap"),
+            ({"running_zombie_batch_cap": -1}, "running_zombie_batch_cap"),
+            (
+                {"running_zombie_age_bound_seconds": 0},
+                "running_zombie_age_bound_seconds",
+            ),
+            (
+                {"running_zombie_age_bound_seconds": -1},
+                "running_zombie_age_bound_seconds",
+            ),
+        ],
+    )
+    def test_out_of_range_knobs_raise_at_construction(
+        self, zombie_harness, kwargs, expected_fragment,
+    ):
+        with pytest.raises(ValueError) as excinfo:
+            _make_healer(zombie_harness, **kwargs)
+        message = str(excinfo.value)
+        assert expected_fragment in message
+        assert "must be >= 1" in message
+
+    def test_the_floor_admits_the_documented_minimum(
+        self, zombie_harness,
+    ):
+        """1 is the smallest ADMISSIBLE value for both knobs (the
+        floor is ``>= 1``, not ``> 1``)."""
+        healer = _make_healer(
+            zombie_harness,
+            running_zombie_batch_cap=1,
+            running_zombie_age_bound_seconds=1,
+        )
+        assert healer._running_zombie_batch_cap == 1
+        assert healer._running_zombie_age_bound_seconds == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Predicate
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 class TestRunningZombiePredicate:
     """Each predicate leg, positive and negative."""
 
@@ -915,6 +973,33 @@ class TestRunningZombieObservability:
         assert "reason=finalize_gap" in joined
 
     @pytest.mark.asyncio
+    async def test_kill_switch_warns_once_per_instance(
+        self, zombie_harness, caplog,
+    ):
+        """Advisory 4: the kill-switch-disabled WARN is emitted ONCE
+        per healer instance (a fresh instance per boot). The old shape
+        repeated the same WARN every 300s tick forever. The lane stays
+        observable — the first WARN names the switch."""
+        import logging
+
+        _seed_zombie_tree(zombie_harness.engine)
+        healer = _make_healer(
+            zombie_harness, running_zombie_enabled=False,
+        )
+        with caplog.at_level(logging.WARNING):
+            first = await healer.sweep_running_zombies_once()
+            second = await healer.sweep_running_zombies_once()
+        kill_switch_warnings = [
+            rec for rec in caplog.records
+            if rec.levelno >= logging.WARNING
+            and "class=kill-switch" in rec.getMessage()
+        ]
+        assert len(kill_switch_warnings) == 1
+        # The lane is still a complete no-op on every tick.
+        assert first["scanned"] == 0
+        assert second["scanned"] == 0
+
+    @pytest.mark.asyncio
     async def test_skip_emits_a_loud_warn(
         self, zombie_harness, caplog,
     ):
@@ -928,3 +1013,82 @@ class TestRunningZombieObservability:
         joined = "\n".join(rec.getMessage() for rec in caplog.records)
         assert "mission_strand_healer|running-zombie:" in joined
         assert "class=young" in joined
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sibling #4 pin — the pre-stamp ``skip_root=True`` dependence
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRunningZombieSkipRootPin:
+    """Sibling #4 pin: the drive DEPENDS on the child_reports
+    PRE-STAMP recursive liveness eval semantics
+    (``child_reports.py:2600-2645``, ``skip_root=True``).
+
+    If that eval's ``skip_root`` semantics change, the pre-stamp eval
+    would report ``live=True`` for a running root with terminal
+    descendants, the stamp would be skipped entirely, and this lane
+    would report ``gate-block`` on EVERY tick — SILENTLY (the heal
+    would simply never happen). The design doc named this pin as
+    absent; it is added here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_skip_root_true_lets_a_running_root_be_stamped(
+        self, zombie_harness,
+    ):
+        """The running root's OWN non-terminal status must NOT count
+        as a live leg when ``skip_root=True`` — that is exactly what
+        lets the stamp proceed."""
+        from daemon.services.mission_live_guard import (
+            evaluate_mission_live,
+            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+        )
+
+        # A FRESH tree: the zombie backstop (6h) must not fire, or
+        # the verdict would be ``live=False`` for the wrong reason.
+        fresh = now_utc_naive() - timedelta(minutes=1)
+        _insert_instance(
+            zombie_harness.engine, ROOT,
+            status=InstanceStatus.RUNNING.value,
+            parent_id=None,
+            agent_id="leader",
+            last_activity_at=fresh,
+        )
+        _insert_instance(
+            zombie_harness.engine, CHILD,
+            status=InstanceStatus.COMPLETED.value,
+            parent_id=ROOT,
+            agent_id="worker",
+            last_activity_at=fresh,
+        )
+        repo = zombie_harness.instance_repo
+
+        # skip_root=True — the mode the pre-stamp eval uses: only the
+        # DESCENDANTS' liveness gates the decision.
+        with_skip = await evaluate_mission_live(
+            instance_repository=repo,
+            instance_id=ROOT,
+            bus_pending_count=None,
+            timeout_seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            skip_root=True,
+        )
+        assert with_skip.live is False, (
+            "the pre-stamp eval must NOT report live for a running "
+            "root with terminal descendants — the stamp (and the "
+            "whole heal) depends on it"
+        )
+
+        # skip_root=False — the root's OWN running status IS a live
+        # leg. This pins the SEMANTICS, not just the outcome: if the
+        # root's own status stopped counting, the two verdicts would
+        # become identical and the pre-stamp early-out would be
+        # vacuous.
+        without_skip = await evaluate_mission_live(
+            instance_repository=repo,
+            instance_id=ROOT,
+            bus_pending_count=None,
+            timeout_seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            skip_root=False,
+        )
+        assert without_skip.live is True
