@@ -33,6 +33,8 @@ deliverable is zero-user-action).
 
 The StaleTaskRecovery `boot+10min` clamp is an **upper-bound backstop**, NOT the target RTO — recovery landing at ~10min means the auto-continue path did not fire.
 
+**The `~14s` figures cover the DAEMON's recovery path only** — systemd's `RestartSec=10` plus the boot pass. They do **NOT** include host-boot time: a FULL HOST REBOOT adds the machine's own power-on / firmware / bootloader time on top, so the end-to-end wall clock from power loss to a resumed turn is `host boot time + ~14s` (plus, on a remote-PG host, the PG start-to-accept window). The `kill -9` drill in §6 measures the daemon path only.
+
 ## 3. PG ordering for an EXISTING install (D15)
 
 `scripts/upgrade/adopt-unit.sh` refuses to clobber an existing unit file, so editing the
@@ -101,6 +103,25 @@ start; check PG reachability first.
   (parked, §5) · G7 KMS_LANE-1 deprecation (post-promote, §5) · G5 Task↔JobItem PAUSED
   reconciliation (runbook-only, §4) · G4 no-checkpoint orphans (runbook-only, §4) · NG-4
   (LangGraph invariant, §5).
+- **Manual MQ-row edits carry a terminal-revive hazard (R-A7).** `send_message` to a
+  TERMINAL instance REVIVES it — the messaging path auto-transitions COMPLETED /
+  TERMINATED / ERROR / FAILED back to RUNNING and reuses the existing checkpoint. So
+  hand-editing a `message_queue` row into a deliverable state for a terminal
+  instance's row can revive that instance and deliver a stale row into it.
+- **Do NOT manually edit `message_queue` rows during a reboot (R-03).** The boot pass
+  owns stranded rows — it resets them under a guarded, idempotent per-row UPDATE whose
+  skip-guards (terminal instance, RUNNING/PAUSED task) are evaluated inside the SAME
+  statement. A hand-edited row can defeat those guards, so a manual reset can deliver
+  a row whose owning task is still running, or whose instance is terminal. If a row
+  must be re-driven, do it AFTER the boot pass has completed, and let the normal
+  task-driven claim path deliver it.
+- **The reset does NOT clear the stale error text.** The guarded UPDATE sets
+  `status='ready'` and `processing_started_at=NULL`; it does NOT touch
+  `error_message`, `last_error` or `retry_count`. A row that failed before the power
+  loss therefore rests at `ready` still carrying its old error text and its old retry
+  count. There is **no retry loop** behind that: the claim path (`dequeue`) gates on
+  `status='ready'` plus the `next_retry_at` due-time, NOT on `retry_count` — so the
+  stale values are cosmetic-but-alarming in the queue views, not a retry driver.
 
 ## 6. Hard-reboot drill (Q-5)
 
