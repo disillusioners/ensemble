@@ -506,14 +506,18 @@ class TestDocSurface:
         )
 
     def test_every_act_doc_states_dry_run_default_true(self):
+        # Review advisory A2: per-tool default-TRUE doc pin — assert the
+        # ACTUAL token each act doc carries (terminate-strength form),
+        # not the bare "dry_run" substring. All six shipped act docs
+        # state ``dry_run: True (default) = preview, no mutation.``;
+        # terminate also carries the ``defaults to TRUE`` phrasing.
         for t in self._tools():
-            doc = (t._full_doc_ or "") + " ".join(
-                (d.get("description") or "")
-                for d in (t.args_schema.model_json_schema().get("properties", {}) or {}).values()
-                if isinstance(d, dict)
-            )
-            doc += t._full_doc_ or ""
-            assert "dry_run" in (t._full_doc_ or ""), t.name
+            doc = t._full_doc_ or ""
+            assert (
+                "dry_run: True (default) = preview, no mutation." in doc
+                or "dry_run` defaults to TRUE" in doc
+                or "dry_run` defaults to `True" in doc
+            ), t.name
 
     def test_terminate_doc_states_the_current_semantics(self):
         tools = self._tools()

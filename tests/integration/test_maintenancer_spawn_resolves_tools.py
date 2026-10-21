@@ -296,7 +296,7 @@ class TestWorkerResolvesSystemLogOnly:
 
 
 class TestPrivilegedCategoryRegistryShape:
-    """PRIVILEGED_TOOL_CATEGORIES must be exactly twelve categories
+    """PRIVILEGED_TOOL_CATEGORIES must be exactly fourteen categories
     (the daemon-internal authority trio ``system_upgrade``,
     ``system-log``, ``ens-db`` plus ``ens-env`` per the W4 leader
     decision 2026-10-02, ``view-views`` per the REWORK 2026-10-07
@@ -305,8 +305,11 @@ class TestPrivilegedCategoryRegistryShape:
     ``settings`` per the settings-worker-slots P2 commission
     2026-10-18, ``board`` per the ari-tools Phase 1 commission
     2026-10-20, ``self-alarm`` per the ari-tools Phase 2
-    commission 2026-10-20, and ``view-write`` + ``board-link`` per
-    the ari-tools Phase 3 commission 2026-10-20). The ``service``
+    commission 2026-10-20, ``view-write`` + ``board-link`` per
+    the ari-tools Phase 3 commission 2026-10-20, and
+    ``instance_read`` + ``instance_ops`` per the nest-ops
+    commission 2026-10-21 — 13/14 = instance_read/instance_ops;
+    the count moved 12→14). The ``service``
     category was REMOVED from this set by user override 2026-09-16
     (D4 reversed; see
     ``.agents/shared/planning/service-tool/decisions.md`` §D4
