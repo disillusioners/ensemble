@@ -31,3 +31,29 @@ REMOVED or NEUTRALIZED at the merge commit — it is bound to this
 worktree's absolute path and must never falsely fail on main / remote VMs
 that no longer have the worktree. The gate is env-gated (opt-in) and a
 silent no-op by default, so the merge is safe even if the file survives.
+
+TRUTH-COMMIT CORRECTION (FIX round, 2026-10-21)
+------------------------------------------------
+The verification claim in commit 9bdbd8c0b ("with the real path, the
+same command exits 0") was FALSE. Measured with the gate ARMED
+(ENSEMBLE_HARD_REBOOT_WORKTREE_GATE=1), the same command exited with
+16 FAILURES, not 0.
+
+Root cause: the gate popped every `daemon*` entry from sys.modules and
+re-imported the package. SQLAlchemy's declarative registry
+(SQLModel.metadata) is PROCESS-GLOBAL and survives the sys.modules
+pop, so re-executing the model modules re-defined the same tables and
+raised `InvalidRequestError: Table 'infra_asset_types' is already
+defined for this MetaData instance`. The armed gate destroyed the very
+suite it was meant to protect.
+
+Corrected by the FIX-round truth-commit: the gate now resolves
+`daemon` NON-EXECUTINGLY (`importlib.util.find_spec("daemon").origin`
+— no pop, no re-import), with a PINNED test
+(tests/unit/test_worktree_gate.py) covering both directions plus the
+no-sys.modules-mutation regression.
+
+Re-verified in BOTH directions (exit codes recorded by the FIX lane):
+
+  * fake path  -> exit 1   (loud refusal; the banner is printed)
+  * real path  -> exit 0   (suite green with the gate ARMED)

@@ -9,6 +9,12 @@ SILENT tests-on-wrong-tree (R-07): without it, a test run against the
 main checkout would import the main tree's ``daemon`` package and
 "pass" while proving nothing about this branch.
 
+The resolution is NON-EXECUTING (``importlib.util.find_spec``, no
+``sys.modules`` pop, no re-import): SQLAlchemy's declarative registry
+is process-global, so re-executing the model modules re-defines the
+same tables and raises ``InvalidRequestError`` — which turned the whole
+suite red under the armed gate. See :func:`_resolve_daemon_origin`.
+
 Shape mirrors the prior-art auto-continue lane
 (``git show 00659fba7 -- tests/conftest_worktree.py``): a SILENT no-op
 by default, enabled by setting ``ENSEMBLE_HARD_REBOOT_WORKTREE_GATE=1``
@@ -30,7 +36,7 @@ plugins named ``conftest.py``, so the prior-art file was dead-as-wired
 
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import os
 import sys
 
@@ -44,24 +50,58 @@ WORKTREE_PATH = "/home/nea/ensemble-src-wt-hard-reboot-recovery"
 WORKTREE_GATE_ENV = "ENSEMBLE_HARD_REBOOT_WORKTREE_GATE"
 
 
+def _resolve_daemon_origin() -> str:
+    """Resolve where the ``daemon`` package lives — WITHOUT executing it.
+
+    ``importlib.util.find_spec`` LOCATES a top-level package through the
+    meta-path finders; it does not import (and therefore does not
+    execute) ``daemon/__init__.py``. For an already-imported module it
+    returns the cached ``__spec__`` — again without re-executing
+    anything.
+
+    Why this matters (the bug this replaced): the earlier version of
+    this gate popped every ``daemon*`` entry from ``sys.modules`` and
+    re-imported the package, to prove the resolution was not a stale
+    cache hit. That RE-EXECUTES the model modules, and SQLAlchemy's
+    declarative registry (``SQLModel.metadata``) is PROCESS-GLOBAL — it
+    survives the ``sys.modules`` pop. Re-executing the model modules
+    therefore re-defines the same tables on the same ``MetaData``
+    instance and raises ``InvalidRequestError: Table 'infra_asset_types'
+    is already defined for this MetaData instance`` — which turned the
+    ENTIRE suite red under the armed gate (16/16 failures). Resolution
+    must be non-executing.
+
+    Falls back to ``sys.modules["daemon"].__file__`` when the spec
+    carries no origin (namespace packages / stripped specs).
+    """
+    spec = None
+    try:
+        spec = importlib.util.find_spec("daemon")
+    except (ImportError, ValueError):  # pragma: no cover - defensive
+        spec = None
+    if spec is not None:
+        origin = getattr(spec, "origin", None)
+        if origin:
+            return str(origin)
+        locations = getattr(spec, "submodule_search_locations", None)
+        if locations:
+            return str(next(iter(locations)))
+    module = sys.modules.get("daemon")
+    resolved = getattr(module, "__file__", None) if module is not None else None
+    return str(resolved) if resolved else "<unknown>"
+
+
 def _daemon_resolves_inside_worktree() -> tuple[bool, str]:
-    """Check whether ``import daemon`` resolves inside ``WORKTREE_PATH``.
+    """Check whether ``daemon`` resolves inside ``WORKTREE_PATH``.
 
     Returns ``(True, daemon_path)`` when the resolved path is under
     ``WORKTREE_PATH``; ``(False, daemon_path)`` otherwise.
 
-    Force-reimports ``daemon`` so a cached import from a prior test
-    (in the same pytest process) does not fool the gate.
+    The resolution is NON-EXECUTING (see :func:`_resolve_daemon_origin`)
+    — a stale ``sys.modules`` cache cannot fool it, and it never
+    re-executes the model modules.
     """
-    # Drop the cached daemon module + parent packages.
-    for mod_name in list(sys.modules):
-        if mod_name == "daemon" or mod_name.startswith("daemon."):
-            sys.modules.pop(mod_name, None)
-    try:
-        daemon = importlib.import_module("daemon")
-    except Exception as exc:  # pragma: no cover - the import always works
-        return (False, f"<import error: {exc!r}>")
-    resolved = getattr(daemon, "__file__", None) or "<unknown>"
+    resolved = _resolve_daemon_origin()
     return (resolved.startswith(WORKTREE_PATH), resolved)
 
 
