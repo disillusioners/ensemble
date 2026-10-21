@@ -524,8 +524,8 @@ if phase_on P3; then
         capture_journal; echo "RESULT: FAIL"; exit 1
     fi
     ok "/livez 200 on 127.0.0.1:${DRILL_PORT}"
-    READYZ_CODE="$(curl -s --max-time 10 -o "$BUNDLE/readyz.json" -w '%{http_code}' "http://127.0.0.1:${DRILL_PORT}/readyz" 2>/dev/null)"
-    [ -z "$READYZ_CODE" ] && READYZ_CODE=000
+    READY_CODE="$(curl -s --max-time 10 -o "$BUNDLE/readyz.json" -w '%{http_code}' "http://127.0.0.1:${DRILL_PORT}/readyz" 2>/dev/null)"
+    [ -z "$READY_CODE" ] && READY_CODE=000
     if [ "$READY_CODE" = "200" ]; then ok "/readyz 200"; else bad "/readyz returned ${READY_CODE}"; capture_journal; echo "RESULT: FAIL"; exit 1; fi
     curl -s "http://127.0.0.1:${DRILL_PORT}/livez" > "$BUNDLE/livez.json" 2>/dev/null || true
     capture_journal
@@ -662,8 +662,8 @@ fi
 if phase_on P7; then
     STEP=P7
     note "P7 observe: recovery markers, MQ accounting, timings"
-    READYZ_CODE="$(curl -s --max-time 10 -o "$BUNDLE/readyz_post.json" -w '%{http_code}' "http://127.0.0.1:${DRILL_PORT}/readyz" 2>/dev/null)"
-    [ -z "$READY_CODE" ] && READYZ_CODE=000
+    READY_CODE="$(curl -s --max-time 10 -o "$BUNDLE/readyz_post.json" -w '%{http_code}' "http://127.0.0.1:${DRILL_PORT}/readyz" 2>/dev/null)"
+    [ -z "$READY_CODE" ] && READY_CODE=000
     [ "$READY_CODE" = "200" ] && ok "/readyz 200 on the restarted daemon" || bad "/readyz returned ${READY_CODE}"
     capture_journal
     JLOG="$BUNDLE/journal-${UNIT}.log"
