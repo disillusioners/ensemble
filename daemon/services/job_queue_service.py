@@ -1008,21 +1008,26 @@ class JobQueueService:
                         bus_pending_count=None,
                     )
                     if _pre_verdict.error:
-                        # A-2: the guard's MEMBER-ALIVE probe error
-                        # HOLDS the tree (``live=True`` + ``error=True``)
-                        # — a fail-MISS hold, not a liveness proof. The
-                        # ORPHAN_RELEASED token below is gated on
-                        # ``timed_out`` only, so without this the
-                        # operator never saw the probe failure. The
-                        # RELEASE itself still fires (the token is
-                        # diagnostic-only).
+                        # A-2 / G3: an ``error=True`` verdict has TWO
+                        # polarities, and the message must be true of
+                        # BOTH:
+                        #   * MEMBER-ALIVE probe error ⇒ ``live=True`` ⇒
+                        #     the tree is HELD (fail-MISS) and the
+                        #     ORPHAN_RELEASED token is suppressed (the
+                        #     token is gated on ``timed_out``);
+                        #   * TREE-WALK error ⇒ ``live=False`` ⇒
+                        #     fail-OPEN per the at-least-once contract:
+                        #     the tree was NOT proven stale, so the
+                        #     release fires with no token either way.
                         logger.warning(
                             "reconcile_held_watches_for_instance: guard "
-                            "member-alive probe FAILED for work_id=%s "
-                            "(fail-miss hold — the tree cannot be proven "
-                            "stale, so the ORPHAN_RELEASED token is "
-                            "suppressed; the release still fires): %s",
+                            "ERROR for work_id=%s — polarity=%s (the "
+                            "ORPHAN_RELEASED token is suppressed either "
+                            "way): %s",
                             work_id[:8],
+                            "member-alive probe error ⇒ held"
+                            if _pre_verdict.live
+                            else "tree-walk error ⇒ fail-open",
                             _pre_verdict.reason,
                         )
                     if _pre_verdict.timed_out:

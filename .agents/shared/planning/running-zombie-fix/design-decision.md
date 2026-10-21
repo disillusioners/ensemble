@@ -28,7 +28,7 @@ by the live logs. What happened:
 
 * The turn ran clean — its task row completed at **2026-10-21T04:09:31Z**.
 * The **PRE-STAMP RECURSIVE LIVENESS HOLD**
-  (`daemon/services/child_reports.py:2738-2790`) fired and **refused the
+  (`daemon/services/child_reports.py:2746-2798`) fired and **refused the
   COMPLETED stamp entirely**. Live log line (2026-10-21):
 
       root_completion: pre-stamp recursive liveness holds for 432988b8...
@@ -115,7 +115,7 @@ The heal invokes
 
 The chain, in order:
 
-1. **Pre-stamp recursive liveness** (`child_reports.py:2738-2790`, `skip_root=True`)
+1. **Pre-stamp recursive liveness** (`child_reports.py:2746-2798`, `skip_root=True`)
    — all-terminal tree ⇒ `live=False` ⇒ falls through to the stamp.
 2. **DB stamp** (`child_reports.py:3586-3600`) — the atomic
    `UPDATE … WHERE status NOT IN (paused, completed, error, waiting_children)`
@@ -377,10 +377,10 @@ never keeps a stale member alive.
 **PREAMBLE — what the table can and cannot say (W-1, corrected in
 cycle 4).** **8 of the 10 consumers can HOLD** the mission. Two
 exceptions, and they are DIFFERENT in kind:
-* the **zombie-GC held-watch reconcile** (`job_queue_service.py:861`,
+* the **zombie-GC held-watch reconcile** (`job_queue_service.py:874`,
   `instance_id=None`) **NEVER RUNS the leg** — the guard raises before
   the walk (there is no tree to walk);
-* the **orphan release** (`job_queue_service.py:992`) **gates only a
+* the **orphan release** (`job_queue_service.py:1005`) **gates only a
   TOKEN** — its guard call is DIAGNOSTIC-ONLY (it feeds the
   `ORPHAN_RELEASED` token through `if _pre_verdict.timed_out:`), and
   the `notify_watchers(...)` release that follows is UNCONDITIONAL.
@@ -394,15 +394,15 @@ difference between them is what they DO with the verdict.
 
 | # | consumer | call site | `skip_root` | reaches the 6h backstop (fresh root + stale member)? | what the companion leg (§2.10) now does for it |
 |---|---|---|---|---|---|
-| 1 | **pre-stamp gate** | `child_reports.py:2744` | **yes** | yes | a member with a live (YOUNG) task row ⇒ the COMPLETED stamp is **REFUSED** (no wrong completion) and the re-arm hands the root to the healer |
-| 2 | **emission gate** | `child_reports.py:2582` | no | yes | ⇒ the gate's guard call returns `live=True` and the gate returns **False** ⇒ the publish is **BLOCKED** (a legitimate miss, not a wrong completion). The traced step is the gate's `False` return (`child_reports.py:2582-2592`) — NOT a stamp downgrade (that downstream step is not in this diff, so it is not claimed here) |
+| 1 | **pre-stamp gate** | `child_reports.py:2752` | **yes** | yes | a member with a live (YOUNG) task row ⇒ the COMPLETED stamp is **REFUSED** (no wrong completion) and the re-arm hands the root to the healer |
+| 2 | **emission gate** | `child_reports.py:2590` | no | yes | ⇒ the gate's guard call returns `live=True` and the gate returns **False** ⇒ the publish is **BLOCKED** (a legitimate miss, not a wrong completion). The traced step is the gate's `False` return (`child_reports.py:2590-2600`) — NOT a stamp downgrade (that downstream step is not in this diff, so it is not claimed here) |
 | 3 | **healer tree leg 4** | `mission_strand_healer.py:1163` | **yes** | yes | ⇒ the lane **SKIPS** with its own skip class `member-live-task` (the operator can tell this hold apart from an ordinary `live-tree` hold) |
 | 4 | **f1** (drift reconciler) | `job_recovery_service.py:2666` | no | yes | ⇒ f1 **HOLDS** the `JobItem` (no force-finalize) — detail pattern `orphan_active_skipped_mission_live_f1` |
 | 5 | **f2** (drift reconciler) | `job_recovery_service.py:2970` | no | yes | ⇒ f2 **HOLDS** the `JobItem` — detail pattern `orphan_active_skipped_mission_live`. **CODE untouched; BEHAVIOUR widened (material disclosure, above)** |
 | 6 | **boot sweep** (`reconcile_terminal_watches`) | `job_queue_service.py:635` | no | yes | ⇒ the sweep does **NOT** fire the terminal for that watch (the watch survives to the next tick) |
-| 7 | **zombie-GC held-watch reconcile** | `job_queue_service.py:861` | n/a — `instance_id=None` | **no** (the guard returns `live=False, error=True` on the unwired id — the fail-OPEN contract; the caller finalizes) | unchanged — the leg never runs (there is no tree to walk) |
-| 8 | **orphan release** | `job_queue_service.py:992` | no | yes | ⇒ the guard call is **DIAGNOSTIC-ONLY**: it gates the `ORPHAN_RELEASED` **TOKEN** (through `if _pre_verdict.timed_out:`). A hold **suppresses the token** — the `notify_watchers(...)` release that follows is **UNCONDITIONAL** and still fires (W-1 correction) |
-| 9 | **stored-watch reconcile** | `job_queue_service.py:1200` | no | yes | ⇒ the hold falls through to the **loss-case leg**, which **REHYDRATES** a watcher on the ORIGINAL `work_id` — the stored watch is **NOT released**, and a watcher row is re-armed (W-1 correction) |
+| 7 | **zombie-GC held-watch reconcile** | `job_queue_service.py:874` | n/a — `instance_id=None` | **no** (the guard returns `live=False, error=True` on the unwired id — the fail-OPEN contract; the caller finalizes) | unchanged — the leg never runs (there is no tree to walk) |
+| 8 | **orphan release** | `job_queue_service.py:1005` | no | yes | ⇒ the guard call is **DIAGNOSTIC-ONLY**: it gates the `ORPHAN_RELEASED` **TOKEN** (through `if _pre_verdict.timed_out:`). A hold **suppresses the token** — the `notify_watchers(...)` release that follows is **UNCONDITIONAL** and still fires (W-1 correction) |
+| 9 | **stored-watch reconcile** | `job_queue_service.py:1231` | no | yes | ⇒ the hold falls through to the **loss-case leg**, which **REHYDRATES** a watcher on the ORIGINAL `work_id` — the stored watch is **NOT released**, and a watcher row is re-armed (W-1 correction) |
 | 10 | **work notifier** | `work_notifier.py:687` | no | yes | ⇒ the watcher is **not notified** (the mission-liveness hold keeps the work row) |
 
 **THE `skip_root=True` PAIR** (rows 1 and 3): in that mode the ROOT's own
@@ -933,6 +933,17 @@ count on both sides" is a **main-gate-RED** result, not a clean gate.
     `assert 'gate-block' == 'member-live-task'` — the root was DRIVEN
     instead of HELD). The earlier council figures (8/2/1) were measured
     with a different mutation/pack scope and are superseded by these.
+  * **G5 — the ABSOLUTE counts are environment-fragile; the digest is
+    the invariant.** The independent reviewer's environment measured
+    **20 failed / 2163 passed → 20 failed / 2169 passed** (vs our
+    18/2165 → 18/2171): the +2 are **order-sensitive concurrency tests**
+    (`test_watcher_repository_concurrent`) that are red at BOTH sides in
+    both environments. The load-bearing invariants are (i) the
+    **BYTE-IDENTICAL FAILED-list digest** across base-vs-HEAD within one
+    environment — `e3a3c74a04e34fd4d1c2ea5476721106d4565a55ccc47c5cc5be7
+    22a08cd58cf` in ours, `f53d151a…` in the reviewer's — and (ii) **zero
+    net-new failures**. Do not compare absolute pass counts across
+    environments.
 * **Cycle 3 (2026-10-21)** — the suite grew to 58: 49 + the
   **member-task battery** — the three live task statuses
   (`pending`/`running`/`processing`) ⇒ NOT healed (skip class
@@ -1042,7 +1053,7 @@ count on both sides" is a **main-gate-RED** result, not a clean gate.
    with inverted (fail-closed) semantics. If the stale-pause probe is ever
    hardened, the two should be unified rather than kept as parallel copies.
 4. **The drive depends on the child_reports PRE-STAMP recursive liveness eval**
-   (`child_reports.py:2738-2790`, `skip_root=True`). For a `running` root with
+   (`child_reports.py:2746-2798`, `skip_root=True`). For a `running` root with
    all-terminal descendants it returns `live=False` — which is exactly WHY the
    running-zombie drive can stamp. A future change to that eval's `skip_root`
    semantics would silently stop the running-zombie strand from stamping (the

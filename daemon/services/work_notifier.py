@@ -691,18 +691,21 @@ async def notify_work_watchers(
                 )
                 mission_live = _guard_verdict.live
                 if _guard_verdict.error:
-                    # A-2: the guard's MEMBER-ALIVE probe error HOLDS
-                    # the tree (``live=True`` + ``error=True``) — a
-                    # fail-MISS hold, NOT a liveness proof. The old
-                    # shape read only ``.live``, so the operator never
-                    # saw the probe failure. The hold itself is
-                    # UNCHANGED.
+                    # A-2 / G3: an ``error=True`` verdict has TWO
+                    # polarities, and the message must be true of BOTH:
+                    #   * MEMBER-ALIVE probe error ⇒ ``live=True`` ⇒ the
+                    #     watcher IS HELD (fail-MISS: the tree cannot be
+                    #     proven stale);
+                    #   * TREE-WALK error ⇒ ``live=False`` ⇒ fail-OPEN per
+                    #     the at-least-once contract: the watcher is
+                    #     CLAIMED + DELIVERED, not retained.
                     logger.warning(
-                        "notify_work_watchers: mission-live guard HELD "
-                        "work_id=%s on a fail-miss probe error (the tree "
-                        "cannot be proven stale — the watcher is "
-                        "retained, not released): %s",
+                        "notify_work_watchers: mission-live guard ERROR "
+                        "for work_id=%s — polarity=%s: %s",
                         work_id[:8],
+                        "member-alive probe error ⇒ watch HELD"
+                        if _guard_verdict.live
+                        else "tree-walk error ⇒ fail-OPEN, watch released",
                         _guard_verdict.reason,
                     )
                 if logger.isEnabledFor(logging.DEBUG):

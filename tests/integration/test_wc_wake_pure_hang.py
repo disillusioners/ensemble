@@ -35,7 +35,7 @@ Real engine (what is NOT mocked):
     step: a ``MessageQueue`` row with
     ``source=internal_report:{child}:{message_id}`` via
     ``manager.enqueue_message`` (the durable wake contract
-    ``child_reports`` itself writes at ``child_reports.py:2744``; the
+    ``child_reports`` itself writes at ``child_reports.py:2752``; the
     report-build/adjudication chain is out of scope here — S6 proves
     DELIVERY + wake + consumption).
 

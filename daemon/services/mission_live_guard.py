@@ -576,6 +576,20 @@ async def _member_alive_companion_verdict(
         return None
     now = now_utc_naive()
     undatable_live_work = 0
+
+    def _flush_undatable_note() -> None:
+        # A-3/G4: ONE aggregated operator-visible line per evaluation,
+        # emitted at EVERY exit of the member loop (the early-return
+        # holds included), so a hold cannot discard the count. The
+        # per-member detail stays at DEBUG.
+        if undatable_live_work:
+            logger.info(
+                "mission_live_guard: member-alive probe for %s... — "
+                "members_with_undatable_live_work=%d ⇒ NOT held "
+                "(stale-eligible; per-member detail at DEBUG)",
+                (instance_id or "?")[:8], undatable_live_work,
+            )
+
     for member_id in candidates:
         try:
             live_work = await asyncio.to_thread(
@@ -588,6 +602,7 @@ async def _member_alive_companion_verdict(
                 "the leg cannot prove the tree is stale)",
                 (instance_id or "?")[:8], type(exc).__name__, exc,
             )
+            _flush_undatable_note()
             return MissionLiveVerdict(
                 live=True,
                 reason=(
@@ -609,6 +624,7 @@ async def _member_alive_companion_verdict(
                 "leg cannot prove the tree is stale)",
                 (instance_id or "?")[:8], type(exc).__name__, exc,
             )
+            _flush_undatable_note()
             return MissionLiveVerdict(
                 live=True,
                 reason=(
@@ -678,17 +694,7 @@ async def _member_alive_companion_verdict(
             (instance_id or "?")[:8], member_id[:8], live_work,
             int(age_seconds), timeout_seconds,
         )
-    if undatable_live_work:
-        # A-3: ONE aggregated operator-visible line per evaluation
-        # (the per-member detail is at DEBUG). The old shape emitted
-        # one INFO per member — N=50 ⇒ 50 lines, ≈400 lines/300s
-        # across ~8 consumers.
-        logger.info(
-            "mission_live_guard: member-alive probe for %s... — "
-            "members_with_undatable_live_work=%d ⇒ NOT held "
-            "(stale-eligible; per-member detail at DEBUG)",
-            (instance_id or "?")[:8], undatable_live_work,
-        )
+    _flush_undatable_note()
     return None
 
 
