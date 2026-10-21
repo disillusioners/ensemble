@@ -211,7 +211,7 @@ Every decision below adopts the gap-doc §6 recommendation as the plan's working
 **Why not in this plan:**
 - 45–60 LOC + the per-candidate safety check is a real implementation lane, not a planning artifact.
 - The risk of false-resume (design-legal orphan) is higher than the risk of the current behavior (frozen instance).
-- The runbook ships a triage query so the operator can identify instances in this state: `SELECT ... FROM instances i WHERE i.status='running' AND NOT EXISTS (SELECT 1 FROM task t WHERE t.instance_id=i.id AND t.status IN ('pending','running','paused'))`.
+- The runbook ships a triage query so the operator can identify instances in this state: `SELECT ... FROM instances i WHERE i.status='running' AND NOT EXISTS (SELECT 1 FROM task t WHERE t.instance_id=i.instance_id AND t.status IN ('pending','running','paused'))`.
 
 **Why MANDATORY tracked (not "parked"):** the user directive *"if our ensemble can continue after a hard reboot"* is not satisfied for this class today; a third occurrence is plausible before a follow-up commission lands; the existing RCAs are 24h old (both 2026-10-19). The follow-up commission is a tracked obligation, not a "someday maybe".
 
