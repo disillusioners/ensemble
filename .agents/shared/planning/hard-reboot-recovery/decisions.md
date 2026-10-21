@@ -321,6 +321,8 @@ Every decision below adopts the gap-doc §6 recommendation as the plan's working
 
 **D19-FU1 (tracked follow-up candidate, NOT part of this commission):** a *task-aware MQ ownership reconciliation* pass — for rows whose owning task is dead/terminal, terminalize the row through the existing `reconcile_turn_mirror` primitive (row → `failed`) instead of re-queueing it to `ready`, and terminalize task-less stranded rows rather than re-queuing them. This converts "invisible wedge" into "honest terminal state" without ever creating a second owner, and it is the only path that would clear the busy-guard for the stranded classes on shipped-default installs. It is a new subsystem (task↔message↔instance correlation + a terminal-state vocabulary decision) and is out of scope here.
 
+**Status upgrade (leader ruling Q2, 2026-10-21 — `c4-lane6-ruling.md` §9.2):** the architect's §6 wording above records D19-FU1 as a "tracked follow-up **candidate**"; the LEADER's ruling (Q2, 2026-10-21, `c4-lane6-ruling.md` §9.2) upgraded that status — D19-FU1 is **COMMISSIONED as a tracked follow-up** (≈45–60 LOC of production code), still **NOT** part of this commission and not shipping with it. The architect's paragraph above is retained VERBATIM; this paragraph records the leader's upgrade alongside it and does not rewrite it. The same upgrade is carried in the plan record at `plan-overview.md` §6 (the PARKED row: "D19-FU1 MQ ownership reconciliation ≈45–60", leader ruling Q2, 2026-10-21).
+
 ---
 
 ## Source-of-Decision Honest Audit

@@ -23,6 +23,11 @@ Contents:
   * :func:`seed_instance` / :func:`seed_message` / :func:`seed_task` /
     :func:`seed_report_injection` / :func:`message_status` — the row
     seeds.
+  * :func:`pg_config` / :func:`no_pg_env` — the PG-coordinate
+    neutraliser: the ambient shell may export the LIVE PG
+    coordinates, and the factory resolves ``POSTGRES_*`` with
+    precedence over the config, so a prod-pointing env would silently
+    redirect the constructed engine.
 
 Importable from both packs via the ``tests.helpers`` package (the
 established pattern — see ``tests.helpers.unified_spawn_fixtures``).

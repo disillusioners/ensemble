@@ -31,7 +31,7 @@ deliverable is zero-user-action).
 | WAITING_CHILDREN | DependencyBus (durable, re-armed at boot) | bus-driven |
 | PAUSED | stays PAUSED — never auto-resumed | never (by design) |
 
-The StaleTaskRecovery `boot+10min` clamp is an **upper-bound backstop**, NOT the target RTO — recovery landing at ~10min means the auto-continue path did not fire.
+The StaleTaskRecovery `boot+~10min` clamp (config `stale_task_recovery_threshold_minutes`, default 10; the module fallback constant is 15) is an **upper-bound backstop**, NOT the target RTO — recovery landing at ~10min means the auto-continue path did not fire.
 
 **The `~14s` figures cover the DAEMON's recovery path only** — systemd's `RestartSec=10` plus the boot pass. They do **NOT** include host-boot time: a FULL HOST REBOOT adds the machine's own power-on / firmware / bootloader time on top, so the end-to-end wall clock from power loss to a resumed turn is `host boot time + ~14s` (plus, on a remote-PG host, the PG start-to-accept window). The `kill -9` drill in §6 measures the daemon path only.
 
@@ -67,7 +67,7 @@ SELECT instance_id, status, agent_id, created_at FROM instances i WHERE i.status
 ```
 
 **No-checkpoint orphans (G4).** No checkpoint thread ⇒ the instance cannot be resumed;
-StaleTaskRecovery's `boot+10min` backstop handles the task layer —
+StaleTaskRecovery's `boot+~10min` backstop (config `stale_task_recovery_threshold_minutes`, default 10; the module fallback constant is 15) handles the task layer —
 `SELECT instance_id, status, agent_id FROM instances WHERE status IN
 ('running','waiting_children') AND instance_id NOT IN (SELECT thread_id FROM checkpoints);`
 
