@@ -554,7 +554,7 @@ class TestG3_PausedStragglerAtHealer:
     parent is NOT never-dispatched-shaped (status != idle, the
     spawn-then-message ritual has progressed past the never-
     dispatched window) — the safety-bound leg
-    (``mission_strand_healer.py:360-371``) aborts the heal before
+    (``mission_strand_healer.py:645-662``) aborts the heal before
     any termination runs. The PAUSED row stays untouched and the
     root stays at WAITING_CHILDREN."""
 
@@ -775,7 +775,7 @@ class TestG5_AlreadyTerminalRoot:
     """Scenario-9: a root that is ALREADY-TERMINAL when the healer
     looks (e.g. terminalized by an operator mid-cycle) is a
     production no-op — the wedge-posture check
-    (``mission_strand_healer.py:254-262``) returns
+    (``mission_strand_healer.py:528-533``) returns
     ``healed=False`` immediately without touching any row."""
 
     @pytest.mark.asyncio
@@ -1078,7 +1078,7 @@ class TestG7_PendingTaskAbortsHeal:
     the root is the (in-flight turn) carrier (an LLM is currently
     processing this work item); the wedge will close via the natural
     path on completion, NOT via the healer. The healer must abort
-    (``mission_strand_healer.py:302-309``) without driving."""
+    (``mission_strand_healer.py:568-577``) without driving."""
 
     @pytest.mark.asyncio
     async def test_pending_task_row_aborts_heal(
