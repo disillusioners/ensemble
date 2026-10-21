@@ -33,44 +33,15 @@ from sqlalchemy.dialects.postgresql.psycopg import PGDialect_psycopg
 import daemon.__main__ as daemon_entry
 import daemon.repositories.factory as factory_mod
 from daemon.constants import BOOT_DB_TIMEOUT_S
-from daemon.ensemble_config import EnsembleConfig, PostgresConfig
-
-# The ambient shell may export the LIVE PG coordinates; the factory
-# resolves POSTGRES_* with precedence over the config, so a prod-pointing
-# env would silently redirect the constructed engine. Drop them (mirrors
-# tests/unit/repositories/test_pg_engine_utc_session.py).
-_PG_ENV_VARS = (
-    "POSTGRES_HOST",
-    "POSTGRES_PORT",
-    "POSTGRES_DB",
-    "POSTGRES_USER",
-    "POSTGRES_PASSWORD",
+from daemon.ensemble_config import EnsembleConfig
+from tests.helpers.hard_reboot_fixtures import (  # noqa: F401 — fixture
+    no_pg_env,
+    pg_config,
 )
 
 _UNIT_TEMPLATE = (
     Path(__file__).resolve().parents[2] / "scripts/systemd/ensemble-daemon.service"
 )
-
-
-def _pg_config() -> EnsembleConfig:
-    """Config pointing at a clearly-fake test coordinate (no connect)."""
-    return EnsembleConfig(
-        database="postgres",
-        postgres=PostgresConfig(
-            host="127.0.0.1",
-            port=15432,
-            db="ensemble_test",
-            user="ensemble",
-            password="ensemble_dev",
-        ),
-    )
-
-
-@pytest.fixture
-def no_pg_env(monkeypatch):
-    """Neutralize ambient POSTGRES_* env so the factory uses the config."""
-    for var in _PG_ENV_VARS:
-        monkeypatch.delenv(var, raising=False)
 
 
 def test_connect_timeout_bound_is_set_on_the_engine(no_pg_env, monkeypatch):
@@ -84,7 +55,7 @@ def test_connect_timeout_bound_is_set_on_the_engine(no_pg_env, monkeypatch):
         return real_create_engine(*args, **kwargs)
 
     monkeypatch.setattr(factory_mod, "create_engine", spy)
-    engine = factory_mod.create_postgres_engine(_pg_config())
+    engine = factory_mod.create_postgres_engine(pg_config())
     try:
         # libpq takes connect_timeout as a conninfo parameter, so it rides
         # the URL query — a top-level create_engine(connect_timeout=...)
@@ -113,7 +84,7 @@ def test_firewall_drop_is_bounded_at_the_boot_budget(no_pg_env, monkeypatch):
         raise RuntimeError("simulated firewall DROP")
 
     monkeypatch.setattr(PGDialect_psycopg, "connect", fake_connect)
-    engine = factory_mod.create_postgres_engine(_pg_config())
+    engine = factory_mod.create_postgres_engine(pg_config())
     try:
         with pytest.raises(RuntimeError):
             engine.connect()
@@ -123,6 +94,47 @@ def test_firewall_drop_is_bounded_at_the_boot_budget(no_pg_env, monkeypatch):
     bound = int(captured["connect_timeout"])
     assert bound == BOOT_DB_TIMEOUT_S
     assert bound <= 10  # the pre-flight budget, NOT the ~75-130s TCP timeout
+
+
+def test_other_engine_sites_carry_no_connect_timeout(no_pg_env, monkeypatch):
+    """(f) ONLY the canonical PG engine carries the libpq bound.
+
+    The other two ``create_engine`` call sites in the factory —
+    ``create_engine_from_config``'s SQLite branch and its
+    dialect-agnostic branch — must stay free of ``connect_timeout``:
+    the bound is a property of the canonical PostgreSQL engine only.
+    """
+    captured: list[dict] = []
+    real_create_engine = factory_mod.create_engine
+
+    def spy(*args, **kwargs):
+        captured.append({"args": args, "kwargs": kwargs})
+        return real_create_engine(*args, **kwargs)
+
+    monkeypatch.setattr(factory_mod, "create_engine", spy)
+
+    # The SQLite branch.
+    sqlite_engine = factory_mod.create_engine_from_config(
+        factory_mod.DatabaseConfig.sqlite(":memory:")
+    )
+    try:
+        assert captured[-1]["kwargs"]["connect_args"] == {"check_same_thread": False}
+        assert "connect_timeout" not in str(captured[-1]["args"][0])
+    finally:
+        sqlite_engine.dispose()
+
+    # The dialect-agnostic branch (a PostgreSQL URL, but not the
+    # canonical engine — it must NOT inherit the bound).
+    pg_engine = factory_mod.create_engine_from_config(
+        factory_mod.DatabaseConfig.postgresql(
+            "postgresql+psycopg://ensemble:ensemble@127.0.0.1:15432/ensemble_test"
+        )
+    )
+    try:
+        assert captured[-1]["kwargs"]["connect_args"] == {"options": "-c timezone=UTC"}
+        assert "connect_timeout" not in str(captured[-1]["args"][0])
+    finally:
+        pg_engine.dispose()
 
 
 def test_boot_preflight_probes_exactly_once(monkeypatch):
@@ -154,7 +166,7 @@ def test_boot_preflight_probes_exactly_once(monkeypatch):
         engines.append(kwargs)
         return _Engine()
 
-    cfg = _pg_config()
+    cfg = pg_config()
     monkeypatch.setattr(sqlalchemy, "create_engine", fake_create_engine)
     monkeypatch.setattr(
         EnsembleConfig, "load_or_create", staticmethod(lambda data_dir: cfg)
