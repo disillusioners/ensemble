@@ -490,3 +490,83 @@ Extend `test_live_task_row_is_untouched` (`:135-150`) with the accounting counte
 ---
 
 *End of ruling. The dev applies the §2 doc amendments, the §3 test specification, the §4 M5 replacement, and the §5 Phase-4 restatement; the §6 D19 entry is appended to `decisions.md`. No implementation or test code is changed by this ruling itself.*
+
+---
+
+## 9. Leader rulings on this artifact (2026-10-21) — Q1, Q2, scope-truth
+
+> Appended by the implementation lane (fold round B) so this artifact is
+> self-consistent: the architect's §7 asked the leader two questions; the
+> answers are recorded HERE, next to the finding they answer.
+
+### 9.1 Q1 — D17 (`QUEUE_DISCARD_ON_STARTUP` default flip): **STAYS PARKED**
+
+**Decision (leader, 2026-10-21):** D17 **STAYS PARKED**. Its "G2 hygiene value"
+rationale is **VOID** — the pass does not clear the busy-guard on
+shipped-default installs (D19: `get_stats()` counts `ready` rows in
+`pending_count`, so the wedge is *transformed into visible-pending*, not
+cleared). But flipping the default is **NOT the answer**: silent backlog
+deletion at boot is worse than a visible-pending row. The decision is
+therefore re-taken with the corrected facts and the default stays as it is.
+
+**What replaces the void rationale:** an **explicit operator triage** for a
+visible-pending row. The runbook now carries it —
+`docs/runbooks/hard-reboot-recovery.md` **§6.2 "Operator triage — a
+visible-pending row after the boot (D17 parked)"**: confirm the row is the
+pass's output (`ready` + `processing_started_at IS NULL`) → check whether a
+task owns it (a `running`/`paused` task ⇒ task-owned, leave it to AutoContinue
+/ STR's reap; a `pending`/`deferred` task ⇒ the claim path will deliver it; NO
+task ⇒ the D13 task-less class, report it) → and never hand-edit the row
+(R-03). The busy-guard clears only when the row is claimed and completed, or on
+a `QUEUE_DISCARD_ON_STARTUP=true` install where the deferred wipe removes the
+doomed rows.
+
+**Recorded in:** `decisions.md` D17 (dated addendum) + the runbook §6.2.
+
+### 9.2 Q2 — D19-FU1: **COMMISSIONED as a tracked follow-up, NOT part of this commission**
+
+**Decision (leader, 2026-10-21):** the task-aware MQ ownership reconciliation
+described in §6 (D19-FU1) is **COMMISSIONED as a tracked follow-up** — it is
+**NOT** part of this commission and does **NOT** ship with it.
+
+**Scope marker (carried verbatim into the plan record):** D19-FU1 ≈ **45–60
+LOC** of production code — for rows whose owning task is dead/terminal,
+terminalize the row through the existing `reconcile_turn_mirror` primitive
+(row → `failed`) instead of re-queueing it to `ready`, and terminalize
+task-less stranded rows rather than re-queuing them. It converts "invisible
+wedge" into "honest terminal state" without ever creating a second owner, and
+it is the only path that would clear the busy-guard for the stranded classes
+on shipped-default installs. It is a new subsystem (task↔message↔instance
+correlation + a terminal-state vocabulary decision) and it exceeds this plan's
+≈44-Python-LOC ceiling — hence a separate commission, not a scope creep here.
+
+**Recorded in:** `plan-overview.md` §6 (the PARKED row now names
+**D19-FU1 MQ ownership reconciliation ≈45–60**), `decisions.md` D19
+(D19-FU1 paragraph), and §9.2 here.
+
+### 9.3 SCOPE-TRUTH (carried verbatim into the plan record)
+
+> The commission's scope statement asserted RDRS lane-6 healing of
+> report-family rows — that is **NOT delivered and does NOT ship**; the code
+> is safe, the claim was false. Lane 6 keeps working via its live producer
+> (claim-window shape, F-1 epoch-belt), independent of the MQ reset; narrowing
+> the claim disables nothing that works today.
+
+**Recorded in:** `plan-overview.md` §2 (the SCOPE-TRUTH bullet, in-scope list),
+`decisions.md` D19 §5, and §9.3 here. The **user-facing** scope-truth
+correction is carried by the leader in the commission report (this ruling's
+§7); the plan record carries the same sentence so no artifact re-asserts the
+withdrawn benefit.
+
+### 9.4 What fold round B applied against this ruling (for the audit trail)
+
+| Ruling item | Applied | Where |
+|---|---|---|
+| §2 A1–A9, A11, A13 | YES — the amendment text is applied VERBATIM (extracted programmatically from this file) | `architecture-recommendation.md` (:84, :116, :118, :172, :182, :213, :233), `plan-overview.md` (:32, :128, :182, STR-backstop bullet), `docs/runbooks/hard-reboot-recovery.md` (:16, the QUEUE_DISCARD bullet) |
+| §2 A10 (the broken D13 query) | ALREADY CORRECT in all four copies — verified, no edit needed; proof by execution recorded in the round-B report | `plan-overview.md:36`, `decisions.md:214`, `architecture-recommendation.md:168`, `docs/runbooks/hard-reboot-recovery.md:65` |
+| §2 A12 (D19) | YES — appended verbatim | `decisions.md` (new `## D19.` entry, placed after D18, before the honest-audit table) |
+| §3 (the §9-3 composition test) | YES — the five ordered assertions + the required docstring + the control + a positive control | `tests/unit/test_message_queue_boot_recovery.py` |
+| §4 (M5 replacement set) | M5-a: round A's test already satisfies it (kept, mapping documented in its docstring) · M5-b: ADDED (round A lacked it) · M5-c: already present in round A's M3 test | `tests/unit/test_message_queue_boot_recovery.py` |
+| §5 (Phase-4 acceptance split) | YES — P4-1..P4-6 mandatory on every install, P4-7 install-conditional | `plan-overview.md:32` + `:128` + `:182`, `docs/runbooks/hard-reboot-recovery.md` §6.1 |
+| §6 (D19 text) | YES — verbatim | `decisions.md` |
+| §9.1–§9.3 (leader rulings) | YES — recorded here, in `decisions.md` (D17 addendum + D19) and in the plan | this file, `decisions.md`, `plan-overview.md` |
