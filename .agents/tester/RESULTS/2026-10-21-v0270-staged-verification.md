@@ -237,15 +237,36 @@ Consequences:
 
 ---
 
-## FENCES (item 7)
+## FENCES (item 7): **PASS — LIVE SURFACE UNCHANGED**
 
-**[PENDING — final re-confirmation lane `a4a15d52`]**
+Final re-confirmation lane `a4a15d52` — 12/12 checks, strictly read-only (no signal, stop, drop, prune, revert, edit or write anywhere).
 
-Standing baseline carried from the pre-verification state: `current -> releases/v0.26.3` (mtime `2026-10-21 10:38:09.014490013 +0000`); live daemon MainPID 528942 / NRestarts 0 / epoch `Wed 2026-10-21 10:38:47 UTC`, livez `{"status":"alive","version":"0.26.3"}`; demo :7979 alive (pid 1147); `releases/state.json` sha256 `c5f2ff9ed9e6b803c4654760af90e73aea5dad4bc51443f978195df9faa4b63f`; port 8088 not bound; `releases/` holding 5 version dirs vs keep-3.
+| # | Check | Observed | Match |
+|---|---|---|---|
+| 1 | `ensemble-main` MainPID / NRestarts / epoch / state | `528942 / 0 / Wed 2026-10-21 10:38:47 UTC / active` | ✅ |
+| 1b | `ensemble-demo` MainPID / NRestarts | `898 / 0 / active` | ✅ |
+| 2 | `:9797` livez | `{"status":"alive","version":"0.26.3","uptime_seconds":38933.19}` — uptime consistent with the 10:38:47Z epoch (**no restart for the whole lane**) | ✅ |
+| 2b/2c | `:7979` livez / `:8088` livez | `200` / `000` (curl exit 7, **connection refused** — nothing bound) | ✅ |
+| 3 | `current` symlink + mtime | `releases/v0.26.3` / `2026-10-21 10:38:09.014490013 +0000` — **byte-exact** | ✅ |
+| 3c | demo `current` | `releases/v0.16.3` (mtime 2026-09-28) | ✅ |
+| 4 | `releases/state.json` sha256 | `c5f2ff9ed9e6b803c4654760af90e73aea5dad4bc51443f978195df9faa4b63f` — **re-read at the end of the fence, after the foreign stage had run 15 min: identical** | ✅ |
+| 5 | `releases/` census | 5 version dirs + state.json + 2 `.bak` + `rollback.lock.d`; hidden `.staging.v0.27.1.1610109` = **FOREIGN** (concurrent v0.27.1 stage) | ✅ |
+| 5b | state.json pointers | `current=v0.26.3`, `previous=v0.26.2`, `in_flight=null`, `pending_op=null`, `quarantined=[]` | ✅ |
+| 6 | staged-payload immutability | `find releases/v0.27.0 -newermt '21:00:36Z' \| wc -l` → **0**; binary sha256 byte-exact `6c6bfd58…6402`; all 6419 payload files still carry the build-tree mtime 20:53:44 | ✅ |
+| 7 | `v0270`/`hrr`/`smoke` units + unit-files | **none** | ✅ |
+| 8 | listeners | 10000 / 10001 / 10043 / 15533 / 8088 / 8079 → **all absent**; 9797 / 7979 / 5432 present as required | ✅ |
+| 9 | processes | exactly the expected LIVE set (529346 on 9797, 1147 on 7979, launcher parents 529318/1111/528942); **no** `v0270` / `hrr_mock` / `uvicorn daemon.api` | ✅ |
+| 10 | local PG16 residue | **0** `hrr%`/`v0270%` roles, **0** databases — this lane's PG footprint is fully clean | ✅ |
+| 11 | `/tmp` residue | `/tmp/v0270-*` → 1 entry (the retained evidence dir `/tmp/v0270-mig-verify`); no orphan payload copy, scratch HOME inside the install dir, or unit-name residue | ✅ |
+| 12 | staging worktree chain | HEAD `1d5fdfe0f…`, porcelain **EMPTY**, `describe --exact-match` = `v0.27.0` | ✅ |
 
-**No promote · no `state.json` edit · no systemd interaction with live units · no real host reboot · no eviction · no write into the live install dir or the staged payload** — every lane reported zero writes to the live surface, and the staged payload's immutability was independently re-checked by two lanes (`find releases/v0.27.0 -newermt …` → **EMPTY**).
+**Two deltas observed — both FOREIGN, neither ours:** (1) `releases/.staging.v0.27.1.1610109` — the concurrent v0.27.1 stage lane; (2) `/tmp/hrr-v0270-rec` — this tester's own evidence worktree. Neither touches the live symlink, the running daemon, any release dir, `state.json`, any port, or any unit. **Nothing changed that is attributable to the verification lanes.**
 
-**Note on this record's location:** it is committed on a dedicated evidence branch off `origin/latest` (the main checkout is on `latest` at `1d5fdfe0` with a concurrent lane's dirty files, and the staging worktree is deliberately left pristine for the promote ceremony).
+**Two clarifications worth carrying forward (corrected from the task-context phrasing):**
+- The **provenance sidecars DO exist** — `…/ensemble-src-wt-stage-v0270/dist/ensemble-prod.build-provenance.json` (332 B) and `…/frontend/dist/frontend/browser/index.html.build-provenance.json` (352 B), both `git_head=1d5fdfe0f…`, `git_dirty=false`. What is true is that **no release dir in this family contains a sidecar** (v0.25.7 / v0.26.2 / v0.26.3 / v0.26.4 / v0.27.0 all 0) — the release dir's provenance equivalent is `manifest.json`, and the sidecars live in the staging worktree by design ("zero sidecars in payload"). The two `provenance*.json` files inside the staged dir are **opendesign plugin content**, not build provenance.
+- **The staged-payload immutability check has a second-granularity nuance:** `find -newermt '2026-10-21 21:00:35Z'` returns 2 entries (the release dir itself and `manifest.json`) because `staged_at` is recorded at second granularity and both land inside that same second — i.e. they are the **staging finalization itself**. The next-second boundary returns **0**, and every payload file still carries the build-tree mtime.
+
+**No promote · no `state.json` edit · no systemd interaction with live units · no real host reboot · no eviction · no write into the live install dir or the staged payload** — the staged payload's immutability was independently re-checked by three lanes.
 
 ---
 
