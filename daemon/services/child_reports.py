@@ -2738,6 +2738,18 @@ Provide a concise summary:"""
                     # DESCENDANT liveness gates the pre-stamp
                     # decision.
                     skip_root=True,
+                    # MEMBER-TASK liveness leg (2026-10-21,
+                    # running-zombie cycle 3): a non-terminal member
+                    # that owns a LIVE task row is WORKING, not stuck
+                    # — ``last_activity_at`` is not written on turn
+                    # progress, so a member inside a long turn reads
+                    # stale and the stamp would finalize a root whose
+                    # member is mid-turn (a FALSE COMPLETION). The leg
+                    # holds the stamp. Opt-in: only this gate and the
+                    # running-zombie healer's tree leg supply a task
+                    # handle, so every other guard consumer (f2, f1,
+                    # the boot sweeps) is unchanged.
+                    task_engine=getattr(self._manager, "engine", None),
                 )
                 if _pre_verdict.live:
                     logger.info(

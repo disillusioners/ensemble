@@ -149,7 +149,10 @@ from typing import TYPE_CHECKING, Any
 
 from sqlmodel import Session, select, func
 
-from daemon.constants import TERMINAL_INSTANCE_STATUSES
+from daemon.constants import (
+    NON_TERMINAL_TASK_STATUSES,
+    TERMINAL_INSTANCE_STATUSES,
+)
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.message_queue.models import (
     MessageQueue,
@@ -208,10 +211,13 @@ _RUNNING_ZOMBIE_MAX_TREE_PROBE_SIZE: int = 256
 
 #: Task statuses that mean "a turn is still in flight" — the presence
 #: of ANY such row for the root means the root is NOT a zombie (the
-#: turn owns the instance). ``processing`` is included defensively
-#: (legacy task vocabulary).
-_RUNNING_ZOMBIE_NON_TERMINAL_TASK_STATUSES: frozenset[str] = frozenset(
-    {"pending", "running", "paused", "processing"}
+#: turn owns the instance). The canonical home is
+#: ``daemon.constants.NON_TERMINAL_TASK_STATUSES`` — the SAME set the
+#: mission-live guard's MEMBER-TASK liveness leg uses (one canonical
+#: set, so the two cannot drift; ``processing`` is legacy task
+#: vocabulary kept defensively).
+_RUNNING_ZOMBIE_NON_TERMINAL_TASK_STATUSES: frozenset[str] = (
+    NON_TERMINAL_TASK_STATUSES
 )
 
 
@@ -1167,6 +1173,14 @@ class MissionStrandHealer:
                 # gate this decision (same mode as the pre-stamp
                 # gate).
                 skip_root=True,
+                # MEMBER-TASK liveness leg (cycle 3): a non-terminal
+                # member that owns a LIVE task row is WORKING, not
+                # stuck (``last_activity_at`` is not written on turn
+                # progress, so a member inside a >6h turn reads
+                # stale). The leg holds the tree ⇒ this lane does NOT
+                # finalize the root. ONE batched query per tree, and
+                # only on the guard's staleness branch.
+                task_engine=self._manager.engine,
             )
         except Exception as exc:  # noqa: BLE001 — fail-closed
             return self._rz_skip(
@@ -1181,6 +1195,15 @@ class MissionStrandHealer:
                 f"terminalizes; an unevaluatable leg must not proceed)",
             )
         if tree_verdict.live:
+            # MEMBER-TASK liveness (cycle 3): a non-terminal member
+            # owns a LIVE task row ⇒ the tree is WORKING, not stale.
+            # Its own skip class, so the operator can tell this hold
+            # apart from an ordinary "the tree is alive" hold.
+            if tree_verdict.member_task_hold:
+                return self._rz_skip(
+                    root_id, "member-live-task",
+                    f"{tree_verdict.reason}",
+                )
             return self._rz_skip(
                 root_id, "live-tree",
                 f"{tree_verdict.reason}",

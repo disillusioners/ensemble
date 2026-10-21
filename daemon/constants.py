@@ -766,6 +766,36 @@ ALIVE_INSTANCE_STATUSES: frozenset[str] = frozenset({
 })
 
 
+# ── Non-terminal TASK statuses (running-zombie cycle 3, 2026-10-21) ────────────
+#
+# A ``task`` row whose status is in this set means "a turn is IN
+# FLIGHT on this instance". The canonical home for the set — the same
+# fork-prevention shape as the instance-status sets above (a duplicated
+# status set is a silent-divergence risk; the codebase's own comment on
+# ``ALIVE_INSTANCE_STATUSES`` says so).
+#
+# Consumers:
+#   * ``daemon/services/mission_live_guard.py`` — the MEMBER-TASK
+#     liveness leg: a non-terminal member that owns a LIVE task row
+#     counts as ALIVE (not stale), so the zombie backstop does not
+#     break a tree whose member is mid-turn (fail-MISS over a false
+#     completion).
+#   * ``daemon/services/mission_strand_healer.py`` — the
+#     running-zombie strand's root-level leg (a live task row on the
+#     ROOT means a turn is still in flight).
+#
+# Values mirror ``TaskStatus`` (``daemon/repositories/task/models.py``):
+# PENDING, RUNNING, PAUSED. ``processing`` is legacy task vocabulary
+# kept defensively (the strand's original set carried it). Kept as raw
+# strings so ``daemon.constants`` stays dependency-free.
+NON_TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({
+    "pending",
+    "running",
+    "paused",
+    "processing",
+})
+
+
 # ── Source-Validation Boundary (stability-backlog item 7, F2 pre-close) ────────
 
 # Reserved source values for the ``source`` field of ``JobItem`` /

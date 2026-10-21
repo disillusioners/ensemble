@@ -319,7 +319,7 @@ def _seed_incident_tree(
     *,
     member_status: str = InstanceStatus.IDLE.value,
     member_activity_age: timedelta = INCIDENT_MEMBER_STALE,
-    member_task_status: str = "completed",
+    member_task_status: str | None = "completed",
     chain_activity_age: timedelta = timedelta(hours=26),
     with_ghost: bool = False,
     root_activity_age: timedelta = timedelta(hours=25),
@@ -365,17 +365,20 @@ def _seed_incident_tree(
         last_activity_at=now_utc_naive() - member_activity_age,
     )
     # The member did real work — a COMPLETED task row keeps it OUT of
-    # the never-dispatched ghost signature.
-    _insert_task(
-        engine,
-        instance_id=INCIDENT_MEMBER,
-        status=member_task_status,
-        completed_at=(
-            datetime.now(timezone.utc) - timedelta(hours=26)
-            if member_task_status == "completed" else None
-        ),
-        work_id="work-incident-member",
-    )
+    # the never-dispatched ghost signature. ``member_task_status=None``
+    # seeds NO task row at all (the cycle-3 "member with no task row"
+    # shape — the observed zombie member).
+    if member_task_status is not None:
+        _insert_task(
+            engine,
+            instance_id=INCIDENT_MEMBER,
+            status=member_task_status,
+            completed_at=(
+                datetime.now(timezone.utc) - timedelta(hours=26)
+                if member_task_status == "completed" else None
+            ),
+            work_id="work-incident-member",
+        )
     if with_ghost:
         # The never-dispatched ghost: idle, version 1, zero messages,
         # zero task rows, no activity stamp, under a TERMINAL direct
@@ -1747,6 +1750,189 @@ class TestRunningZombieReArmWiring:
         # C5 (unchanged): the message id stays the EMPTY STRING.
         assert captured.get("completed_message_id") == ""
         assert outcome.get("drove") is True, outcome
+
+
+class TestRunningZombieMemberTaskLiveness:
+    """CYCLE 3 (leader ruling 1) — the MEMBER-TASK liveness leg.
+
+    ``instances.last_activity_at`` is written on the enqueue /
+    child-report / observer paths — NOT on turn progress. So a member
+    inside a long (>6h) turn reads STALE to the guard's zombie
+    backstop, and the backstop would break the tree (finalize the
+    root) while that member is still working.
+
+    THE RULING: fail-MISS over false-completion — a non-terminal
+    member that owns a LIVE (pending/running/processing) task row
+    counts as ALIVE, not stale; the root is NOT finalized.
+
+    ROUTE 1 (the guard carries the leg): the healer's tree leg AND
+    the pre-stamp gate inherit it. The leg is OPT-IN — a consumer
+    that supplies no task handle (f2, f1, the boot sweeps) keeps its
+    EXACT previous behaviour (pinned below).
+    """
+
+    @pytest.mark.parametrize(
+        "task_status", ["pending", "running", "processing"],
+    )
+    @pytest.mark.asyncio
+    async def test_member_with_live_task_row_is_not_healed(
+        self, zombie_harness, task_status,
+    ):
+        """(i) NEGATIVE — a member with a LIVE task row is WORKING:
+        the root is NOT healed, the drive is NOT invoked, and the
+        root's status is untouched."""
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_task_status=task_status,
+        )
+        healer = _make_healer(zombie_harness)
+        drive = AsyncMock()
+        with patch.object(
+            zombie_harness.service,
+            "_process_child_completion_and_notify_parent",
+            new=drive,
+        ):
+            outcome = await healer.heal_running_zombie(ROOT)
+        assert outcome["healed"] is False, outcome
+        assert outcome["skip_class"] == "member-live-task", outcome
+        assert drive.await_count == 0, (
+            "the completion drive must NOT be invoked while a member "
+            "still owns a live task row"
+        )
+        assert _get_instance_row(
+            zombie_harness.engine, ROOT
+        ).status == InstanceStatus.RUNNING.value
+
+    @pytest.mark.asyncio
+    async def test_member_without_task_row_is_still_healed(
+        self, zombie_harness,
+    ):
+        """(ii) POSITIVE — the OBSERVED zombie shape is untouched: an
+        idle member with NO task row is stale-eligible and still
+        heals."""
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_task_status=None,
+        )
+        healer = _make_healer(zombie_harness)
+        with _patch_drive_seams():
+            outcome = await healer.heal_running_zombie(ROOT)
+        assert outcome["healed"] is True, outcome
+        assert _get_instance_row(
+            zombie_harness.engine, ROOT
+        ).status == InstanceStatus.COMPLETED.value
+
+    @pytest.mark.asyncio
+    async def test_member_with_terminal_task_row_is_still_healed(
+        self, zombie_harness,
+    ):
+        """(iii) POSITIVE — a member whose task row is terminal-COMPLETED
+        but whose INSTANCE row is still non-terminal stays
+        stale-eligible: the leg reads the task row's LIVE-ness, not
+        the member's mere existence."""
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_task_status="completed",
+        )
+        healer = _make_healer(zombie_harness)
+        with _patch_drive_seams():
+            outcome = await healer.heal_running_zombie(ROOT)
+        assert outcome["healed"] is True, outcome
+        assert _get_instance_row(
+            zombie_harness.engine, ROOT
+        ).status == InstanceStatus.COMPLETED.value
+
+    @pytest.mark.asyncio
+    async def test_guard_holds_the_tree_when_a_member_has_a_live_task(
+        self, zombie_harness,
+    ):
+        """The GUARD-level pin — with a task handle the stale tree is
+        HELD (``member_task_hold``), and the backstop did NOT fire."""
+        from daemon.services.mission_live_guard import evaluate_mission_live
+
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_task_status="running",
+        )
+        verdict = await evaluate_mission_live(
+            instance_repository=zombie_harness.instance_repo,
+            instance_id=ROOT,
+            bus_pending_count=None,
+            skip_root=True,
+            task_engine=zombie_harness.engine,
+        )
+        assert verdict.live is True, verdict
+        assert verdict.member_task_hold is True, verdict
+        assert verdict.timed_out is False, verdict
+
+    @pytest.mark.asyncio
+    async def test_the_leg_is_inert_without_a_task_handle(
+        self, zombie_harness,
+    ):
+        """The leg is OPT-IN — a consumer that supplies NO task handle
+        (f2, f1, the boot sweeps) keeps its EXACT previous behaviour:
+        the stale member does NOT hold the tree."""
+        from daemon.services.mission_live_guard import evaluate_mission_live
+
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_task_status="running",
+        )
+        verdict = await evaluate_mission_live(
+            instance_repository=zombie_harness.instance_repo,
+            instance_id=ROOT,
+            bus_pending_count=None,
+            skip_root=True,
+        )
+        assert verdict.live is False, verdict
+        assert verdict.member_task_hold is False, verdict
+        assert verdict.timed_out is True, verdict
+
+    @pytest.mark.asyncio
+    async def test_pre_stamp_gate_holds_when_a_member_has_a_live_task(
+        self, zombie_harness,
+    ):
+        """(v) The PRE-STAMP GATE (the real one) no longer stamps a
+        root whose member holds a live task row."""
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_task_status="running",
+        )
+        with _patch_drive_seams():
+            await zombie_harness.service\
+                ._process_child_completion_and_notify_parent(
+                    ROOT, "msg-member-task-hold",
+                )
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert _get_instance_row(
+            zombie_harness.engine, ROOT
+        ).status == InstanceStatus.RUNNING.value, (
+            "the pre-stamp gate must HOLD: a member with a live task "
+            "row is working — the root must not be stamped"
+        )
+
+    @pytest.mark.asyncio
+    async def test_pre_stamp_gate_stamps_when_the_member_task_is_terminal(
+        self, zombie_harness,
+    ):
+        """The CONTROL for the pin above: with the member's task row
+        terminal, the same shape stamps (so the hold above is caused
+        by the LIVE task row, not by the shape itself)."""
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_task_status="completed",
+        )
+        with _patch_drive_seams():
+            await zombie_harness.service\
+                ._process_child_completion_and_notify_parent(
+                    ROOT, "msg-member-task-control",
+                )
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert _get_instance_row(
+            zombie_harness.engine, ROOT
+        ).status == InstanceStatus.COMPLETED.value
 
 
 class TestRunningZombieKillSwitchSurface:
