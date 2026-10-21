@@ -578,17 +578,20 @@ async def _member_alive_companion_verdict(
     undatable_live_work = 0
 
     def _flush_undatable_note() -> None:
-        # A-3/G4: ONE aggregated operator-visible line per evaluation,
-        # emitted at EVERY exit of the member loop (the early-return
-        # holds included), so a hold cannot discard the count. The
-        # per-member detail stays at DEBUG.
-        if undatable_live_work:
-            logger.info(
-                "mission_live_guard: member-alive probe for %s... — "
-                "members_with_undatable_live_work=%d ⇒ NOT held "
-                "(stale-eligible; per-member detail at DEBUG)",
-                (instance_id or "?")[:8], undatable_live_work,
-            )
+        # A-3/G4/P1: ONE aggregated operator-visible line per
+        # EVALUATION — emitted at EVERY exit of the member loop (the
+        # early-return holds included), so no exit can discard the
+        # count. The count is TRUTHFUL: it is the number of members
+        # whose live work was reported but NOT dateable (those members
+        # are not held on that evidence). It says NOTHING about the
+        # tree's verdict (a young task row holds the tree on its own
+        # evidence) — the per-member detail stays at DEBUG.
+        logger.info(
+            "mission_live_guard: member-alive probe for %s... — "
+            "members_with_undatable_live_work=%d (those members are NOT "
+            "held on that evidence; per-member detail at DEBUG)",
+            (instance_id or "?")[:8], undatable_live_work,
+        )
 
     for member_id in candidates:
         try:
@@ -673,6 +676,13 @@ async def _member_alive_companion_verdict(
             # TERMINAL_INSTANCE_STATUSES) is what makes "non-terminal
             # member" accurate; drop that filter and the wording would
             # mislabel a terminal member (A-6).
+            #
+            # P1: this HOLD path is an evaluation exit too — flush the
+            # aggregate here so the one-INFO-per-evaluation contract
+            # holds on EVERY path (the count is the number of members
+            # whose live work was undatable; it is 0 when none were
+            # seen, and it says nothing about this hold).
+            _flush_undatable_note()
             return MissionLiveVerdict(
                 live=True,
                 reason=(

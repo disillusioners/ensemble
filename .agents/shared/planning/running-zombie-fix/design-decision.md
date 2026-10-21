@@ -291,8 +291,16 @@ NON-ROOT, NON-TERMINAL members on trees that have been quiet for the 6h
 horizon. (A-5 qualification: the `has_live_work` probe's **VALUE** is
 log-only — it never changes the verdict; but a probe **EXCEPTION** DOES
 force the hold, `live=True` + `error=True` (§2.10.3). The probe/evidence
-DISAGREEMENT is surfaced at INFO, review C2 — now AGGREGATED to one line per
-evaluation, A-3.)
+DISAGREEMENT is surfaced at INFO, review C2 — now AGGREGATED.)
+
+**The aggregate contract (P1, cycle 5).** EXACTLY ONE aggregate INFO per
+guard EVALUATION — `members_with_undatable_live_work=N`, where N counts
+the members whose live work was reported but NOT dateable — emitted at
+EVERY exit of the member loop (the loop end, the two probe-error holds
+and the young-task HOLD path). The count is TRUTHFUL: it is 0 when no
+such member was seen, it NEVER counts held members, and it says NOTHING
+about the tree's verdict. The PER-MEMBER detail stays at DEBUG (never
+INFO). Pinned by the cycle-5 aggregate pins (P1/D2).
 
 ## 2.8 Cycle-2 changes (2026-10-21) — the three defects, closed
 
@@ -308,8 +316,27 @@ refreshed on every message enqueue
 (`daemon/services/instance_messaging.py:2455`), so a stranded-but-messaged
 root looked permanently fresh and the 6h backstop was unreachable for it.
 
+**F3 — the rationale, stated in full (the council's F1 story).** The
+root's own enqueue-refreshed `last_activity_at` was the **ONLY accidental
+freshness shield** the tree had: a member's stamp is NOT refreshed by
+turn progress (`last_activity_at` moves on the enqueue / child-report /
+observer paths), so before the fix the ROOT's stamp was what kept a
+member mid-turn from ever looking stale. Removing the root from the
+anchor therefore **moved the false-completion exposure from the ROOT's
+turn to a MEMBER's turn** — the exposure did not disappear, it changed
+owner, and that is exactly what the member-alive companion leg (§2.10)
+now closes. The tester's gate reproduced the mechanism: the root's stamp
+is refreshed by the heal's OWN completion write
+(`daemon/services/child_reports.py:3577` — the WAITING_CHILDREN→RUNNING
+discharge UPDATE sets `last_activity_at=now`), so with the root inside the
+anchor the POST-DRIVE re-evaluation sees a fresh anchor → `live=True` →
+the emission gate blocks → `skip_class='gate-block'` → the heal never
+converges. Under the fix (root excluded) the anchor stays the member's
+stale stamp → the backstop fires → the heal completes. The anchor fix is
+pinned **11×** over (mutant M5 in §5).
+
 **Now:** the anchor is computed over the **NON-ROOT members only**
-(`daemon/services/mission_live_guard.py:485-510`). A tree with NO members
+(`daemon/services/mission_live_guard.py:862-892`). A tree with NO members
 (a **childless root**) falls back to the root's own stamp — there the root
 IS the whole tree, so its activity is the tree activity and the historical
 behaviour is preserved exactly.
@@ -345,7 +372,7 @@ hold → finalize) is the defect the fix closes and is deliberately NOT pinned.
 
 **Side effect the fix introduces — `anchor_missing` is now MEMBER-SCOPED**
 (cycle-2 review, C4). The missing-anchor disarm
-(`daemon/services/mission_live_guard.py:458`, `:602-613`) starts at
+(`daemon/services/mission_live_guard.py:835`, `:979-990`) starts at
 `anchor_missing=True` and is flipped to `False` by any parsed
 `last_activity_at` seen during the walk. **Before** the fix the walk covered
 the whole tree INCLUDING the root, so the root's own stamp flipped
@@ -361,7 +388,7 @@ than terminalizing it, so a stale-activity data gap can never cause a wrong
 finalize — it can only delay one.
 
 **MUST NOT regress (all pinned):** childless roots, the all-terminal
-short-circuit (`daemon/services/mission_live_guard.py:572-591`), f2's 6h
+short-circuit (`daemon/services/mission_live_guard.py:949-971`), f2's 6h
 backstop path.
 
 #### 2.8.1.1 THE CONSUMER TABLE — who reaches the 6h backstop, and what the companion leg now does for them
@@ -924,15 +951,32 @@ count on both sides" is a **main-gate-RED** result, not a clean gate.
     `e3a3c74a04e34fd4d1c2ea5476721106d4565a55ccc47c5cc5be722a08cd58cf`
     on both sides — so the +6 passed is EXACTLY the RZ pack's growth
     (65 → 71) and there are ZERO net-new failures.
-  * **MUTATION COUNTS (over the RZ pack + the f2 pack, 80 tests):**
-    the companion leg's TERMINAL-CANDIDACY filter dropped
-    (`mission_live_guard.py:572`) ⇒ **4 reds** (exactly the new A-1(b)
-    parametrisation); the W-3b `created_at` bound removed ⇒ **1 red**
-    (the new bound test); the H1 branch disabled (undatable row ⇒
-    `None`) ⇒ **1 red** (the H1 test, failing with
-    `assert 'gate-block' == 'member-live-task'` — the root was DRIVEN
-    instead of HELD). The earlier council figures (8/2/1) were measured
-    with a different mutation/pack scope and are superseded by these.
+  * **MUTATION TABLE — RE-MEASURED on this tree (cycle 5)** over the
+    RZ pack + the f2 pack (86 tests). Every row names its MUTANT
+    TARGET, its reds and the failing set. (The tester's gate measured
+    the same six mutants on the PRE-cycle-5 tree; the deltas below are
+    exactly the cycle-5 pins that joined the affected sets.)
+
+| Mut | Mutant target | Reds | Failing set |
+|---|---|---|---|
+| **M0** | baseline (no mutation) | 0 (86P) | — |
+| **M1** | the member-alive leg NEVER holds (the candidate set is emptied, `mission_live_guard.py:568`) | **13** | the 8 holds-surface tests (the member-task battery, the pre-stamp-gate hold, the unconditional-leg pin, the horizon pin) **+ the 5 cycle-5 pins that assert a HOLD** (P1's aggregate-on-hold, D2, D1a, D1b, P2's row-9) |
+| **M2** | the time bound removed (`if age_seconds < timeout_seconds:` → `if True:`, `:673`) | **4** | `test_an_undatable_started_at_is_bounded_by_the_row_age`, `test_member_task_older_than_the_horizon_does_not_hold`, `test_member_with_an_old_task_row_is_still_healed`, **+ D2** (the aggregate pin) |
+| **M3** | the H1 fail-MISS floor disabled (`return now_utc_naive()` → `None`, `:516`) | **1** | `test_member_with_undatable_task_stamp_is_not_healed` (signature: `assert 'gate-block' == 'member-live-task'` — the root was DRIVEN instead of HELD) |
+| **M3b** | the W-3b `created_at` bound disabled (`:502`) | **1** | `test_an_undatable_started_at_is_bounded_by_the_row_age` |
+| **M4** | the terminal-candidacy filter dropped (`:572`) | **5** | the A-1(b) parametrisation (4: pending/running/paused/processing — the failure carries `MissionLiveVerdict(live=True, … member_task_hold=True)`) **+ P1's aggregate-on-hold pin** |
+| **M5** | the anchor reverted to include the ROOT's own `last_activity_at` (the root's `continue` dropped, `:862-892`) | **11** | the anchor-fix pack (`test_stale_depth_three_member_heals`, `test_fresh_root_cannot_hold_a_stale_member_open`, `test_member_scoped_anchor_gap_disarms_the_backstop`) + the member-alive set + the payload pair |
+
+  **The earlier attribution was WRONG (N2).** The "4 reds = the A-1
+  set" reading belonged to **M4** (the candidacy filter). **M1** (the
+  leg never holds) is a DIFFERENT mutant: A-1 asserts the leg does
+  NOT hold, so neutering the leg leaves A-1 trivially GREEN — the
+  literal reading is strictly stronger coverage (8 holds-surface + 4
+  candidacy-surface, disjoint sets). The tester's gate measured
+  M1 = 8 / M2 = 3 / M3 = 1 / M3b = 1 / M4 = 4 / M5 = 11 on the
+  pre-cycle-5 tree; the deltas above (M1 8→13, M2 3→4, M4 4→5) are
+  exactly the cycle-5 pins that joined those sets (M5 and M3/M3b are
+  unchanged).
   * **G5 — the ABSOLUTE counts are environment-fragile; the digest is
     the invariant.** The independent reviewer's environment measured
     **20 failed / 2163 passed → 20 failed / 2169 passed** (vs our
@@ -1243,12 +1287,15 @@ framing is withdrawn — the anti-rot test was already red at base.
 
 ### 10.2 Line-pin attribution (W-5)
 
-Of the census's 17 line-pins, **14 are PRE-EXISTING** and **3 were
-introduced (or broken) by this branch**: `child_reports.py:5173` → `:5321`
-(two entries — the notify moved) and `job_recovery_service.py:4255` →
-`:4261` (the granted comment-only commit is CONTENT-inert but NOT
-line-inert). The three are re-pointed in the census TEST file;
-`job_recovery_service.py` itself is untouched.
+The census's line-pins split as: **14 PRE-EXISTING (base debt) + 3
+introduced (or broken) by this branch**. The three branch ones were
+re-pointed (`child_reports.py:5173` → `:5329` — two entries, the notify
+calls; and `job_recovery_service.py:4255` → `:4261` — the granted
+comment-only commit is CONTENT-inert but NOT line-inert), in the census
+TEST file; `job_recovery_service.py` itself is untouched. **So 14 pins
+remain base debt** — the census's own walker still lists them as stale
+(the anti-rot test is RED at BOTH sides for that pre-existing debt) and
+they are deliberately NOT chased here.
 
 ### 10.3 D11 scope — live-derived ids (A-4)
 

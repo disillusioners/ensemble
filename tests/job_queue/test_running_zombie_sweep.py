@@ -2533,3 +2533,305 @@ class TestRunningZombieKillSwitchSurface:
             "the waiting_children / ghost lane is ALWAYS-ON by hard "
             "policy — a master switch would contradict it"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cycle-5 pins (P1/P2/P3) — the already-disclosed contracts
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRunningZombieCycle5Pins:
+    """Cycle 5 — pins for the contracts the tester gate found
+    unpinned (P1/P2/P3)."""
+
+    @pytest.mark.asyncio
+    async def test_aggregate_info_is_emitted_on_the_young_task_hold_path(
+        self, zombie_harness, caplog,
+    ):
+        """P1 — the aggregate INFO is emitted on EVERY evaluation exit,
+        including the young-task HOLD path. The count is TRUTHFUL (the
+        number of members whose live work was reported but NOT
+        dateable — 0 when none were seen) and it says NOTHING about the
+        tree's verdict."""
+        import logging
+
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_status=InstanceStatus.IDLE.value,
+            member_task_status="running",
+            member_task_created_at=(
+                datetime.now(timezone.utc) - timedelta(minutes=5)
+            ),
+        )
+        healer = _make_healer(zombie_harness)
+        with caplog.at_level(logging.INFO):
+            outcome = await healer.heal_running_zombie(ROOT)
+        assert outcome["skip_class"] == "member-live-task", outcome
+        aggregates = [
+            rec.getMessage() for rec in caplog.records
+            if rec.levelno == logging.INFO
+            and "members_with_undatable_live_work=" in rec.getMessage()
+        ]
+        assert len(aggregates) == 1, aggregates
+        assert "members_with_undatable_live_work=0" in aggregates[0], (
+            aggregates
+        )
+
+    @pytest.mark.asyncio
+    async def test_exactly_one_aggregate_info_and_debug_only_detail(
+        self, zombie_harness, caplog,
+    ):
+        """D2 — the aggregated one-INFO-per-evaluation bound: exactly ONE
+        aggregate INFO per EVALUATION, and the PER-MEMBER detail never
+        rises to INFO (it stays at DEBUG).
+
+        Pinned against a SINGLE guard evaluation (the contract is
+        per-evaluation, not per-heal — a heal may drive several
+        evaluations: the tree leg, the pre-stamp eval, the emission
+        gate)."""
+        import logging
+
+        from daemon.services.mission_live_guard import (
+            evaluate_mission_live,
+            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+        )
+
+        # The member's task row is OLD ⇒ the leg does not hold ⇒ the
+        # end-of-loop flush runs.
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_status=InstanceStatus.IDLE.value,
+            member_task_status="running",
+            member_task_created_at=(
+                datetime.now(timezone.utc) - timedelta(hours=26)
+            ),
+        )
+        with caplog.at_level(logging.DEBUG):
+            verdict = await evaluate_mission_live(
+                instance_repository=zombie_harness.instance_repo,
+                instance_id=ROOT,
+                bus_pending_count=None,
+                timeout_seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+                skip_root=True,
+            )
+        assert verdict.live is False, verdict
+        aggregates = [
+            rec.getMessage() for rec in caplog.records
+            if rec.levelno == logging.INFO
+            and "members_with_undatable_live_work=" in rec.getMessage()
+        ]
+        assert len(aggregates) == 1, aggregates
+        per_member_info = [
+            rec.getMessage() for rec in caplog.records
+            if rec.levelno == logging.INFO
+            and "member-alive probe" in rec.getMessage()
+            and "members_with_undatable_live_work=" not in rec.getMessage()
+        ]
+        assert per_member_info == [], per_member_info
+
+    @pytest.mark.asyncio
+    async def test_member_with_only_a_jobitem_row_is_not_held(
+        self, zombie_harness,
+    ):
+        """C4 — a member whose ONLY live work is a JobItem row (no task
+        row) is deliberately NOT held: the task row is the only DATEABLE
+        evidence class, so the member stays stale-eligible and the root
+        can heal."""
+        from daemon.services.mission_live_guard import (
+            evaluate_mission_live,
+            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+        )
+
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_status=InstanceStatus.IDLE.value,
+            member_task_status=None,   # NO task row
+        )
+        # The member owns a live JobItem row — live work that is NOT
+        # dateable by a task row.
+        with zombie_harness.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO job_queue_items "
+                    "(job_id, agent_id, agent_dir, message, source, "
+                    "project_id, queue_id, priority, admission_state, "
+                    "created_at, instance_id, job_type, retry_count, "
+                    "metadata) VALUES "
+                    "('job-member-itemitem-1', 'explorer', "
+                    "'agents/explorer', 'work', 'api', 'test-project', "
+                    "NULL, 0, 'active', :now, :iid, 'task', 0, '{}')"
+                ),
+                {
+                    "now": datetime.now(timezone.utc).isoformat(),
+                    "iid": INCIDENT_MEMBER,
+                },
+            )
+        # The probe says "live work" ...
+        assert (
+            zombie_harness.instance_repo.has_live_work(INCIDENT_MEMBER)
+            is True
+        ), "the JobItem row must register as live work"
+        # ... but the member is NOT held on that evidence.
+        verdict = await evaluate_mission_live(
+            instance_repository=zombie_harness.instance_repo,
+            instance_id=ROOT,
+            bus_pending_count=None,
+            timeout_seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            skip_root=True,
+        )
+        assert verdict.live is False, verdict
+        assert verdict.member_task_hold is False, verdict
+
+    @pytest.mark.asyncio
+    async def test_live_work_probe_error_holds_the_tree(
+        self, zombie_harness, monkeypatch,
+    ):
+        """D1a — the ``has_live_work`` probe ERROR yields a fail-MISS
+        HOLD (``live=True`` + ``error=True``): "member liveness unknown"
+        must never mean "the tree is stale"."""
+        from daemon.services.mission_live_guard import (
+            evaluate_mission_live,
+            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+        )
+
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_status=InstanceStatus.IDLE.value,
+            member_task_status="running",
+            member_task_created_at=(
+                datetime.now(timezone.utc) - timedelta(hours=26)
+            ),
+        )
+
+        def boom(instance_id):
+            raise RuntimeError("live-work probe down")
+
+        monkeypatch.setattr(
+            zombie_harness.instance_repo, "has_live_work", boom,
+        )
+        verdict = await evaluate_mission_live(
+            instance_repository=zombie_harness.instance_repo,
+            instance_id=ROOT,
+            bus_pending_count=None,
+            timeout_seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            skip_root=True,
+        )
+        assert verdict.live is True, verdict
+        assert verdict.error is True, verdict
+
+    @pytest.mark.asyncio
+    async def test_task_age_probe_error_holds_the_tree(
+        self, zombie_harness, monkeypatch,
+    ):
+        """D1b — the task-AGE probe ERROR yields a fail-MISS HOLD
+        (``live=True`` + ``error=True``) — the SECOND probe-error seam,
+        pinned separately from the live-work probe."""
+        from daemon.services import mission_live_guard as mlg
+
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_status=InstanceStatus.IDLE.value,
+            member_task_status="running",
+            member_task_created_at=(
+                datetime.now(timezone.utc) - timedelta(hours=26)
+            ),
+        )
+
+        def boom(repository, instance_id):
+            raise RuntimeError("task-age probe down")
+
+        monkeypatch.setattr(mlg, "_member_live_task_attempt_at", boom)
+        verdict = await mlg.evaluate_mission_live(
+            instance_repository=zombie_harness.instance_repo,
+            instance_id=ROOT,
+            bus_pending_count=None,
+            timeout_seconds=mlg.MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            skip_root=True,
+        )
+        assert verdict.live is True, verdict
+        assert verdict.error is True, verdict
+
+    @pytest.mark.asyncio
+    async def test_row9_stored_watch_hold_rehydrates_instead_of_releasing(
+        self, zombie_harness,
+    ):
+        """P2 — the row-9 consumer (the stored-watch reconcile) HOLDS on
+        the member-alive verdict and therefore does NOT release the
+        stored watch: it falls through to the LOSS-CASE leg, which
+        REHYDRATES a watcher on the ORIGINAL work_id.
+
+        Read from the consumer's source, not assumed: the guard's hold
+        makes the ``if not verdict.live`` release block unreachable, so
+        the row is CAS'd ``armed -> rehydrated`` and ``add_watch`` is
+        called for the ORIGINAL work_id."""
+        from daemon.repositories.job_queue.stored_watch_models import (
+            StoredWatch,
+        )
+        from daemon.repositories.job_queue.stored_watch_repository import (
+            StoredWatchRepository,
+        )
+        from daemon.services.job_queue_service import JobQueueService
+
+        # The mission HOLDS: the member owns a YOUNG live task row.
+        _seed_incident_tree(
+            zombie_harness.engine,
+            member_status=InstanceStatus.IDLE.value,
+            member_task_status="running",
+            member_task_created_at=(
+                datetime.now(timezone.utc) - timedelta(minutes=5)
+            ),
+        )
+        # An aged ARMED stored watch (older than the 6h GC window).
+        with Session(zombie_harness.engine) as session:
+            session.add(
+                StoredWatch(
+                    stored_watch_id="sw-row9",
+                    original_work_id="work-original-row9",
+                    retry_work_id="work-retry-row9",
+                    watcher_instance_id="watcher-row9",
+                    original_watch_events=["mission_terminal"],
+                    mission_instance_id=ROOT,
+                    work_instance_id=ROOT,
+                    status="armed",
+                    created_at=now_utc_naive() - timedelta(hours=26),
+                )
+            )
+            session.commit()
+
+        class _Resolver:
+            def resolve_work(self, work_id):
+                class _Rec:
+                    status = "completed"
+                return _Rec()
+
+        class _Svc:
+            pass
+
+        svc = _Svc()
+        svc._stored_watch_repo = StoredWatchRepository(
+            zombie_harness.engine,
+        )
+        svc._watcher_repo = zombie_harness.watcher_repo
+        svc._work_resolver = _Resolver()
+        svc._instance_manager = zombie_harness.manager
+
+        stats = await JobQueueService.reconcile_stored_watches(
+            svc, limit=64,
+        )
+        assert stats["released"] == 0, stats
+        assert stats["rehydrated"] == 1, stats
+        with Session(zombie_harness.engine) as session:
+            row = session.get(StoredWatch, "sw-row9")
+            assert row is not None and row.status == "rehydrated", (
+                row.status if row else None
+            )
+        # The watcher is re-armed on the ORIGINAL work_id.
+        rehydrated_watchers = (
+            zombie_harness.watcher_repo.get_watchers_for_job(
+                "work-original-row9",
+            )
+        )
+        assert rehydrated_watchers, (
+            "the loss-case leg must re-arm a watcher on the ORIGINAL "
+            "work_id"
+        )
