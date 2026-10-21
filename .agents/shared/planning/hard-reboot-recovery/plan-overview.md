@@ -127,6 +127,8 @@ Adjudication rule for all seven: adopt the §6 recommendation as the working dec
 
 **Ceiling check:** architect-amended §7 totals `≈44 / ≤155 / ≤113` (per architecture-recommendation.md §7). This plan's pre-fold table was `≤70 / ≤160 / ≤85`; the post-fold Python ceiling is **tighter** by −26 LOC. Total surface ≤312 (down from ≤315). All recommendations still ride existing plug points (no new plug-point needed).
 
+**Reconciliation note (implementation lane, FIX round 2026-10-21 — supersedes the §6 test/ops budgets, does not rewrite them):** the test-LOC budget (≤155) was **not** met — actuals are **711 lines across 4 files** (`tests/conftest_worktree.py` 144, `tests/unit/test_message_queue_boot_recovery.py` 278, `tests/unit/test_connect_timeout.py` 188, `tests/unit/test_worktree_gate.py` 101) **plus a 180-line shared harness** (`tests/helpers/hard_reboot_fixtures.py`) that replaces ~130 lines of per-pack duplication — **891 lines total** vs the 653 the reviewer measured pre-extraction. Every M1–M7 / (a)–(f) assertion is KEPT (independent review: the coverage is high-value); the overage is docstring + harness weight, not feature surface, and the harness now has ONE home (house convention — no byte-copied trios). The ops budget (≤113) **is** met: runbook = 125 lines / **104 non-blank** (all 14 mandated elements kept). Shipped Python LOC unchanged (≈44).
+
 **Per-file touch list (complete, lean):**
 
 | File | Nature of change |
