@@ -31,8 +31,27 @@ Access posture — THREE layers, ALL required
 The tool is the policy layer the raw ``task_schedule`` tool is not: it
 enforces the >= 30-minute horizon, namespaces the label, resolves the
 recurrence-family compatibility before any mutation, re-arms a fired
-alarm safely, and composes a self-contained message for the fresh
-instance that receives the alarm.
+alarm safely, and composes the ALARM INTENT message that is injected
+into the CALLING instance's own session at the scheduled instant.
+
+Wake semantics — the alarm wakes the CALLER (user ruling 2026-10-20)
+----------------------------------------------------------------------
+The alarm does NOT spawn a fresh instance. It fires INTO THE CALLING
+instance: ``instance_mode="reuse_instance"`` plus an instance mapping
+that points the schedule row at the CALLER's instance id. At the
+scheduled instant the engine's EXISTING reuse-instance delivery path
+resolves that mapping and enqueues the alarm message as an ordinary
+USER MESSAGE into the caller's queue (``enqueue_message_job`` →
+``_process_message_with_tracking`` → a ``role="user"`` HumanMessage),
+which wakes the caller's continuation turn with its session context
+intact. NO new wake primitive is introduced — the engine's own
+inject seam is reused verbatim.
+
+The user ruling of 2026-10-20 (Discord, direct) RETRACTS the earlier
+"the fired instance is a FRESH instance with no memory" framing. The
+five §8.4 obligations (lateness in both cap states, board-never-ping,
+unobservable-fire, list semantics, the ``self-alarm:`` label namespace)
+SURVIVE unchanged.
 """
 
 from __future__ import annotations
@@ -69,22 +88,22 @@ logger = logging.getLogger(__name__)
 
 CATEGORY_NAME = "Self-Alarm"
 CATEGORY_DOC = """\
-Arm a reminder to yourself, at least 30 minutes out, delivered into a
-fresh Ari instance at the scheduled instant.
+Arm a reminder to yourself, at least 30 minutes out, delivered into YOUR
+OWN session at the scheduled instant.
 
 Tool in this category:
 - ``self_alarm`` — arm (or re-arm) one self-directed alarm
 
 What the alarm IS: a durable schedule that fires once (or on a daily /
-weekly / cron recurrence) and hands a self-contained message to a FRESH
-Ari instance. That instance has NO memory of the request — everything
-it needs is in the message, so the message must name the action
-explicitly.
+weekly / cron recurrence) and injects the ALARM INTENT into the arming
+instance's own session — the SAME instance, with its context intact. The
+message names the action explicitly (that is the wake reason), but the
+session it lands in is the one that armed the alarm.
 
 What the alarm is NOT: a notification. The scheduler source is one-way
 and the receiving instance has no chat identity, so there is NO chat /
 Discord / Slack ping and no interruption. The BOARD is the user-visible
-surface: the fired instance acts (updates the board item, dispatches a
+surface: the fired session acts (updates the board item, dispatches a
 job) and the board shows the result.
 
 Minimum horizon: 30 minutes. Anything shorter must be done inside the
@@ -96,14 +115,22 @@ current turn with ``bash`` + ``sleep``, not with an alarm.
 SELF_ALARM_AUTHORIZED_AGENT = "ari"
 
 #: The engine's invoked agent for EVERY create (D4 step 4a): the alarm
-#: fires INTO ari — the receiving instance is a scheduler-owned ari
-#: instance. The engine REQUIRES ``payload.agent`` and fail-fasts on an
-#: unknown agent (``scheduling_service.py:132``, ``:673-676``).
+#: fires INTO ari — the receiving instance is an ari instance. The engine
+#: REQUIRES ``payload.agent`` and fail-fasts on an unknown agent
+#: (``scheduling_service.py:132``, ``:673-676``).
 SELF_ALARM_TARGET_AGENT = "ari"
 
-#: The instance mode — a one-shot fires into a BRAND-NEW instance
-#: (D6: the alarm is a fresh task, not a continuation).
-SELF_ALARM_INSTANCE_MODE = "new_instance"
+#: The instance mode — the alarm fires INTO THE CALLING instance
+#: (``reuse_instance``), with the schedule row bound to the caller's
+#: instance id through the engine's instance-mapping table.
+#:
+#: User ruling 2026-10-20 (Discord, direct): the alarm WAKES THE
+#: CALLER — same instance, same session context, no new-instance spawn.
+#: This RETRACTS the earlier "the alarm is a fresh task, not a
+#: continuation" (D6) framing. The engine's reuse-instance delivery
+#: path is reused verbatim (it enqueues the message as an ordinary
+#: user message into the mapped instance) — no new wake primitive.
+SELF_ALARM_INSTANCE_MODE = "reuse_instance"
 
 
 def _error(msg: str) -> str:
@@ -442,8 +469,9 @@ def create_self_alarm_tools(
             str,
             Field(
                 description=(
-                    "What the fresh instance should do when the alarm fires. "
-                    "Appended verbatim as the message's Action line."
+                    "What YOU should do when the alarm fires (it fires into this "
+                    "same session). Appended verbatim as the message's "
+                    "Action line."
                 )
             ),
         ]
@@ -486,8 +514,9 @@ def create_self_alarm_tools(
             str,
             Field(
                 description=(
-                    "What the fresh instance should do when the alarm fires. "
-                    "Appended verbatim as the message's Action line."
+                    "What YOU should do when the alarm fires (it fires into this "
+                    "same session). Appended verbatim as the message's "
+                    "Action line."
                 )
             ),
         ],
@@ -533,7 +562,7 @@ memory of this request, so the message must name the action explicitly.
 
 The board is the user-visible surface — there is NO ping
 --------------------------------------------------------------------
-The promise: at the scheduled instant a fresh Ari instance receives your
+The promise: at the scheduled instant YOUR OWN session is woken with your
 message, performs the action and leaves evidence ON THE BOARD (status /
 notes) and in any job it dispatches; the live board view shows the change.
 What is NOT promised: a chat / Discord / Slack message, a reminder in the
@@ -592,7 +621,8 @@ Args:
         'weekly 1 06:30' (0=Sunday..6=Saturday), or a raw cron expression
         ('cron 0 9 * * *'). Interval recurrence ('every 1h') is NOT
         supported — use a raw cron.
-    message_to_self: What the fresh instance should do. Appended verbatim.
+    message_to_self: What you should do when the alarm fires (it wakes this
+        same session). Appended verbatim.
     link_board_item: Optional board item id ('wi-1a2b3c4d') to link.
 
 Returns:
@@ -674,8 +704,8 @@ async def _arm_self_alarm(
     action_text = (message_to_self or "").strip()
     if not action_text:
         return _error(
-            "message_to_self must be a non-empty string — it is the action the "
-            "fresh instance performs (it has no memory of this request)."
+            "message_to_self must be a non-empty string — it is the action this "
+            "session performs when the alarm wakes it."
         )
 
     try:
@@ -814,9 +844,12 @@ def _create_payload(
 
     ``agent`` is MANDATORY (the engine's create path fail-fasts on an
     unknown agent) and is always ``ari`` — the alarm fires INTO ari.
-    ``instance_mode`` is ``new_instance`` (D6). ``timezone`` is the
-    wrapper's resolved IANA name, so the stored zone is exactly the zone
-    the wrapper floored the fire against.
+    ``instance_mode`` is ``reuse_instance`` (user ruling 2026-10-20):
+    the alarm wakes the CALLING instance, and the instance-mapping row
+    written by :func:`_bind_schedule_to_caller` is what points the
+    engine at it. ``timezone`` is the wrapper's resolved IANA name, so
+    the stored zone is exactly the zone the wrapper floored the fire
+    against.
     """
     return {
         "label": label,
@@ -832,6 +865,93 @@ def _create_payload(
         "project_id": project_id,
         "instance_mode": SELF_ALARM_INSTANCE_MODE,
     }
+
+
+def _bind_schedule_to_caller(
+    *,
+    source_repo: Any,
+    source_id: str,
+    caller_instance_id: str,
+    caller_agent_id: str,
+) -> str | None:
+    """Bind the schedule row to the CALLING instance — the wake target.
+
+    This is the ONE thing that makes the alarm wake the caller rather
+    than spawn a fresh instance, and it does so by reusing the engine's
+    EXISTING reuse-instance resolution — no new wake primitive.
+
+    How the engine resolves a reuse-instance fire
+    ---------------------------------------------
+    ``daemon/sources/adapters/scheduler.py`` looks the target up in the
+    instance-mapping table (``get_instance_mapping(source_id,
+    source_id)``) and dispatches into ``mapping.agent_instance_id``; the
+    mapper's ``get_or_create_instance(..., force_new=False)`` path
+    returns that mapped instance instead of spawning one, and only
+    spawns when NO mapping exists. The message is then delivered as an
+    ordinary USER MESSAGE into that instance's queue
+    (``enqueue_message_job`` → ``_process_message_with_tracking`` → a
+    ``role="user"`` HumanMessage), which wakes the instance's
+    continuation turn with its session context intact.
+
+    So writing the mapping row — pointed at the CALLER's instance id —
+    is exactly what makes the fire land in the caller's own session.
+
+    The row is written AFTER the schedule row exists (the source id is
+    minted by the create), which is harmless: the earliest possible
+    fire is >= 30 minutes out (the D9 floor), so the adapter cannot
+    reach the fire before the binding lands.
+
+    Returns:
+        The bound caller instance id, or ``None`` when the binding could
+        not be written (the alarm stays armed but its wake target is
+        NOT the caller — the caller is told, loudly, in the response).
+    """
+    if source_repo is None or not source_id or not caller_instance_id:
+        logger.warning(
+            "self_alarm: cannot bind schedule %s to the calling instance "
+            "(source_repo=%s, source_id=%r, caller_instance_id=%r)",
+            source_id,
+            source_repo is not None,
+            source_id,
+            caller_instance_id,
+        )
+        return None
+    try:
+        from daemon.registry import get_registry
+
+        agent_meta = get_registry().get(caller_agent_id)
+        agent_dir = str(agent_meta.path) if agent_meta is not None else ""
+        source_repo.create_instance_mapping(
+            source_id=source_id,
+            # The adapter looks the mapping up with external_user_id ==
+            # source_id — the scheduler source uses its own id as the
+            # external user id.
+            external_user_id=source_id,
+            agent_instance_id=caller_instance_id,
+            agent_id=caller_agent_id,
+            agent_dir=agent_dir,
+            metadata={
+                "source": "self_alarm",
+                "bound_to_caller": True,
+                "caller_instance_id": caller_instance_id,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — the binding is best-effort
+        logger.warning(
+            "self_alarm: could not bind schedule %s to the calling "
+            "instance %s: %s",
+            source_id,
+            caller_instance_id,
+            exc,
+        )
+        return None
+    logger.info(
+        "self_alarm: schedule %s bound to the calling instance %s "
+        "(reuse_instance wake)",
+        source_id,
+        caller_instance_id,
+    )
+    return caller_instance_id
 
 
 async def _create_arm(
@@ -910,6 +1030,12 @@ async def _create_arm(
     )
 
     created_source_id = str(getattr(result, "source_id", "") or "")
+    wake_target = _bind_schedule_to_caller(
+        source_repo=source_repo,
+        source_id=created_source_id,
+        caller_instance_id=current_instance_id,
+        caller_agent_id=agent_id,
+    )
     created_status = str(getattr(result, "status", "") or "")
 
     # Post-create duplicate report — the name lookup returns only the
@@ -928,6 +1054,8 @@ async def _create_arm(
         "status": created_status,
         "recurrence": plan.recurrence,
         "instance_mode": SELF_ALARM_INSTANCE_MODE,
+        "wake_target_instance_id": wake_target,
+        "wake_target_bound": wake_target is not None,
         "timezone": zone_name,
         "armed_at_utc": armed_at_utc.isoformat(),
         "first_fire_at_local": plan.first_fire_local.isoformat(),
@@ -1005,11 +1133,24 @@ async def _reuse_alarm(
         "message": message,
         "timezone": zone_name,
         "paused": False,
+        # The re-armed row must ALSO wake the caller — a row armed under
+        # the pre-ruling ``new_instance`` mode is flipped here, so the
+        # re-arm can never leave a fresh-instance alarm armed.
+        "instance_mode": SELF_ALARM_INSTANCE_MODE,
     }
     if plan.recurrence != FAMILY_CRON:
         update_payload["when"] = plan.when
 
     result = await service.update_schedule(stored.source_id, update_payload)
+
+    # Re-bind the row to THIS (the calling) instance — the re-arm may
+    # have been issued by a different session than the original arm.
+    wake_target = _bind_schedule_to_caller(
+        source_repo=source_repo,
+        source_id=stored.source_id,
+        caller_instance_id=current_instance_id,
+        caller_agent_id=agent_id,
+    )
 
     # ── The response assertions (the resume detector) ──────────────────
     problems: list[str] = []
@@ -1045,6 +1186,8 @@ async def _reuse_alarm(
             "status": update_status,
             "recurrence": plan.recurrence,
             "instance_mode": SELF_ALARM_INSTANCE_MODE,
+            "wake_target_instance_id": wake_target,
+            "wake_target_bound": wake_target is not None,
             "timezone": zone_name,
             "armed_at_utc": armed_at_utc.isoformat(),
             "first_fire_at_local": plan.first_fire_local.isoformat(),

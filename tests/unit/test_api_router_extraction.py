@@ -497,27 +497,54 @@ class TestValidateInstanceMode:
         
         assert exc_info.value.status_code == 400
 
-    def test_one_time_schedule_forces_new_instance(self):
-        """Test that one_time schedule type forces new_instance."""
+    def test_one_time_schedule_defaults_to_new_instance(self):
+        """A one_time schedule with no explicit mode defaults to new_instance."""
         from daemon.utils import validate_instance_mode
-        
-        # Even if reuse_instance is specified, one_time should force new_instance
+
+        result = validate_instance_mode(
+            instance_mode=None,
+            schedule_type='one_time'
+        )
+
+        assert result == {'instance_mode': 'new_instance'}
+
+    def test_one_time_honours_an_explicit_reuse_instance(self):
+        """An EXPLICIT reuse_instance is honoured for a one_time schedule.
+
+        The caller-bound wake (user ruling 2026-10-20) needs the one-shot
+        path — the user's own worked example is a one-shot alarm.
+        """
+        from daemon.utils import validate_instance_mode
+
         result = validate_instance_mode(
             instance_mode='reuse_instance',
             schedule_type='one_time'
         )
-        
-        assert result == {'instance_mode': 'new_instance'}
 
-    def test_one_time_via_config_forces_new_instance(self):
-        """Test that run_at in config forces new_instance (one_time detection)."""
+        assert result == {'instance_mode': 'reuse_instance'}
+
+    def test_one_time_via_config_honours_an_explicit_reuse_instance(self):
+        """``run_at`` in the config detects one_time — an EXPLICIT
+        reuse_instance is still honoured (caller-bound wake)."""
         from daemon.utils import validate_instance_mode
-        
+
         result = validate_instance_mode(
             instance_mode='reuse_instance',
             config={'run_at': '2025-01-01T00:00:00Z'}
         )
-        
+
+        assert result == {'instance_mode': 'reuse_instance'}
+
+    def test_one_time_via_config_defaults_to_new_instance(self):
+        """A one_time row (detected via ``run_at``) with no explicit mode
+        still defaults to new_instance — the default is unchanged."""
+        from daemon.utils import validate_instance_mode
+
+        result = validate_instance_mode(
+            instance_mode=None,
+            config={'run_at': '2025-01-01T00:00:00Z'}
+        )
+
         assert result == {'instance_mode': 'new_instance'}
 
     def test_interval_schedule_preserves_mode(self):

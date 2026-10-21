@@ -77,19 +77,43 @@ class TestSchedulerInstanceModeConfig:
             SchedulerAdapter(config, mock_on_message)
 
     def test_one_time_schedule_forces_new_instance(self, mock_on_message):
-        """Test that run_at (one-time) schedule always forces new_instance mode."""
+        """A one-time schedule DEFAULTS to new_instance.
+
+        The force applies when the row does not explicitly ask for
+        ``reuse_instance`` — the caller-bound wake (user ruling
+        2026-10-20) is the only way a one-shot reuses an instance.
+        """
         future_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         config = make_config("test-onetime-force", {
             "run_at": future_time,
             "agent": "./agents/developer",
             "message": "Test",
-            "instance_mode": "reuse_instance",  # This should be ignored
         })
-        
+
         adapter = SchedulerAdapter(config, mock_on_message)
-        
-        # One-time schedules should always use new_instance
+
         assert adapter._instance_mode == SchedulerInstanceMode.NEW_INSTANCE
+
+    def test_one_time_schedule_honours_an_explicit_reuse_instance(
+        self, mock_on_message
+    ):
+        """A one-time schedule that EXPLICITLY asks for reuse_instance
+        keeps it — this is the caller-bound wake (user ruling 2026-10-20).
+
+        The user's own worked example is a ONE-SHOT (arm at 13:00 → fire
+        at 14:00), so the one-shot path MUST be able to wake the caller.
+        """
+        future_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        config = make_config("test-onetime-reuse", {
+            "run_at": future_time,
+            "agent": "./agents/developer",
+            "message": "Test",
+            "instance_mode": "reuse_instance",
+        })
+
+        adapter = SchedulerAdapter(config, mock_on_message)
+
+        assert adapter._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE
 
     def test_one_time_schedule_logs_force_notice(self, mock_on_message):
         """Test that forcing new_instance for one-time schedules is logged."""
@@ -98,12 +122,11 @@ class TestSchedulerInstanceModeConfig:
             "run_at": future_time,
             "agent": "./agents/developer",
             "message": "Test",
-            "instance_mode": "reuse_instance",
         })
-        
+
         with patch("daemon.sources.adapters.scheduler.logger") as mock_logger:
             adapter = SchedulerAdapter(config, mock_on_message)
-            
+
             # Check that debug log was called with force message
             debug_calls = [str(c) for c in mock_logger.debug.call_args_list]
             assert any("Force new_instance for one-time schedule" in str(c) for c in debug_calls)
@@ -518,13 +541,12 @@ class TestOneTimeScheduleInstanceMode:
 
     @pytest.mark.asyncio
     async def test_one_time_always_new_instance(self, mock_on_message):
-        """Test that one-time schedules always use new_instance regardless of config."""
+        """Test that one-time schedules default to new_instance."""
         future_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         config = make_config("test-onetime-new", {
             "run_at": future_time,
             "agent": "./agents/developer",
             "message": "One-time task",
-            "instance_mode": "reuse_instance",  # Should be ignored
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)
@@ -556,7 +578,6 @@ class TestOneTimeScheduleInstanceMode:
             "run_at": future_time,
             "agent": "./agents/developer",
             "message": "One-time task",
-            "instance_mode": "reuse_instance",  # Should be ignored
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)

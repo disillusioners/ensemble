@@ -376,9 +376,17 @@ class TestMessageComposition:
             "[self-alarm] self-alarm:deploy-check",
             "Scheduled fire: 2026-10-20T09:00:00+07:00  (2026-10-20T02:00:00+00:00)",
             "Armed at: 2026-10-19T19:00:00+00:00   Schedule: once | tz Asia/Ho_Chi_Minh | id src-1",
-            "You are a fresh instance with no memory of this request; everything you need is in this message.",
+            "This is an alarm firing into THIS session — the context you armed it with is intact. The reason you are woken is the Action line below.",
             "Action: Check the deploy status.",
         ]
+
+    def test_the_fresh_instance_framing_is_retracted(self) -> None:
+        """The user ruling of 2026-10-20 RETRACTS the "fresh instance with
+        no memory" line — the alarm wakes the CALLING session."""
+        message = self._message()
+        assert "fresh instance" not in message
+        assert "no memory" not in message
+        assert "THIS session" in message
 
     def test_the_board_line_carries_the_id_and_the_instruction(self) -> None:
         message = self._message(board_item="wi-1a2b3c4d")

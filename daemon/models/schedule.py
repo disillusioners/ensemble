@@ -118,7 +118,7 @@ class ScheduleUpdate(BaseModel):
     config: dict[str, Any] | None = Field(default=None, description="Schedule configuration (partial updates)")
     instance_mode: str | None = Field(
         default=None,
-        description="Instance mode: 'new_instance' (default) creates new instance per execution, 'reuse_instance' reuses existing instance. Note: For one_time schedules, instance_mode is always forced to 'new_instance'."
+        description="Instance mode: 'new_instance' (default) creates new instance per execution, 'reuse_instance' reuses existing instance. Note: a one_time schedule defaults to 'new_instance' unless 'reuse_instance' is explicitly requested (the caller-bound wake)."
     )
 
     model_config = ConfigDict(
