@@ -19,12 +19,12 @@ file, no product change:
      allow entry is added VERBATIM). Both arms are pinned: the literal
      name grants VISIBILITY, the tool body still refuses AUTHORITY.
   3. ``_is_board_authorized(None)`` is False and
-     ``BOARD_AUTHORIZED_AGENTS`` is EXACTLY ``frozenset({"ari",
-     "leader"})`` — the authority set is a one-line constant, so a
+     ``BOARD_AUTHORIZED_AGENTS`` is EXACTLY ``frozenset({"ari"})`` —
+     the authority set is a one-line constant, so a
      silent widening would be invisible to the rest of the suite.
   4. The commission's CORE goal — the board is ONE GLOBAL namespace:
-     an item created by an Ari instance is visible to the leader
-     instance, and the leader's note is stamped with the LEADER's
+     an item created by one Ari instance is visible to ANOTHER Ari
+     instance, and that instance's note is stamped with ITS OWN
      instance id. Pinned through the REAL tool layer (two factories
      over ONE real service), plus the negative arm (a third,
      unauthorized factory sees an ``ERROR:`` envelope and changes
@@ -376,13 +376,14 @@ class TestGapAuthorizationSet:
     def test_gap_is_board_authorized_none_is_false(self):
         assert _is_board_authorized(None) is False
 
-    def test_gap_authorized_set_is_exactly_ari_and_leader(self):
-        assert BOARD_AUTHORIZED_AGENTS == frozenset({"ari", "leader"})
+    def test_gap_authorized_set_is_exactly_ari(self):
+        """ARI-ONLY (user ruling 2026-10-20)."""
+        assert BOARD_AUTHORIZED_AGENTS == frozenset({"ari"})
 
     def test_gap_is_board_authorized_refuses_an_unknown_agent(self):
         assert _is_board_authorized("worker") is False
         assert _is_board_authorized("") is False
-        assert _is_board_authorized("leader") is True
+        assert _is_board_authorized("leader") is False
         assert _is_board_authorized("ari") is True
 
 
@@ -392,19 +393,24 @@ class TestGapAuthorizationSet:
 class TestGapGlobalNamespace:
     """The board is ONE global namespace — there is no per-tree board.
 
-    An item created by an Ari instance is visible to the leader
-    instance, and the leader's note is stamped with the LEADER's
-    instance id. The item's ``created_by_instance`` stays the ARI's.
+    An item created by one Ari instance is visible to ANOTHER Ari
+    instance, and that other instance's note is stamped with ITS OWN
+    instance id. The item's ``created_by_instance`` stays the creator's.
+
+    NOTE (user ruling 2026-10-20): the board categories are ARI-ONLY,
+    so the second participant is a second ARI instance (a different
+    instance id, the same agent) rather than the leader — the
+    global-namespace property is unchanged by the audience narrowing.
     """
 
-    def test_gap_item_created_by_ari_is_visible_to_the_leader(
+    def test_gap_item_created_by_one_ari_is_visible_to_another(
         self, service, engine
     ):
         ari = _tool_map(
             service, instance_id="inst-ari-ctx", agent_id="ari"
         )
-        leader = _tool_map(
-            service, instance_id="inst-leader-ctx", agent_id="leader"
+        ari_two = _tool_map(
+            service, instance_id="inst-ari-2-ctx", agent_id="ari"
         )
 
         created = ari["board_create"].invoke(
@@ -418,26 +424,26 @@ class TestGapGlobalNamespace:
         item_id = created["id"]
         assert created["created_by_instance"] == "inst-ari-ctx"
 
-        # The leader sees it — the same global namespace, no per-tree
-        # scoping anywhere in the path.
-        listed = leader["board_list"].invoke({})
+        # The second Ari instance sees it — the same global namespace, no
+        # per-tree scoping anywhere in the path.
+        listed = ari_two["board_list"].invoke({})
         assert isinstance(listed, dict), listed
         ids = [item["id"] for item in listed["items"]]
         assert item_id in ids, (
-            f"the leader must see the Ari instance's item; got {ids}"
+            f"the second Ari instance must see the first's item; got {ids}"
         )
 
-        # The leader's note is stamped with the LEADER's instance id.
-        updated = leader["board_update"].invoke(
-            {"id": item_id, "note": "from leader"}
+        # The second instance's note is stamped with ITS instance id.
+        updated = ari_two["board_update"].invoke(
+            {"id": item_id, "note": "from the second ari"}
         )
         assert isinstance(updated, dict), updated
-        fetched = leader["board_get"].invoke({"id": item_id})
+        fetched = ari_two["board_get"].invoke({"id": item_id})
         assert isinstance(fetched, dict), fetched
-        assert fetched["notes"], "the leader's note must be on the timeline"
-        assert fetched["notes"][0]["author_instance"] == "inst-leader-ctx"
-        assert fetched["notes"][0]["text"] == "from leader"
-        # The creator is still the Ari instance.
+        assert fetched["notes"], "the second instance's note must be on the timeline"
+        assert fetched["notes"][0]["author_instance"] == "inst-ari-2-ctx"
+        assert fetched["notes"][0]["text"] == "from the second ari"
+        # The creator is still the FIRST Ari instance.
         assert fetched["created_by_instance"] == "inst-ari-ctx"
 
     def test_gap_unauthorized_factory_sees_nothing_and_changes_nothing(

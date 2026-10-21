@@ -19,7 +19,7 @@ What lives here (the plan's Task 2 list):
   first-fire instant plus the family-shaped engine payload (D3).
 * :func:`enforce_min_horizon` — the >= 30-minute floor with its
   FAMILY-AWARE rejection text (D9).
-* :func:`compose_alarm_message` — the fresh-instance message contract
+* :func:`compose_alarm_message` — the alarm-intent message contract
   (D7).
 * :func:`validate_board_id` — the phase-1 board id shape (D12).
 
@@ -612,12 +612,19 @@ def compose_alarm_message(
     board_item: str | None,
     message_to_self: str,
 ) -> str:
-    """Compose the fresh-instance reminder message (D7 — VERBATIM shape).
+    """Compose the ALARM INTENT message (D7 — shape preserved, framing changed).
 
     The wrapper stamps the prefix, injects the context and appends the
-    agent's action text VERBATIM. The "fresh instance, no shared state"
-    line is mandatory (Ari instances are separate trees), and the
-    scheduled instant is stated so a late delivery is detectable.
+    agent's action text VERBATIM. The scheduled instant is stated so a
+    late delivery is detectable.
+
+    FRAMING (user ruling 2026-10-20, Discord, direct): the alarm wakes
+    the CALLING instance — the same instance, with its session context
+    intact. The earlier "You are a fresh instance with no memory of
+    this request" line is RETRACTED; the message now states that this
+    is an alarm firing into the session that armed it, and the action
+    line IS the wake reason (it rides in the message, which is what
+    wakes the continuation turn).
     """
     armed_line = (
         f"Armed at: {armed_at_utc.isoformat()}   Schedule: {recurrence} | "
@@ -626,7 +633,7 @@ def compose_alarm_message(
     if source_id:
         # The source id does not exist yet on the create path — the
         # effective label in the header is the correlation handle the
-        # fired instance uses with `task_schedule_list`.
+        # fired session uses with `task_schedule_list`.
         armed_line += f" | id {source_id}"
     lines = [
         f"[self-alarm] {effective_label}",
@@ -639,8 +646,8 @@ def compose_alarm_message(
             "its title, body, status and notes before acting."
         )
     lines.append(
-        "You are a fresh instance with no memory of this request; everything "
-        "you need is in this message."
+        "This is an alarm firing into THIS session — the context you armed it "
+        "with is intact. The reason you are woken is the Action line below."
     )
     lines.append(f"Action: {message_to_self}")
     return "\n".join(lines)

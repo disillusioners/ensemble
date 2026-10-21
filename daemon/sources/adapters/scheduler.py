@@ -160,8 +160,28 @@ class SchedulerAdapter(MessageSourceAdapter):
         
         # Instance mode configuration (Task 6)
         instance_mode_str = scheduler_config.get("instance_mode", "new_instance")
-        # Force new_instance for one-time schedules
-        if scheduler_config.get("run_at"):
+        # One-time schedules are forced to new_instance — UNLESS the stored
+        # row EXPLICITLY asks for reuse_instance.
+        #
+        # HISTORY: the force was UNCONDITIONAL. It encoded the "a one-shot
+        # is a fresh task, never a continuation" semantics — the exact
+        # framing the user ruling of 2026-10-20 (Discord, direct)
+        # RETRACTS: a self-alarm must wake the CALLING instance, and the
+        # user's own worked example is a ONE-SHOT (arm at 13:00 → fire at
+        # 14:00). The stored ``instance_mode`` is the operator's stated
+        # intent, so an explicit ``reuse_instance`` is honoured and the
+        # engine's existing reuse-instance delivery path (an ordinary user
+        # message injected into the mapped instance) does the rest.
+        #
+        # The DEFAULT is unchanged: a one-time row that says nothing (or
+        # says new_instance) still fires into a fresh instance. Measured
+        # blast radius at the ruling: 0 live schedule rows carry
+        # ``reuse_instance`` (14 rows total, 10 one-shot, all
+        # ``new_instance``) — so no existing schedule changes behaviour.
+        if (
+            scheduler_config.get("run_at")
+            and instance_mode_str != "reuse_instance"
+        ):
             self._instance_mode = SchedulerInstanceMode.NEW_INSTANCE
             logger.debug(f"Force new_instance for one-time schedule: {self.source_id}")
         else:

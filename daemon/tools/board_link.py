@@ -21,15 +21,15 @@ impossible to shadow:
 ``board_link`` is the SANCTIONED minting path. Its own module + its own
 category (``board-link``) keeps Phase 3 free of any coupling to the
 Phase-1 ``board`` data tools (D13) and keeps the audience explicit:
-ari + leader may MINT the link; mint ≠ read.
+ari may MINT the link; mint ≠ read.
 
 Access posture — THREE layers, ALL required
 -------------------------------------------
 1. The ``board-link`` category is PRIVILEGED (entry #12 of
    ``PRIVILEGED_TOOL_CATEGORIES``) ⇒ it never joins the empty-allow
    default universe.
-2. ``agents/ari/meta.json`` AND ``agents/leader/meta.json`` carry the
-   explicit ``"board-link"`` allow entry — and no other agent does.
+2. ``agents/ari/meta.json`` carries the explicit ``"board-link"``
+   allow entry — and no other agent does.
 3. The tool body calls the shared
    :func:`daemon.tools.views_auth._is_views_authorized` gate — the FIRST
    statement in the body, BEFORE the mint.
@@ -39,9 +39,11 @@ the category gate outright (``daemon/tools/instance.py``), so layers 1 + 2
 alone do not enforce the audience. The gate is fail-closed: a blank /
 non-``str`` ``agent_id`` is NEVER authorized.
 
-The gate set is ``{ari, leader}`` — DELIBERATELY different from
-``view_write``'s ``{ari}``. Both sets live side by side in
-``daemon/tools/views_auth.py`` so the difference is visible in one place.
+The gate set is ``{ari}`` — the user ruling of 2026-10-20 (Discord,
+direct) is BINDING and RETRACTS the earlier ``{ari, leader}``
+audience. Both sets live side by side in
+``daemon/tools/views_auth.py`` so the audience of each is visible in one
+place.
 """
 
 from __future__ import annotations
@@ -87,7 +89,7 @@ INFORMATIONAL — the direct lane ``/views/board/index.html`` 404s by
 design, because the board is a DB-rendered public surface with no
 behind-the-OAuth variant.
 
-Access: ``board-link`` is a PRIVILEGED category (ari + leader) AND the
+Access: ``board-link`` is a PRIVILEGED category (ari-only) AND the
 tool body re-checks the calling agent. Every failure returns a typed
 ``"Error: ..."`` string — never a partial URL, never a crash.
 """
@@ -194,7 +196,7 @@ def create_board_link_tools(
         # unauthorized caller mints NO row.
         if not _is_views_authorized(caller_agent_id, BOARD_LINK_AGENTS):
             return _error(
-                "board_link is restricted to the 'ari' and 'leader' agents "
+                "board_link is restricted to the 'ari' agent "
                 f"— this call came from agent {caller_agent_id!r}."
             )
 
@@ -333,8 +335,8 @@ Notes:
       link.
     * A concurrent ``board_link(refresh=True)`` revokes outstanding grants
       by design — a reader bounces back to the passcode interstitial.
-    * ``board_link`` is ari + leader only. The category is privileged, the
-      allow-list is ari + leader, and the tool body re-checks the calling
+    * ``board_link`` is ari-only. The category is privileged, the
+      allow-list is ari-only, and the tool body re-checks the calling
       agent — an unauthorized caller mints NO row.
 """
 

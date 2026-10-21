@@ -440,10 +440,11 @@ class TestBoardGet:
 
 
 class TestBodyGate:
-    def test_the_authorized_set_is_ari_and_leader(self):
-        assert BOARD_AUTHORIZED_AGENTS == {"ari", "leader"}
+    def test_the_authorized_set_is_ari_only(self):
+        """ARI-ONLY (user ruling 2026-10-20) — leader is NOT authorized."""
+        assert BOARD_AUTHORIZED_AGENTS == {"ari"}
         assert _is_board_authorized("ari")
-        assert _is_board_authorized("leader")
+        assert not _is_board_authorized("leader")
         assert not _is_board_authorized("worker")
         assert not _is_board_authorized("watcher")
         assert not _is_board_authorized("")
@@ -476,7 +477,9 @@ class TestBodyGate:
         service.list_items.assert_not_called()
         service.get_item.assert_not_called()
 
-    def test_leader_is_authorized(self):
+    def test_leader_is_not_authorized(self):
+        """ARI-ONLY (user ruling 2026-10-20) — leader is DENIED and the
+        service is NEVER reached (zero side effects)."""
         service = MagicMock()
         service.list_items = MagicMock(
             return_value={
@@ -493,16 +496,9 @@ class TestBodyGate:
             )
         }
         result = tools["board_list"].invoke({})
-        assert result == {
-            "items": [],
-            "count": 0,
-            "_pagination": {
-                "has_more": False,
-                "returned": 0,
-                "applied_limit": 50,
-            },
-        }
-        service.list_items.assert_called_once()
+        assert isinstance(result, str), result
+        assert result.startswith("ERROR:"), result
+        service.list_items.assert_not_called()
 
 
 # ── tools never raise ────────────────────────────────────────────────────

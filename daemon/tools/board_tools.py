@@ -30,8 +30,7 @@ Both gates are required; neither substitutes for the other.
 
 The board is NOT a replacement for the ``todo`` tool family: ``todo``
 is an in-memory, per-instance DAG that dies with the instance, while
-the board is durable, global, and shared by every Ari instance and the
-leader.
+the board is durable, global, and shared by every Ari instance.
 
 Tool NAMES are flat snake_case (``board_create`` / ``board_update`` /
 ``board_list`` / ``board_get``) — the repo convention established by
@@ -58,7 +57,7 @@ logger = logging.getLogger(__name__)
 CATEGORY_NAME = "Board"
 CATEGORY_DOC = """\
 Durable, cross-instance work board — one global namespace shared by every
-Ari instance and the leader.
+Ari instance.
 
 Tools in this category:
 - ``board_create`` — create a work item
@@ -97,7 +96,12 @@ cleared.
 #: The agents allowed to operate the board. The privileged category
 #: gates VISIBILITY; this set gates AUTHORITY. Both gates are required
 #: (the literal-tool-name allow entry bypasses the category gate).
-BOARD_AUTHORIZED_AGENTS: frozenset[str] = frozenset({"ari", "leader"})
+#:
+#: ARI-ONLY — the user ruling of 2026-10-20 (Discord, direct) is
+#: BINDING and RETRACTS the earlier "ari + leader" audience: the board
+#: categories belong to ``ari`` alone. Leader keeps its pre-existing
+#: tools (``view_link`` et al.) untouched.
+BOARD_AUTHORIZED_AGENTS: frozenset[str] = frozenset({"ari"})
 
 
 def _is_board_authorized(agent_id: str) -> bool:
@@ -283,9 +287,9 @@ def create_board_tools(
 
     board_create._full_doc_ = """Create a durable work item on the global board.
 
-The board is ONE global namespace — every Ari instance and the leader
-see the same items. Use it for work that must survive the current
-turn; use the `todo` family for scratch planning inside this turn.
+The board is ONE global namespace — every Ari instance sees the same
+items. Use it for work that must survive the current turn; use the
+`todo` family for scratch planning inside this turn.
 
 Args:
     title: Short human title (1-512 chars). Required.
@@ -399,7 +403,7 @@ Examples:
     board_list._full_doc_ = """List board items, most recently updated first.
 
 The board is ONE global namespace — the list is the same for every Ari
-instance and the leader.
+instance.
 
 Args:
     status: `todo` | `in_progress` | `blocked` | `done`, or `"open"`

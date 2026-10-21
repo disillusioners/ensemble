@@ -34,7 +34,7 @@ wrong and must be amended.
 
 | # | Pre-ruling | Enforced where | Binding consequence |
 |---|---|---|---|
-| **L1** | **`board` category → ari + leader.** | [phase1-plan.md E10/E11](phase1-plan.md) | `"board"` is appended to `agents/ari/meta.json` **and** `agents/leader/meta.json` allow lists. **No other agent** may hold it. (Caveat: the *mechanism* by which this is enforced is an open architect question — see §C.1.) |
+| **L1** | **`board` category → ari + leader.** **⚠️ SUPERSEDED 2026-10-20 by [decisions.md](decisions.md) §A-RETRACTED **RET-1** (the board categories are ari-ONLY)**. | [phase1-plan.md E10/E11](phase1-plan.md) | ~~`"board"` is appended to `agents/ari/meta.json` **and** `agents/leader/meta.json` allow lists. **No other agent** may hold it.~~ **The user ruling of 2026-10-20 retracts this pre-ruling: `"board"` goes to `ari` ONLY** (it is REMOVED from `agents/leader/meta.json`; the in-body gate set is `frozenset({"ari"})`). (Caveat: the *mechanism* by which this is enforced is an open architect question — see §C.1.) |
 | **L2** | **`self_alarm` → ari only.** | [phase2-plan.md D10](phase2-plan.md) | `"self-alarm"` goes into `agents/ari/meta.json` **only** — never leader. Enforced **thrice**: the **privileged category** + the **allow-list** **and** a runtime `agent_id != "ari"` gate in the tool body (an allow-list is a visibility boundary, not a security boundary). The third layer is **L2a** below — it is what makes the rule structural rather than advisory. |
 | **L2a** | **`self_alarm` is PRIVILEGED** — leader ruling **R-self-alarm** (architect §1.4). | [phase2-plan.md D10](phase2-plan.md) · architect §1.4 | `"self-alarm"` is **entry #10** of `PRIVILEGED_TOOL_CATEGORIES` from Phase 2's **first** commit, **on top of** L2's two layers. **Three** enforcement layers, not two: (1) the **privileged category** (opt-in — a non-privileged category is default-granted to the empty-allow universe, so `watcher` — the only in-tree agent with an empty allow list — would otherwise resolve the tool); (2) the **allow-list** (`agents/ari/meta.json` only, never leader); (3) the **runtime `agent_id != "ari"` gate** in the tool body — defence in depth, and the only layer that also closes the **literal-tool-name** bypass (`daemon/tools/instance.py:471-478`). Why the escalation is structural, not cosmetic: a watcher-reachable `self_alarm` spawns a **fresh Ari instance** whose message carries the caller's action text **verbatim** ⇒ an attacker-influenced text-execution path, not merely a visibility leak. |
 | **L3** | **`view_write` → ari only.** | [phase3-plan.md D3](phase3-plan.md) | `"view-write"` is a **privileged** category granted to ari only. Leader gains **no** write authority — the existing `view-views` category (ari + leader + designer) is untouched. |
@@ -95,6 +95,28 @@ supersedes.
 | **RD-1** | **The error hierarchy is DEFINED in `daemon/models/board.py` and RE-EXPORTED by `daemon/services/board_service.py`** — the plan's file map assigned the hierarchy to the **service** (N1 = the model module, N2 = `BoardService` **+ error hierarchy**). | reviewer council session `ce047910` (2026-10-20) · phase-1 plan §3 file map (N1/N2) | **ACCEPTED.** The plan's placement would have **created a circular import**: the service imports the model module, so a hierarchy defined in the service could not be raised by the model's single `_to_utc_iso()` (§6.1) without the model importing back from the service. The **model-local** definition lets that one normalizer raise `BoardValidationError` **directly** — **no per-call-site fix-up** — and the service re-exports all three (`BoardError`, `BoardItemNotFound`, `BoardValidationError`), so **both import paths work** (`from daemon.models.board import …` **and** `from daemon.services.board_service import …`). |
 | **RD-2** | **`index=True` is DROPPED from the `project_id` Column.** | reviewer council session `ce047910` (2026-10-20) · phase-1 plan §4.1 (the `project_id` Column sketch) + §4.1 index table | **ACCEPTED.** The plan sketch showed `index=True` **on the Column AND** a named `idx_board_items_project_id` in the six-index set — **internally inconsistent**. `index=True` would emit a **7th auto-named index** (`ix_board_items_project_id`) and break the binding **"exactly six"** index set + the **N7** parity assertions. The implementation keeps the **explicit** `__table_args__` index under the **plan-mandated name** (`idx_board_items_project_id`); live PG shows **exactly 6** `idx_board_*` indexes and **no** `ix_board_items_project_id`. The plan's §4.1 sketch and its §13 D14 row are corrected to that same shape. |
 
+### A-RETRACTED — the 2026-10-20 USER ruling (BINDING — supersedes the rows named)
+
+A **direct user ruling** (Discord, 2026-10-20, ~22:xx) **RETRACTS** two commission decisions. It is
+**BINDING** and sits at the same tier as §A1 / §A2 / §A-ADJUDICATED: where a phase plan or an
+adjudicated row diverges from it, that text is **wrong** and must be amended. The two rows below are
+**retraction records**, not new design — each names exactly what it invalidates and what survives.
+
+| # | Retraction (as ruled) | Supersedes | Binding consequence |
+|---|---|---|---|
+| **RET-1** | **THE NEW TOOL CATEGORIES ARE `ari`-ONLY.** `board_*`, `self_alarm`, `view_write` and — by family — `board_link` belong to agent **`ari` alone**. **Not** leader, **not** any other agent. | §A2 **L1** (`board` category → ari **+ leader**) · the D13 / §2.5 **`board_link` audience-separation** row (`{ari, leader}`, "mint ≠ read") · the `{"ari","leader"}` clause of §A-ADJUDICATED **R-C1**'s in-body gate · phase-1 plan E10/E11 · phase-3 plan D13 | `"board"` and `"board-link"` are **removed** from `agents/leader/meta.json` (`tools.allow`); the in-body gates become `BOARD_AUTHORIZED_AGENTS = frozenset({"ari"})` and `BOARD_LINK_AGENTS = frozenset({"ari"})` (`VIEW_WRITE_AGENTS` was already `{"ari"}`; `self_alarm` was already ari-only). The **two gate sets stay SEPARATE named constants** — the separation survives as *structure* (each tool owns its own policy), **not** as an audience split. **Leader keeps its PRE-EXISTING tools untouched** (`view_link` and the `view-views` category it holds). The **privileged-category** half of R-C1 is **UNAFFECTED** — `"board"` remains entry #9, `board-link` entry #12; the privileged-set trajectory **8 → 9 → 10 → 12** and its pin passes are unchanged. The **board's global-namespace property** (U1) is unchanged — it is a property of the *schema*, not of the audience. |
+| **RET-2** | **THE ALARM WAKES THE CALLING INSTANCE.** At the scheduled instant the **calling** Ari instance is woken **with the alarm intent** — the same instance, the same session context, `instance_mode="reuse_instance"` semantics (like `task_schedule`'s reuse mode). **NOT** a new-instance spawn. The "the reminder must carry enough context for a FRESH instance" framing is **RETRACTED**. | phase-2 plan **D6** (`instance_mode = new_instance` — "the alarm is a fresh task, not a continuation") · phase-2 plan **D7**'s fresh-instance message contract · the fresh-instance framing in the phase-2 plan §8.4 obligations and in the `agents/ari` teachings | The row is armed with **`instance_mode="reuse_instance"`** and the wrapper writes the **instance-mapping row** that points the fire at the **caller's instance id** — the exact key the engine's adapter reads (`get_instance_mapping(source_id, source_id)`). The **delivery mechanism is ALIGNED with the existing engine**: the reuse-instance path already enqueues the message as an ordinary **USER MESSAGE** (`enqueue_message_job` → `_process_message_with_tracking` → `role="user"` HumanMessage) into the mapped instance, waking that instance's continuation turn — **no new wake primitive is introduced**. The composed message is reframed as the **alarm intent** (the label and the linked board item id still ride along — useful, now riding intact session context). **The five §8.4 obligations SURVIVE UNCHANGED**: lateness stated in both cap states, board-never-ping, unobservable-fire, list semantics, and the `self-alarm:` label namespace. |
+
+**Engine constraint found while implementing RET-2 (disclosed, not hidden):** the scheduler adapter
+**forced every one-time schedule to `new_instance` unconditionally**
+(`daemon/sources/adapters/scheduler.py` — the `run_at` branch) — the very "a one-shot is a fresh task"
+framing RET-2 retracts, and **the user's own worked example is a one-shot** (arm at 13:00 → fire at
+14:00). An **explicit** `reuse_instance` is now honoured (the **default is unchanged**: a one-shot that
+says nothing, or says `new_instance`, still fires into a fresh instance). **Measured blast radius:
+0 live schedule rows carry `reuse_instance`** (`ensemble_prod`: 14 `source_configs` rows, 10 one-shot,
+all `new_instance`) ⇒ **no existing schedule changes behaviour**. The REST-layer twin
+(`daemon/utils.py::validate_instance_mode`) was relaxed identically.
+
 ---
 
 ## Section B — DESIGN DECISIONS MADE DURING PLANNING
@@ -153,7 +175,7 @@ shape. Everything else is a one-liner pointing at its owner.
 | P2-D4 | Dedupe/reuse by label: **reuse in place**, never cancel-to-free; a burnt label auto-retries once as `"<label>-2"` (see §B0 #4). |
 | P2-D5 | One-shot post-fire is **engine-native `stopped`**; the wrapper does not cancel (see §B0 #6). |
 | P2-D6 | `instance_mode = "new_instance"`, fixed (see §B0 #5). |
-| P2-D7 | Fresh-instance message contract: the wrapper stamps the prefix, injects the context, appends the agent's text **verbatim**; the "fresh instance, no shared state" line is mandatory and the scheduled instant is stated so a late delivery is detectable. |
+| P2-D7 | Alarm-intent message contract (was: fresh-instance message contract — **⚠️ SUPERSEDED 2026-10-20 by [decisions.md](decisions.md) §A-RETRACTED **RET-2** (the alarm wakes the CALLING instance)**): the wrapper stamps the prefix, injects the context, appends the agent's text **verbatim**; the "firing into THIS session" line replaces the "fresh instance, no shared state" line and the scheduled instant is stated so a late delivery is detectable. |
 | P2-D8 | Board `due_at` glue = **prompt convention**; creation-time auto-arm deferred to v2 (see §B0 #7). |
 | P2-D9 | The ≥30-minute floor lives in the wrapper, **pre-create**; applies to the **first-fire offset only**; a recurring arm-now-imminent case is **rejected**, not auto-skipped (see §B0 #3). |
 | P2-D10 | Ari-only is enforced **thrice**: **privileged category** + **allow-list** **and** runtime `agent_id` gate (leader ruling **R-self-alarm**, L2a). |
@@ -177,7 +199,7 @@ shape. Everything else is a one-liner pointing at its owner.
 | P3-D10 | `board` becomes a **RESERVED root name**; it is not a registered root (prevents operator shadowing, 404s the direct lane, keeps the board's link out of the `view-views` minting path). |
 | P3-D11 | **ONE** passcode row for the board: `(board, "index.html")`. Filters are query params, **not** part of the key — a passcode authorises "may this person see the board", not a filtered subset. Consequence, stated plainly: a passcode holder sees the **whole** board. |
 | P3-D12 | New **static** board GET declared **before** the public catch-all; the POST verify **reuses** the existing catch-all POST unchanged (see §B0 #9). |
-| P3-D13 | The board's link is minted by a dedicated `board_link` tool in its **own module + own privileged category** (`board-link`, ari + leader) — §C.4. |
+| P3-D13 | The board's link is minted by a dedicated `board_link` tool in its **own module + own privileged category** (`board-link`, ari + leader → **⚠️ SUPERSEDED 2026-10-20 by [decisions.md](decisions.md) §A-RETRACTED **RET-1** (the board categories are ari-ONLY)** — now ari-only) — §C.4. |
 | P3-D14 | The board page is zero-JS with the **strict CSP** posture; CDN scripts remain a `view_write`-page-only capability (see §B0 #10). |
 | P3-D15 | `body_md` is rendered as **escaped plain text** (`<pre>`); the notes timeline uses `<details>/<summary>`. No markdown library exists daemon-side ⇒ server-side rendering of agent-authored markdown without a sanitiser would be an XSS hole. |
 | P3-D16 | The board read seam is phase 1's `BoardService` via `request.app.state.manager.board_service`, adapted by a **shape-tolerant** phase-3-owned adapter — the adapter is the **only** place that knows phase 1's surface; sync service ⇒ `asyncio.to_thread`; unavailable ⇒ an explicit notice, never a 500. |
@@ -202,6 +224,11 @@ shape. Everything else is a one-liner pointing at its owner.
 > section previously carried. The conflict narrative is **retained as the decision record**; every sentence that
 > describes the *pre-ruling* state is marked SUPERSEDED, and **no** present-tense claim of a non-privileged
 > `board` survives anywhere in the five planning documents.
+
+**⚠️ 2026-10-20 ADDENDUM (user ruling, §A-RETRACTED **RET-1**):** this section's "ari + leader" audience
+framing is **RETRACTED** — the board categories are `ari`-ONLY. The analysis below is retained as the
+historical record of **how** the audience was to be enforced (privileged category + allow-list + body
+gate) — that mechanism is unchanged; only the audience shrank.
 
 **The conflict, as it stood (HISTORICAL — SUPERSEDED).** Phase 1 originally chose a **non-privileged** `"board"`
 category (P1-D6 as written before the fold), disclosing the consequence as its Q1: a non-privileged category is
@@ -331,7 +358,8 @@ phase-1 plan is the canonical home for the body.
   passcode stable**. An overwrite is still never silent — it requires an explicit `overwrite=True`, and the
   existing file's bytes are preserved when the flag is absent.
 - **P3-D13 — `board_link` gets its own module + its own privileged category.** `daemon/tools/board_link.py`,
-  category `board-link` (ari + leader). Three reasons: (1) `view_link` **cannot** mint it — `board` is a reserved
+  category `board-link` (ari + leader → **⚠️ SUPERSEDED 2026-10-20 by §A-RETRACTED **RET-1**: ari-ONLY**;
+  the category split itself is UNAFFECTED). Three reasons: (1) `view_link` **cannot** mint it — `board` is a reserved
   root name — and `view-views` is reachable by designer; (2) a separate module + category removes the phase-1
   merge conflict entirely; (3) **audience separation** — ari+leader may **mint** the link, while the `board` data
   tools are what the board page **reads** (mint ≠ read).
@@ -474,6 +502,17 @@ body above; the plan is superseded at the points named below and the implementat
 |----|-----|-------------|--------------|
 | **RD-1** | P1 | §A-ADJUDICATED-3 (new row) | The error hierarchy (`BoardError`, `BoardItemNotFound`, `BoardValidationError`) is **defined in `daemon/models/board.py`** and **re-exported by `daemon/services/board_service.py`** — the plan's N1/N2 file map assigned it to the service, which would have **created a circular import** (the service imports the model module) and denied the model's single `_to_utc_iso()` (§6.1) a direct `BoardValidationError` raise (no per-call-site fix-up). **Both import paths work.** |
 | **RD-2** | P1 | §A-ADJUDICATED-3 (new row) + phase-1 plan §4.1 + phase-1 plan §13 (D14) | **`index=True` is dropped from the `project_id` Column.** The plan sketch carried the flag AND a named `idx_board_items_project_id` — **internally inconsistent**; the flag would have emitted a **7th auto-named index** (`ix_board_items_project_id`) and broken the binding "exactly six" index set + the N7 parity assertions. The **explicit** `__table_args__` index under the plan-mandated name is the serving index. |
+
+### User-ruling amendments (2026-10-20, Discord-direct)
+
+A **direct user ruling** (Discord, 2026-10-20, ~22:xx) retracted two commission decisions. It is
+recorded at the binding tier (§A-RETRACTED **RET-1** / **RET-2** above); the amendment rows below
+are the traceability log for what was folded into the plan text.
+
+| ID | Pri | Folded into | What changed |
+|----|-----|-------------|--------------|
+| **UR-1** | P0 | §A-RETRACTED **RET-1** + plan-overview §5 items 13/14, §8 (the `agents/leader/*` row), §9 (the board→alarm row) + phase-1 plan §12 Q1 / §13 D6 / §15 + phase-3 plan §2.5 table, §3.2 (the module + the gate-set text), §3.4 (T-BL4), §13 D13 | The **board categories are `ari`-ONLY**. `"board"` + `"board-link"` removed from `agents/leader/meta.json`; `BOARD_AUTHORIZED_AGENTS` and `BOARD_LINK_AGENTS` are now `frozenset({"ari"})`; leader keeps its pre-existing tools (`view_link` et al.). The **privileged-category** half of R-C1 and the privileged-set trajectory 8 → 9 → 10 → 12 are **UNAFFECTED**; the board's global-namespace property (U1) is a schema property and is unchanged. The **OBSOLETE** "the two gate sets differ" pin is replaced by exact `{"ari"}` pins for BOTH sets. |
+| **UR-2** | P0 | §A-RETRACTED **RET-2** + phase-2 plan (the fire-path table, the payload example, D6, D7, the §8.4 acceptance row) | The **alarm wakes the CALLING instance**: `instance_mode="reuse_instance"` + an instance-mapping row pointing at the caller's instance id. The **delivery mechanism is ALIGNED with the existing engine** (the reuse path enqueues an ordinary **user message** into the mapped instance) — **no new wake primitive**. The composed message is reframed from "fresh instance, no memory" to the **alarm intent**. The **five §8.4 obligations SURVIVE UNCHANGED**. The **engine constraint** (the adapter's unconditional one-shot force to `new_instance`) was **narrowly relaxed** — an explicit `reuse_instance` is honoured, the default is unchanged, and **0 live rows** carry `reuse_instance` (measured on `ensemble_prod`). |
 
 ---
 

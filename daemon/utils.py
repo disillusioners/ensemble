@@ -453,8 +453,27 @@ def validate_instance_mode(
         elif "schedule" in config:
             schedule_type = "cron"
     
-    # For one_time schedules: ALWAYS force to new_instance
+    # For one_time schedules: honour an EXPLICIT reuse_instance.
+    #
+    # HISTORY: one_time was ALWAYS forced to new_instance — the "a
+    # one-shot is a fresh task, never a continuation" semantics. The user
+    # ruling of 2026-10-20 (Discord, direct) RETRACTS that framing: a
+    # self-alarm must wake the CALLING instance, and the user's own
+    # worked example is a ONE-SHOT (arm at 13:00 → fire at 14:00). An
+    # explicit ``reuse_instance`` is the operator's stated intent and is
+    # now honoured, so the engine's existing reuse-instance delivery path
+    # injects the message into the mapped instance.
+    #
+    # The DEFAULT is unchanged: a one_time row that asks for nothing (or
+    # for new_instance) still fires into a fresh instance. Measured blast
+    # radius at the ruling: 0 live schedule rows carry ``reuse_instance``.
     if schedule_type == "one_time":
+        if instance_mode == "reuse_instance":
+            logger.info(
+                "Honouring explicit instance_mode='reuse_instance' for one_time "
+                "schedule (caller-bound wake)"
+            )
+            return {"instance_mode": "reuse_instance"}
         if instance_mode is not None and instance_mode != "new_instance":
             logger.info("Forcing instance_mode to 'new_instance' for one_time schedule")
         return {"instance_mode": "new_instance"}

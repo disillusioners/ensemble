@@ -1399,6 +1399,16 @@ class TestInstallerSkillHygiene:
 # agents/project-manager/rule.md, agents/tester/rule.md, agents/wanderer/rule.md,
 # agents/blueprinter/rule.md. Note agents/wanderer/soul.md IS sealed but was NOT edited in this
 # round (the wanderer canonical home lives in its rule.md) — its pin is unchanged.
+# 2026-10-20 ari-tools USER-RULING re-pin (1 file, constants-only, recomputed from real file bytes on
+# the fix/ari-tools-user-ruling worktree) — attribution: the 2026-10-20 DIRECT USER RULING (Discord)
+# on the ari-tools commission. Rule 2 ("the alarm wakes the CALLING instance") made the
+# fresh-instance framing in agents/ari/workflow.md FALSE, so the file was edited; the
+# prompt-artifacts manifest row was re-stamped in the SAME commit (161/161 OK). The tripwire row had
+# to be re-pinned here or the binding 0-stale gate would go red — this is the adjudicated deviation
+# from the literal "tripwire untouched" wording, taken because the 0-stale gate is the binding
+# outcome. Only this ONE row changed; the other 34 keep their values. The value is a CONTENT-SHA256
+# of the sealed file (NOT a commit sha):
+#   agents/ari/workflow.md <- 4f07f32708ff97094752f3578a4169a92e07570ef73fff6f0d47017145b3c00f (content-sha256) | user ruling 2026-10-20 Rule 2: the fired alarm wakes the CALLING instance (same session), not a fresh instance
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "2a5078f93bd2dcfe427900e85c075ee9671b8aedae17d07c7ef6abb6df4603ab",
@@ -1408,7 +1418,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/charter/skills-template/install-mermaid-cli.md": "4082a47f9662da283746a6f7719e38d82b473dacc61d52bc8e021a362322dbe4",
     "agents/charter/skills-template/install-mermaid-cli.lib.sh": "fcd6f4612d6077a81fe521341e6e2332d1f5da31880d3fc710decbc0579fedbf",
     "agents/_prompt_system/innate-skills/chart/skill.md": "fa29084d7dc0f86c87d667ef46dcfc060fa11e20e0b647295cdd75ff43353515",
-    "agents/ari/workflow.md": "f31f5bc4fc38e2cb14cdf3925e24234b0ca4678184202d25c048da05133a5fcd",
+    "agents/ari/workflow.md": "4f07f32708ff97094752f3578a4169a92e07570ef73fff6f0d47017145b3c00f",
     # Phase B — 7 daemon files
     "daemon/sources/base.py": "ca2762ac8840bd8f7050955744af25f16325ed6806d09ba1fe3d020383581f3a",
     # registry.py re-pinned 2026-10-18 (resource-cost-control O4): the

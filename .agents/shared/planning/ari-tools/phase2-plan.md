@@ -71,7 +71,7 @@ schedule that fires exactly once at the stated instant, into an instance that ca
 | Label lookup does **not** filter status → a cancelled label stays burned; no hard delete for scheduler rows; recurrence is **immutable** via update; cancelled rows are 409 on update | `daemon/repositories/source/repository.py:212-216`, `:263`; `scheduling_service.py:923-926` |
 | Fire path: `SchedulerAdapter._route_via_job_queue` → `InstanceMapper.get_or_create_instance(force_new=instance_mode==new_instance)` → `enqueue_message_job(..., idempotency_key=f"scheduler:{source_id}:{run_at.isoformat()}")` | `daemon/sources/adapters/scheduler.py:1025-1110`, `:1063-1069`, `:1090-1104` |
 | **The job-queue route requires `project_id`** — without it the fire takes the legacy `_execute_immediate` path | `scheduler.py:995` (`if trigger_type == "scheduled" and self._project_id:`) |
-| One-shot fires into a **brand-new instance** when `instance_mode=new_instance` (mapping deleted, new instance) | `daemon/sources/mapper.py:276-346` |
+| One-shot fires into a **brand-new instance** when `instance_mode=new_instance` (mapping deleted, new instance); with `instance_mode=reuse_instance` it fires into the **mapped** instance (the caller) as an ordinary user message | `daemon/sources/mapper.py:276-346` · the one-shot force to `new_instance` was relaxed on 2026-10-20 (RET-2) — an EXPLICIT `reuse_instance` is honoured; the default is unchanged |
 | After a one-shot fires: `status='stopped'`, `enabled=False` — the row **persists**, history preserved, NOT cancelled | `daemon/sources/registry.py:515-526` |
 | The scheduler source is **one-way**: `SchedulerAdapter.send` only LOGS the reply | `scheduler.py:435-457` |
 | **Lateness cap** default = `None` (unlimited) ⇒ a past-due one-shot fires immediately (late). With the cap set, a boot later than the cap ⇒ `schedule_executions` row `status='skipped'`, **no dispatch**, schedule **stays armed** (re-checks every 5 s, once-per-`run_at` guard) | `daemon/config.py:2617-2623`, `scheduler.py:497-560`, `:690-733`, `:737-796` |
@@ -107,7 +107,7 @@ Success return (mirrors the engine echo + wrapper extras — **never** a bare st
 
 ```json
 { "ok": true, "source_id": "...", "label": "self-alarm:deploy-check", "status": "running", "recurrence": "once",
-  "instance_mode": "new_instance", "timezone": "Asia/Ho_Chi_Minh", "armed_at_utc": "...",
+  "instance_mode": "reuse_instance", "timezone": "Asia/Ho_Chi_Minh", "armed_at_utc": "...",
   "first_fire_at_local": "2026-10-20T09:00:00+07:00", "first_fire_at_utc": "2026-10-20T02:00:00+00:00",
   "board_item": "wi-1a2b3c4d", "reused": false, "tz_warning": "",
   "lateness_cap_seconds": null, "message_preview": "[self-alarm] self-alarm:deploy-check …" }
@@ -300,7 +300,7 @@ stored row**, step 4 is the only mutation, and step 6 is what makes the fallback
      effective label (or the candidate), **`agent="ari"`** — **required** by `ScheduleCreatePayload.agent`
      (`scheduling_service.py:132`; the create path fail-fasts on an unknown agent, `:673-676`) and semantically correct: the
      alarm fires **into ari** (worker note B1) — `message`, the family-shaped `when`/`weekday`/`cron_expression`,
-     `timezone=<resolved IANA name>`, `project_id` (D11), `instance_mode="new_instance"` (D6). **Duplicate-label handling:**
+     `timezone=<resolved IANA name>`, `project_id` (D11), `instance_mode="reuse_instance"` (D6 — see **RET-2**). **Duplicate-label handling:**
      duplicate label ⇒ `ValueError("label already exists: …")` (`scheduling_service.py:668-670`); the name lookup ignores status
      and the table has **no unique constraint on `name`** ⇒ two racing creates with the same label both survive and **both
      fire** (`scheduling_service.py:34-39`). Therefore: **collision-check every candidate** with the same name lookup before
@@ -391,7 +391,7 @@ Honest limit: the wrapper **cannot observe the fire** — there is no agent-faci
 is internal) ⇒ "alarm fired" is readable only from the schedule row's status. No phase-2 auto-cleanup (a "board item → done on
 alarm" hook would need that same internal seam).
 
-**D6 — `instance_mode="new_instance"`, fixed.** Rationale: the alarm is a *fresh task*, not a continuation (a rehydrated checkpoint
+**D6 — `instance_mode="reuse_instance"`.** **⚠️ SUPERSEDED by the 2026-10-20 user ruling ([decisions.md](decisions.md) §A-RETRACTED **RET-2**) — the alarm wakes the CALLING instance; it was `new_instance` ("a fresh task, not a continuation").** Rationale (as now ruled): the alarm wakes the CALLING instance — the same session, the context intact; the wrapper writes the instance-mapping row that points the fire at the caller's instance id. The historical text below is retained for the record (a rehydrated checkpoint
 would dilute it); a one-shot fires once, so `reuse_instance` buys no continuity; and `reuse_instance` wraps the message in
 `_format_continuation_message` (run-number text), meaningless for a one-shot (`scheduler.py:801`, `:962`). **Which instance receives
 it:** a scheduler-owned Ari instance (`source_id` = the schedule row id) — **not** any of Ari's chat instances — and the reply is
@@ -402,7 +402,7 @@ live board view shows the result. It **never** promises a ping, a chat/Discord/S
 source is one-way and the receiving instance has no chat identity (`scheduler.py:435-457`, `:1063-1069`). Chat-bridge = OQ-1
 (**RESOLVED**: no new infrastructure in v1 — the board is the only guaranteed surface).
 
-**D7 — Fresh-instance message contract (wrapper-composed, agent supplies only the action).** The wrapper stamps the prefix, injects
+**D7 — Alarm-intent message contract (wrapper-composed, agent supplies only the action).** **⚠️ SUPERSEDED by the 2026-10-20 user ruling ([decisions.md](decisions.md) §A-RETRACTED **RET-2**) — the alarm wakes the CALLING instance; the contract's SHAPE is preserved, only the fresh-instance framing is retracted.** The wrapper stamps the prefix, injects
 the context, appends the agent's text verbatim:
 
 ```
@@ -410,12 +410,12 @@ the context, appends the agent's text verbatim:
 Scheduled fire: <first_fire_local>  (<first_fire_utc>)
 Armed at: <armed_at_utc>   Schedule: <recurrence> | tz <tz> | id <source_id>
 Board item: wi-1a2b3c4d — call board_get with that id to load its title, body, status and notes before acting.
-You are a fresh instance with no memory of this request; everything you need is in this message.
+This is an alarm firing into THIS session — the context you armed it with is intact. The reason you are woken is the Action line below.
 Action: <message_to_self>
 ```
-The "fresh instance, no shared state" line is mandatory (Ari instances are separate trees). The scheduled instant is stated so a
+The "this session" line states that the alarm wakes the session that armed it. The scheduled instant is stated so a
 late delivery is detectable ("if this is more than a few minutes past the scheduled time, verify current state before acting").
-The header line carries the **effective** label (`self-alarm:<label>`) so the fresh instance can correlate it with
+The header line carries the **effective** label (`self-alarm:<label>`) so the woken session can correlate it with
 `task_schedule_list` without guessing the prefix.
 
 **D8 — Board `due_at` glue: PICK = agent-prompt convention (Option 2). Creation-time auto-arming DEFERRED to v2.** Auto-arming from
@@ -669,7 +669,7 @@ home for the grammar only by reference — the tool doc stays canonical. **Write
 | 3 | The 30-minute floor holds | Unit tests at 29 m / 30 m / 30 m+1 s | 29 m ⇒ `ERROR` (bash-sleep hint present) + **no** engine call; 30 m ⇒ accepted |
 | 4 | The armed instant is exactly the floored instant | Wrapper first-fire vs the engine's `next_run_at_utc` echo | ≤1 s drift for once/daily/weekly/cron |
 | 5 | A fired one-shot leaves a `stopped` row (not cancelled) and the label is not silently reusable | Engine-status check (task 1) + the dedupe tests | `status='stopped'`, `enabled=False`; a later same-label request **re-arms the same row** (no `-2`); only a `cancelled` label takes the `-2` path |
-| 6 | The reminder is actionable by a fresh instance | The message-composition test + a manual read of a real composed message | Contains prefix, label, scheduled local+UTC instant, board id + `board_get` instruction, fresh-instance note, action text |
+| 6 | The reminder is actionable by the woken session | The message-composition test + a manual read of a real composed message | Contains prefix, label, scheduled local+UTC instant, board id + `board_get` instruction, the "firing into THIS session" note, action text |
 | 7 | No collateral damage | The phase-2 regression run | Zero new failures; the stale-seal count unchanged (7); no `agents/ari/rule.md` / `workflow.md` diff |
 | 8 | The phase-1 board contract is respected | The board-id regex test | `wi-<8 hex>` accepted; anything else ⇒ typed error; no phase-1 module imported |
 | 9 | `self-alarm` is **privileged** | `PRIVILEGED_TOOL_CATEGORIES` membership + all five exact-set pins | Present in all five pins (**ten** entries); an empty-allow non-ari agent resolves no `self_alarm` |

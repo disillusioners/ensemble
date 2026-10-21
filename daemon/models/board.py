@@ -4,7 +4,7 @@ work board (ari-tools Phase 1 — "The Workbook").
 Three tables, ONE global namespace (D1): there is deliberately **no**
 ``context_key`` / ``tree_root_id`` / ``source`` / project-scoped column
 anywhere in this schema. Every Ari instance (one per chat surface, one
-per wake-up) and the leader read and write the SAME rows. Project and
+per wake-up) reads and writes the SAME rows. Project and
 channel are *attributes of an item* — a nullable ``project_id`` FK and
 the channel/source as a plain tag string (e.g. ``telegram``) — never
 separate boards. This is the deliberate opposite of ``shared_meta_kv``,

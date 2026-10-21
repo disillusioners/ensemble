@@ -41,7 +41,7 @@ Instance IDs (evidence base):
 
 ### 1.1 The mechanism is confirmed, and the planner's premise was wrong twice
 
-**Confirmed:** a non-privileged category **cannot** enforce L1 ("ari + leader").
+**Confirmed:** a non-privileged category **cannot** enforce a narrow audience (L1 as it then read — "ari + leader"; **⚠️ SUPERSEDED 2026-10-20 by [decisions.md](decisions.md) §A-RETRACTED **RET-1** — the board categories are ari-ONLY**).
 
 | Behaviour | Evidence |
 |---|---|
@@ -106,7 +106,7 @@ The registration test must prove the property directly: **`resolve_tool_filter` 
 
 ### 1.5 Consequence for Phase 3's D13 justification
 
-P3-D13 keeps `board-link` in its own category for three reasons; the second ("phase 1's `board` is non-privileged ⇒ default-granted") **dissolves** under this ruling. The decision survives on the two enduring reasons: (a) `view_link` cannot mint the reserved name; (b) **audience separation** — ari+leader may *mint the link*, while the data tools are what the page reads. Keeping the split also preserves the phase-merge hygiene that D13 cites. **Ruling: keep `board-link` separate; amend the stated rationale.**
+P3-D13 keeps `board-link` in its own category for three reasons; the second ("phase 1's `board` is non-privileged ⇒ default-granted") **dissolves** under this ruling. The decision survives on the two enduring reasons: (a) `view_link` cannot mint the reserved name; (b) **audience separation** — ~~ari+leader may *mint the link*, while the data tools are what the page reads~~ (**⚠️ SUPERSEDED 2026-10-20 by [decisions.md](decisions.md) §A-RETRACTED **RET-1** — the minting audience is ari-ONLY; the category split survives structurally**). Keeping the split also preserves the phase-merge hygiene that D13 cites. **Ruling: keep `board-link` separate; amend the stated rationale.**
 
 ---
 
@@ -236,7 +236,7 @@ The plan's characterisation is **correct**, and the code is worse than the plan 
 
 **Ruling.** A cap converts a *late but real* delivery into a **silent, permanent, non-self-healing loss** — the exact failure class the tool exists to prevent. Keep `None`. The late path is self-announcing (the composed message carries the scheduled instant, P2-D7); the skip path announces nothing until a human inspects the list, and its only remedy is a manual `task_schedule_update`.
 
-The honest counter-direction (a days-late alarm can trigger a wrong action) is handled by the **prompt contract**, not by a cap: the message states the scheduled instant and instructs the fresh instance to compare it against its `time` tool and **re-verify before acting if late**. Make the threshold explicit rather than implicit.
+The honest counter-direction (a days-late alarm can trigger a wrong action) is handled by the **prompt contract**, not by a cap: the message states the scheduled instant and instructs the (fresh or, since 2026-10-20 **RET-2**, the CALLING) instance to compare it against its `time` tool and **re-verify before acting if late**. Make the threshold explicit rather than implicit.
 
 Because the cap is **daemon-wide**, the wrapper cannot override it. It **must** read and echo it: `"lateness_cap_seconds": <int|null>` — so the agent knows whether a missed alarm would be delivered late or skipped forever.
 

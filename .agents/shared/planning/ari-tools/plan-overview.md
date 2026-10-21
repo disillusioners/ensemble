@@ -55,7 +55,7 @@ Channel and project are *attributes of an item* (tags / FK), never separate boar
 Give Ari ONE tool that arms a reminder to itself ≥30 minutes out, without Ari needing to know the scheduling
 engine's payload grammar, label lifecycle or timezone-resolution rules. The wrapper enforces the floor
 **pre-create** (a rejected alarm burns no label), resolves the timezone once server-side using the engine's
-own public primitives, composes a **self-contained** message (the receiver is a fresh instance with no memory
+own public primitives, composes a **self-contained** message (the receiver was a fresh instance with no memory — **⚠️ SUPERSEDED 2026-10-20 by [decisions.md](decisions.md) §A-RETRACTED **RET-2**: the receiver is now the CALLING instance, woken with the alarm intent**
 of the request), and optionally links a board item by id. The engine is reused verbatim — no engine change.
 → [phase2-plan.md](phase2-plan.md)
 
@@ -342,11 +342,16 @@ Each phase carries its own measurable criteria; this is the commission-level rol
     `agent_id` gates are PROVEN too** — a **literal tool-name** allow entry bypasses the category gate outright
     (the category-expansion loop, `daemon/tools/instance.py:468-478`), so the body gate is the layer that
     actually enforces "ari-only". **All four gate sets, each with its own assertion:**
-    - `board_create` / `board_update` / `board_list` / `board_get` → `{"ari","leader"}` via the shared
+    - `board_create` / `board_update` / `board_list` / `board_get` → `{"ari"}` via the shared
       `_is_board_authorized()` helper (phase 1; pinned by N6 — "the **body gate** — an `agent_id` outside
-      `{"ari","leader"}` gets an `"ERROR: …"` envelope and never reaches the service");
+      `{"ari"}` gets an `"ERROR: …"` envelope and never reaches the service").
+      **⚠️ SUPERSEDED by the 2026-10-20 user ruling ([decisions.md](decisions.md) §A-RETRACTED **RET-1**):
+      the set was `{"ari","leader"}` and is now `{"ari"}` — the board categories are ari-ONLY;
     - `self_alarm` → `{"ari"}` via the runtime `agent_id != "ari"` gate in the tool body (phase 2; L2a);
-    - `view_write` → `{"ari"}` and `board_link` → `{"ari","leader"}` via the **ONE shared** helper
+    - `view_write` → `{"ari"}` and `board_link` → `{"ari"}` (**⚠️ SUPERSEDED by
+      [decisions.md](decisions.md) §A-RETRACTED **RET-1** — the `board_link` set was `{"ari","leader"}` and
+      is now `{"ari"}`; the two sets stay SEPARATE named constants — the separation is structural, not an
+      audience split**) via the **ONE shared** helper
       `_is_views_authorized()` in the **new** module `daemon/tools/views_auth.py`, with the two gate sets
       `VIEW_WRITE_AGENTS` / `BOARD_LINK_AGENTS` (phase 3 — the **iteration-002 / BLOCKER 1** fold). Both factory
       signatures now take `agent_id` — `create_view_write_tools(manager, *, current_instance_id, agent_id)` and
@@ -355,14 +360,19 @@ Each phase carries its own measurable criteria; this is the commission-level rol
       The proving assertions are **T-A8 (iii)** (`view_write`: a non-authorized `agent_id` returns the typed
       `Error: …` envelope, **no file is written**, **no passcode row is minted** — even when the category gate was
       bypassed by a literal tool-name allow entry) and **T-BL4 (iii)** (`board_link`: the same, plus the
-      assertion that the two gate sets differ so `view_write`'s set cannot leak in), with a source-scan/identity
+      assertion that **each** gate set is exactly `{"ari"}` — **⚠️ the earlier "the two gate sets differ"
+      assertion is OBSOLETE and was REPLACED** by the exact-`{"ari"}` pins under **RET-1**), with a
+      source-scan/identity
       pin that both tools import `_is_views_authorized` from `daemon.tools.views_auth`.
     ⇒ the three-layer doctrine is **enforced and proven for every privileged tool in the commission** — the
     category gate **and** the body gate are both required; one is not a substitute for the other.
-14. `view_write` is ari-only; `self_alarm` is ari-only (exactly one `meta.json` grants each category, **and**
-    the privileged category is registered + pinned in the same commit); `board` is ari + leader; `board-link` is
-    ari + leader. **The privileged-set trajectory is 8 → 9 → 10 → 12 across THREE pin passes** — the merge
-    verifies that #9 (P1) and #10 (P2) landed before P3's 10 → 12 pass.
+14. **`view_write`, `self_alarm`, `board` and `board-link` are ALL ari-only** (exactly one `meta.json` grants
+    each category, **and** the privileged category is registered + pinned in the same commit).
+    **⚠️ SUPERSEDED by the 2026-10-20 user ruling ([decisions.md](decisions.md) §A-RETRACTED **RET-1**):**
+    `board` and `board-link` were ari + leader; the user ruling retracts that audience — **the board
+    categories are `ari`-ONLY** and leader keeps its pre-existing tools (`view_link` et al.) untouched.
+    **The privileged-set trajectory 8 → 9 → 10 → 12 across THREE pin passes is UNAFFECTED** — the merge
+    still verifies that #9 (P1) and #10 (P2) landed before P3's 10 → 12 pass.
 15. Zero seal violations **introduced by this commission**: the seal-test mismatch count **before == after**
     (the measured baseline at this HEAD is **7** — the test is **already red** on 7 pre-existing stale pins, which
     are **NOT ours to fix**); no manifest-covered file is edited **outside** the conventions step (§8), and every
@@ -412,7 +422,7 @@ filename tokens in prompt prose).
 | `agents/ari/workflow.md` | **EDIT** | The **session open/close procedure**: session open ⇒ `board_list(status="open")` — the **full open board** (one global board; cross-instance continuity is the goal), bounded by the `limit` param (default **50**); session close ⇒ append a **handoff note** to **each open item in that open set** (**no ownership filter** — see §8.4 item 2). | `workflow.md` owns "step-by-step process" (guide §2). The tool *reference* stays in `tools_note.md`; `workflow.md` links to it by section name. |
 | `agents/ari/rule.md` | **NO EDIT** | — | Nothing here is a new *hard constraint* that is not already a rule or a process step: the ≥30-min rule is tool-usage guidance (tools_note), the open/close procedure is process (workflow). Editing `rule.md` would duplicate content the guide forbids duplicating, risk the ≤7-Cardinal ceiling, and put `agents/ari/rule.md` — which **IS** in the `SEALED_SHA_BASELINES` tripwire — into the seal blast radius for no benefit. |
 | `agents/ari/soul.md` | **NO EDIT** | — | `soul.md` owns identity / personality / tone (guide §2, §5). The new material carries no tone directive and changes no identity. |
-| `agents/leader/*` | **NO EDIT** | — | The conventions content is **ari-specific** (ari alone holds `self_alarm` and `view_write`; the board/session discipline is ari's). Leader holds `board` + `board-link` only and gains no session procedure. |
+| `agents/leader/*` | **NO EDIT** | — | The conventions content is **ari-specific** (ari alone holds `self_alarm`, `view_write`, `board` and `board-link`; the board/session discipline is ari's). **⚠️ 2026-10-20 update ([decisions.md](decisions.md) §A-RETRACTED **RET-1**):** leader **no longer** holds `board` + `board-link` — the board categories are ari-only; leader gains no session procedure either way. |
 
 **⇒ The seal blast radius of the conventions step is exactly TWO files**: `agents/ari/tools_note.md`
 (manifest-covered only) and `agents/ari/workflow.md` (manifest-covered **and** in the `SEALED_SHA_BASELINES`
@@ -519,7 +529,7 @@ These are recorded as **deferred with reasons**, not as gaps. Each is listed in 
 | Deferred item | Where | Why deferred |
 |---|---|---|
 | **Job-lifecycle auto-update** — when a linked job reaches `DONE`/`DEAD`, auto-append a system note and flip the item's status. | [phase1-plan.md §9](phase1-plan.md) | (a) There is no lifecycle-event seam for an arbitrary table — the job-completion path lives beside the report-delivery sweep, and touching it risks the report-delivery path. (b) Auto-writing notes changes the **authorship model** of an append-only audit trail (system author vs instance author) and needs a documented convention before any row is written. (c) It requires the job-completion path to reach `BoardService`. Deferring until phase-1 traffic exists keeps the phase-1 diff small and the audit trail's provenance unambiguous. |
-| **Board `due_at` → alarm creation-time auto-arm** — the board service arms a `self_alarm` when a due date is set. | [phase2-plan.md D8](phase2-plan.md) | Five concrete blockers: `create_schedule` needs a caller-agent concept the board tools do not have (the board is granted to ari **and** leader, the alarm to ari only); label synthesis + the burned-label rule would leak into the board service; a `due_at` change ⇒ reschedule, which cannot change the recurrence family and has a documented <1 s missed-fire window; `due_at` removal ⇒ cancel ⇒ terminal + label burn + hidden history; and phase 1's board API is not frozen, so coupling to it creates a merge-order dependency. ⇒ **v1 uses an agent-prompt convention**; the board's `due_at` stays the source of truth for the deadline, the alarm is the reminder mechanism. |
+| **Board `due_at` → alarm creation-time auto-arm** — the board service arms a `self_alarm` when a due date is set. | [phase2-plan.md D8](phase2-plan.md) | Five concrete blockers: `create_schedule` needs a caller-agent concept the board tools do not have (the board is granted to ari **only** — **⚠️ per the 2026-10-20 ruling RET-1**; it was ari **and** leader before —, and the alarm to ari only); label synthesis + the burned-label rule would leak into the board service; a `due_at` change ⇒ reschedule, which cannot change the recurrence family and has a documented <1 s missed-fire window; `due_at` removal ⇒ cancel ⇒ terminal + label burn + hidden history; and phase 1's board API is not frozen, so coupling to it creates a merge-order dependency. ⇒ **v1 uses an agent-prompt convention**; the board's `due_at` stays the source of truth for the deadline, the alarm is the reminder mechanism. |
 | **Chat bridge for alarm replies** — bridging a fired alarm's summary back to the originating chat surface. | [phase2-plan.md OQ-1](phase2-plan.md) | **ADJUDICATED (leader ruling R-chat-bridge / architect §4.2) — no new infrastructure in v1; the BOARD is the user-visible surface.** There is **no structural path** to a chat surface (the scheduler source is one-way; the receiving instance is scheduler-owned with **no chat context**), so a bridge would need new ownership plumbing. The v1 contract promises the board and **must NOT** promise a ping. If a public instance→job resolver ever appears, it is a **v2** note — it would not change the v1 ruling. |
 | **A REST twin for the board in phase 1** | [phase1-plan.md Q6](phase1-plan.md) | The bound phase-1 shape is tools-only; phase 3 adds the live view, which may call the service directly. |
 | **A reports-INDEX page** (a listing of published pages) | [phase3-plan.md](phase3-plan.md) | No consumer in this phase; it would also need a title sidecar. |

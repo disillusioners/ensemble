@@ -223,13 +223,26 @@ def _build_instance_tools_for(
 
     from daemon.tools.instance import create_instance_tools
 
-    _stage_synthetic_agent(tmp_path, agent_id, allow)
-    manager = MagicMock(name="InstanceManager")
-    manager.config.daemon.port = 0
-    manager.config.llm.allowed_models = []
-    manager._secret_service = None
-    manager._instance_repository = None
-    tools = create_instance_tools(manager, f"inst-{agent_id}", agent_id)
+    # The synthetic registry is only needed WHILE the tools are built
+    # (``create_instance_tools`` → ``_apply_tool_filter`` resolves the
+    # agent meta from the global registry). Leaving it installed leaks a
+    # synthetic registry into every LATER test in the session — the
+    # agent ids of those tests then fail to resolve ("Agent not found"),
+    # which is an order-dependent failure in unrelated suites. Restore
+    # the previous global as soon as the build is done.
+    import daemon.registry as dr
+
+    previous_registry = dr._registry
+    try:
+        _stage_synthetic_agent(tmp_path, agent_id, allow)
+        manager = MagicMock(name="InstanceManager")
+        manager.config.daemon.port = 0
+        manager.config.llm.allowed_models = []
+        manager._secret_service = None
+        manager._instance_repository = None
+        tools = create_instance_tools(manager, f"inst-{agent_id}", agent_id)
+    finally:
+        dr._registry = previous_registry
     return {getattr(t, "name", "?"): t for t in tools}
 
 
@@ -758,8 +771,8 @@ class TestPrivilege:
         assert _is_views_authorized(123, VIEW_WRITE_AGENTS) is False
         assert _is_views_authorized("ari", VIEW_WRITE_AGENTS) is True
         assert _is_views_authorized("leader", VIEW_WRITE_AGENTS) is False
-        assert _is_views_authorized("leader", BOARD_LINK_AGENTS) is True
-        assert VIEW_WRITE_AGENTS != BOARD_LINK_AGENTS
+        assert _is_views_authorized("leader", BOARD_LINK_AGENTS) is False
+        assert VIEW_WRITE_AGENTS == BOARD_LINK_AGENTS == frozenset({"ari"})
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -883,14 +896,21 @@ class TestReportsRootInjection:
 
 
 # ─────────────────────────────────────────────────────────────────
-# The board_link tool's gate set is DIFFERENT (cross-module discipline)
+# The board_link tool's gate set is the SAME audience (cross-module discipline)
 # ─────────────────────────────────────────────────────────────────
 
 
-def test_the_two_gate_sets_are_different() -> None:
+def test_both_gate_sets_are_ari_only() -> None:
+    """ARI-ONLY (user ruling 2026-10-20).
+
+    The earlier pin asserted the two sets DIFFER (the "mint ≠ read"
+    audience split). That split is RETRACTED — both are now exactly
+    ``{"ari"}``. The replacement pins the EXACT audience of each set
+    (not their difference) and pins that leader is denied both.
+    """
     assert VIEW_WRITE_AGENTS == frozenset({"ari"})
-    assert BOARD_LINK_AGENTS == frozenset({"ari", "leader"})
-    assert VIEW_WRITE_AGENTS != BOARD_LINK_AGENTS
+    assert BOARD_LINK_AGENTS == frozenset({"ari"})
+    assert VIEW_WRITE_AGENTS == BOARD_LINK_AGENTS
 
 
 def test_the_board_link_factory_is_keyword_only_after_manager() -> None:

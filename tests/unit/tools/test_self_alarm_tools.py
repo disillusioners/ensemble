@@ -183,6 +183,8 @@ class FakeRepo:
         #: When True, the FIRST name lookup answers "not found" (used to
         #: stage a duplicate that only appears after the create).
         self.hide_first_name_probe = False
+        #: The instance mappings written by the wrapper (the wake target).
+        self.mappings: list[dict] = []
         self._probes = 0
 
     # ── the repository surface the service + the tool use ───────────────
@@ -266,6 +268,44 @@ class FakeRepo:
             row.status = status
         self.status_writes.append((source_id, status))
         return row
+
+    # ── the instance-mapping surface (the reuse-instance wake target) ──
+    def create_instance_mapping(
+        self,
+        source_id,
+        external_user_id,
+        agent_instance_id,
+        agent_id,
+        agent_dir,
+        metadata=None,
+        mapping_id=None,
+    ):
+        """Record the instance mapping — the wake target.
+
+        The REAL repository upserts on ``(source_id, external_user_id)``
+        and the scheduler adapter reads that exact key to resolve a
+        reuse-instance fire, so the double models the same key.
+        """
+        self.mappings.append(
+            {
+                "source_id": source_id,
+                "external_user_id": external_user_id,
+                "agent_instance_id": agent_instance_id,
+                "agent_id": agent_id,
+                "agent_dir": agent_dir,
+                "metadata": dict(metadata or {}),
+            }
+        )
+        return self.mappings[-1]
+
+    def get_instance_mapping(self, source_id, external_user_id):
+        for mapping in self.mappings:
+            if (
+                mapping["source_id"] == source_id
+                and mapping["external_user_id"] == external_user_id
+            ):
+                return mapping
+        return None
 
 
 class FakeAdapter:
@@ -860,7 +900,7 @@ class TestCreateBranch:
         # ``agent`` is MANDATORY — the engine fail-fasts on an unknown one.
         assert payload["agent"] == "ari"
         assert payload["timezone"] == TZ_NAME
-        assert payload["instance_mode"] == "new_instance"
+        assert payload["instance_mode"] == "reuse_instance"
         assert payload["project_id"] == PROJECT_ID
         assert payload["recurrence"] == "once"
         assert payload["weekday"] is None
@@ -870,7 +910,40 @@ class TestCreateBranch:
         stored = repo.rows[0]
         assert stored.config["timezone"] == TZ_NAME
         assert stored.config["agent"] == "ari"
-        assert stored.config["instance_mode"] == "new_instance"
+        assert stored.config["instance_mode"] == "reuse_instance"
+
+    @pytest.mark.asyncio
+    async def test_the_create_binds_the_row_to_the_CALLING_instance(
+        self, tool_env
+    ) -> None:
+        """The wake target (user ruling 2026-10-20).
+
+        The engine's reuse-instance delivery resolves the target through
+        the instance-mapping table — so the wrapper MUST write the
+        mapping pointing at the CALLING instance, otherwise the fire
+        would spawn a fresh instance.
+        """
+        tools, _service, repo, _instance_repo = tool_env
+        result = await _call(
+            tools,
+            label="deploy-check",
+            when_or_every="in 45m",
+            message_to_self="Do the thing.",
+        )
+        assert isinstance(result, dict)
+        assert result["instance_mode"] == "reuse_instance"
+        assert result["wake_target_bound"] is True
+        assert result["wake_target_instance_id"] == CALLER_INSTANCE
+
+        # Exactly ONE mapping, keyed the way the adapter reads it
+        # (``get_instance_mapping(source_id, source_id)``), pointing at
+        # the CALLING instance.
+        assert len(repo.mappings) == 1
+        mapping = repo.mappings[0]
+        assert mapping["source_id"] == result["source_id"]
+        assert mapping["external_user_id"] == mapping["source_id"]
+        assert mapping["agent_instance_id"] == CALLER_INSTANCE
+        assert mapping["agent_id"] == CALLER_AGENT
 
     @pytest.mark.asyncio
     async def test_the_create_response_echoes_the_branch_scoped_status(
@@ -952,7 +1025,10 @@ class TestCreateBranch:
         assert "Scheduled fire:" in message
         assert "Board item: wi-1a2b3c4d" in message
         assert "board_get" in message
-        assert "fresh instance with no memory" in message
+        # The alarm wakes THIS session (user ruling 2026-10-20) — the
+        # fresh-instance framing is RETRACTED.
+        assert "fresh instance with no memory" not in message
+        assert "firing into THIS session" in message
         assert message.endswith("Action: Check the deploy status.")
 
     @pytest.mark.asyncio

@@ -212,6 +212,14 @@ class ScheduleUpdatePayload(BaseModel):
     timezone: str | None = None
     paused: bool | None = None
     priority: int | None = Field(default=None, ge=1, le=10)
+    instance_mode: str | None = Field(
+        default=None,
+        description=(
+            "new_instance | reuse_instance. Omitted = leave the stored "
+            "value untouched. Set to reuse_instance to bind an existing "
+            "row to the caller's instance (the self_alarm re-arm path)."
+        ),
+    )
 
 
 class ScheduleUpdateResponse(BaseModel):
@@ -991,6 +999,13 @@ async def update_schedule(
             if not payload.message.strip():
                 raise ValueError("message must be a non-empty string")
             config["message"] = payload.message
+        if payload.instance_mode is not None:
+            if payload.instance_mode not in _VALID_INSTANCE_MODES:
+                raise ValueError(
+                    f"Invalid instance_mode '{payload.instance_mode}': "
+                    f"expected one of {', '.join(_VALID_INSTANCE_MODES)}"
+                )
+            config["instance_mode"] = payload.instance_mode
         if payload.priority is not None:
             config["priority"] = payload.priority
         if payload.label is not None:
