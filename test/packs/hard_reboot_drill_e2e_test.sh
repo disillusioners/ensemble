@@ -26,7 +26,9 @@
 #     P1  scratch PostgreSQL role+DB on the LOCAL 16/main cluster only
 #     P2  scratch env file + scratch CWD + FAKE_HOME + free port
 #     P3  isolated daemon boot (systemd transient unit) + cgroup assertion
-#     P4  seed the pre-crash state (instance + schedule + fresh-dead MQ row)
+#     P4  seed the pre-crash state (task-less RUNNING ghost + schedule +
+#         fresh-dead MQ row + a SECOND, genuinely resumable in-flight turn
+#         parked on the local stalling mock LLM)
 #     P5  hard kill (kill -9) of the drill daemon
 #     P6  simulated reboot (unit stop + FRESH systemd-run start)
 #     P7  observe the recovery markers + MQ accounting + timings
@@ -62,7 +64,8 @@
 #     data/logs/, data/ensemble.json, data/launcher.err.log, .launcher-state.
 #   * SCRATCH PG: local 16/main on 127.0.0.1:5432 only; a throwaway role+DB
 #     per run; NEVER CREATEDB on a shared role; DROP verified gone.
-#   * PORT: free port from 10000-10100 (dynamic probe; fallback 10007/10008).
+#   * PORT: free ports from 10000-10100 (dynamic probe; fallback
+#     10007/10008) — TWO ports: the drill daemon's + the mock LLM's.
 #     NEVER 8079 / 9797 / 7979 / 8088.
 #
 #   /bin/sh is dash → $RANDOM is EMPTY (use $$ / date +%s).
@@ -76,8 +79,20 @@
 #
 # ── EVIDENCE BUNDLE ──────────────────────────────────────────────────────────
 #   /tmp/hrr-drill-<ts>/ : preflight.json pg_setup.log boot.log
-#   journal-<unit>.log seed.json pre_crash.json post_restart.json
+#   journal-<unit>.log journal-postrestart-<unit>.log mock_llm.log
+#   seed.json pre_crash.json post_restart.json
 #   timings.json cleanup.json tree_state.json
+#
+# ── POST-RESTART MARKER ANCHORING (defect-1 fix) ─────────────────────────────
+#   The unit journal ACCUMULATES across the simulated reboot (same unit
+#   name ⇒ journalctl -u returns pre-crash AND post-restart entries). A
+#   naive grep for "[HardReboot] MQ boot pass: reset=" can therefore
+#   match the PRE-CRASH boot's line and report T_recovery / marker
+#   presence from a boot that never ran the pass — a false positive on
+#   the drill's most important assertion. Every post-restart observation
+#   in P6/P7 is therefore anchored: the journal CURSOR is captured
+#   immediately BEFORE the unit stop, and all post-restart markers /
+#   parses read journalctl --after-cursor=<that cursor> only.
 #
 # Run:  timeout 300 bash test/packs/hard_reboot_drill_e2e_test.sh
 # ============================================================================
@@ -111,6 +126,15 @@ WATCHDOG_PID=""
 INSTANCE_ID=""
 MESSAGE_ID=""
 SCHEDULE_ID=""
+RESUME_INSTANCE_ID=""
+RESUME_MESSAGE_ID=""
+RESUME_TASK_ID=""
+RESUME_WORK_ID=""
+MOCK_PORT=""
+MOCK_PID=""
+MOCK_SCRIPT=""
+MOCK_PY=""
+PRE_RESTART_CURSOR=""
 T_RESTART=0
 T_READYZ=0
 T_RECOVERY=0
@@ -176,6 +200,29 @@ mq_counts() {
          AND (status='ready' OR (status='retrying' AND next_retry_at <= now())))::text;"
 }
 
+# wait_resume_task — bounded poll for the RESUMABLE instance to reach the
+# state that makes it genuinely resumable: instance status='running' AND
+# a task row with status='running' (a real task row ⇒ the graph is
+# executing ⇒ a LangGraph checkpoint exists for that thread). Bounded
+# (default 30s) so a stuck dispatch fails the drill loudly instead of
+# hanging the pack.
+wait_resume_task() {
+    local limit="${1:-30}" t0 now st tk
+    t0="$(now_s)"
+    while :; do
+        st="$(psql_scratch "SELECT status FROM instances WHERE instance_id='${RESUME_INSTANCE_ID}';" | tr -d '[:space:]')"
+        tk="$(psql_scratch "SELECT count(*) FROM task WHERE instance_id='${RESUME_INSTANCE_ID}' AND status='running';" | tr -d '[:space:]')"
+        if [ "$st" = "running" ] && [ "${tk:-0}" -ge 1 ]; then
+            RESUME_TASK_ID="$(psql_scratch "SELECT id FROM task WHERE instance_id='${RESUME_INSTANCE_ID}' AND status='running' ORDER BY created_at ASC LIMIT 1;" | tr -d '[:space:]')"
+            RESUME_WORK_ID="$(psql_scratch "SELECT work_id FROM task WHERE id='${RESUME_TASK_ID}';" | tr -d '[:space:]')"
+            return 0
+        fi
+        now="$(now_s)"; [ $((now - t0)) -ge "$limit" ] && return 1
+        time_left || return 1
+        sleep 1
+    done
+}
+
 # Only /tmp/hrr-* paths may ever be removed (live-shape delete guard).
 safe_rm() {
     local p="${1:-}"
@@ -190,6 +237,25 @@ safe_rm() {
 teardown() {
     [ -n "$UNIT" ] && sudo -n systemctl stop "$UNIT" >/dev/null 2>&1
     [ -n "$UNIT" ] && sudo -n systemctl reset-failed "$UNIT" >/dev/null 2>&1
+    # Mock LLM server: drill-owned process, killed by the EXACT PID we
+    # started (never by pattern — signal fence). It is killed AFTER the
+    # unit stop so the post-restart resumed turn is never racing a dead
+    # endpoint during observation.
+    if [ -n "$MOCK_PID" ] && kill -0 "$MOCK_PID" 2>/dev/null; then
+        kill "$MOCK_PID" >/dev/null 2>&1
+        sleep 1
+        kill -0 "$MOCK_PID" 2>/dev/null && kill -9 "$MOCK_PID" >/dev/null 2>&1
+    fi
+    # Belt: if the mock's LISTEN socket is STILL held (starter/wrapper fork
+    # class), kill the exact socket owner — never a pattern.
+    if [ -n "$MOCK_PORT" ]; then
+        MOCK_STRAGGLER="$(ss -tlnpH "sport = :${MOCK_PORT}" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\),.*/\1/p' | head -1)"
+        if [ -n "$MOCK_STRAGGLER" ] && kill -0 "$MOCK_STRAGGLER" 2>/dev/null; then
+            kill "$MOCK_STRAGGLER" >/dev/null 2>&1
+            sleep 1
+            kill -0 "$MOCK_STRAGGLER" 2>/dev/null && kill -9 "$MOCK_STRAGGLER" >/dev/null 2>&1
+        fi
+    fi
     if [ "$PG_CREATED" = "1" ]; then
         psql_super "DROP DATABASE IF EXISTS \"${PG_DB}\";" >/dev/null 2>&1
         psql_super "DROP ROLE IF EXISTS \"${PG_ROLE}\";" >/dev/null 2>&1
@@ -267,14 +333,27 @@ if phase_on P0; then
     LIVE_LINK_DEMO="$(readlink -f /home/nea/agents-ensemble-demo/current 2>/dev/null)"
     ok "live baseline: main=${LIVE_MAIN_PID:-?} demo=${LIVE_DEMO_PID:-?} link=${LIVE_LINK_MAIN:-?}"
 
-    # port band: dynamic probe 10000-10100, fallback 10007 then 10008
+    # port band: dynamic probe 10000-10100, fallback 10007 then 10008.
+    # TWO ports: DRILL_PORT (the drill daemon) and MOCK_PORT (the local
+    # stalling mock LLM). Both exclude the reserved set and each other.
     for p in $(seq 10000 10100) 10007 10008; do
+        case "$p" in 8079|9797|7979|8088) continue ;; esac
         if ! (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null; then DRILL_PORT="$p"; break; fi
     done
     case "$DRILL_PORT" in
         8079|9797|7979|8088) DRILL_PORT="" ;;
     esac
-    if [ -n "$DRILL_PORT" ]; then ok "drill port selected: ${DRILL_PORT}"; else bad "no free port in 10000-10100"; fi
+    for p in $(seq 10000 10100) 10007 10008; do
+        [ "$p" = "$DRILL_PORT" ] && continue
+        case "$p" in 8079|9797|7979|8088) continue ;; esac
+        if ! (exec 3<>/dev/tcp/127.0.0.1/$p) 2>/dev/null; then MOCK_PORT="$p"; break; fi
+    done
+    case "$MOCK_PORT" in
+        8079|9797|7979|8088) MOCK_PORT="" ;;
+    esac
+    [ -n "$DRILL_PORT" ] && [ -n "$MOCK_PORT" ] && [ "$DRILL_PORT" != "$MOCK_PORT" ] \
+        && ok "ports selected: daemon=${DRILL_PORT} mock=${MOCK_PORT}" \
+        || { bad "no free port pair in 10000-10100 (drill=${DRILL_PORT:-none} mock=${MOCK_PORT:-none})"; }
 
     # tree state (moving target)
     TREE_HEAD_BOOT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null)"
@@ -287,6 +366,7 @@ if phase_on P0; then
   "phases_selected": "${HRR_PHASE}",
   "fence_self_test": "$(jstr "$FENCE_PROOF")",
   "drill_port": ${DRILL_PORT:-0},
+  "mock_port": ${MOCK_PORT:-0},
   "unit": "${UNIT}",
   "bundle": "${BUNDLE}",
   "repo_root": "${REPO_ROOT}",
@@ -386,9 +466,13 @@ DAEMON_PORT=${DRILL_PORT}
 HOST=127.0.0.1
 DAEMON_HOST=127.0.0.1
 LOG_LEVEL=info
-# LLM: dead LOCAL endpoint — the drill is structural (blind spot §7.8); no
-# live proxy is contacted and no live credential is used.
-OPENAI_BASE_URL=http://127.0.0.1:1/v1
+# LLM: LOCAL stalling mock (127.0.0.1:${MOCK_PORT}, started by this drill
+# in P2 and killed by the cleanup trap by exact PID). The mock SLEEPS
+# before answering so the dispatched turn is still IN FLIGHT when the
+# daemon is kill -9'd — that is what leaves a genuinely resumable orphan
+# (task row + LangGraph checkpoint) for the auto-continue pass. NO live
+# proxy is contacted; the key is a clearly-fake constant.
+OPENAI_BASE_URL=http://127.0.0.1:${MOCK_PORT}/v1
 OPENAI_API_KEY=drill-mock-key-not-real
 OPENAI_MODEL=drill-mock
 OPENAI_REQUEST_GZIP=0
@@ -413,6 +497,139 @@ EOF
         bad "foreign-CWD resolution FAILED: $(printf '%s' "$RESOLVE" | tr '\n' ' ')"
     fi
     printf '%s\n' "$RESOLVE" > "$BUNDLE/scratch_resolution.txt"
+
+    # ── the LOCAL STALLING MOCK LLM (one-file, stdlib-only) ────────────────
+    # Modeled on tests/mock_llm_server.py (build_non_stream_response) —
+    # the response shape this daemon's ThinkingChatOpenAI provably
+    # accepts: non-streaming chat.completion, assistant message with
+    # content + reasoning_content:null, finish_reason "stop", usage
+    # block, NO tool call. The handler SLEEPS STALL_SECONDS before
+    # answering so the turn stays IN FLIGHT (the first superstep's
+    # LangGraph checkpoint is already written while the LLM call is
+    # pending). Started here (BEFORE the P3 boot) so no daemon LLM call
+    # ever hits connection-refused; killed by exact PID in teardown.
+    MOCK_PY="$REPO_ROOT/.venv/bin/python"
+    [ -x "$MOCK_PY" ] || MOCK_PY="$(command -v python3 || echo python3)"
+    MOCK_SCRIPT="$SCRATCH/hrr_mock_llm.py"
+    cat > "$MOCK_SCRIPT" <<'MOCK_EOF'
+#!/usr/bin/env python3
+"""HRR-drill-owned mock: OpenAI-compatible /v1/chat/completions that STALLS.
+
+Stdlib only. The stall keeps the dispatched turn in flight across the
+kill -9 so the auto-continue boot pass has a genuinely resumable orphan.
+Response shape mirrors tests/mock_llm_server.py::build_non_stream_response
+(non-streaming, reasoning_content null, finish_reason stop, NO tool call).
+"""
+import argparse
+import json
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+STALL_SECONDS = 300.0
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def _send_json(self, code, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def do_GET(self):
+        if self.path.split("?")[0].rstrip("/") in ("/health", "/healthz"):
+            self._send_json(200, {"status": "ok", "stall_seconds": STALL_SECONDS})
+        else:
+            self._send_json(404, {"error": "not found"})
+
+    def do_POST(self):
+        if not self.path.split("?")[0].rstrip("/").endswith("/chat/completions"):
+            self._send_json(404, {"error": "not found"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        req = {}
+        if length > 0:
+            try:
+                req = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, UnicodeDecodeError):
+                req = {}
+        time.sleep(STALL_SECONDS)  # the stall IS the feature
+        self._send_json(200, {
+            "id": "mockchat-%d" % int(time.time() * 1000),
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": (req.get("model") if isinstance(req, dict) else None) or "drill-mock",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "hrr drill mock: turn kept in flight (stalled %.0fs)" % STALL_SECONDS,
+                    "reasoning_content": None,
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 9, "total_tokens": 10},
+        })
+
+    def log_message(self, fmt, *args):  # silence per-request stderr noise
+        pass
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, required=True)
+    args = ap.parse_args()
+    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    srv.daemon_threads = True
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
+MOCK_EOF
+    # Start with an EXPLICIT MINIMAL env (env -i — the mock touches no DB,
+    # so the poison fence is honored by construction). `env` execs python
+    # in-place, so $! IS the server process; the ss-based adoption below
+    # verifies this (a wrapper shell would fork and $! would point at the
+    # wrapper, not the listener — the socket owner is the authoritative
+    # exact PID).
+    env -i PATH=/usr/bin:/bin HOME="$FAKE_HOME" \
+        "$MOCK_PY" "$MOCK_SCRIPT" --host 127.0.0.1 --port "$MOCK_PORT" \
+        > "$BUNDLE/mock_llm.log" 2>&1 &
+    MOCK_PID=$!
+    MOCK_UP=0
+    mt0="$(now_s)"
+    while :; do
+        mcode="$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${MOCK_PORT}/health" 2>/dev/null)"
+        [ -z "$mcode" ] && mcode=000
+        [ "$mcode" = "200" ] && { MOCK_UP=1; break; }
+        mnow="$(now_s)"; [ $((mnow - mt0)) -ge 10 ] && break
+        sleep 1
+    done
+    if [ "$MOCK_UP" = "1" ] && kill -0 "$MOCK_PID" 2>/dev/null; then
+        # Adopt the LISTENING socket's owner as the authoritative exact PID
+        # (never a pattern): $! may be a wrapper shell if anything in the
+        # start chain forked, and killing a wrapper would orphan the server.
+        MOCK_SOCK_PID="$(ss -tlnpH "sport = :${MOCK_PORT}" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\),.*/\1/p' | head -1)"
+        if [ -n "$MOCK_SOCK_PID" ] && [ "$MOCK_SOCK_PID" != "$MOCK_PID" ]; then
+            note "mock server real pid=${MOCK_SOCK_PID} (starter pid ${MOCK_PID} forked) — tracking the socket owner"
+            MOCK_PID="$MOCK_SOCK_PID"
+        fi
+        ok "stalling mock LLM up: pid=${MOCK_PID} port=${MOCK_PORT} (GET /health 200)"
+    else
+        bad "mock LLM failed to start (pid=${MOCK_PID:-?} health=${mcode:-000})"; head -20 "$BUNDLE/mock_llm.log" 2>/dev/null
+        echo "RESULT: FAIL"; exit 1
+    fi
 
     time_left || { deadline_hit; echo "RESULT: TIMEOUT"; exit 124; }
 fi
@@ -484,24 +701,52 @@ wait_unit_gone() {
         sleep 1
     done
 }
-# wait_marker <regex> <limit_s> — polls the unit journal until the marker
-# appears; returns 0 on sight. Used to time T_recovery honestly.
-wait_marker() {
-    local re="$1" limit="$2" t0 now
-    t0="$(now_s)"
-    while :; do
-        grep -qE "$re" "$BUNDLE/journal-${UNIT}.log" 2>/dev/null && return 0
-        now="$(now_s)"; [ $((now - t0)) -ge "$limit" ] && return 1
-        time_left || return 1
-        sleep 1
-        journalctl -u "$UNIT" --no-pager --output=short-iso 2>/dev/null > "$BUNDLE/journal-${UNIT}.log"
-    done
+# journal_cursor — the CURRENT head cursor of the unit journal (last
+# entry + "-- cursor: s=…"). Captured immediately BEFORE the simulated
+# reboot; everything the drill observes after the restart MUST come from
+# --after-cursor=<that cursor> so a pre-crash marker can never satisfy a
+# post-restart poll (defect-1 fix: stale-marker false positive).
+journal_cursor() {
+    journalctl -u "$UNIT" --no-pager --show-cursor -n 1 --output=short-iso 2>/dev/null \
+        | sed -n 's/^-- cursor: //p' | tail -1 | tr -d '[:space:]'
 }
+# capture_journal — FULL unit journal (pre-crash + post-restart, evidence)
+# plus the daemon's own ensemble.log snapshot.
 capture_journal() {
     journalctl -u "$UNIT" --no-pager --output=short-iso 2>/dev/null > "$BUNDLE/journal-${UNIT}.log"
     if [ -f "$SCRATCH/data/logs/ensemble.log" ]; then
         cp -f "$SCRATCH/data/logs/ensemble.log" "$BUNDLE/boot.log" 2>/dev/null || true
     fi
+}
+# capture_journal_post — ONLY the entries after the pre-restart cursor:
+# the authoritative view for every post-restart observation (P6 markers,
+# P7 marker list, parses, AutoContinue counts).
+capture_journal_post() {
+    if [ -n "$PRE_RESTART_CURSOR" ]; then
+        journalctl -u "$UNIT" --no-pager --output=short-iso \
+            --after-cursor="$PRE_RESTART_CURSOR" 2>/dev/null \
+            > "$BUNDLE/journal-postrestart-${UNIT}.log"
+    else
+        # No anchor → an EMPTY post-restart view is the only honest view
+        # (fail-closed: markers will "never appear" and the drill fails
+        # loudly instead of silently matching a pre-crash line).
+        : > "$BUNDLE/journal-postrestart-${UNIT}.log"
+    fi
+}
+# wait_marker <regex> <limit_s> — polls the POST-RESTART journal view
+# (cursor-anchored) until the marker appears; returns 0 on sight. Used to
+# time T_recovery honestly: a match here is proof the POST-RESTART boot
+# emitted the line, never the pre-crash one.
+wait_marker() {
+    local re="$1" limit="$2" t0 now
+    t0="$(now_s)"
+    while :; do
+        grep -qE "$re" "$BUNDLE/journal-postrestart-${UNIT}.log" 2>/dev/null && return 0
+        now="$(now_s)"; [ $((now - t0)) -ge "$limit" ] && return 1
+        time_left || return 1
+        sleep 1
+        capture_journal_post
+    done
 }
 
 if phase_on P3; then
@@ -594,6 +839,59 @@ if phase_on P4; then
     [ -z "$SCHED_CODE" ] && SCHED_CODE=000
     if [ "$SCHED_CODE" = "201" ]; then ok "schedule created (HTTP 201) source_id=${SCHEDULE_ID}"; else bad "POST /api/schedules returned ${SCHED_CODE}: $(head -c 400 "$BUNDLE/schedule_create.json" 2>/dev/null)"; fi
 
+    # 4e — the RESUMABLE instance (defect-2 fix): a REAL in-flight turn.
+    # The ghost above proves the passes FIRE; this instance proves they
+    # RESUME. The turn is dispatched against the LOCAL stalling mock LLM
+    # (P2), so at kill time it is parked inside the graph's LLM call with
+    # its first superstep checkpoint already written → a real task row
+    # (status='running', task_type='process_message') + a real checkpoint
+    # = exactly the shape find_auto_continue_candidates + _has_checkpoint
+    # need to report scheduled>=1 after the restart.
+    RESUME_CREATE_CODE="$(curl -s --max-time 30 -o "$BUNDLE/resume_instance_create.json" -w '%{http_code}' \
+        -X POST "http://127.0.0.1:${DRILL_PORT}/api/instances" \
+        -H 'Content-Type: application/json' \
+        -d '{"agent_id":"ari"}' 2>/dev/null)"
+    [ -z "$RESUME_CREATE_CODE" ] && RESUME_CREATE_CODE=000
+    if [ "$RESUME_CREATE_CODE" != "201" ] && [ "$RESUME_CREATE_CODE" != "200" ]; then
+        bad "POST /api/instances (resumable) returned ${RESUME_CREATE_CODE}: $(head -c 400 "$BUNDLE/resume_instance_create.json" 2>/dev/null)"
+        echo "RESULT: FAIL"; exit 1
+    fi
+    RESUME_INSTANCE_ID="$(sed -n 's/^{"instance_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$BUNDLE/resume_instance_create.json" 2>/dev/null | head -1)"
+    if [ -n "$RESUME_INSTANCE_ID" ]; then
+        ok "resumable instance created via API (HTTP ${RESUME_CREATE_CODE}) instance_id=${RESUME_INSTANCE_ID}"
+    else
+        bad "could not parse the resumable instance_id from the API response"
+        echo "RESULT: FAIL"; exit 1
+    fi
+
+    # Dispatch the turn (IDLE instance → durable enqueue path, HTTP 200).
+    RESUME_MSG_CODE="$(curl -s --max-time 30 -o "$BUNDLE/resume_message_create.json" -w '%{http_code}' \
+        -X POST "http://127.0.0.1:${DRILL_PORT}/api/instances/${RESUME_INSTANCE_ID}/messages" \
+        -H 'Content-Type: application/json' \
+        -d '{"content":"hrr drill resumable turn: think carefully about the fixture content and answer."}' 2>/dev/null)"
+    [ -z "$RESUME_MSG_CODE" ] && RESUME_MSG_CODE=000
+    RESUME_MESSAGE_ID="$(sed -n 's/.*"message_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$BUNDLE/resume_message_create.json" 2>/dev/null | head -1)"
+    if [ "$RESUME_MSG_CODE" = "200" ] || [ "$RESUME_MSG_CODE" = "202" ]; then
+        ok "turn dispatched to the resumable instance (HTTP ${RESUME_MSG_CODE}, message_id=${RESUME_MESSAGE_ID:-<none>})"
+    else
+        bad "POST /api/instances/${RESUME_INSTANCE_ID}/messages returned ${RESUME_MSG_CODE}: $(head -c 400 "$BUNDLE/resume_message_create.json" 2>/dev/null)"
+        echo "RESULT: FAIL"; exit 1
+    fi
+
+    # Bounded poll: instance running AND a running task row ⇒ in-flight
+    # turn with a checkpoint. This is the kill precondition — do NOT
+    # proceed to P5 without it (a ghost-only kill would repeat the old
+    # candidates=0 weakness).
+    if wait_resume_task 30; then
+        ok "resumable instance IN FLIGHT: status=running task_id=${RESUME_TASK_ID} work_id=${RESUME_WORK_ID}"
+    else
+        RESUME_ST="$(psql_scratch "SELECT status FROM instances WHERE instance_id='${RESUME_INSTANCE_ID}';")"
+        RESUME_TK="$(psql_scratch "SELECT count(*) FROM task WHERE instance_id='${RESUME_INSTANCE_ID}';")"
+        bad "resumable instance never reached (running + running-task) within 30s (instance=${RESUME_ST:-?} task_rows=${RESUME_TK:-?})"
+        capture_journal
+        echo "RESULT: FAIL"; exit 1
+    fi
+
     PRE_COUNTS="$(mq_counts "$INSTANCE_ID")"
     cat > "$BUNDLE/seed.json" <<EOF
 {
@@ -605,9 +903,14 @@ if phase_on P4; then
   "schedule_id": "${SCHEDULE_ID}",
   "schedule_http": "${SCHED_CODE}",
   "mq_counts": "$(jstr "$PRE_COUNTS")",
-  "note": "fresh-dead row: status='processing', last_activity_at=now()-2min, processing_started_at=same, NO task row (mirrors tests/helpers/hard_reboot_fixtures.py + tests/unit/test_message_queue_boot_recovery.py M1)"
+  "resumable_instance_id": "${RESUME_INSTANCE_ID}",
+  "resumable_message_id": "${RESUME_MESSAGE_ID}",
+  "resumable_task_id": "${RESUME_TASK_ID}",
+  "resumable_work_id": "${RESUME_WORK_ID}",
+  "note": "fresh-dead row: status='processing', last_activity_at=now()-2min, processing_started_at=same, NO task row (mirrors tests/helpers/hard_reboot_fixtures.py + tests/unit/test_message_queue_boot_recovery.py M1); the SECOND instance is a genuinely resumable in-flight turn (real task row + LangGraph checkpoint) parked on the local stalling mock LLM"
 }
 EOF
+    RESUME_PRE_STATUS="$(psql_scratch "SELECT status FROM instances WHERE instance_id='${RESUME_INSTANCE_ID}';")"
     cat > "$BUNDLE/pre_crash.json" <<EOF
 {
   "phase": "P4-pre_crash",
@@ -618,7 +921,20 @@ EOF
   "schedule_row": "$(jstr "$(psql_scratch "SELECT source_id||'|'||status||'|'||enabled||'|'||autostart FROM source_configs WHERE name='${SCHEDULE_ID}';")")",
   "mq_processing_count": "$(printf '%s' "$PRE_COUNTS" | awk '{print $1}')",
   "mq_pending_count": "$(printf '%s' "$PRE_COUNTS" | awk '{print $2}')",
-  "busy_guard_predicate": "pending_count > 0 or processing_count > 0"
+  "busy_guard_predicate": "pending_count > 0 or processing_count > 0",
+  "resumable": {
+    "instance_id": "${RESUME_INSTANCE_ID}",
+    "instance_status": "${RESUME_PRE_STATUS}",
+    "task_id": "${RESUME_TASK_ID}",
+    "work_id": "${RESUME_WORK_ID}",
+    "message_id": "${RESUME_MESSAGE_ID}",
+    "shape": "real in-flight turn: instance running + task running (process_message) + LangGraph checkpoint; parked on the local stalling mock LLM"
+  },
+  "mock_llm": {
+    "port": "${MOCK_PORT}",
+    "pid": "${MOCK_PID}",
+    "stall_seconds": 300
+  }
 }
 EOF
     time_left || { deadline_hit; echo "RESULT: TIMEOUT"; exit 124; }
@@ -643,6 +959,15 @@ fi
 if phase_on P6; then
     STEP=P6
     note "P6 simulated reboot: stop the transient unit, then a FRESH start"
+    # DEFECT-1 ANCHOR: capture the journal cursor BEFORE the stop. Every
+    # post-restart observation is read --after-cursor=<this>, so a stale
+    # pre-crash marker can never satisfy a post-restart poll.
+    PRE_RESTART_CURSOR="$(journal_cursor)"
+    if [ -z "$PRE_RESTART_CURSOR" ]; then
+        bad "could not capture the pre-restart journal cursor — post-restart marker anchoring impossible (fail-closed)"
+        capture_journal; echo "RESULT: FAIL"; exit 1
+    fi
+    ok "journal cursor anchored pre-restart: ${PRE_RESTART_CURSOR}"
     T_RESTART="$(now_s)"
     sudo -n systemctl stop "$UNIT" >/dev/null 2>&1 || true
     wait_unit_gone || note "unit row still visible after stop (proceeding)"
@@ -657,14 +982,15 @@ if phase_on P6; then
         bad "/livez never returned 200 after the fresh start"; capture_journal; echo "RESULT: FAIL"; exit 1
     fi
     # T_recovery = fresh start → the recovery markers observed (MQ boot pass
-    # completed). Polled from the journal, not estimated.
-    capture_journal
+    # completed). Polled from the POST-RESTART journal view (cursor-anchored),
+    # not estimated — a match here is proof the new boot ran the pass.
+    capture_journal_post
     if wait_marker "\[HardReboot\] MQ boot pass: reset=" 60; then
         T_RECOVERY="$(now_s)"
-        ok "MQ boot pass marker observed after the fresh start (T_recovery=${T_RECOVERY})"
+        ok "MQ boot pass marker observed in the POST-RESTART journal (T_recovery=${T_RECOVERY})"
     else
         T_RECOVERY="$(now_s)"
-        bad "MQ boot pass marker never observed within 60s of the fresh start"
+        bad "MQ boot pass marker never observed in the POST-RESTART journal within 60s of the fresh start"
     fi
     capture_journal
     time_left || { deadline_hit; echo "RESULT: TIMEOUT"; exit 124; }
@@ -680,7 +1006,12 @@ if phase_on P7; then
     [ -z "$READY_CODE" ] && READY_CODE=000
     [ "$READY_CODE" = "200" ] && ok "/readyz 200 on the restarted daemon" || bad "/readyz returned ${READY_CODE}"
     capture_journal
-    JLOG="$BUNDLE/journal-${UNIT}.log"
+    capture_journal_post
+    # DEFECT-1 ANCHOR: all post-restart observations read the CURSOR-ANCHORED
+    # view (entries after the pre-restart cursor only). JLOG_FULL keeps the
+    # full pre+post journal as evidence.
+    JLOG="$BUNDLE/journal-postrestart-${UNIT}.log"
+    JLOG_FULL="$BUNDLE/journal-${UNIT}.log"
 
     # Marker strings — VERBATIM from the source (assert on these, not on
     # paraphrases):
@@ -715,7 +1046,21 @@ if phase_on P7; then
     done
     note "G6 preflight: the SUCCESS marker 'Boot preflight: PostgreSQL reachable' is INFO-level and emitted BEFORE the logging handlers are installed, so it is dropped (unobservable in journal AND ensemble.log); the fail-closed exit-75 contract plus the observed scratch-PostgreSQL engine creation cover the same property"
     RESET_N="$(grep -E "\[HardReboot\] MQ boot pass: reset=" "$JLOG" 2>/dev/null | tail -1 | grep -oE 'reset=[0-9]+' | cut -d= -f2)"
-    [ -n "$RESET_N" ] && ok "MQ boot pass reset count = ${RESET_N}" || bad "MQ boot pass reset count not parsed"
+    [ -n "$RESET_N" ] && ok "MQ boot pass reset count = ${RESET_N} (POST-RESTART boot)" || bad "MQ boot pass reset count not parsed"
+
+    # ── DEFECT-2 OBSERVATION: the auto-continue pass must RESUME, not just fire ──
+    # candidates/scheduled parsed from the POST-RESTART boot's ContinueResult
+    # line; the success line "[BOOT_CONTINUE] instance=<id8> work_id=<wid8>
+    # epoch=<iso>" (auto_continue_boot_pass.py:463) proves a checkpoint-backed
+    # resume was actually scheduled for the in-flight turn seeded in P4-4e.
+    AC_LINE="$(grep -E "AutoContinue boot pass: ContinueResult\(" "$JLOG" 2>/dev/null | tail -1)"
+    AC_CAND="$(printf '%s' "$AC_LINE" | grep -oE 'candidates=[0-9]+' | head -1 | cut -d= -f2)"
+    AC_SCHED="$(printf '%s' "$AC_LINE" | grep -oE 'scheduled=[0-9]+' | head -1 | cut -d= -f2)"
+    AC_SUCCESS="$(grep -E '\[BOOT_CONTINUE\] instance=[0-9a-f]{8} work_id=[0-9a-f]{8} epoch=' "$JLOG" 2>/dev/null | tail -1)"
+    [ -n "$AC_LINE" ] && ok "AutoContinue ContinueResult (POST-RESTART boot): ${AC_LINE}" || bad "AutoContinue ContinueResult line ABSENT from the post-restart journal"
+    [ "${AC_CAND:-0}" -ge 1 ] && ok "auto-continue candidates=${AC_CAND} (>=1 — the in-flight turn was selected)" || bad "auto-continue candidates=${AC_CAND:-<none>} (expected >=1)"
+    [ "${AC_SCHED:-0}" -ge 1 ] && ok "auto-continue scheduled=${AC_SCHED} (>=1 — a checkpoint-backed resume was scheduled)" || bad "auto-continue scheduled=${AC_SCHED:-<none>} (expected >=1)"
+    [ -n "$AC_SUCCESS" ] && ok "[BOOT_CONTINUE] success line (POST-RESTART boot): ${AC_SUCCESS}" || bad "[BOOT_CONTINUE] success line ABSENT from the post-restart journal"
 
     # boot epoch is a PROCESS-GLOBAL (no DB column) — parse it from the log
     BOOT_EPOCH_LOG="$(grep -E "Boot epoch captured \(DB clock\):" "$JLOG" 2>/dev/null | tail -1 | sed -E 's/.*Boot epoch captured \(DB clock\): //')"
@@ -746,9 +1091,16 @@ if phase_on P7; then
     SCHED_ROW="$(psql_scratch "SELECT source_id||'|'||status||'|'||enabled||'|'||autostart FROM source_configs WHERE name='${SCHEDULE_ID}';")"
     [ -n "$SCHED_ROW" ] && ok "schedule survived the reboot: ${SCHED_ROW}" || bad "schedule row missing after the reboot"
     INST_STATUS2="$(psql_scratch "SELECT status FROM instances WHERE instance_id='${INSTANCE_ID}';")"
-    note "instance status after reboot: ${INST_STATUS2} (D13 task-less RUNNING ghosts are OUT OF SCOPE — reported, never failed)"
+    note "ghost instance status after reboot: ${INST_STATUS2} (D13 task-less RUNNING ghost — OUT OF SCOPE, reported, never failed)"
     GHOST="$(psql_scratch "SELECT count(*) FROM instances i WHERE i.status='running' AND NOT EXISTS (SELECT 1 FROM task t WHERE t.instance_id=i.instance_id AND t.status IN ('pending','running','paused'));")"
     note "D13 task-less RUNNING ghost count (out of scope, informational): ${GHOST}"
+    # the RESUMABLE instance: the auto-continue resume is continue-in-place
+    # (the orphan task stays status='running'), so the expected post shape is
+    # instance running + task running again on the resumed turn.
+    RESUME_STATUS2="$(psql_scratch "SELECT status FROM instances WHERE instance_id='${RESUME_INSTANCE_ID}';")"
+    RESUME_TASK_STATUS2="$(psql_scratch "SELECT status FROM task WHERE instance_id='${RESUME_INSTANCE_ID}' ORDER BY created_at ASC LIMIT 1;")"
+    RESUME_AC_STAMP="$(psql_scratch "SELECT auto_continued_at::text FROM task WHERE id='${RESUME_TASK_ID}';")"
+    note "resumable instance after reboot: instance=${RESUME_STATUS2:-?} task=${RESUME_TASK_STATUS2:-?} auto_continued_at=${RESUME_AC_STAMP:-<null>}"
 
     # timings — T_restart (unit stop → fresh start issued), T_readyz (fresh
     # start → /readyz 200), T_recovery (fresh start → recovery markers seen),
@@ -788,9 +1140,37 @@ EOF
   "busy_guard_predicate_value": "${GUARD}",
   "busy_guard_branch": "$( [ "$GUARD" = "true" ] && echo visible-pending-shipped-default || echo cleared-override-true )",
   "instance_status": "${INST_STATUS2}",
-  "schedule_row": "$(jstr "$SCHED_ROW")",
   "d13_taskless_running_ghosts": "${GHOST}",
-  "blind_spot_llm": "structural observation only — the drill daemon points OPENAI_BASE_URL at a dead local endpoint (http://127.0.0.1:1/v1); no live proxy call, no LLM-dependent assertion"
+  "ghost_instance": {
+    "instance_id": "${INSTANCE_ID}",
+    "status": "${INST_STATUS2}",
+    "labelling": "D13 task-less RUNNING ghost — OUT OF SCOPE by design, reported never failed"
+  },
+  "resumable_instance": {
+    "instance_id": "${RESUME_INSTANCE_ID}",
+    "status": "${RESUME_STATUS2}",
+    "task_id": "${RESUME_TASK_ID}",
+    "task_status": "${RESUME_TASK_STATUS2}",
+    "auto_continued_at": "${RESUME_AC_STAMP}",
+    "labelling": "defect-2 fix: genuinely resumable in-flight turn (real task row + LangGraph checkpoint parked on the local stalling mock LLM)"
+  },
+  "auto_continue": {
+    "continue_result_line": "$(jstr "$AC_LINE")",
+    "candidates": "${AC_CAND}",
+    "scheduled": "${AC_SCHED}",
+    "success_line": "$(jstr "$AC_SUCCESS")",
+    "journal_view": "cursor-anchored POST-RESTART entries only (--after-cursor=${PRE_RESTART_CURSOR})"
+  },
+  "marker_anchor": {
+    "mechanism": "journal cursor captured before the unit stop; every post-restart marker/parse reads journalctl --after-cursor",
+    "pre_restart_cursor": "${PRE_RESTART_CURSOR}"
+  },
+  "schedule_row": "$(jstr "$SCHED_ROW")",
+  "mock_llm": {
+    "port": "${MOCK_PORT}",
+    "pid": "${MOCK_PID}",
+    "note": "LOCAL stalling mock only — no live proxy is contacted, no real credential used; killed by exact PID in the cleanup trap"
+  }
 }
 EOF
     time_left || { deadline_hit; echo "RESULT: TIMEOUT"; exit 124; }
@@ -826,10 +1206,15 @@ if [ "$DRIFT" = "yes" ]; then note "TREE DRIFT DURING RUN (HEAD ${TREE_HEAD_BOOT
 
 # teardown + residue verification
 DB_AFTER=""; ROLE_AFTER=""; PORT_AFTER=""; UNITS_AFTER=""
+MOCK_PORT_AFTER="free"; MOCK_PID_AFTER="not-started"
 teardown
 DB_AFTER="$(psql_super "SELECT count(*) FROM pg_database WHERE datname='${PG_DB}';" 2>/dev/null | tr -d '[:space:]')"
 ROLE_AFTER="$(psql_super "SELECT count(*) FROM pg_roles WHERE rolname='${PG_ROLE}';" 2>/dev/null | tr -d '[:space:]')"
 if [ -n "$DRILL_PORT" ] && (exec 3<>/dev/tcp/127.0.0.1/$DRILL_PORT) 2>/dev/null; then PORT_AFTER="bound"; else PORT_AFTER="free"; fi
+if [ -n "$MOCK_PORT" ] && (exec 3<>/dev/tcp/127.0.0.1/$MOCK_PORT) 2>/dev/null; then MOCK_PORT_AFTER="bound"; fi
+if [ -n "$MOCK_PID" ]; then
+    if kill -0 "$MOCK_PID" 2>/dev/null; then MOCK_PID_AFTER="alive"; else MOCK_PID_AFTER="gone"; fi
+fi
 UNITS_AFTER="$(systemctl list-units --all --no-legend 'hrr-*' 2>/dev/null | grep -c . || true)"
 LIVE_MAIN_PID2="$(systemctl show ensemble-main.service -p MainPID --value 2>/dev/null | tr -d '[:space:]')"
 LIVE_MAIN_RESTARTS2="$(systemctl show ensemble-main.service -p NRestarts --value 2>/dev/null | tr -d '[:space:]')"
@@ -840,6 +1225,12 @@ LIVE_LINK_MAIN2="$(readlink -f /home/nea/agents-ensemble/current 2>/dev/null)"
 [ "$DB_AFTER" = "0" ] && ok "scratch database dropped (verified gone)" || bad "scratch database still present (count=${DB_AFTER})"
 [ "$ROLE_AFTER" = "0" ] && ok "scratch role dropped (verified gone)" || bad "scratch role still present (count=${ROLE_AFTER})"
 [ "$PORT_AFTER" = "free" ] && ok "drill port ${DRILL_PORT} free" || bad "drill port ${DRILL_PORT} still bound"
+if [ -n "$MOCK_PORT" ]; then
+    [ "$MOCK_PORT_AFTER" = "free" ] && ok "mock LLM port ${MOCK_PORT} free (mock server gone)" || bad "mock LLM port ${MOCK_PORT} still bound"
+    [ "$MOCK_PID_AFTER" = "gone" ] && ok "mock LLM server process gone (pid ${MOCK_PID})" || bad "mock LLM server process still alive (pid ${MOCK_PID}, state=${MOCK_PID_AFTER})"
+else
+    note "mock LLM not started (phase subset without P2) — mock residue check SKIPPED"
+fi
 [ "$UNITS_AFTER" = "0" ] && ok "no hrr-* units remain" || bad "hrr-* units remain (count=${UNITS_AFTER})"
 if [ "${P0_RAN:-0}" = "1" ]; then
     if [ "$LIVE_MAIN_PID" = "$LIVE_MAIN_PID2" ] && [ "$LIVE_MAIN_RESTARTS" = "$LIVE_MAIN_RESTARTS2" ] \
@@ -861,6 +1252,10 @@ cat > "$BUNDLE/cleanup.json" <<EOF
   "scratch_role_rows_after_drop": "${ROLE_AFTER}",
   "drill_port": "${DRILL_PORT}",
   "drill_port_after": "${PORT_AFTER}",
+  "mock_llm_port": "${MOCK_PORT}",
+  "mock_llm_port_after": "${MOCK_PORT_AFTER}",
+  "mock_llm_pid": "${MOCK_PID}",
+  "mock_llm_pid_after": "${MOCK_PID_AFTER}",
   "hrr_units_after": "${UNITS_AFTER}",
   "scratch_cwd_removed": "$([ -d "$SCRATCH" ] && echo false || echo true)",
   "fake_home_removed": "$([ -d "$FAKE_HOME" ] && echo false || echo true)",
