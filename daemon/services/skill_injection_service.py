@@ -308,6 +308,7 @@ class SkillInjectionService:
         project_id: str | None,
         instance_id: str,
         message_id: str,
+        agent_id: str | None = None,
     ) -> tuple[str | None, list[str]]:
         """Resolve relevant skills and render an injection text block.
 
@@ -326,6 +327,11 @@ class SkillInjectionService:
                 docstring.
             message_id: The queue message ID. Used alongside
                 ``instance_id`` for A/B determinism.
+            agent_id: The receiving instance's ``agent_id``.
+                Forwarded to :meth:`SkillSearchService.search` so
+                bank-cloned skills owned by a DIFFERENT agent are
+                excluded (agent-ownership leak fix, 2026-10-21).
+                ``None`` disables the filter (legacy behavior).
 
         Returns:
             Tuple ``(injection_text, injected_skill_ids)``:
@@ -343,6 +349,7 @@ class SkillInjectionService:
             user_message,
             project_id=project_id,
             max_results=max_results,
+            agent_id=agent_id,
         )
 
         injected = list(results.get("injected") or [])

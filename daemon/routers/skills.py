@@ -1053,6 +1053,7 @@ async def search_skills(
             body.query,
             body.project_id,
             body.max_results,
+            agent_id=body.agent_id,
         )
         return result
     except Exception as e:

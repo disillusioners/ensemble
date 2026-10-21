@@ -361,6 +361,52 @@ class SkillBankRepository:
             )
             return list(session.exec(stmt))
 
+    def get_agent_owners(
+        self,
+        item_ids: list[str],
+    ) -> dict[str, Optional[str]]:
+        """Batch-fetch ``{item_id: agent_id}`` for ownership scoping.
+
+        Used by the skill-search layer to resolve, in one round
+        trip per chunk, which agent owns each bank template that a
+        project-scoped skill was cloned from
+        (``skills.source_skill_bank_id -> skill_bank.id``). Skills
+        whose template ``agent_id`` is ``NULL`` are generic/shared
+        and remain visible to every agent; skills whose template
+        ``agent_id`` is set are owned by that agent and are
+        filtered out of search results for other agents (the
+        agent-ownership leak fix, 2026-10-21).
+
+        Args:
+            item_ids: Bank item IDs to resolve. Duplicates are
+                harmless (the dict keys dedupe). Empty list →
+                empty dict (no query issued).
+
+        Returns:
+            Dict mapping each *found* item ID to its ``agent_id``
+            (``None`` for generic/shared templates). IDs that do
+            not exist in the bank are simply absent from the
+            dict — callers treat "absent" as "unknown owner".
+        """
+        unique_ids = list(dict.fromkeys(i for i in item_ids if i))
+        if not unique_ids:
+            return {}
+
+        owners: dict[str, Optional[str]] = {}
+        # Chunk defensively — SQLite's default ``SQLITE_MAX_VARIABLE_NUMBER``
+        # is 999 and the bank can hold hundreds of templates per agent.
+        chunk_size = 500
+        with Session(self.engine) as session:
+            for start in range(0, len(unique_ids), chunk_size):
+                chunk = unique_ids[start : start + chunk_size]
+                stmt = (
+                    select(SkillBankItem.id, SkillBankItem.agent_id)
+                    .where(col(SkillBankItem.id).in_(chunk))
+                )
+                for row_id, row_agent in session.exec(stmt):
+                    owners[row_id] = row_agent
+        return owners
+
     def count(
         self,
         project_id: Optional[str] = None,

@@ -89,11 +89,22 @@ class SkillSearchRequest(BaseModel):
         max_results: Maximum number of skills to surface in the
             ``injected`` list (bounded ``1..20`` to keep the LLM
             prompt within reason).
+        agent_id: Optional requesting agent. When set, bank-cloned
+            skills owned by a DIFFERENT agent are excluded from the
+            result set (agent-ownership filter). ``None`` — the
+            admin/FE default — searches the full project corpus.
     """
 
     query: str = Field(..., description="Natural-language query")
     project_id: str | None = Field(default=None, description="Project scope (None for global)")
     max_results: int = Field(default=2, ge=1, le=20, description="Maximum skills to inject")
+    agent_id: str | None = Field(
+        default=None,
+        description=(
+            "Requesting agent for ownership scoping. When set, "
+            "bank-cloned skills owned by another agent are excluded."
+        ),
+    )
 
 
 class SkillFeedbackRequest(BaseModel):

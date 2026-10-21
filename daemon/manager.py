@@ -2003,6 +2003,11 @@ class InstanceManager:
                 embedding_service=self._skill_embedding_service,
                 llm_config=skill_llm_config,
                 config=self.config.skill_evolution,
+                # Agent-ownership filter (2026-10-21): the search
+                # layer joins skills.source_skill_bank_id ->
+                # skill_bank.id to keep owner-private planner
+                # skills out of other agents' injection results.
+                skill_bank_repo=self._skill_bank_repo,
             )
         else:
             self._skill_embedding_service = None

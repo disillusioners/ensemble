@@ -363,6 +363,7 @@ class SkillSearchService:
         embedding_service: Any,
         llm_config: dict[str, Any],
         config: Any,  # SkillEvolutionConfig
+        skill_bank_repo: Any = None,
     ) -> None:
         """Store dependencies for the three pipeline stages.
 
@@ -372,6 +373,15 @@ class SkillSearchService:
             embedding_service: See :attr:`_embedding_service`.
             llm_config: See :attr:`_llm_config`.
             config: See :attr:`_config`.
+            skill_bank_repo: Duck-typed
+                :class:`~daemon.repositories.skill.skill_bank_repository.SkillBankRepository`
+                used ONLY by the agent-ownership filter
+                (:meth:`_filter_owner_private`). Optional —
+                ``None`` (and any repo without
+                ``get_agent_owners``) disables the filter,
+                preserving the pre-fix behavior for unit-test
+                mocks and older wiring. Expected method:
+                ``get_agent_owners(item_ids) -> dict[str, str | None]``.
         """
         self._skill_repo = skill_repo
         self._embedding_repo = embedding_repo
@@ -380,6 +390,7 @@ class SkillSearchService:
         # their own dict without surprising us.
         self._llm_config = dict(llm_config) if llm_config else {}
         self._config = config
+        self._skill_bank_repo = skill_bank_repo
 
     # --------------------------------------------------------
     # Public API
@@ -390,6 +401,7 @@ class SkillSearchService:
         user_message: str,
         project_id: str | None = None,
         max_results: int = 2,
+        agent_id: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """Run the full three-stage search pipeline.
 
@@ -408,6 +420,18 @@ class SkillSearchService:
             max_results: Maximum number of skills to surface in
                 the ``injected`` list. Defaults to ``2`` to match
                 ``SkillEvolutionConfig.max_inject_skills``.
+            agent_id: The agent requesting the search (the
+                receiving instance's ``agent_id``). When set,
+                bank-cloned skills owned by a DIFFERENT agent are
+                excluded from the corpus (agent-ownership filter,
+                2026-10-21 — e.g. a worker's search must not
+                surface the tidier agent's own ``auto_load``
+                planner). ``None`` disables the filter (legacy /
+                admin callers with no agent context). Organic
+                project skills (no ``source_skill_bank_id``) and
+                generic/shared bank templates
+                (``skill_bank.agent_id IS NULL``) are never
+                filtered.
 
         Returns:
             Dict with keys:
@@ -427,6 +451,7 @@ class SkillSearchService:
             user_message,
             project_id,
             top_k=getattr(self._config, "bm25_top_k", 10),
+            agent_id=agent_id,
         )
         if not candidates:
             return {"injected": [], "low_match": []}
@@ -464,11 +489,117 @@ class SkillSearchService:
     # Stage 1 — BM25
     # --------------------------------------------------------
 
+    async def _filter_owner_private(
+        self,
+        items: list[Any],
+        agent_id: str | None,
+    ) -> list[Any]:
+        """Exclude bank-cloned skills owned by a different agent.
+
+        The agent-ownership leak fix (2026-10-21). Project-scope
+        skill search has no agent dimension of its own: a bank
+        template owned by agent A (e.g. the tidier dispatcher's
+        ``auto_load=True`` ``tidier-strategy`` planner)
+        materializes into the project ``skills`` table through
+        ``ensure_all_skills_sync`` and is then a BM25 candidate
+        for EVERY agent's search in that project. This method
+        restores ownership scoping by joining
+        ``skills.source_skill_bank_id -> skill_bank.id`` and
+        dropping rows whose template owner differs from the
+        requesting agent.
+
+        Deliberately NOT filtered:
+
+        * Organic project skills — no ``source_skill_bank_id``
+          (created directly in project scope via ``skill_create``).
+        * Generic / shared templates — ``skill_bank.agent_id IS
+          NULL`` (e.g. cross-agent foundational skills) and
+          orphans whose bank row no longer exists.
+
+        The explicit ``load_skill`` dispatch path
+        (:meth:`~daemon.services.skill_injection_service.SkillInjectionService.inject_explicit_skill`
+        → clone-on-miss) is intentionally untouched: a dispatcher
+        may still hand a worker any skill by name.
+
+        Filtering happens BEFORE tokenization so the BM25 corpus
+        statistics (DF, avgdl) are computed on the visible set
+        only — a dropped skill cannot inflate scores for the
+        remaining ones.
+
+        Fail-open contract: ``agent_id is None`` (no caller
+        context), a missing bank repo, or a bank-lookup error all
+        return ``items`` unchanged — the pre-fix behavior. Search
+        is best-effort by design; a transient DB fault must not
+        strip an agent's entire skill corpus.
+
+        Args:
+            items: Merged project + global candidate rows (see
+                :meth:`_bm25_prefilter`).
+            agent_id: Requesting agent, or ``None`` to disable.
+
+        Returns:
+            The visible subset of ``items``, original order
+            preserved.
+        """
+        if not agent_id or not items:
+            return items
+        bank_repo = self._skill_bank_repo
+        if bank_repo is None or not hasattr(bank_repo, "get_agent_owners"):
+            return items
+
+        source_ids = [
+            str(getattr(skill, "source_skill_bank_id", None))
+            for skill in items
+            if getattr(skill, "source_skill_bank_id", None)
+        ]
+        if not source_ids:
+            return items
+
+        try:
+            owners = await asyncio.to_thread(
+                bank_repo.get_agent_owners, source_ids
+            )
+        except Exception as e:
+            logger.warning(
+                "[SkillSearch] ownership lookup failed (agent=%r) — "
+                "searching unfiltered: %s",
+                agent_id,
+                e,
+            )
+            return items
+
+        visible: list[Any] = []
+        dropped: list[str] = []
+        for skill in items:
+            source_id = getattr(skill, "source_skill_bank_id", None)
+            if not source_id:
+                # Organic project skill — no bank owner.
+                visible.append(skill)
+                continue
+            owner = owners.get(str(source_id))
+            # owner None → generic/shared (agent_id IS NULL) or
+            # orphaned bank row; both stay visible.
+            if owner is None or owner == agent_id:
+                visible.append(skill)
+                continue
+            dropped.append(getattr(skill, "name", "?"))
+
+        if dropped:
+            logger.info(
+                "[SkillSearch] ownership filter dropped %d "
+                "owner-private skill(s) for agent=%r: %s",
+                len(dropped),
+                agent_id,
+                ", ".join(sorted(str(n) for n in dropped)),
+            )
+        return visible
+
     async def _bm25_prefilter(
         self,
         query: str,
         project_id: str | None,
         top_k: int = 10,
+        agent_id: str | None = None,
     ) -> list[Any]:
         """BM25 keyword prefilter over active skills.
 
@@ -486,6 +617,9 @@ class SkillSearchService:
                 rows with BM25 score ``<= 0`` (no overlapping
                 terms) are filtered out before the cutoff, so
                 the result list may be shorter than ``top_k``.
+            agent_id: Requesting agent for the ownership filter —
+                see :meth:`_filter_owner_private`. ``None``
+                disables the filter.
 
         Returns:
             List of :class:`Skill` instances ordered by BM25
@@ -562,6 +696,17 @@ class SkillSearchService:
                     continue
                 seen_ids.add(skill_id)
                 items.append(skill)
+
+        if not items:
+            return []
+
+        # Agent-ownership filter (2026-10-21): drop bank-cloned
+        # skills owned by a DIFFERENT agent. This is the search-layer
+        # half of the owner-private planner leak fix — an
+        # ``auto_load=True`` owner-agent template (e.g.
+        # ``tidier-strategy``) materialized into project scope must
+        # never be injectable into a non-owner worker's context.
+        items = await self._filter_owner_private(items, agent_id)
 
         if not items:
             return []
