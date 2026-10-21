@@ -259,6 +259,15 @@ class ChildReportsService:
         """
         self._manager = manager
         self._events_service = events_service
+        # Per-root in-flight marker for the strand-heal hand-off
+        # (2026-10-21, running-zombie cycle 2). The hand-off is
+        # COALESCED: N holds on the same root MUST produce ONE
+        # scheduled heal, not N. It is also the RECURSION BOUND: the
+        # heal drive re-enters this completion path, so a hold fired
+        # from INSIDE a running heal can never schedule a second
+        # concurrent heal for the same root (the marker is held for
+        # the whole lifetime of the scheduled task).
+        self._strand_heal_inflight: set[str] = set()
 
     @property
     def _config(self) -> "Config":
@@ -2301,20 +2310,57 @@ Provide a concise summary:"""
                     f"{instance_id[:8]}...: {_sse_exc}"
                 )
 
-    def _schedule_strand_heal(self, instance_id: str) -> None:
+    def _schedule_strand_heal(
+        self, instance_id: str, *, posture: str | None = None,
+    ) -> None:
         """Fire-and-forget hand-off of a tree_liveness-blocked root to
         the MissionStrandHealer (watcher-loss terminal strand,
         2026-10-14 — the event-driven arm of the asymmetry fix).
 
-        Called ONLY from the post-stamp downgrade path when the
-        emission gate blocked with ``reason=tree_liveness`` — the one
-        block class with NO future message-completed signal on a
-        stranded tree. The healer re-checks its full invariant set
-        (zero obligations + strand-only tree + race guards) and is a
-        no-op when any leg fails, so scheduling is always safe and
-        cannot loop (a re-block after a heal means a genuinely-live
-        member appeared — the healer refuses to touch it, and the
-        300s sweep + zombie backstop remain the remaining nets).
+        Called from TWO sites (2026-10-21, running-zombie cycle 2):
+
+        1. the post-stamp downgrade path when the emission gate blocked
+           with ``reason=tree_liveness`` — the one block class with NO
+           future message-completed signal on a stranded tree;
+        2. the PRE-STAMP recursive-liveness hold
+           (``_process_child_completion_and_notify_parent``) — the
+           "completion EVENT lost" class: the stamp is refused, and
+           the historical contract ("the next message-completed signal
+           will re-check") provably never fires on a stranded tree
+           (no children, no queued messages — no future signal
+           exists). The hold now hands the root to the healer instead
+           of waiting for a signal that never comes.
+
+        The healer re-checks its full invariant set (zero obligations +
+        strand-only tree + race guards for the waiting_children lane;
+        the completion proof + age bound + tree guard for the
+        running-zombie lane) and is a no-op when any leg fails, so
+        scheduling is always safe and cannot loop (a re-block after a
+        heal means a genuinely-live member appeared — the healer
+        refuses to touch it, and the 300s sweep + zombie backstop
+        remain the remaining nets).
+
+        LANE DISPATCH (2026-10-21): the two healer lanes have
+        DIFFERENT postures — the waiting_children lane requires a
+        ``waiting_children`` root, the running-zombie lane a
+        ``running`` one. The root's CURRENT posture selects the lane.
+        The caller passes the posture it already knows (the hold site
+        read the row at the top of the drive; the downgrade site just
+        wrote ``waiting_children``); when it is not supplied the task
+        reads it from the DB (off the event loop). Any other posture
+        is a no-op for both lanes.
+
+        COALESCING (2026-10-21): the hand-off is per-root
+        IN-FLIGHT — a second hold for the same root while a hand-off
+        is still running is DROPPED (logged at DEBUG), never queued.
+        Two reasons:
+
+        * a hold storm (the live 2026-10-19 repro logged 455 hold
+          lines across ~40 roots) must not become a heal storm; and
+        * the marker is the RECURSION BOUND — the heal drive re-enters
+          this same completion path, so a hold fired from INSIDE a
+          running heal can never schedule a second, concurrent heal
+          for the same root.
 
         Fail-soft: an unwired healer (partial boot, tests) is a
         silent no-op; task failures are logged by the done-callback.
@@ -2327,8 +2373,61 @@ Provide a concise summary:"""
                 instance_id[:8],
             )
             return
+        if instance_id in self._strand_heal_inflight:
+            # COALESCED — a hand-off for this root is already in
+            # flight. The in-flight attempt re-checks every leg
+            # against the CURRENT state, so a dropped duplicate can
+            # never lose a heal.
+            logger.debug(
+                "strand heal hand-off for %s...: COALESCED (a "
+                "hand-off for this root is already in flight)",
+                instance_id[:8],
+            )
+            return
+        self._strand_heal_inflight.add(instance_id)
+
+        async def _heal_by_posture() -> dict:
+            """Dispatch to the healer lane that matches the root's
+            posture (the DB read happens off the event loop)."""
+            resolved = posture
+            if resolved is None:
+                repo = getattr(
+                    self._manager, "_instance_repository", None,
+                )
+                if repo is not None:
+                    try:
+                        row = await asyncio.to_thread(
+                            repo.get, instance_id,
+                        )
+                        resolved = (
+                            getattr(row, "status", None)
+                            if row is not None else None
+                        )
+                    except Exception as _pose_exc:  # noqa: BLE001
+                        logger.warning(
+                            "strand heal hand-off for %s...: posture "
+                            "read failed (%s: %s) — no lane selected",
+                            instance_id[:8], type(_pose_exc).__name__,
+                            _pose_exc,
+                        )
+            if resolved == InstanceStatus.RUNNING.value:
+                # The running-zombie lane (2026-10-21): a ``running``
+                # root whose completion signal was lost.
+                return await healer.heal_running_zombie(instance_id)
+            if resolved == InstanceStatus.WAITING_CHILDREN.value:
+                # The waiting_children / ghost lane.
+                return await healer.heal_instance(instance_id)
+            logger.debug(
+                "strand heal hand-off for %s...: no lane for posture "
+                "%r (both lanes require running / waiting_children)",
+                instance_id[:8], resolved,
+            )
+            return {"healed": False, "reason": f"no-lane:{resolved!r}"}
 
         def _log_heal_done(task: "asyncio.Task") -> None:
+            # The marker is released FIRST — the root is free for the
+            # next hand-off even if the task failed.
+            self._strand_heal_inflight.discard(instance_id)
             if task.cancelled():
                 return
             exc = task.exception()
@@ -2348,13 +2447,14 @@ Provide a concise summary:"""
 
         try:
             task = asyncio.get_running_loop().create_task(
-                healer.heal_instance(instance_id),
+                _heal_by_posture(),
                 name=f"strand-heal-{instance_id[:8]}",
             )
             task.add_done_callback(_log_heal_done)
         except RuntimeError as _loop_exc:
             # No running loop (defensive — this site is async-context
             # only). The periodic sweep covers the root.
+            self._strand_heal_inflight.discard(instance_id)
             logger.warning(
                 "strand heal hand-off for %s... could not schedule: %s",
                 instance_id[:8], _loop_exc,
@@ -2643,9 +2743,25 @@ Provide a concise summary:"""
                     logger.info(
                         "root_completion: pre-stamp recursive liveness "
                         "holds for %s... (%s) — skipping the COMPLETED "
-                        "stamp entirely (no stamp→downgrade churn; the "
-                        "next message-completed signal re-checks)",
+                        "stamp entirely (no stamp→downgrade churn)",
                         instance_id[:8], _pre_verdict.reason,
+                    )
+                    # RE-ARM (2026-10-21, running-zombie cycle 2): the
+                    # historical contract was "the next message-completed
+                    # signal re-checks" — but on a STRANDED tree that
+                    # signal provably never comes (no children, no
+                    # queued messages; the live 2026-10-21 repro logged
+                    # 455 hold lines across ~40 roots and the root
+                    # stayed ``running`` for 25h). The hold therefore
+                    # hands the root to the strand healer NOW: the heal
+                    # re-checks every leg against the current state and
+                    # is a no-op unless the shape is provably dead. The
+                    # hand-off is COALESCED per root (a hold storm
+                    # cannot become a heal storm) and it is also the
+                    # recursion bound — a hold fired from inside a
+                    # running heal cannot schedule a second one.
+                    self._schedule_strand_heal(
+                        instance_id, posture=instance_meta.status,
                     )
                     return
                 # Not live (all-terminal after strand exclusion, or
@@ -4890,7 +5006,14 @@ Provide a concise summary:"""
                         "tree_liveness"
                     )
                 ):
-                    self._schedule_strand_heal(instance_id)
+                    # The root was just downgraded to WAITING_CHILDREN
+                    # above — that IS the waiting_children lane's
+                    # posture (the caller knows it; the task does not
+                    # have to re-read the row).
+                    self._schedule_strand_heal(
+                        instance_id,
+                        posture=InstanceStatus.WAITING_CHILDREN.value,
+                    )
                 return
 
             # ── FP4 (2026-10-03) — L6: escalate-and-HOLD not annotate.

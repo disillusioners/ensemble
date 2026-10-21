@@ -50,17 +50,45 @@ mission where the leader was still mid-LLM) ``completed_at`` is
 hours old while tree members continue to wake/sleep/respond, so the
 backstop fired 73s pre-terminal on a live row, consuming the
 exactly-once notify row with stale text. The new anchor is the freshest
-tree signal available in the guard's read path:
+tree signal available in the guard's read path.
+
+**Anchor scope correction (2026-10-21, running-zombie cycle 2).**
+The U7 anchor was the max over the WHOLE tree — the root's own
+``last_activity_at`` INCLUDED:
 
     tree_anchor = max(
         root.last_activity_at,
         max(d.last_activity_at for d in descendants),
     )
 
-…computed during the legs (b)/(c) tree walk (same one read, no extra
-DB round-trip). On a live tree the anchor rolls forward each tick and
-the backstop never fires; on a truly quiet tree (no activity for
-``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``) the backstop fires as before.
+That inclusion is the defect the running-zombie strand closed: the
+root's own stamp is refreshed on EVERY message enqueue
+(``daemon/services/instance_messaging.py:2455``), so a stranded root
+that keeps receiving messages looks PERMANENTLY fresh to the
+backstop. The live 2026-10-21 repro logged a 22s-old "freshest tree
+last_activity_at" on a root whose mission had been dead for hours —
+the 22s WAS the root's own enqueue-refreshed stamp, and it made the
+6h backstop unreachable, so the pre-stamp hold
+(``daemon/services/child_reports.py``) refused the COMPLETED stamp
+and the root stayed ``running`` forever.
+
+The anchor is now computed over the NON-ROOT members only:
+
+    tree_anchor = max(
+        d.last_activity_at for d in descendants
+    )            # fallback: the root's own stamp when the tree has
+                 # no members at all (a childless root — the root IS
+                 # the whole tree, so its stamp is the tree signal)
+
+A childless root therefore keeps its historical behaviour exactly
+(its own activity is the tree activity), while a tree WITH members
+can no longer be kept "alive" by the root's enqueue-refreshed stamp.
+The anchor is still collected during the legs (b)/(c) tree walk (same
+one read, no extra DB round-trip). On a live tree the anchor rolls
+forward each tick and the backstop never fires; on a truly quiet tree
+(no member activity for ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``) the
+backstop fires as before.
+
 The pre-existing missing-anchor disarm rule is preserved: a tree where
 no instance has ever recorded ``last_activity_at`` cannot fire the
 backstop (data gap, not evidence of a zombie); the leg verdict — all
@@ -110,11 +138,16 @@ logger = logging.getLogger(__name__)
 #   terminate) flips zombie rows terminal well before this window,
 #   which re-opens the guard naturally.
 # * U7 (2026-09-28): the anchor is now the FRESHEST tree signal
-#   (``max(root.last_activity_at, max(d.last_activity_at))``), not
-#   the per-work ``task_completed_at``. A live tree rolls the anchor
+#   (``max(d.last_activity_at)`` over the DESCENDANTS), not the
+#   per-work ``task_completed_at``. A live tree rolls the anchor
 #   forward indefinitely, so the backstop fires only on a
 #   genuinely-quiet ≥timeout tree — the wave-3 misfire class
 #   (live-tree anchor pinned at per-turn settle) is closed.
+# * 2026-10-21 (running-zombie cycle 2): the anchor is computed over
+#   the NON-ROOT members only (the root's own stamp is refreshed on
+#   every message enqueue, so it can never prove a tree is quiet).
+#   A childless root falls back to its OWN stamp — the root IS the
+#   whole tree there, so its activity is the tree activity.
 MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS: int = 6 * 60 * 60  # 6 hours
 
 
@@ -221,12 +254,23 @@ async def evaluate_mission_live(
 
     U7 (2026-09-28): the zombie backstop is anchored to the FRESHEST
     tree signal available in the read path —
-    ``max(root.last_activity_at, max(d.last_activity_at) for d in
-    descendants)`` — NOT to the per-work ``completed_at`` (which on a
-    long-lived mission is hours old while tree members continue to
-    wake / sleep / respond, and which misfired 73s pre-terminal on
-    the wave-3 evidence). The anchor is collected during the same
-    legs (b)/(c) tree walk; no extra DB round-trip.
+    ``max(d.last_activity_at) for d in descendants`` — NOT to the
+    per-work ``completed_at`` (which on a long-lived mission is hours
+    old while tree members continue to wake / sleep / respond, and
+    which misfired 73s pre-terminal on the wave-3 evidence).
+
+    2026-10-21 (running-zombie cycle 2): the anchor is computed over
+    the NON-ROOT members only. The root's own ``last_activity_at`` is
+    refreshed on every message enqueue
+    (``daemon/services/instance_messaging.py:2455``), so including it
+    made the backstop unreachable for a stranded-but-messaged root
+    (the live 2026-10-21 repro: a 22s-old "freshest tree
+    last_activity_at" on a root whose mission had been dead for
+    hours). A tree with NO members (a childless root) falls back to
+    the root's own stamp — there the root IS the whole tree.
+
+    The anchor is collected during the same legs (b)/(c) tree walk;
+    no extra DB round-trip.
 
     Args:
         instance_repository: Instance repository for the permanent
@@ -408,7 +452,9 @@ async def _evaluate_legs(
     # live. Unknown parent status (row vanished mid-walk) counts as
     # live — fail-closed.
     any_non_terminal = False        # FIXBACK: drives the all-terminal short-circuit
-    freshest_activity = None        # max ``last_activity_at`` seen during the walk
+    freshest_activity = None        # max ``last_activity_at`` over the NON-ROOT members
+    root_activity = None            # the root's OWN ``last_activity_at`` (fallback only)
+    member_count = 0                # non-root members seen during the walk
     anchor_missing = True           # a single non-NULL value flips this to False
     member_status: dict[str, str | None] = {}
     member_parent: dict[str, str | None] = {}
@@ -436,16 +482,38 @@ async def _evaluate_legs(
             and not (skip_root and tree_id == instance_id)
         ):
             any_non_terminal = True
-        # Terminal-or-not, contribute ``last_activity_at`` to the
-        # anchor (a live descendant's recent activity keeps the
-        # backstop from firing on a tree that is plausibly still
-        # alive — that is the legitimate zombie-break input).
+        # ANCHOR SCOPE (2026-10-21, running-zombie cycle 2): the
+        # backstop anchor is computed over the NON-ROOT members only.
+        # The root's own ``last_activity_at`` is refreshed on EVERY
+        # message enqueue (``daemon/services/instance_messaging.py``
+        # :2455) — a stranded-but-messaged root therefore looks
+        # PERMANENTLY fresh and the 6h backstop is unreachable for it
+        # (the live 2026-10-21 repro: a 22s-old "freshest tree
+        # last_activity_at" on a root dead for hours). The root's
+        # stamp is collected SEPARATELY and used ONLY as the fallback
+        # for a tree with no members at all (a childless root — there
+        # the root IS the whole tree, so its activity is the tree
+        # activity). A live descendant's recent activity keeps the
+        # backstop from firing on a tree that is plausibly still alive
+        # — that remains the legitimate zombie-break input.
         activity_str = getattr(instance, "last_activity_at", None)
         parsed_activity = parse_completed_at_naive(activity_str)
+        if tree_id == instance_id:
+            root_activity = parsed_activity
+            continue
+        member_count += 1
         if parsed_activity is not None:
             anchor_missing = False
             if freshest_activity is None or parsed_activity > freshest_activity:
                 freshest_activity = parsed_activity
+
+    # The anchor fallback: a tree with NO members (a childless root)
+    # keeps its historical behaviour — the root's own stamp IS the
+    # tree signal there. A tree WITH members never falls back to the
+    # root's stamp (that is the fix).
+    if member_count == 0 and root_activity is not None:
+        freshest_activity = root_activity
+        anchor_missing = False
 
     # ── Strand exclusion (see STRAND INVARIANT above) ─────────────
     # One extra batched query (``filter_never_dispatched_ids`` — the
@@ -539,7 +607,7 @@ async def _evaluate_legs(
             live=True,
             reason=(
                 "non-terminal member present but no "
-                "last_activity_at anchor on any tree member — "
+                "last_activity_at anchor on any non-root tree member — "
                 "backstop disarmed (data gap, not zombie evidence); "
                 "the live leg holds by default"
             ),
@@ -553,10 +621,10 @@ async def _evaluate_legs(
             live=False,
             reason=(
                 f"mission-tree backstop fires: non-terminal members "
-                f"present AND freshest tree last_activity_at is "
-                f"{int(age_seconds)}s old (>{timeout_seconds}s "
-                f"threshold) — zombie-break, at-least-once terminal "
-                f"delivery takes precedence"
+                f"present AND freshest tree-member last_activity_at "
+                f"(root excluded) is {int(age_seconds)}s old "
+                f"(>{timeout_seconds}s threshold) — zombie-break, "
+                f"at-least-once terminal delivery takes precedence"
             ),
             timed_out=True,
         )
@@ -566,8 +634,8 @@ async def _evaluate_legs(
         live=True,
         reason=(
             f"non-terminal member present (live leg holds) and "
-            f"freshest tree last_activity_at is {int(age_seconds)}s "
-            f"old (<{timeout_seconds}s threshold) — mission is "
-            f"plausibly alive; defer to the next tick"
+            f"freshest tree-member last_activity_at (root excluded) is "
+            f"{int(age_seconds)}s old (<{timeout_seconds}s threshold) "
+            f"— mission is plausibly alive; defer to the next tick"
         ),
     )

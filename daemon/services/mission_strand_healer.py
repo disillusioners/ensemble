@@ -206,29 +206,6 @@ DEFAULT_RUNNING_ZOMBIE_BATCH_CAP: int = 25
 #: ``stale_pause_sweep._MAX_TREE_PROBE_SIZE``.
 _RUNNING_ZOMBIE_MAX_TREE_PROBE_SIZE: int = 256
 
-#: Instance statuses that mean "this instance is still doing something"
-#: — the live-descendant CLASSIFICATION set. Mirrors
-#: ``stale_pause_sweep._LIVE_STATUSES`` (the set is duplicated rather
-#: than imported because ``stale_pause_sweep`` is a releaser module
-#: and this module must not take a terminalizing dependency on it).
-#:
-#: NOTE — this is a CLASSIFICATION set, NOT the liveness authority:
-#: the authority for "the tree must be closed" is
-#: ``TERMINAL_INSTANCE_STATUSES`` (every descendant must be terminal).
-#: This set only decides which SKIP CLASS a non-terminal descendant is
-#: reported under. It therefore DELIBERATELY differs from
-#: ``daemon.constants.ALIVE_INSTANCE_STATUSES`` (which includes
-#: ``idle``/``paused`` — a "may still be doing something" set used by
-#: the drift reconciler): an ``idle``/``paused`` descendant is
-#: reported as ``non-terminal-descendant`` here, not as
-#: ``live-descendant``. Both are skips. The three-set fork across
-#: ``stale_pause_sweep`` / ``job_recovery_service`` / this module is a
-#: named consolidation follow-up (hoist ONE definition into
-#: ``daemon.constants``).
-_RUNNING_ZOMBIE_LIVE_STATUSES: frozenset[str] = frozenset(
-    {"running", "waiting_children", "queued", "waiting"}
-)
-
 #: Task statuses that mean "a turn is still in flight" — the presence
 #: of ANY such row for the root means the root is NOT a zombie (the
 #: turn owns the instance). ``processing`` is included defensively
@@ -769,8 +746,19 @@ class MissionStrandHealer:
         latest_msg_id = await asyncio.to_thread(
             self._latest_completed_message_id, root_id
         )
+        # ``skip_repair=True`` (2026-10-21, running-zombie cycle 2 —
+        # LEADER RULING, widened from the running-zombie lane to this
+        # waiting_children / ghost lane as well): the heal lane's
+        # transcript can be 25h stale, and the LLM report-repair would
+        # spend a 30s call on a transcript nobody will read (the repair
+        # exists to fix a TRUNCATED report for a human reader; this
+        # lane only needs the content as the completion payload).
+        # SAME stale-transcript hazard class as the running-zombie
+        # lane — flagged for the reviewer: the trade-off is that a
+        # genuinely truncated report is carried through un-repaired
+        # into the completion payload.
         await child_reports._process_child_completion_and_notify_parent(
-            root_id, latest_msg_id or "",
+            root_id, latest_msg_id or "", skip_repair=True,
         )
         drove_row = await asyncio.to_thread(repo.get, root_id)
         healed = bool(
@@ -1134,25 +1122,68 @@ class MissionStrandHealer:
                 f"{len(unreadable)} descendant row(s) unreadable — the "
                 f"tree view is not complete",
             )
-        live_descendants = [
-            pid for pid, status in descendant_statuses.items()
-            if status in _RUNNING_ZOMBIE_LIVE_STATUSES
-        ]
-        if live_descendants:
-            return self._rz_skip(
-                root_id, "live-descendant",
-                f"{len(live_descendants)} live descendant(s) — the tree "
-                f"is not closed",
+        # ── Leg 4 (WIDENED 2026-10-21, running-zombie cycle 2): the
+        # tree leg is the CANONICAL mission-live guard — the SAME call
+        # the pre-stamp completion gate makes
+        # (``daemon/services/child_reports.py``, ``skip_root=True``).
+        #
+        # BEFORE: the leg demanded a STRICTLY all-terminal tree
+        # ("every descendant terminal"). That is unreachable for the
+        # live incident shape: the real blocker was a DEPTH-3 ``idle``
+        # member — neither terminal nor live, just STUCK — so the
+        # tree could never be closed and the root stayed ``running``
+        # forever.
+        #
+        # NOW: the guard's verdict decides. ``live=False`` covers BOTH
+        # halves of the guard's own contract:
+        #   * the all-terminal short-circuit (the tree is closed), AND
+        #   * the 6h STALENESS EXPIRY on a non-terminal member (the
+        #     member is not terminal, but it has been quiet for longer
+        #     than ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` — the
+        #     zombie-break), which is only reachable because the
+        #     guard's freshness anchor is computed over the NON-ROOT
+        #     members (the root's own stamp is refreshed on every
+        #     enqueue and can never prove a tree is quiet).
+        # ``live=True`` (a member is genuinely alive) ⇒ SKIP.
+        #
+        # The guard is fail-OPEN (it returns ``live=False, error=True``
+        # on an internal error) — but THIS lane TERMINALIZES, so an
+        # unevaluatable leg must SKIP (fail-closed), never proceed.
+        try:
+            from daemon.services.mission_live_guard import (
+                MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+                evaluate_mission_live,
             )
-        non_terminal_descendants = [
-            pid for pid, status in descendant_statuses.items()
-            if status not in TERMINAL_INSTANCE_STATUSES
-        ]
-        if non_terminal_descendants:
+            tree_verdict = await evaluate_mission_live(
+                instance_repository=repo,
+                instance_id=root_id,
+                # The bus leg is not consulted here — this lane owns
+                # its own bus leg (below, fail-closed); the guard's
+                # tree legs decide, exactly as at the pre-stamp gate.
+                bus_pending_count=None,
+                timeout_seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+                # The root's own (non-terminal) status is what the
+                # stamp is about to flip — only the DESCENDANT legs
+                # gate this decision (same mode as the pre-stamp
+                # gate).
+                skip_root=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-closed
             return self._rz_skip(
-                root_id, "non-terminal-descendant",
-                f"{len(non_terminal_descendants)} non-terminal "
-                f"descendant(s) — the tree is not closed",
+                root_id, "tree-probe-error",
+                f"mission-live guard raised: {type(exc).__name__}: {exc}",
+            )
+        if tree_verdict.error:
+            return self._rz_skip(
+                root_id, "guard-error",
+                f"mission-live guard could not evaluate the tree "
+                f"({tree_verdict.reason}) — fail-closed (this lane "
+                f"terminalizes; an unevaluatable leg must not proceed)",
+            )
+        if tree_verdict.live:
+            return self._rz_skip(
+                root_id, "live-tree",
+                f"{tree_verdict.reason}",
             )
 
         # ── Leg 5: no pending question anywhere in the tree ───────
