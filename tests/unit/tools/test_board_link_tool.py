@@ -173,13 +173,26 @@ def _build_instance_tools_for(
 
     from daemon.tools.instance import create_instance_tools
 
-    _stage_synthetic_agent(tmp_path, agent_id, allow)
-    manager = MagicMock(name="InstanceManager")
-    manager.config.daemon.port = 0
-    manager.config.llm.allowed_models = []
-    manager._secret_service = None
-    manager._instance_repository = None
-    tools = create_instance_tools(manager, f"inst-{agent_id}", agent_id)
+    # The synthetic registry is only needed WHILE the tools are built
+    # (``create_instance_tools`` → ``_apply_tool_filter`` resolves the
+    # agent meta from the global registry). Leaving it installed leaks a
+    # synthetic registry into every LATER test in the session — the
+    # agent ids of those tests then fail to resolve ("Agent not found"),
+    # which is an order-dependent failure in unrelated suites. Restore
+    # the previous global as soon as the build is done.
+    import daemon.registry as dr
+
+    previous_registry = dr._registry
+    try:
+        _stage_synthetic_agent(tmp_path, agent_id, allow)
+        manager = MagicMock(name="InstanceManager")
+        manager.config.daemon.port = 0
+        manager.config.llm.allowed_models = []
+        manager._secret_service = None
+        manager._instance_repository = None
+        tools = create_instance_tools(manager, f"inst-{agent_id}", agent_id)
+    finally:
+        dr._registry = previous_registry
     return {getattr(t, "name", "?"): t for t in tools}
 
 
