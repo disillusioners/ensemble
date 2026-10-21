@@ -270,11 +270,15 @@ def create_postgres_engine(config: "EnsembleConfig") -> Engine:
     # ``create_engine(connect_timeout=...)`` kwarg (the psycopg dialect
     # rejects unknown engine kwargs) and NOT ``connect_args`` (that
     # dict is the B2/B3 UTC-session contract, pinned byte-for-byte by
-    # tests/unit/repositories/test_pg_engine_utc_session.py). Same
-    # bound + same mechanism the boot preflight uses on its own probe
-    # engine (daemon/__main__.py::_boot_db_preflight); the two timeouts
-    # are complementary, not duplicated.
-    url += f"?connect_timeout={BOOT_DB_TIMEOUT_S}"
+    # tests/unit/repositories/test_pg_engine_utc_session.py).
+    # SAME BOUND, DIFFERENT MECHANISM: the boot preflight
+    # (daemon/__main__.py::_boot_db_preflight) pins the SAME
+    # ``BOOT_DB_TIMEOUT_S`` budget, but through ``connect_args`` on its
+    # own locally-built probe engine — that path is deliberately
+    # untouched here (the factory's ``connect_args`` stays the B2/B3
+    # UTC-session contract). The two timeouts are complementary, not
+    # duplicated.
+    url += ("&" if "?" in url else "?") + f"connect_timeout={BOOT_DB_TIMEOUT_S}"
 
     logger.info(
         f"Creating PostgreSQL engine: {host}:{port}/{db}"

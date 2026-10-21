@@ -102,10 +102,14 @@ def _preflight_pg_url(ensemble_config) -> str:
     ``daemon/repositories/factory.py::create_postgres_engine``
     (``POSTGRES_*`` env overrides over ``ensemble.json`` values) so
     the probe targets EXACTLY the database the daemon would use.
-    Duplicated here because the preflight engine needs a
-    ``connect_timeout`` the shared factory deliberately does not
-    set — keep the two in sync if the factory's URL construction
-    changes.
+    Duplicated here because the preflight builds its OWN probe engine.
+    Both engines now carry the SAME ``BOOT_DB_TIMEOUT_S`` bound, but
+    by DIFFERENT mechanisms: the shared factory rides it on the URL
+    query (``?connect_timeout=…``), while the preflight passes it via
+    ``connect_args`` on its locally-built engine — the factory's
+    ``connect_args`` slot is reserved for the B2/B3 UTC-session
+    contract and must not change. Keep this URL construction in sync
+    with the factory's if the factory's URL construction changes.
     """
     import os
 
@@ -149,8 +153,9 @@ def _boot_db_preflight() -> None:
     uvicorn starts. When the resolved backend is PostgreSQL, runs
     ``SELECT 1`` on a LOCALLY constructed engine whose libpq
     ``connect_timeout`` is pinned to ``BOOT_DB_TIMEOUT_S`` — the
-    shared factory engine carries no driver timeout and would hang
-    ~75-130s on a firewall-DROP host:
+    probe pins it through ``connect_args`` (the shared factory rides
+    the SAME bound on its URL query), so a firewall-DROP host fails
+    inside the budget instead of hanging ~75-130s:
 
     * Auth refusal (SQLSTATE 28P01/28000/28P02) → log an
       operator-facing credential hint and ``sys.exit(78)``:
@@ -192,6 +197,9 @@ def _boot_db_preflight() -> None:
         # reason: it carries a libpq ``connect_timeout`` so a
         # firewall-DROP host fails inside the BOOT_DB_TIMEOUT_S
         # budget instead of at the OS TCP timeout (~75-130s). The
+        # shared factory carries the SAME bound, but on its URL query
+        # — the preflight's ``connect_args`` slot is its own (the
+        # factory's slot is the B2/B3 UTC-session contract). The
         # driver bound is the real enforcement — an asyncio.wait_for
         # wrapper CANNOT bound a sync connect (measured on Py3.13:
         # the executor shutdown joins the hung worker thread, so the
