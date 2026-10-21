@@ -95,6 +95,19 @@
 #   parses read journalctl --after-cursor=<that cursor> only.
 #
 # Run:  timeout 300 bash test/packs/hard_reboot_drill_e2e_test.sh
+#
+# ── OPERATOR ENV PASSTHROUGH (HRR_EXTRA_ENV) ─────────────────────────────────
+#   The transient unit inherits NO caller env, so a flag that exists only in
+#   the operator's ambient shell (e.g. QUEUE_DISCARD_ON_STARTUP=true) does
+#   NOT reach the drill daemon. HRR_EXTRA_ENV="KEY=VAL,KEY2=VAL2" appends
+#   the pairs to daemon.env AFTER the allow-list (the ONLY path into the
+#   daemon process) and echoes the injected set into the pack output.
+#   A pair that could point the drill daemon at a live surface (DB / port /
+#   HOME / data dir / config / upgrade switch / LLM endpoint) or that carries
+#   characters outside [A-Za-z0-9_=.,:=/+-] is REFUSED LOUDLY (pack FAIL).
+#   Unset ⇒ the allow-list ONLY (shipped default; no behaviour change).
+#   Example (override lane): HRR_EXTRA_ENV="QUEUE_DISCARD_ON_STARTUP=true" \
+#       timeout 300 bash test/packs/hard_reboot_drill_e2e_test.sh
 # ============================================================================
 
 set -u
@@ -481,6 +494,37 @@ ENSEMBLE_BOOT_SWEEP_STALE_SUBPROCESSES=0
 EOF
     chmod 600 "$SCRATCH/daemon.env"
     ok "scratch daemon env written (${SCRATCH}/daemon.env, mode 600)"
+
+    # ── HRR_EXTRA_ENV passthrough (override lane) ───────────────────────────
+    # Appends operator-supplied KEY=VAL pairs to daemon.env AFTER the
+    # allow-list, so an override (e.g. QUEUE_DISCARD_ON_STARTUP=true) can
+    # reach the drill daemon EXPLICITLY. The transient unit inherits NO
+    # caller env, so an ambient flag in the caller's shell never reaches
+    # the daemon by itself — the passthrough is the ONLY way in.
+    # FENCE UNCHANGED (strengthened, never weakened): a pair that could
+    # point the drill daemon at a LIVE surface (DB / port / HOME / data
+    # dir / config / upgrade switches / LLM endpoint), or that carries a
+    # character outside the safe set, is REFUSED LOUDLY (pack FAIL) — it
+    # is never silently dropped.
+    HRR_EXTRA_ENV_INJECTED=""
+    if [ -n "${HRR_EXTRA_ENV:-}" ]; then
+        IFS=',' read -ra _hrr_pairs <<< "$HRR_EXTRA_ENV"
+        for _pair in "${_hrr_pairs[@]}"; do
+            [ -n "$_pair" ] || continue
+            case "$_pair" in
+                POSTGRES_*=*|PORT=*|DAEMON_PORT=*|HOST=*|DAEMON_HOST=*|HOME=*|PATH=*|DATA_DIR=*|ENSEMBLE_DATA_DIR=*|DAEMON_LOG_DIR=*|PERSISTENCE_DB_PATH=*|ENSEMBLE_CONFIG=*|PYTHONPATH=*|ENSEMBLE_SELF_ENV=*|ENSEMBLE_UPGRADE_LIVE=*|ENSEMBLE_RESTART_UNIT=*|OPENAI_*=*|LD_*=*|SHELL=*) bad "HRR_EXTRA_ENV REFUSED live-surface pair '${_pair}'"; echo "RESULT: FAIL"; exit 1 ;;
+                *[!A-Za-z0-9_=.,:=/+-]*) bad "HRR_EXTRA_ENV REFUSED unsafe characters in pair '${_pair}'"; echo "RESULT: FAIL"; exit 1 ;;
+                *=*) : ;;
+                *) bad "HRR_EXTRA_ENV REFUSED malformed pair '${_pair}' (expected KEY=VAL)"; echo "RESULT: FAIL"; exit 1 ;;
+            esac
+            printf '%s\n' "$_pair" >> "$SCRATCH/daemon.env"
+            HRR_EXTRA_ENV_INJECTED="${HRR_EXTRA_ENV_INJECTED}${HRR_EXTRA_ENV_INJECTED:+,}${_pair}"
+        done
+        ok "HRR_EXTRA_ENV passthrough applied to daemon.env: ${HRR_EXTRA_ENV_INJECTED}"
+        printf '%s\n' "$HRR_EXTRA_ENV_INJECTED" > "$BUNDLE/hrr_extra_env.txt"
+    else
+        note "HRR_EXTRA_ENV unset — daemon.env carries the allow-list ONLY (shipped default)"
+    fi
 
     # Prove the resolution chain from a foreign CWD (the daemon's CWD is the
     # scratch dir): daemon package + config.yaml + agents/ must all resolve.
