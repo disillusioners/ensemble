@@ -2947,10 +2947,16 @@ class JobRecoveryService:
                     # live. The zombie backstop is anchored to
                     # TREE ACTIVITY (FIXBACK U7,
                     # 2026-09-28): the freshest
-                    # ``last_activity_at`` across root + descendants
-                    # (NOT the per-work ``completed_at`` — that was
-                    # the pre-U7 anchor and the wave-3 misfire
-                    # class). Under the FIXBACK, the backstop fires
+                    # ``last_activity_at`` across the tree's NON-ROOT
+                    # members (NOT the per-work ``completed_at`` — that
+                    # was the pre-U7 anchor and the wave-3 misfire
+                    # class; and NOT the root's own stamp — the root's
+                    # ``last_activity_at`` is refreshed on EVERY message
+                    # enqueue, so including it made the backstop
+                    # unreachable for a stranded-but-messaged root; a
+                    # childless tree falls back to the root's own
+                    # stamp, where the root IS the whole tree).
+                    # Under the FIXBACK, the backstop fires
                     # IFF a non-terminal tree member is present AND
                     # that freshest activity is older than
                     # ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (true

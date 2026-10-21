@@ -1635,9 +1635,27 @@ async def lifespan(app: FastAPI):
     mission_strand_heal_interval = (
         config.services.mission_strand_heal_interval_seconds
     )
+    # Running-zombie strand knobs (2026-10-21) — the third strand
+    # family member (a mission root stuck in ``running`` whose
+    # completion event was lost). Read from ``config.services``
+    # (SERVICES_ env prefix). The healer coerces the numeric knobs
+    # defensively (a non-numeric value falls back to the module
+    # default), so the wiring stays a direct read — same shape as the
+    # interval above.
     mission_strand_healer = MissionStrandHealer(
         manager=manager,
         interval_seconds=mission_strand_heal_interval,
+        running_zombie_enabled=(
+            config.services.mission_strand_heal_running_zombie_enabled
+        ),
+        running_zombie_age_bound_seconds=(
+            config.services
+            .mission_strand_heal_running_zombie_age_bound_seconds
+        ),
+        running_zombie_batch_cap=(
+            config.services
+            .mission_strand_heal_running_zombie_batch_cap
+        ),
     )
     mission_strand_healer.start()
     manager._mission_strand_healer = mission_strand_healer
