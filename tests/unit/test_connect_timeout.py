@@ -186,3 +186,58 @@ def test_unit_template_orders_after_postgresql_only():
     assert "After=postgresql.service" in text
     assert "Wants=postgresql.service" not in text
     assert "Requires=postgresql.service" not in text
+
+
+def test_special_char_password_keeps_the_bound_and_the_target(
+    no_pg_env, monkeypatch
+):
+    """(g) A password with URL-special characters keeps the bound + target.
+
+    The URL used to be built by f-string interpolation, so the RAW
+    password landed in the URL unescaped. Measured against the old
+    construction: a password containing ``?`` re-parsed into a
+    corrupted DATABASE name (``ensemble_prod&connect_timeout=10``) and
+    an EMPTY query — the ``connect_timeout`` bound SILENTLY vanished,
+    which is exactly the failure the bound exists to prevent. A
+    password containing ``@`` re-parsed into a corrupted HOST.
+
+    The URL is now built with ``URL.create(...)``: the password is
+    escaped, the host / database / port are the intended ones, and the
+    bound still rides the query.
+    """
+    captured: dict = {}
+    real_create_engine = factory_mod.create_engine
+
+    def spy(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return real_create_engine(*args, **kwargs)
+
+    monkeypatch.setattr(factory_mod, "create_engine", spy)
+    monkeypatch.setenv("POSTGRES_PASSWORD", "pa?ss#word@host")
+
+    engine = factory_mod.create_postgres_engine(pg_config())
+    try:
+        url = engine.url
+        # The bound survived the special characters.
+        assert url.query["connect_timeout"] == str(BOOT_DB_TIMEOUT_S)
+        assert str(captured["args"][0]).endswith(
+            f"?connect_timeout={BOOT_DB_TIMEOUT_S}"
+        )
+        # The target is the INTENDED one — host, port, database.
+        assert url.host == "127.0.0.1"
+        assert url.port == 15432
+        assert url.database == "ensemble_test"
+        # The password round-trips exactly (escaped in the URL, decoded
+        # back to the original by the parser).
+        assert url.password == "pa?ss#word@host"
+        # ... and what the driver receives re-parses to the same values.
+        reparsed = sqlalchemy.engine.make_url(
+            url.render_as_string(hide_password=False)
+        )
+        assert reparsed.password == "pa?ss#word@host"
+        assert reparsed.host == "127.0.0.1"
+        assert reparsed.database == "ensemble_test"
+        assert reparsed.query["connect_timeout"] == str(BOOT_DB_TIMEOUT_S)
+    finally:
+        engine.dispose()
