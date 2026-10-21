@@ -268,7 +268,7 @@ Every decision below adopts the gap-doc §6 recommendation as the plan's working
 
 ## D17. `QUEUE_DISCARD_ON_STARTUP` default revisit = PARKED, tied to the G2 follow-up commission (recorded ruling 4)
 
-**Decision:** PARKED. The shipped `config.yaml:306` default for `QUEUE_DISCARD_ON_STARTUP` is `false`; the live `.env` overrides to `true`. The default revisit (whether to flip the shipped default to `true`) is parked; a **G2 follow-up commission** (a separate, small commission from D13) owns the decision. The G2 follow-up commission's scope is: re-examine the G2 reset action under the discard-on-startup interplay (architect A3), and decide whether the shipped default should flip to `true` based on Phase 4 demo data.
+**Decision:** PARKED. The shipped `config.yaml:318` default for `QUEUE_DISCARD_ON_STARTUP` is `false`; the live `.env` overrides to `true`. The default revisit (whether to flip the shipped default to `true`) is parked; a **G2 follow-up commission** (a separate, small commission from D13) owns the decision. The G2 follow-up commission's scope is: re-examine the G2 reset action under the discard-on-startup interplay (architect A3), and decide whether the shipped default should flip to `true` based on Phase 4 demo data.
 
 **Rationale:**
 - The shipped `false` default is the right dev-friendly value; the live `true` override is the right production value. Flipping the shipped default is a behavior change for every install; it must be tied to a real production-data signal (e.g., "X% of live boots had stuck `processing` rows that the override cleaned up").

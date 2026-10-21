@@ -122,6 +122,7 @@ start; check PG reachability first.
   count. There is **no retry loop** behind that: the claim path (`dequeue`) gates on
   `status='ready'` plus the `next_retry_at` due-time, NOT on `retry_count` — so the
   stale values are cosmetic-but-alarming in the queue views, not a retry driver.
+- **Boot-preflight PG URL is still f-string-built (open follow-up).** `daemon/__main__.py:122` (`_preflight_pg_url`) builds its own probe URL: a password containing `@` corrupts the HOST (unresolvable → exit 75, fail-closed; the launcher retries with capped backoff) while `?` is harmless there and the DATABASE name is never corrupted — the same `URL.create` swap as the factory is the open follow-up.
 
 ## 6. Hard-reboot drill (Q-5)
 

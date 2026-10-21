@@ -112,8 +112,8 @@ G2.A never joins tables, so `mq.message_id ≠ report_injection.child_message_id
 Delivery is **task-driven**, not queue-driven: `dequeue()`/`list_ready()`/`dequeue_by_instance()` have zero production callers; the only production READY→PROCESSING writer is `claim_specific` (`message_processing_pipeline.py:678`) for *known* message_ids with Task rows; enqueue mints MessageQueue+Task in one txn (`instance_messaging.py:2001-2340`). The repository's own warning (`repository.py:138-150`): *"delivery is task-driven only — a task-less insert sits at READY forever."* Therefore:
 
 - Rows with a live RUNNING task → **AutoContinue owns them** (resume step-1 cleanup completes PENDING/PROCESSING/RETRYING MQ rows) — G2 must exclude them.
-- Task-less rows → reset-to-`ready` is inert for delivery (and on `QUEUE_DISCARD_ON_STARTUP=true` installs the discard wipe removes the doomed subset post-readyz; shipped `config.yaml:306` defaults `false`, live `.env` overrides `true`).
-- **G2's actual value = (a) queue-accounting hygiene** — stale `processing` rows are counted by `get_stats()` (`repository.py:1415-1480`) and trip the `send_message` busy-guard (`daemon/tools/instance.py:4037`: `pending_count>0 or processing_count>0`), making a *revived* instance look permanently busy to agent-to-agent sends — **a real, user-visible wedge**; **(b) lane-6 enablement** for report-family wake rows (§2.4).
+- Task-less rows → reset-to-`ready` is inert for delivery (and on `QUEUE_DISCARD_ON_STARTUP=true` installs the discard wipe removes the doomed subset post-readyz; shipped `config.yaml:318` defaults `false`, live `.env` overrides `true`).
+- **G2's actual value = (a) queue-accounting hygiene** — stale `processing` rows are counted by `get_stats()` (`repository.py:1415-1480`) and trip the `send_message` busy-guard (`daemon/tools/instance.py:4200`: `pending_count>0 or processing_count>0`), making a *revived* instance look permanently busy to agent-to-agent sends — **a real, user-visible wedge**; **(b) lane-6 enablement** for report-family wake rows (§2.4).
 
 **Amended action**: one new guarded repo method — `UPDATE message_queue SET status='ready', processing_started_at=NULL WHERE message_id=:id AND status='processing'` (mirrors `dequeue`'s CAS shape) — applied per-row, skip rows whose instance is terminal (revive hazard), skip rows with a RUNNING/PAUSED task (AutoContinue owns them). **Acceptance re-specified**: assert `get_stats()["processing_count"] == 0` post-boot and the busy-guard clears — NOT "the message was re-delivered."
 
@@ -134,6 +134,8 @@ Lifespan failure → uvicorn `sys.exit(STARTUP_FAILURE=3)` (`uvicorn/main.py:43,
 ### 4.3 The reuse that replaces the helper — `_boot_db_preflight` + exit-75 track
 
 **Already shipped**: `daemon/__main__.py:143-247` does `SELECT 1` with `connect_timeout=BOOT_DB_TIMEOUT_S=10` (`constants.py:70`); exits **75** (EX_TEMPFAIL) on unreachable PG, **78** on auth refusal; called on both entry paths (`run_app.py:70` frozen binary; `__main__.py:467` `python -m daemon`). Launcher maps 75 → 5–60s capped backoff, **budget-exempt, infinite** (`launcher.sh:1340-1346,1576-1590`) — the canonical "wait for a transient dependency" lane. A 5-min WAL replay resolves with the daemon starting cleanly the moment PG accepts connections; no crash-budget burn; systemd never sees a failure.
+
+**Residual on this lane (open follow-up, NOT fixed here).** The preflight builds its OWN probe URL at `daemon/__main__.py:122` with the same raw f-string the factory used to use, so the factory's `URL.create` swap (commit `ecc2ff715`) does NOT cover this site. Empirically re-measured 2026-10-21: a password containing `?` is UNAFFECTED there (the preflight appends no query string, and the bound rides its own `connect_args` at `daemon/__main__.py:208-210`), while a password containing `@` corrupts the HOST (unresolvable → exit 75 fail-closed) and NEVER the DATABASE name. The statement of record — including the dated addendum that corrects the over-broad `ecc2ff715` commit-message wording — is plan-overview.md §2 (Out of Scope); the operator-facing disclosure is `docs/runbooks/hard-reboot-recovery.md` §5.
 
 **Amendment (P1 rewrite)**: delete the in-lifespan retry helper; (i) verify preflight coverage is on the canonical boot path (it is, both entry modes); (ii) **+1 LOC: add `connect_timeout` to `create_postgres_engine`** (`daemon/repositories/factory.py:232-284` currently sets only `pool_pre_ping` — a firewall-DROP hangs 75–130s per attempt, making every retry budget fiction); (iii) template comments per §4.1. `ENSEMBLE_INIT_RETRY` knob: **eliminated** (no new knob; the preflight is the existing, better-shaped lane). Kill-switch count stays at one (`ENSEMBLE_HARD_REBOOT_BOOT_PASS`).
 
@@ -186,7 +188,7 @@ Bus starts at `api.py:2043`, AutoContinue at `:2365` — bus first, materially. 
 
 All amendments fit the plan's ≤315 total ceiling; the ≤70 Python ceiling is *tightened* to ≈44 (measured: 42 shipped Python statements). No migrations, no schema change, no agent-prompt files (no seal re-pin), one kill-switch (down from two).
 
-**Measurement method (re-verifiable).** *Shipped Python* = AST statement count (`ast.walk` over `ast.stmt`), base `4c888fbbb` → head: 1974 → 2016 (+42; P1 +2, P2 +40). *Test surface* = physical lines (non-blank and non-blank-non-comment given in plan-overview §6). *Runbook* = physical / non-blank. *P2 service* = 103 physical / 84 non-blank / 79 non-blank-non-comment / 25 executable statements (AST statement count; 23 with every docstring excluded, 26 counting every `ast.stmt`).
+**Measurement method (re-verifiable).** *Shipped Python* = AST statement count (`ast.walk` over `ast.stmt`), base `4c888fbbb` → head: 1974 → 2016 (+42; P1 +2, P2 +40). *Test surface* = physical lines (non-blank and non-blank-non-comment given in plan-overview §6). *Runbook* = physical / non-blank. *P2 service* = 103 physical / 84 non-blank / 79 non-blank-non-comment / 25 executable statements (**25 = `ast.stmt` count excluding the module docstring; 23 with every docstring excluded; 26 counting every `ast.stmt`**).
 
 ---
 
@@ -215,7 +217,7 @@ All amendments fit the plan's ≤315 total ceiling; the ≤70 Python ceiling is 
 
 - Prevalence of the fresh-dead `processing` shape on real data — one `SELECT` during Phase-0 env audit would quantify it.
 - Whether every install shape's ExecStart chain reaches the launcher (and thus the exit-75 track) — verified for the live `ensemble-main.service` shape; spot-check demo/dev shapes during P4.
-- `QUEUE_DISCARD_ON_STARTUP` default divergence (shipped `config.yaml:306` `false` vs live `.env` `true`) — decide whether G2's hygiene value justifies flipping the shipped default in a future commission.
+- `QUEUE_DISCARD_ON_STARTUP` default divergence (shipped `config.yaml:318` `false` vs live `.env` `true`) — decide whether G2's hygiene value justifies flipping the shipped default in a future commission.
 
 ## 11. Evidence Index
 
@@ -228,7 +230,7 @@ All amendments fit the plan's ≤315 total ceiling; the ≤70 Python ceiling is 
 | Selector select-only; R-03 citation false | B, C | `repository.py:385-423` vs `dequeue():302-313` |
 | 3600s predicate boot-invalid | A, B, C | `repository.py:67,413-423`; claim stamps `:298-300,357-359` |
 | No READY consumer; task-driven dispatch | A, B, C | `repository.py:138-150,257-322`; `message_processing_pipeline.py:678`; `instance_messaging.py:2001-2340` |
-| Busy-guard wedge | C | `repository.py:1415-1480`; `daemon/tools/instance.py:4037` |
+| Busy-guard wedge | C | `repository.py:1415-1480`; `daemon/tools/instance.py:4200` |
 | Lane-6 composition | B, C | `report_injection/repository.py:1974+`, `:2127-2131`; obligation triple `:47,180,197` |
 | AutoContinue owns RUNNING-task rows | A, C | `manager.py` resume step-1 cleanup (12040-12440 nbhd); `task/repository.py:1128-1131,1155-1169` |
 | Pairing heal on silent resume | C | `graph.py:336-339,342-465,468+,9065-9111`; `instance_messaging.py:4680,4910` |
