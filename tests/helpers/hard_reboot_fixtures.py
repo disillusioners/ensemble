@@ -21,12 +21,8 @@ Contents:
     pass opens more than one connection and ``:memory:`` is
     per-connection).
   * :func:`seed_instance` / :func:`seed_message` / :func:`seed_task` /
-    :func:`message_status` — the row seeds.
-  * :func:`pg_config` / :func:`no_pg_env` — the PG-coordinate
-    neutraliser: the ambient shell may export the LIVE PG
-    coordinates, and the factory resolves ``POSTGRES_*`` with
-    precedence over the config, so a prod-pointing env would silently
-    redirect the constructed engine.
+    :func:`seed_report_injection` / :func:`message_status` — the row
+    seeds.
 
 Importable from both packs via the ``tests.helpers`` package (the
 established pattern — see ``tests.helpers.unified_spawn_fixtures``).
@@ -43,6 +39,7 @@ from sqlmodel import Session, SQLModel
 
 import daemon.repositories.instance.models  # noqa: F401 — register
 import daemon.repositories.message_queue.models  # noqa: F401
+import daemon.repositories.report_injection.models  # noqa: F401 — register
 import daemon.repositories.task.models  # noqa: F401
 from daemon.ensemble_config import EnsembleConfig, PostgresConfig
 from daemon.repositories.instance.models import Instance
@@ -50,7 +47,11 @@ from daemon.repositories.message_queue.models import MessageQueue, MessageStatus
 from daemon.repositories.message_queue.repository import (
     SQLModelMessageQueueRepository,
 )
-from daemon.repositories.task.models import Task
+from daemon.repositories.report_injection.models import (
+    ReportInjection,
+    ReportInjectionState,
+)
+from daemon.repositories.task.models import Task, TaskType
 
 # The boot epoch — a fixed instant, so "before the boot" is exact.
 BOOT_EPOCH = datetime(2026, 10, 21, 6, 0, 0)
@@ -84,11 +85,18 @@ def engine(tmp_path):
         cursor.execute("PRAGMA busy_timeout=10000")
         cursor.close()
 
-    # Only the three tables this pass touches — a full create_all() of
-    # every registered model costs ~0.5s per test.
+    # Only the four tables this work touches — a full create_all() of
+    # every registered model costs ~0.5s per test. The
+    # ``report_injections`` table is here for the D19 lane-6
+    # composition test (the RDRS lane-6 predicate joins it).
     SQLModel.metadata.create_all(
         eng,
-        tables=[MessageQueue.__table__, Instance.__table__, Task.__table__],
+        tables=[
+            MessageQueue.__table__,
+            Instance.__table__,
+            Task.__table__,
+            ReportInjection.__table__,
+        ],
     )
     yield eng
     eng.dispose()
@@ -140,6 +148,7 @@ def seed_message(
     *,
     last_activity_at: datetime | None,
     status: str = MessageStatus.PROCESSING.value,
+    source: str | None = None,
 ) -> None:
     with Session(eng) as s:
         s.add(
@@ -148,6 +157,7 @@ def seed_message(
                 instance_id=instance_id,
                 content="fixture content",
                 status=status,
+                source=source,
                 last_activity_at=last_activity_at,
                 processing_started_at=last_activity_at,
             )
@@ -161,6 +171,9 @@ def seed_task(
     instance_id: str,
     message_id: str,
     status: str,
+    *,
+    task_type: str = TaskType.PROCESS_MESSAGE.value,
+    last_heartbeat_at: datetime | None = None,
 ) -> None:
     with Session(eng) as s:
         s.add(
@@ -169,6 +182,36 @@ def seed_task(
                 instance_id=instance_id,
                 message_id=message_id,
                 status=status,
+                task_type=task_type,
+                last_heartbeat_at=last_heartbeat_at,
+            )
+        )
+        s.commit()
+
+
+def seed_report_injection(
+    eng: Engine,
+    *,
+    injection_id: str,
+    parent_instance_id: str,
+    child_instance_id: str,
+    child_message_id: str,
+    content: str,
+) -> None:
+    """Seed a PENDING report-injection obligation marker.
+
+    The marker is one half of the RDRS lane-6 candidate shape (the
+    other half is the ``ready`` wake row + the ``running`` wake task).
+    """
+    with Session(eng) as s:
+        s.add(
+            ReportInjection(
+                injection_id=injection_id,
+                parent_instance_id=parent_instance_id,
+                child_instance_id=child_instance_id,
+                child_message_id=child_message_id,
+                content=content,
+                state=ReportInjectionState.PENDING.value,
             )
         )
         s.commit()

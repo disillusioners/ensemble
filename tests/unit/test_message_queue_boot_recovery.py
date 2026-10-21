@@ -24,6 +24,14 @@ and its two repository primitives on
        the pass entirely.
   M7 — never-wedge: a raising repository does not propagate out of the
        pass.
+  D19 — the lane-6 composition is MUTUALLY EXCLUSIVE: the pass and
+       RDRS lane 6 never co-hold on one row (the pass's skip-guard
+       excludes exactly the rows lane 6 would heal). The test pins the
+       non-composition BEFORE and AFTER the pass, plus the controls
+       that prove the fixture is genuinely lane-6-eligible in the live
+       shape — the earlier "they compose" claim was FALSE and is
+       withdrawn by D19 (``.agents/shared/planning/hard-reboot-recovery/
+       c4-lane6-ruling.md`` §3).
 
 Harness: REAL file-backed SQLite + the row seeds live in
 ``tests/helpers/hard_reboot_fixtures.py`` (shared with the
@@ -41,7 +49,8 @@ import pytest
 
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.message_queue.models import MessageStatus
-from daemon.repositories.task.models import TaskStatus
+from daemon.repositories.report_injection.repository import ReportInjectionRepository
+from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.services.message_queue_boot_recovery import (
     HARD_REBOOT_BOOT_PASS_ENV,
     recover_stuck_messages_on_startup,
@@ -53,6 +62,7 @@ from tests.helpers.hard_reboot_fixtures import (  # noqa: F401 — fixtures
     repo,
     seed_instance,
     seed_message,
+    seed_report_injection,
     seed_task,
 )
 
@@ -195,6 +205,16 @@ def test_post_pass_accounting_moves_the_stranded_row_from_processing_to_pending(
 ):
     """M5 — the post-pass accounting, measured on the REAL ``get_stats`` output.
 
+    This is the M5-a assertion set of the C4 ruling
+    (``c4-lane6-ruling.md`` §4, M5-a): post-pass accounting is HONEST
+    (the processing bucket empties) but the busy-guard is NOT cleared
+    on the shipped default (the pending bucket does not empty). The
+    ruling's M5-a test body is covered here assertion-for-assertion —
+    ``reset == 1``, the row is ``'ready'``, ``processing_count == 0``,
+    ``pending_count == 1``, and the busy-guard predicate STILL
+    satisfied — plus the pre-pass counts and the bucket-move
+    invariant, so the count is seen to MOVE rather than disappear.
+
     ``get_stats`` (``daemon/repositories/message_queue/repository.py``)
     reports two counts per instance:
 
@@ -268,6 +288,46 @@ def test_busy_guard_predicate_on_an_instance_with_no_queued_rows(repo, engine):
     assert (stats["pending_count"] > 0 or stats["processing_count"] > 0) is False
 
 
+def test_stranded_row_is_indistinguishable_from_a_freshly_queued_row(repo, engine):
+    """M5 — control: after the pass a stranded row is EXACTLY a queued row.
+
+    This is the real invariant of the pass: a row that was stranded in
+    'processing' by the crash is indistinguishable, to every consumer
+    (claim path, accounting, finalizer), from a row that was enqueued and
+    never claimed. It is what makes the reset safe; it is also why the
+    busy-guard does not clear (both rows count as pending).
+
+    (C4 ruling §4, M5-b — the control the ruling specifies. It is
+    ADDITIVE to the two controls above: those pin the guard's predicate
+    on an EMPTY instance, this one pins the post-pass equivalence of a
+    stranded row and a freshly queued row.)
+    """
+    seed_instance(engine, "i1", InstanceStatus.RUNNING.value)
+    seed_instance(engine, "i2", InstanceStatus.RUNNING.value)
+    seed_message(  # stranded by the crash
+        engine,
+        "m_stranded",
+        "i1",
+        last_activity_at=BOOT_EPOCH - timedelta(minutes=2),
+    )
+    seed_message(  # never claimed, enqueued normally
+        engine,
+        "m_fresh_queued",
+        "i2",
+        last_activity_at=None,
+        status=MessageStatus.READY.value,
+    )
+
+    recover_stuck_messages_on_startup(repo, BOOT_EPOCH)
+
+    stranded = repo.get_stats("i1")
+    queued = repo.get_stats("i2")
+
+    assert message_status(engine, "m_stranded") == MessageStatus.READY.value
+    assert stranded["processing_count"] == queued["processing_count"] == 0
+    assert stranded["pending_count"] == queued["pending_count"] == 1
+
+
 # ---------------------------------------------------------------------------
 # M6 / M7 — kill-switch and never-wedge
 # ---------------------------------------------------------------------------
@@ -334,3 +394,142 @@ def test_no_boot_epoch_skips_the_pass(repo, engine):
 
     assert recover_stuck_messages_on_startup(repo, None) == 0
     assert message_status(engine, "m_fresh") == MessageStatus.PROCESSING.value
+
+
+# ---------------------------------------------------------------------------
+# D19 — the lane-6 composition (MUTUAL EXCLUSIVITY, documented)
+# ---------------------------------------------------------------------------
+
+
+def _seed_lane6_wake_shape(engine, *, task_status: str, row_status: str) -> None:
+    """Seed the live RDRS lane-6 wake shape.
+
+    The shape (per ``report_injection/repository.py:1980-2012`` and the
+    PG lane-6 test at ``tests/postgres/test_report_delivery_recovery_pg.py``):
+
+      * parent instance ``p1`` (running) and child instance ``c1`` (completed);
+      * the wake MESSAGE row ``wake-msg-1`` on the parent, sourced
+        ``internal_report:c1:child-msg-1`` — the colon-form the lane-6
+        join matches on (``internal_report:{child}:%``);
+      * the wake TASK ``wake-task-1`` on the parent: task_type
+        ``process_report``, bound to the wake row's message id, with a
+        stale heartbeat (lane 6 requires a stale heartbeat);
+      * the PENDING report-injection obligation marker (the triple
+        ``(p1, c1, child-msg-1)``).
+    """
+    seed_instance(engine, "p1", InstanceStatus.RUNNING.value)
+    seed_instance(engine, "c1", InstanceStatus.COMPLETED.value)
+    seed_message(
+        engine,
+        "wake-msg-1",
+        "p1",
+        status=row_status,
+        source="internal_report:c1:child-msg-1",
+        last_activity_at=BOOT_EPOCH - timedelta(minutes=2),
+    )
+    seed_task(
+        engine,
+        "wake-task-1",
+        "p1",
+        "wake-msg-1",
+        task_status,
+        task_type=TaskType.PROCESS_REPORT.value,
+        last_heartbeat_at=BOOT_EPOCH - timedelta(minutes=2),
+    )
+    seed_report_injection(
+        engine,
+        injection_id="inj-1",
+        parent_instance_id="p1",
+        child_instance_id="c1",
+        child_message_id="child-msg-1",
+        content="child report content",
+    )
+
+
+def test_lane6_composition_is_mutually_exclusive_documented(repo, engine):
+    """D19 — the MQ boot pass and RDRS lane 6 are MUTUALLY EXCLUSIVE for one row.
+
+    Lane 6 heals a wake row that is 'ready' while its wake task is 'running'
+    (report_injection/repository.py:2122-2147). The boot pass flips 'processing'
+    -> 'ready' ONLY for rows whose owning task is NOT 'running'/'paused'
+    (message_queue/repository.py:470-471) — INV-1, queue ownership. A row that
+    lane 6 could heal is therefore skipped by the pass, and a row the pass flips
+    can never enter lane 6's predicate. The earlier architecture-recommendation
+    claim that the two 'compose' was FALSE and is withdrawn by D19.
+    Narrowing the skip-guard to force the composition would re-arm the row while
+    its task is still running -> the message is delivered twice.
+    """
+    rdrs_repo = ReportInjectionRepository(engine)
+    _seed_lane6_wake_shape(
+        engine, task_status=TaskStatus.RUNNING.value, row_status=MessageStatus.PROCESSING.value
+    )
+
+    # (1) BEFORE the pass — the wake row is 'processing', lane 6 needs 'ready'.
+    assert rdrs_repo.find_stuck_wake_candidates(limit=10) == []
+
+    # (2) the pass does NOT flip the row (its task is 'running' -> skip-guard).
+    #     This is the INV-1 assertion.
+    assert recover_stuck_messages_on_startup(repo, BOOT_EPOCH) == 0
+
+    # (3) the row is untouched.
+    assert message_status(engine, "wake-msg-1") == MessageStatus.PROCESSING.value
+
+    # (4) AFTER the pass — still no candidate. The composition does NOT happen.
+    assert rdrs_repo.find_stuck_wake_candidates(limit=10) == []
+
+    # (5) the row is still counted as in-progress — the GUARD, not the pass,
+    #     is what holds it.
+    assert repo.get_stats("p1")["processing_count"] == 1
+
+
+def test_lane6_composition_control_the_guard_is_what_holds_the_row(repo, engine):
+    """D19 — control: the guard (not a malformed fixture) holds the row.
+
+    The same fixture, with the wake task flipped to 'pending' so the
+    skip-guard no longer applies: the pass DOES flip the row to
+    'ready'. So the empty lane-6 candidate list in the test above is
+    caused by the GUARD, not by a broken fixture.
+
+    And lane 6 still cannot match the flipped row, because lane 6
+    requires ``tk.status='running'`` — the second half of the mutual
+    exclusivity: the pass's target class and lane 6's target class
+    never overlap.
+    """
+    rdrs_repo = ReportInjectionRepository(engine)
+    _seed_lane6_wake_shape(
+        engine, task_status=TaskStatus.PENDING.value, row_status=MessageStatus.PROCESSING.value
+    )
+
+    # The guard no longer applies -> the row IS flipped.
+    assert recover_stuck_messages_on_startup(repo, BOOT_EPOCH) == 1
+    assert message_status(engine, "wake-msg-1") == MessageStatus.READY.value
+
+    # ... and lane 6 still does not match it (tk.status must be 'running').
+    assert rdrs_repo.find_stuck_wake_candidates(limit=10) == []
+
+
+def test_lane6_live_shape_proves_the_fixture_is_lane6_eligible(repo, engine):
+    """D19 — positive control: the fixture IS lane-6-eligible in the live shape.
+
+    The counterfactual that closes the "vacuous fixture" gap: with the
+    wake row 'ready' and its task 'running' (the shape lane 6's own
+    producer creates — the claim-window shape, preserved by the F-1
+    epoch-belt), the SAME fixture yields exactly one lane-6 candidate.
+
+    So the empty candidate list in
+    ``test_lane6_composition_is_mutually_exclusive_documented`` is
+    caused by the mutual exclusivity, not by a fixture that could
+    never match.
+    """
+    rdrs_repo = ReportInjectionRepository(engine)
+    _seed_lane6_wake_shape(
+        engine, task_status=TaskStatus.RUNNING.value, row_status=MessageStatus.READY.value
+    )
+
+    candidates = rdrs_repo.find_stuck_wake_candidates(limit=10)
+
+    assert len(candidates) == 1
+    assert candidates[0]["wake_message_id"] == "wake-msg-1"
+    assert candidates[0]["parent_instance_id"] == "p1"
+    assert candidates[0]["child_instance_id"] == "c1"
+    assert candidates[0]["child_message_id"] == "child-msg-1"
