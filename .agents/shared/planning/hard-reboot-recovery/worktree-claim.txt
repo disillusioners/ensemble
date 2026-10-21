@@ -1,0 +1,33 @@
+Worktree claim — hard-reboot recovery (task_id: hrr-20261021)
+
+Worktree path : /home/nea/ensemble-src-wt-hard-reboot-recovery
+Branch        : feature/hard-reboot-recovery
+Base commit   : latest @ 4c888fbbbe630ebf0c52877beda0a1b839f7cbd5
+Branch HEAD   : 4c888fbbbe630ebf0c52877beda0a1b839f7cbd5 (at claim time)
+Repo          : /home/nea/ensemble-src  (main checkout NOT touched)
+
+Import resolution (Phase 0.1 — `uv sync` in the worktree, no reuse of the
+main checkout's .venv):
+
+  $ .venv/bin/python -c "import daemon; print(daemon.__file__)"
+  /home/nea/ensemble-src-wt-hard-reboot-recovery/daemon/__init__.py
+
+  => resolves INSIDE the worktree. The editable install is the worktree's
+  own (.venv/lib/python3.14/site-packages/_editable_impl_ensemble.pth
+  points at /home/nea/ensemble-src-wt-hard-reboot-recovery).
+
+Env fence (verified in the worktree's .env, never the live install):
+
+  ENSEMBLE_SELF_ENV=dev
+  POSTGRES_DB=ensemble_dev
+  PORT=8079 / DAEMON_PORT=8079   (live daemon is :9797 / ensemble_prod)
+
+  => fenced off ensemble_prod. No daemon boot for testing touches
+  /home/nea/agents-ensemble, the :9797 unit, or the live systemd units.
+
+Merge-checklist obligation carried from the prior-art lane (auto-continue
+D20 / M23 item 6): the worktree gate in tests/conftest_worktree.py MUST be
+REMOVED or NEUTRALIZED at the merge commit — it is bound to this
+worktree's absolute path and must never falsely fail on main / remote VMs
+that no longer have the worktree. The gate is env-gated (opt-in) and a
+silent no-op by default, so the merge is safe even if the file survives.

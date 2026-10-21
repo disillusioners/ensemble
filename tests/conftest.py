@@ -9,7 +9,13 @@ from unittest.mock import MagicMock, AsyncMock
 
 # Keep the attestation-specific real-graph fixtures discoverable without
 # making every unit test load LangGraph.
-pytest_plugins = ("tests.support.conftest",)
+#
+# tests.conftest_worktree is the hard-reboot-recovery worktree gate
+# (Phase 0 / AC5). It MUST be listed here: pytest only auto-loads
+# plugins named ``conftest.py``, so a standalone ``conftest_worktree``
+# module is dead code unless registered. The gate itself is an
+# env-gated silent no-op unless ENSEMBLE_HARD_REBOOT_WORKTREE_GATE=1.
+pytest_plugins = ("tests.support.conftest", "tests.conftest_worktree")
 
 
 # Create mock modules and add to sys.modules BEFORE any daemon imports
