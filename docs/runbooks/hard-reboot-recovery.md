@@ -13,7 +13,7 @@ transparently continues the work that was in flight. Binding design contract:
 | PG startup | `After=postgresql.service` (ordering ONLY) + boot preflight `SELECT 1` (exit 75 → budget-exempt backoff) + `connect_timeout=BOOT_DB_TIMEOUT_S` (10s) | `scripts/systemd/ensemble-daemon.service`, `daemon/__main__.py::_boot_db_preflight`, `daemon/repositories/factory.py::create_postgres_engine` |
 | Continue RUNNING work | auto-continue boot pass (existing) | `daemon/services/auto_continue_boot_pass.py` |
 | Stranded queue rows | message-queue boot recovery (new) | `daemon/services/message_queue_boot_recovery.py` |
-| Stale-task backstop | StaleTaskRecovery, `boot+10min` clamp (existing) | `daemon/services/stale_task_recovery.py` |
+| Stale-task backstop | StaleTaskRecovery `boot+~10min` reap (config `stale_task_recovery_threshold_minutes`, default 10; the module fallback constant is 15) — this is the backstop that terminalizes task-owned stranded rows (`reconcile_turn_mirror` → row `failed`), not the MQ pass. | `daemon/services/stale_task_recovery.py` |
 
 The MQ boot pass resets message-queue rows stranded in `'processing'` back to `'ready'`. It is
 **reset-only** — it never re-dispatches a message. Two skip-guards protect the reset: a row
@@ -93,11 +93,16 @@ start; check PG reachability first.
   re-emit, bounded and operator-observable; recover by re-issuing the task manually.
 - **KMS_LANE-1 handles (G7.C).** If you used KMS handles, re-attach them after a hard
   reboot, or migrate to LANE-2 / Secrets. LANE-1 deprecation is a post-promote follow-up.
-- **QUEUE_DISCARD_ON_STARTUP interplay.** Shipped default is `false` (`config.yaml` →
-  `queue.discard_on_startup`): the MQ boot pass clears stranded rows and the wedge becomes
-  a visible `ready` row — accounting is honest, but the row is still queued. On an install
-  overriding it to `true`, the deferred discard wipe removes the doomed rows instead and
-  `processing_count` reaches 0 post-boot.
+- **QUEUE_DISCARD_ON_STARTUP interplay.** Shipped default is `false` (`config.yaml:318` →
+  `queue.discard_on_startup`): the MQ boot pass moves stranded rows from `processing` to
+  `ready` — accounting is honest, but the row is still queued **and still counted**:
+  `get_stats()` counts `ready` rows in `pending_count`, and the agent-to-agent busy-guard
+  trips on `pending_count > 0 OR processing_count > 0`, so the instance **still reads as
+  busy** after the pass. `processing_count == 0` is not the same as "not busy". The wedge
+  clears only when the row is subsequently claimed and completed (task-driven delivery) or
+  removed by the discard-on-startup wipe. On an install overriding it to `true`, the
+  deferred discard wipe removes the doomed rows instead and both counts reach 0 post-boot.
+  (D19, 2026-10-21.)
 - **Known gaps (tracked, not fixed here).** D13 task-less RUNNING instances (MANDATORY
   follow-up, §4) · G1 JobRecovery alive-row (deferred) · G3 scheduler duplicate fire
   (parked, §5) · G7 KMS_LANE-1 deprecation (post-promote, §5) · G5 Task↔JobItem PAUSED
@@ -122,7 +127,7 @@ start; check PG reachability first.
   count. There is **no retry loop** behind that: the claim path (`dequeue`) gates on
   `status='ready'` plus the `next_retry_at` due-time, NOT on `retry_count` — so the
   stale values are cosmetic-but-alarming in the queue views, not a retry driver.
-- **Boot-preflight PG URL is still f-string-built (open follow-up).** `daemon/__main__.py:122` (`_preflight_pg_url`) builds its own probe URL: a password containing `@` corrupts the HOST (unresolvable → exit 75, fail-closed; the launcher retries with capped backoff) while `?` is harmless there and the DATABASE name is never corrupted — the same `URL.create` swap as the factory is the open follow-up.
+- **Boot-preflight PG URL — built with `URL.create` (fixed; no operator action).** The preflight's probe URL (`daemon/__main__.py::_preflight_pg_url`) is built with the same `URL.create` construction as the shared factory, so a password containing `@` no longer corrupts the probe's HOST (it used to make the host unresolvable → exit 75 → the launcher retried with capped backoff; the DATABASE name was never affected, so it was never a wrong-database probe). The rendered URL is unchanged in the normal case, and the connect bound still rides the probe engine's own `connect_args`.
 
 ## 6. Hard-reboot drill (Q-5)
 
@@ -145,3 +150,62 @@ Run on a NON-live host.
    No row stuck in `processing` with a `last_activity_at` older than the boot.
 6. Negative checks: a PAUSED instance must still be `paused` (§4); no message may have been
    re-delivered twice (check the instance's turn count / the ledger).
+
+### 6.1. Acceptance checklist — the split (D19)
+
+The Phase-4 demo E2E is scored against TWO sets. The mandatory set is the same on
+every install shape; the busy-guard-clears assertion is install-conditional.
+
+**Mandatory on EVERY install shape (shipped default or otherwise):**
+
+| # | Assertion | Where |
+|---|---|---|
+| P4-1 | The stranded row's `status` is `'ready'` (not `'processing'`) after boot | `SELECT status FROM message_queue WHERE message_id='<seeded>'` |
+| P4-2 | `get_stats()["processing_count"] == 0` for the owning instance | the demo's own stats read |
+| P4-3 | `get_stats()["pending_count"] >= 1` — the row is still counted | same read; **recorded in the evidence bundle** |
+| P4-4 | The busy-guard **still trips** on that instance (`pending_count > 0 or processing_count > 0`) on the shipped default | agent-to-agent send attempt to the instance must be rejected as busy; the rejection line records `pending_count`/`processing_count` |
+| P4-5 | The fresh-dead fixture (row claimed 60s pre-power-loss) IS recovered — the boot-epoch predicate works | as today |
+| P4-6 | A task-owned stranded row (task `running`) is NOT flipped — INV-1 holds | `SELECT status` on the task-owned row; `processing_count == 1` for that instance |
+
+**Install-conditional (only on a `QUEUE_DISCARD_ON_STARTUP=true` demo install):**
+
+| # | Assertion |
+|---|---|
+| P4-7 | `processing_count == 0` **and** `pending_count == 0` for the owning instance, and the busy-guard **does not** trip — the deferred wipe removed the doomed rows. |
+
+**Discipline:** the evidence bundle (`.agents/tester/RESULTS/2026-10-19-hard-reboot-recovery-e2e.md`)
+must record the `pending_count`/`processing_count` pair and the busy-guard outcome for
+the seeded instance, and must state which install shape produced it. A run that reports
+only "processing_count == 0" without the pending count and the guard outcome is
+**incomplete**.
+
+### 6.2. Operator triage — a visible-pending row after the boot (D17 parked)
+
+On the shipped default (`QUEUE_DISCARD_ON_STARTUP=false`) the boot pass leaves the
+stranded row **visible as queued** and the instance still reads as busy. That is the
+designed outcome (D19): the pass TRANSFORMS the wedge into visible-pending, it does not
+clear it, and `QUEUE_DISCARD_ON_STARTUP` stays parked at `false` — silently deleting the
+queued backlog at boot is worse than a visible row.
+
+Triage a visible-pending row in this order:
+
+1. **Confirm it is the pass's output, not a live claim** — the row's `status` is `ready`
+   and `processing_started_at IS NULL`:
+   `SELECT message_id, status, last_activity_at, processing_started_at, error_message FROM message_queue WHERE instance_id = '<iid>';`
+2. **Check whether a task owns it** —
+   `SELECT work_id, status, task_type FROM task WHERE message_id = '<mid>';`
+   - a `running`/`paused` task → the row is **task-owned**; the pass deliberately left it
+     alone (INV-1). Do NOT touch it: AutoContinue resumes that turn, and StaleTaskRecovery's
+     `boot+~10min` reap terminalizes it if the turn is dead. Re-check after the reap.
+   - a `pending`/`deferred` task → the row is claimable again; the normal task-driven claim
+     path delivers it once the task's `next_retry_at` comes due. Wait for the claim — do
+     NOT hand-edit the row.
+   - **no** task row → the row is task-less: nothing will ever move it (the D13 class). The
+     boot pass can only make it visible, never deliver it. Report it as the D13 task-less
+     class (D13 follow-up commission is the fix) — and do NOT hand-edit the row into a
+     deliverable state: a hand edit defeats the skip-guards (R-03).
+3. **If the instance must accept agent-to-agent sends now**, the row must be CLAIMED AND
+   COMPLETED (task-driven) — the busy-guard clears only then. On a
+   `QUEUE_DISCARD_ON_STARTUP=true` install the deferred wipe removes the doomed rows and
+   both counts reach 0 post-boot; on the shipped default the row stays visible until a
+   task claims it.
