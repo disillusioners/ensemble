@@ -18,6 +18,11 @@ inside ``BOOT_DB_TIMEOUT_S`` (10s). This file pins:
       declares NO ``Wants=`` / ``Requires=`` on it (a remote-PG host must
       not be forced to start a local PG; a local-PG host must not have
       one force-started behind the daemon's back).
+  (h) the BOOT-PREFLIGHT probe URL is built with ``URL.create`` too:
+      byte-identical to the pre-change string form in the normal case,
+      and the intended host / port / database survive a
+      URL-special-character password (the f-string form mangled the
+      HOST into an unresolvable one -> exit 75 boot-block).
 
 No real PostgreSQL is contacted: every DB touch is mocked.
 """
@@ -241,3 +246,62 @@ def test_special_char_password_keeps_the_bound_and_the_target(
         assert reparsed.query["connect_timeout"] == str(BOOT_DB_TIMEOUT_S)
     finally:
         engine.dispose()
+
+
+def test_preflight_url_is_byte_identical_to_the_string_form(no_pg_env):
+    """(h1) The preflight URL is unchanged in the normal case.
+
+    The preflight probe URL is now built with ``URL.create`` (the
+    same construction as the shared factory), but in the normal case
+    — no URL-special characters in the password — it renders
+    byte-for-byte identical to the f-string form it replaced. Nothing
+    about the probe's target changes with the fix; only the escaping
+    of a pathological password does.
+    """
+    cfg = pg_config()
+    pg = cfg.postgres
+    string_form = (
+        f"postgresql+psycopg://{pg.user}:{pg.password}@{pg.host}:{pg.port}/{pg.db}"
+    )
+
+    assert daemon_entry._preflight_pg_url(cfg) == string_form
+
+
+def test_preflight_url_keeps_the_intended_target_with_a_special_char_password(
+    no_pg_env, monkeypatch
+):
+    """(h2) A URL-special-character password no longer corrupts the HOST.
+
+    Measured against the f-string form: a password containing ``@``
+    re-parsed into a DIFFERENT (unresolvable) host — the probe then
+    failed to connect and the daemon exited 75 (boot-blocked, though
+    fail-closed: it never probed the WRONG database). ``URL.create``
+    escapes the password, so the host, port, database and password
+    are the intended ones.
+    """
+    monkeypatch.setenv("POSTGRES_PASSWORD", "pa?ss#word@host")
+    cfg = pg_config()
+
+    url = daemon_entry._preflight_pg_url(cfg)
+    parsed = sqlalchemy.engine.make_url(url)
+
+    assert parsed.host == "127.0.0.1"
+    assert parsed.port == 15432
+    assert parsed.database == "ensemble_test"
+    assert parsed.password == "pa?ss#word@host"
+
+
+def test_preflight_url_carries_no_connect_timeout_query(no_pg_env):
+    """(h3) The preflight's bound rides ``connect_args``, not the URL query.
+
+    The shared factory rides ``connect_timeout`` on the URL query; the
+    preflight rides it on the probe engine's ``connect_args`` (the
+    factory's ``connect_args`` slot is reserved for the B2/B3
+    UTC-session contract). That mechanism difference is deliberate —
+    pinned here so the fix does not silently move the bound.
+    """
+    cfg = pg_config()
+
+    parsed = sqlalchemy.engine.make_url(daemon_entry._preflight_pg_url(cfg))
+
+    assert "connect_timeout" not in parsed.query

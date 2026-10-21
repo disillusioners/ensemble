@@ -110,8 +110,19 @@ def _preflight_pg_url(ensemble_config) -> str:
     ``connect_args`` slot is reserved for the B2/B3 UTC-session
     contract and must not change. Keep this URL construction in sync
     with the factory's if the factory's URL construction changes.
+
+    The CONSTRUCTION is now the same ``URL.create(...)`` the factory
+    uses (S1 close, 2026-10-21): the f-string form put the RAW
+    password into the URL, so a password containing ``@`` re-parsed
+    into a DIFFERENT (unresolvable) host and boot-blocked the daemon
+    with exit 75. The BOUND still rides ``connect_args`` here (not on
+    the URL query) — that mechanism difference is deliberate and
+    unchanged, so the rendered URL stays byte-for-byte identical to the
+    pre-change string form in the normal case.
     """
     import os
+
+    from sqlalchemy.engine import URL
 
     pg = ensemble_config.postgres
     host = os.environ.get("POSTGRES_HOST", pg.host)
@@ -119,7 +130,25 @@ def _preflight_pg_url(ensemble_config) -> str:
     db = os.environ.get("POSTGRES_DB", pg.db)
     user = os.environ.get("POSTGRES_USER", pg.user)
     password = os.environ.get("POSTGRES_PASSWORD", pg.password)
-    return f"postgresql+psycopg://{user}:{password}@{host}:{port}/{db}"
+    # URL.create(...) — NOT an f-string (same construction as
+    # daemon/repositories/factory.py::create_postgres_engine). The
+    # string form put the RAW password into the URL: a password
+    # containing '@' re-parsed into a DIFFERENT host (unresolvable ->
+    # exit 75, fail-closed) and the DATABASE name was never the
+    # corrupted part. URL.create escapes the password, so the host,
+    # port and database stay the intended ones. The libpq
+    # connect_timeout is deliberately NOT repeated on the URL query:
+    # the preflight engine carries it via connect_args (the mechanism
+    # the factory does not use), and the factory's connect_args slot
+    # is reserved for the B2/B3 UTC-session contract.
+    return URL.create(
+        drivername="postgresql+psycopg",
+        username=user,
+        password=password,
+        host=host,
+        port=port,
+        database=db,
+    ).render_as_string(hide_password=False)
 
 
 def _pg_sqlstate(exc: BaseException) -> "str | None":
