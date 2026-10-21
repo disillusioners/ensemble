@@ -2362,6 +2362,22 @@ Provide a concise summary:"""
           running heal can never schedule a second, concurrent heal
           for the same root.
 
+        BOUND (2026-10-21, cycle-4 review F7 — DISCLOSED, not bounded
+        by code): the coalescing is PER-ROOT, so N DISTINCT stranded
+        roots ⇒ N concurrent hand-offs — the event-driven arm is NOT
+        bounded by the healer's per-tick ``batch_cap``. The
+        amplification is bounded in practice (every hand-off re-checks
+        every leg and writes only a provably dead root), but there is
+        no global ceiling on in-flight event-arm hand-offs in this
+        train; a ceiling is a named follow-up.
+
+        TEARDOWN CAVEAT (2026-10-21, cycle-4 review F8): the in-flight
+        marker is released ONLY by the scheduled task's done-callback.
+        If the event loop tears down before that callback fires, that
+        root's event arm stays WEDGED — no further hand-off is
+        scheduled for it from the hold site. The 300s sweep remains
+        the net (the sweep does not use the marker).
+
         Fail-soft: an unwired healer (partial boot, tests) is a
         silent no-op; task failures are logged by the done-callback.
         """

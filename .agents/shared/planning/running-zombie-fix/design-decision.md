@@ -26,7 +26,7 @@ by the live logs. What happened:
 
 * The turn ran clean — task `bb3df8a3` completed at **2026-10-21T04:09:31Z**.
 * The **PRE-STAMP RECURSIVE LIVENESS HOLD**
-  (`daemon/services/child_reports.py:2700-2766`) fired and **refused the
+  (`daemon/services/child_reports.py:2738-2790`) fired and **refused the
   COMPLETED stamp entirely**. Live log line (2026-10-21):
 
       root_completion: pre-stamp recursive liveness holds for 432988b8...
@@ -59,6 +59,26 @@ comes on a stranded tree), (3) the net was defanged by the later
 close (`daemon/services/task_processor.py:1148-1211`, "Fix B") closed it
 in the same pass.
 
+### 1.3 PROVENANCE — what is snapshot-derived and what is SYNTHESIZED (F9, 2026-10-21)
+
+The read-only specimen snapshot
+(``specimen-<live-root>-snapshot.md``, captured 2026-10-21 06:42Z,
+**never committed**) is the fixture's only evidence source — but it
+does NOT contain the whole shape, and claiming otherwise would be a
+provenance lie. The exact split:
+
+| fixture part | source | note |
+|---|---|---|
+| the root row's identity + its ``last_activity_at`` stamp (04:09:09) + the single task row (created 04:09:09 → started 04:09:10 → completed 04:09:31) | **snapshot-derived** | verbatim |
+| the 7 DIRECT children (all terminal) | **snapshot-derived** | verbatim (7 rows, all ``completed``) |
+| the root's ``running`` status | **log-derived** | the specimen row was captured **AFTER** the operator's ``POST /stop`` — it reads ``paused``. The pre-stop ``running`` posture is reconstructed from the LOG evidence (the stamp-refusal lines, §1.1), NOT from the snapshot |
+| the **DEPTH-3 ``idle`` member** (the real blocker) | **SYNTHESIZED** | the specimen contains **NO depth-3 rows at all**. The blocker came from the LOG evidence + the operator's account, not from the snapshot ⇒ the fixture must NOT claim snapshot fidelity for it |
+| the chain ages (26h / 25h) | **synthesized** | the snapshot carries no depth-3 timestamps to copy |
+| the never-dispatched ghost (the strand-exclusion interaction) | **synthesized** | a shape-pin fixture, not an observed row |
+
+The fixture ids are **descriptive only** — no live-derived 8-hex id
+mnemonics are reproduced in the test pack (F10).
+
 ### 1.2 EPOCH semantics — there is NO persisted epoch
 
 * **Start** = the read-time projection of `instances.last_activity_at`
@@ -88,12 +108,12 @@ existing healer.** NOT:
 
 The heal invokes
 `ChildReportsService._process_child_completion_and_notify_parent(root, …)`
-(`daemon/services/child_reports.py:2617`). NEVER a raw status UPDATE, NEVER
+(`daemon/services/child_reports.py:2633`). NEVER a raw status UPDATE, NEVER
 `terminate_instance` on the root.
 
 The chain, in order:
 
-1. **Pre-stamp recursive liveness** (`child_reports.py:2700-2766`, `skip_root=True`)
+1. **Pre-stamp recursive liveness** (`child_reports.py:2738-2790`, `skip_root=True`)
    — all-terminal tree ⇒ `live=False` ⇒ falls through to the stamp.
 2. **DB stamp** (`child_reports.py:3586-3600`) — the atomic
    `UPDATE … WHERE status NOT IN (paused, completed, error, waiting_children)`
@@ -281,10 +301,23 @@ behaviour is preserved exactly.
 **No new config knob** — single source of truth. The pre-stamp gate, the
 healer and f2 all inherit the corrected anchor.
 
-**f2 is NEUTRAL** (pinned, PIN-FIRST): `job_recovery_service.py` is
-untouched, and its guard CALL shape (no `skip_root` — for f2 the root's own
-status IS a live leg) and its OUTCOME (hold on a live member, finalize on a
-quiet tree) are identical before and after the move. The pin lives in
+**f2 is NEUTRAL in CODE — but NOT in BEHAVIOUR (pinned, PIN-FIRST; the
+pin stays green).** `job_recovery_service.py` is untouched, and its guard
+CALL shape (no `skip_root` — for f2 the root's own status IS a live leg)
+and its OUTCOME **on the pinned shape** (hold on a live member, finalize on
+a quiet tree) are identical before and after the move. **The BEHAVIOUR
+WIDENS, and that is a MATERIAL DISCLOSURE, not a hidden change:**
+
+1. the anchor fix makes f2's 6h backstop **reachable for a messaged
+   root** — before it, the root's own enqueue-refreshed stamp kept the
+   backstop permanently out of reach (the live 2026-10-21 repro's "22s
+   old" root);
+2. the cycle-4 companion leg (F1, §2.10) can now **HOLD f2** on a
+   member that owns a live (YOUNG) task row — f2 no longer
+   force-finalizes that `JobItem`.
+
+Both widen f2's HOLD direction (a MISS, never a wrong terminal), and both
+are disclosed at promote time. The pin lives in
 `tests/job_queue/test_pattern_f_mission_live_gate.py`
 (`TestF1LaneGuardAnchorNeutralityPin` — renamed in the cycle-2 post-review
 touch-up: the class exercises the **f1/E1 lane**
@@ -315,6 +348,46 @@ finalize — it can only delay one.
 short-circuit (`daemon/services/mission_live_guard.py:572-591`), f2's 6h
 backstop path.
 
+#### 2.8.1.1 THE CONSUMER TABLE — who reaches the 6h backstop, and what the companion leg now does for them
+
+**Read the table with the RULING-2 comment-site semantics folded in**
+(the two comment-only sites — `daemon/services/job_queue_service.py`'s
+`_mission_live_guard_holds` docstring and `daemon/services/job_recovery_service.py`'s
+Gate-4 comment): the backstop's freshness anchor is the freshest
+**NON-ROOT** member's `last_activity_at`; the root's own stamp counts
+ONLY as the fallback for a CHILDLESS tree. So "the root looks fresh"
+never keeps a stale member alive.
+
+The **fresh-root + stale-member** case is the incident shape: the root's
+own stamp was refreshed by a message enqueue (22s old) while the member
+had been quiet for 25h. **Every consumer below reaches its 6h backstop in
+that case** (the anchor is the member's, and it is stale) — the
+difference between them is what they DO with the verdict.
+
+| # | consumer | call site | `skip_root` | reaches the 6h backstop (fresh root + stale member)? | what the companion leg (§2.10) now does for it |
+|---|---|---|---|---|---|
+| 1 | **pre-stamp gate** | `child_reports.py:2744` | **yes** | yes | a member with a live (YOUNG) task row ⇒ the COMPLETED stamp is **REFUSED** (no wrong completion) and the re-arm hands the root to the healer |
+| 2 | **emission gate** | `child_reports.py:2582` | no | yes | ⇒ the publish is **BLOCKED** (the stamp is downgraded to `waiting_children` — a legitimate miss, not a wrong completion) |
+| 3 | **healer tree leg 4** | `mission_strand_healer.py:1163` | **yes** | yes | ⇒ the lane **SKIPS** with its own skip class `member-live-task` (the operator can tell this hold apart from an ordinary `live-tree` hold) |
+| 4 | **f1** (drift reconciler) | `job_recovery_service.py:2666` | no | yes | ⇒ f1 **HOLDS** the `JobItem` (no force-finalize) — detail pattern `orphan_active_skipped_mission_live_f1` |
+| 5 | **f2** (drift reconciler) | `job_recovery_service.py:2970` | no | yes | ⇒ f2 **HOLDS** the `JobItem` — detail pattern `orphan_active_skipped_mission_live`. **CODE untouched; BEHAVIOUR widened (material disclosure, above)** |
+| 6 | **boot sweep** (`reconcile_terminal_watches`) | `job_queue_service.py:635` | no | yes | ⇒ the sweep does **NOT** fire the terminal for that watch (the watch survives to the next tick) |
+| 7 | **zombie-GC held-watch reconcile** | `job_queue_service.py:861` | n/a — `instance_id=None` | **no** (the guard fail-opens on the unwired id) | unchanged — the leg never runs (there is no tree to walk) |
+| 8 | **orphan release** | `job_queue_service.py:992` | no | yes | ⇒ the orphan release does **NOT** fire (the `ORPHAN_RELEASED` line is not emitted) |
+| 9 | **stored-watch reconcile** | `job_queue_service.py:1200` | no | yes | ⇒ the stored watch is **NOT released** |
+| 10 | **work notifier** | `work_notifier.py:687` | no | yes | ⇒ the watcher is **not notified** (the mission-liveness hold keeps the work row) |
+
+**THE `skip_root=True` PAIR** (rows 1 and 3): in that mode the ROOT's own
+non-terminal status is not a live leg (the stamp is about to flip it) —
+so the companion leg, which is member-scoped anyway, is the ONLY thing
+that can hold those two lanes' trees. Before cycle 4 they carried an
+opt-in copy of the leg; now they carry the SAME guard-side leg as
+everybody else — one implementation, no second copy.
+
+**The cost of the widening** (§2.7): the companion leg's probes run ONLY
+on the staleness branch — the rare path — and cost PER MEMBER (the
+repository's `has_live_work` + one task read per candidate member).
+
 ### 2.8.2 The TREE-LEG widening — `daemon/services/mission_strand_healer.py`
 
 The strict all-terminal tree leg was unreachable for the live shape: the
@@ -337,16 +410,35 @@ terminal-COMPLETED, the age bound keys on `task.completed_at` (≥2h), no
 pending question in the tree, no live root task, the bus / own-queue gates,
 and the truncation fail-closed probe.
 
-**Adjudication note for the reviewer — the "member with a live task"
-negative.** The guard decides the tree leg, so a member with an in-flight
-task row is blocked while it is **recently active** (a member mid-turn IS
-recently active — the guard's freshness leg holds the mission open). A
-member whose task row is left behind AND whose activity is older than the
-6h window is treated as **stuck**, not live, and the heal proceeds — that
-is the guard's own global semantics (the pre-stamp gate would stamp it too).
-The reviewer may want a separate member-task probe; that would be a 5-line
-addition, but it would also strand a zombie whose stuck member still owns a
-lingering task row.
+**The safety argument, REWRITTEN (W2, cycle-4 review).** The earlier
+text here claimed "a member mid-turn IS recently active" — **the live
+forensics REFUTE that**: `instances.last_activity_at` is written on the
+enqueue / child-report / observer paths and **NOT on turn progress**, so a
+member inside a long turn reads STALE to the freshness anchor (the
+frozen-activity pathology, the same finding the watchdog review landed).
+**That freeze is precisely WHY task-row awareness is REQUIRED**: the
+activity column cannot distinguish "working right now" from "crashed
+three hours ago", and the guard's own anchor therefore mis-reads a
+mid-turn member as a zombie candidate.
+
+The cycle-3 answer (a member-task leg) was RIGHT in direction and WRONG in
+shape (opt-in, unbounded). The cycle-4 shape (F1 + RULING-1b, §2.10) is
+the reconciled one:
+
+* the leg is **unconditional and guard-side** — every consumer inherits
+  it, because the guard is the shared chokepoint and a leg carried by
+  only two lanes leaves the others exposed to the same false completion;
+* the leg is **time-bounded** — only a task row YOUNGER than the guard's
+  own 6h horizon holds the tree, so a crashed/killed mid-turn row (the
+  "lingering task row" that would otherwise strand a zombie forever)
+  does NOT hold it;
+* the leg is **ADDITIVE** — a stale member with NO live task row stays a
+  zombie candidate (the observed shape still heals).
+
+What the leg does NOT do (named, not hidden): a member inside a
+legitimate >6h turn is still indistinguishable from stale (the horizon is
+the system's own) — "heartbeat on turn progress" is a named follow-up
+(§9).
 
 ### 2.8.3 The RE-ARM — `daemon/services/child_reports.py`
 
@@ -368,6 +460,25 @@ through the **existing** `_schedule_strand_heal` scheduler
   path: a hold fired from INSIDE a running heal can never schedule a
   second, concurrent heal for the same root.
 
+**THE EVENT ARM BYPASSES THE BATCH CAP (F7, cycle-4 review — DISCLOSED,
+not bounded by code).** The coalescing above is **per-root**, so N
+DISTINCT stranded roots ⇒ N concurrent hand-offs — the event-driven arm is
+NOT bounded by the healer's per-tick ``batch_cap`` (25). The amplification
+is bounded in practice (every hand-off re-checks every leg and writes only
+a provably dead root; a duplicate for the SAME root is dropped), but there
+is **no global ceiling on in-flight event-arm hand-offs** in this train.
+**The choice: DISCLOSE, not bound** — a ceiling is a new operator-visible
+knob on a lane that is otherwise fail-closed, and the residual is a
+fan-out of READ-ONLY probes over the stranded roots (the same roots the
+300s sweep examines anyway). A per-process in-flight ceiling is a named
+follow-up (§9).
+
+**TEARDOWN CAVEAT (F8, cycle-4 review).** The in-flight marker is
+released **only** by the scheduled task's done-callback. If the event loop
+tears down before that callback fires, that root's event arm stays
+**wedged** — no further hand-off is scheduled for it from the hold site.
+The 300s sweep remains the net (the sweep does not use the marker).
+
 ### 2.8.4 The wc-strand `skip_repair=True` — `daemon/services/mission_strand_healer.py`
 
 The waiting_children / ghost lane now opts out of the LLM report-repair
@@ -382,7 +493,38 @@ as the completion payload).
 > already accepted for the running-zombie lane in cycle 1; this widens it
 > to the wc lane.
 
+**RULING, CYCLE 4 (Point 5 — KEEP the widening, with hardening).** The
+widening STAYS (leader decision): the two heal lanes must not diverge on
+the same hazard class (a stale transcript + the LLM repair), the harm is
+bounded to rare stale-strand heals, and the truncation-repair loss is
+disclosed and user-vetoable at the promote ceremony. The council's
+hardening is adopted:
+
+* **DISCLOSURE (this paragraph)** — the widening is a **deliberate
+  behaviour change**, not a bug fix: with the repair skipped, a genuinely
+  truncated report reaches the completion payload un-repaired.
+* **PAYLOAD-CONTENT PIN** — the existing pin covered only the
+  FLAG-FORWARD (`skip_repair=True` reaches the drive); it could not see
+  what the drive then PUBLISHED, nor whether the 30s repair call was
+  spent. The new pin
+  (`tests/job_queue/test_running_zombie_sweep.py::TestRunningZombieHealPayloadIsRawAssistantMessage`)
+  asserts the **published completion payload is the RAW assistant
+  message** (with the repair ENABLED and the transcript shaped so the
+  repair WOULD fire) and that the repair LLM is **never called** — plus a
+  CONTROL that drives the same shape without the flag and shows the
+  REPAIRED payload, so the pin is sensitive rather than vacuous.
+* **OPERATOR RECORD** — the skip class log lines and this section are the
+  operator-facing record: a heal that publishes a visibly truncated
+  report is this lane's known trade-off (§8(a), §8b).
+
 ### 2.9 Cycle-3 changes (2026-10-21) — the MEMBER-TASK liveness leg
+
+> **⚠ SUPERSEDED IN PART by §2.10 (cycle 4).** The RULING (§2.9.2 — a
+> member with a live task row is ALIVE) STANDS. The ROUTE (§2.9.3 — an
+> OPT-IN `task_engine` parameter) does **NOT**: the council rejected the
+> opt-in shape (F1) and the leg is now unconditional and guard-side, and
+> it is **time-bound** (RULING-1b). Read §2.9 for the ruling and the
+> evidence trail; read **§2.10 for the shipped shape**.
 
 #### 2.9.1 The hazard (leader-confirmed, cycle-2 review finding)
 
@@ -468,6 +610,137 @@ apart from an ordinary "the tree is alive" hold (`live-tree`).
   root-task posture is pre-existing and unchanged.
 * The **watchdog**'s signal quality is a separate follow-up (§9.5).
 
+## 2.10 Cycle-4 changes (2026-10-21) — the council rework (F1 + RULING-1b)
+
+The independent cycle-2 review (governor council, 2 models, run-proven)
+landed AFTER cycle 3 had finalized. Its **F1 finding is CRITICAL** and
+this section is the canonical record of the rework.
+
+### 2.10.1 F1 — the leg becomes UNCONDITIONAL and GUARD-SIDE
+
+Cycle 3 shipped the member-task leg **OPT-IN**: a `task_engine` parameter
+on `evaluate_mission_live`, supplied by exactly TWO consumers (the
+running-zombie healer's tree leg and the pre-stamp gate). The council
+**rejected that shape**:
+
+* the guard is the **shared chokepoint** — a leg carried by only the two
+  terminalize-capable lanes leaves the other EIGHT consumers (f1, f2, the
+  boot sweeps, the emission gate, the orphan release, the work notifier)
+  exposed to the **same false completion** the leg exists to prevent (a
+  root finalized while a member is mid-turn);
+* the healer-side fallback was ruled **explicitly insufficient** — the
+  leg has to live where every consumer already reads.
+
+The shipped shape:
+
+* the cycle-3 `task_engine` parameter, its threading and the batched
+  `_members_with_live_tasks` probe are **GONE**; the guard's public
+  signature is back to its pre-cycle-3 shape (`instance_repository`,
+  `instance_id`, `bus_pending_count`, `timeout_seconds`, `skip_root`);
+* the leg asks the instance repository the guard **already holds** —
+  `SQLModelInstanceRepository.has_live_work(instance_id)`
+  (`daemon/repositories/instance/repository.py:2112`) — **ZERO new
+  plumbing** (no new parameter, no `Engine` import in the guard, no new
+  repository method);
+* the member's task rows are read through that same repository
+  (`instance_repository.engine`) — the one local extension, and the
+  reason the RULING-1b time bound can exist at all.
+
+**The opt-in pin is OBSOLETE and was DELETED** (the leg is never inert
+now); it is replaced by a pin that asserts the opposite — the guard's
+signature carries **no** opt-in parameter and a consumer that passes
+nothing extra still gets the hold.
+
+### 2.10.2 RULING-1b — the leg is TIME-BOUNDED
+
+An unbounded "any live task row ⇒ alive" leg trades one permanent strand
+for another: a member whose task row never completes (a crash / kill
+mid-turn leaves exactly that row behind) would hold its mission open
+**forever** — the exact class this lane closes.
+
+**The rule: a member's live work counts as ALIVE only if its task row is
+YOUNGER than the guard's own staleness horizon.** The horizon is the
+SAME constant (`MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`, 21600s) — one
+source of truth, no new knob. The observable contract, pinned on BOTH
+sides:
+
+| member's live task row | verdict | root |
+|---|---|---|
+| **younger** than the horizon | the member is ALIVE → the leg HOLDS the tree (`live=True`, `member_task_hold=True`, `timed_out=False`) | **NOT** finalized |
+| **older** than the horizon (crash / kill mid-turn) | the member is NOT alive → stale-eligible → the backstop fires (`live=False`, `timed_out=True`) | **CAN** heal |
+| **no** live task row | the member is stale-eligible (the ADDITIVE invariant) | **CAN** heal |
+
+**Where the age is read:** the leg reads the member's non-terminal task
+rows (the canonical set, `daemon.constants.NON_TERMINAL_TASK_STATUSES`)
+and takes the **newest attempt stamp** — the row's `started_at` (when the
+worker claimed the turn), falling back to `created_at` (minted but not yet
+claimed). Naive-UTC digits per the repo's naive-UTC binding convention;
+an unparseable stamp is DROPPED, never guessed.
+
+### 2.10.3 The two PINNED invariants (council)
+
+* **ADDITIVE, never a replacement** — a member with stale activity AND
+  no live task row **remains a zombie candidate** (the OBSERVED family:
+  an idle member with no task row). The leg only ever ADDS a hold; it
+  never removes the staleness expiry.
+* **FAIL-MISS** — a member with a live (YOUNG) task row ⇒ the root is
+  **NOT** finalized. A probe that cannot be evaluated also HOLDS
+  (`live=True`, `error=True`): the leg cannot prove the tree is stale,
+  and the lanes that terminalize a root must not break a tree they
+  cannot see.
+
+### 2.10.4 The cost (§2.7's shape) — PER-MEMBER, on the rare path
+
+The leg runs **ONLY on the staleness branch** (the tree already looks
+quiet), so a live tree pays nothing. On that branch the cost is
+**per candidate member**: the repository's `has_live_work` + one task
+read (≈2 queries per non-root, non-terminal member). The cycle-3 shape
+was ONE batched query per tree; the cycle-4 shape is per-member, and the
+difference is stated here rather than glossed: the per-member read is
+what makes the **time bound** possible (the age is per member), and the
+branch is the rare one (a tree that has been quiet for 6h).
+
+### 2.10.5 What the leg does NOT do (named residuals)
+
+* **A member inside a LEGITIMATE >6h turn is still indistinguishable
+  from stale** — the horizon is the system's own. The fix is a
+  **heartbeat on turn progress** (the task rows already carry
+  `last_heartbeat_at`), which would also close the watchdog's
+  false-positive class (§9). **NO code for it this train.**
+* **A member whose only live work is a JOBITEM row (no task row) is NOT
+  held.** The task row is the only DATEABLE evidence class, and the
+  repository's probe also counts a member's own non-terminal **CHILD** as
+  "live work" — a `waiting_children` parent would otherwise hold the
+  tree forever through its own stuck child. The tree's ordinary legs
+  (status + the member-scoped anchor) judge such a member.
+* **The ROOT's own live task row is not part of the leg** (the root is
+  not a "member"): the healer's own root-level leg covers the healer
+  lane, and the pre-stamp gate's root-task posture is pre-existing.
+* **The emission-time gate's fail-OPEN posture is unchanged** — the leg
+  only ever HOLDS the gate (a miss), never forces a terminal through it.
+
+### 2.10.6 The status-set rule (F11)
+
+The leg's task read uses the **canonical** set
+`daemon.constants.NON_TERMINAL_TASK_STATUSES` — one home, no divergent
+local tuple. `processing` is **LEGACY task vocabulary**: it is NOT a
+`TaskStatus` member (the enum carries PENDING / RUNNING / PAUSED /
+COMPLETED / FAILED / CANCELLED), and the constant keeps it DELIBERATELY
+for legacy rows, so a legacy in-flight turn still counts as live work.
+
+**The repository's own live-task list is a DIFFERENT question.** The
+instance repository's `has_live_work` probe carries only
+`pending`/`running`/`paused` — it answers "does this instance have live
+work **for the zombie scan**", not "is a turn in flight on it". The leg
+therefore DECIDES on the canonical set (this §2.10.6 one), so the legacy
+`processing` shape stays protected — the repository's probe answer never
+vetoes a member whose only live signal is a legacy `processing` row.
+That is why the coarse probe is not a hard gate: it is the repository's
+canonical "live work" answer, while the HOLD is decided on the DATEABLE
+task evidence (the `has_live_work` child arm would otherwise let a
+`waiting_children` parent hold the tree forever through its own stuck
+child — §2.10.5).
+
 ## 3. Known residuals (documented, not closed)
 ### 3.0 Idempotency of the drive against an already-finalized JobItem
 
@@ -525,7 +798,7 @@ completion drive; heal lane opts out` on `fix/running-zombie-sweep`,
 sha **`5edba8f7cdf2b5e10b5c11058b18e38323e99881`** (the literal sha, so
 the reader never has to run `git log --grep`). The change:
 
-* `daemon/services/child_reports.py:2617` — the drive takes an ADDITIVE
+* `daemon/services/child_reports.py:2633` — the drive takes an ADDITIVE
   keyword-only `skip_repair: bool = False`. Default False ⇒ every existing
   caller keeps its current behaviour. All 6 production call sites
   (`manager.py:6757`, `:9745`, `:9891`, `:13101`; `mission_strand_healer.py:760`,
@@ -571,6 +844,12 @@ instance_id, skip_repair=True)`).
 | `daemon/services/job_recovery_service.py` | **COMMENT-ONLY** — the stale root-inclusive anchor prose (§9.4) | 3 |
 | `daemon/services/job_queue_service.py` | **COMMENT-ONLY** — the stale root-inclusive anchor prose (§9.4) | 3 |
 | `tests/job_queue/test_running_zombie_sweep.py` | the cycle-3 suite: the member-task battery (live pending/running/processing, no task row, terminal task row, the guard-level pins, the pre-stamp gate pin + its control) | 3 |
+| `daemon/services/mission_live_guard.py` | **the MEMBER-ALIVE companion leg** — the opt-in `task_engine` parameter and the batched probe are REMOVED; the leg is unconditional and guard-side, time-bounded by the guard's own horizon, and reads the member's live task rows through the instance repository it already holds | 4 |
+| `daemon/services/mission_strand_healer.py` | the leg-4 opt-in (`task_engine`) is REMOVED — the healer inherits the guard-side leg (its `member-live-task` skip class is unchanged) | 4 |
+| `daemon/services/child_reports.py` | the **pre-stamp gate** opt-in (`task_engine`) is REMOVED — the gate inherits the guard-side leg (the re-arm is unchanged) | 4 |
+| `daemon/services/child_reports.py` | the scheduler docstring — the F8 teardown caveat (the in-flight marker is released only by the done-callback) and the F7 event-arm/batch-cap disclosure | 4 |
+| `tests/job_queue/test_running_zombie_sweep.py` | the cycle-4 suite: the companion-leg battery (the unconditional pin, the RULING-1b horizon matrix on BOTH sides, the additive invariant), the D4 anchor-gap disarm pin, and the D12b payload-content pin + its control | 4 |
+| `tests/job_queue/test_u7_s15_wave3_pins.py` | the F5 stale docstring — DOCSTRING ONLY, zero behaviour | 4 |
 
 **NO new terminal-write site** (cycle 2): the census's discovered-site set
 is byte-identical to the base (7 unlisted sites before and after — the
@@ -582,7 +861,8 @@ call, and the re-arm is a scheduler hand-off.
 ## 5. Evidence
 
 * New suite: `tests/job_queue/test_running_zombie_sweep.py` — 34 tests
-  (cycle 1) → **49 tests (cycle 2)** → **58 tests (cycle 3)**.
+  (cycle 1) → **49 tests (cycle 2)** → **58 tests (cycle 3)** → **64
+  tests (cycle 4)**.
 * **Cycle 3 (2026-10-21)** — the suite grew to 58: 49 + the
   **member-task battery** — the three live task statuses
   (`pending`/`running`/`processing`) ⇒ NOT healed (skip class
@@ -603,6 +883,39 @@ call, and the re-arm is a scheduler hand-off.
 * **Cycle 3 whole-tree diff** — `tests/job_queue/` at the cycle-2
   HEAD and at the cycle-3 HEAD produce **IDENTICAL FAILED lists** (18
   pre-existing failures on both sides) ⇒ zero net-new failures.
+* **Cycle 4 (2026-10-21) — the council rework.** The suite grew to 64:
+  the obsolete opt-in pin DELETED (the leg is never inert now), and
+  added — the **unconditional** pin (the guard's signature carries no
+  opt-in parameter AND a plain call still gets the hold), the
+  **RULING-1b horizon matrix on BOTH sides** (a task row younger than
+  the horizon ⇒ held; older ⇒ stale-eligible ⇒ healable), the **D4
+  anchor-gap disarm pin** (member-scoped NULL stamps ⇒ `live=True`,
+  `timed_out=False`), and the **D12b payload-content pin** (the
+  published completion payload is the RAW assistant message and the
+  repair LLM is never called) **+ its control** (the same shape without
+  the flag publishes the REPAIRED text — the pin is sensitive, not
+  vacuous).
+* **Cycle 4 mutation proofs (verbatim in the implementation report).**
+  (1) the companion leg NEUTERED ⇒ **7 tests go RED** (the three
+  member-task statuses, the guard-level hold pin, the unconditional pin,
+  the RULING-1b younger side, the pre-stamp gate pin);
+  (2) the TIME BOUND removed ⇒ **exactly the 2 RULING-1b older-side
+  tests go RED** (the guard-level "older does not hold" pin and the
+  healer-level "old task row is still healed" pin). Both mutants were
+  restored from a byte-identical backup.
+* **Cycle 4 whole-tree diff** — `tests/job_queue/` at the cycle-3 base
+  (`8e45a62da`) and at the cycle-4 HEAD produce **IDENTICAL FAILED
+  lists** (18 pre-existing failures on both sides) ⇒ zero net-new
+  failures. **NUMERIC CORRECTION (D12a):** the base run is **2158
+  passed / 18 failed / 38 skipped / 3 deselected** (426.56s) and the
+  cycle-4 HEAD is **2164 passed / 18 failed / 38 skipped / 3
+  deselected** (415.00s) — the +6 is exactly the RZ pack's growth
+  (58 → 64). The earlier "2148/2149" figure was drift and is
+  withdrawn; every number quoted in this document was re-measured
+  against the run it describes.
+* **The f2-neutrality pin** (`tests/job_queue/test_pattern_f_mission_live_gate.py`,
+  9 tests) stays GREEN — f2's call site is untouched by the rework
+  (its BEHAVIOUR widening is disclosed in §2.8.1).
 * **Cycle 2 (2026-10-21)** — the suite grew to 49: 34 + the synthetic
   incident fixture (rebuilt from the READ-ONLY specimen snapshot; the
   specimen itself is NEVER committed) + the E2E heal for BOTH shapes
@@ -659,7 +972,7 @@ call, and the re-arm is a scheduler hand-off.
    with inverted (fail-closed) semantics. If the stale-pause probe is ever
    hardened, the two should be unified rather than kept as parallel copies.
 4. **The drive depends on the child_reports PRE-STAMP recursive liveness eval**
-   (`child_reports.py:2700-2766`, `skip_root=True`). For a `running` root with
+   (`child_reports.py:2738-2790`, `skip_root=True`). For a `running` root with
    all-terminal descendants it returns `live=False` — which is exactly WHY the
    running-zombie drive can stamp. A future change to that eval's `skip_root`
    semantics would silently stop the running-zombie strand from stamping (the
@@ -712,7 +1025,14 @@ termination of anybody**:
   ≥2h old, drives the **production completion chain**, and the chain's own
   gates decide;
 * the event-driven arm fires when the pre-stamp hold refuses a stamp
-  (the re-arm, §2.8.3) — zero sweep latency;
+  (the re-arm, §2.8.3) — **but the heal it schedules REFUSES a young
+  root** (the lane's own age bound: the root's latest task row must be
+  terminal-`COMPLETED` for ≥2h). So the REAL heal lands via the 300s
+  sweep, **≥2h after the root's task completed**. The earlier wording
+  ("zero sweep latency") was **OVERSTATED** and is withdrawn: what the
+  event arm buys is a **prompt attempt** (and the re-arm guarantee that
+  the root is never left waiting for a signal that never comes), not a
+  sub-second heal;
 * the heal is **non-destructive**: it finalizes the ROOT through the
   production chain; no descendant is terminated, no `message_queue` /
   `task` row is removed.
@@ -802,10 +1122,28 @@ wants to pause, never for a zombie.
    frozen column. **Documentation only in this train** — the fix is a
    follow-up commission (the watchdog's own lane, outside this
    branch's fence).
-6. **The hung-task-member sub-family stays unhealed — DELIBERATE**
-   (see §2.9.2): a member that owns a task row which never completes
-   holds its mission open forever. Its own root cause is that
-   member's recursive strand (deferred by design, §9.3). The admin
-   path (§8) is the recovery.
+6. **The hung-task-member sub-family — RESHAPED by RULING-1b, not
+   closed.** A member that owns a task row which never completes held
+   its mission open forever under the cycle-3 (unbounded) leg. Under the
+   cycle-4 leg it holds the mission only while that row is YOUNGER than
+   the 6h horizon — after that the member is stale-eligible again and
+   the root heals. The residual that REMAINS is the member inside a
+   **legitimate >6h turn** (§2.10.5) — indistinguishable from stale,
+   because the activity column is not written on turn progress. Its own
+   root cause is that member's recursive strand (deferred by design,
+   §9.3); the admin path (§8) is the recovery.
+7. **Heartbeat on turn progress — NO CODE THIS TRAIN (named
+   follow-up).** The `task` rows already carry `last_heartbeat_at`
+   (the worker's liveness signal). Keying the member-alive leg — and
+   the watchdog's hang notice — on the heartbeat instead of the frozen
+   `instances.last_activity_at` would close the ">6h legitimate turn"
+   residual (§2.10.5) AND the watchdog's false-positive class (§9.5) in
+   one change. It needs its own commission (it touches the watchdog's
+   lane, outside this branch's fence).
+8. **An in-flight ceiling for the event-driven arm — NAMED, NOT
+   IMPLEMENTED (F7).** The event arm's coalescing is per-root, so N
+   distinct stranded roots ⇒ N concurrent hand-offs, bypassing the
+   healer's per-tick `batch_cap`. The choice this train is **disclose**
+   (§2.8.3); a per-process ceiling is the candidate hardening.
 
 
