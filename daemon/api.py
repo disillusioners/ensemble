@@ -743,18 +743,10 @@ async def lifespan(app: FastAPI):
     # re-dispatches. Three-layer never-wedge: per-row + per-pass inside
     # the service, lifespan-level here.
     try:
-        from daemon.services.message_queue_boot_recovery import (
-            recover_stuck_messages_on_startup,
-        )
-        mq_reset = recover_stuck_messages_on_startup(
-            manager._queue_repository, get_boot_epoch(),
-        )
-        logger.info("Message-queue boot recovery: reset=%d", mq_reset)
+        from daemon.services.message_queue_boot_recovery import recover_stuck_messages_on_startup
+        recover_stuck_messages_on_startup(manager._queue_repository, get_boot_epoch())
     except Exception as mq_boot_exc:  # noqa: BLE001
-        logger.warning(
-            "Message-queue boot recovery failed (never wedges boot): %s",
-            mq_boot_exc,
-        )
+        logger.warning("Message-queue boot recovery failed (never wedges boot): %s", mq_boot_exc)
 
     # Phase-2 critical-notes boot-state probe (B2 fix): the probe needs
     # the LIVE engine, which only exists after manager.initialize().

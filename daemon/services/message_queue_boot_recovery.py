@@ -49,6 +49,17 @@ logger = logging.getLogger(__name__)
 HARD_REBOOT_BOOT_PASS_ENV = "ENSEMBLE_HARD_REBOOT_BOOT_PASS"
 
 
+def _boot_pass_enabled() -> bool:
+    """Per-boot kill-switch read.
+
+    Returns ``True`` unless the operator has explicitly set
+    ``ENSEMBLE_HARD_REBOOT_BOOT_PASS=0``. The default is ON — the
+    deliverable is zero-user-action; the kill-switch exists for
+    operator opt-out, NOT default-off. Read per boot (NOT cached).
+    """
+    return os.environ.get(HARD_REBOOT_BOOT_PASS_ENV, "1") != "0"
+
+
 def recover_stuck_messages_on_startup(queue_repo, boot_epoch) -> int:
     """Reset stranded ``'processing'`` message rows to ``'ready'``.
 
@@ -71,9 +82,8 @@ def recover_stuck_messages_on_startup(queue_repo, boot_epoch) -> int:
     Returns:
         int: Number of rows reset.
     """
-    if os.environ.get(HARD_REBOOT_BOOT_PASS_ENV, "1") == "0":
-        logger.info("[HardReboot] MQ boot pass off (kill-switch %s=0)",
-                    HARD_REBOOT_BOOT_PASS_ENV)
+    if not _boot_pass_enabled():
+        logger.info("[HardReboot] MQ boot pass off (kill-switch %s=0)", HARD_REBOOT_BOOT_PASS_ENV)
         return 0
     if boot_epoch is None:
         logger.warning("[HardReboot] MQ boot pass skipped: no boot epoch")
@@ -82,13 +92,10 @@ def recover_stuck_messages_on_startup(queue_repo, boot_epoch) -> int:
     reset = 0
     try:
         for row in queue_repo.find_stuck_messages_before(boot_epoch):
-            try:  # per-row isolation (layer 1) — one bad row must not
-                # stop the sweep.
-                if queue_repo.reset_stuck_message_to_ready(row.message_id):
-                    reset += 1
+            try:  # per-row isolation (layer 1) — one bad row must not stop the sweep.
+                reset += 1 if queue_repo.reset_stuck_message_to_ready(row.message_id) else 0
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[HardReboot] MQ reset failed for %s: %s",
-                               row.message_id, exc)
+                logger.warning("[HardReboot] MQ reset failed for %s: %s", row.message_id, exc)
     except Exception as exc:  # noqa: BLE001
         # Per-pass isolation (layer 2) — never raise out of the pass.
         logger.warning("[HardReboot] MQ boot pass failed: %s", exc)

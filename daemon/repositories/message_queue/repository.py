@@ -434,18 +434,14 @@ class SQLModelMessageQueueRepository:
 
         Single-table by design: ``message_queue`` alone, no joins. The
         skip-guards live in :meth:`reset_stuck_message_to_ready` so they
-        are evaluated atomically with the write.
-
-        ``boot_epoch`` is the process boot epoch in naive-UTC digits —
-        the same frame as the stored ``last_activity_at`` digits (see
-        ``daemon/services/boot_epoch.py``).
+        are evaluated atomically with the write. ``boot_epoch`` is the
+        process boot epoch in naive-UTC digits — the same frame as the
+        stored ``last_activity_at`` digits (``daemon/services/boot_epoch.py``).
         """
         with Session(self.engine) as session:
             stmt = select(MessageQueue).where(
                 MessageQueue.status == MessageStatus.PROCESSING.value,
-                (MessageQueue.last_activity_at.is_(None))
-                | (MessageQueue.last_activity_at < boot_epoch),
-            )
+                (MessageQueue.last_activity_at.is_(None)) | (MessageQueue.last_activity_at < boot_epoch))
             return list(session.exec(stmt))
 
     def reset_stuck_message_to_ready(self, message_id: str) -> bool:
@@ -465,17 +461,15 @@ class SQLModelMessageQueueRepository:
         dead ``message_queue.processing_task_id``. This pass does NOT
         ride RDRS: no ``report_injection`` join.
         """
-        terminal = ",".join(f"'{s}'" for s in sorted(TERMINAL_INSTANCE_STATUSES))
         with self.engine.begin() as conn:
             res = conn.execute(text(
-                f"UPDATE message_queue SET status = '{MessageStatus.READY.value}',"
-                " processing_started_at = NULL WHERE message_id = :mid"
+                f"UPDATE message_queue SET status = '{MessageStatus.READY.value}', processing_started_at = NULL"
+                " WHERE message_id = :mid"
                 f" AND status = '{MessageStatus.PROCESSING.value}'"
-                " AND NOT EXISTS (SELECT 1 FROM instances i WHERE i.instance_id"
-                " = message_queue.instance_id AND i.status IN (" + terminal + "))"
-                " AND NOT EXISTS (SELECT 1 FROM task t WHERE t.message_id"
-                " = message_queue.message_id AND t.status IN ('running','paused'))"
-            ), {"mid": message_id})
+                " AND NOT EXISTS (SELECT 1 FROM instances i WHERE i.instance_id = message_queue.instance_id"
+                f" AND i.status IN ({','.join(repr(s) for s in sorted(TERMINAL_INSTANCE_STATUSES))}))"
+                " AND NOT EXISTS (SELECT 1 FROM task t WHERE t.message_id = message_queue.message_id"
+                " AND t.status IN ('running','paused'))"), {"mid": message_id})
             return res.rowcount == 1
 
     def find_retry_ready_messages(self) -> list[MessageQueue]:
