@@ -588,8 +588,13 @@ class JobQueueService:
         FIXBACK (2026-09-28, fixback cycle 1): the docstring on this
         helper drifted from the guard's actual behavior under the new
         U7 anchor. The guard's anchor is now the FRESHEST tree signal
-        (``max(root.last_activity_at, max(d.last_activity_at) for d in
-        descendants)``) — NOT the per-work ``completed_at`` — and the
+        over the tree's NON-ROOT members
+        (``max(d.last_activity_at) for d in descendants``) — NOT the
+        per-work ``completed_at``, and NOT the root's own stamp (the
+        root's ``last_activity_at`` is refreshed on EVERY message
+        enqueue, so including it made the backstop unreachable for a
+        stranded-but-messaged root; a childless tree falls back to the
+        root's own stamp, where the root IS the whole tree) — and the
         backstop fires IFF a non-terminal member is present AND the
         freshest tree activity is older than
         ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (true zombie-break; the
