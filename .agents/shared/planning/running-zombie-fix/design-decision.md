@@ -9,7 +9,9 @@
 
 ## 1. The incident shape
 
-Live incident 2026-10-19/20, instance `432988b8`:
+Live incident 2026-10-19/20, instance `432988b8` (GREP ANCHOR — kept
+deliberately: the shipped daemon source carries a descriptive placeholder
+instead):
 
 | field | value |
 |---|---|
@@ -24,7 +26,7 @@ Live incident 2026-10-19/20, instance `432988b8`:
 The cycle-1 text above ("the completion **EVENT** was lost") is **REFUTED**
 by the live logs. What happened:
 
-* The turn ran clean — task `bb3df8a3` completed at **2026-10-21T04:09:31Z**.
+* The turn ran clean — its task row completed at **2026-10-21T04:09:31Z**.
 * The **PRE-STAMP RECURSIVE LIVENESS HOLD**
   (`daemon/services/child_reports.py:2738-2790`) fired and **refused the
   COMPLETED stamp entirely**. Live log line (2026-10-21):
@@ -286,9 +288,11 @@ task read (the newest attempt stamp). It runs **ONLY on the staleness
 branch** (the tree already looks quiet), so a **live tree pays nothing**;
 the RZ sweep's per-tick cost therefore grows only with the number of
 NON-ROOT, NON-TERMINAL members on trees that have been quiet for the 6h
-horizon. (The `has_live_work` verdict is **not** load-bearing for the
-guard's verdict — it feeds the operator log only; a probe/EVIDENCE
-disagreement is surfaced at INFO, review C2.)
+horizon. (A-5 qualification: the `has_live_work` probe's **VALUE** is
+log-only — it never changes the verdict; but a probe **EXCEPTION** DOES
+force the hold, `live=True` + `error=True` (§2.10.3). The probe/evidence
+DISAGREEMENT is surfaced at INFO, review C2 — now AGGREGATED to one line per
+evaluation, A-3.)
 
 ## 2.8 Cycle-2 changes (2026-10-21) — the three defects, closed
 
@@ -370,6 +374,18 @@ Gate-4 comment): the backstop's freshness anchor is the freshest
 ONLY as the fallback for a CHILDLESS tree. So "the root looks fresh"
 never keeps a stale member alive.
 
+**PREAMBLE — what the table can and cannot say (W-1, corrected in
+cycle 4).** **8 of the 10 consumers can HOLD** the mission. Two
+exceptions, and they are DIFFERENT in kind:
+* the **zombie-GC held-watch reconcile** (`job_queue_service.py:861`,
+  `instance_id=None`) **NEVER RUNS the leg** — the guard raises before
+  the walk (there is no tree to walk);
+* the **orphan release** (`job_queue_service.py:992`) **gates only a
+  TOKEN** — its guard call is DIAGNOSTIC-ONLY (it feeds the
+  `ORPHAN_RELEASED` token through `if _pre_verdict.timed_out:`), and
+  the `notify_watchers(...)` release that follows is UNCONDITIONAL.
+  A hold there suppresses the TOKEN, not the release.
+
 The **fresh-root + stale-member** case is the incident shape: the root's
 own stamp was refreshed by a message enqueue (22s old) while the member
 had been quiet for 25h. **Every consumer below reaches its 6h backstop in
@@ -385,8 +401,8 @@ difference between them is what they DO with the verdict.
 | 5 | **f2** (drift reconciler) | `job_recovery_service.py:2970` | no | yes | ⇒ f2 **HOLDS** the `JobItem` — detail pattern `orphan_active_skipped_mission_live`. **CODE untouched; BEHAVIOUR widened (material disclosure, above)** |
 | 6 | **boot sweep** (`reconcile_terminal_watches`) | `job_queue_service.py:635` | no | yes | ⇒ the sweep does **NOT** fire the terminal for that watch (the watch survives to the next tick) |
 | 7 | **zombie-GC held-watch reconcile** | `job_queue_service.py:861` | n/a — `instance_id=None` | **no** (the guard returns `live=False, error=True` on the unwired id — the fail-OPEN contract; the caller finalizes) | unchanged — the leg never runs (there is no tree to walk) |
-| 8 | **orphan release** | `job_queue_service.py:992` | no | yes | ⇒ the orphan release does **NOT** fire (the `ORPHAN_RELEASED` line is not emitted) |
-| 9 | **stored-watch reconcile** | `job_queue_service.py:1200` | no | yes | ⇒ the stored watch is **NOT released** |
+| 8 | **orphan release** | `job_queue_service.py:992` | no | yes | ⇒ the guard call is **DIAGNOSTIC-ONLY**: it gates the `ORPHAN_RELEASED` **TOKEN** (through `if _pre_verdict.timed_out:`). A hold **suppresses the token** — the `notify_watchers(...)` release that follows is **UNCONDITIONAL** and still fires (W-1 correction) |
+| 9 | **stored-watch reconcile** | `job_queue_service.py:1200` | no | yes | ⇒ the hold falls through to the **loss-case leg**, which **REHYDRATES** a watcher on the ORIGINAL `work_id` — the stored watch is **NOT released**, and a watcher row is re-armed (W-1 correction) |
 | 10 | **work notifier** | `work_notifier.py:687` | no | yes | ⇒ the watcher is **not notified** (the mission-liveness hold keeps the work row) |
 
 **THE `skip_root=True` PAIR** (rows 1 and 3): in that mode the ROOT's own
@@ -558,8 +574,8 @@ sub-family (a member that owns a task row that never completes)
 therefore stays **UNHEALED — DELIBERATE**: that member's own strand is
 the root cause (the recursive case deferred by design); a persisting
 miss is recoverable via the admin path (§8), a false completion is
-not. The **OBSERVED** zombie family (member idle, NO task row — the
-`173ace6e` shape) is unaffected — still stale-eligible.
+not. The **OBSERVED** zombie family (member idle, NO task row) is
+unaffected — still stale-eligible.
 
 #### 2.9.3 The route — ROUTE 1 (the guard carries the leg)
 
@@ -680,7 +696,7 @@ sides:
 |---|---|---|
 | **younger** than the horizon | the member is ALIVE → the leg HOLDS the tree (`live=True`, `member_task_hold=True`, `timed_out=False`) | **NOT** finalized |
 | **older** than the horizon (crash / kill mid-turn) | the member is NOT alive → stale-eligible → the backstop fires (`live=False`, `timed_out=True`) | **CAN** heal |
-| **present** but **undatable** (both `started_at` and `created_at` NULL/unparseable) | the ROW EXISTS ⇒ the member is ALIVE — the row is treated as **YOUNG** (fail-MISS, review C1) → the leg HOLDS the tree | **NOT** finalized |
+| **present** but its stamp **undatable** | fail-MISS: the row EXISTS ⇒ the member is ALIVE and the leg HOLDS the tree — but the hold is **BOUNDED** by the row's own `created_at` (W-3b), so it can never hold forever. **REACHABILITY (W-3):** this state is NOT reachable through today's ORM read — `task.created_at` is NOT NULL and an unparseable stamp RAISES inside the read (so the probe-error path holds instead); the row is a HARDENING for a state a future schema/read change could expose | **NOT** finalized |
 | **no** live task row | the member is stale-eligible (the ADDITIVE invariant) | **CAN** heal |
 
 **Where the age is read:** the leg reads the member's non-terminal task
@@ -739,8 +755,14 @@ branch is the rare one (a tree that has been quiet for 6h).
 * **The ROOT's own live task row is not part of the leg** (the root is
   not a "member"): the healer's own root-level leg covers the healer
   lane, and the pre-stamp gate's root-task posture is pre-existing.
-* **The emission-time gate's fail-OPEN posture is unchanged** — the leg
-  only ever HOLDS the gate (a miss), never forces a terminal through it.
+* **The emission-time gate's TREE-WALK fail-OPEN posture is unchanged** — the
+  leg only ever HOLDS the gate (a miss), never forces a terminal through it.
+  **W-2 (the OPPOSITE polarity, stated honestly):** a MEMBER-ALIVE probe
+  error is NOT a tree-walk error — it yields `live=True` + `error=True`, so
+  the emission gate **HOLDS the publish**. That hold is **not a permanent
+  strand**: the observer / the next pass re-drives the completion, so the
+  at-least-once guarantee still holds (a held publish is retried; a lost one
+  is not).
 
 ### 2.10.6 The status-set rule (F11)
 
@@ -874,18 +896,43 @@ instance_id, skip_repair=True)`).
 | `tests/job_queue/test_running_zombie_sweep.py` | the cycle-4 suite: the companion-leg battery (the unconditional pin, the RULING-1b horizon matrix on BOTH sides, the additive invariant), the D4 anchor-gap disarm pin, and the D12b payload-content pin + its control | 4 |
 | `tests/job_queue/test_u7_s15_wave3_pins.py` | the F5 stale docstring — DOCSTRING ONLY, zero behaviour | 4 |
 
-**NO new terminal-write site** (cycle 2): the census's discovered-site set
-is byte-identical to the base (7 unlisted sites before and after — the
-pre-existing `prompt_version` / `manager.py:6757` debt) and the stale
-`hooked_at` set is identical too (10 before, 10 after). Cycle 2 adds no
-write of its own: the anchor fix is read-only, the tree leg is a guard
-call, and the re-arm is a scheduler hand-off.
+**The census framing — CORRECTED in cycle 4 (A-7).** The circulating
+"census MAIN gate clean (39==39)" framing is **WRONG**. The census's OWN
+walker says: the branch base (`33e1ef513`) discovers **38** sites, of which
+**31** are classified and **7** are unlisted; the head discovers **39**, of
+which **32** are classified and **7** are unlisted. So the branch adds
+exactly **ONE** discovered site **and classifies it** ⇒ **ZERO new unlisted
+sites** — but the main gate **REDS AT BOTH SIDES** for the 7 pre-existing
+unlisted ones (`daemon/manager.py:6757` + 6 `prompt_version` sites). "Same
+count on both sides" is a **main-gate-RED** result, not a clean gate.
 
 ## 5. Evidence
 
 * New suite: `tests/job_queue/test_running_zombie_sweep.py` — 34 tests
   (cycle 1) → **49 tests (cycle 2)** → **58 tests (cycle 3)** → **64
-  tests (cycle 4)**.
+  tests (cycle 4)** → **65 tests** (the post-review batch) → **71
+  tests (cycle 4 pre-merge: the A-1 pair + the W-3b bound test)**.
+* **Cycle 4 FINAL, RE-MEASURED (W-4 — the numbers below supersede every
+  earlier count in this document, which was one commit stale).** At the
+  cycle-4 pre-merge tip:
+  * the RZ pack collects **71 tests**;
+  * whole `tests/job_queue/` base-vs-HEAD, IDENTICAL commands both
+    sides (base `21a2be541` in a scratch worktree): base **2165 passed
+    / 18 failed / 38 skipped / 3 deselected** (415.76s) → head **2171
+    passed / 18 failed / 38 skipped / 3 deselected** (400.49s). The
+    FAILED lists are **BYTE-IDENTICAL** — sha256
+    `e3a3c74a04e34fd4d1c2ea5476721106d4565a55ccc47c5cc5be722a08cd58cf`
+    on both sides — so the +6 passed is EXACTLY the RZ pack's growth
+    (65 → 71) and there are ZERO net-new failures.
+  * **MUTATION COUNTS (over the RZ pack + the f2 pack, 80 tests):**
+    the companion leg's TERMINAL-CANDIDACY filter dropped
+    (`mission_live_guard.py:572`) ⇒ **4 reds** (exactly the new A-1(b)
+    parametrisation); the W-3b `created_at` bound removed ⇒ **1 red**
+    (the new bound test); the H1 branch disabled (undatable row ⇒
+    `None`) ⇒ **1 red** (the H1 test, failing with
+    `assert 'gate-block' == 'member-live-task'` — the root was DRIVEN
+    instead of HELD). The earlier council figures (8/2/1) were measured
+    with a different mutation/pack scope and are superseded by these.
 * **Cycle 3 (2026-10-21)** — the suite grew to 58: 49 + the
   **member-task battery** — the three live task statuses
   (`pending`/`running`/`processing`) ⇒ NOT healed (skip class
@@ -1169,4 +1216,55 @@ wants to pause, never for a zombie.
    healer's per-tick `batch_cap`. The choice this train is **disclose**
    (§2.8.3); a per-process ceiling is the candidate hardening.
 
+## 10. PROMOTE-DISCLOSURE MATERIAL (cycle 4)
+
+Carry these into the promote ceremony — they are the honest statements the
+merge decision rests on.
+
+### 10.1 The census framing (A-7)
+
+The census's own walker: **base `33e1ef513` = 38 discovered / 31 classified
+/ 7 unlisted**; **head = 39 / 32 / 7**. The branch adds exactly ONE
+discovered site AND classifies it ⇒ **zero new unlisted sites**. The main
+gate **REDS AT BOTH SIDES** for the 7 pre-existing unlisted ones
+(`daemon/manager.py:6757` + 6 `prompt_version` sites). The "39==39 clean"
+framing is withdrawn — the anti-rot test was already red at base.
+
+### 10.2 Line-pin attribution (W-5)
+
+Of the census's 17 line-pins, **14 are PRE-EXISTING** and **3 were
+introduced (or broken) by this branch**: `child_reports.py:5173` → `:5321`
+(two entries — the notify moved) and `job_recovery_service.py:4255` →
+`:4261` (the granted comment-only commit is CONTENT-inert but NOT
+line-inert). The three are re-pointed in the census TEST file;
+`job_recovery_service.py` itself is untouched.
+
+### 10.3 D11 scope — live-derived ids (A-4)
+
+The base tree carried **no** live-derived instance id in `daemon/` — the
+three this branch added (`mission_strand_healer.py` ×2, `config.py` ×1)
+are **this branch's debt** and are now scrubbed to descriptive
+placeholders. The pre-existing repo convention (live ids in daemon
+comments elsewhere in the base tree) is **not** this branch's debt. This
+design doc keeps its incident ids deliberately: the §1 anchor and the
+verbatim live log line are **grep aids** and are marked as such.
+
+### 10.4 The four earlier disclosures (still true at cycle 4)
+
+1. **f2's BEHAVIOUR widens** (its CODE is untouched) — §2.8.1.1's
+   consumer table, row 5.
+2. **The probe-error hold posture across consumers** — a MEMBER-ALIVE probe
+   error HOLDS (`live=True` + `error=True`) at every consumer; the
+   tree-walk error path is the only fail-open one (W-2, §2.10.3/§2.10.5).
+   The hold is not a permanent strand: the observer / the next pass
+   re-drives it. All four consumers now LOG it (A-2).
+3. **A member inside a legitimate >6h turn is still indistinguishable from
+   stale** — the horizon is the system's own; the fix is a **heartbeat on
+   turn progress** (the task rows carry `last_heartbeat_at`), a named
+   follow-up (§2.10.5).
+4. **A member whose only live work is a JOBITEM row (no task row) is NOT
+   held** (the task row is the only DATEABLE evidence class) — §2.10.5;
+   and the **event arm's `batch_cap` bypass is unbounded** (N stranded roots
+   ⇒ N concurrent hand-offs), disclosed in §2.8.3 — a per-process ceiling
+   is the candidate hardening.
 
