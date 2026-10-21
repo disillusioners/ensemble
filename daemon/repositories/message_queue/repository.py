@@ -463,8 +463,7 @@ class SQLModelMessageQueueRepository:
         """
         with self.engine.begin() as conn:
             res = conn.execute(text(
-                f"UPDATE message_queue SET status = '{MessageStatus.READY.value}', processing_started_at = NULL"
-                " WHERE message_id = :mid"
+                f"UPDATE message_queue SET status = '{MessageStatus.READY.value}', processing_started_at = NULL WHERE message_id = :mid"
                 f" AND status = '{MessageStatus.PROCESSING.value}'"
                 " AND NOT EXISTS (SELECT 1 FROM instances i WHERE i.instance_id = message_queue.instance_id"
                 f" AND i.status IN ({','.join(repr(s) for s in sorted(TERMINAL_INSTANCE_STATUSES))}))"
