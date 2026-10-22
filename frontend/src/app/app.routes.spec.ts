@@ -80,6 +80,18 @@ describe('App Routes', () => {
       expect(mcpServersRoute?.path).toBe('mcp-servers');
     });
 
+    it('should have the mcps-gateway route (the Remote Hands read-only page)', () => {
+      const gatewayRoute = routes.find(route => route.path === 'mcps-gateway');
+
+      expect(gatewayRoute).toBeDefined();
+      expect(gatewayRoute?.path).toBe('mcps-gateway');
+      expect(gatewayRoute?.title).toBe('MCP Gateway');
+      // The lazy loader must reference the page component.
+      const loaderSource = String(gatewayRoute?.loadComponent);
+      expect(loaderSource).toContain('mcps-gateway');
+      expect(loaderSource).toContain('McpsGatewayComponent');
+    });
+
     it('should redirect unknown routes to home', () => {
       const wildcardRoute = routes.find(route => route.path === '**');
 

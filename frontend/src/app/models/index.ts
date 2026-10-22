@@ -1045,3 +1045,9 @@ export interface MaintenanceErrorBody {
 
 // Snapshot subsystem types (snapshot-uiux v1) — see snapshot.model.ts
 export * from "./snapshot.model";
+
+// Remote Hands / MCP Gateway types (Phase C — the read-only operator
+// surface: machines / sessions / audit). See mcps-gateway.model.ts for
+// the wire-contract notes (snake_case as-is, ISO-8601 UTC strings, the
+// `count` == page-length rule).
+export * from './mcps-gateway.model';
