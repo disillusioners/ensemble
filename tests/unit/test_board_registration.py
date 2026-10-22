@@ -82,6 +82,12 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "instance_read",
     "instance_ops",
     "board-link",
+# remote-hands center gateway (2026-10-22): the ``mcp_rpc``
+# category — the agent-facing surface that drives an ENROLLED
+# remote machine (SPEC.md v0.1). opt-in-only; the ari + leader
+# allow entries are the only access path, and every tool body
+# ALSO carries its own agent_id gate.
+"mcp_rpc",
 })
 
 #: The ONLY agent allowed to hold the board category.
@@ -171,7 +177,7 @@ class TestPrivilegedCategory:
     def test_board_is_in_the_privileged_set(self) -> None:
         assert BOARD_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_fourteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_fifteen_entries(self) -> None:
         """The set is exact — the phase-2 commit moved this pin with the
         tenth entry (``self-alarm``) and the phase-3 commit moved it
         again with the eleventh + twelfth (``view-write`` /
@@ -188,7 +194,7 @@ class TestPrivilegedCategory:
         "ninth entry" is a property of the SET SIZE at the time of the
         phase-1 commit and of the registry's literal order afterwards;
         the comment block in the registry records the ordinal."""
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 14
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 15
         source = (
             REPO_ROOT / "daemon" / "tools" / "_tool_registry.py"
         ).read_text(encoding="utf-8")
@@ -234,21 +240,28 @@ class TestAllowLists:
         ``board-link`` at the END of ari's array — so the trailing set
         is now the phase-2 + phase-3 categories.
 
+        Phase B of the remote-hands center gateway (2026-10-22) appended
+        the ``mcp_rpc`` category at the END of ari's array — so the
+        trailing set is now the phase-2 + phase-3 + remote-hands
+        categories. The pin's INTENT (only the categories that were
+        appended AFTER the board may follow it) is unchanged; the SET
+        grew by one entry.
+
         NOTE (user ruling 2026-10-20): the board categories are
         ARI-ONLY, so leader's array no longer carries ``board`` (nor
         ``board-link``) at all — the trailing discipline is asserted
         for ari alone.
         """
         trailing_by_agent = {
-            "ari": ["self-alarm", "view-write", "board-link"],
+            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc"],
         }
         for agent_id in BOARD_ALLOW_AGENTS:
             allow = self._allow(agent_id)
             assert BOARD_CATEGORY in allow
             trailing = allow[allow.index(BOARD_CATEGORY) + 1 :]
             assert trailing == trailing_by_agent[agent_id], (
-                f"{agent_id}: only the phase-2 + phase-3 categories may "
-                f"follow the board, got {allow}"
+                f"{agent_id}: only the phase-2 + phase-3 + remote-hands "
+                f"categories may follow the board, got {allow}"
             )
 
     def test_no_other_agent_holds_the_board_category(self) -> None:

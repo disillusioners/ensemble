@@ -171,6 +171,10 @@ from daemon.services.live_event_hub import LiveEventHub
 from daemon.services.notification_broadcaster import get_notification_broadcaster
 from daemon.services.editor_utils import get_editor_preference
 from daemon.services.boot_epoch import get_boot_epoch
+# remote-hands center gateway (2026-10-22) — the configuration and the
+# kill switch of the gateway route. The route is registered ONLY when
+# ``MCPS_GATEWAY_ENABLED`` is ON.
+from daemon.services.mcps_gateway.config import load_gateway_config
 from daemon.services.readiness import (
     READINESS_FORCE_DEGRADED_ENV,
     ReadinessComposite,
@@ -987,6 +991,16 @@ async def lifespan(app: FastAPI):
     # ``_ensure_postgres_columns`` mirror needed.
     from daemon.repositories.instance_ops.models import InstanceOpsAudit
     InstanceOpsAudit.metadata.create_all(manager.engine)
+
+    # remote-hands center gateway (2026-10-22) — ``mcp_gateway_audit``
+    # is the append-only ledger of every remote command the center
+    # forwarded (SPEC.md §8.4: who / machine / tool / args-hash /
+    # outcome). Brand-new table — the same create_all precedent as the
+    # secrets pair and the instance_ops pair above; the .sql migration
+    # handles SQLite and the model handles PG. No
+    # ``_ensure_postgres_columns`` mirror needed.
+    from daemon.repositories.mcps_gateway.models import McpGatewayAudit
+    McpGatewayAudit.metadata.create_all(manager.engine)
 
     # agent-secrets P1 — ``SecretService`` is constructed in
     # ``InstanceManager.__init__`` alongside
@@ -2374,6 +2388,16 @@ async def lifespan(app: FastAPI):
     
     # Initialize LiveEventHub for live-only SSE streaming
     app.state.live_hub = manager._live_hub
+
+    # remote-hands center gateway (2026-10-22) — the CENTER service of
+    # the remote-hands protocol (SPEC.md v0.1). Wired on ``app.state``
+    # so the WebSocket route resolves the SAME instance the agent tools
+    # use (the roster and the live sessions are global state).
+    #
+    # The ROUTE is registered only when ``MCPS_GATEWAY_ENABLED`` is ON
+    # (see ``create_app``); the service is wired either way so the agent
+    # tools can refuse with a typed error while the transport is off.
+    app.state.mcps_gateway_service = manager.mcps_gateway_service
     
     # Initialize NotificationBroadcaster and wire into InstanceManager
     notification_broadcaster = get_notification_broadcaster()
@@ -4095,6 +4119,16 @@ def _tag_route_classes(app: FastAPI) -> None:
     # enforcement is the module's (T3.11 KbKeyGuardApp).
     tag_routes_by_path(app, exact_path="/api/mcp/kb", module_lane=True)
     tag_routes_by_path(app, exact_path="/api/mcp/kb/sse", module_lane=True)
+    # remote-hands center gateway (2026-10-22) — the WebSocket route the
+    # controlled machines dial OUT to (SPEC.md v0.1). MODULE-LANE: the
+    # credential is the module's OWN bearer enrollment token on the
+    # upgrade request (§3.1 / §4.1), NOT an OAuth2 token. Without this
+    # tag the OAuth2 middleware would own the request, see the
+    # enrollment bearer, and reject it with a 401 — and the machine
+    # would re-enroll forever. The route is only REGISTERED when
+    # ``MCPS_GATEWAY_ENABLED`` is ON, so this tag is a no-op when the
+    # gateway is off.
+    tag_routes_by_path(app, path_prefix="/api/mcps-gateway", module_lane=True)
 
     # ── PROTECTED (explicit tag) ────────────────────────────────────
     # /api/mcp/kb/keys — OAuth2 human lane (T3.12): the explicit tag
@@ -4484,7 +4518,59 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
 
         api_router.include_router(auth_router)         # /api/auth/*
 
+    # remote-hands center gateway (2026-10-22) — the WebSocket route the
+    # controlled machines dial OUT to (SPEC.md v0.1).
+    #
+    # THE KILL SWITCH IS DEFAULT OFF AND THE ROUTE IS NOT REGISTERED AT
+    # ALL WHEN IT IS OFF: with ``MCPS_GATEWAY_ENABLED`` unset the daemon
+    # answers 404 on the path — the route does not exist, it is not
+    # "registered but rejecting". This mirrors the conditional
+    # registration precedent of the auth router pair above (the
+    # ``if auth_enabled:`` include) — the same shape, a different
+    # switch.
+    #
+    # The path is configurable (``MCPS_GATEWAY_PATH``); the default
+    # ``/api/mcps-gateway/ws`` lives under the ``/api`` namespace, so the
+    # router is mounted inside ``api_router`` (whose prefix is ``/api``).
+    # A path outside ``/api`` is mounted at the app level instead.
+    gateway_config = load_gateway_config()
+    mcp_gateway_router = None
+    mcp_gateway_under_api = True
+    if gateway_config.enabled:
+        from daemon.routers.mcps_gateway import build_mcps_gateway_router
+
+        mcp_gateway_router, mcp_gateway_under_api = build_mcps_gateway_router(
+            path=gateway_config.path
+        )
+        if mcp_gateway_under_api:
+            api_router.include_router(mcp_gateway_router)  # /api/mcps-gateway/ws
+        logger.info(
+            "remote-hands gateway route registered at %s "
+            "(heartbeat interval=%dms, dead detect=%dms, tokens=%d, "
+            "allowed machines=%d)",
+            gateway_config.path,
+            gateway_config.heartbeat_interval_ms,
+            gateway_config.client_dead_detect_ms,
+            len(gateway_config.tokens),
+            len(gateway_config.allowed_machines),
+        )
+    else:
+        logger.info(
+            "remote-hands gateway is DISABLED (MCPS_GATEWAY_ENABLED) — the "
+            "route %s is not registered",
+            gateway_config.path,
+        )
+
     app.include_router(api_router)
+
+    # A gateway path OUTSIDE the /api namespace is mounted at the app
+    # level (the api_router owns the /api prefix). The mount happens
+    # HERE — after ``app.include_router(api_router)`` and BEFORE the SPA
+    # catch-all below — so Starlette first-match-wins resolves the
+    # WebSocket path to this router and never to the index.html
+    # fallback.
+    if mcp_gateway_router is not None and not mcp_gateway_under_api:
+        app.include_router(mcp_gateway_router)
 
     # --- MCP KB server mounts (MUST be before catch-all SPA route) ---
     # Initialize KB MCP server first (creates FastMCP and session manager)

@@ -88,6 +88,12 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "instance_read",
     "instance_ops",
     "board-link",
+# remote-hands center gateway (2026-10-22): the ``mcp_rpc``
+# category — the agent-facing surface that drives an ENROLLED
+# remote machine (SPEC.md v0.1). opt-in-only; the ari + leader
+# allow entries are the only access path, and every tool body
+# ALSO carries its own agent_id gate.
+"mcp_rpc",
 })
 
 #: The ONLY agent allowed to hold the self-alarm category.
@@ -184,11 +190,11 @@ class TestPrivilegedCategory:
     def test_self_alarm_is_in_the_privileged_set(self) -> None:
         assert SELF_ALARM_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_fourteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_fifteen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_fourteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 14
+    def test_the_set_has_fifteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 15
 
 
 # ── the allow-lists ──────────────────────────────────────────────────────

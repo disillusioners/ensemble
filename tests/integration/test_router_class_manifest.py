@@ -110,6 +110,15 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     # so the family classifies as protected-default ("pd") — the
     # D3 fail-closed posture is honored at every endpoint.
     "/api/custom-agents": frozenset({"pd"}),
+    # remote-hands center gateway (2026-10-22) — the WebSocket route the
+    # controlled machines dial OUT to (SPEC.md v0.1). MODULE-LANE: the
+    # credential is the module's OWN bearer enrollment token on the
+    # upgrade request (§3.1 / §4.1) — the OAuth2 middleware must never
+    # own this path, or every machine would be refused with a 401 and
+    # would re-enroll forever. The route is registered ONLY when
+    # MCPS_GATEWAY_ENABLED is ON; the AUTH_ON leg of this cage boots the
+    # app with the gateway ON so the family is observed.
+    "/api/mcps-gateway": frozenset({"module_lane"}),
     "/api/webhooks": frozenset({"module_lane"}),  # FR-40 module lane
     "/api/work": frozenset({"pd"}),
     "/api/workspace": frozenset({"pd"}),
@@ -127,10 +136,17 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
 
 #: Auth-OFF: no auth-self family, no keys family (module/protected
 #: columns collapse to module_lane-only).
+#:
+#: The remote-hands gateway family is excluded too — but for a
+#: DIFFERENT reason than the auth-self family: its route is registered
+#: only when ``MCPS_GATEWAY_ENABLED`` is ON, and the AUTH-OFF leg of
+#: this cage boots the app with the gateway explicitly OFF. The
+#: exclusion is therefore conditional on the GATEWAY flag, not on the
+#: auth flag.
 PINNED_MANIFEST_AUTH_OFF: dict[str, frozenset[str]] = {
     k: (frozenset({"module_lane"}) if k == "/api/mcp" else v)
     for k, v in PINNED_MANIFEST_AUTH_ON.items()
-    if k != "/api/auth"
+    if k != "/api/auth" and k != "/api/mcps-gateway"
 }
 
 _TAG_TO_CLASS = {
@@ -186,8 +202,12 @@ def _auth_on_config() -> AuthConfig:
 class TestRouterClassManifest:
     """The cage — run these on EVERY route-universe change."""
 
-    def test_auth_on_universe_matches_manifest(self):
+    def test_auth_on_universe_matches_manifest(self, monkeypatch):
         warnings.filterwarnings("ignore")
+        # The remote-hands gateway route is registered ONLY when
+        # MCPS_GATEWAY_ENABLED is ON — the manifest declares its family,
+        # so the leg must boot the app with the gateway ON.
+        monkeypatch.setenv("MCPS_GATEWAY_ENABLED", "1")
         app = create_app(auth_config=_auth_on_config())
         observed = _observe(app)
         missing = sorted(set(PINNED_MANIFEST_AUTH_ON) - set(observed))
@@ -214,8 +234,11 @@ class TestRouterClassManifest:
             f"manifest DELIBERATELY (family: observed vs pinned): {drifted}"
         )
 
-    def test_auth_off_universe_matches_manifest(self):
+    def test_auth_off_universe_matches_manifest(self, monkeypatch):
         warnings.filterwarnings("ignore")
+        # The gateway is explicitly OFF here: its route is not registered
+        # and its family is not part of the AUTH-OFF universe.
+        monkeypatch.setenv("MCPS_GATEWAY_ENABLED", "0")
         app = create_app()  # default OFF config
         observed = _observe(app)
         undeclared = sorted(set(observed) - set(PINNED_MANIFEST_AUTH_OFF))
@@ -273,4 +296,7 @@ class TestRouterClassManifest:
         # resource-cost-control P1 (aa95fc438) added the
         # /api/resources family — the api_families count grew
         # from 29 to 30.
-        assert len(api_families) == 30, sorted(api_families)
+        # remote-hands center gateway (2026-10-22) added the
+        # /api/mcps-gateway family — the api_families count grew
+        # from 30 to 31.
+        assert len(api_families) == 31, sorted(api_families)

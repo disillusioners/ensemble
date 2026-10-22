@@ -234,6 +234,19 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "od.compose_brief",
     "od.save",
     "od.lint",
+    # remote-hands center gateway (2026-10-22) — the four tools of the
+    # ``mcp_rpc`` category, created by the create_mcp_rpc_tools()
+    # factory (daemon/tools/mcp_rpc_tools.py). The ``mcp_rpc`` category
+    # is PRIVILEGED (entry #15 of PRIVILEGED_TOOL_CATEGORIES): the
+    # empty-allow inherit universe must NOT auto-grant the authority to
+    # drive a remote DESKTOP. Explicit ``tools.allow: ["mcp_rpc"]`` on
+    # ari + leader is the only access path, and every tool body ALSO
+    # carries its own ``agent_id in {"ari", "leader"}`` gate — a LITERAL
+    # tool name in an allow list bypasses the category gate outright.
+    "mcp_rpc_list_machine",
+    "mcp_rpc_connect",
+    "mcp_rpc_command",
+    "mcp_rpc_disconnect",
 })
 
 
@@ -523,6 +536,31 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # set must never be red between two commits).
     "instance_read",
     "instance_ops",
+    # remote-hands center gateway (2026-10-22): ``mcp_rpc`` is the
+    # category that lets an agent DRIVE A REMOTE MACHINE — the
+    # computer-use surface of the remote-hands protocol (SPEC.md v0.1).
+    # #15 in PRIVILEGED_TOOL_CATEGORIES (14 → 15; ``instance_read`` +
+    # ``instance_ops`` joined 2026-10-21 making the count 13 before
+    # this entry).
+    #
+    # Why privileged: a tool of this category runs a tool on ANOTHER
+    # host's desktop — the wrapper's own policy layer is the only thing
+    # between the agent and the user's screen. The empty-allow inherit
+    # universe (the in-tree ``watcher`` agent plus every tools-less
+    # custom agent) must NEVER auto-grant it.
+    #
+    # Defence in depth: a LITERAL tool name in an allow list bypasses
+    # the category gate entirely, so every tool body ALSO carries an
+    # ``agent_id in {"ari", "leader"}`` runtime gate. Both gates are
+    # required; neither substitutes for the other. The ari + leader
+    # ``tools.allow`` entries are the only access paths (the leader
+    # froze the audience of this phase).
+    #
+    # SAME-PR pin updates at the EIGHT files listed in the SAME-PR RULE
+    # comment above are mandatory (this entry ships in the SAME commit
+    # as those eight insertions — the set must never be red between two
+    # commits).
+    "mcp_rpc",
 })
 
 
@@ -942,6 +980,20 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # tools): audience separation (mint ≠ read) and zero coupling to the
     # phase-1 module (D13).
     "board-link": "daemon.tools.board_link",
+    # remote-hands center gateway (2026-10-22) — the four agent-facing
+    # tools of the remote-hands protocol (SPEC.md v0.1). PRIVILEGED
+    # category (entry #15 of PRIVILEGED_TOOL_CATEGORIES): the
+    # empty-allow inherit universe must NOT auto-grant the authority to
+    # drive a remote desktop.
+    #
+    # The value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``; a
+    # ``daemon.services.*`` value is NEVER discovered and the
+    # exact-equality drift pin fails at boot. The PURE helpers live in
+    # ``daemon/services/mcps_gateway/`` and are imported BY this module —
+    # the category points at the tool module, the service package is a
+    # library, never a category target.
+    "mcp_rpc": "daemon.tools.mcp_rpc_tools",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -1296,6 +1348,18 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "list_missions",
     "list_watched_jobs",
     "mcp_set_env",
+    # remote-hands center gateway (2026-10-22): the four agent-facing
+    # tools of the ``mcp_rpc`` category — created by the
+    # create_mcp_rpc_tools() factory (daemon/tools/mcp_rpc_tools.py).
+    # Factory-built (not import-time registered), so they belong in
+    # DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is
+    # PRIVILEGED (entry #15 of PRIVILEGED_TOOL_CATEGORIES) — opt-in
+    # only, never default-granted; the ari/leader-only runtime gate
+    # lives in the tool bodies.
+    "mcp_rpc_list_machine",
+    "mcp_rpc_connect",
+    "mcp_rpc_command",
+    "mcp_rpc_disconnect",
     "mid_flight_report",
     "pause_instance",
     "plane_sync_project",

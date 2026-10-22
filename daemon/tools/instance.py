@@ -435,10 +435,33 @@ def resolve_tool_filter(
     if all_tool_names is not None and "mcp" in tool_categories:
         # Check if MCP category is empty (not yet expanded)
         if len(tool_categories.get("mcp", [])) == 0:
+            # THE SWEEP MUST NOT CLAIM A TOOL THAT ANOTHER REGISTERED
+            # CATEGORY OWNS (2026-10-22 — the remote-hands ``mcp_rpc``
+            # category).
+            #
+            # The sweep matches every ``mcp_<server>_<tool>`` name, and the
+            # ``mcp_rpc_*`` tools of the remote-hands gateway MATCH that
+            # pattern exactly. Without this guard an allow list naming
+            # ``mcp`` would silently hand the remote-desktop surface to
+            # every agent that carries ``"mcp"`` — and ~20 agents do. The
+            # ``mcp_rpc`` category is PRIVILEGED (opt-in only), so the
+            # sweep must not be a back door around that gate.
+            #
+            # The rule is generic — a tool owned by ANY other registered
+            # category is not a discovery candidate of the ``mcp`` sweep.
+            # The category map is the ownership map: it is populated by
+            # ``scan_tools_for_full_docs`` BEFORE ``_apply_tool_filter``
+            # runs (the production order in ``create_instance_tools``).
+            owned_elsewhere: set[str] = set()
+            for category_key, category_tools in tool_categories.items():
+                if category_key == "mcp":
+                    continue
+                owned_elsewhere.update(category_tools)
             # Find all MCP tools: names starting with "mcp_" and contain at least 2 underscores
             mcp_tools = {
                 name for name in all_tool_names
                 if name.startswith("mcp_") and "_" in name[4:]
+                and name not in owned_elsewhere
             }
             tool_categories["mcp"] = list(mcp_tools)
 
@@ -2388,6 +2411,44 @@ def create_self_alarm_tools_if_available(manager, current_instance_id: str, agen
         source_repo=getattr(manager, "_source_repository", None),
         instance_repository=getattr(manager, "_instance_repository", None),
         project_repository=getattr(manager, "_project_repository", None),
+        current_instance_id=current_instance_id,
+        agent_id=agent_id,
+        agent_tag=agent_tag,
+    )
+
+
+def create_mcp_rpc_tools_if_available(manager, current_instance_id: str, agent_id: str, agent_tag: str | None = None) -> list:
+    """Create the four remote-hands tools when the gateway service is
+    mounted on the manager.
+
+    remote-hands center gateway (2026-10-22) — the tools wrap the shared
+    ``daemon.services.mcps_gateway`` package, which the manager mounts as
+    the ``mcps_gateway_service`` property. Same wiring-check posture as the
+    sibling ``*_if_available`` factories: when the manager is a test
+    double without the property, this returns an EMPTY tool list instead
+    of raising.
+
+    Per-agent visibility is scoped afterwards by ``_apply_tool_filter``
+    via the ``mcp_rpc`` PRIVILEGED category (entry #15) — granted via an
+    explicit ``tools.allow: ["mcp_rpc"]`` entry in ``agents/ari/meta.json``
+    and ``agents/leader/meta.json`` and NOWHERE else. The privileged
+    category is NOT sufficient on its own — a literal tool name in an
+    allow list bypasses the category gate — so every tool body ALSO
+    carries its own ``agent_id in {"ari", "leader"}`` gate. Both gates are
+    required.
+
+    Decorator-only registration is SILENTLY INVISIBLE — the extend of
+    this factory's return list inside ``create_instance_tools`` is the
+    third step of the three-step registration seam (decorator + registry
+    entry + construction).
+    """
+    gateway_service = getattr(manager, "mcps_gateway_service", None)
+    if gateway_service is None:
+        return []
+    from .mcp_rpc_tools import create_mcp_rpc_tools
+
+    return create_mcp_rpc_tools(
+        gateway_service,
         current_instance_id=current_instance_id,
         agent_id=agent_id,
         agent_tag=agent_tag,
@@ -6482,6 +6543,42 @@ Returns:
     from .settings_tools import create_settings_tools
     settings_tool_list = create_settings_tools(manager, current_instance_id)
     tools.extend(settings_tool_list)
+
+    # ── remote-hands tools (2026-10-22) — the four-tool category
+    # exposing ``mcp_rpc_list_machine`` / ``mcp_rpc_connect`` /
+    # ``mcp_rpc_command`` / ``mcp_rpc_disconnect`` — the AGENT-facing
+    # surface of the remote-hands protocol (SPEC.md v0.1). The tools
+    # wrap the shared ``daemon.services.mcps_gateway`` package, which the
+    # manager mounts as the ``mcps_gateway_service`` property (one
+    # service per process: the roster of the enrolled machines is GLOBAL
+    # state, exactly like the board).
+    #
+    # The category is entry #15 in ``PRIVILEGED_TOOL_CATEGORIES`` (14 →
+    # 15) — NEVER default-granted; the ari + leader ``tools.allow``
+    # entries are the only access paths. Every non-allowed agent still
+    # resolves ZERO remote-hands tools through both the
+    # ``_strip_privileged_category_tools`` default-deny strip AND the
+    # ``resolve_tool_filter`` empty-allow branch. Defence in depth: a
+    # LITERAL tool name in an allow list bypasses the category gate, so
+    # every tool body ALSO carries its own ``agent_id in {"ari",
+    # "leader"}`` runtime gate. Both gates are required.
+    #
+    # The factory tolerates a manager without the property (the
+    # ``*_if_available`` posture): an unwired gateway yields an EMPTY
+    # tool list instead of raising. Same three-step registration seam as
+    # the sibling categories: decorator (in ``mcp_rpc_tools.py``) +
+    # ``CATEGORY_MODULES`` entry (``_tool_registry.py``) +
+    # DYNAMIC_TOOL_NAMES + KNOWN_TOOL_NAMES + this construction call —
+    # all required (decorator-only registration is SILENTLY INVISIBLE).
+    #
+    # The extend MUST precede ``create_help_tool`` /
+    # ``scan_tools_for_full_docs`` / ``_apply_tool_filter`` below: the
+    # scan is what registers the ``mcp_rpc`` category in the registry,
+    # and the filter is what resolves the allow entry against it.
+    mcp_rpc_tool_list = create_mcp_rpc_tools_if_available(
+        manager, current_instance_id, agent_id, agent_tag=version_tag
+    )
+    tools.extend(mcp_rpc_tool_list)
 
     # ── Plugin subsystem Port tools (slice ⑤ tier-1 wiring; REC §4.3
     # row ⑤ PROVES line + ⑤b native-lane-LIVE precondition) ──

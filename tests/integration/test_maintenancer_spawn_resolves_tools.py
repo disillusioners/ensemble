@@ -296,7 +296,7 @@ class TestWorkerResolvesSystemLogOnly:
 
 
 class TestPrivilegedCategoryRegistryShape:
-    """PRIVILEGED_TOOL_CATEGORIES must be exactly fourteen categories
+    """PRIVILEGED_TOOL_CATEGORIES must be exactly fifteen categories
     (the daemon-internal authority trio ``system_upgrade``,
     ``system-log``, ``ens-db`` plus ``ens-env`` per the W4 leader
     decision 2026-10-02, ``view-views`` per the REWORK 2026-10-07
@@ -318,7 +318,7 @@ class TestPrivilegedCategoryRegistryShape:
     (the fifth exact-set pin added by the iteration-002 council B2
     correction)."""
 
-    def test_privileged_categories_contains_twelve_entries(self) -> None:
+    def test_privileged_categories_contains_fifteen_entries(self) -> None:
         # W4 (leader decision 2026-10-02): the set was a quartet —
         # ``ens-env`` joined (key-returning tool, explicit opt-in
         # only). REWORK 2026-10-07 (M1) added ``view-views`` (the
@@ -403,7 +403,13 @@ class TestPrivilegedCategoryRegistryShape:
             "instance_read",
             "instance_ops",
             "board-link",
-        })
+                # remote-hands center gateway (2026-10-22): the ``mcp_rpc``
+        # category — the agent-facing surface that drives an ENROLLED
+        # remote machine (SPEC.md v0.1). opt-in-only; the ari + leader
+        # allow entries are the only access path, and every tool body
+        # ALSO carries its own agent_id gate.
+        "mcp_rpc",
+})
 
     def test_ens_db_registered_in_category_modules(self) -> None:
         """CATEGORY_MODULES entry exists for the new category (binding

@@ -39,7 +39,8 @@
       "board",
       "self-alarm",
       "view-write",
-      "board-link"
+      "board-link",
+      "mcp_rpc"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },
