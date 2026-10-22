@@ -687,3 +687,89 @@ class TestSkillMetricScanEnqueue:
         _, total_a = job_repo.list(project_id=project_a, limit=10)
         assert total_b == 1
         assert total_a == 0
+
+class TestFallbackDedupTerminalCollapse:
+    """F5 (review iteration 3): pin the ``created=False`` dedup branch.
+
+    The partial unique index has NO admission_state predicate, so a
+    TERMINAL predecessor row (done/failed) with the same
+    ``skill_fix:<project>:<skill>`` key collapses the fallback's
+    admission silently — no new row is ever minted for that key while
+    the predecessor is not soft-deleted. This is the DISCLOSED
+    one-shot semantic of the dispatcher-unavailable fallback (more
+    conservative than the dispatcher's own path, which synthesizes a
+    fresh ``<key>#<hex>`` for a terminal predecessor). Pinned here AS
+    INTENDED.
+    """
+
+    @pytest.mark.asyncio
+    async def test_terminal_predecessor_collapses_no_new_row(
+        self, engine, project_id, monkeypatch: pytest.MonkeyPatch
+    ):
+        from sqlmodel import Session
+
+        from daemon.repositories.job_queue.models import JobItem
+
+        monkeypatch.setenv("ENSEMBLE_SKILL_EVOLUTION_ENABLED", "1")
+        _make_project(engine, project_id=project_id)
+        queue_id = _make_queue(
+            engine,
+            project_id=project_id,
+            queue_name="system_parallel_queue",
+        )
+
+        # A TERMINAL predecessor already holds the dedup key.
+        key = f"skill_fix:{project_id}:skill-collapsed"
+        with Session(engine) as sess:
+            sess.add(
+                JobItem(
+                    job_id="job-predecessor",
+                    agent_id="skill-keeper",
+                    agent_dir="agents/skill-keeper",
+                    message="Evolve skill skill-collapsed (old build)",
+                    source="skill_evolution",
+                    project_id=project_id,
+                    priority=4,
+                    job_metadata={
+                        "skill_id": "skill-collapsed",
+                        "evolution_type": "FIX",
+                    },
+                    queue_id=queue_id,
+                    job_type="skill_evolution",
+                    status="done",
+                    admission_state="done",
+                    idempotency_key=key,
+                )
+            )
+            sess.commit()
+
+        trigger = MagicMock()
+        trigger.evaluate_all = AsyncMock(
+            return_value=[
+                {
+                    "skill_id": "skill-collapsed",
+                    "skill_name": "EvolveMe",
+                    "trigger_name": "consecutive_failures",
+                    "trigger_action": "evolve_fix",
+                    "reason": "consecutive_failures=5 >= 3",
+                    "stats": {"consecutive_failures": 5},
+                }
+            ]
+        )
+
+        manager, _, job_repo, _, _ = _make_manager_with_services(
+            engine, project_id, trigger_engine=trigger
+        )
+        manager._project_repository.set_projects(
+            [MagicMock(project_id=project_id, status="active")]
+        )
+
+        await manager._run_skill_metric_scan()
+
+        jobs, total = job_repo.list(project_id=project_id, limit=10)
+        assert total == 1, (
+            "a terminal predecessor with the same dedup key must "
+            "collapse the fallback's admission (created=False branch) "
+            "— no second row may be minted"
+        )
+        assert jobs[0].job_id == "job-predecessor"

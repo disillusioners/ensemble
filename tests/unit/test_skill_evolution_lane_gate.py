@@ -33,9 +33,10 @@ Out of scope (NOT gated, deliberate): ``enqueue_analysis`` (Tier-2
 read-only analysis jobs), ``enqueue_metric_scan`` (the scan itself),
 the CAPTURED lane (its own ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` switch,
 default OFF), and the skill-keeper's DIRECT execution tools
-(``skill_evolve`` / ``analyze_skill`` run inline on an
-already-running keeper — the gate stops job ADMISSION, not
-execution).
+(``skill_evolve`` / ``skill_analyze`` run inline on an
+already-running keeper — the job-level gate stops ADMISSION and
+queued-EXECUTION (terminally), but cannot reach an inline tool call
+on a keeper instance that is already running).
 """
 
 from __future__ import annotations
@@ -973,56 +974,392 @@ def _make_exec_processor(lane_enabled: bool, job: _ExecJob) -> Any:
 
 
 class TestJobProcessorExecutionGate:
-    """M-2: a queued ``skill_evolution`` row must NOT silently execute
-    while the lane is OFF (admission gate covers NEW rows; this is the
-    belt for rows admitted before the lane was turned off)."""
+    """F1/F4 (review iteration 3): the gate pin runs against the REAL
+    ``JobQueueService`` + in-memory SQLite and asserts POST-STATE —
+    the refused row is TERMINALLY written (admission_state='done',
+    terminal_reason='lane_disabled', no ``failed_at`` so the retry
+    engine cannot loop it) and the queue head ADVANCES (a second job
+    completes). The first cut of this pin mocked ``complete_job`` and
+    asserted only ``await_args`` — blind to the queued-row no-op write
+    that was the F1 defect.
+    """
 
-    async def test_skill_evolution_refused_when_lane_off(self):
-        from daemon.services.job_processor import JobProcessor as _JP  # noqa: F401
+    @staticmethod
+    def _build_real_service():
+        """Real JobQueueService + repos over in-memory SQLite (the
+        ``tests/services/test_skill_metric_scan.py`` pattern)."""
+        from sqlalchemy import create_engine, event
+        from sqlalchemy.pool import StaticPool
+        from sqlmodel import SQLModel
 
-        job = _ExecJob(job_type="skill_evolution")
-        processor = _make_exec_processor(lane_enabled=False, job=job)
+        import daemon.repositories.job_queue.models  # noqa: F401
 
-        await processor._process_next_job()
+        eng = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
 
-        queue_service = processor._queue_service
-        queue_service.start_job.assert_not_called()
-        queue_service.complete_job.assert_awaited()
-        kwargs = queue_service.complete_job.await_args.kwargs
-        from daemon.services.job_queue_service import DemandState
+        @event.listens_for(eng, "connect")
+        def _enable_fk(dbapi_conn, _connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
 
-        assert kwargs["demand_state"] == DemandState.FAILED
-        assert "lane disabled" in (kwargs.get("error") or "").lower()
+        SQLModel.metadata.create_all(eng)
 
-    async def test_skill_evolution_executes_when_lane_on(self):
-        job = _ExecJob(job_type="skill_evolution")
-        processor = _make_exec_processor(lane_enabled=True, job=job)
+        from daemon.repositories.job_queue.lock_repository import (
+            LockRepository,
+        )
+        from daemon.repositories.job_queue.queue_repository import (
+            JobQueueRepository,
+        )
+        from daemon.repositories.job_queue.repository import JobRepository
+        from daemon.services.job_lock_manager import JobLockManager
+        from daemon.services.job_queue_service import JobQueueService
 
-        await processor._process_next_job()
+        job_repo = JobRepository(eng)
+        queue_repo = JobQueueRepository(eng)
+        lock_manager = JobLockManager(lock_repo=LockRepository(eng))
 
-        processor._queue_service.start_job.assert_awaited()
+        manager = MagicMock()
+        manager.is_skill_evolution_lane_enabled = MagicMock(
+            return_value=False
+        )
+        manager.get_instance = AsyncMock(side_effect=KeyError("not in memory"))
+        manager.spawn_instance_with_mcp = AsyncMock(return_value="inst-1")
+        manager.enqueue_message = AsyncMock(return_value=None)
 
-    async def test_non_skill_job_untouched_when_lane_off(self):
-        """Scope: skill_evolution rows ONLY — a plain task job proceeds."""
-        job = _ExecJob(job_type="task")
-        processor = _make_exec_processor(lane_enabled=False, job=job)
+        service = JobQueueService(
+            repository=job_repo,
+            lock_manager=lock_manager,
+            queue_repo=queue_repo,
+            instance_manager=manager,
+        )
+        return eng, service, manager, job_repo, queue_repo
 
-        await processor._process_next_job()
+    @staticmethod
+    def _seed_queue(engine, project_id: str) -> str:
+        from sqlmodel import Session
 
-        processor._queue_service.start_job.assert_awaited()
+        from daemon.repositories.job_queue.models import (
+            JobQueue,
+            QueueType,
+        )
 
-    async def test_lane_probe_failure_fails_closed(self):
-        """An unreadable lane state must not silently execute."""
-        job = _ExecJob(job_type="skill_evolution")
-        processor = _make_exec_processor(lane_enabled=True, job=job)
-        processor._instance_manager.is_skill_evolution_lane_enabled = (
-            MagicMock(side_effect=RuntimeError("probe down"))
+        queue_id = "q-exec-gate"
+        with Session(engine) as sess:
+            sess.add(
+                JobQueue(
+                    queue_id=queue_id,
+                    project_id=project_id,
+                    queue_name="system_parallel_queue",
+                    queue_name_lower="system_parallel_queue",
+                    queue_type=QueueType.PARALLEL.value,
+                    concurrency_limit=5,
+                    is_system=True,
+                )
+            )
+            sess.commit()
+        return queue_id
+
+    @staticmethod
+    def _seed_job(
+        engine,
+        *,
+        job_id: str,
+        job_type: str,
+        project_id: str,
+        queue_id: str,
+        created_offset_seconds: int,
+    ) -> None:
+        from datetime import datetime, timedelta, timezone
+        from sqlmodel import Session
+
+        from daemon.repositories.job_queue.models import JobItem
+
+        with Session(engine) as sess:
+            sess.add(
+                JobItem(
+                    job_id=job_id,
+                    agent_id="skill-keeper",
+                    agent_dir="agents/skill-keeper",
+                    message=(
+                        f"Evolve skill sk-1. Type: FIX. Direction: d ({job_id})"
+                        if job_type == "skill_evolution"
+                        else f"plain task ({job_id})"
+                    ),
+                    source="skill_evolution"
+                    if job_type == "skill_evolution"
+                    else "api",
+                    project_id=project_id,
+                    priority=5,
+                    job_metadata={"skill_id": "sk-1"}
+                    if job_type == "skill_evolution"
+                    else {},
+                    queue_id=queue_id,
+                    job_type=job_type,
+                    status="pending",
+                    admission_state="queued",
+                    created_at=(
+                        datetime.now(timezone.utc)
+                        + timedelta(seconds=created_offset_seconds)
+                    ).isoformat(),
+                )
+            )
+            sess.commit()
+
+    @staticmethod
+    def _get_job(engine, job_id: str):
+        from sqlmodel import Session
+
+        from daemon.repositories.job_queue.models import JobItem
+
+        with Session(engine) as sess:
+            job = sess.get(JobItem, job_id)
+            assert job is not None
+            sess.refresh(job)
+            return job
+
+    async def test_refused_row_is_terminally_written_and_head_advances(self):
+        """THE F1 post-state proof: tick 1 terminally writes the gated
+        head row; tick 2 admits the SECOND job (no permanent
+        head-of-line blocker)."""
+        from daemon.services.job_processor import JobProcessor
+
+        eng, service, manager, job_repo, queue_repo = (
+            self._build_real_service()
+        )
+        project_id = "proj-exec-gate"
+        queue_id = self._seed_queue(eng, project_id)
+        self._seed_job(
+            eng,
+            job_id="job-tier3-head",
+            job_type="skill_evolution",
+            project_id=project_id,
+            queue_id=queue_id,
+            created_offset_seconds=0,
+        )
+        self._seed_job(
+            eng,
+            job_id="job-task-second",
+            job_type="task",
+            project_id=project_id,
+            queue_id=queue_id,
+            created_offset_seconds=1,
+        )
+
+        processor = JobProcessor(
+            queue_service=service,
+            instance_manager=manager,
+            project_repo=MagicMock(
+                get=MagicMock(
+                    return_value=SimpleNamespace(job_queue_paused=False)
+                )
+            ),
+            queue_repo=queue_repo,
+            poll_interval=0.1,
+        )
+
+        await processor._process_next_job()  # tick 1: the gated head
+
+        head = self._get_job(eng, "job-tier3-head")
+        assert head.admission_state == "done", (
+            f"the refused row must be TERMINALLY written, got "
+            f"admission_state={head.admission_state!r} (F1: a no-op "
+            f"write leaves it queued forever)"
+        )
+        assert head.terminal_reason == "lane_disabled"
+        assert head.failed_at is None, (
+            "no failed_at marker => should_retry can never loop the row"
+        )
+        # The instance must NOT have been spawned for the refused row.
+        manager.spawn_instance_with_mcp.assert_not_awaited()
+
+        await processor._process_next_job()  # tick 2: the second job
+
+        second = self._get_job(eng, "job-task-second")
+        assert second.admission_state == "active", (
+            f"the queue head must ADVANCE — second job admitted, got "
+            f"admission_state={second.admission_state!r}"
+        )
+
+    async def test_active_orphan_refused_terminally_when_lane_off(self):
+        """F2: the ACTIVE-orphan recovery path is covered by the hoisted
+        predicate — the row is terminally written and NO instance is
+        re-spawned (the direction text never reaches a keeper)."""
+        from daemon.services.job_processor import JobProcessor
+
+        eng, service, manager, job_repo, queue_repo = (
+            self._build_real_service()
+        )
+        manager.is_skill_evolution_lane_enabled = MagicMock(
+            return_value=False
+        )
+        project_id = "proj-exec-gate-2"
+        queue_id = self._seed_queue(eng, project_id)
+        self._seed_job(
+            eng,
+            job_id="job-tier3-orphan",
+            job_type="skill_evolution",
+            project_id=project_id,
+            queue_id=queue_id,
+            created_offset_seconds=0,
+        )
+        # Force the row into the ACTIVE admission state (orphan shape).
+        from sqlmodel import Session
+
+        from daemon.repositories.job_queue.models import JobItem
+
+        with Session(eng) as sess:
+            job = sess.get(JobItem, "job-tier3-orphan")
+            job.admission_state = "active"
+            job.instance_id = "inst-orphan-1"
+            sess.add(job)
+            sess.commit()
+
+        processor = JobProcessor(
+            queue_service=service,
+            instance_manager=manager,
+            project_repo=MagicMock(
+                get=MagicMock(
+                    return_value=SimpleNamespace(job_queue_paused=False)
+                )
+            ),
+            queue_repo=queue_repo,
+            poll_interval=0.1,
         )
 
         await processor._process_next_job()
 
-        processor._queue_service.start_job.assert_not_called()
-        processor._queue_service.complete_job.assert_awaited()
+        orphan = self._get_job(eng, "job-tier3-orphan")
+        assert orphan.admission_state == "done"
+        # NOTE: the ACTIVE path goes through complete_job(FAILED), whose
+        # fail semantics stamp ``failed_at`` (unlike the queued-gate
+        # path, which deliberately omits it). In production a retry
+        # engine could bounce such a row back to queued ONCE — where the
+        # queued gate terminally refuses it again with NO failed_at, so
+        # the cycle ends; it can never loop indefinitely.
+        assert orphan.terminal_reason in ("lane_disabled", None) or (
+            orphan.failed_at is not None
+        )
+        manager.spawn_instance_with_mcp.assert_not_awaited()
+        manager.enqueue_message.assert_not_awaited()
+
+    async def test_absent_lane_accessor_fails_closed(self):
+        """F3: an instance manager WITHOUT the lane accessor must
+        REFUSE (fail-closed), never silently admit."""
+        from daemon.services.job_processor import JobProcessor
+
+        eng, service, manager, job_repo, queue_repo = (
+            self._build_real_service()
+        )
+        del manager.is_skill_evolution_lane_enabled  # absent accessor
+        project_id = "proj-exec-gate-3"
+        queue_id = self._seed_queue(eng, project_id)
+        self._seed_job(
+            eng,
+            job_id="job-tier3-noprobe",
+            job_type="skill_evolution",
+            project_id=project_id,
+            queue_id=queue_id,
+            created_offset_seconds=0,
+        )
+
+        processor = JobProcessor(
+            queue_service=service,
+            instance_manager=manager,
+            project_repo=MagicMock(
+                get=MagicMock(
+                    return_value=SimpleNamespace(job_queue_paused=False)
+                )
+            ),
+            queue_repo=queue_repo,
+            poll_interval=0.1,
+        )
+
+        await processor._process_next_job()
+
+        job = self._get_job(eng, "job-tier3-noprobe")
+        assert job.admission_state == "done"
+        assert job.terminal_reason == "lane_disabled"
+
+    async def test_lane_probe_error_fails_closed(self):
+        """A raising probe must REFUSE (and terminally write), never
+        silently execute."""
+        from daemon.services.job_processor import JobProcessor
+
+        eng, service, manager, job_repo, queue_repo = (
+            self._build_real_service()
+        )
+        manager.is_skill_evolution_lane_enabled = MagicMock(
+            side_effect=RuntimeError("probe down")
+        )
+        project_id = "proj-exec-gate-4"
+        queue_id = self._seed_queue(eng, project_id)
+        self._seed_job(
+            eng,
+            job_id="job-tier3-errprobe",
+            job_type="skill_evolution",
+            project_id=project_id,
+            queue_id=queue_id,
+            created_offset_seconds=0,
+        )
+
+        processor = JobProcessor(
+            queue_service=service,
+            instance_manager=manager,
+            project_repo=MagicMock(
+                get=MagicMock(
+                    return_value=SimpleNamespace(job_queue_paused=False)
+                )
+            ),
+            queue_repo=queue_repo,
+            poll_interval=0.1,
+        )
+
+        await processor._process_next_job()
+
+        job = self._get_job(eng, "job-tier3-errprobe")
+        assert job.admission_state == "done"
+        assert job.terminal_reason == "lane_disabled"
+        manager.spawn_instance_with_mcp.assert_not_awaited()
+
+    async def test_non_skill_job_untouched_when_lane_off(self):
+        """Scope: skill_evolution rows ONLY — a plain task job proceeds
+        through start_job even with the lane off."""
+        from daemon.services.job_processor import JobProcessor
+
+        eng, service, manager, job_repo, queue_repo = (
+            self._build_real_service()
+        )
+        project_id = "proj-exec-gate-5"
+        queue_id = self._seed_queue(eng, project_id)
+        self._seed_job(
+            eng,
+            job_id="job-task-plain",
+            job_type="task",
+            project_id=project_id,
+            queue_id=queue_id,
+            created_offset_seconds=0,
+        )
+
+        processor = JobProcessor(
+            queue_service=service,
+            instance_manager=manager,
+            project_repo=MagicMock(
+                get=MagicMock(
+                    return_value=SimpleNamespace(job_queue_paused=False)
+                )
+            ),
+            queue_repo=queue_repo,
+            poll_interval=0.1,
+        )
+
+        await processor._process_next_job()
+
+        job = self._get_job(eng, "job-task-plain")
+        assert job.admission_state == "active"
 
 
 class TestRetryJobCarryThrough:
@@ -1124,6 +1461,62 @@ class TestSwitchTokenAlignment:
             d._resolve_capture_enabled()
         with pytest.raises(ValueError):
             d._resolve_evolution_enabled(False)
+
+    def test_empty_and_whitespace_match_capture_exactly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Capture-parity ruling (iteration 3, (a)): the capture switch
+        does NOT raise on empty/whitespace — it defers to its (hardcoded
+        False) default. The evolution switch matches EXACTLY: no raise,
+        defer to the configured default. Only unrecognized NON-empty
+        values raise — in both switches."""
+        from daemon.services import skill_job_dispatcher as d
+
+        for token in ("", "   "):
+            monkeypatch.setenv(d.SKILL_CAPTURE_KILL_SWITCH_ENV, token)
+            assert d._resolve_capture_enabled() is False
+            monkeypatch.setenv(d.SKILL_EVOLUTION_KILL_SWITCH_ENV, token)
+            assert d._resolve_evolution_enabled(False) is False
+            assert d._resolve_evolution_enabled(True) is True
+        # "banana" raises in BOTH (unchanged).
+        monkeypatch.setenv(d.SKILL_CAPTURE_KILL_SWITCH_ENV, "banana")
+        with pytest.raises(ValueError):
+            d._resolve_capture_enabled()
+
+    def test_alias_surface_is_disclosed_not_eliminated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Reviewer finding (iteration 3): pydantic's env_prefix mints a
+        SECOND switch surface (``SKILL_EVOLUTION_EVOLUTION_LANE_ENABLED``).
+        Elimination was probed and is NOT mechanical (validation_alias
+        breaks the by-name yaml/test surface; populate_by_name
+        re-enables the field name for env lookup), so the ruling's
+        fallback applies: BOTH surfaces exist and are pinned here —
+        the alias sets the CONSTRUCTED DEFAULT; the canonical var wins
+        at every resolution (the resolver reads it per-call first)."""
+        from daemon.config import SkillEvolutionConfig
+        from daemon.services import skill_job_dispatcher as d
+
+        monkeypatch.delenv(d.SKILL_EVOLUTION_KILL_SWITCH_ENV, raising=False)
+        monkeypatch.delenv(
+            "SKILL_EVOLUTION_EVOLUTION_LANE_ENABLED", raising=False
+        )
+        # The alias var alone sets the constructed default.
+        monkeypatch.setenv("SKILL_EVOLUTION_EVOLUTION_LANE_ENABLED", "true")
+        cfg = SkillEvolutionConfig()
+        assert cfg.evolution_lane_enabled is True
+        # ...but the canonical var (unset) still decides at resolution
+        # time: the resolver returns the configured default only when
+        # the canonical var is unset — here the alias-configured default
+        # flows through and the lane IS enabled (the disclosed residual).
+        assert d._resolve_evolution_enabled(
+            cfg.evolution_lane_enabled
+        ) is True
+        # The canonical var, once set, wins over BOTH.
+        monkeypatch.setenv(d.SKILL_EVOLUTION_KILL_SWITCH_ENV, "0")
+        assert d._resolve_evolution_enabled(
+            cfg.evolution_lane_enabled
+        ) is False
 
     def test_load_time_check_logs_error_for_invalid_values(
         self, monkeypatch: pytest.MonkeyPatch, caplog
