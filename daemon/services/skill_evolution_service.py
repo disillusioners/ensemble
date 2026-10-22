@@ -1277,7 +1277,12 @@ class SkillEvolutionService:
            (deactivate loser / resolve ab_test / promote winner).
            ``reason='forced_winner'``. Skips the
            sample-size / threshold / extension gates entirely —
-           the caller has explicit authority to pick.
+           the caller has explicit authority to pick. REFUSAL
+           (2026-10-22): a forced winner while
+           ``comparisons < ab_sample_size`` raises ``ValueError``
+           (incident 2026-10-21 — an agent force-resolved a live
+           experiment at 2/10 comparisons and killed the incumbent
+           arm).
         1. **Not enough data** (``comparisons < ab_sample_size``) →
            keep collecting. ``reason='needs_more_data'``.
         2. **Threshold met** (``difference >= ab_min_difference``) →
@@ -1355,6 +1360,27 @@ class SkillEvolutionService:
                     f"winner_id={winner_id!r} is not a variant of "
                     f"ab_test_group={ab_test_group!r} "
                     f"(variants: {skill_id_a!r}, {skill_id_b!r})"
+                )
+            # Forced-resolve below-threshold guard (2026-10-22
+            # confinement fix, incident 2026-10-21): a forced winner
+            # at comparisons < ab_sample_size is REFUSED. During the
+            # incident a skill-keeper run force-resolved a LIVE
+            # experiment at comparisons=2/10 via the admin endpoint
+            # (POST /api/skills/{id}/ab-test/resolve?winner_id=...),
+            # killing the incumbent arm with no data. The
+            # "explicit authority" contract stays intact for
+            # at/above-sample-size resolves; below it, the caller
+            # must let the test reach sample size or exhaust
+            # max_extensions (Path 3 force-resolve still exists for
+            # the out-of-extensions case). Raising ValueError maps
+            # to HTTP 400 at the router.
+            if comparisons < sample_size:
+                raise ValueError(
+                    f"Forced A/B resolve refused for "
+                    f"ab_test_group={ab_test_group!r}: comparisons="
+                    f"{comparisons} < ab_sample_size={sample_size}. "
+                    f"Let the test reach sample size (or exhaust "
+                    f"max_extensions) before forcing a verdict."
                 )
             loser_id = (
                 skill_id_b if winner_id == skill_id_a else skill_id_a
