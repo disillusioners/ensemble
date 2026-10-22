@@ -680,6 +680,147 @@ class JobProcessor:
             except Exception as e:
                 logger.exception(f"Error in processing loop: {e}")
     
+    # ── Skill-evolution lane gate helpers (2026-10-22, M-2/F1) ────
+
+    def _skill_evolution_lane_refusal(self) -> str | None:
+        """Return a refusal reason when the Tier-3 lane is OFF, else None.
+
+        FAIL-CLOSED (review iteration 3, F3): the probe is consulted
+        through ``InstanceManager.is_skill_evolution_lane_enabled``; an
+        ABSENT accessor or a raising probe REFUSES — a confinement
+        control must fail in the refuse direction, never silently admit.
+        """
+        lane_probe = getattr(
+            self._instance_manager,
+            "is_skill_evolution_lane_enabled",
+            None,
+        )
+        if not callable(lane_probe):
+            return "lane state accessor absent (fail-closed)"
+        try:
+            if bool(lane_probe()):
+                return None
+            return (
+                "kill-switch ENSEMBLE_SKILL_EVOLUTION_ENABLED off / "
+                "evolution_lane_enabled=False"
+            )
+        except Exception as probe_err:  # noqa: BLE001 — fail-closed
+            return f"lane state probe failed ({probe_err}) (fail-closed)"
+
+    async def _terminally_refuse_skill_evolution_job(
+        self,
+        job: Any,
+        *,
+        admission_state: str,
+        probe_reason: str,
+    ) -> bool:
+        """Terminally write a refused ``skill_evolution`` row.
+
+        F1 (review iteration 3): the first cut of the execution gate
+        refused the work but never terminated the row —
+        ``complete_job`` only transitions ACTIVE rows, so a still-QUEUED
+        row survived every tick and became a permanent head-of-line
+        blocker. This helper writes the terminal state through a
+        QUEUED-capable guarded transition and CHECKS the result:
+
+        * ``queued`` row → single guarded UPDATE via the repo's
+          ``atomic_transition(from_status='queued', to_status='done')``
+          (the cancel-pending edge of the admission state machine) with
+          ``terminal_reason='lane_disabled'``. The row's ``failed_at``
+          is deliberately NOT set, so ``JobRetryEngine.should_retry``
+          (which requires ``failed_at is not None``) can never loop the
+          row — a refused lane-disabled job is not retryable.
+        * ``active`` row → ``complete_job(FAILED)`` (the active→done
+          edge works there — it is what every other completion branch
+          in the orphan loop uses).
+
+        Returns True iff the row is now terminal. A failed terminal
+        write is logged at ERROR (the row would otherwise silently
+        block the queue head on the next tick).
+        """
+        error_text = (
+            "Skill-evolution lane disabled — job refused at execution "
+            f"time ({probe_reason}; no mutation performed)."
+        )
+        if admission_state == AdmissionState.QUEUED.value:
+            # NOTE: JobItem (Phase-5 queue-proxy model) has NO error
+            # column — ``error_message`` is a DeadLetterItem column and
+            # a ``_REMOVED_JOB_COLUMNS`` member that atomic_transition
+            # silently strips. The truthful terminal marker for a
+            # refused queued row IS ``terminal_reason='lane_disabled'``
+            # (indexed); the human-readable explanation lives in the
+            # processor log line emitted by the caller.
+            try:
+                updated = await asyncio.to_thread(
+                    self._queue_service._repository.atomic_transition,
+                    job.job_id,
+                    from_status=AdmissionState.QUEUED.value,
+                    to_status="done",
+                    terminal_reason="lane_disabled",
+                )
+            except Exception as term_err:  # noqa: BLE001
+                # A concurrent start_job flipping the row to ACTIVE (or
+                # any other transition race) must not lose the refusal —
+                # fall back to the ACTIVE-capable path.
+                logger.warning(
+                    "JobProcessor: guarded queued-refusal raised for "
+                    "skill_evolution job %s... (%s) — falling back to "
+                    "the active-terminal path",
+                    job.job_id[:8],
+                    term_err,
+                )
+                return await self._terminally_refuse_active_skill_evolution_job(
+                    job, error_text
+                )
+            if updated is None:
+                # atomic_transition returns None only when the row does
+                # not exist. Surface it — discarding this return is what
+                # created the F1 silent no-op.
+                logger.error(
+                    "JobProcessor: queued-refusal for skill_evolution "
+                    "job %s... wrote NOTHING — job not found. The row "
+                    "may block the queue head; investigate.",
+                    job.job_id[:8],
+                )
+                return False
+            return True
+
+        return await self._terminally_refuse_active_skill_evolution_job(
+            job, error_text
+        )
+
+    async def _terminally_refuse_active_skill_evolution_job(
+        self, job: Any, error_text: str
+    ) -> bool:
+        """Terminal write for an ACTIVE refused row (complete_job path)."""
+        try:
+            finalized = await self._queue_service.complete_job(
+                job.job_id,
+                demand_state=DemandState.FAILED,
+                error=error_text,
+            )
+        except Exception as term_err:  # noqa: BLE001
+            logger.error(
+                "JobProcessor: terminal write FAILED for refused "
+                "skill_evolution job %s... (%s) — the row may block "
+                "its queue; investigate.",
+                job.job_id[:8],
+                term_err,
+            )
+            return False
+        if finalized is None:
+            # complete_job returns None when the row is not ACTIVE
+            # (e.g. it was concurrently cancelled) or the write was
+            # refused — surface it instead of discarding (F1 lesson).
+            logger.error(
+                "JobProcessor: active-refusal for skill_evolution job "
+                "%s... wrote NOTHING (complete_job returned None — row "
+                "not ACTIVE?). The row may block its queue; investigate.",
+                job.job_id[:8],
+            )
+            return False
+        return True
+
     async def _process_next_job(self) -> None:
         """Get the next pending job from any queue that has work and process it.
 
@@ -882,6 +1023,40 @@ class JobProcessor:
                     # existence and resets stale rows to queued).
                     if proc_job.job_type == "message":
                         continue
+
+                    # ── ACTIVE-orphan lane gate (2026-10-22, F2) ─────
+                    # HOISTED above both re-spawn branches (the
+                    # crashed-instance re-spawn and the no-instance_id
+                    # orphan resume): a refused skill_evolution row must
+                    # not feed its Tier-3 direction text to a spawned
+                    # keeper while the lane is OFF. The row is ACTIVE
+                    # here, so the terminal write goes through
+                    # complete_job (the active→done edge — the path the
+                    # queued gate cannot use; see F1).
+                    if proc_job.job_type == "skill_evolution":
+                        orphan_refusal = self._skill_evolution_lane_refusal()
+                        if orphan_refusal is not None:
+                            terminated = (
+                                await self._terminally_refuse_skill_evolution_job(
+                                    proc_job,
+                                    admission_state=AdmissionState.ACTIVE.value,
+                                    probe_reason=orphan_refusal,
+                                )
+                            )
+                            if terminated:
+                                logger.warning(
+                                    "JobProcessor: REFUSED ACTIVE "
+                                    "skill_evolution orphan job %s... — "
+                                    "lane DISABLED (%s). Row terminally "
+                                    "written; no re-spawn, no direction "
+                                    "text reached a model.",
+                                    proc_job.job_id[:8],
+                                    orphan_refusal,
+                                )
+                            self._cleanup_in_progress_tracking(
+                                proc_job.job_id
+                            )
+                            continue
 
                     # NOTE: the legacy "inline MESSAGE-specific
                     # orphan guard" was removed in D11. The W1
@@ -1162,57 +1337,49 @@ class JobProcessor:
                 f"job_type={job_type} instance={job.instance_id[:8] if job.instance_id else 'N/A'}..."
             )
 
-            # ── EXECUTION-time lane check (2026-10-22, M-2) ────────
+            # ── QUEUED-execution lane gate (2026-10-22, M-2; F1 fix) ──
             # The ADMISSION gate (SkillJobDispatcher.enqueue_evolution)
             # refuses NEW Tier-3 jobs while the lane is off. This is
             # the belt for rows that were admitted BEFORE the lane was
-            # turned off (or that were minted by a path the admission
-            # gate does not own): a queued ``skill_evolution`` row must
-            # NOT silently execute while the lane is off — it is
-            # REFUSED loudly and terminally (no instance is spawned,
-            # no direction text reaches a model).
+            # turned off (or minted by a path the admission gate does
+            # not own): a queued ``skill_evolution`` row must NOT
+            # silently execute while the lane is off, and it must NOT
+            # sit in the queue either — it is REFUSED and TERMINALLY
+            # WRITTEN (admission_state='done', terminal_reason=
+            # 'lane_disabled') so it cannot block the queue head.
+            #
+            # F1 (2026-10-22, council 2/2 + real-PG tester evidence):
+            # the first cut of this gate refused the work but wrote
+            # NOTHING — ``complete_job`` only transitions ACTIVE rows,
+            # so the still-QUEUED row survived every tick and became a
+            # PERMANENT head-of-line blocker (pending[0] ordering is
+            # immutable). The refusal below now terminally writes the
+            # row via the QUEUED-capable guarded transition (the
+            # cancel-pending edge: queued → done) and CHECKS the
+            # result.
             #
             # Scope: strictly ``job_type == "skill_evolution"`` rows.
             # Every other job type is untouched.
             if job_type == "skill_evolution":
-                lane_enabled = True
-                lane_probe = getattr(
-                    self._instance_manager,
-                    "is_skill_evolution_lane_enabled",
-                    None,
-                )
-                if callable(lane_probe):
-                    try:
-                        lane_enabled = bool(lane_probe())
-                    except Exception as lane_err:  # noqa: BLE001
-                        # Fail-CLOSED: an unreadable lane state must
-                        # not silently execute a Tier-3 mutation job.
+                refusal_reason = self._skill_evolution_lane_refusal()
+                if refusal_reason is not None:
+                    terminated = await self._terminally_refuse_skill_evolution_job(
+                        job,
+                        admission_state=AdmissionState.QUEUED.value,
+                        probe_reason=refusal_reason,
+                    )
+                    if terminated:
                         logger.warning(
-                            "JobProcessor: skill-evolution lane state "
-                            "probe failed for job %s... (%s) — refusing "
-                            "execution (fail-closed)",
+                            "JobProcessor: REFUSED skill_evolution job "
+                            "%s... — the skill-evolution lane is "
+                            "DISABLED (%s). Row terminally written "
+                            "(admission_state='done', "
+                            "terminal_reason='lane_disabled'); no "
+                            "instance was spawned and no direction "
+                            "text reached a model.",
                             job.job_id[:8],
-                            lane_err,
+                            refusal_reason,
                         )
-                        lane_enabled = False
-                if not lane_enabled:
-                    logger.warning(
-                        "JobProcessor: REFUSING skill_evolution job "
-                        "%s... — the skill-evolution lane is DISABLED "
-                        "(kill-switch ENSEMBLE_SKILL_EVOLUTION_ENABLED "
-                        "off / evolution_lane_enabled=False). No "
-                        "instance is spawned and no direction text "
-                        "reaches a model.",
-                        job.job_id[:8],
-                    )
-                    await self._queue_service.complete_job(
-                        job.job_id,
-                        demand_state=DemandState.FAILED,
-                        error=(
-                            "Skill-evolution lane disabled — job refused "
-                            "at execution time (no mutation performed)."
-                        ),
-                    )
                     self._cleanup_in_progress_tracking(job.job_id)
                     continue
 
