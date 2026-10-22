@@ -35,16 +35,14 @@ import pytest
 from daemon.constants import is_reserved_source
 from daemon.services.upgrade_journal_sweep import UpgradeJournalSweepService
 from daemon.services.messaging_types import AsyncMessageResult
-from daemon.tools import upgrade_journal as uj
 from daemon.tools.upgrade_journal import (
-    PendingWake,
-    PENDING_WAKE_GRACE_S,
     SWEEP_NO_USER_ORIGIN_WAKE_SOURCE,
-    arm_pending_wake,
     classify_user_origin,
-    iso_plus,
-    journal_init,
-    journal_read,
+)
+from tests.helpers.df4_wake_fixtures import (
+    append_journal_history,
+    make_install,
+    make_pending_wake,
 )
 
 
@@ -53,46 +51,7 @@ from daemon.tools.upgrade_journal import (
 
 @pytest.fixture
 def install(tmp_path: Path) -> Path:
-    inst = tmp_path / "install"
-    (inst / "releases").mkdir(parents=True)
-    journal_init(inst)
-    uj.ensure_extensions(inst)
-    return inst
-
-
-def _make_wake(
-    install_dir: Path,
-    run_id: str,
-    *,
-    source: str = "discord:user123",
-    message_id: str | None = "m-original-1",
-    arming_instance_id: str = "i-arm-1",
-    # agent-restart: the ADR-041 routing/re-stamp pins are the PROMOTE-lane
-    # contract (restart-kind wakes deliver reserved-sourced and never
-    # re-stamp — pinned in tests/unit/tools/test_agent_restart.py + the
-    # wake drills). Default kind=promote so these routing pins keep
-    # testing what they were written to test.
-    kind: str = "promote",
-) -> PendingWake:
-    """Build + arm a PendingWake with the given source."""
-    wake = PendingWake(
-        run_id=run_id,
-        kind=kind,
-        env="demo",
-        arming_instance_id=arming_instance_id,
-        arming_agent_id="ari",
-        source=source,
-        message_id=message_id,
-        message_metadata={"k": "v"},
-        target_version=None,
-        mode="graceful-now",
-        armed_at="2026-10-04T00:00:00Z",
-        expires_at="2026-10-04T00:10:00Z",
-        abandon_after=iso_plus("2026-10-04T00:10:00Z", PENDING_WAKE_GRACE_S),
-        status="pending",
-    )
-    arm_pending_wake(install_dir, wake)
-    return wake
+    return make_install(tmp_path)
 
 
 def _msg_result(message_id: str = "m-wake-1") -> AsyncMessageResult:
@@ -103,14 +62,6 @@ def _msg_result(message_id: str = "m-wake-1") -> AsyncMessageResult:
         job_id=None,
         queued=True,
     )
-
-
-def _append_history(install_dir: Path, event: str, ts: str = "2026-10-04T00:01:00Z") -> None:
-    data = journal_read(install_dir)
-    history = data.get("history") or []
-    history.append({"ts": ts, "event": event, "detail": "..."})
-    data["history"] = history
-    uj.journal_write(install_dir, data)
 
 
 def _mock_manager_with_windows() -> tuple[MagicMock, dict[str, dict]]:
@@ -147,8 +98,8 @@ class TestWakeSourceRouting:
         """T3.1: an arm with ``source=discord:user123`` records
         ``pending_wakes.source="discord:user123"``; the wake's
         ``enqueue_message`` is called with the SAME source. AC3 routing."""
-        _make_wake(install, run_id="r-aaa", source="discord:user123")
-        _append_history(install, "commit")
+        make_pending_wake(install, run_id="r-aaa", source="discord:user123")
+        append_journal_history(install, "commit")
         manager, _windows = _mock_manager_with_windows()
         service = UpgradeJournalSweepService(install, manager=manager)
         await service.sweep_wake_records()
@@ -164,8 +115,8 @@ class TestWakeSourceRouting:
         verbatim; the MessageQueue row's ``source`` is the recorded
         value (the report-delivery path inherits from the triggering
         message's source, by construction)."""
-        _make_wake(install, run_id="r-aaa", source="telegram:chat42")
-        _append_history(install, "commit")
+        make_pending_wake(install, run_id="r-aaa", source="telegram:chat42")
+        append_journal_history(install, "commit")
         manager, _windows = _mock_manager_with_windows()
         service = UpgradeJournalSweepService(install, manager=manager)
         await service.sweep_wake_records()
@@ -185,13 +136,13 @@ class TestWakeSourceRouting:
         the entry with the recorded source + message_id. The re-stamp
         uses the recorded source verbatim (ADR-041 — defensive /
         redundant against the natural manager.py:8112 stamp)."""
-        _make_wake(
+        make_pending_wake(
             install,
             run_id="r-aaa",
             source="discord:user123",
             message_id="m-original-1",
         )
-        _append_history(install, "commit")
+        append_journal_history(install, "commit")
         manager, windows = _mock_manager_with_windows()
         service = UpgradeJournalSweepService(install, manager=manager)
         await service.sweep_wake_records()
@@ -225,8 +176,8 @@ class TestWakeSourceRouting:
         CLOSED, so the dispatch funnel POPS the window instead of
         stamping one. (DF-4 plan §P1, A1.)
         """
-        _make_wake(install, run_id="r-aaa", source="")
-        _append_history(install, "commit")
+        make_pending_wake(install, run_id="r-aaa", source="")
+        append_journal_history(install, "commit")
         manager, _windows = _mock_manager_with_windows()
         service = UpgradeJournalSweepService(install, manager=manager)
         await service.sweep_wake_records()
@@ -234,6 +185,7 @@ class TestWakeSourceRouting:
         delivered = kwargs["source"]
         # The RESERVED literal — never the user-origin literal.
         assert delivered == SWEEP_NO_USER_ORIGIN_WAKE_SOURCE
+        # the constant's VALUE must never be the user-origin literal
         assert delivered != "api"
         # It IS reserved, and it classifies FAIL-CLOSED.
         assert is_reserved_source(delivered) is True

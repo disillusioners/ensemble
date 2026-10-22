@@ -1274,10 +1274,10 @@ _OUTCOME_LABELS: dict[str, str] = {
 # implementation was RELOCATED byte-compatibly, and every consumed name keeps
 # resolving from its historical home here.
 #
-# SIX names moved (review W1, binding — implementation-plan §1.1a):
+# SIX names moved (review W1, binding — implementation-plan §1.1a), all of
+# them bound by the alias block below:
 #   _restart_provenance, _lookup_provenance_field, _capture_user_source,
-#   _capture_provenance_class, _ProvenanceVerdict  (+ _EMPTY_PROVENANCE)
-# — six in total, all bound by the alias block below.
+#   _capture_provenance_class, _ProvenanceVerdict, _EMPTY_PROVENANCE
 # The live lane still consumes all of them (call sites at the promote/arm
 # sites, the `system_restart` verdict construction, and the 1c narrowing's
 # promote branch), AND one EXTERNAL pin imports `_capture_user_source` from

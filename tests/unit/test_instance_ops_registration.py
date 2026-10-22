@@ -31,6 +31,10 @@ AC-10a, AC-10b):
 * allow-lists: the maintenancer holds BOTH categories; ari, leader and
   every other agent hold NEITHER (D-1/D-2/D-13).
 
+SIZE: ≈535 lines — registration + wiring + vocabulary + the DF-4
+gate-predicate source pins; split the source-pin classes out when a
+third lane lands.
+
 SAFETY FENCE: no HOME-derived or live-shaped path is ever resolved by
 this file — every read is a repo-relative source read.
 """
@@ -293,11 +297,12 @@ class TestProvenanceWiring:
 class TestNoGateKeysOnPclass:
     """DF-4 pin (iv) — NEITHER gate predicate keys on the window's CLASS.
 
-    ``pclass`` is a READ-TIME derivation (``daemon/tools/provenance.py``) —
-    never stored, never re-verified. Keying a gate on it is unsound by
-    construction: it carried zero trust signal and it was the cause of
-    the wrong-side refusal (the genuine operator path). The class
-    survives as OBSERVABILITY in the audit rows.
+    ``pclass`` is a READ-TIME derivation of the live window — never
+    stored in the window store (the ledger snapshots it as
+    ``provenance_class``), never re-verified. Keying a gate on it is
+    unsound by construction: it carried zero trust signal and it was
+    the cause of the wrong-side refusal (the genuine operator path).
+    The class survives as OBSERVABILITY in the audit rows.
 
     This pin REPLACES the vacuous fixture-parity pin (it compared the
     helper to itself). It is a SOURCE-level pin, analysed with ``ast``
@@ -328,7 +333,24 @@ class TestNoGateKeysOnPclass:
             if isinstance(sub, ast.Attribute) and sub.attr == "pclass"
         ]
 
-    def _restart_gate_pclass_reads(self) -> list[int]:
+    @staticmethod
+    def _restart_gate_pclass_reads() -> list[int]:
+        """The restart-lane gate tuple — located STRUCTURALLY.
+
+        The previous locator matched the PROSE LITERAL
+        ``"no-user-provenance"``: a mere token rename (or a reworded
+        refusal string) would have made the pin report "block not found"
+        instead of the DEFECT it exists to catch. The gate is now found
+        by its SHAPE — the ``verdicts.append((...))`` tuple that carries
+        the LOCAL ``provenance`` verdict object (``provenance.ok`` /
+        ``provenance.detail``). The sibling rails append plain names
+        (``not cooldown_active`` / ``uptime_ok`` / ``budget_ok``), so
+        exactly one tuple references ``provenance``.
+
+        The scan stays INSIDE that appended tuple: five lines above it
+        the lane legitimately constructs ``ok=False`` for the non-live
+        case, and a function-wide scan would false-positive on it.
+        """
         source = (
             REPO_ROOT / "daemon" / "tools" / "upgrade_tools.py"
         ).read_text(encoding="utf-8")
@@ -355,17 +377,24 @@ class TestNoGateKeysOnPclass:
                 elts = sub.args[0].elts
                 if len(elts) < 2:
                     continue
-                token = elts[1]
-                if (
-                    isinstance(token, ast.Constant)
-                    and token.value == "no-user-provenance"
+                # the STRUCTURAL marker — the tuple references the local
+                # ``provenance`` verdict object.
+                if not any(
+                    isinstance(name, ast.Name) and name.id == "provenance"
+                    for elt in elts
+                    for name in ast.walk(elt)
                 ):
-                    block = sub
-                    break
+                    continue
+                block = sub
+                break
             if block is not None:
                 break
         assert block is not None, (
-            "the restart-lane provenance gate block must be found"
+            "the restart-lane provenance gate tuple must be found BY ITS "
+            "SHAPE (the verdicts.append tuple that references the local "
+            "`provenance` verdict) — a MISS means the gate no longer keys "
+            "on the provenance verdict, which is a DEFECT (a pclass-keyed "
+            "or reworded gate), not a benign refactor"
         )
         return [
             sub.lineno
@@ -438,8 +467,8 @@ class TestProvenanceVocabulary:
 
         The retired token is reconstructed from its two halves rather
         than spelled out: DF-4's acceptance rule forbids the literal
-        anywhere under ``daemon/`` or ``tests/``, so the pin must not
-        introduce it either.
+        anywhere under ``daemon/`` OR ``tests/``, so the pin must not
+        introduce it either — and the scan below covers BOTH trees.
         """
         retired = "direct-provenance" + "-insufficient"
         source = (
@@ -449,14 +478,14 @@ class TestProvenanceVocabulary:
         # the retired token is absent from the source — and from the
         # whole tree (the token is gone, not merely un-referenced).
         assert retired not in source
-        repo_root = REPO_ROOT
         offenders = []
-        for path in (repo_root / "daemon").rglob("*.py"):
-            if retired in path.read_text(encoding="utf-8"):
-                offenders.append(str(path.relative_to(repo_root)))
+        for scope in ("daemon", "tests"):
+            for path in (REPO_ROOT / scope).rglob("*.py"):
+                if retired in path.read_text(encoding="utf-8"):
+                    offenders.append(str(path.relative_to(REPO_ROOT)))
         assert not offenders, (
             "the retired provenance token must not survive anywhere in "
-            f"daemon/: {offenders}"
+            f"daemon/ or tests/: {offenders}"
         )
         # the surviving token is the SOLE provenance refusal inside the
         # gate block

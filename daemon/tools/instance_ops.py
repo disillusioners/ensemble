@@ -47,12 +47,14 @@ terminate-budget-exceeded → cascade-false-would-orphan-descendants →
 dry-run preview | apply.
 
 THE PROVENANCE GATE IS A SPEED BUMP, NOT A PROOF (D-18 → superseded by DF-4)
---------------------------------------------------------------------------
+-------------------------------------------------------------------------------
 The gate keys on LIVENESS, not on class: a protected target needs a live
 user-origin provenance window, whatever SHAPE that window has. The class
-(``pclass``) is a READ-TIME derivation — never stored, never re-verified
-— so it carried zero trust signal and survives as OBSERVABILITY only
-(the audit rows answer "which window shape authorised this act?").
+(``pclass``) is a READ-TIME derivation of the live window — never stored
+in the window store (the ledger snapshots it as ``provenance_class``),
+never re-verified — so it carried zero trust signal and survives as
+OBSERVABILITY only (the audit rows answer "which window shape authorised
+this act?").
 
 D-18's "direct refused on purpose" property is RETIRED BY DESIGN. The
 old class-keyed rule refused the GENUINE operator-direct path (defect B)

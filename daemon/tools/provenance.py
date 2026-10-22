@@ -47,17 +47,19 @@ durability.
 Known bounds (stated, not implied)
 ----------------------------------
 The window's CLASS is NOT a trust signal: ``pclass`` is a READ-TIME
-derivation — never stored, never re-verified — so it carries zero trust
-information and survives as OBSERVABILITY only (the audit rows answer
-"which window shape authorised this act?"). A protected-target gate that
-KEYED on ``pclass == "inherited"`` therefore refused the GENUINE
-operator-direct path while never blocking the DELEGATED forge (the
-inherited mint never inspects the root's own provenance). DF-4 retired
-that class-keyed rule: the gate keys on the LIVENESS of the window, and
-the delegated forge is closed at its ROOT (the sweep's no-user-origin
-fall-back now rides a reserved lane and cannot mint a forged DIRECT
-window). The REST-ingress class remains OPEN — critical note
-``257488dc``. This module is a defense-in-depth layer, NOT a proof of
+derivation of the live window — never stored in the window store (the
+ledger snapshots it as ``provenance_class``), never re-verified — so it
+carries zero trust information and survives as OBSERVABILITY only (the
+audit rows answer "which window shape authorised this act?"). A
+protected-target gate that KEYED on ``pclass == "inherited"`` therefore
+refused the GENUINE operator-direct path while never blocking the
+DELEGATED forge (the inherited mint never inspects the root's own
+provenance). DF-4 retired that class-keyed rule: the gate keys on the
+LIVENESS of the window, and the delegated forge is closed at its ROOT
+(the sweep's no-user-origin fall-back now rides a reserved lane and
+cannot mint a forged DIRECT window). The REST-ingress class remains
+OPEN — critical note ``257488dc``. This module is a defense-in-depth
+layer, NOT a proof of
 user intent.
 """
 

@@ -321,7 +321,6 @@ class TestProtectedGateLadder:
         assert verdict.pclass == "direct"
         assert verdict.depth == 0
         # …and the committed audit row records the four provenance fields.
-        repo = InstanceOpsAuditRepository(fleet.engine)
         with Session(fleet.engine) as s:
             rows = list(
                 s.exec(
@@ -386,7 +385,6 @@ class TestProtectedGateLadder:
         assert iid in fleet.terminated
         # …and the audit row records the five provenance fields for the
         # post-hoc reviewer (the observability half of D-18).
-        repo = InstanceOpsAuditRepository(fleet.engine)
         with Session(fleet.engine) as s:
             rows = list(
                 s.exec(
@@ -405,7 +403,19 @@ class TestProtectedGateLadder:
         assert row.provenance_depth == 1
 
     async def test_delegated_turn_on_another_lane_clears_the_window(self, fleet):
-        """The refusal text must state the non-internal_agent clearing."""
+        """AC-23b (DF-4 / P2, re-pointed) — with NO live window the gate
+        REFUSES with ``no-user-provenance``.
+
+        The cleared-window shape is SIMULATED (the inherited store is
+        emptied by hand); this test does NOT exercise the dispatch that
+        clears it. It asserts the refusal TOKEN only — the refusal TEXT
+        that spelled out the "a non-internal_agent delegation CLEARS the
+        inherited window" rule lived in the retired ``direct-provenance``-
+        ``insufficient`` refusal (DF-4 / P2) and no longer ships.
+
+        (The retired token is spelled in TWO HALVES on purpose — it must
+        not survive anywhere under ``daemon/`` or ``tests/``.)
+        """
         iid = self._protected_target(fleet)
         fleet._inherited_provenance_windows = {}  # cleared by the dispatch
         tools = _act_tools(fleet)

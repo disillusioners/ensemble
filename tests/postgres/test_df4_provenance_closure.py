@@ -37,13 +37,25 @@ dict shape)
 6. The REAL ``instance_terminate`` act runs against a REAL protected
    target row and the REAL audit ledger.
 
+BODY ↔ HEADER STEP MAP: the body's numbered comments run 1, 2, 3, 4,
+5a, 5b, 6, 7, 8 — body steps 5a/5b/6/7/8 correspond to header steps
+4/4/5/6 (the body is finer-grained; the numbering is NOT renumbered).
+
 ENV FENCING
 -----------
-The resolved database is asserted NOT to be a live/dev/prod database
-BOTH in the shell (the mandatory command sets ``PG_TEST_*`` explicitly)
-and INSIDE the test (before anything is written). ``POSTGRES_*`` is set
-explicitly to the SAME scratch database the ``pg_engine`` fixture owns —
-never inherited from the ambient environment.
+The database fence runs at COLLECTION time — at MODULE IMPORT, which
+PRECEDES the session-scoped ``pg_engine`` fixture's
+``drop_all``/``create_all`` (a mis-pointed ``PG_TEST_DB`` would
+otherwise have its tables dropped before any in-test assert could fire).
+The effective ``PG_TEST_DB`` must be neither a live/dev/prod database
+nor a non-scratch-shaped name. The RESOLVED engine database is asserted
+AGAIN inside the test: the manager's engine is built by
+``create_postgres_engine``, which reads ``POSTGRES_*`` FIRST, so the
+resolved name gets the same forbidden + scratch-shape check and must
+equal the scratch database the ``pg_engine`` fixture owns.
+``POSTGRES_*`` is set explicitly to the SAME scratch database the
+``pg_engine`` fixture owns — never inherited from the ambient
+environment.
 
 MANDATORY INVOCATION (a deselected/skipped pin is a FAILED gate)::
 
@@ -54,7 +66,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator, Sequence
 
 import pytest
 from sqlmodel import Session, select
@@ -67,15 +79,14 @@ from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance_ops.models import InstanceOpsAudit
 from daemon.repositories.message_queue.models import MessageQueue
 from daemon.services.upgrade_journal_sweep import UpgradeJournalSweepService
-from daemon.tools import upgrade_journal as uj
 from daemon.tools.upgrade_journal import (
-    PENDING_WAKE_GRACE_S,
-    PendingWake,
     SWEEP_NO_USER_ORIGIN_WAKE_SOURCE,
-    arm_pending_wake,
     classify_user_origin,
-    iso_plus,
-    journal_init,
+)
+from tests.helpers.df4_wake_fixtures import (
+    append_journal_history,
+    make_install,
+    make_pending_wake,
 )
 
 # EVERY SQLModel model module is imported HERE, at COLLECTION time, so the
@@ -134,10 +145,54 @@ FORBIDDEN_DATABASES = frozenset({
     "ensemble_demo",
     "ensemble_dev_prod",
     "ensemble_prod",
+    "ensemble_sandbox",
     "postgres",
     "template0",
     "template1",
 })
+
+#: The house POSITIVE scratch-shape rule (adopted from
+#: ``tests/postgres/test_resource_monitor_estimated_bool_pg.py``): a
+#: scratch database NAME must be visibly scratch — "test" or "scratch"
+#: in the name. The denylist above is necessary but NOT sufficient — a
+#: live database that is not on the list would slip through it.
+SCRATCH_NAME_MARKERS = ("test", "scratch")
+
+
+def _assert_scratch_db(db_name: str, *, where: str) -> None:
+    """Refuse a live/dev database OR a name that is not scratch-shaped.
+
+    Two rails, both required: the FORBIDDEN name list and the POSITIVE
+    scratch-shape rule.
+    """
+    assert db_name not in FORBIDDEN_DATABASES, (
+        f"refusing to run against a live/dev database ({where}): {db_name!r}"
+    )
+    lowered = db_name.lower()
+    assert any(marker in lowered for marker in SCRATCH_NAME_MARKERS), (
+        f"refusing to run against a non scratch-shaped database ({where}): "
+        f"{db_name!r} — the name must contain 'test' or 'scratch'"
+    )
+
+
+def _refuse_non_scratch(db_name: str) -> None:
+    """The COLLECTION-TIME fence — RAISES (never asserts).
+
+    The session-scoped ``pg_engine`` fixture drops every table at
+    session setup; a mis-pointed ``PG_TEST_DB`` must be refused BEFORE
+    that happens, so this runs at module import (collection time), not
+    inside a test body.
+    """
+    try:
+        _assert_scratch_db(db_name, where="PG_TEST_DB (collection-time fence)")
+    except AssertionError as exc:
+        raise RuntimeError(
+            f"refused: {exc} — the DF-4 postgres pin is scratch-only "
+            "(point PG_TEST_DB at a scratch-shaped database)"
+        ) from exc
+
+
+_refuse_non_scratch(os.environ.get("PG_TEST_DB", "ensemble_test"))
 
 ARMING_IID = "i-df4-arming"
 CHILD_IID = "i-df4-child"
@@ -156,21 +211,17 @@ def _pg_settings() -> dict[str, Any]:
     }
 
 
-def _assert_not_live(db_name: str) -> None:
-    assert db_name not in FORBIDDEN_DATABASES, (
-        f"refusing to run against a live/dev database: {db_name!r}"
-    )
-
-
 @pytest.fixture
-def real_manager(pg_engine, pg_url, tmp_path, monkeypatch):
+def real_manager(
+    pg_engine, tmp_path, monkeypatch
+) -> Generator[InstanceManager, None, None]:
     """A REAL ``InstanceManager`` over the REAL PostgreSQL engine.
 
     ``pg_engine`` is requested so the fixture owns the schema lifecycle
     (drop_all + create_all at session setup, TRUNCATE per test).
     """
     settings = _pg_settings()
-    _assert_not_live(settings["db"])
+    _assert_scratch_db(settings["db"], where="PG_TEST_DB (fixture)")
     # ``create_postgres_engine`` reads POSTGRES_* FIRST — pin them to the
     # SAME scratch database the fixture owns, so the manager's engine and
     # the fixture's engine are the same database (never the ambient one).
@@ -199,15 +250,26 @@ def real_manager(pg_engine, pg_url, tmp_path, monkeypatch):
     manager = InstanceManager(config, ensemble_config=ensemble_config)
     # The fence is asserted INSIDE the test, against the RESOLVED engine.
     resolved = manager.engine.url.database
-    _assert_not_live(resolved)
+    _assert_scratch_db(resolved, where="the RESOLVED manager engine database")
     assert resolved == settings["db"], (
         "the manager's engine must resolve to the same scratch database "
         f"the pg_engine fixture owns ({settings['db']!r} != {resolved!r})"
     )
-    yield manager
+    try:
+        yield manager
+    finally:
+        # The manager's own PG engine/pool is never disposed otherwise
+        # (``cleanup()`` disposes exactly that engine).
+        manager.cleanup()
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def install(tmp_path: Path) -> Path:
+    """A tmp install dir with a real journal — never a live-shaped path."""
+    return make_install(tmp_path)
 
 
 def _seed_rows(manager: InstanceManager) -> None:
@@ -259,34 +321,6 @@ def _seed_rows(manager: InstanceManager) -> None:
         session.commit()
 
 
-def _arm_wake(install: Path, source: str, run_id: str = "r-df4") -> None:
-    """Arm a REAL ``PendingWake`` with the given source."""
-    wake = PendingWake(
-        run_id=run_id,
-        kind="promote",
-        env="demo",
-        arming_instance_id=ARMING_IID,
-        arming_agent_id="ari",
-        source=source,
-        message_id="m-arm-1",
-        message_metadata={},
-        target_version=None,
-        mode="graceful-now",
-        armed_at="2026-10-04T00:00:00Z",
-        expires_at="2026-10-04T00:10:00Z",
-        abandon_after=iso_plus("2026-10-04T00:10:00Z", PENDING_WAKE_GRACE_S),
-        status="pending",
-    )
-    arm_pending_wake(install, wake)
-    data = uj.journal_read(install)
-    history = data.get("history") or []
-    history.append(
-        {"ts": "2026-10-04T00:01:00Z", "event": "commit", "detail": "df4"}
-    )
-    data["history"] = history
-    uj.journal_write(install, data)
-
-
 def _delivered_sources(manager: InstanceManager) -> list[str]:
     """The sources the sweep actually delivered — read back from the REAL
     ``message_queue`` rows."""
@@ -300,7 +334,7 @@ async def _drive_funnel(
     instance_id: str,
     message_source: str,
     message_id: str,
-) -> None:
+) -> str:
     """Drive the REAL dispatch funnel.
 
     The funnel entry point is ``InstanceManager._process_message_with_tracking``
@@ -310,6 +344,13 @@ async def _drive_funnel(
     continues into the messaging service — this pin asserts the PROVENANCE
     STATE, so a downstream failure (no graph / no checkpointer in a
     headless harness) is expected and swallowed.
+
+    Returns the DIAGNOSTIC of that swallowed failure (a short
+    ``TypeName: message`` string, or ``"no exception"``) so the follow-on
+    asserts can report WHY the funnel failed instead of failing
+    opaquely. The swallow itself is deliberate: the follow-on asserts
+    catch a funnel failure BEFORE the stamp site, so the pin cannot pass
+    vacuously.
     """
     try:
         await manager._process_message_with_tracking(
@@ -318,8 +359,9 @@ async def _drive_funnel(
             message_id=message_id,
             message_source=message_source,
         )
-    except Exception:  # noqa: BLE001 — the turn may fail; the stamp ran
-        pass
+    except Exception as exc:  # noqa: BLE001 — the turn may fail; the stamp ran
+        return f"{type(exc).__name__}: {exc}"
+    return "no exception"
 
 
 def _audit_rows(manager: InstanceManager) -> list[InstanceOpsAudit]:
@@ -327,8 +369,14 @@ def _audit_rows(manager: InstanceManager) -> list[InstanceOpsAudit]:
         return list(session.exec(select(InstanceOpsAudit)).all())
 
 
-def _by_name(tools, name):
-    return next(t for t in tools if t.name == name)
+def _by_name(tools: Sequence[Any], name: str) -> Any:
+    """The registered tool named ``name`` — a MISS is a legible failure."""
+    tool = next((t for t in tools if t.name == name), None)
+    assert tool is not None, (
+        f"tool {name!r} is not registered "
+        f"(registered: {sorted(t.name for t in tools)})"
+    )
+    return tool
 
 
 # ── pin (iii) ──────────────────────────────────────────────────────────────
@@ -336,7 +384,7 @@ def _by_name(tools, name):
 
 @pytest.mark.asyncio
 async def test_sweep_forged_wake_is_refused_real_chain(
-    real_manager, tmp_path
+    real_manager, install
 ) -> None:
     """The sweep-forged chain is DEAD: no window is minted, the delegated
     child inherits nothing, and the protected act REFUSES.
@@ -347,12 +395,15 @@ async def test_sweep_forged_wake_is_refused_real_chain(
     manager = real_manager
     _seed_rows(manager)
 
-    install = tmp_path / "install"
-    (install / "releases").mkdir(parents=True)
-    journal_init(install)
-    uj.ensure_extensions(install)
     # 1. a REAL wake armed with NO user origin.
-    _arm_wake(install, source="")
+    make_pending_wake(
+        install,
+        source="",
+        arming_instance_id=ARMING_IID,
+        message_id="m-arm-1",
+        message_metadata={},
+    )
+    append_journal_history(install, "commit", detail="df4")
 
     # 2. the REAL sweep — the fallback arm is exercised by production code.
     service = UpgradeJournalSweepService(install, manager=manager)
@@ -364,6 +415,7 @@ async def test_sweep_forged_wake_is_refused_real_chain(
     assert delivered_sources, "the sweep must have written a queue row"
     for delivered in delivered_sources:
         assert delivered == SWEEP_NO_USER_ORIGIN_WAKE_SOURCE
+        # the constant's VALUE must never be the user-origin literal
         assert delivered != "api"
 
     # 4. the classifier fails the delivered source CLOSED.
@@ -378,27 +430,33 @@ async def test_sweep_forged_wake_is_refused_real_chain(
     #     merely that no window exists.
     assert manager._user_origin_last_stamp.get(ARMING_IID) is None, (
         "the sweep's re-stamp must not fire for a no-user-origin wake"
+        " (observed stamp state: "
+        f"{manager._user_origin_last_stamp.get(ARMING_IID)!r})"
     )
 
     # 5b. the REAL dispatch funnel runs; the stamp takes the POP branch
     #     (manager.stamp_user_origin_window's else-arm pops the window).
-    await _drive_funnel(
+    funnel_diag = await _drive_funnel(
         manager, ARMING_IID, delivered_sources[0], "m-df4-funnel-1"
     )
     assert ARMING_IID not in manager._user_origin_windows, (
         "no DIRECT window may be minted on the woken instance"
+        f" (funnel diagnostic: {funnel_diag})"
     )
     stamp = manager._user_origin_last_stamp[ARMING_IID]
-    assert stamp["stamped"] is False
-    assert stamp["detail"] == "reserved-internal"
+    assert stamp["stamped"] is False, f"funnel diagnostic: {funnel_diag}"
+    assert stamp["detail"] == "reserved-internal", (
+        f"funnel diagnostic: {funnel_diag}"
+    )
 
     # 6. the delegated child inherits NOTHING (the parent has no live
     #    window to copy).
-    await _drive_funnel(
+    child_diag = await _drive_funnel(
         manager, CHILD_IID, f"internal_agent:{ARMING_IID}", "m-df4-funnel-2"
     )
     assert CHILD_IID not in manager._inherited_provenance_windows, (
         "no INHERITED window may be minted from a forged root"
+        f" (funnel diagnostic: {child_diag})"
     )
 
     # 7. the protected act on the child REFUSES.
@@ -426,7 +484,7 @@ async def test_sweep_forged_wake_is_refused_real_chain(
 
 @pytest.mark.asyncio
 async def test_genuine_wake_source_mints_the_window_and_admits(
-    real_manager, tmp_path
+    real_manager, install
 ) -> None:
     """NEGATIVE CONTROL — the pin above is not passing vacuously.
 
@@ -436,17 +494,21 @@ async def test_genuine_wake_source_mints_the_window_and_admits(
     manager = real_manager
     _seed_rows(manager)
 
-    install = tmp_path / "install"
-    (install / "releases").mkdir(parents=True)
-    journal_init(install)
-    uj.ensure_extensions(install)
     # "api" is the genuine-by-design web-UI chat ingress literal
     # (daemon/routers/messages.py) — the exact user-origin arm of
     # classify_user_origin. It is ALSO the literal the sweep's retired
     # fallback used to fabricate, so this control isolates the one
     # difference that matters: a GENUINE user-origin source vs a
     # no-user-origin wake.
-    _arm_wake(install, source="api", run_id="r-df4-genuine")
+    make_pending_wake(
+        install,
+        source="api",
+        run_id="r-df4-genuine",
+        arming_instance_id=ARMING_IID,
+        message_id="m-arm-1",
+        message_metadata={},
+    )
+    append_journal_history(install, "commit", detail="df4")
 
     service = UpgradeJournalSweepService(install, manager=manager)
     result = await service.sweep_wake_records()
@@ -459,20 +521,24 @@ async def test_genuine_wake_source_mints_the_window_and_admits(
     assert ok is True
 
     # the REAL funnel mints the window (the POP branch does NOT run).
-    await _drive_funnel(
+    funnel_diag = await _drive_funnel(
         manager, ARMING_IID, delivered_sources[0], "m-df4-genuine-1"
     )
     assert ARMING_IID in manager._user_origin_windows, (
         "a genuine user-origin source MUST mint the window"
+        f" (funnel diagnostic: {funnel_diag})"
     )
-    assert manager._user_origin_last_stamp[ARMING_IID]["stamped"] is True
+    assert manager._user_origin_last_stamp[ARMING_IID]["stamped"] is True, (
+        f"funnel diagnostic: {funnel_diag}"
+    )
 
     # the delegated child inherits the genuine root.
-    await _drive_funnel(
+    child_diag = await _drive_funnel(
         manager, CHILD_IID, f"internal_agent:{ARMING_IID}", "m-df4-genuine-2"
     )
     assert CHILD_IID in manager._inherited_provenance_windows, (
         "a genuine delegation MUST mint the inherited window"
+        f" (funnel diagnostic: {child_diag})"
     )
 
     # …and the protected act on the child ADMITS.

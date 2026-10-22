@@ -26,22 +26,28 @@ occurs would be a VACUOUS pin.
 """
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from daemon.constants import is_reserved_source
+from daemon.services.instance_messaging import (
+    _build_graph_input,
+    _stamped_additional_kwargs,
+)
 from daemon.services.upgrade_journal_sweep import UpgradeJournalSweepService
 from daemon.tools import upgrade_journal as uj
 from daemon.tools.upgrade_journal import (
-    PENDING_WAKE_GRACE_S,
-    PendingWake,
+    RESTART_WAKE_SOURCE,
     SWEEP_NO_USER_ORIGIN_WAKE_SOURCE,
-    arm_pending_wake,
     classify_user_origin,
-    iso_plus,
-    journal_init,
+)
+from tests.helpers.df4_wake_fixtures import (
+    append_journal_history,
+    make_install,
+    make_pending_wake,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -57,47 +63,7 @@ EXPECTED_VALUE = "system:sweep_no_user_origin_wake"
 @pytest.fixture
 def install(tmp_path: Path) -> Path:
     """A tmp install dir with a real journal — never a live-shaped path."""
-    inst = tmp_path / "install"
-    (inst / "releases").mkdir(parents=True)
-    journal_init(inst)
-    uj.ensure_extensions(inst)
-    return inst
-
-
-def _make_wake(
-    install_dir: Path,
-    run_id: str,
-    *,
-    source: str,
-    kind: str = "promote",
-) -> PendingWake:
-    """Arm a real ``PendingWake`` with the given source."""
-    wake = PendingWake(
-        run_id=run_id,
-        kind=kind,
-        env="demo",
-        arming_instance_id="i-arm-1",
-        arming_agent_id="ari",
-        source=source,
-        message_id="m-original-1",
-        message_metadata={"k": "v"},
-        target_version=None,
-        mode="graceful-now",
-        armed_at="2026-10-04T00:00:00Z",
-        expires_at="2026-10-04T00:10:00Z",
-        abandon_after=iso_plus("2026-10-04T00:10:00Z", PENDING_WAKE_GRACE_S),
-        status="pending",
-    )
-    arm_pending_wake(install_dir, wake)
-    return wake
-
-
-def _append_history(install_dir: Path, event: str) -> None:
-    data = uj.journal_read(install_dir)
-    history = data.get("history") or []
-    history.append({"ts": "2026-10-04T00:01:00Z", "event": event, "detail": "..."})
-    data["history"] = history
-    uj.journal_write(install_dir, data)
+    return make_install(tmp_path)
 
 
 class _RecordingManager:
@@ -155,6 +121,7 @@ class TestSweepReservedLiteral:
         assert EXPECTED_VALUE.startswith("system:")
 
     def test_the_literal_is_reserved(self) -> None:
+        """The literal is RESERVED by the ``system:`` prefix family."""
         assert is_reserved_source(SWEEP_NO_USER_ORIGIN_WAKE_SOURCE) is True
 
     def test_the_literal_fails_classification_closed(self) -> None:
@@ -217,14 +184,15 @@ class TestSweepDeliverySource:
     ) -> None:
         """A wake armed with NO user origin (``source=""``) delivers on
         the RESERVED lane — NOT on the user-origin literal."""
-        _make_wake(install, run_id="r-df4", source="")
-        _append_history(install, "commit")
+        make_pending_wake(install, run_id="r-df4", source="")
+        append_journal_history(install, "commit")
         manager = _RecordingManager()
         service = UpgradeJournalSweepService(install, manager=manager)
         await service.sweep_wake_records()
         assert manager.calls, "the sweep must have delivered the wake"
         delivered = manager.calls[-1]["source"]
         assert delivered == SWEEP_NO_USER_ORIGIN_WAKE_SOURCE
+        # the constant's VALUE must never be the user-origin literal
         assert delivered != "api"
 
     @pytest.mark.asyncio
@@ -233,8 +201,8 @@ class TestSweepDeliverySource:
     ) -> None:
         """R3 — the genuine path must NOT break: a non-empty wake source
         rides VERBATIM. The reserved literal is the FALLBACK arm only."""
-        _make_wake(install, run_id="r-df4", source="discord:user123")
-        _append_history(install, "commit")
+        make_pending_wake(install, run_id="r-df4", source="discord:user123")
+        append_journal_history(install, "commit")
         manager = _RecordingManager()
         service = UpgradeJournalSweepService(install, manager=manager)
         await service.sweep_wake_records()
@@ -247,13 +215,15 @@ class TestSweepDeliverySource:
     ) -> None:
         """The restart-kind arm is untouched — it keeps its own reserved
         literal (the R18 precedent)."""
-        _make_wake(install, run_id="r-df4", source="", kind="restart")
-        _append_history(install, "commit")
+        make_pending_wake(install, run_id="r-df4", source="", kind="restart")
+        append_journal_history(install, "commit")
         manager = _RecordingManager()
         service = UpgradeJournalSweepService(install, manager=manager)
         await service.sweep_wake_records()
         assert manager.calls, "the sweep must have delivered the wake"
-        assert manager.calls[-1]["source"] == "system:post_restart_arm_notify"
+        # the constant's VALUE must never be the user-origin literal
+        assert RESTART_WAKE_SOURCE == "system:post_restart_arm_notify"
+        assert manager.calls[-1]["source"] == RESTART_WAKE_SOURCE
 
 
 # ── pin (vi): the is_system_origin lane + the message-identity flip ────────
@@ -294,8 +264,6 @@ class TestSweepWakeTakesTheIsSystemOriginLane:
         Analysed with ``ast`` so a comment or a docstring cannot
         mask/false-positive the branch structure.
         """
-        import ast
-
         source = (
             REPO_ROOT / "daemon" / "services" / "instance_messaging.py"
         ).read_text(encoding="utf-8")
@@ -314,7 +282,7 @@ class TestSweepWakeTakesTheIsSystemOriginLane:
                 break
         assert branch is not None, "the system-origin dispatch branch must exist"
 
-        def _set_metadata_calls(body) -> list[int]:
+        def _set_metadata_calls(body: list[ast.stmt]) -> list[int]:
             # The durable write is ``await asyncio.to_thread(
             # self._manager._instance_repository.set_metadata, ...)`` —
             # the attribute is an ARGUMENT of ``to_thread``, not the
@@ -338,11 +306,6 @@ class TestSweepWakeTakesTheIsSystemOriginLane:
         ``"api"`` produced a BARE HumanMessage; the reserved literal
         produces the stamped shape.
         """
-        from daemon.services.instance_messaging import (
-            _build_graph_input,
-            _stamped_additional_kwargs,
-        )
-
         stamped = _stamped_additional_kwargs(SWEEP_NO_USER_ORIGIN_WAKE_SOURCE)
         assert stamped == {
             "injected_message": True,
@@ -369,8 +332,6 @@ class TestSweepWakeTakesTheIsSystemOriginLane:
         (the genuine web-UI path is untouched), the reserved literal is
         STAMPED — which is why the sweep must not use the user-origin
         literal as its no-user-origin fall-back."""
-        from daemon.services.instance_messaging import _stamped_additional_kwargs
-
         assert _stamped_additional_kwargs("api") is None
         assert _stamped_additional_kwargs(
             SWEEP_NO_USER_ORIGIN_WAKE_SOURCE
