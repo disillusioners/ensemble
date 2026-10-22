@@ -90,10 +90,11 @@ def pytest_report_header(config: pytest.Config) -> list[str]:
             "This proves the kit, NOT your center. Point it at a real center "
             "with CONFORMANCE_CENTER_URL (see scripts/conformance/README.md)."
         ]
+    env = _effective_env(config)
     hooks = [
-        f"{key}={os.environ.get(key, '') or '<unset>'}"
+        f"{key}={env.get(key, '') or '<unset>'}"
         for key in BEGIN_HOOK_KEYS
-        if os.environ.get(key)
+        if env.get(key)
     ]
     return [
         f"conformance kit: POINTED at {target.url}",

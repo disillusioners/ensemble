@@ -132,7 +132,7 @@ async def test_kill_on_silence(target, strict_close) -> None:
         started = time.monotonic()
         await peer.serve(silence=True, budget_s=(2 * timeout_ms / 1000.0) + 6)
         elapsed_ms = (time.monotonic() - started) * 1000.0
-        if not peer.transcript.close_code is not None and peer._ws is not None:
+        if peer.transcript.close_code is None and peer._ws is not None:
             peer._note_close()
         if peer.transcript.close_code is None:
             raise ConformanceFinding(

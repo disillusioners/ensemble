@@ -25,7 +25,7 @@ CONFORMANCE_EXPECTED_AGENT=conformance-agent \
 Every key also has a pytest mirror (`--conformance-center-url`, ...);
 an explicit CLI option beats the environment.
 
-## The pointing surface — exactly EIGHT keys
+## The pointing surface — exactly EIGHT keys (the kit's pytest layer)
 
 **The five pointing keys** (nothing else points the kit):
 
@@ -63,6 +63,22 @@ Errors-from-the-machine / Auth) is the scoped invocation:
 
 Total = 5 + 2 + 1 = **8** — pinned by `test_peer_selftest.py`
 (an undocumented knob cannot appear; a documented one cannot vanish).
+That invariant is scoped to the kit's **pytest layer** — the
+`conformance_peer.py` pointing surface (the eight keys above plus their
+`--conformance-*` CLI mirrors).
+
+### Runner controls (operator tooling — outside the pytest layer)
+
+`scripts/conformance/run.sh` is a thin shell wrapper around the pytest
+lane. It reads ONE extra key, which is **not** a pointing key and is not
+part of the eight:
+
+| Key | Meaning |
+|---|---|
+| `CONFORMANCE_RUN_TIMEOUT` | the OUTER timeout (seconds) for the WHOLE kit run — the runner wraps the pytest call in `timeout "$RUN_TIMEOUT"`. Default: **600**. |
+
+So: the pytest pointing surface is exactly eight keys; the shell runner
+adds ONE documented control (`CONFORMANCE_RUN_TIMEOUT`).
 
 ## Two modes
 

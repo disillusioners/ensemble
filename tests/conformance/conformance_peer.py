@@ -1075,7 +1075,10 @@ def check_g1_heartbeat_timeout_frame(envelope: dict[str, Any], transcript: Trans
             "§6.1 (G1 tension)",
             "the HEARTBEAT_TIMEOUT frame carries an id — the reference center "
             "deliberately sends none (no request to correlate); this pin "
-            "tracks the reference behaviour and flips only with a SPEC change",
+            "tracks the reference behaviour and flips only with a SPEC change. "
+            "G1 OPEN-SPEC: the reference centre omits id today; if your centre "
+            "includes id per SPEC §6.1 this FINDING is the known SPEC tension — "
+            "flip this pin when the SPEC decision lands.",
             transcript.excerpt(),
         )
 

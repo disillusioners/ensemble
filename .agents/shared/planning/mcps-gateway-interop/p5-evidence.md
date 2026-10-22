@@ -188,3 +188,63 @@ group.
 
 None blocking. The one decision that remains is the OWNER + DATE for the
 TLS terminator (§11) — a user decision, tracked open in the doc.
+
+
+---
+
+## Independent review round (post-121997b43)
+
+An independent review of the P5 kit + docs riders landed after `121997b43`.
+
+**Verdict**: 7/7 focus areas **PASS**. The reviewer's own re-runs:
+
+| # | Command | Result |
+|---|---|---|
+| 1 | `timeout 300 ./scripts/conformance/run.sh` | **41 passed** in 12.31 s (exit 0) |
+| 2 | `timeout 300 uv run python -m pytest tests/unit/test_mcps_gateway_docs.py -q` | **55 passed** in 0.24 s (exit 0) |
+| 3 | Deselect proof — `uv run python -m pytest tests/conformance -q` | **41 deselected** (exit 0) |
+
+The re-runs were **dir-scoped**: a whole-suite collect is blocked by the
+PRE-EXISTING `tests/packs/g7_unique_index_smoke_test.py:121` `SystemExit`
+(raised at collection time). That file is untouched by this phase — out of
+scope, **reported upward** to the dispatcher, NOT fixed here.
+
+**Findings**: 0 🔴 / 3 🟡 / 4 🟢.
+
+**This round's dispositions** (F1–F5):
+
+* **F1 🟡 — the README under-documented the 9th runner key.**
+  `scripts/conformance/run.sh:26` reads `CONFORMANCE_RUN_TIMEOUT`
+  (default 600) at the shell layer, while the README claimed "exactly
+  EIGHT keys" (:28-65) and "an undocumented knob cannot appear" (:65).
+  **FIXED**: the README now scopes the invariant explicitly to the kit's
+  **pytest layer** (the `conformance_peer.py` pointing surface that
+  `test_peer_selftest.py` pins) and documents `CONFORMANCE_RUN_TIMEOUT`
+  in a new "Runner controls" section — operator tooling, NOT a pointing
+  key. The truthfulness sentence now reads: the pytest surface is exactly
+  eight; the runner adds one documented control.
+* **F2 🟡 — the G1 FINDING label gave an operator no way to read the
+  tension.** The **HARD RED STAYS** (deliberate: the kit pins the current
+  reference behaviour per the phase tasking — it was NOT converted to a
+  warn). **FIXED (TEXT ONLY)**: the detail of
+  `FINDING transport/g1-heartbeat-timeout-no-id`
+  (`tests/conformance/conformance_peer.py:1057-1083`) now appends the
+  G1 OPEN-SPEC pointer — the reference centre omits `id` today, so a
+  centre that includes `id` per SPEC §6.1 hits the KNOWN SPEC tension;
+  flip the pin when the SPEC decision lands. The existing marker comment
+  is intact and the label string is unchanged (no test pins it).
+* **F4 🟢 — double negative.** `tests/conformance/test_transport.py:135`
+  read `not peer.transcript.close_code is not None` → rewritten
+  `peer.transcript.close_code is None` (same semantics).
+* **F5 🟢 — the pytest header read `os.environ`** instead of the resolved
+  env, so a `--conformance-begin-cmd` CLI mirror was invisible in the
+  header. **FIXED**: `tests/conformance/conftest.py:93-97` now reads
+  `_effective_env(config)`, the same resolution the kit uses.
+* **F3 🟢 — REPORTED, NOT FIXED** (tester territory; out of this round's
+  scope).
+
+**This round's verification** (one run, per the tasking):
+
+| # | Command | Result |
+|---|---|---|
+| 1 | `timeout 180 ./scripts/conformance/run.sh` | **41 passed** in 11.99 s (exit 0) — the F2 detail-text change breaks no selftest assertion (no test pins the G1 detail string, and the red is unchanged by design) |
