@@ -122,6 +122,20 @@ class _RecordingManager:
 
 
 class TestSweepReservedLiteral:
+    def test_sweep_reserved_fallback_is_reserved(self) -> None:
+        """DF-4 pin (v) — the canonical form.
+
+        The literal is RESERVED, it classifies FAIL-CLOSED, and the bare
+        ``or "api"`` shape is ABSENT from BOTH sweep sites.
+        """
+        assert is_reserved_source(SWEEP_NO_USER_ORIGIN_WAKE_SOURCE) is True
+        ok, detail = classify_user_origin(SWEEP_NO_USER_ORIGIN_WAKE_SOURCE, None)
+        assert ok is False
+        assert detail == "reserved-internal"
+        source = SWEEP_SOURCE.read_text(encoding="utf-8")
+        assert 'or "api"' not in source
+        assert source.count("or SWEEP_NO_USER_ORIGIN_WAKE_SOURCE") == 2
+
     def test_name_and_value_are_exact(self) -> None:
         """The NAME + VALUE are frozen — no variant spellings exist."""
         assert EXPECTED_NAME == "SWEEP_NO_USER_ORIGIN_WAKE_SOURCE"
@@ -240,3 +254,124 @@ class TestSweepDeliverySource:
         await service.sweep_wake_records()
         assert manager.calls, "the sweep must have delivered the wake"
         assert manager.calls[-1]["source"] == "system:post_restart_arm_notify"
+
+
+# ── pin (vi): the is_system_origin lane + the message-identity flip ────────
+
+
+class TestSweepWakeTakesTheIsSystemOriginLane:
+    """DF-4 pin (vi) — the wake takes the ``is_system_origin`` lane and its
+    MESSAGE IDENTITY flips.
+
+    Post-P1 the delivered source starts with ``system:``, so the dispatch
+    lane at ``daemon/services/instance_messaging.py`` treats it as an
+    internal notice: ``dispatch_source`` resolves from the instance's
+    ``original_source`` metadata instead of the literal, and the durable
+    ``original_source`` write no longer happens for these wakes.
+
+    The identity flip is the load-bearing half: the ``system:`` literal is
+    stamped ``injected_message=True`` by ``_stamped_additional_kwargs``,
+    so the wake is no longer a bare HumanMessage. Three downstream
+    effects follow (attestation-ladder exclusion, no repair-budget reset,
+    compaction as an injected note) — the SAME shape the restart-kind wake
+    already has in production. This pin asserts the SHAPE, so the
+    disclosed behaviour is pinned rather than merely claimed.
+    """
+
+    def test_the_reserved_literal_takes_the_system_origin_lane(self) -> None:
+        """The REAL lane selector is the ``system:`` prefix."""
+        assert SWEEP_NO_USER_ORIGIN_WAKE_SOURCE.startswith("system:")
+        source = (
+            REPO_ROOT / "daemon" / "services" / "instance_messaging.py"
+        ).read_text(encoding="utf-8")
+        assert 'is_system_origin = message_source.startswith("system:")' in source
+
+    def test_the_system_origin_lane_never_writes_original_source(self) -> None:
+        """The durable ``original_source`` write lives in the EXTERNAL
+        branch only — the system-origin lane READS the metadata, it
+        never stamps itself into it.
+
+        Analysed with ``ast`` so a comment or a docstring cannot
+        mask/false-positive the branch structure.
+        """
+        import ast
+
+        source = (
+            REPO_ROOT / "daemon" / "services" / "instance_messaging.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        branch = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            names = {
+                sub.id
+                for sub in ast.walk(node.test)
+                if isinstance(sub, ast.Name)
+            }
+            if "is_system_origin" in names:
+                branch = node
+                break
+        assert branch is not None, "the system-origin dispatch branch must exist"
+
+        def _set_metadata_calls(body) -> list[int]:
+            # The durable write is ``await asyncio.to_thread(
+            # self._manager._instance_repository.set_metadata, ...)`` —
+            # the attribute is an ARGUMENT of ``to_thread``, not the
+            # callee — so scan for the attribute itself.
+            return [
+                sub.lineno
+                for sub in ast.walk(ast.Module(body=list(body), type_ignores=[]))
+                if isinstance(sub, ast.Attribute) and sub.attr == "set_metadata"
+            ]
+
+        assert _set_metadata_calls(branch.body) == [], (
+            "the system-origin lane must not write original_source"
+        )
+        assert _set_metadata_calls(branch.orelse), (
+            "the external-message branch owns the durable original_source write"
+        )
+
+    def test_the_delivered_wake_carries_the_injected_message_stamp(self) -> None:
+        """The REAL stamp helper + the REAL graph-input builder.
+
+        ``"api"`` produced a BARE HumanMessage; the reserved literal
+        produces the stamped shape.
+        """
+        from daemon.services.instance_messaging import (
+            _build_graph_input,
+            _stamped_additional_kwargs,
+        )
+
+        stamped = _stamped_additional_kwargs(SWEEP_NO_USER_ORIGIN_WAKE_SOURCE)
+        assert stamped == {
+            "injected_message": True,
+            "source": SWEEP_NO_USER_ORIGIN_WAKE_SOURCE,
+        }
+        # the OLD literal produced a BARE HumanMessage — no stamp.
+        assert _stamped_additional_kwargs("api") is None
+
+        graph_input = _build_graph_input(
+            content="wake body",
+            message_id="m-df4-1",
+            message_source=SWEEP_NO_USER_ORIGIN_WAKE_SOURCE,
+        )
+        messages = graph_input["messages"]
+        assert messages, "the graph input must carry the user message"
+        user_message = messages[-1]
+        assert user_message.additional_kwargs == {
+            "injected_message": True,
+            "source": SWEEP_NO_USER_ORIGIN_WAKE_SOURCE,
+        }
+
+    def test_the_reserved_literal_is_stamped_and_the_user_literal_is_bare(self) -> None:
+        """The contrast that matters: the user-origin literal stays BARE
+        (the genuine web-UI path is untouched), the reserved literal is
+        STAMPED — which is why the sweep must not use the user-origin
+        literal as its no-user-origin fall-back."""
+        from daemon.services.instance_messaging import _stamped_additional_kwargs
+
+        assert _stamped_additional_kwargs("api") is None
+        assert _stamped_additional_kwargs(
+            SWEEP_NO_USER_ORIGIN_WAKE_SOURCE
+        ) is not None

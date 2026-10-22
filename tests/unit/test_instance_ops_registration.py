@@ -37,6 +37,7 @@ this file — every read is a repo-relative source read.
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -287,6 +288,120 @@ class TestProvenanceWiring:
 
 
 # ── AC-10b: the VOCABULARY pins ───────────────────────────────────────────
+
+
+class TestNoGateKeysOnPclass:
+    """DF-4 pin (iv) — NEITHER gate predicate keys on the window's CLASS.
+
+    ``pclass`` is a READ-TIME derivation (``daemon/tools/provenance.py``) —
+    never stored, never re-verified. Keying a gate on it is unsound by
+    construction: it carried zero trust signal and it was the cause of
+    the wrong-side refusal (the genuine operator path). The class
+    survives as OBSERVABILITY in the audit rows.
+
+    This pin REPLACES the vacuous fixture-parity pin (it compared the
+    helper to itself). It is a SOURCE-level pin, analysed with ``ast``
+    so a docstring mention cannot false-positive and a comment cannot
+    mask a real keying.
+
+    SCOPE (the house anti-false-positive rule): the restart-lane scan
+    covers the GATE PREDICATE BLOCK ONLY — the ``verdicts.append(...)``
+    tuple that carries the provenance verdict. A function-wide scan
+    false-positives: five lines above the gate the lane legitimately
+    constructs ``ok=False`` for the non-live case.
+    """
+
+    def _instance_ops_gate_pclass_reads(self) -> list[int]:
+        source = (
+            REPO_ROOT / "daemon" / "tools" / "instance_ops.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        gate = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_protected_gate":
+                gate = node
+                break
+        assert gate is not None, "the protected-target gate must exist"
+        return [
+            sub.lineno
+            for sub in ast.walk(gate)
+            if isinstance(sub, ast.Attribute) and sub.attr == "pclass"
+        ]
+
+    def _restart_gate_pclass_reads(self) -> list[int]:
+        source = (
+            REPO_ROOT / "daemon" / "tools" / "upgrade_tools.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        block = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            if node.name != "system_restart":
+                continue
+            for sub in ast.walk(node):
+                if not isinstance(sub, ast.Call):
+                    continue
+                func = sub.func
+                if not (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "append"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "verdicts"
+                ):
+                    continue
+                if not sub.args or not isinstance(sub.args[0], ast.Tuple):
+                    continue
+                elts = sub.args[0].elts
+                if len(elts) < 2:
+                    continue
+                token = elts[1]
+                if (
+                    isinstance(token, ast.Constant)
+                    and token.value == "no-user-provenance"
+                ):
+                    block = sub
+                    break
+            if block is not None:
+                break
+        assert block is not None, (
+            "the restart-lane provenance gate block must be found"
+        )
+        return [
+            sub.lineno
+            for sub in ast.walk(block)
+            if isinstance(sub, ast.Attribute) and sub.attr == "pclass"
+        ]
+
+    def test_no_gate_predicate_keys_on_pclass(self) -> None:
+        hits = self._instance_ops_gate_pclass_reads()
+        assert hits == [], (
+            "the instance_ops protected gate must NOT key on pclass — "
+            f"class reads found at lines {hits}"
+        )
+        hits = self._restart_gate_pclass_reads()
+        assert hits == [], (
+            "the restart-lane gate predicate must NOT key on pclass — "
+            f"class reads found at lines {hits}"
+        )
+
+    def test_the_class_survives_as_observability(self) -> None:
+        """The class must STILL be recorded — the pin is about the GATE,
+        not about deleting the field. Every audit write site keeps
+        carrying ``provenance_class``."""
+        source = (
+            REPO_ROOT / "daemon" / "tools" / "instance_ops.py"
+        ).read_text(encoding="utf-8")
+        assert "provenance_class=verdict.pclass or None" in source
+        assert '"provenance_class": verdict.pclass or None' in source
+
+    def test_the_instance_ops_gate_still_keys_on_ok(self) -> None:
+        """The gate keys on LIVENESS (``verdict.ok``) — the pin must not
+        be satisfiable by deleting the check."""
+        source = (
+            REPO_ROOT / "daemon" / "tools" / "instance_ops.py"
+        ).read_text(encoding="utf-8")
+        assert "if not verdict.ok:" in source
 
 
 class TestProvenanceVocabulary:

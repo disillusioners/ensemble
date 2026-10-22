@@ -7,12 +7,13 @@ and a SCRATCH SQLite engine for the audit ledger:
 * AC-23a — a GENUINE direct window on the ACTING instance ADMITS
   (DF-4 / P2 — D-18's "direct refused on purpose" is RETIRED BY
   DESIGN; the gate keys on LIVENESS, not on the window's class);
-* AC-23b — THE DELEGATED-FORGE RESIDUAL, PINNED AS TRUTH: a forged
-  direct window on the SPAWNER → an inherited window on the
-  maintenancer ⇒ the act is ADMITTED. Root-fix lane: DF-4 / critical
-  note ``f4cf9c4f``. DO NOT "fix" this test to assert a refusal — that
-  would re-introduce a false security property (the gate never
-  inspected the root, so refusal is not what the code does).
+* AC-23b — the GENUINE delegated chain ADMITS the protected act
+  (DF-4 / P3 — this test is pin (ii)). The FORGED chain is unreachable
+  through the real sweep path: pin (iii), the REAL-chain e2e
+  (``tests/postgres/test_df4_provenance_closure.py``), proves the
+  refusal leg. DO NOT "fix" this test to assert a refusal — that
+  would re-introduce a false security property (a live window of either
+  shape is admitted BY DESIGN).
 * AC-24 / D-16 — the terminate budget + the min-age rail;
 * AC-12 — self-surgery refusal;
 * AC-13 — cascade=False orphans;
@@ -23,6 +24,12 @@ and a SCRATCH SQLite engine for the audit ledger:
 * AC-25 / D-20 — reclaim terminal-only;
 * AC-21 — SQL-side status pagination;
 * AC-22 — a parked instance never reads as wedged.
+
+DF-4 TEST RENAMES (the plan's canonical pin names):
+  test_direct_window_on_acting_instance_refused
+      → test_genuine_direct_window_admits_protected_act  (AC-23a, pin (i))
+  test_inherited_window_proceeds_ac23b
+      → test_genuine_inherited_window_admits_protected_act (AC-23b, pin (ii))
 
 SAFETY FENCE: the audit ledger runs on a ``tempfile`` SQLite database —
 no HOME-derived or live-shaped path is ever resolved.
@@ -286,9 +293,9 @@ class TestProtectedGateLadder:
         )
         assert "reason=no-user-provenance" in out
 
-    async def test_genuine_direct_window_on_acting_instance_admits(self, fleet):
-        """AC-23a (DF-4 / P2, RE-POINTED) — the GENUINE operator-direct
-        path is ADMITTED.
+    async def test_genuine_direct_window_admits_protected_act(self, fleet):
+        """AC-23a (DF-4 / P2, RE-POINTED) — this test IS pin (i): the
+        GENUINE operator-direct path is ADMITTED.
 
         D-18's "a DIRECT window on the acting instance is refused on
         purpose" property is RETIRED BY DESIGN. It refused the genuine
@@ -333,20 +340,39 @@ class TestProtectedGateLadder:
         # depth-0 verdict is stored as NULL, so the ROW depth is None.
         assert row.provenance_depth is None
 
-    async def test_inherited_window_proceeds_ac23b(self, fleet):
-        """AC-23b — THE DELEGATED-FORGE RESIDUAL, PINNED AS TRUTH.
+    async def test_genuine_inherited_window_admits_protected_act(self, fleet):
+        """AC-23b (amended by DF-4 / P3) — this test IS pin (ii): a
+        GENUINE delegated chain ADMITS the protected act.
 
-        A FORGED direct window on the SPAWNER arms an INHERITED window
-        on the maintenancer; the gate ADMITS the act because the
-        inherited mint never inspects the root's own provenance.
+        DF-4 splits the old scenario in two:
 
-        ROOT-FIX LANE: DF-4 / critical note ``f4cf9c4f`` (the sweep's
-        ``or "api"`` fallback). DO NOT "fix" this test to assert a
-        refusal — that would certify a property the code does not have;
-        the residual is caught by the D-16 budget + post-hoc audit.
+        * THIS test — the GENUINE chain: a genuine user-origin window on
+          the PARENT is inherited by the delegated child, and the act is
+          ADMITTED (audit ``class="inherited"``, ``depth>=1``,
+          ``root_source=<genuine>``).
+        * pin (iii) — the FORGED chain, the REAL-chain e2e
+          (``tests/postgres/test_df4_provenance_closure.py``): a sweep
+          wake armed with NO user origin can no longer mint a DIRECT
+          root (DF-4 / P1 closed the sweep's fallback), so the delegated
+          child inherits NOTHING and the gate REFUSES with
+          ``no-user-provenance``.
+
+        This test is NOT flipped to a refusal assertion: a live window of
+        either shape is admitted BY DESIGN (the gate keys on liveness).
+
+        DISCLOSURE — the closure claim is SCOPED, not total. A window
+        forged through a NON-sweep surface — the REST ingress
+        (``daemon/routers/jobs_crud.py`` / ``daemon/routers/messages.py``,
+        critical note ``257488dc``) — remains reachable and admitted.
+        DF-4 does NOT claim total closure; the compensating controls are
+        scopes, the acting-instance allow-list, named-target
+        confirmation, the D-16 budget, the two-tier audit ledger and the
+        ``ENSEMBLE_INSTANCE_OPS_ENABLED`` kill switch. The nest-ops
+        retraction trace (``nest-ops/decisions.md``) remains the
+        authoritative history — DF-4 appends, it does not rewrite.
         """
         iid = self._protected_target(fleet)
-        # the forged direct window sits on the SPAWNER, not on me…
+        # the GENUINE direct window sits on the SPAWNER…
         fleet._user_origin_windows = _stamp_direct("ari-iid", source="api")
         # …and my inherited window was minted from it.
         fleet._inherited_provenance_windows = _stamp_inherited("maint-iid", depth=1, root_source="api")
@@ -354,12 +380,12 @@ class TestProtectedGateLadder:
         out = await _by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid, "dry_run": False}
         )
-        # ADMITTED — the documented residual.
+        # ADMITTED — the genuine delegated chain.
         import json as _json
         assert _json.loads(out)["terminated"] is True
         assert iid in fleet.terminated
         # …and the audit row records the five provenance fields for the
-        # post-hoc reviewer (the speed-bump half of D-18).
+        # post-hoc reviewer (the observability half of D-18).
         repo = InstanceOpsAuditRepository(fleet.engine)
         with Session(fleet.engine) as s:
             rows = list(
