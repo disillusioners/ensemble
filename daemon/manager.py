@@ -139,6 +139,7 @@ from .repositories.mcps_gateway.repository import McpGatewayAuditRepository
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
 from .services.skill_job_dispatcher import (
+    EVOLUTION_TYPE_FIX,
     SKILL_EVOLUTION_KILL_SWITCH_ENV,
     SkillJobDispatcher,
     is_evolution_lane_enabled,
@@ -6443,7 +6444,7 @@ class InstanceManager:
                         job_type = "skill_analysis"
                     elif action == "evolve_fix":
                         job_type = "skill_evolution"
-                        payload["evolution_type"] = "FIX"
+                        payload["evolution_type"] = EVOLUTION_TYPE_FIX
                     else:
                         # Unknown action — surface as analysis so the
                         # downstream pipeline can decide.
@@ -6471,7 +6472,7 @@ class InstanceManager:
                             await dispatcher.enqueue_evolution(
                                 project_id=project_id,
                                 skill_id=skill_id,
-                                evolution_type="FIX",
+                                evolution_type=EVOLUTION_TYPE_FIX,
                                 direction=payload.get("reason", ""),
                             )
                         else:

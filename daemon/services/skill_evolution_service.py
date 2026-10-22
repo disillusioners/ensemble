@@ -48,6 +48,7 @@ from typing import Any, Optional
 
 import openai
 
+from .skill_job_dispatcher import EVOLUTION_TYPE_FIX
 from .llm_failover import current_failover_url, invoke_raw_with_failover
 
 logger = logging.getLogger(__name__)
@@ -455,7 +456,7 @@ class SkillEvolutionService:
                 "task_details) instead."
             )
 
-        if evolution_type == "FIX":
+        if evolution_type == EVOLUTION_TYPE_FIX:
             return await self._evolve_fix(skill, direction)
         if evolution_type == "DERIVED":
             return await self._evolve_derived(skill, direction)
