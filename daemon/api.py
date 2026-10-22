@@ -4530,15 +4530,16 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # sessions and the remote-command audit tail.
     #
     # REGISTERED UNCONDITIONALLY — the read endpoints are ordinary
-    # /api read routers (the dominant convention: 33 of the 35
-    # api_router mounts are unconditional), and a browser page needs a
-    # STABLE contract: with the gateway OFF the payloads degrade to
-    # EMPTY lists and ``gateway_enabled: false`` instead of a 404 the
-    # page cannot interpret. The kill switch (``MCPS_GATEWAY_ENABLED``)
-    # still governs the TRANSPORT — the WebSocket route below is not
-    # registered at all while it is off, and the agent tools refuse with
-    # a typed error. The read surface only REPORTS the state of the
-    # center; it never drives it.
+    # /api read routers (the dominant convention: 32 of the 35
+    # api_router mounts are unconditional; the other 3 are 2
+    # auth-ON-gated families + 1 gateway-flag-gated WebSocket mount),
+    # and a browser page needs a STABLE contract: with the gateway OFF
+    # the payloads degrade to EMPTY lists and ``gateway_enabled: false``
+    # instead of a 404 the page cannot interpret. The kill switch
+    # (``MCPS_GATEWAY_ENABLED``) still governs the TRANSPORT — the
+    # WebSocket route below is not registered at all while it is off,
+    # and the agent tools refuse with a typed error. The read surface
+    # only REPORTS the state of the center; it never drives it.
     #
     # The OAuth2 middleware owns these routes (the same lane as every
     # other /api family) and each one carries the ``mcp:read`` scope.
