@@ -145,6 +145,7 @@ from daemon.routers import (
     tmp_images_router,        # /api/tmp_images (Phase 1: clipboard-image-chat upload+serve)
     prompts_router,           # /api/prompts (Phase B T5: agent-prompt-immutability approval REST)
     resources_router,         # /api/resources (resource-cost-control P1: live + history + self-cost)
+    mcps_gateway_read_router, # /api/mcps-gateway/{machines,sessions,audit} (Phase C: the OAuth read lane)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
@@ -4523,6 +4524,25 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
         from daemon.routers.auth import router as auth_router
 
         api_router.include_router(auth_router)         # /api/auth/*
+
+    # remote-hands center gateway (2026-10-22) — the Phase C READ
+    # surface (the OAuth API lane): the machine roster, the live
+    # sessions and the remote-command audit tail.
+    #
+    # REGISTERED UNCONDITIONALLY — the read endpoints are ordinary
+    # /api read routers (the dominant convention: 33 of the 35
+    # api_router mounts are unconditional), and a browser page needs a
+    # STABLE contract: with the gateway OFF the payloads degrade to
+    # EMPTY lists and ``gateway_enabled: false`` instead of a 404 the
+    # page cannot interpret. The kill switch (``MCPS_GATEWAY_ENABLED``)
+    # still governs the TRANSPORT — the WebSocket route below is not
+    # registered at all while it is off, and the agent tools refuse with
+    # a typed error. The read surface only REPORTS the state of the
+    # center; it never drives it.
+    #
+    # The OAuth2 middleware owns these routes (the same lane as every
+    # other /api family) and each one carries the ``mcp:read`` scope.
+    api_router.include_router(mcps_gateway_read_router)  # /api/mcps-gateway/{machines,sessions,audit}
 
     # remote-hands center gateway (2026-10-22) — the WebSocket route the
     # controlled machines dial OUT to (SPEC.md v0.1).

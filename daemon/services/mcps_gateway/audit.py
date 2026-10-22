@@ -107,6 +107,24 @@ class AuditSink(Protocol):
         """
 
 
+class AuditReader(Protocol):
+    """The READ side of the audit sink — OPTIONAL.
+
+    The sink contract (:class:`AuditSink`) is write-only: a sink that
+    drops the rows (:class:`NullAuditSink`) or keeps them in memory
+    (:class:`MemoryAuditSink`) may or may not answer reads. The DB
+    sink (``McpGatewayAuditRepository``) does.
+
+    The read surface (``daemon/routers/mcps_gateway_read.py``) reaches
+    the ledger through ``McpGatewayService.audit_tail``, which
+    duck-types ``list_recent`` on the sink — so a write-only sink
+    degrades to an EMPTY tail instead of an error.
+    """
+
+    def list_recent(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """The most recent rows, newest first, skipping ``offset`` of them."""
+
+
 class NullAuditSink:
     """A sink that drops everything (audit disabled)."""
 
@@ -126,9 +144,37 @@ class MemoryAuditSink:
     def clear(self) -> None:
         self.records.clear()
 
+    def list_recent(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """The most recent rows, newest first — the READ side of the fake.
+
+        Mirrors the DB sink's shape (``daemon/repositories/mcps_gateway/
+        repository.py`` — ``row.model_dump()``): the same keys, so the
+        read surface does not care which sink it is talking to.
+        """
+        ordered = sorted(
+            self.records, key=lambda r: r.created_at, reverse=True
+        )
+        window = ordered[max(0, int(offset)) : max(0, int(offset)) + max(1, int(limit))]
+        return [
+            {
+                "created_at": record.created_at,
+                "agent_id": record.agent_id,
+                "instance_id": record.instance_id or None,
+                "machine_id": record.machine_id,
+                "tool": record.tool,
+                "args_hash": record.args_hash,
+                "outcome": record.outcome,
+                "session_id": record.session_id or None,
+                "error_code": record.error_code or None,
+                "detail": record.detail or None,
+            }
+            for record in window
+        ]
+
 
 __all__ = [
     "AuditRecord",
+    "AuditReader",
     "AuditSink",
     "MemoryAuditSink",
     "NullAuditSink",

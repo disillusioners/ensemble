@@ -604,3 +604,63 @@ def test_doc_does_not_overstate_the_pre_fix_sweep_exposure() -> None:
             "path was unreachable dead code in production; the exclusion "
             "is defence-in-depth of a latent lane, not a live hole."
         )
+
+
+# ── Phase C: the operator read surface ─────────────────────────────────────
+#
+# The read surface is a SECOND, separate lane next to the module-lane
+# WebSocket transport. These pins keep the doc honest about the facts
+# an operator (and the frontend developer) types against: the three
+# paths, the unconditional registration of the READ routes (and the
+# still-conditional transport), the scope name, and the pagination
+# bounds.
+
+READ_ENDPOINTS = (
+    "/api/mcps-gateway/machines",
+    "/api/mcps-gateway/sessions",
+    "/api/mcps-gateway/audit",
+)
+
+
+def test_doc_names_the_three_read_endpoints() -> None:
+    """The read surface's paths are pinned."""
+    text = _doc_prose()
+    for endpoint in READ_ENDPOINTS:
+        assert endpoint in text, (
+            f"the runbook must name the read endpoint {endpoint!r} — the "
+            "frontend developer types against these paths."
+        )
+
+
+def test_doc_states_the_read_routes_are_registered_unconditionally() -> None:
+    """The read routes are registered ALWAYS; only the TRANSPORT is
+    gated. The doc must keep the two apart."""
+    text = _doc_prose()
+    assert "registered **unconditionally**" in text or (
+        "registered unconditionally" in text
+    ), (
+        "the runbook must state that the read routes are registered "
+        "unconditionally — the page needs a stable contract while the "
+        "transport is off."
+    )
+    assert "gateway_enabled: false" in text, (
+        "the runbook must state the degraded shape the page sees while "
+        "the gateway is off (empty lists + the gateway_enabled flag)."
+    )
+
+
+def test_doc_states_the_read_scope_and_the_pagination_bounds() -> None:
+    """The auth lane and the pagination bounds are pinned."""
+    text = _doc_prose()
+    assert "mcp:read" in text, (
+        "the runbook must name the scope the read routes require."
+    )
+    assert "SCOPE_INSUFFICIENT" in text, (
+        "the runbook must name the 403 the page sees for a credential "
+        "without the scope."
+    )
+    assert "limit` default 50, max 200" in text, (
+        "the runbook must pin the pagination bounds (limit default 50, "
+        "max 200; offset default 0) — they are the validation contract "
+        "of the audit tail."
+    )

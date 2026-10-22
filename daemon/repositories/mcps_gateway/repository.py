@@ -70,14 +70,25 @@ class McpGatewayAuditRepository:
 
     # ── read ─────────────────────────────────────────────────────────────
 
-    def list_recent(self, limit: int = 50) -> list[dict[str, Any]]:
-        """The most recent audit rows, newest first. Safe on failure."""
+    def list_recent(
+        self, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """The most recent audit rows, newest first. Safe on failure.
+
+        ``offset`` skips rows from the HEAD of the newest-first list —
+        the pagination seam of the Phase C read surface
+        (``GET /api/mcps-gateway/audit``). The ORDER is the ledger's own
+        order (``created_at`` DESC, the ISO-8601 TEXT stamp of the
+        audit table — a lexicographic order over a fixed-format stamp
+        is a chronological order).
+        """
         try:
             with Session(self._engine) as session:
                 statement = (
                     select(McpGatewayAudit)
                     .order_by(McpGatewayAudit.created_at.desc())
                     .limit(max(1, int(limit)))
+                    .offset(max(0, int(offset)))
                 )
                 rows = session.exec(statement).all()
                 return [row.model_dump() for row in rows]
