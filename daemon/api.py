@@ -145,9 +145,11 @@ from daemon.routers import (
     tmp_images_router,        # /api/tmp_images (Phase 1: clipboard-image-chat upload+serve)
     prompts_router,           # /api/prompts (Phase B T5: agent-prompt-immutability approval REST)
     resources_router,         # /api/resources (resource-cost-control P1: live + history + self-cost)
+    wedge_capture_router,    # /api/wedge-captures (wedge-capture: the capture evidence store)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
+from daemon.routers.wedge_capture import router as wedge_capture_router  # /api/wedge-captures (wedge-capture evidence store)
 
 from daemon.mcp import (
     create_kb_mcp_server,
@@ -4605,6 +4607,12 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # endpoints 2–5; ``/availability`` is exempt — see
     # ``daemon/routers/maintenance.py``.
     api_router.include_router(maintenance_router)        # /api/maintenance (Section 1)
+    # wedge-capture (2026-10-22) — the capture evidence store. The
+    # family is declared in BOTH router manifest cages (the class
+    # cage in tests/integration/test_router_class_manifest.py and the
+    # scope cage in tests/unit/test_router_scope_manifest.py) — an
+    # undeclared mount fails both loudly.
+    api_router.include_router(wedge_capture_router)      # /api/wedge-captures
     # Phase 3 / plane-integration-revival — POST /api/plane/sync/{project_id}.
     # The router is mounted BEFORE the SPA catch-all (the catch-all
     # only fires for unmatched paths; the prefix /api/plane is owned

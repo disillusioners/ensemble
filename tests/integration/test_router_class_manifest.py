@@ -94,6 +94,13 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     "/api/resources": frozenset({"pd"}),
     "/api/sources": frozenset({"pd"}),  # + mappings_router
     "/api/tmp_images": frozenset({"pd"}),
+    # wedge-capture (2026-10-22): the wedge_capture_router mounts at
+    # /api/wedge-captures (4 routes: GET "" (list), GET /status,
+    # POST /capture, GET /{capture_id}). Every route carries an
+    # explicit scope (``maintenance:read``), so the family classifies
+    # protected-default ("pd") — the D3.7 legacy posture, declared
+    # HERE. The POST additionally carries the trusted-Origin guard.
+    "/api/wedge-captures": frozenset({"pd"}),
     # Phase B / agent-prompt-immutability T6 — the prompts_router
     # mounts at /api/prompts (the 15-endpoint family: the canonical
     # 12 per phaseB-plan.md addendum S4 + the 3 USER-DIRECTIVE-#2
@@ -345,4 +352,6 @@ class TestRouterClassManifest:
         # remote-hands center gateway (2026-10-22) added the
         # /api/mcps-gateway family — the api_families count grew
         # from 30 to 31.
-        assert len(api_families) == 31, sorted(api_families)
+        # wedge-capture (2026-10-22) added the /api/wedge-captures
+        # family — the api_families count grew from 31 to 32.
+        assert len(api_families) == 32, sorted(api_families)

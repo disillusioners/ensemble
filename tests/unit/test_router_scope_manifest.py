@@ -81,8 +81,15 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     "/api/sources": "sources:write",        # + mappings router; the
     #   family is write-class in the v1 taxonomy (D4.2 has no
     #   sources:read) — reads ride sources:write by declaration.
-    "/api/workspace": "workspace:read|*",
-    #   §5.4: reads workspace:read; PUT /{project_id}/file stays
+    # wedge-capture (2026-10-22): the /api/wedge-captures family
+    # mounts 4 routes (GET "" (list), GET /status, POST /capture,
+    # GET /{capture_id}). Every route carries an explicit
+    # ``maintenance:read`` scope — the EXISTING taxonomy entry for a
+    # maintenance/diagnostic read. The family therefore declares that
+    # scope (NOT a wildcard): the routes DO carry an explicit scope, so
+    # the wildcard would be less precise than reality.
+    "/api/wedge-captures": "maintenance:read",
+    "/api/workspace": "workspace:read|*",    #   §5.4: reads workspace:read; PUT /{project_id}/file stays
     #   undeclared (NO workspace:write exists in the v1 taxonomy —
     #   declared gap, not an omission).
     # ── explicitly wildcarded families (the D9 default-* posture) ───
@@ -253,12 +260,17 @@ class TestSourceMatchTarget:
         resources_router (31 unconditional; was 30 pre-P1) — the
         cage reflects this with the /api/resources family pinned in
         the manifest above.
+
+        wedge-capture (2026-10-22) added the wedge_capture_router
+        (32 unconditional; was 31 pre-wedge-capture) — the cage
+        reflects this with the /api/wedge-captures family pinned in
+        the manifest above.
         """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
-        assert len(matches) == 34, (
+        assert len(matches) == 35, (
             f"api_router.include_router( census drifted: {len(matches)} "
-            "(pinned 34 = 32 unconditional + 2 auth-ON-gated). New mount? "
+            "(pinned 35 = 33 unconditional + 2 auth-ON-gated). New mount? "
             "Declare its family in PINNED_SCOPE_MANIFEST above."
         )
 
@@ -283,9 +295,11 @@ class TestScopeManifestCage:
         T3.12 mcpkb:admin keys routes + the 12 Phase B T5 prompts
         routes + the 3 USER-DIRECTIVE-#2 (2026-10-14) prompts deltas
         (PATCH /versions/{id}, DELETE /versions/{id}, GET
-        /pending-count — every one @require_scope-decorated) = 97
-        declared routes. A drift is a decoration added/removed
-        without a manifest row change.
+        /pending-count — every one @require_scope-decorated) + the 4
+        wedge-capture routes (GET "" (list), GET /status, POST
+        /capture, GET /{capture_id} — every one @require_scope
+        decorated) = 104 declared routes. A drift is a decoration
+        added/removed without a manifest row change.
 
         Phase B / agent-prompt-immutability T5 added 12
         @require_scope-decorated routes under /api/prompts (the
@@ -304,6 +318,14 @@ class TestScopeManifestCage:
         declares ``prompts:read|prompts:write`` and the actual
         scope per route maps to it — see
         ``daemon/routers/custom_agents.py`` module docstring).
+
+        wedge-capture (2026-10-22) added 4 @require_scope-decorated
+        routes under /api/wedge-captures (GET "" (list), GET /status,
+        POST /capture, GET /{capture_id}) — every one carrying the
+        existing ``maintenance:read`` taxonomy entry — growing the cage
+        count 100 → 104. The /api/wedge-captures family entry declares
+        that scope (NOT a wildcard): the routes DO carry an explicit
+        scope, so the wildcard would be less precise than reality.
         """
         declared = [
             r
@@ -312,8 +334,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 100, (
-            f"declared-route census drifted: {len(declared)} (pinned 100)"
+        assert len(declared) == 104, (
+            f"declared-route census drifted: {len(declared)} (pinned 104)"
         )
 
     def test_manifest_entries_valid(self):
