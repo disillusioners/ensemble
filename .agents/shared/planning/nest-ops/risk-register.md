@@ -29,6 +29,17 @@ bypass**; the upgrade lane's own exposure is already filed in **project critical
 refused** by `classify_user_origin` (`daemon/tools/upgrade_journal.py:3376-3426`). The
 exposure is specifically the promote-kind wake fallback.
 
+> **[DF-4 CORRECTION — 2026-10-22]** R1's **sweep class is CLOSED** by DF-4 / P1: both
+> sweep sites now fall back to the reserved internal literal
+> `SWEEP_NO_USER_ORIGIN_WAKE_SOURCE` (`"system:sweep_no_user_origin_wake"`) instead of the
+> user-origin literal `"api"`, so a wake armed with NO user origin can no longer mint a
+> DIRECT window. **TWO same-class mint surfaces remain OPEN and are NOT fixed by DF-4:**
+> (a) the **job-queue defer-resend** lane (`daemon/services/job_queue_service.py:2608`
+> hard-codes `source="api"` on re-enqueue → a FRESH direct window at resend time) — routed
+> as **DF-5**; (b) the **REST-ingress** class (`daemon/routers/jobs_crud.py` /
+> `daemon/routers/messages.py`) — filed as project critical note `257488dc`. See
+> `.agents/shared/planning/df4-provenance-closure/plan-overview.md`.
+
 **Disposition — RE-OPENED for the DELEGATED LEG by review C1 (the original "CLOSED FOR THIS
 LANE by D-18" disposition is RETRACTED; D-18's real bounds are below).**
 
@@ -68,6 +79,19 @@ the maintenancer. Both mint `pclass="direct"` on the acting instance ⇒ refused
 * **Pinned as truth:** **AC-23b** asserts the delegated forge is **ADMITTED**, with the
   assertion message naming DF-4/`f4cf9c4f` — so the suite certifies the documented residual
   rather than a property that does not hold.
+
+> **[DF-4 CORRECTION — 2026-10-22]** The re-scoping above is **SUPERSEDED**:
+> * **"CLOSED by D-18" is now "RETIRED BY DESIGN"** — the direct-window-on-the-acting-
+>   instance refusal is gone (DF-4 / P2). The genuine operator-direct path is admitted;
+>   `pclass` is observability only.
+> * **The delegated-forge residual is CLOSED at its ROOT** (DF-4 / P1 + P3): the sweep's
+>   no-user-origin fallback rides a reserved lane, and the REAL-chain e2e
+>   (`tests/postgres/test_df4_provenance_closure.py`) proves the forged chain mints no
+>   window and the gate refuses `no-user-provenance`.
+> * **STILL OPEN:** the defer-resend class (routed as **DF-5**) and the REST-ingress class
+>   (critical note `257488dc`) — a window forged through either surface is admitted
+>   post-DF-4, bounded by the D-16 budget + the audit ledger.
+> See `.agents/shared/planning/df4-provenance-closure/plan-overview.md` §Honesty Clause.
 
 **The retained defense-in-depth, named honestly (four layers):**
 (a) **D-17 attributable confirmation** — the act names its target; the audit records

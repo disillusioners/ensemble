@@ -67,7 +67,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from daemon.tools import upgrade_journal as uj
-from daemon.tools.upgrade_journal import RESTART_WAKE_SOURCE
+from daemon.tools.upgrade_journal import (
+    RESTART_WAKE_SOURCE,
+    SWEEP_NO_USER_ORIGIN_WAKE_SOURCE,
+)
 
 
 def _outcome_labels() -> dict[str, str]:
@@ -1202,11 +1205,16 @@ class UpgradeJournalSweepService:
                 message=annotated_body,
                 # agent-restart C-2: same reserved-lane rule as the direct
                 # deliver path — restart-kind wakes NEVER ride a user
-                # source, even on the ari fall-back.
+                # source, even on the ari fall-back. DF-4 (P1): the
+                # NON-restart fall-back arm rides the reserved lane too —
+                # a wake armed with NO user origin must never mint a
+                # DIRECT user-origin window (the retired bare-"api"
+                # fallback forged one). A non-empty source still rides
+                # VERBATIM — the reserved literal is the fallback arm ONLY.
                 source=(
                     RESTART_WAKE_SOURCE
                     if wake.kind == "restart"
-                    else (wake.source or "api")
+                    else (wake.source or SWEEP_NO_USER_ORIGIN_WAKE_SOURCE)
                 ),
                 priority=2,
                 metadata=metadata,
@@ -1728,10 +1736,16 @@ class UpgradeJournalSweepService:
                             # source, never "api") — the wake turn can
                             # never re-mint direct provenance (§2.5 row
                             # (i)); promote-kind keeps today's routing.
+                            # DF-4 (P1): the NON-restart fall-back arm now
+                            # uses the reserved lane as well — a wake armed
+                            # with NO user origin delivered on the retired
+                            # bare-"api" fallback FORGED a DIRECT
+                            # user-origin window (the delegated-forge root
+                            # mint). A non-empty source still rides VERBATIM.
                             source=(
                                 RESTART_WAKE_SOURCE
                                 if head.kind == "restart"
-                                else (head.source or "api")
+                                else (head.source or SWEEP_NO_USER_ORIGIN_WAKE_SOURCE)
                             ),
                             priority=2,
                             metadata=metadata,
