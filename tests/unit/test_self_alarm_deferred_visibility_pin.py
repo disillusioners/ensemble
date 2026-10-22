@@ -97,6 +97,14 @@ PIN_TAG = "pin_self_alarm_deferred_visibility"
 #: Used ONLY to compare the migration file SET (D5) — never to mutate git.
 BASE_COMMIT = "8e6df58e445cd56b5e775dacebe0ef53f0add0b4"
 
+#: THIS commission's feature commit — the tree OUR side produced (the
+#: merge tip is this commit + ``origin/latest``).  The D5 contract is
+#: "**OUR** commission adds no migration", NOT "the tree's migration set
+#: never changes": the merged tip legitimately carries other commissions'
+#: migrations (nest-ops, mcps-gateway), so the comparison is relative to
+#: OUR side (the leader's merged-tree ruling: 108-at-tip + OUR-DELTA-0).
+OUR_FEATURE_COMMIT = "6d3121c60e8c003f4c357ca2a04f7a9fd05cb50d"
+
 #: The two visibility fields D4 requires on every schedule-detail surface.
 REQUIRED_VISIBILITY_KEYS = ("deferred_count", "last_execution_status")
 
@@ -121,6 +129,69 @@ def _repo_root() -> Path:
 
 def _migrations_dir() -> Path:
     return _repo_root() / "daemon" / "migrations" / "versions"
+
+
+def _migration_files_at(commit: str) -> set[str]:
+    """The migration file NAMES (basenames) at ``commit`` — read-only git.
+
+    Returns an empty set when the commit is unknown to git (the caller
+    turns that into the "could not compare" finding).
+    """
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(_repo_root()),
+            "ls-tree",
+            "-r",
+            "--name-only",
+            commit,
+            "--",
+            "daemon/migrations/versions/",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return {
+        line.split("/")[-1]
+        for line in completed.stdout.splitlines()
+        if line.strip().endswith(".sql")
+    }
+
+
+def _migration_changes_between(from_commit: str, to_commit: str) -> list[str]:
+    """The migration file names CHANGED between two commits (read-only git).
+
+    Any entry (added, removed or renamed) means the range touched the
+    migration set.  The names are the basenames so they compare directly
+    against the working tree's file names.
+    """
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(_repo_root()),
+            "diff",
+            "--name-status",
+            from_commit,
+            to_commit,
+            "--",
+            "daemon/migrations/versions/",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    changed: list[str] = []
+    for line in completed.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        # "A\tfile" / "D\tfile" / "R100\told\tnew" — every name counts.
+        for name in parts[1:]:
+            changed.append(name.split("/")[-1])
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -577,8 +648,15 @@ class TestDeferredVisibility:
            no file under ``daemon/migrations/versions/`` may create a DB
            enum type for the execution status, nor ALTER the
            ``schedule_executions.status`` column.
-        6. The migration file SET is byte-for-byte the commission's base
-           set — no file was added, removed or renamed.
+        6. The migration delta of THIS commission is EMPTY — our side
+           (``BASE_COMMIT..OUR_FEATURE_COMMIT``) changed no file under
+           ``daemon/migrations/versions/``, and every migration file in the
+           tree is attributable to the commission base, to our side, or to
+           the incoming side of the merge.  (MERGE-AWARE: the leader's
+           merged-tree ruling is **108-at-tip + OUR-DELTA-0** — the merged
+           tip legitimately carries other commissions' migrations
+           (nest-ops, mcps-gateway), so the assertion is about OUR delta,
+           not about the tree's set being frozen forever.)
 
         MUTATION SPEC (plan §(e), "Extra pins (same house shape)" —
         "``test_no_migration_file_and_deferred_status_is_text`` (asserts
@@ -713,43 +791,49 @@ class TestDeferredVisibility:
                 f"{offenders} — D5 is additive-only (no migration)"
             )
 
-        # ---- (6) the migration file SET is unchanged ---------------------
+        # ---- (6) OUR commission's migration DELTA is EMPTY ---------------
+        # MERGE-AWARE (the leader's merged-tree ruling): the commission's
+        # contract is "**WE** add no migration" — NOT "the tree's migration
+        # set never changes".  The merged tip legitimately carries other
+        # commissions' migrations (nest-ops, mcps-gateway), so the old
+        # base-relative SET comparison false-reds under drift.  The
+        # assertion is now: 108-at-tip + OUR-DELTA-0.
+        #
+        #   our_delta   = the migration files OUR side changed
+        #                 (BASE_COMMIT..OUR_FEATURE_COMMIT)  -> MUST be EMPTY
+        #   incoming    = the migration files the MERGE brought in
+        #                 (OUR_FEATURE_COMMIT..HEAD)        -> allowed
+        #   unattributed = the tree's migration files that are neither the
+        #                 base's, ours, nor the incoming side's -> MUST be EMPTY
         try:
-            completed = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(_repo_root()),
-                    "ls-tree",
-                    "-r",
-                    "--name-only",
-                    BASE_COMMIT,
-                    "--",
-                    "daemon/migrations/versions/",
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
+            base_files = _migration_files_at(BASE_COMMIT)
+            our_files = _migration_files_at(OUR_FEATURE_COMMIT)
+            our_delta = _migration_changes_between(BASE_COMMIT, OUR_FEATURE_COMMIT)
+            incoming = set(
+                _migration_changes_between(OUR_FEATURE_COMMIT, "HEAD")
             )
-            base_files = {
-                line.split("/")[-1]
-                for line in completed.stdout.splitlines()
-                if line.strip().endswith(".sql")
-            }
             now_files = {p.name for p in migrations_dir.glob("*.sql")}
-            added = sorted(now_files - base_files)
-            removed = sorted(base_files - now_files)
-            if added or removed:
+            if our_delta:
                 problems.append(
-                    "the migration file SET changed against the commission base "
-                    f"commit — added={added} removed={removed} (D5: the "
-                    "migration delta must stay EMPTY)"
+                    "OUR commission's migration delta is NOT EMPTY — our side "
+                    f"changed the migration file set: {sorted(our_delta)} "
+                    "(D5: this commission adds NO migration; the merged-tree "
+                    "contract is 108-at-tip + OUR-DELTA-0)"
+                )
+            attributable = base_files | our_files | incoming
+            unattributed = sorted(now_files - attributable)
+            if unattributed:
+                problems.append(
+                    "the migration files in the tree are not attributable to "
+                    "the commission base, to our side, or to the incoming "
+                    f"side: {unattributed} (D5: no migration may be "
+                    "introduced under this commission)"
                 )
         except Exception as exc:  # noqa: BLE001 — a broken env is a finding
             problems.append(
                 "could not compare the migration file set against the "
-                f"commission base commit {BASE_COMMIT[:8]}: "
-                f"{type(exc).__name__}: {exc}"
+                f"commission base commit {BASE_COMMIT[:8]} / feature commit "
+                f"{OUR_FEATURE_COMMIT[:8]}: {type(exc).__name__}: {exc}"
             )
 
         assert not problems, (
