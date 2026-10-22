@@ -377,3 +377,67 @@ this phase were added — the pre-existing untracked `.agents/` files and
 3. **The close code (G4)** — the SPEC names none; the kit pins 1000 and
    flags the gap. The `CONFORMANCE_STRICT_CLOSE_CODE` knob is the P5
    kit's business.
+
+## 11. Independent review round (2026-10-22, post-031dab747)
+
+> **RE-RUN VERDICT: PASS — 7/7 focus areas UPHeld, 0 critical findings,
+> 0 implementer defects.** The findings the round raised are **1× 🟡** and
+> **4× 🟢**; the 🟡 is **dispatcher-side**, not an implementer defect.
+
+This block is **appended** after the review round — **nothing above it is
+rewritten**. It records (a) the adjudication, (b) the independent re-runs,
+(c) the carry-forwards that bind the P3/P4/P5 briefs, and (d) the findings
+register.
+
+### 11.1 The adjudication — 7/7 focus areas UPHeld
+
+| # | Focus area | Verdict |
+|---|---|---|
+| 1 | **Assertion honesty (#16c)** — every assertion is read from the SPEC, never from observed behaviour; the S1 branch is recorded, never asserted green | **UPHELD** |
+| 2 | **The daemon-import boundary** — the new files (`transcript.py`, `test_real_pair.py`) carry no `import daemon.*` statement; every daemon object (app, service seam, engine, audit sink, typed error, Plane kill switches, bearer mint) is reached through `tls_harness`'s API | **UPHELD** |
+| 3 | **`harness.py` exports-only** — the change is limited to the export of the env-knob table (`GatewayEnv`) and the teardown helpers (`_EnvPatch`, `port_is_listening`); not one line of the existing behaviour changed | **UPHELD** |
+| 4 | **R-23 / fence discipline** — the asserted protections are the `job_queue_items` count (0, delta-based), the **PID-scoped** `lsof` listener scan and the `machine_id`-scoped DB assertions; `DRY_RUN` / `DESTRUCTIVE` are never cited as effective gates | **UPHELD** |
+| 5 | **Evidence quality** — the compressed timing profile carries the EXACT values used, the exact commands are reproduced, and the teardown proof is per-phase (P1 / P2) | **UPHELD** |
+| 6 | **S1 unreachability, as scoped** — the non-object tool result is structurally unreachable with the shipped peer; it is recorded as an observation, never asserted green, and the plan's sanctioned fallback is shown not to help | **UPHELD** |
+| 7 | **Scope discipline** — `daemon/` source was **not** modified; the centre-side transcript is a tap installed by the harness; the pre-existing untracked `.agents/` files and `.agents/approver/**` were left alone | **UPHELD** |
+
+**The tally: 7 UPHELD / 7 — 0 critical findings, 0 implementer defects.**
+
+### 11.2 The independent re-runs
+
+```bash
+timeout 300 uv run pytest tests/integration/mcps_gateway/test_real_pair.py -m integration -q
+#   → 2 passed in 22.92s      (the THIRD green run; the prior two: 23.68s / 22.37s)
+
+timeout 240 uv run pytest tests/integration/mcps_gateway/test_mcps_gateway_protocol.py \
+    tests/integration/mcps_gateway/test_fake_client_selftest.py -m integration -q
+#   → 34 passed, 28 warnings in 27.06s
+```
+
+**The `-m integration` marker is load-bearing.** The pyproject `addopts` is
+`-m 'not integration and not postgres and not slow'`, so the **marker-less**
+form of the second command collects **0** and reports the **34 tests
+deselected** — a vacuous green, not a green suite. Every regression command
+in the P3/P4/P5 briefs must carry `-m integration`.
+
+### 11.3 The carry-forwards (bound to the P3/P4/P5 briefs)
+
+| # | Carry-forward | Binds |
+|---|---|---|
+| **(a)** | **The fake-client regression command must carry `-m integration`.** The marker-less form deselects all 34 via the pyproject `addopts` — a vacuous pass, not a green suite. | P3, P4, P5 |
+| **(b)** | **The approver watch-list item-4 importer list is imprecise — re-derive it by grep.** `go_client.py` imports **NO** daemon module; `harness.py` **DOES** (pre-existing, not introduced by this lane). The list in §0 item 4 is the stale version. | P3, P4, P5 |
+| **(c)** | **Harden #16(c) with a roster-row presence check** — the assertion must prove the roster row is **present** (not only that the in-memory roster carries the entry). | P3 |
+| **(d)** | **`EVIDENCE_PATH` in `test_real_pair.py` is a dead constant** — the real-pair gate writes to **stdout** only; **only `p0_gate.py`** appends to the evidence files. | P3, P4, P5 |
+
+### 11.4 The findings register
+
+| Sev | Finding | Owner |
+|---|---|---|
+| 🟡 | **Dispatch-text marker omission** — the dispatch text did not carry the marker the command needs. **Dispatcher-side — NOT an implementer defect.** | dispatcher |
+| 🟢 | **The `23.55s × 3` figure was unproven** — this block records the **22.92s** third run; the earlier `23.68s` / `22.37s` pair stays as recorded in §2. | evidence |
+| 🟢 | **`EVIDENCE_PATH` is dead** (carry-forward **(d)**). | P3+ |
+| 🟢 | **The importer list is imprecise** (carry-forward **(b)**). | P3+ |
+| 🟢 | **#16(c) needs roster-row presence hardening** (carry-forward **(c)**). | P3+ |
+
+**The tally: 1× 🟡 (dispatcher-side) + 4× 🟢 — 0 critical, 0 implementer
+defects.**
