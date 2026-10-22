@@ -308,56 +308,72 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     """The CLI's argument parser."""
-    parser = argparse.ArgumentParser(
-        prog="wedge_capture.py",
-        description=(
-            "Read the daemon's wedge-capture evidence store (a thin HTTP "
-            "client over /api/wedge-captures)."
-        ),
+    # The connection flags live on a PARENT parser shared by every
+    # subparser: argparse only accepts a top-level flag BEFORE the
+    # subcommand, so a parent parser is what makes
+    # ``wedge_capture.py status --base-url ...`` (the documented operator
+    # form) work as well as the flag-first form. Without this, the
+    # subcommand form exited 2 on every invocation.
+    # ``argument_default=SUPPRESS`` is load-bearing: with the SAME flags on
+    # the parent and on every subparser, an unset subparser flag would
+    # OTHERWISE overwrite a value parsed before the subcommand with its
+    # own default (argparse shares one namespace). Suppressing the default
+    # means "not given here" never clobbers "given earlier"; the resolved
+    # defaults are filled in after parsing, below.
+    common = argparse.ArgumentParser(
+        add_help=False, argument_default=argparse.SUPPRESS
     )
-    parser.add_argument(
+    common.add_argument(
         "--base-url",
-        default=None,
         help=(
             "the daemon's base URL (default: ENSEMBLE_DAEMON_URL / "
             "DAEMON_PORT / PORT, else http://127.0.0.1:9797)"
         ),
     )
-    parser.add_argument(
+    common.add_argument(
         "--token",
-        default=None,
         help="bearer token — only needed when auth is ON",
     )
-    parser.add_argument(
+    common.add_argument(
         "--install-dir",
-        default=None,
         help=(
             "the install dir — used ONLY for the version display "
             "(default: the INSTALL_DIR env var). NEVER derived from $HOME."
         ),
     )
-    parser.add_argument(
+    common.add_argument(
         "--json",
         action="store_true",
         help="raw JSON passthrough",
     )
-    parser.add_argument(
+    common.add_argument(
         "--limit",
         type=int,
         default=50,
         help="the list page size (default 50)",
     )
 
+    parser = argparse.ArgumentParser(
+        prog="wedge_capture.py",
+        description=(
+            "Read the daemon's wedge-capture evidence store (a thin HTTP "
+            "client over /api/wedge-captures)."
+        ),
+        parents=[common],
+    )
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("list", help="the capture list (the default)")
-    get_parser = sub.add_parser("get", help="one capture's payload")
+    sub.add_parser("list", help="the capture list (the default)", parents=[common])
+    get_parser = sub.add_parser(
+        "get", help="one capture's payload", parents=[common]
+    )
     get_parser.add_argument("capture_id", help="the capture id")
     sub.add_parser(
         "capture",
         help="submit a manual capture (202 + the pre-allocated id)",
+        parents=[common],
     )
-    sub.add_parser("status", help="the watchdog status")
+    sub.add_parser("status", help="the watchdog status", parents=[common])
     return parser
 
 
@@ -366,10 +382,25 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
     # The default subcommand is ``list`` — ``wedge_capture.py`` with no
-    # arguments must not print usage.
-    if not argv or (argv[0].startswith("-") and argv[0] not in ("-h", "--help")):
+    # arguments (or only flags) must not print usage. A subcommand
+    # ANYWHERE in argv suppresses the rewrite: prepending ``list`` to a
+    # flag-first argv that already names a subcommand produced
+    # ``list --base-url … status`` and exited 2.
+    known_commands = {"list", "get", "capture", "status"}
+    if not any(token in known_commands for token in argv):
         argv = ["list", *argv]
     args = parser.parse_args(argv)
+    # Fill the connection-flag defaults that SUPPRESS withheld (see the
+    # parent-parser comment in ``build_parser``).
+    for name, value in (
+        ("base_url", None),
+        ("token", None),
+        ("install_dir", None),
+        ("json", False),
+        ("limit", 50),
+    ):
+        if not hasattr(args, name):
+            setattr(args, name, value)
     command = args.command or "list"
 
     install_dir = args.install_dir or os.environ.get("INSTALL_DIR")

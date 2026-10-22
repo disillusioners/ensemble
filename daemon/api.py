@@ -149,7 +149,9 @@ from daemon.routers import (
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
-from daemon.routers.wedge_capture import router as wedge_capture_router  # /api/wedge-captures (wedge-capture evidence store)
+# wedge-capture: ``wedge_capture_router`` is re-exported by
+# ``daemon.routers`` (see the import block above) — no second direct
+# import, so there is exactly ONE binding of the name.
 
 from daemon.mcp import (
     create_kb_mcp_server,

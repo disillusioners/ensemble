@@ -43,6 +43,7 @@ healthy-tick noise floor and could not fire at all.
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -99,7 +100,11 @@ class LagHistogram:
         if len(ordered) == 1:
             return ordered[0]
         # Nearest-rank percentile — no interpolation, no invented value.
-        rank = max(1, min(len(ordered), int(round(pct / 100.0 * len(ordered) + 0.5))))
+        # ``ceil`` (not ``round``): the earlier ``round(x + 0.5)`` form was
+        # subject to banker's rounding, so p95 of 1..100 reported 96 while
+        # p50 reported 50 — an inconsistent headline number in an evidence
+        # artifact. Nearest-rank is ``ceil(pct/100 * n)``, clamped to 1.
+        rank = max(1, min(len(ordered), math.ceil(pct / 100.0 * len(ordered))))
         return ordered[rank - 1]
 
     def as_dict(self) -> dict[str, Any]:

@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
 from .config import WedgeCaptureConfig
-from .lag_probe import PROBE_STOPPED, PROBE_UNKNOWN
+from .lag_probe import PROBE_INITIALIZING, PROBE_STOPPED, PROBE_UNKNOWN
 
 # ── the canonical trigger reasons (D3) ──────────────────────────────────────
 REASON_SUSTAINED_CPU = "sustained_cpu"
@@ -224,7 +224,8 @@ def evaluate(
         samples,
         lambda s: (
             s.lag_s is not None
-            and s.lag_state not in (PROBE_STOPPED, PROBE_UNKNOWN)
+            and s.lag_state
+            not in (PROBE_INITIALIZING, PROBE_STOPPED, PROBE_UNKNOWN)
             and s.lag_s >= config.lag_s
         ),
     )
@@ -259,11 +260,16 @@ def evaluate(
     if conc_run:
         window_process_s = sum(s.process_cpu_delta_s for s in conc_run)
         window_thread_s = sum(s.top_thread_delta_s for s in conc_run)
-        window_pct = (
-            (window_process_s / max(conc_run[-1].t - conc_run[0].t, 1e-9)) * 100.0
-            if conc_run
-            else 0.0
-        )
+        # The window's elapsed span. A single-sample window has NO span:
+        # fall back to that tick's own percentage. Dividing by an epsilon
+        # would fabricate an astronomical number and make the absolute
+        # floor trivially true — exactly the degenerate case F-06 exists
+        # to prevent.
+        window_elapsed_s = conc_run[-1].t - conc_run[0].t
+        if window_elapsed_s > 0:
+            window_pct = (window_process_s / window_elapsed_s) * 100.0
+        else:
+            window_pct = conc_run[-1].process_cpu_pct
         ratio = (window_thread_s / window_process_s) if window_process_s > 0 else 0.0
         above_floor = window_pct >= CONCENTRATION_ABSOLUTE_FLOOR_PCT
         conc_ok, conc_elapsed = _sustained(conc_run, config.cpu_sustain_s)

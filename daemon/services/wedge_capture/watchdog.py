@@ -642,6 +642,10 @@ class WedgeCaptureWatchdog:
                 max_captures=self._config.max_captures,
                 max_age_hours=self._config.max_age_hours,
                 max_disk_mb=self._config.max_disk_mb,
+                # Prune-on-write runs BEFORE the new capture exists, so
+                # one slot is reserved for it: the cap is then exact at
+                # every observation point (SC-7 / AC21).
+                reserve=1,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Wedge-capture: prune failed: %s", exc)

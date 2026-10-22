@@ -203,10 +203,14 @@ def _pool_stats(pool: Any) -> dict[str, Any] | None:
     """Read ``get_stats()`` defensively; ``None`` when it is unavailable."""
     if pool is None:
         return None
-    getter = getattr(pool, "get_stats", None)
-    if getter is None:
-        return None
     try:
+        # The ``getattr`` is INSIDE the guard: a pool-shaped object whose
+        # attribute access raises (a proxy, a half-torn-down pool) must
+        # degrade the counter block — never abort the capture. The
+        # instrument must never fail because of the thing it measures.
+        getter = getattr(pool, "get_stats", None)
+        if getter is None:
+            return None
         stats = getter()
     except Exception:  # noqa: BLE001
         return None

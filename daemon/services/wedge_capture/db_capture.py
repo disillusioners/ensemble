@@ -398,12 +398,24 @@ def write_capture_row(
 
 
 def _json_or_none(value: Any) -> Any:
-    """Coerce a value into something psycopg can bind as JSON."""
+    """Coerce a value into something psycopg can bind as JSON.
+
+    psycopg 3 does NOT adapt a bare ``dict``/``list`` for a ``%s``
+    placeholder — it raises ``ProgrammingError: cannot adapt type 'dict'``
+    and the row write fails on a REAL PostgreSQL backend (observed
+    against a live PG during this lane: the insert never landed). The
+    value must be wrapped in a ``Jsonb`` adapter. The import is lazy so
+    a SQLite-only / no-psycopg deployment still imports this module.
+    """
     if value is None:
         return None
-    if isinstance(value, (dict, list)):
-        return value
-    return str(value)
+    payload = value if isinstance(value, (dict, list)) else str(value)
+    try:
+        from psycopg.types.json import Jsonb
+
+        return Jsonb(payload)
+    except Exception:  # noqa: BLE001 — no psycopg ⇒ the write fails later anyway
+        return payload
 
 
 __all__ = [

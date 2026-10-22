@@ -323,7 +323,11 @@ def _list_captures(root: Path, limit: int) -> list[dict[str, Any]]:
     try:
         from daemon.services.wedge_capture.writer import capture_directories
 
-        for directory in reversed(capture_directories(root))[:limit]:
+        # Materialise BEFORE slicing: ``reversed()`` yields an iterator,
+        # and slicing it raises TypeError — which silently emptied the
+        # tool's list (the same defect the router's fallback carried).
+        newest_first = list(reversed(capture_directories(root)))
+        for directory in newest_first[:limit]:
             manifest_path = directory / "manifest.json"
             if not manifest_path.exists():
                 continue

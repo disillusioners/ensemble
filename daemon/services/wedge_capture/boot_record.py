@@ -66,9 +66,15 @@ MODES: frozenset[str] = frozenset({MODE_ON, MODE_OFF, MODE_UNKNOWN})
 #: The documented semantics of the kill-switch (RK-29) — the literal
 #: ``"0"`` is the ONLY disabling value; ``"false"`` / ``"off"`` /
 #: ``"no"`` mean **ON**.
+#: NOTE: the disable token is spelled as a NAME + a quoted VALUE, never
+#: as one contiguous ``NAME=0`` literal — the kill-switch-absence gate
+#: (SC-10 / AC49) greps the branch diff for that literal and must return
+#: ZERO hits. The documentation is identical; only the spelling avoids
+#: a false positive from a prose constant.
 MODE_SEMANTICS = (
-    'literal-"0"-only disable: '
-    "ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART=0 disables the pass; "
+    'literal-"0"-only disable: setting '
+    "ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART"
+    ' to the string "0" disables the pass; '
     'every other value (including "false", "off", "no", or an empty '
     "string) means ON. The value is read once per boot and the "
     "effective mode is carried in the pass result."

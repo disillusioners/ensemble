@@ -222,7 +222,12 @@ async def list_captures(request: Request, limit: int = 50) -> dict[str, Any]:
         source = "filesystem"
         from daemon.services.wedge_capture.writer import capture_directories
 
-        for directory in reversed(capture_directories(root))[: max(1, int(limit))]:
+        # ``reversed(list)`` is an ITERATOR — slicing it raises
+        # ``TypeError`` and would take the whole D12 filesystem fallback
+        # (the most valuable recovery path: a capture whose row write
+        # failed) down with it. Materialise first, slice second.
+        newest_first = list(reversed(capture_directories(root)))
+        for directory in newest_first[: max(1, int(limit))]:
             manifest = _directory_manifest(directory)
             if manifest is None:
                 continue
@@ -386,8 +391,12 @@ async def get_capture(request: Request, capture_id: str) -> dict[str, Any]:
             row = None
 
     capture_dir: Path | None = None
-    if row is not None and getattr(row, "capture_dir", None):
-        capture_dir = Path(row.capture_dir)
+    row_dir = getattr(row, "capture_dir", None) if row is not None else None
+    if isinstance(row_dir, str) and row_dir.strip():
+        # A row value that is not a usable path string is IGNORED (the
+        # filesystem fallback still applies) — a read must never 500 on
+        # a malformed row (AC28's "never a 500" posture).
+        capture_dir = Path(row_dir)
     else:
         candidate = root / capture_id
         if candidate.exists():

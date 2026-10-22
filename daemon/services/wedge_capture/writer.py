@@ -211,12 +211,26 @@ def prune_captures(
     max_age_hours: int,
     max_disk_mb: int,
     now: float | None = None,
+    reserve: int = 0,
 ) -> list[Path]:
     """Prune the capture directories until the caps hold (D23 / A3).
 
     **The directories are the authority, never the table.** The walk
     is mtime-ordered (oldest first) and prunes the oldest until the
     count / age / disk caps hold.
+
+    Args:
+        root: The capture root.
+        max_captures: The COUNT cap (the number of captures that may
+            REMAIN after the prune).
+        max_age_hours: The age cap.
+        max_disk_mb: The disk cap.
+        now: The reference instant (tests inject it).
+        reserve: Slots to leave free for the capture that is ABOUT to be
+            written. ``run_capture`` prunes BEFORE writing, so it passes
+            ``reserve=1`` — otherwise a ``max_captures=3`` run would sit
+            at 3 survivors and the new capture would take it to 4
+            (SC-7/AC21's "a 5-capture run leaves exactly 3").
 
     Returns:
         The pruned (deleted) directories, oldest first.
@@ -254,8 +268,9 @@ def prune_captures(
         else:
             survivors.append(path)
 
-    # Count cap — the oldest go first.
-    while len(survivors) > max_captures:
+    # Count cap — the oldest go first, leaving ``reserve`` slots free.
+    keep = max(1, max_captures - max(0, reserve))
+    while len(survivors) > keep:
         victim = survivors.pop(0)
         _remove_capture(victim)
         removed.append(victim)
@@ -434,10 +449,16 @@ class CaptureWriter:
         if extra_manifest:
             manifest.update(extra_manifest)
 
-        manifest_status = self._guarded(
-            started,
-            lambda: self._write_json(capture_dir / "manifest.json", manifest),
-        )
+        # The manifest is NEVER budget-gated (AC9 / A-F7-iv): it is the
+        # capture's INDEX, so skipping it would turn a partial capture
+        # into an UNDISCOVERABLE one. Every data step above may be
+        # ``skipped:budget``; the manifest write is always ATTEMPTED, and
+        # its failure is still swallowed into ``ok=False`` (never raises).
+        try:
+            self._write_json(capture_dir / "manifest.json", manifest)
+            manifest_status = "ok"
+        except Exception as exc:  # noqa: BLE001 — one artifact degrades
+            manifest_status = f"failed:{type(exc).__name__}"
         artifacts["manifest.json"] = manifest_status
         manifest["artifacts"] = artifacts
         result.manifest = manifest
