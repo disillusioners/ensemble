@@ -755,6 +755,9 @@ Field notes:
   dies with its connection, §6.8; there is no resumption).
 * `args_hash` is the SHA-256 of the canonicalised arguments; the
   arguments themselves are never stored (§8.4).
+* `count` is the length of THIS PAGE — the number of rows in this
+  response — NOT the total size of the audit ledger, which the read
+  surface does not expose.
 
 ### 8.4 Pagination, auth and failure modes
 
