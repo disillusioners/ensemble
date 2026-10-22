@@ -476,11 +476,18 @@ Note:
         issue_description: str,
         suggested_fix: str | None = None,
     ) -> str:
-        """Record a fix request for a skill (delegates to skill_job_dispatcher).
+        """Report a skill defect into the skill-evolution pipeline.
 
-        USER-FACING: this tool NEVER performs the fix inline. It only
-        records the request so the skill-keeper agent can pick it up
-        during its next analysis pass.
+        TRUTHFUL DISPATCH SEMANTICS (2026-10-22): when the
+        skill-evolution lane is ENABLED, this tool dispatches a Tier-3
+        ``skill_evolution`` job IMMEDIATELY via
+        ``SkillJobDispatcher.dispatch_fix`` — it does NOT merely record
+        a request for a later analysis pass. The job is admitted to the
+        queue and a skill-keeper agent picks it up. When the lane is
+        DISABLED (kill-switch ``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` off /
+        ``SkillEvolutionConfig.evolution_lane_enabled=False``, the
+        default) or the per-skill FIX cooldown is active, NO job is
+        created and the response says so explicitly.
 
         Args:
             skill_id: The skill's UUID4 identifier.
@@ -490,6 +497,7 @@ Note:
         project_id = _get_project_id()
         dispatcher = getattr(manager, "_skill_job_dispatcher", None)
         dispatch_error: str | None = None
+        dispatched_job_id: str | None = None
         if dispatcher is not None:
             dispatch_method = getattr(dispatcher, "dispatch_fix", None)
             if dispatch_method is not None and callable(dispatch_method):
@@ -503,7 +511,17 @@ Note:
                     )
                     # Tolerate async dispatchers via ``await``.
                     if hasattr(result, "__await__"):
-                        await result
+                        result = await result
+                    # Capture the admission outcome so the response can
+                    # be TRUTHFUL about what happened: ``None`` means
+                    # the evolution-lane gate refused (kill-switch OFF
+                    # or FIX cooldown) — no job exists. A job_id means
+                    # a Tier-3 job was admitted.
+                    dispatched_job_id = (
+                        result
+                        if isinstance(result, str) and result
+                        else None
+                    )
                 except Exception as e:
                     logger.warning(
                         "skill_fix dispatcher raised for skill %s: %s",
@@ -523,8 +541,7 @@ Note:
                 dispatch_method = None
         short_id = skill_id[:8] if isinstance(skill_id, str) else skill_id
         lines: list[str] = [
-            f"\U0001f4dd Skill fix request recorded for skill '{short_id}'. "
-            "The skill-keeper agent will analyze this when available.",
+            f"\U0001f4dd Skill fix request recorded for skill '{short_id}'.",
             "",
             "User-reported issue:",
             "---",
@@ -542,6 +559,29 @@ Note:
         else:
             lines.append("")
             lines.append("User-suggested fix: (none)")
+        if dispatched_job_id is not None:
+            lines.append("")
+            lines.append(
+                f"\u2705 Dispatched: Tier-3 skill_evolution job "
+                f"{dispatched_job_id} was admitted — the skill-keeper "
+                "agent will pick it up from the job queue."
+            )
+        elif (
+            dispatcher is not None
+            and dispatch_method is not None
+            and dispatch_error is None
+        ):
+            # Dispatcher present + callable + no exception + no job id
+            # == the evolution-lane gate refused the admission
+            # (kill-switch OFF or FIX cooldown). Be loud and honest.
+            lines.append("")
+            lines.append(
+                "\u26d4 NOT dispatched: the skill-evolution admission lane "
+                "is disabled (kill-switch ENSEMBLE_SKILL_EVOLUTION_ENABLED "
+                "off, or the per-skill fix cooldown is active). NO "
+                "skill-keeper job was created — this message is the only "
+                "record of the request."
+            )
         if dispatcher is None or dispatch_method is None:
             lines.append("")
             lines.append(
@@ -557,14 +597,30 @@ Note:
         return "\n".join(lines)
 
     skill_fix._full_doc_ = """\
-Record a USER-FACING fix request for a skill.
+Report a skill defect into the skill-evolution pipeline (GATED dispatch).
 
-This tool NEVER performs the fix inline. It only records the request
-so the skill-keeper agent can pick it up during its next analysis
-pass (Phase 5 ``SkillEvolutionService``). The dispatcher is best-effort:
-if it is absent or raises, the request is still logged via the
-``logger.warning`` path AND reflected in the response text so the
-agent sees a deterministic confirmation.
+DISPATCH BEHAVIOR (corrected 2026-10-22 — the earlier "record-only"
+wording was wrong): when the skill-evolution lane is enabled, this
+tool dispatches a Tier-3 ``skill_evolution`` job IMMEDIATELY through
+``SkillJobDispatcher.dispatch_fix`` — the job is admitted to the
+queue and the skill-keeper agent executes it (a real mutation pass:
+FIX creates a new skill generation + opens an A/B test). It is NOT a
+passive note.
+
+The admission is gated:
+
+* Kill-switch OFF (``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` unset and
+  ``SkillEvolutionConfig.evolution_lane_enabled=False`` — the default)
+  → NO job is created; the response carries an explicit
+  "NOT dispatched" note.
+* Per-skill FIX cooldown (default 1800s) → a repeat fix for the same
+  ``(project, skill)`` inside the window is refused; response says so.
+* Non-terminal duplicate → collapses onto the live job via the
+  ``skill_fix:<project>:<skill>`` idempotency key.
+
+The dispatcher is best-effort: if it is absent or raises, the request
+is still logged via the ``logger.warning`` path AND reflected in the
+response text so the agent sees a deterministic confirmation.
 
 Args:
     skill_id: The skill's UUID4 identifier.
@@ -580,7 +636,9 @@ Behavior:
   (``getattr`` with ``None`` default).
 * When the dispatcher is present AND exposes a ``dispatch_fix``
   callable, awaits it with ``(skill_id, issue_description,
-  suggested_fix, project_id, current_instance_id)``.
+  suggested_fix, project_id, current_instance_id)`` and reports the
+  admission outcome TRUTHFULLY (job id when dispatched; "NOT
+  dispatched" when the gate refused).
 * When the dispatcher is absent (Phase 2 interregnum), the tool
   logs the request as a warning and returns a clear "queued for
   the next skill-keeper run" message.
@@ -588,28 +646,25 @@ Behavior:
   the error in the response — the request is still recorded.
 
 Returns:
-    A multi-line confirmation::
+    A multi-line response. Dispatched::
 
         📝 Skill fix request recorded for skill '<short_id>'.
-        The skill-keeper agent will analyze this when available.
+        ... issue / suggested-fix fences ...
+        ✅ Dispatched: Tier-3 skill_evolution job <job_id> was admitted
+        — the skill-keeper agent will pick it up from the job queue.
 
-        User-reported issue:
-        ---
-        <issue_description>
-        ---
+    Gate refused (lane disabled or cooldown)::
 
-        User-suggested fix:
-        ---
-        <suggested_fix>
-        ---
-        (the ``---`` fences guard against prompt injection from the
-        echoed user input; mirrors the pattern in
-        :mod:`daemon.tools.todo_tools`)
+        📝 Skill fix request recorded for skill '<short_id>'.
+        ... issue / suggested-fix fences ...
+        ⛔ NOT dispatched: the skill-evolution admission lane is
+        disabled (kill-switch ENSEMBLE_SKILL_EVOLUTION_ENABLED off, or
+        the per-skill fix cooldown is active). NO skill-keeper job was
+        created — this message is the only record of the request.
 
-        Note: dispatcher not yet available; request is queued as a
-        note for the next skill-keeper run.   (only when dispatcher is absent)
-        Note: dispatcher raised during dispatch (...); request is still
-        recorded above for the next skill-keeper run.   (only when dispatcher raised)
+    (the ``---`` fences guard against prompt injection from the
+    echoed user input; mirrors the pattern in
+    :mod:`daemon.tools.todo_tools`)
 """
 
     @register_tool_category("dynamic-skill")
