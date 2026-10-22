@@ -140,7 +140,7 @@ class TestStaticRegistrationChecklist:
         )
 
     def test_attestation_not_in_privileged_categories(self) -> None:
-        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly twelve entries
+        """``PRIVILEGED_TOOL_CATEGORIES`` is exactly fifteen entries
         (the daemon-internal authority trio ``system_upgrade``,
         ``system-log``, ``ens-db`` plus ``ens-env`` per the W4
         leader decision 2026-10-02, ``view-views`` per the
@@ -234,8 +234,18 @@ class TestStaticRegistrationChecklist:
             # board. The ari + leader tools.allow entries are the only
             # access path; the tool body ALSO carries the runtime
             # agent_id gate.
+            # nest-ops (2026-10-21): the two maintenancer fleet categories
+            # (read #13 / act #14) — opt-in-only, never default-granted.
+            "instance_read",
+            "instance_ops",
             "board-link",
-        })
+                # remote-hands center gateway (2026-10-22): the ``mcp_rpc``
+        # category — the agent-facing surface that drives an ENROLLED
+        # remote machine (SPEC.md v0.1). opt-in-only; the ari + leader
+        # allow entries are the only access path, and every tool body
+        # ALSO carries its own agent_id gate.
+        "mcp_rpc",
+})
 
 
 # ── Live tool behavior: decorator order survives langchain wrap ─────────────

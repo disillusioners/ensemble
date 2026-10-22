@@ -109,6 +109,23 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     # unauthorized 34th mount still fails this test loudly.
     "mcp_kb_keys_router",   # /api/mcp/kb/keys (OAuth2 human lane)
     "auth_router",          # /api/auth/*
+    # remote-hands center gateway (2026-10-22): the WebSocket route the
+    # controlled machines dial OUT to (SPEC.md v0.1). The rationale the
+    # guard demands, for this ONE addition:
+    #   (a) it is NOT an HTTP endpoint for the wake — it is a WebSocket
+    #       route (the machine dials the center out; §2.3), and it adds
+    #       no REST surface to the daemon;
+    #   (b) it is registered ONLY when MCPS_GATEWAY_ENABLED is ON (the
+    #       route is not registered at all when the kill switch is off),
+    #       so the OFF-state route table is untouched;
+    #   (c) the accompanying census — the textual include_router count in
+    #       tests/unit/test_router_scope_manifest.py (33 -> 34) and the
+    #       route-family manifest in
+    #       tests/integration/test_router_class_manifest.py — is updated
+    #       in the SAME commit.
+    # The guard's intent is UNCHANGED: an unauthorized 35th mount still
+    # fails this test loudly.
+    "mcp_gateway_router",   # /api/mcps-gateway/ws (WebSocket, kill-switch gated)
 )
 
 # Names that are explicitly REJECTED for the wake surface (D-FA3.1

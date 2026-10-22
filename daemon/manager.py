@@ -132,6 +132,10 @@ from .services.skill_injection_service import SkillInjectionService
 from .services.prompt_version_service import PromptVersionService
 from .services.secret_service import SecretService
 from .services.board_service import BoardService
+# remote-hands center gateway (2026-10-22) — the CENTER service of the
+# remote-hands protocol (SPEC.md v0.1) and its DB-backed audit sink.
+from .services.mcps_gateway.config import load_gateway_config
+from .repositories.mcps_gateway.repository import McpGatewayAuditRepository
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
 from .services.skill_job_dispatcher import SkillJobDispatcher
@@ -1432,6 +1436,24 @@ class InstanceManager:
         # direct constructors and ad-hoc tests get a working service
         # without the lifespan having run.
         self._board_service = BoardService(engine=self._engine)
+        # remote-hands center gateway (2026-10-22): the CENTER service of
+        # the remote-hands protocol (SPEC.md v0.1). One instance per
+        # process — the roster of the enrolled machines and the live
+        # sessions are GLOBAL state, exactly like the board. Constructed
+        # here (not in the api.py lifespan) so direct constructors and
+        # ad-hoc tests get a working service without the lifespan having
+        # run.
+        #
+        # The transport itself (the WebSocket route) is registered only
+        # when ``MCPS_GATEWAY_ENABLED`` is ON — the service exists either
+        # way so that the agent tools can refuse with a typed error
+        # instead of vanishing.
+        from .services.mcps_gateway.service import McpGatewayService
+
+        self._mcps_gateway_service = McpGatewayService(
+            config=load_gateway_config(),
+            audit_sink=McpGatewayAuditRepository(engine=self._engine),
+        )
         # Phase A T6 / T7: register the repo with the loader so the
         # ``load_and_cache_prompt`` hook can lazily look it up. The
         # loader MUST NOT import the repository class at module load
@@ -2003,6 +2025,11 @@ class InstanceManager:
                 embedding_service=self._skill_embedding_service,
                 llm_config=skill_llm_config,
                 config=self.config.skill_evolution,
+                # Agent-ownership filter (2026-10-21): the search
+                # layer joins skills.source_skill_bank_id ->
+                # skill_bank.id to keep owner-private planner
+                # skills out of other agents' injection results.
+                skill_bank_repo=self._skill_bank_repo,
             )
         else:
             self._skill_embedding_service = None
@@ -11886,7 +11913,10 @@ class InstanceManager:
         return True
 
     async def terminate_instance(
-        self, instance_id: str, terminal_reason: str = "aborted"
+        self,
+        instance_id: str,
+        terminal_reason: str = "aborted",
+        audit_sink=None,
     ) -> bool:
         """Terminate an instance.
 
@@ -11910,7 +11940,7 @@ class InstanceManager:
             True if termination was successful, False if instance was not found.
         """
         return await self._lifecycle_service.terminate_instance(
-            instance_id, terminal_reason=terminal_reason
+            instance_id, terminal_reason=terminal_reason, audit_sink=audit_sink
         )
 
     async def hard_delete_instance(self, instance_id: str) -> dict[str, Any]:
@@ -13519,6 +13549,7 @@ class InstanceManager:
         search: str | None = None,
         order: str = "pinned",
         source: str | None = None,
+        status: str | None = None,
     ) -> tuple[list[dict], int, bool]:
         """List instances with pagination.
 
@@ -13550,6 +13581,12 @@ class InstanceManager:
                 ``USER_ORIGIN_CHAT_SOURCE_TYPES``). Any other string matches
                 a single ``source_type`` value. ``None`` (default) applies
                 no source filter.
+            status: Optional exact ``InstanceStatus`` filter, applied
+                **in SQL** by the repository. Added for the nest-ops
+                ``instance_read`` category (GT-3 / AC-21): a status filter
+                applied in Python over a fetched page silently returns an
+                arbitrary pinned-ordered subset past the first page.
+                ``None`` (default) applies no status filter.
 
         Returns:
             Tuple of (list of instance info dicts, total count, truncated flag).
@@ -13567,6 +13604,7 @@ class InstanceManager:
             search=search,
             order=order,
             source=source,
+            status=status,
         )
 
     def get_instance_info(self, instance_id: str) -> dict:
@@ -13797,6 +13835,26 @@ class InstanceManager:
         replaced.
         """
         return self._board_service
+
+    @property
+    def mcps_gateway_service(self):
+        """The remote-hands gateway service — the CENTER of the protocol.
+
+        One instance per process: the roster of the enrolled machines and
+        the live sessions are GLOBAL state — the same reasoning as the
+        board. The agent tools (via ``create_mcp_rpc_tools_if_available``)
+        and the WebSocket route (via ``app.state``) share this one seam.
+
+        The service exists even when the transport is off
+        (``MCPS_GATEWAY_ENABLED`` is DEFAULT OFF): the ROUTE is not
+        registered at all when the switch is off, and the TOOLS refuse
+        with a typed error — the tool layer must never look healthy while
+        the transport is dead.
+
+        Read-only property: the service is constructed once and never
+        replaced.
+        """
+        return self._mcps_gateway_service
 
     def find_near_instance(self, instance_id: str, max_distance: int = DEFAULT_FUZZY_MATCH_DISTANCE) -> list[str]:
         """Find all near-matching instance IDs from recent instances.

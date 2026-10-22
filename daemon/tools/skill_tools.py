@@ -157,7 +157,10 @@ def create_skill_tools(
             )
         try:
             result = await service.search(
-                query, project_id=project_id, max_results=limit
+                query,
+                project_id=project_id,
+                max_results=limit,
+                agent_id=_get_agent_id(),
             )
             return json.dumps(result, default=_json_default, indent=2)
         except Exception as e:

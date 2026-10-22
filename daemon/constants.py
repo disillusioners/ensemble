@@ -766,6 +766,48 @@ ALIVE_INSTANCE_STATUSES: frozenset[str] = frozenset({
 })
 
 
+# ── Non-terminal TASK statuses (running-zombie cycle 3, 2026-10-21) ────────────
+#
+# A ``task`` row whose status is in this set means "a turn is IN
+# FLIGHT on this instance". The canonical home for the set — the same
+# fork-prevention shape as the instance-status sets above (a duplicated
+# status set is a silent-divergence risk; the codebase's own comment on
+# ``ALIVE_INSTANCE_STATUSES`` says so).
+#
+# Consumers:
+#   * ``daemon/services/mission_live_guard.py`` — the MEMBER-ALIVE
+#     companion leg: a non-terminal member that owns a LIVE task row
+#     that is YOUNGER than the guard's staleness horizon counts as
+#     ALIVE (not stale), so the zombie backstop does not break a tree
+#     whose member is mid-turn (fail-MISS over a false completion).
+#   * ``daemon/services/mission_strand_healer.py`` — the
+#     running-zombie strand's root-level leg (a live task row on the
+#     ROOT means a turn is still in flight).
+#
+# Values mirror ``TaskStatus`` (``daemon/repositories/task/models.py``):
+# PENDING, RUNNING, PAUSED. ``processing`` is LEGACY task vocabulary —
+# it is NOT a ``TaskStatus`` member (the enum carries PENDING /
+# RUNNING / PAUSED / COMPLETED / FAILED / CANCELLED) — and the set
+# keeps it DELIBERATELY for legacy rows, so a legacy in-flight turn
+# still counts as live work. Kept as raw strings so
+# ``daemon.constants`` stays dependency-free.
+#
+# NOTE (2026-10-21, cycle 4): the INSTANCE repository's own live-task
+# list (behind ``has_live_work`` —
+# ``daemon/repositories/instance/repository.py``) carries only
+# ``pending``/``running``/``paused`` — it answers a DIFFERENT
+# question ("does this instance have live work for the zombie scan").
+# The guard's leg therefore decides on THIS set (the canonical one, the
+# SSOT), so the legacy ``processing`` shape stays protected; the
+# repository's probe answer never vetoes it.
+NON_TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({
+    "pending",
+    "running",
+    "paused",
+    "processing",
+})
+
+
 # ── Source-Validation Boundary (stability-backlog item 7, F2 pre-close) ────────
 
 # Reserved source values for the ``source`` field of ``JobItem`` /

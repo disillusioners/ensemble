@@ -3915,6 +3915,7 @@ class InstanceMessagingService:
                                         skill_project_id,
                                         instance_id,
                                         message_id,
+                                        agent_id=skill_instance_meta.agent_id,
                                     )
                                     if injection_text:
                                         # the metrics service queries this

@@ -1749,6 +1749,7 @@ async def _run_skill_search(
     instance_id: str,
     manager: Any,
     message_id: str | None = None,
+    agent_id: str | None = None,
 ) -> tuple[str | None, list[str]]:
     """Run ``SkillInjectionService.inject_skills`` with graceful fallback.
 
@@ -1768,6 +1769,11 @@ async def _run_skill_search(
             attaches to. ``None`` → fall back to ``instance_id`` so
             legacy call sites keep working and search-result
             caching remains scoped to the instance.
+        agent_id: The receiving agent's id. Forwarded to the
+            injector for the agent-ownership search filter
+            (2026-10-21) — bank-cloned skills owned by another
+            agent are never injected here. ``None`` disables the
+            filter.
 
     Returns:
         Tuple ``(injection_text, skill_ids)`` matching the
@@ -1784,6 +1790,7 @@ async def _run_skill_search(
             project_id=project_id,
             instance_id=instance_id,
             message_id=effective_message_id,
+            agent_id=agent_id,
         )
         if not isinstance(result, tuple) or len(result) != 2:
             logger.warning(
@@ -1999,6 +2006,7 @@ async def assemble_context_messages(
                 instance_id=instance_id,
                 manager=manager,
                 message_id=message_id,
+                agent_id=getattr(agent_meta, "id", None),
             )
         skills_msg = build_skills_message(injection_text)
         if skills_msg is None:
@@ -2294,6 +2302,7 @@ async def assemble_context_messages(
                 instance_id=instance_id,
                 manager=manager,
                 message_id=message_id,
+                agent_id=getattr(agent_meta, "id", None),
             )
 
         skills_msg = build_skills_message(injection_text)

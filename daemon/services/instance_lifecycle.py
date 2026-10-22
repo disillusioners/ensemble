@@ -37,6 +37,7 @@ gains that justify the current size. Track in
 """
 
 import asyncio
+from collections.abc import Callable
 import concurrent.futures
 import json
 import logging
@@ -2537,7 +2538,10 @@ class InstanceLifecycleService:
             )
 
     async def terminate_instance(
-        self, instance_id: str, terminal_reason: str = "aborted"
+        self,
+        instance_id: str,
+        terminal_reason: str = "aborted",
+        audit_sink: "Callable[[Session], None] | None" = None,
     ) -> bool:
         """Terminate an instance.
 
@@ -2573,6 +2577,16 @@ class InstanceLifecycleService:
                 is the canonical target of :func:`canonicalize_status`.
                 Children terminated as part of the cascade always get
                 ``"aborted"`` regardless of the parent's reason.
+
+        Args (nest-ops D-15, Tier-1):
+            audit_sink: OPTIONAL hook invoked INSIDE the DB half's
+                ``WriteGuardSession``, AFTER the cascade writes and BEFORE
+                the commit. The ``instance_ops`` audit ledger passes a
+                closure that INSERTs the audit row on the SAME session, so
+                the act and its audit row commit TOGETHER or NEITHER
+                commits. ``None`` (the default) is byte-identical to the
+                pre-hook behaviour for every existing caller — the hook is
+                strictly opt-in from the new tool layer.
 
         Returns:
             True if termination was successful, False if instance was not found.
@@ -2830,6 +2844,7 @@ class InstanceLifecycleService:
                 self._manager.write_guard,
                 instance_id,
                 terminal_reason,
+                audit_sink,
             )
 
             if db_result.skip:
@@ -5013,6 +5028,7 @@ class InstanceLifecycleService:
         search: str | None = None,
         order: str = "pinned",
         source: str | None = None,
+        status: str | None = None,
     ) -> tuple[list[dict], int, bool]:
         """List instances with pagination.
 
@@ -5048,6 +5064,14 @@ class InstanceLifecycleService:
                 slack, discord, whatsapp). Any other string is matched as a
                 single ``source_type`` value. ``None`` (default) applies no
                 source filter.
+            status: Optional exact ``InstanceStatus`` filter, applied
+                **in SQL** by the repository (``repo.list(status=...)``).
+                Added for the nest-ops ``instance_read`` category: a status
+                filter applied in Python over a fetched page silently
+                returns an arbitrary pinned-ordered subset past the first
+                page — the SQL-side filter is the only honest shape
+                (GT-3 / AC-21). ``None`` (default) applies no status
+                filter.
 
         Returns:
             Tuple of (list of instance info dicts, total count, truncated flag).
@@ -5151,6 +5175,7 @@ class InstanceLifecycleService:
         write_guard,
         instance_id: str,
         terminal_reason: str = "aborted",
+        audit_sink: "Callable[[Session], None] | None" = None,
     ) -> _TerminateResult:
         """Sync DB half of ``terminate_instance`` (H10 fix).
 
@@ -5461,6 +5486,18 @@ class InstanceLifecycleService:
                 text("DELETE FROM instance_hierarchy WHERE parent_id = :iid"),
                 {"iid": instance_id},
             )
+
+            # ── nest-ops D-15 Tier-1: the audit_sink hook ──────────────
+            # Invoked AFTER the cascade writes and BEFORE the commit, on
+            # the SAME session: the instance_ops audit ledger INSERTs its
+            # row here, so the act and the audit row commit TOGETHER or
+            # NEITHER commits (an audit-write failure rolls the terminate
+            # back). ``None`` (the default) skips the hook entirely —
+            # byte-identical to the pre-hook behaviour. The sink is NOT
+            # invoked on either skip path above (a skipped node is a
+            # no-op, and an audit row must not claim a no-op).
+            if audit_sink is not None:
+                audit_sink(session)
 
             # ── COMMIT ── atomic across all 5 steps above (Step 4b is
             # the task-table cleanup that closes the message-not-found

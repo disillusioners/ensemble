@@ -51,6 +51,7 @@ def make_skill(
     description: str = "Review code for bugs and style.",
     content: str = "",
     project_id: str | None = None,
+    source_skill_bank_id: str | None = None,
 ) -> SimpleNamespace:
     """Build a minimal stand-in for a :class:`Skill` row.
 
@@ -67,6 +68,7 @@ def make_skill(
         project_id=project_id,
         is_active=True,
         status="active",
+        source_skill_bank_id=source_skill_bank_id,
     )
 
 
@@ -187,6 +189,7 @@ def make_service(
     embedding_service: MagicMock | None = None,
     llm_config: dict | None = None,
     config: MagicMock | None = None,
+    skill_bank_repo: MagicMock | None = None,
 ) -> SkillSearchService:
     """Construct a :class:`SkillSearchService` with sensible defaults."""
     return SkillSearchService(
@@ -201,6 +204,7 @@ def make_service(
         ),
         llm_config=llm_config if llm_config is not None else make_llm_config(),
         config=config if config is not None else make_config(),
+        skill_bank_repo=skill_bank_repo,
     )
 
 
@@ -442,6 +446,249 @@ class TestBm25Prefilter:
         call_kwargs = repo.list.call_args.kwargs
         assert call_kwargs.get("project_id") == "proj-x"
         assert call_kwargs.get("active_only") is True
+
+
+def make_bank_repo(
+    *,
+    owners: dict[str, str | None] | None = None,
+    side_effect: Exception | None = None,
+) -> MagicMock:
+    """Build a mock :class:`SkillBankRepository` for ownership lookups.
+
+    ``get_agent_owners(item_ids)`` mirrors the real batch method —
+    it returns a mapping for the *known* IDs only (unknown IDs are
+    absent), which is what the service's orphan handling expects.
+    """
+    owner_map = dict(owners or {})
+    repo = MagicMock()
+    if side_effect is not None:
+        repo.get_agent_owners = MagicMock(side_effect=side_effect)
+    else:
+        def _get_owners(item_ids: list[str]) -> dict[str, str | None]:
+            return {i: owner_map[i] for i in item_ids if i in owner_map}
+
+        repo.get_agent_owners = MagicMock(side_effect=_get_owners)
+    return repo
+
+
+# ============================================================
+# TestOwnerPrivateFilter
+# ============================================================
+
+
+class TestOwnerPrivateFilter:
+    """Agent-ownership filter over the search corpus (2026-10-21).
+
+    The leak: an ``auto_load=True`` owner-agent planner skill
+    (e.g. ``tidier-strategy``) materializes into project scope and
+    was previously a BM25 candidate for EVERY agent's search.
+    The filter joins ``skills.source_skill_bank_id`` to
+    ``skill_bank.agent_id`` and drops rows owned by another agent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_other_agent_owned_skill_excluded(self):
+        # tidier's planner skill — owned by "tidier"; a worker's
+        # search must not surface it even though the text matches.
+        s = make_skill(
+            skill_id="s-tidier",
+            name="tidier-strategy",
+            description="Plan a craftsmanship review and dispatch workers.",
+            content="Strategy for planning a Tidier review.",
+            source_skill_bank_id="bank-tidier",
+        )
+        bank = make_bank_repo(owners={"bank-tidier": "tidier"})
+        service = make_service(
+            skill_repo=make_skill_repo(skills=[s]),
+            skill_bank_repo=bank,
+        )
+
+        result = await service._bm25_prefilter(
+            "plan craftsmanship review", project_id="proj", top_k=10,
+            agent_id="worker",
+        )
+
+        assert result == []
+        # The lookup was issued with the skill's source bank id.
+        bank.get_agent_owners.assert_called_once_with(["bank-tidier"])
+
+    @pytest.mark.asyncio
+    async def test_owner_agent_still_sees_own_skill(self):
+        s = make_skill(
+            skill_id="s-tidier",
+            name="tidier-strategy",
+            description="Tidier review dispatch planner.",
+            content="Dispatch tidier workers.",
+            source_skill_bank_id="bank-tidier",
+        )
+        service = make_service(
+            skill_repo=make_skill_repo(skills=[s]),
+            skill_bank_repo=make_bank_repo(owners={"bank-tidier": "tidier"}),
+        )
+
+        result = await service._bm25_prefilter(
+            "tidier dispatch", project_id="proj", top_k=10,
+            agent_id="tidier",
+        )
+
+        assert [x.id for x in result] == ["s-tidier"]
+
+    @pytest.mark.asyncio
+    async def test_generic_bank_skill_visible_to_all(self):
+        # ``skill_bank.agent_id IS NULL`` → shared/generic.
+        s = make_skill(
+            skill_id="s-shared",
+            name="git-hygiene",
+            description="Shared git hygiene rules.",
+            content="Commit hygiene.",
+            source_skill_bank_id="bank-shared",
+        )
+        service = make_service(
+            skill_repo=make_skill_repo(skills=[s]),
+            skill_bank_repo=make_bank_repo(owners={"bank-shared": None}),
+        )
+
+        result = await service._bm25_prefilter(
+            "git hygiene", project_id="proj", top_k=10,
+            agent_id="worker",
+        )
+
+        assert [x.id for x in result] == ["s-shared"]
+
+    @pytest.mark.asyncio
+    async def test_organic_project_skill_visible_to_all(self):
+        # No ``source_skill_bank_id`` → created directly in project
+        # scope; never filtered.
+        s = make_skill(
+            skill_id="s-organic",
+            name="project-notes",
+            description="Notes about this project's deploy.",
+            content="Deploy via make release.",
+            source_skill_bank_id=None,
+        )
+        service = make_service(
+            skill_repo=make_skill_repo(skills=[s]),
+            skill_bank_repo=make_bank_repo(owners={}),
+        )
+
+        result = await service._bm25_prefilter(
+            "deploy release", project_id="proj", top_k=10,
+            agent_id="worker",
+        )
+
+        assert [x.id for x in result] == ["s-organic"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_requester_disables_filter(self):
+        # ``agent_id=None`` (legacy/admin callers) → pre-fix behavior.
+        s = make_skill(
+            skill_id="s-tidier",
+            name="tidier-strategy",
+            description="Tidier planner.",
+            content="Dispatch tidier workers.",
+            source_skill_bank_id="bank-tidier",
+        )
+        bank = make_bank_repo(owners={"bank-tidier": "tidier"})
+        service = make_service(
+            skill_repo=make_skill_repo(skills=[s]),
+            skill_bank_repo=bank,
+        )
+
+        result = await service._bm25_prefilter(
+            "tidier dispatch", project_id="proj", top_k=10,
+            agent_id=None,
+        )
+
+        assert [x.id for x in result] == ["s-tidier"]
+        bank.get_agent_owners.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_bank_repo_disables_filter(self):
+        # Older wiring / unit-test mocks without the bank repo.
+        s = make_skill(
+            skill_id="s-tidier",
+            name="tidier-strategy",
+            description="Tidier planner.",
+            content="Dispatch tidier workers.",
+            source_skill_bank_id="bank-tidier",
+        )
+        service = make_service(skill_repo=make_skill_repo(skills=[s]))
+
+        result = await service._bm25_prefilter(
+            "tidier dispatch", project_id="proj", top_k=10,
+            agent_id="worker",
+        )
+
+        assert [x.id for x in result] == ["s-tidier"]
+
+    @pytest.mark.asyncio
+    async def test_bank_lookup_failure_fails_open(self):
+        # Transient DB fault must not strip the whole corpus.
+        s = make_skill(
+            skill_id="s-tidier",
+            name="tidier-strategy",
+            description="Tidier planner.",
+            content="Dispatch tidier workers.",
+            source_skill_bank_id="bank-tidier",
+        )
+        service = make_service(
+            skill_repo=make_skill_repo(skills=[s]),
+            skill_bank_repo=make_bank_repo(side_effect=RuntimeError("db down")),
+        )
+
+        result = await service._bm25_prefilter(
+            "tidier dispatch", project_id="proj", top_k=10,
+            agent_id="worker",
+        )
+
+        assert [x.id for x in result] == ["s-tidier"]
+
+    @pytest.mark.asyncio
+    async def test_mixed_corpus_keeps_only_visible_rows(self):
+        owned = make_skill(
+            skill_id="s-owned",
+            name="tidier-strategy",
+            description="Tidier planner for review dispatch.",
+            content="Dispatch tidier workers for review.",
+            source_skill_bank_id="bank-tidier",
+        )
+        generic = make_skill(
+            skill_id="s-generic",
+            name="review-checklist",
+            description="Generic review checklist for workers.",
+            content="Review checklist.",
+            source_skill_bank_id="bank-shared",
+        )
+        organic = make_skill(
+            skill_id="s-organic",
+            name="review-notes",
+            description="Project review notes.",
+            content="Review notes.",
+        )
+        service = make_service(
+            skill_repo=make_skill_repo(skills=[owned, generic, organic]),
+            skill_bank_repo=make_bank_repo(
+                owners={"bank-tidier": "tidier", "bank-shared": None}
+            ),
+        )
+
+        result = await service._bm25_prefilter(
+            "review dispatch", project_id="proj", top_k=10,
+            agent_id="worker",
+        )
+
+        ids = [x.id for x in result]
+        assert "s-owned" not in ids
+        assert set(ids) == {"s-generic", "s-organic"}
+
+    @pytest.mark.asyncio
+    async def test_search_forwards_agent_id_to_prefilter(self):
+        service = make_service(skill_repo=make_skill_repo(skills=[]))
+        service._bm25_prefilter = AsyncMock(return_value=[])
+
+        await service.search("query", project_id="proj", agent_id="worker")
+
+        assert service._bm25_prefilter.await_args.kwargs["agent_id"] == "worker"
 
 
 # ============================================================

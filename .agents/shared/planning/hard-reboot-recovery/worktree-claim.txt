@@ -1,0 +1,104 @@
+Worktree claim — hard-reboot recovery (task_id: hrr-20261021)
+
+Worktree path : /home/nea/ensemble-src-wt-hard-reboot-recovery
+Branch        : feature/hard-reboot-recovery
+Base commit   : latest @ 4c888fbbbe630ebf0c52877beda0a1b839f7cbd5
+Branch HEAD   : 4c888fbbbe630ebf0c52877beda0a1b839f7cbd5 (at claim time)
+Repo          : /home/nea/ensemble-src  (main checkout NOT touched)
+
+Import resolution (Phase 0.1 — `uv sync` in the worktree, no reuse of the
+main checkout's .venv):
+
+  $ .venv/bin/python -c "import daemon; print(daemon.__file__)"
+  /home/nea/ensemble-src-wt-hard-reboot-recovery/daemon/__init__.py
+
+  => resolves INSIDE the worktree. The editable install is the worktree's
+  own (.venv/lib/python3.14/site-packages/_editable_impl_ensemble.pth
+  points at /home/nea/ensemble-src-wt-hard-reboot-recovery).
+
+Env fence (verified in the worktree's .env, never the live install):
+
+  ENSEMBLE_SELF_ENV=dev
+  POSTGRES_DB=ensemble_dev
+  PORT=8079 / DAEMON_PORT=8079   (live daemon is :9797 / ensemble_prod)
+
+  => fenced off ensemble_prod. No daemon boot for testing touches
+  /home/nea/agents-ensemble, the :9797 unit, or the live systemd units.
+
+Merge-checklist obligation carried from the prior-art lane (auto-continue
+D20 / M23 item 6): the worktree gate in tests/conftest_worktree.py MUST be
+REMOVED or NEUTRALIZED at the merge commit — it is bound to this
+worktree's absolute path and must never falsely fail on main / remote VMs
+that no longer have the worktree.
+
+TRUTH-COMMIT CORRECTION (FIX round, 2026-10-21)
+------------------------------------------------
+The verification claim in commit 9bdbd8c0b ("with the real path, the
+same command exits 0") was FALSE. Measured with the gate ARMED
+(ENSEMBLE_HARD_REBOOT_WORKTREE_GATE=1), the same command exited with
+16 FAILURES, not 0.
+
+Root cause: the gate popped every `daemon*` entry from sys.modules and
+re-imported the package. SQLAlchemy's declarative registry
+(SQLModel.metadata) is PROCESS-GLOBAL and survives the sys.modules
+pop, so re-executing the model modules re-defined the same tables and
+raised `InvalidRequestError: Table 'infra_asset_types' is already
+defined for this MetaData instance`. The armed gate destroyed the very
+suite it was meant to protect.
+
+Corrected by the FIX-round truth-commit: the gate now resolved
+`daemon` NON-EXECUTINGLY (`importlib.util.find_spec("daemon").origin`
+— no pop, no re-import), with a PINNED test
+(tests/unit/test_worktree_gate.py — since DROPPED along with the gate
+itself, see the GATE REMOVAL section below) covering both directions
+plus the no-sys.modules-mutation regression.
+
+Re-verified in BOTH directions (exit codes recorded by the FIX lane):
+
+  * fake path  -> exit 1   (loud refusal; the banner is printed)
+  * real path  -> exit 0   (suite green with the gate ARMED)
+
+GATE REMOVAL — DECISION + CROSS-LANE RESIDUAL (FIX round 2, 2026-10-21)
+-----------------------------------------------------------------------
+DECISION: the worktree gate is REMOVED from the tree (DROP). It was a
+DEV-LANE-ONLY implementation invariant, never a post-merge invariant.
+
+Ship/drop list (this decision):
+  * tests/conftest_worktree.py              -> DROP (module)
+  * "tests.conftest_worktree" entry in the
+    tests/conftest.py pytest_plugins tuple  -> DROP (registration)
+  * tests/unit/test_worktree_gate.py        -> DROP (pins a module
+                                               that is going away)
+  * .agents/shared/planning/hard-reboot-recovery/worktree-claim.txt
+                                             -> SHIP (this receipt)
+
+RATIONALE (prior art + absolute-path binding): the gate asserts that
+`import daemon` resolves inside THIS worktree's absolute path
+(/home/nea/ensemble-src-wt-hard-reboot-recovery). That predicate can
+never be true for any other checkout — main, another feature worktree,
+or a remote VM. The prior-art lane (auto-continue D20 / M23 item 6)
+reached the same conclusion and recorded the SAME obligation on ITS
+file: the gate must be dropped or neutralized at the merge commit.
+Shipping it (or shipping it neutralized to a no-op) would ship
+dead/landmine code whose only surviving function is to fail loudly on
+a checkout it was never meant to describe.
+
+COUPLING NOTE (why the removal had to be ATOMIC): the gate module was
+registered through `pytest_plugins` in the SHARED tests/conftest.py —
+pytest only auto-loads plugins named `conftest.py`, so a standalone
+`conftest_worktree` module is dead code unless registered. Deleting
+the module while leaving the tuple entry would abort EVERY lane's
+pytest at collection with an ImportError. Hence one commit removes
+the module, the registration, and the pins together; no intermediate
+commit may leave a dangling `pytest_plugins` entry.
+
+CROSS-LANE RESIDUAL — HISTORY AND RESOLUTION: because the gate was
+registered in the shared tests/conftest.py, it ran for EVERY lane's
+pytest invocation, not just this feature's lane. Any future edit to
+that module therefore carried cross-lane blast radius, mitigated only
+by the env gate (silent no-op unless
+ENSEMBLE_HARD_REBOOT_WORKTREE_GATE=1). That exposure is now
+ELIMINATED in the merged tree: this removal deletes the registration
+atomically, so no lane's pytest loads the gate any more. This entry
+is the HISTORY + the RESOLUTION, not a live residual.
+

@@ -131,6 +131,15 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     # = prompts:read (read-class). The cage's parsing leg
     # validates the named scopes against SCOPE_TAXONOMY below.
     "/api/custom-agents": "prompts:read|prompts:write",
+    # remote-hands center gateway (2026-10-22) — the WebSocket route the
+    # controlled machines dial OUT to (SPEC.md v0.1). The route is
+    # REGISTERED ONLY when MCPS_GATEWAY_ENABLED is ON, and it is
+    # MODULE-LANE: the credential is the module's own bearer enrollment
+    # token on the upgrade request (§3.1 / §4.1), never an OAuth2 token.
+    # The route carries no OAuth2 scope decoration of its own — the
+    # family is declared with the wildcard for that reason (the same
+    # posture as the maintenance family's "*" member).
+    "/api/mcps-gateway": "*",
 }
 
 #: The wildcard sentinel as stored in the manifest.
@@ -247,9 +256,9 @@ class TestSourceMatchTarget:
         """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
-        assert len(matches) == 33, (
+        assert len(matches) == 34, (
             f"api_router.include_router( census drifted: {len(matches)} "
-            "(pinned 33 = 31 unconditional + 2 auth-ON-gated). New mount? "
+            "(pinned 34 = 32 unconditional + 2 auth-ON-gated). New mount? "
             "Declare its family in PINNED_SCOPE_MANIFEST above."
         )
 

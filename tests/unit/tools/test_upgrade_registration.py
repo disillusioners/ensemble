@@ -99,8 +99,8 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_twelve_entries(self) -> None:
-        """The default-deny set is exactly twelve entries —
+    def test_privileged_categories_is_exactly_fifteen_entries(self) -> None:
+        """The default-deny set is exactly fifteen entries —
         ``system_upgrade``, ``system-log``, ``ens-db``,
         ``ens-env``, ``view-views``, ``cu``, ``secrets``,
         ``settings``, ``board`` and ``self-alarm``.
@@ -199,8 +199,18 @@ class TestStaticRegistrationChecklist:
             # board. The ari + leader tools.allow entries are the only
             # access path; the tool body ALSO carries the runtime
             # agent_id gate.
+            # nest-ops (2026-10-21): the two maintenancer fleet categories
+            # (read #13 / act #14) — opt-in-only, never default-granted.
+            "instance_read",
+            "instance_ops",
             "board-link",
-        })
+                # remote-hands center gateway (2026-10-22): the ``mcp_rpc``
+        # category — the agent-facing surface that drives an ENROLLED
+        # remote machine (SPEC.md v0.1). opt-in-only; the ari + leader
+        # allow entries are the only access path, and every tool body
+        # ALSO carries its own agent_id gate.
+        "mcp_rpc",
+})
 
     def test_checklist_comment_block_present_in_module(self) -> None:
         """The T2 checklist is encoded as the module's comment block — the

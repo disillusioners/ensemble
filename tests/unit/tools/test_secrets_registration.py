@@ -23,7 +23,7 @@ category:
 
 Plus the privileged-category pin (septet → octet → nonet → decet):
 
-* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly twelve entries
+* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly fifteen entries
   (``system_upgrade``, ``system-log``, ``ens-db``, ``ens-env``,
   ``view-views``, ``cu``, ``secrets``, ``settings``, ``board``,
   ``self-alarm``) — NEVER default-granted
@@ -204,7 +204,7 @@ class TestStaticRegistrationChecklist:
         default-granted (R-SR16: opt-in-only via
         per-agent ``tools.allow``).
 
-        The full set is exactly twelve entries:
+        The full set is exactly fifteen entries:
         ``system_upgrade``, ``system-log``, ``ens-db``,
         ``ens-env``, ``view-views``, ``cu``,
         ``secrets``, ``settings`` (settings-worker-slots
@@ -216,7 +216,7 @@ class TestStaticRegistrationChecklist:
         D18/A14).
         """
         assert SECRETS_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
-        # The full set is exactly twelve entries — the
+        # The full set is exactly fifteen entries — the
         # same-PR pin (the SEVEN-file rule; the fifth
         # exact-set pin was added by the iteration-002
         # council B2 correction, the sixth + seventh by
@@ -263,8 +263,18 @@ class TestStaticRegistrationChecklist:
             # board. The ari + leader tools.allow entries are the only
             # access path; the tool body ALSO carries the runtime
             # agent_id gate.
+            # nest-ops (2026-10-21): the two maintenancer fleet categories
+            # (read #13 / act #14) — opt-in-only, never default-granted.
+            "instance_read",
+            "instance_ops",
             "board-link",
-        })
+                # remote-hands center gateway (2026-10-22): the ``mcp_rpc``
+        # category — the agent-facing surface that drives an ENROLLED
+        # remote machine (SPEC.md v0.1). opt-in-only; the ari + leader
+        # allow entries are the only access path, and every tool body
+        # ALSO carries its own agent_id gate.
+        "mcp_rpc",
+})
 
 
 # ── Live tool behavior: decorator order survives langchain wrap ─

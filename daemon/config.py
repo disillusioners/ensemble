@@ -2414,6 +2414,77 @@ class ServicesConfig(BaseSettings):
             "SERVICES_MISSION_STRAND_HEAL_INTERVAL_SECONDS."
         ),
     )
+    # ── MissionStrandHealer — running-zombie strand (2026-10-21) ──
+    # The THIRD member of the strand family: a MISSION ROOT whose
+    # instance row is stuck in ``running`` while every descendant is
+    # terminal and the root's own latest task row is terminal-
+    # COMPLETED (the completion EVENT was lost — live incident
+    # 2026-10-19/20 live incident — stuck 25h). The f2 drift
+    # finalizer heals only the JobItem; the INSTANCE row is a
+    # different table and stays ``running`` forever.
+    #
+    # The strand is ALWAYS-ON infrastructure by default (same HARD
+    # POLICY as the sibling strands), BUT it is the one heal lane
+    # that performs a TERMINALIZING WRITE through the production
+    # completion chain, so it ships with an explicit kill-switch the
+    # other strands do not have: the operator can stop the lane
+    # without a code change if the predicate is ever suspected. The
+    # default TRUE is justified by the fail-CLOSED predicate (every
+    # leg must hold; any unprovable leg SKIPS), the age bound (2h)
+    # that keeps the lane away from live turns, and the dev-staged
+    # + promote-gated rollout (the kill-switch exists for the
+    # operator, not as the default posture).
+    mission_strand_heal_running_zombie_enabled: bool = Field(
+        default=True,
+        description=(
+            "Running-zombie strand (2026-10-21): whether the "
+            "``MissionStrandHealer`` may heal mission roots stuck in "
+            "``running`` whose completion event was lost. Default "
+            "TRUE. When False the lane is a COMPLETE no-op (no "
+            "candidate selection, no probe, no drive) and the "
+            "waiting_children strand is unaffected. Override via "
+            "SERVICES_MISSION_STRAND_HEAL_RUNNING_ZOMBIE_ENABLED."
+        ),
+    )
+    mission_strand_heal_running_zombie_age_bound_seconds: int = Field(
+        default=7200,
+        ge=1,
+        description=(
+            "Running-zombie strand (2026-10-21): the age bound (in "
+            "seconds) applied to the root's LATEST TASK ROW "
+            "``completed_at`` stamp. A root whose latest task "
+            "completed longer ago than this, whose instance row is "
+            "still ``running``, and whose whole permanent tree is "
+            "terminal, is a running-zombie candidate. Default 7200s "
+            "(2h) — the same class as the stale-pause sweep's age "
+            "bound, comfortably longer than any legitimate short "
+            "turn and well under the 6h zombie backstop horizon. "
+            "NOTE: the age keys on ``task.completed_at`` — NOT "
+            "``instances.last_activity_at``, which is frozen-by-"
+            "design for a running root and cannot distinguish a "
+            "zombie from a long-legitimate turn. Floor 1s prevents "
+            "an instant-sweep posture; out-of-range values FAIL FAST "
+            "AT BOOT. Override via "
+            "SERVICES_MISSION_STRAND_HEAL_RUNNING_ZOMBIE_AGE_BOUND_"
+            "SECONDS."
+        ),
+    )
+    mission_strand_heal_running_zombie_batch_cap: int = Field(
+        default=25,
+        ge=1,
+        description=(
+            "Running-zombie strand (2026-10-21): the maximum number "
+            "of RUNNING mission roots examined per sweep pass. "
+            "Deliberately SMALLER than the stale-pause sweep's 100 — "
+            "this strand performs TERMINALIZING WRITES through the "
+            "production completion chain, so a tighter per-tick "
+            "bound keeps the blast radius of a mis-predicate small. "
+            "A root beyond the cap is picked up on the next tick. "
+            "Floor 1s; out-of-range values FAIL FAST AT BOOT. "
+            "Override via "
+            "SERVICES_MISSION_STRAND_HEAL_RUNNING_ZOMBIE_BATCH_CAP."
+        ),
+    )
     # clipboard-image-chat Phase 1 / Task 2b (architect amendment #3):
     # hard cap on the tmp-image store's total disk usage. The store
     # performs a walkdir sum BEFORE each write and raises
