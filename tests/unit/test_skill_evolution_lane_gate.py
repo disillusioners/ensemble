@@ -57,48 +57,105 @@ KEEPER_SOUL_PATH = REPO_ROOT / "agents" / "skill-keeper" / "soul.md"
 # read half of the ``filesystem`` category — write_file / edit_file
 # are the only mutating tools in it).
 READ_ONLY_FS_TOOLS = ("read_file", "list_directory", "glob_files", "grep_files")
-WRITE_FS_TOOLS = ("write_file", "edit_file")
-# Representative category maps for resolve_tool_filter (the registry
-# populates at tool-module import; the pins pass explicit maps, same
-# pattern as tests/tools/test_infra_tools.py Group 12).
-CATEGORY_MAP = {
-    "bash": ["bash"],
-    "proc": ["proc_run", "proc_logs", "proc_status", "proc_stop", "proc_list"],
-    "service": [
-        "service_start",
-        "service_stop",
-        "service_status",
-        "service_list",
-        "service_logs",
-    ],
-    "filesystem": [
-        "read_file",
-        "write_file",
-        "edit_file",
-        "list_directory",
-        "glob_files",
-        "grep_files",
-    ],
-    "self": ["inner_soul", "access_memory"],
-    "help": ["tool_help"],
-    "knowledge": ["explore", "experience"],
-    "dynamic-skill": [
-        "skill_search",
-        "skill_list",
-        "skill_view",
-        "skill_create",
-        "skill_fix",
-        "skill_feedback",
-    ],
-    "skill-evolution": [
-        "skill_analyze",
-        "skill_evolve",
-        "skill_resolve_ab",
-        "skill_metrics",
-        "skill_capture_opportunities",
-    ],
-    "shared_meta_kv": ["shared_meta_kv"],
-}
+WRITE_CAPABLE_TOOLS = ("write_file", "edit_file", "inner_soul")
+# The categories the skill-keeper allow/deny lists touch — resolved
+# against the PRODUCTION registry (see ``_production_category_map``).
+_REGISTRY_CATEGORIES = (
+    "bash",
+    "proc",
+    "service",
+    "filesystem",
+    "self",
+    "dynamic-skill",
+    "skill-evolution",
+    "knowledge",
+    "shared_meta_kv",
+)
+
+
+def _production_category_map() -> dict[str, list[str]]:
+    """Build the category→tool-names map from the PRODUCTION registry.
+
+    NO hand-invented names (2026-10-22 review M-3): the map is derived
+    from ``daemon.tools._tool_registry.CATEGORY_MODULES`` (the
+    registry's own category→module ownership map) plus the real tool
+    objects those modules expose — module-level ``@tool`` functions and
+    the tools the production factories create (factory-internal tools
+    never register at import time).
+
+    The inner_soul factory runs an archival sweep over the agent's
+    memories directory at CREATION time; it is fenced to a no-op here
+    so this helper can never mutate the repo tree.
+    """
+    import importlib
+    from unittest.mock import MagicMock
+
+    import daemon.tools.inner_soul as inner_soul_module
+    from daemon.tools._tool_registry import CATEGORY_MODULES
+
+    categories: dict[str, list[str]] = {}
+
+    def _add(category_key: str, obj: Any) -> None:
+        if getattr(obj, "_tool_category", None) != category_key:
+            return
+        name = getattr(obj, "name", None) or getattr(obj, "__name__", None)
+        if not name:
+            return
+        bucket = categories.setdefault(category_key, [])
+        if name not in bucket:
+            bucket.append(name)
+
+    # 1) Module-level tools (filesystem, bash, ...).
+    for category_key in _REGISTRY_CATEGORIES:
+        module_paths = CATEGORY_MODULES.get(category_key)
+        if not module_paths:
+            continue
+        paths = (
+            module_paths if isinstance(module_paths, list) else [module_paths]
+        )
+        for path in paths:
+            try:
+                module = importlib.import_module(path)
+            except Exception:  # pragma: no cover — import guard
+                continue
+            for attr in dir(module):
+                _add(category_key, getattr(module, attr, None))
+
+    # 2) Factory-created tools (self, dynamic-skill, skill-evolution,
+    #    knowledge, proc, service, shared_meta_kv).
+    manager = MagicMock()
+    from daemon.tools.access_memory import create_access_memory_tool
+    from daemon.tools.help import create_help_tool
+    from daemon.tools.inner_soul import create_inner_soul_tool
+    from daemon.tools.knowledge_tools import create_knowledge_tools
+    from daemon.tools.proc_tools import create_proc_tools
+    from daemon.tools.service_tools import create_service_tools
+    from daemon.tools.shared_meta_kv_tools import create_shared_meta_kv_tools
+    from daemon.tools.skill_evolution_tools import create_skill_evolution_tools
+    from daemon.tools.skill_tools import create_skill_tools
+
+    # Never mutate the repo tree from a test: the inner_soul factory
+    # archives old memory files at creation time.
+    inner_soul_module._archive_old_memories = lambda *a, **k: 0
+
+    for tool in create_skill_tools(manager, "inst-1"):
+        _add("dynamic-skill", tool)
+    for tool in create_skill_evolution_tools(manager, "inst-1"):
+        _add("skill-evolution", tool)
+    for tool in create_knowledge_tools(manager, "inst-1", "skill-keeper"):
+        _add("knowledge", tool)
+    for tool in create_proc_tools("inst-1"):
+        _add("proc", tool)
+    for tool in create_service_tools(manager, "inst-1"):
+        _add("service", tool)
+    for tool in create_shared_meta_kv_tools(manager, "inst-1"):
+        _add("shared_meta_kv", tool)
+    for tool in [create_access_memory_tool("skill-keeper")]:
+        _add("self", tool)
+    for tool in [create_inner_soul_tool(manager, "skill-keeper", "inst-1")]:
+        _add("self", tool)
+
+    return categories
 
 
 # =============================================================================
@@ -527,7 +584,7 @@ class TestSkillKeeperAllowlistConfinement:
 
     def test_no_write_tools_in_allow(self):
         allow = self._meta()["tools"]["allow"]
-        for tool_name in WRITE_FS_TOOLS:
+        for tool_name in WRITE_CAPABLE_TOOLS:
             assert tool_name not in allow
 
     def test_read_only_surface_present(self):
@@ -546,30 +603,66 @@ class TestSkillKeeperAllowlistConfinement:
     def test_deny_defends_against_allow_regression(self):
         """Deny wins over allow in resolve_tool_filter — pin the fence."""
         deny = self._meta()["tools"].get("deny", [])
-        for mutation in ("bash", "proc", "service", "write_file", "edit_file"):
+        for mutation in (
+            "bash", "proc", "service", "write_file", "edit_file", "inner_soul",
+        ):
             assert mutation in deny
 
     def test_resolved_filter_grants_no_write_capable_tool(self):
         """End-to-end: resolve skill-keeper's allow/deny through the
-        production filter — the resolved set must contain ZERO
-        write-capable tools and the full read-only surface."""
+        production filter AND the PRODUCTION registry map — the
+        resolved set must contain ZERO write-capable tools and the
+        full read-only surface."""
         from daemon.tools.instance import resolve_tool_filter
+
+        category_map = _production_category_map()
+        meta = self._meta()["tools"]
+        resolved = resolve_tool_filter(
+            allow=meta["allow"],
+            deny=meta.get("deny"),
+            tool_categories=category_map,
+        )
+        assert resolved is not None
+        for tool_name in WRITE_CAPABLE_TOOLS:
+            assert tool_name not in resolved
+        assert "bash" not in resolved
+        assert not (resolved & set(category_map["proc"]))
+        assert not (resolved & set(category_map["service"]))
+        for tool_name in READ_ONLY_FS_TOOLS:
+            assert tool_name in resolved
+        assert "skill_view" in resolved  # audit-duty read path survives
+
+    def test_memory_read_preserved_after_inner_soul_denial(self):
+        """M-1: denying ``inner_soul`` must NOT take ``access_memory``
+        with it — the keeper keeps READ access to its own memories.
+
+        ``inner_soul`` is denied by exact tool name; ``access_memory``
+        is a DIFFERENT tool in the same ``self`` category, so the
+        deny-list (deny wins, name-scoped) leaves it in the resolved
+        set.
+        """
+        from daemon.tools.instance import resolve_tool_filter
+
+        category_map = _production_category_map()
+        # The production registry really does expose both names.
+        assert "inner_soul" in category_map["self"]
+        assert "access_memory" in category_map["self"]
 
         meta = self._meta()["tools"]
         resolved = resolve_tool_filter(
             allow=meta["allow"],
             deny=meta.get("deny"),
-            tool_categories=CATEGORY_MAP,
+            tool_categories=category_map,
         )
         assert resolved is not None
-        for tool_name in WRITE_FS_TOOLS:
-            assert tool_name not in resolved
-        assert "bash" not in resolved
-        assert not (resolved & set(CATEGORY_MAP["proc"]))
-        assert not (resolved & set(CATEGORY_MAP["service"]))
-        for tool_name in READ_ONLY_FS_TOOLS:
-            assert tool_name in resolved
-        assert "skill_view" in resolved  # audit-duty read path survives
+        assert "inner_soul" not in resolved, (
+            "inner_soul writes agents/<agent>/memories/** — on live "
+            "installs that is releases/<ver>/agents/** (the recurring "
+            "agent-self-mod incident class)"
+        )
+        assert "access_memory" in resolved, (
+            "memory READ must survive the inner_soul denial"
+        )
 
     def test_meta_version_bumped(self):
         """The confinement is a behavior change — meta version must move."""
@@ -591,16 +684,19 @@ class TestSkillKeeperCharterFencing:
         # The section must name the actual read-only tools...
         for tool_name in READ_ONLY_FS_TOOLS:
             assert tool_name in soul
-        # ...and state that writes/bash are denied at the tool layer.
+        # ...and state that writes/bash/inner_soul are denied at the
+        # tool layer (M-1 added inner_soul to the deny list).
         assert "write_file" in soul
         assert "edit_file" in soul
+        assert "inner_soul" in soul
         assert "tools.deny" in soul
-        assert "not granted" in soul
+        assert "no tool i hold can write" in soul.lower()
 
     def test_must_not_section_carries_the_repo_mutation_prohibition(self):
         soul = KEEPER_SOUL_PATH.read_text(encoding="utf-8")
         assert "❌ Mutate the repository" in soul
         assert "NO bash" in soul
+        assert "NO inner_soul" in soul
         assert "read-only evidence" in soul
 
     def test_charter_does_not_claim_shell_access(self):
@@ -609,6 +705,44 @@ class TestSkillKeeperCharterFencing:
         assert "### `bash`" not in soul
         # The old phrasing granted shell "when an audit demands" — gone.
         assert "run migrations when an audit demands" not in soul
+
+    def test_charter_uses_real_tool_names_only(self):
+        """HIGH-2: the charter must name tools that EXIST.
+
+        The phantom names (``skill_update``, ``analyze_skill``,
+        ``evolve_skill``, ``resolve_ab_test``, ``get_skill_metrics``,
+        ``list_captured_opportunities``) are gone — the real registry
+        names are in their place.
+        """
+        soul = KEEPER_SOUL_PATH.read_text(encoding="utf-8")
+        for phantom in (
+            "skill_update",
+            "analyze_skill",
+            "evolve_skill",
+            "resolve_ab_test",
+            "get_skill_metrics",
+            "list_captured_opportunities",
+        ):
+            assert phantom not in soul, f"phantom tool name {phantom!r}"
+        for real in (
+            "skill_analyze",
+            "skill_evolve",
+            "skill_resolve_ab",
+            "skill_get_metrics",
+            "skill_execute_capture",
+        ):
+            assert real in soul, f"real tool name {real!r} must be listed"
+
+    def test_charter_states_read_reach_is_not_workdir_fenced(self):
+        """M-5: the charter must be accurate about READ reach —
+        absolute paths are honored, so reads are not confined to the
+        project. The over-claim ("read-only = confined") is corrected
+        in prose; the scope feature itself is NOT built here.
+        """
+        soul = KEEPER_SOUL_PATH.read_text(encoding="utf-8")
+        assert "ABSOLUTE paths" in soul
+        assert "not fenced to the repo" in soul
+        assert "filesystem_scope" in soul
 
 
 # =============================================================================
@@ -761,3 +895,269 @@ class TestManagerDispatcherWiring:
         d = self._wire(600, evolution_lane_enabled=True)
         assert d._evolution_lane_enabled is True
         assert d._fix_cooldown_seconds == 600
+
+
+# =============================================================================
+# 9. Execution-time gate (M-2) — job processor + retry carry-through
+# =============================================================================
+
+
+class _ExecJob:
+    """Minimal JobItem stand-in for the job-processor execution gate."""
+
+    def __init__(self, job_type: str = "skill_evolution") -> None:
+        self.job_id = "job-exec-1"
+        self.job_type = job_type
+        self.agent_id = "skill-keeper"
+        self.project_id = "proj-1"
+        self.queue_id = "q-1"
+        self.message = "Evolve skill sk-1. Type: FIX. Direction: d"
+        self.source = "skill_evolution"
+        self.instance_id = None
+        self.status = "queued"
+        self.admission_state = "queued"
+
+
+class _ExecQueue:
+    def __init__(self) -> None:
+        self.queue_id = "q-1"
+        self.project_id = "proj-1"
+        self.queue_name = "system_parallel_queue"
+        self.is_paused = False
+        self.concurrency_limit = 5
+        self.queue_type = "parallel"
+
+
+def _make_exec_processor(lane_enabled: bool, job: _ExecJob) -> Any:
+    from daemon.services.job_processor import JobProcessor
+
+    queue_service = MagicMock()
+    queue_service.complete_job = AsyncMock()
+    queue_service.start_job = AsyncMock()
+    queue_service._repository.list_pending_by_queue = MagicMock(
+        return_value=[job]
+    )
+    queue_service._repository.list_by_queue = MagicMock(
+        return_value=([], 0)
+    )
+
+    instance_manager = MagicMock()
+    instance_manager.is_skill_evolution_lane_enabled = MagicMock(
+        return_value=lane_enabled
+    )
+    instance_manager.spawn_instance_with_mcp = AsyncMock(
+        return_value="instance-123"
+    )
+    instance_manager.enqueue_message = AsyncMock()
+    instance_manager.get_instance = AsyncMock(
+        return_value=MagicMock()
+    )
+
+    project_repo = MagicMock()
+    project_repo.get = MagicMock(
+        return_value=SimpleNamespace(job_queue_paused=False)
+    )
+
+    queue_repo = MagicMock()
+    queue_repo.list_queues_with_admittable_work = MagicMock(
+        return_value=[_ExecQueue()]
+    )
+
+    return JobProcessor(
+        queue_service=queue_service,
+        instance_manager=instance_manager,
+        project_repo=project_repo,
+        queue_repo=queue_repo,
+        poll_interval=0.1,
+    )
+
+
+class TestJobProcessorExecutionGate:
+    """M-2: a queued ``skill_evolution`` row must NOT silently execute
+    while the lane is OFF (admission gate covers NEW rows; this is the
+    belt for rows admitted before the lane was turned off)."""
+
+    async def test_skill_evolution_refused_when_lane_off(self):
+        from daemon.services.job_processor import JobProcessor as _JP  # noqa: F401
+
+        job = _ExecJob(job_type="skill_evolution")
+        processor = _make_exec_processor(lane_enabled=False, job=job)
+
+        await processor._process_next_job()
+
+        queue_service = processor._queue_service
+        queue_service.start_job.assert_not_called()
+        queue_service.complete_job.assert_awaited()
+        kwargs = queue_service.complete_job.await_args.kwargs
+        from daemon.services.job_queue_service import DemandState
+
+        assert kwargs["demand_state"] == DemandState.FAILED
+        assert "lane disabled" in (kwargs.get("error") or "").lower()
+
+    async def test_skill_evolution_executes_when_lane_on(self):
+        job = _ExecJob(job_type="skill_evolution")
+        processor = _make_exec_processor(lane_enabled=True, job=job)
+
+        await processor._process_next_job()
+
+        processor._queue_service.start_job.assert_awaited()
+
+    async def test_non_skill_job_untouched_when_lane_off(self):
+        """Scope: skill_evolution rows ONLY — a plain task job proceeds."""
+        job = _ExecJob(job_type="task")
+        processor = _make_exec_processor(lane_enabled=False, job=job)
+
+        await processor._process_next_job()
+
+        processor._queue_service.start_job.assert_awaited()
+
+    async def test_lane_probe_failure_fails_closed(self):
+        """An unreadable lane state must not silently execute."""
+        job = _ExecJob(job_type="skill_evolution")
+        processor = _make_exec_processor(lane_enabled=True, job=job)
+        processor._instance_manager.is_skill_evolution_lane_enabled = (
+            MagicMock(side_effect=RuntimeError("probe down"))
+        )
+
+        await processor._process_next_job()
+
+        processor._queue_service.start_job.assert_not_called()
+        processor._queue_service.complete_job.assert_awaited()
+
+
+class TestRetryJobCarryThrough:
+    """M-2: ``retry_job`` must carry ``job_type`` + ``idempotency_key``
+    (a retried skill_evolution job must not silently become a generic
+    task job that bypasses the execution-time gate)."""
+
+    async def test_retry_carries_job_type_and_idempotency_key(self):
+        from daemon.repositories.job_queue.models import AdmissionState
+        from daemon.services.job_queue_service import JobQueueService
+
+        failed = MagicMock()
+        failed.job_id = "job-1"
+        failed.admission_state = AdmissionState.DONE.value
+        failed.failed_at = "2026-10-22T00:00:00+00:00"
+        failed.agent_id = "skill-keeper"
+        failed.message = "Evolve skill sk-1"
+        failed.source = "skill_evolution"
+        failed.project_id = "proj-1"
+        failed.queue_id = "q-1"
+        failed.priority = 4
+        failed.job_metadata = {"skill_id": "sk-1"}
+        failed.agent_tag = None
+        failed.job_type = "skill_evolution"
+        failed.idempotency_key = "skill_fix:proj-1:sk-1"
+
+        svc = MagicMock()
+        svc._repository.get = MagicMock(return_value=failed)
+        svc.enqueue = AsyncMock(return_value=MagicMock(job_id="job-2"))
+
+        result = await JobQueueService.retry_job(svc, "job-1")
+
+        assert result is not None
+        kwargs = svc.enqueue.await_args.kwargs
+        assert kwargs["job_type"] == "skill_evolution"
+        assert kwargs["idempotency_key"] == "skill_fix:proj-1:sk-1"
+
+    async def test_retry_carries_task_type_for_plain_jobs(self):
+        from daemon.repositories.job_queue.models import AdmissionState
+        from daemon.services.job_queue_service import JobQueueService
+
+        failed = MagicMock()
+        failed.admission_state = AdmissionState.DONE.value
+        failed.failed_at = "2026-10-22T00:00:00+00:00"
+        failed.job_type = "task"
+        failed.idempotency_key = None
+        svc = MagicMock()
+        svc._repository.get = MagicMock(return_value=failed)
+        svc.enqueue = AsyncMock(return_value=MagicMock(job_id="job-3"))
+
+        await JobQueueService.retry_job(svc, "job-1")
+
+        kwargs = svc.enqueue.await_args.kwargs
+        assert kwargs["job_type"] == "task"
+        assert kwargs["idempotency_key"] is None
+
+
+# =============================================================================
+# 10. Switch-token alignment + load-time loud check + type constants
+#    (review iteration-2 minors c/d/b)
+# =============================================================================
+
+
+class TestSwitchTokenAlignment:
+    def test_capture_and_evolution_share_the_exact_token_sets(self):
+        """Minor (c): one parser, one token set — no drift."""
+        from daemon.services import skill_job_dispatcher as d
+
+        assert d._SWITCH_ON_TOKENS == frozenset({"1", "true", "yes", "on"})
+        assert d._SWITCH_OFF_TOKENS == frozenset({"0", "false", "no", "off"})
+        # Both resolvers delegate to the SAME shared parser.
+        import inspect
+
+        assert "_resolve_switch" in inspect.getsource(
+            d._resolve_capture_enabled
+        )
+        assert "_resolve_switch" in inspect.getsource(
+            d._resolve_evolution_enabled
+        )
+
+    def test_both_resolvers_agree_across_the_token_matrix(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from daemon.services import skill_job_dispatcher as d
+
+        matrix = ["1", "true", "yes", "on", "0", "false", "no", "off"]
+        for token in matrix:
+            monkeypatch.setenv(d.SKILL_CAPTURE_KILL_SWITCH_ENV, token)
+            monkeypatch.setenv(d.SKILL_EVOLUTION_KILL_SWITCH_ENV, token)
+            capture = d._resolve_capture_enabled()
+            evolution = d._resolve_evolution_enabled(configured_default=False)
+            assert capture == evolution, (
+                f"token {token!r}: capture={capture} evolution={evolution}"
+            )
+        # And both fail closed on the same invalid value.
+        monkeypatch.setenv(d.SKILL_CAPTURE_KILL_SWITCH_ENV, "banana")
+        monkeypatch.setenv(d.SKILL_EVOLUTION_KILL_SWITCH_ENV, "banana")
+        with pytest.raises(ValueError):
+            d._resolve_capture_enabled()
+        with pytest.raises(ValueError):
+            d._resolve_evolution_enabled(False)
+
+    def test_load_time_check_logs_error_for_invalid_values(
+        self, monkeypatch: pytest.MonkeyPatch, caplog
+    ):
+        """Minor (c): an invalid switch value is LOUD at load time."""
+        import logging
+
+        from daemon.services import skill_job_dispatcher as d
+
+        monkeypatch.setenv(d.SKILL_EVOLUTION_KILL_SWITCH_ENV, "banana")
+        with caplog.at_level(logging.ERROR, logger=d.logger.name):
+            d._log_invalid_switch_env_at_load()
+        assert any(
+            "Invalid" in rec.message and d.SKILL_EVOLUTION_KILL_SWITCH_ENV in rec.message
+            for rec in caplog.records
+        )
+
+    def test_load_time_check_silent_for_valid_values(
+        self, monkeypatch: pytest.MonkeyPatch, caplog
+    ):
+        import logging
+
+        from daemon.services import skill_job_dispatcher as d
+
+        monkeypatch.setenv(d.SKILL_EVOLUTION_KILL_SWITCH_ENV, "1")
+        monkeypatch.setenv(d.SKILL_CAPTURE_KILL_SWITCH_ENV, "off")
+        with caplog.at_level(logging.ERROR, logger=d.logger.name):
+            d._log_invalid_switch_env_at_load()
+        assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+    def test_evolution_type_constants(self):
+        """Minor (b): literal-match fragility replaced by constants."""
+        from daemon.services import skill_job_dispatcher as d
+
+        assert d.EVOLUTION_TYPE_FIX == "FIX"
+        assert d.EVOLUTION_TYPE_DERIVED == "DERIVED"
+        assert d.EVOLUTION_TYPE_CAPTURED == "CAPTURED"

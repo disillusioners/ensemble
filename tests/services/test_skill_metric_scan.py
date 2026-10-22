@@ -437,6 +437,95 @@ class TestSkillMetricScanEnqueue:
         assert jobs[0].job_type == "skill_evolution"
 
     @pytest.mark.asyncio
+    async def test_fallback_carries_fix_idempotency_key(
+        self, engine, project_id, monkeypatch: pytest.MonkeyPatch
+    ):
+        """M-4: the dispatcher-unavailable fallback stamps the SAME
+        ``skill_fix:<project>:<skill>`` idempotency key the dispatcher
+        uses, so a repeat FIX row for the same (project, skill)
+        collapses onto the live row instead of stacking one per scan
+        cycle."""
+        monkeypatch.setenv("ENSEMBLE_SKILL_EVOLUTION_ENABLED", "1")
+        _make_project(engine, project_id=project_id)
+        _make_queue(
+            engine,
+            project_id=project_id,
+            queue_name="system_parallel_queue",
+        )
+
+        trigger = MagicMock()
+        trigger.evaluate_all = AsyncMock(
+            return_value=[
+                {
+                    "skill_id": "skill-evolve-keyed",
+                    "skill_name": "EvolveMe",
+                    "trigger_name": "consecutive_failures",
+                    "trigger_action": "evolve_fix",
+                    "reason": "consecutive_failures=5 >= 3",
+                    "stats": {"consecutive_failures": 5},
+                }
+            ]
+        )
+
+        manager, _, job_repo, _, _ = _make_manager_with_services(
+            engine, project_id, trigger_engine=trigger
+        )
+        manager._project_repository.set_projects(
+            [MagicMock(project_id=project_id, status="active")]
+        )
+
+        await manager._run_skill_metric_scan()
+
+        jobs, total = job_repo.list(project_id=project_id, limit=10)
+        assert total == 1
+        assert jobs[0].idempotency_key == f"skill_fix:{project_id}:skill-evolve-keyed"
+
+    @pytest.mark.asyncio
+    async def test_fallback_refuses_repeat_fix_inside_cooldown(
+        self, engine, project_id, monkeypatch: pytest.MonkeyPatch
+    ):
+        """M-4: a second scan cycle for the SAME skill inside the
+        cooldown window must not mint a second FIX row (the amplifier
+        class the incident showed)."""
+        monkeypatch.setenv("ENSEMBLE_SKILL_EVOLUTION_ENABLED", "1")
+        _make_project(engine, project_id=project_id)
+        _make_queue(
+            engine,
+            project_id=project_id,
+            queue_name="system_parallel_queue",
+        )
+
+        trigger = MagicMock()
+        trigger.evaluate_all = AsyncMock(
+            return_value=[
+                {
+                    "skill_id": "skill-evolve-repeat",
+                    "skill_name": "EvolveMe",
+                    "trigger_name": "consecutive_failures",
+                    "trigger_action": "evolve_fix",
+                    "reason": "consecutive_failures=5 >= 3",
+                    "stats": {"consecutive_failures": 5},
+                }
+            ]
+        )
+
+        manager, _, job_repo, _, _ = _make_manager_with_services(
+            engine, project_id, trigger_engine=trigger
+        )
+        manager._project_repository.set_projects(
+            [MagicMock(project_id=project_id, status="active")]
+        )
+
+        await manager._run_skill_metric_scan()
+        await manager._run_skill_metric_scan()
+
+        jobs, total = job_repo.list(project_id=project_id, limit=10)
+        assert total == 1, (
+            "the second scan cycle inside the cooldown must not mint a "
+            "second skill_evolution row"
+        )
+
+    @pytest.mark.asyncio
     async def test_fallback_analysis_not_gated_when_lane_off(
         self, engine, project_id, monkeypatch: pytest.MonkeyPatch
     ):
