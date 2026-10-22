@@ -4106,6 +4106,40 @@ class SkillEvolutionConfig(EmbeddingConfig):
     capture_min_iterations: int = Field(default=5)
     capture_min_duration_seconds: int = Field(default=60)
 
+    # ── Evolution-lane gate (2026-10-22 confinement fix) ──────────
+    # Tier-3 mutation admission (FIX/DERIVED/CAPTURED via
+    # SkillJobDispatcher.enqueue_evolution). DEFAULT OFF: the
+    # 2026-10-21 incident showed this lane admitting agent-authored
+    # fix directions straight into an executor, with no switch, no
+    # dedup, and no cooldown. Opting in is a deliberate operator act.
+    #
+    # The RUNTIME gate resolves PER-CALL: the dedicated
+    # ``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` env wins when set (live
+    # emergency-off without a config change); when unset, THIS field
+    # is the default the dispatcher was constructed with. See
+    # ``SkillJobDispatcher._resolve_evolution_enabled``.
+    evolution_lane_enabled: bool = Field(
+        default=False,
+        description=(
+            "Tier-3 skill-evolution job admission (default OFF — "
+            "incident 2026-10-21). Override live via env "
+            "ENSEMBLE_SKILL_EVOLUTION_ENABLED (wins when set)."
+        ),
+    )
+    # Minimum seconds between ACCEPTED FIX admissions for the same
+    # (project_id, skill_id). Refusals inside the window return None
+    # from the dispatcher (no job). RAM-only rate limiter; the DB-side
+    # idempotency_key dedup covers the non-terminal window.
+    fix_cooldown_seconds: int = Field(
+        default=1800,
+        description=(
+            "Min seconds between FIX admissions for the same "
+            "(project, skill); 0 disables the cooldown (not "
+            "recommended — the 2026-10-21 burst re-FIXed one skill "
+            "3x in 38 minutes)."
+        ),
+    )
+
 
 class LoopBreakerConfig(BaseSettings):
     """Configuration for the general hallucination loop breaker.

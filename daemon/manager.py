@@ -6650,8 +6650,35 @@ class InstanceManager:
             self._skill_job_dispatcher = SkillJobDispatcher(
                 job_service=service,
                 queue_repo=queue_repo,
+                # Evolution-lane gate defaults (incident 2026-10-22
+                # confinement): config-declared default + env
+                # kill-switch override, resolved per-call inside the
+                # dispatcher. ``skill_evolution`` is default-constructed
+                # (never None) per the config model, but defensive
+                # getattr keeps test doubles that hand-roll config
+                # objects working.
+                evolution_lane_enabled=bool(
+                    getattr(
+                        getattr(self.config, "skill_evolution", None),
+                        "evolution_lane_enabled",
+                        False,
+                    )
+                ),
+                fix_cooldown_seconds=int(
+                    getattr(
+                        getattr(self.config, "skill_evolution", None),
+                        "fix_cooldown_seconds",
+                        1800,
+                    )
+                    or 1800
+                ),
             )
-            logger.info("SkillJobDispatcher wired to manager")
+            logger.info(
+                "SkillJobDispatcher wired to manager "
+                "(evolution_lane_enabled=%s, fix_cooldown_seconds=%s)",
+                self._skill_job_dispatcher._evolution_lane_enabled,
+                self._skill_job_dispatcher._fix_cooldown_seconds,
+            )
 
         # Wire the metrics service's job dispatcher handle so the
         # CAPTURED flow (Phase 5) can actually enqueue capture jobs
