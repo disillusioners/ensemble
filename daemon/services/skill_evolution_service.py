@@ -1317,7 +1317,11 @@ class SkillEvolutionService:
 
         Raises:
             ValueError: When ``winner_id`` is provided but does
-                not match either variant of the test group.
+                not match either variant of the test group, OR when a
+                forced winner is requested while
+                ``comparisons < ab_sample_size`` (below-sample-size
+                forced resolve is refused — 2026-10-22 confinement
+                fix).
         """
         sample_size = getattr(self._config, "ab_sample_size", 10) or 10
         min_diff = getattr(self._config, "ab_min_difference", 0.15) or 0.15
