@@ -82,6 +82,7 @@ from ..services.self_alarm_service import (
     validate_board_id,
     validate_label_input,
 )
+from ..sources.mapper import BoundCallerRefusal
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)
@@ -876,7 +877,7 @@ def _bind_schedule_to_caller(
     source_id: str,
     caller_instance_id: str,
     caller_agent_id: str,
-) -> str | None:
+) -> str:
     """Bind the schedule row to the CALLING instance — the wake target.
 
     This is the ONE thing that makes the alarm wake the caller rather
@@ -904,10 +905,19 @@ def _bind_schedule_to_caller(
     fire is >= 30 minutes out (the D9 floor), so the adapter cannot
     reach the fire before the binding lands.
 
-    Returns:
-        The bound caller instance id, or ``None`` when the binding could
-        not be written (the alarm stays armed but its wake target is
-        NOT the caller — the caller is told, loudly, in the response).
+    DEC-21 (REFUSE-TO-ARM): a binding-write failure is NO LONGER a
+    best-effort warning.  An alarm whose binding cannot be written is an
+    ARMED-UNBOUND alarm: it would never wake its caller and its next
+    fire would take the mapper's no-mapping fall-through
+    (``mapper.py:352-360``) and SPAWN A STRANGER in the caller's place.
+    The same doctrine the degraded-alarm path already applies ("a
+    degraded alarm is REFUSED, never armed", ``self_alarm.py:318``).
+
+    Raises:
+        BoundCallerRefusal: the binding could not be written — the arm is
+            REFUSED (the caller applies the F1 row disposition: the
+            adapter is evicted + stopped FIRST, then the row is left
+            ``status='stopped'`` / ``enabled=False``).
     """
     if source_repo is None or not source_id or not caller_instance_id:
         logger.warning(
@@ -918,7 +928,12 @@ def _bind_schedule_to_caller(
             source_id,
             caller_instance_id,
         )
-        return None
+        raise BoundCallerRefusal(
+            f"self_alarm: the binding write for schedule {source_id!r} could not "
+            f"be attempted (source_repo present={source_repo is not None}, "
+            f"caller_instance_id={caller_instance_id!r}) — the alarm was REFUSED, "
+            f"never armed unbound."
+        )
     try:
         from daemon.registry import get_registry
 
@@ -939,15 +954,19 @@ def _bind_schedule_to_caller(
                 "caller_instance_id": caller_instance_id,
             },
         )
-    except Exception as exc:  # noqa: BLE001 — the binding is best-effort
-        logger.warning(
+    except Exception as exc:  # noqa: BLE001 — the binding failure is fatal (DEC-21)
+        logger.error(
             "self_alarm: could not bind schedule %s to the calling "
-            "instance %s: %s",
+            "instance %s: %s — the alarm is REFUSED, never armed unbound",
             source_id,
             caller_instance_id,
             exc,
         )
-        return None
+        raise BoundCallerRefusal(
+            f"self_alarm: the binding write for schedule {source_id} failed "
+            f"(caller_instance_id={caller_instance_id}): {exc} — the alarm was "
+            f"REFUSED, never armed unbound."
+        ) from exc
     logger.info(
         "self_alarm: schedule %s bound to the calling instance %s "
         "(reuse_instance wake)",
@@ -955,6 +974,167 @@ def _bind_schedule_to_caller(
         caller_instance_id,
     )
     return caller_instance_id
+
+
+def _armed_registry(service: Any) -> Any:
+    """The SOURCE REGISTRY the scheduling service dispatches through.
+
+    Every fire path resolves its adapter through ``registry.get(source_id)``
+    — so the registry is the authority on "is this adapter still armed?".
+    ``None`` when the service does not expose one.
+    """
+    deps = getattr(service, "_deps", None)
+    return getattr(deps, "source_registry", None) if deps is not None else None
+
+
+async def _disarm_refused_arm(
+    *,
+    service: Any,
+    source_repo: Any,
+    source_id: str,
+) -> bool:
+    """F1 disposition for a REFUSED arm (DEC-21 + Blocking 2).
+
+    The already-created schedule row is left DISABLED + UNARMED
+    (``status='stopped'`` + ``enabled=False``) — NOT deleted: the attempt
+    stays visible and the retry intent is preserved.
+
+    ORDERING (R11): the adapter is EVICTED + STOPPED FIRST, the row
+    flags are written AFTER.  ``enabled`` is read only at boot
+    (``registry.py:291``) and the scheduler loop never re-reads it
+    (``scheduler.py:519-520``), so the row flags alone leave a RUNNING
+    adapter whose next tick would take the no-mapping fall-through
+    (``mapper.py:352-360``) and spawn a stranger.  At arm time the row
+    status is ``'starting'`` before ``'running'`` persists, so a late
+    ``'running'`` write would clobber the disarm — hence the order.
+
+    VERIFY-AFTER (audit F2): the seam ``_evict_and_stop_adapter`` NEVER
+    re-raises — it swallows BOTH internal failure modes (a failed
+    ``registry.unregister`` and a failed ``adapter.stop()``) with a
+    WARNING.  A successful seam call therefore does NOT prove the
+    eviction happened, and decisions.md:564 forbids treating the seam's
+    internal ``except`` as "the eviction succeeded".  The eviction is
+    therefore VERIFIED here:
+      (1) the registry must no longer hold the adapter (the fire path
+          resolves adapters through ``registry.get``), and
+      (2) the captured adapter's loop must be STOPPED (an unregistered but
+          still-running ``_run_schedule`` task would keep firing the
+          unbound alarm — the unregister alone does NOT stop it; the
+          seam's ``await adapter.stop()`` does).
+
+    Both checks fail CLOSED: anything unverifiable counts as a failure.
+
+    Returns:
+        ``True`` when the adapter eviction FAILED (the caller then
+        surfaces the ``adapter_evict_failed`` reason — the alarm must never
+        be left silently armed-unbound).
+    """
+    evict_failed = False
+    registry = _armed_registry(service)
+
+    # Capture the adapter BEFORE the seam call: the seam pops it from the
+    # registry, so afterwards only the captured reference can prove that
+    # the LOOP was stopped.
+    captured = None
+    if registry is not None:
+        try:
+            captured = registry.get(source_id)
+        except Exception as exc:  # noqa: BLE001 — an unreadable registry is not a proof
+            logger.warning(
+                "self_alarm: could not read the registry for the refused "
+                "schedule %s: %s",
+                source_id,
+                exc,
+            )
+
+    try:
+        await service._evict_and_stop_adapter(source_id)
+    except Exception as exc:  # noqa: BLE001 — the failure is surfaced, not swallowed
+        evict_failed = True
+        logger.error(
+            "self_alarm: could not evict the adapter of the refused schedule "
+            "%s (adapter_evict_failed): %s",
+            source_id,
+            exc,
+        )
+
+    # (1) the registry must no longer hold the adapter.
+    if registry is not None:
+        still_registered = True  # fail closed until proven otherwise
+        try:
+            still_registered = registry.get(source_id) is not None
+        except Exception as exc:  # noqa: BLE001 — cannot verify → fail closed
+            logger.error(
+                "self_alarm: could not verify the eviction of the refused "
+                "schedule %s (adapter_evict_failed): %s",
+                source_id,
+                exc,
+            )
+        if still_registered:
+            evict_failed = True
+            logger.error(
+                "self_alarm: the adapter of the refused schedule %s is STILL "
+                "REGISTERED after the eviction (adapter_evict_failed) — the "
+                "unbound alarm could still fire",
+                source_id,
+            )
+
+    # (2) the captured adapter's loop must be stopped.
+    if captured is not None:
+        stop_event = getattr(captured, "_stop_event", None)
+        if stop_event is not None and not stop_event.is_set():
+            evict_failed = True
+            logger.error(
+                "self_alarm: the adapter of the refused schedule %s is still "
+                "RUNNING after the eviction (adapter_evict_failed) — the "
+                "unbound alarm could still fire",
+                source_id,
+            )
+
+    try:
+        source_repo.update_source_status(source_id, "stopped")
+        source_repo.update_source_config(source_id, enabled=False)
+    except Exception as exc:  # noqa: BLE001 — the refusal still propagates
+        logger.error(
+            "self_alarm: could not disarm the refused schedule %s: %s",
+            source_id,
+            exc,
+        )
+    return evict_failed
+
+
+async def _deferral_visibility(service: Any, source_id: str) -> dict[str, Any]:
+    """The deferral visibility fields for the arm response (DEC-12).
+
+    ``deferred_count`` is the number of occurrences coalesced into the
+    CURRENT deferral generation; ``last_execution_status`` is the LAST
+    fire's outcome (``deferred`` / ``failed`` / ``completed`` /
+    ``triggered`` — the named crash TELL).
+    """
+    deferred_count = 0
+    last_execution_status: str | None = None
+    try:
+        detail = await service.get_schedule(source_id)
+    except Exception as exc:  # noqa: BLE001 — the echo is best-effort
+        logger.debug(
+            "self_alarm: deferral visibility read failed for %s: %s",
+            source_id,
+            exc,
+        )
+        return {
+            "deferred_count": 0,
+            "last_execution_status": None,
+        }
+    if detail is not None:
+        try:
+            deferred_count = int(getattr(detail, "deferred_count", 0) or 0)
+        except (TypeError, ValueError):
+            deferred_count = 0
+        last_execution_status = getattr(detail, "last_execution_status", None)
+    return {
+        "deferred_count": deferred_count,
+        "last_execution_status": last_execution_status,
+    }
 
 
 async def _create_arm(
@@ -1033,12 +1213,29 @@ async def _create_arm(
     )
 
     created_source_id = str(getattr(result, "source_id", "") or "")
-    wake_target = _bind_schedule_to_caller(
-        source_repo=source_repo,
-        source_id=created_source_id,
-        caller_instance_id=current_instance_id,
-        caller_agent_id=agent_id,
-    )
+    try:
+        wake_target = _bind_schedule_to_caller(
+            source_repo=source_repo,
+            source_id=created_source_id,
+            caller_instance_id=current_instance_id,
+            caller_agent_id=agent_id,
+        )
+    except BoundCallerRefusal as refusal:
+        # DEC-21 (REFUSE-TO-ARM): the arm is REFUSED — the adapter is
+        # evicted + stopped FIRST, then the row is left DISABLED +
+        # UNARMED, and the typed refusal propagates to the caller.
+        evict_failed = await _disarm_refused_arm(
+            service=service,
+            source_repo=source_repo,
+            source_id=created_source_id,
+        )
+        if evict_failed:
+            raise BoundCallerRefusal(
+                f"self_alarm: the binding write for schedule {created_source_id} "
+                f"failed AND the adapter could not be evicted "
+                f"(adapter_evict_failed): {refusal.reason}"
+            ) from refusal
+        raise
     created_status = str(getattr(result, "status", "") or "")
 
     # Post-create duplicate report — the name lookup returns only the
@@ -1049,6 +1246,9 @@ async def _create_arm(
         other_id = str(getattr(reread, "source_id", "") or "")
         if other_id and other_id != created_source_id:
             duplicate_source_ids.append(other_id)
+
+    # The deferral visibility fields (DEC-12) — the schedule's own surface.
+    visibility = await _deferral_visibility(service, created_source_id)
 
     response: dict[str, Any] = {
         "ok": True,
@@ -1068,6 +1268,7 @@ async def _create_arm(
         "tz_warning": tz_warning,
         "lateness_cap_seconds": lateness_cap_seconds,
         "message_preview": summarize_message(message),
+        **visibility,
     }
     if gate.reason:
         response["fallback_reason"] = gate.reason
@@ -1148,12 +1349,28 @@ async def _reuse_alarm(
 
     # Re-bind the row to THIS (the calling) instance — the re-arm may
     # have been issued by a different session than the original arm.
-    wake_target = _bind_schedule_to_caller(
-        source_repo=source_repo,
-        source_id=stored.source_id,
-        caller_instance_id=current_instance_id,
-        caller_agent_id=agent_id,
-    )
+    try:
+        wake_target = _bind_schedule_to_caller(
+            source_repo=source_repo,
+            source_id=stored.source_id,
+            caller_instance_id=current_instance_id,
+            caller_agent_id=agent_id,
+        )
+    except BoundCallerRefusal as refusal:
+        # DEC-21 (REFUSE-TO-ARM): evict + stop the adapter FIRST, then
+        # leave the row DISABLED + UNARMED, and propagate the refusal.
+        evict_failed = await _disarm_refused_arm(
+            service=service,
+            source_repo=source_repo,
+            source_id=stored.source_id,
+        )
+        if evict_failed:
+            raise BoundCallerRefusal(
+                f"self_alarm: the binding write for schedule {stored.source_id} "
+                f"failed AND the adapter could not be evicted "
+                f"(adapter_evict_failed): {refusal.reason}"
+            ) from refusal
+        raise
 
     # ── The response assertions (the resume detector) ──────────────────
     problems: list[str] = []
@@ -1182,6 +1399,8 @@ async def _reuse_alarm(
         )
 
     if not problems:
+        # The deferral visibility fields (DEC-12).
+        visibility = await _deferral_visibility(service, stored.source_id)
         return {
             "ok": True,
             "source_id": stored.source_id,
@@ -1200,6 +1419,7 @@ async def _reuse_alarm(
             "tz_warning": tz_warning,
             "lateness_cap_seconds": lateness_cap_seconds,
             "message_preview": summarize_message(message),
+            **visibility,
         }
 
     # ── D4 step 5 — FALLBACK: mint a fresh label and create it ─────────

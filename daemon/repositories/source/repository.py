@@ -209,6 +209,208 @@ class SQLModelSourceRepository:
         with Session(self.engine) as session:
             return session.get(SourceConfig, source_id)
 
+    # ------------------------------------------------------------------
+    # Scheduler deferred-delivery episode state (commission
+    # ``scheduler-deferred-alarm-delivery``; plan §(c) C0 / decisions.md
+    # DEC-9, DEC-12, DEC-19, DEC-22).
+    # ------------------------------------------------------------------
+    #
+    # The episode carrier rides the ``source_configs.config`` JSON/JSONB
+    # column as ATOMIC siblings of ``_run_counter`` (the same
+    # dialect-aware ``jsonb_set`` / ``json_set`` + ``RETURNING`` pattern as
+    # ``increment_scheduler_run_counter`` above):
+    #
+    #   ``_defer_gen``        — the generation number (canonical spelling;
+    #                            the architect's ``_deferred_gen`` is
+    #                            SUPERSEDED)
+    #   ``_defer_message_id`` — the live delivery's ``message_id`` (the
+    #                            forward-carried coalescing anchor — the
+    #                            predecessor is NEVER matched by
+    #                            idempotency key)
+    #   ``_defer_count``      — the occurrences coalesced into the current
+    #                            generation
+    #   ``_defer_since``      — the NON-DELIVERY episode start (set-if-
+    #                            absent; the 24h age cap's clock)
+    #
+    # NEVER a Python read-modify-write: ``update_source_config`` replaces
+    # the whole ``config`` dict (its docstring forbids per-key mutation),
+    # so a per-key update MUST go through this method.
+
+    def apply_scheduler_defer_state(
+        self,
+        source_id: str,
+        *,
+        count_delta: int = 0,
+        count_cap: int = 16,
+        gen_delta: int = 0,
+        set_message_id: str | None = None,
+        set_since: str | None = None,
+        reset_count: bool = False,
+        clear_since: bool = False,
+        clear_message_id: bool = False,
+    ) -> dict[str, Any] | None:
+        """Atomically apply the scheduler deferral-episode state mutation.
+
+        ONE dialect-aware statement (``UPDATE ... RETURNING``) — never a
+        Python read-modify-write.  The clearing parameters are IN the
+        signature on purpose: set-if-absent alone can OPEN an episode but
+        never CLOSE one, so a recurring schedule would re-trip the age cap
+        forever (plan §(c) C0, "should-fix d").
+
+        Args:
+            source_id: The scheduler row's source id.
+            count_delta: Occurrences to add to ``_defer_count`` (capped at
+                ``count_cap``; ``GREATEST``/``MAX`` floor 0).
+            count_cap: The saturation cap for ``_defer_count`` (the
+                ``SchedulingConfig.defer_max_count`` value).
+            gen_delta: Generations to add to ``_defer_gen``.
+            set_message_id: Set ``_defer_message_id`` to this value.
+            set_since: Set ``_defer_since`` — SET-IF-ABSENT (``COALESCE``
+                inside the statement, so a plain overwrite would reset the
+                age each cycle and the age cap would never trip).
+            reset_count: Reset ``_defer_count`` to 0 before applying
+                ``count_delta`` (the generation-rollover reset).
+            clear_since: Clear ``_defer_since`` (the episode ends).
+            clear_message_id: Clear ``_defer_message_id``.
+
+            Precedence: when both are given, ``set_message_id`` wins over
+            ``clear_message_id`` and ``set_since`` wins over
+            ``clear_since``.
+
+        Returns:
+            The updated ``config`` dict, or ``None`` when the row was not
+            found.
+        """
+        params: dict[str, Any] = {
+            "source_id": source_id,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "count_delta": int(count_delta),
+            "count_cap": int(count_cap),
+            "gen_delta": int(gen_delta),
+        }
+
+        # ---- the fragments (dialect-specific expressions) ---------------
+        gen_fragment = (
+            "COALESCE(CAST(json_extract(config, '$._defer_gen') AS INTEGER), 0) + :gen_delta"
+        )
+        count_fragment = (
+            "MIN(:count_cap, MAX(0, COALESCE(CAST(json_extract(config, '$._defer_count') "
+            "AS INTEGER), 0) + :count_delta))"
+        )
+        if reset_count:
+            count_fragment = "MIN(:count_cap, MAX(0, :count_delta))"
+
+        with Session(self.engine) as session:
+            is_pg = session.bind is not None and session.bind.dialect.name == "postgresql"
+
+            if is_pg:
+                # PostgreSQL: ``jsonb_set`` on a JSONB column.  The merge
+                # operator (``||``) replaces the WHOLE value of each key
+                # (the keys are scalars, so a deep merge is not needed).
+                #
+                # Every bound parameter carries an EXPLICIT cast: PG cannot
+                # resolve the type of an uncast bind parameter inside
+                # ``LEAST`` / ``GREATEST`` / ``jsonb_build_object``
+                # ("could not determine polymorphic type because input has
+                # type unknown").
+                pieces: list[str] = []
+                if gen_delta:
+                    pieces.append(
+                        "'_defer_gen', to_jsonb(COALESCE((config->>'_defer_gen')::int, 0) "
+                        "+ CAST(:gen_delta AS int))"
+                    )
+                if reset_count or count_delta:
+                    if reset_count:
+                        pg_count = (
+                            "LEAST(CAST(:count_cap AS int), "
+                            "GREATEST(0, CAST(:count_delta AS int)))"
+                        )
+                    else:
+                        pg_count = (
+                            "LEAST(CAST(:count_cap AS int), GREATEST(0, "
+                            "COALESCE((config->>'_defer_count')::int, 0) "
+                            "+ CAST(:count_delta AS int)))"
+                        )
+                    pieces.append(f"'_defer_count', to_jsonb({pg_count})")
+                if set_message_id is not None:
+                    pieces.append(
+                        "'_defer_message_id', to_jsonb(CAST(:set_message_id AS text))"
+                    )
+                elif clear_message_id:
+                    pieces.append("'_defer_message_id', NULL::jsonb")
+                if set_since is not None:
+                    # SET-IF-ABSENT (COALESCE) — a plain overwrite would
+                    # reset the age on every cycle and the cap would never
+                    # trip (decisions.md DEC-22).
+                    pieces.append(
+                        "'_defer_since', to_jsonb(COALESCE(config->>'_defer_since', "
+                        "CAST(:set_since AS text)))"
+                    )
+                elif clear_since:
+                    pieces.append("'_defer_since', NULL::jsonb")
+                if not pieces:
+                    # Nothing to mutate — read the row back unchanged.
+                    row = session.get(SourceConfig, source_id)
+                    return dict(row.config or {}) if row is not None else None
+                update_sql = text(
+                    "UPDATE source_configs "
+                    "SET config = COALESCE(config, '{}'::jsonb) || jsonb_build_object("
+                    + ", ".join(pieces)
+                    + "), updated_at = :updated_at "
+                    "WHERE source_id = :source_id "
+                    "RETURNING config"
+                )
+            else:
+                # SQLite: ``json_set`` with one path/value pair per key.
+                pieces = []
+                if gen_delta:
+                    pieces.append(f"'$._defer_gen', {gen_fragment}")
+                if reset_count or count_delta:
+                    pieces.append(f"'$._defer_count', {count_fragment}")
+                if set_message_id is not None:
+                    pieces.append("'$._defer_message_id', :set_message_id")
+                elif clear_message_id:
+                    pieces.append("'$._defer_message_id', NULL")
+                if set_since is not None:
+                    pieces.append(
+                        "'$._defer_since', COALESCE(json_extract(config, '$._defer_since'), :set_since)"
+                    )
+                elif clear_since:
+                    pieces.append("'$._defer_since', NULL")
+                if not pieces:
+                    row = session.get(SourceConfig, source_id)
+                    return dict(row.config or {}) if row is not None else None
+                update_sql = text(
+                    "UPDATE source_configs "
+                    "SET config = json_set(COALESCE(config, '{}'), "
+                    + ", ".join(pieces)
+                    + "), updated_at = :updated_at "
+                    "WHERE source_id = :source_id "
+                    "RETURNING config"
+                )
+
+            if set_message_id is not None:
+                params["set_message_id"] = set_message_id
+            if set_since is not None:
+                params["set_since"] = set_since
+
+            result = session.execute(update_sql, params).fetchone()
+            session.commit()
+
+            if result is None:
+                logger.warning(
+                    "Source not found for scheduler defer-state update: source_id=%s",
+                    source_id,
+                )
+                return None
+
+            new_config = result[0]
+            if isinstance(new_config, str):
+                import json as _json
+
+                new_config = _json.loads(new_config)
+            return dict(new_config or {})
+
     def get_source_config_by_name(self, name: str) -> SourceConfig | None:
         """Get a source configuration by name."""
         with Session(self.engine) as session:
