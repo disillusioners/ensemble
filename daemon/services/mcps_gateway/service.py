@@ -28,6 +28,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from daemon.services.timestamps import now_utc_iso
+
 from .audit import (
     OUTCOME_ERROR,
     OUTCOME_OK,
@@ -152,9 +154,16 @@ class McpGatewayService:
     def _assert_enabled(self) -> None:
         """Refuse while the transport is off.
 
-        The kill switch (``MCPS_GATEWAY_ENABLED``) is read at call
-        time; the service is constructed with the boot-time config, so
-        the gate answers the CURRENT knob.
+        The kill switch (``MCPS_GATEWAY_ENABLED``) is read at BOOT time:
+        the service is constructed with the boot-time config (the
+        ``load_gateway_config()`` snapshot taken in ``manager.__init__``),
+        so the gate answers the value the daemon BOOTED with — NOT the
+        CURRENT value of the environment. That is deliberate and it
+        matches the boot-gated route registration: the WebSocket route
+        is registered (or not) at boot, so the service and the transport
+        can never disagree about whether the gateway is on. Flipping the
+        knob therefore requires a daemon restart, exactly like the
+        route it guards.
         """
         if not self.config.enabled:
             raise GatewayProtocolError(
@@ -782,7 +791,7 @@ class McpGatewayService:
             )
         except GatewayProtocolError as exc:
             outcome = OUTCOME_TIMEOUT if exc.code == CODE_TOOL_TIMEOUT else OUTCOME_ERROR
-            self._audit_command(
+            await self._audit_command(
                 agent_id=agent_id,
                 instance_id=instance_id,
                 machine_id=session.machine_id,
@@ -795,7 +804,7 @@ class McpGatewayService:
             )
             raise
         self._sessions.touch(session.session_id, now)
-        self._audit_command(
+        await self._audit_command(
             agent_id=agent_id,
             instance_id=instance_id,
             machine_id=session.machine_id,
@@ -851,7 +860,7 @@ class McpGatewayService:
 
     # ── the audit ────────────────────────────────────────────────────────
 
-    def _audit_command(
+    async def _audit_command(
         self,
         *,
         agent_id: str,
@@ -871,6 +880,24 @@ class McpGatewayService:
         report it because the OBSERVABILITY write failed would turn an
         audit problem into an availability problem on a path that drives a
         user's desktop. The failure is logged loudly and counted.
+
+        THE WRITE IS OFF THE EVENT LOOP
+        --------------------------------
+
+        The DB-backed sink (:class:`McpGatewayAuditRepository`) is
+        SYNCHRONOUS — it opens a ``Session(engine)`` and commits, and a
+        slow or stalled PostgreSQL would freeze the WHOLE daemon event
+        loop (every agent, every socket, the gateway's own sweep). So the
+        write is bridged through ``asyncio.to_thread`` — the repo's
+        established convention for calling a blocking repository from
+        async code (``daemon/services/auth_service.py``,
+        ``daemon/services/work_notifier.py``).
+
+        The write is still AWAITED, not fired and forgotten: the row is
+        durable before the command returns, so there is no race between
+        the audit and the answer, and a shutdown cannot lose the row of a
+        command that already happened. Nothing else is held while it
+        runs (no lock, no session), so the offload cannot deadlock.
         """
         if not self.config.audit_enabled:
             return
@@ -884,11 +911,10 @@ class McpGatewayService:
             session_id=session_id,
             error_code=error_code,
             detail=detail[:500],
-            created_at=time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-            + f".{int((time.time() % 1) * 1_000_000):06d}Z",
+            created_at=now_utc_iso(),
         )
         try:
-            self._audit.record(record)
+            await asyncio.to_thread(self._audit.record, record)
         except Exception as exc:  # noqa: BLE001 — the audit must not wedge the gateway
             self._audit_failures += 1
             logger.error(

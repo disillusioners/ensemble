@@ -22,12 +22,15 @@ protocol layer.
 from __future__ import annotations
 
 import asyncio
+import logging
+from typing import Any
 
 from daemon.routers.mcps_gateway import (
     PING_INTERVAL_SECONDS,
     UNAUTHORIZED_BODY,
     WebSocketGatewayTransport,
     _websocket_protocol,
+    mcp_gateway_endpoint,
 )
 
 
@@ -71,11 +74,14 @@ class _FakeWebSocket:
 class _PinglessWebSocket(_FakeWebSocket):
     """A transport that CANNOT ping (an in-process test client)."""
 
-    def __init__(self) -> None:
+    def __init__(self, scope: dict[str, Any] | None = None) -> None:
         super().__init__()
         # A plain function (not a bound method) → no ``__self__`` → the
         # protocol object is not reachable.
         self._send = lambda message: self.sent.append(message)  # noqa: E731
+        #: The ASGI scope — the peer identity the liveness-degradation
+        #: check reads (a real server connection has a real peer).
+        self.scope = scope
 
 
 class TestWebSocketLivenessMechanism:
@@ -149,3 +155,160 @@ class TestWebSocketLivenessMechanism:
         """The refusal of the upgrade carries a plain-text body (the
         reference refusal shape)."""
         assert UNAUTHORIZED_BODY == b"unauthorized\n"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The route adapter — the liveness ping loop and its degradation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeAppState:
+    """The ``app.state`` seam the route reads the service from."""
+
+    def __init__(self, service: Any) -> None:
+        self.mcps_gateway_service = service
+
+
+class _FakeApp:
+    def __init__(self, service: Any) -> None:
+        self.state = _FakeAppState(service)
+
+
+class _RouteWebSocket(_FakeWebSocket):
+    """A Starlette-shaped WebSocket for the ROUTE (not just the transport).
+
+    It is the surface the route adapter uses: ``accept``, ``headers``,
+    ``app.state`` and ``receive``.
+    """
+
+    def __init__(self, service: Any, *, scope: dict[str, Any] | None = None) -> None:
+        super().__init__()
+        self.app = _FakeApp(service)
+        self.headers = {"authorization": "Bearer tok-alpha"}
+        self.accepted = False
+        self.scope = (
+            scope
+            if scope is not None
+            else {
+                "type": "websocket",
+                "client": ("10.0.0.7", 51515),
+                "server": ("10.0.0.1", 8079),
+            }
+        )
+
+    async def accept(self) -> None:
+        self.accepted = True
+
+    async def receive(self) -> dict[str, Any]:
+        return {"type": "websocket.disconnect"}
+
+
+class _FailingSetupService:
+    """A service whose connection setup FAILS — after a while.
+
+    The delay is what makes the leak observable: the liveness ping loop
+    is already running when the setup blows up.
+    """
+
+    def __init__(self, *, setup_seconds: float = 0.25) -> None:
+        self.transport: Any = None
+        self._setup_seconds = setup_seconds
+
+    def authenticate(self, authorization: str | None) -> bool:
+        return True
+
+    async def open_connection(self, transport: Any) -> Any:
+        self.transport = transport
+        await asyncio.sleep(self._setup_seconds)
+        raise RuntimeError("the connection setup failed")
+
+    async def ensure_monitor(self) -> None:
+        return None
+
+    async def close_connection(self, connection: Any, reason: str = "") -> None:
+        return None
+
+
+class TestThePingLoopNeverSurvivesTheConnection:
+    async def test_the_ping_loop_stops_when_the_connection_setup_fails(self):
+        """FIX 3 — the ping loop must stop on EVERY exit path.
+
+        The liveness ping loop used to be started BEFORE the connection
+        setup, and the setup sat OUTSIDE the read loop's try/finally: a
+        failure there (a cancelled open) left the 200 ms ping loop
+        running on a dead socket FOREVER — only ``close_connection``
+        stopped it, and it was never reached.
+        """
+        service = _FailingSetupService()
+        websocket = _RouteWebSocket(service)
+
+        await mcp_gateway_endpoint(websocket)
+
+        assert service.transport is not None
+        # The loop WAS running: it pinged while the setup was in flight.
+        assert len(websocket.pings) >= 1, (
+            "the liveness ping never fired — the test proves nothing"
+        )
+        assert service.transport._ping_task is None, (
+            "the ping loop survived the failed connection setup"
+        )
+        pings_at_failure = len(websocket.pings)
+        await asyncio.sleep(PING_INTERVAL_SECONDS * 2)
+        assert len(websocket.pings) == pings_at_failure, (
+            "the ping loop is still running on a dead socket"
+        )
+
+
+class TestTheLivenessDegradationIsVisible:
+    def test_a_warning_is_emitted_when_the_pings_cannot_be_produced(self, caplog):
+        """FIX 4 — the degradation must not be SILENT.
+
+        A correct client reads the inbound silence as server death (§3.3)
+        and reconnects in a loop; the daemon must be able to say WHY it
+        went quiet. ONE warning per connection — never per frame and
+        never per tick.
+        """
+        websocket = _PinglessWebSocket(
+            scope={
+                "type": "websocket",
+                "client": ("10.0.0.7", 51515),
+                "server": ("10.0.0.1", 8079),
+            }
+        )
+        with caplog.at_level(logging.WARNING, logger="daemon.routers.mcps_gateway"):
+            transport = WebSocketGatewayTransport(websocket)
+
+        assert transport.can_ping is False
+        warnings = [
+            record
+            for record in caplog.records
+            if record.name == "daemon.routers.mcps_gateway"
+            and record.levelno >= logging.WARNING
+        ]
+        assert len(warnings) == 1, (
+            f"the liveness degradation produced {len(warnings)} warnings — "
+            "it must be reported exactly once per connection"
+        )
+        assert "liveness" in warnings[0].getMessage()
+
+    def test_the_in_process_test_client_is_not_a_degradation(self, caplog):
+        """The in-process test client has NO protocol object by design —
+        warning there would be a false alarm on every test connection."""
+        websocket = _PinglessWebSocket(
+            scope={
+                "type": "websocket",
+                "client": ("testclient", 50000),
+                "server": ["testserver", 80],
+            }
+        )
+        with caplog.at_level(logging.WARNING, logger="daemon.routers.mcps_gateway"):
+            transport = WebSocketGatewayTransport(websocket)
+
+        assert transport.can_ping is False
+        warnings = [
+            record
+            for record in caplog.records
+            if record.name == "daemon.routers.mcps_gateway"
+            and record.levelno >= logging.WARNING
+        ]
+        assert warnings == []

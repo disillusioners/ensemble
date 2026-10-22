@@ -64,6 +64,13 @@ UNAUTHORIZED_BODY = b"unauthorized\n"
 PING_INTERVAL_SECONDS = 0.2
 
 
+#: The peer host names Starlette's IN-PROCESS test client uses. A real
+#: server connection carries a real socket peer, so there the absence of
+#: an ASGI protocol object is a DEFECT; in the in-process client it is
+#: the expected state (there is no protocol object at all).
+_IN_PROCESS_PEER_HOSTS = ("testclient", "testserver")
+
+
 def _websocket_protocol(websocket: WebSocket) -> Any | None:
     """The server's WebSocket protocol object, when it is reachable.
 
@@ -93,6 +100,36 @@ def _websocket_protocol(websocket: WebSocket) -> Any | None:
     return None
 
 
+def _is_real_server_connection(websocket: WebSocket) -> bool:
+    """Is this a REAL server connection rather than an in-process client?
+
+    Starlette's in-process test client drives the ASGI app directly: it
+    has no ASGI protocol object, so "the transport cannot ping" is the
+    EXPECTED state there — a warning would be a false alarm on every
+    test connection.
+
+    A real server connection carries a real socket peer in the ASGI
+    scope. There, a missing protocol object means the liveness evidence
+    of §3.3 CANNOT be produced, and the degradation is SILENT: a correct
+    client treats the inbound silence as server death and reconnects in
+    a loop, with no daemon-side explanation. That is the case the
+    warning exists for.
+    """
+    scope = getattr(websocket, "scope", None)
+    if not isinstance(scope, dict):
+        # Not a Starlette WebSocket at all (a hand-rolled fake): the
+        # caller decides, so no production claim is made here.
+        return False
+    for key in ("client", "server"):
+        peer = scope.get(key)
+        if not isinstance(peer, (tuple, list)) or not peer:
+            continue
+        host = peer[0]
+        if isinstance(host, str) and host.strip().lower() in _IN_PROCESS_PEER_HOSTS:
+            return False
+    return True
+
+
 class WebSocketGatewayTransport:
     """The :class:`GatewayTransport` over a Starlette ``WebSocket``.
 
@@ -112,6 +149,19 @@ class WebSocketGatewayTransport:
         #: is produced at the TRANSPORT level (and not as a protocol
         #: frame).
         self.pings_sent = 0
+        if self._protocol is None and _is_real_server_connection(websocket):
+            # ONE warning per connection — never per frame and never per
+            # tick. The degradation is otherwise SILENT: a correct client
+            # reads the inbound silence as server death (§3.3) and
+            # reconnects in a loop, and the daemon would have nothing to
+            # say about it.
+            logger.warning(
+                "the remote-hands gateway cannot produce the WebSocket "
+                "liveness ping on this connection: the ASGI protocol object "
+                "is not reachable (the transport layout changed). A correct "
+                "client reads the inbound silence as server death (§3.3) and "
+                "will reconnect in a loop."
+            )
 
     async def send_json(self, payload: dict[str, Any]) -> None:
         await self._websocket.send_text(json.dumps(payload))
@@ -238,12 +288,15 @@ async def mcp_gateway_endpoint(websocket: WebSocket) -> None:
 
     await websocket.accept()
     transport = WebSocketGatewayTransport(websocket)
-    # The liveness evidence of §3.3 — a WebSocket CONTROL frame, never a
-    # protocol frame.
-    transport.start_liveness_pings(PING_INTERVAL_SECONDS)
-    connection: ClientConnection = await service.open_connection(transport)
-    await service.ensure_monitor()
+    connection: ClientConnection | None = None
     try:
+        # The liveness evidence of §3.3 — a WebSocket CONTROL frame, never
+        # a protocol frame. It is started INSIDE the try: the setup below
+        # can fail (a cancelled open), and a ping loop left running on a
+        # dead socket would ping it FOREVER.
+        transport.start_liveness_pings(PING_INTERVAL_SECONDS)
+        connection = await service.open_connection(transport)
+        await service.ensure_monitor()
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
@@ -257,7 +310,16 @@ async def mcp_gateway_endpoint(websocket: WebSocket) -> None:
     except Exception as exc:  # noqa: BLE001 — the socket died
         logger.warning("the remote-hands socket of the machine failed: %s", exc)
     finally:
-        await service.close_connection(connection, "the client disconnected")
+        try:
+            if connection is not None:
+                await service.close_connection(connection, "the client disconnected")
+        finally:
+            # The ping loop MUST stop on EVERY exit path. The normal path
+            # stops it inside ``close_connection`` (which closes the
+            # transport); this is the net for the paths where the
+            # connection was never established, so no 200 ms ping loop
+            # survives on a dead socket.
+            await transport.stop_liveness_pings()
 
 
 def build_mcps_gateway_router(
@@ -329,10 +391,14 @@ def build_mcps_gateway_router(
                 return
             await websocket.accept()
             transport = WebSocketGatewayTransport(websocket)
-            transport.start_liveness_pings(PING_INTERVAL_SECONDS)
-            connection = await service.open_connection(transport)
-            await service.ensure_monitor()
+            connection: ClientConnection | None = None
             try:
+                # Started inside the try: the setup below can fail, and a
+                # ping loop left running on a dead socket would ping it
+                # FOREVER.
+                transport.start_liveness_pings(PING_INTERVAL_SECONDS)
+                connection = await service.open_connection(transport)
+                await service.ensure_monitor()
                 while True:
                     message = await websocket.receive()
                     if message["type"] == "websocket.disconnect":
@@ -342,7 +408,15 @@ def build_mcps_gateway_router(
                         continue
                     await service.handle_frame(connection, text)
             finally:
-                await service.close_connection(connection, "the client disconnected")
+                try:
+                    if connection is not None:
+                        await service.close_connection(
+                            connection, "the client disconnected"
+                        )
+                finally:
+                    # The ping loop MUST stop on EVERY exit path (the
+                    # normal path stops it inside ``close_connection``).
+                    await transport.stop_liveness_pings()
 
     router.add_api_websocket_route(
         tail,

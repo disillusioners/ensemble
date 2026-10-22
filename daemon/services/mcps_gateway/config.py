@@ -21,8 +21,10 @@ The knob set (all under the ``MCPS_GATEWAY_`` prefix)::
     MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS 300000
 
 ``MCPS_GATEWAY_TOKENS`` empty means **nobody may enroll** — fail closed.
-The tokens are compared with :func:`hmac.compare_digest`; there is no
-plaintext downgrade and no fallback path.
+The tokens are compared with :func:`hmac.compare_digest` over BYTES (a
+``str`` comparison raises on a non-ASCII credential, and an HTTP header
+is latin-1 decoded); there is no plaintext downgrade and no fallback
+path.
 
 The THREE heartbeat parameters of §3.3 are all knobs: the center
 advertises all three in its hello result and the client adopts them
@@ -185,12 +187,24 @@ class GatewayConfig:
         EVERY configured token is compared — the loop does not short
         circuit on the first match, so the comparison time does not leak
         WHICH token was presented.
+
+        THE COMPARISON IS OVER BYTES
+        -----------------------------
+
+        ``hmac.compare_digest`` raises ``TypeError`` when a ``str``
+        argument holds a NON-ASCII character, and an HTTP header value
+        is latin-1 decoded — so a garbage credential (any byte above
+        0x7F) would escape ``authenticate`` as an UNHANDLED exception
+        instead of a clean 401. Both sides are therefore ENCODED before
+        the comparison: the bytes comparison is constant-time and cannot
+        raise on any credential.
         """
         import hmac
 
         matched = False
+        candidate_bytes = candidate.encode("utf-8")
         for token in self.tokens:
-            if hmac.compare_digest(token, candidate):
+            if hmac.compare_digest(token.encode("utf-8"), candidate_bytes):
                 matched = True
         return matched
 

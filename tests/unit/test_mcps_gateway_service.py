@@ -12,8 +12,10 @@ from the gateway) lives in ``tests/integration/test_mcps_gateway_ws.py``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -565,6 +567,37 @@ class TestAudit:
         assert "hunter2" not in record.args_hash
         assert "hunter2" not in json.dumps(record.__dict__, default=str)
 
+    async def test_the_created_at_is_the_model_default_iso_format(self):
+        """FIX 5 — ONE ISO format for the audit stamp.
+
+        The row used to be stamped ``%Y-%m-%dT%H:%M:%S.%fZ`` while the
+        MODEL default is ``datetime.now(timezone.utc).isoformat()`` (the
+        ``+00:00`` form): two formats for the same column. The write now
+        goes through the sanctioned ``now_utc_iso()`` helper, so the
+        stamped value matches the model's own default byte-for-byte.
+        """
+        audit = MemoryAuditSink()
+        service = make_service(audit_sink=audit)
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+
+        task = asyncio.create_task(
+            service.command(agent_id="ari", tool="type", arguments={"text": "x"})
+        )
+        await asyncio.sleep(0.02)
+        await machine.answer_last({"ok": True})
+        await task
+
+        assert len(audit.records) == 1
+        created_at = audit.records[0].created_at
+        assert created_at.endswith("+00:00"), (
+            f"the audit stamp {created_at!r} is not the model default format"
+        )
+        # It parses as an aware UTC instant.
+        parsed = datetime.fromisoformat(created_at)
+        assert parsed.tzinfo is not None
+        assert parsed.utcoffset() == timedelta(0)
+
     async def test_an_audit_failure_does_not_abort_the_command(self):
         class ExplodingSink:
             def record(self, record):
@@ -583,6 +616,64 @@ class TestAudit:
         result = await task
         assert result == {"ok": True}
         assert service.audit_failures == 1
+
+
+class TestTheAuditWriteIsOffTheEventLoop:
+    async def test_a_stalled_audit_sink_cannot_stall_the_event_loop(self):
+        """FIX 1 — the blocking DB write must NOT sit on the event loop.
+
+        The DB-backed sink is SYNCHRONOUS: it opens a ``Session(engine)``
+        and commits. Called inline from the async command path, a slow or
+        stalled PostgreSQL froze the WHOLE daemon event loop — every
+        agent, every socket, the gateway's own sweep.
+
+        The write is bridged through ``asyncio.to_thread`` (the repo's
+        convention for a blocking repository), so the loop keeps turning
+        while the audit is in flight.
+        """
+
+        class StalledSink:
+            """A sink whose write BLOCKS — the shape of a slow commit."""
+
+            def __init__(self) -> None:
+                self.records: list[Any] = []
+
+            def record(self, record: Any) -> None:
+                time.sleep(0.4)
+                self.records.append(record)
+
+        sink = StalledSink()
+        service = make_service(audit_sink=sink)
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+
+        ticks = 0
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        ticker_task = asyncio.create_task(ticker())
+        try:
+            task = asyncio.create_task(service.command(agent_id="ari", tool="click"))
+            await asyncio.sleep(0.02)
+            await machine.answer_last({"ok": True})
+            result = await task
+        finally:
+            ticker_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ticker_task
+
+        # The command still succeeded and the row was still written.
+        assert result == {"ok": True}
+        assert len(sink.records) == 1
+        # The loop kept turning WHILE the stalled write was in flight.
+        assert ticks >= 5, (
+            f"the event loop turned only {ticks} times during the audit "
+            "write — the blocking database write is still ON the event loop"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

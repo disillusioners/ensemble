@@ -23,6 +23,7 @@ from daemon.services.mcps_gateway.config import (
     DEFAULT_SESSION_IDLE_TIMEOUT_MS,
     DEFAULT_SESSION_TTL_MS,
     ENV_PREFIX,
+    GatewayConfig,
     gateway_enabled,
     load_gateway_config,
 )
@@ -139,6 +140,64 @@ class TestGatewayConfig:
         monkeypatch.setenv(ENV_PREFIX + "CLIENT_DEAD_DETECT_MS", "6000")
         config = load_gateway_config()
         assert any("3x" in w for w in config.warnings)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The credential comparison (§4.1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTheCredentialComparison:
+    """FIX 2 — a garbage credential must be a clean refusal.
+
+    ``hmac.compare_digest`` raises ``TypeError`` when a ``str`` argument
+    holds a NON-ASCII character, and an HTTP header value is latin-1
+    decoded: before the fix, a credential with any byte above 0x7F
+    escaped ``authenticate`` as an UNHANDLED exception instead of the
+    clean 401 of §4.1.
+    """
+
+    def test_a_non_ascii_candidate_is_refused_and_never_raises(self):
+        config = GatewayConfig(tokens=("tok-alpha", "tok-beta"))
+        assert config.token_is_valid("tökén") is False
+        assert config.token_is_valid("tok-ÿ") is False
+        assert config.token_is_valid("令牌") is False
+
+    def test_the_service_refuses_a_non_ascii_bearer_cleanly(self):
+        """The upgrade auth answers a garbage credential with a refusal —
+        never with an exception."""
+        service = McpGatewayService(GatewayConfig(enabled=True, tokens=("tok-alpha",)))
+        assert service.authenticate("Bearer t\xf6ken") is False
+        assert service.authenticate("Bearer tok-\u00ff") is False
+        # The legitimate credential still works.
+        assert service.authenticate("Bearer tok-alpha") is True
+
+    def test_every_token_is_compared_even_after_a_match(self, monkeypatch):
+        """The anti-timing design: the loop NEVER short-circuits.
+
+        The comparison time must not leak WHICH token was presented, so
+        every configured token is compared — the match does not stop the
+        loop.
+        """
+        import hmac
+
+        calls: list[tuple[bytes, bytes]] = []
+        real_compare = hmac.compare_digest
+
+        def counting_compare(a, b):
+            calls.append((a, b))
+            return real_compare(a, b)
+
+        monkeypatch.setattr(hmac, "compare_digest", counting_compare)
+        config = GatewayConfig(tokens=("tok-alpha", "tok-beta", "tok-gamma"))
+        assert config.token_is_valid("tok-beta") is True
+        assert len(calls) == 3, (
+            f"only {len(calls)} of the 3 tokens were compared — the loop "
+            "short-circuits on the match and leaks WHICH token was used"
+        )
+        # The comparison is over BYTES (a str comparison raises on a
+        # non-ASCII candidate).
+        assert all(isinstance(a, bytes) and isinstance(b, bytes) for a, b in calls)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
