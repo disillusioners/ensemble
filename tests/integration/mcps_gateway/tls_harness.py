@@ -963,6 +963,58 @@ def fetch_rows(engine: Any, sql: str, params: dict[str, Any] | None = None) -> l
         return [dict(row) for row in result.mappings()]
 
 
+def independent_fence_engine(user: str = "") -> Any:
+    """A SECOND engine on the SAME fence DSN, built independently.
+
+    The P3 audit proof reads the ledger back through an engine the test
+    constructed itself — never through the manager's pool — so the
+    round-trip proof cannot share a connection cache (or a transaction)
+    with the writer.  The connect args are the daemon's own PG session
+    pins, reached through this module (the sanctioned importer).
+    """
+    from sqlalchemy import create_engine
+
+    from daemon.repositories.factory import PG_SESSION_CONNECT_ARGS
+
+    return create_engine(
+        fence_sync_dsn(resolve_fence_role(user)),
+        connect_args=dict(PG_SESSION_CONNECT_ARGS),
+    )
+
+
+def record_audit_canary(
+    service: Any,
+    *,
+    agent_id: str,
+    machine_id: str,
+    tool: str,
+    args_hash: str,
+    outcome: str = "ok",
+    session_id: str = "",
+    detail: str = "",
+) -> None:
+    """Write ONE canary audit row through the service's OWN sink.
+
+    The record type is a daemon type; the interop lane reaches it
+    through this module (the sanctioned importer) so the assertion
+    file stays daemon-import-free.  Synchronous on purpose — the
+    caller bridges with ``asyncio.to_thread``.
+    """
+    from daemon.services.mcps_gateway.audit import AuditRecord
+
+    service._audit.record(
+        AuditRecord(
+            agent_id=agent_id,
+            machine_id=machine_id,
+            tool=tool,
+            args_hash=args_hash,
+            outcome=outcome,
+            session_id=session_id,
+            detail=detail,
+        )
+    )
+
+
 __all__ = [
     "EnvPatch",
     "FENCE_DB_NAME",
@@ -990,11 +1042,13 @@ __all__ = [
     "generate_self_signed_cert",
     "hex_token",
     "https_probe",
+    "independent_fence_engine",
     "issue_read_bearer",
     "listeners_owned_by",
     "plane_switches_effective",
     "postgres_env",
     "preflight_fence_role",
+    "record_audit_canary",
     "reset_audit_table",
     "resolve_fence_role",
     "rows_in",

@@ -116,6 +116,7 @@ def write_client_config(
     reconnect_max_backoff_ms: int = 60000,
     tool_call_timeout_ms: int = 30000,
     max_frame_bytes: int = 8388608,
+    audit_enabled: bool = False,
 ) -> Path:
     """Write the client configuration.
 
@@ -134,6 +135,14 @@ def write_client_config(
     whose ``heartbeat_interval_ms`` is outside 5000-60000 (SPEC §3.3), so
     the compressed values of the CENTRE cannot be written here — the
     client ADOPTS the advertised ones at runtime instead.
+
+    ``audit_enabled`` turns the CLIENT's own audit jsonl on
+    (``audit.enabled`` — off by default, ``config.go:323-328``).  The P3
+    gate enables it: the client then records every forwarded call with
+    ITS OWN ``args_hash`` (``audit.HashArgs``, ``internal/audit/audit.go``),
+    which is how the Go-side hash of assertion 19 becomes ACTUAL evidence
+    instead of a derivation.  The default (False) keeps the P1/P2 file
+    byte-identical.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     text = f"""listen:
@@ -159,7 +168,7 @@ policy:
   enabled: true
   deny_tools: []
 audit:
-  enabled: false
+  enabled: {str(audit_enabled).lower()}
   path: "{audit_path}"
 remote:
   enabled: true
@@ -189,6 +198,32 @@ def run_check_config(client_bin: Path, config_path: Path) -> tuple[int, str, str
         timeout=60,
     )
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def read_client_audit_log(path: Path) -> list[dict[str, Any]]:
+    """Parse the CLIENT's audit jsonl (one record per forwarded call).
+
+    The record shape is the Go ``audit.Record``
+    (``internal/audit/audit.go``): ``timestamp`` / ``session_id`` /
+    ``machine_id`` / ``agent_id`` / ``tool`` / ``args_hash`` /
+    ``outcome`` / ``detail`` — the omitempty members are absent when
+    empty.  A missing file answers ``[]`` (the audit lane is OFF by
+    default; the P3 config turns it on).
+    """
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except Exception:  # noqa: BLE001 - a partial line is skipped
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
 
 
 class GoClient:

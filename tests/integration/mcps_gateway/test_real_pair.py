@@ -105,6 +105,41 @@ COMMAND_ARGS: dict[str, Any] = {"command": "uptime", "timeout_ms": 5000}
 #: the shipped stub child: it MUST NOT reach the ledger (§8.4).
 FAILING_ARGS: dict[str, Any] = {"password": "S3CRET-VALUE-4711"}
 
+#: The machine id of the P3 canary row — a SEPARATE id, so the canary is
+#: never counted by the ``mach_interop``-scoped assertions (B11: every DB
+#: assertion is machine-scoped, and the canary row is not the flow's).
+CANARY_MACHINE_ID = "mach_canary_p3"
+
+#: The arguments of the canary row (ASCII-only: the canary hash must be
+#: recomputable byte for byte, like every fixture arg of the #18 shape).
+CANARY_ARGS: dict[str, Any] = {"probe": "p3-canary"}
+
+#: The args of the three EXPECTED-DIVERGENCE markers (assertion 19) —
+#: each INDEPENDENT (never one bundled "they differ"):
+#:   (i)   UTF-8 escaping — Python ``ensure_ascii=True`` vs Go raw UTF-8;
+#:   (ii)  HTML escaping — Go escapes ``<`` ``>`` ``&``; Python does not;
+#:   (iii) number canonicalisation — Go shortest-roundtrip float64
+#:         (``1.0`` -> ``1``); Python keeps ``.0``.
+#: These args are DELIBERATELY outside the R-2 safe set (ASCII/no-floats)
+#: — that is their point.
+DIVERGENCE_MARKERS: tuple[tuple[str, dict[str, Any]], ...] = (
+    ("utf8-escaping", {"text": "héllo"}),
+    ("html-escaping", {"text": "<b>&"}),
+    ("float-canonicalisation", {"n": 1.0}),
+)
+
+#: The wrapper key sets of the three read endpoints (assertion 23) —
+#: EXACT, not superset: a key that appears here unannounced is a shape
+#: change the FE model does not know about (and D2 is the sanctioned
+#: future growth point, not drift).
+MACHINES_WRAPPER_KEYS = frozenset({"machines", "count", "gateway_enabled"})
+SESSIONS_WRAPPER_KEYS = frozenset({"sessions", "count", "gateway_enabled"})
+AUDIT_WRAPPER_KEYS = frozenset({"audit", "count", "limit", "offset", "gateway_enabled"})
+
+#: The §8.4 outcome vocabulary (SPEC: ``ok`` / ``error`` / ``denied`` /
+#: ``timeout``).
+OUTCOME_VOCABULARY = frozenset({"ok", "error", "denied", "timeout"})
+
 # ── the compressed timing profile (the plan's §4 profile) ───────────────
 
 #: THE CENTRE's compressed knobs.  They are NAMES, not literals buried in
@@ -153,15 +188,6 @@ AUTH_PROFILE: dict[str, str] = {
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 #: Where the evidence of the run is written.
-EVIDENCE_PATH = (
-    REPO_ROOT
-    / ".agents"
-    / "shared"
-    / "planning"
-    / "mcps-gateway-interop"
-    / "p1-p2-evidence.md"
-)
-
 #: The marker of the machine-readable result line of the runner.
 RESULT_MARKER = "##RESULT##"
 
@@ -385,6 +411,80 @@ def canonical_args_hash(arguments: Any) -> str:
         default=str,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def go_canonical_hash_derived(arguments: Any) -> str:
+    """The SHA-256 of the bytes Go's ``canonical()`` is DOCUMENTED to emit.
+
+    DERIVED — a faithful transcription of ``internal/audit/audit.go``
+    (``canonical()``: ``json.Unmarshal`` into ``any``, then
+    ``json.Marshal``) combined with ``encoding/json``'s documented
+    encodings:
+
+    * map keys are sorted (``json.Marshal`` sorts map keys);
+    * ``<``/``>``/``&`` are HTML-escaped (``SetEscapeHTML(true)`` is the
+      default) — transcribe with ``ensure_ascii=False`` FIRST, then
+      replace exactly ``&`` -> ``\\u0026``, ``<`` -> ``\\u003c``,
+      ``>`` -> ``\\u003e`` (in that order: the escapings do not nest);
+    * strings are written as RAW UTF-8 (Go never \\u-escapes printable
+      non-ASCII);
+    * floats take the shortest-roundtrip form (``1.0`` -> ``1``).
+
+    The P3 gate ALSO reads the client's own audit jsonl (the client
+    writes ``audit.HashArgs`` for every forwarded call when
+    ``audit.enabled`` is on), so this derivation is CROSS-CHECKED against
+    the ACTUAL Go hash — if they disagree, this transcription is wrong,
+    not the pair.
+    """
+    payload = json.dumps(
+        _go_number_forms(arguments) if arguments is not None else {},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,  # Go writes raw UTF-8
+        default=str,
+    )
+    # Go's SetEscapeHTML(true): & first, then < and > (no nesting).
+    payload = (
+        payload.replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _go_number_forms(value: Any) -> Any:
+    """Normalise integral floats to ints — Go's shortest-roundtrip form.
+
+    ``json.Marshal(float64(1.0))`` emits ``1``; Python's ``json.dumps``
+    emits ``1.0``.  Replacing the VALUE (not the serialised text) keeps
+    the transcription honest for nested shapes.
+    """
+    if isinstance(value, float) and value == int(value) and abs(value) < 1e21:
+        return int(value)
+    if isinstance(value, dict):
+        return {key: _go_number_forms(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_go_number_forms(item) for item in value]
+    return value
+
+
+def shasum_sha256(payload: str) -> str:
+    """The SHA-256 of ``payload`` computed by a NON-PYTHON tool (shasum).
+
+    Assertion 18 is only as strong as its independence claim: hashing the
+    same bytes twice in one interpreter proves nothing about the hash
+    FUNCTION.  ``shasum -a 256`` (macOS / coreutils) is the second
+    implementation — the payload goes in on stdin, exactly the bytes the
+    Python side hashed.
+    """
+    proc = subprocess.run(
+        ["shasum", "-a", "256"],
+        input=payload.encode("utf-8"),
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    return proc.stdout.decode("utf-8").split()[0]
 
 
 def https_get(
@@ -691,6 +791,7 @@ async def _write_client_yaml(
     listen_token: str,
     listen_addr: str,
     name: str = "client-config.yaml",
+    audit_enabled: bool = False,
 ) -> Path:
     """Write the client configuration and run the ``-check-config`` preflight."""
     config_path = work_dir / name
@@ -705,6 +806,7 @@ async def _write_client_yaml(
         stub_child_bin=artifacts.stub_child_bin,
         audit_path=work_dir / "client-audit.jsonl",
         child_record_path=work_dir / "child.jsonl",
+        audit_enabled=audit_enabled,
         **CLIENT_PROFILE,
     )
     return config_path
@@ -1518,8 +1620,12 @@ async def _phase_p2(
         16,
         "the-session-is-gone-and-the-roster-no-longer-points-at-it",
         service.sessions.get(old_session_id) is None
+        # P3 hygiene: the row must EXIST and be cleared — a VANISHED row
+        # answers ``None`` for session_id and would pass vacuously.
+        and bool(roster_row)
         and roster_row.get("session_id") in (None, ""),
         f"sessions.get(old)={service.sessions.get(old_session_id)!r} "
+        f"roster_row_present={bool(roster_row)} "
         f"roster.session_id={roster_row.get('session_id')!r} "
         f"roster.connected={roster_row.get('connected')!r} "
         f"kill_seen_after={killed_elapsed:.3f}s",
@@ -1605,6 +1711,813 @@ async def _phase_p2(
     result.observe(f"envelope deviations recorded: {recorder.summary()}")
     for violation in recorder.violations:
         result.observe(f"deviation: {violation}")
+
+    return client
+
+
+# ── P3 — the audit DB proof + the read parity ────────────────────────────
+
+
+def _pick_row(rows: Any, **criteria: Any) -> list[dict[str, Any]]:
+    """The rows matching EVERY criterion by exact value."""
+    return [
+        row
+        for row in (rows or [])
+        if all(row.get(key) == value for key, value in criteria.items())
+    ]
+
+
+async def _phase_p3(
+    result: PhaseResult,
+    *,
+    gw: Any,
+    artifacts: go_client.GoArtifacts,
+    enrollment_token: str,
+    listen_token: str,
+    listen_addr: str,
+    read_token: str,
+    fence_role: str,
+    capture: LogCapture,
+    box: ClientBox,
+) -> go_client.GoClient:
+    """Assertions 17, 18, 19, 23 — P3 is the SOLE GATE for 17-19.
+
+    The audit proof is canary-guarded (B11, extended): the sink identity,
+    the enabled flag, a canary row read back through a SECOND,
+    independently constructed engine, and the flow's rows correlated by
+    EXACT VALUE (machine/session/tool/outcome/args_hash) and reasoned
+    from DELTAS — never absolutes.  The read parity (#23) runs on the
+    SAME live daemon with AUTH ON.
+    """
+    service = gw.service
+    lines = gw.transcript
+    work_dir = Path(gw.data_dir).parent
+
+    # ── #17 (canary set, extended) — BEFORE anything else ──────────────
+    result.add(
+        17,
+        "the-audit-sink-writes-through-the-manager-engine",
+        getattr(service._audit, "_engine", None) is gw.manager.engine,
+        f"identical={getattr(service._audit, '_engine', None) is gw.manager.engine} "
+        f"sink={type(service._audit).__name__}",
+    )
+    result.add(
+        17,
+        "the-audit-sink-is-enabled",
+        getattr(gw.config, "audit_enabled", None) is True,
+        f"audit_enabled={getattr(gw.config, 'audit_enabled', None)!r}",
+    )
+    canary_hash = canonical_args_hash(CANARY_ARGS)
+    await asyncio.to_thread(
+        tls_harness.record_audit_canary,
+        service,
+        agent_id="ari-canary",
+        machine_id=CANARY_MACHINE_ID,
+        tool="canary_tool",
+        args_hash=canary_hash,
+        session_id="sess_canary_p3",
+        detail="p3 canary row",
+    )
+    independent = await asyncio.to_thread(
+        tls_harness.independent_fence_engine, fence_role
+    )
+    try:
+        canary_rows = await asyncio.to_thread(
+            tls_harness.fetch_rows,
+            independent,
+            "SELECT * FROM mcp_gateway_audit WHERE machine_id = :m",
+            {"m": CANARY_MACHINE_ID},
+        )
+    finally:
+        await asyncio.to_thread(independent.dispose)
+    result.add(
+        17,
+        "the-canary-row-round-trips-to-a-second-independent-engine",
+        len(canary_rows) == 1
+        and canary_rows[0].get("args_hash") == canary_hash,
+        f"rows={len(canary_rows)} "
+        f"stored={canary_rows[0].get('args_hash') if canary_rows else None!r} "
+        f"recomputed={canary_hash}",
+        evidence=(
+            "canary row: "
+            + json.dumps(canary_rows[0], sort_keys=True, default=str)
+        )
+        if canary_rows
+        else "",
+    )
+
+    # ── the shipped client, audit lane ON (the Go hashes become ACTUAL) ──
+    config_path = await _write_client_yaml(
+        work_dir,
+        artifacts,
+        gw=gw,
+        enrollment_token=enrollment_token,
+        listen_token=listen_token,
+        listen_addr=listen_addr,
+        name="client-p3.yaml",
+        audit_enabled=True,
+    )
+    code, out, err = await asyncio.to_thread(
+        go_client.run_check_config, artifacts.client_bin, config_path
+    )
+    result.gate(
+        "client-check-config-exit-0",
+        code == 0,
+        f"exit={code} stdout={out.strip()[:160]} stderr={err.strip()[:300]}",
+    )
+    client = await _start_client(result, artifacts, config_path, work_dir, box)
+
+    # ── #23 — the positive control FIRST, then the Accept gotcha ───────
+    # (the runner's own 401 gate has already fired; the SHAPE is pinned
+    # here — the 401 body is FLAT: middleware/auth.py:596-608)
+    control = await asyncio.to_thread(https_get, gw.port, "/api/mcps-gateway/audit")
+    control_body = control["body"] or {}
+    result.add(
+        23,
+        "the-401-body-is-FLAT",
+        control["status"] == 401
+        and control_body
+        == {"error": "AUTH_REQUIRED", "message": "Authentication required"},
+        f"status={control['status']} body={json.dumps(control_body)[:200]}",
+    )
+    # The Accept gotcha: with ``Accept: */*`` the auth middleware answers
+    # the BROWSER 302 to the login page, not the machine 401 — the
+    # gateway prefix is NOT in _401_HEURISTIC_PREFIXES (middleware/auth.py:84-91).
+    wildcard = await asyncio.to_thread(
+        https_get, gw.port, "/api/mcps-gateway/audit", accept="*/*"
+    )
+    location = (
+        wildcard["headers"].get("Location")
+        or wildcard["headers"].get("location")
+        or ""
+    )
+    result.add(
+        23,
+        "no-token-with-accept-wildcard-is-a-302-to-the-login-page-not-401",
+        wildcard["status"] == 302 and "/api/auth/login" in location,
+        f"status={wildcard['status']} location={location!r}",
+        evidence=f"body={wildcard['text'][:160]!r}",
+    )
+
+    # ── #23 — the 403 lane: a VALID token lacking mcp:read ─────────────
+    # D3a consumes this pin: the 403 body is NESTED under ``detail``
+    # (decorators.py:108-114) — a DIFFERENT shape from the flat 401.
+    narrow_token = await asyncio.to_thread(
+        tls_harness.issue_read_bearer,
+        gw.engine,
+        label="interop-narrow",
+        scopes=("profile",),
+        ttl=600,
+    )
+    result.gate("narrow-bearer-minted", bool(narrow_token), f"length={len(narrow_token)}")
+    forbidden = await asyncio.to_thread(
+        https_get, gw.port, "/api/mcps-gateway/audit", token=narrow_token
+    )
+    forbidden_body = forbidden["body"] or {}
+    forbidden_detail = forbidden_body.get("detail")
+    result.add(
+        23,
+        "the-403-body-is-NESTED-under-detail-with-SCOPE_INSUFFICIENT",
+        forbidden["status"] == 403
+        and set(forbidden_body.keys()) == {"detail"}
+        and isinstance(forbidden_detail, dict)
+        and forbidden_detail.get("error") == "SCOPE_INSUFFICIENT"
+        and forbidden_detail.get("required") == ["mcp:read"],
+        f"status={forbidden['status']} body={json.dumps(forbidden_body)[:300]}",
+    )
+
+    # ── snapshot 0 — enrolled but NOT busy (before the session) ────────
+    m0 = await asyncio.to_thread(
+        https_get, gw.port, "/api/mcps-gateway/machines", token=read_token
+    )
+    m0_body = m0["body"] or {}
+    m0_row = (
+        _pick_row(m0_body.get("machines"), machine_id=MACHINE_ID) or [{}]
+    )[0]
+    s0 = await asyncio.to_thread(
+        https_get, gw.port, "/api/mcps-gateway/sessions", token=read_token
+    )
+    s0_body = s0["body"] or {}
+    result.gate(
+        "read-snapshot-pre-connect",
+        m0["status"] == 200
+        and bool(m0_row)
+        and m0_row.get("busy") is False
+        and m0_row.get("session_id") is None
+        and isinstance(s0_body.get("sessions"), list),
+        f"machines={m0['status']} busy={m0_row.get('busy')!r} "
+        f"session_id={m0_row.get('session_id')!r} "
+        f"sessions_is_list={isinstance(s0_body.get('sessions'), list)}",
+    )
+
+    # ── the live session ───────────────────────────────────────────────
+    session = await service.connect(
+        machine_id=MACHINE_ID, agent_id=AGENT_ID, reason="p3-gate"
+    )
+    session_id = str(session.get("session_id") or "")
+    result.gate("p3-session-open", bool(session_id), f"session_id={session_id!r}")
+
+    m1 = await asyncio.to_thread(
+        https_get, gw.port, "/api/mcps-gateway/machines", token=read_token
+    )
+    m1_body = m1["body"] or {}
+    m1_row = (
+        _pick_row(m1_body.get("machines"), machine_id=MACHINE_ID) or [{}]
+    )[0]
+    s1 = await asyncio.to_thread(
+        https_get, gw.port, "/api/mcps-gateway/sessions", token=read_token
+    )
+    s1_body = s1["body"] or {}
+    s1_row = (
+        _pick_row(s1_body.get("sessions"), session_id=session_id) or [{}]
+    )[0]
+    child_tools = await asyncio.to_thread(child_catalog, work_dir / "child.jsonl")
+    catalog_names = sorted(
+        str(tool.get("name"))
+        for tool in (child_tools or [])
+        if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+    )
+    result.add(
+        23,
+        "the-live-machine-row-is-busy-and-names-the-session",
+        m1["status"] == 200
+        and m1_row.get("busy") is True
+        and m1_row.get("session_id") == session_id
+        and m1_row.get("agent_id") == AGENT_ID
+        and m1_row.get("online") is True
+        and m1_row.get("connected") is True,
+        f"status={m1['status']} busy={m1_row.get('busy')!r} "
+        f"session_id={m1_row.get('session_id')!r} "
+        f"agent_id={m1_row.get('agent_id')!r} "
+        f"online={m1_row.get('online')!r} connected={m1_row.get('connected')!r}",
+        evidence=f"row={json.dumps(m1_row, sort_keys=True)[:300]}",
+    )
+    result.add(
+        23,
+        "the-live-session-row-is-live-locked-and-carries-the-REAL-catalog",
+        s1["status"] == 200
+        and bool(s1_row)
+        and s1_row.get("state") == "live"
+        and s1_row.get("machine_locked") is True
+        and s1_row.get("machine_id") == MACHINE_ID
+        and s1_row.get("agent_id") == AGENT_ID
+        and bool(catalog_names)
+        and sorted(s1_row.get("tools") or []) == catalog_names,
+        f"status={s1['status']} state={s1_row.get('state')!r} "
+        f"machine_locked={s1_row.get('machine_locked')!r} "
+        f"tools={sorted(s1_row.get('tools') or [])} "
+        f"child_catalog={catalog_names}",
+    )
+
+    # ── the flow: one ok, one error, three markers, one timeout ────────
+    ok_result = await service.command(
+        agent_id=AGENT_ID, tool=SUCCESS_TOOL, arguments=COMMAND_ARGS
+    )
+    result.gate(
+        "p3-ok-command-returned",
+        isinstance(ok_result, dict) and isinstance(ok_result.get("content"), list),
+        f"result_keys={sorted(ok_result) if isinstance(ok_result, dict) else None}",
+    )
+
+    echo_error_code = ""
+    try:
+        await service.command(
+            agent_id=AGENT_ID, tool=FAILING_TOOL, arguments=FAILING_ARGS
+        )
+        result.gate("p3-error-command-refused", False, "echo_tool returned instead of erroring")
+    except Exception as exc:  # noqa: BLE001 — the refusal IS the evidence
+        echo_error_code = tls_harness.gateway_error_code(exc)
+        result.gate(
+            "p3-error-command-refused", bool(echo_error_code), f"code={echo_error_code!r}"
+        )
+
+    for marker_name, marker_args in DIVERGENCE_MARKERS:
+        try:
+            await service.command(
+                agent_id=AGENT_ID, tool=FAILING_TOOL, arguments=marker_args
+            )
+            result.gate(
+                f"p3-marker-{marker_name}-refused",
+                False,
+                "echo_tool returned instead of erroring",
+            )
+        except Exception as exc:  # noqa: BLE001
+            result.gate(
+                f"p3-marker-{marker_name}-refused",
+                bool(tls_harness.gateway_error_code(exc)),
+                f"code={tls_harness.gateway_error_code(exc)!r}",
+            )
+
+    # the timeout row — cheap under the compressed profile (1200 ms)
+    timeout_code = ""
+    os.kill(client.process.pid, signal.SIGSTOP)
+    try:
+        await service.command(
+            agent_id=AGENT_ID, tool=SUCCESS_TOOL, arguments=COMMAND_ARGS
+        )
+        result.gate(
+            "p3-timeout-command-timed-out",
+            False,
+            "the command returned instead of timing out",
+        )
+    except Exception as exc:  # noqa: BLE001
+        timeout_code = tls_harness.gateway_error_code(exc)
+        result.gate(
+            "p3-timeout-command-timed-out",
+            timeout_code == "TOOL_TIMEOUT",
+            f"code={timeout_code!r}",
+        )
+    finally:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.kill(client.process.pid, signal.SIGCONT)
+    # let the client drain the frozen frame and resume heartbeats
+    await asyncio.sleep(1.5)
+    session_survived = service.sessions.get(session_id) is not None
+    result.gate(
+        "p3-session-survived-the-request-timeout",
+        session_survived,
+        f"session_id={session_id!r} still_live={session_survived}",
+    )
+
+    # ── snapshot 2 — the audit rows are visible on the read surface ────
+    a2 = await asyncio.to_thread(
+        https_get, gw.port, "/api/mcps-gateway/audit", token=read_token
+    )
+    a2_body = a2["body"] or {}
+    a2_rows = a2_body.get("audit") or []
+
+    # ── session.end, then the post-end snapshot ─────────────────────────
+    end_result = await service.disconnect(agent_id=AGENT_ID)
+    result.gate(
+        "p3-session-closed", bool(end_result.get("ended")), f"ended={end_result.get('ended')!r}"
+    )
+    await _wait_until(
+        lambda: _roster_session_id(service, MACHINE_ID) in (None, ""),
+        timeout=10.0,
+        poll=0.05,
+    )
+    m3 = await asyncio.to_thread(
+        https_get, gw.port, "/api/mcps-gateway/machines", token=read_token
+    )
+    m3_body = m3["body"] or {}
+    m3_row = (
+        _pick_row(m3_body.get("machines"), machine_id=MACHINE_ID) or [{}]
+    )[0]
+    s3 = await asyncio.to_thread(
+        https_get, gw.port, "/api/mcps-gateway/sessions", token=read_token
+    )
+    s3_body = s3["body"] or {}
+    result.add(
+        23,
+        "the-busy-flag-transitions-true-then-false-across-begin-end",
+        m0_row.get("busy") is False
+        and m1_row.get("busy") is True
+        and m3_row.get("busy") is False
+        and m3_row.get("session_id") is None,
+        f"pre={m0_row.get('busy')!r} live={m1_row.get('busy')!r} "
+        f"post={m3_row.get('busy')!r} post_session_id={m3_row.get('session_id')!r}",
+    )
+    result.add(
+        23,
+        "the-session-disappears-from-the-session-read-after-the-end",
+        s3["status"] == 200
+        and isinstance(s3_body.get("sessions"), list)
+        and not _pick_row(s3_body.get("sessions"), session_id=session_id),
+        f"sessions_after_end={len(s3_body.get('sessions') or [])} "
+        f"matching={len(_pick_row(s3_body.get('sessions'), session_id=session_id))}",
+    )
+
+    # ── #23 — the wrapper shapes are EXACT ─────────────────────────────
+    result.add(
+        23,
+        "the-machines-wrapper-is-exactly-machines-count-gateway_enabled",
+        m3["status"] == 200
+        and frozenset(m3_body.keys()) == MACHINES_WRAPPER_KEYS
+        and m3_body.get("count") == len(m3_body.get("machines") or []),
+        f"keys={sorted(m3_body.keys())} count={m3_body.get('count')} "
+        f"page={len(m3_body.get('machines') or [])}",
+    )
+    result.add(
+        23,
+        "the-sessions-wrapper-is-exactly-sessions-count-gateway_enabled",
+        s3["status"] == 200
+        and frozenset(s3_body.keys()) == SESSIONS_WRAPPER_KEYS
+        and s3_body.get("count") == len(s3_body.get("sessions") or []),
+        f"keys={sorted(s3_body.keys())} count={s3_body.get('count')} "
+        f"page={len(s3_body.get('sessions') or [])}",
+    )
+    result.add(
+        23,
+        "the-audit-wrapper-is-exactly-audit-count-limit-offset-gateway_enabled",
+        a2["status"] == 200
+        and frozenset(a2_body.keys()) == AUDIT_WRAPPER_KEYS
+        and a2_body.get("count") == len(a2_rows),
+        f"keys={sorted(a2_body.keys())} count={a2_body.get('count')} "
+        f"page={len(a2_rows)}",
+    )
+
+    # ── #23 — count is the PAGE LENGTH, not the ledger total ───────────
+    page1 = await asyncio.to_thread(
+        https_get,
+        gw.port,
+        "/api/mcps-gateway/audit?limit=1&offset=0",
+        token=read_token,
+    )
+    page1_body = page1["body"] or {}
+    result.add(
+        23,
+        "the-audit-count-is-the-PAGE-LENGTH-not-the-ledger-total",
+        page1["status"] == 200
+        and page1_body.get("count") == 1
+        and len(page1_body.get("audit") or []) == 1
+        and len(a2_rows) > 1,
+        f"count(limit=1)={page1_body.get('count')} "
+        f"page={len(page1_body.get('audit') or [])} "
+        f"rows_on_the_default_page={len(a2_rows)}",
+        evidence=(
+            "the FE footgun: 'The length of THIS PAGE — NOT the ledger "
+            "total' (mcps-gateway.model.ts); the BE honours it"
+        ),
+    )
+    result.add(
+        23,
+        "the-audit-default-page-is-limit-50-offset-0",
+        a2_body.get("limit") == 50 and a2_body.get("offset") == 0,
+        f"limit={a2_body.get('limit')} offset={a2_body.get('offset')}",
+    )
+    page2 = await asyncio.to_thread(
+        https_get,
+        gw.port,
+        "/api/mcps-gateway/audit?limit=1&offset=1",
+        token=read_token,
+    )
+    page2_body = page2["body"] or {}
+    result.add(
+        23,
+        "the-audit-echoes-the-applied-limit-and-offset",
+        page2["status"] == 200
+        and page2_body.get("limit") == 1
+        and page2_body.get("offset") == 1,
+        f"limit={page2_body.get('limit')} offset={page2_body.get('offset')}",
+    )
+
+    # ── #23 — the pagination bounds are 422 (1 <= limit <= 200, offset >= 0) ──
+    bounds: dict[str, tuple[int, bool]] = {}
+    for query in ("limit=0", "limit=201", "offset=-1"):
+        response = await asyncio.to_thread(
+            https_get, gw.port, f"/api/mcps-gateway/audit?{query}", token=read_token
+        )
+        body = response["body"] or {}
+        bounds[query] = (
+            response["status"],
+            isinstance(body.get("detail"), list),
+        )
+    result.add(
+        23,
+        "the-audit-pagination-bounds-answer-422",
+        all(status == 422 and detail_is_list for status, detail_is_list in bounds.values()),
+        json.dumps({key: value[0] for key, value in bounds.items()}),
+    )
+
+    # ── #23 — machines/sessions take NO query params ───────────────────
+    ignored: dict[str, int] = {}
+    shape_ok = True
+    for lane, keys in (("machines", MACHINES_WRAPPER_KEYS), ("sessions", SESSIONS_WRAPPER_KEYS)):
+        response = await asyncio.to_thread(
+            https_get,
+            gw.port,
+            f"/api/mcps-gateway/{lane}?limit=1&offset=1",
+            token=read_token,
+        )
+        ignored[lane] = response["status"]
+        if response["status"] != 200 or frozenset((response["body"] or {}).keys()) != keys:
+            shape_ok = False
+    result.add(
+        23,
+        "machines-and-sessions-take-no-query-params",
+        shape_ok and all(status == 200 for status in ignored.values()),
+        f"statuses={ignored} (extra params are IGNORED — the endpoints "
+        "declare none, so no 422 and no shape change)",
+    )
+
+    # ── #23 — the 17-18 rows are visible in /audit, keys ⊇ FE fields ──
+    ok_hash = canonical_args_hash(COMMAND_ARGS)
+    wire_ok_rows = _pick_row(
+        a2_rows,
+        machine_id=MACHINE_ID,
+        session_id=session_id,
+        tool=SUCCESS_TOOL,
+        outcome="ok",
+        args_hash=ok_hash,
+    )
+    result.add(
+        23,
+        "the-17-18-audit-rows-are-visible-in-the-audit-read",
+        a2["status"] == 200 and len(wire_ok_rows) >= 1,
+        f"matching_ok_rows={len(wire_ok_rows)} of {len(a2_rows)} wire rows",
+        evidence=(
+            "wire ok row: "
+            + json.dumps(wire_ok_rows[0], sort_keys=True)
+            if wire_ok_rows
+            else ""
+        ),
+    )
+    machines_superset = bool(m1_row) and set(MACHINE_FIELDS) <= set(m1_row.keys())
+    sessions_superset = bool(s1_row) and set(SESSION_FIELDS) <= set(s1_row.keys())
+    audit_superset = bool(wire_ok_rows) and set(AUDIT_FIELDS) <= set(wire_ok_rows[0].keys())
+    result.add(
+        23,
+        "be-keys-are-a-superset-of-the-fe-model-fields-on-all-three-shapes",
+        machines_superset and sessions_superset and audit_superset,
+        f"machines={machines_superset} sessions={sessions_superset} "
+        f"audit={audit_superset}",
+    )
+    array_keys_always_present = all(
+        isinstance(body.get(key), list)
+        for body, key in (
+            (m0_body, "machines"),
+            (m1_body, "machines"),
+            (m3_body, "machines"),
+            (s0_body, "sessions"),
+            (s1_body, "sessions"),
+            (s3_body, "sessions"),
+            (a2_body, "audit"),
+            (page1_body, "audit"),
+            (page2_body, "audit"),
+        )
+    )
+    result.add(
+        23,
+        "the-array-keys-are-always-present-so-the-fe-defaults-are-never-load-bearing",
+        array_keys_always_present,
+        "machines/sessions/audit keys were lists in every response of "
+        "the run (mcps-gateway.service.ts `?? []` never fires)",
+    )
+
+    # ── #17/#18 — the ledger in the REAL DB, read INDEPENDENTLY ────────
+    independent = await asyncio.to_thread(
+        tls_harness.independent_fence_engine, fence_role
+    )
+    try:
+        rows = await asyncio.to_thread(
+            tls_harness.fetch_rows,
+            independent,
+            "SELECT * FROM mcp_gateway_audit WHERE machine_id = :m "
+            "ORDER BY created_at, id",
+            {"m": MACHINE_ID},
+        )
+    finally:
+        await asyncio.to_thread(independent.dispose)
+    expected_rows = 2 + len(DIVERGENCE_MARKERS) + 1  # ok + error + markers + timeout
+    result.add(
+        17,
+        "the-ledger-grew-by-exactly-the-six-commands-of-the-flow",
+        len(rows) == expected_rows,
+        f"delta={len(rows)} (pre-flow 0 is gated by the runner's "
+        f"audit-pre-flow-count-zero; expected={expected_rows})",
+    )
+
+    failing_hash = canonical_args_hash(FAILING_ARGS)
+    ok_rows = _pick_row(
+        rows,
+        session_id=session_id,
+        tool=SUCCESS_TOOL,
+        outcome="ok",
+        args_hash=ok_hash,
+    )
+    result.add(
+        17,
+        "the-ok-row-correlates-by-EXACT-VALUE",
+        len(ok_rows) == 1
+        and ok_rows[0].get("machine_id") == MACHINE_ID
+        and ok_rows[0].get("agent_id") == AGENT_ID,
+        f"rows={len(ok_rows)} "
+        f"args_hash={ok_rows[0].get('args_hash') if ok_rows else None!r} "
+        f"recomputed={ok_hash}",
+        evidence=(
+            "ok row: " + json.dumps(ok_rows[0], sort_keys=True, default=str)
+            if ok_rows
+            else ""
+        ),
+    )
+    error_rows = _pick_row(
+        rows,
+        session_id=session_id,
+        tool=FAILING_TOOL,
+        outcome="error",
+        args_hash=failing_hash,
+    )
+    result.add(
+        17,
+        "the-error-row-correlates-by-EXACT-VALUE-and-carries-an-error-code",
+        len(error_rows) == 1
+        and isinstance(error_rows[0].get("error_code"), str)
+        and bool(error_rows[0].get("error_code")),
+        f"rows={len(error_rows)} "
+        f"error_code={error_rows[0].get('error_code') if error_rows else None!r} "
+        f"typed_client_code={echo_error_code!r} "
+        f"args_hash={error_rows[0].get('args_hash') if error_rows else None!r} "
+        f"recomputed={failing_hash}",
+        evidence=(
+            "error row: " + json.dumps(error_rows[0], sort_keys=True, default=str)
+            if error_rows
+            else ""
+        ),
+    )
+    timeout_rows = _pick_row(
+        rows,
+        session_id=session_id,
+        tool=SUCCESS_TOOL,
+        outcome="timeout",
+        error_code="TOOL_TIMEOUT",
+    )
+    result.add(
+        17,
+        "the-timeout-row-correlates-by-EXACT-VALUE",
+        len(timeout_rows) == 1
+        and timeout_rows[0].get("args_hash") == ok_hash,
+        f"rows={len(timeout_rows)} "
+        f"error_code={timeout_rows[0].get('error_code') if timeout_rows else None!r} "
+        f"args_hash={timeout_rows[0].get('args_hash') if timeout_rows else None!r}",
+    )
+
+    # §8.4 — the field presence per row (+ error_code where applicable)
+    presence_fields = (
+        "created_at",
+        "session_id",
+        "machine_id",
+        "agent_id",
+        "tool",
+        "args_hash",
+        "outcome",
+    )
+    missing_presence = [
+        (index, field)
+        for index, row in enumerate(rows)
+        for field in presence_fields
+        if row.get(field) in (None, "")
+    ]
+    result.add(
+        17,
+        "every-row-carries-the-8.4-field-set",
+        not missing_presence,
+        f"missing={missing_presence[:6]} rows={len(rows)}",
+    )
+    vocab_ok = {row.get("outcome") for row in rows} <= OUTCOME_VOCABULARY
+    result.add(
+        17,
+        "the-outcomes-stay-within-the-8.4-vocabulary",
+        vocab_ok,
+        f"outcomes={sorted(str(row.get('outcome')) for row in rows)}",
+    )
+    row_dump = json.dumps(rows, sort_keys=True, default=str)
+    leaked_password = FAILING_ARGS["password"] in row_dump
+    leaked_args = json.dumps(COMMAND_ARGS, sort_keys=True) in row_dump
+    result.add(
+        17,
+        "no-column-carries-the-raw-arguments",
+        not leaked_password and not leaked_args,
+        f"password_leaked={leaked_password} command_args_leaked={leaked_args} "
+        "(§8.4: the arguments are hashed, never stored)",
+    )
+
+    # the plan's full column list, reconciled against the actual row
+    if rows:
+        observed_columns = sorted(rows[0].keys())
+        result.observe(
+            "the plan #17 column list reconciled: observed DB columns "
+            f"{observed_columns}; the plan names agent_id, instance_id, "
+            "machine_id, tool, args_hash, outcome, session_id, error_code, "
+            "detail, created_at as the storage shape — every one present"
+            + (
+                "; instance_id/detail are NULL on these rows (the flow "
+                "passes no instance_id; the centre writes a FIXED detail "
+                "classification, empty-rendered as NULL)"
+                if rows[0].get("instance_id") is None and rows[0].get("detail") is None
+                else f"; instance_id={rows[0].get('instance_id')!r} detail={rows[0].get('detail')!r}"
+            )
+        )
+
+    # ── #18 — the recomputation is INDEPENDENT (shasum cross-check) ────
+    command_payload = json.dumps(
+        COMMAND_ARGS, sort_keys=True, separators=(",", ":"), default=str
+    )
+    shasum_hash = await asyncio.to_thread(shasum_sha256, command_payload)
+    result.add(
+        18,
+        "the-args-hash-matches-a-second-non-python-implementation",
+        shasum_hash == ok_hash and len(ok_rows) == 1
+        and ok_rows[0].get("args_hash") == ok_hash,
+        f"python={ok_hash} shasum={shasum_hash} "
+        f"stored={ok_rows[0].get('args_hash') if ok_rows else None!r}",
+        evidence=f"payload={command_payload!r} | shasum -a 256",
+    )
+    failing_payload = json.dumps(
+        FAILING_ARGS, sort_keys=True, separators=(",", ":"), default=str
+    )
+    failing_shasum = await asyncio.to_thread(shasum_sha256, failing_payload)
+    result.add(
+        18,
+        "the-error-rows-hash-also-matches-the-recomputation",
+        failing_shasum == failing_hash and len(error_rows) == 1
+        and error_rows[0].get("args_hash") == failing_hash,
+        f"python={failing_hash} shasum={failing_shasum} "
+        f"stored={error_rows[0].get('args_hash') if error_rows else None!r}",
+    )
+
+    # ── #19 — the three EXPECTED-DIVERGENCE markers, each INDEPENDENT ──
+    # The Go side is ACTUAL: the P3 client config turns the client's own
+    # audit lane on, so the client's jsonl carries the Go-computed hash
+    # of every forwarded call.  The documented derivation
+    # (internal/audit/audit.go canonical()) is cross-checked against it.
+    client_audit = await asyncio.to_thread(
+        go_client.read_client_audit_log, work_dir / "client-audit.jsonl"
+    )
+    # the jsonl is APPEND-ONLY and survives runs: correlate by THIS run's
+    # session id (the client stamps the remote-hands session on every
+    # forwarded record — client.go:1244-1255).
+    session_audit = [
+        record
+        for record in client_audit
+        if record.get("session_id") == session_id
+    ]
+    go_echo_error_rows = [
+        record
+        for record in session_audit
+        if record.get("tool") == FAILING_TOOL and record.get("outcome") == "error"
+    ]
+    result.gate(
+        "client-audit-lane-captured-the-flow",
+        len(go_echo_error_rows) == 1 + len(DIVERGENCE_MARKERS),
+        f"go_records_total={len(client_audit)} "
+        f"this_session={len(session_audit)} "
+        f"echo_error_records={len(go_echo_error_rows)} "
+        f"(the failing call + {len(DIVERGENCE_MARKERS)} markers)",
+    )
+    result.observe(
+        "the client's audit jsonl is APPEND-ONLY across runs (observed: "
+        f"{len(client_audit)} records accumulated over the P3 attempts, "
+        "only the session filter isolates this run's six) — an operator "
+        "note for the kit, not a defect."
+    )
+    result.observe(
+        "the Go-side hashes of assertion 19 are ACTUAL: the P3 client "
+        "config sets audit.enabled=true, and the shipped client writes "
+        "one record per forwarded call with audit.HashArgs "
+        "(internal/remote/client.go:1244-1255, internal/audit/audit.go). "
+        "No derivation fallback was needed."
+    )
+    # the client records the calls in order: [ok, failing, m1, m2, m3, …]
+    marker_go_rows = go_echo_error_rows[1 : 1 + len(DIVERGENCE_MARKERS)]
+    for (marker_name, marker_args), go_row in zip(DIVERGENCE_MARKERS, marker_go_rows):
+        python_hash = canonical_args_hash(marker_args)
+        derived_go_hash = go_canonical_hash_derived(marker_args)
+        actual_go_hash = str(go_row.get("args_hash") or "")
+        result.add(
+            19,
+            f"marker-{marker_name}-the-python-and-go-args-hashes-DIFFER",
+            python_hash != actual_go_hash,
+            f"python={python_hash} go(actual)={actual_go_hash}",
+            evidence=(
+                "EXPECTED DIVERGENCE — if this fails, Go was aligned: "
+                "update the SPEC note and drop the marker"
+            ),
+        )
+        result.gate(
+            f"go-derivation-faithful-{marker_name}",
+            derived_go_hash == actual_go_hash,
+            f"derived={derived_go_hash} actual={actual_go_hash} "
+            "(the audit.go transcription is cross-checked against the "
+            "client's own record)",
+        )
+
+    # ── the rulings this phase records (they bind later phases) ────────
+    result.observe(
+        "RULING G1 (OPEN-SPEC): the centre's HEARTBEAT_TIMEOUT error frame "
+        "carries NO id (pinned by P2 #16a) while SPEC §6.1 requires an id "
+        "on every error — the client DROPS uncorrelated errors, so the "
+        "machine can never see why it was killed.  Owner: the mcps_client "
+        "SPEC owner; options: amend §6.1 for unsolicited errors, or carry "
+        "an id.  The conformance kit (P5) pins the CURRENT behaviour "
+        "(error frame, no id) with a marker comment pointing at G1.  The "
+        "daemon is NOT altered."
+    )
+    result.observe(
+        "RULING (roster-release ordering, CONFIRMED for P4): the centre "
+        "releases the roster's §8.3 pointer AFTER the awaited socket "
+        "close (the P2 §7.1 finding) — on a wedged peer the read surface "
+        "keeps reporting the dead session as busy.  P4 owns the one-line "
+        "fix (release the roster pointer BEFORE the awaited close); P2 "
+        "#16c's honest failure is the regression pin; the defect "
+        "mechanics are cited in the P4 commit message.  P3 records the "
+        "disposition only."
+    )
+
+    # ── the envelope deviations of the whole run (recorded, never raised) ──
+    recorder = transcript.ViolationRecorder()
+    recorder.observe_all(lines.frames)
+    result.violations = [str(v) for v in recorder.violations]
+    result.observe(f"envelope deviations recorded: {recorder.summary()}")
 
     return client
 
@@ -1758,7 +2671,7 @@ async def run_phase(
                     capture=capture,
                     box=box,
                 )
-            else:
+            elif phase == "p2":
                 client = await _phase_p2(
                     result,
                     gw=gw,
@@ -1767,6 +2680,19 @@ async def run_phase(
                     listen_token=listen_token,
                     listen_addr=listen_addr,
                     read_token=read_token,
+                    capture=capture,
+                    box=box,
+                )
+            else:
+                client = await _phase_p3(
+                    result,
+                    gw=gw,
+                    artifacts=artifacts,
+                    enrollment_token=enrollment_token,
+                    listen_token=listen_token,
+                    listen_addr=listen_addr,
+                    read_token=read_token,
+                    fence_role=fence_role,
                     capture=capture,
                     box=box,
                 )
@@ -1915,7 +2841,7 @@ def main(argv: list[str] | None = None) -> int:
             index += 1
             postgres_user = argv[index]
         index += 1
-    if phase not in ("p1", "p2"):
+    if phase not in ("p1", "p2", "p3"):
         print(f"unknown phase {phase!r}", file=sys.stderr)
         return 2
     work_dir = work_root / phase
@@ -2010,6 +2936,26 @@ def test_p2_negative_paths_real_pair() -> None:
     ]
     assert not failed, "P2 FAILED:\n" + "\n".join(failed)
     assert code == 0, f"the P2 gate exited with {code}"
+    assert payload.get("verdict") == "PASS"
+
+
+@pytest.mark.timeout(GATE_TIMEOUT_SECONDS)
+def test_p3_audit_db_proof_and_read_parity() -> None:
+    """P3 — the audit DB proof (17-19) + the BE-FE read parity (23)."""
+    code, _stdout, payload = _run_phase("p3")
+    assert payload, "the gate produced no machine-readable result"
+    failed = [
+        f"#{a['number']} {a['name']} — {a['detail']}"
+        for a in payload.get("assertions", [])
+        if a.get("verdict") == "FAIL"
+    ]
+    failed += [
+        f"gate {g['name']} — {g['detail']}"
+        for g in payload.get("gates", [])
+        if g.get("verdict") == "FAIL"
+    ]
+    assert not failed, "P3 FAILED:\n" + "\n".join(failed)
+    assert code == 0, f"the P3 gate exited with {code}"
     assert payload.get("verdict") == "PASS"
 
 
