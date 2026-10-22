@@ -588,7 +588,7 @@ Phase-A interpretations document.
 | Audit read surface | shipped (Phase C) | `GET /api/mcps-gateway/audit` — the read-only tail of the ledger, newest first, paginated (§8). The repository method `McpGatewayAuditRepository.list_recent(limit, offset)` is the seam underneath it |
 | §6.7 frame-size enforcement | backlog | constants defined, no active center-side enforcement |
 | §10 conformance kit | future | does not exist on either side |
-| **Phase C** | FE follow-up | the backend read surface SHIPPED (§8 — the three OAuth-lane GET endpoints). What remains is the frontend half: the center/gateway management UI (machines, sessions, audit) — the client-facing half of the "reference center" SPEC §1 names |
+| **Phase C** | shipped | the read surface SHIPPED (§8 — the three OAuth-lane GET endpoints) and the operator management page SHIPPED (§9 — the read-only machines / sessions / audit page). The page is read-only in v1; the write controls arrive with the v0.2 per-tool ACL work (§9.2) |
 | **Phase D** | later | yeda-agent-fleet second-center interop per SPEC §1 |
 
 ---
@@ -837,7 +837,7 @@ Ten seconds is the compromise between freshness and load: the machine
 heartbeat is 15 s and the presence timeout is 45 s, so presence only
 ever moves on a heartbeat — a faster poll would buy nothing, a slower
 one would let a machine flap between `online` and `offline` for long
-strokes. The poll stops when the page is closed, and a refresh cycle
+stretches. The poll stops when the page is closed, and a refresh cycle
 that is still in flight suppresses the next one (no request pile-up on
 a slow daemon).
 

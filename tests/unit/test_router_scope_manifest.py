@@ -18,9 +18,10 @@ column: every ``api_router.include_router(...)`` mount in
 The cage greps ``daemon/api.py`` for the SPECIFIC
 ``api_router.include_router(`` pattern (NOT the raw
 ``include_router(`` textual set — the F3-pinned census: 35 textual
-matches at the current tree = 33 unconditional mounts + the 2
-auth-ON-gated families (mcp-kb keys, auth-self); the residual matches
-are the 2 app-level ``app.include_router(`` calls + prose comments,
+matches at the current tree = 32 unconditional mounts + the 2
+auth-ON-gated families (mcp-kb keys, auth-self) + the 1
+gateway-flag-gated (WS) mount; the residual matches are the 2
+app-level ``app.include_router(`` calls + prose comments,
 documented in the P3 cage and NOT in this cage's match set). A NEW
 mount that adds routes under a family absent from the manifest (or a
 mount whose declaration drifted from the manifest) FAILS LOUDLY,
@@ -246,9 +247,9 @@ class TestSourceMatchTarget:
 
     def test_census_pinned(self):
         """The textual census: 35 ``api_router.include_router(`` matches
-        at the current tree = 33 unconditional + 2 auth-ON-gated
-        (mcp-kb keys, auth-self). A drift here fails the cage and
-        forces a manifest review.
+        at the current tree = 32 unconditional + 2 auth-ON-gated
+        (mcp-kb keys, auth-self) + 1 gateway-flag-gated (WS). A drift
+        here fails the cage and forces a manifest review.
 
         Phase B / agent-prompt-immutability T6 added the prompts_router
         (29 unconditional; was 28 pre-T6) — the cage must reflect this
@@ -268,14 +269,16 @@ class TestSourceMatchTarget:
         mcps_gateway_read_router (32 unconditional; was 31 pre-Phase-C)
         — the cage reflects this with the /api/mcps-gateway family
         pinned in the manifest above (the family already existed for
-        the module-lane WebSocket route; the READ routes joined it
-        with an ``mcp:read`` scope declaration).
+        the module-lane WebSocket route — the 1 gateway-flag-gated (WS)
+        mount of the census; the READ routes joined it with an
+        ``mcp:read`` scope declaration).
         """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
         assert len(matches) == 35, (
             f"api_router.include_router( census drifted: {len(matches)} "
-            "(pinned 35 = 33 unconditional + 2 auth-ON-gated). New mount? "
+            "(pinned 35 = 32 unconditional + 2 auth-ON-gated + 1 "
+            "gateway-flag-gated (WS)). New mount? "
             "Declare its family in PINNED_SCOPE_MANIFEST above."
         )
 

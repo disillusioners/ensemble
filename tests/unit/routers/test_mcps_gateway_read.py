@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import hashlib
 import warnings
-from typing import Any
 
 import pytest
 from fastapi import FastAPI

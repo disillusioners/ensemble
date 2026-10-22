@@ -31,8 +31,10 @@ The kill switch (``MCPS_GATEWAY_ENABLED``, DEFAULT OFF) governs the
 TRANSPORT — the WebSocket route is not registered at all while it is
 off, and the ``mcp_rpc_*`` tools refuse with a typed error. The READ
 routes stay registered unconditionally, which is the dominant
-convention for read-only ``/api`` routers (33 of the 35
-``api_router.include_router(`` mounts are unconditional), and it gives
+convention for read-only ``/api`` routers (32 of the 35
+``api_router.include_router(`` mounts are unconditional — the other 3
+are the 2 auth-ON-gated families and the 1 gateway-flag-gated (WS)
+mount), and it gives
 the operator page a STABLE contract: with the gateway OFF the payloads
 degrade to EMPTY lists and ``gateway_enabled: false`` — the page can
 say "the gateway is disabled" instead of guessing from a 404 it cannot
