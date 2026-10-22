@@ -1275,14 +1275,13 @@ class SkillEvolutionService:
            validate the ID against the two persisted variants,
            then run the same side effects as Path 2 / Path 3
            (deactivate loser / resolve ab_test / promote winner).
-           ``reason='forced_winner'``. Skips the
-           sample-size / threshold / extension gates entirely —
-           the caller has explicit authority to pick. REFUSAL
-           (2026-10-22): a forced winner while
-           ``comparisons < ab_sample_size`` raises ``ValueError``
-           (incident 2026-10-21 — an agent force-resolved a live
-           experiment at 2/10 comparisons and killed the incumbent
-           arm).
+           ``reason='forced_winner'``. Skips the threshold /
+           extension evaluation — the caller has explicit
+           authority to pick — but NOT the sample-size floor:
+           a forced winner while ``comparisons < ab_sample_size``
+           raises ``ValueError`` (incident 2026-10-21 — an agent
+           force-resolved a live experiment at 2/10 comparisons
+           and killed the incumbent arm).
         1. **Not enough data** (``comparisons < ab_sample_size``) →
            keep collecting. ``reason='needs_more_data'``.
         2. **Threshold met** (``difference >= ab_min_difference``) →
