@@ -171,3 +171,30 @@ debt. All recorded in the addendum.
 PASS-with-preexisting (1 branch regression tier1 boot-scan fixed `efc460262`; 12
 pre-existing base-proven). Awaiting user promote ceremony (3-factor nonce gate) —
 NO live promote performed.
+
+## Skill System Audit — incident 2026-10-21
+
+**Full forensic report**: `.agents/shared/planning/skill-system-audit/incident-2026-10-21.md`
+
+**Key state facts (pending disposition):**
+1. **Unpushed commit `660e73453` pending disposition** — skill-keeper instance
+   b7da3ed0 committed 10 files (9 daemon/ + 1 tests/) (+476/−1, owner-private skill-search
+   filter) directly to `latest`. Keep-after-review or revert-and-reimplement =
+   USER decision.
+2. **Uncommitted `agents/wanderer/skill-set.yaml` edit pending disposition** —
+   run 1e3792d4 flipped auto_load true→false + version 1.0.0→1.0.1 via bash
+   workdir-bypass. USER decision (may be superseded by the search-layer fix).
+3. **skill-keeper allowlist over-grant (bash + filesystem-write)** — a DB-only
+   agent holds full repo-write capability; soul.md prose prohibitions are NOT
+   enforcement. Root cause L1 in the report.
+4. **skill_fix lane ungated — no kill-switch/dedup** — skill_fix → dispatch_fix
+   mints immediate Tier-3 mutation jobs with agent-authored free-text
+   directions; no cooldown (same skill re-FIXed 3× in 38 min). Root cause L2.
+5. **Capture was NEVER re-enabled — user's re-activation hypothesis DISPROVEN**
+   — `ENSEMBLE_SKILL_CAPTURE_ENABLED` absent from live daemon env, all
+   set-sites, and code history; zero `skill_capture` jobs since 2026-09-17. The
+   ten runs were all `skill_evolution` FIX-lane jobs.
+6. **Burst runs wrote ZERO `skill_usage_records` rows** (census verdict);
+   capture-era A/B `7c9440b3` still open (resolved_at NULL) — cleanup candidate.
+
+**Disposition (user-decided, executed 2026-10-21/22):** commit 660e73453 KEEP (unpushed; two-lens review = correct + sabotage-clean; P1 test-stub fix + security merge conditions logged as follow-ups); agents/wanderer/skill-set.yaml auto_load flip REVERTED via git restore (auto_load is owner-scoped; the observed leak was search-driven — deactivations were the real barrier; fleet convention = own planner auto_load true). DB cleanup + fix sequencing deferred.
