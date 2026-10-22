@@ -4127,21 +4127,41 @@ class SkillEvolutionConfig(EmbeddingConfig):
     #     residual, tracked for the master skill-system switch.
     #
     # The RUNTIME gate resolves PER-CALL: the dedicated
-    # ``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` env wins when set (live
-    # emergency-off without a config change); when unset, THIS field
-    # is the default the dispatcher was constructed with. The env
-    # accepts EXACTLY the same tokens as the capture switch
-    # (1/true/yes/on vs 0/false/no/off); an invalid value raises at
-    # first use and logs an ERROR at load time.
+    # ``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` env is the CANONICAL switch
+    # and WINS whenever set; when unset/empty, THIS field is the
+    # default the dispatcher was constructed with. The env accepts
+    # EXACTLY the same tokens as the capture switch (1/true/yes/on vs
+    # 0/false/no/off); an invalid value raises at first use and logs an
+    # ERROR at load time.
+    #
+    # ALIAS SURFACE (review iteration 3 — DISCLOSED, not eliminated):
+    # pydantic's env_prefix ALSO exposes this field as
+    # ``SKILL_EVOLUTION_EVOLUTION_LANE_ENABLED``. Elimination was
+    # probed and is NOT mechanical: validation_alias pinning breaks the
+    # by-name yaml/test/wiring surface, and populate_by_name=True
+    # re-enables the field name for env lookup (the alias survives).
+    # Both surfaces therefore exist, with a strict precedence: the
+    # canonical var wins at every resolution (the resolver reads it
+    # per-call BEFORE this field is ever consulted); the alias var can
+    # only set the CONSTRUCTED DEFAULT, which is inert whenever the
+    # canonical var is set. Setting the alias var alone DOES enable the
+    # lane — that is the disclosed residual.
     evolution_lane_enabled: bool = Field(
         default=False,
         description=(
             "Tier-3 skill-evolution lane (default OFF — incident "
             "2026-10-21). Governs BOTH admission (no new "
-            "skill_evolution jobs) and execution (queued "
-            "skill_evolution rows are refused) while off. Override "
-            "live via env ENSEMBLE_SKILL_EVOLUTION_ENABLED (wins when "
-            "set)."
+            "skill_evolution jobs) and queued-execution (queued "
+            "skill_evolution rows are TERMINALLY refused by the job "
+            "processor — admission_state='done', "
+            "terminal_reason='lane_disabled' — never silently "
+            "executed, never left blocking the queue head). TWO env "
+            "surfaces exist (disclosed): the CANONICAL "
+            "ENSEMBLE_SKILL_EVOLUTION_ENABLED (wins at every "
+            "resolution) and the pydantic-prefix alias "
+            "SKILL_EVOLUTION_EVOLUTION_LANE_ENABLED (sets the "
+            "constructed default only; inert when the canonical var "
+            "is set)."
         ),
     )
     # Minimum seconds between ACCEPTED FIX admissions for the same

@@ -1386,10 +1386,13 @@ async def post_fix(
                         "evolution_lane_enabled) is off or the per-skill "
                         "FIX cooldown is active. No job was created. "
                         "While the lane is off it governs BOTH "
-                        "admission (no new skill_evolution jobs) and "
-                        "execution (queued skill_evolution rows are "
-                        "refused by the job processor, never silently "
-                        "executed)."
+                        "admission (no new skill_evolution jobs) AND "
+                        "queued-execution (a queued skill_evolution row "
+                        "is terminally written by the job processor — "
+                        "admission_state='done', "
+                        "terminal_reason='lane_disabled' — never "
+                        "silently executed, never left blocking the "
+                        "queue head)."
                     )
                 },
             )
