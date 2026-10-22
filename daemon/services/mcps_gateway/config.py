@@ -317,8 +317,11 @@ def load_gateway_config() -> GatewayConfig:
         command_timeout = DEFAULT_COMMAND_TIMEOUT_MS
     if read_timeout <= 0:
         warnings.append(
-            f"READ_TIMEOUT_MS={read_timeout} is not positive; the default "
-            f"({DEFAULT_READ_TIMEOUT_MS}) is used"
+            # ONE canonical knob prefix with the ctor warning
+            # (``read_timeout_ms``=); the env path names its env var in
+            # the parenthetical so both warnings read as the SAME knob.
+            f"read_timeout_ms (env READ_TIMEOUT_MS)={read_timeout} is not "
+            f"positive; the default ({DEFAULT_READ_TIMEOUT_MS}) is used"
         )
         read_timeout = DEFAULT_READ_TIMEOUT_MS
 

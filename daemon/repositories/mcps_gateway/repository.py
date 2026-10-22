@@ -48,7 +48,14 @@ class McpGatewayAuditRepository:
         # TRANSACTION-LOCAL ``statement_timeout``: ``SET LOCAL`` cannot
         # leak the GUC back into the pool, and SQLite (the unit-test
         # harness) has no such GUC and is skipped.
-        self._read_timeout_ms = read_timeout_ms
+        #
+        # The coercion happens ONCE, HERE (review nit on C9): the
+        # ``> 0`` guard in ``list_recent`` then compares a real int —
+        # a string knob (``"1000"``) is coerced (or fails loudly at
+        # CONSTRUCTION) instead of raising TypeError at read time.
+        self._read_timeout_ms = (
+            None if read_timeout_ms is None else int(read_timeout_ms)
+        )
 
     # ── write ────────────────────────────────────────────────────────────
 

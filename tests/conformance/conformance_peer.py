@@ -1215,8 +1215,14 @@ class InKitCenter:
         if self._tmp_owner is not None:
             # The cert + PRIVATE KEY live under ``self.tmp`` — reclaim
             # the self-created dir (QA C13). Caller-owned dirs (pytest
-            # ``tmp_path``) stay the caller's problem.
-            self._tmp_owner.cleanup()
+            # ``tmp_path``) stay the caller's problem. Exception-safe
+            # against an ALREADY-REMOVED dir (a crashed stop, a concurrent
+            # cleanup): a vanished tmp must not mask whatever exception
+            # ``stop()`` is unwinding through.
+            try:
+                self._tmp_owner.cleanup()
+            except FileNotFoundError:
+                pass
             self._tmp_owner = None
 
     # ── the wire side (what the machine sees) ───────────────────────────

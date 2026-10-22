@@ -75,7 +75,7 @@ part of the eight:
 
 | Key | Meaning |
 |---|---|
-| `CONFORMANCE_RUN_TIMEOUT` | the OUTER timeout (seconds) for the WHOLE kit run — the runner wraps the pytest call in `timeout "$RUN_TIMEOUT"`. Default: **600**. |
+| `CONFORMANCE_RUN_TIMEOUT` | the OUTER budget (seconds) for the WHOLE kit run. Default: **600**. The runner does NOT use GNU `timeout(1)` (absent on stock macOS/BSD — that dependency is gone): it runs a portable watcher — background `sleep` of the budget → TERM → 5 s grace → KILL. A budget-fired run reports **124** (the watchdog's TERM/KILL codes, 143/137, are collapsed to 124 — and ONLY when the watcher actually fired, so a child that dies 137/143 on its own, e.g. an OOM kill, keeps its own exit code). A MALFORMED value (non-integer, e.g. `10m`) aborts BEFORE any child launches with **exit 125** and a stderr diagnostic. |
 
 So: the pytest pointing surface is exactly eight keys; the shell runner
 adds ONE documented control (`CONFORMANCE_RUN_TIMEOUT`).

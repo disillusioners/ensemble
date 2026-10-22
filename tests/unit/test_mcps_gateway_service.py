@@ -512,6 +512,80 @@ class TestSessions:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# The close teardown ORDER (interop gate #16c — the pin)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _RecordingStore:
+    """Delegates to the real store; records ``mark_offline`` calls."""
+
+    def __init__(self, inner: Any, events: list[str]) -> None:
+        self._inner = inner
+        self._events = events
+
+    def mark_offline(self, machine_id: str, connection_id: str) -> Any:
+        self._events.append("store.mark_offline")
+        return self._inner.mark_offline(machine_id, connection_id)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _RecordingSessions:
+    """Delegates to the real SessionManager; records the release call."""
+
+    def __init__(self, inner: Any, events: list[str]) -> None:
+        self._inner = inner
+        self._events = events
+
+    def end_for_connection(self, connection_id: str) -> list[Any]:
+        self._events.append("sessions.end_for_connection")
+        return self._inner.end_for_connection(connection_id)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _RecordingMachine(FakeMachine):
+    """FakeMachine whose socket close is also recorded."""
+
+    def __init__(self, service: McpGatewayService, events: list[str]) -> None:
+        super().__init__(service)
+        self._events = events
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self._events.append("transport.close")
+        await super().close(code=code, reason=reason)
+
+
+class TestCloseConnectionOrdering:
+    async def test_close_releases_the_roster_before_the_socket(self):
+        """The #16c release order, PINNED as an observable sequence:
+        session-manager release → ``mark_offline`` → ``transport.close``
+        (the close LAST, in ``finally``).  The release order is only
+        narratively stated in the service — this test turns a future
+        reorder (e.g. awaiting the socket close before the §8.3 roster
+        release) RED instead of silently shipping the busy-window bug.
+        """
+        service = make_service()
+        events: list[str] = []
+        service._store = _RecordingStore(service._store, events)
+        service._sessions = _RecordingSessions(service._sessions, events)
+        machine = await open_machine(service, _RecordingMachine(service, events))
+        # The roster release is guarded by machine_id — the hello must
+        # have landed for the pin to exercise the real path.
+        assert machine.connection.machine_id == "mach_1"
+
+        await service.close_connection(machine.connection, "order pin")
+
+        assert events == [
+            "sessions.end_for_connection",
+            "store.mark_offline",
+            "transport.close",
+        ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # The command forwarding (§6.6)
 # ─────────────────────────────────────────────────────────────────────────────
 
