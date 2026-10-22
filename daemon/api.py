@@ -4077,7 +4077,7 @@ def _tag_route_classes(app: FastAPI) -> None:
     see ``daemon/auth/route_meta.py``). Everything NOT tagged here is
     oauth2-protected by default (default-deny, AC-23).
     """
-    from daemon.auth.route_meta import tag_routes_by_path
+    from daemon.auth.route_meta import tag_module_lane, tag_routes_by_path
     from daemon.routers.mcp_kb_keys import tag_keys_router_protected
 
     # ── PUBLIC (public-probe tag) ───────────────────────────────────
@@ -4125,10 +4125,16 @@ def _tag_route_classes(app: FastAPI) -> None:
     # upgrade request (§3.1 / §4.1), NOT an OAuth2 token. Without this
     # tag the OAuth2 middleware would own the request, see the
     # enrollment bearer, and reject it with a 401 — and the machine
-    # would re-enroll forever. The route is only REGISTERED when
-    # ``MCPS_GATEWAY_ENABLED`` is ON, so this tag is a no-op when the
-    # gateway is off.
-    tag_routes_by_path(app, path_prefix="/api/mcps-gateway", module_lane=True)
+    # would re-enroll forever.
+    #
+    # TAGGED BY ROUTE IDENTITY (the route NAME), NOT BY A PATH PREFIX:
+    # the path is configurable (``MCPS_GATEWAY_PATH``), and a prefix
+    # match with an empty prefix would match EVERY route in the app.
+    # The route is only REGISTERED when ``MCPS_GATEWAY_ENABLED`` is ON,
+    # so this loop is a no-op when the gateway is off.
+    for _ws_route in app.routes:
+        if getattr(_ws_route, "name", None) == "mcp_gateway_ws":
+            tag_module_lane(_ws_route)
 
     # ── PROTECTED (explicit tag) ────────────────────────────────────
     # /api/mcp/kb/keys — OAuth2 human lane (T3.12): the explicit tag

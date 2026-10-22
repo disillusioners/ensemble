@@ -19,7 +19,9 @@ from daemon.services.mcps_gateway.config import (
     DEFAULT_CLIENT_DEAD_DETECT_MS,
     DEFAULT_COMMAND_TIMEOUT_MS,
     DEFAULT_HEARTBEAT_INTERVAL_MS,
+    DEFAULT_HEARTBEAT_TIMEOUT_MS,
     DEFAULT_PATH,
+    DEFAULT_PING_INTERVAL_MS,
     DEFAULT_SESSION_IDLE_TIMEOUT_MS,
     DEFAULT_SESSION_TTL_MS,
     ENV_PREFIX,
@@ -28,8 +30,17 @@ from daemon.services.mcps_gateway.config import (
     load_gateway_config,
 )
 from daemon.services.mcps_gateway.protocol import (
+    CENTER_EMITTED_CODES,
+    CODE_CAPABILITY_MISSING,
+    CODE_HEARTBEAT_TIMEOUT,
     CODE_INTERNAL,
+    CODE_MACHINE_BUSY,
     CODE_MACHINE_NOT_ENROLLED,
+    CODE_PROTOCOL_VERSION_UNSUPPORTED,
+    CODE_SESSION_EXPIRED,
+    CODE_SESSION_NOT_FOUND,
+    CODE_TOOL_TIMEOUT,
+    RELAYED_CODES,
 )
 from daemon.services.mcps_gateway.service import McpGatewayService
 from daemon.tools.mcp_rpc_tools import (
@@ -330,3 +341,95 @@ class TestMcpRpcTools:
         assert kwargs["arguments"] == {"x": 1, "y": 2}
         assert kwargs["agent_id"] == "ari"
         assert kwargs["instance_id"] == "inst-1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T1 — the DEFAULT_* constants are pinned to their contract literals
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDefaultConstantsArePinned:
+    """T1: the knob DEFAULTS are part of the contract.
+
+    Experiment-proven drift: changing ``DEFAULT_HEARTBEAT_INTERVAL_MS``
+    from 15000 to 99000 leaves every behavioural test green — nothing
+    in the suite pinned the literal. These pins close the code↔doc
+    chain: the values below are the ones the ops document and the
+    protocol authority state.
+    """
+
+    def test_the_heartbeat_defaults(self):
+        assert DEFAULT_HEARTBEAT_INTERVAL_MS == 15000
+        assert DEFAULT_HEARTBEAT_TIMEOUT_MS == 45000
+        assert DEFAULT_CLIENT_DEAD_DETECT_MS == 45000
+
+    def test_the_command_and_session_defaults(self):
+        assert DEFAULT_COMMAND_TIMEOUT_MS == 30000
+        assert DEFAULT_SESSION_TTL_MS == 3600000
+        assert DEFAULT_SESSION_IDLE_TIMEOUT_MS == 300000
+
+    def test_the_ping_default_is_the_reference_cadence(self):
+        assert DEFAULT_PING_INTERVAL_MS == 200
+
+    def test_the_route_path_default(self):
+        assert DEFAULT_PATH == "/api/mcps-gateway/ws"
+
+    def test_the_enabled_default_is_off(self):
+        config = load_gateway_config()
+        assert config.enabled is False
+        assert gateway_enabled() is False
+
+    def test_the_token_and_machine_defaults_are_empty(self):
+        config = load_gateway_config()
+        assert config.tokens == ()
+        assert config.has_enrollment_tokens is False
+        assert config.allowed_machines == ()
+        # An empty allowlist means every AUTHENTICATED machine is
+        # enrolled.
+        assert config.machine_allowed("mach_anything") is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T2 — the wire strings are pinned
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestWireCodesArePinned:
+    """T2: the typed error codes are WIRE STRINGS.
+
+    A drift in one of them is invisible to the default pytest run (the
+    conformance suite that would catch it is behind the ``integration``
+    marker). These tripwires make the drift visible in the DEFAULT run.
+    """
+
+    def test_the_center_emitted_codes(self):
+        assert CODE_PROTOCOL_VERSION_UNSUPPORTED == "PROTOCOL_VERSION_UNSUPPORTED"
+        assert CODE_CAPABILITY_MISSING == "CAPABILITY_MISSING"
+        assert CODE_MACHINE_NOT_ENROLLED == "MACHINE_NOT_ENROLLED"
+        assert CODE_MACHINE_BUSY == "MACHINE_BUSY"
+        assert CODE_SESSION_NOT_FOUND == "SESSION_NOT_FOUND"
+        assert CODE_SESSION_EXPIRED == "SESSION_EXPIRED"
+        assert CODE_HEARTBEAT_TIMEOUT == "HEARTBEAT_TIMEOUT"
+        assert CODE_TOOL_TIMEOUT == "TOOL_TIMEOUT"
+        assert CODE_INTERNAL == "INTERNAL"
+
+    def test_the_relayed_codes(self):
+        assert "TOOL_NOT_FOUND" in RELAYED_CODES
+        assert "TOOL_ERROR" in RELAYED_CODES
+        assert "PAYLOAD_TOO_LARGE" in RELAYED_CODES
+        assert "RATE_LIMITED" in RELAYED_CODES
+
+    def test_the_reserved_code_is_never_emitted(self):
+        """``TOOL_DENIED`` is reserved for v0.2+ (§6.5)."""
+        assert "TOOL_DENIED" not in CENTER_EMITTED_CODES
+        assert "TOOL_DENIED" not in RELAYED_CODES
+
+    def test_the_only_overlap_of_the_two_code_sets_is_the_timeout(self):
+        """``TOOL_TIMEOUT`` has TWO origins: the machine's own deadline
+        (relayed verbatim) and the CENTER's deadline on the round-trip
+        (the center must bound its own wait). Every other code has
+        exactly one origin."""
+        overlap = CENTER_EMITTED_CODES & RELAYED_CODES
+        assert overlap == {"TOOL_TIMEOUT"}, overlap
+        # The codes that are relayed are never invented by the center.
+        assert not (RELAYED_CODES - {"TOOL_TIMEOUT"} & CENTER_EMITTED_CODES)

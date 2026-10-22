@@ -19,6 +19,7 @@ The knob set (all under the ``MCPS_GATEWAY_`` prefix)::
     MCPS_GATEWAY_ALLOWED_MACHINES        ""       comma-separated; empty = all
     MCPS_GATEWAY_SESSION_TTL_MS          3600000
     MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS 300000
+    MCPS_GATEWAY_PING_INTERVAL_MS         200
 
 ``MCPS_GATEWAY_TOKENS`` empty means **nobody may enroll** — fail closed.
 The tokens are compared with :func:`hmac.compare_digest` over BYTES (a
@@ -72,6 +73,16 @@ DEFAULT_SESSION_TTL_MS = 3_600_000
 
 #: The default session idle timeout (§3.3).
 DEFAULT_SESSION_IDLE_TIMEOUT_MS = 300_000
+
+#: The default cadence of the WebSocket-level liveness ping.
+#:
+#: The reference center of the protocol pings every 200 ms (§3.3: the
+#: client treats the absence of ANY inbound frame as server death, so the
+#: center has to produce evidence of its own liveness well inside the
+#: client's death-detector window). The value is configurable so a
+#: deployment can trade traffic for latency — the DEFAULT stays at the
+#: reference cadence.
+DEFAULT_PING_INTERVAL_MS = 200
 
 #: The realm of the protection space the credential belongs to.
 #:
@@ -161,6 +172,7 @@ class GatewayConfig:
     allowed_machines: tuple[str, ...] = ()
     session_ttl_ms: int = DEFAULT_SESSION_TTL_MS
     session_idle_timeout_ms: int = DEFAULT_SESSION_IDLE_TIMEOUT_MS
+    ping_interval_ms: int = DEFAULT_PING_INTERVAL_MS
     warnings: tuple[str, ...] = field(default=(), repr=False)
 
     @property
@@ -226,6 +238,7 @@ def load_gateway_config() -> GatewayConfig:
     command_timeout = _env_int("COMMAND_TIMEOUT_MS", DEFAULT_COMMAND_TIMEOUT_MS, warnings)
     ttl = _env_int("SESSION_TTL_MS", DEFAULT_SESSION_TTL_MS, warnings)
     idle = _env_int("SESSION_IDLE_TIMEOUT_MS", DEFAULT_SESSION_IDLE_TIMEOUT_MS, warnings)
+    ping_interval = _env_int("PING_INTERVAL_MS", DEFAULT_PING_INTERVAL_MS, warnings)
 
     if interval <= 0:
         warnings.append(
@@ -253,6 +266,12 @@ def load_gateway_config() -> GatewayConfig:
             f"interval ({interval}); the §3.3 table expects at least "
             f"{3 * interval}"
         )
+    if ping_interval <= 0:
+        warnings.append(
+            f"PING_INTERVAL_MS={ping_interval} is not positive; the default "
+            f"({DEFAULT_PING_INTERVAL_MS}) is used"
+        )
+        ping_interval = DEFAULT_PING_INTERVAL_MS
     if command_timeout <= 0:
         warnings.append(
             f"COMMAND_TIMEOUT_MS={command_timeout} is not positive; the "
@@ -276,6 +295,7 @@ def load_gateway_config() -> GatewayConfig:
         allowed_machines=_env_list("ALLOWED_MACHINES"),
         session_ttl_ms=ttl,
         session_idle_timeout_ms=idle,
+        ping_interval_ms=ping_interval,
         warnings=tuple(warnings),
     )
 
@@ -292,6 +312,7 @@ __all__ = [
     "DEFAULT_HEARTBEAT_INTERVAL_MS",
     "DEFAULT_HEARTBEAT_TIMEOUT_MS",
     "DEFAULT_PATH",
+    "DEFAULT_PING_INTERVAL_MS",
     "DEFAULT_SESSION_IDLE_TIMEOUT_MS",
     "DEFAULT_SESSION_TTL_MS",
     "ENV_PREFIX",

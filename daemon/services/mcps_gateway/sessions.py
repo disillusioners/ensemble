@@ -143,7 +143,22 @@ class SessionManager:
         catalog: list[dict[str, Any]],
         now: float | None = None,
     ) -> GatewaySession:
-        """Record a session the machine has just opened."""
+        """Record a session the machine has just opened.
+
+        THE SLOT IS TAKEN ATOMICALLY (the §8.3 lock).
+
+        ``assert_machine_free`` runs BEFORE the round-trip to the
+        machine, so between that check and this write another agent can
+        take the machine. A blind overwrite would hand the loser the
+        MACHINE'S refusal (the machine answers the second
+        ``session.begin`` with its own ``MACHINE_BUSY``) — which would
+        make the center's exclusivity rest on the conformANTness of the
+        machine instead of on the center itself.
+
+        So the slot is RE-CHECKED HERE, under the same lock that writes
+        it, and the loser is refused with ``MACHINE_BUSY`` by the
+        CENTER. The slot is never blind-overwritten.
+        """
         now = time.time() if now is None else now
         session = GatewaySession(
             session_id=session_id,
@@ -157,6 +172,34 @@ class SessionManager:
             expires_at=now + self._session_ttl_ms / 1000.0,
         )
         with self._lock:
+            held_id = self._by_machine.get(machine_id)
+            held = self._sessions.get(held_id) if held_id else None
+            if held is not None and held.session_id != session_id:
+                raise GatewayProtocolError(
+                    CODE_MACHINE_BUSY,
+                    f"machine {machine_id!r} already has an active session",
+                    {"machine_id": machine_id, "session_id": held.session_id},
+                )
+            agent_id_held = self._by_agent.get(agent_id)
+            agent_session = (
+                self._sessions.get(agent_id_held) if agent_id_held else None
+            )
+            if (
+                agent_session is not None
+                and agent_session.session_id != session_id
+                and agent_session.machine_id != machine_id
+            ):
+                raise GatewayProtocolError(
+                    CODE_MACHINE_BUSY,
+                    f"the agent already drives the machine "
+                    f"{agent_session.machine_id!r}",
+                    {
+                        "reason": "agent_already_holds_session",
+                        "agent_id": agent_id,
+                        "session_id": agent_session.session_id,
+                        "machine_id": agent_session.machine_id,
+                    },
+                )
             self._sessions[session_id] = session
             self._by_machine[machine_id] = session_id
             self._by_agent[agent_id] = session_id
@@ -216,11 +259,29 @@ class SessionManager:
 
     @staticmethod
     def session_not_found(session_id: str) -> GatewayProtocolError:
-        """The typed refusal for an unknown / dead session id."""
+        """The typed refusal for an unknown / dead session id.
+
+        The ``data.session_id`` carries the SESSION id — the contract
+        member is a session id, never an agent id.
+        """
         return GatewayProtocolError(
             CODE_SESSION_NOT_FOUND,
             f"there is no live session {session_id!r}",
             {"session_id": session_id},
+        )
+
+    @staticmethod
+    def no_session_for_agent(agent_id: str) -> GatewayProtocolError:
+        """The typed refusal for "this agent holds no session at all".
+
+        There is NO session id to report, so ``data.session_id`` is
+        ABSENT (the contract member carries a session id) — the agent is
+        named in its own member instead.
+        """
+        return GatewayProtocolError(
+            CODE_SESSION_NOT_FOUND,
+            f"the agent {agent_id!r} has no open session",
+            {"agent_id": agent_id},
         )
 
     @staticmethod

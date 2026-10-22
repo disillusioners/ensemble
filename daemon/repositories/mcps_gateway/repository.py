@@ -27,6 +27,7 @@ from sqlalchemy import Engine
 from sqlmodel import Session, select
 
 from daemon.services.mcps_gateway.audit import AuditRecord
+from daemon.services.timestamps import now_utc_iso
 
 from .models import McpGatewayAudit
 
@@ -48,7 +49,11 @@ class McpGatewayAuditRepository:
         gateway service logs it, counts it, and lets the command stand.
         """
         row = McpGatewayAudit(
-            created_at=record.created_at or None,
+            # P3: the column is NOT NULL — a missing stamp must never
+            # become None (the default of the model is an empty string,
+            # which is not a timestamp either). The daemon-wide UTC
+            # convention fills the gap.
+            created_at=record.created_at or now_utc_iso(),
             agent_id=record.agent_id,
             instance_id=record.instance_id or None,
             machine_id=record.machine_id,

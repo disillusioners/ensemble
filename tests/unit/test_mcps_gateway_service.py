@@ -143,6 +143,21 @@ class FakeMachine:
         await self.service.handle_frame(self.connection, json.dumps(payload))
         return payload
 
+    async def answer_request(
+        self, request_id: str, result: Any = None, error: tuple[str, str] | None = None
+    ) -> None:
+        """Answer ONE specific request by id."""
+        payload: dict[str, Any] = {
+            "v": PROTOCOL_VERSION,
+            "type": "error" if error else "response",
+            "id": request_id,
+        }
+        if error:
+            payload["error"] = {"code": error[0], "message": error[1]}
+        else:
+            payload["result"] = result if result is not None else {}
+        await self.service.handle_frame(self.connection, json.dumps(payload))
+
     async def answer_session_begin(
         self, session_id: str = "sess_abc", machine_id: str = "mach_1"
     ) -> None:
@@ -179,11 +194,19 @@ def make_config(**overrides: Any) -> GatewayConfig:
     return GatewayConfig(**base)
 
 
-def make_service(audit_sink: Any = None, **overrides: Any) -> McpGatewayService:
+def make_service(
+    audit_sink: Any = None,
+    *,
+    pre_hello_timeout_ms: int = 30_000,
+    audit_write_timeout_seconds: float = 5.0,
+    **overrides: Any,
+) -> McpGatewayService:
     return McpGatewayService(
         make_config(**overrides),
         audit_sink=audit_sink if audit_sink is not None else MemoryAuditSink(),
         monitor_interval_seconds=0.05,
+        pre_hello_timeout_ms=pre_hello_timeout_ms,
+        audit_write_timeout_seconds=audit_write_timeout_seconds,
     )
 
 
@@ -868,3 +891,336 @@ class TestNoProtocolNoise:
             else:
                 raise AssertionError(f"the center emitted an unknown frame type: {frame}")
         await service.close_all()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S1 — the audit NEVER carries peer text
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAuditNeverCarriesPeerText:
+    async def test_quoted_arguments_never_reach_the_audit_detail(self):
+        """S1: a hostile machine can quote the arguments in its error
+        message; the ledger must not become the place they land."""
+        audit = MemoryAuditSink()
+        service = make_service(audit_sink=audit)
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+
+        secret = "hunter2-the-password"
+        task = asyncio.create_task(
+            service.command(
+                agent_id="ari",
+                tool="type",
+                arguments={"text": secret},
+            )
+        )
+        await asyncio.sleep(0.02)
+        # The machine answers with an error whose MESSAGE quotes the args.
+        await machine.answer_last(
+            error=("TOOL_ERROR", f"the tool refused the arguments {secret!r}")
+        )
+        with pytest.raises(Exception):
+            await task
+
+        assert len(audit.records) == 1
+        record = audit.records[0]
+        assert secret not in record.detail
+        assert secret not in (record.error_code or "")
+        assert secret not in json.dumps(record.__dict__, default=str)
+        # The classification is FIXED and the code is the protocol code.
+        assert "the machine refused the command" in record.detail
+        assert record.error_code == "TOOL_ERROR"
+
+    async def test_an_unrecognized_peer_error_code_is_not_recorded_verbatim(self):
+        """S1: the error CODE arrives from the peer too."""
+        audit = MemoryAuditSink()
+        service = make_service(audit_sink=audit)
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+
+        task = asyncio.create_task(service.command(agent_id="ari", tool="type"))
+        await asyncio.sleep(0.02)
+        await machine.answer_last(
+            error=("the arguments were hunter2", "the tool refused")
+        )
+        with pytest.raises(Exception):
+            await task
+
+        record = audit.records[0]
+        assert "hunter2" not in record.error_code
+        assert record.error_code == "UNRECOGNIZED_ERROR_CODE"
+        assert "hunter2" not in record.detail
+
+    async def test_the_peer_text_stays_agent_facing(self):
+        """S1: the refusal text still reaches the AGENT (only the ledger
+        is scrubbed)."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+
+        task = asyncio.create_task(service.command(agent_id="ari", tool="type"))
+        await asyncio.sleep(0.02)
+        await machine.answer_last(error=("TOOL_ERROR", "the machine said no"))
+        with pytest.raises(Exception) as excinfo:
+            await task
+        assert excinfo.value.message == "the machine said no"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S2 — the machine slot is taken ATOMICALLY
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSessionSlotIsAtomic:
+    async def test_the_loser_of_a_connect_race_is_refused_with_machine_busy(self):
+        """S2: two connects race through the await seam.
+
+        The pre-flight check (``assert_machine_free``) runs BEFORE the
+        round-trip to the machine, so both racers pass it. The slot is
+        taken by the CENTER, atomically, in ``SessionManager.begin`` —
+        the loser is refused with ``MACHINE_BUSY`` by the CENTER and
+        never learns the machine's own refusal.
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+
+        task_a = asyncio.create_task(
+            service.connect(machine_id="mach_1", agent_id="ari")
+        )
+        await asyncio.sleep(0.01)
+        task_b = asyncio.create_task(
+            service.connect(machine_id="mach_1", agent_id="leader")
+        )
+        await asyncio.sleep(0.01)
+
+        requests = machine.requests()
+        assert len(requests) == 2, "both racers must reach the machine"
+        request_a, request_b = requests[0], requests[1]
+
+        # A wins the slot.
+        await machine.answer_request(
+            request_a["id"],
+            {"session_id": "sess_a", "machine_id": "mach_1", "tools": []},
+        )
+        await asyncio.sleep(0.01)
+        # B's session.begin is answered too — but the center refuses it.
+        await machine.answer_request(
+            request_b["id"],
+            {"session_id": "sess_b", "machine_id": "mach_1", "tools": []},
+        )
+
+        await task_a
+        with pytest.raises(Exception) as excinfo:
+            await task_b
+        assert excinfo.value.code == "MACHINE_BUSY"
+        # The center's slot still belongs to the winner.
+        assert service.sessions.for_machine("mach_1").session_id == "sess_a"
+
+    async def test_the_session_manager_never_blind_overwrites_the_slot(self):
+        """S2: the manager itself refuses the overwrite."""
+        from daemon.services.mcps_gateway.sessions import SessionManager
+
+        manager = SessionManager()
+        manager.begin(
+            session_id="sess_1",
+            machine_id="mach_1",
+            agent_id="ari",
+            instance_id="inst-1",
+            connection_id="conn-1",
+            catalog=[],
+        )
+        with pytest.raises(Exception) as excinfo:
+            manager.begin(
+                session_id="sess_2",
+                machine_id="mach_1",
+                agent_id="leader",
+                instance_id="inst-2",
+                connection_id="conn-2",
+                catalog=[],
+            )
+        assert excinfo.value.code == "MACHINE_BUSY"
+        assert manager.for_machine("mach_1").session_id == "sess_1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# S3 — a reconnect supersedes the previous socket
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestReconnectSupersedesTheOldSession:
+    async def test_the_superseded_session_dies_with_the_old_socket(self):
+        """S3: a reconnect must not leave the old session alive."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+        assert service.sessions.for_machine("mach_1") is not None
+
+        # The machine reconnects on a NEW socket.
+        second = FakeMachine(service)
+        second.connection = await service.open_connection(second)
+        await second.hello(machine_id="mach_1")
+
+        # The old session is gone and the old socket is closed.
+        assert service.sessions.for_machine("mach_1") is None
+        assert machine.closed is True
+        # The new connection is the live one.
+        assert service.store.get("mach_1") is not None
+
+    async def test_the_reconnected_machine_is_not_told_machine_busy(self):
+        """S3: the practical consequence — the reconnected machine can
+        open a session immediately instead of waiting for the timeout."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+
+        second = FakeMachine(service)
+        second.connection = await service.open_connection(second)
+        await second.hello(machine_id="mach_1")
+
+        result = await connect_machine(
+            service, second, session_id="sess_second", machine_id="mach_1"
+        )
+        assert result["session_id"] == "sess_second"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R1 — the audit write is bounded
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAuditWriteIsBounded:
+    async def test_a_stalled_audit_write_does_not_hang_the_command(self):
+        """R1: a stalled PostgreSQL must not hang an agent tool call."""
+
+        class StalledSink:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+
+            def record(self, record):
+                self.started.set()
+                time.sleep(2.0)
+
+        sink = StalledSink()
+        service = McpGatewayService(
+            make_config(),
+            audit_sink=sink,
+            audit_write_timeout_seconds=0.1,
+        )
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+
+        task = asyncio.create_task(service.command(agent_id="ari", tool="click"))
+        await asyncio.sleep(0.02)
+        await machine.answer_last({"ok": True})
+        result = await task
+
+        # The command result stands and the audit failure is counted.
+        assert result == {"ok": True}
+        assert service.audit_failures == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R2 — the connection bookkeeping
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestConnectionBookkeeping:
+    async def test_a_connection_that_never_says_hello_is_reaped(self):
+        """R2a: a token-holder that upgrades and never speaks must not
+        hold a socket and a roster entry forever."""
+        service = make_service(pre_hello_timeout_ms=50)
+        machine = FakeMachine(service)
+        machine.connection = await service.open_connection(machine)
+        # No hello.
+        await asyncio.sleep(0.08)
+        reaped = await service.check_heartbeats()
+        assert len(reaped) == 1
+        assert machine.closed is True
+
+    async def test_the_connection_ids_are_unique_after_a_close(self):
+        """R2b: a counter-derived id collides after a close; a
+        collision would overwrite a LIVE entry."""
+        service = make_service()
+        first = FakeMachine(service)
+        first.connection = await service.open_connection(first)
+        second = FakeMachine(service)
+        second.connection = await service.open_connection(second)
+        await service.close_connection(first.connection, "closed")
+        third = FakeMachine(service)
+        third.connection = await service.open_connection(third)
+
+        ids = {
+            first.connection.connection_id,
+            second.connection.connection_id,
+            third.connection.connection_id,
+        }
+        assert len(ids) == 3, f"the connection ids collided: {ids}"
+        # The live entries are still distinct objects.
+        assert (
+            service._connections[second.connection.connection_id]
+            is second.connection
+        )
+        assert (
+            service._connections[third.connection.connection_id]
+            is third.connection
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P1 / P2 — the contract details
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestContractDetails:
+    async def test_session_not_found_carries_no_agent_id_as_a_session_id(self):
+        """P1: ``data.session_id`` carries a SESSION id."""
+        service = make_service()
+        with pytest.raises(Exception) as excinfo:
+            await service.command(agent_id="ari", tool="screenshot")
+        assert excinfo.value.code == CODE_SESSION_NOT_FOUND
+        assert "session_id" not in excinfo.value.data
+        assert excinfo.value.data.get("agent_id") == "ari"
+
+    async def test_a_dead_session_refusal_never_carries_the_agent_id(self):
+        """P1: the ``session_id`` member carries a SESSION id — the agent
+        id never lands in that slot."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+        await service.close_connection(machine.connection, "the socket died")
+        with pytest.raises(Exception) as excinfo:
+            await service.command(agent_id="ari", tool="screenshot")
+        assert excinfo.value.code == CODE_SESSION_NOT_FOUND
+        session_id = excinfo.value.data.get("session_id")
+        assert session_id != "ari"
+        if session_id is not None:
+            assert session_id.startswith("sess_")
+
+    async def test_a_frame_with_a_wrong_version_closes_the_socket(self):
+        """P2: the version of EVERY inbound frame is enforced (§6.1)."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await service.handle_frame(
+            machine.connection,
+            json.dumps(
+                {
+                    "v": "0.9",
+                    "type": "notification",
+                    "method": "heartbeat",
+                    "params": {},
+                }
+            ),
+        )
+        assert machine.closed is True
+
+    async def test_a_frame_without_a_version_closes_the_socket(self):
+        """P2: a frame that does not name its version is not a v0.1
+        frame."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await service.handle_frame(
+            machine.connection,
+            json.dumps({"type": "notification", "method": "heartbeat"}),
+        )
+        assert machine.closed is True

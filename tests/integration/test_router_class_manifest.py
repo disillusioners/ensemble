@@ -35,7 +35,9 @@ pinned alongside (the G3.2-adjacent base).
 
 from __future__ import annotations
 
+import os
 import warnings
+from unittest.mock import patch
 
 import pytest
 from pydantic import SecretStr
@@ -187,6 +189,15 @@ def _observe(app) -> dict[str, frozenset[str]]:
     return {k: frozenset(v) for k, v in observed.items()}
 
 
+#: The route path the contract fixes (SPEC.md v0.1, the daemon side).
+CONTRACT_GATEWAY_PATH = "/api/mcps-gateway/ws"
+
+#: The NAME of the gateway's WebSocket route — the identity the
+#: module-lane tag is applied to (the path is configurable, so the tag
+#: must NOT be a path prefix).
+GATEWAY_ROUTE_NAME = "mcp_gateway_ws"
+
+
 def _auth_on_config() -> AuthConfig:
     return AuthConfig(
         enabled=True,
@@ -208,6 +219,10 @@ class TestRouterClassManifest:
         # MCPS_GATEWAY_ENABLED is ON — the manifest declares its family,
         # so the leg must boot the app with the gateway ON.
         monkeypatch.setenv("MCPS_GATEWAY_ENABLED", "1")
+        # The PATH is configurable (MCPS_GATEWAY_PATH): pin it to the
+        # contract path so the family key of the manifest is
+        # deterministic and does not depend on the ambient environment.
+        monkeypatch.setenv("MCPS_GATEWAY_PATH", CONTRACT_GATEWAY_PATH)
         app = create_app(auth_config=_auth_on_config())
         observed = _observe(app)
         missing = sorted(set(PINNED_MANIFEST_AUTH_ON) - set(observed))
@@ -239,6 +254,7 @@ class TestRouterClassManifest:
         # The gateway is explicitly OFF here: its route is not registered
         # and its family is not part of the AUTH-OFF universe.
         monkeypatch.setenv("MCPS_GATEWAY_ENABLED", "0")
+        monkeypatch.setenv("MCPS_GATEWAY_PATH", CONTRACT_GATEWAY_PATH)
         app = create_app()  # default OFF config
         observed = _observe(app)
         undeclared = sorted(set(observed) - set(PINNED_MANIFEST_AUTH_OFF))
@@ -250,6 +266,36 @@ class TestRouterClassManifest:
         assert not missing, (
             f"Route families DISAPPEARED (auth-OFF manifest): {missing}"
         )
+
+    def test_a_custom_gateway_path_is_still_module_lane(self):
+        """R3: the module-lane tag follows the ROUTE, not the path.
+
+        The path is configurable (``MCPS_GATEWAY_PATH``), so the tag
+        must be applied by ROUTE IDENTITY (the route name) — a path
+        prefix would either miss a custom path or, with an empty
+        prefix, match EVERY route in the app.
+        """
+        warnings.filterwarnings("ignore")
+        custom_path = "/api/remote-hands/v1"
+        assert custom_path != CONTRACT_GATEWAY_PATH
+        with patch.dict(
+            os.environ,
+            {"MCPS_GATEWAY_ENABLED": "1", "MCPS_GATEWAY_PATH": custom_path},
+        ):
+            app = create_app(auth_config=_auth_on_config())
+        tagged = [
+            route
+            for route in app.routes
+            if getattr(route, "name", None) == GATEWAY_ROUTE_NAME
+        ]
+        assert tagged, "the gateway route was not registered at the custom path"
+        for route in tagged:
+            assert getattr(route, AUTH_MODULE_LANE_ATTR, False) is True, (
+                "the gateway route lost its module-lane tag at a custom path"
+            )
+        assert any(
+            getattr(route, "path", "") == custom_path for route in tagged
+        ), "the route was not mounted at the configured path"
 
     def test_undeclared_mount_makes_the_cage_fire(self):
         """THE cage property: include_router with NO explicit class

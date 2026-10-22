@@ -207,6 +207,30 @@ class TestResolveToolFilterGating:
 
 
 class TestApplyToolFilterGating:
+    """END-TO-END through the real drop site.
+
+    WHAT THIS ARM EXERCISES (and what it does NOT): the two arms below
+    run the REAL ``_apply_tool_filter`` against the REAL registry
+    shape — the ``mcp_rpc`` category is registered and the tools carry
+    their ``_tool_category`` stamp, so the CATEGORY GATE is what keeps
+    them out of an ``allow=['mcp']`` agent.
+
+    They do NOT exercise the prefix sweep: the sweep only fires when the
+    ``mcp`` category is present and EMPTY, and the production registry
+    never has an empty ``mcp`` category (the key only exists once an
+    MCP-server tool was scanned, which fills it). The sweep is armed
+    EXPLICITLY by the two arms of
+    ``TestResolveToolFilterGating`` above — ``test_allow_mcp_does_not_
+    grant_the_mcp_rpc_tools`` and ``test_the_sweep_cannot_claim_the_
+    tools_of_another_registered_category``.
+
+    EXACTLY 2 OF THE 11 TESTS IN THIS FILE are load-bearing against the
+    sweep fix: those two fail when the ``owned_elsewhere`` block in
+    ``daemon/tools/instance.py`` is removed (the sweep would claim the
+    ``mcp_rpc_*`` names). The other nine pin the contract (who is
+    granted what) and would stay green without the fix.
+    """
+
     def test_an_agent_with_allow_mcp_keeps_the_mcp_rpc_tools_out(self):
         """END-TO-END through the real drop site.
 

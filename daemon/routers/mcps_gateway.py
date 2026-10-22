@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 #: The body of a refused upgrade (plain text, as the reference refusal).
 UNAUTHORIZED_BODY = b"unauthorized\n"
 
-#: The cadence of the WebSocket-level liveness ping.
+#: The DEFAULT cadence of the WebSocket-level liveness ping.
 #:
 #: §3.3: the client treats "the absence of any inbound frame of any
 #: kind" as server death, so a center that only answers requests looks
@@ -61,6 +61,9 @@ UNAUTHORIZED_BODY = b"unauthorized\n"
 #: INVISIBLE to the protocol layer: §6.1 carries "one JSON object per
 #: WebSocket text message", and a control frame is not a text message.
 #: The reference center pings every 200 ms; this one does the same.
+#:
+#: The effective cadence is ``MCPS_GATEWAY_PING_INTERVAL_MS`` (the
+#: default is this value) — the knob is wired into the route below.
 PING_INTERVAL_SECONDS = 0.2
 
 
@@ -128,6 +131,23 @@ def _is_real_server_connection(websocket: WebSocket) -> bool:
         if isinstance(host, str) and host.strip().lower() in _IN_PROCESS_PEER_HOSTS:
             return False
     return True
+
+
+def _ping_interval_seconds(service: McpGatewayService) -> float:
+    """The effective liveness-ping cadence, in seconds.
+
+    The knob (``MCPS_GATEWAY_PING_INTERVAL_MS``) lives on the service's
+    configuration — the service and the transport are constructed from
+    the SAME boot-time config, so the cadence the route uses is the
+    cadence the operator configured. The module constant is only the
+    DEFAULT (the reference center's 200 ms).
+    """
+    interval_ms = getattr(
+        getattr(service, "config", None), "ping_interval_ms", None
+    )
+    if not interval_ms or interval_ms <= 0:
+        return PING_INTERVAL_SECONDS
+    return interval_ms / 1000.0
 
 
 class WebSocketGatewayTransport:
@@ -294,7 +314,7 @@ async def mcp_gateway_endpoint(websocket: WebSocket) -> None:
         # a protocol frame. It is started INSIDE the try: the setup below
         # can fail (a cancelled open), and a ping loop left running on a
         # dead socket would ping it FOREVER.
-        transport.start_liveness_pings(PING_INTERVAL_SECONDS)
+        transport.start_liveness_pings(_ping_interval_seconds(service))
         connection = await service.open_connection(transport)
         await service.ensure_monitor()
         while True:
@@ -396,7 +416,7 @@ def build_mcps_gateway_router(
                 # Started inside the try: the setup below can fail, and a
                 # ping loop left running on a dead socket would ping it
                 # FOREVER.
-                transport.start_liveness_pings(PING_INTERVAL_SECONDS)
+                transport.start_liveness_pings(_ping_interval_seconds(service))
                 connection = await service.open_connection(transport)
                 await service.ensure_monitor()
                 while True:

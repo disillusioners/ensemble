@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -41,6 +42,7 @@ from .audit import (
 )
 from .config import GatewayConfig, load_gateway_config
 from .protocol import (
+    CENTER_EMITTED_CODES,
     CODE_CAPABILITY_MISSING,
     CODE_HEARTBEAT_TIMEOUT,
     CODE_INTERNAL,
@@ -55,6 +57,7 @@ from .protocol import (
     METHOD_SESSION_END,
     METHOD_TOOLS_CALL,
     PROTOCOL_VERSION,
+    RELAYED_CODES,
     REQUIRED_CLIENT_CAPABILITIES,
     SERVER_CAPABILITIES,
     SERVER_NAME,
@@ -70,6 +73,40 @@ from .sessions import GatewaySession, SessionManager
 from .store import InMemoryMachineStore, MachineStore
 
 logger = logging.getLogger(__name__)
+
+#: The audit detail CLASSIFICATIONS.
+#:
+#: The audit row NEVER carries peer text. A hostile machine can quote the
+#: command arguments in its error message, and the ledger is exactly the
+#: place raw arguments must never reach (spec-interpretations §6.4 names
+#: this threat: "a typed password should not end up in a log file because
+#: it was the argument to a tool"). The peer text stays AGENT-FACING (the
+#: tool result carries it); the AUDIT carries a fixed classification plus
+#: the error code — and the error code is itself checked against the
+#: protocol vocabulary, because it arrives from the peer too.
+AUDIT_DETAIL_OK = "the remote command completed"
+AUDIT_DETAIL_ERROR = "the machine refused the command"
+AUDIT_DETAIL_TIMEOUT = "the machine did not answer in time"
+AUDIT_DETAIL_UNRECOGNIZED_CODE = (
+    "the machine answered with an unrecognized error code"
+)
+
+#: The error codes the audit is allowed to record verbatim. Everything
+#: else (a peer's free text that happens to sit in the code slot) is
+#: replaced by :data:`AUDIT_DETAIL_UNRECOGNIZED_CODE`.
+AUDIT_ALLOWED_ERROR_CODES: frozenset[str] = frozenset(
+    CENTER_EMITTED_CODES | RELAYED_CODES
+) | {"UNRECOGNIZED_ERROR_CODE"}
+
+#: The deadline of the audit write (R1). A stalled PostgreSQL must not
+#: hang an agent tool call indefinitely: the write is abandoned, the
+#: failure is counted and logged, and the command result stands.
+DEFAULT_AUDIT_WRITE_TIMEOUT_SECONDS = 5.0
+
+#: The deadline of the HELLO exchange for a connection that upgraded but
+#: never said hello (R2a). A token-holder that holds a socket without
+#: ever speaking is reaped after this window.
+DEFAULT_PRE_HELLO_TIMEOUT_MS = 30_000
 
 #: The cadence of the housekeeping sweep (the heartbeat check and the
 #: session expiry). It is SHORT — and it is DERIVED from the heartbeat
@@ -123,6 +160,8 @@ class McpGatewayService:
         audit_sink: AuditSink | None = None,
         clock: Callable[[], float] = time.time,
         monitor_interval_seconds: float = DEFAULT_MONITOR_INTERVAL_SECONDS,
+        audit_write_timeout_seconds: float = DEFAULT_AUDIT_WRITE_TIMEOUT_SECONDS,
+        pre_hello_timeout_ms: int = DEFAULT_PRE_HELLO_TIMEOUT_MS,
         server_version: str = "0.1.0",
     ) -> None:
         self.config = config if config is not None else load_gateway_config()
@@ -130,6 +169,8 @@ class McpGatewayService:
         self._audit = audit_sink if audit_sink is not None else NullAuditSink()
         self._clock = clock
         self._server_version = server_version
+        self._audit_write_timeout_seconds = audit_write_timeout_seconds
+        self._pre_hello_timeout_ms = pre_hello_timeout_ms
 
         self._sessions = SessionManager(
             session_ttl_ms=self.config.session_ttl_ms,
@@ -222,8 +263,15 @@ class McpGatewayService:
     # ── connection lifecycle ─────────────────────────────────────────────
 
     async def open_connection(self, transport: GatewayTransport) -> ClientConnection:
-        """Register a freshly upgraded socket."""
-        connection_id = f"conn-{len(self._connections) + 1:04d}-{int(self._clock() * 1000) % 100000}"
+        """Register a freshly upgraded socket.
+
+        The id is a UUID4, NOT a counter: a counter derived from
+        ``len(self._connections)`` collides as soon as a connection is
+        closed (the length drops), and a colliding id would make the
+        dictionary OVERWRITE the live entry — after which
+        ``close_connection`` could cross-kill an unrelated socket.
+        """
+        connection_id = f"conn-{uuid.uuid4().hex[:12]}"
         connection = ClientConnection(
             connection_id=connection_id,
             transport=transport,
@@ -290,15 +338,26 @@ class McpGatewayService:
             return
 
         version = payload.get("v")
-        if version is not None and version != PROTOCOL_VERSION:
-            # §5.2 forbids a silent downgrade. The strict refusal is the
-            # hello exchange; a later frame of a wrong version is refused
-            # too — but the connection is NOT killed, because the spec
-            # names no failure mode for it.
+        if version != PROTOCOL_VERSION:
+            # §6.1: "v | string | yes | Protocol version of this message
+            # ("0.1")". A frame that does not name the version cannot be
+            # read as a v0.1 message, and §5.2 forbids a silent
+            # downgrade — so the frame is REFUSED and the connection
+            # goes down. This mirrors the shipped client, which checks
+            # the version of EVERY inbound message and tears the
+            # connection down on a mismatch (interpretation §2.4).
+            #
+            # NO error frame goes out: there is nothing to correlate the
+            # refusal with (the frame's id belongs to a message the
+            # center never accepted), and the socket close is the
+            # refusal.
             logger.warning(
-                "the machine sent a frame of the protocol version %r; it is ignored",
+                "the machine sent a frame with the protocol version %r "
+                "(expected %r); the connection is closed",
                 version,
+                PROTOCOL_VERSION,
             )
+            await self.close_connection(connection, "protocol version violation")
             return
 
         message_type = payload.get("type")
@@ -479,6 +538,23 @@ class McpGatewayService:
         # The handshake is over: the machine owes the center a heartbeat
         # (§3.3), and the silence of the machine starts now.
         now = self._clock()
+
+        # A RECONNECT supersedes the previous socket (S3). The old
+        # connection's session must die WITH it: a session belongs to its
+        # connection (§6.8), and a machine that reconnects starts over
+        # from the beginning (§6.8 — no resumption in v0.1). Without this
+        # the superseded session would live on until the heartbeat
+        # timeout, and the reconnected machine would be told
+        # ``MACHINE_BUSY`` for up to 45 s by a session nobody can use.
+        stale = self._by_machine.get(machine_id)
+        if stale is not None and stale is not connection and not stale.closed:
+            logger.warning(
+                "the machine %r reconnected on a new socket; the previous "
+                "connection and its session are closed",
+                machine_id,
+            )
+            await self.close_connection(stale, "the machine reconnected")
+
         connection.machine_id = machine_id
         connection.hello_received = True
         connection.last_heartbeat = now
@@ -562,9 +638,13 @@ class McpGatewayService:
     async def ensure_monitor(self) -> None:
         """Start the housekeeping sweep (idempotent).
 
-        The sweep is started with the FIRST connection and lives until the
-        last one is gone — the center has no background task when no
-        machine is connected.
+        The sweep is started with the FIRST connection and then runs for
+        the PROCESS LIFETIME: it is NOT stopped when the last machine
+        disconnects — only :meth:`close_all` (the daemon shutdown path)
+        cancels it. It is a cheap loop (the heartbeat check, the session
+        expiry and the reaping of the connections that never said
+        hello), and it is the ONLY thing that enforces the §3.3 timeouts
+        while the daemon is up.
         """
         if self._monitor_task is not None and not self._monitor_task.done():
             return
@@ -589,6 +669,12 @@ class McpGatewayService:
         Heartbeat loss is a KILL, not a pause (§6.8): the session is not
         resumable, so the session dies with the machine and the machine
         is expected to reconnect and start over.
+
+        It also REAPS the connections that upgraded and never said
+        hello (R2a): the hello exchange is mandatory and happens once
+        per connection (§5.1), so a connection that stays silent through
+        it holds a socket and a roster entry forever. Such a connection
+        is closed after the pre-hello deadline.
         """
         now = self._clock()
         # The kill fires at EXACTLY the advertised ``heartbeat_timeout_ms``
@@ -596,7 +682,23 @@ class McpGatewayService:
         limit_ms = self.config.heartbeat_timeout_ms
         killed: list[ClientConnection] = []
         for connection in list(self._connections.values()):
-            if connection.closed or not connection.hello_received:
+            if connection.closed:
+                continue
+            if not connection.hello_received:
+                # R2a: a socket that never completed the hello exchange.
+                age_ms = (now - connection.connected_at) * 1000.0
+                if age_ms <= self._pre_hello_timeout_ms:
+                    continue
+                killed.append(connection)
+                logger.warning(
+                    "the connection %s never completed the hello exchange "
+                    "(%d ms); it is closed",
+                    connection.connection_id,
+                    int(age_ms),
+                )
+                await self.close_connection(
+                    connection, "the hello exchange never completed"
+                )
                 continue
             silence_ms = (now - connection.last_heartbeat) * 1000.0
             if silence_ms <= limit_ms:
@@ -732,15 +834,26 @@ class McpGatewayService:
 
         catalog = result.get("tools")
         catalog = list(catalog) if isinstance(catalog, list) else []
-        session = self._sessions.begin(
-            session_id=session_id,
-            machine_id=machine_id,
-            agent_id=agent_id,
-            instance_id=instance_id,
-            connection_id=connection.connection_id,
-            catalog=catalog,
-            now=self._clock(),
-        )
+        try:
+            session = self._sessions.begin(
+                session_id=session_id,
+                machine_id=machine_id,
+                agent_id=agent_id,
+                instance_id=instance_id,
+                connection_id=connection.connection_id,
+                catalog=catalog,
+                now=self._clock(),
+            )
+        except GatewayProtocolError:
+            # S2: the slot was taken between the pre-flight check and
+            # this write (a concurrent connect). The machine DID open a
+            # session for us — the center refuses it, so the machine-side
+            # session is released best-effort, or the machine would keep
+            # its local lock until its own timeout.
+            await self._release_machine_session(
+                connection, session_id, machine_id
+            )
+            raise
         self._store.bind_session(machine_id, session_id, agent_id)
         return {
             "session_id": session.session_id,
@@ -768,7 +881,10 @@ class McpGatewayService:
 
         session = self._sessions.for_agent(agent_id)
         if session is None:
-            raise SessionManager.session_not_found(agent_id)
+            # P1: the refusal names the AGENT (there is no session id to
+            # name) — the contract's ``data.session_id`` carries a
+            # SESSION id, so it is absent here, not the agent id.
+            raise SessionManager.no_session_for_agent(agent_id)
 
         connection = self._connections.get(session.connection_id)
         if connection is None or connection.closed:
@@ -800,7 +916,6 @@ class McpGatewayService:
                 session_id=session.session_id,
                 outcome=outcome,
                 error_code=exc.code,
-                detail=exc.message,
             )
             raise
         self._sessions.touch(session.session_id, now)
@@ -814,6 +929,38 @@ class McpGatewayService:
             outcome=OUTCOME_OK,
         )
         return result
+
+    async def _release_machine_session(
+        self,
+        connection: ClientConnection,
+        session_id: str,
+        machine_id: str,
+    ) -> None:
+        """Best-effort release of a machine-side session the center refuses.
+
+        The machine opened a session for a request the center is about to
+        refuse (the §8.3 slot was taken in the meantime). The machine
+        keeps its local lock until the session is ended, so the center
+        ends it — best-effort and BOUNDED: a machine that does not
+        answer simply keeps the session until its own timeout, which is
+        no worse than the refusal itself.
+        """
+        try:
+            await self._request(
+                connection,
+                METHOD_SESSION_END,
+                {"session_id": session_id},
+                session_id=session_id,
+                timeout_ms=2000,
+            )
+        except Exception as exc:  # noqa: BLE001 — the release is best-effort
+            logger.warning(
+                "the machine-side session %s of the machine %r could not be "
+                "released after a refused connect: %s",
+                session_id,
+                machine_id,
+                exc,
+            )
 
     async def disconnect(
         self, *, agent_id: str, instance_id: str = ""
@@ -871,7 +1018,6 @@ class McpGatewayService:
         session_id: str,
         outcome: str,
         error_code: str = "",
-        detail: str = "",
     ) -> None:
         """Write ONE audit row.
 
@@ -901,6 +1047,26 @@ class McpGatewayService:
         """
         if not self.config.audit_enabled:
             return
+
+        # S1: the row carries a FIXED classification and the error code
+        # — NEVER the peer's free text. The peer text stays agent-facing
+        # (the tool result carries it); the ledger must not become the
+        # place a hostile machine parks the command arguments.
+        if error_code and error_code not in AUDIT_ALLOWED_ERROR_CODES:
+            # The code came from the PEER. Anything outside the protocol
+            # vocabulary is not recorded verbatim.
+            error_code = "UNRECOGNIZED_ERROR_CODE"
+        if outcome == OUTCOME_OK:
+            detail = AUDIT_DETAIL_OK
+        elif outcome == OUTCOME_TIMEOUT:
+            detail = AUDIT_DETAIL_TIMEOUT
+        elif error_code == "UNRECOGNIZED_ERROR_CODE":
+            detail = AUDIT_DETAIL_UNRECOGNIZED_CODE
+        else:
+            detail = AUDIT_DETAIL_ERROR
+        if error_code:
+            detail = f"{detail} [{error_code}]"
+
         record = AuditRecord(
             agent_id=agent_id,
             instance_id=instance_id,
@@ -910,11 +1076,26 @@ class McpGatewayService:
             outcome=outcome,
             session_id=session_id,
             error_code=error_code,
-            detail=detail[:500],
+            detail=detail,
             created_at=now_utc_iso(),
         )
         try:
-            await asyncio.to_thread(self._audit.record, record)
+            # R1: the write is BOUNDED. A stalled PostgreSQL must not
+            # hang an agent tool call indefinitely — the write is
+            # abandoned, the failure is counted and logged, and the
+            # command result stands.
+            await asyncio.wait_for(
+                asyncio.to_thread(self._audit.record, record),
+                timeout=self._audit_write_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            self._audit_failures += 1
+            logger.error(
+                "the remote-command audit write timed out after %.1fs (%d "
+                "failures so far); the command result stands",
+                self._audit_write_timeout_seconds,
+                self._audit_failures,
+            )
         except Exception as exc:  # noqa: BLE001 — the audit must not wedge the gateway
             self._audit_failures += 1
             logger.error(
