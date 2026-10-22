@@ -2758,6 +2758,30 @@ class SchedulingConfig(BaseSettings):
                     "min(60, host_local_tz_cache_seconds) applied. Architecture §4.4. "
                     "Env: ENSEMBLE_SCHEDULING_NEGATIVE_CACHE_SECONDS.",
     )
+    # ── scheduler deferred-delivery bounds (commission
+    #    ``scheduler-deferred-alarm-delivery``; decisions.md DEC-19) ─────
+    # Pydantic-settings, NOT DDL — the migration delta stays EMPTY (plan
+    # §(d) D5). Both bounds are checked at FIRE TICKS ONLY (no polling
+    # loop — the hard non-goal).
+    defer_max_count: int = Field(
+        default=16,
+        ge=1,
+        description="Max coalesced deferral occurrences per generation. "
+                    "At saturation the count PINS at this value and the delivered "
+                    "body carries the saturating '<cap>+ occurrences' display "
+                    "(never min(count+1, cap)). "
+                    "Env: ENSEMBLE_SCHEDULING_DEFER_MAX_COUNT.",
+    )
+    defer_max_age_seconds: int = Field(
+        default=86400,
+        ge=60,
+        description="Max age (seconds) of the non-delivery episode carrier "
+                    "('_defer_since'). On breach the episode terminates VISIBLY: "
+                    "the still-pending delivery is abandoned with ONE guarded "
+                    "statement and the occurrence is consumed with a terminal "
+                    "'failed' row (reason 'nondelivery_age_cap') + a WARNING. "
+                    "Env: ENSEMBLE_SCHEDULING_DEFER_MAX_AGE_SECONDS.",
+    )
 
 
 class McpPoolConfig(BaseSettings):

@@ -199,6 +199,20 @@ class ScheduleDetail(BaseModel):
     last_run_at: str | None
     cancelled_at: str | None = None  # populated when status == "cancelled"
     tz_warning: str = ""
+    # ── Deferral visibility (commission ``scheduler-deferred-alarm-delivery``
+    # · decisions.md DEC-12 / plan §(c) C4) ──────────────────────────────
+    #: The number of occurrences coalesced into the CURRENT deferral
+    #: generation (``config['_defer_count']``).  It resets to 0 on the next
+    #: DIRECT dispatch — so ``deferred`` + ``deferred_count == 0`` is the
+    #: NORMAL post-delivery shape and must NOT be read as "a deferral is
+    #: pending" (the authoritative pending-delivery indicator is the
+    #: generation marker, not this field).
+    deferred_count: int = 0
+    #: The status of the LAST fire (``get_latest_execution(...).status``) —
+    #: NOT the delivery's fate.  ``triggered`` is the named TELL for a
+    #: crash between the start row and the complete row; ``deferred`` /
+    #: ``failed`` / ``completed`` are closed states.
+    last_execution_status: str | None = None
 
 
 class ScheduleListItem(ScheduleDetail):
@@ -609,7 +623,37 @@ def _last_run_at(schedule_id: str) -> str | None:
     return latest.triggered_at if latest is not None else None
 
 
-def _row_to_detail(row: Any, *, tz_warning: str = "", last_run_at: str | None = None) -> ScheduleDetail:
+def _last_execution_status(schedule_id: str) -> str | None:
+    """The status of the LATEST ``schedule_executions`` row for a schedule.
+
+    Commission ``scheduler-deferred-alarm-delivery`` (decisions.md DEC-12 /
+    plan §(c) C4): the deferral visibility surface reports the LAST fire's
+    outcome.  It is NOT the delivery's fate — there is no
+    delivery-completed callback (the adapter observes enqueues, never
+    completions), so the field keeps reading ``deferred`` until the next
+    DIRECT dispatch.
+
+    ``triggered`` is the named TELL for a crash between the start row and
+    the complete row (the only OPEN state).
+    """
+    repo = _require_repo()
+    try:
+        latest = repo.get_latest_execution(schedule_id)
+    except Exception as exc:  # noqa: BLE001 — history echo is best-effort
+        logger.warning(
+            "scheduling_service: execution lookup failed for %s: %s", schedule_id, exc
+        )
+        return None
+    return getattr(latest, "status", None) if latest is not None else None
+
+
+def _row_to_detail(
+    row: Any,
+    *,
+    tz_warning: str = "",
+    last_run_at: str | None = None,
+    last_execution_status: str | None = None,
+) -> ScheduleDetail:
     """Map a SourceConfig scheduler row onto the canonical ScheduleDetail.
 
     ``last_run_at`` is computed by the async caller via
@@ -618,6 +662,11 @@ def _row_to_detail(row: Any, *, tz_warning: str = "", last_run_at: str | None = 
     ``_row_to_detail`` directly) the value is ``None`` and the
     ``last_run_at`` echo is suppressed — tests that need the echo
     must compute it themselves and pass it in.
+
+    ``last_execution_status`` follows the same pattern (the async caller
+    computes it via ``asyncio.to_thread(_last_execution_status, ...)``).
+    ``deferred_count`` is read straight off the row's ``config`` JSON
+    (``_defer_count`` — the carrier's authoritative counter).
     """
     config = row.config or {}
     next_local, next_utc, next_warning = _compute_next_run(config)
@@ -625,6 +674,10 @@ def _row_to_detail(row: Any, *, tz_warning: str = "", last_run_at: str | None = 
     cancelled_at = None
     if row.status == "cancelled":
         cancelled_at = getattr(row, "updated_at", None)
+    try:
+        deferred_count = int(config.get("_defer_count") or 0)
+    except (TypeError, ValueError):
+        deferred_count = 0
     return ScheduleDetail(
         source_id=row.source_id,
         label=row.name,
@@ -642,6 +695,8 @@ def _row_to_detail(row: Any, *, tz_warning: str = "", last_run_at: str | None = 
         last_run_at=last_run_at,
         cancelled_at=cancelled_at,
         tz_warning=warning,
+        deferred_count=deferred_count,
+        last_execution_status=last_execution_status,
     )
 
 
@@ -860,7 +915,16 @@ async def get_schedule(schedule_id: str) -> ScheduleDetail | None:
     # DB read (repo.get_latest_execution) and would otherwise block
     # the event loop on every get_schedule call.
     last_run_at = await asyncio.to_thread(_last_run_at, row.source_id)
-    return _row_to_detail(row, last_run_at=last_run_at)
+    # Deferral visibility (DEC-12): the last fire's outcome — same
+    # worker-thread pattern as ``last_run_at`` (a sync DB read).
+    last_execution_status = await asyncio.to_thread(
+        _last_execution_status, row.source_id
+    )
+    return _row_to_detail(
+        row,
+        last_run_at=last_run_at,
+        last_execution_status=last_execution_status,
+    )
 
 
 async def list_schedules(
@@ -896,7 +960,15 @@ async def list_schedules(
         # fix; a future refactor could batch the lookup into a single
         # ``list_latest_executions_by_source`` repository call.
         last_run_at = await asyncio.to_thread(_last_run_at, row.source_id)
-        detail = _row_to_detail(row, last_run_at=last_run_at)
+        # Deferral visibility (DEC-12) — same worker-thread pattern.
+        last_execution_status = await asyncio.to_thread(
+            _last_execution_status, row.source_id
+        )
+        detail = _row_to_detail(
+            row,
+            last_run_at=last_run_at,
+            last_execution_status=last_execution_status,
+        )
         items.append(ScheduleListItem(**detail.model_dump()))
     return items
 

@@ -21,6 +21,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: The COMPLETE public surface of this module (a partial ``__all__``
+#: would silently narrow ``from mapper import *``).  ``logger`` and the
+#: underscore-prefixed internals are deliberately excluded.
+__all__ = [
+    "MAX_USER_ID_LENGTH",
+    "SOURCE_TYPE_TELEGRAM",
+    "SOURCE_TYPE_WEBHOOK",
+    "SOURCE_TYPE_SLACK",
+    "SOURCE_TYPE_DISCORD",
+    "VALID_SOURCE_TYPES",
+    "SLACK_ID_PATTERN",
+    "DISCORD_ID_PATTERN",
+    "ValidationError",
+    "BoundCallerRefusal",
+    "validate_external_user_id",
+    "InstanceMapper",
+]
+
 # Maximum length for external user IDs
 MAX_USER_ID_LENGTH = 256
 
@@ -57,10 +75,72 @@ DISCORD_ID_PATTERN = (
     r"^(dm:\d{17,19}|\d{17,19}:\d{17,19}(:\d{17,19})?)$"
 )
 
+#: Placeholder for an id that is absent at a log/observability site (a
+#: missing mapping id or a NULL agent_instance_id) — one spelling so log
+#: greps stay stable.
+_UNKNOWN_ID = "<unknown>"
+
 
 class ValidationError(Exception):
     """Raised when input validation fails."""
     pass
+
+
+class BoundCallerRefusal(Exception):
+    """E1 fire-time stranger-spawn refusal (R10 [LEADER-RULED]).
+
+    Raised by :meth:`InstanceMapper.get_or_create_instance` when a mapping
+    that is BOUND to a caller instance — ``mapping_metadata`` carries a
+    truthy ``bound_to_caller``, as stamped by
+    ``self_alarm._bind_schedule_to_caller`` — resolves to a caller instance
+    that is CONFIRMED gone (a successful liveness query returned "absent").
+
+    The delivery lane must treat this as the terminal ``refused_permanent``
+    outcome (plan-overview.md §C1 / DEC-9 CRIT-1): consume VISIBLY (the
+    one-shot is consumed + a ``failed`` execution row carries the reason),
+    never as a generic ``failed`` (which re-arms and spins against a dead
+    target), and never as a trigger to spawn a stranger instance in the
+    caller's place.
+
+    The refusal reason travels as the exception message AND as the
+    :attr:`reason` attribute, so the execution row's ``error_message`` can be
+    populated without string-matching the exception type
+    (``error_message=refusal.reason``, plan-overview.md CRIT-1 part 2).
+    """
+
+    #: The refusal reason (also the exception message).
+    reason: str
+    #: The schedule/source id whose bound caller was confirmed gone.
+    source_id: str
+    #: The dead caller instance id (``"<unknown>"`` placeholder when the
+    #: mapping row carried none).
+    dead_agent_instance_id: str
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        source_id: str = "",
+        dead_agent_instance_id: str = "",
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.source_id = source_id
+        self.dead_agent_instance_id = dead_agent_instance_id
+
+
+#: Self-alarm binding keys, stamped into ``instance_mappings.mapping_metadata``
+#: by ``self_alarm._bind_schedule_to_caller``:
+#: ``{"source": "self_alarm", "bound_to_caller": True, "caller_instance_id": …}``.
+#: They are carried forward when the mapper REBUILDS a mapping's metadata
+#: (DEC-5 item 3): ``create_instance_mapping`` upserts ``mapping_metadata``
+#: wholesale, so a rebuild that dropped them would leave the row looking
+#: UNBOUND — silently re-opening the E1 stranger-spawn door for the next fire.
+_BINDING_METADATA_KEYS: tuple[str, ...] = (
+    "source",
+    "bound_to_caller",
+    "caller_instance_id",
+)
 
 
 def validate_external_user_id(source_type: str, user_id: str) -> str:
@@ -149,6 +229,9 @@ class InstanceMapper:
     - Tracking last message activity
     - Detecting and recovering from stale mappings whose target instance
       was removed out-of-band (DB reset, manual cleanup, restore, etc.)
+    - Refusing (typed ``BoundCallerRefusal``) to re-target a caller-BOUND
+      mapping whose caller is confirmed gone, so no stranger instance is
+      spawned in the caller's place (E1).
     """
     
     def __init__(self, source_repo: "SQLModelSourceRepository", manager: "InstanceManager"):
@@ -204,7 +287,7 @@ class InstanceMapper:
             logger.warning(
                 "Failed to verify instance %s for mapping %s: %s",
                 instance_id[:8] if instance_id else "<empty>",
-                mapping.get("mapping_id", "<unknown>"),
+                mapping.get("mapping_id", _UNKNOWN_ID),
                 e,
             )
             return True
@@ -303,6 +386,9 @@ class InstanceMapper:
             The agent_instance_id (UUID string).
 
         Raises:
+            BoundCallerRefusal: If the mapping is bound to a caller instance
+                that is CONFIRMED gone (E1 fire-time refusal — the mapping is
+                kept and no instance is spawned).
             Exception: If instance creation fails.
         """
         # Resolve agent_id to canonical form
@@ -334,6 +420,44 @@ class InstanceMapper:
                 # deletion). Returning a dead id would make the worker fail
                 # with ``Instance not found`` and drop the user message.
                 if not self._mapping_instance_exists(mapping):
+                    # E1 fire-time refusal (R10 [LEADER-RULED] — decisions.md
+                    # DEC-5 item 1, as amended by ADR-11 (confirmed absence
+                    # only) + DEC-9 CRIT-1 (the ``refused_permanent`` outcome);
+                    # plan-overview.md §C3): a mapping BOUND to a caller
+                    # instance whose caller is CONFIRMED gone must not be
+                    # re-targeted at a fresh stranger instance. The binding
+                    # discriminator is already in hand — ``get_mapping``
+                    # returned ``mapping_metadata``, so this costs ZERO extra
+                    # I/O; ``source_type`` is unusable as the signal because
+                    # every self-alarm row is source_type="scheduler".
+                    #
+                    # Fail closed on CONFIRMED absence ONLY: an indeterminate
+                    # read (DB error) makes ``_mapping_instance_exists`` return
+                    # True (the fail-open path is preserved verbatim), so a
+                    # transient DB error can never masquerade as a
+                    # confirmed-absence refusal here — it routes to
+                    # return-existing, exactly as today.
+                    if (mapping.get("metadata") or {}).get("bound_to_caller"):
+                        dead_agent_instance_id = (
+                            mapping.get("agent_instance_id") or _UNKNOWN_ID
+                        )
+                        logger.warning(
+                            f"E1 refused stranger spawn: source_id={source_id}, "
+                            f"external_user_id={external_user_id}, "
+                            f"dead_agent_instance_id={dead_agent_instance_id}. "
+                            f"Mapping kept intact; no instance spawned."
+                        )
+                        raise BoundCallerRefusal(
+                            (
+                                f"Bound caller instance {dead_agent_instance_id} "
+                                f"for schedule {source_id} is confirmed gone; "
+                                f"refusing to delete the mapping or spawn a "
+                                f"stranger instance in its place "
+                                f"(E1 fire-time refusal)"
+                            ),
+                            source_id=source_id,
+                            dead_agent_instance_id=dead_agent_instance_id,
+                        )
                     logger.warning(
                         f"Stale instance mapping detected: source_id={source_id}, "
                         f"external_user_id={external_user_id}, "
@@ -371,10 +495,32 @@ class InstanceMapper:
                 "source_id": source_id,
                 "external_user_id": external_user_id,
             }
-            
+
+            # DEC-5 item 3 — binding-key preservation. ``create_instance_mapping``
+            # upserts ``mapping_metadata`` WHOLESALE (repository-side semantics,
+            # deliberately untouched — the cross-source blast radius is not
+            # worth it), so a rebuild would drop the self-alarm binding keys
+            # stamped by ``_bind_schedule_to_caller`` and the rebuilt row would
+            # LOOK unbound — silently re-opening the E1 stranger-spawn door for
+            # the next fire (the refusal is gated on a truthy
+            # ``bound_to_caller``). Carry them forward from the prior mapping
+            # (if any) at the mapper's own metadata-construction site — the
+            # only place that rebuilds a mapping's metadata.
+            prior_metadata = (mapping or {}).get("metadata") or {}
+
             # Merge extra mapping metadata if provided (e.g., for Slack channel_id, thread_ts)
             if extra_mapping_metadata:
                 metadata.update(extra_mapping_metadata)
+
+            # The binding keys are applied LAST so the carry is unconditional:
+            # a colliding ``extra_mapping_metadata`` key must not be able to
+            # defeat DEC-5 item 3 and leave the rebuilt row looking unbound
+            # (the fail-closed direction — today no caller passes a binding
+            # key here; ``extra_mapping_metadata`` carries Slack
+            # channel_id/thread_ts only).
+            for binding_key in _BINDING_METADATA_KEYS:
+                if binding_key in prior_metadata:
+                    metadata[binding_key] = prior_metadata[binding_key]
             
             self.source_repo.create_instance_mapping(
                 source_id=source_id,
