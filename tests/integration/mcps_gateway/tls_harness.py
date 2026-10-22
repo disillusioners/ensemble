@@ -143,93 +143,17 @@ def cert_has_ip_san(cert_path: Path, ip: str = "127.0.0.1") -> bool:
 
 
 # ── the centre-side frame transcript ──────────────────────────────────────
+#
+# The frame model lives in ``transcript.py`` — the daemon-FREE module of
+# the lane (the frame log + the envelope violation recorder).  The harness
+# re-exports it so there is exactly ONE frame model in the interop lane:
+# the frames the harness records and the frames the assertions read are
+# the same objects.
 
-
-@dataclass
-class Frame:
-    """One frame the centre sent or received."""
-
-    direction: str  # "send" (centre -> machine) | "recv" (machine -> centre)
-    raw: str
-    at: float
-    parsed: dict[str, Any] | None = None
-
-    def __str__(self) -> str:  # pragma: no cover - transcript rendering
-        return f"{self.direction:4} {self.raw}"
-
-
-class Transcript:
-    """Every frame that crossed the centre's WebSocket, in order.
-
-    The tap is installed by this harness (in-process monkeypatch); the
-    daemon source is untouched.
-    """
-
-    def __init__(self) -> None:
-        self._frames: list[Frame] = []
-        self._lock = asyncio.Lock()
-
-    def add(self, direction: str, raw: str) -> Frame:
-        try:
-            parsed = json.loads(raw)
-            if not isinstance(parsed, dict):
-                parsed = None
-        except Exception:  # noqa: BLE001 — a non-JSON frame is recorded raw
-            parsed = None
-        frame = Frame(direction=direction, raw=raw, at=time.monotonic(), parsed=parsed)
-        self._frames.append(frame)
-        return frame
-
-    @property
-    def frames(self) -> list[Frame]:
-        return list(self._frames)
-
-    def sent(self) -> list[Frame]:
-        return [f for f in self._frames if f.direction == "send"]
-
-    def received(self) -> list[Frame]:
-        return [f for f in self._frames if f.direction == "recv"]
-
-    def find(
-        self,
-        *,
-        direction: str | None = None,
-        method: str | None = None,
-        type: str | None = None,
-    ) -> list[Frame]:
-        out = []
-        for frame in self._frames:
-            if direction is not None and frame.direction != direction:
-                continue
-            parsed = frame.parsed or {}
-            if method is not None and parsed.get("method") != method:
-                continue
-            if type is not None and parsed.get("type") != type:
-                continue
-            out.append(frame)
-        return out
-
-    def render(self, limit: int = 40) -> str:
-        return "\n".join(str(f) for f in self._frames[-limit:])
-
-    async def wait_for(
-        self,
-        predicate: Callable[[Frame], bool],
-        *,
-        timeout: float = 20.0,
-        poll: float = 0.02,
-    ) -> Frame | None:
-        """Wait for a frame that satisfies ``predicate`` (or ``None``)."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            for frame in self._frames:
-                if predicate(frame):
-                    return frame
-            await asyncio.sleep(poll)
-        for frame in self._frames:
-            if predicate(frame):
-                return frame
-        return None
+try:  # pragma: no cover - the package import is the normal one
+    from .transcript import Frame, Transcript
+except ImportError:  # pragma: no cover - direct script invocation
+    from tests.integration.mcps_gateway.transcript import Frame, Transcript
 
 
 # ── environment plumbing ──────────────────────────────────────────────────
@@ -916,6 +840,100 @@ def reset_audit_table(engine: Any) -> int:
     return int(deleted or 0)
 
 
+def gateway_error_code(exc: BaseException) -> str:
+    """The typed code of a gateway refusal — or ``""`` for anything else.
+
+    The daemon's own exception carries the §6.5 code (``MACHINE_BUSY``,
+    ``TOOL_TIMEOUT``, …).  The interop lane must not import
+    ``daemon.*`` itself, so the ONE sanctioned importer reads the code
+    here and hands the plain string over.
+    """
+    from daemon.services.mcps_gateway.protocol import GatewayProtocolError
+
+    if isinstance(exc, GatewayProtocolError):
+        return str(exc.code)
+    return ""
+
+
+def gateway_error_data(exc: BaseException) -> dict[str, Any]:
+    """The ``data`` member of a gateway refusal (an empty dict if none)."""
+    from daemon.services.mcps_gateway.protocol import GatewayProtocolError
+
+    if isinstance(exc, GatewayProtocolError):
+        return dict(exc.data or {})
+    return {}
+
+
+def issue_read_bearer(
+    engine: Any,
+    *,
+    label: str = "interop-read",
+    scopes: tuple[str, ...] = ("mcp:read",),
+    ttl: int = 3600,
+) -> str:
+    """Mint a bearer token through the daemon's OWN mint core.
+
+    The read-parity lane runs with AUTH ON (B12): the decorator that
+    guards the read surface is INERT when auth is off, so an auth-off
+    lane would vacate exactly the behaviour the read surface has to
+    prove.  This helper calls the same ``_issue_token`` the operator CLI
+    calls — the token is a real row in ``auth_bearer_tokens``, hashed
+    exactly like an operator's, and the plaintext is returned ONCE.
+
+    WHY THE DAEMON IMPORT LIVES HERE: the interop lane has exactly ONE
+    module that may import ``daemon.*`` (this one).  The assertion file
+    stays daemon-free and only ever sees the plaintext token.
+    """
+    from daemon.auth.cli import _issue_token
+
+    return _issue_token(
+        label=label,
+        ttl=ttl,
+        scopes=tuple(scopes),
+        bootstrap_material=None,
+        engine=engine,
+        bearer_ttl_default=ttl,
+        pid=os.getpid(),
+    )
+
+
+def plane_switches_effective() -> tuple[bool, str]:
+    """Are the two Plane kill switches EFFECTIVE on the booted app?
+
+    ``DRY_RUN`` / ``DESTRUCTIVE`` have NO daemon-wide consumer today
+    (verified by grep — only the two Plane switches are honoured), so
+    they are NO-OPS PENDING A KNOB: they gate NOTHING and they are never
+    cited as an effective mitigation.  The real protection of the lane is
+    the job-queue assertion, the PID-scoped listener scan and the
+    machine-scoped DB assertions.
+
+    The switches themselves are read back through the daemon's OWN
+    readers, so the EFFECT is measured on the booted application instead
+    of being assumed from the environment.
+    """
+    from daemon.mcp.builtin_servers import plane as plane_builtin
+    from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
+    from daemon.services.plane_sync_service import (
+        PlaneSyncService,
+        plane_sync_enabled,
+    )
+
+    sync_enabled = plane_sync_enabled()
+    sync_reason = PlaneSyncService.unavailable_reason()
+    switch_off = plane_builtin._mcp_kill_switch_enabled() is False
+    available = PlaneServerDefinition.is_available()
+    ok = (
+        sync_enabled is False
+        and sync_reason == "disabled by kill-switch (PLANE_SYNC_ENABLED=false)"
+        and switch_off
+        and available is False
+    )
+    return ok, (
+        f"sync_enabled={sync_enabled} reason={sync_reason!r} "
+        f"mcp_switch_off={switch_off} mcp_available={available}"
+    )
+
+
 def hex_token() -> str:
     """A 32-byte hex credential (the shape the Go client requires)."""
     return subprocess.run(
@@ -967,10 +985,14 @@ __all__ = [
     "fence_role_failure_message",
     "fence_sync_dsn",
     "free_tcp_port",
+    "gateway_error_code",
+    "gateway_error_data",
     "generate_self_signed_cert",
     "hex_token",
     "https_probe",
+    "issue_read_bearer",
     "listeners_owned_by",
+    "plane_switches_effective",
     "postgres_env",
     "preflight_fence_role",
     "reset_audit_table",
