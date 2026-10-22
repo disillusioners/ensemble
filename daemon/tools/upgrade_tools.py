@@ -1259,8 +1259,10 @@ _OUTCOME_LABELS: dict[str, str] = {
 # These helpers snapshot the in-memory routing context at arm time so the
 # wake record can re-stamp the user-origin window on the wake turn (Phase 2,
 # T6). The capture is best-effort — non-user-origin arms leave the wake's
-# source as "" (sentinel, falls back to "api" in Phase 2); the agent_id is
-# informational only (the wake's target is the instance id).
+# source as "" (sentinel); the sweep's fall-back arm then rides the RESERVED
+# internal literal SWEEP_NO_USER_ORIGIN_WAKE_SOURCE (DF-4 / P1 — NOT the
+# user-origin literal "api", which forged a DIRECT user-origin window);
+# the agent_id is informational only (the wake's target is the instance id).
 #
 # Defensive: every helper swallows exceptions and returns a sentinel —
 # the arm NEVER blocks on the capture (D-FA2.2, "never blocks on the
@@ -1272,9 +1274,10 @@ _OUTCOME_LABELS: dict[str, str] = {
 # implementation was RELOCATED byte-compatibly, and every consumed name keeps
 # resolving from its historical home here.
 #
-# FIVE names moved (review W1, binding — implementation-plan §1.1a):
+# SIX names moved (review W1, binding — implementation-plan §1.1a):
 #   _restart_provenance, _lookup_provenance_field, _capture_user_source,
 #   _capture_provenance_class, _ProvenanceVerdict  (+ _EMPTY_PROVENANCE)
+# — six in total, all bound by the alias block below.
 # The live lane still consumes all of them (call sites at the promote/arm
 # sites, the `system_restart` verdict construction, and the 1c narrowing's
 # promote branch), AND one EXTERNAL pin imports `_capture_user_source` from

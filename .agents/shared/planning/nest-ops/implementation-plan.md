@@ -652,6 +652,21 @@ category** — the original R11 rule, restated so the generalization does not be
 | `instance_dismiss` — **F3 ordering** | the SSE `question_pack` emit fires **BEFORE** the resume cascade (the extracted service preserves the route's contract) |
 | `instance_reclaim` — **AC-25 / D-20** | a non-terminal target ⇒ `target-not-terminal` (distinguishing it from `instance_nudge`); a `COMPLETED`/`TERMINATED`/`ERROR`/`FAILED` target revives with the documented message and reuses its checkpoint; self ⇒ `self-surgery-refused` |
 
+> **[DF-4 CORRECTION — 2026-10-22]** Applies to the **AC-11 / D-17**, **AC-23a** and
+> **AC-23b** rows above.
+>
+> * **AC-11 / D-17** — the "exact name + **direct** window ⇒
+>   `direct-provenance-insufficient` (D-18)" clause is **RETRACTED**: a live **direct**
+>   window now **PROCEEDS** (DF-4 / P2). The `protected-target-confirmation-required`,
+>   `confirmed-target-mismatch` and `no-user-provenance` clauses are unchanged.
+> * **AC-23a** — **RE-POINTED**: the genuine direct window on the acting instance is
+>   **ADMITTED** (test: `test_genuine_direct_window_admits_protected_act`).
+> * **AC-23b** — **SPLIT**: the genuine delegated chain is ADMITTED (test:
+>   `test_genuine_inherited_window_admits_protected_act`); the FORGED chain's refusal leg
+>   moved to the REAL-chain e2e `tests/postgres/test_df4_provenance_closure.py`.
+>
+> See `.agents/shared/planning/df4-provenance-closure/plan-overview.md`.
+
 ### 6.5 The provenance pins (D-14) and the kill-switch
 
 | Test | Asserts |
@@ -660,6 +675,13 @@ category** — the original R11 rule, restated so the generalization does not be
 | **AC-10b — VOCABULARY pins** | the verdict tokens (`ok`, `pclass` ∈ {direct, inherited}, `depth`, `detail` strings) and the gate's refusal-token mapping (`ok=False` → `no-user-provenance`; `pclass="direct"` on a protected target → `direct-provenance-insufficient`) are pinned — **neither lane can silently change semantics** |
 | Alias equivalence | `upgrade_tools._restart_provenance` and `provenance.restart_provenance` return the same verdict for the same fixture (the alias is a delegation, pinned so it cannot drift into a copy) |
 | Kill-switch | `ENSEMBLE_INSTANCE_OPS_ENABLED=0` ⇒ every **ACT** tool returns the **byte-identical** no-op; every **`instance_read`** tool still works |
+
+> **[DF-4 CORRECTION — 2026-10-22]** Applies to the **AC-10b** row above: the
+> refusal-token mapping is **RE-POINTED** by DF-4 / P2 — there is now **exactly ONE**
+> provenance refusal token (`no-user-provenance`); the class-keyed token is **RETIRED**
+> and appears nowhere in `daemon/` or `tests/`. The verdict tokens (`ok` / `pclass` /
+> `depth` / `detail`) are **unchanged** — `pclass` survives as OBSERVABILITY on the audit
+> row. See `.agents/shared/planning/df4-provenance-closure/plan-overview.md`.
 
 ### 6.6 The doc-surface pin (D-V2 lesson)
 
