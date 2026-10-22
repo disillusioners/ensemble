@@ -109,12 +109,31 @@ def write_client_config(
     stub_child_bin: Path,
     audit_path: Path,
     child_record_path: Path,
+    heartbeat_interval_ms: int = 15000,
+    heartbeat_timeout_ms: int = 45000,
+    client_dead_detect_ms: int = 45000,
+    reconnect_initial_backoff_ms: int = 1000,
+    reconnect_max_backoff_ms: int = 60000,
+    tool_call_timeout_ms: int = 30000,
+    max_frame_bytes: int = 8388608,
 ) -> Path:
     """Write the client configuration.
 
     The shape is EXACT for this build: an unknown YAML key is a hard error
     at load time (``internal/config/config.go``), and ``child.command`` is
     a SCALAR — a YAML sequence is refused by the strict decoder.
+
+    THE TIMING KNOBS ARE PARAMETERS (the defaults reproduce the previous
+    file byte for byte, so the P0 gate is unaffected): the compressed
+    profile of the P1/P2 lane needs a client whose ``tool_call_timeout``
+    is ABOVE the centre's command deadline (the centre's arm must win the
+    timeout race, §9.3) and whose reconnect backoff is short.
+
+    The heartbeat values written here are the FALLBACKS of the client
+    (``internal/config/config.go``): the client REFUSES a configuration
+    whose ``heartbeat_interval_ms`` is outside 5000-60000 (SPEC §3.3), so
+    the compressed values of the CENTRE cannot be written here — the
+    client ADOPTS the advertised ones at runtime instead.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     text = f"""listen:
@@ -149,13 +168,13 @@ remote:
   machine_id: "{machine_id}"
   ca_pem: "{ca_pem}"
   server_pin_sha256: ""
-  heartbeat_interval_ms: 15000
-  heartbeat_timeout_ms: 45000
-  client_dead_detect_ms: 45000
-  reconnect_initial_backoff_ms: 1000
-  reconnect_max_backoff_ms: 60000
-  tool_call_timeout_ms: 30000
-  max_frame_bytes: 8388608
+  heartbeat_interval_ms: {heartbeat_interval_ms}
+  heartbeat_timeout_ms: {heartbeat_timeout_ms}
+  client_dead_detect_ms: {client_dead_detect_ms}
+  reconnect_initial_backoff_ms: {reconnect_initial_backoff_ms}
+  reconnect_max_backoff_ms: {reconnect_max_backoff_ms}
+  tool_call_timeout_ms: {tool_call_timeout_ms}
+  max_frame_bytes: {max_frame_bytes}
 """
     path.write_text(text, encoding="utf-8")
     return path
