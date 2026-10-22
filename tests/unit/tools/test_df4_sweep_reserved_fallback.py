@@ -1,0 +1,242 @@
+"""DF-4 pin (v) — the sweep's no-user-origin wake source is RESERVED.
+
+Commission DF-4 (AGENT-ORIGIN provenance gate closure), phase P1.
+
+The sweep (``daemon/services/upgrade_journal_sweep.py``) used to deliver a
+wake that was armed with NO user origin on the bare user-origin literal
+``"api"``. ``classify_user_origin("api")`` arms, so the dispatch funnel
+STAMPED a DIRECT user-origin window on the woken instance — a forged
+DIRECT root that ``_inherit_provenance_window`` then copied onto every
+delegated child. DF-4 replaces that fallback with a reserved internal
+literal (``SWEEP_NO_USER_ORIGIN_WAKE_SOURCE``), so the classifier fails it
+closed and the funnel POPS the window instead of stamping one.
+
+WHAT THIS FILE PINS
+-------------------
+* the literal exists, is module-level, and its NAME + VALUE are exact;
+* the literal is RESERVED (``is_reserved_source`` → True) and classifies
+  FAIL-CLOSED (``classify_user_origin`` → ok False);
+* the bare ``or "api"`` shape is ABSENT from the sweep (both sites);
+* a NON-EMPTY wake source still rides VERBATIM (the genuine path must not
+  break — R3).
+
+The file is deliberately source-anchored (the ``test_agent_restart.py``
+house precedent style): a literal transcription of a shape that never
+occurs would be a VACUOUS pin.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from daemon.constants import is_reserved_source
+from daemon.services.upgrade_journal_sweep import UpgradeJournalSweepService
+from daemon.tools import upgrade_journal as uj
+from daemon.tools.upgrade_journal import (
+    PENDING_WAKE_GRACE_S,
+    PendingWake,
+    SWEEP_NO_USER_ORIGIN_WAKE_SOURCE,
+    arm_pending_wake,
+    classify_user_origin,
+    iso_plus,
+    journal_init,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SWEEP_SOURCE = REPO_ROOT / "daemon" / "services" / "upgrade_journal_sweep.py"
+
+EXPECTED_NAME = "SWEEP_NO_USER_ORIGIN_WAKE_SOURCE"
+EXPECTED_VALUE = "system:sweep_no_user_origin_wake"
+
+
+# ── fixtures ────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def install(tmp_path: Path) -> Path:
+    """A tmp install dir with a real journal — never a live-shaped path."""
+    inst = tmp_path / "install"
+    (inst / "releases").mkdir(parents=True)
+    journal_init(inst)
+    uj.ensure_extensions(inst)
+    return inst
+
+
+def _make_wake(
+    install_dir: Path,
+    run_id: str,
+    *,
+    source: str,
+    kind: str = "promote",
+) -> PendingWake:
+    """Arm a real ``PendingWake`` with the given source."""
+    wake = PendingWake(
+        run_id=run_id,
+        kind=kind,
+        env="demo",
+        arming_instance_id="i-arm-1",
+        arming_agent_id="ari",
+        source=source,
+        message_id="m-original-1",
+        message_metadata={"k": "v"},
+        target_version=None,
+        mode="graceful-now",
+        armed_at="2026-10-04T00:00:00Z",
+        expires_at="2026-10-04T00:10:00Z",
+        abandon_after=iso_plus("2026-10-04T00:10:00Z", PENDING_WAKE_GRACE_S),
+        status="pending",
+    )
+    arm_pending_wake(install_dir, wake)
+    return wake
+
+
+def _append_history(install_dir: Path, event: str) -> None:
+    data = uj.journal_read(install_dir)
+    history = data.get("history") or []
+    history.append({"ts": "2026-10-04T00:01:00Z", "event": event, "detail": "..."})
+    data["history"] = history
+    uj.journal_write(install_dir, data)
+
+
+class _RecordingManager:
+    """Minimal delivery recorder for the SWEEP DELIVERY shape.
+
+    Pin (v) pins the SOURCE the sweep hands to ``enqueue_message`` — the
+    provenance chain itself is pinned elsewhere (pin (iii), the REAL-chain
+    e2e). This recorder therefore captures the delivery kwargs verbatim
+    and nothing else; it is NOT a stand-in for the manager in the
+    provenance chain.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def enqueue_message(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        return type("_R", (), {"message_id": "m-wake-1"})()
+
+
+# ── the literal ────────────────────────────────────────────────────────────
+
+
+class TestSweepReservedLiteral:
+    def test_name_and_value_are_exact(self) -> None:
+        """The NAME + VALUE are frozen — no variant spellings exist."""
+        assert EXPECTED_NAME == "SWEEP_NO_USER_ORIGIN_WAKE_SOURCE"
+        assert EXPECTED_VALUE == "system:sweep_no_user_origin_wake"
+        assert getattr(uj, EXPECTED_NAME) == EXPECTED_VALUE
+
+    def test_the_literal_is_declared_at_module_level(self) -> None:
+        """MODULE level (importable), NOT nested inside a function."""
+        assert EXPECTED_NAME in vars(uj), (
+            f"{EXPECTED_NAME} must be a module-level attribute of "
+            "daemon.tools.upgrade_journal"
+        )
+
+    def test_the_literal_carries_the_system_prefix(self) -> None:
+        """The value MUST start with ``system:`` so the EXISTING reserved
+        prefix family catches it — no new prefix family is introduced."""
+        assert EXPECTED_VALUE.startswith("system:")
+
+    def test_the_literal_is_reserved(self) -> None:
+        assert is_reserved_source(SWEEP_NO_USER_ORIGIN_WAKE_SOURCE) is True
+
+    def test_the_literal_fails_classification_closed(self) -> None:
+        """``classify_user_origin`` fails it closed — the funnel POPs the
+        window instead of stamping one."""
+        ok, detail = classify_user_origin(SWEEP_NO_USER_ORIGIN_WAKE_SOURCE, None)
+        assert ok is False
+        assert detail == "reserved-internal"
+
+    def test_the_api_literal_is_still_armed(self) -> None:
+        """The genuine web-UI chat path is NOT touched — ``"api"`` STAYS
+        armed (the classify arm set is frozen)."""
+        ok, detail = classify_user_origin("api", None)
+        assert ok is True
+        assert detail == "exact:api"
+
+
+# ── the sweep sites ────────────────────────────────────────────────────────
+
+
+class TestSweepSitesCarryNoBareApiFallback:
+    def test_the_bare_api_fallback_shape_is_absent(self) -> None:
+        """The ``or "api"`` shape is ABSENT from the sweep file.
+
+        This is the shape P1-AC-#1 greps for — a literal transcription of
+        a shape that never occurs would be vacuous, so the pin greps for
+        the shape the sweep ACTUALLY used.
+        """
+        source = SWEEP_SOURCE.read_text(encoding="utf-8")
+        assert 'or "api"' not in source, (
+            'the sweep must not retain the bare "api" fallback — DF-4 '
+            "replaced it with the reserved literal"
+        )
+
+    def test_both_delivery_sites_use_the_reserved_literal(self) -> None:
+        """BOTH sweep delivery sites (the ari fall-back arm and the direct
+        arm) fall back to the reserved literal."""
+        source = SWEEP_SOURCE.read_text(encoding="utf-8")
+        assert source.count("or SWEEP_NO_USER_ORIGIN_WAKE_SOURCE") == 2, (
+            "both sweep delivery sites must use the reserved literal"
+        )
+
+    def test_the_sweep_imports_the_literal_from_the_journal_module(self) -> None:
+        """ONE import path — the sweep reuses the journal module's
+        constant (no second definition, no local literal)."""
+        source = SWEEP_SOURCE.read_text(encoding="utf-8")
+        assert "SWEEP_NO_USER_ORIGIN_WAKE_SOURCE" in source
+        assert (
+            'source=f"system:sweep_no_user_origin_wake"' not in source
+        ), "the literal must be imported, never re-spelled inline"
+
+
+# ── the delivery behaviour ─────────────────────────────────────────────────
+
+
+class TestSweepDeliverySource:
+    @pytest.mark.asyncio
+    async def test_empty_source_delivers_the_reserved_literal(
+        self, install: Path
+    ) -> None:
+        """A wake armed with NO user origin (``source=""``) delivers on
+        the RESERVED lane — NOT on the user-origin literal."""
+        _make_wake(install, run_id="r-df4", source="")
+        _append_history(install, "commit")
+        manager = _RecordingManager()
+        service = UpgradeJournalSweepService(install, manager=manager)
+        await service.sweep_wake_records()
+        assert manager.calls, "the sweep must have delivered the wake"
+        delivered = manager.calls[-1]["source"]
+        assert delivered == SWEEP_NO_USER_ORIGIN_WAKE_SOURCE
+        assert delivered != "api"
+
+    @pytest.mark.asyncio
+    async def test_non_empty_source_delivers_verbatim(
+        self, install: Path
+    ) -> None:
+        """R3 — the genuine path must NOT break: a non-empty wake source
+        rides VERBATIM. The reserved literal is the FALLBACK arm only."""
+        _make_wake(install, run_id="r-df4", source="discord:user123")
+        _append_history(install, "commit")
+        manager = _RecordingManager()
+        service = UpgradeJournalSweepService(install, manager=manager)
+        await service.sweep_wake_records()
+        assert manager.calls, "the sweep must have delivered the wake"
+        assert manager.calls[-1]["source"] == "discord:user123"
+
+    @pytest.mark.asyncio
+    async def test_restart_kind_wake_still_rides_the_restart_literal(
+        self, install: Path
+    ) -> None:
+        """The restart-kind arm is untouched — it keeps its own reserved
+        literal (the R18 precedent)."""
+        _make_wake(install, run_id="r-df4", source="", kind="restart")
+        _append_history(install, "commit")
+        manager = _RecordingManager()
+        service = UpgradeJournalSweepService(install, manager=manager)
+        await service.sweep_wake_records()
+        assert manager.calls, "the sweep must have delivered the wake"
+        assert manager.calls[-1]["source"] == "system:post_restart_arm_notify"

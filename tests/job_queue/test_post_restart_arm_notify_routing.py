@@ -15,7 +15,9 @@ the user-origin window re-stamp (T3.3), and the empty-source fall-back
 covered by ``test_a2_autopromote_notify.py``; this file focuses on the
 wake-specific shape — the recorded ``source`` field rides the wake
 verbatim, the user-origin window is set for the wake turn, and an
-empty source falls back to ``"api"``.
+empty source falls back to the RESERVED internal literal
+``SWEEP_NO_USER_ORIGIN_WAKE_SOURCE`` (DF-4 / P1 — NOT the user-origin
+literal ``"api"``, which forged a DIRECT user-origin window).
 
 All tests use ``tmp_path`` journal fixtures + a stub manager; no live
 chat adapter is involved.
@@ -30,13 +32,16 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from daemon.constants import is_reserved_source
 from daemon.services.upgrade_journal_sweep import UpgradeJournalSweepService
 from daemon.services.messaging_types import AsyncMessageResult
 from daemon.tools import upgrade_journal as uj
 from daemon.tools.upgrade_journal import (
     PendingWake,
     PENDING_WAKE_GRACE_S,
+    SWEEP_NO_USER_ORIGIN_WAKE_SOURCE,
     arm_pending_wake,
+    classify_user_origin,
     iso_plus,
     journal_init,
     journal_read,
@@ -130,8 +135,10 @@ class TestWakeSourceRouting:
     full path with stub adapter — verified at the manager layer (the
     MessageQueue + response routing is the standard MessageQueue row
     surface, exercised here as a stub-driven e2e). T3.3: the
-    user-origin window is re-stamped for the wake turn. T3.4: empty
-    source falls back to ``"api"`` sentinel."""
+    user-origin window is re-stamped for the wake turn. T3.4: an empty
+    source falls back to the RESERVED internal literal
+    ``SWEEP_NO_USER_ORIGIN_WAKE_SOURCE`` (DF-4 / P1 — never the
+    user-origin literal ``"api"``)."""
 
     @pytest.mark.asyncio
     async def test_wake_source_equals_recorded_source(
@@ -201,21 +208,38 @@ class TestWakeSourceRouting:
         assert windows["i-arm-1"]["source"] == "discord:user123"
 
     @pytest.mark.asyncio
-    async def test_empty_source_uses_api_sentinel(
+    async def test_empty_source_uses_reserved_sweep_literal(
         self, install: Path
     ) -> None:
-        """T3.4: a wake with ``source=""`` (the empty-source sentinel
-        from the arm-time capture for a non-user-origin arm) →
-        ``enqueue_message`` is called with ``source="api"`` (the
-        best-effort routing fall-back). The user still receives the
-        report via the default chat."""
+        """T3.4 (DF-4 / P1, re-pointed): a wake with ``source=""`` (the
+        empty-source sentinel from the arm-time capture for a
+        non-user-origin arm) → ``enqueue_message`` is called with the
+        RESERVED internal literal
+        ``SWEEP_NO_USER_ORIGIN_WAKE_SOURCE``, NOT the user-origin
+        literal ``"api"``.
+
+        WHY the re-point: the old ``"api"`` fallback armed
+        ``classify_user_origin`` and therefore forged a DIRECT
+        user-origin window on the woken instance — the root mint of the
+        delegated-forge class. The reserved literal fails the classifier
+        CLOSED, so the dispatch funnel POPS the window instead of
+        stamping one. (DF-4 plan §P1, A1.)
+        """
         _make_wake(install, run_id="r-aaa", source="")
         _append_history(install, "commit")
         manager, _windows = _mock_manager_with_windows()
         service = UpgradeJournalSweepService(install, manager=manager)
         await service.sweep_wake_records()
         kwargs = manager.enqueue_message.await_args.kwargs
-        assert kwargs["source"] == "api"
+        delivered = kwargs["source"]
+        # The RESERVED literal — never the user-origin literal.
+        assert delivered == SWEEP_NO_USER_ORIGIN_WAKE_SOURCE
+        assert delivered != "api"
+        # It IS reserved, and it classifies FAIL-CLOSED.
+        assert is_reserved_source(delivered) is True
+        ok, detail = classify_user_origin(delivered, None)
+        assert ok is False
+        assert detail == "reserved-internal"
         # stamp_user_origin_window is NOT called when source is empty
         # (the recorded source was empty — the re-stamp is a no-op).
         manager.stamp_user_origin_window.assert_not_called()

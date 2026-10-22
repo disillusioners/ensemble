@@ -1176,6 +1176,20 @@ ARM_NOTIFY_KILL_SWITCH_ENV = "ENSEMBLE_POST_RESTART_ARM_NOTIFY"
 # complements it.
 RESTART_WAKE_SOURCE = "system:post_restart_arm_notify"
 
+# DF-4 (P1): the delivery source for a sweep wake that was armed with
+# NO user origin (the ``""`` sentinel — ``PendingWake.source``). Reserved
+# by the SAME ``system:`` prefix family (daemon/constants.py
+# RESERVED_SOURCE_PREFIXES) — ``classify_user_origin`` fails it closed
+# BEFORE the registry, so the dispatch funnel POPS the user-origin window
+# instead of stamping one.
+#
+# This REPLACES the sweep's former bare-"api" fallback, which substituted
+# the user-origin literal for a wake that carried NO user ancestor and
+# therefore forged a DIRECT user-origin window (the delegated-forge root
+# mint). A NON-EMPTY wake source still rides VERBATIM — this literal is the
+# fallback arm ONLY.
+SWEEP_NO_USER_ORIGIN_WAKE_SOURCE = "system:sweep_no_user_origin_wake"
+
 
 def _arm_notify_enabled() -> bool:
     """Operator kill-switch: ``ENSEMBLE_POST_RESTART_ARM_NOTIFY=0`` disables.
