@@ -4113,17 +4113,35 @@ class SkillEvolutionConfig(EmbeddingConfig):
     # fix directions straight into an executor, with no switch, no
     # dedup, and no cooldown. Opting in is a deliberate operator act.
     #
+    # ADMISSION vs EXECUTION semantics (both governed by this switch):
+    #   * ADMISSION — ``SkillJobDispatcher.enqueue_evolution`` refuses
+    #     NEW Tier-3 jobs while the lane is off (returns ``None``;
+    #     the ``skill_fix`` tool and POST /api/skills/{id}/fix report
+    #     the refusal instead of pretending a job exists).
+    #   * EXECUTION — the job processor refuses to EXECUTE a queued
+    #     ``skill_evolution`` row while the lane is off (rows admitted
+    #     before the lane was turned off are failed loudly, never
+    #     silently executed). Scope: skill_evolution rows only.
+    #   * The inline ``skill_evolve`` tool path (a keeper instance
+    #     already running) is NOT covered by this switch — disclosed
+    #     residual, tracked for the master skill-system switch.
+    #
     # The RUNTIME gate resolves PER-CALL: the dedicated
     # ``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` env wins when set (live
     # emergency-off without a config change); when unset, THIS field
-    # is the default the dispatcher was constructed with. See
-    # ``SkillJobDispatcher._resolve_evolution_enabled``.
+    # is the default the dispatcher was constructed with. The env
+    # accepts EXACTLY the same tokens as the capture switch
+    # (1/true/yes/on vs 0/false/no/off); an invalid value raises at
+    # first use and logs an ERROR at load time.
     evolution_lane_enabled: bool = Field(
         default=False,
         description=(
-            "Tier-3 skill-evolution job admission (default OFF — "
-            "incident 2026-10-21). Override live via env "
-            "ENSEMBLE_SKILL_EVOLUTION_ENABLED (wins when set)."
+            "Tier-3 skill-evolution lane (default OFF — incident "
+            "2026-10-21). Governs BOTH admission (no new "
+            "skill_evolution jobs) and execution (queued "
+            "skill_evolution rows are refused) while off. Override "
+            "live via env ENSEMBLE_SKILL_EVOLUTION_ENABLED (wins when "
+            "set)."
         ),
     )
     # Minimum seconds between ACCEPTED FIX admissions for the same

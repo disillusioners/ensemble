@@ -1162,6 +1162,60 @@ class JobProcessor:
                 f"job_type={job_type} instance={job.instance_id[:8] if job.instance_id else 'N/A'}..."
             )
 
+            # ── EXECUTION-time lane check (2026-10-22, M-2) ────────
+            # The ADMISSION gate (SkillJobDispatcher.enqueue_evolution)
+            # refuses NEW Tier-3 jobs while the lane is off. This is
+            # the belt for rows that were admitted BEFORE the lane was
+            # turned off (or that were minted by a path the admission
+            # gate does not own): a queued ``skill_evolution`` row must
+            # NOT silently execute while the lane is off — it is
+            # REFUSED loudly and terminally (no instance is spawned,
+            # no direction text reaches a model).
+            #
+            # Scope: strictly ``job_type == "skill_evolution"`` rows.
+            # Every other job type is untouched.
+            if job_type == "skill_evolution":
+                lane_enabled = True
+                lane_probe = getattr(
+                    self._instance_manager,
+                    "is_skill_evolution_lane_enabled",
+                    None,
+                )
+                if callable(lane_probe):
+                    try:
+                        lane_enabled = bool(lane_probe())
+                    except Exception as lane_err:  # noqa: BLE001
+                        # Fail-CLOSED: an unreadable lane state must
+                        # not silently execute a Tier-3 mutation job.
+                        logger.warning(
+                            "JobProcessor: skill-evolution lane state "
+                            "probe failed for job %s... (%s) — refusing "
+                            "execution (fail-closed)",
+                            job.job_id[:8],
+                            lane_err,
+                        )
+                        lane_enabled = False
+                if not lane_enabled:
+                    logger.warning(
+                        "JobProcessor: REFUSING skill_evolution job "
+                        "%s... — the skill-evolution lane is DISABLED "
+                        "(kill-switch ENSEMBLE_SKILL_EVOLUTION_ENABLED "
+                        "off / evolution_lane_enabled=False). No "
+                        "instance is spawned and no direction text "
+                        "reaches a model.",
+                        job.job_id[:8],
+                    )
+                    await self._queue_service.complete_job(
+                        job.job_id,
+                        demand_state=DemandState.FAILED,
+                        error=(
+                            "Skill-evolution lane disabled — job refused "
+                            "at execution time (no mutation performed)."
+                        ),
+                    )
+                    self._cleanup_in_progress_tracking(job.job_id)
+                    continue
+
             # NOTE: The legacy MESSAGE-specific DB-level
             # sibling pre-check was removed in D11. The unified
             # observer owns message dispatch end-to-end — it

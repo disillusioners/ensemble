@@ -1381,11 +1381,15 @@ async def post_fix(
                 status_code=503,
                 detail={
                     "error": (
-                        "Skill-evolution admission lane is not accepting "
-                        "jobs: the kill-switch "
-                        "(ENSEMBLE_SKILL_EVOLUTION_ENABLED / "
+                        "Skill-evolution lane is not accepting jobs: the "
+                        "kill-switch (ENSEMBLE_SKILL_EVOLUTION_ENABLED / "
                         "evolution_lane_enabled) is off or the per-skill "
-                        "FIX cooldown is active. No job was created."
+                        "FIX cooldown is active. No job was created. "
+                        "While the lane is off it governs BOTH "
+                        "admission (no new skill_evolution jobs) and "
+                        "execution (queued skill_evolution rows are "
+                        "refused by the job processor, never silently "
+                        "executed)."
                     )
                 },
             )
