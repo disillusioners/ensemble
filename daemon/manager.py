@@ -141,7 +141,7 @@ from .services.skill_evolution_service import SkillEvolutionService
 from .services.skill_job_dispatcher import (
     SKILL_EVOLUTION_KILL_SWITCH_ENV,
     SkillJobDispatcher,
-    _resolve_evolution_enabled,
+    is_evolution_lane_enabled,
 )
 from .services.skill_trigger_engine import SkillTriggerEngine
 from .services.skill_trigger_seed import seed_default_triggers
@@ -6516,8 +6516,12 @@ class InstanceManager:
                                     False,
                                 )
                             )
-                            if not _resolve_evolution_enabled(_lane_default):
-                                logger.warning(
+                            if not is_evolution_lane_enabled(_lane_default):
+                                # INFO: the lane is OFF BY DEFAULT — a
+                                # refused fallback row is the expected
+                                # steady state, not an anomaly
+                                # (2026-10-22 review minor (d)).
+                                logger.info(
                                     "_run_skill_metric_scan: evolution "
                                     "lane gate OFF (env %s unset-or-off, "
                                     "configured default=%s) — refusing "
@@ -6528,25 +6532,102 @@ class InstanceManager:
                                     skill_id,
                                 )
                                 continue
+                            # M-4 (2026-10-22 review): the fallback
+                            # applies the SAME abuse controls the
+                            # dispatcher applies — the
+                            # ``skill_fix:<project>:<skill>``
+                            # idempotency key (DB-level non-terminal
+                            # dedup) and the per-(project, skill)
+                            # cooldown. Routing through
+                            # ``enqueue_evolution`` is NOT possible
+                            # here (the dispatcher is None BY
+                            # DEFINITION in this branch), so the
+                            # controls are applied IN PLACE over the
+                            # direct ``job_repo.create`` shape.
+                            _fix_key = f"skill_fix:{project_id}:{skill_id}"
+                            _cooldown_key = (project_id, skill_id)
+                            _cooldown_map = getattr(
+                                self, "_skill_scan_fix_cooldown", None
+                            )
+                            if _cooldown_map is None:
+                                _cooldown_map = {}
+                                self._skill_scan_fix_cooldown = _cooldown_map
+                            _cooldown_seconds = getattr(
+                                _skill_evo_cfg, "fix_cooldown_seconds", None
+                            )
+                            _cooldown_seconds = (
+                                1800
+                                if _cooldown_seconds is None
+                                else int(_cooldown_seconds)
+                            )
+                            _now = time.monotonic()
+                            _last = _cooldown_map.get(_cooldown_key)
+                            if (
+                                _last is not None
+                                and (_now - _last) < _cooldown_seconds
+                            ):
+                                logger.warning(
+                                    "_run_skill_metric_scan: FIX "
+                                    "cooldown active for (project=%s, "
+                                    "skill=%s) — refusing repeat "
+                                    "skill_evolution fallback create",
+                                    project_id[:8] if project_id else "<none>",
+                                    skill_id[:8] if isinstance(skill_id, str) else skill_id,
+                                )
+                                continue
                         message = (
                             f"[skill_metric_scan] {action} "
                             f"skill={skill_id} reason={payload['reason']}"
                         )
-                        await asyncio.to_thread(
-                            job_repo.create,
-                            agent_id="skill-keeper",
-                            agent_dir="agents/skill-keeper",
-                            message=message,
-                            source="skill_metric_scan",
-                            project_id=project_id,
-                            priority=4,
-                            job_metadata=payload,
-                            queue_id=parallel_queue.queue_id,
-                            idempotency_key=None,
-                            job_type=job_type,
-                            instance_id=None,
-                            max_retries=2,
-                        )
+                        if job_type == "skill_evolution":
+                            # M-4: dedup-aware create — the SAME
+                            # repository path the dispatcher's
+                            # ``enqueue`` uses for an idempotency
+                            # key (INSERT ... ON CONFLICT DO NOTHING
+                            # on the partial unique index). A plain
+                            # ``create`` with a non-null key would
+                            # RAISE on the second insert for the same
+                            # key, so the key is only safe on this
+                            # path.
+                            _job, _created = await asyncio.to_thread(
+                                job_repo.create_or_get_by_idempotency_key,
+                                agent_id="skill-keeper",
+                                agent_dir="agents/skill-keeper",
+                                message=message,
+                                source="skill_metric_scan",
+                                project_id=project_id,
+                                priority=4,
+                                job_metadata=payload,
+                                queue_id=parallel_queue.queue_id,
+                                idempotency_key=_fix_key,
+                                job_type=job_type,
+                                instance_id=None,
+                                job_id=None,
+                                agent_tag=None,
+                            )
+                        else:
+                            await asyncio.to_thread(
+                                job_repo.create,
+                                agent_id="skill-keeper",
+                                agent_dir="agents/skill-keeper",
+                                message=message,
+                                source="skill_metric_scan",
+                                project_id=project_id,
+                                priority=4,
+                                job_metadata=payload,
+                                queue_id=parallel_queue.queue_id,
+                                idempotency_key=None,
+                                job_type=job_type,
+                                instance_id=None,
+                                max_retries=2,
+                            )
+                        if job_type == "skill_evolution":
+                            # Stamp the cooldown AFTER the admission
+                            # attempt (accept semantics — mirrors the
+                            # dispatcher's accept+dedup-hit stamping).
+                            self._skill_scan_fix_cooldown[
+                                _cooldown_key
+                            ] = time.monotonic()
                 except Exception as exc:
                     logger.warning(
                         f"_run_skill_metric_scan: enqueue failed for "
@@ -6750,6 +6831,31 @@ class InstanceManager:
             scan_service.set_job_queue_service(service)
 
         logger.info("JobQueueService connected to SessionManager")
+
+    def is_skill_evolution_lane_enabled(self) -> bool:
+        """Public accessor — is the Tier-3 skill-evolution lane ENABLED?
+
+        Single resolution point for the lane state outside the
+        dispatcher module: the env kill-switch
+        (``ENSEMBLE_SKILL_EVOLUTION_ENABLED``) wins when set; the
+        configured default
+        (``SkillEvolutionConfig.evolution_lane_enabled``, itself
+        False) applies when the env var is unset or empty.
+
+        Used by the admission gate (dispatcher), the metric-scan
+        fallback, and the job processor's EXECUTION-time check —
+        the same answer for all three (2026-10-22).
+
+        Returns:
+            ``True`` when Tier-3 evolution-job admission AND
+            execution are permitted.
+        """
+        cfg = getattr(self, "config", None)
+        skill_evo_cfg = getattr(cfg, "skill_evolution", None)
+        configured_default = bool(
+            getattr(skill_evo_cfg, "evolution_lane_enabled", False)
+        )
+        return is_evolution_lane_enabled(configured_default)
 
     def set_job_feedback_observer(self, observer: Any) -> None:
         """Set the JobFeedbackObserver reference.
