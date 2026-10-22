@@ -88,5 +88,10 @@ export const routes: Routes = [
     canMatch: [maintenanceAvailabilityGuard],
     title: 'Maintenance · Checkpoint Cleanup',
   },
+  // Remote Hands / MCP Gateway — the READ-ONLY operator page (Phase C).
+  // Lazy loadComponent (the snapshots/resources precedent) so the page
+  // cost stays off the initial bundle. The page itself only READS: the
+  // gateway is driven by the agent tools, never by the browser.
+  { path: 'mcps-gateway', loadComponent: () => import('./pages/mcps-gateway/mcps-gateway.component').then(m => m.McpsGatewayComponent), title: 'MCP Gateway' },
   { path: '**', redirectTo: '' }
 ];

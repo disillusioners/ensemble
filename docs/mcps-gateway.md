@@ -59,7 +59,9 @@ flowchart LR
 | `daemon/services/mcps_gateway/sessions.py` | the session manager — the §8.3 one-session-per-machine lock and the §8.2 one-agent-one-remote rule |
 | `daemon/services/mcps_gateway/audit.py` | the remote-command audit (§8.4) — args hashed, never stored |
 | `daemon/services/mcps_gateway/service.py` | the center itself: hello exchange, heartbeats, the four MCP methods, the monitor sweep |
-| `daemon/routers/mcps_gateway.py` | the thin FastAPI adapter — upgrade auth, the read loop, teardown |
+| `daemon/routers/mcps_gateway.py` | the thin FastAPI adapter — upgrade auth, the read loop, teardown (the MODULE-LANE transport) |
+| `daemon/routers/mcps_gateway_read.py` | the Phase C READ surface — the three OAuth-lane read-only GET endpoints (machines / sessions / audit) |
+| `daemon/routers/mcps_gateway_schemas.py` | the Phase C response models — the FE-facing wire contract |
 | `daemon/tools/mcp_rpc_tools.py` | the four agent-facing `mcp_rpc_*` tools |
 | `daemon/repositories/mcps_gateway/` | the `mcp_gateway_audit` table + writer (the audit sink) |
 | `daemon/manager.py` (`mcps_gateway_service` property) | the one-per-process mount both the route and the tools share |
@@ -133,9 +135,10 @@ Every forwarded `tools/call` writes one append-only row into the DB table
 created by the model's `create_all` at boot (PostgreSQL) plus the migration
 `20261022_000001_create_mcp_gateway_audit.sql` (SQLite). The sink is the
 DB **unconditionally** — there is no file-sink knob (the audit write is
-also off the event loop; see §4.3). There is no HTTP read endpoint for
-the ledger yet; reads go through `McpGatewayAuditRepository.list_recent()`
-or the DB directly (§6).
+also off the event loop; see §4.3). The ledger is read over HTTP by the
+Phase C read surface (`GET /api/mcps-gateway/audit`, §8); the repository
+method `McpGatewayAuditRepository.list_recent(limit, offset)` is the seam
+underneath it, and the DB remains the direct path for ad-hoc queries.
 
 ### 1.6 The kill switch
 
@@ -582,10 +585,10 @@ Phase-A interpretations document.
 | Per-tool ACL / `TOOL_DENIED` | v0.2 | unreachable in v0.1 — the code never emits it; the per-machine allowlist is the only machine-level gate today |
 | Session resumption | none in v0.1 | a killed/expired session is dead; the agent re-connects and starts over (§6.8) |
 | DB-persisted presence/roster | backlog | the roster and sessions are in-memory; a daemon restart empties them and machines re-appear on their next upgrade. Both sit behind interfaces (`MachineStore`, `AuditSink`) for exactly this swap |
-| Audit read surface | backlog | no HTTP endpoint; `McpGatewayAuditRepository.list_recent()` or direct DB reads only |
+| Audit read surface | shipped (Phase C) | `GET /api/mcps-gateway/audit` — the read-only tail of the ledger, newest first, paginated (§8). The repository method `McpGatewayAuditRepository.list_recent(limit, offset)` is the seam underneath it |
 | §6.7 frame-size enforcement | backlog | constants defined, no active center-side enforcement |
 | §10 conformance kit | future | does not exist on either side |
-| **Phase C** | FE follow-up | the frontend (center/gateway management UI: machines, sessions, audit) — the client-facing half of the "reference center" SPEC §1 names |
+| **Phase C** | shipped | the read surface SHIPPED (§8 — the three OAuth-lane GET endpoints) and the operator management page SHIPPED (§9 — the read-only machines / sessions / audit page). The page is read-only in v1; the write controls arrive with the v0.2 per-tool ACL work (§9.2) |
 | **Phase D** | later | yeda-agent-fleet second-center interop per SPEC §1 |
 
 ---
@@ -634,6 +637,227 @@ Two ways down, deliberately different:
   when you want machines to wind down quietly.
 
 Both require a daemon restart (§2).
+
+---
+
+## 8. The operator read surface (Phase C)
+
+The daemon-side half of the management page: **three read-only GET
+endpoints** over the state the center already keeps. They are ordinary
+`/api` routers on the **OAuth API lane** — NOT the module-lane WebSocket
+route, which stays the machine transport (§1.6).
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/mcps-gateway/machines` | the roster: presence, liveness, the active-session pointer |
+| `GET /api/mcps-gateway/sessions` | the live sessions and the §8.3 lock state |
+| `GET /api/mcps-gateway/audit` | the remote-command audit tail (§8.4), newest first, paginated |
+
+### 8.1 The two lanes, side by side
+
+| | WebSocket transport | Read surface |
+|---|---|---|
+| Path | `/api/mcps-gateway/ws` (configurable) | `/api/mcps-gateway/{machines,sessions,audit}` (fixed) |
+| Lane | **module-lane** — the module's own enrollment bearer (§3.1 / §4.1) | **OAuth API lane** — the middleware authenticates, the route requires the `mcp:read` scope |
+| Registered | only when `MCPS_GATEWAY_ENABLED` is on | **always** |
+| Methods | the protocol frames | `GET` only — there is no write route |
+
+### 8.2 Why the read routes are registered unconditionally
+
+The kill switch governs the **transport** (the WebSocket route is not
+registered at all while it is off, and the `mcp_rpc_*` tools refuse with
+a typed error). The read routes are registered **unconditionally**, which
+is the dominant convention for read-only `/api` routers — and it gives
+the operator page a **stable contract**: with the gateway off the
+payloads degrade to empty lists with `gateway_enabled: false`, instead
+of a 404 the page cannot interpret. The read surface only REPORTS
+state; it never drives the gateway.
+
+### 8.3 The wire contract
+
+Timestamps are ISO-8601 UTC strings with an explicit offset
+(`2026-10-22T07:31:04.512000+00:00`) — the repo-wide wire convention,
+not the epoch-milliseconds shape of the agent-facing tool surface.
+
+```json
+// GET /api/mcps-gateway/machines
+{
+  "machines": [
+    {
+      "machine_id": "mac-studio-01",
+      "presence": "online",
+      "online": true,
+      "connected": true,
+      "last_seen_at": "2026-10-22T07:31:04.512000+00:00",
+      "session_id": "sess-9f2c1a",
+      "agent_id": "leader",
+      "busy": true
+    }
+  ],
+  "count": 1,
+  "gateway_enabled": true
+}
+```
+
+```json
+// GET /api/mcps-gateway/sessions
+{
+  "sessions": [
+    {
+      "session_id": "sess-9f2c1a",
+      "machine_id": "mac-studio-01",
+      "agent_id": "leader",
+      "instance_id": "inst-42",
+      "state": "live",
+      "machine_locked": true,
+      "started_at": "2026-10-22T07:20:00.000000+00:00",
+      "last_activity_at": "2026-10-22T07:31:04.000000+00:00",
+      "expires_at": "2026-10-22T08:20:00.000000+00:00",
+      "tools": ["computer_click", "computer_type"]
+    }
+  ],
+  "count": 1,
+  "gateway_enabled": true
+}
+```
+
+```json
+// GET /api/mcps-gateway/audit?limit=50&offset=0
+{
+  "audit": [
+    {
+      "timestamp": "2026-10-22T07:31:04.512000+00:00",
+      "agent_id": "leader",
+      "instance_id": "inst-42",
+      "machine_id": "mac-studio-01",
+      "tool": "computer_click",
+      "outcome": "ok",
+      "session_id": "sess-9f2c1a",
+      "error_code": null,
+      "args_hash": "b1946ac92492d2347c6235b4d2611184b0b6f5b8a9f0e1d2c3b4a5968778695a4b"
+    }
+  ],
+  "count": 1,
+  "limit": 50,
+  "offset": 0,
+  "gateway_enabled": true
+}
+```
+
+Field notes:
+
+* `presence` is `online` / `stale` / `offline`; `online` is its boolean
+  face and `connected` says whether the socket is open.
+* `busy` on a machine and `machine_locked` on a session are the SAME
+  fact seen from the two sides: the §8.3 exclusive slot is taken, so a
+  second `session.begin` would be refused with `MACHINE_BUSY`.
+* `state` is `live` — the center keeps only live sessions (a session
+  dies with its connection, §6.8; there is no resumption).
+* `args_hash` is the SHA-256 of the canonicalised arguments; the
+  arguments themselves are never stored (§8.4).
+* `count` is the length of THIS PAGE — the number of rows in this
+  response — NOT the total size of the audit ledger, which the read
+  surface does not expose.
+
+### 8.4 Pagination, auth and failure modes
+
+| Case | Answer |
+|---|---|
+| `limit` out of range (`0`, negative, `> 200`) | **422** (FastAPI validates before the handler runs) |
+| `offset` negative | **422** |
+| `offset` beyond the end of the ledger | **200** with an empty `audit` list |
+| no credentials | **401** (`AUTH_REQUIRED`) — or a 302 to the login page for a browser request, exactly like every other `/api` route |
+| a credential without the `mcp:read` scope | **403** (`SCOPE_INSUFFICIENT`) |
+| the gateway service is not wired on `app.state` | **503** (`gateway_unavailable`) — a boot-order defect, not a silent empty list |
+
+The pagination bounds follow the read-only snapshots family
+(`limit` default 50, max 200; `offset` default 0).
+
+---
+
+## 9. The management page (Phase C)
+
+The daemon-side half of the management page is §8; this section is the
+**frontend half** — a read-only Angular page that renders those three
+read surfaces as three tables.
+
+### 9.1 What the page shows
+
+| Section | Endpoint | Renders |
+|---|---|---|
+| Machines | `GET /api/mcps-gateway/machines` | the roster: the presence badge, online/connected, the last heartbeat, the active-session pointer, the busy flag |
+| Sessions | `GET /api/mcps-gateway/sessions` | the live sessions: agent, machine, instance, state, the §8.3 lock indicator, the started/expires stamps, the reported tool chips |
+| Audit | `GET /api/mcps-gateway/audit` | the audit tail, newest first: time, agent, machine, tool, outcome badge, session, error code, the truncated args hash (the full hash is the cell's tooltip) |
+
+The page lives at the SPA route **`/mcps-gateway`** and is reachable
+from the **gear menu** ("MCP Gateway") — there is NO top-level header
+link (the header nav carries the primary destinations only). The route
+is lazy-loaded, so the page costs nothing until it is opened.
+
+The audit rows are rendered **in the order the daemon returned them** —
+the page never re-sorts the tail.
+
+### 9.2 READ-ONLY v1 — what the page does NOT do
+
+The page reads. There is **no kill, no lock release, no disconnect and
+no write verb** anywhere in it — the gateway is driven by the AGENT
+TOOLS (`mcp_rpc_*`), never by the browser, and the read surface has no
+POST/PUT/DELETE route to call (§8.1). The write controls arrive with
+the v0.2 per-tool ACL work; until then the page is strictly
+observational.
+
+### 9.3 Running it
+
+In dev:
+
+```bash
+cd frontend && npm start
+```
+
+The dev server proxies `/api` to `http://localhost:8079`
+(`frontend/proxy.conf.json`), so the page talks to the local daemon
+with no configuration and no hard-coded host anywhere in the frontend.
+Start the daemon with `MCPS_GATEWAY_ENABLED=1` if you want the gateway
+transport itself up — the page renders either way (§9.5).
+
+For a production build:
+
+```bash
+cd frontend && npm run build
+```
+
+which emits `frontend/dist`, served per the repo's deploy conventions.
+A daemon rebuild does **not** rebuild the frontend bundle — the FE
+dist is a separate deploy artifact.
+
+### 9.4 Polling and pagination
+
+The page polls every **10 s** (`McpsGatewayService.POLL_INTERVAL_MS`).
+Ten seconds is the compromise between freshness and load: the machine
+heartbeat is 15 s and the presence timeout is 45 s, so presence only
+ever moves on a heartbeat — a faster poll would buy nothing, a slower
+one would let a machine flap between `online` and `offline` for long
+stretches. The poll stops when the page is closed, and a refresh cycle
+that is still in flight suppresses the next one (no request pile-up on
+a slow daemon).
+
+The audit tail is paginated with a **page size of 50** (the BE default;
+the maximum the BE accepts is 200). `count` on the audit response is
+the PAGE LENGTH, not the ledger total (§8.3), so **Next is enabled iff
+the page came back full** (`count === limit`) and **Previous is
+enabled iff `offset > 0`**.
+
+### 9.5 The degraded states
+
+| State | What the operator sees |
+|---|---|
+| The gateway is off (`gateway_enabled: false`) | a banner naming the enable steps and pointing at `docs/mcps-gateway.md`; the three tables are empty — the read routes stay registered while the transport is off (§8.2) |
+| 503 `gateway_unavailable` | an error banner — the gateway service is not wired on `app.state`; a boot-order defect, NOT an empty roster |
+| 403 `SCOPE_INSUFFICIENT` | "credential lacks mcp:read" — the token must carry the `mcp:read` scope |
+| no credentials | the ordinary 401 / login redirect of every `/api` route |
+
+The three tables degrade INDEPENDENTLY: a failing roster never blanks
+the audit tail.
 
 ---
 

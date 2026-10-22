@@ -837,8 +837,11 @@ class TestCaptureHelpers:
         assert _capture_user_message_id(manager, "i-1") == "m-1"
 
     def test_capture_user_source_returns_empty_sentinel_for_absent(self) -> None:
-        """No window entry → ``""`` (the empty-source sentinel; Phase 2
-        falls back to ``"api"``)."""
+        """No window entry → ``""`` (the empty-source sentinel; the sweep's
+        fall-back arm now rides the RESERVED internal literal
+        ``SWEEP_NO_USER_ORIGIN_WAKE_SOURCE`` — DF-4 / P1 — NOT the
+        user-origin literal ``"api"``, which forged a DIRECT user-origin
+        window)."""
         manager = MagicMock()
         manager._user_origin_windows = {}
         from daemon.tools.upgrade_tools import _capture_user_source

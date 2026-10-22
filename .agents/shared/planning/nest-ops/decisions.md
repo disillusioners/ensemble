@@ -137,6 +137,12 @@ user-origin forge path** (R1) inside this commission.
 > → `confirmed_target_id: str`), and D-18 (`pclass == "inherited"` required for protected
 > targets).** The static/dynamic protection predicates and the "no nonce" ruling are
 > UNCHANGED.
+>
+> **[DF-4 CORRECTION — 2026-10-22]** D-18's `pclass == "inherited"` requirement is
+> **RETRACTED** (DF-4 / P2) — the protected-target gate now keys on the **LIVENESS** of
+> the user-origin window; `pclass` survives as observability on the audit row. See
+> `decisions.md:657` (the correction appended there) and the authoritative retraction
+> trace at `:666-684`.
 
 **What.** The "explicit user confirmation" gate for terminating a protected target is built
 from three existing pieces:
@@ -655,6 +661,15 @@ now materially less dangerous.)
 **What — unchanged.** For a protected-target terminate, require `pclass == "inherited"` in
 addition to the live user-origin verdict. A **direct** window ⇒ refusal
 `direct-provenance-insufficient` — genuine or forged.
+
+> **[DF-4 CORRECTION — 2026-10-22]** The D-18 ruling above is **RETRACTED by DF-4** and
+> its analysis above it is **confirmed**: the delegated forge was never closed by the
+> class-keyed rule, and the genuine operator-direct path WAS refused (defect B). The class
+> requirement is retired; the gate now keys on the **LIVENESS** of the user-origin window,
+> and `no-user-provenance` is the only provenance refusal token. The authoritative 5-step
+> retraction trace for D-18 is the block below (`:666-684`) — it is **cited, not
+> duplicated** here. DF-4's own disclosure is in
+> `.agents/shared/planning/df4-provenance-closure/plan-overview.md` §Honesty Clause.
 
 **THE CORRECTED ANALYSIS (what the gate ACTUALLY closes).**
 

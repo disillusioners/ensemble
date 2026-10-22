@@ -46,12 +46,21 @@ durability.
 
 Known bounds (stated, not implied)
 ----------------------------------
-Requiring ``pclass == "inherited"`` on a protected target CLOSES the
-direct-window-on-the-acting-instance forgery class, but it does NOT
-close the DELEGATED forge: the inherited mint never inspects the
-root's own provenance. See ``decisions.md`` D-18 and critical note
-``f4cf9c4f`` (DF-4) for the root-fix lane. This module is a
-defense-in-depth layer, NOT a proof of user intent.
+The window's CLASS is NOT a trust signal: ``pclass`` is a READ-TIME
+derivation of the live window — never stored in the window store (the
+ledger snapshots it as ``provenance_class``), never re-verified — so it
+carries zero trust information and survives as OBSERVABILITY only (the
+audit rows answer "which window shape authorised this act?"). A
+protected-target gate that KEYED on ``pclass == "inherited"`` therefore
+refused the GENUINE operator-direct path while never blocking the
+DELEGATED forge (the inherited mint never inspects the root's own
+provenance). DF-4 retired that class-keyed rule: the gate keys on the
+LIVENESS of the window, and the delegated forge is closed at its ROOT
+(the sweep's no-user-origin fall-back now rides a reserved lane and
+cannot mint a forged DIRECT window). The REST-ingress class remains
+OPEN — critical note ``257488dc``. This module is a defense-in-depth
+layer, NOT a proof of
+user intent.
 """
 
 from __future__ import annotations
@@ -116,7 +125,10 @@ def lookup_provenance_field(
 def capture_user_source(manager: "Any", instance_id: str) -> str:
     """Read the recorded ``source`` from the manager's per-instance
     user-origin window. Returns ``""`` on absence (non-user-origin arm;
-    Phase 2 falls back to ``"api"`` for routing). Defensive — never raises.
+    the sweep's fall-back arm then rides the RESERVED internal literal
+    ``SWEEP_NO_USER_ORIGIN_WAKE_SOURCE`` — DF-4 / P1 — NOT the
+    user-origin literal ``"api"``, which forged a DIRECT user-origin
+    window). Defensive — never raises.
 
     agent-restart C-2 (§2.4 arm-time capture — extended to BOTH stores):
     when no DIRECT window is live, the inherited store's ROOT source is

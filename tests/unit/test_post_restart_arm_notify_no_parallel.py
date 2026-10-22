@@ -104,11 +104,31 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     # unconditional set, both registered ONLY under `if auth_enabled:`
     # in daemon/api.py (OFF-state route table untouched, G3.2).
     # Accounting matches tests/unit/test_router_scope_manifest.py
-    # (33 textual include_router matches = 31 unconditional + these
-    # 2 auth-ON-gated families). The guard's intent is UNCHANGED: an
-    # unauthorized 34th mount still fails this test loudly.
+    # (35 textual include_router matches = 32 unconditional + these
+    # 2 auth-ON-gated families + the 1 gateway-flag-gated WebSocket
+    # mount). The guard's intent is UNCHANGED: an unauthorized 36th
+    # mount still fails this test loudly.
     "mcp_kb_keys_router",   # /api/mcp/kb/keys (OAuth2 human lane)
     "auth_router",          # /api/auth/*
+    # remote-hands center gateway (2026-10-22): the Phase C READ
+    # surface (the OAuth API lane) — the machine roster, the live
+    # sessions and the remote-command audit tail. The rationale the
+    # guard demands, for this ONE addition:
+    #   (a) it is NOT an HTTP endpoint for the wake — it is a REST read
+    #       surface for the gateway, and it adds no wake path;
+    #   (b) it is registered UNCONDITIONALLY (ordinary /api read
+    #       routers), so the OFF-state route table DOES grow by this one
+    #       family: with the gateway OFF the payloads degrade to EMPTY
+    #       lists and ``gateway_enabled: false`` rather than a 404. The
+    #       kill switch governs the TRANSPORT (the WebSocket route
+    #       below), not the read view;
+    #   (c) the accompanying census — the textual include_router count
+    #       in tests/unit/test_router_scope_manifest.py (35 = 32
+    #       unconditional + 2 auth-ON-gated + 1 gateway-flag-gated
+    #       (WS)) and the route-family manifest in
+    #       tests/integration/test_router_class_manifest.py — was
+    #       updated in the SAME commit as the mount (6259b843a).
+    "mcps_gateway_read_router",  # /api/mcps-gateway/{machines,sessions,audit}
     # remote-hands center gateway (2026-10-22): the WebSocket route the
     # controlled machines dial OUT to (SPEC.md v0.1). The rationale the
     # guard demands, for this ONE addition:
@@ -123,7 +143,7 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     #       route-family manifest in
     #       tests/integration/test_router_class_manifest.py — is updated
     #       in the SAME commit.
-    # The guard's intent is UNCHANGED: an unauthorized 35th mount still
+    # The guard's intent is UNCHANGED: an unauthorized 36th mount still
     # fails this test loudly.
     "mcp_gateway_router",   # /api/mcps-gateway/ws (WebSocket, kill-switch gated)
 )

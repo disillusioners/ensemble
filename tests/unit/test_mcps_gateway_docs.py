@@ -604,3 +604,185 @@ def test_doc_does_not_overstate_the_pre_fix_sweep_exposure() -> None:
             "path was unreachable dead code in production; the exclusion "
             "is defence-in-depth of a latent lane, not a live hole."
         )
+
+
+# ── Phase C: the operator read surface ─────────────────────────────────────
+#
+# The read surface is a SECOND, separate lane next to the module-lane
+# WebSocket transport. These pins keep the doc honest about the facts
+# an operator (and the frontend developer) types against: the three
+# paths, the unconditional registration of the READ routes (and the
+# still-conditional transport), the scope name, and the pagination
+# bounds.
+
+READ_ENDPOINTS = (
+    "/api/mcps-gateway/machines",
+    "/api/mcps-gateway/sessions",
+    "/api/mcps-gateway/audit",
+)
+
+
+def test_doc_names_the_three_read_endpoints() -> None:
+    """The read surface's paths are pinned."""
+    text = _doc_prose()
+    for endpoint in READ_ENDPOINTS:
+        assert endpoint in text, (
+            f"the runbook must name the read endpoint {endpoint!r} — the "
+            "frontend developer types against these paths."
+        )
+
+
+def test_doc_states_the_read_routes_are_registered_unconditionally() -> None:
+    """The read routes are registered ALWAYS; only the TRANSPORT is
+    gated. The doc must keep the two apart."""
+    text = _doc_prose()
+    assert "registered **unconditionally**" in text or (
+        "registered unconditionally" in text
+    ), (
+        "the runbook must state that the read routes are registered "
+        "unconditionally — the page needs a stable contract while the "
+        "transport is off."
+    )
+    assert "gateway_enabled: false" in text, (
+        "the runbook must state the degraded shape the page sees while "
+        "the gateway is off (empty lists + the gateway_enabled flag)."
+    )
+
+
+def test_doc_states_the_read_scope_and_the_pagination_bounds() -> None:
+    """The auth lane and the pagination bounds are pinned."""
+    text = _doc_prose()
+    assert "mcp:read" in text, (
+        "the runbook must name the scope the read routes require."
+    )
+    assert "SCOPE_INSUFFICIENT" in text, (
+        "the runbook must name the 403 the page sees for a credential "
+        "without the scope."
+    )
+    assert "limit` default 50, max 200" in text, (
+        "the runbook must pin the pagination bounds (limit default 50, "
+        "max 200; offset default 0) — they are the validation contract "
+        "of the audit tail."
+    )
+
+
+# ── Phase C: the management page (the frontend half) ─────────────────────
+#
+# §9 documents the READ-ONLY Angular page that renders the §8 read
+# surface: what it shows, how to run it, the polling + pagination
+# contract and the degraded states. These pins keep the operator doc
+# honest about the facts a frontend developer types against — the SPA
+# route, the poll cadence, the read-only scope, the dev proxy and the
+# three degraded states.
+#
+# CONVENTION (unchanged): positive and negative needles NEVER share a
+# test function.
+
+FE_ROUTE = "/mcps-gateway"
+
+
+def test_doc_names_the_management_page_section() -> None:
+    """§9 exists and carries the pinned heading."""
+    text = _doc_text()
+    assert "## 9. The management page (Phase C)" in text, (
+        "the runbook must carry the §9 heading — the management page is "
+        "the operator-facing half of Phase C."
+    )
+
+
+def test_doc_pins_the_management_page_route() -> None:
+    """The SPA route of the page is pinned."""
+    text = _doc_prose()
+    assert FE_ROUTE in text, (
+        f"the runbook must name the frontend route {FE_ROUTE} — the page "
+        "is reachable from the gear menu only (no top-level header link)."
+    )
+
+
+def test_doc_states_the_management_page_is_read_only() -> None:
+    """v1 has no write control — the doc must say so, and enumerate them."""
+    text = _doc_prose().lower()
+    assert "read-only" in text, (
+        "the doc must state the management page is read-only."
+    )
+    assert "no kill, no lock release, no disconnect" in text, (
+        "the doc must enumerate the write controls the page does NOT "
+        "have (kill / lock release / disconnect) — the gateway is driven "
+        "by the agent tools, never by the browser."
+    )
+
+
+def test_doc_states_the_management_page_polls_every_ten_seconds() -> None:
+    """The poll cadence is pinned."""
+    text = _doc_prose()
+    assert "polls every **10 s**" in text, (
+        "the doc must pin the page's polling cadence (10 s) — a frontend "
+        "developer needs the number, not a vibe."
+    )
+
+
+def test_doc_states_the_management_page_pagination_contract() -> None:
+    """The page size + the next/prev guards are pinned."""
+    text = _doc_prose()
+    assert "page size of 50" in text, (
+        "the doc must pin the audit page size the page requests (50)."
+    )
+    assert "count === limit" in text, (
+        "the doc must state the Next guard (a full page) — the audit "
+        "count is the page length, not the ledger total."
+    )
+    assert "offset > 0" in text, (
+        "the doc must state the Previous guard (a non-zero offset)."
+    )
+
+
+def test_doc_states_the_management_page_dev_run_and_proxy() -> None:
+    """How to run the page in dev — and where the API goes."""
+    text = _doc_prose()
+    assert "cd frontend && npm start" in text, (
+        "the doc must carry the dev invocation of the page."
+    )
+    assert "http://localhost:8079" in text, (
+        "the doc must name the dev proxy target — the frontend uses "
+        "relative /api URLs (no hard-coded host)."
+    )
+    assert "frontend/proxy.conf.json" in text, (
+        "the doc must name the proxy config that carries the forwarding."
+    )
+
+
+def test_doc_states_the_management_page_degraded_states() -> None:
+    """The three degraded states the operator can meet on the page."""
+    text = _doc_prose()
+    assert "gateway_enabled: false" in text, (
+        "the doc must state the gateway-disabled shape the page renders."
+    )
+    assert "gateway_unavailable" in text, (
+        "the doc must name the 503 the page renders as an error banner."
+    )
+    assert "SCOPE_INSUFFICIENT" in text, (
+        "the doc must name the 403 the page renders."
+    )
+    assert "credential lacks mcp:read" in text, (
+        "the doc must carry the page's own 403 message."
+    )
+
+
+def test_doc_does_not_claim_the_management_page_can_write() -> None:
+    """NEGATIVE arm — the page is read-only in v1.
+
+    (The positive counterpart — the doc DOES say the page is read-only —
+    lives in ``test_doc_states_the_management_page_is_read_only``.)
+    """
+    text = _doc_prose().lower()
+    for phrase in (
+        "click to kill",
+        "release the lock",
+        "disconnect button",
+        "terminate a session from the page",
+    ):
+        assert phrase not in text, (
+            f"the runbook must not advertise {phrase!r} — the management "
+            "page is read-only in v1; the write controls arrive with the "
+            "v0.2 per-tool ACL work."
+        )

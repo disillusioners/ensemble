@@ -44,6 +44,17 @@ A restart is strictly less dangerous than a promote: same binary, no migration, 
 - **Stamp machinery:** single implementation (`InstanceManager.stamp_user_origin_window`, `daemon/manager.py:4803-4865`), **TWO call sites** — the dispatch funnel (`manager.py:9551-9559`, post-build) and the wake-sweep re-stamp (`daemon/services/upgrade_journal_sweep.py:1668-1686`, TTL-resetting — post-build lines). **Stamp-capable `"api"` producers:** (1) HTTP chat lane (`daemon/routers/messages.py:691`); (2) `_auto_dispatch_first_turn` fallback (`daemon/tools/instance.py:952-955` — hardened here, §2.5 row (h)); (3) wake-delivery fallbacks (`upgrade_journal_sweep.py:1183-1190` ari-fallback, `:1706-1711` deliver pass — post-build lines; fixed for restart-kind wakes). **Not stamp-capable:** `messages.py:427` `api_resume_fallback` is RESERVED and **CLEARS**.
 - **TTL:** `NONCE_TTL_S = 60min` (`upgrade_journal.py:135`), applied at `manager.py:4856` (post-build).
 - **Verify site (upgrade factor 2):** `upgrade_tools.py:3432-3501` (post-build) — direct-store read (`:3452-3454`); fail-closed.
+
+> **[DF-4 CORRECTION — 2026-10-22]** The "**Stamp-capable `"api"` producers**" bullet above
+> is a **stale producer census** — CITE-ONLY, not rewritten. As of DF-4 the promote-kind
+> wake's delivery fallback is **NO LONGER** an `"api"` producer: both sweep sites now fall
+> back to the reserved internal literal `SWEEP_NO_USER_ORIGIN_WAKE_SOURCE`
+> (`"system:sweep_no_user_origin_wake"`), which `classify_user_origin` fails CLOSED — the
+> wake turn can no longer mint a DIRECT user-origin window. The restart-kind wake already
+> rode a reserved literal (`RESTART_WAKE_SOURCE`); the promote-kind wake now inherits that
+> shape. The remaining `"api"` producers listed above (the HTTP chat lane, the
+> auto-dispatch fallback) are unchanged. See
+> `.agents/shared/planning/df4-provenance-closure/plan-overview.md`.
 - **`source` is daemon-written everywhere:** chat adapters build `source=f"{source_id}:{external_user_id}"`; agent sends `internal_agent:{caller}` (`instance.py:3989,4096,4200,1187`); job lane `agent:{caller_agent_id}` (`job_queue.py:2006,1265`); no source param on `send_message` (`instance.py:3564-3593`). `additional_kwargs["source"]` write sites known: `instance_messaging.py:395-419`, `graph.py:8406-8412` (exhaustive enumeration = residual, §10).
 
 ### 2.2 Dispatch-chain verdict
