@@ -44,7 +44,7 @@ KILL_SWITCH_ENV = "MCPS_GATEWAY_ENABLED"
 DEFAULT_ROUTE_PATH = "/api/mcps-gateway/ws"
 
 #: Every knob's documented default, transcribed from
-#: ``daemon/services/mcps_gateway/config.py`` (12 knobs — 11 plus
+#: ``daemon/services/mcps_gateway/config.py`` (13 knobs — 12 plus
 #: ``MCPS_GATEWAY_PING_INTERVAL_MS``; the ``MCPS_GATEWAY_AUDIT_PATH``
 #: knob was REMOVED from the implementation — the sink is DB-only and
 #: unconditional, and the doc must not resurrect the dead knob). Keys are
@@ -60,6 +60,7 @@ ENV_DEFAULTS: dict[str, str] = {
     "MCPS_GATEWAY_HEARTBEAT_TIMEOUT_MS": "45000",
     "MCPS_GATEWAY_CLIENT_DEAD_DETECT_MS": "45000",
     "MCPS_GATEWAY_COMMAND_TIMEOUT_MS": "30000",
+    "MCPS_GATEWAY_READ_TIMEOUT_MS": "5000",
     "MCPS_GATEWAY_SESSION_TTL_MS": "3600000",
     "MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS": "300000",
     "MCPS_GATEWAY_PING_INTERVAL_MS": "200",
@@ -792,3 +793,172 @@ def test_doc_does_not_claim_the_management_page_can_write() -> None:
             "page is read-only in v1; the write controls arrive with the "
             "v0.2 per-tool ACL work."
         )
+
+# ── Phase D1: the harness, the degraded contract, the projection, the kit,
+#    the activation blocker (§10 / §8.5 / §1.7 / §11 of the runbook) ───────
+#
+# CONVENTION (unchanged): positive and negative needles NEVER share a
+# test function. Each fact gets its own function.
+
+
+def test_doc_pins_the_activation_blocker_verbatim() -> None:
+    """§11 — the blocking statement is pinned WORD FOR WORD."""
+    text = _doc_prose()
+    assert "activation is BLOCKED on a TLS terminator until one exists" in text, (
+        "the runbook must carry the activation blocker verbatim — this is "
+        "the phrase the operator/owner decision is tracked against."
+    )
+    assert "owner: **TBD — user decision**" in text, (
+        "the blocker must name its owner (TBD — user decision)."
+    )
+    assert "date: **open**" in text, "the blocker must carry an explicit open date."
+
+
+def test_doc_states_the_terminator_must_proxy_websocket_upgrades() -> None:
+    """§11 — a plain-HTTP terminator masquerades as a route bug."""
+    text = _doc_prose()
+    assert "proxy WebSocket upgrades" in text, (
+        "the doc must say the terminator MUST proxy WebSocket upgrades."
+    )
+    assert "strips the `Upgrade` header" in text, (
+        "the doc must name the failure mode: a terminator stripping Upgrade."
+    )
+    assert "masquerades as a route bug" in text, (
+        "the doc must say the 404/400 masquerades as a route bug."
+    )
+
+
+def test_doc_states_harness_tls_does_not_validate_the_terminator() -> None:
+    """§10.2/§11 — a harness-green run says nothing about the proxy."""
+    text = _doc_prose()
+    assert "does NOT validate the terminator path" in text, (
+        "the doc must state the harness's own TLS does not validate the "
+        "production terminator path."
+    )
+
+
+def test_doc_pins_the_degraded_contract() -> None:
+    """§8.5 — the 200+flag contract, the read bound, only /audit degrades."""
+    text = _doc_prose()
+    assert "can actually set `degraded: true`" in text, (
+        "the doc must say only /audit can actually set degraded:true."
+    )
+    assert "`degraded` ≠ `gateway_enabled`" in text, (
+        "the doc must separate the degraded flag from the feature flag."
+    )
+    assert "asyncio.wait_for(..., MCPS_GATEWAY_READ_TIMEOUT_MS)" in text, (
+        "the doc must name the read bound mechanism and knob."
+    )
+    assert "IN-MEMORY lanes" in text, (
+        "the doc must explain WHY machines/sessions cannot degrade "
+        "(in-memory lanes — truthful symmetry, not a gap)."
+    )
+
+
+def test_doc_pins_the_audit_projection() -> None:
+    """§1.7 — one helper, two read sites, write path excluded BY DESIGN."""
+    text = _doc_prose()
+    assert "audit_row_to_wire" in text, "the doc must name the projection helper."
+    assert "AUDIT_WIRE_KEYS" in text, "the doc must name the wire-key contract."
+    assert "EXCLUDED by design" in text, (
+        "the doc must state the write path is excluded by design, not a gap."
+    )
+    assert "id-absence" in text and "empty-vs-synthetic stamp" in text, (
+        "the doc must keep the two real divergences the helper absorbs."
+    )
+
+
+def test_doc_pins_the_d3b_ordering_wording() -> None:
+    """§8.4 — id DESC buys paging stability, NOT chronological tie order."""
+    text = _doc_prose()
+    assert "created_at DESC, id DESC" in text, (
+        "the doc must pin the exact ordering."
+    )
+    assert "uuid4" in text, (
+        "the doc must say id is uuid4 — the reason the tie order is not "
+        "chronological."
+    )
+    assert "deterministic, stable pagination" in text, (
+        "the doc must state what the secondary key DOES buy."
+    )
+    assert "NOT buy chronological order" in text, (
+        "the doc must state what the secondary key does NOT buy."
+    )
+
+
+def test_doc_pins_the_audit_ledger_limits() -> None:
+    """§4.4 — the §8.4 canonicalisation divergence + the amendment recommendation."""
+    text = _doc_prose()
+    assert "NOT JOINABLE" in text, (
+        "the doc must say the two audit heads are not joinable for the "
+        "divergent argument classes."
+    )
+    assert "JCS (RFC 8785)" in text, (
+        "the doc must carry the SPEC amendment recommendation."
+    )
+    assert "shortest-roundtrip" in text, (
+        "the doc must name the minimal alternative canonicalisation."
+    )
+    assert "COLLIDES" in text, (
+        "the doc must record Go's float64 collision (1 vs 1.0)."
+    )
+
+
+def test_doc_pins_the_conformance_kit_location_and_invocation() -> None:
+    """§10.3 — the kit exists, where it lives, and how it is run."""
+    text = _doc_prose()
+    assert "scripts/conformance/run.sh" in text, (
+        "the doc must name the kit entry point."
+    )
+    assert "--confcutdir=tests/conformance" in text, (
+        "the doc must carry the pinned invocation INCLUDING the load-bearing "
+        "--confcutdir isolation."
+    )
+    assert "SESSION-BEGIN-GAP" in text, (
+        "the doc must name the begin-hook gap message."
+    )
+    assert "CONFORMANCE_BEGIN_CMD" in text and "CONFORMANCE_BEGIN_URL" in text, (
+        "the doc must name both begin-hook keys."
+    )
+    assert "mutated-center" in text or "mutated center" in text, (
+        "the doc must name the mutated-center control (the proof of life)."
+    )
+
+
+def test_doc_carries_the_spec_pointer_note() -> None:
+    """§10.4 — the mcps_client repo is read-only; the pointer is applied by hand."""
+    text = _doc_prose()
+    assert "Pointer (2026-10-22)" in text, "the doc must carry the pointer text."
+    assert "remains a **stub placeholder** in the protocol repo" in text, (
+        "the doc must say SPEC §10 remains a stub and the pointer is applied "
+        "by hand (mcps_client is READ-ONLY)."
+    )
+    assert "The runner now exists" in text, (
+        "the doc must carry the kit-exists paragraph of the proposed pointer."
+    )
+
+
+def test_doc_records_the_fd2_disposition() -> None:
+    """§11 — the doubled create_app() is reported, not fixed here."""
+    text = _doc_prose()
+    assert "F-D2" in text and "doubled" in text, (
+        "the doc must record the F-D2 disposition (doubled create_app, out of scope)."
+    )
+
+
+def test_doc_does_not_claim_knobs_are_reread_at_call_time() -> None:
+    """NEGATIVE arm — the service holds a boot-time snapshot (§2 sweep).
+
+    (The positive counterpart is the corrected §2 prose: values are read
+    when the service is CONSTRUCTED; a running daemon needs a restart.)
+    """
+    text = _doc_prose()
+    for phrase in (
+        "the knobs are re-read at call time",
+        "is read at CALL time (never at import time)",
+    ):
+        assert phrase not in text, (
+            f"the runbook must not claim {phrase!r} — the running service "
+            "holds a boot-time config snapshot; env changes need a restart."
+        )
+
