@@ -90,6 +90,12 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     # (read #13 / act #14) — opt-in-only, never default-granted.
     "instance_read",
     "instance_ops",
+# remote-hands center gateway (2026-10-22): the ``mcp_rpc``
+# category — the agent-facing surface that drives an ENROLLED
+# remote machine (SPEC.md v0.1). opt-in-only; the ari + leader
+# allow entries are the only access path, and every tool body
+# ALSO carries its own agent_id gate.
+"mcp_rpc",
 })
 
 
@@ -165,11 +171,11 @@ class TestPrivilegedCategory:
         assert READ_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
         assert ACT_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_fourteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_fifteen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_fourteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 14
+    def test_the_set_has_fifteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 15
 
 
 class TestAllowLists:

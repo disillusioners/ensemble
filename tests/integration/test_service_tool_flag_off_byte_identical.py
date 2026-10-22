@@ -883,7 +883,13 @@ def test_privileged_category_set_is_pinned() -> None:
             "instance_read",
             "instance_ops",
             "board-link",
-        }
+                # remote-hands center gateway (2026-10-22): the ``mcp_rpc``
+        # category — the agent-facing surface that drives an ENROLLED
+        # remote machine (SPEC.md v0.1). opt-in-only; the ari + leader
+        # allow entries are the only access path, and every tool body
+        # ALSO carries its own agent_id gate.
+        "mcp_rpc",
+}
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "
         f"trio + W4 ens-env + REWORK view-views + cu-mcp 'cu' + "

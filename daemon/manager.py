@@ -132,6 +132,10 @@ from .services.skill_injection_service import SkillInjectionService
 from .services.prompt_version_service import PromptVersionService
 from .services.secret_service import SecretService
 from .services.board_service import BoardService
+# remote-hands center gateway (2026-10-22) — the CENTER service of the
+# remote-hands protocol (SPEC.md v0.1) and its DB-backed audit sink.
+from .services.mcps_gateway.config import load_gateway_config
+from .repositories.mcps_gateway.repository import McpGatewayAuditRepository
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
 from .services.skill_job_dispatcher import SkillJobDispatcher
@@ -1432,6 +1436,24 @@ class InstanceManager:
         # direct constructors and ad-hoc tests get a working service
         # without the lifespan having run.
         self._board_service = BoardService(engine=self._engine)
+        # remote-hands center gateway (2026-10-22): the CENTER service of
+        # the remote-hands protocol (SPEC.md v0.1). One instance per
+        # process — the roster of the enrolled machines and the live
+        # sessions are GLOBAL state, exactly like the board. Constructed
+        # here (not in the api.py lifespan) so direct constructors and
+        # ad-hoc tests get a working service without the lifespan having
+        # run.
+        #
+        # The transport itself (the WebSocket route) is registered only
+        # when ``MCPS_GATEWAY_ENABLED`` is ON — the service exists either
+        # way so that the agent tools can refuse with a typed error
+        # instead of vanishing.
+        from .services.mcps_gateway.service import McpGatewayService
+
+        self._mcps_gateway_service = McpGatewayService(
+            config=load_gateway_config(),
+            audit_sink=McpGatewayAuditRepository(engine=self._engine),
+        )
         # Phase A T6 / T7: register the repo with the loader so the
         # ``load_and_cache_prompt`` hook can lazily look it up. The
         # loader MUST NOT import the repository class at module load
@@ -13813,6 +13835,26 @@ class InstanceManager:
         replaced.
         """
         return self._board_service
+
+    @property
+    def mcps_gateway_service(self):
+        """The remote-hands gateway service — the CENTER of the protocol.
+
+        One instance per process: the roster of the enrolled machines and
+        the live sessions are GLOBAL state — the same reasoning as the
+        board. The agent tools (via ``create_mcp_rpc_tools_if_available``)
+        and the WebSocket route (via ``app.state``) share this one seam.
+
+        The service exists even when the transport is off
+        (``MCPS_GATEWAY_ENABLED`` is DEFAULT OFF): the ROUTE is not
+        registered at all when the switch is off, and the TOOLS refuse
+        with a typed error — the tool layer must never look healthy while
+        the transport is dead.
+
+        Read-only property: the service is constructed once and never
+        replaced.
+        """
+        return self._mcps_gateway_service
 
     def find_near_instance(self, instance_id: str, max_distance: int = DEFAULT_FUZZY_MATCH_DISTANCE) -> list[str]:
         """Find all near-matching instance IDs from recent instances.
