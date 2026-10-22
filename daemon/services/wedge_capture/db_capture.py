@@ -1,0 +1,421 @@
+"""The DB sub-capture + the metadata row write (D11 / D12 / D22 / T10 / T11).
+
+THE IRONY THIS SOLVES (RK-1)
+----------------------------
+The capture path needs the DB it may be capturing **exhausted**. The
+saver pool is hard-capped at 5 connections
+(``daemon/persistence.py``) and is the thing that may be saturated at
+capture time (the H2 shape). Borrowing it would make the instrument
+depend on the resource it is diagnosing.
+
+Therefore:
+
+* the capture NEVER touches ``adapter._pool`` / the saver pool — the
+  writer pack asserts it with a spy pool that raises on ANY access;
+* the DB work runs over an **own one-shot SYNC** ``psycopg``
+  connection, opened by the watchdog thread, with ``connect_timeout``
+  bounded by ``daemon.constants.BOOT_DB_TIMEOUT_S`` (10 s) and a
+  statement timeout;
+* ``application_name='wedge-capture'`` makes the capture's own
+  connection identifiable in ``pg_stat_activity`` — this is the
+  CAPTURE path only; the daemon's own connections carry an empty
+  ``application_name`` (a note-for-architect, out of scope here);
+* there is NO loop bridge: a ``run_coroutine_threadsafe`` onto the
+  loop would hang the capture behind the very stall it observes.
+
+``connect_timeout`` covers TCP, NOT DNS (A5 / RK-27) — the DSN is
+resolved ONCE at watchdog start for that reason.
+
+THE READS
+----------
+* the executing turns — ``tasks`` rows with ``status='running'``,
+  joined to ``instances`` for the agent identity;
+* the checkpoint-store census — ``pg_stat_user_tables`` drift
+  (``n_live_tup`` / ``reltuples``) plus the relation sizes;
+* the resume history — the tasks carrying ``auto_continued_at``;
+* the boot epoch.
+
+``msg_count`` is NOT cheaply available in the application DB (the
+messages live in the LangGraph checkpoint store), so it is reported as
+``None`` with an explicit reason — never a wrong number.
+
+NO QUERY-PLAN CAPTURE
+---------------------
+Out of scope per Addendum 2: the ``aget`` latest-checkpoint read is
+index-driven; the cold path is byte-identical.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Any
+
+logger = logging.getLogger("daemon.wedge_capture.db_capture")
+
+#: The capture connection's ``application_name`` (D11).
+CAPTURE_APPLICATION_NAME = "wedge-capture"
+
+#: The DB sub-capture's typed statuses.
+STATUS_OK = "ok"
+STATUS_UNAVAILABLE = "unavailable"
+STATUS_DENIED = "denied"
+STATUS_TIMEOUT = "timeout"
+STATUS_ERROR = "error"
+
+#: How many executing turns to report (the payload is a SUMMARY, not
+#: a dump — the capture must stay small).
+MAX_EXECUTING_TURNS = 50
+
+#: The checkpoint-store tables the census looks at.
+CHECKPOINT_TABLES = ("checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations")
+
+
+def _strip_driver(dsn: str) -> str:
+    """``postgresql+psycopg://`` → ``postgresql://`` (raw psycopg)."""
+    if "://" not in dsn:
+        return dsn
+    scheme, _, rest = dsn.partition("://")
+    if "+" in scheme:
+        scheme = scheme.split("+", 1)[0]
+    return f"{scheme}://{rest}"
+
+
+def resolve_dsn(engine: Any = None) -> str | None:
+    """The DSN for the capture's own connection.
+
+    Preference order:
+
+    1. the RUNNING engine's URL (the process's truth — no credential
+       re-derivation, no env precedence guess);
+    2. ``POSTGRES_URL``;
+    3. the ``POSTGRES_*`` parts.
+
+    Returns:
+        The DSN, or ``None`` when the deployment is not PostgreSQL
+        (a SQLite backend ⇒ the DB sub-capture is simply unavailable).
+    """
+    if engine is not None:
+        url = getattr(engine, "url", None)
+        if url is not None:
+            try:
+                rendered = url.render_as_string(hide_password=False)
+            except Exception:  # pragma: no cover — defensive
+                rendered = None
+            if rendered:
+                return _strip_driver(rendered)
+    direct = os.environ.get("POSTGRES_URL")
+    if direct:
+        return _strip_driver(direct)
+    host = os.environ.get("POSTGRES_HOST")
+    db = os.environ.get("POSTGRES_DB")
+    if host and db:
+        from urllib.parse import quote_plus
+
+        user = os.environ.get("POSTGRES_USER", "")
+        password = os.environ.get("POSTGRES_PASSWORD", "")
+        port = os.environ.get("POSTGRES_PORT", "5432")
+        if user:
+            auth = f"{quote_plus(user)}:{quote_plus(password)}@"
+        else:
+            auth = ""
+        return f"postgresql://{auth}{host}:{port}/{db}"
+    return None
+
+
+def _connect(dsn: str, *, connect_timeout_s: int, statement_timeout_ms: int) -> Any:
+    """Open the own one-shot connection (raises — the caller guards)."""
+    import psycopg
+
+    return psycopg.connect(
+        dsn,
+        connect_timeout=connect_timeout_s,
+        application_name=CAPTURE_APPLICATION_NAME,
+        options=f"-c statement_timeout={statement_timeout_ms}",
+    )
+
+
+def capture_db_snapshot(
+    dsn: str | None,
+    *,
+    boot_epoch: str | None = None,
+    connect_timeout_s: int = 10,
+    statement_timeout_ms: int = 5000,
+) -> dict[str, Any]:
+    """The DB-side sub-capture.
+
+    Never raises. Returns a dict whose ``status`` is one of ``ok`` /
+    ``unavailable`` / ``denied`` / ``timeout`` / ``error``.
+    """
+    if not dsn:
+        return {"status": STATUS_UNAVAILABLE, "reason": "no_postgres_dsn"}
+
+    payload: dict[str, Any] = {
+        "status": STATUS_OK,
+        "boot_epoch": boot_epoch,
+        "executing_turns": [],
+        "executing_turns_count": 0,
+        "checkpoint_store_census": {},
+        "resume_history": [],
+    }
+
+    connection = None
+    try:
+        connection = _connect(
+            dsn,
+            connect_timeout_s=connect_timeout_s,
+            statement_timeout_ms=statement_timeout_ms,
+        )
+    except Exception as exc:  # noqa: BLE001
+        name = type(exc).__name__
+        message = str(exc).lower()
+        if "timeout" in message or name in ("OperationalError", "InterfaceError"):
+            payload["status"] = STATUS_TIMEOUT
+        elif "permission" in message or "denied" in message:
+            payload["status"] = STATUS_DENIED
+        else:
+            payload["status"] = STATUS_UNAVAILABLE
+        payload["reason"] = f"{name}: {exc}"
+        return payload
+
+    try:
+        with connection.cursor() as cursor:
+            payload["executing_turns"], payload["executing_turns_count"] = (
+                _read_executing_turns(cursor)
+            )
+            payload["checkpoint_store_census"] = _read_store_census(cursor)
+            payload["resume_history"] = _read_resume_history(cursor)
+    except Exception as exc:  # noqa: BLE001
+        payload["status"] = STATUS_ERROR
+        payload["reason"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        try:
+            if connection is not None:
+                connection.close()
+        except Exception:  # pragma: no cover — defensive
+            pass
+
+    return payload
+
+
+def _read_executing_turns(cursor: Any) -> tuple[list[dict[str, Any]], int]:
+    """The executing turns — the ``tasks`` rows that are ``running``."""
+    try:
+        cursor.execute(
+            """
+            SELECT t.work_id, t.instance_id, t.status, t.task_type,
+                   t.created_at, t.started_at, t.last_heartbeat_at,
+                   t.suspension_reason, t.resume_target_turn_id,
+                   i.agent_id, i.status AS instance_status
+              FROM tasks t
+              LEFT JOIN instances i ON i.instance_id = t.instance_id
+             WHERE t.status = 'running'
+             ORDER BY t.last_heartbeat_at DESC NULLS LAST
+             LIMIT %s
+            """,
+            (MAX_EXECUTING_TURNS,),
+        )
+        rows = cursor.fetchall()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Wedge-capture: executing-turns read failed: %s", exc)
+        return [], 0
+
+    turns: list[dict[str, Any]] = []
+    for row in rows:
+        turns.append(
+            {
+                "work_id": row[0],
+                "instance_id": row[1],
+                "status": row[2],
+                "task_type": row[3],
+                "created_at": _iso(row[4]),
+                "started_at": _iso(row[5]),
+                "last_heartbeat_at": _iso(row[6]),
+                "suspension_reason": row[7],
+                "resume_target_turn_id": row[8],
+                "agent_id": row[9],
+                "instance_status": row[10],
+                # The messages live in the LangGraph checkpoint store,
+                # not the application DB — the count is NOT cheaply
+                # available here, and a wrong number is worse than an
+                # absent one.
+                "msg_count": None,
+                "msg_count_reason": "not_cheaply_available_in_the_app_db",
+            }
+        )
+    return turns, len(turns)
+
+
+def _read_store_census(cursor: Any) -> dict[str, Any]:
+    """The checkpoint-store census — the H2 evidence (D10 / T10)."""
+    census: dict[str, Any] = {}
+    try:
+        cursor.execute(
+            """
+            SELECT c.relname,
+                   c.reltuples::bigint,
+                   c.n_live_tup::bigint,
+                   pg_total_relation_size(c.oid)
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = current_schema()
+               AND c.relname = ANY(%s)
+            """,
+            (list(CHECKPOINT_TABLES),),
+        )
+        rows = cursor.fetchall()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Wedge-capture: store census failed: %s", exc)
+        return {"status": f"failed:{type(exc).__name__}"}
+
+    for name, reltuples, n_live_tup, total_bytes in rows:
+        census[name] = {
+            "reltuples": int(reltuples) if reltuples is not None else None,
+            "n_live_tup": int(n_live_tup) if n_live_tup is not None else None,
+            "total_bytes": int(total_bytes) if total_bytes is not None else None,
+        }
+    census["checkpoints_rows"] = census.get("checkpoints", {}).get("n_live_tup")
+    census["checkpoint_blobs_rows"] = census.get("checkpoint_blobs", {}).get("n_live_tup")
+    census["checkpoint_blobs_bytes"] = census.get("checkpoint_blobs", {}).get("total_bytes")
+    return census
+
+
+def _read_resume_history(cursor: Any) -> list[dict[str, Any]]:
+    """The tasks that were auto-continued — the resume chain."""
+    try:
+        cursor.execute(
+            """
+            SELECT work_id, instance_id, auto_continued_at, started_at
+              FROM tasks
+             WHERE auto_continued_at IS NOT NULL
+             ORDER BY auto_continued_at DESC
+             LIMIT %s
+            """,
+            (MAX_EXECUTING_TURNS,),
+        )
+        rows = cursor.fetchall()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Wedge-capture: resume-history read failed: %s", exc)
+        return []
+    return [
+        {
+            "work_id": row[0],
+            "instance_id": row[1],
+            "auto_continued_at": _iso(row[2]),
+            "started_at": _iso(row[3]),
+        }
+        for row in rows
+    ]
+
+
+def _iso(value: Any) -> str | None:
+    """Render a DB timestamp as an ISO string."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.isoformat() + "Z"
+    return str(value)
+
+
+def write_capture_row(
+    dsn: str | None,
+    row: dict[str, Any],
+    *,
+    connect_timeout_s: int = 10,
+    statement_timeout_ms: int = 5000,
+) -> dict[str, Any]:
+    """Insert the metadata row over the OWN one-shot connection (T11).
+
+    The row write is **deferred-tolerant** (D22): a failure is logged
+    with the capture directory path and the capture is still valid on
+    disk — the caller writes the ``.pending_row.json`` sidecar.
+
+    Returns:
+        ``{"status": "ok"|"failed", "reason": ...}``.
+    """
+    if not dsn:
+        return {"status": "failed", "reason": "no_postgres_dsn"}
+    connection = None
+    try:
+        connection = _connect(
+            dsn,
+            connect_timeout_s=connect_timeout_s,
+            statement_timeout_ms=statement_timeout_ms,
+        )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO wedge_captures (
+                    id, capture_id, capture_dir, trigger_reason,
+                    trigger_source, captured_at, boot_epoch, host,
+                    release_version, summary, auto_continue_mode,
+                    file_count, total_bytes, metrics_snapshot, created_at
+                ) VALUES (
+                    %(id)s, %(capture_id)s, %(capture_dir)s, %(trigger_reason)s,
+                    %(trigger_source)s, %(captured_at)s, %(boot_epoch)s, %(host)s,
+                    %(release_version)s, %(summary)s, %(auto_continue_mode)s,
+                    %(file_count)s, %(total_bytes)s, %(metrics_snapshot)s,
+                    %(created_at)s
+                )
+                ON CONFLICT (capture_dir) DO NOTHING
+                """,
+                {
+                    "id": row.get("id") or __import__("uuid").uuid4().hex,
+                    "capture_id": row.get("capture_id"),
+                    "capture_dir": row.get("capture_dir"),
+                    "trigger_reason": row.get("trigger_reason"),
+                    "trigger_source": row.get("trigger_source") or "",
+                    "captured_at": row.get("captured_at"),
+                    "boot_epoch": row.get("boot_epoch"),
+                    "host": row.get("host"),
+                    "release_version": row.get("release_version"),
+                    "summary": row.get("summary"),
+                    "auto_continue_mode": row.get("auto_continue_mode"),
+                    "file_count": row.get("file_count"),
+                    "total_bytes": row.get("total_bytes"),
+                    "metrics_snapshot": _json_or_none(row.get("metrics_snapshot")),
+                    "created_at": row.get("created_at")
+                    or datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        connection.commit()
+        return {"status": "ok"}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Wedge-capture: metadata row write failed for %s: %s",
+            row.get("capture_dir"), exc,
+        )
+        return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+    finally:
+        try:
+            if connection is not None:
+                connection.close()
+        except Exception:  # pragma: no cover — defensive
+            pass
+
+
+def _json_or_none(value: Any) -> Any:
+    """Coerce a value into something psycopg can bind as JSON."""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    return str(value)
+
+
+__all__ = [
+    "CAPTURE_APPLICATION_NAME",
+    "CHECKPOINT_TABLES",
+    "MAX_EXECUTING_TURNS",
+    "STATUS_DENIED",
+    "STATUS_ERROR",
+    "STATUS_OK",
+    "STATUS_TIMEOUT",
+    "STATUS_UNAVAILABLE",
+    "capture_db_snapshot",
+    "resolve_dsn",
+    "write_capture_row",
+]
