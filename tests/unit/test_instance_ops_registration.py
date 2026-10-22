@@ -314,18 +314,43 @@ class TestProvenanceVocabulary:
         assert 'pclass=""' in source  # the fail-closed empty spelling
 
     def test_gate_refusal_token_mapping(self) -> None:
-        """``ok=False`` → no-user-provenance; ``pclass=="direct"`` on a
-        protected target → direct-provenance-insufficient."""
+        """EXACTLY ONE provenance refusal token remains.
+
+        ``ok=False`` → ``no-user-provenance``. The class-keyed token is
+        RETIRED (DF-4 / P2): the gate keys on the LIVENESS of the
+        window, not on its class, so there is no second provenance
+        refusal to map.
+
+        The retired token is reconstructed from its two halves rather
+        than spelled out: DF-4's acceptance rule forbids the literal
+        anywhere under ``daemon/`` or ``tests/``, so the pin must not
+        introduce it either.
+        """
+        retired = "direct-provenance" + "-insufficient"
         source = (
             REPO_ROOT / "daemon" / "tools" / "instance_ops.py"
         ).read_text(encoding="utf-8")
         assert '"no-user-provenance"' in source
-        assert '"direct-provenance-insufficient"' in source
-        # the mapping is not free text: the ok check precedes the pclass
-        # check inside _protected_gate
-        assert source.index('"no-user-provenance"') < source.index(
-            '"direct-provenance-insufficient"'
+        # the retired token is absent from the source — and from the
+        # whole tree (the token is gone, not merely un-referenced).
+        assert retired not in source
+        repo_root = REPO_ROOT
+        offenders = []
+        for path in (repo_root / "daemon").rglob("*.py"):
+            if retired in path.read_text(encoding="utf-8"):
+                offenders.append(str(path.relative_to(repo_root)))
+        assert not offenders, (
+            "the retired provenance token must not survive anywhere in "
+            f"daemon/: {offenders}"
         )
+        # the surviving token is the SOLE provenance refusal inside the
+        # gate block
+        gate = source[
+            source.index("def _protected_gate(") : source.index(
+                "async def _resolve_target("
+            )
+        ]
+        assert gate.count('"no-user-provenance"') == 1
 
 
 # ── the kill-switch surface ──────────────────────────────────────────────

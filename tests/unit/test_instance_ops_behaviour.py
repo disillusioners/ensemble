@@ -4,9 +4,9 @@ Covers the plan §6.3-§6.6 matrix at the unit level with a FAKE manager
 and a SCRATCH SQLite engine for the audit ledger:
 
 * AC-11 / D-17 / D-18 — the protected-target gate ladder;
-* AC-23a — a DIRECT window on the ACTING instance refuses (the F2
-  forgery class; the GENUINE operator-direct path is ALSO refused —
-  INTENDED, L-9);
+* AC-23a — a GENUINE direct window on the ACTING instance ADMITS
+  (DF-4 / P2 — D-18's "direct refused on purpose" is RETIRED BY
+  DESIGN; the gate keys on LIVENESS, not on the window's class);
 * AC-23b — THE DELEGATED-FORGE RESIDUAL, PINNED AS TRUTH: a forged
   direct window on the SPAWNER → an inherited window on the
   maintenancer ⇒ the act is ADMITTED. Root-fix lane: DF-4 / critical
@@ -286,17 +286,52 @@ class TestProtectedGateLadder:
         )
         assert "reason=no-user-provenance" in out
 
-    async def test_direct_window_on_acting_instance_refused(self, fleet):
-        """AC-23a — the class D-18 GENUINELY closes. The GENUINE
-        operator-direct path is ALSO refused (INTENDED — L-9)."""
+    async def test_genuine_direct_window_on_acting_instance_admits(self, fleet):
+        """AC-23a (DF-4 / P2, RE-POINTED) — the GENUINE operator-direct
+        path is ADMITTED.
+
+        D-18's "a DIRECT window on the acting instance is refused on
+        purpose" property is RETIRED BY DESIGN. It refused the genuine
+        operator path (defect B) while never blocking the delegated
+        forge — the inherited mint copies the root without inspecting
+        the root's own provenance. The gate now keys on LIVENESS; the
+        window's class survives as OBSERVABILITY only, recorded in the
+        audit row.
+        """
         iid = self._protected_target(fleet)
-        fleet._user_origin_windows = _stamp_direct("maint-iid")
+        fleet._user_origin_windows = _stamp_direct("maint-iid", source="api")
         tools = _act_tools(fleet)
         out = await _by_name(tools, "instance_terminate").ainvoke(
-            {"id": iid, "reason": "r", "confirmed_target_id": iid}
+            {"id": iid, "reason": "r", "confirmed_target_id": iid, "dry_run": False}
         )
-        assert "reason=direct-provenance-insufficient" in out
-        assert fleet.terminated == []  # nothing happened
+        # ADMITTED — the act proceeds.
+        import json as _json
+        assert _json.loads(out)["terminated"] is True
+        assert iid in fleet.terminated
+        # The VERDICT-level depth is 0 — a direct window IS the root.
+        verdict = io.restart_provenance(fleet, "maint-iid")
+        assert verdict.ok is True
+        assert verdict.pclass == "direct"
+        assert verdict.depth == 0
+        # …and the committed audit row records the four provenance fields.
+        repo = InstanceOpsAuditRepository(fleet.engine)
+        with Session(fleet.engine) as s:
+            rows = list(
+                s.exec(
+                    select(InstanceOpsAudit).where(
+                        InstanceOpsAudit.action == "instance_terminate",
+                        InstanceOpsAudit.outcome == "committed",
+                    )
+                ).all()
+            )
+        assert rows, "the admitted act must carry a committed audit row"
+        row = rows[-1]
+        assert row.provenance_class == "direct"
+        assert row.root_source == "api"
+        assert row.root_message_id == "root-msg-1"
+        # F2: the write path coerces ``verdict.depth or None`` — a
+        # depth-0 verdict is stored as NULL, so the ROW depth is None.
+        assert row.provenance_depth is None
 
     async def test_inherited_window_proceeds_ac23b(self, fleet):
         """AC-23b — THE DELEGATED-FORGE RESIDUAL, PINNED AS TRUTH.
@@ -602,7 +637,13 @@ class TestDocSurface:
         term = _by_name(tools, "instance_terminate")._full_doc_
         assert "dry_run` defaults to TRUE" in term or "dry_run` defaults to `True" in term or "defaults to TRUE" in term
         assert "reason` is required" in term
-        assert "INHERITED" in term  # D-18 current semantics
+        # DF-4 / P2 (AC-16, re-pointed): the CURRENT semantics are
+        # LIVENESS-ONLY. The class-keyed requirement (D-18's
+        # "the window must be INHERITED") is RETIRED — the window's
+        # shape is recorded in the audit ledger, not gated on.
+        assert "live user-origin" in term
+        assert "NOT a gate input" in term
+        assert "INHERITED" not in term
         assert "kill switch" in term.lower() or "kill-switch" in term.lower()
         fields = _by_name(tools, "instance_terminate").args_schema.model_json_schema()["properties"]
         assert "dry_run" in fields

@@ -42,20 +42,28 @@ THE GATES, IN ORDER (terminate)
 -------------------------------
 reason-required → instance-not-found → self-surgery-refused →
 target-too-young → [protected: protected-target-confirmation-required →
-confirmed-target-mismatch → no-user-provenance →
-direct-provenance-insufficient] → terminate-budget-exceeded →
-cascade-false-would-orphan-descendants → dry-run preview | apply.
+confirmed-target-mismatch → no-user-provenance] →
+terminate-budget-exceeded → cascade-false-would-orphan-descendants →
+dry-run preview | apply.
 
-THE PROVENANCE GATE IS A SPEED BUMP, NOT A PROOF (D-18)
--------------------------------------------------------
-Requiring ``pclass == "inherited"`` on a protected target CLOSES the
-direct-window-on-the-acting-instance forgery class (a trivial API POST
-straight at this instance mints a DIRECT window ⇒ refused). It does
-NOT close the DELEGATED forge: the inherited mint never inspects the
-root's own provenance, so a forged direct window on a spawner can
-still arm an inherited window here. That residual is DOCUMENTED
-(critical note ``f4cf9c4f`` / DF-4 owns the root fix) and is caught by
-the D-16 budget plus the post-hoc audit — never by this gate.
+THE PROVENANCE GATE IS A SPEED BUMP, NOT A PROOF (D-18 → superseded by DF-4)
+--------------------------------------------------------------------------
+The gate keys on LIVENESS, not on class: a protected target needs a live
+user-origin provenance window, whatever SHAPE that window has. The class
+(``pclass``) is a READ-TIME derivation — never stored, never re-verified
+— so it carried zero trust signal and survives as OBSERVABILITY only
+(the audit rows answer "which window shape authorised this act?").
+
+D-18's "direct refused on purpose" property is RETIRED BY DESIGN. The
+old class-keyed rule refused the GENUINE operator-direct path (defect B)
+while never blocking the DELEGATED forge: the inherited mint copies the
+root WITHOUT inspecting the root's own provenance, so a forged direct
+window on a spawner armed an inherited window here anyway. DF-4 closes
+that delegated forge at its ROOT — the sweep's no-user-origin fallback
+now rides a reserved lane and can no longer mint a forged DIRECT window
+— and re-scopes this gate to liveness. The REST-ingress class stays OPEN
+(critical note ``257488dc``): a window forged through a NON-sweep surface
+is admitted, bounded by the D-16 budget plus the post-hoc audit.
 
 THE KILL-SWITCH (D-7)
 ---------------------
@@ -116,9 +124,9 @@ happen and mutates nothing.
 A PROTECTED target — a user-facing chat session, the leader, or an
 instance marked protected — additionally requires a named confirmation
 (`confirmed_target_id`, the exact instance id) AND a live user-origin
-provenance window that was INHERITED through a delegation chain. A
-window minted directly on THIS instance is refused on purpose: route
-the request through the leader instead.
+provenance window. The window's SHAPE (minted on this instance vs
+inherited through a delegation chain) is recorded in the audit ledger but
+is NOT a gate input — a live window of either shape is admitted.
 
 You never act on your own session. There is a kill switch: when the
 act surface is switched off, every act here refuses and the read
@@ -330,7 +338,13 @@ def _protected_gate(
     verdict: ProvenanceVerdict,
     label: str,
 ) -> str | None:
-    """The THREE-condition protected-target gate (D-17 / D-18).
+    """The protected-target gate (D-17 / D-18, re-scoped by DF-4).
+
+    TWO conditions, in order: the confirmed-target check (D-17) and the
+    LIVENESS of the user-origin provenance window. The window's CLASS is
+    NOT a gate input — ``pclass`` is a read-time derivation that carries
+    no trust signal, and it survives as observability in the audit
+    ledger (DF-4).
 
     Returns ``None`` when the gate PASSES, or the refusal string.
     """
@@ -364,22 +378,6 @@ def _protected_gate(
                 "no live user-origin provenance window on this turn. "
                 "The windows are in-memory and are wiped on a daemon "
                 f"restart.{extra}"
-            ),
-        )
-    if verdict.pclass != "inherited":
-        return _refusal(
-            label,
-            "direct-provenance-insufficient",
-            (
-                f"the provenance window on this turn is "
-                f"{verdict.pclass!r}; a protected target requires an "
-                "INHERITED window (a delegation chain from a "
-                "user-facing turn). A DIRECT window — genuine or "
-                "forged — is refused ON PURPOSE: route the request "
-                "through the leader. Note that any dispatch that is "
-                "not an internal_agent: delegation CLEARS the "
-                "inherited window, so a delegated turn arriving on "
-                "another lane also refuses, fail-closed."
             ),
         )
     return None
@@ -806,13 +804,11 @@ The gates, in order:
 3. Never your own session (`self-surgery-refused`).
 4. A target younger than 600s refuses (`target-too-young`).
 5. A PROTECTED target — a user-facing chat session, the leader, or an
-   instance marked protected — additionally requires ALL of:
-   `confirmed_target_id == id` (verbatim), a live user-origin provenance
-   window, and that window to be INHERITED (`pclass == "inherited"`).
-   A DIRECT window on this session is refused ON PURPOSE — route
-   through the leader. Note the inherited window is CLEARED by any
-   non-internal_agent dispatch, so a delegated turn on another lane
-   also refuses, fail-closed.
+   instance marked protected — additionally requires BOTH:
+   `confirmed_target_id == id` (verbatim) AND a live user-origin
+   provenance window. The window's shape (minted on this instance vs
+   inherited through a delegation chain) is recorded in the audit ledger
+   but is NOT a gate input — a live window of either shape is admitted.
 6. The budget: at most 3 committed terminates per 24h fleet-wide, and
    at most 1 per 24h for protected targets (`terminate-budget-exceeded`).
 7. `cascade=False` on a target with live descendants refuses
