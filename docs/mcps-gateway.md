@@ -78,7 +78,10 @@ A machine is a stable `machine_id` that completed the hello exchange
 * **`offline`** — the socket is closed.
 
 Reconnect tolerance (§8.1): a machine that reconnects after a blip re-appears
-in the roster on its next upgrade; it does **not** re-enroll.
+in the roster on its next upgrade; it does **not** re-enroll. A machine
+that upgrades but **never sends `hello`** is disconnected after a
+pre-hello deadline (30 s) — a silent peer does not hold a socket open
+indefinitely.
 
 The v0.1 roster is **IN-MEMORY** — a daemon restart empties it and every
 open session dies with it. The store sits behind the `MachineStore`
@@ -106,14 +109,21 @@ service (see §6).
 The v1 policy is **exclusivity**: while a session is open on a machine, no
 second session may open on it. The SPEC lets the center either queue or
 reject; this center **rejects with `MACHINE_BUSY`** — and the lock is
-enforced **by the center, before any frame reaches the machine**. A second
-dimension of the same policy (§8.2) limits one agent to one remote at a
-time; a second `mcp_rpc_connect` from an agent that already holds a session
-on a *different* machine is also refused with `MACHINE_BUSY`
-(`reason: agent_already_holds_session`). `mcp_rpc_disconnect` (or expiry,
-heartbeat loss, or socket loss) ends the session and **releases the slot**;
-the machine keeps its socket and returns to `ready`, so the next session
-opens on the same connection.
+enforced **by the center, before any frame reaches the machine**. The
+refusal is **atomic**: the busy-check and the session record happen under
+one lock, so a concurrent second connect to a busy machine loses the race
+cleanly and is refused by the **center** — it is never delegated to the
+machine's own concurrent-`session.begin` refusal (which would merely have
+to be translated). A second dimension of the same policy (§8.2) limits
+one agent to one remote at a time; a second `mcp_rpc_connect` from an
+agent that already holds a session on a *different* machine is also
+refused with `MACHINE_BUSY` (`reason: agent_already_holds_session`).
+`mcp_rpc_disconnect` (or expiry, heartbeat loss, or socket loss) ends the
+session and **releases the slot**; the machine keeps its socket and
+returns to `ready`, so the next session opens on the same connection. On
+reconnect, the center ends the old connection's session **immediately** —
+there is no heartbeat-timeout window during which the machine answers
+`MACHINE_BUSY` for a session whose connection is already gone.
 
 ### 1.5 Where the audit records land
 
@@ -121,10 +131,11 @@ Every forwarded `tools/call` writes one append-only row into the DB table
 **`mcp_gateway_audit`** with **who / machine / tool / args-hash / outcome**
 (§8.4 — see §4.3 below for the column set and the hashing). The table is
 created by the model's `create_all` at boot (PostgreSQL) plus the migration
-`20261022_000001_create_mcp_gateway_audit.sql` (SQLite). `MCPS_GATEWAY_AUDIT_PATH`
-is **reserved for a future file sink and is not used in v0.1** — the sink is
-the DB. There is no HTTP read endpoint for the ledger yet; reads go through
-`McpGatewayAuditRepository.list_recent()` or the DB directly (§6).
+`20261022_000001_create_mcp_gateway_audit.sql` (SQLite). The sink is the
+DB **unconditionally** — there is no file-sink knob (the audit write is
+also off the event loop; see §4.3). There is no HTTP read endpoint for
+the ledger yet; reads go through `McpGatewayAuditRepository.list_recent()`
+or the DB directly (§6).
 
 ### 1.6 The kill switch
 
@@ -157,10 +168,12 @@ things to come alive:
   client gets a **404**, and the daemon logs
   `remote-hands gateway is DISABLED (MCPS_GATEWAY_ENABLED) — the route ...
   is not registered` at boot.
-* The four `mcp_rpc_*` tools still resolve for `ari`/`leader` but every
-  call returns `{"error": {"code": "INTERNAL", ...}}` with the message
-  `the remote-hands gateway is disabled`. The tool layer never looks
-  healthy while the transport is dead.
+* **All four `mcp_rpc_*` tools refuse while the gateway is disabled** —
+  every one of the four service entry points (`roster`, `connect`,
+  `command`, `disconnect`) runs the same enabled assertion and returns
+  `{"error": {"code": "INTERNAL", ...}}` with the message `the
+  remote-hands gateway is disabled`. The tool layer never looks healthy
+  while the transport is dead.
 * No machine can enroll: there is no listener at all.
 
 ### 2.2 The knobs
@@ -174,14 +187,14 @@ Every knob lives under the `MCPS_GATEWAY_` prefix and is read at CALL time
 | `MCPS_GATEWAY_PATH` | `/api/mcps-gateway/ws` | path | the route path (a path outside `/api` mounts at the app level) |
 | `MCPS_GATEWAY_TOKENS` | *(empty)* | comma-separated list | enrollment tokens — **empty means nobody may enroll** (fail closed) |
 | `MCPS_GATEWAY_ALLOWED_MACHINES` | *(empty)* | comma-separated list | per-machine allowlist of `machine_id`s — empty = every authenticated machine is enrolled |
-| `MCPS_GATEWAY_HEARTBEAT_INTERVAL_MS` | `15000` | ms | §3.3 heartbeat interval the center advertises (the client adopts it) |
-| `MCPS_GATEWAY_HEARTBEAT_TIMEOUT_MS` | `45000` | ms | §3.3 the SERVER's silence tolerance — past it the machine is declared dead (session killed, socket closed) and presence flips to `stale` |
-| `MCPS_GATEWAY_CLIENT_DEAD_DETECT_MS` | `45000` | ms | §3.3 the value advertised for the CLIENT's death detector (advisory to the client) |
+| `MCPS_GATEWAY_HEARTBEAT_INTERVAL_MS` | `15000` | ms | §3.3 heartbeat interval the center advertises — the CLIENT sends a heartbeat on this cadence (it adopts the center's value) |
+| `MCPS_GATEWAY_HEARTBEAT_TIMEOUT_MS` | `45000` | ms | §3.3 the SERVER-side client-silence kill threshold — after this much heartbeat silence from the machine, the center kills the session and closes the socket; presence also flips to `stale` past it |
+| `MCPS_GATEWAY_CLIENT_DEAD_DETECT_MS` | `45000` | ms | §3.3 how long the CLIENT waits for evidence the server is alive — **advisory to the client and enforced client-side**; the center advertises it, the client's own death detector uses it |
 | `MCPS_GATEWAY_COMMAND_TIMEOUT_MS` | `30000` | ms | the center's own bound on ONE `tools/call` / `session.begin` / `session.end` wait — past it the answer is `TOOL_TIMEOUT` |
 | `MCPS_GATEWAY_SESSION_TTL_MS` | `3600000` | ms | §3.3 session TTL ceiling (the center enforces it) |
 | `MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS` | `300000` | ms | §3.3 session idle timeout (the center enforces it) |
+| `MCPS_GATEWAY_PING_INTERVAL_MS` | `200` | ms | the WebSocket liveness-ping cadence — the default matches the protocol authority's reference center (it pings at 200 ms); the knob exists so operators can lengthen it |
 | `MCPS_GATEWAY_AUDIT_ENABLED` | `true` | boolean | the remote-command audit (§8.4) — `false` skips the audit write entirely |
-| `MCPS_GATEWAY_AUDIT_PATH` | *(empty)* | path | **reserved, not used in v0.1** — the sink is the `mcp_gateway_audit` DB table |
 
 Parsing rules (`config.py`): booleans accept `1/true/yes/on` and
 `0/false/no/off` case-insensitively — anything else logs a warning and keeps
@@ -191,12 +204,21 @@ the default; `CLIENT_DEAD_DETECT_MS` below 3× the heartbeat interval is
 warning lands in the daemon log at config load.
 
 Derived behavior (not knobs): the housekeeping sweep runs at
-`min(0.25 s, heartbeat_timeout/4)` so a timeout is detected within a small
-fraction of the advertised tolerance; the center also emits **liveness
-evidence** (a response envelope with an unknown id) roughly every 2 s per
-connection, because §3.3 makes the client treat "no inbound frame of any
-kind" as server death — a center that only answered requests would look
-dead to a correct client.
+`min(0.1 s, heartbeat_timeout/10)` so a timeout fires on schedule — within
+a few percent of the advertised tolerance, with **zero grace** added (the
+advertised value must be the real one). The ROUTER also emits **liveness
+evidence** — a WebSocket **CONTROL frame (a ping), not a protocol
+message** — on the `MCPS_GATEWAY_PING_INTERVAL_MS` cadence (default
+200 ms, matching the protocol authority's reference center; raise the
+knob to lengthen it). This is the gateway's liveness evidence to the
+client: §3.3 makes the client treat "no inbound frame of any kind" as
+server death, and a center that only answered requests would look dead to
+a correct client — which would reconnect-loop. Being a control frame, the
+ping is invisible to the protocol layer (§6.1 carries "one JSON object
+per WebSocket text message" — a ping is not a text message). If the ASGI
+protocol object is unreachable the transport cannot ping; the daemon logs
+one WARNING per connection saying so (an in-process test client has no
+protocol object by construction and is not warned).
 
 ### 2.3 Enrollment tokens
 
@@ -217,7 +239,9 @@ dead to a correct client.
 * **Rotation = edit the env var + restart the daemon** (§2). The token is
   checked on every WS upgrade, but the token LIST is what a restart
   refreshes reliably alongside route registration — treat restart as part
-  of every rotation.
+  of every rotation. (The comparison is constant-time over the UTF-8
+  **bytes** of both sides, so a garbage credential answers a clean 401
+  instead of crashing the handler.)
 
 ### 2.4 Configuring the remote client (the path matters)
 
@@ -288,20 +312,26 @@ Only agents whose `meta.json` explicitly lists `mcp_rpc` in `tools.allow`
 get the four tools — currently `agents/ari/meta.json` and
 `agents/leader/meta.json` **and nowhere else**. The posture is two layers:
 
-1. the `mcp_rpc` category is in `PRIVILEGED_TOOL_CATEGORIES` (entry #15),
-   so the empty-allow inherit universe never auto-grants the authority to
-   drive a remote desktop;
+1. the `mcp_rpc` category is in `PRIVILEGED_TOOL_CATEGORIES` — the 15th
+   entry of **15 categories** — so the empty-allow inherit universe never
+   auto-grants the authority to drive a remote desktop;
 2. a **literal tool name** in an allow list bypasses the category gate
    entirely, so every tool body ALSO carries its own
    `agent_id in {"ari", "leader"}` gate (`MCP_RPC_AUTHORIZED_AGENTS`).
 
-The `mcp` category's dynamic prefix sweep would otherwise claim the
-`mcp_rpc_*` names (they match `mcp_<server>_<tool>`) and hand the
-remote-desktop surface to every agent whose allow list names `mcp`. The
-sweep is therefore **category-aware**: it never claims a tool another
-registered category owns. The audience (ari + leader) is a leader ruling
-for this phase — widening it is a one-line constant change plus a meta.json
-edit, not a structural one.
+The `mcp` category's dynamic prefix sweep matches the `mcp_rpc_*` names
+in *shape* (`mcp_<server>_<tool>`), so the sweep is **category-aware**: it
+never claims a tool that another registered category owns. Credit where
+due — this is **defence-in-depth of a latent lane, not the closing of a
+live hole**: the sweep path was **unreachable dead code in production**
+(an empty-but-present `mcp` category key is unconstructible from the
+registry), so **no agent was actually exposed** before the exclusion, and
+the exclusion was **verified to change zero existing toolsets**. The
+guard exists so the lane can never open by accident — a future change
+that made the sweep reachable would otherwise hand the remote-desktop
+surface to every agent whose allow list names `mcp`. The audience (ari +
+leader) is a leader ruling for this phase — widening it is a one-line
+constant change plus a meta.json edit, not a structural one.
 
 ---
 
@@ -382,7 +412,7 @@ branch on.
 
 | Tool | Args | Returns | Notes |
 |---|---|---|---|
-| `mcp_rpc_list_machine` | none | `{"machines": [{machine_id, presence, connected, last_seen_epoch_ms, session_id, agent_id}], "count"}` | a roster read; needs no session; works (with a typed refusal) even while the transport is off only in the sense that it reports the empty in-memory roster — the enabled check lives in the service for connect/command |
+| `mcp_rpc_list_machine` | none | `{"machines": [{machine_id, presence, connected, last_seen_epoch_ms, session_id, agent_id}], "count"}` | a roster read; needs no session; refuses with a typed error while the transport is disabled (as all four tools do) |
 | `mcp_rpc_connect` | `machine_id`, `reason?` | `{"session_id", "machine_id", "tools": [...catalog...], "expires_at_epoch_ms"}` | **holds the machine's single session slot**; the machine mints the `session_id` and returns the catalog verbatim |
 | `mcp_rpc_command` | `tool`, `arguments?` | the **raw** MCP result of the remote call, or a typed error | forwards **ONE** `tools/call` into the caller's open session; arguments travel verbatim, results come back as the machine produced them (§7 — MCP travels unchanged through the middle); audited per call |
 | `mcp_rpc_disconnect` | none | `{"session_id", "machine_id", "ended": true, "result"}` | ends the session and **releases the slot**; the machine keeps its socket and returns to `ready` |
@@ -393,13 +423,24 @@ Operational caveats:
   **`MACHINE_BUSY`** — decided center-side, before any frame reaches the
   machine.
 * A connect to an **enrolled but offline** machine answers
-  `MACHINE_NOT_ENROLLED` with `presence: offline` — the roster remembers
-  the machine, but there is no live socket to drive.
+  `MACHINE_NOT_ENROLLED` with `enrolled: true, presence: "offline"` and
+  the message *"...is enrolled but currently offline — reconnect
+  pending"* — the roster remembers the machine; wait for it to reconnect,
+  do **not** re-enroll. A connect to a machine **not in the roster at
+  all** answers the same code with `enrolled: false` and the message
+  *"...is not in the enrolled roster — re-enrollment is required"*. Same
+  code, two meanings — branch on the `enrolled` detail.
 * The same agent holding a session on machine A and connecting to machine B
   answers `MACHINE_BUSY` (`agent_already_holds_session`) — one agent, one
   remote (§8.2).
 * A command with **no open session** answers `SESSION_NOT_FOUND` — the
-  agent must re-connect (and there is nothing to resume, §1.3).
+  agent must re-connect (and there is nothing to resume, §1.3). The
+  error's `data` has two shapes: when a session id exists but is not
+  live, `data.session_id` carries that **real session id**; when the
+  agent holds **no session at all**, there is no session id to report, so
+  `data.session_id` is **absent** and the agent is named in its own
+  `data.agent_id` member — the contract member is a session id and is
+  never filled with an agent id.
 * A machine that does not answer within `MCPS_GATEWAY_COMMAND_TIMEOUT_MS`
   answers `TOOL_TIMEOUT`; the machine's own typed refusals
   (`TOOL_NOT_FOUND`, `TOOL_ERROR`, `PAYLOAD_TOO_LARGE`, `RATE_LIMITED`)
@@ -418,7 +459,10 @@ Operational caveats:
 
 `GET /api/mcps-gateway/ws` — a WebSocket upgrade on the daemon's existing
 port (single-port operations; the machine dials out over WSS, §3.1). The
-route is **module-lane**: the credential is the module's own bearer
+route owns four things and nothing else: the upgrade auth, the read loop,
+the teardown, and the **liveness ping** (`MCPS_GATEWAY_PING_INTERVAL_MS`,
+§2.2). The route is
+**module-lane**: the credential is the module's own bearer
 enrollment token, never an OAuth2 token. Without the module-lane tag the
 OAuth2 middleware would own the request, see the enrollment bearer and
 reject it with a 401 — and every machine would re-enroll forever. A
@@ -438,13 +482,31 @@ args-hash / outcome** into the append-only `mcp_gateway_audit` table
   hex) and **never stored**: the table has **no arguments column at all**,
   so there is nothing to fill in by accident.
 * The outcomes are `ok` / `error` / `timeout` / `denied`; the typed error
-  code and a short advisory detail ride along when a command failed.
+  code rides along when a command failed. The `detail` column carries a
+  **fixed, center-authored classification** (plus the `error_code`) —
+  **peer-authored error text never enters the audit ledger**: a message
+  the machine produced stays agent-facing in the tool result and is not
+  copied into the row. The hardening goes one step further: a
+  **peer-authored error CODE is validated against the protocol
+  vocabulary** (`AUDIT_ALLOWED_ERROR_CODES`); anything outside it is
+  recorded as **`UNRECOGNIZED_ERROR_CODE`** — a hostile machine cannot
+  park arbitrary strings in the ledger through the code column either.
 * An **audit failure never aborts a command**: the command describes a
   *remote* side effect that has already happened by the time a row could be
   written, and refusing to report it because the observability write failed
   would turn an audit problem into an availability problem on a path that
   drives a user's desktop. The failure is logged loudly and counted
   (`service.audit_failures`).
+* The write is **off the event loop** (`asyncio.to_thread`) — the sink
+  opens a synchronous DB session, so a stalled PostgreSQL must not freeze
+  the whole daemon — yet still **awaited**, so the row is durable before
+  the command returns and a shutdown cannot lose the row of a command
+  that already happened.
+* The audit write is **bounded (~5 s)**: on timeout the command's result
+  still returns to the agent — the audit failure is logged loudly and
+  counted, never propagated to the caller.
+* `created_at` is a `now_utc_iso()` UTC stamp (the sanctioned
+  ISO-8601-TEXT lineage), not a naive timestamp column.
 * `MCPS_GATEWAY_AUDIT_ENABLED=false` skips the write entirely (no row, no
   attempt).
 
@@ -462,7 +524,7 @@ Reference: `mcps_client/SPEC.md` v0.1. The shipped reference client
 | §3.3 heartbeat (interval / timeout / client-dead-detect) | implemented — all three are advertised in the hello result and the client adopts them; the center kills on silence > timeout |
 | §5.1/§5.2 hello + version negotiation | implemented — exactly `"0.1"`; a mismatch answers `PROTOCOL_VERSION_UNSUPPORTED` and closes (no silent downgrade); a second hello on one connection answers `INTERNAL` and closes |
 | §5.3 capability map | implemented — the center advertises `session: true, tools: true, heartbeat: true, notifications: false, screenshot_delta: false, multi_session: false, client_cert: false`; it demands `session`, `tools`, `heartbeat` of the machine (missing → `CAPABILITY_MISSING` + close) |
-| §6.1 envelope, one JSON object per text frame | implemented — every frame carries `v: "0.1"`; binary frames are not part of the protocol and are ignored |
+| §6.1 envelope, one JSON object per text frame | implemented — every frame carries `v: "0.1"`; an inbound frame with a missing or wrong `v` gets the **socket closed** (the violation is logged as a warning and **no error frame is sent** — mirroring the client's own behavior, no silent tolerance of a version it did not negotiate); binary frames are not part of the protocol and are ignored |
 | §6.3 the seven methods | implemented as: machine sends `hello` (request) + `heartbeat` (notification); center requests `session.begin`, `session.end`, `tools/call`. **`tools/list` is never issued by this center** — the catalog rides `session.begin` (§6.4). `notifications/*` from the machine is accepted and dropped |
 | §6.4 machine-minted `session_id`, catalog verbatim | implemented — the center adopts the machine's id and stores the catalog unmodified |
 | §6.5 typed errors | implemented — center-originated: `PROTOCOL_VERSION_UNSUPPORTED`, `CAPABILITY_MISSING`, `MACHINE_NOT_ENROLLED`, `MACHINE_BUSY`, `SESSION_NOT_FOUND`, `SESSION_EXPIRED`, `HEARTBEAT_TIMEOUT`, `TOOL_TIMEOUT`, `INTERNAL`; machine codes relayed verbatim: `TOOL_NOT_FOUND`, `TOOL_TIMEOUT`, `TOOL_ERROR`, `PAYLOAD_TOO_LARGE`, `RATE_LIMITED`. `TOOL_DENIED` is reserved for v0.2+ and never emitted |
@@ -487,6 +549,28 @@ OFFERING side — enforcing a literal reading against the machine would kill
 every connection. The spec text was NOT edited; the resolution lives in the
 Phase-A interpretations document.
 
+### 5.1 The test suites
+
+* **The independent conformance suite** lives at
+  `tests/integration/mcps_gateway/` — an independent fake remote client
+  driving the real gateway over the wire. It is **marker-gated and NOT in
+  the default suite** (repo convention: `pyproject.toml` addopts exclude
+  `-m integration`). Run it from the repo root with:
+
+  ```
+  uv run python -m pytest tests/integration/mcps_gateway -m integration
+  ```
+
+  It is self-contained — ephemeral ports, no external services, no
+  database — and takes roughly **27 s**. Its SPEC coverage declaration
+  (what is exercised, and what is deliberately not) lives in
+  `tests/integration/mcps_gateway/COVERAGE.md`.
+* **The unit suite carries literal tripwires for the wire codes** — the
+  §6.5 typed-code strings appear as literals in
+  `tests/unit/test_mcps_gateway_service.py` (and the doc-pin suite holds
+  the operator-facing literals) — so default runs still catch string
+  drift even without the integration lane.
+
 ---
 
 ## 6. Known gaps & Phase C/D
@@ -510,12 +594,13 @@ Phase-A interpretations document.
 
 | Symptom | Likely cause | What to check / do |
 |---|---|---|
-| **404 on the route** ("route not found") | the kill switch is off — the route is not registered | `MCPS_GATEWAY_ENABLED` unset/false, or set **after** the daemon booted. Enable it AND restart the daemon (§2). Confirm the boot log says `remote-hands gateway route registered at /api/mcps-gateway/ws` |
-| **401 on every upgrade** | wrong or missing token | the client's bearer is not in `MCPS_GATEWAY_TOKENS` (or the list is empty — nobody may enroll). Remember: a 401 is FATAL to the client — it stops and requires re-enrollment, so fix the token before restarting the client |
+| **404 on the route** ("route not found") | the kill switch is off — the route is not registered | `MCPS_GATEWAY_ENABLED` unset/false, or set **after** the daemon booted. Enable it AND restart the daemon (§2). Confirm the boot log says `remote-hands gateway route registered at /api/mcps-gateway/ws`. **Expect reconnect loops from still-configured machines while the flag is off** — see the retire/pause recipe in §7.1 |
+| **401 on every upgrade** | wrong or missing token | the client's bearer is not in `MCPS_GATEWAY_TOKENS` (or the list is empty — nobody may enroll). Remember: a 401 is FATAL to the client — it stops cleanly and awaits re-enrollment, so fix the token before restarting the client |
 | Machine never appears in the roster | upgrade refused, or hello refused | check the daemon log: `a remote-hands upgrade was refused` → token; `the machine ... is not enrolled at this center` → `MCPS_GATEWAY_ALLOWED_MACHINES` does not list it; `the machine does not support the capabilities [...]` → client too old |
 | Machine connects then vanishes in a loop | heartbeat params / network silence | silence > `MCPS_GATEWAY_HEARTBEAT_TIMEOUT_MS` (default 45 s) kills the session AND the socket. If the network genuinely blips longer than the timeout, raise the timeout (and keep `CLIENT_DEAD_DETECT_MS` ≥ 3× the interval — §3.3 expects it, the config warns below 3×). Also check the client is heartbeating at the advertised interval (it adopts the center's values) |
 | `MACHINE_BUSY` on connect | the slot is taken | another agent holds the machine's single session, OR this agent already drives a different machine (`agent_already_holds_session`). `mcp_rpc_list_machine` shows the holder (`session_id`, `agent_id`). Wait for the session to end, ask the holder to disconnect, or pick another machine |
 | `SESSION_NOT_FOUND` on command | no open session for this agent | the session expired (TTL/idle), was killed by heartbeat loss, or was never opened. Re-`connect` — there is nothing to resume |
+| `MACHINE_NOT_ENROLLED` on connect — which case? | same code, two meanings | read the `enrolled` detail: `enrolled: true` + *"is enrolled but currently offline — reconnect pending"* → WAIT for the machine to reconnect (§8.1), do not re-enroll; `enrolled: false` + *"is not in the enrolled roster — re-enrollment is required"* → the roster never knew it (fresh machine, roster wiped by a restart, or `MCPS_GATEWAY_ALLOWED_MACHINES` excludes it) |
 | `SESSION_EXPIRED` on command | TTL (1 h) or idle (5 min) passed | re-`connect`; raise `MCPS_GATEWAY_SESSION_TTL_MS` / `MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS` if the workload needs longer |
 | `TOOL_TIMEOUT` on command | the machine did not answer in time | the center waits `MCPS_GATEWAY_COMMAND_TIMEOUT_MS` (default 30 s). A wedged remote tool or a sleepy machine surfaces here — the bound exists so a wedged machine cannot hang an agent tool forever |
 | Client dials the wrong path | `CenterURL` configured without a path | the client appends `/remote-hands/v1` only when the URL has NO path — configure the full URL **including** `/api/mcps-gateway/ws` (§2.4) |
@@ -523,9 +608,37 @@ Phase-A interpretations document.
 | Audit rows missing | audit disabled or write failing | `MCPS_GATEWAY_AUDIT_ENABLED=false` skips writes; a failing DB write is logged (`the remote-command audit row could not be written`) and counted — it never aborts the command. Query `mcp_gateway_audit` directly |
 | Daemon restart wiped the roster | in-memory store (by design in v0.1) | not a fault — machines re-appear on their next upgrade; sessions are dead and must be re-opened |
 
+### 7.1 The reconnect-loop trap — retiring or pausing a center
+
+**Only an HTTP 401 is fatal to the remote client.** Every *other* failure
+— connection refused, timeout, a proxy 502, and **the route being absent
+because the gateway is disabled (404)** — is treated as *transient*: the
+machine backs off and retries, forever. A still-configured machine pointed
+at a center that silently disappeared will reconnect-loop indefinitely,
+with no daemon-side trace (the route does not exist, so nothing logs it).
+
+Two ways down, deliberately different:
+
+* **Graceful retire / pause — clear the tokens.** Set
+  `MCPS_GATEWAY_TOKENS` to empty and restart the daemon. Every upgrade
+  then answers **401**, which is the *one* fatal code: each machine
+  stops cleanly (`AUTH_FAILED`) and **awaits operator re-enrollment** —
+  no loop, and the daemon logs each refused upgrade. This is the way to
+  retire or pause a center politely. (Equivalently: remove just that
+  machine's token from the list to retire one machine.)
+* **Hard kill — `MCPS_GATEWAY_ENABLED=false`.** The route vanishes
+  entirely (404) and the transport is gone. This is the emergency
+  switch — and **expect reconnect loops from any still-configured
+  machine** until you either clear the tokens as above or unconfigure
+  the client. Use it when you want the surface gone *now*; do not use it
+  when you want machines to wind down quietly.
+
+Both require a daemon restart (§2).
+
 ---
 
 *Maintained alongside `tests/unit/test_mcps_gateway_docs.py`, which pins the
 operational facts of this page (kill-switch name and default, the restart
 requirement, the route path, every knob default, and the honest-absence
 statements) so they cannot silently rot.*
+
