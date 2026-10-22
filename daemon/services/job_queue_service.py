@@ -588,8 +588,13 @@ class JobQueueService:
         FIXBACK (2026-09-28, fixback cycle 1): the docstring on this
         helper drifted from the guard's actual behavior under the new
         U7 anchor. The guard's anchor is now the FRESHEST tree signal
-        (``max(root.last_activity_at, max(d.last_activity_at) for d in
-        descendants)``) — NOT the per-work ``completed_at`` — and the
+        over the tree's NON-ROOT members
+        (``max(d.last_activity_at) for d in descendants``) — NOT the
+        per-work ``completed_at``, and NOT the root's own stamp (the
+        root's ``last_activity_at`` is refreshed on EVERY message
+        enqueue, so including it made the backstop unreachable for a
+        stranded-but-messaged root; a childless tree falls back to the
+        root's own stamp, where the root IS the whole tree) — and the
         backstop fires IFF a non-terminal member is present AND the
         freshest tree activity is older than
         ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (true zombie-break; the
@@ -633,6 +638,19 @@ class JobQueueService:
             bus_pending_count=bus_pending_count,
         )
         if verdict.live:
+            if verdict.error:
+                # A-2: the guard's MEMBER-ALIVE probe error HOLDS the
+                # tree (``live=True`` + ``error=True``) — a fail-MISS
+                # hold, NOT a liveness proof. Log it inside the live
+                # branch (the old order made this warning unreachable
+                # for exactly that verdict, so the operator never saw
+                # the probe failure).
+                logger.warning(
+                    "mission-live guard HELD the terminal door at the "
+                    "boot sweep (fail-miss: a member-alive probe failed, "
+                    "so the tree cannot be proven stale): %s",
+                    verdict.reason,
+                )
             return True
         if verdict.error or verdict.timed_out:
             logger.warning(
@@ -989,6 +1007,29 @@ class JobQueueService:
                         instance_id=_pre_guard_work_root,
                         bus_pending_count=None,
                     )
+                    if _pre_verdict.error:
+                        # A-2 / G3: an ``error=True`` verdict has TWO
+                        # polarities, and the message must be true of
+                        # BOTH:
+                        #   * MEMBER-ALIVE probe error ⇒ ``live=True`` ⇒
+                        #     the tree is HELD (fail-MISS) and the
+                        #     ORPHAN_RELEASED token is suppressed (the
+                        #     token is gated on ``timed_out``);
+                        #   * TREE-WALK error ⇒ ``live=False`` ⇒
+                        #     fail-OPEN per the at-least-once contract:
+                        #     the tree was NOT proven stale, so the
+                        #     release fires with no token either way.
+                        logger.warning(
+                            "reconcile_held_watches_for_instance: guard "
+                            "ERROR for work_id=%s — polarity=%s (the "
+                            "ORPHAN_RELEASED token is suppressed either "
+                            "way): %s",
+                            work_id[:8],
+                            "member-alive probe error ⇒ held"
+                            if _pre_verdict.live
+                            else "tree-walk error ⇒ fail-open",
+                            _pre_verdict.reason,
+                        )
                     if _pre_verdict.timed_out:
                         orphan_released += 1
                         logger.warning(
@@ -1201,6 +1242,28 @@ class JobQueueService:
                         instance_id=row.mission_instance_id,
                         bus_pending_count=None,
                     )
+                    if verdict.live:
+                        if verdict.error:
+                            # A-2: the guard's MEMBER-ALIVE probe
+                            # error HOLDS the tree (``live=True`` +
+                            # ``error=True``) — a fail-MISS hold, NOT a
+                            # liveness proof. The old order tested
+                            # ``verdict.live`` first, so this case fell
+                            # through to the loss-case leg with no
+                            # operator signal. NOTE: the fall-through
+                            # is UNCHANGED (the hold does not skip the
+                            # loss case) — only the log is added.
+                            logger.warning(
+                                "reconcile_stored_watches: guard HELD "
+                                "the stored watch %s (orig=%s retry=%s) "
+                                "on a fail-miss probe error — the tree "
+                                "cannot be proven stale, so the watch is "
+                                "NOT released: %s",
+                                row.stored_watch_id[:8],
+                                row.original_work_id[:8],
+                                row.retry_work_id[:8],
+                                verdict.reason,
+                            )
                     if not verdict.live:
                         if verdict.error:
                             logger.warning(

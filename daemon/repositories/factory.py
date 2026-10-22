@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Engine, create_engine, event
+from sqlalchemy.engine import URL
 from sqlmodel import Session, SQLModel
+
+from daemon.constants import BOOT_DB_TIMEOUT_S
 
 from .project.repository import SQLModelProjectRepository
 from .instance.repository import SQLModelInstanceRepository
@@ -63,6 +66,15 @@ from .custom_agent_configs import (
     CustomAgentConfig,
     CustomAgentConfigRepository,
 )
+
+# Instance-ops audit ledger (nest-ops, 2026-10-21). Imported here so
+# ``SQLModel.metadata.create_all()`` (called from daemon/manager.py)
+# registers the ``instance_ops_audit`` table on fresh PostgreSQL
+# databases. Fresh SQLite databases pick the table up from the
+# MigrationRunner via the 20261021_120000 migration. Brand-new table —
+# no _ensure_postgres_columns needed (same secrets_audit / prompt_
+# versions precedent).
+from .instance_ops.models import InstanceOpsAudit
 
 if TYPE_CHECKING:
     from daemon.ensemble_config import EnsembleConfig
@@ -259,7 +271,39 @@ def create_postgres_engine(config: "EnsembleConfig") -> Engine:
     user = os.environ.get("POSTGRES_USER", pg.user)
     password = os.environ.get("POSTGRES_PASSWORD", pg.password)
 
-    url = f"postgresql+psycopg://{user}:{password}@{host}:{port}/{db}"
+    # G6: bound the libpq connect phase so a firewall-DROP host fails
+    # inside BOOT_DB_TIMEOUT_S instead of hanging on the OS TCP timeout
+    # (~75-130s). libpq takes ``connect_timeout`` as a conninfo
+    # parameter, so it rides the URL query — NOT a top-level
+    # ``create_engine(connect_timeout=...)`` kwarg (the psycopg dialect
+    # rejects unknown engine kwargs) and NOT ``connect_args`` (that
+    # dict is the B2/B3 UTC-session contract, pinned byte-for-byte by
+    # tests/unit/repositories/test_pg_engine_utc_session.py).
+    # SAME BOUND, DIFFERENT MECHANISM: the boot preflight
+    # (daemon/__main__.py::_boot_db_preflight) pins the SAME
+    # ``BOOT_DB_TIMEOUT_S`` budget, but through ``connect_args`` on its
+    # own locally-built probe engine — that path is deliberately
+    # untouched here (the factory's ``connect_args`` stays the B2/B3
+    # UTC-session contract). The two timeouts are complementary, not
+    # duplicated.
+    #
+    # URL.create(...) — NOT an f-string. The string form put the RAW
+    # password into the URL: a password containing '?' made the
+    # connect_timeout fall out of the query (silently defeating the
+    # bound above) and a password containing '@' re-parsed into a
+    # DIFFERENT host. URL.create escapes the password and carries the
+    # bound in the query dict, so both stay correct. It is rendered
+    # back to a STRING (the shape create_engine has always received
+    # here — see tests/unit/repositories/test_pg_engine_utc_session.py).
+    url = URL.create(
+        drivername="postgresql+psycopg",
+        username=user,
+        password=password,
+        host=host,
+        port=port,
+        database=db,
+        query={"connect_timeout": str(BOOT_DB_TIMEOUT_S)},
+    ).render_as_string(hide_password=False)
 
     logger.info(
         f"Creating PostgreSQL engine: {host}:{port}/{db}"

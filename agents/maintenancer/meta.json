@@ -9,7 +9,16 @@
   "skill_injection": true,
   "no_force_explore": true,
   "tools": {
-    "allow": ["system-log", "ens-db", "knowledge", "system_upgrade", "system_restart", "db"],
+    "allow": [
+      "system-log",
+      "ens-db",
+      "knowledge",
+      "system_upgrade",
+      "system_restart",
+      "db",
+      "instance_read",
+      "instance_ops"
+    ],
     "deny": ["git_commit", "edit_file", "write_file"]
   },
   "team_members": ["explorer", "worker", "coder"]

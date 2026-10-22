@@ -2515,7 +2515,13 @@ class SQLModelInstanceRepository:
             instances = list(db_session.exec(stmt).all())
             return self._enrich_instances(db_session, instances)
 
-    def set_metadata(self, instance_id: str, key: str, value: Any) -> Instance | None:
+    def set_metadata(
+        self,
+        instance_id: str,
+        key: str,
+        value: Any,
+        session: "Session | None" = None,
+    ) -> Instance | None:
         """Atomically set an instance_metadata key-value pair.
 
         Uses a dialect-aware single-statement UPDATE so concurrent calls
@@ -2532,64 +2538,94 @@ class SQLModelInstanceRepository:
             key: Top-level JSON key to set.
             value: JSON-serialisable value to store.
 
+        Args (nest-ops D-15, Tier-1):
+            session: OPTIONAL caller-owned session. When given, the
+                UPDATE executes on THAT session and this method does NOT
+                commit — the caller owns the transaction (the
+                ``instance_ops`` audit ledger uses this so a marker write
+                and its audit row commit together or neither commits).
+                ``None`` (the default) opens and commits its own session,
+                byte-identical to the pre-parameter behaviour.
+
         Returns:
             The refreshed enriched ``Instance``, or ``None`` if the
             instance does not exist.
         """
+        if session is not None:
+            return self._set_metadata_on_session(session, instance_id, key, value)
         with SQLModelSession(self.engine) as db_session:
-            dialect = (
-                db_session.bind.dialect.name
-                if db_session.bind is not None
-                else "sqlite"
-            )
-            json_value = json.dumps(value)
-            now = datetime.now(timezone.utc).isoformat()
-
-            if dialect == "postgresql":
-                update_sql = text(
-                    """
-                    UPDATE instances
-                    SET metadata = jsonb_set(
-                        COALESCE(metadata, '{}'::jsonb),
-                        :path,
-                        CAST(:value AS jsonb),
-                        true
-                    ),
-                    updated_at = :now
-                    WHERE instance_id = :instance_id
-                    """
-                )
-                path_value = f"{{{key}}}"
-            else:
-                update_sql = text(
-                    """
-                    UPDATE instances
-                    SET metadata = json_set(
-                        COALESCE(metadata, '{}'),
-                        :path,
-                        json(:value)
-                    ),
-                    updated_at = :now
-                    WHERE instance_id = :instance_id
-                    """
-                )
-                path_value = f"$.{key}"
-
-            db_session.execute(
-                update_sql,
-                {
-                    "path": path_value,
-                    "value": json_value,
-                    "now": now,
-                    "instance_id": instance_id,
-                },
+            instance = self._set_metadata_on_session(
+                db_session, instance_id, key, value
             )
             db_session.commit()
+            return instance
 
-            instance = db_session.get(Instance, instance_id)
-            if instance is None:
-                return None
-            return self._enrich_instance(db_session, instance)
+    def _set_metadata_on_session(
+        self,
+        db_session,
+        instance_id: str,
+        key: str,
+        value: Any,
+    ) -> Instance | None:
+        """The single-key metadata UPDATE on a CALLER-OWNED session.
+
+        Extracted verbatim from :meth:`set_metadata` (nest-ops D-15) so
+        the own-session path and the caller-``session=`` path execute the
+        SAME statement. Does NOT commit — the caller owns the
+        transaction.
+        """
+        dialect = (
+            db_session.bind.dialect.name
+            if db_session.bind is not None
+            else "sqlite"
+        )
+        json_value = json.dumps(value)
+        now = datetime.now(timezone.utc).isoformat()
+
+        if dialect == "postgresql":
+            update_sql = text(
+                """
+                UPDATE instances
+                SET metadata = jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    :path,
+                    CAST(:value AS jsonb),
+                    true
+                ),
+                updated_at = :now
+                WHERE instance_id = :instance_id
+                """
+            )
+            path_value = f"{{{key}}}"
+        else:
+            update_sql = text(
+                """
+                UPDATE instances
+                SET metadata = json_set(
+                    COALESCE(metadata, '{}'),
+                    :path,
+                    json(:value)
+                ),
+                updated_at = :now
+                WHERE instance_id = :instance_id
+                """
+            )
+            path_value = f"$.{key}"
+
+        db_session.execute(
+            update_sql,
+            {
+                "path": path_value,
+                "value": json_value,
+                "now": now,
+                "instance_id": instance_id,
+            },
+        )
+
+        instance = db_session.get(Instance, instance_id)
+        if instance is None:
+            return None
+        return self._enrich_instance(db_session, instance)
 
     def set_metadata_many(
         self, instance_id: str, updates: dict[str, Any]

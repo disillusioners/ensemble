@@ -5,6 +5,31 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.4] — 2026-10-21
+
+### Fixed — running-zombie strand heal (`fix/running-zombie-sweep`, merge `9b1777b8`)
+
+> **Composition:** 19 commits, merged `--no-ff` (base `33e1ef513`). Heals mission roots stranded in `running` whose completion stamp was REFUSED by the pre-stamp liveness hold — the freshness anchor counted the root's own enqueue-refreshed `last_activity_at`, so the staleness backstop was unreachable for a stranded-but-messaged root. Independent functional gate: PASS-WITH-PREEXISTING (`.agents/tester/RESULTS/2026-10-21-running-zombie-functional-gate.md`).
+
+- **Running-zombie strand** — the `MissionStrandHealer` gains a third strand family member: a mission root whose instance row is stuck in `running` while its whole permanent tree is terminal and its own latest task row is terminal-`COMPLETED` (the completion event was lost — live incident 2026-10-19/20, stuck 25h) is selected, probed and healed through the PRODUCTION completion chain (terminalizing write), with an explicit kill-switch the sibling strands do not have (`SERVICES_MISSION_STRAND_HEAL_RUNNING_ZOMBIE_ENABLED`, default on). The heal is bounded (age keys on the task row's `completed_at`, default 2h; batch cap 25) and fail-CLOSED (every leg must hold; any unprovable leg skips). Loud line: `mission_strand_healer|running-zombie:`.
+- **Anchor fix** — the guard's freshness anchor is recomputed over NON-ROOT members only (a childless tree falls back to the root's own stamp, preserving childless-root behavior).
+- **Member-alive companion leg** — guard-side, via `has_live_work`, TIME-BOUNDED by the guard's own 6h horizon (`MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`): a member with a live task row is alive, not stale.
+- **Pre-stamp hold re-arm** — the hold site now wires `_schedule_strand_heal` (per-root refcounted, coalesced), so a hold schedules a heal attempt instead of waiting for a signal that never comes.
+
+### Behavior changes (disclosed)
+
+- **The guard's member-alive companion leg applies across ALL consumers** (the guard is the shared chokepoint — f1, f2, the boot sweeps, the emission gate, the orphan release and the work notifier all get the hold, not only the two terminalize-capable lanes).
+- **Probe-error ⇒ hold (fail-MISS)**: a member-alive probe that errors holds the tree (`live=True, error=True`) — an operator-visible warning, never treated as a liveness proof.
+- **A legitimate >6h member turn remains indistinguishable from a stale member** (the companion leg's horizon); the heartbeat-on-turn-progress follow-up that would separate them is named in the design doc.
+- **f2 code untouched but behavior widened** — the f2 drift finalizer heals only the `JobItem`; the widened guard now also unblocks the instance-row strand behind it.
+- **wc-strand heal drives pass `skip_repair=True`** (leader ruling — same stale-transcript hazard class; cycle-2 review adjudicated the truncation-repair trade-off).
+
+### Tests
+
+- RZ pack 77, f2/gate 9, real-PG 23/23 (PostgreSQL 16.15), 6/6 mutations MEANINGFUL (0 ineffective pins), regression base↔HEAD FAILED-list digest byte-identical (zero net-new failures; 15 pre-existing disclosed, not ours).
+- **No schema migration** (106==106 migration files unchanged) — rollback-safe by construction; the only payload change is the binary. No `agents/` touch — the prompt-artifact seal verifies unchanged (161/161).
+- Full promote disclosures: `.agents/shared/planning/running-zombie-fix/design-decision.md` §10.
+
 ## [0.26.0] — 2026-10-20
 
 ### Added — Ari self-evolution tools (ari-tools commission, merge `bfeca369d`)

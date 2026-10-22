@@ -68,18 +68,34 @@ def _insert_instance(
     project_id: str = "test-project",
     status: str = InstanceStatus.RUNNING.value,
     created_at: datetime | None = None,
+    parent_id: str | None = None,
+    last_activity_at: datetime | None = None,
 ) -> None:
+    """Insert an ``instances`` row.
+
+    ``parent_id`` / ``last_activity_at`` are ADDITIVE (default
+    ``None`` ⇒ the historical single-instance shape) — the f2
+    guard-anchor-neutrality pin needs a MULTI-MEMBER tree with
+    explicit activity stamps (the anchor is a tree aggregate).
+    """
     now = (created_at or datetime.now(timezone.utc)).isoformat()
+    activity_iso = (
+        last_activity_at.isoformat()
+        if last_activity_at is not None
+        else None
+    )
     with engine.begin() as conn:
         conn.execute(
             text(
                 """
                 INSERT INTO instances
                     (instance_id, agent_id, agent_dir, status, project_id,
-                     created_at, updated_at, version)
+                     created_at, updated_at, version, parent_id,
+                     last_activity_at)
                 VALUES
                     (:instance_id, 'developer', 'agents/developer',
-                     :status, :project_id, :created_at, :updated_at, 1)
+                     :status, :project_id, :created_at, :updated_at, 1,
+                     :parent_id, :last_activity_at)
                 """
             ),
             {
@@ -88,7 +104,41 @@ def _insert_instance(
                 "project_id": project_id,
                 "created_at": now,
                 "updated_at": now,
+                "parent_id": parent_id,
+                "last_activity_at": activity_iso,
             },
+        )
+
+
+def _update_instance(
+    engine,
+    instance_id: str,
+    *,
+    status: str | None = None,
+    last_activity_at: datetime | None = None,
+) -> None:
+    """UPDATE an existing ``instances`` row (status / activity stamp).
+
+    The f2 anchor-neutrality pin re-shapes the SEEDED rows — a second
+    INSERT would violate the primary key.
+    """
+    sets: list[str] = []
+    params: dict = {"instance_id": instance_id}
+    if status is not None:
+        sets.append("status = :status")
+        params["status"] = status
+    if last_activity_at is not None:
+        sets.append("last_activity_at = :last_activity_at")
+        params["last_activity_at"] = last_activity_at.isoformat()
+    if not sets:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"UPDATE instances SET {', '.join(sets)} "
+                "WHERE instance_id = :instance_id"
+            ),
+            params,
         )
 
 
@@ -643,3 +693,277 @@ class TestE1MissionLiveFinalizeGate:
             and "timed_out=False" in record.getMessage()
             for record in fail_open_warnings
         ), fail_open_warnings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# f1/E1 LANE GUARD-ANCHOR NEUTRALITY PIN (running-zombie cycle 2, 2026-10-21)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _FakeVerdict:
+    """Minimal stand-in for ``MissionLiveVerdict`` (the call-shape pin
+    only asserts HOW the lane calls the guard, not the verdict)."""
+
+    def __init__(self, live: bool, reason: str = "pinned"):
+        self.live = live
+        self.reason = reason
+        self.error = False
+        self.timed_out = False
+
+
+class TestF1LaneGuardAnchorNeutralityPin:
+    """The f1/E1 lane is NEUTRAL to the running-zombie anchor fix.
+
+    LANE HONESTY (cycle-2 review, C2 — this class was previously
+    mislabeled ``TestF2GuardAnchorNeutralityPin``): the seeded shape
+    short-circuits at the **f1/E1 lane**
+    (``job_recovery_service.py:2674``, detail pattern
+    ``orphan_active_skipped_mission_live_f1``) — f2's own lane
+    (``orphan_active_skipped_mission_live``, ``:2975``) is NEVER
+    REACHED by these tests. Consequences, stated plainly:
+
+    * f2's own lane is **behaviorally unasserted** here. Neither
+      behavioral pin below can fail on an anchor REVERT — by
+      construction: in both, the MEMBER's stamp is the tree max on
+      both sides of the fix, so the verdict is identical whichever
+      way the anchor is scoped. These pins prove f1-lane
+      *neutrality*, not anchor protection.
+    * The **mutation-grade anchor protection** lives in
+      ``tests/job_queue/test_running_zombie_sweep.py::
+      test_fresh_root_cannot_hold_a_stale_member_open`` — that test
+      is M1-proven RED when the anchor reverts to root-inclusive.
+    * f2's CALL SHAPE is covered by the static source pin
+      (``test_f2_lane_source_call_shape_is_pinned``, below), which
+      anchors on the ``job_recovery_service.py`` source text
+      (READ-ONLY on this branch — the file itself is not touched).
+
+    The anchor fix (2026-10-21, ``daemon/services/mission_live_guard.py``)
+    moves the zombie-backstop freshness anchor OFF the ROOT's own
+    ``last_activity_at`` onto the NON-ROOT members'. The root's own
+    stamp is refreshed on every message enqueue
+    (``daemon/services/instance_messaging.py:2455``), so it can never
+    prove a tree is quiet — that is the defect the fix closes.
+
+    This class is the PIN-FIRST proof (leader instruction, cycle 2):
+
+    * ``test_f2_guard_call_shape_is_pinned`` — the FIRST guard call
+      the reconciler makes (the f1/E1 lane) keeps its shape (no
+      ``skip_root``: for this lane the root's own status IS a live
+      leg; the anchor fix must not change the call).
+    * ``test_live_member_keeps_f2_holding`` — a tree whose MEMBER
+      carries a RECENT stamp holds (no finalize). The member's
+      stamp is the tree max both before and after the fix ⇒ the
+      verdict is identical on both sides.
+    * ``test_quiet_tree_lets_f2_finalize`` — a tree whose member
+      carries a STALE stamp (>6h) fires the backstop and the lane
+      finalizes. Identical before and after the fix.
+
+    DELIBERATELY NOT PINNED: the shape where the ROOT's stamp is
+    FRESH and the member's is STALE. There the verdict CHANGES
+    (hold → finalize) — that IS the defect the fix closes, and
+    pinning it would pin the bug.
+    """
+
+    @pytest.mark.asyncio
+    async def test_f2_guard_call_shape_is_pinned(
+        self,
+        engine,
+        repository,
+        lock_repo,
+        task_repository,
+    ):
+        """f2's guard call keeps its shape across the anchor fix."""
+        from unittest.mock import patch
+
+        instance_repo = SQLModelInstanceRepository(engine=engine)
+        _seed_043d64a8_shape(engine, mission_live=True)
+        jq = _boundary_mock(repository)
+        service = _make_service(
+            engine=engine,
+            repository=repository,
+            lock_repo=lock_repo,
+            instance_repo=instance_repo,
+            task_repository=task_repository,
+            job_queue_service_mock=jq,
+            witness_manager=_witness_manager(instance_repo),
+        )
+
+        captured: list[dict] = []
+
+        async def _spy(**kwargs):
+            captured.append(kwargs)
+            return _FakeVerdict(live=True, reason="pinned-stub")
+
+        with patch(
+            "daemon.services.job_recovery_service.evaluate_mission_live",
+            _spy,
+        ):
+            await service.reconcile_drift_states(
+                min_pending_age_seconds=0,
+                min_orphan_age_seconds=60,
+            )
+
+        assert captured, (
+            "f2 MUST consult the mission-live guard — the pin is "
+            "meaningless if f2 stopped calling it"
+        )
+        kwargs = captured[0]
+        assert kwargs.get("instance_id") == "inst-e1-worker"
+        assert kwargs.get("instance_repository") is instance_repo
+        # The f1 lane has no bus seam → the bus leg is UNKNOWN
+        # (skipped), never a fabricated 0.
+        assert kwargs.get("bus_pending_count") is None
+        # f2 does NOT run in the pre-stamp mode: the root's own
+        # status IS a live leg for f2 (skip_root is never True).
+        assert kwargs.get("skip_root", False) is False, (
+            "f2 must not opt into the pre-stamp skip_root mode — the "
+            f"anchor fix must not change the CALL shape. Got: {kwargs}"
+        )
+
+    def test_f2_lane_source_call_shape_is_pinned(self):
+        """STATIC source pin for f2's OWN lane.
+
+        The behavioral tests in this class exercise the f1/E1 lane —
+        the seeded shape short-circuits there, so f2 is never reached
+        and cannot be asserted behaviorally from this module. f2's
+        CALL SHAPE is therefore pinned from the SOURCE TEXT instead
+        (the census suite's source-text anchoring style; the file
+        itself stays READ-ONLY on this branch):
+
+        * the f2 lane passes the Gate-1 bus pending count
+          (``bus_pending_count=bus_pending_count``) — the guard's bus
+          leg must AGREE with the gate seam (unlike f1, which has no
+          bus seam and passes ``None``);
+        * the f2 lane must NOT opt into the pre-stamp ``skip_root``
+          mode — for f2 the root's own status IS a live leg.
+        """
+        import re
+        from pathlib import Path
+
+        from daemon.services import job_recovery_service as jrs
+
+        source = Path(jrs.__file__).read_text()
+        f2_pattern = '"orphan_active_skipped_mission_live"'
+        assert f2_pattern in source, (
+            "f2's detail pattern vanished from job_recovery_service.py "
+            "— the lane was renamed or removed and this pin must be "
+            "re-homed"
+        )
+        # The f2 guard call sits ~218 chars above its detail pattern;
+        # a 2.5k-char look-back window covers the call without
+        # reaching the f1 lane's own call (~16.5k chars earlier).
+        idx = source.index(f2_pattern)
+        window = source[max(0, idx - 2500):idx]
+        assert "bus_pending_count=bus_pending_count" in window, (
+            "f2's guard call must pass the Gate-1 bus pending count — "
+            "the guard's bus leg must agree with the gate seam"
+        )
+        assert not re.search(r"\bskip_root\s*=", window), (
+            "f2 must NOT opt into the pre-stamp skip_root mode: for "
+            "f2 the root's own status IS a live leg"
+        )
+
+    @pytest.mark.asyncio
+    async def test_live_member_keeps_f2_holding(
+        self,
+        engine,
+        repository,
+        lock_repo,
+        task_repository,
+    ):
+        """A member with a RECENT stamp keeps the mission live ⇒ f2
+        HOLDS the JobItem (no finalize). Identical before and after
+        the anchor fix (the member's stamp is the tree max on both
+        sides)."""
+        instance_repo = SQLModelInstanceRepository(engine=engine)
+        _seed_043d64a8_shape(engine, mission_live=True)
+        # The job's instance is TERMINAL (so the verdict is decided
+        # by the MEMBER, not by the root's own status); the member
+        # carries a RECENT stamp.
+        _update_instance(
+            engine, "inst-e1-worker",
+            status=InstanceStatus.COMPLETED.value,
+            last_activity_at=datetime.now(timezone.utc) - timedelta(hours=9),
+        )
+        _insert_instance(
+            engine, "inst-e1-member",
+            status=InstanceStatus.RUNNING.value,
+            parent_id="inst-e1-worker",
+            last_activity_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+        )
+        jq = _boundary_mock(repository)
+        service = _make_service(
+            engine=engine,
+            repository=repository,
+            lock_repo=lock_repo,
+            instance_repo=instance_repo,
+            task_repository=task_repository,
+            job_queue_service_mock=jq,
+            witness_manager=_witness_manager(instance_repo),
+        )
+
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=60,
+        )
+        details = stats.get("details", []) if isinstance(stats, dict) else []
+        assert any(
+            d.get("pattern") == "orphan_active_skipped_mission_live_f1"
+            for d in details
+        ), details
+        jq._finalize_terminal.assert_not_called()
+        with engine.begin() as conn:
+            state = conn.execute(
+                text(
+                    "SELECT admission_state FROM job_queue_items "
+                    "WHERE job_id = 'job-e1-043d'"
+                )
+            ).fetchone()[0]
+        assert state == AdmissionState.ACTIVE.value
+
+    @pytest.mark.asyncio
+    async def test_quiet_tree_lets_f2_finalize(
+        self,
+        engine,
+        repository,
+        lock_repo,
+        task_repository,
+    ):
+        """A member with a STALE stamp (>6h) fires the 6h backstop ⇒
+        f2 FINALIZES. Identical before and after the anchor fix (the
+        member's stamp is the tree max on both sides)."""
+        instance_repo = SQLModelInstanceRepository(engine=engine)
+        _seed_043d64a8_shape(engine, mission_live=True)
+        stale = datetime.now(timezone.utc) - timedelta(hours=9)
+        _update_instance(
+            engine, "inst-e1-worker",
+            status=InstanceStatus.COMPLETED.value,
+            last_activity_at=stale,
+        )
+        _insert_instance(
+            engine, "inst-e1-member",
+            status=InstanceStatus.RUNNING.value,
+            parent_id="inst-e1-worker",
+            last_activity_at=stale,
+        )
+        jq = _boundary_mock(repository)
+        service = _make_service(
+            engine=engine,
+            repository=repository,
+            lock_repo=lock_repo,
+            instance_repo=instance_repo,
+            task_repository=task_repository,
+            job_queue_service_mock=jq,
+            witness_manager=_witness_manager(instance_repo),
+        )
+
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+            min_orphan_age_seconds=60,
+        )
+        details = stats.get("details", []) if isinstance(stats, dict) else []
+        assert not any(
+            d.get("pattern") == "orphan_active_skipped_mission_live_f1"
+            for d in details
+        ), details
+        jq._finalize_terminal.assert_awaited_once()

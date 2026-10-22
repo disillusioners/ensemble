@@ -878,6 +878,10 @@ def test_privileged_category_set_is_pinned() -> None:
             # board. The ari + leader tools.allow entries are the only
             # access path; the tool body ALSO carries the runtime
             # agent_id gate.
+            # nest-ops (2026-10-21): the two maintenancer fleet categories
+            # (read #13 / act #14) — opt-in-only, never default-granted.
+            "instance_read",
+            "instance_ops",
             "board-link",
         }
     ), (

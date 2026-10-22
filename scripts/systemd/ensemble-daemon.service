@@ -84,6 +84,10 @@ __GENERATED_NOTE__
 [Unit]
 Description=Ensemble daemon — __UNIT_LABEL__
 After=network-online.target
+# Host-dependent PG ordering (G6): After= ONLY — no Wants=/Requires=, so a
+# remote-PG host is unaffected and a local-PG host is never force-started.
+# Existing installs: apply the runbook drop-in (see hard-reboot-recovery.md).
+After=postgresql.service
 Wants=network-online.target
 
 [Service]

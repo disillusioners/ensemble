@@ -409,7 +409,7 @@ class TestCreateJobSourceBoundary:
         """``source='internal_report:xyz'`` must be rejected with 422.
         The drain path stamps ``source='internal_report:<child_iid>'``
         directly (``daemon/graph.py:3169``,
-        ``daemon/services/child_reports.py:2744``) — never through
+        ``daemon/services/child_reports.py:2752``) — never through
         HTTP — so the boundary rejection does not affect those flows."""
         from daemon.routers.jobs_crud import get_job_queue_service
 

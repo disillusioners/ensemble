@@ -690,6 +690,24 @@ async def notify_work_watchers(
                     bus_pending_count=None,
                 )
                 mission_live = _guard_verdict.live
+                if _guard_verdict.error:
+                    # A-2 / G3: an ``error=True`` verdict has TWO
+                    # polarities, and the message must be true of BOTH:
+                    #   * MEMBER-ALIVE probe error ⇒ ``live=True`` ⇒ the
+                    #     watcher IS HELD (fail-MISS: the tree cannot be
+                    #     proven stale);
+                    #   * TREE-WALK error ⇒ ``live=False`` ⇒ fail-OPEN per
+                    #     the at-least-once contract: the watcher is
+                    #     CLAIMED + DELIVERED, not retained.
+                    logger.warning(
+                        "notify_work_watchers: mission-live guard ERROR "
+                        "for work_id=%s — polarity=%s: %s",
+                        work_id[:8],
+                        "member-alive probe error ⇒ watch HELD"
+                        if _guard_verdict.live
+                        else "tree-walk error ⇒ fail-OPEN, watch released",
+                        _guard_verdict.reason,
+                    )
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
                         "notify_work_watchers: mission-live guard "
