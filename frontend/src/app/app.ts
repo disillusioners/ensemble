@@ -577,7 +577,16 @@ export class App implements OnInit {
     // so the conditional Database/Maintenance appends still land at the
     // menu tail. Static (not conditional): the endpoint ships in the
     // same promote train and degrades to empty shapes, never 503 (D2).
-    { label: 'Resources', icon: 'insights', route: '/resources' }
+    { label: 'Resources', icon: 'insights', route: '/resources' },
+    // MCP Gateway — the Remote Hands / MCP gateway operator page
+    // (Phase C). GEAR MENU ONLY (no top-level header link — the header
+    // nav carries the primary destinations only) and READ-ONLY v1:
+    // the page reports the machine roster, the live sessions and the
+    // audit tail; it never drives the gateway. Placed AFTER Resources
+    // and BEFORE the conditional Database/Maintenance appends so those
+    // appends still land at the menu tail (the resources ordering pin
+    // in resources-gear-menu.spec.ts must stay green).
+    { label: 'MCP Gateway', icon: 'computer', route: '/mcps-gateway' }
   ]);
 
   constructor() {

@@ -120,7 +120,13 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     # would re-enroll forever. The route is registered ONLY when
     # MCPS_GATEWAY_ENABLED is ON; the AUTH_ON leg of this cage boots the
     # app with the gateway ON so the family is observed.
-    "/api/mcps-gateway": frozenset({"module_lane"}),
+    #
+    # Phase C added the OAUTH READ LANE to the same family: the three
+    # read-only routes (GET /machines + GET /sessions + GET /audit)
+    # are ordinary /api routers — untagged, so they classify as
+    # protected-default ("pd"), exactly like the other read families.
+    # The family therefore carries BOTH classes.
+    "/api/mcps-gateway": frozenset({"module_lane", "pd"}),
     "/api/webhooks": frozenset({"module_lane"}),  # FR-40 module lane
     "/api/work": frozenset({"pd"}),
     "/api/workspace": frozenset({"pd"}),
@@ -139,16 +145,24 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
 #: Auth-OFF: no auth-self family, no keys family (module/protected
 #: columns collapse to module_lane-only).
 #:
-#: The remote-hands gateway family is excluded too — but for a
-#: DIFFERENT reason than the auth-self family: its route is registered
-#: only when ``MCPS_GATEWAY_ENABLED`` is ON, and the AUTH-OFF leg of
-#: this cage boots the app with the gateway explicitly OFF. The
-#: exclusion is therefore conditional on the GATEWAY flag, not on the
-#: auth flag.
+#: The remote-hands gateway family IS part of the auth-OFF universe —
+#: but for a DIFFERENT reason than the auth-self family: the Phase C
+#: READ routes are registered UNCONDITIONALLY (the kill switch governs
+#: the TRANSPORT, not the read surface), so the family exists in the
+#: auth-OFF app with ONLY the read routes in it. The module-lane
+#: WebSocket route is absent there (the gateway is explicitly OFF in
+#: that leg), so the family classifies protected-default ("pd") — the
+#: same class it has for the read routes in the auth-ON universe.
 PINNED_MANIFEST_AUTH_OFF: dict[str, frozenset[str]] = {
-    k: (frozenset({"module_lane"}) if k == "/api/mcp" else v)
+    k: (
+        frozenset({"module_lane"})
+        if k == "/api/mcp"
+        else frozenset({"pd"})
+        if k == "/api/mcps-gateway"
+        else v
+    )
     for k, v in PINNED_MANIFEST_AUTH_ON.items()
-    if k != "/api/auth" and k != "/api/mcps-gateway"
+    if k != "/api/auth"
 }
 
 _TAG_TO_CLASS = {

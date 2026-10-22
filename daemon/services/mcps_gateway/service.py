@@ -735,6 +735,46 @@ class McpGatewayService:
             )
         return expired
 
+    # ── the ops read surface (Phase C) ────────────────────────────────────
+    #
+    # The agent-facing surface above REFUSES while the transport is off
+    # (R2: a healthy-looking answer while the transport is dead would
+    # mislead the agent). The read surface below is the opposite: it
+    # REPORTS the state of the center and therefore answers even while
+    # the gateway is disabled — the operator page must be able to say
+    # "the gateway is off", and an empty roster is exactly that
+    # statement.
+
+    def now(self) -> float:
+        """The current instant, per the service clock.
+
+        The read surface needs the SAME clock the presence computation
+        uses: a router-side ``time.time()`` would disagree with the
+        service's injectable clock and would mark every machine
+        ``stale`` under a pinned clock.
+        """
+        return self._clock()
+
+    def audit_tail(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """The remote-command audit tail, NEWEST FIRST.
+
+        The READ side of the ledger. The sink contract
+        (:class:`~daemon.services.mcps_gateway.audit.AuditSink`) is
+        write-only, so the read is a duck-typed ``list_recent`` call on
+        the sink: the DB-backed sink
+        (``McpGatewayAuditRepository``) answers it; a write-only sink
+        answers nothing and the tail is EMPTY (never an error — the
+        read side is defensive).
+        """
+        reader = getattr(self._audit, "list_recent", None)
+        if not callable(reader):
+            return []
+        try:
+            return [dict(row) for row in reader(limit=limit, offset=offset)]
+        except Exception as exc:  # noqa: BLE001 — the read side is defensive
+            logger.warning("the remote-command audit could not be read: %s", exc)
+            return []
+
     # ── the agent-facing surface (§2.2) ──────────────────────────────────
 
     def roster(self) -> list[dict[str, Any]]:
