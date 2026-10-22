@@ -110,7 +110,7 @@ by hand.)
 | Section | Change |
 |---|---|
 | header | status/footnote reworded: the doc now pins the activation blocker too |
-| **§1.7 (NEW)** The audit projection | one helper `audit_row_to_wire` + `AUDIT_WIRE_KEYS`; TWO read sites (memory sink + router); the write path EXCLUDED by design (persists `id`+`detail`); the `id`-absence and empty-vs-synthetic-stamp divergences; idempotence |
+| **§1.7 (NEW)** The audit projection | one helper `audit_row_to_wire` + `AUDIT_WIRE_KEYS`; ONE read site (the router — `MemoryAuditSink` returns the storage shape and never projects); the write path EXCLUDED by design (persists `id`+`detail`); the `id`-absence and empty-vs-synthetic-stamp divergences; idempotence |
 | §2 (activate step 2) | **rider**: the knob-re-read claim corrected — the running service holds a BOOT-TIME snapshot; `load_gateway_config()` reads env only when CALLED (fresh service in tests) |
 | §2.2 (intro) | **rider**: same correction at the second site (`:184-186` in the old numbering) |
 | §2.2 knob table | **+`MCPS_GATEWAY_READ_TIMEOUT_MS` (5000 ms)** row; heartbeat-interval row gains the `protocol.go:266-278` validation cite (timeout/dead-detect ≥ 3× interval) |

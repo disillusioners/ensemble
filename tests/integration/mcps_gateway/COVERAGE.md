@@ -19,7 +19,7 @@ which SPEC sections the test suite exercises, and exactly which it does not.
 | §4.1 | Tier 1 — enrollment is out of band; bearer on the upgrade; center decides machine admission | `TestTransportAndAuth.test_upgrade_auth_matrix`; `TestTypedErrors.test_disallowed_machine_is_refused` | Unknown bearer ⇒ 401 (no protocol layer reached); a machine outside the allowlist ⇒ `MACHINE_NOT_ENROLLED`. |
 | §5.1 | The `hello` exchange — mandatory, once per connection, after a successful upgrade | `TestHandshake.test_hello_response_shape_capabilities_and_heartbeat_params`; `TestSessionLifecycle.test_session_begin_returns_matching_session_id_and_catalog` | `hello` answered in band; exactly one `session.begin` per session; no session traffic before `hello`. |
 | §5.2 | Version negotiation — the server replies with the version it will speak | `TestHandshake.test_hello_response_shape_capabilities_and_heartbeat_params` | `result.protocol_version == "0.1"` (the requested version). **Not** exercised: the `PROTOCOL_VERSION_UNSUPPORTED` refusal path (see §3 below). |
-| §5.3 | Capability flags — flat map of booleans; the four v0.1-**required** capabilities must be `true`; both peers carry the same key set | `TestHandshake.test_hello_response_shape_capabilities_and_heartbeat_params`; `test_fake_client_selftest.py::TestCapabilityMap` | Capability values are all booleans; the key set is exactly §5.3's seven keys; `session`, `tools`, `notifications`, `heartbeat` are all `true`. |
+| §5.3 | Capability flags — flat map of booleans; a missing required capability is a refusal | `TestHandshake.test_hello_response_shape_capabilities_and_heartbeat_params`; `test_fake_client_selftest.py::TestCapabilityMap` | Capability values are all booleans; the key set is exactly §5.3's seven keys; `session`, `tools`, `heartbeat` are `true` and **`notifications: false` is advertised and ACCEPTED** (the offering-side reading — a `hello` carrying `notifications:false` proceeds; the exact seven-key map is pinned in the real-pair §5.3 row below). |
 | §5.4 | Illustrative `hello` / `hello.result` shapes | `TestHandshake.test_hello_response_shape_capabilities_and_heartbeat_params` | `v`, `type`, `id` echo, `result.protocol_version`, `result.server{name,version}`, `result.capabilities`, the three `heartbeat_*` members. |
 | §6.1 | Message envelope — `v` / `type` / `id` / `session_id` / `method` / `params` / `result` / `error` | every test; `TestEnvelopeRecording.test_every_inbound_frame_is_transcribed_and_violations_recorded`; `TestTypedErrors.test_error_frames_carry_the_session_id_when_a_session_is_active` | `v` present and equal to `"0.1"`; `type` in the four legal values; `id` echoed verbatim; `session_id` present after a session exists; no second layer of indirection around the MCP fields. Violations are **recorded** (never raised) and cross-checked against the transcript. |
 | §6.2 | Session states — `ready` ⇄ `active`; ending a session returns the connection to `ready`; the socket stays open | `TestSessionLifecycle.test_session_end_acknowledges_and_keeps_the_socket_open` | `session.end` acknowledged; the socket stays open; a **new** session can be opened on the same socket with a fresh id. |
@@ -164,17 +164,22 @@ real lifespan, uvicorn-native TLS, real PostgreSQL fence DB) against the
 sanctioned `daemon.*` importer of the lane), `go_client.py` (the peer driver),
 `harness.py` (reused for the env-knob table and the teardown helper only).
 
-**Corrected boundary reading (approver iteration-002, item 4).** The rule
-"only `tls_harness.py` imports `daemon.*`" is factually stale: the committed
-P0 files `p0_gate.py` and `go_client.py` also import `daemon.*` directly.
-The CORRECTED rule applied here is: the sanctioned direct daemon-importers of
-the interop lane are exactly the three committed P0 files
-(`tls_harness.py`, `p0_gate.py`, `go_client.py`); **every D1-NEW file stays
-daemon-import-free** — `transcript.py` and `test_real_pair.py` contain **no**
-`import daemon.*` statement, and every daemon object (the app, the service
-seam, the engine, the audit sink, the typed error, the Plane kill switches)
-is reached through `tls_harness`'s API. Verified by source grep:
-`grep -n "^\s*\(from\|import\) daemon" transcript.py test_real_pair.py` ⇒
+**Corrected boundary reading (approver iteration-002, item 4; import
+census re-verified 2026-10-22).** The rule
+"only `tls_harness.py` imports `daemon.*`" was factually stale. The
+CORRECTED rule, matching `tests/conformance/COVERAGE.md` and the current
+source census (`grep -cE "^\s*(from|import) daemon"`): the sanctioned
+direct daemon-importers of the interop lane are exactly
+`tls_harness.py` (11 imports — the mounting jig), `p0_gate.py` (5) and
+`harness.py` (4 — reused for the env-knob table and the teardown
+helper). `go_client.py` imports **ZERO** daemon modules — it is the
+peer driver and talks to the centre over the wire only. **Every D1-NEW
+file stays daemon-import-free** — `transcript.py` and
+`test_real_pair.py` contain **no** `import daemon.*` statement, and
+every daemon object (the app, the service seam, the engine, the audit
+sink, the typed error, the Plane kill switches) is reached through
+`tls_harness`'s API. Verified by source grep:
+`grep -n "^\s*\(from\|import\) daemon" transcript.py test_real_pair.py go_client.py` ⇒
 **no matches**.
 
 ## 1. SPEC sections EXERCISED by the REAL pair (P1 + P2)

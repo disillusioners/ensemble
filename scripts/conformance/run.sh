@@ -15,10 +15,23 @@
 # ``State`` patch.  The kit must not inherit the daemon lane's
 # scaffolding — with the cutdir, none of the root conftest is collected.
 #
+# WHY NO GNU `timeout(1)` (QA B8): it is ABSENT on stock macOS/BSD —
+# the kit used to die with exit 127 on the maintainers' own platform,
+# reading as "tests failed".  The bounded run below is the repo's
+# `_run_bounded` semantics (see `scripts/upgrade/lib.sh`): background +
+# sleep + TERM + grace + KILL watcher, portable over bash 3.2…5.x, with
+# GNU `timeout`'s RETURN-CODE CONVENTION preserved — 0 = clean,
+# non-zero = the child's own rc, 124 = the budget fired (TERM/KILL
+# collapsed per GNU: 137/143 → 124).
+#
 # Teardown: the kit is IN-PROCESS (the self-host center lives inside the
 # pytest process), so the trap kills the pytest process (and, when the
 # operator's begin hook spawns an external center, its process group) on
-# TERM/INT/EXIT.  Nothing is left listening.
+# TERM/INT/EXIT.  Nothing is left listening.  The trap is installed
+# BEFORE the launch so a TERM arriving in the launch window cannot leak
+# the child; the old post-hoc lsof listener probe is GONE — it was
+# unreachable (it ran after `wait` had reaped the pid) and it targeted
+# the wrapper pid rather than any listener.
 set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
@@ -40,25 +53,49 @@ fi
 # The house invocation: uv run python -m pytest (bare pytest is broken in this repo).
 ARGS=(tests/conformance -p no:cacheprovider --confcutdir=tests/conformance -m conformance)
 
-timeout "$RUN_TIMEOUT" uv run python -m pytest "${ARGS[@]}" "$@" &
-pytest_pid=$!
+# ── the bounded run (portable; NO GNU timeout dependency) ──────────────
+# Watcher: sleep the budget, TERM the child, grace 5 s, KILL.  If the
+# child finishes first, the (still-sleeping) watcher is SIGKILLed — a
+# bash builtin kill is one syscall, no orphan risk.  Mirrors
+# scripts/upgrade/lib.sh `_run_bounded` / launcher.sh `_js_run_bounded`.
+pytest_pid=""
+watcher_pid=""
 
 cleanup() {
   local rc=$?
-  # Kill the whole pytest process group when we own it (the begin hook's
-  # spawned center, if any, lives under it).
-  kill -- "-${pytest_pid}" 2>/dev/null || kill "${pytest_pid}" 2>/dev/null || true
-  wait "${pytest_pid}" 2>/dev/null || true
-  # Prove nothing the run owned is still listening (best effort — the
-  # self-host center is in-process and dies with pytest).
-  if command -v lsof >/dev/null 2>&1 && kill -0 "${pytest_pid}" 2>/dev/null; then
-    lsof -p "${pytest_pid}" -iTCP -sTCP:LISTEN 2>/dev/null || true
+  if [[ -n "${watcher_pid}" ]]; then
+    kill -KILL "${watcher_pid}" 2>/dev/null || true
+    wait "${watcher_pid}" 2>/dev/null || true
+  fi
+  if [[ -n "${pytest_pid}" ]]; then
+    # Kill the whole pytest process group when we own it (the begin
+    # hook's spawned center, if any, lives under it); fall back to the
+    # pid itself when the group kill finds no such process group.
+    kill -- "-${pytest_pid}" 2>/dev/null || kill "${pytest_pid}" 2>/dev/null || true
+    wait "${pytest_pid}" 2>/dev/null || true
   fi
   exit "${rc}"
 }
 trap cleanup INT TERM EXIT
 
+uv run python -m pytest "${ARGS[@]}" "$@" &
+pytest_pid=$!
+
+(
+  sleep "$RUN_TIMEOUT" 2>/dev/null
+  kill -TERM "${pytest_pid}" 2>/dev/null
+  sleep 5 2>/dev/null
+  kill -KILL "${pytest_pid}" 2>/dev/null
+) >/dev/null 2>&1 &
+watcher_pid=$!
+
 wait "${pytest_pid}"
 rc=$?
+# GNU `timeout` convention: TERM (143) / KILL (137) from the watchdog
+# collapse to 124 — the caller's "timed out" sentinel.  pytest's own
+# exit code propagates untouched (its failures must NOT wear 124).
+case "$rc" in
+  137|143) rc=124 ;;
+esac
 trap - INT TERM EXIT
-exit "${rc}"
+exit "$rc"

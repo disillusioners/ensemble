@@ -41,6 +41,13 @@ knob, so the app is served through uvicorn's own TLS
 (``ssl_certfile``/``ssl_keyfile``) on an ephemeral port, with a per-run
 self-signed certificate whose SAN is ``IP:127.0.0.1``.  The client trusts it
 through ``remote.ca_pem`` (additive trust; chain verification still runs).
+
+File-size rationale (~1050 lines):
+    One mounting jig, one file: everything here is the SAME concern —
+    boot the real app under TLS, tap the two seams, tear it down — and
+    the interop lane's import discipline makes this the ONE sanctioned
+    ``daemon.*`` importer; splitting it would multiply sanctioned
+    importers, the exact thing the boundary reading forbids.
 """
 
 from __future__ import annotations
@@ -57,7 +64,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 # ── the fence database (never ``ensemble_prod``) ──────────────────────────
 

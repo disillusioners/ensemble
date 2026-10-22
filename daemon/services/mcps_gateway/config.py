@@ -185,6 +185,32 @@ class GatewayConfig:
     ping_interval_ms: int = DEFAULT_PING_INTERVAL_MS
     warnings: tuple[str, ...] = field(default=(), repr=False)
 
+    def __post_init__(self) -> None:
+        """Clamp-or-warn the values a DIRECT constructor can get wrong.
+
+        ``load_gateway_config`` already clamps every env knob and emits
+        a warning; a direct ``GatewayConfig(...)`` call used to bypass
+        that entirely — ``read_timeout_ms=0`` would silently turn every
+        audit read into an instant degraded storm
+        (``asyncio.wait_for(..., 0)`` fires immediately). The env path
+        feeds this constructor an already-clamped POSITIVE value, so
+        the warning fires exactly once (here, for direct constructions
+        only). Frozen dataclass: the clamps go through
+        ``object.__setattr__``.
+        """
+        if self.read_timeout_ms <= 0:
+            bad = self.read_timeout_ms
+            object.__setattr__(self, "read_timeout_ms", DEFAULT_READ_TIMEOUT_MS)
+            object.__setattr__(
+                self,
+                "warnings",
+                self.warnings
+                + (
+                    f"read_timeout_ms={bad} is not positive; the default "
+                    f"({DEFAULT_READ_TIMEOUT_MS}) is used",
+                ),
+            )
+
     @property
     def has_enrollment_tokens(self) -> bool:
         """Is anybody allowed to enroll? Empty tokens = nobody."""

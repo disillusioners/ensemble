@@ -312,22 +312,29 @@ class McpGatewayService:
                     )
                 )
         connection.pending.clear()
-        if connection.machine_id:
-            # P4 (roster-release ordering): the §8.3 roster pointer is
-            # released BEFORE the awaited socket close. The close
-            # handshake of a WEDGED peer can stretch for seconds, and
-            # the read surface kept reporting the dead session as
-            # ``busy: true`` through that whole window (found by the
-            # interop gate #16c failing honestly in P1/P2). The session
-            # manager already released the slot above, so the §8.3 lock
-            # is never held twice — this only closes the STALE
-            # READ-SURFACE window. The connection_id guard inside
-            # mark_offline keeps a reconnect that raced the close safe.
-            self._store.mark_offline(connection.machine_id, connection.connection_id)
         try:
-            await connection.transport.close()
-        except Exception:  # noqa: BLE001 — a dead socket is not an error
-            pass
+            if connection.machine_id:
+                # P4 (roster-release ordering): the §8.3 roster pointer is
+                # released BEFORE the awaited socket close. The close
+                # handshake of a WEDGED peer can stretch for seconds, and
+                # the read surface kept reporting the dead session as
+                # ``busy: true`` through that whole window (found by the
+                # interop gate #16c failing honestly in P1/P2). The session
+                # manager already released the slot above, so the §8.3 lock
+                # is never held twice — this only closes the STALE
+                # READ-SURFACE window. The connection_id guard inside
+                # mark_offline keeps a reconnect that raced the close safe.
+                self._store.mark_offline(connection.machine_id, connection.connection_id)
+        finally:
+            # fd-leak guard (QA round, C10): even if the roster release
+            # RAISES, the socket close below still runs — a skipped close
+            # leaks the transport fd for the life of the process. The
+            # RELEASE ORDER is unchanged: mark_offline (the §8.3 release)
+            # runs FIRST, the awaited close second.
+            try:
+                await connection.transport.close()
+            except Exception:  # noqa: BLE001 — a dead socket is not an error
+                pass
 
     # ── inbound frames ───────────────────────────────────────────────────
 

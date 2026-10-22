@@ -38,9 +38,6 @@ import pytest
 
 from .conformance_peer import (
     BEGIN_HOOK_KEYS,
-    CONFORMANCE_ENV_KEYS,
-    POINTING_KEYS,
-    STRICT_KEYS,
     begin_on_target,
     InKitCenter,
     Target,

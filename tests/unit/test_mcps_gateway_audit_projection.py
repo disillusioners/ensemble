@@ -34,6 +34,7 @@ PostgreSQL.
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -210,3 +211,48 @@ class TestBothSinksProjectIdentically:
         assert memory_wire["timestamp"] is None  # "" → None
         assert repo_wire["timestamp"] is None  # '' (raw SQL) → None
         assert memory_wire == repo_wire
+
+
+def test_wire_keys_exactly_match_the_gateway_audit_entry_fields() -> None:
+    """The wire-contract cross-check (QA C15): ``AUDIT_WIRE_KEYS`` ≡ the FE model.
+
+    The router materializes ``GatewayAuditEntry(**audit_row_to_wire(row))``
+    — key drift between the helper's output contract and the pydantic
+    model surfaces as an UNHANDLED 500 at that call site, not as a
+    degraded body. The sets are pinned equal here so drift goes red in
+    THIS test instead of in production.
+    """
+    from daemon.routers.mcps_gateway_schemas import GatewayAuditEntry
+
+    assert set(AUDIT_WIRE_KEYS) == set(GatewayAuditEntry.model_fields), (
+        "AUDIT_WIRE_KEYS and GatewayAuditEntry.model_fields have drifted — "
+        "the router's GatewayAuditEntry(**...) would now raise a 500."
+    )
+
+
+def test_audit_row_to_wire_has_exactly_one_production_call_site() -> None:
+    """§1.7's ONE-install-site claim, pinned as a source census (QA A1).
+
+    ``audit_row_to_wire`` must be CALLED at exactly one production site —
+    the wire router. A second call site (a sink, the write path) would
+    double-project or silently drop/rename keys. The census counts
+    call syntax only (``audit_row_to_wire(``) minus the ``def`` line, so
+    docstring/comment mentions do not trip it) across ``daemon/``.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    hits: list[str] = []
+    for path in sorted((repo_root / "daemon").rglob("*.py")):
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            if "audit_row_to_wire(" not in line:
+                continue
+            if line.lstrip().startswith("def "):
+                continue  # the definition itself (audit.py)
+            hits.append(f"{path.relative_to(repo_root)}:{lineno}")
+    assert len(hits) == 1 and hits[0].startswith(
+        "daemon/routers/mcps_gateway_read.py"
+    ), (
+        "expected exactly ONE production call site of audit_row_to_wire "
+        f"(the wire router) — the §1.7 single-install-point contract. Got: {hits}"
+    )

@@ -281,7 +281,22 @@ export class McpsGatewayService {
     ).pipe(
       tap((res) => {
         if (this.bodyIsUnexpected(res)) {
+          // Lane hygiene (C11): a non-JSON body is an ERROR, not a
+          // degraded read — clear the stale degraded slot so the two
+          // banners can never coexist.
+          this.machinesDegraded.set(false);
           this.machinesError.set(this.notJsonError('machines', 200));
+          return;
+        }
+        if (res.degraded === true) {
+          // Latent symmetry with the audit lane (C11): the machines
+          // lane is IN-MEMORY and answers degraded:false today, but if
+          // it ever degrades the semantics match the audit lane — keep
+          // the last good roster, raise the degraded flag, clear the
+          // error slot.
+          this.gatewayEnabled.set(res.gateway_enabled !== false);
+          this.machinesDegraded.set(true);
+          this.machinesError.set(null);
           return;
         }
         this.machines.set(res.machines ?? []);
@@ -305,7 +320,22 @@ export class McpsGatewayService {
     ).pipe(
       tap((res) => {
         if (this.bodyIsUnexpected(res)) {
+          // Lane hygiene (C11): a non-JSON body is an ERROR, not a
+          // degraded read — clear the stale degraded slot so the two
+          // banners can never coexist.
+          this.sessionsDegraded.set(false);
           this.sessionsError.set(this.notJsonError('sessions', 200));
+          return;
+        }
+        if (res.degraded === true) {
+          // Latent symmetry with the audit lane (C11): the sessions
+          // lane is IN-MEMORY and answers degraded:false today, but if
+          // it ever degrades the semantics match the audit lane — keep
+          // the last good list, raise the degraded flag, clear the
+          // error slot.
+          this.gatewayEnabled.set(res.gateway_enabled !== false);
+          this.sessionsDegraded.set(true);
+          this.sessionsError.set(null);
           return;
         }
         this.sessions.set(res.sessions ?? []);
@@ -335,6 +365,10 @@ export class McpsGatewayService {
     ).pipe(
       tap((res) => {
         if (this.bodyIsUnexpected(res)) {
+          // Lane hygiene (C11): a non-JSON body is an ERROR, not a
+          // degraded read — clear the stale degraded slot so the
+          // degraded banner and the error banner can never coexist.
+          this.auditDegraded.set(false);
           this.auditError.set(this.notJsonError('audit', 200));
           return;
         }

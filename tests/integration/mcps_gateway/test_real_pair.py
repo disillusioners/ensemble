@@ -49,6 +49,17 @@ Run it directly (the gate itself)::
 or through pytest (the wrapper)::
 
     .venv/bin/python -m pytest tests/integration/mcps_gateway/test_real_pair.py -m integration -q
+
+File-size rationale (~3000 lines — over the pack band ceiling; header
+now, split is BACKLOG):
+    This file is deliberately ONE unit for now: it is BOTH the pytest
+    wrapper AND the runner (the wrapper shells out to ``python -m
+    tests.integration.mcps_gateway.test_real_pair`` — the two-process
+    ordering invariants live in one place), and the P1/P2 assertions
+    share the harness fixtures and the transcript cross-check helpers.
+    Splitting runner from assertions is a filed BACKLOG item (the QA
+    consolidation explicitly defers it), not something this lane does
+    incidentally.
 """
 
 from __future__ import annotations

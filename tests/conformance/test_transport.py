@@ -30,7 +30,6 @@ from .conformance_peer import (
     DEFAULT_MAX_FRAME_BYTES,
     check_close_code,
     check_g1_heartbeat_timeout_frame,
-    wait_until,
 )
 
 pytestmark = [pytest.mark.conformance]

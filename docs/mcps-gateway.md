@@ -149,13 +149,17 @@ refuse with a typed error, and the service object still exists (the manager
 mounts it) so the tools can answer with a typed refusal instead of
 vanishing. Full activation procedure: §2.
 
-### 1.7 The audit projection (one helper, two read sites)
+### 1.7 The audit projection (one helper, ONE read site)
 
 The wire shape of an audit row is produced by **one** helper —
 `audit_row_to_wire(row)` next to `AuditRecord` in
-`daemon/services/mcps_gateway/audit.py` — and installed at exactly **two
-read-projection sites**: the in-memory sink's read (`MemoryAuditSink`)
-and the wire router (`daemon/routers/mcps_gateway_read.py`). The contract
+`daemon/services/mcps_gateway/audit.py` — and installed at exactly **ONE
+read site**: the wire router (`daemon/routers/mcps_gateway_read.py` —
+the helper's single production call, pinned by a source census in
+`tests/unit/test_mcps_gateway_audit_projection.py`). The in-memory
+sink's read (`MemoryAuditSink.list_recent`) deliberately returns the
+STORAGE shape — the DB row's keys minus `id` — and never projects; the
+projection happens at the router only. The contract
 is `AUDIT_WIRE_KEYS`: ids `""` → `None`, text `None` → `""`, and the
 storage-only members `id` and `detail` are **never emitted**.
 
@@ -883,7 +887,7 @@ The degraded body:
 {
   "audit": [], "count": 0, "limit": 50, "offset": 0,
   "gateway_enabled": true, "degraded": true,
-  "error": "audit_read_failed"
+  "error": "audit_unavailable"
 }
 ```
 
@@ -898,10 +902,25 @@ The degraded body:
   the same classification path. The classification lives in the SERVICE
   (`audit_tail` returns `(rows, degraded, reason)`); the repository
   RAISES (it no longer swallows to `[]`), so the contract cannot
-  silently re-absorb the failure.
-* **A write-only sink is NOT an outage**: `NullAuditSink` /
-  `MCPS_GATEWAY_AUDIT_ENABLED=false` answer `degraded: false` with an
-  empty list.
+  silently re-absorb the failure. The bound is **two-layered**: the
+  request-level `asyncio.wait_for` cancels the REQUEST, not the query —
+  so the audit read ALSO carries a SERVER-SIDE `statement_timeout`
+  scoped to that one query (the same millisecond budget, set
+  transaction-local by the repository; PostgreSQL only). A HUNG query
+  is aborted by the server itself, which RELEASES the pooled
+  connection instead of leaking it toward pool exhaustion. FE back-off
+  while degraded is deliberately NOT built (BACKLOG).
+* **A silent audit lane is NOT an outage — and in production the sink
+  is ALWAYS the DB**: the manager mounts `McpGatewayAuditRepository`
+  UNCONDITIONALLY (`daemon/manager.py` builds the service with the
+  DB-backed sink at construction; there is no runtime sink swap), so
+  the read always has a ledger. `MCPS_GATEWAY_AUDIT_ENABLED=false`
+  mutes the **write** only (the service's `_audit` returns before
+  recording) — the read still answers the existing rows with
+  `degraded: false`. A sink with NO read side (`NullAuditSink`, the
+  default when a direct constructor passes no sink — the unit-test
+  shape) answers `degraded: false` with an empty list: a write-only
+  sink is not an outage.
 * **The FE rendering**: a degraded audit read draws a DISTINCT banner
   (not the error banner) and KEEPS the last page on screen; the
   machines/sessions tables keep rendering (§9.5).
@@ -1037,7 +1056,10 @@ listen: {addr: "127.0.0.1:0", token: "<local-token>", path: "/mcp"}
 child:
   command: "/tmp/mcps-d1/adversarial.test"   # PRIMARY stub child (below)
   args: ["-test.run=^$"]
-  env: ["MCPS_ADVERSARIAL_CHILD_MODE=1"]
+  env:
+    - "MCPS_ADVERSARIAL_CHILD_MODE=1"
+    - "MCPS_ADVERSARIAL_CHILD_RECORD=/tmp/mcps-d1/child-record.jsonl"   # the P3 evidence file the stub writes
+  dir: ""
   terminate_grace_ms: 5000
 restart: {enabled: true, initial_backoff_ms: 1000, max_backoff_ms: 60000, max_attempts: 0, multiplier: 2.0, jitter: 0.2}
 policy: {enabled: true, deny_tools: []}

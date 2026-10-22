@@ -15,10 +15,8 @@ from .conformance_peer import (
     ConformanceFinding,
     ConformancePeer,
     PROTOCOL_VERSION,
-    UpgradeRefused,
     check_error_envelope,
     check_hello_result,
-    wait_until,
 )
 
 pytestmark = [pytest.mark.conformance]

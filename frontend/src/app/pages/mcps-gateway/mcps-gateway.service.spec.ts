@@ -520,6 +520,61 @@ describe('McpsGatewayService', () => {
     expect(service.degradedSource()).toBeNull();
   });
 
+  it('a not_json audit body CLEARS a stale degraded flag (no banner coexistence)', () => {
+    // Degrade first…
+    service.loadAudit(0);
+    httpMock
+      .expectOne((r) => r.url === McpsGatewayService.AUDIT_URL)
+      .flush({
+        audit: [],
+        count: 0,
+        limit: 50,
+        offset: 0,
+        gateway_enabled: true,
+        degraded: true,
+        error: 'audit_unavailable',
+      } satisfies McpsGatewayAuditResponse);
+    expect(service.degraded()).toBe(true);
+
+    // …then the login-page shape: 200 + an HTML body. The degraded
+    // slot must RESET (an ERROR is not a degraded read) so the
+    // degraded banner and the error banner can never coexist (C11).
+    service.loadAudit(0);
+    httpMock
+      .expectOne((r) => r.url === McpsGatewayService.AUDIT_URL)
+      .flush('<!doctype html><html lang="en"><body>login</body></html>');
+
+    expect(service.degraded()).toBe(false);
+    expect(service.degradedSource()).toBeNull();
+    expect(service.error()?.code).toBe('not_json');
+    expect(service.error()?.source).toBe('audit');
+  });
+
+  it('a degraded machines body keeps the LAST roster and raises the flag (latent lane symmetry)', () => {
+    service.loadMachines();
+    httpMock.expectOne(McpsGatewayService.MACHINES_URL).flush(MACHINE_ROSTER);
+    expect(service.machines().length).toBe(1);
+
+    // The machines lane is IN-MEMORY and answers degraded:false today
+    // (truthful symmetry); if it ever degrades, the semantics must
+    // mirror the audit lane — keep the last good roster, raise the
+    // flag, clear the error slot (C11).
+    service.loadMachines();
+    httpMock
+      .expectOne(McpsGatewayService.MACHINES_URL)
+      .flush({
+        machines: [],
+        count: 0,
+        gateway_enabled: true,
+        degraded: true,
+      } satisfies McpsGatewayMachinesResponse);
+
+    expect(service.degraded()).toBe(true);
+    expect(service.degradedSource()).toBe('machines');
+    expect(service.error()).toBeNull();
+    expect(service.machines().length).toBe(1); // the LAST roster stays
+  });
+
   it('sends the defensive Accept: application/json header on every read (the 302 trap)', () => {
     service.refreshAll();
     const requests = [

@@ -34,8 +34,21 @@ from .models import McpGatewayAudit
 class McpGatewayAuditRepository:
     """Writer + readers for the ``mcp_gateway_audit`` ledger."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, read_timeout_ms: int | None = None) -> None:
         self._engine = engine
+        # The server-side half of the hung-DB resource bound (QA C9 /
+        # Reviewer F2 / Tidier M14): the Phase C audit read is bounded
+        # at the REQUEST level by ``asyncio.wait_for`` — but cancelling
+        # the request does NOT cancel the query. Without a server-side
+        # bound, a HUNG query holds its pooled connection forever (pool
+        # exhaustion after a handful of stalled reads). When set
+        # (production wires it from ``GatewayConfig.read_timeout_ms`` —
+        # the SAME millisecond budget as the request bound) and the
+        # dialect is PostgreSQL, ``list_recent`` sets a
+        # TRANSACTION-LOCAL ``statement_timeout``: ``SET LOCAL`` cannot
+        # leak the GUC back into the pool, and SQLite (the unit-test
+        # harness) has no such GUC and is skipped.
+        self._read_timeout_ms = read_timeout_ms
 
     # ── write ────────────────────────────────────────────────────────────
 
@@ -97,6 +110,20 @@ class McpGatewayAuditRepository:
         swallow layer, and it is not this one).
         """
         with Session(self._engine) as session:
+            if (
+                self._read_timeout_ms
+                and self._read_timeout_ms > 0
+                and session.get_bind().dialect.name == "postgresql"
+            ):
+                # The server-side hung-query bound (see ``__init__``).
+                # ``session.connection()`` begins the transaction, so
+                # ``SET LOCAL`` is scoped to THIS read and reverts at
+                # its end — the pooled connection cannot carry the GUC
+                # to the next borrower. ``int()`` coerces, so the SQL
+                # cannot be injected through the knob.
+                session.connection().exec_driver_sql(
+                    f"SET LOCAL statement_timeout = {int(self._read_timeout_ms)}"
+                )
             statement = (
                 select(McpGatewayAudit)
                 .order_by(

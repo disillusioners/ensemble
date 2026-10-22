@@ -23,9 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import http.server
-import json
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -34,7 +32,6 @@ from .conformance_peer import (
     CONFORMANCE_ENV_KEYS,
     POINTING_KEYS,
     STRICT_KEYS,
-    BeginOutcome,
     CenterMutations,
     ConformanceFinding,
     ConformancePeer,
@@ -43,7 +40,6 @@ from .conformance_peer import (
     SessionBeginGap,
     Target,
     check_close_code,
-    check_error_envelope,
     check_hello_result,
     check_upgrade_refused,
     hash_args_python_center,

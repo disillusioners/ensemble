@@ -432,7 +432,8 @@ class TestDegradedPostures:
 
 
 #: The deterministic unreachable DSN (plan §4 construction 3): port 1
-#: refuses the connection instantly — no external service, no flaky
+#: refuses the connection instantly — no external service, no
+#: flaky-port race.
 #:
 #: The earlier ``engine.dispose()`` construction was a FALSE PREMISE
 #: (dispose merely refreshes the pool; the next read succeeds) — this

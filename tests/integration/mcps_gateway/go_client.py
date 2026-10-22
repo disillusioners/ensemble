@@ -370,7 +370,13 @@ def stub_child_pids() -> list[int]:
 def start_client(
     client_bin: Path, config_path: Path, *, log_path: Path
 ) -> GoClient:
-    """Start the client as a foreground subprocess with JSON logs on stderr."""
+    """Start the client as a foreground subprocess with JSON logs on stderr.
+
+    The post-``Popen`` construction is guarded (QA C12): if anything
+    between the spawn and the return raises, the ORPHANED process is
+    killed and reaped before the exception propagates — a wrapper that
+    cannot be built must not leak a running client.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     process = subprocess.Popen(
         [str(client_bin), "-config", str(config_path)],
@@ -379,7 +385,12 @@ def start_client(
         bufsize=1,
         start_new_session=True,
     )
-    return GoClient(process, log_path)
+    try:
+        return GoClient(process, log_path)
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
 
 
 __all__ = [

@@ -1450,9 +1450,18 @@ class InstanceManager:
         # instead of vanishing.
         from .services.mcps_gateway.service import McpGatewayService
 
+        _gateway_config = load_gateway_config()
         self._mcps_gateway_service = McpGatewayService(
-            config=load_gateway_config(),
-            audit_sink=McpGatewayAuditRepository(engine=self._engine),
+            config=_gateway_config,
+            audit_sink=McpGatewayAuditRepository(
+                engine=self._engine,
+                # The server-side hung-query bound (QA C9): same budget
+                # as the request-level read bound, so a HUNG query is
+                # aborted by PostgreSQL and the pooled connection is
+                # RELEASED when ``asyncio.wait_for`` fires. See the
+                # repository's ``__init__`` note.
+                read_timeout_ms=_gateway_config.read_timeout_ms,
+            ),
         )
         # Phase A T6 / T7: register the repo with the loader so the
         # ``load_and_cache_prompt`` hook can lazily look it up. The

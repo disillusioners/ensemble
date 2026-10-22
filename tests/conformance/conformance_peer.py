@@ -44,6 +44,14 @@ SPEC anchors (section numbers = SPEC.md v0.1):
 * §6.8  ``session.end`` acks; the socket stays open; no resumption.
 * §8.3  one active session per machine; the CENTER rejects with
   ``MACHINE_BUSY`` before any frame reaches the machine.
+
+File-size rationale (~1670 lines):
+    The kit's independence contract pins this module to ONE file: it is
+    the machine-side peer, the FINDING machinery and the in-kit
+    reference/mutated centers, all transcribed from the SPEC with no
+    ``daemon.*`` import — a second module would be a second place the
+    transcription can drift from the SPEC, with no shared authority to
+    arbitrate.
 """
 
 from __future__ import annotations
@@ -60,7 +68,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any, Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
@@ -1129,7 +1137,18 @@ class InKitCenter:
         self.token = token
         self.machine_id = machine_id
         self.agent_id = agent_id
-        self.tmp = Path(tmp_dir or tempfile.mkdtemp(prefix="conformance-center-"))
+        # The temp dir holds the SELF-SIGNED CERTIFICATE **AND ITS
+        # PRIVATE KEY** — it must not outlive the center (QA C13: the
+        # old bare ``mkdtemp`` never got removed). When the caller owns
+        # the dir (pytest ``tmp_path``) we leave cleanup to them; when
+        # WE created it, a ``TemporaryDirectory`` reclaims it in
+        # ``stop()``.
+        self._tmp_owner: "tempfile.TemporaryDirectory | None" = None
+        if tmp_dir is not None:
+            self.tmp = Path(tmp_dir)
+        else:
+            self._tmp_owner = tempfile.TemporaryDirectory(prefix="conformance-center-")
+            self.tmp = Path(self._tmp_owner.name)
         self.cert_path, self.key_path = generate_self_signed_cert(self.tmp)
         self.port = 0
         self.url = ""
@@ -1193,6 +1212,12 @@ class InKitCenter:
                 except Exception:  # noqa: BLE001
                     pass
             self._server = None
+        if self._tmp_owner is not None:
+            # The cert + PRIVATE KEY live under ``self.tmp`` — reclaim
+            # the self-created dir (QA C13). Caller-owned dirs (pytest
+            # ``tmp_path``) stay the caller's problem.
+            self._tmp_owner.cleanup()
+            self._tmp_owner = None
 
     # ── the wire side (what the machine sees) ───────────────────────────
 

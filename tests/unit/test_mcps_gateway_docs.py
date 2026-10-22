@@ -856,7 +856,7 @@ def test_doc_pins_the_degraded_contract() -> None:
 
 
 def test_doc_pins_the_audit_projection() -> None:
-    """§1.7 — one helper, two read sites, write path excluded BY DESIGN."""
+    """§1.7 — one helper, ONE read site, write path excluded BY DESIGN."""
     text = _doc_prose()
     assert "audit_row_to_wire" in text, "the doc must name the projection helper."
     assert "AUDIT_WIRE_KEYS" in text, "the doc must name the wire-key contract."
