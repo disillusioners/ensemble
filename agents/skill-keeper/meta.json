@@ -9,6 +9,6 @@
   "system": true,
   "tools": {
     "allow": ["read_file", "list_directory", "glob_files", "grep_files", "self", "help", "knowledge", "dynamic-skill", "skill-evolution", "shared_meta_kv"],
-    "deny": ["bash", "proc", "service", "write_file", "edit_file"]
+    "deny": ["bash", "proc", "service", "write_file", "edit_file", "inner_soul"]
   }
 }
