@@ -175,8 +175,14 @@ CHROME_MAJOR_PIN="${CHROME_MAJOR_PIN:-154}"
 PUPPETEER_CACHE_DIR="$HOME/.cache/puppeteer"
 "$BROWSERS_BIN" install "chrome@$CHROME_MAJOR_PIN" --path "$PUPPETEER_CACHE_DIR"
 
-# 8. Locate the chromium binary
-CHROME_PATH="$(find "$PUPPETEER_CACHE_DIR" -name 'chrome' -type f 2>/dev/null | head -1)"
+# 8. Resolve the chromium binary via the puppeteer browsers CLI — NOT a
+#    find-by-name: on macOS the launcher is `Google Chrome for Testing`
+#    (spaces included), so `find -name 'chrome' -type f` matches nothing.
+#    `browsers list` prints one `chrome@<build> (<platform>) <absolute
+#    executable path>` line per installed build; success = the newest
+#    chrome@154 line resolves to an executable path (on macOS ending in
+#    `Google Chrome for Testing`), which the [ -x ] guard then confirms.
+CHROME_PATH="$("$BROWSERS_BIN" list --path "$PUPPETEER_CACHE_DIR" 2>/dev/null | grep -E "^chrome@${CHROME_MAJOR_PIN}\." | sort -V | tail -1 | sed 's/^[^)]*) //')"
 [ -x "$CHROME_PATH" ] || { echo "HARD_BLOCKER: chromium not found after download"; charter_release_install_lock 2>/dev/null || true; exit 1; }
 ```
 
