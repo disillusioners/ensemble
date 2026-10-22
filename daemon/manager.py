@@ -138,7 +138,11 @@ from .services.mcps_gateway.config import load_gateway_config
 from .repositories.mcps_gateway.repository import McpGatewayAuditRepository
 from .services.skill_metrics_service import SkillMetricsService
 from .services.skill_evolution_service import SkillEvolutionService
-from .services.skill_job_dispatcher import SkillJobDispatcher
+from .services.skill_job_dispatcher import (
+    SKILL_EVOLUTION_KILL_SWITCH_ENV,
+    SkillJobDispatcher,
+    _resolve_evolution_enabled,
+)
 from .services.skill_trigger_engine import SkillTriggerEngine
 from .services.skill_trigger_seed import seed_default_triggers
 from .services.snapshot_executor import SnapshotService, compute_staleness_report
@@ -6489,6 +6493,41 @@ class InstanceManager:
                             "unavailable, falling back to direct "
                             "job_repo.create"
                         )
+                        # (2026-10-22 confinement) The fallback
+                        # bypasses the dispatcher, so the dispatcher's
+                        # own evolution-lane gate cannot run here —
+                        # consult the SAME kill-switch (env +
+                        # configured default) BEFORE minting a Tier-3
+                        # job row directly. A boot/unwired window with
+                        # the lane OFF must not admit skill_evolution
+                        # jobs either (incident 2026-10-21 L2 class).
+                        # Tier-2 analysis rows are NOT gated — parity
+                        # with the dispatcher-side gate.
+                        if job_type == "skill_evolution":
+                            _skill_evo_cfg = getattr(
+                                getattr(self, "config", None),
+                                "skill_evolution",
+                                None,
+                            )
+                            _lane_default = bool(
+                                getattr(
+                                    _skill_evo_cfg,
+                                    "evolution_lane_enabled",
+                                    False,
+                                )
+                            )
+                            if not _resolve_evolution_enabled(_lane_default):
+                                logger.warning(
+                                    "_run_skill_metric_scan: evolution "
+                                    "lane gate OFF (env %s unset-or-off, "
+                                    "configured default=%s) — refusing "
+                                    "direct skill_evolution fallback "
+                                    "create for skill %s",
+                                    SKILL_EVOLUTION_KILL_SWITCH_ENV,
+                                    _lane_default,
+                                    skill_id,
+                                )
+                                continue
                         message = (
                             f"[skill_metric_scan] {action} "
                             f"skill={skill_id} reason={payload['reason']}"
@@ -6647,6 +6686,10 @@ class InstanceManager:
             )
             self._skill_job_dispatcher = None
         else:
+            _skill_evo_cfg = getattr(self.config, "skill_evolution", None)
+            _raw_cooldown = getattr(
+                _skill_evo_cfg, "fix_cooldown_seconds", None
+            )
             self._skill_job_dispatcher = SkillJobDispatcher(
                 job_service=service,
                 queue_repo=queue_repo,
@@ -6658,19 +6701,15 @@ class InstanceManager:
                 # getattr keeps test doubles that hand-roll config
                 # objects working.
                 evolution_lane_enabled=bool(
-                    getattr(
-                        getattr(self.config, "skill_evolution", None),
-                        "evolution_lane_enabled",
-                        False,
-                    )
+                    getattr(_skill_evo_cfg, "evolution_lane_enabled", False)
                 ),
-                fix_cooldown_seconds=int(
-                    getattr(
-                        getattr(self.config, "skill_evolution", None),
-                        "fix_cooldown_seconds",
-                        1800,
-                    )
-                    or 1800
+                # Absent/None falls back to 1800 — an EXPLICIT 0 must
+                # SURVIVE (the config contract: "0 disables the
+                # cooldown"). The former ``or 1800`` truthiness
+                # coercion silently turned a configured 0 back into
+                # 1800.
+                fix_cooldown_seconds=(
+                    int(_raw_cooldown) if _raw_cooldown is not None else 1800
                 ),
             )
             logger.info(

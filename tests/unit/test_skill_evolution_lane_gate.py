@@ -705,3 +705,59 @@ class TestForcedABResolveGuard:
         svc = _make_evolution_service(self._row(2), self._stats())
         with pytest.raises(ValueError, match="not a variant"):
             await svc.check_ab_test_resolution(self.A_GROUP, winner_id="skill-nope")
+
+# =============================================================================
+# 8. Manager wiring (review iteration-1 pins)
+# =============================================================================
+
+
+class TestManagerDispatcherWiring:
+    """``InstanceManager.set_job_queue_service`` must pass the config
+    knobs into the dispatcher faithfully.
+
+    Review finding 2: the former ``or 1800`` truthiness coercion
+    silently turned a configured ``fix_cooldown_seconds=0`` back into
+    1800, violating the config contract ("0 disables the cooldown").
+    Only absent/None falls back to 1800.
+    """
+
+    @staticmethod
+    def _wire(
+        fix_cooldown_seconds: int | None,
+        evolution_lane_enabled: bool = False,
+    ) -> Any:
+        from daemon.config import SkillEvolutionConfig
+        from daemon.manager import InstanceManager
+
+        mgr = SimpleNamespace()
+        mgr.config = SimpleNamespace(
+            skill_evolution=SkillEvolutionConfig(
+                evolution_lane_enabled=evolution_lane_enabled,
+                **(
+                    {}
+                    if fix_cooldown_seconds is None
+                    else {"fix_cooldown_seconds": fix_cooldown_seconds}
+                ),
+            )
+        )
+        svc = MagicMock()
+        svc._queue_repo = MagicMock()
+        InstanceManager.set_job_queue_service(mgr, svc)
+        return mgr._skill_job_dispatcher
+
+    def test_explicit_zero_cooldown_survives_wiring(self):
+        """``fix_cooldown_seconds=0`` must reach the dispatcher as 0
+        (0 disables the cooldown) — NOT be coerced back to 1800."""
+        d = self._wire(0)
+        assert d._fix_cooldown_seconds == 0
+
+    def test_absent_cooldown_falls_back_to_1800(self):
+        """Absent (None) still falls back to the 1800 default."""
+        d = self._wire(None)
+        assert d._fix_cooldown_seconds == 1800
+
+    def test_configured_lane_flag_reaches_dispatcher(self):
+        """The config-declared lane default rides the same wiring."""
+        d = self._wire(600, evolution_lane_enabled=True)
+        assert d._evolution_lane_enabled is True
+        assert d._fix_cooldown_seconds == 600

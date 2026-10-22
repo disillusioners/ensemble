@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -121,6 +122,7 @@ def _make_manager_with_services(
     *,
     trigger_engine: Any = None,
     metrics_service: Any = None,
+    evolution_lane_enabled: bool = False,
 ):
     """Build a manager-shaped object exposing the attributes the
     scan handler reaches into.
@@ -129,7 +131,10 @@ def _make_manager_with_services(
     second engine + dozens of services we don't care about). Instead
     we build a lightweight shim that mirrors the handler's access
     pattern (``self._skill_trigger_engine``, ``self._project_repository``,
-    ``self._job_queue_service``).
+    ``self._job_queue_service``). ``config`` is mirrored too since the
+    2026-10-22 confinement fix: the dispatcher-unavailable fallback
+    consults ``config.skill_evolution.evolution_lane_enabled`` (with
+    the env kill-switch winning) before minting a Tier-3 job row.
     """
     queue_repo = JobQueueRepository(engine)
     job_repo = JobRepository(engine)
@@ -177,6 +182,11 @@ def _make_manager_with_services(
     manager._engine = engine
     manager._project_repository = _ProjectRepoStub()
     manager._job_queue_service = _JobQueueServiceShim()
+    manager.config = SimpleNamespace(
+        skill_evolution=SkillEvolutionConfig(
+            evolution_lane_enabled=evolution_lane_enabled
+        )
+    )
     # Bind the production method onto the shim so the handler runs
     # against the real ``InstanceManager._run_skill_metric_scan``
     # implementation, but with this stub's wiring.
@@ -282,8 +292,11 @@ class TestSkillMetricScanEnqueue:
 
     @pytest.mark.asyncio
     async def test_enqueues_skill_evolution_with_fix_type(
-        self, engine, project_id
+        self, engine, project_id, monkeypatch: pytest.MonkeyPatch
     ):
+        """Fallback-ON path: with the evolution lane enabled (env), the
+        dispatcher-unavailable fallback still mints the FIX row."""
+        monkeypatch.setenv("ENSEMBLE_SKILL_EVOLUTION_ENABLED", "1")
         _make_project(engine, project_id=project_id)
         _make_queue(
             engine,
@@ -320,6 +333,154 @@ class TestSkillMetricScanEnqueue:
         assert job.job_type == "skill_evolution"
         assert job.job_metadata["skill_id"] == "skill-evolve-1"
         assert job.job_metadata["evolution_type"] == "FIX"
+
+    @pytest.mark.asyncio
+    async def test_fallback_refuses_skill_evolution_when_lane_off(
+        self, engine, project_id, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Confinement pin (2026-10-22 review finding 1): the
+        dispatcher-unavailable fallback must NOT mint a Tier-3
+        skill_evolution row while the lane is OFF — a boot/unwired
+        window is exactly the admission class the gate kills. The env
+        kill-switch is left unset AND the shim config carries the
+        default (evolution_lane_enabled=False) → the fallback refuses
+        with no job row.
+        """
+        from daemon.services.skill_job_dispatcher import (
+            SKILL_EVOLUTION_KILL_SWITCH_ENV,
+        )
+
+        monkeypatch.delenv(SKILL_EVOLUTION_KILL_SWITCH_ENV, raising=False)
+        _make_project(engine, project_id=project_id)
+        _make_queue(
+            engine,
+            project_id=project_id,
+            queue_name="system_parallel_queue",
+        )
+
+        trigger = MagicMock()
+        trigger.evaluate_all = AsyncMock(
+            return_value=[
+                {
+                    "skill_id": "skill-evolve-refused",
+                    "skill_name": "EvolveMe",
+                    "trigger_name": "consecutive_failures",
+                    "trigger_action": "evolve_fix",
+                    "reason": "consecutive_failures=5 >= 3",
+                    "stats": {"consecutive_failures": 5},
+                }
+            ]
+        )
+
+        manager, _, job_repo, _, _ = _make_manager_with_services(
+            engine, project_id, trigger_engine=trigger
+        )
+        manager._project_repository.set_projects(
+            [MagicMock(project_id=project_id, status="active")]
+        )
+
+        await manager._run_skill_metric_scan()
+
+        jobs, total = job_repo.list(project_id=project_id, limit=10)
+        assert total == 0, (
+            "the dispatcher-unavailable fallback must not mint a "
+            "skill_evolution row while the lane gate is OFF"
+        )
+
+    @pytest.mark.asyncio
+    async def test_fallback_respects_configured_lane_enabled(
+        self, engine, project_id, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The fallback consults the SAME configured default the
+        dispatcher was constructed with: env unset +
+        ``evolution_lane_enabled=True`` → the FIX row is admitted."""
+        from daemon.services.skill_job_dispatcher import (
+            SKILL_EVOLUTION_KILL_SWITCH_ENV,
+        )
+
+        monkeypatch.delenv(SKILL_EVOLUTION_KILL_SWITCH_ENV, raising=False)
+        _make_project(engine, project_id=project_id)
+        _make_queue(
+            engine,
+            project_id=project_id,
+            queue_name="system_parallel_queue",
+        )
+
+        trigger = MagicMock()
+        trigger.evaluate_all = AsyncMock(
+            return_value=[
+                {
+                    "skill_id": "skill-evolve-config-on",
+                    "skill_name": "EvolveMe",
+                    "trigger_name": "consecutive_failures",
+                    "trigger_action": "evolve_fix",
+                    "reason": "consecutive_failures=5 >= 3",
+                    "stats": {"consecutive_failures": 5},
+                }
+            ]
+        )
+
+        manager, _, job_repo, _, _ = _make_manager_with_services(
+            engine,
+            project_id,
+            trigger_engine=trigger,
+            evolution_lane_enabled=True,
+        )
+        manager._project_repository.set_projects(
+            [MagicMock(project_id=project_id, status="active")]
+        )
+
+        await manager._run_skill_metric_scan()
+
+        jobs, total = job_repo.list(project_id=project_id, limit=10)
+        assert total == 1
+        assert jobs[0].job_type == "skill_evolution"
+
+    @pytest.mark.asyncio
+    async def test_fallback_analysis_not_gated_when_lane_off(
+        self, engine, project_id, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Tier-2 parity: with the lane OFF, the fallback still admits
+        skill_analysis rows (read-only analysis stays live — same
+        scope as the dispatcher-side gate)."""
+        from daemon.services.skill_job_dispatcher import (
+            SKILL_EVOLUTION_KILL_SWITCH_ENV,
+        )
+
+        monkeypatch.delenv(SKILL_EVOLUTION_KILL_SWITCH_ENV, raising=False)
+        _make_project(engine, project_id=project_id)
+        _make_queue(
+            engine,
+            project_id=project_id,
+            queue_name="system_parallel_queue",
+        )
+
+        trigger = MagicMock()
+        trigger.evaluate_all = AsyncMock(
+            return_value=[
+                {
+                    "skill_id": "skill-analyze-off",
+                    "skill_name": "AnalyzeMe",
+                    "trigger_name": "low_completion_rate",
+                    "trigger_action": "analyze",
+                    "reason": "completion_rate=0.20 < 0.3",
+                    "stats": {"completion_rate": 0.2},
+                }
+            ]
+        )
+
+        manager, _, job_repo, _, _ = _make_manager_with_services(
+            engine, project_id, trigger_engine=trigger
+        )
+        manager._project_repository.set_projects(
+            [MagicMock(project_id=project_id, status="active")]
+        )
+
+        await manager._run_skill_metric_scan()
+
+        jobs, total = job_repo.list(project_id=project_id, limit=10)
+        assert total == 1
+        assert jobs[0].job_type == "skill_analysis"
 
     @pytest.mark.asyncio
     async def test_no_flagged_skills_no_jobs(
