@@ -735,6 +735,19 @@ async def lifespan(app: FastAPI):
 
     capture_boot_epoch(manager.engine)
 
+    # ── Hard-reboot recovery (G2): reset message_queue rows stranded in
+    # 'processing' by the pre-reboot process. Placement: AFTER
+    # capture_boot_epoch (the predicate is boot-epoch-relative, so the
+    # epoch must exist first) and BEFORE setup_worker_pool (no claimer
+    # may start against the stranded rows). Reset-only — never
+    # re-dispatches. Three-layer never-wedge: per-row + per-pass inside
+    # the service, lifespan-level here.
+    try:
+        from daemon.services.message_queue_boot_recovery import recover_stuck_messages_on_startup
+        recover_stuck_messages_on_startup(manager._queue_repository, get_boot_epoch())
+    except Exception as mq_boot_exc:  # noqa: BLE001
+        logger.warning("Message-queue boot recovery failed (never wedges boot): %s", mq_boot_exc)
+
     # Phase-2 critical-notes boot-state probe (B2 fix): the probe needs
     # the LIVE engine, which only exists after manager.initialize().
     # Injected here rather than inside load_config — config load runs
@@ -965,6 +978,15 @@ async def lifespan(app: FastAPI):
     from daemon.repositories.secrets.models import Secret, SecretAuditEvent
     Secret.metadata.create_all(manager.engine)
     SecretAuditEvent.metadata.create_all(manager.engine)
+
+    # nest-ops (2026-10-21) — ``instance_ops_audit`` is the single new
+    # table that backs the ``instance_ops`` privileged tool category
+    # (the audit ledger for the 6 act tools). Brand-new table — the
+    # same create_all precedent as the secrets pair above; the .sql
+    # migration handles SQLite and the model handles PG. No
+    # ``_ensure_postgres_columns`` mirror needed.
+    from daemon.repositories.instance_ops.models import InstanceOpsAudit
+    InstanceOpsAudit.metadata.create_all(manager.engine)
 
     # agent-secrets P1 — ``SecretService`` is constructed in
     # ``InstanceManager.__init__`` alongside
@@ -1635,9 +1657,27 @@ async def lifespan(app: FastAPI):
     mission_strand_heal_interval = (
         config.services.mission_strand_heal_interval_seconds
     )
+    # Running-zombie strand knobs (2026-10-21) — the third strand
+    # family member (a mission root stuck in ``running`` whose
+    # completion event was lost). Read from ``config.services``
+    # (SERVICES_ env prefix). The healer coerces the numeric knobs
+    # defensively (a non-numeric value falls back to the module
+    # default), so the wiring stays a direct read — same shape as the
+    # interval above.
     mission_strand_healer = MissionStrandHealer(
         manager=manager,
         interval_seconds=mission_strand_heal_interval,
+        running_zombie_enabled=(
+            config.services.mission_strand_heal_running_zombie_enabled
+        ),
+        running_zombie_age_bound_seconds=(
+            config.services
+            .mission_strand_heal_running_zombie_age_bound_seconds
+        ),
+        running_zombie_batch_cap=(
+            config.services
+            .mission_strand_heal_running_zombie_batch_cap
+        ),
     )
     mission_strand_healer.start()
     manager._mission_strand_healer = mission_strand_healer

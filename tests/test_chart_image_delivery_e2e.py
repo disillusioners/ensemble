@@ -1435,7 +1435,16 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     # to this file still trips the tripwire.
     "daemon/sources/adapters/slack/adapter.py": "476ba0b5a17a297f652125ab9060af125ba3955d4b71e324e3de3bf177e1ef1e",
     "daemon/sources/adapters/telegram.py": "7e08882fc2fcc4291bed994ab992cb5afdc7a232a1444839f42da86fbfae063c",
-    "daemon/constants.py": "df41a67f65428b4d9ef39878602657e60108e541a1f9cacde04c006cd2fc4970",
+    # daemon/constants.py re-pinned 2026-10-21 (running-zombie fix — V-1 from
+    # tester e078bd474): the LEADER-ADJUDICATED additive change that introduced
+    # NON_TERMINAL_TASK_STATUSES (the SSOT the guard's member-alive companion
+    # leg consumes; councils 7e1629d5 + 61ad8053) edited this file without
+    # re-pinning the seal baseline, so 1-of-35 tripwire rows went stale. The
+    # value is recomputed from the real file bytes; the delta is EXACTLY the
+    # additive frozenset + its comment block and nothing else. Only this ONE
+    # row changed; the other 34 keep their values. The re-pinned sha is
+    # IDENTICAL at the staged v0.26.4 tree (6df7d8994) and at origin/latest.
+    "daemon/constants.py": "bd0545bd26bd388edd0c4045856cb18a2067a1384093c0773b1f45e005ed5835",
     # Phase C — 20 agent canonical-home files
     "agents/approver/rule.md": "c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae",
     "agents/approver[v2]/rule.md": "c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae",

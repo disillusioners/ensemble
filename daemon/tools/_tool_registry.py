@@ -88,6 +88,25 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # explicit ``tools.allow: ["self-alarm"]`` entry (ari only) is the
     # only access path.
     "self_alarm",
+    # nest-ops (2026-10-21) — the instance fleet surfaces for the
+    # maintenancer. Four read tools (instance_list / instance_get /
+    # instance_health / fleet_capacity_summary, created by the
+    # create_instance_read_tools() factory in
+    # daemon/tools/instance_read.py) and six act tools
+    # (instance_terminate / instance_reclaim / instance_nudge /
+    # instance_mark / instance_answer / instance_dismiss, created by
+    # the create_instance_ops_tools() factory in
+    # daemon/tools/instance_ops.py).
+    "instance_list",
+    "instance_get",
+    "instance_health",
+    "fleet_capacity_summary",
+    "instance_terminate",
+    "instance_reclaim",
+    "instance_nudge",
+    "instance_mark",
+    "instance_answer",
+    "instance_dismiss",
     # ari-tools Phase 3 (the live-views surface) — the view_write tool is
     # created by the create_view_write_tools() factory
     # (daemon/tools/view_write.py). The ``view-write`` category is
@@ -262,10 +281,10 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # is still exact-pinned below (now a quartet: ``ens-env`` joined per
 # the W4 leader decision, reviewer council 2026-10-02).
 #
-# SAME-PR RULE (D18/A14): the set is SEVEN-pin pinned by exact-equality
-# asserts (five inline ``frozenset({...})`` literals + two
+# SAME-PR RULE (D18/A14): the set is EIGHT-pin pinned by exact-equality
+# asserts (six inline ``frozenset({...})`` literals + two
 # ``EXPECTED_PRIVILEGED_SET`` constants). Adding or removing a category
-# REQUIRES updating ALL SEVEN pins in the same commit:
+# REQUIRES updating ALL EIGHT pins in the same commit:
 # ``tests/unit/tools/test_upgrade_registration.py``,
 # ``tests/unit/tools/test_attestation_registration.py``,
 # ``tests/integration/test_maintenancer_spawn_resolves_tools.py``,
@@ -278,9 +297,16 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # ``tests/unit/test_board_registration.py`` (the ari-tools Phase 1
 # pin — added 2026-10-20) and
 # ``tests/unit/test_self_alarm_registration.py`` (the ari-tools Phase 2
-# pin — added 2026-10-20). The two phase-local pins ALSO carry a
-# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion. Silent
-# additions and silent removals (fail-open regressions) both trip the
+# pin — added 2026-10-20) and
+# ``tests/unit/test_instance_ops_registration.py`` (the nest-ops pin —
+# added 2026-10-21; it pins BOTH categories plus the registration
+# wiring). The two phase-local pins and the nest-ops pin ALSO carry a
+# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion (14 today).
+# Derive the authoritative pin set by GREPPING THE TREE — do NOT trust
+# this count:
+#   grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/ --include=*.py
+#   grep -rn "len(PRIVILEGED_TOOL_CATEGORIES)" tests/ --include=*.py
+# Silent additions and silent removals (fail-open regressions) both trip the
 # pins.
 #
 # Derive the authoritative pin set by GREPPING THE TREE — do NOT trust
@@ -470,10 +496,33 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # runtime gate (the shared ``daemon/tools/views_auth.py``
     # helper — the SAME helper ``view_write`` uses, with a DIFFERENT gate
     # set). Both gates are required; neither substitutes for the other.
-    # SAME-PR pin updates at the SEVEN files listed in the SAME-PR RULE
+    # SAME-PR pin updates at the EIGHT files listed in the SAME-PR RULE
     # comment above are mandatory (this entry ships in the SAME commit as
     # those insertions — the set must never be red between two commits).
     "board-link",
+    # nest-ops (2026-10-21, D-13): TWO single-owner categories for the
+    # maintenancer — ``instance_read`` (#13: the four fleet reads) and
+    # ``instance_ops`` (#14: the six audited acts). Why BOTH are
+    # privileged, and why the split is structural rather than prose:
+    #   * the ACT surface is DESTRUCTIVE (terminate takes a whole
+    #     cascade tree) — the empty-allow inherit universe must never
+    #     auto-grant it, and the per-tool in-body agent gate is a
+    #     SECOND layer, not a substitute for the category strip;
+    #   * the READ surface is fleet-wide telemetry (every instance in
+    #     the daemon, cross-project by design) — a default-granted
+    #     census would leak the whole fleet's shape to the empty-allow
+    #     universe;
+    #   * two categories keep read and act structurally separable: a
+    #     future read-only grant to another agent is a one-line allow
+    #     change on a category that structurally CANNOT carry acts.
+    # Both name the SAME single owner (maintenancer). Per-tool allow
+    # is REJECTED (D-13): a literal tool name in an allow list bypasses
+    # the category gate outright. SAME-PR pin updates at the EIGHT
+    # files listed in the SAME-PR RULE comment above are mandatory
+    # (this entry ships in the SAME commit as those insertions — the
+    # set must never be red between two commits).
+    "instance_read",
+    "instance_ops",
 })
 
 
@@ -846,6 +895,13 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # PRIVILEGED_TOOL_CATEGORIES): the board is global and shared, so
     # the empty-allow inherit universe must NOT auto-grant it. Placed
     # near "job" — the board is work-adjacent (it links job ids).
+    # nest-ops (2026-10-21): the two maintenancer fleet categories. The
+    # values MUST be ``daemon.tools.*`` paths — the AST scanner resolves
+    # a CATEGORY_MODULES value as ``daemon/tools/<parts[2:]>.py``, so a
+    # ``daemon.services.*`` value is NEVER discovered and the
+    # exact-equality drift pin fails at boot.
+    "instance_read": "daemon.tools.instance_read",
+    "instance_ops": "daemon.tools.instance_ops",
     "board": "daemon.tools.board_tools",
     # ari-tools Phase 2 (the self-alarm wrapper) — the alarm/timer
     # category. PRIVILEGED category (entry #10 of
@@ -1100,6 +1156,24 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "attest_completion",
     "await_mission",
     "bash",
+    # nest-ops (2026-10-21): the instance fleet surfaces — created by
+    # the create_instance_read_tools() (daemon/tools/instance_read.py)
+    # and create_instance_ops_tools() (daemon/tools/instance_ops.py)
+    # factories. Factory-built (not import-time registered), so they
+    # belong in DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. BOTH
+    # categories are PRIVILEGED (#13 / #14) — opt-in only, never
+    # default-granted; the maintenancer-only runtime gate lives in the
+    # tool bodies.
+    "instance_list",
+    "instance_get",
+    "instance_health",
+    "fleet_capacity_summary",
+    "instance_terminate",
+    "instance_reclaim",
+    "instance_nudge",
+    "instance_mark",
+    "instance_answer",
+    "instance_dismiss",
     # ari-tools Phase 1 (the Workbook): board tools — created by the
     # create_board_tools() factory (daemon/tools/board_tools.py).
     # Factory-built (not import-time registered), so they belong in

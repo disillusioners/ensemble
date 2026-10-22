@@ -422,6 +422,55 @@ class SQLModelMessageQueueRepository:
             )
             return list(session.exec(stmt))
     
+    def find_stuck_messages_before(self, boot_epoch: datetime) -> list[MessageQueue]:
+        """Select messages stranded in 'processing' before the boot epoch.
+
+        Boot-epoch-relative (hard-reboot recovery). The age predicate of
+        :meth:`find_stuck_messages` is boot-INVALID: at boot every
+        'processing' row predates the boot by construction, so age is the
+        wrong axis — the COMMON hard-kill shape (a row claimed seconds
+        before the power loss) is missed by any age threshold. This
+        selector uses the boot epoch as the axis instead.
+
+        Single-table by design: ``message_queue`` alone, no joins. The
+        skip-guards live in :meth:`reset_stuck_message_to_ready` so they
+        are evaluated atomically with the write. ``boot_epoch`` is the
+        process boot epoch in naive-UTC digits — the same frame as the
+        stored ``last_activity_at`` digits (``daemon/services/boot_epoch.py``).
+        """
+        with Session(self.engine) as session:
+            stmt = select(MessageQueue).where(
+                MessageQueue.status == MessageStatus.PROCESSING.value,
+                (MessageQueue.last_activity_at.is_(None)) | (MessageQueue.last_activity_at < boot_epoch))
+            return list(session.exec(stmt))
+
+    def reset_stuck_message_to_ready(self, message_id: str) -> bool:
+        """Reset one stranded 'processing' row back to 'ready' (guarded CAS).
+
+        Per-row CAS in the shape of :meth:`dequeue`: the status guard
+        makes the UPDATE a no-op when a concurrent actor already moved
+        the row, so a reboot-loop can never double-reset. Returns True
+        when the row was actually flipped.
+
+        The two skip-guards ride the same statement, so a row is never
+        reset if it must not be: rows whose instance is TERMINAL (revive
+        hazard — a later revive would deliver a stale row) and rows
+        backed by a RUNNING/PAUSED task (AutoContinue owns those and
+        completes the message row itself). They correlate via
+        ``instances.instance_id`` and ``task.message_id`` — never the
+        dead ``message_queue.processing_task_id``. This pass does NOT
+        ride RDRS: no ``report_injection`` join.
+        """
+        with self.engine.begin() as conn:
+            res = conn.execute(text(
+                f"UPDATE message_queue SET status = '{MessageStatus.READY.value}', processing_started_at = NULL WHERE message_id = :mid"
+                f" AND status = '{MessageStatus.PROCESSING.value}'"
+                " AND NOT EXISTS (SELECT 1 FROM instances i WHERE i.instance_id = message_queue.instance_id"
+                f" AND i.status IN ({','.join(repr(s) for s in sorted(TERMINAL_INSTANCE_STATUSES))}))"
+                " AND NOT EXISTS (SELECT 1 FROM task t WHERE t.message_id = message_queue.message_id"
+                " AND t.status IN ('running','paused'))"), {"mid": message_id})
+            return res.rowcount == 1
+
     def find_retry_ready_messages(self) -> list[MessageQueue]:
         """Find all retry-ready messages that can be moved to ready.
         

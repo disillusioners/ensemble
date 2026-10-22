@@ -554,7 +554,7 @@ class TestG3_PausedStragglerAtHealer:
     parent is NOT never-dispatched-shaped (status != idle, the
     spawn-then-message ritual has progressed past the never-
     dispatched window) — the safety-bound leg
-    (``mission_strand_healer.py:360-371``) aborts the heal before
+    (``mission_strand_healer.py:658-673``) aborts the heal before
     any termination runs. The PAUSED row stays untouched and the
     root stays at WAITING_CHILDREN."""
 
@@ -775,7 +775,7 @@ class TestG5_AlreadyTerminalRoot:
     """Scenario-9: a root that is ALREADY-TERMINAL when the healer
     looks (e.g. terminalized by an operator mid-cycle) is a
     production no-op — the wedge-posture check
-    (``mission_strand_healer.py:254-262``) returns
+    (``mission_strand_healer.py:540-545``) returns
     ``healed=False`` immediately without touching any row."""
 
     @pytest.mark.asyncio
@@ -960,7 +960,7 @@ class TestG6_DoubleHealIdempotency:
 
 class TestG8_PreStampEvalFailOpen:
     """G8 fidelity-audit pin: the pre-stamp liveness eval
-    (``child_reports.py:2613-2650``, C3 contract) is INTENTIONALLY
+    (``child_reports.py:2710-2775``, C3 contract) is INTENTIONALLY
     fail-OPEN — any exception logs a WARNING and the code proceeds
     to the sync stamp. The at-least-once terminal-delivery
     guarantee outranks the churn-avoidance optimization. This is the
@@ -1026,7 +1026,7 @@ class TestG8_PreStampEvalFailOpen:
         #    Root reached COMPLETED — the stamp was NOT skipped.
         row = _get_instance_row(gap_harness.engine, ROOT)
         assert row.status == InstanceStatus.COMPLETED.value, (
-            "FAIL-OPEN contract (C3, child_reports.py:2644-2650): "
+            "FAIL-OPEN contract (C3, child_reports.py:2769-2775): "
             "the pre-stamp eval raise must NOT skip the sync stamp "
             f"(got root status={row.status!r})"
         )
@@ -1078,7 +1078,7 @@ class TestG7_PendingTaskAbortsHeal:
     the root is the (in-flight turn) carrier (an LLM is currently
     processing this work item); the wedge will close via the natural
     path on completion, NOT via the healer. The healer must abort
-    (``mission_strand_healer.py:302-309``) without driving."""
+    (``mission_strand_healer.py:580-589``) without driving."""
 
     @pytest.mark.asyncio
     async def test_pending_task_row_aborts_heal(
