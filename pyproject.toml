@@ -90,8 +90,9 @@ markers = [
     "postgres: PostgreSQL-only tests that require a live PostgreSQL server (run with `pytest -m postgres`)",
     "no_xdist: tests that cannot run under pytest-xdist parallelism (skipped automatically when PYTEST_XDIST_WORKER is set; run them serially with `pytest -m no_xdist`)",
     "slow: opt-in tests that download large artifacts (~200MB) or take minutes to run; not executed by default",
+    "conformance: the center-agnostic remote-hands conformance kit (tests/conformance/ — point it at any center, or let it self-host its in-kit reference center; run via scripts/conformance/run.sh)",
 ]
-addopts = "-m 'not integration and not postgres and not slow'"
+addopts = "-m 'not integration and not postgres and not slow and not conformance'"
 asyncio_mode = "auto"
 timeout = 30
 timeout_method = "thread"
