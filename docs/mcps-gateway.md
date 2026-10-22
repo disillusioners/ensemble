@@ -149,6 +149,40 @@ refuse with a typed error, and the service object still exists (the manager
 mounts it) so the tools can answer with a typed refusal instead of
 vanishing. Full activation procedure: §2.
 
+### 1.7 The audit projection (one helper, ONE read site)
+
+The wire shape of an audit row is produced by **one** helper —
+`audit_row_to_wire(row)` next to `AuditRecord` in
+`daemon/services/mcps_gateway/audit.py` — and installed at exactly **ONE
+read site**: the wire router (`daemon/routers/mcps_gateway_read.py` —
+the helper's single production call, pinned by a source census in
+`tests/unit/test_mcps_gateway_audit_projection.py`). The in-memory
+sink's read (`MemoryAuditSink.list_recent`) deliberately returns the
+STORAGE shape — the DB row's keys minus `id` — and never projects; the
+projection happens at the router only. The contract
+is `AUDIT_WIRE_KEYS`: ids `""` → `None`, text `None` → `""`, and the
+storage-only members `id` and `detail` are **never emitted**.
+
+The **write path is EXCLUDED by design, not as a gap**: the repository's
+write projection persists `id` (the primary key) and `detail` (the
+center-authored classification) — a wire projection at the write site
+would drop both, and the stored row is separately pinned. Normalisation
+happens at exactly **ONE** point (the router), so the helper is
+shape-agnostic AND idempotent: it accepts `created_at` OR `timestamp`,
+never synthesizes "now", and feeding an already-projected dict is a
+no-op.
+
+Two real divergences the helper absorbs (history worth keeping):
+
+* **id-absence** — the in-memory record has no `id` member while the
+  DB row does; the projection drops it on both sides.
+* **empty-vs-synthetic stamp** — the memory sink exposes `""` verbatim
+  when the producer left `created_at` unset, while the DB WRITE path
+  substitutes `now_utc_iso()` at write time ⇒ the same logical record
+  reads back differently per sink (empty → wire `None` from memory; a
+  real stamp from the DB). The projection maps both to the same wire
+  shape; the divergence is then only in the VALUE, as documented.
+
 ---
 
 ## 2. Enablement & activation
@@ -158,12 +192,17 @@ things to come alive:
 
 1. **Enable the env var** — set `MCPS_GATEWAY_ENABLED=true` (plus at least
    one enrollment token, §2.3) in the daemon's environment.
-2. **Restart the daemon.** Env changes are NOT hot-reloaded for route
-   registration — the route table is composed once at boot inside
-   `create_app` (`daemon/api.py`), so **activation requires a daemon
-   restart**. The same restart applies to every other knob in §2.2: the
-   knobs are re-read at call time by the running service, but the ROUTE and
-   the boot-time config log line are composed only at startup.
+2. **Restart the daemon.** Env changes are NOT hot-reloaded — the route
+   table is composed once at boot inside `create_app` (`daemon/api.py`),
+   and the running service holds a **boot-time config snapshot**
+   (`McpGatewayService.__init__` takes `load_gateway_config()` once;
+   `manager.__init__` builds it), so **activation requires a daemon
+   restart**. That is also true for every OTHER knob in §2.2: the values
+   are read when the service is CONSTRUCTED, not at call time — editing
+   an env var on a running daemon changes nothing until the restart. (The
+   `load_gateway_config()` function itself reads the environment each
+   time it is CALLED, which is why a unit test that builds a fresh
+   service with `monkeypatch.setenv` sees the new value.)
 
 ### 2.1 What "off" means concretely
 
@@ -181,8 +220,12 @@ things to come alive:
 
 ### 2.2 The knobs
 
-Every knob lives under the `MCPS_GATEWAY_` prefix and is read at CALL time
-(never at import time), so a test can flip one with `monkeypatch.setenv`.
+Every knob lives under the `MCPS_GATEWAY_` prefix and is loaded by
+`load_gateway_config()` — which reads the environment when it is CALLED
+(never at import time). The RUNNING service keeps the snapshot taken at
+construction, so an operator flips a knob with **edit + daemon restart**
+(§2); a unit test flips one with `monkeypatch.setenv` because it builds a
+fresh service afterwards.
 
 | Knob | Default | Unit | Meaning |
 |---|---|---|---|
@@ -190,10 +233,11 @@ Every knob lives under the `MCPS_GATEWAY_` prefix and is read at CALL time
 | `MCPS_GATEWAY_PATH` | `/api/mcps-gateway/ws` | path | the route path (a path outside `/api` mounts at the app level) |
 | `MCPS_GATEWAY_TOKENS` | *(empty)* | comma-separated list | enrollment tokens — **empty means nobody may enroll** (fail closed) |
 | `MCPS_GATEWAY_ALLOWED_MACHINES` | *(empty)* | comma-separated list | per-machine allowlist of `machine_id`s — empty = every authenticated machine is enrolled |
-| `MCPS_GATEWAY_HEARTBEAT_INTERVAL_MS` | `15000` | ms | §3.3 heartbeat interval the center advertises — the CLIENT sends a heartbeat on this cadence (it adopts the center's value) |
+| `MCPS_GATEWAY_HEARTBEAT_INTERVAL_MS` | `15000` | ms | §3.3 heartbeat interval the center advertises — the CLIENT sends a heartbeat on this cadence (it adopts the center's value; the shipped client validates the triplet — `heartbeat_timeout_ms >= 3 x interval`, `client_dead_detect_ms >= 3 x interval` — the same rule the reference client enforces at `internal/remote/protocol.go:266-278`) |
 | `MCPS_GATEWAY_HEARTBEAT_TIMEOUT_MS` | `45000` | ms | §3.3 the SERVER-side client-silence kill threshold — after this much heartbeat silence from the machine, the center kills the session and closes the socket; presence also flips to `stale` past it |
 | `MCPS_GATEWAY_CLIENT_DEAD_DETECT_MS` | `45000` | ms | §3.3 how long the CLIENT waits for evidence the server is alive — **advisory to the client and enforced client-side**; the center advertises it, the client's own death detector uses it |
 | `MCPS_GATEWAY_COMMAND_TIMEOUT_MS` | `30000` | ms | the center's own bound on ONE `tools/call` / `session.begin` / `session.end` wait — past it the answer is `TOOL_TIMEOUT` |
+| `MCPS_GATEWAY_READ_TIMEOUT_MS` | `5000` | ms | the OPERATOR READ SURFACE's bound on one DB read (§8.5) — a read that exceeds it answers the degraded body (200 + `degraded:true`), never a hung request |
 | `MCPS_GATEWAY_SESSION_TTL_MS` | `3600000` | ms | §3.3 session TTL ceiling (the center enforces it) |
 | `MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS` | `300000` | ms | §3.3 session idle timeout (the center enforces it) |
 | `MCPS_GATEWAY_PING_INTERVAL_MS` | `200` | ms | the WebSocket liveness-ping cadence — the default matches the protocol authority's reference center (it pings at 200 ms); the knob exists so operators can lengthen it |
@@ -513,6 +557,32 @@ args-hash / outcome** into the append-only `mcp_gateway_audit` table
 * `MCPS_GATEWAY_AUDIT_ENABLED=false` skips the write entirely (no row, no
   attempt).
 
+### 4.4 The audit ledger's limits (the §8.4 argparse divergence)
+
+SPEC §8.4 says the arguments are "**hashed**, not stored verbatim" — and
+names **neither an algorithm nor a canonicalisation**. The two
+implementations chose differently, and the consequences are real:
+
+* **The two audit heads are NOT JOINABLE** for arguments containing
+  non-ASCII text, `<` / `>` / `&`, or floats. The center canonicalises
+  with Python `json.dumps(sort_keys=True, separators=(",", ":"),
+  default=str)` — which escapes non-ASCII (`ensure_ascii=True` by
+  default) and folds non-JSON types with `str()` — while the shipped
+  client re-encodes with Go's `json.Marshal`, which HTML-escapes
+  `<`/`>`/`&` and prints floats in shortest-roundtrip form. The same
+  logical call therefore produces two different hashes, one per ledger.
+* **Go's float64 normalisation COLLIDES** `{"n": 1}` and `{"n": 1.0}`
+  into one hash (Go decodes every number as float64) — a documented
+  consequence of `json.Marshal`, not a defect.
+* **The center's own documented collisions**: `None` and `{}` can fold
+  to the same canonical text under `default=str` for non-JSON types, and
+  `default=str` folds decimals/datetimes to their `str()` forms.
+* **Recommendation (carried in the SPEC §10 pointer, never asserted as
+  Go-side hash equality)**: amend §8.4 to normatively pin **JCS (RFC
+  8785)** — or minimally *sorted keys + `ensure_ascii=false` +
+  shortest-roundtrip numbers* — so an args hash is comparable across
+  implementations.
+
 ---
 
 ## 5. Protocol conformance summary
@@ -535,7 +605,7 @@ Reference: `mcps_client/SPEC.md` v0.1. The shipped reference client
 | §6.8 no resumption / heartbeat loss kills | implemented — a session belongs to its connection; reconnect = new session |
 | §7 MCP fidelity | implemented for `tools/call` — the params object is forwarded unwrapped and the result returned raw |
 | §8 center obligations (roster/presence/exclusivity/audit) | **RECOMMENDED, not wire-protocol conformance** — SPEC §8 says so itself. This center implements all four anyway: roster + presence (§8.1), one-agent-one-remote (§8.2), one-session-per-machine with `MACHINE_BUSY` reject (§8.3), and the who/machine/tool/args-hash audit (§8.4) |
-| §10 conformance kit | does not exist yet (neither side) |
+| §10 conformance kit | **EXISTS (Phase D1)** — `scripts/conformance/run.sh` + `tests/conformance/` in THIS repo: an independent, center-agnostic pack mapped 1:1 onto the §10 areas, pointable at any center with a URL + a machine (five pointing keys, §10 below) |
 
 **Deliberately NOT implemented in v0.1:** the MCP notification relay. The
 `notifications/*` server→client relay is NOT implemented in v0.1 — the
@@ -573,6 +643,16 @@ Phase-A interpretations document.
   `tests/unit/test_mcps_gateway_service.py` (and the doc-pin suite holds
   the operator-facing literals) — so default runs still catch string
   drift even without the integration lane.
+* **The CONFORMANCE KIT** is a third, independent lane:
+  `scripts/conformance/run.sh` shells to
+  `uv run python -m pytest tests/conformance -p no:cacheprovider
+  --confcutdir=tests/conformance -m conformance`. It is marker-gated
+  (`conformance`, deselected by the default addopts) and it imports
+  NOTHING from `daemon.*` — every frame is a SPEC transcription. Run
+  with no env it SELF-HOSTS an in-kit reference center (a
+  self-consistency run); point it at any center with the five pointing
+  keys (§10.3). Its mutated-center selftest proves it can go RED for
+  the right reason.
 
 ---
 
@@ -587,9 +667,11 @@ Phase-A interpretations document.
 | DB-persisted presence/roster | backlog | the roster and sessions are in-memory; a daemon restart empties them and machines re-appear on their next upgrade. Both sit behind interfaces (`MachineStore`, `AuditSink`) for exactly this swap |
 | Audit read surface | shipped (Phase C) | `GET /api/mcps-gateway/audit` — the read-only tail of the ledger, newest first, paginated (§8). The repository method `McpGatewayAuditRepository.list_recent(limit, offset)` is the seam underneath it |
 | §6.7 frame-size enforcement | backlog | constants defined, no active center-side enforcement |
-| §10 conformance kit | future | does not exist on either side |
+| §10 conformance kit | **shipped (Phase D1)** | `scripts/conformance/` + `tests/conformance/` — see §10.3. Cross-center behavioural proof still awaits a SECOND real center (the protocol repo's fakecenter is Go-`internal/`, library-only); the mutated-center control + the real-pair gate are today's evidence |
 | **Phase C** | shipped | the read surface SHIPPED (§8 — the three OAuth-lane GET endpoints) and the operator management page SHIPPED (§9 — the read-only machines / sessions / audit page). The page is read-only in v1; the write controls arrive with the v0.2 per-tool ACL work (§9.2) |
-| **Phase D** | later | yeda-agent-fleet second-center interop per SPEC §1 |
+| **Phase D1** | **shipped** | the interop harness + the real-pair gate + the degraded signal (§8.5) + the audit projection (§1.7) + the conformance kit (§10.3). What remains for ACTIVATION — and the TLS-terminator blocker — is §11 |
+| **TLS terminator** | **BLOCKING activation — owner TBD (user decision), date open** | the daemon ships NO TLS knob; the shipped client refuses `ws://`. See §11 |
+| `daemon/api.py` double `create_app()` (F-D2) | reported, out of scope | `daemon/api.py` calls `create_app()` TWICE at module level (two `app = create_app()` lines), so one import builds two apps/managers/pools. Reported by the Phase-D1 lane; NOT fixed in this phase (outside its contract) — a boot-cost defect, not a correctness one |
 
 ---
 
@@ -770,8 +852,78 @@ Field notes:
 | a credential without the `mcp:read` scope | **403** (`SCOPE_INSUFFICIENT`) |
 | the gateway service is not wired on `app.state` | **503** (`gateway_unavailable`) — a boot-order defect, not a silent empty list |
 
+**Ordering (D3b, stated honestly).** The audit tail is ordered
+`created_at DESC, id DESC`. The secondary key buys **deterministic,
+stable pagination**: two rows stamped in the same instant cannot swap
+places between page reads, so an offset walk cannot skip or duplicate a
+row at a tie boundary. It does NOT buy chronological order within a
+same-stamp tie — `id` is a **uuid4** TEXT column, so the tie-break order
+is arbitrary-but-stable, not "newest first". (The in-memory sink has no
+`id` member and Python's sort is stable, so ties there keep insertion
+order — a documented divergence, not a bug to chase.)
+
 The pagination bounds follow the read-only snapshots family
 (`limit` default 50, max 200; `offset` default 0).
+
+### 8.5 The degraded contract (200 + `degraded: true`)
+
+Every read response carries a `degraded` boolean (all three envelopes
+share the `GatewayReadEnvelope` base — truthful symmetry), and:
+`gateway_enabled` is the FEATURE flag; `degraded` is the DATA-READ health
+of the request you made. **`degraded` ≠ `gateway_enabled`**: a disabled
+gateway is not a degraded read (empty lists + `gateway_enabled: false`),
+and a degraded read can happen with the gateway fully on.
+
+Only **`/audit` can actually set `degraded: true`** today. Machines and
+sessions are served from the IN-MEMORY lanes (roster + session manager),
+which cannot fail independently of the process itself; their `degraded`
+is permanently `false`. That is truthful symmetry, not a gap: the flag
+is carried everywhere so the FE contract never changes per lane, and it
+is set only where a real failure mode exists.
+
+The degraded body:
+
+```json
+{
+  "audit": [], "count": 0, "limit": 50, "offset": 0,
+  "gateway_enabled": true, "degraded": true,
+  "error": "audit_unavailable"
+}
+```
+
+* **Why 200 and not 503**: in this codebase a 503 means "surface not
+  wired" (a boot-order defect the FE maps to `gateway_unavailable`); a DB
+  outage would be mislabelled. The house precedent for partial reads is
+  200 + flag.
+* **The bound**: the read is wrapped in
+  `asyncio.wait_for(..., MCPS_GATEWAY_READ_TIMEOUT_MS)` (default 5000).
+  A HUNG database therefore answers the degraded body within the bound
+  instead of hanging the request; a plain exception (engine down) takes
+  the same classification path. The classification lives in the SERVICE
+  (`audit_tail` returns `(rows, degraded, reason)`); the repository
+  RAISES (it no longer swallows to `[]`), so the contract cannot
+  silently re-absorb the failure. The bound is **two-layered**: the
+  request-level `asyncio.wait_for` cancels the REQUEST, not the query —
+  so the audit read ALSO carries a SERVER-SIDE `statement_timeout`
+  scoped to that one query (the same millisecond budget, set
+  transaction-local by the repository; PostgreSQL only). A HUNG query
+  is aborted by the server itself, which RELEASES the pooled
+  connection instead of leaking it toward pool exhaustion. FE back-off
+  while degraded is deliberately NOT built (BACKLOG).
+* **A silent audit lane is NOT an outage — and in production the sink
+  is ALWAYS the DB**: the manager mounts `McpGatewayAuditRepository`
+  UNCONDITIONALLY (`daemon/manager.py` builds the service with the
+  DB-backed sink at construction; there is no runtime sink swap), so
+  the read always has a ledger. `MCPS_GATEWAY_AUDIT_ENABLED=false`
+  mutes the **write** only (the service's `_audit` returns before
+  recording) — the read still answers the existing rows with
+  `degraded: false`. A sink with NO read side (`NullAuditSink`, the
+  default when a direct constructor passes no sink — the unit-test
+  shape) answers `degraded: false` with an empty list: a write-only
+  sink is not an outage.
+* **The FE rendering**: a degraded audit read draws a DISTINCT banner
+  (not the error banner) and KEEPS the last page on screen; the
+  machines/sessions tables keep rendering (§9.5).
 
 ---
 
@@ -853,16 +1005,204 @@ enabled iff `offset > 0`**.
 |---|---|
 | The gateway is off (`gateway_enabled: false`) | a banner naming the enable steps and pointing at `docs/mcps-gateway.md`; the three tables are empty — the read routes stay registered while the transport is off (§8.2) |
 | 503 `gateway_unavailable` | an error banner — the gateway service is not wired on `app.state`; a boot-order defect, NOT an empty roster |
-| 403 `SCOPE_INSUFFICIENT` | "credential lacks mcp:read" — the token must carry the `mcp:read` scope |
-| no credentials | the ordinary 401 / login redirect of every `/api` route |
+| 403 `SCOPE_INSUFFICIENT` | "Token lacks required scope (needs mcp:read)" — the server's own message with its `required` scope list; any OTHER 403 (CSRF guard, reverse proxy) renders the generic `forbidden` label instead, never this one |
+| no credentials | the ordinary 401 / login redirect of every `/api` route — the page renders the `AUTH_REQUIRED` (or `not_json`, when the browser followed the login redirect) banner |
+| degraded audit read (200 + `degraded: true`) | a DISTINCT degraded banner (not the error banner) — the audit ledger could not be read from the daemon's database (outage or read timeout); the LAST page stays on screen, the machines/sessions lanes keep answering |
 
 The three tables degrade INDEPENDENTLY: a failing roster never blanks
-the audit tail.
+the audit tail. The `degraded` flag is carried by all three envelopes
+but only the audit lane can set it today — the machines and sessions
+lanes are in-memory and answer `degraded: false` permanently.
+
+---
+
+## 10. The interop harness & the conformance kit (Phase D1)
+
+### 10.1 The real-pair gate (`tests/integration/mcps_gateway/`)
+
+The gate boots the REAL application (lifespan ON — the manager-built
+gateway service and its DB-backed audit sink) with TLS on an ephemeral
+port, and drives it with the SHIPPED Go client as a subprocess.
+
+**The TLS recipe** (the daemon has NO TLS knob; the harness uses
+uvicorn-native TLS — see §11 for why production needs a terminator):
+
+```bash
+# A per-run self-signed cert with an IP SAN — a DNS SAN would not match
+# a dial to 127.0.0.1.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1   -keyout /tmp/center-key.pem -out /tmp/center-cert.pem   -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1"
+```
+
+then `uvicorn.Config(app, host="127.0.0.1", port=0, lifespan="on",
+ssl_certfile=..., ssl_keyfile=...)`; the port is read from
+`server.servers[0].sockets[0]`. The client trusts the cert through
+`remote.ca_pem` (additive trust; chain verification still runs;
+`server_pin_sha256` is the optional SPKI pin).
+
+**Process isolation is load-bearing**: the gateway knobs and the
+database are read at IMPORT time, so the gate refuses to run in a
+process where `daemon.api` was already imported.
+
+**The database fence**: the gate uses `ensemble_dev_test_only` (NEVER
+`ensemble_prod`); the fence role must OWN the boot-ALTERed tables
+(`MCPS_GATEWAY_FENCE_PG_USER` is the explicit override). The harness
+preflights the role in seconds and fails fast.
+
+**The client YAML** (the strict decoder refuses unknown keys;
+`child.command` is a SCALAR):
+
+```yaml
+listen: {addr: "127.0.0.1:0", token: "<local-token>", path: "/mcp"}
+child:
+  command: "/tmp/mcps-d1/adversarial.test"   # PRIMARY stub child (below)
+  args: ["-test.run=^$"]
+  env:
+    - "MCPS_ADVERSARIAL_CHILD_MODE=1"
+    - "MCPS_ADVERSARIAL_CHILD_RECORD=/tmp/mcps-d1/child-record.jsonl"   # the P3 evidence file the stub writes
+  dir: ""
+  terminate_grace_ms: 5000
+restart: {enabled: true, initial_backoff_ms: 1000, max_backoff_ms: 60000, max_attempts: 0, multiplier: 2.0, jitter: 0.2}
+policy: {enabled: true, deny_tools: []}
+audit: {enabled: false, path: "/tmp/mcps-d1/client-audit.jsonl"}
+remote:
+  enabled: true
+  center_url: "wss://127.0.0.1:<port>/api/mcps-gateway/ws"
+  enrollment_token: "<MCPS_GATEWAY_TOKENS entry>"
+  machine_id: "mach_interop"
+  ca_pem: "/tmp/center-cert.pem"
+  server_pin_sha256: ""
+  heartbeat_interval_ms: 15000
+  heartbeat_timeout_ms: 45000
+  client_dead_detect_ms: 45000
+  reconnect_initial_backoff_ms: 250
+  reconnect_max_backoff_ms: 2000
+  tool_call_timeout_ms: 5000
+  max_frame_bytes: 8388608
+```
+
+**The stub child — primary + fallback.** PRIMARY: the adversarial
+stdio child the client repo already carries, built OUTSIDE the read-only
+repo (`go build`/`go test -c ./internal/adversarial` in `mcps_client`,
+output to `/tmp`). FALLBACK: any stdio MCP server binary the operator
+supplies — the client validates only that `child.command` exists and
+speaks MCP; the gateway lane itself needs the child solely so
+`session.begin` has a catalog to serve.
+
+**Preflight**: `mcps-client -config <yaml> -check-config` exits 0 on a
+valid file (a bad key fails HERE, before any network attempt).
+
+**Failure detection is LOG-based.** The client is a foreground
+long-runner with JSON logs on stderr and a fatal remote error does NOT
+exit the process — readiness is the log line `child started` followed by
+`the center accepted the handshake`; a fatal condition (401, pin
+mismatch) is a JSON log record, never an exit code. The compressed
+timing profile the gate uses: interval 500 / timeout 1500 / dead-detect
+1500 / command 1200 / read 500 ms (the client validates
+`timeout >= 3 x interval`, so the pair is chosen deliberately).
+
+**The assertion checklists** live in
+`tests/integration/mcps_gateway/COVERAGE.md` (what the real-pair gate
+exercises) and `tests/conformance/COVERAGE.md` (the kit's §-by-§
+coverage and its NOT-exercised list).
+
+Run the gate:
+
+```bash
+uv run python -m pytest tests/integration/mcps_gateway/test_real_pair.py -m integration
+```
+
+### 10.2 Why the harness TLS does NOT prove production
+
+The harness terminates TLS IN-PROCESS (uvicorn) on loopback. Production
+ships NO TLS of its own (§11) — the operator fronts the daemon port with
+a terminator. A harness-green run proves the center↔client PROTOCOL over
+a TLS socket; it says **nothing** about whether a real terminator
+forwards WebSocket upgrades correctly. That gap is why §11 makes the
+terminator a blocking gate, not a detail.
+
+### 10.3 The conformance kit — point it at ANY center
+
+`scripts/conformance/run.sh` + `tests/conformance/` (fully documented in
+`scripts/conformance/README.md`). Design facts:
+
+* **Eight env keys, pinned**: the FIVE pointing keys
+  (`CONFORMANCE_CENTER_URL`, `CONFORMANCE_TOKEN`, `CONFORMANCE_CA_PEM`,
+  `CONFORMANCE_MACHINE_ID`, `CONFORMANCE_EXPECTED_AGENT`) + the TWO
+  begin-hook keys (`CONFORMANCE_BEGIN_CMD` / `CONFORMANCE_BEGIN_URL`) +
+  the ONE strict knob (`CONFORMANCE_STRICT_CLOSE_CODE`).
+* **The begin-hook contract** (B8a): the SPEC has no agent-facing
+  `session.begin`, so a foreign center needs an operator-provided hook —
+  a shell command or an HTTP endpoint that asks the center to open a
+  session; stdout line 1 is the session id, and an optional JSON line
+  echoes the agent-visible catalog / audit rows. Neither set ⇒ the
+  session areas FAIL FAST with `SESSION-BEGIN-GAP` (the machine-facing
+  subset is the scoped run).
+* **The mutated-center control** (the proof of life): an in-kit center
+  answering `protocol_version: "0.2"`, omitting `heartbeat_timeout_ms`,
+  refusing the upgrade with 403, or closing with 1008 makes the kit RED
+  with the CORRECT `FINDING <area>/<check>` label and the transcript
+  excerpt. A kit that passes everything proves only that it asserts
+  nothing.
+* **Pins with markers**: G1 (the `HEARTBEAT_TIMEOUT` frame's missing
+  `id` — current reference behaviour vs SPEC §6.1) and S2 (close code
+  1000 — default a recorded warning; strict knob for a hard assert).
+* **Honest scope**: a kit run against THIS center is a
+  self-consistency result; cross-center behavioural proof awaits a
+  second real center. `tests/conformance/COVERAGE.md` states this and
+  the NOT-exercised rows.
+
+### 10.4 The SPEC §10 pointer (proposed — the mcps_client repo is READ-ONLY)
+
+`mcps_client/SPEC.md` §10 remains a **stub placeholder** in the protocol
+repo; the user applies the pointer below BY HAND. It is reproduced
+verbatim so the two repos cannot drift:
+
+> **Pointer (2026-10-22).** The client half of a harness exists in this repo: `internal/fakecenter` is the server side of this protocol (independently transcribed, TLS on loopback) and `internal/remote/conformance_test.go` drives the real client against it over a real WSS connection. The reference center's interop run and the divergences it found are recorded outside this repo, in `agents-ensemble/.agents/shared/planning/mcps-gateway-interop/research-spec-go.md`. What §10 still does not have is the *runner*: a kit that points a client at an arbitrary center with nothing but a URL and a machine.
+>
+> **The runner now exists** (added 2026-10-22 by the center implementation): `agents-ensemble/scripts/conformance/run.sh` + `agents-ensemble/tests/conformance/` — an independent, center-agnostic pack mapped 1:1 onto this section's six areas (Handshake / Session lifecycle / Transport / MCP fidelity / Errors / Auth). It imports NOTHING from the center's `daemon.*`; every frame is transcribed from this SPEC. Point it at any center with five keys — `CONFORMANCE_CENTER_URL` (the full WSS path), `CONFORMANCE_TOKEN`, `CONFORMANCE_CA_PEM`, `CONFORMANCE_MACHINE_ID`, `CONFORMANCE_EXPECTED_AGENT` — plus the begin-hook contract (`CONFORMANCE_BEGIN_CMD` or `CONFORMANCE_BEGIN_URL`: how a foreign center is told to open a session) and `CONFORMANCE_STRICT_CLOSE_CODE`. Run: `./scripts/conformance/run.sh`. It proves the six areas' wire behaviour incl. a mutated-center negative control (a kit that cannot go RED proves nothing) and pins the known tensions (G1: `HEARTBEAT_TIMEOUT` carries no `id` vs §6.1; the §5.3 "required" column read offering-side; §10 "byte-identically" vs the client's catalog re-encoding — the kit asserts SEMANTIC equality). Its coverage + independence attestation: `tests/conformance/COVERAGE.md`.
+>
+> **Recommended amendment (§8.4).** §8.4 says "args hashed" and names neither an algorithm nor a canonicalisation. The two implementations diverge today on non-ASCII, `<>&`, and float arguments (Python `ensure_ascii=True` + `default=str` vs Go `json.Marshal` HTML-escaping + shortest-roundtrip float64), so the two audit ledgers are **not joinable** for those arguments, and Go's float64 normalisation collapses `{"n":1}` and `{"n":1.0}` to one hash. Recommendation: normatively pin **JCS (RFC 8785)**, or minimally *sorted keys + `ensure_ascii=false` + shortest-roundtrip numbers*, so an args hash is comparable across implementations.
+
+---
+
+## 11. What remains for activation (Phase D1 close-out)
+
+**Shipped.** Phase B: the transport + the four `mcp_rpc_*` tools + the
+audit ledger. Phase C: the operator read surface (§8) + the read-only
+management page (§9). Phase D1: the real-pair interop gate + the audit
+degraded signal (§8.5) + the audit projection (§1.7) + the conformance
+kit (§10.3) + this document's harness/activation sections.
+
+**What remains is one blocking item and a short checklist.**
+
+1. **The TLS terminator.** The daemon ships **no TLS of its own** and the
+   shipped client refuses `ws://` at config load AND at dial — so, as
+   shipped, the pair cannot connect. **activation is BLOCKED on a TLS
+   terminator until one exists** (owner: **TBD — user decision**, date:
+   **open**).
+2. **The terminator MUST proxy WebSocket upgrades.** A plain-HTTP
+   terminator that strips the `Upgrade` header yields a **404/400** that
+   masquerades as a route bug (the route IS registered; the proxy ate
+   the upgrade). Verify with a real client handshake through the
+   terminator, not with `curl` on the HTTP path.
+3. **The harness's own TLS does NOT validate the terminator path**
+   (§10.2): a harness-green run proves the protocol over TLS, nothing
+   about your proxy. Treat the terminator as untested until a real client
+   connects THROUGH it.
+4. Then: `MCPS_GATEWAY_ENABLED=1` + at least one token in
+   `MCPS_GATEWAY_TOKENS` + **daemon restart** (§2), and the machine side
+   configured with the full WSS URL including the gateway path (§2.4).
+
+**Disposition note (F-D2).** `daemon/api.py` contains a doubled
+module-level `app = create_app()` (two calls, two app/manager/pool per
+import). Reported by the Phase-D1 lane; **out of scope for this phase**
+— a boot-cost defect, not a correctness one. Fix before the terminator
+work if boot cost matters.
 
 ---
 
 *Maintained alongside `tests/unit/test_mcps_gateway_docs.py`, which pins the
 operational facts of this page (kill-switch name and default, the restart
-requirement, the route path, every knob default, and the honest-absence
-statements) so they cannot silently rot.*
+requirement, the route path, every knob default, the activation blocker,
+and the honest-absence statements) so they cannot silently rot.*
 

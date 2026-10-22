@@ -269,6 +269,86 @@ class TestListRecentOrderingAndPagination:
         )
 
 
+class TestTieBreakPagingStability:
+    """AD8 — the ``id DESC`` secondary sort buys PAGING STABILITY.
+
+    Two rows sharing one ``created_at`` stamp are a REAL case (same
+    second, sub-second writes): without a deterministic tiebreaker the
+    DB is free to swap them BETWEEN two identical queries, so a page
+    boundary could repeat a row on one page and skip it on the next.
+    ``id`` is uuid4 TEXT — uncorrelated with time — so this pins the
+    FIXED order, NOT a chronological claim within the tie.
+    """
+
+    _TIE_STAMP = "2026-10-22T12:00:00.000000+00:00"
+
+    @pytest.fixture
+    def tied_repository(self, repository):
+        """Two rows with the SAME stamp, written through the real path."""
+        repository.record(
+            AuditRecord(
+                agent_id="leader",
+                machine_id="mac-a",
+                tool="computer_type",
+                args_hash="aa" * 32,
+                created_at=self._TIE_STAMP,
+            )
+        )
+        repository.record(
+            AuditRecord(
+                agent_id="worker",
+                machine_id="mac-b",
+                tool="computer_click",
+                args_hash="bb" * 32,
+                created_at=self._TIE_STAMP,
+            )
+        )
+        return repository
+
+    def test_the_tie_order_is_deterministic_across_reads(self, tied_repository):
+        first = [row["machine_id"] for row in tied_repository.list_recent(limit=2)]
+        second = [row["machine_id"] for row in tied_repository.list_recent(limit=2)]
+        assert first == second
+        assert sorted(first) == ["mac-a", "mac-b"]
+
+    def test_paging_across_the_tie_returns_two_different_rows(self, tied_repository):
+        """The pin that did not exist before: ``limit=1`` pages must
+        not repeat a row (nor drop one) across the tie."""
+        page_one = tied_repository.list_recent(limit=1, offset=0)
+        page_two = tied_repository.list_recent(limit=1, offset=1)
+        assert len(page_one) == 1
+        assert len(page_two) == 1
+        assert page_one[0]["id"] != page_two[0]["id"]
+        assert {page_one[0]["machine_id"], page_two[0]["machine_id"]} == {
+            "mac-a",
+            "mac-b",
+        }
+
+
+class TestRepositoryRaisesWhenEngineDead:
+    """AD5 — the repository no longer swallows read failures.
+
+    The classification (the degraded body) lives in the SERVICE, not
+    here; this pin keeps the contract from silently re-absorbing the
+    exception at the wrong layer.
+    """
+
+    def test_audit_repository_raises_when_engine_dead(self):
+        from sqlalchemy import create_engine
+
+        from daemon.repositories.mcps_gateway.repository import (
+            McpGatewayAuditRepository,
+        )
+
+        engine = create_engine("postgresql+psycopg://127.0.0.1:1/ensemble_dev_test_only")
+        repository = McpGatewayAuditRepository(engine)
+        try:
+            with pytest.raises(Exception):  # noqa: B017, PT011 — ANY raise is the pin
+                repository.list_recent(limit=10, offset=0)
+        finally:
+            engine.dispose()
+
+
 # ────────────────────────────────────────────────────────────────────────
 # The row payload contract
 # ────────────────────────────────────────────────────────────────────────

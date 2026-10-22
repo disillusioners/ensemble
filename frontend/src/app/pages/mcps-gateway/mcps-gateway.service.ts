@@ -1,5 +1,10 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
-import { HttpClient, HttpErrorResponse, HttpParams } from '@angular/common/http';
+import {
+  HttpClient,
+  HttpErrorResponse,
+  HttpHeaders,
+  HttpParams,
+} from '@angular/common/http';
 import { EMPTY, Observable, catchError, defer, finalize, forkJoin, tap } from 'rxjs';
 import type {
   McpsGatewayAuditEntry,
@@ -45,6 +50,21 @@ export class McpsGatewayService {
   static readonly MACHINES_URL = '/api/mcps-gateway/machines';
   static readonly SESSIONS_URL = '/api/mcps-gateway/sessions';
   static readonly AUDIT_URL = '/api/mcps-gateway/audit';
+
+  /**
+   * The defensive `Accept: application/json` header of every gateway
+   * read (D3a, upstream-decided).
+   *
+   * The OAuth middleware's unauthenticated flow answers a browser-ish
+   * request (a bare wildcard Accept header, or a missing one) with a
+   * 302 to the login page; only an explicit `application/json` earns
+   * the clean 401 `AUTH_REQUIRED` JSON body
+   * (`daemon/middleware/auth.py`). The HttpClient default sends a
+   * wildcard Accept, which sits ON the trap — this header is cheap
+   * insurance that keeps every unauthenticated read on the JSON lane,
+   * and it self-documents the trap right here at the call site.
+   */
+  static readonly JSON_HEADERS = new HttpHeaders({ Accept: 'application/json' });
 
   /**
    * The poll cadence of the page — **10 s**.
@@ -109,6 +129,33 @@ export class McpsGatewayService {
 
   /** The client-side stamp of the last completed refresh cycle. */
   readonly lastRefreshedAt = signal<Date | null>(null);
+
+  // ── Per-lane degraded slots + the derived surface ────────────────────
+
+  private readonly machinesDegraded = signal(false);
+  private readonly sessionsDegraded = signal(false);
+  private readonly auditDegraded = signal(false);
+
+  /**
+   * Did any lane answer its DEGRADED body (200 + `degraded: true`)?
+   *
+   * A degraded lane is NOT an error: the daemon answered, the other
+   * lanes are healthy, and the last good page stays on screen — the
+   * page renders a DISTINCT banner for it (only the audit lane can
+   * degrade today; the machines/sessions lanes are in-memory and
+   * permanently `false` — truthful symmetry, AD4).
+   */
+  readonly degraded = computed(
+    () => this.machinesDegraded() || this.sessionsDegraded() || this.auditDegraded(),
+  );
+
+  /** The first degraded lane (for the banner's context), or `null`. */
+  readonly degradedSource = computed<McpsGatewayErrorSource | null>(() => {
+    if (this.machinesDegraded()) return 'machines';
+    if (this.sessionsDegraded()) return 'sessions';
+    if (this.auditDegraded()) return 'audit';
+    return null;
+  });
 
   // ── Per-lane error slots + the derived surface ───────────────────────
 
@@ -227,13 +274,38 @@ export class McpsGatewayService {
   // ── Lane fetchers (private) ──────────────────────────────────────────
 
   private fetchMachines(): Observable<McpsGatewayMachinesResponse> {
-    return this.track(() => this.http.get<McpsGatewayMachinesResponse>(McpsGatewayService.MACHINES_URL)).pipe(
+    return this.track(() =>
+      this.http.get<McpsGatewayMachinesResponse>(McpsGatewayService.MACHINES_URL, {
+        headers: McpsGatewayService.JSON_HEADERS,
+      }),
+    ).pipe(
       tap((res) => {
+        if (this.bodyIsUnexpected(res)) {
+          // Lane hygiene (C11): a non-JSON body is an ERROR, not a
+          // degraded read — clear the stale degraded slot so the two
+          // banners can never coexist.
+          this.machinesDegraded.set(false);
+          this.machinesError.set(this.notJsonError('machines', 200));
+          return;
+        }
+        if (res.degraded === true) {
+          // Latent symmetry with the audit lane (C11): the machines
+          // lane is IN-MEMORY and answers degraded:false today, but if
+          // it ever degrades the semantics match the audit lane — keep
+          // the last good roster, raise the degraded flag, clear the
+          // error slot.
+          this.gatewayEnabled.set(res.gateway_enabled !== false);
+          this.machinesDegraded.set(true);
+          this.machinesError.set(null);
+          return;
+        }
         this.machines.set(res.machines ?? []);
         this.gatewayEnabled.set(res.gateway_enabled !== false);
+        this.machinesDegraded.set(res.degraded === true);
         this.machinesError.set(null);
       }),
       catchError((err) => {
+        this.machinesDegraded.set(false);
         this.machinesError.set(this.decodeError(err, 'machines'));
         return EMPTY;
       }),
@@ -241,13 +313,38 @@ export class McpsGatewayService {
   }
 
   private fetchSessions(): Observable<McpsGatewaySessionsResponse> {
-    return this.track(() => this.http.get<McpsGatewaySessionsResponse>(McpsGatewayService.SESSIONS_URL)).pipe(
+    return this.track(() =>
+      this.http.get<McpsGatewaySessionsResponse>(McpsGatewayService.SESSIONS_URL, {
+        headers: McpsGatewayService.JSON_HEADERS,
+      }),
+    ).pipe(
       tap((res) => {
+        if (this.bodyIsUnexpected(res)) {
+          // Lane hygiene (C11): a non-JSON body is an ERROR, not a
+          // degraded read — clear the stale degraded slot so the two
+          // banners can never coexist.
+          this.sessionsDegraded.set(false);
+          this.sessionsError.set(this.notJsonError('sessions', 200));
+          return;
+        }
+        if (res.degraded === true) {
+          // Latent symmetry with the audit lane (C11): the sessions
+          // lane is IN-MEMORY and answers degraded:false today, but if
+          // it ever degrades the semantics match the audit lane — keep
+          // the last good list, raise the degraded flag, clear the
+          // error slot.
+          this.gatewayEnabled.set(res.gateway_enabled !== false);
+          this.sessionsDegraded.set(true);
+          this.sessionsError.set(null);
+          return;
+        }
         this.sessions.set(res.sessions ?? []);
         this.gatewayEnabled.set(res.gateway_enabled !== false);
+        this.sessionsDegraded.set(res.degraded === true);
         this.sessionsError.set(null);
       }),
       catchError((err) => {
+        this.sessionsDegraded.set(false);
         this.sessionsError.set(this.decodeError(err, 'sessions'));
         return EMPTY;
       }),
@@ -261,17 +358,40 @@ export class McpsGatewayService {
       .set('limit', String(limit))
       .set('offset', String(safeOffset));
     return this.track(() =>
-      this.http.get<McpsGatewayAuditResponse>(McpsGatewayService.AUDIT_URL, { params }),
+      this.http.get<McpsGatewayAuditResponse>(McpsGatewayService.AUDIT_URL, {
+        params,
+        headers: McpsGatewayService.JSON_HEADERS,
+      }),
     ).pipe(
       tap((res) => {
+        if (this.bodyIsUnexpected(res)) {
+          // Lane hygiene (C11): a non-JSON body is an ERROR, not a
+          // degraded read — clear the stale degraded slot so the
+          // degraded banner and the error banner can never coexist.
+          this.auditDegraded.set(false);
+          this.auditError.set(this.notJsonError('audit', 200));
+          return;
+        }
+        if (res.degraded === true) {
+          // A degraded tail must NOT blank the last good page: the
+          // ledger is unreadable, the page is not — keep the rows, the
+          // page number and the pager state, and let the banner say
+          // what happened. Only a HEALTHY read reassigns them.
+          this.gatewayEnabled.set(res.gateway_enabled !== false);
+          this.auditDegraded.set(true);
+          this.auditError.set(null);
+          return;
+        }
         this.audit.set(res.audit ?? []);
         this.auditCount.set(res.count ?? (res.audit ?? []).length);
         this.auditLimit.set(limit);
         this.auditOffset.set(safeOffset);
         this.gatewayEnabled.set(res.gateway_enabled !== false);
+        this.auditDegraded.set(false);
         this.auditError.set(null);
       }),
       catchError((err) => {
+        this.auditDegraded.set(false);
         this.auditError.set(this.decodeError(err, 'audit'));
         return EMPTY;
       }),
@@ -316,15 +436,19 @@ export class McpsGatewayService {
 
   /**
    * Decode a failed read into the typed `{ code, message }` the page
-   * renders.
+   * renders (D3a — the BODY is decoded FIRST, the status last).
    *
-   * The daemon answers with TWO body shapes and the page must accept
-   * both:
+   * The daemon answers with THREE body shapes and the page must accept
+   * them all:
    *
-   * * `{"error": "...", "message": "..."}` — the flat shape (the scope
-   *   decorator's 403);
-   * * `{"detail": {"error": "...", "message": "..."}}` — the FastAPI
-   *   `HTTPException` shape (the 503 `gateway_unavailable`).
+   * * `{"error": "...", "message": "..."}` — the flat shape (the auth
+   *   middleware's 401 `AUTH_REQUIRED`; the CSRF guard's 403);
+   * * `{"detail": {"error": "...", "message": "...", "required": [...]}}`
+   *   — the FastAPI `HTTPException` shape (the scope decorator's 403,
+   *   which nests under `detail` and carries the `required` scopes);
+   * * a NON-JSON body — a 302 to the login page followed by the
+   *   browser yields 200 + HTML, which the transport surfaces as a
+   *   parse failure; that must render `not_json`, never `http_200`.
    *
    * The repo's existing detail-unwrapping precedent is
    * `pages/settings/settings.component.ts` (`err?.error?.detail`).
@@ -335,12 +459,38 @@ export class McpsGatewayService {
     const body = this.asRecord(response?.error);
     const detail = this.asRecord(body?.['detail']) ?? body ?? {};
     const rawCode = this.asString(detail['error']) ?? this.asString(body?.['error']);
-    const rawMessage = this.asString(detail['message']) ?? this.asString(body?.['message']);
+    const rawMessage =
+      this.asString(detail['message']) ?? this.asString(body?.['message']);
+    const required = this.asStringList(detail['required'] ?? body?.['required']);
 
-    if (rawCode === 'SCOPE_INSUFFICIENT' || status === 403) {
+    // The BODY branches come FIRST: a 403 whose body names
+    // SCOPE_INSUFFICIENT keeps the server's message AND its required
+    // scope list — and any OTHER 403 (CSRF guard, reverse proxy) must
+    // NOT wear this label.
+    if (rawCode === 'SCOPE_INSUFFICIENT') {
+      const base = rawMessage ?? 'Token lacks required scope';
+      const message =
+        required.length > 0 ? `${base} (needs ${required.join(', ')})` : base;
+      return { code: 'SCOPE_INSUFFICIENT', message, status, source };
+    }
+    if (rawCode === 'AUTH_REQUIRED' || status === 401) {
       return {
-        code: 'SCOPE_INSUFFICIENT',
-        message: 'credential lacks mcp:read',
+        code: 'AUTH_REQUIRED',
+        message: rawMessage ?? 'Authentication required',
+        status,
+        source,
+      };
+    }
+    // A 2xx that reaches the ERROR path is a JSON parse failure — the
+    // classic shape is the login page's HTML behind a 302 the browser
+    // followed. `http_200` would be a lie.
+    if (this.bodyLooksLikeHtml(response?.error) || (status >= 200 && status < 300)) {
+      return this.notJsonError(source, status);
+    }
+    if (status === 403) {
+      return {
+        code: 'forbidden',
+        message: rawMessage ?? rawCode ?? 'The request was forbidden.',
         status,
         source,
       };
@@ -369,11 +519,53 @@ export class McpsGatewayService {
     };
   }
 
+  /**
+   * The shared `not_json` failure — the daemon answered something that
+   * is not the gateway's JSON (the login page's HTML is the expected
+   * case). Rendered with a NON-`http_200` label.
+   */
+  private notJsonError(source: McpsGatewayErrorSource, status: number): McpsGatewayError {
+    return {
+      code: 'not_json',
+      message:
+        'The daemon answered a non-JSON body (likely the login page), ' +
+        'not the gateway read.',
+      status,
+      source,
+    };
+  }
+
+  /**
+   * The success-path guard: a 200 whose body is not a JSON object is
+   * the login-page redirect (the mock/JSON-parse-tolerant transports
+   * deliver the HTML as-is instead of failing). Route it to the SAME
+   * `not_json` label instead of silently assigning empty rows.
+   */
+  private bodyIsUnexpected(res: unknown): boolean {
+    return !this.asRecord(res) || this.bodyLooksLikeHtml(res);
+  }
+
+  /** Does the value look like an HTML document (the login page)? */
+  private bodyLooksLikeHtml(value: unknown): boolean {
+    if (typeof value !== 'string') {
+      return false;
+    }
+    const trimmed = value.trimStart().slice(0, 64).toLowerCase();
+    return trimmed.startsWith('<!doctype') || trimmed.startsWith('<html');
+  }
+
   /** A plain object (not an array), or `null`. */
   private asRecord(value: unknown): Record<string, unknown> | null {
     return value && typeof value === 'object' && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : null;
+  }
+
+  /** A list of strings, or `[]`. */
+  private asStringList(value: unknown): string[] {
+    return Array.isArray(value)
+      ? value.filter((entry): entry is string => typeof entry === 'string')
+      : [];
   }
 
   /** A string, or `undefined`. */

@@ -47,6 +47,21 @@
         <span class="banner-source">({{ err.source }})</span>
       </div>
     }
+    @if (degraded()) {
+      <!-- DISTINCT from the error banner: a degraded lane is NOT a
+           failed request — the daemon answered 200, the other lanes
+           are healthy, and the last good page stays on screen. Only
+           the audit lane can set this today (the machines/sessions
+           lanes are in-memory and permanently healthy). -->
+      <div class="banner banner-degraded" role="status" data-test="degraded-banner">
+        <strong class="banner-code">degraded read</strong>
+        <span class="banner-message">
+          The {{ degradedSource() }} lane could not be read from the daemon's
+          database (the read was answered, not failed) — the last good data
+          stays on screen. This is not the page's error; see the daemon logs.
+        </span>
+      </div>
+    }
     @if (!gatewayEnabled()) {
       <div class="banner banner-disabled" role="status" data-test="gateway-disabled-banner">
         <strong>The remote-hands gateway is disabled.</strong>

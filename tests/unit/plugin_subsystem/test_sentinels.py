@@ -49,6 +49,7 @@ WALK_EXCLUDED_TOP_LEVEL = {
     "tools",  # CLI helpers / build-time tools (od_vendor.py et al.); not tier-1/tier-2 code
     ".agents",  # incl. shared/planning/plugin-subsystem — defines the vocabulary
     "plugins-convention",  # allowed zone
+    ".inspiration-projects",  # gitignored personal vendored content (.gitignore:71); not repo vocabulary surface
 }
 WALK_ALLOWED_PREFIXES = {("daemon", "plugin_subsystem")}  # allowed zone (tier-2 home)
 WALK_EXCLUDED_FILES = {"package-lock.json", "uv.lock"}

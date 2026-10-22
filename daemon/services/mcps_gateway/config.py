@@ -15,6 +15,7 @@ The knob set (all under the ``MCPS_GATEWAY_`` prefix)::
     MCPS_GATEWAY_HEARTBEAT_TIMEOUT_MS    45000
     MCPS_GATEWAY_CLIENT_DEAD_DETECT_MS   45000
     MCPS_GATEWAY_COMMAND_TIMEOUT_MS      30000
+    MCPS_GATEWAY_READ_TIMEOUT_MS         5000    the read-surface DB bound
     MCPS_GATEWAY_AUDIT_ENABLED           true
     MCPS_GATEWAY_ALLOWED_MACHINES        ""       comma-separated; empty = all
     MCPS_GATEWAY_SESSION_TTL_MS          3600000
@@ -67,6 +68,14 @@ DEFAULT_CLIENT_DEAD_DETECT_MS = 45_000
 #: long it waits for the machine to answer, so a wedged machine cannot
 #: hang an agent tool forever.
 DEFAULT_COMMAND_TIMEOUT_MS = 30_000
+
+#: The default bound of the READ surface's audit-tail DB call. The
+#: WRITES are bounded by the service's own audit-write timeout (a hung
+#: PostgreSQL must not hang an agent tool); the READS need the same
+#: treatment — a hung DB must not hang the operator page's request, or
+#: ``degraded`` could never fire (AD4: the degraded body is only
+#: reachable when the read actually RETURNS, in error or in time).
+DEFAULT_READ_TIMEOUT_MS = 5_000
 
 #: The default session TTL (§3.3 — the center owns the enforcement).
 DEFAULT_SESSION_TTL_MS = 3_600_000
@@ -168,12 +177,39 @@ class GatewayConfig:
     heartbeat_timeout_ms: int = DEFAULT_HEARTBEAT_TIMEOUT_MS
     client_dead_detect_ms: int = DEFAULT_CLIENT_DEAD_DETECT_MS
     command_timeout_ms: int = DEFAULT_COMMAND_TIMEOUT_MS
+    read_timeout_ms: int = DEFAULT_READ_TIMEOUT_MS
     audit_enabled: bool = True
     allowed_machines: tuple[str, ...] = ()
     session_ttl_ms: int = DEFAULT_SESSION_TTL_MS
     session_idle_timeout_ms: int = DEFAULT_SESSION_IDLE_TIMEOUT_MS
     ping_interval_ms: int = DEFAULT_PING_INTERVAL_MS
     warnings: tuple[str, ...] = field(default=(), repr=False)
+
+    def __post_init__(self) -> None:
+        """Clamp-or-warn the values a DIRECT constructor can get wrong.
+
+        ``load_gateway_config`` already clamps every env knob and emits
+        a warning; a direct ``GatewayConfig(...)`` call used to bypass
+        that entirely — ``read_timeout_ms=0`` would silently turn every
+        audit read into an instant degraded storm
+        (``asyncio.wait_for(..., 0)`` fires immediately). The env path
+        feeds this constructor an already-clamped POSITIVE value, so
+        the warning fires exactly once (here, for direct constructions
+        only). Frozen dataclass: the clamps go through
+        ``object.__setattr__``.
+        """
+        if self.read_timeout_ms <= 0:
+            bad = self.read_timeout_ms
+            object.__setattr__(self, "read_timeout_ms", DEFAULT_READ_TIMEOUT_MS)
+            object.__setattr__(
+                self,
+                "warnings",
+                self.warnings
+                + (
+                    f"read_timeout_ms={bad} is not positive; the default "
+                    f"({DEFAULT_READ_TIMEOUT_MS}) is used",
+                ),
+            )
 
     @property
     def has_enrollment_tokens(self) -> bool:
@@ -236,6 +272,7 @@ def load_gateway_config() -> GatewayConfig:
     )
     dead_detect = _env_int("CLIENT_DEAD_DETECT_MS", DEFAULT_CLIENT_DEAD_DETECT_MS, warnings)
     command_timeout = _env_int("COMMAND_TIMEOUT_MS", DEFAULT_COMMAND_TIMEOUT_MS, warnings)
+    read_timeout = _env_int("READ_TIMEOUT_MS", DEFAULT_READ_TIMEOUT_MS, warnings)
     ttl = _env_int("SESSION_TTL_MS", DEFAULT_SESSION_TTL_MS, warnings)
     idle = _env_int("SESSION_IDLE_TIMEOUT_MS", DEFAULT_SESSION_IDLE_TIMEOUT_MS, warnings)
     ping_interval = _env_int("PING_INTERVAL_MS", DEFAULT_PING_INTERVAL_MS, warnings)
@@ -278,6 +315,15 @@ def load_gateway_config() -> GatewayConfig:
             f"default ({DEFAULT_COMMAND_TIMEOUT_MS}) is used"
         )
         command_timeout = DEFAULT_COMMAND_TIMEOUT_MS
+    if read_timeout <= 0:
+        warnings.append(
+            # ONE canonical knob prefix with the ctor warning
+            # (``read_timeout_ms``=); the env path names its env var in
+            # the parenthetical so both warnings read as the SAME knob.
+            f"read_timeout_ms (env READ_TIMEOUT_MS)={read_timeout} is not "
+            f"positive; the default ({DEFAULT_READ_TIMEOUT_MS}) is used"
+        )
+        read_timeout = DEFAULT_READ_TIMEOUT_MS
 
     path = _env("PATH") or DEFAULT_PATH
     if not path.startswith("/"):
@@ -291,6 +337,7 @@ def load_gateway_config() -> GatewayConfig:
         heartbeat_timeout_ms=heartbeat_timeout,
         client_dead_detect_ms=dead_detect,
         command_timeout_ms=command_timeout,
+        read_timeout_ms=read_timeout,
         audit_enabled=_env_bool("AUDIT_ENABLED", True),
         allowed_machines=_env_list("ALLOWED_MACHINES"),
         session_ttl_ms=ttl,
@@ -313,6 +360,7 @@ __all__ = [
     "DEFAULT_HEARTBEAT_TIMEOUT_MS",
     "DEFAULT_PATH",
     "DEFAULT_PING_INTERVAL_MS",
+    "DEFAULT_READ_TIMEOUT_MS",
     "DEFAULT_SESSION_IDLE_TIMEOUT_MS",
     "DEFAULT_SESSION_TTL_MS",
     "ENV_PREFIX",

@@ -122,9 +122,31 @@ export interface McpsGatewayAuditEntry {
 }
 
 /**
+ * The shared envelope of the three read responses — the degraded
+ * signal (the BE's `GatewayReadEnvelope`).
+ *
+ * A DB outage must be distinguishable from an empty ledger: the BE
+ * answers **200 + `degraded: true`** (never 503 — 503 means the surface
+ * is not wired). `degraded` is OPTIONAL here (decision B3b): the 8
+ * typed fixture literals in the specs keep compiling, and `undefined`
+ * is treated as `false` (a body without `degraded` renders as a
+ * healthy read — pinned by spec).
+ *
+ * TRUTHFUL SYMMETRY: all three envelopes carry the flag, but only the
+ * audit lane can set it today — machines/sessions are in-memory lanes
+ * and answer `degraded: false` permanently (and honestly).
+ */
+export interface McpsGatewayReadEnvelope {
+  /** `true` when the lane's read failed or timed out (still HTTP 200). */
+  degraded?: boolean;
+  /** A short, non-secret classification (e.g. `audit_unavailable`). */
+  error?: string | null;
+}
+
+/**
  * Body of `GET /api/mcps-gateway/machines`.
  */
-export interface McpsGatewayMachinesResponse {
+export interface McpsGatewayMachinesResponse extends McpsGatewayReadEnvelope {
   machines: McpsGatewayMachine[];
   /** The number of entries in THIS list. */
   count: number;
@@ -135,7 +157,7 @@ export interface McpsGatewayMachinesResponse {
 /**
  * Body of `GET /api/mcps-gateway/sessions`.
  */
-export interface McpsGatewaySessionsResponse {
+export interface McpsGatewaySessionsResponse extends McpsGatewayReadEnvelope {
   sessions: McpsGatewaySession[];
   /** The number of entries in THIS list. */
   count: number;
@@ -146,7 +168,7 @@ export interface McpsGatewaySessionsResponse {
 /**
  * Body of `GET /api/mcps-gateway/audit?limit=&offset=`.
  */
-export interface McpsGatewayAuditResponse {
+export interface McpsGatewayAuditResponse extends McpsGatewayReadEnvelope {
   /** The audit rows, NEWEST FIRST (the BE never re-sorts them). */
   audit: McpsGatewayAuditEntry[];
   /**
@@ -170,13 +192,24 @@ export type McpsGatewayErrorSource = 'machines' | 'sessions' | 'audit';
 /**
  * The decoded failure of a read-surface call.
  *
- * `code` is the machine code the page branches on:
+ * `code` is the machine code the page branches on (D3a — decoded from
+ * the BODY first, the status last):
  *
- * * `gateway_unavailable` — the 503 the daemon answers when the gateway
- *   service is not wired on `app.state` (a boot-order defect — NOT an
- *   empty roster);
- * * `SCOPE_INSUFFICIENT` — the 403 a credential without the `mcp:read`
- *   scope gets;
+ * * `SCOPE_INSUFFICIENT` — a 403 whose body names the code; the
+ *   message preserves the server's message AND its `required` scope
+ *   list ("Token lacks required scope (needs mcp:read)");
+ * * `AUTH_REQUIRED` — the 401 of the OAuth middleware (flat body) —
+ *   the browser was redirected to the login page, or the token
+ *   expired;
+ * * `forbidden` — ANY OTHER 403 (CSRF guard, reverse proxy) — a
+ *   generic label plus the server's raw message; it must never be
+ *   mislabelled `SCOPE_INSUFFICIENT`;
+ * * `not_json` — the daemon answered a NON-JSON body (a 302 to the
+ *   login page followed by the browser yields 200 + HTML); rendered
+ *   instead of the misleading `http_200`;
+ * * `gateway_unavailable` — the 503 the daemon answers when the
+ *   gateway service is not wired on `app.state` (a boot-order defect —
+ *   NOT an empty roster);
  * * `network_error` — the daemon could not be reached at all;
  * * `http_<status>` — any other HTTP failure.
  */

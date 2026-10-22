@@ -313,11 +313,28 @@ class McpGatewayService:
                 )
         connection.pending.clear()
         try:
-            await connection.transport.close()
-        except Exception:  # noqa: BLE001 — a dead socket is not an error
-            pass
-        if connection.machine_id:
-            self._store.mark_offline(connection.machine_id, connection.connection_id)
+            if connection.machine_id:
+                # P4 (roster-release ordering): the §8.3 roster pointer is
+                # released BEFORE the awaited socket close. The close
+                # handshake of a WEDGED peer can stretch for seconds, and
+                # the read surface kept reporting the dead session as
+                # ``busy: true`` through that whole window (found by the
+                # interop gate #16c failing honestly in P1/P2). The session
+                # manager already released the slot above, so the §8.3 lock
+                # is never held twice — this only closes the STALE
+                # READ-SURFACE window. The connection_id guard inside
+                # mark_offline keeps a reconnect that raced the close safe.
+                self._store.mark_offline(connection.machine_id, connection.connection_id)
+        finally:
+            # fd-leak guard (QA round, C10): even if the roster release
+            # RAISES, the socket close below still runs — a skipped close
+            # leaks the transport fd for the life of the process. The
+            # RELEASE ORDER is unchanged: mark_offline (the §8.3 release)
+            # runs FIRST, the awaited close second.
+            try:
+                await connection.transport.close()
+            except Exception:  # noqa: BLE001 — a dead socket is not an error
+                pass
 
     # ── inbound frames ───────────────────────────────────────────────────
 
@@ -755,25 +772,40 @@ class McpGatewayService:
         """
         return self._clock()
 
-    def audit_tail(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        """The remote-command audit tail, NEWEST FIRST.
+    def audit_tail(
+        self, limit: int = 50, offset: int = 0
+    ) -> tuple[list[dict[str, Any]], bool, str | None]:
+        """The remote-command audit tail, NEWEST FIRST — the CLASSIFIED read.
 
-        The READ side of the ledger. The sink contract
-        (:class:`~daemon.services.mcps_gateway.audit.AuditSink`) is
-        write-only, so the read is a duck-typed ``list_recent`` call on
-        the sink: the DB-backed sink
-        (``McpGatewayAuditRepository``) answers it; a write-only sink
-        answers nothing and the tail is EMPTY (never an error — the
-        read side is defensive).
+        Returns ``(rows, degraded, reason)``:
+
+        * ``degraded=False`` for a HEALTHY read **and** for a write-only
+          sink (no ``list_recent`` ⇒ an EMPTY tail, never degraded — a
+          write-only sink is not an outage);
+        * ``degraded=True`` + a SHORT NON-SECRET classification
+          (``"audit_unavailable"``) when the reader RAISED. The raw
+          exception never crosses this boundary (a DB error string can
+          quote DSNs and paths).
+
+        AD5 — exactly ONE swallow layer: the repository no longer
+        swallows, and the classification lives HERE (the service), not
+        in the router. The ROUTER owns the other leg of the same
+        classification — the READ TIMEOUT (``asyncio.wait_for`` around
+        this call, ``MCPS_GATEWAY_READ_TIMEOUT_MS``): a reader that
+        hangs instead of raising produces the same degraded body. The
+        WRITE path's swallow (``_audit`` command flow) is a different,
+        correct rule — an audit-write failure must never abort a
+        command — and it stays.
         """
         reader = getattr(self._audit, "list_recent", None)
         if not callable(reader):
-            return []
+            return [], False, None
         try:
-            return [dict(row) for row in reader(limit=limit, offset=offset)]
-        except Exception as exc:  # noqa: BLE001 — the read side is defensive
+            rows = [dict(row) for row in reader(limit=limit, offset=offset)]
+        except Exception as exc:  # noqa: BLE001 — classified HERE, one layer up from the repo
             logger.warning("the remote-command audit could not be read: %s", exc)
-            return []
+            return [], True, "audit_unavailable"
+        return rows, False, None
 
     # ── the agent-facing surface (§2.2) ──────────────────────────────────
 

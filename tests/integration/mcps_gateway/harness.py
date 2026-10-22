@@ -286,3 +286,38 @@ async def connect_ws(url: str, token: str | None):
 
 def format_transcript(entries: Iterable[Any]) -> str:
     return "\n".join(f"{e.direction:14} {e.raw}" for e in entries)
+
+
+#: The names the interop lane reuses from this module.
+#:
+#: The fake-client suite mounts its own gateway with :func:`boot_gateway`;
+#: the interop lane (the REAL pair) needs only the ENV-KNOB TABLE
+#: (:class:`GatewayEnv`) and the TEARDOWN HELPERS (:class:`_EnvPatch` and
+#: :func:`port_is_listening`) — the boot itself belongs to
+#: ``tls_harness.py``, which is the ONE module of the lane that may
+#: import ``daemon.*``.
+#:
+#: Nothing above this line changed: the 34-test fake-client suite stays
+#: byte-identical.
+__all__ = [
+    "CONTRACT_ENV_KNOBS",
+    "CONTRACT_WS_PATH",
+    "ENV_ALLOWED_MACHINES",
+    "ENV_AUDIT_ENABLED",
+    "ENV_CLIENT_DEAD_DETECT_MS",
+    "ENV_COMMAND_TIMEOUT_MS",
+    "ENV_ENABLED",
+    "ENV_HEARTBEAT_INTERVAL_MS",
+    "ENV_HEARTBEAT_TIMEOUT_MS",
+    "ENV_PATH",
+    "ENV_SESSION_IDLE_TIMEOUT_MS",
+    "ENV_SESSION_TTL_MS",
+    "ENV_TOKENS",
+    "BootedGateway",
+    "GatewayEnv",
+    "_EnvPatch",
+    "boot_gateway",
+    "connect_ws",
+    "format_transcript",
+    "port_is_listening",
+]

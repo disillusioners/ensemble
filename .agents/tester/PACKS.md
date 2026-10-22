@@ -1,4 +1,22 @@
 # Test Packs
+## Commission D1 FINAL MERGE GATE — mcps-gateway-interop (2026-10-22) @ `feature/mcps-gateway-interop` `96bd8f695`→`ac1d00f06` — ✅ PASS-WITH-NOTES (full report: `RESULTS/2026-10-22-mcps-gateway-interop-d1-gate.md`)
+
+> Deferred FULL-suite regression discharged: ≈31,800 BE nodes + 4,166 FE tests in bounded packs (all ≤5 min, dual-layer timeout), ZERO new failures vs base — 13 unmatched reds adjudicated by EXECUTED base-leg A/B at `9632badd4` (11 token-identical, 2 mechanism-proven). Packs below are dispatcher ad-hoc packs (commands recorded for reproducibility; not standalone scripts). Fence env for every BE pack: `env -u DATABASE_URL POSTGRES_HOST=127.0.0.1 POSTGRES_DB=ensemble_dev_test_only ENSEMBLE_SELF_ENV=dev DAEMON_PORT=8079` (per-field — `env -u POSTGRES_*` does NOT glob). Excluded by design: `tests/packs/*` (g7 `sys.exit(0)` collection blocker, BASE-IDENTICAL), `tests/e2e/*` (LLM release-gate items), `tests/mock_*.py`, postgres/slow marks.
+
+| Pack | Invocation | Scope | Last Run | Status |
+|---|---|---|---|---|
+| d1_mcps_gateway_interop | `timeout 300 env <fence> uv run python -m pytest tests/integration/mcps_gateway --override-ini='addopts=' -m integration -q` | Interop family incl. P0 gate + P1/P2/P3 real-pair | 2026-10-22 @ ac1d00f06 | ✅ PASS 38/38 (70 s) |
+| d1_conformance_kit | `CONFORMANCE_RUN_TIMEOUT=280 timeout 300 bash scripts/conformance/run.sh` | Conformance kit self-host | 2026-10-22 | ✅ PASS 41/41 (12 s) |
+| d1_unit_u1 / b1–b5 | `timeout 300 env <fence> uv run python -m pytest <paths> -n 5 -q` (6 partitions; B1 runs the session-aborter file as a separate `timeout 120` solo leg — pytest-9 `--ignore` does NOT exclude explicit args) | tests/unit 18,202 nodes, census-exact | 2026-10-22 | ✅ PASS (ledger reds only; branch files all green) |
+| d1_int_default / attest_a1–a5 | as Phase C shapes (ignore-glob `*test_attestation*` with leading `*`; shards `-n 4 --override-ini='timeout=120'`) | 878 + 229 nodes | 2026-10-22 | ✅ PASS (227P + 2 by-design skips) |
+| d1_int_marked_i2a/i2b | `timeout 300 env <fence> uv run python -m pytest <half-files> --override-ini='addopts=' -m integration -n 4 -q` | NEW leg: 407 integration-marked nodes (never gated before) | 2026-10-22 | ✅ PASS (all reds base-proven) |
+| d1_pg_contract_rr | same + `PG_TEST_HOST/PORT/DB/USER` → leg-private scratch DB (create→run→drop) | report_delivery + secrets_v1 PG files | 2026-10-22 | ✅ PASS 27/27 |
+| d1_jobqueue / toplevel_t1-t2 / serial_s1 | Phase C shapes | 2,233 + ~5,730 + 2 nodes | 2026-10-22 | ✅ PASS (ledger/base-proven reds only) |
+| d1_fe_jest | `cd frontend && timeout 300 npx jest --ci --silent` | 125 suites / 4,166 tests | 2026-10-22 | ✅ PASS (4 quarantined jobs-model) |
+| d1_fe_web_e2e | real daemon :8079 (gateway on, fence DB) + FE :4199 + Playwright; scenarios A/B/C bounded ≤300 s each; artifacts /tmp/d1-fe-web/ | mcps-gateway page: surfaces, audit rows, degraded (hung-DB lock + READ_TIMEOUT_MS), 403/401 honesty, teardown | 2026-10-22 | ✅ PASS 41/41 assertions |
+| d1_base_ab | detached worktree @ 9632badd4, main .venv interpreter, serial node runs | 13 unmatched reds | 2026-10-22 | ✅ 0 branch-caused |
+
+---
 <!-- v0273-staged-verification-begin -->
 ## Commission VERIFIED — INDEPENDENT STAGED-RELEASE VERIFICATION `v0.27.3` (`scheduler-deferred-alarm-delivery`) @ live install, READ-ONLY + 1 isolated smoke — ✅ **STAGED-VERIFIED 8/8 — CEREMONY-READY** (2026-10-22)
 
