@@ -130,11 +130,19 @@ DIVERGENCE_MARKERS: tuple[tuple[str, dict[str, Any]], ...] = (
 
 #: The wrapper key sets of the three read endpoints (assertion 23) —
 #: EXACT, not superset: a key that appears here unannounced is a shape
-#: change the FE model does not know about (and D2 is the sanctioned
-#: future growth point, not drift).
-MACHINES_WRAPPER_KEYS = frozenset({"machines", "count", "gateway_enabled"})
-SESSIONS_WRAPPER_KEYS = frozenset({"sessions", "count", "gateway_enabled"})
-AUDIT_WRAPPER_KEYS = frozenset({"audit", "count", "limit", "offset", "gateway_enabled"})
+#: change the FE model does not know about. D2 (P4) added the shared
+#: ``degraded`` / ``error`` envelope keys — this set is the sanctioned
+#: post-D2 shape (the FE models them as OPTIONAL, so an older daemon's
+#: body without them still parses).
+MACHINES_WRAPPER_KEYS = frozenset(
+    {"machines", "count", "gateway_enabled", "degraded", "error"}
+)
+SESSIONS_WRAPPER_KEYS = frozenset(
+    {"sessions", "count", "gateway_enabled", "degraded", "error"}
+)
+AUDIT_WRAPPER_KEYS = frozenset(
+    {"audit", "count", "limit", "offset", "gateway_enabled", "degraded", "error"}
+)
 
 #: The §8.4 outcome vocabulary (SPEC: ``ok`` / ``error`` / ``denied`` /
 #: ``timeout``).
@@ -2087,33 +2095,40 @@ async def _phase_p3(
         f"matching={len(_pick_row(s3_body.get('sessions'), session_id=session_id))}",
     )
 
-    # ── #23 — the wrapper shapes are EXACT ─────────────────────────────
+    # ── #23 — the wrapper shapes are EXACT (post-D2: + degraded/error) ─
     result.add(
         23,
-        "the-machines-wrapper-is-exactly-machines-count-gateway_enabled",
+        "the-machines-wrapper-is-exactly-machines-count-gateway_enabled-degraded-error",
         m3["status"] == 200
         and frozenset(m3_body.keys()) == MACHINES_WRAPPER_KEYS
-        and m3_body.get("count") == len(m3_body.get("machines") or []),
+        and m3_body.get("count") == len(m3_body.get("machines") or [])
+        # D2: the VALUE is pinned, not the key's presence — an
+        # in-memory lane must never report degraded.
+        and m3_body.get("degraded") is False,
         f"keys={sorted(m3_body.keys())} count={m3_body.get('count')} "
-        f"page={len(m3_body.get('machines') or [])}",
+        f"page={len(m3_body.get('machines') or [])} "
+        f"degraded={m3_body.get('degraded')!r}",
     )
     result.add(
         23,
-        "the-sessions-wrapper-is-exactly-sessions-count-gateway_enabled",
+        "the-sessions-wrapper-is-exactly-sessions-count-gateway_enabled-degraded-error",
         s3["status"] == 200
         and frozenset(s3_body.keys()) == SESSIONS_WRAPPER_KEYS
-        and s3_body.get("count") == len(s3_body.get("sessions") or []),
+        and s3_body.get("count") == len(s3_body.get("sessions") or [])
+        and s3_body.get("degraded") is False,
         f"keys={sorted(s3_body.keys())} count={s3_body.get('count')} "
-        f"page={len(s3_body.get('sessions') or [])}",
+        f"page={len(s3_body.get('sessions') or [])} "
+        f"degraded={s3_body.get('degraded')!r}",
     )
     result.add(
         23,
-        "the-audit-wrapper-is-exactly-audit-count-limit-offset-gateway_enabled",
+        "the-audit-wrapper-is-exactly-audit-count-limit-offset-gateway_enabled-degraded-error",
         a2["status"] == 200
         and frozenset(a2_body.keys()) == AUDIT_WRAPPER_KEYS
-        and a2_body.get("count") == len(a2_rows),
+        and a2_body.get("count") == len(a2_rows)
+        and a2_body.get("degraded") is False,
         f"keys={sorted(a2_body.keys())} count={a2_body.get('count')} "
-        f"page={len(a2_rows)}",
+        f"page={len(a2_rows)} degraded={a2_body.get('degraded')!r}",
     )
 
     # ── #23 — count is the PAGE LENGTH, not the ledger total ───────────
@@ -2311,8 +2326,11 @@ async def _phase_p3(
         17,
         "the-error-row-correlates-by-EXACT-VALUE-and-carries-an-error-code",
         len(error_rows) == 1
-        and isinstance(error_rows[0].get("error_code"), str)
-        and bool(error_rows[0].get("error_code")),
+        # P4 tightening (carry-forward): the code is pinned to the
+        # TYPED code the centre actually answered on the raise — not
+        # merely "is a non-empty string" (the P3 posture).
+        and bool(echo_error_code)
+        and error_rows[0].get("error_code") == echo_error_code,
         f"rows={len(error_rows)} "
         f"error_code={error_rows[0].get('error_code') if error_rows else None!r} "
         f"typed_client_code={echo_error_code!r} "
@@ -2335,7 +2353,11 @@ async def _phase_p3(
         17,
         "the-timeout-row-correlates-by-EXACT-VALUE",
         len(timeout_rows) == 1
-        and timeout_rows[0].get("args_hash") == ok_hash,
+        and timeout_rows[0].get("args_hash") == ok_hash
+        # P4 tightening (carry-forward): the timeout row's code is
+        # pinned by VALUE (the pick filters on it, but the assertion
+        # never did).
+        and timeout_rows[0].get("error_code") == "TOOL_TIMEOUT",
         f"rows={len(timeout_rows)} "
         f"error_code={timeout_rows[0].get('error_code') if timeout_rows else None!r} "
         f"args_hash={timeout_rows[0].get('args_hash') if timeout_rows else None!r}",
@@ -2489,6 +2511,27 @@ async def _phase_p3(
             f"derived={derived_go_hash} actual={actual_go_hash} "
             "(the audit.go transcription is cross-checked against the "
             "client's own record)",
+        )
+        # P4 tightening (carry-forward): each marker's DB audit row is
+        # correlated BY VALUE and pinned to the TYPED error code —
+        # the 3 marker rows previously had no error_code pin at all.
+        marker_db_rows = _pick_row(
+            rows,
+            session_id=session_id,
+            tool=FAILING_TOOL,
+            outcome="error",
+            args_hash=python_hash,
+        )
+        result.add(
+            19,
+            f"marker-{marker_name}-the-db-row-carries-the-TYPED-error-code",
+            len(marker_db_rows) == 1
+            and bool(echo_error_code)
+            and marker_db_rows[0].get("error_code") == echo_error_code,
+            f"rows={len(marker_db_rows)} "
+            f"error_code={marker_db_rows[0].get('error_code') if marker_db_rows else None!r} "
+            f"typed_client_code={echo_error_code!r} "
+            f"args_hash={python_hash}",
         )
 
     # ── the rulings this phase records (they bind later phases) ────────

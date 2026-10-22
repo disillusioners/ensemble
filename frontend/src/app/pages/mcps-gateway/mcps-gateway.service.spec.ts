@@ -332,6 +332,9 @@ describe('McpsGatewayService', () => {
   });
 
   it('decodes the 403 SCOPE_INSUFFICIENT body (the flat { error } shape)', () => {
+    // D3a: the server's message is preserved verbatim — no longer
+    // discarded in favour of a hard-coded label. The FLAT shape has no
+    // `required` list, so the message stands alone.
     service.loadSessions();
     httpMock
       .expectOne(McpsGatewayService.SESSIONS_URL)
@@ -343,24 +346,93 @@ describe('McpsGatewayService', () => {
     const error = service.error();
     expect(error).not.toBeNull();
     expect(error!.code).toBe('SCOPE_INSUFFICIENT');
-    expect(error!.message).toBe('credential lacks mcp:read');
+    expect(error!.message).toBe('missing scope');
     expect(error!.status).toBe(403);
   });
 
-  it('decodes the 403 SCOPE_INSUFFICIENT body (the nested { detail: { error } } shape)', () => {
+  it('decodes the 403 SCOPE_INSUFFICIENT body (the nested { detail } shape, the live-pinned decorator body)', () => {
+    // D3a: the LIVE shape (daemon/auth/decorators.py) nests under
+    // `detail` and carries the `required` scope list — the message
+    // must preserve BOTH the server's message and the list.
     service.loadAudit(0);
     httpMock
       .expectOne((r) => r.url === McpsGatewayService.AUDIT_URL)
       .flush(
-        { detail: { error: 'SCOPE_INSUFFICIENT', message: 'missing scope' } },
+        {
+          detail: {
+            error: 'SCOPE_INSUFFICIENT',
+            message: 'Token lacks required scope',
+            required: ['mcp:read'],
+          },
+        },
         { status: 403, statusText: 'Forbidden' },
       );
 
     const error = service.error();
     expect(error).not.toBeNull();
     expect(error!.code).toBe('SCOPE_INSUFFICIENT');
-    expect(error!.message).toBe('credential lacks mcp:read');
+    expect(error!.message).toBe('Token lacks required scope (needs mcp:read)');
     expect(error!.source).toBe('audit');
+  });
+
+  it('a 403 WITHOUT the SCOPE_INSUFFICIENT code renders the generic forbidden label (never SCOPE_INSUFFICIENT)', () => {
+    // The CSRF guard / a reverse proxy also answer 403 — labelling
+    // those "SCOPE_INSUFFICIENT" would send the operator hunting the
+    // wrong credential.
+    service.loadMachines();
+    httpMock
+      .expectOne(McpsGatewayService.MACHINES_URL)
+      .flush(
+        { error: 'CSRF_ORIGIN_MISMATCH' },
+        { status: 403, statusText: 'Forbidden' },
+      );
+
+    const error = service.error();
+    expect(error).not.toBeNull();
+    expect(error!.code).toBe('forbidden');
+    expect(error!.code).not.toBe('SCOPE_INSUFFICIENT');
+    expect(error!.message).toContain('CSRF_ORIGIN_MISMATCH');
+  });
+
+  it('decodes the 401 AUTH_REQUIRED body (the flat middleware shape)', () => {
+    // daemon/middleware/auth.py answers 401 with a FLAT
+    // { error, message } body — this branch had NO pin at all before
+    // D3a (a grep for 401|AUTH_REQUIRED over these specs was empty).
+    service.loadMachines();
+    httpMock
+      .expectOne(McpsGatewayService.MACHINES_URL)
+      .flush(
+        { error: 'AUTH_REQUIRED', message: 'Authentication required' },
+        { status: 401, statusText: 'Unauthorized' },
+      );
+
+    const error = service.error();
+    expect(error).not.toBeNull();
+    expect(error!.code).toBe('AUTH_REQUIRED');
+    expect(error!.message).toBe('Authentication required');
+    expect(error!.status).toBe(401);
+  });
+
+  it('an HTML body behind a followed 302 renders not_json — never http_200', () => {
+    // The trap: a 302 to /api/auth/login followed by the browser yields
+    // 200 + HTML. A transport that delivers it to the success path (or
+    // one whose JSON parse fails into the error path) must render a
+    // NON-http_200 label, not an "HTTP 200 success" lie.
+    service.loadMachines();
+    httpMock
+      .expectOne(McpsGatewayService.MACHINES_URL)
+      .flush('<!doctype html><html><body>login</body></html>', {
+        status: 200,
+        statusText: 'OK',
+      });
+
+    const error = service.error();
+    expect(error).not.toBeNull();
+    expect(error!.code).toBe('not_json');
+    expect(error!.code).not.toBe('http_200');
+    expect(error!.message).toContain('non-JSON');
+    // The HTML never reaches the rows.
+    expect(service.machines()).toEqual([]);
   });
 
   it('clears a lane error once that lane recovers', () => {
@@ -373,6 +445,94 @@ describe('McpsGatewayService', () => {
     service.loadMachines();
     httpMock.expectOne(McpsGatewayService.MACHINES_URL).flush(MACHINE_ROSTER);
     expect(service.error()).toBeNull();
+  });
+
+  // ── (d2) the degraded signal (D2) ──────────────────────────────────
+
+  it('a body WITHOUT the degraded key renders as a healthy read (the optional-field default)', () => {
+    // Decision B3b: `degraded` is OPTIONAL on the wire models, so the
+    // 8 typed literals keep compiling — undefined must behave as
+    // `false`, and this is the pin for that default.
+    service.refreshAll();
+    httpMock.expectOne(McpsGatewayService.MACHINES_URL).flush(MACHINE_ROSTER);
+    httpMock.expectOne(McpsGatewayService.SESSIONS_URL).flush(SESSION_LIST);
+    httpMock
+      .expectOne((r) => r.url === McpsGatewayService.AUDIT_URL)
+      .flush(makeAuditPage(2));
+
+    expect(service.degraded()).toBe(false);
+    expect(service.degradedSource()).toBeNull();
+    expect(service.error()).toBeNull();
+  });
+
+  it('a degraded audit lane keeps the LAST page and raises the degraded flag', () => {
+    // Flush a healthy page first…
+    service.loadAudit(0);
+    httpMock
+      .expectOne((r) => r.url === McpsGatewayService.AUDIT_URL)
+      .flush(makeAuditPage(2));
+    expect(service.audit().length).toBe(2);
+    expect(service.auditOffset()).toBe(0);
+
+    // …then the outage shape: 200 + degraded:true (never 503). The
+    // rows, the offset and the pager state MUST survive — the ledger
+    // is unreadable, the page is not.
+    service.loadAudit(50);
+    httpMock
+      .expectOne((r) => r.url === McpsGatewayService.AUDIT_URL)
+      .flush({
+        audit: [],
+        count: 0,
+        limit: 50,
+        offset: 50,
+        gateway_enabled: true,
+        degraded: true,
+        error: 'audit_unavailable',
+      } satisfies McpsGatewayAuditResponse);
+
+    expect(service.degraded()).toBe(true);
+    expect(service.degradedSource()).toBe('audit');
+    expect(service.error()).toBeNull();
+    expect(service.audit().length).toBe(2); // the LAST page stays
+    expect(service.auditOffset()).toBe(0); // the pager state stays
+  });
+
+  it('a recovered healthy read clears the degraded flag', () => {
+    service.loadAudit(0);
+    httpMock
+      .expectOne((r) => r.url === McpsGatewayService.AUDIT_URL)
+      .flush({
+        audit: [],
+        count: 0,
+        limit: 50,
+        offset: 0,
+        gateway_enabled: true,
+        degraded: true,
+        error: 'audit_unavailable',
+      } satisfies McpsGatewayAuditResponse);
+    expect(service.degraded()).toBe(true);
+
+    service.loadAudit(0);
+    httpMock
+      .expectOne((r) => r.url === McpsGatewayService.AUDIT_URL)
+      .flush(makeAuditPage(1));
+    expect(service.degraded()).toBe(false);
+    expect(service.degradedSource()).toBeNull();
+  });
+
+  it('sends the defensive Accept: application/json header on every read (the 302 trap)', () => {
+    service.refreshAll();
+    const requests = [
+      httpMock.expectOne(McpsGatewayService.MACHINES_URL),
+      httpMock.expectOne(McpsGatewayService.SESSIONS_URL),
+      httpMock.expectOne((r) => r.url === McpsGatewayService.AUDIT_URL),
+    ];
+    for (const req of requests) {
+      expect(req.request.headers.get('Accept')).toBe('application/json');
+    }
+    requests[0].flush(MACHINE_ROSTER);
+    requests[1].flush(SESSION_LIST);
+    requests[2].flush(makeAuditPage(0));
   });
 
   // ── (e) the pagination contract ──────────────────────────────────────

@@ -20,7 +20,6 @@ WRITE side (the exception is the signal).
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from sqlalchemy import Engine
@@ -30,8 +29,6 @@ from daemon.services.mcps_gateway.audit import AuditRecord
 from daemon.services.timestamps import now_utc_iso
 
 from .models import McpGatewayAudit
-
-logger = logging.getLogger(__name__)
 
 
 class McpGatewayAuditRepository:
@@ -73,28 +70,44 @@ class McpGatewayAuditRepository:
     def list_recent(
         self, limit: int = 50, offset: int = 0
     ) -> list[dict[str, Any]]:
-        """The most recent audit rows, newest first. Safe on failure.
+        """The most recent audit rows, newest first.
 
         ``offset`` skips rows from the HEAD of the newest-first list —
         the pagination seam of the Phase C read surface
-        (``GET /api/mcps-gateway/audit``). The ORDER is the ledger's own
-        order (``created_at`` DESC, the ISO-8601 TEXT stamp of the
+        (``GET /api/mcps-gateway/audit``). The order is
+        ``created_at DESC, id DESC`` (the ISO-8601 TEXT stamp of the
         audit table — a lexicographic order over a fixed-format stamp
         is a chronological order).
+
+        THE ``id DESC`` TIEBREAKER BUYS PAGING STABILITY, NOT
+        CHRONOLOGY (AD8). ``id`` is a uuid4 TEXT — it is uncorrelated
+        with time, so within a same-stamp tie the secondary order is
+        arbitrary-but-FIXED: no row repeats or vanishes across
+        ``limit/offset`` pages (the paging contract the read surface
+        exposes). It is NOT a claim about which of two same-stamped
+        rows happened first.
+
+        Memory-sink parity (documented, not chased): the memory sink's
+        ``AuditRecord`` has no ``id`` and its ``sorted`` is stable, so
+        ties there keep insertion order — a benign divergence on the
+        unit-test fake, invisible on the wire after the router's
+        projection.
+
+        Raises on failure — the service classifies (AD5: exactly one
+        swallow layer, and it is not this one).
         """
-        try:
-            with Session(self._engine) as session:
-                statement = (
-                    select(McpGatewayAudit)
-                    .order_by(McpGatewayAudit.created_at.desc())
-                    .limit(max(1, int(limit)))
-                    .offset(max(0, int(offset)))
+        with Session(self._engine) as session:
+            statement = (
+                select(McpGatewayAudit)
+                .order_by(
+                    McpGatewayAudit.created_at.desc(),
+                    McpGatewayAudit.id.desc(),
                 )
-                rows = session.exec(statement).all()
-                return [row.model_dump() for row in rows]
-        except Exception as exc:  # noqa: BLE001 — the read side is defensive
-            logger.warning("the remote-command audit could not be read: %s", exc)
-            return []
+                .limit(max(1, int(limit)))
+                .offset(max(0, int(offset)))
+            )
+            rows = session.exec(statement).all()
+            return [row.model_dump() for row in rows]
 
 
 __all__ = ["McpGatewayAuditRepository"]

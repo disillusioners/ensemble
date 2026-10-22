@@ -166,6 +166,18 @@
   background: rgba(245, 158, 11, 0.1);
 }
 
+// A degraded read is a WARNING, not an error: amber-on-blue distinct
+// from both the red error banner and the amber disabled banner — a
+// different accent (info-blue) so the three states never blur.
+.banner-degraded {
+  border-color: rgba(56, 189, 248, 0.45);
+  background: rgba(56, 189, 248, 0.1);
+
+  .banner-code {
+    color: #38bdf8;
+  }
+}
+
 // ── Panels ─────────────────────────────────────────────────────────────
 .panel {
   display: flex;

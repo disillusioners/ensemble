@@ -31,8 +31,15 @@ import { McpsGatewayService } from './mcps-gateway.service';
  * * gateway disabled (`gateway_enabled: false`) → a banner that names
  *   the enable steps and points at `docs/mcps-gateway.md`;
  * * 503 `gateway_unavailable` → an error banner (never a crash);
- * * 403 `SCOPE_INSUFFICIENT` → its own message ("credential lacks
- *   mcp:read").
+ * * 403 `SCOPE_INSUFFICIENT` → its own message — the SERVER's message
+ *   with its `required` scope list ("Token lacks required scope
+ *   (needs mcp:read)"); any other 403 renders the generic `forbidden`
+ *   label, never this one;
+ * * 401 `AUTH_REQUIRED` / a login-page redirect → the auth banner
+ *   (`AUTH_REQUIRED` / `not_json`);
+ * * a degraded audit lane (200 + `degraded: true`) → a DISTINCT
+ *   degraded banner — the ledger could not be read, the last page
+ *   stays on screen.
  */
 @Component({
   selector: 'app-mcps-gateway',
@@ -60,6 +67,8 @@ export class McpsGatewayComponent implements OnInit {
   readonly audit = this.service.audit;
   readonly loading = this.service.loading;
   readonly error = this.service.error;
+  readonly degraded = this.service.degraded;
+  readonly degradedSource = this.service.degradedSource;
   readonly gatewayEnabled = this.service.gatewayEnabled;
   readonly auditOffset = this.service.auditOffset;
   readonly auditLimit = this.service.auditLimit;

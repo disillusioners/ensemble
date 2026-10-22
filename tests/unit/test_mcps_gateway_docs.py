@@ -752,7 +752,7 @@ def test_doc_states_the_management_page_dev_run_and_proxy() -> None:
 
 
 def test_doc_states_the_management_page_degraded_states() -> None:
-    """The three degraded states the operator can meet on the page."""
+    """The four degraded states the operator can meet on the page."""
     text = _doc_prose()
     assert "gateway_enabled: false" in text, (
         "the doc must state the gateway-disabled shape the page renders."
@@ -763,8 +763,14 @@ def test_doc_states_the_management_page_degraded_states() -> None:
     assert "SCOPE_INSUFFICIENT" in text, (
         "the doc must name the 403 the page renders."
     )
-    assert "credential lacks mcp:read" in text, (
-        "the doc must carry the page's own 403 message."
+    assert "Token lacks required scope (needs mcp:read)" in text, (
+        "the doc must carry the page's own 403 message — the server's "
+        "message with its required scope list (D3a replaced the old "
+        "hard-coded 'credential lacks mcp:read' label)."
+    )
+    assert "degraded: true" in text, (
+        "the doc must name the 200+flag degraded shape the page renders "
+        "as a DISTINCT banner (D2's fourth degraded state)."
     )
 
 

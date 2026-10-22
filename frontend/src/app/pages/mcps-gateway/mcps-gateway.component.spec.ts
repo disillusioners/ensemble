@@ -21,6 +21,7 @@ import { McpsGatewayService } from './mcps-gateway.service';
 import type {
   McpsGatewayAuditEntry,
   McpsGatewayError,
+  McpsGatewayErrorSource,
   McpsGatewayMachine,
   McpsGatewaySession,
 } from '../../models';
@@ -33,6 +34,8 @@ class MockMcpsGatewayService {
   readonly audit = signal<McpsGatewayAuditEntry[]>([]);
   readonly loading = signal(false);
   readonly error = signal<McpsGatewayError | null>(null);
+  readonly degraded = signal(false);
+  readonly degradedSource = signal<McpsGatewayErrorSource | null>(null);
   readonly gatewayEnabled = signal(true);
   readonly auditOffset = signal(0);
   readonly auditLimit = signal(50);
@@ -292,14 +295,56 @@ describe('McpsGatewayComponent', () => {
     await build();
     mock.error.set({
       code: 'SCOPE_INSUFFICIENT',
-      message: 'credential lacks mcp:read',
+      message: 'Token lacks required scope (needs mcp:read)',
       status: 403,
       source: 'audit',
     });
     fixture.detectChanges();
 
     expect(text()).toContain('SCOPE_INSUFFICIENT');
-    expect(text()).toContain('credential lacks mcp:read');
+    expect(text()).toContain('Token lacks required scope (needs mcp:read)');
+  });
+
+  it('renders the AUTH_REQUIRED banner for a 401 (the auth branch)', async () => {
+    // D3a: the 401 branch had NO pin at all before (a grep for
+    // 401|AUTH_REQUIRED over these specs returned zero matches).
+    await build();
+    mock.error.set({
+      code: 'AUTH_REQUIRED',
+      message: 'Authentication required',
+      status: 401,
+      source: 'machines',
+    });
+    fixture.detectChanges();
+
+    expect(text()).toContain('AUTH_REQUIRED');
+    expect(text()).toContain('Authentication required');
+  });
+
+  it('renders a DISTINCT degraded banner (not the error banner) and keeps the rows', async () => {
+    // D2: a degraded lane is a WARNING, not an error — a different
+    // banner element, and the last good page stays rendered.
+    await build();
+    mock.audit.set([AUDIT_ENTRY]);
+    fixture.detectChanges();
+
+    mock.degraded.set(true);
+    mock.degradedSource.set('audit');
+    fixture.detectChanges();
+
+    const degraded = fixture.debugElement.query(By.css('[data-test="degraded-banner"]'));
+    expect(degraded).not.toBeNull();
+    const degradedText = (degraded.nativeElement as HTMLElement).textContent ?? '';
+    expect(degradedText).toContain('degraded read');
+    expect(degradedText).toContain('audit');
+
+    // DISTINCT from the error banner: the error slot is NULL here, and
+    // the error banner element must NOT render alongside.
+    expect(mock.error()).toBeNull();
+    expect(fixture.debugElement.query(By.css('[data-test="error-banner"]'))).toBeNull();
+
+    // The last good page stays on screen under the banner.
+    expect(text()).toContain('computer_click');
   });
 
   // ── (e) the pager ────────────────────────────────────────────────────

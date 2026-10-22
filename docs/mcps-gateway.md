@@ -853,11 +853,14 @@ enabled iff `offset > 0`**.
 |---|---|
 | The gateway is off (`gateway_enabled: false`) | a banner naming the enable steps and pointing at `docs/mcps-gateway.md`; the three tables are empty — the read routes stay registered while the transport is off (§8.2) |
 | 503 `gateway_unavailable` | an error banner — the gateway service is not wired on `app.state`; a boot-order defect, NOT an empty roster |
-| 403 `SCOPE_INSUFFICIENT` | "credential lacks mcp:read" — the token must carry the `mcp:read` scope |
-| no credentials | the ordinary 401 / login redirect of every `/api` route |
+| 403 `SCOPE_INSUFFICIENT` | "Token lacks required scope (needs mcp:read)" — the server's own message with its `required` scope list; any OTHER 403 (CSRF guard, reverse proxy) renders the generic `forbidden` label instead, never this one |
+| no credentials | the ordinary 401 / login redirect of every `/api` route — the page renders the `AUTH_REQUIRED` (or `not_json`, when the browser followed the login redirect) banner |
+| degraded audit read (200 + `degraded: true`) | a DISTINCT degraded banner (not the error banner) — the audit ledger could not be read from the daemon's database (outage or read timeout); the LAST page stays on screen, the machines/sessions lanes keep answering |
 
 The three tables degrade INDEPENDENTLY: a failing roster never blanks
-the audit tail.
+the audit tail. The `degraded` flag is carried by all three envelopes
+but only the audit lane can set it today — the machines and sessions
+lanes are in-memory and answer `degraded: false` permanently.
 
 ---
 

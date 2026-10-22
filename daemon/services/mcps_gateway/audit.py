@@ -41,7 +41,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
 from .protocol import canonical_json
@@ -53,6 +54,72 @@ OUTCOME_OK = "ok"
 OUTCOME_ERROR = "error"
 OUTCOME_DENIED = "denied"
 OUTCOME_TIMEOUT = "timeout"
+
+#: The WIRE keys of one audit row — the FE-facing contract
+#: (``GatewayAuditEntry`` in ``daemon/routers/mcps_gateway_schemas.py``).
+#: The wire renames the storage ``created_at`` to ``timestamp`` and never
+#: carries ``id`` or ``detail`` (those are storage-only columns — the
+#: write path persists them BY DESIGN; a wire projection at the write
+#: site would drop the PK and the detail column).
+AUDIT_WIRE_KEYS = (
+    "timestamp",
+    "agent_id",
+    "instance_id",
+    "machine_id",
+    "tool",
+    "outcome",
+    "session_id",
+    "error_code",
+    "args_hash",
+)
+
+
+def _wire_source(row: AuditRecord | Mapping[str, Any]) -> Mapping[str, Any]:
+    """Coerce a supported row shape into a read-only mapping."""
+    if isinstance(row, AuditRecord):
+        return asdict(row)
+    if isinstance(row, Mapping):
+        return row
+    return {}
+
+
+def audit_row_to_wire(row: AuditRecord | Mapping[str, Any]) -> dict[str, Any]:
+    """One audit row → the FE-facing wire dict (the ONE projection).
+
+    Installed at the ROUTER ONLY (``daemon/routers/mcps_gateway_read.py``)
+    — normalization happens at exactly ONE point, so a row can never be
+    projected twice (the double-projection hazard).
+
+    SHAPE-AGNOSTIC AND IDEMPOTENT (AD6, Rev-2 B1):
+
+    * accepts the storage key ``created_at`` **OR** the wire key
+      ``timestamp`` (a wire dict fed back in is a no-op);
+    * NEVER synthesizes a stamp — an unset ``created_at`` projects to
+      ``None`` on BOTH sinks (the DB write path substitutes
+      ``now_utc_iso()`` at write time, ``repository.py``, which is why
+      the unset-stamp acceptance test inserts its row via raw SQL);
+    * ``""`` → ``None`` for the stamp and the ids (``instance_id``,
+      ``session_id``, ``error_code``); ``None`` → ``""`` for the text
+      fields;
+    * NEVER emits ``id`` or ``detail`` — the DB row's ``model_dump``
+      superset (which carries both) and the memory row (which carries
+      ``detail`` but no ``id``) project to the SAME wire dict.
+    """
+    source = _wire_source(row)
+    stamp = source.get("created_at") or source.get("timestamp") or None
+    if not isinstance(stamp, str) or not stamp:
+        stamp = None
+    return {
+        "timestamp": stamp,
+        "agent_id": source.get("agent_id") or "",
+        "instance_id": source.get("instance_id") or None,
+        "machine_id": source.get("machine_id") or "",
+        "tool": source.get("tool") or "",
+        "outcome": source.get("outcome") or "",
+        "session_id": source.get("session_id") or None,
+        "error_code": source.get("error_code") or None,
+        "args_hash": source.get("args_hash") or "",
+    }
 
 
 def hash_args(arguments: Any) -> str:
@@ -148,8 +215,16 @@ class MemoryAuditSink:
         """The most recent rows, newest first — the READ side of the fake.
 
         Mirrors the DB sink's shape (``daemon/repositories/mcps_gateway/
-        repository.py`` — ``row.model_dump()``): the same keys, so the
-        read surface does not care which sink it is talking to.
+        repository.py`` — ``row.model_dump()``): the same keys **except
+        ``id``** (the DB row's PK — the memory row has no equivalent), so
+        the read surface does not care which sink it is talking to. The
+        projection to the WIRE keys happens at exactly ONE point, the
+        router (``audit_row_to_wire``) — never here.
+
+        Ties on ``created_at`` keep INSERTION order (``sorted`` is
+        stable) — the documented divergence from the DB sink's
+        ``id DESC`` tiebreaker, which buys paging stability, not
+        chronological order.
         """
         ordered = sorted(
             self.records, key=lambda r: r.created_at, reverse=True
@@ -173,6 +248,7 @@ class MemoryAuditSink:
 
 
 __all__ = [
+    "AUDIT_WIRE_KEYS",
     "AuditRecord",
     "AuditReader",
     "AuditSink",
@@ -182,5 +258,6 @@ __all__ = [
     "OUTCOME_ERROR",
     "OUTCOME_OK",
     "OUTCOME_TIMEOUT",
+    "audit_row_to_wire",
     "hash_args",
 ]

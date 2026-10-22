@@ -58,6 +58,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from daemon.auth.decorators import require_scope
+from daemon.services.mcps_gateway.audit import audit_row_to_wire
 from daemon.services.mcps_gateway.service import McpGatewayService
 from daemon.services.mcps_gateway.store import PRESENCE_ONLINE
 
@@ -231,9 +232,25 @@ async def list_audit(
     newest row). The read is a synchronous DB call, so it is bridged
     to async with ``asyncio.to_thread`` — the project's standard
     pattern for the synchronous repositories.
+
+    The read is BOUNDED (``MCPS_GATEWAY_READ_TIMEOUT_MS``): a HUNG
+    database must not hang the operator page's request — the writes
+    have had the same bound since Phase B. A timeout classifies exactly
+    like a raised reader: the 200 + ``degraded: true`` body (AD4), so
+    the outage shape stays ONE shape whatever the DB does — refuse,
+    raise or hang. (Only this lane can degrade; the machines/sessions
+    lanes are in-memory and answer ``degraded: false`` — see
+    ``GatewayReadEnvelope``.)
     """
     service = _service_of(request)
-    rows = await asyncio.to_thread(service.audit_tail, limit, offset)
+    read_timeout_seconds = service.config.read_timeout_ms / 1000.0
+    try:
+        rows, degraded, reason = await asyncio.wait_for(
+            asyncio.to_thread(service.audit_tail, limit, offset),
+            timeout=read_timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        rows, degraded, reason = [], True, "audit_unavailable"
     entries = [_audit_entry(row) for row in rows]
     return GatewayAuditResponse(
         audit=entries,
@@ -241,28 +258,23 @@ async def list_audit(
         limit=limit,
         offset=offset,
         gateway_enabled=service.config.enabled,
+        degraded=degraded,
+        error=reason,
     )
 
 
 def _audit_entry(row: dict[str, Any]) -> GatewayAuditEntry:
     """One ledger row → the FE-facing audit entry.
 
-    The row keys are the audit table's own column names
-    (``daemon/repositories/mcps_gateway/models.py``); the wire renames
-    ``created_at`` to ``timestamp`` (the brief's name for the time
-    field) and keeps every other name.
+    THE ONE PROJECTION POINT (AD6): the row may come from the DB sink
+    (a ``model_dump()`` superset carrying ``id`` + ``detail``), the
+    memory sink (no ``id``) or — defensively — an already-projected wire
+    dict; :func:`audit_row_to_wire` is shape-agnostic and idempotent,
+    never synthesizes a stamp, and is installed HERE ONLY. Applying it
+    anywhere else (the sinks, the write path) would double-project and
+    silently drop or rename keys.
     """
-    return GatewayAuditEntry(
-        timestamp=row.get("created_at"),
-        agent_id=row.get("agent_id") or "",
-        instance_id=row.get("instance_id"),
-        machine_id=row.get("machine_id") or "",
-        tool=row.get("tool") or "",
-        outcome=row.get("outcome") or "",
-        session_id=row.get("session_id"),
-        error_code=row.get("error_code"),
-        args_hash=row.get("args_hash") or "",
-    )
+    return GatewayAuditEntry(**audit_row_to_wire(row))
 
 
 __all__ = [

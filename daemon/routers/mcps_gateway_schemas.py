@@ -35,9 +35,37 @@ __all__ = [
     "GatewayAuditResponse",
     "GatewayMachine",
     "GatewayMachinesResponse",
+    "GatewayReadEnvelope",
     "GatewaySession",
     "GatewaySessionsResponse",
 ]
+
+
+class GatewayReadEnvelope(BaseModel):
+    """The shared envelope of the three read responses — the degraded
+    signal (AD4).
+
+    A DB outage must be DISTINGUISHABLE from an empty ledger, and the
+    house convention for that is **200 + flag, never 503**: 503 stays
+    reserved for "surface not wired" (the read routes' own 503), where
+    the FE maps it to ``gateway_unavailable``. ``degraded`` is
+    ORTHOGONAL to ``gateway_enabled`` — a disabled gateway is NOT
+    degraded (it answers a perfectly healthy empty payload).
+
+    ``error`` carries a SHORT, NON-SECRET classification (e.g.
+    ``"audit_unavailable"``) — never a raw exception string (a DB error
+    message can quote DSNs and paths).
+
+    TRUTHFUL SYMMETRY: all three envelopes carry the flag, but only
+    ``/audit`` can set it today — the machines and sessions lanes read
+    IN-MEMORY state and cannot fail on a DB outage, so they answer
+    ``degraded: false`` permanently (and honestly). The symmetry exists
+    so the FE can treat one shape everywhere and so a future persisted
+    roster does not need a breaking change.
+    """
+
+    degraded: bool = False
+    error: str | None = None
 
 
 class GatewayMachine(BaseModel):
@@ -71,7 +99,7 @@ class GatewayMachine(BaseModel):
     busy: bool = False
 
 
-class GatewayMachinesResponse(BaseModel):
+class GatewayMachinesResponse(GatewayReadEnvelope):
     """Body of ``GET /api/mcps-gateway/machines``."""
 
     machines: list[GatewayMachine] = Field(default_factory=list)
@@ -117,7 +145,7 @@ class GatewaySession(BaseModel):
     tools: list[str] = Field(default_factory=list)
 
 
-class GatewaySessionsResponse(BaseModel):
+class GatewaySessionsResponse(GatewayReadEnvelope):
     """Body of ``GET /api/mcps-gateway/sessions``."""
 
     sessions: list[GatewaySession] = Field(default_factory=list)
@@ -153,11 +181,15 @@ class GatewayAuditEntry(BaseModel):
     args_hash: str = ""
 
 
-class GatewayAuditResponse(BaseModel):
+class GatewayAuditResponse(GatewayReadEnvelope):
     """Body of ``GET /api/mcps-gateway/audit``.
 
     The audit tail is paginated (``limit`` / ``offset``) and ordered
-    NEWEST FIRST — the order the ledger is written in.
+    NEWEST FIRST — the order the ledger is written in. This is the one
+    envelope whose lane can actually DEGRADE: the tail is read from the
+    DB, bounded by ``MCPS_GATEWAY_READ_TIMEOUT_MS`` — a dead or hung
+    reader answers ``degraded: true`` with the LAST classification in
+    ``error`` (still 200, never 503).
     """
 
     audit: list[GatewayAuditEntry] = Field(default_factory=list)

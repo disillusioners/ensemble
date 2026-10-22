@@ -153,9 +153,19 @@ class TestMachinesShape:
     def test_body_and_item_keys_are_exact(self, read_client):
         client, _ = read_client
         body = client.get("/api/mcps-gateway/machines").json()
-        assert set(body.keys()) == {"machines", "count", "gateway_enabled"}
+        assert set(body.keys()) == {
+            "machines",
+            "count",
+            "gateway_enabled",
+            "degraded",
+            "error",
+        }
         assert body["count"] == 3
         assert body["gateway_enabled"] is True
+        # §2.D2.1 #1 — the VALUE is pinned, not the key's presence: a
+        # healthy machines read must never report degraded.
+        assert body["degraded"] is False
+        assert body["error"] is None
         assert set(body["machines"][0].keys()) == {
             "machine_id",
             "presence",
@@ -203,16 +213,32 @@ class TestMachinesShape:
         )
         client = TestClient(_read_app(empty))
         body = client.get("/api/mcps-gateway/machines").json()
-        assert body == {"machines": [], "count": 0, "gateway_enabled": True}
+        # §2.D2.1 #2 — the exact healthy body, degraded arms included.
+        assert body == {
+            "machines": [],
+            "count": 0,
+            "gateway_enabled": True,
+            "degraded": False,
+            "error": None,
+        }
 
 
 class TestSessionsShape:
     def test_body_and_item_keys_are_exact(self, read_client):
         client, _ = read_client
         body = client.get("/api/mcps-gateway/sessions").json()
-        assert set(body.keys()) == {"sessions", "count", "gateway_enabled"}
+        assert set(body.keys()) == {
+            "sessions",
+            "count",
+            "gateway_enabled",
+            "degraded",
+            "error",
+        }
         assert body["count"] == 1
         assert body["gateway_enabled"] is True
+        # §2.D2.1 #3 — the in-memory lane is permanently degraded:false.
+        assert body["degraded"] is False
+        assert body["error"] is None
         assert set(body["sessions"][0].keys()) == {
             "session_id",
             "machine_id",
@@ -251,11 +277,16 @@ class TestAuditShape:
             "limit",
             "offset",
             "gateway_enabled",
+            "degraded",
+            "error",
         }
         assert body["count"] == 3
         assert body["limit"] == AUDIT_DEFAULT_LIMIT
         assert body["offset"] == 0
         assert body["gateway_enabled"] is True
+        # §2.D2.1 #4 — the healthy tail is degraded:false, by VALUE.
+        assert body["degraded"] is False
+        assert body["error"] is None
         assert set(body["audit"][0].keys()) == {
             "timestamp",
             "agent_id",
@@ -358,17 +389,25 @@ class TestDegradedPostures:
         )
         client = TestClient(_read_app(service))
         machines = client.get("/api/mcps-gateway/machines").json()
+        # §2.D2.1 #5 — the disabled-gateway shape. This pin carries the
+        # disabled ≠ degraded orthogonality (AD4): the transport being
+        # OFF is not a degraded read.
         assert machines == {
             "machines": [],
             "count": 0,
             "gateway_enabled": False,
+            "degraded": False,
+            "error": None,
         }
 
         sessions = client.get("/api/mcps-gateway/sessions").json()
+        # §2.D2.1 #6 — as #5, for the sessions envelope.
         assert sessions == {
             "sessions": [],
             "count": 0,
             "gateway_enabled": False,
+            "degraded": False,
+            "error": None,
         }
 
     def test_a_disabled_gateway_still_reports_the_flag_honestly(self):
@@ -387,6 +426,162 @@ class TestDegradedPostures:
         r = client.get("/api/mcps-gateway/machines")
         assert r.status_code == 503
         assert r.json()["detail"]["error"] == "gateway_unavailable"
+
+
+# ── the degraded audit lane (D2 — the outage shape, as a BODY) ────────────
+
+
+#: The deterministic unreachable DSN (plan §4 construction 3): port 1
+#: refuses the connection instantly — no external service, no flaky
+#:
+#: The earlier ``engine.dispose()`` construction was a FALSE PREMISE
+#: (dispose merely refreshes the pool; the next read succeeds) — this
+#: replaces it.
+_UNREACHABLE_DSN = "postgresql+psycopg://127.0.0.1:1/ensemble_dev_test_only"
+
+#: The exact degraded body of the audit lane (the ONE shape the outage
+#: takes — 200, never 500 and never 503).
+_DEGRADED_AUDIT_BODY = {
+    "audit": [],
+    "count": 0,
+    "limit": AUDIT_DEFAULT_LIMIT,
+    "offset": 0,
+    "gateway_enabled": True,
+    "degraded": True,
+    "error": "audit_unavailable",
+}
+
+
+def _service_with_sink(sink, *, read_timeout_ms: int = 5_000) -> McpGatewayService:
+    return McpGatewayService(
+        config=GatewayConfig(
+            enabled=True,
+            heartbeat_timeout_ms=HEARTBEAT_TIMEOUT_MS,
+            read_timeout_ms=read_timeout_ms,
+        ),
+        audit_sink=sink,
+        clock=_Clock(),
+    )
+
+
+class TestDegradedAuditLane:
+    def test_audit_read_degraded_on_unreachable_engine(self):
+        """Plan §4 construction 1+3 — the sink is the REAL repository
+        on an unreachable engine. The repository no longer swallows
+        (AD5), the service classifies, and the endpoint answers the
+        degraded body — 200, not 500 and not 503."""
+        from sqlalchemy import create_engine
+
+        from daemon.repositories.mcps_gateway.repository import (
+            McpGatewayAuditRepository,
+        )
+
+        engine = create_engine(_UNREACHABLE_DSN)
+        try:
+            service = _service_with_sink(McpGatewayAuditRepository(engine))
+            client = TestClient(_read_app(service))
+            r = client.get("/api/mcps-gateway/audit")
+            assert r.status_code == 200
+            assert r.json() == _DEGRADED_AUDIT_BODY
+        finally:
+            engine.dispose()
+
+    def test_machines_and_sessions_stay_healthy_on_the_same_outage(self):
+        """Orthogonality + truthful symmetry: the machines/sessions
+        lanes are IN-MEMORY, so the DB outage that degrades the audit
+        lane leaves them healthy — permanently ``degraded: false``,
+        with ``gateway_enabled`` unchanged."""
+        from sqlalchemy import create_engine
+
+        from daemon.repositories.mcps_gateway.repository import (
+            McpGatewayAuditRepository,
+        )
+
+        engine = create_engine(_UNREACHABLE_DSN)
+        try:
+            service = _service_with_sink(McpGatewayAuditRepository(engine))
+            client = TestClient(_read_app(service))
+            machines = client.get("/api/mcps-gateway/machines").json()
+            assert machines["degraded"] is False
+            assert machines["gateway_enabled"] is True
+            sessions = client.get("/api/mcps-gateway/sessions").json()
+            assert sessions["degraded"] is False
+            assert sessions["gateway_enabled"] is True
+        finally:
+            engine.dispose()
+
+    def test_audit_read_degraded_on_raising_reader(self, monkeypatch):
+        """Plan §4 construction 2 — a monkeypatched reader. The SAME
+        body arrives through the service classification path, proving
+        the classification lives in ``audit_tail`` — and the raw
+        exception string (which carries a secret) never leaks."""
+        sink = MemoryAuditSink()
+        service = _service_with_sink(sink)
+
+        def _raising(**_kwargs):
+            raise RuntimeError("boom postgresql://secret-user:pw@host/db")
+
+        monkeypatch.setattr(sink, "list_recent", _raising)
+        client = TestClient(_read_app(service))
+        r = client.get("/api/mcps-gateway/audit")
+        assert r.status_code == 200
+        assert r.json() == _DEGRADED_AUDIT_BODY
+        assert "secret-user" not in r.text
+
+    async def test_audit_read_degraded_on_hung_reader(self, monkeypatch):
+        """Plan §4 construction 4 — the class constructions 1-3 do NOT
+        cover: a reader that HANGS instead of raising. The read is
+        bounded by ``MCPS_GATEWAY_READ_TIMEOUT_MS``; the answer is the
+        SAME degraded body, and the wall clock is bounded by the
+        timeout — not by the reader's sleep.
+
+        Harness note: this one test uses ``httpx.AsyncClient`` with
+        ``ASGITransport`` (the repo's established pattern,
+        ``tests/test_daemon_settings_api.py``) instead of ``TestClient``
+        — starlette's blocking portal JOINS the loop's default executor
+        on request teardown, so a ``TestClient`` wall clock would wait
+        for the sleeping reader thread and measure the JOIN, not the
+        bound. The portal-free transport returns when the HANDLER
+        returns, which is the production behaviour (uvicorn never joins
+        the executor per request).
+        """
+        import time
+
+        import httpx
+
+        sink = MemoryAuditSink()
+        service = _service_with_sink(sink, read_timeout_ms=200)
+
+        def _hanging(**_kwargs):
+            time.sleep(2.0)  # 10x the read timeout
+            return []
+
+        monkeypatch.setattr(sink, "list_recent", _hanging)
+        transport = httpx.ASGITransport(app=_read_app(service))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            started = time.monotonic()
+            r = await client.get("/api/mcps-gateway/audit")
+            elapsed = time.monotonic() - started
+        assert r.status_code == 200
+        body = r.json()
+        assert body["degraded"] is True
+        assert body["error"] == "audit_unavailable"
+        assert body["audit"] == []
+        assert elapsed < 1.5, f"the read must be bounded, took {elapsed:.2f}s"
+
+    def test_a_write_only_sink_is_not_degraded(self):
+        """Negative control — a write-only sink (audit disabled /
+        ``NullAuditSink``) is NOT an outage: an empty tail with
+        ``degraded: false``."""
+        from daemon.services.mcps_gateway.audit import NullAuditSink
+
+        service = _service_with_sink(NullAuditSink())
+        rows, degraded, reason = service.audit_tail(limit=10, offset=0)
+        assert rows == []
+        assert degraded is False
+        assert reason is None
 
 
 # ── the auth lane ─────────────────────────────────────────────────────────
@@ -496,9 +691,17 @@ def test_the_service_read_accessors_are_public() -> None:
     """The read surface reaches the center through the PUBLIC seams."""
     service, _clock, sink = _build_service()
     assert service.now() == T0
-    rows = service.audit_tail(limit=10, offset=0)
+    # §2.D2.1 #12 — audit_tail returns the classified TRIPLE now; the
+    # rows themselves are unchanged.
+    rows, degraded, reason = service.audit_tail(limit=10, offset=0)
     assert len(rows) == 3
     assert rows[0]["created_at"] == "2026-10-22T07:02:00.000000+00:00"
-    assert service.audit_tail(limit=1, offset=1)[0]["tool"] == "computer_tool_1"
-    assert service.audit_tail(limit=10, offset=99) == []
+    assert degraded is False
+    assert reason is None
+    page, page_degraded, _ = service.audit_tail(limit=1, offset=1)
+    assert page[0]["tool"] == "computer_tool_1"
+    assert page_degraded is False
+    tail, tail_degraded, _ = service.audit_tail(limit=10, offset=99)
+    assert tail == []
+    assert tail_degraded is False
     assert sink.records  # the fake sink is the one behind the service
