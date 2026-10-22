@@ -775,6 +775,92 @@ The pagination bounds follow the read-only snapshots family
 
 ---
 
+## 9. The management page (Phase C)
+
+The daemon-side half of the management page is §8; this section is the
+**frontend half** — a read-only Angular page that renders those three
+read surfaces as three tables.
+
+### 9.1 What the page shows
+
+| Section | Endpoint | Renders |
+|---|---|---|
+| Machines | `GET /api/mcps-gateway/machines` | the roster: the presence badge, online/connected, the last heartbeat, the active-session pointer, the busy flag |
+| Sessions | `GET /api/mcps-gateway/sessions` | the live sessions: agent, machine, instance, state, the §8.3 lock indicator, the started/expires stamps, the reported tool chips |
+| Audit | `GET /api/mcps-gateway/audit` | the audit tail, newest first: time, agent, machine, tool, outcome badge, session, error code, the truncated args hash (the full hash is the cell's tooltip) |
+
+The page lives at the SPA route **`/mcps-gateway`** and is reachable
+from the **gear menu** ("MCP Gateway") — there is NO top-level header
+link (the header nav carries the primary destinations only). The route
+is lazy-loaded, so the page costs nothing until it is opened.
+
+The audit rows are rendered **in the order the daemon returned them** —
+the page never re-sorts the tail.
+
+### 9.2 READ-ONLY v1 — what the page does NOT do
+
+The page reads. There is **no kill, no lock release, no disconnect and
+no write verb** anywhere in it — the gateway is driven by the AGENT
+TOOLS (`mcp_rpc_*`), never by the browser, and the read surface has no
+POST/PUT/DELETE route to call (§8.1). The write controls arrive with
+the v0.2 per-tool ACL work; until then the page is strictly
+observational.
+
+### 9.3 Running it
+
+In dev:
+
+```bash
+cd frontend && npm start
+```
+
+The dev server proxies `/api` to `http://localhost:8079`
+(`frontend/proxy.conf.json`), so the page talks to the local daemon
+with no configuration and no hard-coded host anywhere in the frontend.
+Start the daemon with `MCPS_GATEWAY_ENABLED=1` if you want the gateway
+transport itself up — the page renders either way (§9.5).
+
+For a production build:
+
+```bash
+cd frontend && npm run build
+```
+
+which emits `frontend/dist`, served per the repo's deploy conventions.
+A daemon rebuild does **not** rebuild the frontend bundle — the FE
+dist is a separate deploy artifact.
+
+### 9.4 Polling and pagination
+
+The page polls every **10 s** (`McpsGatewayService.POLL_INTERVAL_MS`).
+Ten seconds is the compromise between freshness and load: the machine
+heartbeat is 15 s and the presence timeout is 45 s, so presence only
+ever moves on a heartbeat — a faster poll would buy nothing, a slower
+one would let a machine flap between `online` and `offline` for long
+strokes. The poll stops when the page is closed, and a refresh cycle
+that is still in flight suppresses the next one (no request pile-up on
+a slow daemon).
+
+The audit tail is paginated with a **page size of 50** (the BE default;
+the maximum the BE accepts is 200). `count` on the audit response is
+the PAGE LENGTH, not the ledger total (§8.3), so **Next is enabled iff
+the page came back full** (`count === limit`) and **Previous is
+enabled iff `offset > 0`**.
+
+### 9.5 The degraded states
+
+| State | What the operator sees |
+|---|---|
+| The gateway is off (`gateway_enabled: false`) | a banner naming the enable steps and pointing at `docs/mcps-gateway.md`; the three tables are empty — the read routes stay registered while the transport is off (§8.2) |
+| 503 `gateway_unavailable` | an error banner — the gateway service is not wired on `app.state`; a boot-order defect, NOT an empty roster |
+| 403 `SCOPE_INSUFFICIENT` | "credential lacks mcp:read" — the token must carry the `mcp:read` scope |
+| no credentials | the ordinary 401 / login redirect of every `/api` route |
+
+The three tables degrade INDEPENDENTLY: a failing roster never blanks
+the audit tail.
+
+---
+
 *Maintained alongside `tests/unit/test_mcps_gateway_docs.py`, which pins the
 operational facts of this page (kill-switch name and default, the restart
 requirement, the route path, every knob default, and the honest-absence
