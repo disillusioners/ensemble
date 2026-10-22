@@ -652,6 +652,23 @@ class TestFix:
         )
         assert response.status_code == 400
 
+    def test_fix_503_when_gate_refuses(self, skill_app_with_mock_services):
+        """Evolution-lane gate OFF (dispatch_fix → None) → 503, NOT a fake 202.
+
+        The dispatcher returns ``None`` when the kill-switch is off or
+        the FIX cooldown refuses the repeat admission — no job exists,
+        so the endpoint must not answer 202 with ``job_id: null``.
+        """
+        client = skill_app_with_mock_services["client"]
+        dispatcher = skill_app_with_mock_services["dispatcher"]
+        dispatcher.dispatch_fix = AsyncMock(return_value=None)
+        response = client.post(
+            "/api/skills/skill-abc/fix",
+            json={"issue_description": "broken"},
+        )
+        assert response.status_code == 503
+        assert "No job was created" in response.json()["detail"]["error"]
+
 
 class TestABTest:
     def test_get_ab_test_returns_dict(self, skill_app_with_mock_services):

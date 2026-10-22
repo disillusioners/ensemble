@@ -204,9 +204,25 @@ class TestSkillKeeperAgentDefinition:
         assert meta["id"] == "skill-keeper"
         assert "dynamic-skill" in meta["innate_skills"]
         assert "skill-evolution" in meta["tools"]["allow"]
-        # Reserved for the skill-keeper's tier-3 evolution flows.
-        assert "bash" in meta["tools"]["allow"]
-        assert "filesystem" in meta["tools"]["allow"]
+        # 2026-10-22 confinement fix (incident 2026-10-21): the
+        # DB-only agent holds NO repo-mutation surface. bash /
+        # filesystem / service categories are stripped from allow and
+        # pinned in deny; only the READ-ONLY filesystem tools remain.
+        assert "bash" not in meta["tools"]["allow"]
+        assert "filesystem" not in meta["tools"]["allow"]
+        assert "service" not in meta["tools"]["allow"]
+        assert "write_file" not in meta["tools"]["allow"]
+        assert "edit_file" not in meta["tools"]["allow"]
+        for read_only_tool in (
+            "read_file",
+            "list_directory",
+            "glob_files",
+            "grep_files",
+        ):
+            assert read_only_tool in meta["tools"]["allow"]
+        deny = meta["tools"].get("deny", [])
+        for mutation_surface in ("bash", "proc", "service", "write_file", "edit_file"):
+            assert mutation_surface in deny
 
     def test_skill_keeper_soul_exists(self):
         """``soul.md`` exists and has non-trivial content."""

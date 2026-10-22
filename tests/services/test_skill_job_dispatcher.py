@@ -238,6 +238,20 @@ class TestEnqueueAnalysis:
 class TestEnqueueEvolution:
     """Tests for ``SkillJobDispatcher.enqueue_evolution``."""
 
+    @pytest.fixture(autouse=True)
+    def _enable_evolution_lane(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pin ``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` to ON for this class.
+
+        ``enqueue_evolution`` is now a GATED admission lane (2026-10-22
+        confinement fix): with the gate OFF (the default) it
+        short-circuits to ``None`` and never touches the job service.
+        These tests pin the ON path so the routing / metadata
+        assertions still verify the real evolution dispatch. Per-test
+        gate coverage (OFF behavior, cooldown, idempotency key) lives
+        in ``tests/unit/test_skill_evolution_lane_gate.py``.
+        """
+        monkeypatch.setenv("ENSEMBLE_SKILL_EVOLUTION_ENABLED", "1")
+
     async def test_enqueue_evolution_fix(
         self, dispatcher, job_service
     ):
@@ -391,19 +405,23 @@ class TestRoutingInvariant:
     """
 
     @pytest.fixture(autouse=True)
-    def _enable_skill_capture_killswitch(
+    def _enable_skill_lanes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Pin ``ENSEMBLE_SKILL_CAPTURE_ENABLED`` to ON for this class.
+        """Pin BOTH skill-lane kill-switches to ON for this class.
 
         Three of the four routing tests below call
-        ``d.enqueue_capture(...)`` and assert it produces a real
-        ``job_service.enqueue`` call. With the kill-switch OFF the
-        dispatcher short-circuits to ``None`` and the ``enqueue``
-        await count would be 3 instead of 4. Pin ON so the routing
-        invariants remain byte-identical to the pre-flag codebase.
+        ``d.enqueue_capture(...)`` and one calls
+        ``d.enqueue_evolution(...)``. With the capture kill-switch OFF
+        (its default) the dispatcher short-circuits capture to
+        ``None``; with the evolution-lane gate OFF (its default,
+        2026-10-22 confinement fix) it short-circuits evolution to
+        ``None`` — the ``enqueue`` await count would drop. Pin both ON
+        so the routing invariants remain byte-identical to the
+        pre-gate codebase.
         """
         monkeypatch.setenv("ENSEMBLE_SKILL_CAPTURE_ENABLED", "1")
+        monkeypatch.setenv("ENSEMBLE_SKILL_EVOLUTION_ENABLED", "1")
 
     async def test_all_jobs_use_parallel_queue_id(
         self, job_service,
