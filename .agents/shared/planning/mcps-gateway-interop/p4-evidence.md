@@ -262,7 +262,7 @@ exit 0, no listeners). Ephemeral ports only; nothing left listening.
 ## 6. Scope notes (disclosed, for the record)
 
 * **One file beyond the plan's enumerated FE list:**
-  `mcps-gateway.component.scss` (+7 lines) — a DISTINCT banner needs a
+  `mcps-gateway.component.scss` (+12 lines) — a DISTINCT banner needs a
   distinct visual treatment; the plan's file map predates the banner.
   No other rider.
 * The new unit file landed at `tests/unit/test_mcps_gateway_audit_projection.py`
@@ -285,3 +285,8 @@ D3c → D3b → D2 → D3a(FE)+pins → roster fix, with the roster defect
 mechanics cited. SHA recorded in §8 below after the push (no force).
 
 — P4 (Coder), 2026-10-22
+
+## §8 — Commit
+
+Phase-D1 / P4 phase commit: `c2796ed99ae88fb26f785dc1bfd5daffd679e473`
+(recorded post-push by the evidence-correction commit — a self-referencing SHA cannot live inside its own commit).
