@@ -28,9 +28,22 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 GATE_SCRIPT = REPO_ROOT / "tests" / "integration" / "mcps_gateway" / "p0_gate.py"
 
-#: The fence database user — the local PostgreSQL cluster is reached with
-#: the shell user unless the caller overrides it.
-POSTGRES_USER = os.environ.get("POSTGRES_USER", "") or ""
+#: The role the FENCE database is reached with.
+#:
+#: WHY NOT THE AMBIENT ``POSTGRES_USER``: the repository's ``.env``
+#: exports ``POSTGRES_USER=ensemble`` — the role of the PRODUCTION
+#: database — and the ambient shell inherits it.  The fence database
+#: (``ensemble_dev_test_only``) is owned by the SHELL USER, so the
+#: ``ensemble`` role does not own its tables: the daemon's boot
+#: ``ALTER TABLE task …`` raises ``InsufficientPrivilege`` ("must be
+#: owner of table task"), the lifespan dies and the gate used to hang
+#: for 60 s on a generic "the server failed to start" error.  The fence
+#: role is therefore resolved by the harness (the fence owner, unless
+#: ``MCPS_GATEWAY_FENCE_PG_USER`` names one explicitly).
+sys.path.insert(0, str(REPO_ROOT))
+from tests.integration.mcps_gateway import tls_harness  # noqa: E402
+
+FENCE_ROLE = tls_harness.resolve_fence_role()
 
 pytestmark = pytest.mark.integration
 
@@ -39,9 +52,12 @@ pytestmark = pytest.mark.integration
 def test_p0_gate_real_client_against_real_gateway() -> None:
     """The real Go client completes a TLS handshake and a command against the real gateway."""
     env = dict(os.environ)
-    env["POSTGRES_USER"] = POSTGRES_USER
+    # The subprocess talks to the FENCE database only — the fence role
+    # is pinned here so that nothing in the gate process can inherit the
+    # ambient (production) role.
+    env["POSTGRES_USER"] = FENCE_ROLE
     proc = subprocess.run(
-        [sys.executable, str(GATE_SCRIPT), "1", "/tmp/mcps-d1/gate", POSTGRES_USER],
+        [sys.executable, str(GATE_SCRIPT), "1", "/tmp/mcps-d1/gate", FENCE_ROLE],
         cwd=str(REPO_ROOT),
         env=env,
         capture_output=True,

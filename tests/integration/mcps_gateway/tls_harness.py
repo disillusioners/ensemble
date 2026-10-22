@@ -47,7 +47,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import getpass
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -62,6 +64,22 @@ from typing import Any, Callable
 FENCE_DB_NAME = "ensemble_dev_test_only"
 PG_HOST = "127.0.0.1"
 PG_PORT = 5432
+
+#: The environment variable that EXPLICITLY names the role that owns the
+#: fence database.  It is the ONLY explicit override — the ambient
+#: ``POSTGRES_USER`` is NOT one (see :func:`resolve_fence_role`).
+FENCE_ROLE_ENV = "MCPS_GATEWAY_FENCE_PG_USER"
+
+#: The fence tables the daemon's boot ALTERs (``daemon/manager.py`` —
+#: ``_ensure_postgres_columns``).  A role that does not OWN them cannot
+#: run those statements, so they are the probe set of the preflight.
+FENCE_SCHEMA_TABLES = (
+    "task",
+    "job_queue_items",
+    "job_queues",
+    "mcp_gateway_audit",
+    "secrets_audit",
+)
 
 #: The repository root — the ``config.yaml`` of the daemon is read from
 #: here (``ENSEMBLE_CONFIG``), so the harness does not depend on the CWD.
@@ -285,6 +303,182 @@ def postgres_env(user: str = "") -> dict[str, str | None]:
     }
 
 
+# ── the fence role (who may act on the fence schema) ─────────────────────
+
+
+def fence_owner_role() -> str:
+    """The role that owns the fence database — the shell user."""
+    return getpass.getuser()
+
+
+def resolve_fence_role(requested: str = "") -> str:
+    """The role the fence DSN must authenticate as.
+
+    WHY NOT THE AMBIENT ``POSTGRES_USER``
+    -------------------------------------
+    The repository's ``.env`` exports ``POSTGRES_USER=ensemble`` — the
+    role of the PRODUCTION database — and the ambient shell inherits it.
+    The fence database (``ensemble_dev_test_only``) is owned by the
+    SHELL USER, so the ``ensemble`` role does not own its tables: the
+    daemon's boot ``ALTER TABLE task ...`` then fails with
+    ``InsufficientPrivilege`` ("must be owner of table task"), the
+    lifespan dies, and the gate used to hang for 60 s on a generic
+    "the TLS gateway server failed to start within 60s" error.
+
+    THE OVERRIDE: only ``MCPS_GATEWAY_FENCE_PG_USER`` (an explicit
+    request) or a caller that names a role OTHER than the ambient one
+    counts.  The ambient value is never an explicit request — it is
+    exactly the thing that must not be trusted here.
+    """
+    explicit = (os.environ.get(FENCE_ROLE_ENV, "") or "").strip()
+    if explicit:
+        return explicit
+    requested = (requested or "").strip()
+    ambient = (os.environ.get("POSTGRES_USER", "") or "").strip()
+    if requested and requested != ambient:
+        return requested
+    return fence_owner_role()
+
+
+def preflight_fence_role(user: str) -> dict[str, Any]:
+    """Assert — BEFORE the boot — that ``user`` can act on the fence schema.
+
+    The daemon's boot runs ``ALTER TABLE …`` over the fence tables; a
+    role that does not own them gets ``InsufficientPrivilege`` and the
+    lifespan dies.  This preflight turns that 60-second hang into a
+    one-line, actionable failure (seconds, not a minute).
+
+    Returns a report dict — ``ok`` is True only when the role is
+    connected AND may ALTER every fence table that already exists.
+    """
+    from sqlalchemy import create_engine, text as sa_text
+
+    report: dict[str, Any] = {
+        "ok": False,
+        "role": user,
+        "database": FENCE_DB_NAME,
+        "owners": {},
+        "not_privileged": [],
+        "error": "",
+    }
+    engine = None
+    try:
+        engine = create_engine(
+            fence_sync_dsn(user),
+            connect_args={"options": "-c timezone=UTC"},
+        )
+        with engine.connect() as conn:
+            current = conn.execute(sa_text("SELECT current_user")).scalar()
+            report["role"] = str(current)
+            # The table names are module constants — no injection surface.
+            names = ", ".join(f"'{name}'" for name in FENCE_SCHEMA_TABLES)
+            rows = conn.execute(
+                sa_text(
+                    "SELECT c.relname, pg_get_userbyid(c.relowner) AS owner, "
+                    "pg_has_role(:role, c.relowner, 'MEMBER') AS can_alter "
+                    "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    f"WHERE n.nspname = 'public' AND c.relname IN ({names})"
+                ),
+                {"role": str(current)},
+            ).all()
+            for tablename, owner, can_alter in rows:
+                report["owners"][str(tablename)] = str(owner)
+                # ALTER on a table is an OWNERSHIP right in PostgreSQL
+                # (there is no 'ALTER' table privilege) — so the probe is
+                # membership of the owning role.
+                if not can_alter:
+                    report["not_privileged"].append(
+                        f"{tablename} (owner={owner})"
+                    )
+    except Exception as exc:  # noqa: BLE001 — the report IS the diagnosis
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        return report
+    finally:
+        if engine is not None:
+            engine.dispose()
+    report["ok"] = not report["not_privileged"] and not report["error"]
+    return report
+
+
+def fence_role_failure_message(report: dict[str, Any]) -> str:
+    """The ONE actionable line of a failed fence-role preflight."""
+    role = report.get("role") or "?"
+    database = report.get("database", FENCE_DB_NAME)
+    if report.get("error"):
+        return (
+            f"fence-role preflight FAILED: role {role!r} cannot reach the fence "
+            f"database {database!r} ({report['error']}) — create it as the fence "
+            f"owner: createdb -h {PG_HOST} -p {PG_PORT} -U "
+            f"{fence_owner_role()} {database}"
+        )
+    blocked = ", ".join(report.get("not_privileged") or [])
+    return (
+        f"fence-role preflight FAILED: role {role!r} cannot ALTER the fence "
+        f"tables ({blocked}) — run the gate as the fence owner "
+        f"({fence_owner_role()}), or grant ALTER on them to {role!r}"
+    )
+
+
+# ── the startup capture (the REAL cause of a failed boot) ─────────────────
+
+
+class StartupCapture(logging.Handler):
+    """Capture the startup output (uvicorn + daemon) of the boot.
+
+    The lifespan failure of the real app is logged by uvicorn's
+    ``uvicorn.error`` logger WITH the exception attached; without this
+    capture the gate could only report "the server failed to start",
+    which hides the real cause (e.g. ``InsufficientPrivilege``).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.lines: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:  # noqa: D102
+        try:
+            self.lines.append(self.format(record))
+        except Exception:  # noqa: BLE001 — a formatting failure is not fatal
+            self.lines.append(record.getMessage())
+
+    def tail(self, limit: int = 40) -> str:
+        """The last ``limit`` captured lines (the startup stderr)."""
+        return "\n".join(self.lines[-limit:])
+
+
+def attach_startup_capture(capture: logging.Handler) -> None:
+    """Attach the capture to the loggers the boot writes to.
+
+    uvicorn's ``dictConfig`` (applied INSIDE ``serve()``) REPLACES the
+    handlers of the loggers it configures, so the capture is re-attached
+    by the boot loop — see :func:`boot_tls_gateway`.
+    """
+    for logger in (logging.getLogger(), logging.getLogger("uvicorn.error")):
+        if capture not in logger.handlers:
+            logger.addHandler(capture)
+
+
+def startup_failure_message(
+    capture: StartupCapture, exc: BaseException | None
+) -> str:
+    """The startup failure, with the REAL cause visible."""
+    parts = [
+        "the TLS gateway server failed to start within 60s "
+        "(the lifespan boot of the real app failed)"
+    ]
+    if exc is not None:
+        parts.append(f"lifespan exception: {type(exc).__name__}: {exc}")
+    tail = capture.tail(40)
+    if tail:
+        parts.append("--- captured startup output (last 40 lines) ---\n" + tail)
+    else:
+        parts.append(
+            "--- captured startup output: EMPTY (the daemon logged nothing "
+            "at WARNING level or above) ---"
+        )
+    return "\n".join(parts)
+
+
 # ── the booted gateway ────────────────────────────────────────────────────
 
 
@@ -309,8 +503,14 @@ class TlsGateway:
     server: Any = None
     server_task: Any = None
     server_task_completed: bool = False
+    server_task_error: str = ""
     shutdown_seconds: float = 0.0
     ws_route_paths: list[str] = field(default_factory=list)
+    #: The TCP listeners of the test process captured BEFORE the server
+    #: bound its socket.  A baseline taken AFTER the bind contains the
+    #: gateway's OWN listener and would mask a leaked gateway listener
+    #: as "pre-existing".
+    listener_baseline: list[str] = field(default_factory=list)
 
     @property
     def ws_url(self) -> str:
@@ -380,6 +580,20 @@ async def boot_tls_gateway(
     tmp_dir = Path(tmp_dir)
     data_dir = tmp_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── the fence role (F1) ──
+    # The ambient ``POSTGRES_USER`` is the role of the PRODUCTION
+    # database (``ensemble``) and does NOT own the fence schema, so the
+    # daemon's boot ``ALTER TABLE task …`` would raise
+    # ``InsufficientPrivilege``.  The fence role is therefore pinned to
+    # the fence OWNER unless the caller explicitly overrides it.
+    role = resolve_fence_role(postgres_user)
+
+    # ── the preflight (F1) — fail FAST, in seconds, not in 60 ──
+    preflight = await asyncio.to_thread(preflight_fence_role, role)
+    if not preflight.get("ok"):
+        raise RuntimeError(fence_role_failure_message(preflight))
+
     # FORCE the postgres backend: the auto-detection reads the INHERITED
     # shell environment, which is exactly the thing that must not be
     # trusted here.
@@ -391,7 +605,7 @@ async def boot_tls_gateway(
                     "host": PG_HOST,
                     "port": PG_PORT,
                     "db": FENCE_DB_NAME,
-                    "user": postgres_user,
+                    "user": role,
                     "password": "",
                 },
             }
@@ -416,8 +630,16 @@ async def boot_tls_gateway(
         "ENSEMBLE_DATA_DIR": str(data_dir),
         "ENSEMBLE_CONFIG": str(REPO_ROOT / "config.yaml"),
         # ── R-23: the kill switches of the side effects ──
+        # The ONLY two switches with a daemon-wide consumer are the two
+        # Plane ones; the gate ASSERTS their effect on the booted app
+        # (see the ``plane-*-kill-switch-effective`` checks of the gate).
         "PLANE_SYNC_ENABLED": "0",
         "PLANE_MCP_ENABLED": "0",
+        # NO-OP PENDING A DAEMON KNOB: neither variable has a
+        # daemon-wide consumer today (verified by grep — only
+        # PLANE_SYNC_ENABLED / PLANE_MCP_ENABLED are honoured), so these
+        # two lines are DOCUMENTATION, not a mitigation.  They are kept
+        # (harmless) so the intent survives the day the knobs exist.
         "DRY_RUN": "1",
         "DESTRUCTIVE": None,  # UNSET
     }
@@ -431,7 +653,7 @@ async def boot_tls_gateway(
         # switched off and the window disappears.
         for server in ("CONTEXT7", "COMPUTER_USE", "WEBFETCH", "PLANE"):
             env[f"MCP_DISABLE_BUILT_IN_{server}"] = "true"
-    env.update(postgres_env(postgres_user))
+    env.update(postgres_env(role))
     if extra_env:
         env.update(extra_env)
 
@@ -455,6 +677,25 @@ async def boot_tls_gateway(
                 f"MCPS_GATEWAY_ENABLED was not honoured at boot "
                 f"(routes: {route_paths[:20]})"
             )
+
+        # ── the lifespan tap (the REAL exception of a failed boot) ──
+        # The daemon's lifespan raises when the boot fails (e.g. the
+        # ``InsufficientPrivilege`` of an ALTER on a table the role does
+        # not own).  uvicorn swallows it into a log line, so the harness
+        # taps the lifespan context and keeps the exception itself.
+        startup_failure: dict[str, BaseException | None] = {"exc": None}
+        original_lifespan = app.router.lifespan_context
+
+        @contextlib.asynccontextmanager
+        async def tapped_lifespan(inner_app: Any):
+            try:
+                async with original_lifespan(inner_app) as state:
+                    yield state
+            except BaseException as exc:  # noqa: BLE001 — the failure IS the evidence
+                startup_failure["exc"] = exc
+                raise
+
+        app.router.lifespan_context = tapped_lifespan
 
         # ── the taps (in-process; the daemon source is NOT modified) ──
         from daemon.routers.mcps_gateway import WebSocketGatewayTransport
@@ -486,18 +727,32 @@ async def boot_tls_gateway(
             access_log=False,
         )
         server = uvicorn.Server(config_obj)
+
+        # ── the listener baseline (F3) ──
+        # It MUST be captured BEFORE the server binds its socket: a
+        # baseline taken afterwards contains the gateway's OWN listener
+        # and would mask a leaked gateway listener as "pre-existing".
+        listener_baseline = await asyncio.to_thread(listeners_owned_by, os.getpid())
+
+        # ── the startup capture (F1) ──
+        startup_capture = StartupCapture()
+        attach_startup_capture(startup_capture)
+
         task = asyncio.create_task(server.serve())
         booted: TlsGateway | None = None
         try:
             deadline = time.monotonic() + 60.0
             while not server.started:
+                # uvicorn's ``dictConfig`` runs INSIDE ``serve()`` and
+                # REPLACES the handlers of the loggers it configures —
+                # re-attach the capture so the lifespan error is kept.
+                attach_startup_capture(startup_capture)
                 if time.monotonic() > deadline:
                     server.should_exit = True
                     with contextlib.suppress(Exception):
                         await asyncio.wait_for(task, timeout=SHUTDOWN_BUDGET_SECONDS)
                     raise RuntimeError(
-                        "the TLS gateway server failed to start within 60s "
-                        "(the lifespan boot of the real app failed)"
+                        startup_failure_message(startup_capture, startup_failure["exc"])
                     )
                 await asyncio.sleep(0.02)
 
@@ -534,25 +789,51 @@ async def boot_tls_gateway(
                 server=server,
                 server_task=task,
                 ws_route_paths=route_paths,
+                listener_baseline=list(listener_baseline),
             )
             yield booted
         finally:
             # ── teardown ──
             WebSocketGatewayTransport.send_json = original_send_json  # type: ignore[method-assign]
             McpGatewayService.handle_frame = original_handle_frame  # type: ignore[method-assign]
+            app.router.lifespan_context = original_lifespan
+            for logger in (logging.getLogger(), logging.getLogger("uvicorn.error")):
+                if startup_capture in logger.handlers:
+                    logger.removeHandler(startup_capture)
 
             server.should_exit = True
             started = time.monotonic()
-            completed = True
+            completed = False
+            task_error = ""
             with contextlib.suppress(asyncio.TimeoutError, Exception):
                 await asyncio.wait_for(task, timeout=SHUTDOWN_BUDGET_SECONDS)
             if not task.done():
-                completed = False
+                # The task did not finish inside the budget — cancel it.
                 task.cancel()
                 with contextlib.suppress(BaseException):
                     await task
+            if task.done():
+                # A CRASHED task is ALSO ``done()`` — the completion test
+                # must look at the exception, not at ``done()`` alone.
+                if task.cancelled():
+                    completed = False
+                    task_error = "the server task was cancelled"
+                else:
+                    try:
+                        task_exc = task.exception()
+                    except asyncio.CancelledError:  # pragma: no cover - defensive
+                        task_exc = None
+                    completed = task_exc is None
+                    if task_exc is not None:
+                        task_error = f"{type(task_exc).__name__}: {task_exc}"
+            else:
+                task_error = (
+                    "the server task did not finish within the "
+                    f"{SHUTDOWN_BUDGET_SECONDS:.0f}s shutdown budget"
+                )
             if booted is not None:
                 booted.server_task_completed = completed
+                booted.server_task_error = task_error
                 booted.shutdown_seconds = time.monotonic() - started
             with contextlib.suppress(Exception):
                 sock.close()
@@ -667,17 +948,23 @@ def fetch_rows(engine: Any, sql: str, params: dict[str, Any] | None = None) -> l
 __all__ = [
     "EnvPatch",
     "FENCE_DB_NAME",
+    "FENCE_ROLE_ENV",
+    "FENCE_SCHEMA_TABLES",
     "Frame",
     "PG_HOST",
     "PG_PORT",
     "REPO_ROOT",
     "SHUTDOWN_BUDGET_SECONDS",
+    "StartupCapture",
     "Transcript",
     "TlsGateway",
+    "attach_startup_capture",
     "boot_tls_gateway",
     "cert_has_ip_san",
     "fetch_rows",
     "fence_dsn",
+    "fence_owner_role",
+    "fence_role_failure_message",
     "fence_sync_dsn",
     "free_tcp_port",
     "generate_self_signed_cert",
@@ -685,6 +972,9 @@ __all__ = [
     "https_probe",
     "listeners_owned_by",
     "postgres_env",
+    "preflight_fence_role",
     "reset_audit_table",
+    "resolve_fence_role",
     "rows_in",
+    "startup_failure_message",
 ]

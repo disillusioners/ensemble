@@ -147,6 +147,36 @@ def canonical_args_hash(arguments: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _process_group_of(client: go_client.GoClient | None) -> int | None:
+    """The process GROUP of the client (it is started with ``start_new_session=True``).
+
+    The group is the honest "is anything of this client left?" probe: the
+    client process AND any survivor of its group (the stub child) keep
+    the group alive.
+    """
+    if client is None:
+        return None
+    try:
+        return os.getpgid(client.process.pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        return None
+
+
+def _process_group_alive(pgid: int | None) -> bool:
+    """Is any process still a member of the process group ``pgid``?"""
+    if pgid is None:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def write_client_yaml(
     artifacts: go_client.GoArtifacts,
     *,
@@ -186,6 +216,11 @@ async def run_gate(
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    # The fence role is resolved ONCE here (the harness resolves it the
+    # same way) so that the independent engine below connects as the
+    # fence OWNER — never as the ambient (production) role.
+    fence_role = tls_harness.resolve_fence_role(postgres_user)
+
     root = logging.getLogger()
     capture = LogCapture()
     root.addHandler(capture)
@@ -193,6 +228,7 @@ async def run_gate(
     root.setLevel(logging.DEBUG)
 
     client: go_client.GoClient | None = None
+    client_pgid: int | None = None
     gw: Any = None
     stop_report: dict[str, Any] = {}
     baseline_listeners: list[str] = []
@@ -218,12 +254,27 @@ async def run_gate(
             work_dir,
             tokens=(enrollment_token,),
             machine_id=MACHINE_ID,
-            postgres_user=postgres_user,
+            postgres_user=fence_role,
         ) as gw:
             result.timings["boot_s"] = time.monotonic() - t0
             result.evidence.append(f"gateway ws url: {gw.ws_url}")
             result.evidence.append(
                 f"gateway route registered: {gw.ws_path in gw.ws_route_paths}"
+            )
+            # The listener baseline was captured by the harness BEFORE the
+            # server bound its socket.  A baseline taken after the bind
+            # contains the gateway's OWN listener and would mask a leaked
+            # gateway listener as "pre-existing" — the gateway's port is
+            # subtracted explicitly as well (belt and braces).
+            baseline_listeners = [
+                line
+                for line in (getattr(gw, "listener_baseline", []) or [])
+                if f":{gw.port} " not in line
+            ]
+            result.add(
+                "listener-baseline-excludes-gateway-port",
+                not any(f":{gw.port} " in line for line in baseline_listeners),
+                f"baseline={baseline_listeners} gateway_port={gw.port}",
             )
             result.add(
                 "tls-route-registered",
@@ -232,7 +283,9 @@ async def run_gate(
             )
             result.add(
                 "tls-cert-has-ip-san",
-                tls_harness.cert_has_ip_san(gw.cert_path),
+                # The SAN probe shells out to ``openssl x509`` — a BLOCKING
+                # call.  It must not run inside the live event loop.
+                await asyncio.to_thread(tls_harness.cert_has_ip_san, gw.cert_path),
                 str(gw.cert_path),
             )
             result.add(
@@ -293,8 +346,10 @@ async def run_gate(
             )
             result.add(
                 "audit-enabled",
-                bool(getattr(gw.config, "audit_enabled", False)),
-                f"audit_enabled={getattr(gw.config, 'audit_enabled', None)}",
+                # IDENTITY on the bool — the documented claim is that the
+                # audit sink is ON, not merely truthy.
+                getattr(gw.config, "audit_enabled", None) is True,
+                f"audit_enabled={getattr(gw.config, 'audit_enabled', None)!r}",
             )
 
             canary_args = {"probe": "p0-canary"}
@@ -312,7 +367,7 @@ async def run_gate(
             await asyncio.to_thread(service._audit.record, canary)
 
             independent_engine = create_engine(
-                tls_harness.fence_sync_dsn(postgres_user),
+                tls_harness.fence_sync_dsn(fence_role),
                 connect_args=dict(PG_SESSION_CONNECT_ARGS),
             )
             try:
@@ -338,6 +393,15 @@ async def run_gate(
                 )
                 result.evidence.append(
                     "canary row: " + json.dumps(row, sort_keys=True, default=str)
+                )
+            else:
+                # ALWAYS recorded — the check COUNT must not depend on the
+                # outcome of the previous check (an unstable tally makes
+                # the "N/N checks green" claim meaningless).
+                result.add(
+                    "audit-canary-hash-exact",
+                    False,
+                    "the canary row is absent: there is no stored hash to compare",
                 )
 
             pre_flow_count = await asyncio.to_thread(
@@ -369,14 +433,16 @@ async def run_gate(
             )
             result.evidence.append(f"client config: {config_path}")
 
-            baseline_listeners = await asyncio.to_thread(
-                tls_harness.listeners_owned_by, os.getpid()
-            )
+            # NOTE: the listener baseline is NOT captured here — the
+            # gateway's own listener is already open at this point, so a
+            # baseline taken now would mask a leaked gateway listener as
+            # "pre-existing".  The harness captured it BEFORE the bind.
 
             t0 = time.monotonic()
             client = go_client.start_client(
                 artifacts.client_bin, config_path, log_path=work_dir / "client-stderr.log"
             )
+            client_pgid = _process_group_of(client)
             result.timings["client_start_s"] = time.monotonic() - t0
 
             child_ready = await client.wait_for_message_async(
@@ -583,7 +649,55 @@ async def run_gate(
                 f"audit_failures={getattr(gw.service, 'audit_failures', None)}",
             )
 
-            # ── 8. the job queue stays empty (R-23) ──
+            # ── 8. the REAL kill switches (R-23), read back on the booted app ──
+            # ``DRY_RUN`` / ``DESTRUCTIVE`` have NO daemon-wide consumer
+            # (verified by grep — only the two Plane switches are
+            # honoured), so the R-23 mitigation is real ONLY for these
+            # two.  Their EFFECT is therefore read back here, on the
+            # booted application, instead of being assumed.
+            from daemon.mcp.builtin_servers import plane as plane_builtin
+            from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
+            from daemon.services.plane_sync_service import (
+                PlaneSyncService,
+                plane_sync_enabled,
+            )
+
+            sync_enabled = plane_sync_enabled()
+            sync_reason = PlaneSyncService.unavailable_reason()
+            result.add(
+                "plane-sync-kill-switch-effective",
+                sync_enabled is False
+                and sync_reason == "disabled by kill-switch (PLANE_SYNC_ENABLED=false)",
+                f"enabled={sync_enabled} reason={sync_reason!r}",
+            )
+            try:
+                plane_rows = await asyncio.to_thread(
+                    tls_harness.fetch_rows,
+                    gw.engine,
+                    "SELECT name, is_active FROM mcp_servers WHERE name = :n",
+                    {"n": "plane"},
+                )
+            except Exception as exc:  # noqa: BLE001 — the query IS the check
+                plane_rows = []
+                plane_error = f"{type(exc).__name__}: {exc}"
+            else:
+                plane_error = ""
+            # The switch itself is read back through the daemon's OWN reader
+            # (a private module function — the public ``is_available()``
+            # also returns False when the URL/key are missing, so it
+            # cannot isolate the switch).
+            mcp_switch_off = plane_builtin._mcp_kill_switch_enabled() is False
+            mcp_available = PlaneServerDefinition.is_available()
+            result.add(
+                "plane-mcp-kill-switch-effective",
+                mcp_switch_off
+                and mcp_available is False
+                and not any(bool(row.get("is_active")) for row in plane_rows),
+                f"switch_off={mcp_switch_off} available={mcp_available} "
+                f"rows={plane_rows} error={plane_error}",
+            )
+
+            # ── 9. the job queue stays empty (R-23) ──
             job_count = await asyncio.to_thread(
                 tls_harness.rows_in, gw.engine, "job_queue_items"
             )
@@ -610,7 +724,12 @@ async def run_gate(
         result.add(
             "server-task-completed",
             bool(getattr(gw, "server_task_completed", False)),
-            "the uvicorn server task did not complete within the shutdown budget",
+            "the uvicorn server task finished cleanly"
+            if getattr(gw, "server_task_completed", False)
+            else (
+                "the uvicorn server task did not finish cleanly: "
+                f"{getattr(gw, 'server_task_error', '') or 'no exception recorded'}"
+            ),
         )
         result.timings["server_shutdown_s"] = float(getattr(gw, "shutdown_seconds", 0.0))
     except Exception as exc:  # noqa: BLE001 — the failure IS the deliverable
@@ -633,9 +752,15 @@ async def run_gate(
             client is None or client.process.poll() is not None,
             f"exit={client.process.poll() if client else None}",
         )
+        # DISTINCT from ``client-process-stopped``: the client's process
+        # GROUP (the client was started with ``start_new_session=True``)
+        # must have NO member left — the stub child lives in that group
+        # too, so this catches a survivor that the process check misses.
+        group_alive = _process_group_alive(client_pgid)
         result.add(
             "no-orphan-client-process",
-            client is None or client.process.poll() is not None,
+            not group_alive,
+            f"pgid={client_pgid} group_alive={group_alive} "
             f"pid={client.process.pid if client else None}",
         )
         # nothing may listen
