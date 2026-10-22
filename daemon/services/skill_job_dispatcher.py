@@ -72,6 +72,81 @@ logger = logging.getLogger(__name__)
 SKILL_CAPTURE_KILL_SWITCH_ENV = "ENSEMBLE_SKILL_CAPTURE_ENABLED"
 
 
+# ── Shared switch token sets (2026-10-22 review minor (c)) ───────────────
+# The CAPTURE switch and the EVOLUTION switch MUST accept exactly the
+# same spellings — one parser, one token set, no drift. Do NOT invent a
+# stricter or laxer set for either switch.
+_SWITCH_ON_TOKENS = frozenset({"1", "true", "yes", "on"})
+_SWITCH_OFF_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def _resolve_switch(env_name: str, configured_default: bool = False) -> bool:
+    """Resolve a kill-switch env var against the SHARED token sets.
+
+    Resolution order:
+
+    1. ``env_name`` unset → ``configured_default``.
+    2. ``env_name`` set but empty/whitespace → ``configured_default``
+       (empty = "no opinion", defer to config).
+    3. Recognized OFF token (``0``/``false``/``no``/``off``) → ``False``.
+    4. Recognized ON token (``1``/``true``/``yes``/``on``) → ``True``.
+    5. Anything else → ``ValueError`` (fail-closed on misconfiguration
+       rather than silently enabling or disabling the lane).
+
+    Args:
+        env_name: The environment variable to read.
+        configured_default: The configured default used when the env
+            var is unset or empty.
+
+    Returns:
+        The resolved switch state.
+    """
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return configured_default
+    val = raw.strip().lower()
+    if val == "":
+        return configured_default
+    if val in _SWITCH_OFF_TOKENS:
+        return False
+    if val in _SWITCH_ON_TOKENS:
+        return True
+    raise ValueError(
+        f"Invalid value for {env_name}: {raw!r} "
+        f"(expected 0/1/true/false/yes/no/on/off; unset/empty = default)"
+    )
+
+
+def _log_invalid_switch_env_at_load() -> None:
+    """Load-time loud check for invalid kill-switch env values.
+
+    The resolvers raise ``ValueError`` at CALL time; this makes a typo
+    in the operator's env visible at process start as well (a switch
+    that is never exercised would otherwise stay silent until the lane
+    is first used). Purely observational — it never mutates state and
+    never changes a resolution.
+    """
+    for env_name in (
+        SKILL_CAPTURE_KILL_SWITCH_ENV,
+        SKILL_EVOLUTION_KILL_SWITCH_ENV,
+    ):
+        raw = os.environ.get(env_name)
+        if raw is None:
+            continue
+        val = raw.strip().lower()
+        if val == "" or val in _SWITCH_ON_TOKENS or val in _SWITCH_OFF_TOKENS:
+            continue
+        logger.error(
+            "Invalid %s=%r at load time — expected one of %s / %s "
+            "(unset/empty = default). The switch raises ValueError on "
+            "first use.",
+            env_name,
+            raw,
+            sorted(_SWITCH_ON_TOKENS),
+            sorted(_SWITCH_OFF_TOKENS),
+        )
+
+
 def _resolve_capture_enabled() -> bool:
     """Resolve the skill-capture kill-switch (default OFF; flag-ON enables).
 
@@ -82,7 +157,9 @@ def _resolve_capture_enabled() -> bool:
 
     Recognized ON values (case-insensitive): ``"1"``, ``"true"``,
     ``"yes"``, ``"on"``. Recognized OFF values: ``"0"``, ``"false"``,
-    ``"no"``, ``"off"`` (and the default-OFF unset/empty case).
+    ``"no"``, ``"off"`` (and the default-OFF unset/empty case) — the
+    SHARED token sets (see ``_SWITCH_ON_TOKENS`` / ``_SWITCH_OFF_TOKENS``),
+    identical to the evolution switch's.
 
     Invalid env values raise ``ValueError`` — fail-closed on
     misconfiguration rather than silently enabling capture (parity
@@ -93,20 +170,7 @@ def _resolve_capture_enabled() -> bool:
         ``True`` if automatic capture should run; ``False`` if the
         kill-switch is OFF (every capture entry point must no-op).
     """
-    raw = os.environ.get(SKILL_CAPTURE_KILL_SWITCH_ENV)
-    if raw is None:
-        return False  # default OFF
-    val = raw.strip().lower()
-    if val == "":
-        return False  # empty string = use default (OFF)
-    if val in ("0", "false", "no", "off"):
-        return False
-    if val in ("1", "true", "yes", "on"):
-        return True
-    raise ValueError(
-        f"Invalid value for {SKILL_CAPTURE_KILL_SWITCH_ENV}: {raw!r} "
-        f"(expected 0/1/true/false/yes/no/on/off; unset/empty = default OFF)"
-    )
+    return _resolve_switch(SKILL_CAPTURE_KILL_SWITCH_ENV, False)
 
 
 # ── Evolution-lane kill-switch (2026-10-22 confinement fix) ─────────
@@ -163,21 +227,29 @@ def _resolve_evolution_enabled(configured_default: bool = False) -> bool:
         ``False`` if the kill-switch is OFF (``enqueue_evolution``
         must no-op with ``None``).
     """
-    raw = os.environ.get(SKILL_EVOLUTION_KILL_SWITCH_ENV)
-    if raw is None:
-        return configured_default
-    val = raw.strip().lower()
-    if val == "":
-        return configured_default  # empty string = defer to config
-    if val in ("0", "false", "no", "off"):
-        return False
-    if val in ("1", "true", "yes", "on"):
-        return True
-    raise ValueError(
-        f"Invalid value for {SKILL_EVOLUTION_KILL_SWITCH_ENV}: {raw!r} "
-        f"(expected 0/1/true/false/yes/no/on/off; unset/empty = "
-        f"configured default)"
+    return _resolve_switch(
+        SKILL_EVOLUTION_KILL_SWITCH_ENV, configured_default
     )
+
+
+def is_evolution_lane_enabled(configured_default: bool = False) -> bool:
+    """PUBLIC accessor for the Tier-3 evolution-lane state.
+
+    The single resolution point every caller outside this module uses
+    (the manager's metric-scan fallback, the job processor's
+    execution-time check, the HTTP layer). Import the PUBLIC name
+    rather than the private ``_resolve_evolution_enabled`` — the
+    private symbol is an implementation detail of this module.
+
+    Args:
+        configured_default: The configured default (from
+            ``SkillEvolutionConfig.evolution_lane_enabled``), used
+            when the env var is unset or empty.
+
+    Returns:
+        ``True`` when Tier-3 evolution-job admission is enabled.
+    """
+    return _resolve_evolution_enabled(configured_default)
 
 
 # Job types created by this dispatcher. String literals because
@@ -193,6 +265,14 @@ JOB_TYPE_METRIC_SCAN = "skill_metric_scan"
 # The privileged evolution agent that owns Tier 2/3 work. NOT a normal
 # workflow participant — spawned on-demand via this dispatcher only.
 SKILL_KEEPER_AGENT_ID = "skill-keeper"
+
+# Evolution-type literals (``evolution_type`` on the evolution job and
+# in its metadata). Named constants so the admission controls (the FIX
+# cooldown / idempotency key) cannot drift from the producer side on a
+# literal typo — 2026-10-22 review minor (b).
+EVOLUTION_TYPE_FIX = "FIX"
+EVOLUTION_TYPE_DERIVED = "DERIVED"
+EVOLUTION_TYPE_CAPTURED = "CAPTURED"
 
 # Source tag for skill-evolution jobs. ``enqueue()`` accepts any string
 # here; the value flows through to ``JobItem.source`` and is visible in
@@ -539,7 +619,12 @@ class SkillJobDispatcher:
         # NOT covered here (those are already-admitted rows); what is
         # covered is every NEW admission attempt.
         if not _resolve_evolution_enabled(self._evolution_lane_enabled):
-            logger.warning(
+            # INFO, not WARNING: the lane is OFF BY DEFAULT — a
+            # refused admission is the EXPECTED steady state, not an
+            # anomaly (2026-10-22 review minor (d)). The cooldown
+            # refusal below stays at WARNING (that one IS an anomaly:
+            # a repeat admission attempt).
+            logger.info(
                 "SkillJobDispatcher.enqueue_evolution: evolution lane "
                 "gate OFF (env %s unset-or-off, configured default=%s). "
                 "No-op — no skill_evolution job admitted for skill %s.",
@@ -550,7 +635,7 @@ class SkillJobDispatcher:
             return None
 
         normalized_project_id = normalize_project_id(project_id)
-        is_fix = evolution_type == "FIX"
+        is_fix = evolution_type == EVOLUTION_TYPE_FIX
         cooldown_key = (normalized_project_id, skill_id)
 
         if is_fix and self._fix_cooldown_seconds > 0:
@@ -731,4 +816,12 @@ class SkillJobDispatcher:
         direction = issue_description
         if suggested_fix:
             direction = f"{issue_description}\n\nSuggested fix: {suggested_fix}"
-        return await self.enqueue_evolution(project_id, skill_id, "FIX", direction)
+        return await self.enqueue_evolution(
+            project_id, skill_id, EVOLUTION_TYPE_FIX, direction
+        )
+
+# Load-time loud check for invalid kill-switch env values (2026-10-22
+# review minor (c)). Runs at module import — AFTER both switch
+# constants are defined — so a typo in the operator's env surfaces at
+# process start instead of only when the lane is first exercised.
+_log_invalid_switch_env_at_load()
