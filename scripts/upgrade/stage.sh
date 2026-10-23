@@ -683,10 +683,19 @@ if [ -f "$ENV_FILE" ]; then
         tmp="$ENV_FILE.tmp.$$"
         sed -E "s/^[[:space:]]*(export[[:space:]]+)?ENSEMBLE_SELF_ENV=.*/$MARKER/" "$ENV_FILE" > "$tmp" \
             && mv -f "$tmp" "$ENV_FILE" || { rm -f "$tmp"; _warn "failed to update $ENV_FILE marker"; exit 1; }
+        # mode-0600 hygiene (unit-secret-exposure P5) — ORDER-SENSITIVE: the
+        # mv above re-creates the inode at the default umask, so the chmod
+        # must FOLLOW it. STAGE-OWNERSHIP PRECONDITION (N3): the stage runs
+        # as the install owner; a cross-uid stage would fail this chmod
+        # loudly instead of leaving an unreadable 0600 file behind.
+        chmod 600 "$ENV_FILE" || { _warn "failed to chmod 600 $ENV_FILE"; exit 1; }
     else
         tmp="$ENV_FILE.tmp.$$"
         { cat "$ENV_FILE"; printf '%s\n' "$MARKER"; } > "$tmp" \
             && mv -f "$tmp" "$ENV_FILE" || { rm -f "$tmp"; _warn "failed to append marker to $ENV_FILE"; exit 1; }
+        # mode-0600 hygiene (unit-secret-exposure P5) — must FOLLOW the mv
+        # (the mv replaces the inode; a chmod before it would be discarded).
+        chmod 600 "$ENV_FILE" || { _warn "failed to chmod 600 $ENV_FILE"; exit 1; }
     fi
 else
     {
@@ -694,6 +703,9 @@ else
         printf 'PORT=%s\n' "$PORT"
         printf 'POSTGRES_DB=%s\n' "$POSTGRES_DB"
     } > "$ENV_FILE" || { _warn "failed to create $ENV_FILE"; exit 1; }
+    # mode-0600 hygiene (unit-secret-exposure P5): fresh creation lands at
+    # the default umask — pin 0600 explicitly.
+    chmod 600 "$ENV_FILE" || { _warn "failed to chmod 600 $ENV_FILE"; exit 1; }
     _log "created $ENV_FILE (self-env marker + resolved port/db; operator completes secrets per .env.prod.example)"
 fi
 _log "ENSEMBLE_SELF_ENV marker staged: $MARKER (in $ENV_FILE — never inside the release dir)"

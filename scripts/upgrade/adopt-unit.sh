@@ -431,7 +431,9 @@ _stage_restart_unit_env() {
     fi
     printf '\n# staged by scripts/upgrade/adopt-unit.sh (P4 adoption — service mode)\nENSEMBLE_RESTART_UNIT=%s\n' \
         "$UNIT_NAME" >> "$tmp" || { rm -f "$tmp"; return 1; }
-    # cat > preserves the existing file's inode/owner/mode (.env is 0600-class)
+    # cat > preserves the existing file's inode/owner/mode (.env is 0600-class;
+    # unit-secret-exposure P5: deploy.sh + stage.sh now pin/restore the 0600
+    # at every write site — this additive-staging path must never need its own chmod)
     cat "$tmp" > "$ENV_FILE" || { rm -f "$tmp"; return 1; }
     rm -f "$tmp"
     # verified write (W3 discipline — never report an unverified staging)

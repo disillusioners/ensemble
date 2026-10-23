@@ -251,6 +251,9 @@ if [ "$TARGET" = "demo" ] && [ ! -f "$ENV_SOURCE" ]; then
             _log "FAILED: generating $ENV_SOURCE"
             exit 1
         fi
+        # mode-0600 hygiene (unit-secret-exposure P5): the mv re-creates the
+        # inode at the default umask — chmod MUST follow it (order-sensitive).
+        chmod 600 "$ENV_SOURCE"
     fi
 fi
 
@@ -309,6 +312,11 @@ else
     _log "WARN: no frontend build at frontend/dist/frontend/browser — UI not staged (run 'cd frontend && npm run build')"
 fi
 run "stage env → $INSTALL_DIR/.env" -- cp "$ENV_SOURCE" "$INSTALL_DIR/.env"
+# mode-0600 hygiene (unit-secret-exposure P5): cp to a new destination
+# creates the file at source-mode-masked-by-umask — pin 0600 explicitly.
+# NOTE (A3'): deploys must run as the INSTALL OWNER — a sudo-deploy would
+# mint a root-owned 0600 .env the unit's User= cannot read.
+run "chmod env 0600" -- chmod 600 "$INSTALL_DIR/.env"
 
 # ── Phase 3: stop (ownership-scoped, REUSED — never duplicated) ─────────────
 _log "phase 3/5 stop (ownership-scoped: only processes owned by $INSTALL_DIR)"
