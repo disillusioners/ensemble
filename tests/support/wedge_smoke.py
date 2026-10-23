@@ -347,18 +347,27 @@ class LegObservation:
 
 
 def leg_attribution(root: Path) -> tuple[int | None, set[int]]:
-    """Read ``threads.csv`` of the newest capture: (top native id, all ids)."""
+    """Read ``threads.csv`` of the newest capture: (top native id, all ids).
+
+    Parsed with the standard ``csv`` reader — ``render_threads_csv``
+    quotes free-text fields RFC 4180-style, so a ``comm`` carrying a
+    comma or an embedded quote must not corrupt the column indices.
+    """
+    import csv as _csv
+    import io as _io
+
     directories = capture_dirs(root)
     if not directories:
         return None, set()
     csv_path = directories[-1] / "threads.csv"
     try:
-        lines = csv_path.read_text(encoding="utf-8").strip().splitlines()
+        text = csv_path.read_text(encoding="utf-8")
     except OSError:
         return None, set()
-    if len(lines) < 2:
+    rows = list(_csv.reader(_io.StringIO(text)))
+    if len(rows) < 2:
         return None, set()
-    header = lines[0].split(",")
+    header = rows[0]
     try:
         native_index = header.index("native_id")
         share_index = header.index("share_pct")
@@ -367,13 +376,12 @@ def leg_attribution(root: Path) -> tuple[int | None, set[int]]:
     attributed: set[int] = set()
     top_id: int | None = None
     top_share = -1.0
-    for row in lines[1:]:
-        parts = row.split(",")
-        if len(parts) <= max(native_index, share_index):
+    for row in rows[1:]:
+        if len(row) <= max(native_index, share_index):
             continue
         try:
-            native_id = int(parts[native_index])
-            share = float(parts[share_index])
+            native_id = int(row[native_index])
+            share = float(row[share_index])
         except (TypeError, ValueError):
             continue
         attributed.add(native_id)
@@ -522,6 +530,97 @@ def scratch_env(*, tmp_path: Path, port: int, pg_env: Iterable[tuple[str, str]])
     }
     env.update({key: value for key, value in pg_env})
     return env
+
+
+# ── the boot-alive gate (the wiring seam Lane B proves) ──────────────────
+
+#: Benign-HIGH thresholds for the boot-alive leg (RK-22 discipline): the
+#: boot is ENABLED but nothing the daemon's own boot work does may fire a
+#: spurious capture — this leg proves LIVENESS, not triggers.
+BOOT_ALIVE_KNOBS = LegEnv(
+    name="boot-alive",
+    knobs={
+        "ENSEMBLE_WEDGE_CAPTURE_CPU_PCT": "99",
+        "ENSEMBLE_WEDGE_CAPTURE_LAG_S": "30",
+        "ENSEMBLE_WEDGE_CAPTURE_THREAD_CONCENTRATION_PCT": "99",
+        "ENSEMBLE_WEDGE_CAPTURE_SAMPLE_INTERVAL_S": "1.0",
+        "ENSEMBLE_WEDGE_CAPTURE_COOLDOWN_S": "300",
+        "ENSEMBLE_WEDGE_CAPTURE_DEADLINE_S": "20",
+    },
+    expect_fire=(),
+)
+
+
+def pg_test_env_pairs() -> list[tuple[str, str]]:
+    """The ``PG_TEST_*`` pairs of THIS process (the scratch-DB contract).
+
+    The tester lane provisions them; an empty result means "not
+    provisioned" and the boot-alive leg SKIPS (never fails).
+    """
+    return sorted(
+        (key, value) for key, value in os.environ.items() if key.startswith("PG_TEST_")
+    )
+
+
+def assert_watchdog_boot_alive(app_state: Any) -> dict[str, Any]:
+    """The Lane-B BOOT-ALIVE gate — the end-to-end wiring proof.
+
+    Asserts a REAL boot left a LIVE watchdog on ``app.state``:
+
+    * ``app.state.wedge_capture_watchdog is not None`` — the historical
+      blocker left this ``None`` on every enabled boot (a NameError at
+      constructor-kwarg evaluation, swallowed by the boot guard);
+    * ``status()["running"]`` — the watchdog THREAD is alive;
+    * ``status()["started_at_monotonic"]`` — the started signal is set.
+
+    Returns the status payload so the caller can log it as evidence.
+    """
+    watchdog = getattr(app_state, "wedge_capture_watchdog", None)
+    assert watchdog is not None, (
+        "app.state.wedge_capture_watchdog is None after an ENABLED boot — "
+        "the boot wiring seam failed (the historical blocker shape: an "
+        "exception at watchdog construction, swallowed by the never-wedge "
+        "boot guard)"
+    )
+    status = watchdog.status()
+    assert status.get("running") is True, (
+        "the watchdog is wired but its thread is NOT running: "
+        + str(status)
+    )
+    assert status.get("started_at_monotonic") is not None, (
+        "the watchdog never recorded a started signal: " + str(status)
+    )
+    return status
+
+
+def boot_alive_script() -> str:
+    """The in-unit boot script the boot-alive leg executes.
+
+    Boots the REAL ``create_app()`` + REAL ``lifespan`` (no ASGI server,
+    no pytest conftest — the unit child is a plain python process), then
+    runs the boot-alive gate. Exit 0 ⇒ the gate held.
+    """
+    return (
+        "import asyncio\n"
+        "from daemon.api import create_app, lifespan\n"
+        "from tests.support.wedge_smoke import assert_watchdog_boot_alive\n"
+        "\n"
+        "app = create_app()\n"
+        "\n"
+        "\n"
+        "async def main() -> None:\n"
+        "    async with lifespan(app):\n"
+        "        status = assert_watchdog_boot_alive(app.state)\n"
+        "        print('BOOT-ALIVE OK:', {\n"
+        "            'running': status.get('running'),\n"
+        "            'started_at_monotonic': status.get('started_at_monotonic'),\n"
+        "            'enabled': status.get('enabled'),\n"
+        "            'capture_dir': status.get('capture_dir'),\n"
+        "        })\n"
+        "\n"
+        "\n"
+        "asyncio.run(main())\n"
+    )
 
 
 def run_injected_leg(

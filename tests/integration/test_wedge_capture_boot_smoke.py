@@ -13,6 +13,15 @@ This file carries the whole smoke, in two lanes:
   full daemon on an ephemeral port against a scratch PG, with the cgroup
   assertion, the live-fence snapshot and a SIGTERM-only teardown.
 
+Lane B checklist (the boot-alive gate, added 2026-10-23 after the wiring
+blocker): an ENABLED real boot must leave a LIVE watchdog on
+``app.state`` — ``wedge_capture_watchdog is not None``, the thread
+``running``, and the ``started_at_monotonic`` signal set
+(``smoke.assert_watchdog_boot_alive``). The historical blocker
+(api.py's ``getattr(daemon, ...)`` NameError, swallowed by the
+never-wedge boot guard) passed every direct-drive pack and died exactly
+at this gate.
+
 Both lanes are **opt-in**:
 
     ENSEMBLE_WEDGE_SMOKE=1            # lane A
@@ -198,6 +207,74 @@ class TestKillSwitchLeg:
 
 
 # ── Lane B: the daemon in a transient unit ────────────────────────────────
+
+
+@pytest.mark.skipif(
+    not smoke.unit_lane_enabled(),
+    reason=(
+        "the boot-alive leg needs a systemd transient unit "
+        "(ENSEMBLE_WEDGE_SMOKE_UNIT=1) and a scratch PG (PG_TEST_*)"
+    ),
+)
+class TestBootWiring:
+    def test_an_enabled_boot_leaves_a_live_watchdog_on_app_state(
+        self, tmp_path
+    ) -> None:
+        """The wiring blocker's end-to-end gate: a REAL ``create_app()`` +
+        REAL ``lifespan`` boot with the instrument ENABLED must leave a
+        LIVE watchdog on ``app.state`` — not-None, thread running, and
+        the started signal set (``smoke.assert_watchdog_boot_alive``).
+
+        The historical blocker (2026-10-23) died exactly here: a
+        NameError at constructor-kwarg evaluation was swallowed by the
+        never-wedge boot guard, leaving
+        ``app.state.wedge_capture_watchdog = None`` on EVERY enabled
+        boot while every direct-drive pack stayed green. This leg runs
+        the boot the production process runs, inside the isolated unit.
+        """
+        import os
+        import subprocess
+        import sys
+
+        pg_pairs = smoke.pg_test_env_pairs()
+        if not pg_pairs:
+            pytest.skip(
+                "PG_TEST_* not provisioned — the tester lane owns the "
+                "scratch DB for the real-boot lane"
+            )
+
+        unit = "ensemble-wedge-smoke-boot-alive"
+        env = smoke.apply_leg_env(smoke.BOOT_ALIVE_KNOBS, environ={})
+        env["ENSEMBLE_WEDGE_CAPTURE_ENABLED"] = "1"
+        env.setdefault("PATH", os.environ.get("PATH", "/usr/bin:/bin"))
+        env.update(
+            smoke.scratch_env(
+                tmp_path=tmp_path, port=smoke.free_port(), pg_env=pg_pairs
+            )
+        )
+        argv = smoke.transient_unit_argv(
+            unit=unit,
+            workdir=str(smoke_repo_root()),
+            argv=[sys.executable, "-c", smoke.boot_alive_script()],
+            env=env,
+        )
+        try:
+            completed = subprocess.run(
+                argv, capture_output=True, text=True, check=False, timeout=300
+            )
+        except subprocess.TimeoutExpired as exc:
+            pytest.fail(f"the boot-alive leg timed out after 300s: {exc}")
+        assert completed.returncode == 0, (
+            "the boot-alive gate FAILED (the watchdog did not survive a "
+            "real enabled boot):\n"
+            + completed.stdout[-2000:]
+            + "\n--- stderr ---\n"
+            + completed.stderr[-2000:]
+        )
+        assert not smoke.unit_exists(unit), (
+            f"the transient unit {unit} survived the run — the unit-gone "
+            "check failed (A16(4))"
+        )
 
 
 @pytest.mark.skipif(
