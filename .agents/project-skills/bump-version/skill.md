@@ -41,6 +41,10 @@ python scripts/bump_version.py [patch|minor|major|prerelease]
 4. Create git commit: `! New version`
 5. Run tests to verify
 
+## Release tag rule
+
+A version bump commit ships WITH its tag: cut and push `v<version>` together with the bump commit, never later. Historical gaps: v0.17.1, v0.18.1, v0.19.0 shipped as untagged version bumps; v0.27.5 sat untagged until the tag was cut manually on 2026-10-24. Untagged bumps leave deployed lineage ambiguous — lineage had to be proven by binary sha instead of a tag.
+
 ## Version Sources
 
 | Project Type | Files to Update |
