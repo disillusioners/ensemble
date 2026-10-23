@@ -47,7 +47,7 @@ moves an install from row 3 to row 4.
 | 1 | **script × macOS** | The byte-identical no-systemd arm: classifier short-circuits before ANY `/proc` / `/run` read (P1 guard discipline — `supervision_classify` non-Linux gate; python twin `supervision_detect` same). Launcher lineage self-respawns; launchd plist (`scripts/ensemble-prod.plist`) owns boot-restart where installed. | **Nothing on this row — by design.** `adopt-unit.sh` REFUSES non-Linux (step b). A1 naming only (`SCRIPT_NOHUP` = conforming). | `tests/test_supervision_classify.sh` §5 (Darwin uname stub: ZERO /proc reads, auto + explicit-unit arms); `tests/test_supervision_stop_handback.sh` A′4 (BSD degrade-loud stop fallback) + C10 (hand-back degrades LOUD to nohup); `tests/test_adopt_unit.sh` (b1) non-Linux refusal; `tests/unit/tools/test_supervision_python.py` 8d (platform guard cells). |
 | 2 | **script × ubuntu (no systemd)** | The SAME byte-identical arm: `/run/systemd/system` absent → classifier returns `SCRIPT_NOHUP` without further reads; launcher backoff loop is the whole supervision story. | **Nothing on this row.** `adopt-unit.sh` refuses (step b host guard — no systemd to adopt into). | `tests/test_supervision_classify.sh` §1a (ladder-top zero-read cells) + the NAMED FENCE "no /run/systemd/system" (the auto-chain's /run-absent early return IS this row's classifier shape — the suite exercises it live on hosts without the marker, fences it with the name on hosts that have it); `tests/test_supervision_stop_handback.sh` A′1–A′3 (byte-identical pid-path arms, zero systemctl calls); `tests/test_adopt_unit.sh` (b2) ADOPT_SYSTEMD_RUN_DIR refusal. |
 | 3 | **script × ubuntu (systemd present, NOT adopted) — TODAY'S LIVE TOPOLOGY** | systemd exists but the install runs as a direct/nohup lineage; cgroup leaf = `session-*`/user-slice → verified `SCRIPT_NOHUP`; declared `auto` → **conforming** (A1). This is ensemble-vm live (port = live port) TODAY. | **A documented, one-command graduation path** (this runbook + `adopt-unit.sh`), plus the P3 in-promote self-heal: with a unit configured (`ENSEMBLE_RESTART_UNIT`), the next promote's hand-back moves the install INTO the unit (scope→unit / script→unit). | `tests/test_supervision_classify.sh` §2 (§0 allowlist-strip pin: INVOCATION_ID absent + upgrade-scope cgroup → SCOPE_SURVIVOR, never SCRIPT) + §1b scope-leaf cells + §3h; `tests/test_supervision_stop_handback.sh` C6 (scope-no-unit → nohup byte-identical + WARN, zero systemctl) + C5 (scope→unit self-heal + `supervision_handback` journal event, outcome=degraded); `tests/test_supervision_twins.sh` (ladder agreement incl. the scope leaf); `tests/test_supervision_e2e.sh` E3 (real scope-survivor heal under real systemd). |
-| 4 | **service × ubuntu (systemd substrate) — THE NEW PATH** | Before P4: reachable ONLY by hand-provisioning a unit (the `ensemble-live.service` precedent on ensemble-vm — out-of-repo, incident doc §5). | **The adoption lane (P4):** static base template (`scripts/systemd/ensemble-daemon.service`) + `scripts/upgrade/adopt-unit.sh` generation from CURRENT install config + verified handover (polkit-gated, fail-loud, rollback documented below). Declared `unit` × verified `UNIT_MANAGED` = conforming; P3 unit hand-back keeps the unit across promotes (NO nohup fallback — Amendment #1). **Layered on top of P4 (commission v0.16.6 component 2, 2026-09-29): the 3-layer adoption protocol (Layer i settle-check + Layer ii mutex + Layer iii this runbook) closes the racy-precondition class proven by incident `r-20260929-170301-0cb2`.** | `tests/test_adopt_unit.sh` (all arms: refusals a/b/c, naming table, DRY_RUN unit content + %h rule + secret masking + zero mutations); `tests/test_supervision_stop_handback.sh` A (unit-path stop incl. b″ respawn sim + escalation + fail-loud) + C1–C4 (hand-back happy/stale/timeout/start-fail — NO nohup fallback) + C7–C9 (comp7 a′); `tests/test_supervision_journal.sh` J3 (halt-B4 stamped open txn); `tests/test_supervision_e2e.sh` E1 (boot under a real service: INVOCATION_ID + livez + UNIT_MANAGED boot advisory) + E2 (full real promote under the unit: classify → unit-stop → hand-back NEW-MainPID verify → commit) — the DR-4 leg (e) drill, `upgrade-drills.md` §5(e). **New for v0.16.6 component 2**: `tests/test_release_journal.sh` §15 (pipeline_settled reason-token matrix) + §16 (Layer-ii mutex: stop-ensemble.sh acquire + PIPELINE_LOCK_HELD_BY_CALLER escape + --force pre-parse all positions) + §17 (adoption marker preflight + clear path) — see §8 below. **`tests/test_adopt_unit.sh` is UNCHANGED for v0.16.6 component 2** — it pins the MUTATION-mode refusal surface only (a/b/c + naming + DRY_RUN), which is the same surface the 3-layer protocol inherits (no new mutation-mode lock/marker integration). MUTATION-mode lock/marker integration coverage lives in the NAMED FENCE `tests/test_release_journal.sh` §19 — a real-systemd host is required to exercise the lock+marker acquisition under the actual unit lifecycle, and the suite emits a `SKIP(no-systemd-host)` when that host is absent (no faked pass). |
+| 4 | **service × ubuntu (systemd substrate) — THE NEW PATH** | Before P4: reachable ONLY by hand-provisioning a unit (the `ensemble-live.service` precedent on ensemble-vm — out-of-repo, incident doc §5). | **The adoption lane (P4):** static base template (`scripts/systemd/ensemble-daemon.service`) + `scripts/upgrade/adopt-unit.sh` generation from CURRENT install config + verified handover (polkit-gated, fail-loud, rollback documented below). Declared `unit` × verified `UNIT_MANAGED` = conforming; P3 unit hand-back keeps the unit across promotes (NO nohup fallback — Amendment #1). **Layered on top of P4 (commission v0.16.6 component 2, 2026-09-29): the 3-layer adoption protocol (Layer i settle-check + Layer ii mutex + Layer iii this runbook) closes the racy-precondition class proven by incident `r-20260929-170301-0cb2`.** | `tests/test_adopt_unit.sh` (all arms: refusals a/b/c, naming table, DRY_RUN unit content + %h rule + zero-env contract + zero mutations); `tests/test_supervision_stop_handback.sh` A (unit-path stop incl. b″ respawn sim + escalation + fail-loud) + C1–C4 (hand-back happy/stale/timeout/start-fail — NO nohup fallback) + C7–C9 (comp7 a′); `tests/test_supervision_journal.sh` J3 (halt-B4 stamped open txn); `tests/test_supervision_e2e.sh` E1 (boot under a real service: INVOCATION_ID + livez + UNIT_MANAGED boot advisory) + E2 (full real promote under the unit: classify → unit-stop → hand-back NEW-MainPID verify → commit) — the DR-4 leg (e) drill, `upgrade-drills.md` §5(e). **New for v0.16.6 component 2**: `tests/test_release_journal.sh` §15 (pipeline_settled reason-token matrix) + §16 (Layer-ii mutex: stop-ensemble.sh acquire + PIPELINE_LOCK_HELD_BY_CALLER escape + --force pre-parse all positions) + §17 (adoption marker preflight + clear path) — see §8 below. **`tests/test_adopt_unit.sh` is UNCHANGED for v0.16.6 component 2** — it pins the MUTATION-mode refusal surface only (a/b/c + naming + DRY_RUN), which is the same surface the 3-layer protocol inherits (no new mutation-mode lock/marker integration). MUTATION-mode lock/marker integration coverage lives in the NAMED FENCE `tests/test_release_journal.sh` §19 — a real-systemd host is required to exercise the lock+marker acquisition under the actual unit lifecycle, and the suite emits a `SKIP(no-systemd-host)` when that host is absent (no faked pass). |
 | 5 | **service × macOS (launchd) — documented FUTURE scope** | `scripts/ensemble-prod.plist` (daemon) + `scripts/watchdog-watcher.plist` (watchdog) exist as launchd substrates. | **Nothing — FUTURE scope by decision.** The A1/A2 vocabulary (declared×verified) is substrate-neutral; a launchd adoption tool would slot here. Not commissioned. | Named future-scope fence: `tests/test_supervision_e2e.sh` FENCE "no /run/systemd/system (non-systemd host)" (all legs counted-SKIP, never FAIL) + `tests/test_supervision_stop_handback.sh` C10 (a UNIT_MANAGED classification on a non-Linux host degrades LOUD to nohup — the safe intersection while launchd is unbuilt). |
 
 *(Test ids filled by P5 (2026-09-29): every row is covered by stub-driven
@@ -109,7 +109,8 @@ on test hosts).
    Runs every refusal check except the Layer-ii lock acquire (pre/i/a/
    b/c — DRY_RUN exits before the lock call so the preview stays
    side-effect-free), reads config, generates the unit, and prints the
-   sequence + the unit with the PG password masked. Zero mutations; no
+   sequence + the unit (zero-env contract — no env values to mask).
+   Zero mutations; no
    marker written; no lock acquired.
 4. **Adopt:**
    ```bash
@@ -132,13 +133,18 @@ on test hosts).
    - **(b)** refuses non-Linux / no `/run/systemd/system` / no systemctl;
    - **(c)** refuses (🔴) without the polkit rule of §4;
    - **(d)** generates the instance unit from the static base template
-     (`scripts/systemd/ensemble-daemon.service`) reading config the
-     `_resolve_wait_s` way (port + `POSTGRES_*` straight from
-     `<INSTALL_DIR>/.env`; `User` defaults to the adopting user; `ExecStart`
+     (`scripts/systemd/ensemble-daemon.service`) reading ONLY `PORT` from
+     `<INSTALL_DIR>/.env` (the `_resolve_wait_s` way — staged file, never
+     ambient env; `User` defaults to the adopting user; `ExecStart`
      = the EXISTING `<INSTALL_DIR>/launcher.sh` — the launcher's exit map
-     and backoff stay in the loop; the unit adds NO second supervisor),
+     and backoff stay in the loop; the unit adds NO second supervisor).
+     **ZERO-ENV CONTRACT (unit-secret-exposure, 2026-10-23):** the generated
+     unit carries NO `.env`-derived `Environment=` lines — runtime env is
+     supplied entirely by `launcher.sh` (see the precedence contract below);
+     systemd exposes `Environment=` to any local uid via D-Bus, so minted
+     secrets in the unit were pure exposure with zero runtime benefit.
      then: **writes the adoption-in-progress marker** (Layer ii — see §3b) →
-     install unit (0600 — it carries secret env) → `daemon-reload` →
+     install unit (0600 — hygiene; the unit carries no secrets) → `daemon-reload` →
      stage `ENSEMBLE_RESTART_UNIT=<unit>` into `.env` (ADDITIVE — only that
      key is touched) → `systemctl enable --now` → **verify**: `/livez` on
      the staged port + the boot journal's `supervision_boot` advisory shows
@@ -159,6 +165,46 @@ on test hosts).
    (`reset-failed → is-active → start → verify NEW MainPID`) — no nohup
    fallback ever re-creates the survivor lineage (Amendment #1).
 
+**Env sourcing & precedence — the 4-rung contract (zero-env, unit-secret-exposure 2026-10-23).**
+The generated unit carries NO `.env`-derived `Environment=` lines (zero-env
+contract — the unit rung is EMPTY BY DESIGN; only the static
+`Environment=MALLOC_ARENA_MAX=2` directive remains). Effective precedence,
+highest wins:
+
+1. `.env` — `launcher.sh load_env_file` (per-key export, LAST-wins)
+2. unit `Environment=` — now EMPTY by design (zero-env contract; only the
+   static MALLOC_ARENA_MAX directive)
+3. `systemctl set-environment` (inherited) — vacuous in-repo (zero
+   producers/consumers)
+4. code defaults — launcher `: "${MALLOC_ARENA_MAX:=2}"` (`launcher.sh:1658-1659`);
+   `config.yaml` defaults
+
+`load_env_file` is called **ONCE per launcher process** (`launcher.sh:1649`,
+env-first in `main()`, OUTSIDE `run_loop`): child restarts inside the loop
+re-inherit the exports without re-reading `.env`. (Precision: `run_app.py`'s
+only-unset `.env` load is **frozen-binary-only** (`sys.frozen` gate) and
+quote-unaware — the structural precedence guarantee lives solely in the
+launcher path.)
+
+**Missing `.env` after adoption — INTENDED fail-fast (with its conditions).**
+With the unit no longer carrying minted env, a missing/unreadable `.env`
+means the launcher continues with inherited env (loud WARN
+`env file not found`) → no `POSTGRES_*` → the daemon's boot preflight
+blocks. Exact behavior is CONDITIONAL on `ensemble.json` (the installed
+norm — it declares postgres, persisted at first boot): the boot-block exits
+**75** (PG unreachable). Exit taxonomy: **75** = PG unreachable; **78** =
+auth refused AND auth-config misconfig (78 → unit FAILED via
+`RestartPreventExitStatus=78`, visible in `systemctl status`); a 75-loop
+keeps the unit **"active"** while the launcher retries internally —
+**watch the journal, not unit state** for 75-loops. There is **no
+"config-absent" refusal code**: absent/corrupt `ensemble.json` silently
+auto-derives + persists a SQLITE config — on a fresh-dir or corrupt-config
+install a missing `.env` yields a silent SQLITE boot on an empty DB (known
+residual; candidate for a future refusal-hardening commission).
+Restart-storm: NON-ISSUE — tempfail backoff 5s start ×2, cap 60s
+(`launcher.sh:55-56`, ladder `:1349-1370`, arm `:1569-1585`), so a 75-loop
+costs ≈2 journal lines per ≤60s steady state.
+
 **Unit naming rule** (the polkit pattern `^ensemble-[0-9A-Za-z@._-]+\.service$`):
 `ensemble-<slug>.service` where `slug` = `basename(INSTALL_DIR)` minus any
 leading `agents-`, minus any leading `ensemble-` (no double prefix),
@@ -172,8 +218,8 @@ with the hand-provisioned `ensemble-live.service` on ensemble-vm);
 `SYSTEMCTL_BIN` (stub the systemctl interactions), `UNIT_DIR` (unit-file
 destination), `POLKIT_RULES_DIR` (the §(c) scan), `ADOPT_SYSTEMD_RUN_DIR`
 (host guard), `ADOPT_USER`, `ADOPT_LIVEZ_BUDGET_S`, `DRY_RUN=1`
-(preview-only mode — print the sequence + the generated unit with the
-PG password masked; zero mutations), plus `curl`/`uname` PATH-stubs for
+(preview-only mode — print the sequence + the generated unit; the unit
+carries no env values, zero mutations), plus `curl`/`uname` PATH-stubs for
 the verify/host arms. The P4 smoke used all of these against fixture
 dirs — no live/demo contact, no real daemon-reload.
 
@@ -432,6 +478,164 @@ left an adoption-in-progress marker (§3c), clear it AFTER step 4 — the
 unit-disable + .env-unstage above may or may not clear it depending on
 where the prior adopt aborted (the marker is removed on verify success
 only; partial-state failures leave it present).
+
+---
+
+## 5a. ONE-TIME LIVE REMEDIATION — purge the pre-strip unit's minted env (USER DECIDES — no live action tonight)
+
+> **Status: DOCUMENTATION ONLY (unit-secret-exposure, 2026-10-23).** The
+> zero-env generator strip fixes FUTURE generations; the EXISTING live unit
+> (generated Sep-30) still carries six minted `Environment=` lines
+> (`PORT` + `POSTGRES_HOST` + `POSTGRES_PORT` + `POSTGRES_DB` +
+> `POSTGRES_USER` + `POSTGRES_PASSWORD`) that systemd re-serves — in
+> cleartext — to ANY local uid via D-Bus (`systemctl show -p Environment`;
+> man 5 systemd.exec: the unit environment is "exposed to unprivileged
+> clients via D-Bus IPC … not suitable for passing secrets"). Purging them
+> is a one-time operator action **the user decides on**; no lane performs
+> it tonight. Key NAMES only appear below — never values.
+
+**Fix-delivery path (read first):** `scripts/` does **NOT** ship in the
+staged release payload — `adopt-unit.sh` runs from a repo checkout, and
+`deploy.sh` never invokes it. **The fixed generator reaches operators via
+an updated checkout post-merge; the staged release does not carry it.**
+
+**Remediation census (run BEFORE/WITH either option — W6):** enumerate ALL
+`ensemble-*.service` units on the host and check EACH — any unit still
+carrying minted env needs the same remediation (the demo install is the
+same generator class and must not be forgotten):
+
+```bash
+systemctl list-units 'ensemble-*' --all --no-legend     # running/loaded set
+ls -1 /etc/systemd/system/ensemble-*.service 2>/dev/null  # on-disk set
+for u in $(systemctl list-unit-files 'ensemble-*' --no-legend | awk '{print $1}'); do
+  echo "== $u"; systemctl show -p Environment "$u"
+done
+# ANY unit whose Environment property lists POSTGRES_* (or PORT) KEY=VALUE
+# entries carries minted env → remediate it too.
+```
+
+### 5a.(a) NON-DISRUPTIVE DROP-IN — full-list env reset (RECOMMENDED: apply now)
+
+A systemd drop-in can reset the unit's `Environment=` list without
+regenerating anything and without stopping the daemon:
+
+```bash
+# 1. SCRATCH-UNIT EMPIRICAL CHECK FIRST (note (i) — cheap, zero live risk;
+#    validates the lone-reset mechanics on THIS host's systemd BEFORE the
+#    live unit is touched; also — via the read-only census above — confirms
+#    the live unit's env set is the six minted keys the reset will clear):
+sudo tee /etc/systemd/system/ensemble-scratch-envcheck.service >/dev/null <<'EOF'
+[Unit]
+Description=scratch — zero-env reset empirical check (delete after)
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+Environment=PORT=1
+Environment=POSTGRES_PASSWORD=scratch_dummy_value
+EOF
+sudo mkdir -p /etc/systemd/system/ensemble-scratch-envcheck.service.d
+sudo tee /etc/systemd/system/ensemble-scratch-envcheck.service.d/10-reset.conf >/dev/null <<'EOF'
+[Service]
+Environment=
+EOF
+sudo systemctl daemon-reload
+echo "--- scratch property after lone-reset (expect BARE 'Environment=' — no KEY=VALUE):"
+systemctl show -p Environment ensemble-scratch-envcheck
+#    → if the scratch property still lists KEY=VALUE entries, STOP: this
+#      host's systemd does not reset via the lone form — escalate instead
+#      of applying to the live unit.
+# CLEANUP (throwaway — leave nothing behind):
+sudo rm -rf /etc/systemd/system/ensemble-scratch-envcheck.service.d
+sudo rm -f /etc/systemd/system/ensemble-scratch-envcheck.service
+sudo systemctl daemon-reload
+
+# 2. THE DROP-IN — ONE LONE `Environment=` LINE (the FULL-LIST reset):
+sudo mkdir -p /etc/systemd/system/ensemble-main.service.d
+sudo tee /etc/systemd/system/ensemble-main.service.d/10-zero-env-reset.conf >/dev/null <<'EOF'
+[Service]
+# LONE Environment= — the option-level FULL-LIST reset (man 5 systemd.exec).
+# This is deliberately NOT the per-variable empty-string form
+# (`Environment=POSTGRES_PASSWORD=` …) — that form is WRONG and must NOT
+# appear: it leaves each var present-but-empty (not unset), and whether the
+# manager's stored list drops the earlier non-empty entry is unverifiable
+# on this host — under either behavior the gate below would fail while
+# this runbook reported success, and if systemd retains BOTH entries the
+# plaintext STAYS exposed. Do not "improve" this line per-variable.
+Environment=
+EOF
+
+# 3. RELOAD (this is where the manager's merged view loses the values):
+sudo systemctl daemon-reload
+
+# 4. VERIFICATION GATE:
+systemctl show -p Environment ensemble-main
+#    PASS = NO `KEY=VALUE` entries in the output. EXPECTED & CORRECT: an
+#    emptied list still prints the BARE `Environment=` line — that bare
+#    line is NOT a failure; do not re-apply anything over it.
+#    FAIL = any `POSTGRES_*=` / `PORT=` entry still listed → STOP, do not
+#    proceed on any assumption; investigate with the scratch-unit check.
+```
+
+**Honest caveat (running process):** the exposure CLOSES at
+`daemon-reload` — that is when the manager's merged view drops the values.
+The RUNNING daemon keeps its inherited environment (copied at fork/exec)
+until its NEXT RESTART — the next promote performs one. The drop-in closes
+the D-Bus read surface immediately; the process memory surface closes at
+the next restart.
+
+Required notes:
+
+1. **Scratch-unit empirical check BEFORE live application** (step 1 above)
+   — cheap, zero live risk, and it confirms the six-key set the reset will
+   clear.
+2. **The reset also clears `MALLOC_ARENA_MAX`** — harmless: the launcher
+   re-establishes it default-only (`: "${MALLOC_ARENA_MAX:=2}"` + export,
+   `launcher.sh:1658-1659`) at every start.
+3. **Order-sensitivity:** drop-ins sort AFTER the main unit. A FUTURE
+   drop-in that re-adds `Environment=` values RE-CREATES the exposure —
+   the lone-reset drop-in must stay the LAST-sorting env-bearing drop-in
+   (or be re-verified after any future drop-in change).
+4. **Post-re-adoption:** once the unit is regenerated by the fixed
+   generator (option (b)), the lone reset is an idempotent no-op-to-
+   harmless (the regenerated unit sets only `MALLOC_ARENA_MAX`, which the
+   reset clears and the launcher re-establishes) — removal is OPTIONAL at
+   re-adoption.
+
+### 5a.(b) FULL RE-ADOPTION — §5 teardown THEN §3(d) adoption (apply at the next maintenance window)
+
+**Not §5 alone:** §5 above is the ROLLBACK-TO-SCRIPT-MODE recipe — it is
+NOT a re-adoption recipe and must not be cited as one. The re-adoption
+composite is **§5 teardown (steps 1–4) THEN §3(d) adoption**, in that
+order:
+
+- **HARD precondition:** §5 step 2 (unit file removed + `daemon-reload`)
+  MUST have completed — `adopt-unit.sh` REFUSES (exit 78) when the
+  destination unit already exists (one-time migration never clobbers,
+  `adopt-unit.sh:534-539`). No clobber-free shortcut exists by design.
+- **UNWRITTEN COMPOSITE STEP (spelled here):** §5 step 4 restarts the
+  install in script-mode (nohup). **STOP that interim script-mode daemon
+  BEFORE the adoption's `systemctl enable --now`** (step (d).4) — the
+  interim daemon holds the port and the adoption would mint DUAL_FIGHT.
+  Concretely: run `bash scripts/stop-ensemble.sh <INSTALL_DIR>` between
+  §5 step 4 and the adoption (step (a) of the tool refuses on any owned
+  pid otherwise). The §5 script-mode interim exists to keep the downtime
+  window near-zero (stop → adopt → start is seconds); going
+  removal→adopt DIRECTLY widens the outage.
+- **UNIT-BACKUP HAZARD:** do NOT "back up" the removed unit file
+  (`sudo cp /etc/systemd/system/... ~/backup/`): a backup RE-PERSISTS the
+  POSTGRES_PASSWORD-bearing artifact at a new path — the exact defect this
+  section exists to close, now untracked. FORBID backups; if a copy is
+  truly required for forensics, make it root-owned 0600 AND delete it
+  after verification.
+- **What the regenerated unit looks like:** drop-in replacement for the
+  old one, GAINS `After=postgresql.service` + `Environment=MALLOC_ARENA_MAX=2`
+  (both post-date the Sep-30 generation), and LOSES the six minted
+  `Environment=` lines (zero-env contract).
+
+**Recommendation:** apply **(a) now** (non-disruptive, closes the D-Bus
+read surface immediately) and schedule **(b) at the next maintenance
+window** (purges the values from the unit file itself and from the running
+process at its next start). **User decides — no live action tonight.**
 
 ---
 

@@ -78,10 +78,15 @@
 #   into the launcher/daemon; a WatchdogSec without notify would be an
 #   unconditional restart loop). See docs/runbooks/systemd-adoption.md.
 #
-# INERT: no real values and no secrets in this file — only placeholders. The
-# generated instance unit carries the substituted PORT + POSTGRES_* values
-# and is installed mode 0600 (root-owned) precisely because it then contains
-# secret env; this template stays safe to commit.
+# INERT: no real values and no secrets in this file — only placeholders.
+# ZERO-ENV CONTRACT (unit-secret-exposure, 2026-10-23): the template AND
+# every unit generated from it carry NO .env-derived Environment= lines —
+# no secrets exist to protect. The generated unit is still installed mode
+# 0600 (root-owned) as defense-in-depth hygiene only — NOTE: the 0600 does
+# NOT gate systemd's D-Bus `Environment=` property read (any local uid can
+# read it; there is simply nothing sensitive left to expose). Runtime env
+# is supplied by launcher.sh from INSTALL_DIR/.env. This template stays
+# safe to commit.
 # ============================================================================
 
 __GENERATED_NOTE__
