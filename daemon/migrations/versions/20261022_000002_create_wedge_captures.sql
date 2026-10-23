@@ -19,9 +19,12 @@
 --   disk.
 --
 -- UNIQUENESS (A3):
---   ``capture_id`` and ``capture_dir`` are UNIQUE. The reconciler
---   re-inserts the pending sidecars with ``ON CONFLICT (capture_dir)
---   DO NOTHING``, which needs the constraint to exist — and a
+--   ``capture_id`` and ``capture_dir`` are UNIQUE — in the model AND
+--   in this file (A4, fix-forward: ``capture_id`` now carries its
+--   UNIQUE constraint here too, matching the SQLModel column that PG's
+--   create_all has always produced; this .sql is the persistent
+--   record). The reconciler re-inserts the pending sidecars, which
+--   dedup by an existence check PLUS these constraints — and a
 --   duplicate capture directory is a bug worth failing on, not
 --   absorbing silently.
 --
@@ -67,7 +70,7 @@
 
 CREATE TABLE IF NOT EXISTS wedge_captures (
     id TEXT NOT NULL PRIMARY KEY,
-    capture_id TEXT NOT NULL,
+    capture_id TEXT NOT NULL UNIQUE,
     capture_dir TEXT NOT NULL,
     trigger_reason TEXT NOT NULL,
     trigger_source TEXT NOT NULL DEFAULT '',

@@ -14,8 +14,11 @@ Therefore:
   writer pack asserts it with a spy pool that raises on ANY access;
 * the DB work runs over an **own one-shot SYNC** ``psycopg``
   connection, opened by the watchdog thread, with ``connect_timeout``
-  bounded by ``daemon.constants.BOOT_DB_TIMEOUT_S`` (10 s) and a
-  statement timeout;
+  bounded by the MODULE-LOCAL ``CAPTURE_CONNECT_TIMEOUT_S`` (10 s —
+  A8: ``daemon/constants.py`` is seal-pinned, so the constant lives
+  here rather than growing a daemon import) and a per-statement
+  timeout (``CAPTURE_STATEMENT_TIMEOUT_MS``), BOTH scaled to the
+  capture's remaining phase budget (W2);
 * ``application_name='wedge-capture'`` makes the capture's own
   connection identifiable in ``pg_stat_activity`` — this is the
   CAPTURE path only; the daemon's own connections carry an empty
@@ -56,6 +59,18 @@ logger = logging.getLogger("daemon.wedge_capture.db_capture")
 
 #: The capture connection's ``application_name`` (D11).
 CAPTURE_APPLICATION_NAME = "wedge-capture"
+
+#: The DB connect timeout (SECONDS) for the capture's own one-shot
+#: connections — MODULE-LOCAL by design (A8): ``daemon/constants.py``
+#: is seal-pinned, and this package must not grow a daemon import to
+#: read a timeout. Carries the boot-DB timeout's 10 s intent; W2's
+#: ``budget_s`` scaling clamps it further at capture time.
+CAPTURE_CONNECT_TIMEOUT_S = 10
+
+#: The per-statement timeout (MILLISECONDS) for the capture's reads
+#: and the metadata-row insert (W2: scaled to the phase budget at
+#: capture time).
+CAPTURE_STATEMENT_TIMEOUT_MS = 5000
 
 #: The DB sub-capture's typed statuses.
 STATUS_OK = "ok"
@@ -181,8 +196,8 @@ def capture_db_snapshot(
     dsn: str | None,
     *,
     boot_epoch: str | None = None,
-    connect_timeout_s: int = 10,
-    statement_timeout_ms: int = 5000,
+    connect_timeout_s: int = CAPTURE_CONNECT_TIMEOUT_S,
+    statement_timeout_ms: int = CAPTURE_STATEMENT_TIMEOUT_MS,
     budget_s: float | None = None,
 ) -> dict[str, Any]:
     """The DB-side sub-capture.
@@ -398,8 +413,8 @@ def write_capture_row(
     dsn: str | None,
     row: dict[str, Any],
     *,
-    connect_timeout_s: int = 10,
-    statement_timeout_ms: int = 5000,
+    connect_timeout_s: int = CAPTURE_CONNECT_TIMEOUT_S,
+    statement_timeout_ms: int = CAPTURE_STATEMENT_TIMEOUT_MS,
     budget_s: float | None = None,
 ) -> dict[str, Any]:
     """Insert the metadata row over the OWN one-shot connection (T11).
@@ -518,6 +533,8 @@ def _json_or_none(value: Any) -> Any:
 
 __all__ = [
     "CAPTURE_APPLICATION_NAME",
+    "CAPTURE_CONNECT_TIMEOUT_S",
+    "CAPTURE_STATEMENT_TIMEOUT_MS",
     "CHECKPOINT_TABLES",
     "MAX_EXECUTING_TURNS",
     "ROW_STATUS_FAILED",

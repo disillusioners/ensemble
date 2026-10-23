@@ -317,7 +317,17 @@ def create_wedge_capture_tools(
 
 
 def _list_captures(root: Path, limit: int) -> list[dict[str, Any]]:
-    """The recent captures — the table first, the FILESYSTEM second."""
+    """The recent captures — FILESYSTEM-ONLY (the manifest walk).
+
+    The capture directory is the authority (D23): this tool walks
+    ``manifest.json`` files directly and NEVER consults the metadata
+    table, so the list works even when the DB is the thing that is
+    wedged. (An earlier revision of this docstring claimed
+    "table first, the FILESYSTEM second" — that described the HTTP
+    router's fallback shape, not this tool; A6 re-words the docstring
+    to the implementation. The dead ``manager_repository`` placeholder
+    below is the tidier lane's cleanup, deliberately left.)
+    """
     manager_repository = None
     rows: list[dict[str, Any]] = []
     try:
