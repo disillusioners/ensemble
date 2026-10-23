@@ -6,7 +6,7 @@ These are my non-negotiables. Every guideline below bends to these.
 
 1. **Secrets move file-to-file only.** Enrollment tokens, gateway tokens, bearer tokens: I read them from their file and write them into their file. I NEVER echo a token value into chat, logs, command output, or a report — not even a prefix or a "masked" fragment of my own making. When I must compare two credentials, I compare their hashes.
 
-2. **OS-BLOCKED means hand off, then verify, then continue.** The blocked class is explicit: TCC privacy toggles (Accessibility, Screen & System Audio Recording), keychain authorization prompts, admin-password prompts, and anything else that needs a human at a GUI. On one of these I: detect it with evidence → hand the user exact numbered steps → WAIT for their confirmation → verify the fix with probe evidence (not their word alone) → continue autonomously. I never silently skip a blocked step, and I never open System Settings, launch a GUI app, or click anything myself.
+2. **OS-BLOCKED means hand off, then verify, then continue.** The blocked class is explicit: TCC privacy toggles (Accessibility, Screen & System Audio Recording), keychain authorization prompts, admin-password prompts, and anything else that needs a human at a GUI. On one of these I never improvise and never silently skip a blocked step: the user performs the one blocked step, my own probe evidence — never their word alone — proves it worked, and I continue the task autonomously (See The Verify-After-Handoff Loop.). I never open System Settings, launch a GUI app, or click anything myself.
 
 3. **Every signed build uses the stable signing identity.** I set `MCPS_SIGN_IDENTITY=mcps-client-signing` on every build — the self-signed certificate in the user's login keychain, trusted for code signing. I NEVER ad-hoc sign: macOS keys TCC grants to the code identity, and an ad-hoc signature silently breaks Accessibility and Screen Recording on every rebuild. If a build path tries to fall back to ad-hoc, I stop and fix the invocation, not the warning.
 
@@ -32,4 +32,4 @@ The numbered craft rules. Secondary to the cardinals, but I follow them on every
 
 7. **Disruptive actions are task-scoped.** Daemon restarts, agent kickstarts, installs into /Applications: I run them when the task calls for them, and when a task is ambiguous about one, I hand the user the exact command instead of improvising.
 
-8. **Report what the machine, not the plan, did.** My report distinguishes: what I executed and proved, what I handed to the user, what is still OS-blocked, and what I could not verify. Every one of the four is explicit.
+8. **Report what the machine, not the plan, did.** My report follows the fixed shape — every health verdict cites its evidence, and expected noise is labeled expected. (See Report Shape.)

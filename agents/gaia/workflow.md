@@ -117,6 +117,26 @@ stat -f "%Sp %Lp" ~/.config/mcps-client/config.yaml        # must read 0600
 
 First-time enrollment order: gateway side holds the token (fail-closed when empty) → client config carries it → install/kickstart → the machine appears in the gateway's machine roster.
 
+**Rotation is ATOMIC-PAIRED** — same semantics as first enrollment, run whenever a token must change (See Cardinal 4.):
+
+```bash
+# 1. edit BOTH sides in the same breath — never one without the other:
+#    a) the gateway env entry: MCPS_GATEWAY_TOKENS in ~/agents-ensemble/.env
+#    b) this machine's enrollment_token line in ~/.config/mcps-client/config.yaml
+# 2. prove both sides now hold the SAME new value — hash-compare, never print:
+gwy="$(awk -F'=' '/^MCPS_GATEWAY_TOKENS=/{print $2}' ~/agents-ensemble/.env)"
+cfg="$(sed -n 's/^  enrollment_token: "\(.*\)"/\1/p' ~/.config/mcps-client/config.yaml)"
+[ "$(printf %s "$gwy" | shasum -a 256 | cut -d' ' -f1)" = "$(printf %s "$cfg" | shasum -a 256 | cut -d' ' -f1)" ] \
+  && echo "rotation pair hash-matches"
+chmod 600 ~/.config/mcps-client/config.yaml
+# 3. restart the daemon (the token list is read at daemon start) — a disruptive action,
+#    task-scoped (See Guideline 7) — then kickstart the wrapper so it dials with the new token:
+launchctl kickstart -k gui/$(id -u)/com.disillusioners.mcps-client
+# 4. re-run the HEALTHCHECK ladder; the roster must show this machine online again
+```
+
+A half-rotated pair enrolls nothing: the daemon still gates on the old list, the client presents a token nobody admits. Togetherness is the procedure.
+
 ## HEALTHCHECK
 
 Run the ladder top to bottom; every verdict cites output:
@@ -146,10 +166,11 @@ Expected-good evidence: livez answers with the version; the WS probe answers 401
 
 ## TCC CEREMONY — the OS-blocked hand-off
 
-Screen capture and accessibility are granted per-app in System Settings; no script can flip them. I cannot click — I run the ceremony as a hand-off (See Cardinal 2):
+Screen capture and accessibility are granted per-app in System Settings; no script can flip them. I cannot click — I run the ceremony as a hand-off (See Cardinal 2).
 
-1. **Detect with evidence.** The agent runs but capture is dead: the log shows capture/permission failures, or desktop-driving tools return empty frames while launchd shows a healthy pid.
-2. **Hand the user the exact steps.** Both panes, both toggles — copy-pasteable:
+**Detect with evidence.** The agent runs but capture is dead: the log shows capture/permission failures, or desktop-driving tools return empty frames while launchd shows a healthy pid.
+
+**Hand the user the exact steps** — both panes, both toggles, copy-pasteable:
 
 ```
 Pane 1: open this in a browser/Spotlight →  x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility
@@ -159,8 +180,7 @@ In BOTH panes: enable the toggle for "McpsClient".
 (System Settings → Privacy & Security → Accessibility, and → Screen & System Audio Recording)
 ```
 
-3. **Wait for the user's confirmation.** Never assume the click happened.
-4. **Verify, then bounce the agent so it picks the grants up:**
+**After the user confirms, bounce the agent so it picks the grants up, and verify:**
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.disillusioners.mcps-client
@@ -169,7 +189,7 @@ launchctl print gui/$(id -u)/com.disillusioners.mcps-client | grep -E "state|pid
 tail -n 30 ~/Library/Logs/McpsClient/*.log     # the doctor-equivalent evidence: clean start, no permission refusal
 ```
 
-5. **Continue autonomously** — re-run the HEALTHCHECK ladder and report the evidence.
+The ceremony rides the one hand-off loop — the waiting for confirmation, the evidence verification, the autonomous continuation, and the re-entry on failed verification live once in the runbook (See The Verify-After-Handoff Loop.).
 
 If the toggles were already on and capture still fails: the bundle's signature changed (re-sign with the stable identity, reinstall) or the grant is attached to a stale bundle copy — find the stale entry, have the user remove it, reinstall, repeat the ceremony.
 
