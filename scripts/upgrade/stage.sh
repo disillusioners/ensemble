@@ -683,11 +683,8 @@ if [ -f "$ENV_FILE" ]; then
         tmp="$ENV_FILE.tmp.$$"
         sed -E "s/^[[:space:]]*(export[[:space:]]+)?ENSEMBLE_SELF_ENV=.*/$MARKER/" "$ENV_FILE" > "$tmp" \
             && mv -f "$tmp" "$ENV_FILE" || { rm -f "$tmp"; _warn "failed to update $ENV_FILE marker"; exit 1; }
-        # mode-0600 hygiene (unit-secret-exposure P5) — ORDER-SENSITIVE: the
-        # mv above re-creates the inode at the default umask, so the chmod
-        # must FOLLOW it. STAGE-OWNERSHIP PRECONDITION (N3): the stage runs
-        # as the install owner; a cross-uid stage would fail this chmod
-        # loudly instead of leaving an unreadable 0600 file behind.
+        # mode-0600 (P5) — must FOLLOW the mv (inode replacement). Stage
+        # runs as the install owner (N3); cross-uid fails loudly here.
         chmod 600 "$ENV_FILE" || { _warn "failed to chmod 600 $ENV_FILE"; exit 1; }
     else
         tmp="$ENV_FILE.tmp.$$"

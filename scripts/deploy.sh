@@ -243,17 +243,19 @@ if [ "$TARGET" = "demo" ] && [ ! -f "$ENV_SOURCE" ]; then
         _dry "sed-generate $ENV_SOURCE (PORT=$PORT, POSTGRES_DB=$DB_NAME)"
     else
         ENV_TMP="$ENV_SOURCE.tmp.$$"
-        if ! sed -e "s/^PORT=.*/PORT=$PORT/" \
-                 -e "s/^POSTGRES_DB=.*/POSTGRES_DB=$DB_NAME/" \
-                 "$ENV_BASE" > "$ENV_TMP" \
-                 || ! mv -f "$ENV_TMP" "$ENV_SOURCE"; then
+        # unit-secret-exposure P5: chmod rides the SAME chain as the mv —
+        # the mv re-creates the inode, so the 0600 pin must follow it.
+        if sed -e "s/^PORT=.*/PORT=$PORT/" \
+               -e "s/^POSTGRES_DB=.*/POSTGRES_DB=$DB_NAME/" \
+               "$ENV_BASE" > "$ENV_TMP" \
+               && mv -f "$ENV_TMP" "$ENV_SOURCE" \
+               && chmod 600 "$ENV_SOURCE"; then
+            :
+        else
             rm -f "$ENV_TMP" 2>/dev/null
             _log "FAILED: generating $ENV_SOURCE"
             exit 1
         fi
-        # mode-0600 hygiene (unit-secret-exposure P5): the mv re-creates the
-        # inode at the default umask — chmod MUST follow it (order-sensitive).
-        chmod 600 "$ENV_SOURCE"
     fi
 fi
 
@@ -312,10 +314,8 @@ else
     _log "WARN: no frontend build at frontend/dist/frontend/browser — UI not staged (run 'cd frontend && npm run build')"
 fi
 run "stage env → $INSTALL_DIR/.env" -- cp "$ENV_SOURCE" "$INSTALL_DIR/.env"
-# mode-0600 hygiene (unit-secret-exposure P5): cp to a new destination
-# creates the file at source-mode-masked-by-umask — pin 0600 explicitly.
-# NOTE (A3'): deploys must run as the INSTALL OWNER — a sudo-deploy would
-# mint a root-owned 0600 .env the unit's User= cannot read.
+# mode-0600 (unit-secret-exposure P5); deploys run as the INSTALL OWNER
+# (A3') — a sudo-deploy would mint a root-owned 0600 the User= can't read.
 run "chmod env 0600" -- chmod 600 "$INSTALL_DIR/.env"
 
 # ── Phase 3: stop (ownership-scoped, REUSED — never duplicated) ─────────────

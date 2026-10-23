@@ -14,10 +14,26 @@
 #   naming derivation table (header rule) + explicit-name override +
 #       invalid-name refusal
 #   DRY_RUN=1 happy path — the generated unit CONTENT asserted line-by-
-#       line (ExecStart=launcher.sh absolute, substituted User/port/PG,
-#       every template directive, the %h-under-home rule, secret masking,
-#       torn-token guard) + ZERO mutations (no unit file, .env untouched,
-#       zero systemctl calls).
+#       line (ExecStart=launcher.sh absolute, substituted User/label,
+#       every template directive, the %h-under-home rule, torn-token
+#       guard) + the ZERO-ENV CONTRACT (NO .env-derived Environment=
+#       lines — zero-env pins, mutation-verified below) + ZERO mutations
+#       (no unit file, .env untouched, zero systemctl calls).
+#
+# PIN DISCLOSURE (honest-skip discipline; §19 NAMED-SKIP precedent
+# tests/test_release_journal.sh:2474-2517):
+#   - The REAL-systemd mutation path (a live unit actually carrying
+#     minted Environment= lines) is a NAMED SKIP on this fence — it needs
+#     the systemd substrate. Mutation coverage lives at the generator/
+#     DRY_RUN level: the template-copy injection leg below (plant
+#     Environment=POSTGRES_PASSWORD=<clearly-marked DUMMY> in a
+#     THROWAWAY template copy under $WORK → zero-env pins RED → restore
+#     → GREEN). The repo template is NEVER mutated.
+#   - The 4-rung env-precedence contract (.env > unit Environment=
+#     [EMPTY BY DESIGN — zero-env contract] > systemctl set-environment
+#     > code defaults) is DOC-PINNED
+#     (docs/runbooks/systemd-adoption.md §"Env sourcing & precedence") —
+#     not executable-pinned here.
 #
 # Stub seams (the P4-designed operator/test surface): SYSTEMCTL_BIN,
 # UNIT_DIR, POLKIT_RULES_DIR, ADOPT_SYSTEMD_RUN_DIR, ADOPT_USER, DRY_RUN,
@@ -347,9 +363,15 @@ assert_contains "template carries static MALLOC_ARENA_MAX cap as a real directiv
 assert_contains "ExecStart is the ABSOLUTE fixture launcher" "ExecStart=$FIX/launcher.sh" "$H_OUT"
 assert_contains "User substituted" "User=ens-adm" "$H_OUT"
 assert_contains "WorkingDirectory substituted (absolute, non-HOME fixture)" "WorkingDirectory=$FIX" "$H_OUT"
-assert_contains "Environment=PORT substituted" "Environment=PORT=18095" "$H_OUT"
-assert_contains "Environment=POSTGRES_HOST substituted" "Environment=POSTGRES_HOST=10.44.0.2" "$H_OUT"
-assert_contains "Environment=POSTGRES_DB substituted" "Environment=POSTGRES_DB=ensemble_adopt" "$H_OUT"
+
+# ZERO-ENV CONTRACT pins (unit-secret-exposure): the generated unit carries
+# NO .env-derived Environment= lines. The fixture .env carries PORT + all
+# five POSTGRES_* keys (maximal input), so these negatives run against the
+# worst case. `Environment=POSTGRES_` covers the HOST/DB/USER/PASSWORD
+# variants in one needle; `__ENV_LINES__` proves the token did not survive.
+assert_not_contains "zero-env: no minted PORT env line" "Environment=PORT=" "$H_OUT"
+assert_not_contains "zero-env: no minted POSTGRES_* env lines" "Environment=POSTGRES_" "$H_OUT"
+assert_not_contains "zero-env: no __ENV_LINES__ token survived" "__ENV_LINES__" "$H_OUT"
 
 # every template directive rides through. MALLOC_ARENA_MAX is checked
 # separately BELOW with a comment-stripped haystack — see that pin's note
@@ -371,10 +393,11 @@ assert_contains "directive Environment=MALLOC_ARENA_MAX=2 present (directive-spe
 assert_not_contains "NO WatchdogSec (deferred by design)" "WatchdogSec=" "$H_OUT"
 assert_not_contains "torn-token guard: no __TOKEN__ survived" "__" "$H_OUT"
 
-# secret masking in the DRY_RUN preview (value never echoed)
-assert_contains "POSTGRES_PASSWORD masked in the preview" "Environment=POSTGRES_PASSWORD=***masked***" "$H_OUT"
+# zero-env DRY_RUN preview (unit-secret-exposure): nothing secret remains
+# to mask — the preview prints the unit raw under the neutral banner
+assert_not_contains "no masked-section banner (masking removed with the minting)" "secret env value masked" "$H_OUT"
 assert_not_contains "real password NEVER echoed" "sekret-adopt-pw" "$H_OUT"
-assert_contains "preview announces the masked section" "generated unit (secret env value masked)" "$H_OUT"
+assert_contains "preview announces the zero-env section" "generated unit (zero-env contract)" "$H_OUT"
 
 # zero mutations
 assert_eq "no unit file installed under DRY_RUN" "0" "$(find "$UNITDIR" -type f | wc -l | tr -d ' ')"
@@ -394,15 +417,126 @@ assert_contains "WorkingDirectory relativized to %h under HOME" "WorkingDirector
 assert_contains "ExecStart stays ABSOLUTE even under HOME" "ExecStart=$HOMEFIX/launcher.sh" "$HH_OUT"
 
 # ===========================================================================
-section "PG quoting arm (values outside the bare charset get systemd-quoted)"
+section "MUTATION LEG — zero-env pins are mutation-meaningful (house rule)"
+# Vehicle: THROWAWAY copies of the generator + template under $WORK
+# (never the repo files — the repo template is byte-immutable here).
+# _resolve_template resolves SELF_DIR-relative, so BOTH files must be
+# copied into the fence for the copy to self-contain.
+MUT="$WORK/mut"
+mkdir -p "$MUT/scripts/upgrade" "$MUT/scripts/systemd"
+cp "$REPO_ROOT/scripts/upgrade/adopt-unit.sh" "$REPO_ROOT/scripts/upgrade/lib.sh" "$MUT/scripts/upgrade/"
+cp "$REPO_ROOT/scripts/systemd/ensemble-daemon.service" "$MUT/scripts/systemd/"
 
+mut_run() { # DRY_RUN against the FENCED copy of the generator
+    UNIT_DIR="$UNITDIR" POLKIT_RULES_DIR="$POLKIT" ADOPT_SYSTEMD_RUN_DIR="$RUND" \
+        SYSTEMCTL_BIN="$SCBIN/systemctl" DRY_RUN=1 \
+        bash "$MUT/scripts/upgrade/adopt-unit.sh" "$FIX" 2>&1
+}
+# the RED detector = the exact needle the zero-env pins assert on
+mut_goes_red() { printf '%s' "$1" | grep -qF 'Environment=POSTGRES_'; }
+
+# leg 1 (GREEN baseline): the fenced copy behaves like the repo generator
 make_install "$FIX"
-printf 'PORT=18095\nPOSTGRES_HOST=host with space\nPOSTGRES_PASSWORD=p@ss word!\n' > "$FIX/.env"
-Q_OUT="$(UNIT_DIR="$UNITDIR" POLKIT_RULES_DIR="$POLKIT" ADOPT_SYSTEMD_RUN_DIR="$RUND" \
-    SYSTEMCTL_BIN="$SCBIN/systemctl" DRY_RUN=1 bash "$ADOPT" "$FIX" 2>&1)"
-assert_contains "bare-charset value stays unquoted" "Environment=PORT=18095" "$Q_OUT"
-assert_contains "space-containing value single-quoted" "Environment=POSTGRES_HOST='host with space'" "$Q_OUT"
-assert_contains "masking still applies to the quoted secret" "Environment=POSTGRES_PASSWORD=***masked***" "$Q_OUT"
+MUT_G_OUT="$(mut_run)"
+MUT_G_RC=$?
+assert_eq "mutation baseline (GREEN): fenced copy exit 0" "0" "$MUT_G_RC"
+if mut_goes_red "$MUT_G_OUT"; then
+    _fail "mutation baseline (GREEN)" "no minted env on the unmutated copy" "pin went RED"
+else
+    _pass "mutation baseline (GREEN): zero-env pin holds on the unmutated copy"
+fi
+
+# leg 2 (RED): plant a minted env line in the TEMPLATE COPY → the pin MUST
+# go RED. (Not a __TOKEN__, so the torn-token guard correctly does not
+# fire — this proves the pins detect minted CONTENT, not merely tokens.)
+printf 'Environment=POSTGRES_PASSWORD=DUMMY_MUTATION_PW_NOT_A_SECRET\n' \
+    >> "$MUT/scripts/systemd/ensemble-daemon.service"
+MUT_R_OUT="$(mut_run)"
+MUT_R_RC=$?
+assert_eq "mutation (RED): fenced copy still completes generation" "0" "$MUT_R_RC"
+if mut_goes_red "$MUT_R_OUT"; then
+    _pass "mutation (RED): planted minted line DETECTED by the zero-env pin"
+else
+    _fail "mutation (RED)" "pin RED on planted minted line" "pin stayed GREEN (mutation-dead)"
+fi
+
+# leg 3 (restore → GREEN): restore the pristine template copy
+cp "$REPO_ROOT/scripts/systemd/ensemble-daemon.service" "$MUT/scripts/systemd/"
+MUT_G2_OUT="$(mut_run)"
+if mut_goes_red "$MUT_G2_OUT"; then
+    _fail "mutation restore (GREEN)" "pin recovered after restore" "pin still RED"
+else
+    _pass "mutation restore (GREEN): zero-env pin recovered after restore"
+fi
+rm -rf "$MUT"
+
+# ===========================================================================
+section "MODE PINS — every .env/.env.prod.demo write site leaves mode 0600 (P5)"
+# Static byte-adjacency pins: a `chmod 600` must appear within 3 lines
+# AFTER each of the 5 write sites (deploy.sh ×2, stage.sh ×3). The
+# stage.sh chmod is LOAD-BEARING (the marker rewrite's `mv -f` re-creates
+# the inode at the default umask and would silently reset any prior 600).
+# These pins run against the REPO files (read-only) — mutation coverage
+# comes from the W5 leg below on THROWAWAY copies.
+
+_pin_deploy="$REPO_ROOT/scripts/deploy.sh"
+_pin_stage="$REPO_ROOT/scripts/upgrade/stage.sh"
+
+adjacent_chmod() { # <file> <fixed-string anchor on the write line> → rc 0 iff chmod 600 within +1..+3
+    local f="$1" anchor="$2" n
+    n="$(grep -nF -- "$anchor" "$f" | head -1 | cut -d: -f1)"
+    [ -n "$n" ] || return 1
+    sed -n "$((n + 1)),$((n + 3))p" "$f" | grep -q 'chmod 600'
+}
+assert_adjacent_chmod() { # <name> <file> <anchor>
+    if adjacent_chmod "$2" "$3"; then
+        _pass "$1"
+    else
+        _fail "$1" "chmod 600 within 3 lines after the write" "not found"
+    fi
+}
+
+assert_adjacent_chmod "mode pin: deploy.sh installed-copy cp → chmod 600" \
+    "$_pin_deploy" 'cp "$ENV_SOURCE" "$INSTALL_DIR/.env"'
+assert_adjacent_chmod "mode pin: deploy.sh demo-guard generate-mv → chmod 600" \
+    "$_pin_deploy" 'mv -f "$ENV_TMP" "$ENV_SOURCE"'
+assert_adjacent_chmod "mode pin: stage.sh marker rewrite-mv → chmod 600" \
+    "$_pin_stage" 'failed to update $ENV_FILE marker'
+assert_adjacent_chmod "mode pin: stage.sh marker append-mv → chmod 600" \
+    "$_pin_stage" 'failed to append marker to $ENV_FILE'
+assert_adjacent_chmod "mode pin: stage.sh create path → chmod 600" \
+    "$_pin_stage" 'failed to create $ENV_FILE'
+
+# W5 mutation leg (house rule — pins MUST be mutation-verified): remove the
+# create-path chmod in a THROWAWAY stage.sh copy → the create-site pin goes
+# RED → restore → GREEN. Repo files never mutated; the 4-space indent
+# matches ONLY the create-path chmod (the two mv-path chmods indent 8).
+MUT_PIN="$WORK/mut-pin"
+mkdir -p "$MUT_PIN"
+cp "$_pin_stage" "$MUT_PIN/stage.sh"
+
+assert_adjacent_chmod "mode-pin mutation baseline (GREEN): stage copy create-site pinned" \
+    "$MUT_PIN/stage.sh" 'failed to create $ENV_FILE'
+
+sed -i '/^    chmod 600 "$ENV_FILE" || { _warn "failed to chmod 600 \$ENV_FILE"; exit 1; }/d' \
+    "$MUT_PIN/stage.sh"
+if adjacent_chmod "$MUT_PIN/stage.sh" 'failed to create $ENV_FILE'; then
+    _fail "mode-pin mutation (RED)" "create-site pin RED after chmod removal" "pin stayed GREEN (mutation-dead)"
+else
+    _pass "mode-pin mutation (RED): create-site chmod removed → pin RED"
+fi
+
+cp "$_pin_stage" "$MUT_PIN/stage.sh"
+assert_adjacent_chmod "mode-pin mutation restore (GREEN): create-site pin recovered" \
+    "$MUT_PIN/stage.sh" 'failed to create $ENV_FILE'
+rm -rf "$MUT_PIN"
+
+# BEHAVIORAL-PIN DISCLOSURE (D5b): the full stage-harness behavioral
+# exercise of the marker-rewrite chmod lives in
+# tests/test_stage_freshness_guard.sh (real stage.sh under a FAKE_REPO
+# fence). It is NOT duplicated here — see that pack; disclosure per the
+# plan: the static + mutation pins above are the P5-owned surface in THIS
+# pack.
 
 rm -rf "$WORK"
 
