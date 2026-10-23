@@ -18,9 +18,11 @@
 #       §Polkit prerequisite first, then re-runs.
 #   (d) generate the instance unit from the STATIC BASE template
 #       (scripts/systemd/ensemble-daemon.service — template + substitution)
-#       reading config the _resolve_wait_s way (directly from the staged
-#       INSTALL_DIR/.env, never from ambient env — the stop-ensemble.sh
-#       :83-125 precedent), then: install unit (0600) → daemon-reload →
+#       reading ONLY PORT from the staged INSTALL_DIR/.env (never ambient
+#       env — the stop-ensemble.sh :83-125 precedent); the generated unit
+#       carries ZERO .env-derived Environment= lines (zero-env contract —
+#       runtime env is supplied by launcher.sh), then: install unit
+#       (0600) → daemon-reload →
 #       stage ENSEMBLE_RESTART_UNIT into .env (ADDITIVE — replaces only
 #       that key, never clobbers others) → systemctl enable --now →
 #       verify (livez + boot journal UNIT_MANAGED advisory + declared×
@@ -60,12 +62,18 @@
 #   DRY_RUN=1               full refusal-check + generation pass, ZERO
 #                           mutations (no file installs, no systemctl
 #                           calls, no .env staging); prints the sequence
-#                           and the generated unit with secret env MASKED.
+#                           and the generated unit.
 #
-# SECRET HYDROMETRY: POSTGRES_* values (incl. POSTGRES_PASSWORD) are read
-# from .env into the generated unit (installed 0600 for exactly that
-# reason) but are NEVER echoed to stdout/stderr by this script — logs carry
-# key NAMES only, and the DRY_RUN preview masks values.
+# ZERO-ENV CONTRACT (unit-secret-exposure, 2026-10-23): the generated unit
+# carries NO .env-derived Environment= lines — systemd exposes Environment=
+# to any local uid via D-Bus (man 5 systemd.exec), and launcher.sh already
+# re-exports every .env value last-wins, so the minted lines were redundant
+# at runtime while remaining D-Bus-readable. Runtime env is supplied by
+# launcher.sh (load_env_file, env-first). The 0600 install is retained as
+# defense-in-depth HYGIENE only (it does NOT gate the D-Bus surface). The
+# EXISTING live unit (pre-strip generation) still needs the ONE-TIME
+# remediation — user decision: docs/runbooks/systemd-adoption.md
+# §One-time live remediation.
 #
 # EXIT CODES
 #   0   success (or clean DRY_RUN preview)
@@ -288,7 +296,6 @@ ADOPT_USER="${ADOPT_USER:-${SUDO_USER:-$(id -un)}}"
 ENV_FILE="$INSTALL_DIR/.env"
 
 _read_config() {
-    local key val
     LAUNCHER="$INSTALL_DIR/launcher.sh"
     if [ ! -x "$LAUNCHER" ]; then
         _warn "REFUSED: existing launcher not found/executable at $LAUNCHER — adoption keeps the launcher as ExecStart (the unit-inert design); nothing to adopt without it."
@@ -299,32 +306,13 @@ _read_config() {
         _warn "REFUSED: no valid PORT in $ENV_FILE (found: '${PORT:-<absent>}') — fail-closed, the ADR-014 rule (PORT is staged env state, never a script constant)."
         exit 78
     fi
-    # PORT + POSTGRES_* only (never OPENAI_* etc. — minimal secret surface).
-    ENV_KEYS=""
-    ENV_LINES=""
-    for key in PORT $( [ -f "$ENV_FILE" ] && sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}\(POSTGRES_[A-Za-z0-9_]\{1,\}\)[[:space:]]*=.*/\2/p' "$ENV_FILE" | awk '!seen[$0]++' ); do
-        val="$(_dotenv_value "$ENV_FILE" "$key" || true)"
-        ENV_KEYS="$ENV_KEYS $key"
-        ENV_LINES="${ENV_LINES}Environment=$key=$(_systemd_env_quote "$val")
-"
-    done
-    [ -n "$ENV_LINES" ] || {
-        _warn "REFUSED: no PORT/POSTGRES_* env lines could be derived from $ENV_FILE"
-        exit 78
-    }
-    _log "config: user=$ADOPT_USER port=$PORT env keys(names only):$ENV_KEYS launcher=$LAUNCHER"
-}
-
-# systemd Environment= value quoting: bare when in the safe charset, else
-# single-quoted with '\'' escaping (systemd.syntax(7) — the unit env parser
-# is NOT a shell).
-_systemd_env_quote() {
-    case "$1" in
-        ''|*[!A-Za-z0-9_@%+=:,./-]*)
-            printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
-            ;;
-        *)  printf '%s' "$1" ;;
-    esac
+    # ZERO-ENV CONTRACT (unit-secret-exposure, 2026-10-23): the generated
+    # unit carries NO .env-derived Environment= lines — runtime env is
+    # supplied by launcher.sh (load_env_file, env-first, last-wins), which
+    # made every minted line redundant at runtime while remaining D-Bus-
+    # exposed. PORT is the ONLY config this generator reads (the livez
+    # verify below needs it).
+    _log "config: user=$ADOPT_USER port=$PORT launcher=$LAUNCHER (unit carries NO env from .env — zero-env contract; runtime env supplied by launcher.sh)"
 }
 
 # ── Unit name derivation + validation ───────────────────────────────────────
@@ -413,20 +401,13 @@ _generate_unit() {
     _resolve_template || return 1
     out=""
     while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in
-            *__ENV_LINES__*)
-                out="${out}${ENV_LINES}"
-                ;;
-            *)
-                out="${out}$(printf '%s\n' "$line" \
-                    | _splice_line '__GENERATED_NOTE__' "$note" \
-                    | _splice_line '__UNIT_LABEL__' "$UNIT_LABEL" \
-                    | _splice_line '__USER__' "$ADOPT_USER" \
-                    | _splice_line '__WORKING_DIRECTORY__' "$WORKING_DIRECTORY" \
-                    | _splice_line '__LAUNCHER__' "$LAUNCHER")
+        out="${out}$(printf '%s\n' "$line" \
+            | _splice_line '__GENERATED_NOTE__' "$note" \
+            | _splice_line '__UNIT_LABEL__' "$UNIT_LABEL" \
+            | _splice_line '__USER__' "$ADOPT_USER" \
+            | _splice_line '__WORKING_DIRECTORY__' "$WORKING_DIRECTORY" \
+            | _splice_line '__LAUNCHER__' "$LAUNCHER")
 "
-                ;;
-        esac
     done < "$TEMPLATE_PATH"
     # torn-substitution guard: no __TOKEN__ may survive
     if printf '%s\n' "$out" | grep -Eq '__[A-Z][A-Z0-9_]*__'; then
@@ -547,8 +528,8 @@ if [ "$DRY_RUN" = "1" ]; then
     _log "  3. stage ENSEMBLE_RESTART_UNIT=$UNIT_NAME into $ENV_FILE (additive)"
     _log "  4. $SYSTEMCTL_BIN enable --now $UNIT_NAME"
     _log "  5. verify: livez :$PORT + classify UNIT_MANAGED:$UNIT_NAME + declared-mode conforming + boot-journal advisory"
-    echo "──────── generated unit (secret env value masked) ────────"
-    printf '%s' "$UNIT_CONTENT" | sed -E 's/^(Environment=POSTGRES_PASSWORD=).+$/\1***masked***/'
+    echo "──────── generated unit (zero-env contract) ────────"
+    printf '%s' "$UNIT_CONTENT"
     echo "──────── end generated unit ────────"
     _log "DRY RUN complete — re-run without DRY_RUN=1 to execute (operator lane)"
     exit 0
@@ -576,8 +557,8 @@ if ! install -m 0600 "$UNIT_TMP" "$DEST"; then
     _report_partial_and_fail "install-unit-file"
 fi
 rm -f "$UNIT_TMP"
-LEDGER_UNIT_FILE="installed at $DEST (0600)"
-_log "step (d).1: unit installed → $DEST (0600 — carries secret env)"
+LEDGER_UNIT_FILE="installed at $DEST (0600 — hygiene; carries no secrets)"
+_log "step (d).1: unit installed → $DEST (0600 — hygiene; unit carries no secrets)"
 
 "$SYSTEMCTL_BIN" daemon-reload \
     || _report_partial_and_fail "daemon-reload"

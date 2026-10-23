@@ -12,12 +12,17 @@
 #   user token          → service user (default: adopting user)   [User=]
 #   working-dir token   → install dir — %h-relative when natural  [WorkingDirectory=]
 #   launcher token      → ABSOLUTE path to the EXISTING launcher  [ExecStart=]
-#   env-lines token     → one Environment= line per staged key    (PORT +
-#                         POSTGRES_* read from INSTALL_DIR/.env)
 #
 # (Token literals are deliberately NOT spelled out in this header — a
 # surviving header mention would false-positive the torn-substitution
 # guard and would itself get spliced into noise.)
+#
+# ZERO-ENV CONTRACT (unit-secret-exposure, 2026-10-23): this template and
+# every unit generated from it carry NO .env-derived Environment= lines.
+# Runtime env is supplied by launcher.sh from INSTALL_DIR/.env (load_env_file,
+# env-first, last-wins) — minted unit env was redundant at runtime while
+# staying D-Bus-readable by any local uid. The single static Environment=
+# below (MALLOC_ARENA_MAX) is host-independent and carries no secret.
 #
 # WHY THE LAUNCHER IS THE ExecStart (architect's unit-inert finding, P4
 # ruling): the launcher's exit-code map (0 clean / 75 tempfail / 78 refuse /
@@ -104,12 +109,12 @@ StandardOutput=journal
 StandardError=journal
 TimeoutStopSec=90
 # Allocator cap (resource-cost-control O1, 2026-10-18): static, host-
-# independent directive — see the header rationale. The env-lines token
-# below splices ONLY the staged PORT/POSTGRES_* keys; this line is the
-# shared baseline (override per install via a systemd drop-in).
+# independent directive — see the header rationale. This is the ONLY
+# Environment= line in the template and in every generated unit (zero-env
+# contract) — the shared baseline (override per install via a systemd
+# drop-in).
 Environment=MALLOC_ARENA_MAX=2
 # NO WatchdogSec — deferred by design (see header + systemd-adoption.md).
-__ENV_LINES__
 
 [Install]
 WantedBy=multi-user.target
