@@ -126,6 +126,15 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # access path (ARI-ONLY — user ruling 2026-10-20); the tool body
     # ALSO carries the runtime agent_id gate.
     "board_link",
+    # wedge-capture (2026-10-22): the two READ-ONLY capture-evidence
+    # tools — created by the create_wedge_capture_tools() factory
+    # (daemon/tools/wedge_capture.py). Factory-built (not import-time
+    # registered), so they belong in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is PRIVILEGED (entry #16 of
+    # PRIVILEGED_TOOL_CATEGORIES) — opt-in only, never default-granted;
+    # the runtime agent gate lives in the tool bodies.
+    "wedge_capture_list",
+    "wedge_capture_get",
     # system_upgrade tools — created by create_upgrade_tools() factory
     # (daemon/tools/upgrade_tools.py, P2.2 Dispatch A read pair + Dispatch B
     # actor pair).
@@ -294,9 +303,9 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # is still exact-pinned below (now a quartet: ``ens-env`` joined per
 # the W4 leader decision, reviewer council 2026-10-02).
 #
-# SAME-PR RULE (D18/A14): the set is EIGHT-pin pinned by exact-equality
-# asserts (six inline ``frozenset({...})`` literals + two
-# ``EXPECTED_PRIVILEGED_SET`` constants). Adding or removing a category
+# SAME-PR RULE (D18/A14): the set is pinned by exact-equality asserts at
+# EIGHT sites — six inline ``frozenset({...})`` literals + two
+# ``EXPECTED_PRIVILEGED_SET`` constants. Adding or removing a category
 # REQUIRES updating ALL EIGHT pins in the same commit:
 # ``tests/unit/tools/test_upgrade_registration.py``,
 # ``tests/unit/tools/test_attestation_registration.py``,
@@ -313,10 +322,10 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # pin — added 2026-10-20) and
 # ``tests/unit/test_instance_ops_registration.py`` (the nest-ops pin —
 # added 2026-10-21; it pins BOTH categories plus the registration
-# wiring). The two phase-local pins and the nest-ops pin ALSO carry a
-# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion (14 today).
-# Derive the authoritative pin set by GREPPING THE TREE — do NOT trust
-# this count:
+# wiring). The three phase-local pins ALSO carry a
+# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion (16 today).
+#
+# DERIVE THE PIN SET BY GREPPING THE TREE — do NOT trust this prose:
 #   grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/ --include=*.py
 #   grep -rn "len(PRIVILEGED_TOOL_CATEGORIES)" tests/ --include=*.py
 # Silent additions and silent removals (fail-open regressions) both trip the
@@ -513,6 +522,21 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # comment above are mandatory (this entry ships in the SAME commit as
     # those insertions — the set must never be red between two commits).
     "board-link",
+    # wedge-capture (2026-10-22, D-28): the READ-ONLY capture-evidence
+    # surface — ``wedge_capture_list`` + ``wedge_capture_get``. Why it is
+    # privileged: the capture payload is a privileged diagnostic artifact
+    # (all-thread stack dumps, per-thread CPU maps, process RSS and the
+    # DB-side executing turns), and the empty-allow inherit universe must
+    # never auto-grant it. The allow-list is ari + leader + maintenancer
+    # — a DIFFERENT population from ``instance_read`` (maintenancer-only),
+    # so a separate category keeps the privilege boundary auditable.
+    # Defence in depth: a LITERAL TOOL NAME in an allow list bypasses the
+    # category gate, so the tool bodies ALSO carry an ``agent_id in
+    # {"ari", "leader", "maintenancer"}`` runtime gate (the shared helper
+    # in ``daemon/tools/wedge_capture.py``). Both gates are required.
+    # The manual capture trigger is deliberately NOT an agent tool — it
+    # stays on the admin API / CLI, so an agent cannot fill the disk.
+    "wedge-capture",
     # nest-ops (2026-10-21, D-13): TWO single-owner categories for the
     # maintenancer — ``instance_read`` (#13: the four fleet reads) and
     # ``instance_ops`` (#14: the six audited acts). Why BOTH are
@@ -994,6 +1018,22 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # the category points at the tool module, the service package is a
     # library, never a category target.
     "mcp_rpc": "daemon.tools.mcp_rpc_tools",
+    # wedge-capture (2026-10-22, D-31/D-41): the READ-ONLY capture
+    # evidence surface. PRIVILEGED category (entry #16 of
+    # PRIVILEGED_TOOL_CATEGORIES): the empty-allow inherit universe must
+    # NOT auto-grant the authority to read the all-thread stack dumps and
+    # per-thread CPU maps of a wedged daemon.
+    #
+    # The value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``; a
+    # ``daemon.services.*`` value is NEVER discovered and the
+    # exact-equality drift pin fails at boot. The category key is
+    # KEBAB-case (``wedge-capture``) while the tool names are snake-case
+    # (``wedge_capture_*``) — the house pattern (``self-alarm`` →
+    # ``self_alarm``, ``board-link`` → ``board_link``), and the MCP
+    # privilege stamping keys off the category prefix, so the two must
+    # agree.
+    "wedge-capture": "daemon.tools.wedge_capture",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -1262,6 +1302,15 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # (entry #12 of PRIVILEGED_TOOL_CATEGORIES) — opt-in only, never
     # default-granted; the ari+leader runtime gate lives in the tool body.
     "board_link",
+    # wedge-capture (2026-10-22): the two READ-ONLY capture-evidence
+    # tools — created by the create_wedge_capture_tools() factory
+    # (daemon/tools/wedge_capture.py). Factory-built (not import-time
+    # registered), so they belong in DYNAMIC_TOOL_NAMES and
+    # KNOWN_TOOL_NAMES. The category is PRIVILEGED (entry #16 of
+    # PRIVILEGED_TOOL_CATEGORIES) — opt-in only, never default-granted;
+    # the runtime agent gate lives in the tool bodies.
+    "wedge_capture_list",
+    "wedge_capture_get",
     "blueprint_acknowledge_pending",
     "blueprint_claim_pending",
     "blueprint_create",

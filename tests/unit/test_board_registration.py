@@ -82,6 +82,14 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "instance_read",
     "instance_ops",
     "board-link",
+    # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
+    # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
+    # PRIVILEGED (entry #16): the capture payload is a privileged
+    # diagnostic artifact; the empty-allow inherit universe must
+    # NOT auto-grant it. The ari + leader + maintenancer allow
+    # entries are the only access path, and every tool body ALSO
+    # carries its own agent_id gate.
+    "wedge-capture",
 # remote-hands center gateway (2026-10-22): the ``mcp_rpc``
 # category — the agent-facing surface that drives an ENROLLED
 # remote machine (SPEC.md v0.1). opt-in-only; the ari + leader
@@ -194,7 +202,7 @@ class TestPrivilegedCategory:
         "ninth entry" is a property of the SET SIZE at the time of the
         phase-1 commit and of the registry's literal order afterwards;
         the comment block in the registry records the ordinal."""
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 15
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 16
         source = (
             REPO_ROOT / "daemon" / "tools" / "_tool_registry.py"
         ).read_text(encoding="utf-8")
@@ -253,7 +261,7 @@ class TestAllowLists:
         for ari alone.
         """
         trailing_by_agent = {
-            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc"],
+            "ari": ["self-alarm", "view-write", "board-link", "mcp_rpc", "wedge-capture"],
         }
         for agent_id in BOARD_ALLOW_AGENTS:
             allow = self._allow(agent_id)

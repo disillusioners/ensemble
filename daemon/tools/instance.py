@@ -277,6 +277,7 @@ from .instance_read import create_instance_read_tools
 from .instance_ops import create_instance_ops_tools
 from .view_write import create_view_write_tools
 from .board_link import create_board_link_tools
+from .wedge_capture import create_wedge_capture_tools
 from .db_tools import create_db_tools
 from .infra import create_infra_tools, create_kms_tools, create_mcp_env_tools
 from .system import create_system_tools
@@ -6126,6 +6127,45 @@ Returns:
     )
     tools.extend(
         create_instance_ops_tools(
+            manager,
+            current_instance_id=current_instance_id,
+            agent_id=agent_id,
+            agent_tag=version_tag,
+        )
+    )
+
+    # ── Wedge-capture read tools (2026-10-22) ───────────────────────────
+    # Same critical list-append pattern as board_tool_list /
+    # self_alarm_tool_list / instance_read_tool_list above:
+    # decorator-only registration is SILENTLY INVISIBLE — this extend is
+    # the third step of the three-step registration seam (decorator +
+    # registry entries + construction).
+    #
+    # PLACEMENT: this extend MUST precede ``create_help_tool`` (which
+    # snapshots the tool list into its index), ``scan_tools_for_full_docs``
+    # and ``_apply_tool_filter`` (which applies the per-agent allow list
+    # and the privileged-category default-deny strip). A later extend is
+    # either invisible to the help tool or BYPASSES the privileged strip.
+    #
+    # The category is PRIVILEGED: the capture payload is a privileged
+    # diagnostic artifact (all-thread stack dumps, per-thread CPU maps,
+    # process RSS, the DB-side executing turns) — the empty-allow
+    # inherit universe must never auto-grant it. The tool bodies carry
+    # a SECOND, independent agent_id gate (the shared helper in
+    # ``daemon/tools/wedge_capture.py``) — a LITERAL tool name in an
+    # allow list bypasses the category gate, so the category alone
+    # cannot spell the audience.
+    #
+    # The tools are READ-ONLY: they never write, never delete and never
+    # trigger a capture (the manual trigger stays on the admin API).
+    #
+    # ``agent_id`` is the layer-3 gate's input; it is a parameter of THIS
+    # function already (``create_instance_tools(..., agent_id="", ...)``),
+    # so it is in scope here. A construction that omitted it would fall
+    # back to ``""`` ⇒ the body gate denies every call (fail-closed, but a
+    # dead tool).
+    tools.extend(
+        create_wedge_capture_tools(
             manager,
             current_instance_id=current_instance_id,
             agent_id=agent_id,

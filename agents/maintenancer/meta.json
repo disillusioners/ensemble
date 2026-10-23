@@ -17,7 +17,8 @@
       "system_restart",
       "db",
       "instance_read",
-      "instance_ops"
+      "instance_ops",
+      "wedge-capture"
     ],
     "deny": ["git_commit", "edit_file", "write_file"]
   },

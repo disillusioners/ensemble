@@ -91,6 +91,14 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "self-alarm",
     "view-write",
     "board-link",
+    # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
+    # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
+    # PRIVILEGED (entry #16): the capture payload is a privileged
+    # diagnostic artifact; the empty-allow inherit universe must
+    # NOT auto-grant it. The ari + leader + maintenancer allow
+    # entries are the only access path, and every tool body ALSO
+    # carries its own agent_id gate.
+    "wedge-capture",
     # nest-ops (2026-10-21): the two maintenancer fleet categories
     # (read #13 / act #14) — opt-in-only, never default-granted.
     "instance_read",
@@ -180,7 +188,7 @@ class TestPrivilegedCategory:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
     def test_the_set_has_fifteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 15
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 16
 
 
 class TestAllowLists:

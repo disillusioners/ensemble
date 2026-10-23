@@ -268,6 +268,15 @@ class TestStaticRegistrationChecklist:
             "instance_read",
             "instance_ops",
             "board-link",
+            # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
+            # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
+            # PRIVILEGED (entry #16): the capture payload is a privileged
+            # diagnostic artifact (all-thread stack dumps, per-thread CPU
+            # maps, process RSS); the empty-allow inherit universe must
+            # NOT auto-grant it. The ari + leader + maintenancer allow
+            # entries are the only access path, and every tool body ALSO
+            # carries its own agent_id gate.
+            "wedge-capture",
                 # remote-hands center gateway (2026-10-22): the ``mcp_rpc``
         # category — the agent-facing surface that drives an ENROLLED
         # remote machine (SPEC.md v0.1). opt-in-only; the ari + leader

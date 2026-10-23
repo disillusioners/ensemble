@@ -119,17 +119,24 @@ class TestRealMaintenancerMetaShape:
     granted or denied must fail here first."""
 
     def test_real_meta_allow_is_exact_category_set(self) -> None:
-        """tools.allow = exactly the 8 categories: the privileged pair
+        """tools.allow = exactly the 9 categories: the privileged pair
         (system-log, ens-db), system_upgrade, system_restart, knowledge,
-        db (D19 — external user-registered connections only), and the two
-        nest-ops fleet categories (instance_read / instance_ops).
+        db (D19 — external user-registered connections only), the two
+        nest-ops fleet categories (instance_read / instance_ops) and the
+        wedge-capture read surface.
 
         nest-ops (2026-10-21): the inherited 3-red fold. ``system_restart``
         was added to the allow list by ``ff27305c4`` (which updated only
         ``tests/unit/test_maintenancer_agent.py`` and left THIS integration
         pin stale), and this commission appends the two fleet categories.
         The literal is stated in full so the fold lands at 0 in ONE shot —
-        otherwise the new assertions carry no usable green/red signal."""
+        otherwise the new assertions carry no usable green/red signal.
+
+        wedge-capture (2026-10-22): the ninth entry — the READ-ONLY
+        capture-evidence surface (``wedge_capture_list`` /
+        ``wedge_capture_get``). The category is PRIVILEGED, so an
+        explicit allow entry is the only access path; the tool bodies
+        ALSO carry their own agent_id gate."""
         assert MAINTAINER_META_ALLOW == [
             "system-log",
             "ens-db",
@@ -139,6 +146,7 @@ class TestRealMaintenancerMetaShape:
             "db",
             "instance_read",
             "instance_ops",
+            "wedge-capture",
         ]
 
     def test_real_meta_deny_is_exact_category_set(self) -> None:
@@ -403,6 +411,15 @@ class TestPrivilegedCategoryRegistryShape:
             "instance_read",
             "instance_ops",
             "board-link",
+            # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
+            # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
+            # PRIVILEGED (entry #16): the capture payload is a privileged
+            # diagnostic artifact (all-thread stack dumps, per-thread CPU
+            # maps, process RSS); the empty-allow inherit universe must
+            # NOT auto-grant it. The ari + leader + maintenancer allow
+            # entries are the only access path, and every tool body ALSO
+            # carries its own agent_id gate.
+            "wedge-capture",
                 # remote-hands center gateway (2026-10-22): the ``mcp_rpc``
         # category — the agent-facing surface that drives an ENROLLED
         # remote machine (SPEC.md v0.1). opt-in-only; the ari + leader

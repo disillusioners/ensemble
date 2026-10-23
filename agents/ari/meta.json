@@ -40,7 +40,8 @@
       "self-alarm",
       "view-write",
       "board-link",
-      "mcp_rpc"
+      "mcp_rpc",
+      "wedge-capture"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },

@@ -146,9 +146,13 @@ from daemon.routers import (
     prompts_router,           # /api/prompts (Phase B T5: agent-prompt-immutability approval REST)
     resources_router,         # /api/resources (resource-cost-control P1: live + history + self-cost)
     mcps_gateway_read_router, # /api/mcps-gateway/{machines,sessions,audit} (Phase C: the OAuth read lane)
+    wedge_capture_router,    # /api/wedge-captures (wedge-capture: the capture evidence store)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
+# wedge-capture: ``wedge_capture_router`` is re-exported by
+# ``daemon.routers`` (see the import block above) — no second direct
+# import, so there is exactly ONE binding of the name.
 
 from daemon.mcp import (
     create_kb_mcp_server,
@@ -1002,6 +1006,18 @@ async def lifespan(app: FastAPI):
     # ``_ensure_postgres_columns`` mirror needed.
     from daemon.repositories.mcps_gateway.models import McpGatewayAudit
     McpGatewayAudit.metadata.create_all(manager.engine)
+
+    # wedge-capture (2026-10-22) — ``wedge_captures`` is the ADDITIVE
+    # metadata table behind the wedge-capture instrument: ONE row per
+    # capture, holding a PATH REFERENCE plus a small metrics snapshot
+    # (the payload itself lives on disk — the incident's own lesson is
+    # that multi-MB blobs in the DB are how the checkpoint store
+    # reached ~13 GB). Brand-new table — the same create_all precedent
+    # as the secrets / instance_ops / mcps_gateway pairs above. The
+    # .sql migration handles SQLite and the model handles PG. No
+    # ``_ensure_postgres_columns`` mirror needed.
+    from daemon.repositories.wedge_captures.models import WedgeCapture
+    WedgeCapture.metadata.create_all(manager.engine)
 
     # agent-secrets P1 — ``SecretService`` is constructed in
     # ``InstanceManager.__init__`` alongside
@@ -2654,14 +2670,61 @@ async def lifespan(app: FastAPI):
                 continue_running_instances_after_restart,
                 sweep_orphaned_live_turns,
             )
+            # ── wedge-capture boot record (A8 / F-04 / RK-20) ──────────
+            # The import is LAZY and ISOLATED: a failure to import the
+            # diagnostics module must NEVER disable the auto-continue
+            # passes (this envelope's ``except`` only WARNs, so a
+            # top-level ImportError would silently skip BOTH passes —
+            # a settled-item violation). The INTENT record is written
+            # BEFORE the pass and carries ``mode="unknown"``; the pass
+            # result is the SOLE mode authority and overwrites it.
+            wedge_record = None
+            try:
+                from daemon.services.wedge_capture import boot_record as wedge_record
+                wedge_record.write_intent_record(
+                    wedge_record.resolve_capture_root(data_dir), get_boot_epoch(),
+                )
+            except Exception as wedge_intent_exc:  # noqa: BLE001
+                logger.warning(
+                    "Wedge-capture boot-record intent write failed "
+                    "(auto-continue unaffected): %s", wedge_intent_exc,
+                )
             continue_result = await continue_running_instances_after_restart(
                 manager=manager, boot_epoch=get_boot_epoch(),
             )
             logger.info("AutoContinue boot pass: %s", continue_result)
             # D13 follow-up (NG-8) — task-less orphan sweep; never raises.
-            await sweep_orphaned_live_turns(
+            sweep_result = await sweep_orphaned_live_turns(
                 manager=manager, boot_epoch=get_boot_epoch(),
             )
+            # The boot record — the effective-mode carrier (D16). The
+            # mode comes from the PASS RESULT; the recorder never
+            # re-reads the environment (A8's single-read rule).
+            if wedge_record is not None:
+                try:
+                    wedge_record.write_boot_record(
+                        wedge_record.resolve_capture_root(data_dir),
+                        get_boot_epoch(),
+                        effective_mode=getattr(
+                            continue_result, "auto_continue_mode", "unknown",
+                        ),
+                        raw_env_value=getattr(
+                            continue_result, "auto_continue_raw_env", None,
+                        ),
+                        passes={
+                            "autocontinue": wedge_record.result_to_dict(
+                                continue_result
+                            ),
+                            "orphan_sweep": wedge_record.result_to_dict(
+                                sweep_result
+                            ),
+                        },
+                    )
+                except Exception as wedge_record_exc:  # noqa: BLE001
+                    logger.warning(
+                        "Wedge-capture boot record write failed "
+                        "(never wedges): %s", wedge_record_exc,
+                    )
         except Exception as cont_boot_exc:  # noqa: BLE001
             logger.warning(
                 "AutoContinue boot pass failed (StaleTaskRecovery "
@@ -2710,6 +2773,53 @@ async def lifespan(app: FastAPI):
             boot_exc,
         )
     upgrade_journal_sweep.start()
+    # ── wedge-capture watchdog (T17 / A9 / F-02) ─────────────────────
+    # START anchor: immediately after ``upgrade_journal_sweep.start()``
+    # and before ``app.state.upgrade_journal_sweep = …`` — that is the
+    # one syntactically valid statement boundary (F-02: the earlier
+    # ``:2718`` anchor fell INSIDE the ``logger.info(`` opened a few
+    # lines below and was syntactically impossible).
+    #
+    # The start is OUTSIDE the upgrade-journal envelope's ``try`` and
+    # carries its OWN try/except + its OWN log line — a raising start
+    # is NOT misattributed to the upgrade-journal envelope, and it
+    # never aborts the boot (the three-layer never-wedge contract).
+    #
+    # START-SITE TRUTH (W4): this site sits AFTER the awaited
+    # AutoContinue boot pass above — the watchdog is NOT live during
+    # that pass, so a wedge DURING the boot pass itself is outside the
+    # instrument's reach. The F-02 anchor is plan-pinned and is NOT
+    # moved by the fix-forward lane; boot-pass observability would be
+    # a plan amendment and is out of scope here. From THIS point on,
+    # the tick loop observes wedge conditions.
+    try:
+        from daemon.services.wedge_capture.config import WedgeCaptureConfig
+        from daemon.services.wedge_capture.watchdog import WedgeCaptureWatchdog
+
+        _wedge_config = WedgeCaptureConfig.from_env(data_dir=data_dir)
+        if _wedge_config.enabled:
+            _wedge_watchdog = WedgeCaptureWatchdog(
+                config=_wedge_config,
+                manager=manager,
+                app_state=app.state,
+                loop=getattr(manager, "_loop", None),
+                boot_epoch=get_boot_epoch(),
+                release_version=__version__,
+            )
+            _wedge_watchdog.start()
+            app.state.wedge_capture_watchdog = _wedge_watchdog
+        else:
+            app.state.wedge_capture_watchdog = None
+            logger.info(
+                "Wedge-capture watchdog disabled "
+                "(ENSEMBLE_WEDGE_CAPTURE_ENABLED=0)"
+            )
+    except Exception as wedge_start_exc:  # noqa: BLE001
+        app.state.wedge_capture_watchdog = None
+        logger.warning(
+            "Wedge-capture watchdog failed to start (never wedges the "
+            "boot): %s", wedge_start_exc,
+        )
     app.state.upgrade_journal_sweep = upgrade_journal_sweep
     manager.set_upgrade_journal_sweep(upgrade_journal_sweep)
     logger.info(
@@ -3267,6 +3377,37 @@ async def lifespan(app: FastAPI):
                 resource_monitor_join_exc,
             )
     app.state.resource_monitor = None
+
+    # ── wedge-capture watchdog stop (T17 / A9 / W3) ───────────────────
+    # The same HOUSE detached-join form as the resource monitor above.
+    # OWNERSHIP (W3): ``stop()`` sets the Event and drops the pending
+    # manual capture requests and does NOT join — ALL joining is owned
+    # HERE, on the DETACHED thread with a 5.0 s timeout, so no event
+    # loop is ever blocked on the join. ``stop()`` is idempotent and
+    # never raises; a pending manual capture request is DROPPED (never
+    # captured after the stop event).
+    _wedge_watchdog = getattr(app.state, "wedge_capture_watchdog", None)
+    if _wedge_watchdog is not None:
+        try:
+            _wedge_watchdog.stop()
+        except Exception as wedge_stop_exc:  # noqa: BLE001
+            logger.warning(
+                "Wedge-capture watchdog stop-event set failed: %s",
+                wedge_stop_exc,
+            )
+        try:
+            threading.Thread(
+                target=_wedge_watchdog.join,
+                kwargs={"timeout": 5.0},
+                name="wedge-capture-shutdown",
+                daemon=True,
+            ).start()
+        except Exception as wedge_join_exc:  # noqa: BLE001
+            logger.warning(
+                "Wedge-capture watchdog detached join failed: %s",
+                wedge_join_exc,
+            )
+    app.state.wedge_capture_watchdog = None
 
     # Batch A — A3 (2026-09-11): stop the eligible-PENDING sweep.
     # The service exposes ``stop()`` which cancels + awaits the
@@ -4475,6 +4616,12 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # endpoints 2–5; ``/availability`` is exempt — see
     # ``daemon/routers/maintenance.py``.
     api_router.include_router(maintenance_router)        # /api/maintenance (Section 1)
+    # wedge-capture (2026-10-22) — the capture evidence store. The
+    # family is declared in BOTH router manifest cages (the class
+    # cage in tests/integration/test_router_class_manifest.py and the
+    # scope cage in tests/unit/test_router_scope_manifest.py) — an
+    # undeclared mount fails both loudly.
+    api_router.include_router(wedge_capture_router)      # /api/wedge-captures
     # Phase 3 / plane-integration-revival — POST /api/plane/sync/{project_id}.
     # The router is mounted BEFORE the SPA catch-all (the catch-all
     # only fires for unmatched paths; the prefix /api/plane is owned
