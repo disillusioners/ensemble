@@ -172,11 +172,24 @@ def _write_json(path: Path, payload: Any) -> None:
     _write_text(path, json.dumps(payload, indent=2, sort_keys=True, default=str))
 
 
+def _csv_quote(value: str) -> str:
+    """RFC 4180-quote one CSV field: wrap in double quotes and double
+    every embedded double quote (``"`` → ``""``)."""
+    return '"' + value.replace('"', '""') + '"'
+
+
 def render_threads_csv(threads: list[dict[str, Any]]) -> str:
-    """Render the per-thread attribution as CSV.
+    """Render the per-thread attribution as CSV (RFC 4180).
 
     The columns are the canonical matrix §9 fields: ``tid``,
     ``native_id``, ``name``, ``comm``, ``cpu_delta_s``, ``share_pct``.
+
+    ``name`` and ``comm`` are free-text fields sourced from the thread
+    table / ``/proc`` — they can carry commas, embedded double quotes,
+    spaces, even newlines. Every quoted field therefore escapes its
+    embedded quotes by doubling (RFC 4180 §2.7: ``"`` → ``""``), so a
+    hostile or merely odd ``comm`` round-trips through any standard CSV
+    reader instead of corrupting the ``threads.csv`` evidence columns.
     """
     lines = ["tid,native_id,name,comm,cpu_delta_s,share_pct"]
     for row in threads:
@@ -187,8 +200,8 @@ def render_threads_csv(threads: list[dict[str, Any]]) -> str:
                 [
                     str(row.get("tid", "")),
                     "" if row.get("native_id") is None else str(row.get("native_id")),
-                    f'"{name}"',
-                    f'"{comm}"',
+                    _csv_quote(name),
+                    _csv_quote(comm),
                     str(row.get("cpu_delta_s", 0.0)),
                     str(row.get("share_pct", 0.0)),
                 ]
@@ -247,6 +260,38 @@ def capture_directories(root: Path) -> list[Path]:
         out.append(entry)
     out.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0)
     return out
+
+
+#: The TYPED degraded marker carried by a LIST row whose capture's
+#: ``manifest.json`` exists but could not be parsed. Single-sourced here
+#: (D8): BOTH LIST surfaces — the HTTP router and the tools module —
+#: import it, so the LIST contract can never drift.
+DEGRADED_MANIFEST_MARKER = "unparseable"
+
+
+def degraded_list_row(directory: Path) -> dict[str, Any]:
+    """The LIST row for a capture with an UNPARSEABLE manifest.
+
+    An unparseable manifest must never make the capture VANISH from the
+    list (the phantom-capture race): the evidence directory exists, so
+    the row exists — shape-identical to a healthy row, every
+    manifest-derived field ``None``, ``capture_id`` falling back to the
+    directory name, and the typed ``manifest_error`` marker set.
+    """
+    return {
+        "capture_id": directory.name,
+        "captured_at": None,
+        "trigger_reason": None,
+        "trigger_source": None,
+        "boot_epoch": None,
+        "host": None,
+        "summary": None,
+        "auto_continue_mode": None,
+        "file_count": None,
+        "total_bytes": None,
+        "capture_dir": str(directory),
+        "manifest_error": DEGRADED_MANIFEST_MARKER,
+    }
 
 
 def prune_captures(
@@ -515,8 +560,12 @@ class CaptureWriter:
         # into an UNDISCOVERABLE one. Every data step above may be
         # ``skipped:budget``; the manifest write is always ATTEMPTED, and
         # its failure is still swallowed into ``ok=False`` (never raises).
+        # The write is ATOMIC (tmp + os.replace, the same discipline as
+        # the pending-row sidecar and the boot record): the manifest is
+        # the SOLE evidence index, and a torn write during a live wedge
+        # would leave it unparseable — exactly when it matters most.
         try:
-            self._write_json_artifact(capture_dir / "manifest.json", manifest)
+            self._write_json_atomic(capture_dir / "manifest.json", manifest)
             manifest_status = "ok"
         except Exception as exc:  # noqa: BLE001 — one artifact degrades
             manifest_status = f"failed:{type(exc).__name__}"
@@ -544,6 +593,32 @@ class CaptureWriter:
 
     def _write_json_artifact(self, path: Path, payload: Any) -> str:
         _write_json(path, payload)
+        return "ok"
+
+    def _write_json_atomic(self, path: Path, payload: Any) -> str:
+        """Write a JSON artifact ATOMICALLY (tmp + ``os.replace``).
+
+        Reserved for the manifest — the capture's SOLE evidence index.
+        A plain in-place write can be torn mid-flush by the very wedge
+        being captured (the disk hiccup / OOM / kill window the
+        instrument exists to record), leaving the index unparseable
+        while every data artifact sits intact beside it. The pending-row
+        sidecar and the boot record already use this exact discipline.
+        """
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(payload, indent=2, sort_keys=True, default=str)
+                )
+            os.replace(tmp, path)
+        except Exception:
+            # never leave the tmp behind to pollute the capture dir
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         return "ok"
 
 
@@ -603,11 +678,13 @@ __all__ = [
     "CAPTURE_ID_PATTERN",
     "CaptureResult",
     "CaptureWriter",
+    "DEGRADED_MANIFEST_MARKER",
     "MAX_ARTIFACT_BYTES",
     "PENDING_ROW_SIDECAR",
     "SKIPPED_BUDGET",
     "SKIPPED_NA",
     "capture_directories",
+    "degraded_list_row",
     "make_capture_id",
     "prune_captures",
     "read_pending_row_sidecars",

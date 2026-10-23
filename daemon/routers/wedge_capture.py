@@ -187,7 +187,10 @@ async def list_captures(request: Request, limit: int = 50) -> dict[str, Any]:
     if not rows:
         source = "filesystem"
         # lazy: the filesystem fallback is the only consumer of writer here.
-        from daemon.services.wedge_capture.writer import capture_directories
+        from daemon.services.wedge_capture.writer import (
+            capture_directories,
+            degraded_list_row,
+        )
 
         # ``reversed(list)`` is an ITERATOR — slicing it raises
         # ``TypeError`` and would take the whole D12 filesystem fallback
@@ -197,6 +200,12 @@ async def list_captures(request: Request, limit: int = 50) -> dict[str, Any]:
         for directory in newest_first[: max(1, int(limit))]:
             manifest = _directory_manifest(directory)
             if manifest is None:
+                # An UNPARSEABLE manifest must never make the capture
+                # VANISH from the list — the phantom-capture race. It
+                # stays listed, carrying a TYPED degraded marker, so the
+                # operator sees the evidence exists and is damaged
+                # (single-sourced with the tools LIST surface).
+                rows.append(degraded_list_row(directory))
                 continue
             rows.append(
                 {

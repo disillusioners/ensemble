@@ -54,6 +54,7 @@ from daemon.services.wedge_capture.writer import (
     CAPTURE_ID_PATTERN,
     MAX_ARTIFACT_BYTES,
     _read_artifact,
+    degraded_list_row,
 )
 
 from ._tool_registry import register_tool_category
@@ -307,6 +308,14 @@ def _list_captures(root: Path, limit: int) -> list[dict[str, Any]]:
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except (OSError, ValueError, TypeError):
+                manifest = None
+            if not isinstance(manifest, dict):
+                # An UNPARSEABLE manifest must never make the capture
+                # VANISH from the list — the phantom-capture race. It
+                # stays listed with the SAME typed degraded marker the
+                # HTTP router's LIST carries (single-sourced in the
+                # writer module).
+                rows.append(degraded_list_row(directory))
                 continue
             rows.append(
                 {

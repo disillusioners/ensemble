@@ -44,7 +44,10 @@ from daemon.services.wedge_capture.watchdog import (
     REFUSAL_WATCHDOG_DISABLED,
     WedgeCaptureWatchdog,
 )
-from daemon.services.wedge_capture.writer import PENDING_ROW_SIDECAR
+from daemon.services.wedge_capture.writer import (
+    DEGRADED_MANIFEST_MARKER,
+    PENDING_ROW_SIDECAR,
+)
 from daemon.tools.wedge_capture import create_wedge_capture_tools
 
 CAPTURE_ID = "20261022T120000Z-host01-sustained_cpu-abcdef01"
@@ -168,6 +171,49 @@ class TestList:
     ) -> None:
         body = _client(_watchdog(tmp_path), tmp_path).get("/api/wedge-captures").json()
         assert body == {"captures": [], "count": 0, "source": "filesystem"}
+
+
+class TestDegradedListRows:
+    """FIX 2b (2026-10-23 ship-blocker batch): an UNPARSEABLE manifest
+    must never make the capture VANISH from EITHER list surface — the
+    evidence directory exists, so the row exists, carrying the TYPED
+    ``manifest_error`` marker (single-sourced in the writer module)."""
+
+    def _write_torn_capture(self, root: Path) -> Path:
+        """A capture directory whose manifest.json exists but is torn."""
+        directory = _write_capture(root)
+        (directory / "manifest.json").write_text(
+            '{"capture_id": "tor', encoding="utf-8"
+        )
+        return directory
+
+    def test_the_router_list_still_lists_a_capture_whose_manifest_is_torn(
+        self, tmp_path: Path
+    ) -> None:
+        self._write_torn_capture(tmp_path)
+        response = _client(_watchdog(tmp_path), tmp_path).get("/api/wedge-captures")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 1, "the capture VANISHED from the router list"
+        row = body["captures"][0]
+        assert row["capture_id"] == CAPTURE_ID
+        assert row["manifest_error"] == DEGRADED_MANIFEST_MARKER
+        assert row["capture_dir"].endswith(CAPTURE_ID)
+
+    @pytest.mark.asyncio
+    async def test_the_tool_list_carries_the_same_marker(
+        self, tmp_path: Path
+    ) -> None:
+        self._write_torn_capture(tmp_path)
+        tools = _tools(tmp_path, "ari")
+        listed = json.loads(
+            await tools["wedge_capture_list"].ainvoke({"limit": 10})
+        )
+        assert listed["count"] == 1, "the capture VANISHED from the tool list"
+        row = listed["captures"][0]
+        assert row["capture_id"] == CAPTURE_ID
+        assert row["manifest_error"] == DEGRADED_MANIFEST_MARKER
+        assert row["capture_dir"].endswith(CAPTURE_ID)
 
 
 # ── AC47: the fetch ────────────────────────────────────────────────────────

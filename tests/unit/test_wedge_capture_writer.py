@@ -23,6 +23,8 @@ no live-database connection-variable literal, no HOME-derived directory.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import logging
 import time
@@ -52,11 +54,13 @@ from daemon.services.wedge_capture.watchdog import WedgeCaptureWatchdog
 from daemon.services.wedge_capture.writer import (
     BOOT_RECORDS_DIRNAME,
     CAPTURE_FILE_NAMES,
+    DEGRADED_MANIFEST_MARKER,
     PENDING_ROW_SIDECAR,
     SKIPPED_BUDGET,
     SKIPPED_NA,
     CaptureWriter,
     capture_directories,
+    degraded_list_row,
     make_capture_id,
     prune_captures,
     read_pending_row_sidecars,
@@ -194,6 +198,112 @@ class TestFileSet:
             suffix="3f2a91c4",
         )
         assert capture_id == "20261022T050351Z-web01-sustained_loop_lag-3f2a91c4"
+
+
+# ── evidence integrity (2026-10-23 ship-blocker batch) ─────────────────────
+#
+# FIX 2 + FIX 3: the manifest is the capture's SOLE evidence index — it
+# is written ATOMICALLY (tmp + os.replace), an unparseable one still
+# LISTS (typed degraded marker, never a silent vanish), and free-text
+# CSV fields round-trip through a standard reader.
+
+
+class TestEvidenceIntegrity:
+    def test_free_text_fields_round_trip_through_a_csv_reader(
+        self, tmp_path: Path
+    ) -> None:
+        """FIX 3: a ``comm``/``name`` carrying comma + double-quote +
+        newline (the /proc free-text reality) must render quoted and
+        survive a stdlib ``csv.reader`` round-trip with the column
+        structure intact."""
+        hostile_name = 'Thread, "0x7f" \nnested'
+        hostile_comm = 'python, "3.14" \nmain'
+        result = _capture(
+            CaptureWriter(tmp_path),
+            threads=[
+                {
+                    "tid": 111,
+                    "native_id": 111,
+                    "name": hostile_name,
+                    "comm": hostile_comm,
+                    "cpu_delta_s": 0.9,
+                    "share_pct": 95.0,
+                }
+            ],
+        )
+        assert result.artifacts["threads.csv"] == "ok"
+        text = (result.capture_dir / "threads.csv").read_text(encoding="utf-8")
+        rows = list(csv.reader(io.StringIO(text)))
+        assert rows[0] == [
+            "tid", "native_id", "name", "comm", "cpu_delta_s", "share_pct",
+        ]
+        assert len(rows) == 2, "one header + one data row, no split rows"
+        row = rows[1]
+        assert row[2] == hostile_name, "the name field did not round-trip"
+        assert row[3] == hostile_comm, "the comm field did not round-trip"
+        assert row[0] == "111"
+        assert row[4] == "0.9"
+        assert row[5] == "95.0"
+
+    def test_a_successful_capture_leaves_no_tmp_residue(
+        self, tmp_path: Path
+    ) -> None:
+        """FIX 2a: the manifest write goes tmp → os.replace; a successful
+        capture must leave no ``.tmp`` beside the artifacts."""
+        result = _capture(CaptureWriter(tmp_path))
+        assert result.artifacts["manifest.json"] == "ok"
+        residue = [
+            path.name
+            for path in result.capture_dir.iterdir()
+            if path.name.endswith(".tmp")
+        ]
+        assert residue == []
+
+    def test_a_failed_replace_leaves_the_old_manifest_intact(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FIX 2a: ``os.replace`` failing mid-write must NOT truncate the
+        previous manifest (the torn-write the atomicity exists to kill)
+        and must not leave the tmp file behind."""
+
+        def _torn(*args: Any, **kwargs: Any) -> None:
+            raise OSError("simulated torn flush")
+
+        writer = CaptureWriter(tmp_path)
+        path = tmp_path / "manifest.json"
+        assert writer._write_json_atomic(path, {"v": 1}) == "ok"
+        before = path.read_bytes()
+
+        monkeypatch.setattr(writer_module.os, "replace", _torn)
+        with pytest.raises(OSError):
+            writer._write_json_atomic(path, {"v": 2})
+
+        assert path.read_bytes() == before, (
+            "the old manifest was torn by the failed write"
+        )
+        assert not (tmp_path / "manifest.json.tmp").exists(), (
+            "the tmp file leaked into the capture directory"
+        )
+
+    def test_the_degraded_list_row_carries_the_typed_marker(
+        self, tmp_path: Path
+    ) -> None:
+        """FIX 2b: the degraded row is shape-identical to a healthy LIST
+        row (every manifest-derived field ``None``, ``capture_id``
+        falling back to the directory name) plus ``manifest_error``."""
+        directory = tmp_path / "20261022T120000Z-host01-sustained_cpu-abcdef01"
+        row = degraded_list_row(directory)
+        healthy_fields = {
+            "capture_id", "captured_at", "trigger_reason", "trigger_source",
+            "boot_epoch", "host", "summary", "auto_continue_mode",
+            "file_count", "total_bytes", "capture_dir",
+        }
+        assert set(row) == healthy_fields | {"manifest_error"}
+        assert row["capture_id"] == directory.name
+        assert row["capture_dir"] == str(directory)
+        assert row["manifest_error"] == DEGRADED_MANIFEST_MARKER
+        for field in healthy_fields - {"capture_id", "capture_dir"}:
+            assert row[field] is None, field
 
 
 # ── AC8: per-artifact isolation, never raises ─────────────────────────────
