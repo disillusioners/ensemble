@@ -40,9 +40,15 @@
 --     late-import block in `daemon/api.py` BEFORE the create_all call.
 --     Brand-new tables need NO `_ensure_postgres_columns` mirror. The
 --     PG-side runner is a NO-OP for this file.
---   - Column names and types stay byte-identical to the model
---     (canonical source for PG). Every string column is TEXT on both
---     drivers — never VARCHAR.
+--   - Column names stay byte-identical to the model. Every string
+--     column is TEXT on both drivers — never VARCHAR. The one
+--     dialect-split column is ``metrics_snapshot`` (see the note on
+--     the column itself): the raw-SQL declaration carries the SQLite
+--     face (``JSON``), the model's ``JSONBType`` decorator carries the
+--     PostgreSQL face (``JSONB``) — the same deliberate split as
+--     ``20261021_120000_create_instance_ops_audit.sql``
+--     (``before_snapshot``/``after_snapshot``) and
+--     ``20260621_000001_create_dependency_watchers.sql``.
 --
 -- WHY EVERY CREATE CARRIES IF NOT EXISTS (MANDATORY):
 --   On the boot path `SQLModel.metadata.create_all(self._engine)` runs
@@ -82,6 +88,16 @@ CREATE TABLE IF NOT EXISTS wedge_captures (
     auto_continue_mode TEXT,
     file_count INTEGER,
     total_bytes INTEGER,
+    -- RECORD NOTE (the model's jsonb): on PostgreSQL this column IS
+    -- ``jsonb`` — `SQLModel.metadata.create_all` builds it from the
+    -- model's ``JSONBType`` decorator (`daemon/repositories/infra/
+    -- types.py`), which re-types the column to JSONB on the PG dialect
+    -- and JSON on SQLite. The raw-SQL declaration below therefore
+    -- carries the SQLITE face (SQLite has no JSONB type) — the same
+    -- deliberate split as instance_ops_audit and dependency_watchers.
+    -- Do NOT "fix" this to a bare JSONB literal: this file's only
+    -- executing driver is the SQLite runner, and a JSONB token would
+    -- give SQLite NUMERIC affinity for JSON text.
     metrics_snapshot JSON,
     created_at TEXT NOT NULL
 );
@@ -96,8 +112,35 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_wedge_captures_capture_dir
     ON wedge_captures (capture_dir);
 
 -- DOWN
-
-DROP INDEX IF EXISTS idx_wedge_captures_capture_dir;
-DROP INDEX IF EXISTS idx_wedge_captures_trigger_reason;
-DROP INDEX IF EXISTS idx_wedge_captures_captured_at;
-DROP TABLE IF EXISTS wedge_captures;
+--
+-- DELIBERATELY NEUTRALIZED (2026-10-23) — the DROP statements that used
+-- to live here are COMMENTED OUT and must stay that way:
+--
+--   * ``psql -f <this-file>`` executes BOTH sections — a shell cat of
+--     this file at a PG prompt would DROP the table that
+--     ``SQLModel.metadata.create_all`` owns and destroy the live
+--     capture index. NEVER apply this file with ``psql -f``. The ONLY
+--     sanctioned manual apply is the migration runner's UP extraction
+--     (``MigrationFile`` parses the sections and executes UP only —
+--     `daemon/migrations/runner.py`).
+--   * There is no production DOWN path for this table by design: the
+--     runner is a PostgreSQL NO-OP (runner.py early-returns when the
+--     engine is not SQLite), the PG schema is create_all's, and
+--     ``rollback_migration()`` has zero production callers (promote.sh
+--     and rollback.sh never invoke it). A release rollback restores
+--     the previous BINARY, whose metadata has no WedgeCapture model —
+--     the table is simply inert (the v0.26.0 board-tables reasoning
+--     class).
+--   * The SQLite-side drop below was a dev convenience no path calls;
+--     as an executable section it was a silent footgun against the
+--     very evidence table this commission exists to keep.
+--
+-- A comments-only DOWN parses to zero statements under the runner's
+-- comment-stripping splitter, so ``rollback_migration`` degrades to a
+-- ledger-row clear with no schema mutation — the safe shape.
+--
+-- Audit trail — the neutralized statements, verbatim:
+--   DROP INDEX IF EXISTS idx_wedge_captures_capture_dir;
+--   DROP INDEX IF EXISTS idx_wedge_captures_trigger_reason;
+--   DROP INDEX IF EXISTS idx_wedge_captures_captured_at;
+--   DROP TABLE IF EXISTS wedge_captures;
