@@ -17,7 +17,10 @@ leg   injection                            what must fire / must NOT fire
 (i)   a dedicated BURNER thread spins      ``sustained_cpu`` fires;
       (the GIL is released every switch    ``sustained_loop_lag`` must NOT
       interval, so the loop still runs)    fire (the loop is serviced)
-(ii)  the LOOP thread ``time.sleep(3)``    ``sustained_loop_lag`` fires;
+(ii)  the LOOP thread ``time.sleep(6)``    ``sustained_loop_lag`` fires
+      (SC-2's envelope: ``LAG_S=2.0`` /    (and SUSTAINS — the 2 s wall
+      ``LAG_SUSTAIN_S=2`` / a >= 5 s       window is proven, not just
+      block; 6 s in the leg)               first-sample firing);
                                            ``sustained_cpu`` AND
                                            ``thread_concentration`` must NOT
                                            (a sleep releases the GIL) —
@@ -146,13 +149,22 @@ LEG_CPU = LegEnv(
 )
 
 #: leg (ii) — the loop-thread SLEEP block (the H2 shape: no CPU peg).
+#:
+#: THE SC-2 ENVELOPE (plan-overview §6 SC-2, the B1-corrected arithmetic —
+#: do NOT diverge): ``LAG_S=2.0`` **and** ``LAG_SUSTAIN_S=2`` with a loop
+#: block of **>= 5 s (6 s in the leg, for margin)**. Under D4(b) a
+#: T-second block measures ``lag_s ≈ T − one tick``, so the 6 s block
+#: measures ``lag_s >= 5.0`` and holds the over-threshold run ~3.5-4 s —
+#: comfortably over the 2 s sustain window. (The pre-2026-10-23 shape
+#: ran ``SUSTAIN=0`` with a 3.0 s block — it proved first-sample firing,
+#: NOT SC-2's sustain semantics.)
 LEG_LAG = LegEnv(
     name="leg-ii-loop-sleep",
     knobs={
         "ENSEMBLE_WEDGE_CAPTURE_CPU_PCT": "999",
         "ENSEMBLE_WEDGE_CAPTURE_CPU_SUSTAIN_S": "0",
         "ENSEMBLE_WEDGE_CAPTURE_LAG_S": "2.0",
-        "ENSEMBLE_WEDGE_CAPTURE_LAG_SUSTAIN_S": "0",
+        "ENSEMBLE_WEDGE_CAPTURE_LAG_SUSTAIN_S": "2",
         "ENSEMBLE_WEDGE_CAPTURE_THREAD_CONCENTRATION_PCT": "999",
         "ENSEMBLE_WEDGE_CAPTURE_SAMPLE_INTERVAL_S": "0.25",
         "ENSEMBLE_WEDGE_CAPTURE_COOLDOWN_S": "300",
@@ -161,6 +173,17 @@ LEG_LAG = LegEnv(
     expect_fire=(REASON_LAG,),
     expect_silent=(REASON_CPU, REASON_CONCENTRATION),
 )
+
+#: SC-2's prescribed injection duration (plan-overview §6 SC-2: "an
+#: artificial event-loop block of **>= 5 s (6 s in the leg, for
+#: margin)**"). Kept BESIDE the leg's knobs so the env+duration pair
+#: cannot drift apart again — the 2026-10-23 gate found them divergent
+#: (3.0 s block with ``SUSTAIN=0``).
+SC2_LOOP_BLOCK_S = 6.0
+#: The leg's hold time: the 6 s block + 1 s of settle headroom (the lag
+#: capture fires ~4 s INTO the block and needs the leg held open to
+#: finish writing).
+SC2_LEG_HOLD_S = 7.0
 
 #: leg (iii) — the loop-thread CPU SPIN (maximum GIL contention, live wedge).
 LEG_SPIN = LegEnv(
@@ -513,12 +536,38 @@ def assert_live_fence_unchanged(before: dict[str, str], after: dict[str, str]) -
             )
 
 
+#: ``PG_TEST_*`` → the daemon's own ``POSTGRES_*`` names (the F1 fix,
+#: 2026-10-23). The daemon reads ONLY ``POSTGRES_URL`` /
+#: ``POSTGRES_HOST`` / ``POSTGRES_PORT`` / ``POSTGRES_DB`` /
+#: ``POSTGRES_USER`` / ``POSTGRES_PASSWORD``
+#: (``daemon/persistence.py:_build_pg_connection_string``) and selects
+#: the PostgreSQL backend only when ``POSTGRES_HOST`` AND ``POSTGRES_DB``
+#: are BOTH set (``daemon/ensemble_config.py`` auto-detection). The
+#: tester lane provisions ``PG_TEST_*`` — the repo's test-DB convention
+#: (``POSTGRES_*`` in a test process is exactly the live-probe hazard
+#: the scrubbed runner exists to scrub) — so the CHILD env must be
+#: TRANSLATED before it reaches the daemon: a verbatim pass-through
+#: left the child on SQLite, where boot dies at the pre-existing
+#: ``20260714_000001`` migration (``near "EXISTS"`` — not valid SQLite).
+PG_TEST_TO_POSTGRES: tuple[tuple[str, str], ...] = (
+    ("PG_TEST_URL", "POSTGRES_URL"),
+    ("PG_TEST_HOST", "POSTGRES_HOST"),
+    ("PG_TEST_PORT", "POSTGRES_PORT"),
+    ("PG_TEST_DB", "POSTGRES_DB"),
+    ("PG_TEST_USER", "POSTGRES_USER"),
+    ("PG_TEST_PASSWORD", "POSTGRES_PASSWORD"),
+)
+
+
 def scratch_env(*, tmp_path: Path, port: int, pg_env: Iterable[tuple[str, str]]) -> dict[str, str]:
     """The isolated child environment (scratch DB + scratch dirs).
 
     Never reuses a live path: ``HOME``/``DATA_DIR`` point INTO
     ``tmp_path`` (the mktemp-FAKE_HOME discipline), and the PG credentials
-    come from ``PG_TEST_*`` only.
+    come from ``PG_TEST_*`` only. The ``PG_TEST_*`` pairs are translated
+    to their ``POSTGRES_*`` equivalents (``PG_TEST_TO_POSTGRES``) so the
+    child daemon actually CONNECTS to the scratch PG — an explicit
+    ``POSTGRES_*`` value in ``pg_env`` still wins (setdefault).
     """
     fake_home = tmp_path / "fake-home"
     fake_home.mkdir(parents=True, exist_ok=True)
@@ -528,7 +577,12 @@ def scratch_env(*, tmp_path: Path, port: int, pg_env: Iterable[tuple[str, str]])
         "DAEMON_PORT": str(port),
         "ENSEMBLE_SELF_ENV": "sandbox",
     }
-    env.update({key: value for key, value in pg_env})
+    supplied = dict(pg_env)
+    env.update(supplied)
+    for test_key, daemon_key in PG_TEST_TO_POSTGRES:
+        value = supplied.get(test_key)
+        if value:
+            env.setdefault(daemon_key, value)
     return env
 
 

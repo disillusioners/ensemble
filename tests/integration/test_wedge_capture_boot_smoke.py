@@ -24,8 +24,16 @@ at this gate.
 
 Both lanes are **opt-in**:
 
-    ENSEMBLE_WEDGE_SMOKE=1            # lane A
-    ENSEMBLE_WEDGE_SMOKE_UNIT=1       # + lane B (implies lane A)
+    ENSEMBLE_WEDGE_SMOKE=1            # lane A (the module gate)
+    ENSEMBLE_WEDGE_SMOKE_UNIT=1       # + lane B (an ADDITIONAL gate —
+                                      #   it does NOT imply lane A)
+
+BOTH env vars are required for lane B: the module-level ``pytestmark``
+skips everything unless ``ENSEMBLE_WEDGE_SMOKE=1``, and the lane-B
+classes skip again unless ``ENSEMBLE_WEDGE_SMOKE_UNIT=1``. The
+``TestBootWiring`` boot-alive leg additionally needs a scratch PG
+provisioned via ``PG_TEST_*`` (translated to ``POSTGRES_*`` for the
+child by ``smoke.scratch_env`` — the F1 fix).
 
 Rationale: lane A spins a CPU core for a few seconds and lane B starts a
 daemon — neither belongs in a default suite run. **The tester lane owns
@@ -49,8 +57,10 @@ from tests.support import wedge_smoke as smoke
 pytestmark = pytest.mark.skipif(
     not smoke.smoke_enabled(),
     reason=(
-        "the wedge boot smoke is OPT-IN (set ENSEMBLE_WEDGE_SMOKE=1); the "
-        "tester lane runs it — it spins a CPU core and starts a daemon"
+        "the wedge boot smoke is OPT-IN (set ENSEMBLE_WEDGE_SMOKE=1 for "
+        "lane A; lane B additionally needs ENSEMBLE_WEDGE_SMOKE_UNIT=1 — "
+        "it does NOT imply lane A); the tester lane runs it — it spins a "
+        "CPU core and starts a daemon"
     ),
 )
 
@@ -101,9 +111,13 @@ class TestLegII_LoopSleep:
     def test_a_loop_sleep_fires_the_lag_trigger_without_a_cpu_peg(
         self, tmp_path, leg_runner
     ) -> None:
-        """Leg (ii): the H2 shape. A sleep releases the GIL, so neither the
-        CPU nor the concentration trigger may fire — the negative pair IS
-        the H1/H2 discriminator (F-14: multi-core only)."""
+        """Leg (ii): the H2 shape, at SC-2's PRESCRIBED envelope
+        (plan-overview §6 SC-2): ``LAG_S=2.0`` + ``LAG_SUSTAIN_S=2`` and
+        a **>= 5 s loop block (6 s in the leg, for margin)** — the lag
+        trigger must fire AND sustain the 2 s window. A sleep releases
+        the GIL, so neither the CPU nor the concentration trigger may
+        fire — the negative pair IS the H1/H2 discriminator (F-14:
+        multi-core only)."""
         if not smoke.multi_core():
             pytest.skip(
                 f"single-core host (nproc={smoke.nproc()}): the negative pair "
@@ -111,7 +125,9 @@ class TestLegII_LoopSleep:
             )
 
         observation = leg_runner(
-            smoke.LEG_LAG, lambda loop: smoke.sleep_on_loop(loop, 3.0), hold_s=3.5
+            smoke.LEG_LAG,
+            lambda loop: smoke.sleep_on_loop(loop, smoke.SC2_LOOP_BLOCK_S),
+            hold_s=smoke.SC2_LEG_HOLD_S,
         )
 
         assert observation.capture_count >= 1, observation.as_dict()
@@ -212,8 +228,11 @@ class TestKillSwitchLeg:
 @pytest.mark.skipif(
     not smoke.unit_lane_enabled(),
     reason=(
-        "the boot-alive leg needs a systemd transient unit "
-        "(ENSEMBLE_WEDGE_SMOKE_UNIT=1) and a scratch PG (PG_TEST_*)"
+        "lane B needs BOTH gates: ENSEMBLE_WEDGE_SMOKE=1 (the module "
+        "gate, without which every test in this file skips) AND "
+        "ENSEMBLE_WEDGE_SMOKE_UNIT=1 (this lane) — plus a systemd "
+        "transient unit; the boot-alive leg also needs a scratch PG "
+        "(PG_TEST_*, translated to POSTGRES_* for the child)"
     ),
 )
 class TestBootWiring:
@@ -240,7 +259,8 @@ class TestBootWiring:
         if not pg_pairs:
             pytest.skip(
                 "PG_TEST_* not provisioned — the tester lane owns the "
-                "scratch DB for the real-boot lane"
+                "scratch DB for the real-boot lane (scratch_env translates "
+                "them to the POSTGRES_* names the daemon reads)"
             )
 
         unit = "ensemble-wedge-smoke-boot-alive"
@@ -280,8 +300,10 @@ class TestBootWiring:
 @pytest.mark.skipif(
     not smoke.unit_lane_enabled(),
     reason=(
-        "the daemon boot lane needs a systemd transient unit "
-        "(ENSEMBLE_WEDGE_SMOKE_UNIT=1) and a scratch PG (PG_TEST_*)"
+        "lane B needs BOTH gates: ENSEMBLE_WEDGE_SMOKE=1 (the module "
+        "gate, without which every test in this file skips) AND "
+        "ENSEMBLE_WEDGE_SMOKE_UNIT=1 (this lane) — plus a systemd "
+        "transient unit"
     ),
 )
 class TestDaemonBootLane:
@@ -298,27 +320,65 @@ class TestDaemonBootLane:
 
     def test_the_cgroup_and_live_fence_hold(self, tmp_path) -> None:
         """SC-14 / AC52: the run is cgroup-isolated and the LIVE daemon's
-        identity is identical before and after."""
+        identity is identical before and after.
+
+        F2 fix (2026-10-23): ``/proc/<pid>/cgroup`` is sampled WHILE THE
+        PROCESS IS ALIVE. The pre-fix shape read it only after
+        ``systemd-run --wait`` had returned — by then the child had
+        exited and its /proc entry was gone, so the pin was permanently
+        red under its own documented prerequisites.
+        """
         import subprocess
+        import time
 
         before = smoke.live_daemon_fence()
         version_before = smoke.livez_version()
 
         unit = "ensemble-wedge-smoke-cgroup"
+        # The child reports its pid to a FILE (never stdout — a pipe read
+        # could block), then stays alive a few seconds so the parent can
+        # read its /proc entry mid-flight.
+        pid_file = tmp_path / "cgroup-child.pid"
+        script = (
+            "import os, pathlib, time\n"
+            f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
+            "time.sleep(4)\n"
+        )
         argv = smoke.transient_unit_argv(
             unit=unit,
             workdir=tmp_path,
-            argv=["python3", "-c", "import os; print(os.getpid())"],
+            argv=["python3", "-c", script],
             env={"ENSEMBLE_WEDGE_CAPTURE_ENABLED": "1"},
         )
-        completed = subprocess.run(argv, capture_output=True, text=True, check=False)
-        assert completed.returncode == 0, completed.stderr[-800:]
-
-        pid_text = [
-            line.strip() for line in completed.stdout.splitlines() if line.strip().isdigit()
-        ]
-        if pid_text:
-            smoke.assert_cgroup_isolated(int(pid_text[-1]))
+        child = subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        try:
+            pid = 0
+            deadline = time.monotonic() + 60.0
+            while time.monotonic() < deadline:
+                if pid_file.exists():
+                    reported = pid_file.read_text(encoding="utf-8").strip()
+                    if reported.isdigit():
+                        pid = int(reported)
+                        break
+                if child.poll() is not None:
+                    break
+                time.sleep(0.05)
+            assert pid, (
+                "the unit child never reported its pid — cannot prove "
+                "cgroup isolation while the process is alive"
+            )
+            # THE isolation proof — read while the child is ALIVE (F2).
+            smoke.assert_cgroup_isolated(pid)
+        finally:
+            stdout, stderr = child.communicate(timeout=120)
+        assert child.returncode == 0, (
+            "the cgroup probe child failed:\n"
+            + stdout[-400:]
+            + "\n--- stderr ---\n"
+            + stderr[-400:]
+        )
         assert not smoke.unit_exists(unit), (
             f"the transient unit {unit} is still registered after --wait "
             "--collect — the unit-gone check failed (A16(4))"
