@@ -132,8 +132,13 @@ class SkillFixRequest(BaseModel):
     """Request body for ``POST /api/skills/{skill_id}/fix``.
 
     The router dispatches a ``FIX`` evolution job to the
-    skill-keeper agent via ``SkillJobDispatcher.dispatch_fix``.
-    Returns ``202 Accepted`` with the job ID so the caller can
+    skill-keeper agent via ``SkillJobDispatcher.dispatch_fix`` —
+    a GATED admission lane (2026-10-22): the kill-switch
+    (``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` /
+    ``SkillEvolutionConfig.evolution_lane_enabled``, default OFF)
+    or the per-skill FIX cooldown refuses the admission, the
+    endpoint returns ``503`` with no job created. On admission it
+    returns ``202 Accepted`` with the job ID so the caller can
     poll for resolution instead of blocking on the LLM call.
 
     Attributes:

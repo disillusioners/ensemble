@@ -298,6 +298,12 @@ summary. Decision tree:
 4. **Threshold missed + extensions remaining** → bump
    ``extension_count`` via the repo. ``reason='extended'``.
 
+FORCED RESOLVE (the admin/API path, not this tool): a forced
+winner (``winner_id``) is REFUSED while ``comparisons <
+ab_sample_size`` — the service raises ValueError (HTTP 400 at the
+router). At/above sample size a forced winner is honoured
+(``reason='forced_winner'``). This tool never forces a winner.
+
 Args:
     ab_test_group: Stable identifier of the A/B test group to
         resolve — typically a slug like ``"prompt-style-2026-07"``
