@@ -18,12 +18,19 @@ directory when the table is unreachable.
 
 THE RECONCILER (A3)
 -------------------
-At watchdog start and before each capture, the reconciler scans for
-``.pending_row.json`` sidecars and re-inserts each with ``ON CONFLICT
-(capture_dir) DO NOTHING`` over the OWN one-shot connection, deleting
-the sidecar on success. The sidecar is a RECONCILE artifact — it is
-never part of the capture's evidence payload and never a capture of
-its own.
+At watchdog start and before each capture (W6 / AC19), the reconciler
+scans for ``.pending_row.json`` sidecars and re-inserts each over the
+DAEMON'S POOLED ENGINE (``Session(self._engine)``) — NOT the capture
+path's own one-shot connection. T12's "one-shot" wording was a
+plan-time assumption; the pooled-engine shape is the ACCEPTED
+deviation (leader-picked, W5: boot-time and mid-run engine use is the
+lower-risk shape, and the honesty fix is this paragraph — not a
+reroute of a healthy boot-time path through a second connect).
+Duplicate ``capture_dir`` rows are absorbed by the pre-insert
+existence check plus the table's UNIQUE constraints; a reconciled
+sidecar is deleted on success. The sidecar is a RECONCILE artifact —
+it is never part of the capture's evidence payload and never a
+capture of its own.
 """
 
 from __future__ import annotations

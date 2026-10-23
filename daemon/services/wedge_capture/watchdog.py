@@ -497,6 +497,13 @@ class WedgeCaptureWatchdog:
             )
         executor_native_id = _current_native_id()
 
+        # ── the reconciler BEFORE the capture (T12 / AC19 / W6) ───────
+        # The reconciler runs at watchdog start AND before each capture:
+        # a mid-run sidecar converges immediately instead of waiting
+        # for the next boot. Swallow discipline lives inside
+        # reconcile_pending (it never raises).
+        self.reconcile_pending()
+
         # ── retention FIRST (prune-on-write, D23 / A3) ────────────────
         self._prune()
 
