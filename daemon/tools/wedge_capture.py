@@ -43,12 +43,18 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Annotated, Any
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+
+from daemon.services.wedge_capture.writer import (
+    CAPTURE_FILE_NAMES,
+    CAPTURE_ID_PATTERN,
+    MAX_ARTIFACT_BYTES,
+    _read_artifact,
+)
 
 from ._tool_registry import register_tool_category
 
@@ -79,27 +85,10 @@ WEDGE_CAPTURE_AUTHORIZED_AGENTS: frozenset[str] = frozenset(
 )
 
 #: The D8 artifact file set — the fetch payload carries EXACTLY these
-#: (the ``.pending_row.json`` sidecar is EXCLUDED — MR-5).
-ARTIFACT_FILE_NAMES: tuple[str, ...] = (
-    "manifest.json",
-    "stacks.txt",
-    "threads.csv",
-    "lag.json",
-    "metrics.json",
-    "db.json",
-    "readyz.json",
-    "checkpoint_perf_tail.json",
-)
-
-#: The capture-id pattern (D40) — the canonical reason tokens.
-CAPTURE_ID_PATTERN = re.compile(
-    r"^[0-9TZ]+-[a-z0-9.\-]+-"
-    r"(sustained_cpu|sustained_loop_lag|thread_concentration|manual)"
-    r"-[0-9a-f]{8}$"
-)
-
-#: The maximum bytes of ONE artifact the fetch returns.
-MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
+#: (the ``.pending_row.json`` sidecar is EXCLUDED — MR-5). The
+#: canonical tuple lives in the writer (D8 single-sourcing); this
+#: alias keeps this surface's historical name.
+ARTIFACT_FILE_NAMES = CAPTURE_FILE_NAMES
 
 #: The default number of list rows.
 DEFAULT_LIST_LIMIT = 20
@@ -153,30 +142,6 @@ def _resolve_root(manager: Any) -> Path:
     from daemon.services.wedge_capture.config import WedgeCaptureConfig
 
     return Path(WedgeCaptureConfig.from_env().capture_dir)
-
-
-def _read_artifact(path: Path) -> dict[str, Any]:
-    """Read ONE artifact — the parsed body for JSON, the text otherwise."""
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return {"status": "missing"}
-    if size > MAX_ARTIFACT_BYTES:
-        return {
-            "status": "too_large",
-            "bytes": size,
-            "note": f"artifact exceeds the {MAX_ARTIFACT_BYTES} byte cap",
-        }
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return {"status": f"failed:{type(exc).__name__}"}
-    if path.suffix == ".json":
-        try:
-            return {"status": "ok", "json": json.loads(raw)}
-        except (TypeError, ValueError):
-            return {"status": "ok", "text": raw}
-    return {"status": "ok", "text": raw}
 
 
 def create_wedge_capture_tools(

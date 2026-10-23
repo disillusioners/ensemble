@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -69,6 +70,18 @@ CAPTURE_FILE_NAMES: tuple[str, ...] = (
     "readyz.json",
     "checkpoint_perf_tail.json",
 )
+
+#: The capture-id pattern (D40) — the canonical reason tokens.
+#: Single-sourced here (D8): the tools and the HTTP router import it.
+CAPTURE_ID_PATTERN = re.compile(
+    r"^[0-9TZ]+-[a-z0-9.\-]+-"
+    r"(sustained_cpu|sustained_loop_lag|thread_concentration|manual)"
+    r"-[0-9a-f]{8}$"
+)
+
+#: The maximum bytes of ONE artifact the read-back surfaces return.
+#: Single-sourced here (D8): the tools and the HTTP router import it.
+MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 
 #: The sidecar written when the metadata row could not be written.
 PENDING_ROW_SIDECAR = ".pending_row.json"
@@ -183,6 +196,33 @@ def render_threads_csv(threads: list[dict[str, Any]]) -> str:
             )
         )
     return "\n".join(lines) + "\n"
+
+
+def _read_artifact(path: Path) -> dict[str, Any]:
+    """Read ONE artifact — the parsed body for JSON, the text otherwise.
+
+    Single-sourced here (D8): the tools and the HTTP router import it.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return {"status": "missing"}
+    if size > MAX_ARTIFACT_BYTES:
+        return {
+            "status": "too_large",
+            "bytes": size,
+            "note": f"artifact exceeds the {MAX_ARTIFACT_BYTES} byte cap",
+        }
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return {"status": f"failed:{type(exc).__name__}"}
+    if path.suffix == ".json":
+        try:
+            return {"status": "ok", "json": json.loads(raw)}
+        except (TypeError, ValueError):
+            return {"status": "ok", "text": raw}
+    return {"status": "ok", "text": raw}
 
 
 def capture_directories(root: Path) -> list[Path]:
@@ -561,8 +601,10 @@ def read_pending_row_sidecars(root: Path) -> list[tuple[Path, dict[str, Any]]]:
 __all__ = [
     "BOOT_RECORDS_DIRNAME",
     "CAPTURE_FILE_NAMES",
+    "CAPTURE_ID_PATTERN",
     "CaptureResult",
     "CaptureWriter",
+    "MAX_ARTIFACT_BYTES",
     "PENDING_ROW_SIDECAR",
     "SKIPPED_BUDGET",
     "SKIPPED_NA",

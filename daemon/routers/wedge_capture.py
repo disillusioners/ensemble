@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -64,35 +63,24 @@ from daemon.auth.decorators import scope_required
 from daemon.routers.maintenance_origin_guard import (
     require_trusted_origin as _require_origin,
 )
+from daemon.services.wedge_capture.writer import (
+    CAPTURE_FILE_NAMES,
+    CAPTURE_ID_PATTERN,
+    MAX_ARTIFACT_BYTES,
+    _read_artifact,
+)
 
 logger = logging.getLogger(__name__)
 
-#: The router — mounted under ``/api/wedge-captures``.
-router = APIRouter(prefix="/wedge-captures", tags=["wedge-captures"])
-
-#: The capture-id pattern (D40) — the canonical reason tokens.
-CAPTURE_ID_PATTERN = re.compile(
-    r"^[0-9TZ]+-[a-z0-9.\-]+-"
-    r"(sustained_cpu|sustained_loop_lag|thread_concentration|manual)"
-    r"-[0-9a-f]{8}$"
-)
-
 #: The D8 artifact file set — the fetch payload carries EXACTLY these
 #: (MR-5: the ``.pending_row.json`` sidecar is a reconcile artifact,
-#: not capture evidence, and is never included).
-ARTIFACT_FILE_NAMES: tuple[str, ...] = (
-    "manifest.json",
-    "stacks.txt",
-    "threads.csv",
-    "lag.json",
-    "metrics.json",
-    "db.json",
-    "readyz.json",
-    "checkpoint_perf_tail.json",
-)
+#: not capture evidence, and is never included). The canonical tuple
+#: lives in the writer (D8 single-sourcing); this alias keeps this
+#: surface's historical name.
+ARTIFACT_FILE_NAMES = CAPTURE_FILE_NAMES
 
-#: The maximum bytes of ONE artifact the fetch returns.
-MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
+#: The router — mounted under ``/api/wedge-captures``.
+router = APIRouter(prefix="/wedge-captures", tags=["wedge-captures"])
 
 
 def _envelope(error: str, message: str, **details: Any) -> dict[str, Any]:
@@ -149,30 +137,6 @@ def _repository(request: Request) -> Any:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Wedge-capture: repository unavailable: %s", exc)
         return None
-
-
-def _read_artifact(path: Path) -> dict[str, Any]:
-    """Read one artifact — the parsed body for JSON, the text otherwise."""
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return {"status": "missing"}
-    if size > MAX_ARTIFACT_BYTES:
-        return {
-            "status": "too_large",
-            "bytes": size,
-            "note": f"artifact exceeds the {MAX_ARTIFACT_BYTES} byte cap",
-        }
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return {"status": f"failed:{type(exc).__name__}"}
-    if path.suffix == ".json":
-        try:
-            return {"status": "ok", "json": json.loads(raw)}
-        except (TypeError, ValueError):
-            return {"status": "ok", "text": raw}
-    return {"status": "ok", "text": raw}
 
 
 def _directory_manifest(capture_dir: Path) -> dict[str, Any] | None:
