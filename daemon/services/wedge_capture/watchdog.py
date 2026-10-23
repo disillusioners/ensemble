@@ -345,20 +345,27 @@ class WedgeCaptureWatchdog:
         self.reconcile_pending()
 
     def join(self, timeout: float | None = None) -> None:
-        """Join the watchdog thread (the house detached-join target).
+        """Join the watchdog thread — the DETACHED-join target (T17/W3).
 
-        The lifespan NEVER calls this inline — it runs on a detached
-        thread so the event loop is not blocked on the join.
+        The lifespan NEVER calls this inline: the shutdown caller runs
+        it on a detached thread so no event loop is ever blocked on the
+        join. ``stop()`` deliberately does NOT join and does NOT null
+        the thread handle — this method must stay able to reach it.
         """
         thread = self._thread
         if thread is not None:
             thread.join(timeout=timeout)
 
-    def stop(self, *, timeout: float = 5.0) -> None:
-        """Stop the watchdog. Idempotent, never raises.
+    def stop(self) -> None:
+        """Set the stop event + drop the pending manual requests (N7).
 
-        The pending manual request is **DROPPED** (N7) — a capture is
-        never started after the stop event.
+        The WATCHDOG DOES NOT JOIN HERE (T17 / W3): ALL joining is
+        owned by the shutdown caller's DETACHED join thread (the
+        resource-monitor facade precedent) — an inline join would block
+        the caller's thread for up to one capture deadline. Idempotent,
+        never raises. The thread handle is deliberately KEPT (not
+        nulled) so the detached join can reach it; a subsequent
+        ``start()`` replaces it.
         """
         self._stop_event.set()
         dropped = self.manual_slot.drop_pending()
@@ -368,12 +375,8 @@ class WedgeCaptureWatchdog:
                 "request(s) (the operator re-submits)",
                 dropped,
             )
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout)
         with self._lock:
             self._started = False
-        self._thread = None
 
     # ── the loop ───────────────────────────────────────────────────────
     def _run_loop(self) -> None:

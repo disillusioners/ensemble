@@ -2784,8 +2784,13 @@ async def lifespan(app: FastAPI):
     # is NOT misattributed to the upgrade-journal envelope, and it
     # never aborts the boot (the three-layer never-wedge contract).
     #
-    # The watchdog is live BEFORE the first AutoContinue boot pass
-    # runs, so a boot-time wedge is observable.
+    # START-SITE TRUTH (W4): this site sits AFTER the awaited
+    # AutoContinue boot pass above — the watchdog is NOT live during
+    # that pass, so a wedge DURING the boot pass itself is outside the
+    # instrument's reach. The F-02 anchor is plan-pinned and is NOT
+    # moved by the fix-forward lane; boot-pass observability would be
+    # a plan amendment and is out of scope here. From THIS point on,
+    # the tick loop observes wedge conditions.
     try:
         from daemon.services.wedge_capture.config import WedgeCaptureConfig
         from daemon.services.wedge_capture.watchdog import WedgeCaptureWatchdog
@@ -3372,13 +3377,14 @@ async def lifespan(app: FastAPI):
             )
     app.state.resource_monitor = None
 
-    # ── wedge-capture watchdog stop (T17 / A9) ───────────────────────
-    # The same HOUSE detached-join form as the resource monitor above:
-    # ``stop()`` sets the Event, then the join runs on a DETACHED
-    # thread with a 5.0 s timeout — the event loop is NEVER blocked
-    # on the join. ``stop()`` is idempotent and never raises; a
-    # pending manual capture request is DROPPED (never captured after
-    # the stop event).
+    # ── wedge-capture watchdog stop (T17 / A9 / W3) ───────────────────
+    # The same HOUSE detached-join form as the resource monitor above.
+    # OWNERSHIP (W3): ``stop()`` sets the Event and drops the pending
+    # manual capture requests and does NOT join — ALL joining is owned
+    # HERE, on the DETACHED thread with a 5.0 s timeout, so no event
+    # loop is ever blocked on the join. ``stop()`` is idempotent and
+    # never raises; a pending manual capture request is DROPPED (never
+    # captured after the stop event).
     _wedge_watchdog = getattr(app.state, "wedge_capture_watchdog", None)
     if _wedge_watchdog is not None:
         try:
