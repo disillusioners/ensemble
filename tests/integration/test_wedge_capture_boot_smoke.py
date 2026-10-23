@@ -180,20 +180,32 @@ class TestLegIII_LoopSpin:
 
 
 class TestCooldown:
-    def test_a_sustained_wedge_produces_exactly_one_capture(
+    def test_a_sustained_wedge_produces_one_capture_per_reason(
         self, tmp_path, leg_runner
     ) -> None:
-        """SC-6 / AC51: one capture per cooldown window — a broken
-        cooldown would produce one per tick."""
+        """SC-6 / AC51 (per-reason, D43): the cooldown dedups PER REASON —
+        a broken cooldown produces one capture per tick for the SAME
+        reason; a legally co-firing second reason may add its OWN once."""
+        from collections import Counter
         from tests.support.wedge_smoke import Burner
 
         burner = Burner()
         with burner:
             observation = leg_runner(smoke.LEG_CPU, lambda loop: None, hold_s=5.0)
 
-        assert observation.capture_count == 1, (
-            "a sustained wedge inside one cooldown window must produce "
-            "EXACTLY one capture: " + str(observation.as_dict())
+        assert observation.capture_count >= 1, (
+            "a sustained wedge must produce at least one capture: "
+            + str(observation.as_dict())
+        )
+        per_reason = Counter(
+            str(item.get("trigger_reason"))
+            for item in smoke.manifests(observation.root)
+        )
+        duplicates = sorted(r for r, n in per_reason.items() if n > 1)
+        assert not duplicates, (
+            "a sustained wedge re-fired the same reason(s) "
+            f"{duplicates} inside one cooldown window — the SC-6 per-reason "
+            "dedup is broken: " + str(observation.as_dict())
         )
 
 
