@@ -204,6 +204,13 @@ things to come alive:
    time it is CALLED, which is why a unit test that builds a fresh
    service with `monkeypatch.setenv` sees the new value.)
 
+**Restart discipline:** an agent living inside this daemon cannot run
+stop-then-launch sequentially from its own turn — the stop kills the agent's
+turn before the launch fires. Wrap both in ONE pre-detached supervisor,
+`setsid nohup bash -c '<stop>; sleep 2; <launch>' &` (pattern not yet verified
+live — the 2026-10-24 recovery finished user-manual); the full runbook block
+lives in `agents/gaia/workflow.md` (CONFIG).
+
 ### 2.1 What "off" means concretely
 
 * The route `/api/mcps-gateway/ws` does not exist — an HTTP/WebSocket

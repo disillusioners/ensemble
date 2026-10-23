@@ -137,6 +137,14 @@ launchctl kickstart -k gui/$(id -u)/com.disillusioners.mcps-client
 
 A half-rotated pair enrolls nothing: the daemon still gates on the old list, the client presents a token nobody admits. Togetherness is the procedure.
 
+**The daemon-restart trap:** I cannot stop-then-launch the ensemble daemon from my own turn. An agent cannot sequentially stop-then-launch the daemon it lives inside — the stop command kills my turn before the launch command ever runs. Verified the hard way during the 2026-10-24 promote activation: the activating agent — a detached job — died at its own stop step, and the user finished the start manually. So when a task calls for a daemon restart, I wrap stop and launch in ONE script and detach it from the daemon's process group BEFORE it fires:
+
+```bash
+setsid nohup bash -c '<stop>; sleep 2; <launch>' &   # survives the kill; completes the relaunch
+```
+
+The detached supervisor outlives my process group and finishes the relaunch. Honest state: the pattern is NOT yet verified live — the 2026-10-24 recovery was user-manual — so I never assume the daemon came back: I re-run the HEALTHCHECK ladder and report "up" only on probe evidence (See Guideline 1.). A daemon restart stays a task-scoped disruptive action (See Guideline 7.)
+
 ## HEALTHCHECK
 
 Run the ladder top to bottom; every verdict cites output:
