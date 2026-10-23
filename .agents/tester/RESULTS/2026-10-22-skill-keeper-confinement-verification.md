@@ -150,4 +150,78 @@ Full-suite run was **not** warranted: the change set (9 daemon files + skill-kee
 
 ---
 
-*Report: `.agents/tester/RESULTS/2026-10-22-skill-keeper-confinement-verification.md` · Evidence dirs: `/tmp/l1probe`, `/tmp/lane-l2`, `/tmp/l3`, `/tmp/l4`, `/tmp/l5_probe`, `/tmp/l6*`, `/tmp/l7`, `/tmp/l9*`, `/tmp/sk-mut-l8-2ae2b592` (removed; outputs retained under `/tmp`), `/tmp/pkconc2.out`. Docs-only commit: see §7 row 1 status and the commit SHA in the final section.*
+*Report: `.agents/tester/RESULTS/2026-10-22-skill-keeper-confinement-verification.md` · Evidence dirs: `/tmp/l1probe`, `/tmp/lane-l2`, `/tmp/l3`, `/tmp/l4`, `/tmp/l5_probe`, `/tmp/l6*`, `/tmp/l7`, `/tmp/l9*`, `/tmp/sk-mut-l8-2ae2b592` (removed; outputs retained under `/tmp`), `/tmp/pkconc2.out`. Docs-only commit: `7f80b7987e72633be6e558b797c2ecd90d40b0b0`.*
+
+---
+
+# RE-RUN (iteration 3) — post-fix HEAD `7f3218f40` — VERDICT: 🟢 PASS-WITH-NOTES
+
+- **Date**: 2026-10-23 (00:0x–00:4xZ) · **Target**: same worktree, branch `fix/skill-keeper-confinement`, HEAD `7f3218f40b12ccc7a4d2a621d128a30439e9ff67` (prior verified HEAD `95b16b265`; docs commit `7f80b7987` rides in the range).
+- **Delta**: `95b16b265..7f3218f40` = 6 commits, 9 files, +938/−95. The F1 fix landed **entirely in `daemon/services/job_processor.py`** (+208/−41) via the pre-existing `atomic_transition`; `job_queue_service.py` and `skill_job_dispatcher.py` untouched; `soul.md`/`meta.json`/`.prompt-artifacts.sha256`/`test/packs/` untouched ⇒ seal invariant by file identity (re-checked at commit time, below).
+- **Method**: 8 lanes (delta map, blocker re-verify, pins+F2/F3, switch semantics, regression spot-check, job-queue changed-surface selection, 3 packs). Same fences: per-variable scrub, `current_database()='ensemble_dev'` asserted, no daemon, prod contact NONE (every DB call 127.0.0.1:5432; live daemon MainPID 2199019 epoch 05:25:49Z untouched).
+
+## R.1 — The blocker (items 7 & 20) is FIXED and the probe has teeth
+
+All 7 assertions PASS on real PostgreSQL 16; the **base control reproduces the defect under the identical harness**, and **two hand-applied mutants are detected** — the evidence is differential, not one-sided:
+
+| # | Claimed | Observed at `7f3218f40` | Result |
+|---|---|---|---|
+| 1 | terminal write | `admission_state='done'`, `terminal_reason='lane_disabled'`, `failed_at=None`, `retry_count=0`, `instance_id=None` (full row quoted in lane report) | **PASS** |
+| 2a | no re-refusal | refusal logs per pass `[1,1,1,1]` — cumulative **1** over 4 passes; row unchanged | **PASS** |
+| 2b | not retryable | **real** `JobRetryEngine.should_retry(row) = False` (gate `job_retry_engine.py:186-188` requires `failed_at is not None`) | **PASS** |
+| 3 | head advances | pass 1 → A refused; pass 2 → **B `active` with 1 spawn + 1 enqueue** → `done`/`completed`; passes 3–4 stable | **PASS** |
+| 4 | zero spawns for A | `spawns attributable to A = 0` | **PASS** |
+| 5 | logged once | **1** WARNING for A across 4 passes (base: **4**) | **PASS** |
+| 6 | concurrent-start race | exercised, 3 shapes (double-refusal; refusal-vs-`start_job`; double-`start_job`) — **no refusal lost in any shape**; race 6b: refusal won, `start_job` returned None, `instance_id=None` | **PASS** |
+| 7 | call site | `job_processor.py:754-760` = `atomic_transition(job_id, from_status='queued', to_status='done', terminal_reason='lane_disabled')` — the **identical mechanism** `start_job` uses for B3 (`job_queue_service.py:4497-4503`), sanctioned edge `(QUEUED, DONE) # cancel pending` (`job_state_machine.py:55`); marker persisted (real indexed column); `error_message` is in `_REMOVED_JOB_COLUMNS` so the human text lives in the log — documented in-code | **PASS** |
+| 20a/b | fail-closed | env `maybe` → ValueError → refused, `done`/`lane_disabled`, 0 spawns; injected RuntimeError → refused, same | **PASS** |
+
+**Controls**: base `95b16b265` under the same harness → A stuck `queued` (`InvalidTransitionError: queued -> dead_letter` ×4), **B never advances, 0 spawns for B** — the original starvation, reproduced. MUT1 (drop `terminal_reason` kwarg) → detected (`terminal_reason=None`). MUT2 (`done`→`active`) → **blocker reproduced** (A stuck `queued`, B starves). All row deltas 0; foreign drift 0; residue 0.
+
+## R.2 — F2 / F3 proven real by differential (RR-R2, corroborated by RR-R1)
+
+- **F2 (ACTIVE-orphan re-spawn, both branches)** — branches enumerated from source (`:1171` instance_id-set KeyError; `:1263` NULL orphan). Lane OFF at HEAD: spawn **0**, enqueue **0**, no payload, row terminal. **Prior HEAD: spawn 1 + enqueue 1 + `Direction: SUPER_SECRET_DIRECTION_PAYLOAD` delivered on BOTH branches.** Lane-ON controls deliver the payload ⇒ the negative is non-vacuous.
+- **F3 (fail-closed)** — absent accessor → `'lane state accessor absent (fail-closed)'`; raising probe → `'lane state probe failed … (fail-closed)'`; both refused + terminally written + 0 spawns. **Prior HEAD bare manager: ADMITTED + STARTED** (the iteration-2 fail-open was real).
+
+## R.3 — Pins (RR-R2 + RR-R5)
+
+`lane_gate` now **63 nodes, all green** (60→63: +4 post-state pins, −3 replaced). `TestJobProcessorExecutionGate` builds the **real** `JobQueueService` + repositories over in-memory SQLite; zero `complete_job`/queue-service mocks in the class; assertions are post-state (`done`/`lane_disabled`/`failed_at is None`/`second == 'active'`/`spawn.assert_not_awaited()`). **Mutant M1** (F1-era revert) → RED 3 nodes (`got admission_state='queued' (F1: a no-op write leaves it queued forever)`) → restore → 63 green. Retry-carry is now pinned (2 new tests). The old blind harness `_make_exec_processor` is **dead code (0 references)** — see advisory A5.
+
+## R.4 — Switch semantics (RR-R3): 13/13 probes + 31/31 parity pins PASS
+
+Alias alone enables (+1 real row, deleted); canonical wins **both** directions (alias`true`+canonical`0` → 0 rows/0 SQL; alias`false`+canonical`1` → admit); parity matrix identical across both switches (same frozenset objects); load-time check = exactly 1 ERROR per switch, config stays false; items 1 & 3 re-verified (OFF default: `None`, **0 SQL statements**; precedence 5/5). Derived chain: **canonical env > YAML key > alias env > default False**.
+
+## R.5 — Regression spot-check (RR-R4): 8/8 PASS; pinned 31-tool set diff **EMPTY**
+
+Items 4/5/6/9/10/11/13/19 all reproduce prior evidence on real wiring; `added=[] removed=[]` vs the prior pinned set; deny still bites; forged invocations still refused; memories tree digest `4cba2363…` unchanged. Pre-existing fact re-observed: shipped `ab_sample_size` default is **20** (boundary probes pin 10 explicitly).
+
+## R.6 — Packs + job-queue surface: byte-identical to baseline, 0 delta-caused failures
+
+| Run | Result | vs baseline |
+|---|---|---|
+| `skill_capture_killswitch_unit_test` | PASS **118/118** | identical (parity pins live in `lane_gate`, covered) |
+| `skill_services_gzip_regression_unit_test` | rc=1, **177P/3F** | identical 3 migration nodes; all 6 `TestCheckABTestResolution` genuinely passed |
+| `concurrency_atomic_unit_test` | rc=1, **94P/5F/74S** | node-for-node identical quarantined family |
+| job-queue changed-surface selection (retry/DLQ/idempotency/atomic + supplements) | **275/275 green** | prior-green surface still green |
+
+## R.7 — Advisories (non-blocking, with dispositions)
+
+| # | Advisory | Severity | Disposition |
+|---|---|---|---|
+| A1 | **ACTIVE-orphan refusal lands `dead`/`terminal_reason=NULL`** (via `complete_job(FAILED)`→DEAD_LETTER, `job_processor.py:786-806`) while the QUEUED path writes `done`/`lane_disabled` — policy refusals pollute the DLQ and the documented `lane_disabled` marker misses every ACTIVE-path refusal. No strand, no retry loop (row is terminal; `should_retry`=False). Found independently by two lanes (RR-R1 F-1, RR-R2 N3c) | 🟠 important | Route to developer: align via `atomic_transition(active→done, terminal_reason='lane_disabled')` (~5 lines + pin) **or** document+pin the `dead` shape. Either way the marker contract must be explicit |
+| A2 | **Race-loser false-alarm ERROR** — under benign concurrent double-refusal the loser logs `terminal write FAILED … may block its queue` while the row is correctly terminal (RR-R1 F-2) | 🟠 important | Route: re-read row in the `except` branch; if already terminal → INFO, not ERROR |
+| A3 | **Fail-closed probe defeated by `MagicMock`** (auto-attr → callable → admit). Production unaffected (real manager defines it, `manager.py:6836`); blast radius = 41 mock-harness test files; current pin passes via `del` (RR-R2 N1). Verified hardening: class-side `getattr(type(mgr), …)` | 🟠 important | Route: adopt class-side resolution in `_skill_evolution_lane_refusal` + strengthen the pin |
+| A4 | **Lane-ON positive control deleted, unpinned** — mutant "always refuse" passes 63/63 lane-gate + 147 adjacent nodes (RR-R2 N2, mutant M2) | 🟠 important | Route: restore a real-service lane-ON admission pin |
+| A5 | Dead blind harness `_make_exec_processor` still in the pin file (0 refs) — the loaded gun that hid F1; log-once has no pin (empirically 1 vs base 4); mis-describing comment at `job_processor.py:733-737` names `active→done` when the edge is `active→dead`; no refusal timestamp on the row (RR-R2 N3, RR-R1 F-3/F-4) | 🟢 nice-to-have | Route as test hygiene |
+| A6 | **YAML key beats alias env** (init-kwarg > env): a custom yaml carrying `evolution_lane_enabled` silently defeats `SKILL_EVOLUTION_EVOLUTION_LANE_ENABLED`; shipped `config.yaml` does NOT carry the key (verified) so the alias is live ON in shipped deployments (RR-R3 disclosure 1) | 🟢 nice-to-have | Route: adopt the `auth.enabled` env-over-yaml pattern + precedence pin. Non-urgent (shipped-config mitigated) |
+| A7 | Mis-describing comment F-3; chartered toolset note: if 31 is the contract, say so in the charter (RAG-conditional `explore`/`experience` make it 29 without warning) | 🟢 nice-to-have | Route as docs |
+
+## R.8 — Not re-run, with reasons
+
+Whole-tree base-diff (out of scope); full `job_queue_unit_test` pack (base-identical 120 s budget defect — routed for split; changed-surface 275/275 green instead); `skill_evolution_unit_test` (surface untouched by delta; prior 47/47); `skill_evolution_pg_test` (broken pre-existing pack — repair routed); `TestCheckABTestResolution` 20-run stress (delta does not touch that file; 6/6 green in-pack + RR-R2 observed the known flake once, KB-recorded); item-21 base-proven legs (delta empty for those files).
+
+## R.9 — Re-run verdict
+
+**PASS-WITH-NOTES** — the blocking defect is fixed with differential + mutation-grade evidence; F2/F3 are real fixes; every previously-passing item reproduces; zero delta-caused failures anywhere; prod contact NONE. The notes are A1–A7 above, none of which strands a queue, re-enables the lane, or loses a refusal. **Stage-only gate: CLEAR.** (Promote remains the user's nonce ceremony.)
+
+Seal re-check (post-delta, commit lane): PASS — rc=0, PROMPT-BASELINE: OK — 161 versioned artifact(s) match .prompt-artifacts.sha256, non-mutating (git status unchanged).
