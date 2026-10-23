@@ -222,7 +222,6 @@ class TestDaemonBootLane:
     def test_the_cgroup_and_live_fence_hold(self, tmp_path) -> None:
         """SC-14 / AC52: the run is cgroup-isolated and the LIVE daemon's
         identity is identical before and after."""
-        import os
         import subprocess
 
         before = smoke.live_daemon_fence()

@@ -363,7 +363,8 @@ class TestLagProbeRealLoop:
             real_loop.call_soon_threadsafe(lambda: gate.wait(2.0))
             time.sleep(0.05)  # the loop is now inside the block
 
-            assert probe.tick() is not None or True  # post or measure
+            result = probe.tick()  # post or measure
+            assert result is None or result >= 0.0
             time.sleep(0.3)
             measured = probe.tick()
         finally:

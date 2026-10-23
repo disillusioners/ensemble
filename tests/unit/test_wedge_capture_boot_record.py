@@ -38,7 +38,6 @@ from pathlib import Path
 import pytest
 
 from daemon.services import auto_continue_boot_pass as boot_pass
-from daemon.services.wedge_capture import boot_record as record_module
 from daemon.services.wedge_capture.boot_record import (
     BOOT_RECORDS_DIRNAME,
     BOOT_RECORDS_MAX_FILES,
