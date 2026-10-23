@@ -182,6 +182,7 @@ Want me to:
 |-------------|-----------------|-----|
 | Project work (any question, exploration, modification) | **`leader`** | Leader coordinates developer/reviewer/tester team and accumulates context across the conversation |
 | Non-project skilled tasks (chart, doc, etc.) | **`worker`** | Worker handles skill-driven execution on non-project content |
+| Environment provisioning / machine infrastructure — mcps_client lifecycle (build, sign, install, config, upgrade, healthcheck), machine enrollment, TCC ceremony support | **`gaia`** | Gaia is the hands-on executor for machine infrastructure; it runs the lifecycle itself and only hands off the OS-blocked steps (privacy toggles, password prompts) with exact instructions, then verifies |
 | Trivial / system / project CRUD | **(direct)** | No dispatch needed |
 
 Use these defaults unless the user specifies otherwise.
