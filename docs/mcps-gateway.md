@@ -205,11 +205,14 @@ things to come alive:
    service with `monkeypatch.setenv` sees the new value.)
 
 **Restart discipline:** an agent living inside this daemon cannot run
-stop-then-launch sequentially from its own turn — the stop kills the agent's
-turn before the launch fires. Wrap both in ONE pre-detached supervisor,
-`setsid nohup bash -c '<stop>; sleep 2; <launch>' &` (pattern not yet verified
-live — the 2026-10-24 recovery finished user-manual); the full runbook block
-lives in `agents/gaia/workflow.md` (CONFIG).
+stop-then-launch sequentially from its own turn — any live turn dies when the
+daemon stops. Wrap both in ONE pre-detached supervisor: the `setsid` one-liner
+is the Linux form (macOS has no `setsid` — use a python `os.fork()` +
+`os.setsid()` supervisor, the mechanics that fired 2026-10-24, exactly once).
+Honest state: end-to-end detach→daemon-up is NOT yet verified — that launch
+crash-looped on PyInstaller _MEI extraction and the recovery was user-manual.
+Sanitize the launch env, poll past the launcher backoff (>120s), ALERT (page
+the user) on a not-alive outcome; full runbook in `agents/gaia/workflow.md` (CONFIG).
 
 ### 2.1 What "off" means concretely
 
