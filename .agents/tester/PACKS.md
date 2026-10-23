@@ -2826,3 +2826,35 @@ Worktree `/home/nea/ensemble-src-wt-qprasym` (fenced dev .env: `ENSEMBLE_SELF_EN
 - **Env-fence note:** test lanes that boot daemons must scrub `-u PORT -u HOST` AND export `PORT=8079 HOST=127.0.0.1` — ambient `PORT` beats `DAEMON_PORT` via config.yaml (fence gap found this gate; RESULTS §4g).
 
 Note (F1 disclosure): commission said "code frozen at `e7634c39d`" but tip `b1ec0c0d7` additionally carries a one-line comment swap in `daemon/services/instance_lifecycle.py` (fail-open → fail-CLOSED comment; no logic). Gate runs at tip `b1ec0c0d7` regardless — all verdicts below are tip verdicts.
+
+
+---
+
+## Wedge-Capture Packs (registered 2026-10-23 by the independent verification gate)
+
+Pytest-path packs (no shell wrapper); run one-at-a-time with the house scrubbed runner:
+`timeout 300 env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT -u DATABASE_URL -u SSL_CERT_FILE -u SSL_CERT_DIR .venv/bin/python -m pytest <path> --tb=short -q`
+
+| Pack | Location | Scope | Last Run | Status |
+|------|----------|-------|----------|--------|
+| wedge_sampler_unit_test | tests/unit/test_wedge_capture_sampler.py | sampler thread/counters collection incl. MR-6 observer self-exclusion | 2026-10-23 @ 968a0c0b2 | ✅ PASS 20/20 |
+| wedge_readback_unit_test | tests/unit/test_wedge_capture_readback.py | admin router + operator CLI read-back surfaces, degraded rows, cage limits | 2026-10-23 @ 968a0c0b2 | ✅ PASS 26/26 |
+| wedge_writer_unit_test | tests/unit/test_wedge_capture_writer.py | capture writer, D8 file set incl. checkpoint_perf_tail.json (carries the checkpoint_perf_logging surface), deadline/budget, T39 pool predicate, degraded-row 11-key pin | 2026-10-23 @ 968a0c0b2 | ✅ PASS 42/42 |
+| wedge_cli_unit_test | tests/unit/test_wedge_capture_cli.py | scripts/wedge_capture.py — 202-enqueue no-poll, capture_busy refusal, thin-client invariants | 2026-10-23 @ 968a0c0b2 | ✅ PASS 15/15 |
+| wedge_registration_unit_test | tests/unit/test_wedge_capture_registration.py | category 15→16 exact set, allow {ari,leader,maintenancer}, default-deny static+behavioral | 2026-10-23 @ 968a0c0b2 | ✅ PASS 17/17 |
+| wedge_boot_record_unit_test | tests/unit/test_wedge_capture_boot_record.py | per-boot record, 5 named [BOOT_CONTINUE] mode carriers, 50-file cap, effective-mode-from-process | 2026-10-23 @ 968a0c0b2 | ✅ PASS 29/29 |
+| wedge_triggers_unit_test | tests/unit/test_wedge_capture_triggers.py | CPU/lag/concentration verdicts, sustain window both directions, H2 lag-only discriminator, cooldown fingerprint | 2026-10-23 @ 968a0c0b2 | ✅ PASS 27/27 |
+| wedge_wiring_unit_test | tests/unit/test_wedge_capture_wiring.py | api.py watchdog call-site pin (ship-blocker class: kwarg resolution, live release_version, app.state assignment) | 2026-10-23 @ 968a0c0b2 | ✅ PASS 3/3 |
+| wedge_no_autocontinue_disable_unit_test | tests/unit/test_wedge_capture_no_autocontinue_disable.py | kill-switch ABSENCE (diff-vs-base zero added VAR=0) — T35/AC49/SC-10/BC-1 | 2026-10-23 @ 968a0c0b2 | ✅ PASS 10/10 |
+| wedge_boot_smoke_integration (OPT-IN) | tests/integration/test_wedge_capture_boot_smoke.py (+ tests/support/wedge_smoke.py) | Lane A: `ENSEMBLE_WEDGE_SMOKE=1` (3-leg matrix + cooldown + kill-switch; addopts+timeout overrides). Lane B: ALSO `ENSEMBLE_WEDGE_SMOKE_UNIT=1` + scratch PG. ⚠️ KNOWN DEFECT @ 968a0c0b2: `PG_TEST_*` is inert (never translated to `POSTGRES_*`) → boot legs boot SQLite and fail at migration 20260714_000001; cgroup-fence leg has a /proc read race. See RESULTS/2026-10-23-wedge-capture-independent-verification.md | 2026-10-23 @ 968a0c0b2 | ⚠️ Lane A PASS 6P/4S(expected) · Lane B FAIL 8P/2F (harness defects; product proven via manual boot) |
+
+### 2026-10-23 commission section — independent verification gate @ 968a0c0b2 (base 639b7129b)
+
+- G1 corpus: 9/9 packs PASS, 189/189 tests; boot_smoke collection CLEAN (10 nodes).
+- G2 Lane A: PASS (legs i/ii/iii + attribution + cooldown + kill-switch + negatives @ nproc=8). SC-2 env+duration deviation disclosed (leg-ii LAG_S=2.0/SUSTAIN=0/3.0s vs prescribed 5.0/2/≥5s).
+- G3 Lane B: FAIL (harness: PG_TEST_* inert → SQLite boot death; cgroup race) — product-side (a)-(d) evidence obtained via manual boot: watchdog boot-alive, boot record + mode=on line, POST /capture 202→serviced→8 artifacts→row, kill-switch absence.
+- G4 live-PG re-proof (scratch PG): Jsonb adaptation / ON CONFLICT dedup via real unique index / .pending_row.json reconcile — 4/4 PASS + 6 findings (latent insert() defect no-caller; .sql json vs model jsonb drift; psql -f DOWN footgun; reconcile existence-check dedup; ok-on-no-op token; duplicate index).
+- G5: annex A2 PASS (shas byte-exact); T39 4/4 evaluable (form nuances); T40 deliverable NOT materialized; SC-2 composition-only.
+- G6 regression slice: 6 items HEAD-vs-base, identical invocation, NET-NEW = ∅ everywhere; 1 BASE-only red RESOLVED (legitimate seal re-pin); api_unit_test carries 6 pre-existing base-identical reds (mock-seam debt — its row baseline 213P/8S is STALE, current 269P both trees).
+- G7 residual register: 4/4 hold-as-described (W2 measured ≤~1.0s vs stated ≤~2s).
+- Evidence: .agents/tester/RESULTS/2026-10-23-wedge-capture-independent-verification.md · branch tester/wedge-capture-verification (docs-only).
